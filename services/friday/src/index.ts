@@ -2,6 +2,7 @@ import { loadRuntimeConfig } from "./config.js";
 import { createSlackApp } from "./slack/app.js";
 import { registerEventHandlers } from "./slack/events.js";
 import { loadSessions } from "./sessions/manager.js";
+import { loadRegistry } from "./sessions/registry.js";
 import { log } from "./log.js";
 import { startHealthHeartbeat, stopHealthHeartbeat } from "./monitor/health.js";
 
@@ -12,6 +13,7 @@ async function main() {
 
   const config = loadRuntimeConfig();
   loadSessions();
+  loadRegistry();
   log("info", "config_loaded", {
     orchestratorChannelId: config.slack.orchestratorChannelId,
     workingDirectory: config.agent.workingDirectory,

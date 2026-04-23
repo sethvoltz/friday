@@ -5,6 +5,7 @@ import { sendToAgent, type AgentCallbacks } from "../agent/client.js";
 import { createSlackTools } from "../agent/tools.js";
 import { log } from "../log.js";
 import { resetSession, getSessionId } from "../sessions/manager.js";
+import { listAgents } from "../sessions/registry.js";
 import {
   getSessionStats,
   formatDuration,
@@ -41,6 +42,15 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
     const channelId = command.channel_id;
 
     if (args === "reset") {
+      // Block reset on orchestrator channel — it's long-lived
+      if (channelId === orchestratorChannelId) {
+        await respond(
+          "The Orchestrator session is long-lived and can't be reset. " +
+            "If you really need to start fresh, stop the daemon and clear the session manually."
+        );
+        return;
+      }
+
       const hadSession = !!getSessionId(channelId);
       resetSession(channelId);
       await client.chat.postMessage({
@@ -67,6 +77,54 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
                 },
               ]
             : []),
+        ],
+      });
+    } else if (args === "agents") {
+      const agents = listAgents({ status: "active" });
+      if (agents.length === 0) {
+        await client.chat.postMessage({
+          channel: channelId,
+          text: "No active agents",
+          blocks: [
+            {
+              type: "context",
+              elements: [
+                {
+                  type: "mrkdwn",
+                  text: ":information_source:  No active agents",
+                },
+              ],
+            },
+          ],
+        });
+        return;
+      }
+
+      const lines = agents.map(({ name, entry }) => {
+        const typeLabel =
+          entry.type === "orchestrator"
+            ? ":crown:"
+            : entry.type === "builder"
+              ? ":hammer:"
+              : ":zap:";
+        const workspace =
+          "workspace" in entry ? `  ·  \`${entry.workspace}\`` : "";
+        const parent =
+          "parent" in entry ? `  ·  _parent: ${entry.parent}_` : "";
+        return `${typeLabel}  *${name}*  \`${entry.type}\`${parent}${workspace}`;
+      });
+
+      await client.chat.postMessage({
+        channel: channelId,
+        text: `Active agents: ${agents.length}`,
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: lines.join("\n"),
+            },
+          },
         ],
       });
     } else if (args === "session") {
@@ -118,6 +176,7 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
         "*Friday commands:*\n" +
           "• `/friday reset` — Clear session, start fresh\n" +
           "• `/friday session` — Show current session info\n" +
+          "• `/friday agents` — List active agents\n" +
           "• `/friday help` — Show this message"
       );
     } else {

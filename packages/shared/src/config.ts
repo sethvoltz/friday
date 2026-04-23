@@ -52,7 +52,7 @@ const DEFAULT_CONFIG: FridayConfig = {
     orchestratorChannelId: "",
   },
   agent: {
-    workingDirectory: join(homedir(), "Development"),
+    workingDirectory: join(FRIDAY_DIR, "working"),
     allowedTools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Agent"],
     permissionMode: "auto-accept",
     model: "claude-sonnet-4-6",
