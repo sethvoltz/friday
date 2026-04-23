@@ -23,7 +23,8 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | Module | Responsibility |
 |--------|---------------|
 | `src/config.ts` | Loads `~/.friday/config.json` + `~/.friday/.env`, validates required fields, merges with defaults |
-| `src/slack/app.ts` | Creates `@slack/bolt` App with Socket Mode |
+| `src/log.ts` | Structured JSON logger — all output goes through this (`ts`, `level`, `event`, context fields) |
+| `src/slack/app.ts` | Creates `@slack/bolt` App with Socket Mode, global error handler |
 | `src/slack/events.ts` | Message handler, `/friday` commands, per-channel FIFO queue, streaming, compaction detection |
 | `src/agent/client.ts` | Wraps Agent SDK `query()`, streams text chunks, detects compaction, logs usage, passes MCP servers and system prompt |
 | `src/agent/tools.ts` | MCP tool definitions (`slack_reply`) injected into agent sessions via `createSdkMcpServer` |
@@ -31,6 +32,7 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | `src/sessions/queue.ts` | Per-channel FIFO queue with edit/delete support, emoji lifecycle helpers |
 | `src/monitor/usage.ts` | Appends per-turn usage entries to `~/.friday/usage.jsonl` |
 | `src/monitor/session-stats.ts` | Reads usage log, computes session aggregates (cost, tokens, cache hit rate, duration) |
+| `src/monitor/health.ts` | Writes `~/.friday/health.json` heartbeat every 30s (pid, uptime, last heartbeat). Removed on clean shutdown. |
 
 ### Shared Package (`packages/shared`)
 
@@ -120,6 +122,7 @@ All persistent state lives in `~/.friday/`:
 ~/.friday/
 ├── config.json          — Runtime config (channel IDs, agent settings, formatting)
 ├── .env                 — Secrets (SLACK_APP_TOKEN, SLACK_BOT_TOKEN)
+├── health.json          — Daemon heartbeat (pid, uptime, last beat). Present = running.
 ├── sessions/
 │   └── channels.json    — Channel ID → Agent SDK session ID mapping
 └── usage.jsonl          — Per-turn usage log (cost, tokens, cache hits, duration)
