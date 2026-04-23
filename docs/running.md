@@ -4,9 +4,26 @@ Friday is a well-behaved Unix daemon. It reads config from `~/.friday/`, logs st
 
 ## Development
 
+Add `./bin` to your PATH, or invoke the shim directly:
+
 ```bash
-pnpm run dev              # All services (daemon + dashboard) via Turborepo
-pnpm --filter @friday/daemon run dev   # Daemon only (tsx watch, auto-reload)
+./bin/friday dev start              # All services (daemon + dashboard) via Turborepo
+./bin/friday dev start daemon       # Daemon only (tsx watch, auto-reload)
+./bin/friday dev start dashboard    # Dashboard only
+```
+
+The dashboard (optional) will be available at `http://localhost:5173`.
+
+## Service Management
+
+The `friday` CLI manages daemon and dashboard processes via PID tracking:
+
+```bash
+./bin/friday start                  # Start all services (detached)
+./bin/friday start daemon           # Start daemon only
+./bin/friday stop                   # Stop all services
+./bin/friday restart daemon         # Restart a specific service
+./bin/friday status                 # Check what's running
 ```
 
 ## Production
@@ -105,7 +122,7 @@ The daemon writes `~/.friday/health.json` every 30 seconds:
 }
 ```
 
-The file is removed on clean shutdown. If the file exists but `lastHeartbeat` is stale (> 60s old), the daemon is likely hung.
+The file is removed on clean shutdown. If the file exists but `lastHeartbeat` is stale (> 60s old), the daemon is likely hung. `./bin/friday status` checks this automatically.
 
 ## Logs
 

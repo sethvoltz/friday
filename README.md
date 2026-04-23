@@ -54,54 +54,33 @@ cd agent-friday
 pnpm install
 ```
 
-### 2. Create a Slack app
+### 2. Create a Slack app and get tokens
 
-See [SETUP.md](SETUP.md) for the full Slack app manifest and token setup.
-
-The short version: create a Socket Mode app with bot scopes for `chat:write`, `channels:history`, `reactions:write`, and a `/friday` slash command. You'll get two tokens:
-
-- **App Token** (`xapp-...`) -- for Socket Mode
-- **Bot Token** (`xoxb-...`) -- for API calls
+Follow the [Setup guide](docs/setup-friday.md) to create a Socket Mode Slack app and obtain your App Token (`xapp-...`) and Bot Token (`xoxb-...`).
 
 ### 3. Configure Friday
+
+Follow the [Configuration guide](docs/configure-friday.md) to set up `~/.friday/` with your tokens, config file, and channel mapping. The short version:
 
 ```bash
 mkdir -p ~/.friday/sessions
 ```
 
-Add your tokens to `~/.friday/.env`:
-
-```bash
-SLACK_APP_TOKEN=xapp-your-token
-SLACK_BOT_TOKEN=xoxb-your-token
-```
-
-Set your orchestrator channel in `~/.friday/config.json`:
-
-```json
-{
-  "slack": {
-    "orchestratorChannelId": "C0123ABCDEF"
-  },
-  "agent": {
-    "workingDirectory": "/path/to/your/project"
-  }
-}
-```
-
-Don't forget to `/invite @Friday` in the channel.
+Add tokens to `~/.friday/.env`, set your orchestrator channel in `~/.friday/config.json`, and `/invite @Friday` in the channel.
 
 ### 4. Run
 
 ```bash
-# Daemon only
-pnpm --filter @friday/daemon dev
+# Start everything in dev mode (daemon + dashboard with hot reload)
+./bin/friday dev start
 
-# Daemon + dashboard
-pnpm dev
+# Or start just the daemon
+./bin/friday dev start daemon
 ```
 
 Send a message in your orchestrator channel. Friday will pick it up.
+
+> **Tip:** Add `./bin` to your PATH to use `friday` directly, or invoke the shim as `./bin/friday` from the repo root.
 
 ## CLI
 
@@ -112,14 +91,15 @@ The `friday` CLI manages services and reports usage without needing the daemon r
 ./bin/friday <command>
 
 # Commands:
-friday status                  # Check what's running
+friday status                   # Check what's running
 friday start [daemon|dashboard] # Start services (detached)
 friday stop [daemon|dashboard]  # Stop services
 friday restart <service>        # Restart a service
-friday usage                   # Cost/token report
-friday usage -v                # Verbose token breakdown
-friday config                  # Print resolved config
-friday config --validate       # Validate config
+friday usage                    # Cost/token report
+friday usage -v                 # Verbose token breakdown
+friday config                   # Print resolved config
+friday config --validate        # Validate config
+friday dev start [service]      # Dev mode with hot reload
 ```
 
 ## Project Structure
@@ -132,16 +112,13 @@ agent-friday/
 ├── services/
 │   ├── friday/          # Bridge daemon (@friday/daemon)
 │   └── dashboard/       # SvelteKit management UI
-├── tools/
-│   └── usage-report/    # Standalone usage CLI (absorbed into CLI)
 ├── bin/friday            # Dev shim
-└── docs/
-    └── architecture.md  # Detailed system design
+└── docs/                # Documentation index, setup, config, architecture
 ```
 
-**Stack:** TypeScript, pnpm workspaces, Turborepo, Vitest, SvelteKit
-
 ## Developing
+
+**Stack:** TypeScript, pnpm workspaces, Turborepo, Vitest, SvelteKit
 
 ### Setup
 
@@ -154,7 +131,7 @@ pnpm build        # Build all packages
 
 ```bash
 # Start everything with hot reload
-pnpm dev
+./bin/friday dev start
 
 # Or start a specific service
 ./bin/friday dev start daemon
@@ -187,10 +164,10 @@ pnpm build        # Turborepo builds shared first, then services in parallel
 ./bin/friday config --validate
 ```
 
-## Architecture
+## Documentation
 
-See [docs/architecture.md](docs/architecture.md) for the full system design, including message flow, queue behavior, session management, and slash command handling.
+See [docs/index.md](docs/index.md) for the full documentation index, including setup, configuration, architecture, and decision records.
 
 ## License
 
-Private.
+Apache License 2.0. See [LICENSE](LICENSE) for details.

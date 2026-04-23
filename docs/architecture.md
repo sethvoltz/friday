@@ -164,8 +164,8 @@ agent-friday/
 ├── packages/cli         — CLI entrypoint (@friday/cli)
 ├── services/friday      — Bridge daemon
 ├── services/dashboard   — Management GUI (SvelteKit)
-├── tools/usage-report   — Standalone usage CLI (absorbed into @friday/cli)
-└── bin/friday           — Dev shim (runs @friday/cli via tsx)
+├── bin/friday           — Dev shim (runs @friday/cli via tsx)
+└── docs/                — Documentation index, setup, config, architecture
 ```
 
 **Package manager:** pnpm workspaces

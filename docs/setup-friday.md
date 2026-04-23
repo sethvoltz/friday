@@ -1,4 +1,6 @@
-# Friday Setup
+# Setup Friday
+
+This guide covers creating the Slack app and obtaining the tokens Friday needs. For configuration, see [configure-friday.md](configure-friday.md).
 
 ## 1. Create the Slack App
 
@@ -61,55 +63,14 @@ settings:
 2. Click **Install to Workspace** and authorize
 3. Copy the **Bot User OAuth Token** (`xoxb-...`)
 
-## 3. Configure Friday
-
-```bash
-mkdir -p ~/.friday/sessions
-```
-
-Create `~/.friday/.env`:
-```bash
-SLACK_APP_TOKEN=xapp-your-token-here
-SLACK_BOT_TOKEN=xoxb-your-token-here
-```
-
-Create `~/.friday/config.json`:
-```json
-{
-  "slack": {
-    "orchestratorChannelId": "YOUR_CHANNEL_ID"
-  },
-  "agent": {
-    "workingDirectory": "/Users/seth/Development/Seth",
-    "model": "claude-sonnet-4-6"
-  }
-}
-```
-
-To find the channel ID: right-click the channel in Slack → **View channel details** → the ID is at the bottom of the modal.
-
-## 4. Invite the Bot
+## 3. Invite the Bot
 
 In Slack, go to your orchestrator channel and type:
 ```
 /invite @Friday
 ```
 
-## 5. Run
+## Next Steps
 
-```bash
-cd agent-friday
-
-# Install dependencies
-pnpm install
-
-# Run just the daemon
-pnpm --filter @friday/daemon dev
-
-# Or run everything (daemon + dashboard)
-pnpm dev
-```
-
-The daemon will connect to Slack via Socket Mode and start listening for messages in the orchestrator channel.
-
-The dashboard (optional) will be available at `http://localhost:5173`.
+- [Configure Friday](configure-friday.md) -- set up tokens, config, and channel mapping
+- [Running Friday](running.md) -- start the daemon in dev or production mode
