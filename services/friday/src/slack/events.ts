@@ -21,6 +21,14 @@ import {
   clearProcessingEmoji,
   type QueuedMessage,
 } from "../sessions/queue.js";
+import {
+  buildSystemPrompt,
+  chunkMessage,
+  buildBatchPrompt,
+  buildBlockquote,
+  formatErrorResponse,
+  buildSessionFields,
+} from "./helpers.js";
 
 export function registerEventHandlers(app: App, config: RuntimeConfig): void {
   const orchestratorChannelId = config.slack.orchestratorChannelId;
@@ -84,16 +92,13 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
 
       const stats = getSessionStats(sessionId);
       const workDir = config.agent.workingDirectory;
-
-      const fields = [
-        `*Session*  \`${sessionId.slice(0, 8)}…\``,
-        `*Turns*  ${stats?.turnCount ?? "—"}`,
-        `*Cost*  ${stats ? `$${stats.totalCostUsd.toFixed(4)}` : "—"}`,
-        `*Cache hit rate*  ${stats ? `${stats.cacheHitRate}%` : "—"}`,
-        `*Started*  ${stats ? formatAge(stats.firstTurnAt) : "—"}`,
-        `*Agent time*  ${stats ? formatDuration(stats.totalDurationMs) : "—"}`,
-        `*Working dir*  \`${workDir}\``,
-      ];
+      const fields = buildSessionFields(
+        sessionId,
+        stats,
+        workDir,
+        formatAge,
+        formatDuration
+      );
 
       await client.chat.postMessage({
         channel: channelId,
@@ -243,20 +248,9 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
       }
 
       // Combine batch into single prompt
-      const prompt =
-        batch.length === 1
-          ? batch[0].text
-          : batch.map((m) => m.text).join("\n\n");
-
+      const prompt = buildBatchPrompt(batch.map((m) => m.text));
       const quoted = wasQueued
-        ? batch
-            .map((m) =>
-              m.text
-                .split("\n")
-                .map((line) => `> ${line}`)
-                .join("\n")
-            )
-            .join("\n\n")
+        ? buildBlockquote(batch.map((m) => m.text))
         : null;
 
       // For queued messages: post placeholder with blockquote echo + "Working..."
@@ -372,13 +366,11 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
           await client.chat.update({
             channel: channelId,
             ts: placeholderTs,
-            text: quoted
-              ? `${quoted}\n\n:radioactive_sign: _${errorMessage}_`
-              : `:radioactive_sign: _${errorMessage}_`,
+            text: formatErrorResponse(errorMessage, quoted),
           }).catch(() => {});
         } else {
           await say({
-            text: `:radioactive_sign: _${errorMessage}_`,
+            text: formatErrorResponse(errorMessage, null),
           });
         }
 
@@ -464,67 +456,4 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
       await say({ text: chunks[i] });
     }
   }
-}
-
-function buildSystemPrompt(
-  config: RuntimeConfig,
-  isOrchestrator: boolean,
-  channelId: string
-): string | { type: "preset"; preset: "claude_code"; append: string } | undefined {
-  const agentConfig = isOrchestrator ? config.agent : config.independentAgent;
-  const customPrompt = agentConfig?.systemPrompt;
-
-  // Always inject channel context so the agent knows its channel_id for slack_reply
-  const channelContext = `You are communicating via Slack channel ${channelId}.`;
-
-  if (customPrompt) {
-    // Custom prompt: append to Claude Code's default
-    return {
-      type: "preset",
-      preset: "claude_code",
-      append: `${channelContext}\n\n${customPrompt}`,
-    };
-  }
-
-  if (isOrchestrator) {
-    // Orchestrator gets channel context even without a custom prompt
-    return {
-      type: "preset",
-      preset: "claude_code",
-      append: channelContext,
-    };
-  }
-
-  // Independent sessions with no custom prompt: no override
-  return undefined;
-}
-
-function chunkMessage(text: string, maxLength: number): string[] {
-  if (text.length <= maxLength) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= maxLength) {
-      chunks.push(remaining);
-      break;
-    }
-
-    // Try to break at a newline
-    let breakPoint = remaining.lastIndexOf("\n", maxLength);
-    if (breakPoint <= 0) {
-      // Fall back to space
-      breakPoint = remaining.lastIndexOf(" ", maxLength);
-    }
-    if (breakPoint <= 0) {
-      // Hard break
-      breakPoint = maxLength;
-    }
-
-    chunks.push(remaining.slice(0, breakPoint));
-    remaining = remaining.slice(breakPoint).trimStart();
-  }
-
-  return chunks;
 }

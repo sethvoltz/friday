@@ -15,6 +15,11 @@ interface ChannelQueue {
 
 const queues = new Map<string, ChannelQueue>();
 
+/** @internal — exported for test isolation */
+export function _resetAllQueues(): void {
+  queues.clear();
+}
+
 function getQueue(channelId: string): ChannelQueue {
   let queue = queues.get(channelId);
   if (!queue) {

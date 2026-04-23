@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "vitest run",
     "dev": "tsx src/index.ts",
     "clean": "rm -rf dist"
   },

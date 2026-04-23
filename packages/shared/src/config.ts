@@ -82,5 +82,20 @@ export function loadConfig(): FridayConfig {
   }
   const raw = readFileSync(CONFIG_PATH, "utf-8");
   const userConfig = JSON.parse(raw) as Partial<FridayConfig>;
-  return { ...DEFAULT_CONFIG, ...userConfig };
+  return {
+    slack: { ...DEFAULT_CONFIG.slack, ...userConfig.slack },
+    agent: { ...DEFAULT_CONFIG.agent, ...userConfig.agent },
+    independentAgent: userConfig.independentAgent !== undefined
+      ? { ...DEFAULT_CONFIG.independentAgent, ...userConfig.independentAgent }
+      : DEFAULT_CONFIG.independentAgent,
+    slack_formatting: {
+      ...DEFAULT_CONFIG.slack_formatting,
+      ...userConfig.slack_formatting,
+      emojiReactions: {
+        ...DEFAULT_CONFIG.slack_formatting.emojiReactions,
+        ...userConfig.slack_formatting?.emojiReactions,
+      },
+    },
+    monitoring: { ...DEFAULT_CONFIG.monitoring, ...userConfig.monitoring },
+  };
 }

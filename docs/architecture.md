@@ -193,3 +193,46 @@ Unified command-line interface for managing Friday. Provides both standalone com
 **Entry points:**
 - `bin/friday` — dev shim, runs `packages/cli/src/index.ts` via tsx
 - `npm install -g @friday/cli` — production install puts `friday` on PATH via npm bin linking
+
+## Testing
+
+### Framework & Runner
+
+All packages use **Vitest** (`vitest run`). Tests are co-located with source files as `*.test.ts`. The root `pnpm test` runs `turbo run test`, which builds `@friday/shared` first (since other packages depend on it) then runs all package tests in parallel.
+
+### Running Tests
+
+```bash
+# Full suite (all packages, via Turborepo)
+pnpm test
+
+# Single package
+pnpm --filter @friday/shared run test
+pnpm --filter @friday/cli run test
+pnpm --filter @friday/daemon run test
+
+# Single file
+pnpm --filter @friday/cli exec vitest run src/commands/start.test.ts
+```
+
+### Coverage by Package
+
+| Package | Test files | What's tested |
+|---------|-----------|---------------|
+| `@friday/shared` | `config.test.ts` | Path derivation, defaults, deep merge (agent, slack, emoji, independentAgent), malformed JSON |
+| `@friday/cli` | `help.test.ts`, `services.test.ts`, 5× command tests | Help text, PID management, isRunning, parseServiceArg, findMonorepoRoot, all CLI commands |
+| `@friday/daemon` | `queue.test.ts`, `manager.test.ts`, `helpers.test.ts`, `usage.test.ts`, `config.test.ts` | FIFO queue ops, session persistence, Slack helpers (prompt building, chunking, formatting), usage logging, runtime config validation |
+
+### Conventions
+
+- **Mocking external deps:** Mock `@friday/shared` or `node:os` to redirect paths to temp dirs. Use `vi.mock()` before `await import()`.
+- **Temp directories:** Always include `process.pid` and `Date.now()` in temp dir names for CI safety. Clean up in `afterEach`.
+- **Process exit:** When testing code that calls `process.exit(1)`, spy on both `process.exit` (throw to break flow) and `console.error` (suppress output).
+- **Module state:** For modules with module-level mutable state (queues, sessions), either call the initializer in each test or export a `_resetForTesting()` function.
+- **No e2e yet:** Playwright tests for the SvelteKit dashboard are planned but not yet implemented.
+
+### CI Notes
+
+- All tests are deterministic — no network calls, no real Slack connections, no real Claude sessions.
+- Tests use temp dirs under `os.tmpdir()` with unique names; no hardcoded paths.
+- `tsconfig.json` in each package excludes `src/**/*.test.ts` so test files don't end up in `dist/`.
