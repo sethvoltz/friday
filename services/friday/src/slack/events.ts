@@ -1,10 +1,57 @@
 import type { App } from "@slack/bolt";
 import type { RuntimeConfig } from "../config.js";
 import { sendToAgent } from "../agent/client.js";
+import { resetSession, getSessionId } from "../sessions/manager.js";
 
 export function registerEventHandlers(app: App, config: RuntimeConfig): void {
   const orchestratorChannelId = config.slack.orchestratorChannelId;
   const emojis = config.slack_formatting.emojiReactions;
+
+  // /friday slash command — top-level command namespace
+  app.command("/friday", async ({ command, ack, respond, client }) => {
+    await ack();
+    const args = command.text.trim().toLowerCase();
+    const channelId = command.channel_id;
+
+    if (args === "reset") {
+      const hadSession = !!getSessionId(channelId);
+      resetSession(channelId);
+      await client.chat.postMessage({
+        channel: channelId,
+        text: hadSession
+          ? "Session reset. Next message starts a fresh conversation."
+          : "No active session for this channel.",
+        blocks: [
+          {
+            type: "context",
+            elements: [
+              {
+                type: "mrkdwn",
+                text: hadSession
+                  ? ":recycle:  *Session reset* — next message starts a fresh conversation"
+                  : ":shrug:  No active session for this channel",
+              },
+            ],
+          },
+          ...(hadSession
+            ? [
+                {
+                  type: "divider" as const,
+                },
+              ]
+            : []),
+        ],
+      });
+    } else if (args === "" || args === "help") {
+      await respond(
+        "*Friday commands:*\n" +
+          "• `/friday reset` — Clear session, start fresh\n" +
+          "• `/friday help` — Show this message"
+      );
+    } else {
+      await respond(`Unknown command: \`${args}\`. Try \`/friday help\`.`);
+    }
+  });
 
   app.message(async ({ message, client, say }) => {
     // Ignore bot messages, message edits, etc.

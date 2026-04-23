@@ -76,8 +76,8 @@ All persistent state lives in `~/.friday/`:
 ├── config.json          — Runtime config (channel IDs, agent settings, formatting)
 ├── .env                 — Secrets (SLACK_APP_TOKEN, SLACK_BOT_TOKEN)
 ├── sessions/
-│   └── channels.json    — Channel ID → Agent SDK session ID mapping (Phase 2)
-└── usage.jsonl          — Per-turn usage log (Phase 2)
+│   └── channels.json    — Channel ID → Agent SDK session ID mapping
+└── usage.jsonl          — Per-turn usage log (cost, tokens, cache hits, duration)
 ```
 
 Agent SDK sessions are stored by Claude Code in `~/.claude/projects/<encoded-cwd>/`.
@@ -104,7 +104,7 @@ Agent SDK sessions are stored by Claude Code in `~/.claude/projects/<encoded-cwd
 
 **Prompt caching:** Handled automatically at the infrastructure level. 1-hour TTL on cached system prompt (~15k tokens). Subsequent turns in a resumed session cost ~58% less. Validated in Phase 0.
 
-**Current mode (Phase 1):** Each message is an independent `query()` call — no session continuity between messages. Session resume comes in Phase 2.
+**Session continuity:** Each channel maps to a persistent Agent SDK session. The session ID is tracked in `~/.friday/sessions/channels.json` and passed via `resume: sessionId` on every `query()` call. This means the agent has full context of the conversation history within that channel. Use `/reset` in Slack to start a fresh session.
 
 **Permission mode:** `bypassPermissions` — the agent can use all allowed tools without interactive confirmation. This is required since there's no human at the terminal to approve tool calls.
 

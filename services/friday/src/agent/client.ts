@@ -1,5 +1,6 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { getSessionId, setSessionId } from "../sessions/manager.js";
+import { logUsage } from "../monitor/usage.js";
 
 export interface AgentOptions {
   channelId: string;
@@ -9,11 +10,15 @@ export interface AgentOptions {
   model: string;
 }
 
+// Track turn count per session for usage logging
+const turnCounts = new Map<string, number>();
+
 export async function sendToAgent(
   prompt: string,
   options: AgentOptions
 ): Promise<string> {
   let responseText = "";
+  const startTime = Date.now();
 
   // Resume existing session for this channel, or start fresh
   const existingSessionId = getSessionId(options.channelId);
@@ -46,28 +51,58 @@ export async function sendToAgent(
         throw new Error(`Agent ended with status: ${message.subtype}`);
       }
 
-      // Track session for this channel
-      setSessionId(options.channelId, message.session_id);
+      const sessionId = message.session_id;
+      setSessionId(options.channelId, sessionId);
 
-      // Log usage for monitoring
+      // Track turn number
+      const turnNumber = (turnCounts.get(sessionId) ?? 0) + 1;
+      turnCounts.set(sessionId, turnNumber);
+
       const usage = (message as any).usage;
-      if (usage) {
-        console.log(
-          JSON.stringify({
-            event: "agent_response",
-            channelId: options.channelId,
-            sessionType: options.isOrchestrator
-              ? "orchestrator"
-              : "independent",
-            sessionId: message.session_id,
-            costUsd: (message as any).total_cost_usd ?? null,
-            inputTokens: usage.input_tokens ?? 0,
-            outputTokens: usage.output_tokens ?? 0,
-            cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
-            cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-          })
-        );
-      }
+      const costUsd = (message as any).total_cost_usd ?? null;
+      const durationMs = Date.now() - startTime;
+
+      const inputTokens = usage?.input_tokens ?? 0;
+      const outputTokens = usage?.output_tokens ?? 0;
+      const cacheCreationTokens =
+        usage?.cache_creation_input_tokens ?? 0;
+      const cacheReadTokens = usage?.cache_read_input_tokens ?? 0;
+
+      // Log to stdout
+      console.log(
+        JSON.stringify({
+          event: "agent_response",
+          channelId: options.channelId,
+          sessionType: options.isOrchestrator
+            ? "orchestrator"
+            : "independent",
+          sessionId,
+          turnNumber,
+          costUsd,
+          inputTokens,
+          outputTokens,
+          cacheCreationTokens,
+          cacheReadTokens,
+          durationMs,
+        })
+      );
+
+      // Append to usage log file
+      logUsage({
+        timestamp: new Date().toISOString(),
+        channelId: options.channelId,
+        sessionType: options.isOrchestrator
+          ? "orchestrator"
+          : "independent",
+        sessionId,
+        costUsd,
+        inputTokens,
+        outputTokens,
+        cacheCreationTokens,
+        cacheReadTokens,
+        turnNumber,
+        durationMs,
+      });
     }
   }
 

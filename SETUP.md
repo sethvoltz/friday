@@ -15,6 +15,11 @@ features:
   bot_user:
     display_name: friday
     always_online: true
+  slash_commands:
+    - command: /friday
+      description: Send a command to Friday
+      usage_hint: "[reset]"
+      should_escape: false
 
 oauth_config:
   scopes:
@@ -24,6 +29,7 @@ oauth_config:
       - channels:history
       - im:history
       - groups:history
+      - commands
       - files:read
       - files:write
       - reactions:read
