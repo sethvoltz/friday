@@ -41,10 +41,6 @@ TypeScript types and utilities shared across services:
 - `config.ts` — `FridayConfig` type, default values, `loadConfig()` function, path constants
 - `usage.ts` — `UsageEntry` type for the JSONL usage log
 
-### Usage Report (`tools/usage-report`)
-
-Standalone CLI tool that reads `~/.friday/usage.jsonl` and reports usage stats without making any LLM calls. Run via `pnpm --filter @friday/usage-report run start` (or `-- -v` for token breakdown).
-
 ### Dashboard (`services/dashboard`)
 
 Optional SvelteKit app for management. Reads `~/.friday/` state files via server-side load functions. Does not need the daemon running.
@@ -177,7 +173,7 @@ agent-friday/
 Unified command-line interface for managing Friday. Provides both standalone commands (no daemon needed) and service management.
 
 **Standalone commands:**
-- `friday usage` — reads `~/.friday/usage.jsonl`, reports cost/token/cache stats (absorbs `tools/usage-report`)
+- `friday usage` — reads `~/.friday/usage.jsonl`, reports cost/token/cache stats
 - `friday config` — prints/validates `~/.friday/config.json`
 - `friday status` — checks PID files and health.json for service state
 
