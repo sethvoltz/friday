@@ -161,11 +161,35 @@ Agent SDK sessions are stored by Claude Code in `~/.claude/projects/<encoded-cwd
 ```
 agent-friday/
 ├── packages/shared      — Shared types (config, usage)
+├── packages/cli         — CLI entrypoint (@friday/cli)
 ├── services/friday      — Bridge daemon
 ├── services/dashboard   — Management GUI (SvelteKit)
-└── tools/usage-report   — CLI usage introspection (Phase 4)
+├── tools/usage-report   — Standalone usage CLI (absorbed into @friday/cli)
+└── bin/friday           — Dev shim (runs @friday/cli via tsx)
 ```
 
 **Package manager:** pnpm workspaces
 **Build orchestration:** Turborepo — builds `packages/shared` first, then services in parallel
 **Language:** TypeScript throughout
+
+### CLI (`packages/cli`)
+
+Unified command-line interface for managing Friday. Provides both standalone commands (no daemon needed) and service management.
+
+**Standalone commands:**
+- `friday usage` — reads `~/.friday/usage.jsonl`, reports cost/token/cache stats (absorbs `tools/usage-report`)
+- `friday config` — prints/validates `~/.friday/config.json`
+- `friday status` — checks PID files and health.json for service state
+
+**Service management:**
+- `friday start [service]` — start daemon, dashboard, or all (detached, PID tracked in `~/.friday/pids/`)
+- `friday stop [service]` — stop services via SIGTERM
+- `friday restart <service>` — restart a specific service (required argument)
+
+**Dev mode:**
+- `friday dev start [service]` — start with tsx watch / hot reload (uses turbo for all)
+- `friday dev restart <service>` — restart a specific service in dev mode
+
+**Entry points:**
+- `bin/friday` — dev shim, runs `packages/cli/src/index.ts` via tsx
+- `npm install -g @friday/cli` — production install puts `friday` on PATH via npm bin linking

@@ -18,6 +18,19 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
 
+  packages/cli:
+    dependencies:
+      '@friday/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      tsx:
+        specifier: ^4.19.0
+        version: 4.21.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
   packages/shared:
     devDependencies:
       typescript:
