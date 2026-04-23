@@ -24,8 +24,12 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 |--------|---------------|
 | `src/config.ts` | Loads `~/.friday/config.json` + `~/.friday/.env`, validates required fields, merges with defaults |
 | `src/slack/app.ts` | Creates `@slack/bolt` App with Socket Mode |
-| `src/slack/events.ts` | Message event handler: emoji reactions, agent dispatch, response chunking, error threading |
-| `src/agent/client.ts` | Wraps Agent SDK `query()`, extracts text responses, logs usage data |
+| `src/slack/events.ts` | Message handler, `/friday` commands, per-channel FIFO queue, streaming, compaction detection |
+| `src/agent/client.ts` | Wraps Agent SDK `query()`, streams text chunks, detects compaction, logs usage |
+| `src/sessions/manager.ts` | Channel → session ID mapping (in-memory + persisted to `~/.friday/sessions/channels.json`) |
+| `src/sessions/queue.ts` | Per-channel FIFO queue with edit/delete support, emoji lifecycle helpers |
+| `src/monitor/usage.ts` | Appends per-turn usage entries to `~/.friday/usage.jsonl` |
+| `src/monitor/session-stats.ts` | Reads usage log, computes session aggregates (cost, tokens, cache hit rate, duration) |
 
 ### Shared Package (`packages/shared`)
 
@@ -40,32 +44,68 @@ Optional SvelteKit app for management. Reads `~/.friday/` state files via server
 
 ## Message Flow
 
-### Happy Path
+### Linear (Non-Queued) Path
 
 ```
-1. User posts message in #orchestrator channel
+1. User posts message in channel
 2. Slack sends event via Socket Mode WebSocket
 3. Bolt SDK receives event, calls message handler
-4. Handler reacts with 👀 emoji on the message
-5. Handler calls sendToAgent() with message text
-6. Agent SDK spawns Claude Code CLI subprocess
-7. CLI processes the request (may use tools: Read, Write, Bash, etc.)
-8. CLI returns response through SDK async iterator
-9. Handler posts response flat in channel (chunked if >4000 chars)
+4. Message is enqueued (wasQueued=false) and drained immediately
+5. Handler reacts with 👀 emoji on the message
+6. Handler calls sendToAgent() with message text
+7. Agent SDK spawns/resumes Claude Code CLI subprocess
+8. CLI processes the request (may use tools: Read, Write, Bash, etc.)
+9. If streaming: post "_..._" message, edit with chunks at 1/sec throttle
+   If non-streaming: post response flat in channel (chunked if >4000 chars)
 10. Handler removes 👀 emoji
 ```
+
+### Queued (Out-of-Order) Path
+
+When the agent is already processing a message, additional messages are queued:
+
+```
+1. User posts message while agent is busy
+2. Handler reacts with 🕐 emoji (queued indicator)
+3. Message is enqueued (wasQueued=true)
+4. When the current turn completes, queue is drained as a batch
+5. 🕐 swapped to 👀 on all batch messages
+6. Batch messages are echoed as a blockquote in a "Working..." placeholder
+7. Combined text is sent to agent as a single prompt
+8. Placeholder is updated with the response
+9. 👀 removed from all batch messages
+```
+
+Users can edit or delete queued messages before they're processed — edits update the queued text, deletes remove from queue and clear the 🕐 emoji.
 
 ### Error Path
 
 ```
-1-6. Same as happy path
-7. CLI or SDK throws an error
+1-6. Same as above
+7. Agent throws an error
 8. Handler reacts with ☢️ emoji on the original message
-9. Handler posts error details in a thread on the original message
-10. Handler removes 👀 emoji
+9. Error posted flat in channel (or updates the placeholder if one exists)
+10. 👀 removed
 ```
 
-Errors are threaded to keep the main channel clean. The ☢️ reaction on the original message signals visually that something went wrong without needing to read the thread.
+### Compaction
+
+When the Agent SDK detects conversation compaction:
+
+```
+1. SDK emits status: "compacting"
+2. Handler posts "⏳ Compacting conversation..." in channel
+3. SDK completes compaction
+4. Handler updates message to "🗜️ Conversation was compacted"
+```
+
+### Slash Commands
+
+| Command | Behavior |
+|---------|----------|
+| `/friday reset` | Clears channel session, posts confirmation (channel-visible) |
+| `/friday session` | Shows session stats: ID, turns, cost, cache rate, age, duration, working dir (channel-visible) |
+| `/friday help` | Lists commands (ephemeral, user-only) |
 
 ## State & Configuration
 

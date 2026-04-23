@@ -13,10 +13,27 @@ export interface AgentOptions {
 // Track turn count per session for usage logging
 const turnCounts = new Map<string, number>();
 
+export interface AgentCallbacks {
+  onChunk?: (text: string) => void;
+  onCompactStart?: () => void;
+  onCompactEnd?: (result: "success" | "failed") => void;
+}
+
+/**
+ * Send a prompt to the agent and stream text chunks as they arrive.
+ * onChunk is called with each new piece of text.
+ * Returns the full accumulated response.
+ */
 export async function sendToAgent(
   prompt: string,
-  options: AgentOptions
+  options: AgentOptions,
+  callbacksOrOnChunk?: AgentCallbacks | ((text: string) => void)
 ): Promise<string> {
+  // Support both old (onChunk function) and new (callbacks object) signatures
+  const callbacks: AgentCallbacks =
+    typeof callbacksOrOnChunk === "function"
+      ? { onChunk: callbacksOrOnChunk }
+      : callbacksOrOnChunk ?? {};
   let responseText = "";
   const startTime = Date.now();
 
@@ -44,6 +61,25 @@ export async function sendToAgent(
         .map((block: any) => block.text)
         .join("");
       responseText += text;
+      if (text && callbacks.onChunk) {
+        callbacks.onChunk(text);
+      }
+    }
+
+    // Detect compaction status changes
+    if (
+      message.type === "system" &&
+      (message as any).subtype === "status"
+    ) {
+      const status = (message as any).status;
+      const compactResult = (message as any).compact_result;
+
+      if (status === "compacting" && callbacks.onCompactStart) {
+        callbacks.onCompactStart();
+      }
+      if (compactResult && callbacks.onCompactEnd) {
+        callbacks.onCompactEnd(compactResult);
+      }
     }
 
     if (message.type === "result") {

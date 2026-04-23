@@ -71,19 +71,21 @@
 
 ---
 
-## ADR-004: Flat Channel Responses, Threaded Errors
+## ADR-004: Flat Channel Responses and Errors
 
 **Date:** 2026-04-22
-**Status:** Accepted
+**Status:** Accepted (updated)
 
 **Context:** The orchestrator Slack channel mirrors a Claude Code CLI session. Responses could be posted flat in the channel or threaded under the original message.
 
-**Decision:** Responses post flat in the channel. Errors thread under the original message with a ☢️ reaction.
+**Decision:** All responses and errors post flat in the channel. The ☢️ reaction on the original message signals an error visually.
 
 **Rationale:**
-- The channel IS the conversation — threading every response would break the conversational flow and make it hard to read linearly
-- Errors are metadata about a specific message, not part of the conversation — threading them keeps the channel clean
-- The ☢️ reaction provides a visual signal without needing to expand the thread
+- The channel IS the conversation — threading any response would break the conversational flow and make it hard to read linearly
+- With queued/out-of-order messages, threaded errors would land on the wrong message or be hard to find
+- The ☢️ reaction on the original message provides a clear visual signal without needing a separate thread
+
+**History:** Initially errors were threaded to keep the channel "clean," but in practice this was more confusing than helpful — especially with batched/queued messages where the thread parent might not be the right context.
 
 ---
 
