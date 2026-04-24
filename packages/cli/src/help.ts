@@ -10,6 +10,8 @@ Commands:
   stop [service]     Stop services (daemon, dashboard, or all)
   restart <service>  Restart a specific service (daemon or dashboard)
   status             Show running services and health
+  inspect <agent>    Inspect an agent's recent transcript
+  transcript <agent> Export full transcript as markdown
   mail               Inter-agent mail (check, read, send)
   send               Shorthand for 'friday mail send'
   dev                Development mode commands
@@ -151,6 +153,43 @@ Options:
   --help, -h         Show this help
 `.trim();
 
+const INSPECT_HELP = `
+friday inspect — Inspect an agent's recent transcript
+
+Usage: friday inspect <agent-name> [options]
+
+Shows the last N turns from an agent's Claude Code session transcript.
+
+Options:
+  --turns N          Number of recent turns to show (default: 5)
+  --full             Show the entire transcript
+  --follow, -f       Tail the transcript live (like tail -f)
+  --no-tools         Hide tool call details
+  --help, -h         Show this help
+
+Examples:
+  friday inspect orchestrator              Last 5 turns
+  friday inspect builder-blog --turns 10   Last 10 turns
+  friday inspect builder-blog --full       Full transcript
+  friday inspect builder-blog -f           Watch live
+`.trim();
+
+const TRANSCRIPT_HELP = `
+friday transcript — Export full transcript as markdown
+
+Usage: friday transcript <agent-name> [options]
+
+Exports the complete session transcript as a readable markdown document.
+
+Options:
+  --output, -o <file>  Write to file instead of stdout
+  --help, -h           Show this help
+
+Examples:
+  friday transcript orchestrator
+  friday transcript builder-blog -o builder-blog.md
+`.trim();
+
 export const HELP: Record<string, string> = {
   main: MAIN_HELP,
   usage: USAGE_HELP,
@@ -161,6 +200,8 @@ export const HELP: Record<string, string> = {
   status: STATUS_HELP,
   mail: MAIL_HELP,
   dev: DEV_HELP,
+  inspect: INSPECT_HELP,
+  transcript: TRANSCRIPT_HELP,
 };
 
 export function showHelp(command: string): void {

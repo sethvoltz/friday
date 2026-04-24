@@ -70,7 +70,7 @@
   const dailyMap = new Map<string, { costByModel: Map<string, number>; inputUncached: number; inputCached: number; output: number }>();
   const modelSet = new Set<string>();
   for (const e of entries) {
-    const day = e.timestamp.slice(0, 10);
+    const day = new Date(e.timestamp).toLocaleDateString('en-CA'); // YYYY-MM-DD in local tz
     const model = e.model ?? 'unknown';
     modelSet.add(model);
     if (!dailyMap.has(day)) dailyMap.set(day, { costByModel: new Map(), inputUncached: 0, inputCached: 0, output: 0 });

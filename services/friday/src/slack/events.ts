@@ -7,7 +7,8 @@ import { createAgentTools } from "../agent/agent-tools.js";
 import { createMailTools } from "../comms/mail-tools.js";
 import { log } from "../log.js";
 import { resetSession, getSessionId } from "../sessions/manager.js";
-import { listAgents } from "../sessions/registry.js";
+import { listAgents, getAgent } from "../sessions/registry.js";
+import { buildInspectResult, formatTurns } from "@friday/shared";
 import {
   getSessionStats,
   formatDuration,
@@ -184,12 +185,77 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
           },
         ],
       });
+    } else if (args.startsWith("inspect")) {
+      const agentName = args.replace(/^inspect\s*/, "").trim();
+      if (!agentName) {
+        await respond("Usage: `/friday inspect <agent-name>`");
+        return;
+      }
+
+      const entry = getAgent(agentName);
+      if (!entry) {
+        await respond(`Agent \`${agentName}\` not found. Use \`/friday agents\` to see available agents.`);
+        return;
+      }
+
+      try {
+        const cwdOverride = entry.type === "orchestrator" ? config.agent.workingDirectory : undefined;
+        const result = await buildInspectResult(agentName, entry, {
+          lastN: 3,
+          includeTools: true,
+          cwdOverride,
+        });
+
+        const stats = entry.sessionId ? getSessionStats(entry.sessionId) : null;
+
+        const fields = [
+          `*${agentName}*  \`${entry.type}\``,
+          `Status: ${entry.status === "active" ? ":large_green_circle:" : ":white_circle:"} ${entry.status}`,
+          ...("parent" in entry ? [`Parent: ${entry.parent}`] : []),
+          ...(stats ? [`Turns: ${stats.turnCount}`, `Cost: $${stats.totalCostUsd.toFixed(4)}`] : []),
+        ].join("  ·  ");
+
+        const blocks: any[] = [
+          { type: "section", text: { type: "mrkdwn", text: fields } },
+        ];
+
+        if (result.turns.length > 0) {
+          blocks.push({ type: "divider" });
+          const turnSummaries = result.turns.map((t) => {
+            const prompt = t.prompt.length > 100 ? t.prompt.slice(0, 100) + "…" : t.prompt;
+            const response = t.response.length > 200 ? t.response.slice(0, 200) + "…" : t.response;
+            const tools = t.toolCalls.length > 0
+              ? `\n_Tools: ${t.toolCalls.map((tc) => `\`${tc.name}\``).join(", ")}_`
+              : "";
+            return `*Turn ${t.index + 1}*\n> ${prompt}\n${response}${tools}`;
+          });
+          blocks.push({
+            type: "section",
+            text: { type: "mrkdwn", text: turnSummaries.join("\n\n") },
+          });
+        } else {
+          blocks.push({
+            type: "context",
+            elements: [{ type: "mrkdwn", text: "_No turns in transcript yet_" }],
+          });
+        }
+
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: command.user_id,
+          text: `Inspect: ${agentName}`,
+          blocks,
+        });
+      } catch (err) {
+        await respond(`:x: Error inspecting agent: ${err instanceof Error ? err.message : String(err)}`);
+      }
     } else if (args === "" || args === "help") {
       await respond(
         "*Friday commands:*\n" +
           "• `/friday reset` — Clear session, start fresh\n" +
           "• `/friday session` — Show current session info\n" +
           "• `/friday agents` — List active agents\n" +
+          "• `/friday inspect <agent>` — Inspect agent's recent transcript\n" +
           "• `/friday help` — Show this message"
       );
     } else {

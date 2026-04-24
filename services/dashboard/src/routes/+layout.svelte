@@ -2,6 +2,8 @@
   import '../app.css';
   import favicon from '$lib/assets/favicon.svg';
 
+  import { page } from '$app/stores';
+
   let { children } = $props();
 
   let theme = $state<'light' | 'dark'>('dark');
@@ -30,6 +32,10 @@
         <span>Friday</span>
       </h1>
     </div>
+    <nav class="header-nav">
+      <a href="/" class:active={$page.url.pathname === '/'}>Dashboard</a>
+      <a href="/sessions" class:active={$page.url.pathname.startsWith('/sessions')}>Sessions</a>
+    </nav>
     <div class="header-right">
       <button class="theme-toggle" onclick={toggleTheme} title="Toggle theme">
         {theme === 'dark' ? '☀' : '☾'}
@@ -96,6 +102,31 @@
     font-family: var(--font-mono);
     font-size: 0.9rem;
     font-weight: 700;
+  }
+
+  .header-nav {
+    display: flex;
+    gap: 0.25rem;
+  }
+
+  .header-nav a {
+    padding: 0.35rem 0.75rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-fast);
+  }
+
+  .header-nav a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+  }
+
+  .header-nav a.active {
+    color: var(--accent-primary);
+    background: var(--accent-glow);
   }
 
   .app-main {

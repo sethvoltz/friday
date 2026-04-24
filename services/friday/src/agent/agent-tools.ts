@@ -1,9 +1,7 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { parseLastTurns, formatTurns } from "@friday/shared";
+import { buildInspectResult, formatTurns } from "@friday/shared";
 import {
   getAgent,
   listAgents,
@@ -356,43 +354,19 @@ export function createAgentTools(ctx: AgentToolsContext) {
               );
             }
 
-            if (!entry.sessionId) {
-              return errorResult(`Agent "${args.name}" has no session yet.`);
-            }
+            // Use cwdOverride for orchestrator (no cwd/workspace on its entry)
+            const cwdOverride = entry.type === "orchestrator" ? ctx.workingDirectory : undefined;
+            const result = await buildInspectResult(args.name, entry, {
+              lastN: args.turns,
+              includeTools: args.include_tools,
+              cwdOverride,
+            });
 
-            // Derive the session JSONL path from the agent's CWD and session ID
-            const agentCwd =
-              entry.type === "builder" && "workspace" in entry
-                ? entry.workspace
-                : "cwd" in entry
-                  ? entry.cwd
-                  : null;
-
-            if (!agentCwd) {
-              return errorResult(`Cannot determine working directory for agent "${args.name}".`);
-            }
-
-            const encodedCwd = agentCwd.replace(/\//g, "-");
-            const jsonlPath = join(
-              homedir(),
-              ".claude",
-              "projects",
-              encodedCwd,
-              `${entry.sessionId}.jsonl`
-            );
-
-            if (!existsSync(jsonlPath)) {
-              return errorResult(
-                `Session transcript not found at ${jsonlPath}. ` +
-                  `The agent may not have completed any turns yet.`
-              );
-            }
-
-            const turns = await parseLastTurns(jsonlPath, args.turns);
-            if (turns.length === 0) {
+            if (result.turns.length === 0) {
               return okResult(`Agent "${args.name}" has no turns in its transcript yet.`);
             }
 
+            // Enrich with daemon-only live state
             const lastActivityMs = getLastActivity(args.name);
             const lastActivityStr = lastActivityMs
               ? `${Math.round((Date.now() - lastActivityMs) / 1000)}s ago`
@@ -402,11 +376,11 @@ export function createAgentTools(ctx: AgentToolsContext) {
               `Agent: ${args.name} (${entry.type})`,
               `Status: ${entry.status} | Loop: ${isAgentRunning(args.name) ? "running" : "stopped"}`,
               `Last activity: ${lastActivityStr}`,
-              `Showing last ${turns.length} of transcript:`,
+              `Showing last ${result.turns.length} of ${result.totalTurns} turns:`,
               "",
             ].join("\n");
 
-            const body = formatTurns(turns, { includeTools: args.include_tools });
+            const body = formatTurns(result.turns, { includeTools: args.include_tools });
 
             return okResult(header + body);
           } catch (err) {

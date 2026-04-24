@@ -57,6 +57,7 @@ TypeScript types and utilities shared across services:
 - `agents.ts` — Agent types (`AgentType`, `AgentStatus`), registry types (`OrchestratorEntry`, `BuilderEntry`, `AgentEntry`), name validation
 - `usage.ts` — `UsageEntry` type for the JSONL usage log
 - `transcript.ts` — Session JSONL transcript parser: parses Claude Code session files into structured turns, supports full parse and last-N-turns, streaming tail via `fs.watch`, and human-readable formatting
+- `inspect.ts` — Shared agent inspection logic: resolves agent → transcript path, builds structured `InspectResult`, formats as plain text or markdown. Used by CLI, Slack command, MCP tool, and dashboard.
 
 ### Memory Package (`packages/memory`)
 
@@ -69,6 +70,10 @@ Persistent knowledge store for Orchestrator and Bare sessions. Memories are file
 ### Dashboard (`services/dashboard`)
 
 Optional SvelteKit app for management. Reads `~/.friday/` state files via server-side load functions. Does not need the daemon running.
+
+**Pages:**
+- `/` — Home dashboard: status, usage stats, daily cost chart, agents, sessions, memory, config
+- `/sessions` — Session explorer with hierarchical sidebar (agent tree + bare sessions) and transcript viewer. Supports current and historical sessions. Routes: `/sessions/agent/<name>[/<sessionId>]`, `/sessions/bare/<channelId>[/<sessionId>]`
 
 ## Message Flow
 
@@ -134,6 +139,7 @@ When the Agent SDK detects conversation compaction:
 | `/friday reset` | Clears channel session, posts confirmation. Blocked on the orchestrator channel (long-lived session). |
 | `/friday session` | Shows session stats: ID, turns, cost, cache rate, age, duration, working dir (channel-visible) |
 | `/friday agents` | Lists all active agents with type, name, status |
+| `/friday inspect <agent>` | Shows compact summary of agent's last 3 turns: status, parent, tool calls, cost (ephemeral) |
 | `/friday help` | Lists commands (ephemeral, user-only) |
 
 ## State & Configuration
@@ -257,6 +263,8 @@ Unified command-line interface for managing Friday. Provides both standalone com
 - `friday usage` — reads `~/.friday/usage.jsonl`, reports cost/token/cache stats
 - `friday config` — prints/validates `~/.friday/config.json`
 - `friday status` — checks PID files and health.json for service state
+- `friday inspect <agent>` — show last N turns from an agent's session transcript (supports `--turns N`, `--full`, `--follow/-f`, `--no-tools`)
+- `friday transcript <agent>` — export full session transcript as markdown (supports `--output <file>`)
 
 **Service management:**
 - `friday start [service]` — start daemon, dashboard, or all (detached, PID tracked in `~/.friday/pids/`)
@@ -296,9 +304,9 @@ pnpm --filter @friday/cli exec vitest run src/commands/start.test.ts
 
 | Package | Test files | What's tested |
 |---------|-----------|---------------|
-| `@friday/shared` | `config.test.ts`, `agents.test.ts`, `transcript.test.ts` | Path derivation, defaults, deep merge, agent name validation, name building, JSONL transcript parsing, turn grouping, tool call tracking, formatting |
+| `@friday/shared` | `config.test.ts`, `agents.test.ts`, `transcript.test.ts`, `inspect.test.ts` | Path derivation, defaults, deep merge, agent name validation, name building, JSONL transcript parsing, turn grouping, tool call tracking, formatting, agent inspection (path resolution, result building, plain/markdown formatting) |
 | `@friday/memory` | `store.test.ts`, `search.test.ts` | Memory CRUD, serialization roundtrip, recall tracking, hybrid search scoring, tag filtering, recall frequency boosting, event logging |
-| `@friday/cli` | `help.test.ts`, `services.test.ts`, 5× command tests | Help text, PID management, isRunning, parseServiceArg, findMonorepoRoot, all CLI commands |
+| `@friday/cli` | `help.test.ts`, `services.test.ts`, 7× command tests | Help text, PID management, isRunning, parseServiceArg, findMonorepoRoot, all CLI commands including inspect and transcript |
 | `@friday/daemon` | `queue.test.ts`, `manager.test.ts`, `helpers.test.ts`, `usage.test.ts`, `config.test.ts`, `registry.test.ts`, `workspace.test.ts`, `prime.test.ts`, `client.test.ts`, `agent-tools.test.ts`, `preflight.test.ts`, `agent-health.test.ts`, `mail.test.ts`, `mail-tools.test.ts` | FIFO queue ops, session persistence, Slack helpers, usage logging, runtime config, agent registry CRUD, workspace/worktree lifecycle, system prompt generation, thinking indicator, MCP agent tools, boot preflight cleanup, agent health monitoring (stall/crash detection), mail CRUD and delivery |
 
 ### Conventions

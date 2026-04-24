@@ -8,6 +8,8 @@ import { restartCommand } from "./commands/restart.js";
 import { statusCommand } from "./commands/status.js";
 import { devCommand } from "./commands/dev.js";
 import { mailCommand } from "./commands/mail.js";
+import { inspectCommand } from "./commands/inspect.js";
+import { transcriptCommand } from "./commands/transcript.js";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -19,7 +21,7 @@ if (!command || command === "help" || command === "--help" || command === "-h") 
   process.exit(0);
 }
 
-// Route commands
+// Route commands — async commands use .catch for top-level error handling
 switch (command) {
   case "usage":
     if (hasHelpFlag(commandArgs)) { showHelp("usage"); break; }
@@ -64,6 +66,22 @@ switch (command) {
   case "send":
     if (hasHelpFlag(commandArgs)) { showHelp("mail"); break; }
     mailCommand(["send", ...commandArgs]);
+    break;
+
+  case "inspect":
+    if (hasHelpFlag(commandArgs)) { showHelp("inspect"); break; }
+    inspectCommand(commandArgs).catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
+    break;
+
+  case "transcript":
+    if (hasHelpFlag(commandArgs)) { showHelp("transcript"); break; }
+    transcriptCommand(commandArgs).catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
     break;
 
   default:

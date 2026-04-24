@@ -16,6 +16,8 @@ export interface OrchestratorEntry {
   status: AgentStatus;
   createdAt: string;
   children: string[];
+  /** Previous session IDs (most recent first), preserved on reset */
+  formerSessionIds?: string[];
 }
 
 export interface BuilderEntry {
@@ -27,6 +29,8 @@ export interface BuilderEntry {
   epicId: string | null;
   createdAt: string;
   children: string[];
+  /** Previous session IDs (most recent first), preserved on reset/recreate */
+  formerSessionIds?: string[];
 }
 
 export interface AgentEntry {
@@ -37,6 +41,8 @@ export interface AgentEntry {
   taskId: string | null;
   cwd: string;
   createdAt: string;
+  /** Previous session IDs (most recent first), preserved on reset/recreate */
+  formerSessionIds?: string[];
 }
 
 export type RegistryEntry = OrchestratorEntry | BuilderEntry | AgentEntry;

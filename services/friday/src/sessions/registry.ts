@@ -13,6 +13,17 @@ import { log } from "../log.js";
 
 let registry: AgentRegistry = {};
 
+/**
+ * Collect former session IDs from a destroyed entry being replaced.
+ * Prepends the entry's current sessionId to its existing formerSessionIds.
+ */
+function collectFormerSessions(existing: RegistryEntry | undefined): string[] {
+  if (!existing) return [];
+  const former = existing.formerSessionIds ? [...existing.formerSessionIds] : [];
+  if (existing.sessionId) former.unshift(existing.sessionId);
+  return former;
+}
+
 export function loadRegistry(): void {
   if (existsSync(AGENTS_PATH)) {
     registry = JSON.parse(readFileSync(AGENTS_PATH, "utf-8"));
@@ -88,6 +99,9 @@ export function registerBuilder(
     throw new Error(`Only the Orchestrator can create Builders`);
   }
 
+  // Preserve session history from the destroyed entry being replaced
+  const formerSessionIds = collectFormerSessions(existing);
+
   const entry: BuilderEntry = {
     type: "builder",
     parent,
@@ -97,6 +111,7 @@ export function registerBuilder(
     epicId,
     createdAt: new Date().toISOString(),
     children: [],
+    ...(formerSessionIds.length > 0 ? { formerSessionIds } : {}),
   };
 
   registry[name] = entry;
@@ -130,6 +145,8 @@ export function registerAgent(
     throw new Error(`Agents cannot create other Agents`);
   }
 
+  const formerSessionIds = collectFormerSessions(existing);
+
   const entry: AgentEntry = {
     type: "agent",
     parent,
@@ -138,6 +155,7 @@ export function registerAgent(
     taskId,
     cwd,
     createdAt: new Date().toISOString(),
+    ...(formerSessionIds.length > 0 ? { formerSessionIds } : {}),
   };
 
   registry[name] = entry;
