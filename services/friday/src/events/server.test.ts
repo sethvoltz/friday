@@ -32,6 +32,7 @@ function collectSSEEvents(
         buf = parts.pop()!;
         for (const part of parts) {
           if (part.startsWith(":")) continue; // skip comments
+          if (!part.includes("data:")) continue; // skip non-event fields (retry, etc.)
           events.push(part);
           if (events.length >= count) {
             res.destroy();

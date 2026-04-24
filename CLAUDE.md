@@ -43,3 +43,35 @@ pnpm --filter @friday/daemon exec vitest run src/path/to/file.test.ts  # Single 
 - TypeScript throughout, Vitest for tests, pnpm workspaces + Turborepo
 - Tests are co-located with source as `*.test.ts`
 - All state lives in `~/.friday/` — never hardcode paths, use constants from `@friday/shared`
+
+## Versioning
+
+Single system version in the root `package.json`. All packages ship together — no per-package versioning. Bump the version when tagging a release on `main`.
+
+## Branching
+
+- `main` is the stable branch. All work happens on feature branches.
+- Merge feature branches into `main` via squash merge or regular merge.
+- Tag releases on `main` as `vX.Y.Z`.
+
+## Commits
+
+All commits **must** follow [Conventional Commits](https://www.conventionalcommits.org/). The scope is the service, package, or tool being changed:
+
+```
+feat(daemon): add mail polling on agent idle
+fix(dashboard): correct token breakdown calculation
+refactor(shared): extract transcript parser into its own module
+test(cli): add coverage for restart command
+docs: update architecture table
+chore: bump dependencies
+```
+
+**Scopes:** `daemon`, `dashboard`, `shared`, `cli`, `memory`, `docs`, `ci`. Use `system` for cross-cutting changes that touch multiple packages in a single commit.
+
+**Subject line rules:**
+- Lowercase, imperative mood, no trailing period
+- Under 72 characters
+- Body explains *why*, not *what* (the diff shows what)
+
+Co-author lines are added automatically — do not omit them.
