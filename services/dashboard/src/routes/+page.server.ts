@@ -4,8 +4,10 @@ import {
   CONFIG_PATH,
   USAGE_LOG_PATH,
   SESSIONS_DIR,
+  AGENTS_PATH,
   FRIDAY_DIR,
   type UsageEntry,
+  type AgentRegistry,
 } from "@friday/shared";
 import { join } from "node:path";
 import type { PageServerLoad } from "./$types";
@@ -73,6 +75,16 @@ export const load: PageServerLoad = async () => {
     }
   }
 
+  // Agent registry
+  let agents: AgentRegistry = {};
+  if (existsSync(AGENTS_PATH)) {
+    try {
+      agents = JSON.parse(readFileSync(AGENTS_PATH, "utf-8"));
+    } catch {
+      // skip
+    }
+  }
+
   return {
     configExists,
     configPath: CONFIG_PATH,
@@ -81,5 +93,6 @@ export const load: PageServerLoad = async () => {
     daemonOnline,
     usageEntries,
     sessions,
+    agents,
   };
 };

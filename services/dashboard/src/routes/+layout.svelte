@@ -6,6 +6,10 @@
 
   let theme = $state<'light' | 'dark'>('dark');
 
+  $effect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  });
+
   function toggleTheme() {
     theme = theme === 'dark' ? 'light' : 'dark';
   }
