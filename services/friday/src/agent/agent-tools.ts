@@ -1,5 +1,9 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { parseLastTurns, formatTurns } from "@friday/shared";
 import {
   getAgent,
   listAgents,
@@ -13,7 +17,9 @@ import {
 import {
   addWorktreeToWorkspace,
   removeWorktreeFromWorkspace,
+  destroyWorkspace,
 } from "./workspace.js";
+import { getLastActivity } from "../monitor/agent-health.js";
 
 export interface AgentToolsContext {
   /** Name of the calling agent (for permission checks) */
@@ -311,6 +317,104 @@ export function createAgentTools(ctx: AgentToolsContext) {
         }
       ),
 
+      // ── Agent Inspection ──────────────────────────────────────
+
+      tool(
+        "agent_inspect",
+        "Read the last N turns from a child agent's session transcript. " +
+          "This is the equivalent of peering into a tmux session — see what the agent has been doing, " +
+          "what tools it called, and what it said. Use this when checking on an agent's progress " +
+          "or diagnosing why it's stuck.",
+        {
+          name: z.string().describe("Name of the agent to inspect"),
+          turns: z
+            .number()
+            .optional()
+            .default(5)
+            .describe("Number of recent turns to show (default: 5)"),
+          include_tools: z
+            .boolean()
+            .optional()
+            .default(true)
+            .describe("Include tool call names in output (default: true)"),
+        },
+        async (args) => {
+          try {
+            const entry = getAgent(args.name);
+            if (!entry) {
+              return errorResult(`Agent "${args.name}" not found.`);
+            }
+
+            // Builders can only inspect their own children
+            if (
+              ctx.callerType === "builder" &&
+              "parent" in entry &&
+              entry.parent !== ctx.callerName
+            ) {
+              return errorResult(
+                `Builder "${ctx.callerName}" cannot inspect agent "${args.name}" (not a child).`
+              );
+            }
+
+            if (!entry.sessionId) {
+              return errorResult(`Agent "${args.name}" has no session yet.`);
+            }
+
+            // Derive the session JSONL path from the agent's CWD and session ID
+            const agentCwd =
+              entry.type === "builder" && "workspace" in entry
+                ? entry.workspace
+                : "cwd" in entry
+                  ? entry.cwd
+                  : null;
+
+            if (!agentCwd) {
+              return errorResult(`Cannot determine working directory for agent "${args.name}".`);
+            }
+
+            const encodedCwd = agentCwd.replace(/\//g, "-");
+            const jsonlPath = join(
+              homedir(),
+              ".claude",
+              "projects",
+              encodedCwd,
+              `${entry.sessionId}.jsonl`
+            );
+
+            if (!existsSync(jsonlPath)) {
+              return errorResult(
+                `Session transcript not found at ${jsonlPath}. ` +
+                  `The agent may not have completed any turns yet.`
+              );
+            }
+
+            const turns = await parseLastTurns(jsonlPath, args.turns);
+            if (turns.length === 0) {
+              return okResult(`Agent "${args.name}" has no turns in its transcript yet.`);
+            }
+
+            const lastActivityMs = getLastActivity(args.name);
+            const lastActivityStr = lastActivityMs
+              ? `${Math.round((Date.now() - lastActivityMs) / 1000)}s ago`
+              : "unknown";
+
+            const header = [
+              `Agent: ${args.name} (${entry.type})`,
+              `Status: ${entry.status} | Loop: ${isAgentRunning(args.name) ? "running" : "stopped"}`,
+              `Last activity: ${lastActivityStr}`,
+              `Showing last ${turns.length} of transcript:`,
+              "",
+            ].join("\n");
+
+            const body = formatTurns(turns, { includeTools: args.include_tools });
+
+            return okResult(header + body);
+          } catch (err) {
+            return errorResult(errMsg(err));
+          }
+        }
+      ),
+
       // ── Workspace Management ──────────────────────────────────
 
       tool(
@@ -381,6 +485,49 @@ export function createAgentTools(ctx: AgentToolsContext) {
 
             removeWorktreeFromWorkspace(args.workspace, args.worktree_name);
             return okResult(`Worktree "${args.worktree_name}" removed from workspace.`);
+          } catch (err) {
+            return errorResult(errMsg(err));
+          }
+        }
+      ),
+
+      tool(
+        "workspace_cleanup",
+        "Clean up a Builder's workspace directory, properly removing git worktrees before deleting. " +
+          "Use this after a Builder is destroyed and the user confirms workspace deletion. " +
+          "This is the safe way to remove workspaces — it detaches worktrees from their source repos " +
+          "before deleting files, preventing dangling worktree references. " +
+          "Only the Orchestrator can use this tool.",
+        {
+          workspace: z.string().describe("Absolute path to the workspace to clean up"),
+          builder_name: z
+            .string()
+            .describe("Name of the builder whose workspace this is (for logging/confirmation)"),
+        },
+        async (args) => {
+          try {
+            if (ctx.callerType !== "orchestrator") {
+              return errorResult("Only the Orchestrator can clean up workspaces.");
+            }
+
+            // Safety: check that the agent is actually destroyed
+            const entry = getAgent(args.builder_name);
+            if (entry && entry.status !== "destroyed") {
+              return errorResult(
+                `Builder "${args.builder_name}" is still ${entry.status}. ` +
+                  `Destroy it first with agent_destroy before cleaning up the workspace.`
+              );
+            }
+
+            if (!existsSync(args.workspace)) {
+              return okResult(`Workspace "${args.workspace}" does not exist (already cleaned up).`);
+            }
+
+            destroyWorkspace(args.workspace);
+            return okResult(
+              `Workspace "${args.workspace}" cleaned up. ` +
+                `Git worktrees were properly detached before removal.`
+            );
           } catch (err) {
             return errorResult(errMsg(err));
           }

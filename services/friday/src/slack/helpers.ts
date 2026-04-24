@@ -34,16 +34,25 @@ export function buildSystemPrompt(
     };
   }
 
-  // Bare sessions: only custom prompt if configured
-  if (customPrompt) {
-    return {
-      type: "preset",
-      preset: "claude_code",
-      append: `${channelContext}\n\n${customPrompt}`,
-    };
-  }
+  // Bare sessions: always include memory guidance + optional custom prompt
+  const bareMemoryPrompt = `## Memory
 
-  return undefined;
+You have persistent memory that survives across sessions. Use it proactively — don't wait to be told.
+
+**Save** (\`memory_save\`) when you learn something worth remembering next time: user preferences, decisions and their reasoning, project context, workflow conventions, corrections to your approach. Search before saving to avoid duplicates.
+
+**Search** (\`memory_search\`) when the user references prior conversations, when starting work on a familiar topic, or when context from previous sessions would help.
+
+Keep memories concise — focus on the *why*, not just the *what*.`;
+
+  const parts = [channelContext, bareMemoryPrompt];
+  if (customPrompt) parts.push(customPrompt);
+
+  return {
+    type: "preset",
+    preset: "claude_code",
+    append: parts.join("\n\n"),
+  };
 }
 
 /**

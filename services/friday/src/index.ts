@@ -3,9 +3,10 @@ import { createSlackApp } from "./slack/app.js";
 import { registerEventHandlers } from "./slack/events.js";
 import { loadSessions } from "./sessions/manager.js";
 import { loadRegistry } from "./sessions/registry.js";
-import { initOrchestrator, restoreActiveAgents } from "./agent/lifecycle.js";
+import { initOrchestrator, restoreActiveAgents, isAgentRunning } from "./agent/lifecycle.js";
 import { log } from "./log.js";
 import { startHealthHeartbeat, stopHealthHeartbeat } from "./monitor/health.js";
+import { startAgentHealthCheck, stopAgentHealthCheck } from "./monitor/agent-health.js";
 import { startMailPoller, stopMailPoller } from "./comms/mail-poller.js";
 import { sendToAgent } from "./agent/client.js";
 import { createSlackTools } from "./agent/tools.js";
@@ -13,6 +14,7 @@ import { createAgentTools } from "./agent/agent-tools.js";
 import { createMailTools } from "./comms/mail-tools.js";
 import { buildSystemPrompt, chunkMessage } from "./slack/helpers.js";
 import { slackPreflight } from "./slack/preflight.js";
+import { createMemoryTools } from "./memory/memory-tools.js";
 
 async function main() {
   const startTime = Date.now();
@@ -43,6 +45,7 @@ async function main() {
     log("info", "shutdown_started", { signal, uptimeMs });
 
     stopHealthHeartbeat();
+    stopAgentHealthCheck();
     stopMailPoller();
     try {
       await app.stop();
@@ -113,6 +116,7 @@ async function main() {
             "friday-slack": slackMcp,
             "friday-agents": agentMcp,
             "friday-mail": mailMcp,
+            "friday-memory": createMemoryTools({ callerName: "orchestrator" }),
           },
           systemPrompt: buildSystemPrompt(
             config,
@@ -140,6 +144,9 @@ async function main() {
 
   // Restore agents that were active before shutdown
   restoreActiveAgents(config.agent.model);
+
+  // Start agent health monitoring
+  startAgentHealthCheck({ isAgentRunning });
 
   log("info", "friday_ready", {
     pid: process.pid,

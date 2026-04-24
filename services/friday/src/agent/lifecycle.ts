@@ -19,6 +19,7 @@ import { buildAgentSystemPrompt, buildFirstTurnPrompt } from "./prime.js";
 import { createMailTools } from "../comms/mail-tools.js";
 import { mailCheck, mailEvents } from "../comms/mail.js";
 import { log } from "../log.js";
+import { recordActivity, clearActivity } from "../monitor/agent-health.js";
 
 /** Tracks running agent loops by agent name */
 const runningAgents = new Map<
@@ -147,6 +148,7 @@ export function destroyAgentByName(name: string): void {
 
   // Stop the running loop
   stopAgentLoop(name);
+  clearActivity(name);
 
   // Workspace is NOT deleted here — soft delete only.
   // Workspace cleanup is a separate, user-directed action.
@@ -305,6 +307,7 @@ async function runAgentLoop(
               running.sessionId = sessionId;
             }
 
+            recordActivity(agentName);
             log("info", "agent_turn_complete", {
               agent: agentName,
               sessionId,

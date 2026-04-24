@@ -79,11 +79,14 @@ describe("buildSystemPrompt", () => {
     expect(result!.append).toContain("You are Agent");
   });
 
-  it("bare session returns undefined without custom prompt", () => {
+  it("bare session includes memory guidance without custom prompt", () => {
     const config = makeConfig();
     const result = buildSystemPrompt(config, "bare", "C999", "/tmp");
 
-    expect(result).toBeUndefined();
+    expect(result).toBeDefined();
+    expect(result!.append).toContain("Memory");
+    expect(result!.append).toContain("memory_save");
+    expect(result!.append).toContain("C999");
   });
 
   it("bare session returns preset with custom prompt", () => {

@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.117",
+    "@friday/memory": "workspace:*",
     "@friday/shared": "workspace:*",
     "@slack/bolt": "^4.1.0",
     "@slack/web-api": "^7.15.1",

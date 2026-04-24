@@ -97,7 +97,10 @@ Optional config for non-orchestrator channel sessions. Same fields as `agent`. D
 ├── .env                 -- Secrets (SLACK_APP_TOKEN, SLACK_BOT_TOKEN)
 ├── health.json          -- Daemon heartbeat (present = running)
 ├── agents.json          -- Agent registry (managed by daemon, do not edit manually)
+├── slack-names.json     -- Cached Slack channel/user display names (auto-generated)
 ├── beads/               -- Beads database (task/epic tracking, inter-agent mail)
+├── memory/
+│   └── entries/         -- Persistent memory entries (markdown with YAML frontmatter)
 ├── pids/                -- PID files for managed services
 ├── sessions/
 │   └── channels.json    -- Channel ID → Agent SDK session ID mapping

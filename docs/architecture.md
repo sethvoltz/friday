@@ -42,6 +42,12 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | `src/monitor/usage.ts` | Appends per-turn usage entries to `~/.friday/usage.jsonl` |
 | `src/monitor/session-stats.ts` | Reads usage log, computes session aggregates (cost, tokens, cache hit rate, duration) |
 | `src/monitor/health.ts` | Writes `~/.friday/health.json` heartbeat every 30s (pid, uptime, last heartbeat). Removed on clean shutdown. |
+| `src/monitor/agent-health.ts` | Periodic agent health checks — detects stalled agents (no turn progress) and crashed agents (loop exited but status active). Notifies orchestrator via mail. |
+| `src/memory/memory-tools.ts` | Memory MCP tools (`memory_search`, `memory_save`, `memory_get`, `memory_forget`) for Orchestrator and Bare sessions |
+| `src/slack/preflight.ts` | Boot-time Slack cleanup — patches interrupted messages and removes dangling emoji reactions from previous crashes |
+| `src/comms/mail.ts` | Beads-backed inter-agent mail system with push delivery via EventEmitter |
+| `src/comms/mail-tools.ts` | Mail MCP tools (`mail_send`, `mail_check`, `mail_read`, `mail_close`) |
+| `src/comms/mail-poller.ts` | Polls for orchestrator mail and triggers turns via `sendToAgent` |
 
 ### Shared Package (`packages/shared`)
 
@@ -50,6 +56,15 @@ TypeScript types and utilities shared across services:
 - `config.ts` — `FridayConfig` type, default values, `loadConfig()` function, path constants
 - `agents.ts` — Agent types (`AgentType`, `AgentStatus`), registry types (`OrchestratorEntry`, `BuilderEntry`, `AgentEntry`), name validation
 - `usage.ts` — `UsageEntry` type for the JSONL usage log
+- `transcript.ts` — Session JSONL transcript parser: parses Claude Code session files into structured turns, supports full parse and last-N-turns, streaming tail via `fs.watch`, and human-readable formatting
+
+### Memory Package (`packages/memory`)
+
+Persistent knowledge store for Orchestrator and Bare sessions. Memories are file-based markdown with YAML frontmatter stored at `~/.friday/memory/entries/`.
+
+- `store.ts` — CRUD operations: `saveEntry`, `getEntry`, `updateEntry`, `forgetEntry`, `listEntries`, `touchRecall`. Markdown serialization with frontmatter.
+- `search.ts` — Hybrid keyword search with recall frequency boosting (`log2(recallCount + 1)`). Tag filtering (AND logic). Score: title match (3pts), content match (1pt), tag exact match (5pts).
+- `events.ts` — JSONL event logging at `~/.friday/memory/events.jsonl` for audit trail.
 
 ### Dashboard (`services/dashboard`)
 
@@ -136,6 +151,10 @@ All persistent state lives in `~/.friday/`:
 ├── working/
 │   └── workspaces/      — Builder workspaces with git worktrees
 ├── repos/               — Bare clone cache for remote repos (<org>/<repo>/)
+├── memory/
+│   ├── entries/         — Memory entries as markdown with YAML frontmatter
+│   └── events.jsonl     — Memory operation audit log
+├── beads/               — Beads task/epic tracker data
 └── usage.jsonl          — Per-turn usage log (cost, tokens, cache hits, duration)
 ```
 
@@ -205,7 +224,9 @@ Agents interact with the system via MCP tool servers injected into their session
 | Server | Tools | Available To |
 |--------|-------|-------------|
 | `friday-slack` | `slack_reply` | Orchestrator |
-| `friday-agents` | `agent_create`, `agent_list`, `agent_status`, `agent_destroy`, `worktree_add`, `worktree_remove` | Orchestrator, Builders (scoped to own children) |
+| `friday-agents` | `agent_create`, `agent_list`, `agent_status`, `agent_destroy`, `agent_inspect`, `worktree_add`, `worktree_remove`, `workspace_cleanup` | Orchestrator, Builders (scoped to own children) |
+| `friday-mail` | `mail_send`, `mail_check`, `mail_read`, `mail_close` | All agent types |
+| `friday-memory` | `memory_search`, `memory_save`, `memory_get`, `memory_forget` | Orchestrator, Bare sessions |
 
 ### Workspaces
 
@@ -215,8 +236,9 @@ Builders work in isolated workspaces under `~/.friday/working/workspaces/<builde
 
 ```
 agent-friday/
-├── packages/shared      — Shared types (config, usage)
+├── packages/shared      — Shared types (config, usage, transcript parser)
 ├── packages/cli         — CLI entrypoint (@friday/cli)
+├── packages/memory      — Memory system (file-based store, search, events)
 ├── services/friday      — Bridge daemon
 ├── services/dashboard   — Management GUI (SvelteKit)
 ├── bin/friday           — Dev shim (runs @friday/cli via tsx)
@@ -274,9 +296,10 @@ pnpm --filter @friday/cli exec vitest run src/commands/start.test.ts
 
 | Package | Test files | What's tested |
 |---------|-----------|---------------|
-| `@friday/shared` | `config.test.ts`, `agents.test.ts` | Path derivation, defaults, deep merge, agent name validation, name building |
+| `@friday/shared` | `config.test.ts`, `agents.test.ts`, `transcript.test.ts` | Path derivation, defaults, deep merge, agent name validation, name building, JSONL transcript parsing, turn grouping, tool call tracking, formatting |
+| `@friday/memory` | `store.test.ts`, `search.test.ts` | Memory CRUD, serialization roundtrip, recall tracking, hybrid search scoring, tag filtering, recall frequency boosting, event logging |
 | `@friday/cli` | `help.test.ts`, `services.test.ts`, 5× command tests | Help text, PID management, isRunning, parseServiceArg, findMonorepoRoot, all CLI commands |
-| `@friday/daemon` | `queue.test.ts`, `manager.test.ts`, `helpers.test.ts`, `usage.test.ts`, `config.test.ts`, `registry.test.ts`, `workspace.test.ts`, `prime.test.ts`, `client.test.ts`, `agent-tools.test.ts` | FIFO queue ops, session persistence, Slack helpers, usage logging, runtime config, agent registry CRUD, workspace/worktree lifecycle, system prompt generation, thinking indicator, MCP agent tools |
+| `@friday/daemon` | `queue.test.ts`, `manager.test.ts`, `helpers.test.ts`, `usage.test.ts`, `config.test.ts`, `registry.test.ts`, `workspace.test.ts`, `prime.test.ts`, `client.test.ts`, `agent-tools.test.ts`, `preflight.test.ts`, `agent-health.test.ts`, `mail.test.ts`, `mail-tools.test.ts` | FIFO queue ops, session persistence, Slack helpers, usage logging, runtime config, agent registry CRUD, workspace/worktree lifecycle, system prompt generation, thinking indicator, MCP agent tools, boot preflight cleanup, agent health monitoring (stall/crash detection), mail CRUD and delivery |
 
 ### Conventions
 

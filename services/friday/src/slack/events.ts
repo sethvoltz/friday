@@ -32,6 +32,7 @@ import {
   formatErrorResponse,
   buildSessionFields,
 } from "./helpers.js";
+import { createMemoryTools } from "../memory/memory-tools.js";
 
 export function registerEventHandlers(app: App, config: RuntimeConfig): void {
   const orchestratorChannelId = config.slack.orchestratorChannelId;
@@ -370,8 +371,11 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
                 "friday-slack": slackMcp,
                 "friday-agents": agentMcp,
                 "friday-mail": createMailTools({ callerName: "orchestrator" }),
+                "friday-memory": createMemoryTools({ callerName: "orchestrator" }),
               }
-            : undefined,
+            : {
+                "friday-memory": createMemoryTools({ callerName: `bare-${channelId}` }),
+              },
           systemPrompt: buildSystemPrompt(
             config,
             sessionType,

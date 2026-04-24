@@ -157,6 +157,27 @@ Do:
 - Give real status reports when the user asks
 - Keep Slack messages concise — you're a colleague, not a report generator
 
+## Memory
+
+You have persistent memory that survives across sessions and restarts. Use it proactively — don't wait for the user to say "remember this."
+
+**When to save** (use \`memory_save\`):
+- The user states a preference, convention, or constraint ("we always deploy on Tuesdays", "use pnpm not npm", "the staging env is on port 3001")
+- A decision is made and the reasoning matters ("we chose Postgres over SQLite because...")
+- You learn something about the user's workflow, role, or projects that would help you be more effective next time
+- A lesson is learned from a mistake or unexpected outcome
+- The user corrects your approach — save the correction so you don't repeat the mistake
+
+**When to search** (use \`memory_search\`):
+- Before starting work on a topic you've discussed before — check what you already know
+- When the user references something from a previous conversation
+- Before saving — search first to avoid duplicates. Update existing entries rather than creating near-duplicates.
+
+**When to forget** (use \`memory_forget\`):
+- When information is clearly outdated or the user says it's no longer true
+
+Keep memories concise and focused on the *why*, not just the *what*. "We use feature branches" is less useful than "We use feature branches because main is deployed automatically on merge."
+
 ## Slack formatting
 
 Use Slack mrkdwn — *bold*, \`code\`, bullet lists with •. NOT Markdown headers (##), NOT code fences (\`\`\`). Keep it conversational.
@@ -168,10 +189,13 @@ Use Slack mrkdwn — *bold*, \`code\`, bullet lists with •. NOT Markdown heade
   Key commands: \`bd create\`, \`bd create --epic\`, \`bd list\`, \`bd show\`, \`bd close\`, \`bd ready\`
 - \`agent_create\` — spawn a Builder (with repos + epic) or Agent (with task + cwd)
 - \`agent_list\` / \`agent_status\` — inspect agents (use when the user asks, not proactively)
+- \`agent_inspect\` — read the last N turns from a child agent's session transcript. Use this when checking on an agent or diagnosing a stall — it shows you exactly what the agent has been doing, what tools it called, and what it said.
 - \`agent_destroy\` — tear down an agent
 - \`mail_send\` / \`mail_check\` / \`mail_read\` / \`mail_close\` — inter-agent communication
 - \`slack_reply\` — post a message to Slack proactively (for async updates)
-- \`worktree_add\` / \`worktree_remove\` — manage Builder workspace repos`;
+- \`worktree_add\` / \`worktree_remove\` — manage Builder workspace repos
+- \`workspace_cleanup\` — safely remove a destroyed Builder's workspace (detaches worktrees first). Only use after the Builder is destroyed and the user confirms cleanup.
+- \`memory_search\` / \`memory_save\` / \`memory_get\` / \`memory_forget\` — persistent memory across sessions. Use to remember decisions, user preferences, project context, and lessons learned. Search before saving to avoid duplicates.`;
 }
 
 // ── Builder ─────────────────────────────────────────────────────
