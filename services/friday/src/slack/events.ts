@@ -28,11 +28,13 @@ import {
 import {
   buildSystemPrompt,
   chunkMessage,
-  buildBatchPrompt,
+  buildBatchContent,
   buildBlockquote,
   formatErrorResponse,
   buildSessionFields,
+  type MultimodalPrompt,
 } from "./helpers.js";
+import { fetchSlackImages } from "./image-fetch.js";
 import { createMemoryTools } from "../memory/memory-tools.js";
 
 export function registerEventHandlers(app: App, config: RuntimeConfig): void {
@@ -304,14 +306,25 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
   app.message(async ({ message, client, say }) => {
     // Ignore bot messages, message edits, etc.
     if (message.subtype) return;
-    if (!("text" in message) || !message.text) return;
     if (!("user" in message)) return;
+
+    const rawMsg = message as any;
+    const hasFiles = Array.isArray(rawMsg.files) && rawMsg.files.length > 0;
+    const hasText = "text" in message && !!message.text;
+
+    // Drop messages with neither text nor files
+    if (!hasText && !hasFiles) return;
 
     const channelId = message.channel;
     const sessionType = channelId === orchestratorChannelId ? "orchestrator" as const : "bare" as const;
-    const text = message.text;
+    const text = hasText ? (message as any).text as string : "";
     const ts = message.ts;
-    const userId = message.user;
+    const userId = message.user as string;
+
+    // Fetch image attachments (non-image files and download failures are skipped)
+    const images = hasFiles
+      ? await fetchSlackImages(rawMsg.files, config.slackBotToken)
+      : undefined;
 
     const queuedMsg: QueuedMessage = {
       id: ts,
@@ -319,6 +332,7 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
       text,
       userId,
       wasQueued: isProcessing(channelId),
+      images: images && images.length > 0 ? images : undefined,
     };
 
     if (queuedMsg.wasQueued) {
@@ -385,10 +399,10 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
         }
       }
 
-      // Combine batch into single prompt
-      const prompt = buildBatchPrompt(batch.map((m) => m.text));
+      // Combine batch into single prompt (multimodal when images present)
+      const prompt = buildBatchContent(batch);
       const quoted = wasQueued
-        ? buildBlockquote(batch.map((m) => m.text))
+        ? buildBlockquote(batch.map((m) => m.text.trim() || "[image]"))
         : null;
 
       // For queued messages: post placeholder with blockquote echo + "Working..."
@@ -611,7 +625,7 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
   }
 
   async function processWithStreaming(
-    prompt: string,
+    prompt: string | MultimodalPrompt,
     quoted: string | null,
     channelId: string,
     agentOptions: Parameters<typeof sendToAgent>[1],
