@@ -1,6 +1,6 @@
-import { mkdirSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, existsSync, rmSync, writeFileSync, readdirSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { REPOS_DIR } from "@friday/shared";
 import { log } from "../log.js";
 
@@ -115,7 +115,7 @@ function ensureBareClone(repo: string): string {
     // Fetch latest
     log("info", "repo_cache_fetch", { repo, cachePath });
     try {
-      execSync("git fetch --all", { cwd: cachePath, stdio: "pipe" });
+      execFileSync("git", ["fetch", "--all"], { cwd: cachePath, stdio: "pipe" });
     } catch (err) {
       log("warn", "repo_cache_fetch_failed", {
         repo,
@@ -132,12 +132,12 @@ function ensureBareClone(repo: string): string {
   if (isGhShorthand || repo.includes("github.com")) {
     const target = isGhShorthand ? repo : resolveCloneUrl(repo);
     log("info", "repo_cache_clone_gh", { repo, cachePath });
-    execSync(`gh repo clone ${target} "${cachePath}" -- --bare`, {
+    execFileSync("gh", ["repo", "clone", target, cachePath, "--", "--bare"], {
       stdio: "pipe",
     });
   } else {
     log("info", "repo_cache_clone_git", { repo, cachePath });
-    execSync(`git clone --bare "${resolveCloneUrl(repo)}" "${cachePath}"`, {
+    execFileSync("git", ["clone", "--bare", resolveCloneUrl(repo), cachePath], {
       stdio: "pipe",
     });
   }
@@ -150,7 +150,7 @@ function ensureBareClone(repo: string): string {
  */
 function isGitRepo(localPath: string): boolean {
   try {
-    execSync("git rev-parse --git-dir", {
+    execFileSync("git", ["rev-parse", "--git-dir"], {
       cwd: localPath,
       stdio: "pipe",
     });
@@ -170,10 +170,10 @@ function addWorktree(
 ): void {
   // Create a new branch based on the default branch
   const defaultBranch = getDefaultBranch(sourceRepo);
-  execSync(
-    `git worktree add -b "${branch}" "${targetDir}" "${defaultBranch}"`,
-    { cwd: sourceRepo, stdio: "pipe" }
-  );
+  execFileSync("git", ["worktree", "add", "-b", branch, targetDir, defaultBranch], {
+    cwd: sourceRepo,
+    stdio: "pipe",
+  });
 }
 
 /**
@@ -182,7 +182,7 @@ function addWorktree(
 function getDefaultBranch(repoPath: string): string {
   try {
     // For bare repos, check HEAD
-    const head = execSync("git symbolic-ref HEAD", {
+    const head = execFileSync("git", ["symbolic-ref", "HEAD"], {
       cwd: repoPath,
       stdio: "pipe",
     })
@@ -326,7 +326,7 @@ export function removeWorktreeFromWorkspace(
 
   // Find the source repo and remove the worktree properly
   try {
-    execSync(`git worktree remove "${worktreePath}" --force`, {
+    execFileSync("git", ["worktree", "remove", worktreePath, "--force"], {
       cwd: worktreePath,
       stdio: "pipe",
     });
@@ -348,17 +348,13 @@ export function destroyWorkspace(workspacePath: string): void {
 
   // Clean up git worktrees properly before removing the directory
   try {
-    const entries = execSync("ls", { cwd: workspacePath, stdio: "pipe" })
-      .toString()
-      .trim()
-      .split("\n")
-      .filter(Boolean);
+    const entries = readdirSync(workspacePath);
 
     for (const entry of entries) {
       const entryPath = join(workspacePath, entry);
       if (entry === ".claude") continue;
       try {
-        execSync(`git worktree remove "${entryPath}" --force`, {
+        execFileSync("git", ["worktree", "remove", entryPath, "--force"], {
           cwd: entryPath,
           stdio: "pipe",
         });

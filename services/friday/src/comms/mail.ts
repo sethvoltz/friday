@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -33,14 +33,16 @@ export interface MailMessage {
 
 /**
  * Run a bd command in the beads workspace, returning stdout.
+ * Uses execFileSync with an args array to avoid shell interpretation
+ * of special characters in subjects, bodies, etc.
  */
-function bd(args: string): string {
+function bd(args: string[]): string {
   if (!existsSync(join(BEADS_WORKSPACE, ".beads"))) {
     throw new Error(
       `Beads database not found at ${BEADS_WORKSPACE}. Run: cd ${BEADS_WORKSPACE} && bd init --non-interactive --prefix friday --skip-agents --skip-hooks`
     );
   }
-  const result = execSync(`bd ${args}`, {
+  const result = execFileSync("bd", args, {
     cwd: BEADS_WORKSPACE,
     stdio: "pipe",
     env: { ...process.env, BD_NON_INTERACTIVE: "1" },
@@ -65,13 +67,17 @@ export function mailSend(opts: {
     labels.push("priority:urgent");
   }
 
-  const labelsFlag = labels.map((l) => `"${l}"`).join(",");
   const priorityNum = priority === "urgent" ? 1 : 3;
 
-  // Use bd create --silent for just the ID (bd q doesn't support -d, -a, --ephemeral)
-  const id = bd(
-    `create "${subject}" -d "${body}" -a "${to}" -l ${labelsFlag} --priority ${priorityNum} --ephemeral --silent`
-  );
+  const id = bd([
+    "create", subject,
+    "-d", body,
+    "-a", to,
+    "-l", labels.join(","),
+    "--priority", String(priorityNum),
+    "--ephemeral",
+    "--silent",
+  ]);
 
   log("info", "mail_sent", { id, from, to, subject, priority });
   mailEvents.emit(`mail:${to}`, id);
@@ -84,9 +90,11 @@ export function mailSend(opts: {
 export function mailCheck(agentName: string): MailMessage[] {
   let raw: string;
   try {
-    raw = bd(
-      `query "assignee=${agentName} AND label=${LABEL_TYPE_MESSAGE} AND status=open" --json`
-    );
+    raw = bd([
+      "query",
+      `assignee=${agentName} AND label=${LABEL_TYPE_MESSAGE} AND status=open`,
+      "--json",
+    ]);
   } catch {
     return [];
   }
@@ -107,19 +115,19 @@ export function mailCheck(agentName: string): MailMessage[] {
  * Read a specific mail message by ID. Marks it as acknowledged.
  */
 export function mailRead(id: string): MailMessage {
-  const raw = bd(`show ${id} --json`);
+  const raw = bd(["show", id, "--json"]);
   const issue = JSON.parse(raw);
   const mail = parseMailIssue(issue);
 
   // Mark as acknowledged if still pending
   if (mail.status === "pending") {
     try {
-      bd(`label ${id} --remove "${LABEL_PENDING}"`);
+      bd(["label", id, "--remove", LABEL_PENDING]);
     } catch {
       // Label might already be removed
     }
     try {
-      bd(`label ${id} --add "${LABEL_ACKED}"`);
+      bd(["label", id, "--add", LABEL_ACKED]);
     } catch {
       // Label might already exist
     }
@@ -134,7 +142,7 @@ export function mailRead(id: string): MailMessage {
  * Close a processed mail message.
  */
 export function mailClose(id: string): void {
-  bd(`close ${id}`);
+  bd(["close", id]);
   log("info", "mail_closed", { id });
 }
 

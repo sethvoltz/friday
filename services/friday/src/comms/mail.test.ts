@@ -1,16 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mailSend, mailCheck, mailRead, mailClose } from "./mail.js";
 
-// Mock execSync to capture bd commands
+// Mock execFileSync to capture bd commands
 const execResults = new Map<string, string>();
-let lastExecCmd = "";
+let lastExecArgs: string[] = [];
 
 vi.mock("node:child_process", () => ({
-  execSync: vi.fn((cmd: string) => {
-    lastExecCmd = cmd;
-    // Match on the bd subcommand
+  execFileSync: vi.fn((_cmd: string, args: string[]) => {
+    lastExecArgs = args;
+    // Match on the bd subcommand (first arg)
+    const joined = args.join(" ");
     for (const [pattern, result] of execResults) {
-      if (cmd.includes(pattern)) {
+      if (joined.includes(pattern)) {
         return Buffer.from(result);
       }
     }
@@ -28,12 +29,12 @@ vi.mock("../log.js", () => ({
 
 beforeEach(() => {
   execResults.clear();
-  lastExecCmd = "";
+  lastExecArgs = [];
 });
 
 describe("mailSend", () => {
   it("creates a beads issue with correct flags", () => {
-    execResults.set("bd create", "friday-abc123");
+    execResults.set("create", "friday-abc123");
 
     const id = mailSend({
       from: "orchestrator",
@@ -43,17 +44,20 @@ describe("mailSend", () => {
     });
 
     expect(id).toBe("friday-abc123");
-    expect(lastExecCmd).toContain("bd create");
-    expect(lastExecCmd).toContain("--silent");
-    expect(lastExecCmd).toContain("-a \"builder-blog\"");
-    expect(lastExecCmd).toContain("type:message");
-    expect(lastExecCmd).toContain("delivery:pending");
-    expect(lastExecCmd).toContain("from:orchestrator");
-    expect(lastExecCmd).toContain("--ephemeral");
+    expect(lastExecArgs[0]).toBe("create");
+    expect(lastExecArgs[1]).toBe("Start work");
+    expect(lastExecArgs).toContain("--silent");
+    expect(lastExecArgs).toContain("builder-blog");
+    expect(lastExecArgs).toContain("--ephemeral");
+    // Labels are joined as a single arg
+    const labelsArg = lastExecArgs[lastExecArgs.indexOf("-l") + 1];
+    expect(labelsArg).toContain("type:message");
+    expect(labelsArg).toContain("delivery:pending");
+    expect(labelsArg).toContain("from:orchestrator");
   });
 
   it("adds urgent label and priority for urgent messages", () => {
-    execResults.set("bd create", "friday-def456");
+    execResults.set("create", "friday-def456");
 
     mailSend({
       from: "builder-blog",
@@ -63,20 +67,41 @@ describe("mailSend", () => {
       priority: "urgent",
     });
 
-    expect(lastExecCmd).toContain("priority:urgent");
-    expect(lastExecCmd).toContain("--priority 1");
+    const labelsArg = lastExecArgs[lastExecArgs.indexOf("-l") + 1];
+    expect(labelsArg).toContain("priority:urgent");
+    expect(lastExecArgs).toContain("1");
+    const priorityIdx = lastExecArgs.indexOf("--priority");
+    expect(lastExecArgs[priorityIdx + 1]).toBe("1");
+  });
+
+  it("preserves special characters in subject and body", () => {
+    execResults.set("create", "friday-quote1");
+
+    mailSend({
+      from: "orchestrator",
+      to: "helper-research",
+      subject: 'Research: "Svelte for CLI" — reactive libs',
+      body: 'Found https://example.com but it\'s experimental.\n\nCheck "this" & <that>.',
+    });
+
+    // Subject and body are passed as discrete args, not shell-interpolated
+    expect(lastExecArgs[1]).toBe('Research: "Svelte for CLI" — reactive libs');
+    const bodyIdx = lastExecArgs.indexOf("-d") + 1;
+    expect(lastExecArgs[bodyIdx]).toContain('"this"');
+    expect(lastExecArgs[bodyIdx]).toContain("&");
+    expect(lastExecArgs[bodyIdx]).toContain("<that>");
   });
 });
 
 describe("mailCheck", () => {
   it("returns empty array when no mail", () => {
-    execResults.set("bd query", "[]");
+    execResults.set("query", "[]");
     expect(mailCheck("orchestrator")).toEqual([]);
   });
 
   it("parses pending messages", () => {
     execResults.set(
-      "bd query",
+      "query",
       JSON.stringify([
         {
           id: "friday-abc",
@@ -106,7 +131,7 @@ describe("mailCheck", () => {
 describe("mailRead", () => {
   it("parses message and triggers ack labels", () => {
     execResults.set(
-      "bd show",
+      "show",
       JSON.stringify({
         id: "friday-abc",
         title: "Hello",
@@ -116,7 +141,7 @@ describe("mailRead", () => {
         created: "2026-04-23T10:00:00Z",
       })
     );
-    execResults.set("bd label", "");
+    execResults.set("label", "");
 
     const msg = mailRead("friday-abc");
     expect(msg.from).toBe("orchestrator");
@@ -127,8 +152,8 @@ describe("mailRead", () => {
 
 describe("mailClose", () => {
   it("closes the beads issue", () => {
-    execResults.set("bd close", "");
+    execResults.set("close", "");
     mailClose("friday-abc");
-    expect(lastExecCmd).toContain("bd close friday-abc");
+    expect(lastExecArgs).toEqual(["close", "friday-abc"]);
   });
 });

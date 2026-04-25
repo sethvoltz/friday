@@ -1,11 +1,11 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { BEADS_DIR } from "@friday/shared";
 
 const BEADS_WORKSPACE = BEADS_DIR;
 
-function bd(args: string): string {
+function bd(args: string[]): string {
   if (!existsSync(join(BEADS_WORKSPACE, ".beads"))) {
     console.error(
       `Beads database not found at ${BEADS_WORKSPACE}.`
@@ -15,7 +15,7 @@ function bd(args: string): string {
     );
     process.exit(1);
   }
-  const result = execSync(`bd ${args}`, {
+  const result = execFileSync("bd", args, {
     cwd: BEADS_WORKSPACE,
     stdio: "pipe",
     env: { ...process.env, BD_NON_INTERACTIVE: "1" },
@@ -64,9 +64,11 @@ function parseMailIssue(issue: any): MailMessage {
 function listMail(agent: string): void {
   let raw: string;
   try {
-    raw = bd(
-      `query "assignee=${agent} AND label=type:message AND status=open" --json`
-    );
+    raw = bd([
+      "query",
+      `assignee=${agent} AND label=type:message AND status=open`,
+      "--json",
+    ]);
   } catch {
     console.log("No pending messages.");
     return;
@@ -95,7 +97,7 @@ function listMail(agent: string): void {
 }
 
 function readMail(id: string): void {
-  const raw = bd(`show ${id} --json`);
+  const raw = bd(["show", id, "--json"]);
   const msg = parseMailIssue(JSON.parse(raw));
 
   console.log(`\nFrom:     ${msg.from}`);
@@ -124,12 +126,17 @@ function sendMail(args: string[]): void {
   const labels = ["type:message", "delivery:pending", "from:user"];
   if (urgent) labels.push("priority:urgent");
 
-  const labelsFlag = labels.map((l) => `"${l}"`).join(",");
   const priorityNum = urgent ? 1 : 3;
 
-  const id = bd(
-    `create "${subject}" -d "${body}" -a "${to}" -l ${labelsFlag} --priority ${priorityNum} --ephemeral --silent`
-  );
+  const id = bd([
+    "create", subject,
+    "-d", body,
+    "-a", to,
+    "-l", labels.join(","),
+    "--priority", String(priorityNum),
+    "--ephemeral",
+    "--silent",
+  ]);
   console.log(`Message sent to ${to} (id: ${id})`);
 }
 

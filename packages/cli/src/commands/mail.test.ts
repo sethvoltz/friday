@@ -3,9 +3,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const execResults = new Map<string, string>();
 
 vi.mock("node:child_process", () => ({
-  execSync: vi.fn((cmd: string) => {
+  execFileSync: vi.fn((_cmd: string, args: string[]) => {
+    const joined = args.join(" ");
     for (const [pattern, result] of execResults) {
-      if (cmd.includes(pattern)) return Buffer.from(result);
+      if (joined.includes(pattern)) return Buffer.from(result);
     }
     return Buffer.from("");
   }),
@@ -23,7 +24,7 @@ beforeEach(() => {
 
 describe("mailCommand", () => {
   it("lists mail for orchestrator by default", () => {
-    execResults.set("bd query", "[]");
+    execResults.set("query", "[]");
     const logs: string[] = [];
     vi.spyOn(console, "log").mockImplementation((msg) => logs.push(String(msg)));
 
@@ -35,7 +36,7 @@ describe("mailCommand", () => {
 
   it("lists pending messages with from and subject", () => {
     execResults.set(
-      "bd query",
+      "query",
       JSON.stringify([
         {
           id: "friday-abc",
@@ -62,7 +63,7 @@ describe("mailCommand", () => {
 
   it("reads a specific message", () => {
     execResults.set(
-      "bd show",
+      "show",
       JSON.stringify({
         id: "friday-abc",
         title: "Hello",
@@ -85,7 +86,7 @@ describe("mailCommand", () => {
   });
 
   it("sends a message", () => {
-    execResults.set("bd create", "friday-xyz");
+    execResults.set("create", "friday-xyz");
     const logs: string[] = [];
     vi.spyOn(console, "log").mockImplementation((msg) => logs.push(String(msg)));
 
