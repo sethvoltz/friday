@@ -543,19 +543,25 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
             agentOptions,
             agentCallbacks
           );
-          const chunks = chunkMessage(response, maxLen);
 
-          if (placeholderTs) {
-            await client.chat.update({
-              channel: channelId,
-              ts: placeholderTs,
-              text: chunks[0],
-            });
-          } else {
-            await say({ text: chunks[0] });
-          }
-          for (let i = 1; i < chunks.length; i++) {
-            await say({ text: chunks[i] });
+          if (response) {
+            const chunks = chunkMessage(response, maxLen);
+
+            if (placeholderTs) {
+              await client.chat.update({
+                channel: channelId,
+                ts: placeholderTs,
+                text: chunks[0],
+              });
+            } else {
+              await say({ text: chunks[0] });
+            }
+            for (let i = 1; i < chunks.length; i++) {
+              await say({ text: chunks[i] });
+            }
+          } else if (placeholderTs) {
+            // Remove placeholder if agent produced no text
+            await client.chat.delete({ channel: channelId, ts: placeholderTs }).catch(() => {});
           }
         }
       } catch (err) {
@@ -654,16 +660,21 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
     );
 
     // Final update: replace placeholder with final content
-    const chunks = chunkMessage(response, maxLen);
+    if (response) {
+      const chunks = chunkMessage(response, maxLen);
 
-    await client.chat.update({
-      channel: channelId,
-      ts: placeholderTs,
-      text: chunks[0],
-    });
-    // Post any overflow chunks as new messages
-    for (let i = 1; i < chunks.length; i++) {
-      await say({ text: chunks[i] });
+      await client.chat.update({
+        channel: channelId,
+        ts: placeholderTs,
+        text: chunks[0],
+      });
+      // Post any overflow chunks as new messages
+      for (let i = 1; i < chunks.length; i++) {
+        await say({ text: chunks[i] });
+      }
+    } else {
+      // Remove placeholder if agent produced no text
+      await client.chat.delete({ channel: channelId, ts: placeholderTs }).catch(() => {});
     }
   }
 }

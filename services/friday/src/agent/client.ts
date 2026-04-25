@@ -216,5 +216,5 @@ export async function sendToAgent(
     clearThinkingTimer();
   }
 
-  return responseText || "(No response from agent)";
+  return responseText;
 }

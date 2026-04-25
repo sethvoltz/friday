@@ -129,13 +129,15 @@ async function main() {
           ),
         });
 
-        // Post the orchestrator's response to Slack
-        const chunks = chunkMessage(response, maxLen);
-        for (const chunk of chunks) {
-          await app.client.chat.postMessage({
-            channel: orchChannelId,
-            text: chunk,
-          });
+        // Post the orchestrator's response to Slack (skip if no text output)
+        if (response) {
+          const chunks = chunkMessage(response, maxLen);
+          for (const chunk of chunks) {
+            await app.client.chat.postMessage({
+              channel: orchChannelId,
+              text: chunk,
+            });
+          }
         }
       } catch (err) {
         log("error", "mail_poller_turn_error", {
