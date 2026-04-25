@@ -119,6 +119,18 @@ Agent names are permanent — once used, a name can never be reused. Pick descri
 
 The name should capture *what this specific agent is doing*, not just the domain it works in.
 
+## Helper lifecycle
+
+**One helper, one task.** Each Helper gets a single, focused assignment. If you need two things researched in parallel, create two Helpers — don't bundle unrelated questions into one. A Helper's name should reflect its specific task (e.g. \`helper-cms-branch-config\`, \`helper-svelte-tui-options\`), not a broad topic.
+
+**Follow-ups are fine, new tasks are not.** If the user asks a follow-up question about the same topic a Helper just researched, you MAY mail that Helper with the follow-up — it has useful context. But if it's a *different* task, create a new Helper. The test: would the Helper's prior conversation context help or hurt? If it would be irrelevant noise, spin up a fresh one.
+
+**Destroy when done.** When a Helper has served its purpose and you don't expect follow-ups on that topic:
+1. Read and process the mail as usual
+2. Destroy the Helper with \`agent_destroy\`
+
+Helpers are cheap to create and expensive to leave running (they hold a session and poll for mail indefinitely). Don't keep them around "in case you need them later" — if a new need arises, create a new Helper.
+
 ## How to delegate
 
 **Project work** (features, refactors, multi-file changes):
@@ -272,7 +284,9 @@ When you receive approval mail from the Orchestrator:
 3. Commit locally after each meaningful unit of work. Do NOT push yet.
 4. Close each task as you finish: \`cd ${BEADS_DIR} && bd close <taskId>\`
 
-If a task is large or parallelizable, create a Helper for it using \`agent_create\` with type="helper". Names are permanent and can never be reused — pick descriptive ones like \`helper-auth-unit-tests\` or \`helper-migration-rollback-check\`, not \`helper-tests\`.
+If a task is large or parallelizable, create Helpers using \`agent_create\` with type="helper". One Helper per task — if you have three independent subtasks, create three Helpers so they run in parallel. Names are permanent and can never be reused — pick descriptive ones like \`helper-auth-unit-tests\` or \`helper-migration-rollback-check\`, not \`helper-tests\`.
+
+When a Helper mails you that it's done, read the results. If you don't need the Helper for follow-up on the same topic, destroy it with \`agent_destroy\`. Don't reuse a Helper for a different task — its stale context will cause confusion.
 
 ### Phase 3 — Report and wait
 

@@ -40,6 +40,12 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("slack_reply");
     expect(prompt).toContain("mrkdwn");
 
+    // Helper lifecycle — one per task, destroy when done
+    expect(prompt).toContain("Helper lifecycle");
+    expect(prompt).toContain("One helper, one task");
+    expect(prompt).toContain("Follow-ups are fine, new tasks are not");
+    expect(prompt).toContain("Destroy when done");
+
     // Turn discipline
     expect(prompt).toContain("End your turn");
 
@@ -73,6 +79,10 @@ describe("buildAgentSystemPrompt", () => {
 
     // No direct user contact
     expect(prompt).toContain("cannot talk to the user");
+
+    // Helper cleanup — destroy when done, don't reuse for different tasks
+    expect(prompt).toContain("agent_destroy");
+    expect(prompt).toContain("stale context");
 
     // Beads dir
     expect(prompt).toContain(BEADS_DIR);
