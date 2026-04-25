@@ -2,7 +2,7 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentType } from "@friday/shared";
 import {
   registerBuilder,
-  registerAgent,
+  registerHelper,
   registerOrchestrator,
   updateAgentSession,
   updateAgentStatus,
@@ -39,7 +39,7 @@ export interface CreateBuilderOptions {
   mcpServers?: Record<string, any>;
 }
 
-export interface CreateAgentOptions {
+export interface CreateHelperOptions {
   name: string;
   parent: string;
   taskId: string | null;
@@ -108,10 +108,10 @@ export async function createBuilder(
 }
 
 /**
- * Create a new Agent: register and spawn session loop.
+ * Create a new Helper: register and spawn session loop.
  */
-export async function createAgentAgent(
-  options: CreateAgentOptions
+export async function createHelper(
+  options: CreateHelperOptions
 ): Promise<void> {
   const {
     name,
@@ -123,11 +123,11 @@ export async function createAgentAgent(
     mcpServers,
   } = options;
 
-  registerAgent(name, parent, taskId, cwd);
+  registerHelper(name, parent, taskId, cwd);
 
   spawnAgentLoop({
     agentName: name,
-    agentType: "agent",
+    agentType: "helper",
     cwd,
     model,
     allowedTools,
@@ -136,7 +136,7 @@ export async function createAgentAgent(
     parent,
   });
 
-  log("info", "agent_agent_created", { name, parent, taskId, cwd });
+  log("info", "helper_created", { name, parent, taskId, cwd });
 }
 
 /**
@@ -500,7 +500,7 @@ export function restoreActiveAgents(
       allowedTools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Agent"],
       mcpServers,
       epicId: entry.type === "builder" ? entry.epicId : undefined,
-      taskId: entry.type === "agent" ? entry.taskId : undefined,
+      taskId: entry.type === "helper" ? entry.taskId : undefined,
       parent: entry.parent,
       workspace: entry.type === "builder" ? entry.workspace : undefined,
       resumeSessionId: entry.sessionId,

@@ -44,7 +44,7 @@
     switch (type) {
       case 'orchestrator': return '👑';
       case 'builder': return '🔨';
-      case 'agent': return '⚡';
+      case 'helper': return '⚡';
       default: return '💬';
     }
   }

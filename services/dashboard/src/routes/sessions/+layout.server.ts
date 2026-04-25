@@ -98,7 +98,7 @@ export const load: LayoutServerLoad = async () => {
   function agentCwd(entry: RegistryEntry): string | null {
     if (entry.type === "orchestrator") return config.agent.workingDirectory;
     if (entry.type === "builder") return entry.workspace;
-    if (entry.type === "agent") return entry.cwd;
+    if (entry.type === "helper") return entry.cwd;
     return null;
   }
 

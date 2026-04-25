@@ -11,7 +11,7 @@ import {
 import type {
   OrchestratorEntry,
   BuilderEntry,
-  AgentEntry,
+  HelperEntry,
 } from "./agents.js";
 
 // ── resolveTranscriptPath ──────────────────────────────────────
@@ -34,9 +34,9 @@ describe("resolveTranscriptPath", () => {
     );
   });
 
-  it("resolves agent path from cwd", () => {
-    const entry: AgentEntry = {
-      type: "agent",
+  it("resolves helper path from cwd", () => {
+    const entry: HelperEntry = {
+      type: "helper",
       parent: "builder-blog",
       sessionId: "sess-def",
       status: "active",
@@ -129,8 +129,8 @@ describe("buildInspectResult", () => {
   }
 
   it("returns empty turns when JSONL does not exist", async () => {
-    const entry: AgentEntry = {
-      type: "agent",
+    const entry: HelperEntry = {
+      type: "helper",
       parent: "orchestrator",
       sessionId: "nonexistent",
       status: "active",
@@ -142,12 +142,12 @@ describe("buildInspectResult", () => {
     expect(result.turns).toEqual([]);
     expect(result.totalTurns).toBe(0);
     expect(result.agentName).toBe("test-agent");
-    expect(result.agentType).toBe("agent");
+    expect(result.agentType).toBe("helper");
   });
 
   it("returns empty turns when sessionId is null", async () => {
-    const entry: AgentEntry = {
-      type: "agent",
+    const entry: HelperEntry = {
+      type: "helper",
       parent: "orchestrator",
       sessionId: null,
       status: "active",
@@ -186,8 +186,8 @@ describe("buildInspectResult", () => {
 
     // Actually, let's just test the path resolution + formatting separately,
     // and test buildInspectResult's metadata assembly with a no-file scenario.
-    const entry: AgentEntry = {
-      type: "agent",
+    const entry: HelperEntry = {
+      type: "helper",
       parent: "builder-blog",
       sessionId,
       status: "active",
@@ -195,11 +195,11 @@ describe("buildInspectResult", () => {
       cwd: tempDir,
       createdAt: "2026-04-23T10:00:00Z",
     };
-    const result = await buildInspectResult("agent-test", entry);
+    const result = await buildInspectResult("helper-test", entry);
     // File won't exist at the resolved path (which is under ~/.claude/projects)
     // so we get empty turns but valid metadata
-    expect(result.agentName).toBe("agent-test");
-    expect(result.agentType).toBe("agent");
+    expect(result.agentName).toBe("helper-test");
+    expect(result.agentType).toBe("helper");
     expect(result.status).toBe("active");
     expect(result.parent).toBe("builder-blog");
     expect(result.sessionId).toBe(sessionId);
@@ -242,8 +242,8 @@ describe("formatInspectPlain", () => {
 
   it("formats result with no turns", () => {
     const result = {
-      agentName: "agent-test",
-      agentType: "agent",
+      agentName: "helper-test",
+      agentType: "helper",
       status: "destroyed",
       sessionId: null,
       jsonlPath: null,
@@ -257,8 +257,8 @@ describe("formatInspectPlain", () => {
 
   it("shows all turns count when not truncated", () => {
     const result = {
-      agentName: "agent-test",
-      agentType: "agent",
+      agentName: "helper-test",
+      agentType: "helper",
       status: "active",
       sessionId: "s1",
       jsonlPath: "/tmp/t.jsonl",
@@ -325,8 +325,8 @@ describe("formatInspectMarkdown", () => {
 
   it("handles turns with no tool calls", () => {
     const result = {
-      agentName: "agent-test",
-      agentType: "agent",
+      agentName: "helper-test",
+      agentType: "helper",
       status: "active",
       sessionId: "s1",
       jsonlPath: null,

@@ -129,7 +129,7 @@
       createdAt: entry.createdAt as string,
     }))
     .sort((a, b) => {
-      const typeOrder: Record<string, number> = { orchestrator: 0, builder: 1, agent: 2 };
+      const typeOrder: Record<string, number> = { orchestrator: 0, builder: 1, helper: 2 };
       return (typeOrder[a.type] ?? 3) - (typeOrder[b.type] ?? 3);
     });
 
@@ -152,7 +152,7 @@
     switch (type) {
       case 'orchestrator': return '\u{1F451}';
       case 'builder': return '\u{1F528}';
-      case 'agent': return '\u{26A1}';
+      case 'helper': return '\u{26A1}';
       default: return '\u{1F4AD}';
     }
   }

@@ -18,7 +18,7 @@ export function buildSystemPrompt(
 
   const channelContext = `You are communicating via Slack channel ${channelId}.`;
 
-  // Typed sessions (orchestrator, builder, agent) get their role prime
+  // Typed sessions (orchestrator, builder, helper) get their role prime
   if (sessionType !== "bare") {
     const prime = buildAgentSystemPrompt({
       agentName: sessionType === "orchestrator" ? "orchestrator" : `slack-${sessionType}`,

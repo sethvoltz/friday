@@ -54,7 +54,7 @@ export function resolveTranscriptPath(
   const cwd =
     cwdOverride ??
     (entry.type === "builder" ? entry.workspace : null) ??
-    (entry.type === "agent" ? entry.cwd : null);
+    (entry.type === "helper" ? entry.cwd : null);
 
   if (!cwd) return null;
 

@@ -35,7 +35,7 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | `src/agent/agent-tools.ts` | Agent management MCP tools (`agent_create`, `agent_list`, `agent_status`, `agent_destroy`, `worktree_add`, `worktree_remove`) |
 | `src/agent/lifecycle.ts` | Agent lifecycle — create/destroy Builders and Agents, spawn/stop agent loops, restore on daemon restart |
 | `src/agent/workspace.ts` | Workspace and git worktree management for Builder agents |
-| `src/agent/prime.ts` | System prompt and first-turn prompt generation for typed agent sessions (Orchestrator, Builder, Agent) |
+| `src/agent/prime.ts` | System prompt and first-turn prompt generation for typed agent sessions (Orchestrator, Builder, Helper) |
 | `src/sessions/registry.ts` | Agent registry CRUD — persisted to `~/.friday/agents.json`, hierarchy enforcement, session tracking |
 | `src/sessions/manager.ts` | Channel → session ID mapping (in-memory + persisted to `~/.friday/sessions/channels.json`) |
 | `src/sessions/queue.ts` | Per-channel FIFO queue with edit/delete support, emoji lifecycle helpers |
@@ -56,7 +56,7 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 TypeScript types and utilities shared across services:
 
 - `config.ts` — `FridayConfig` type, default values, `loadConfig()` function, path constants
-- `agents.ts` — Agent types (`AgentType`, `AgentStatus`), registry types (`OrchestratorEntry`, `BuilderEntry`, `AgentEntry`), name validation
+- `agents.ts` — Agent types (`AgentType`, `AgentStatus`), registry types (`OrchestratorEntry`, `BuilderEntry`, `HelperEntry`), name validation
 - `usage.ts` — `UsageEntry` type for the JSONL usage log
 - `transcript.ts` — Session JSONL transcript parser: parses Claude Code session files into structured turns, supports full parse and last-N-turns, streaming tail via `fs.watch`, and human-readable formatting
 - `inspect.ts` — Shared agent inspection logic: resolves agent → transcript path, builds structured `InspectResult`, formats as plain text or markdown. Used by CLI, Slack command, MCP tool, and dashboard.
@@ -204,19 +204,19 @@ Friday supports a three-tier agent model for orchestrating complex work:
 ```
 Orchestrator (singular, root)
 ├── Builder (long-lived, has workspace with worktrees)
-│   ├── Agent (short-lived, task-focused)
-│   └── Agent
+│   ├── Helper (short-lived, task-focused)
+│   └── Helper
 └── Builder
-    └── Agent
+    └── Helper
 ```
 
 ### Agent Types
 
 | Type | Lifecycle | Creates | Capabilities |
 |------|----------|---------|-------------|
-| **Orchestrator** | Singleton, managed by Slack event handler | Builders, Agents | Full tool access, Slack communication, agent management |
-| **Builder** | Long-lived, daemon-managed loop | Agents (not Builders) | Workspace with git worktrees, project-scoped work, plan-then-execute |
-| **Agent** | Short-lived, daemon-managed loop | Nothing | Single-task execution, reports to parent |
+| **Orchestrator** | Singleton, managed by Slack event handler | Builders, Helpers | Full tool access, Slack communication, agent management |
+| **Builder** | Long-lived, daemon-managed loop | Helpers (not Builders) | Workspace with git worktrees, project-scoped work, plan-then-execute |
+| **Helper** | Short-lived, daemon-managed loop | Nothing | Single-task execution, reports to parent |
 
 ### Agent Lifecycle
 

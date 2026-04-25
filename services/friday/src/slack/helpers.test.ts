@@ -71,12 +71,12 @@ describe("buildSystemPrompt", () => {
     expect(result!.append).toContain("You are Builder");
   });
 
-  it("agent gets agent role prime", () => {
+  it("helper gets helper role prime", () => {
     const config = makeConfig();
-    const result = buildSystemPrompt(config, "agent", "C123", "/tmp");
+    const result = buildSystemPrompt(config, "helper", "C123", "/tmp");
 
     expect(result).toBeDefined();
-    expect(result!.append).toContain("You are Agent");
+    expect(result!.append).toContain("You are Helper");
   });
 
   it("bare session includes memory guidance without custom prompt", () => {

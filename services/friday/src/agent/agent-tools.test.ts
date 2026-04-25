@@ -25,7 +25,7 @@ vi.mock("../sessions/registry.js", () => ({
 
 vi.mock("./lifecycle.js", () => ({
   createBuilder: vi.fn(async () => ({ workspace: "/tmp/ws/builder-test" })),
-  createAgentAgent: vi.fn(async () => {}),
+  createHelper: vi.fn(async () => {}),
   destroyAgentByName: vi.fn(),
   isAgentRunning: vi.fn(() => false),
 }));
@@ -46,7 +46,7 @@ import { createAgentTools } from "./agent-tools.js";
 import { getAgent, listAgents } from "../sessions/registry.js";
 import {
   createBuilder,
-  createAgentAgent,
+  createHelper,
   destroyAgentByName,
   isAgentRunning,
 } from "./lifecycle.js";
@@ -136,20 +136,20 @@ describe("createAgentTools", () => {
       expect(result.content[0].text).toContain("require at least one repo");
     });
 
-    it("orchestrator can create an agent", async () => {
+    it("orchestrator can create a helper", async () => {
       vi.mocked(getAgent).mockReturnValue(undefined);
       createAgentTools(orchestratorCtx());
       const result = await callTool("agent_create", {
-        type: "agent",
-        name: "agent-lint",
+        type: "helper",
+        name: "helper-lint",
         task_id: "bd-456",
         cwd: "/tmp/ws/builder-auth",
       });
 
       expect(result.isError).toBeUndefined();
-      expect(createAgentAgent).toHaveBeenCalledWith(
+      expect(createHelper).toHaveBeenCalledWith(
         expect.objectContaining({
-          name: "agent-lint",
+          name: "helper-lint",
           parent: "orchestrator",
           taskId: "bd-456",
           cwd: "/tmp/ws/builder-auth",
@@ -157,7 +157,7 @@ describe("createAgentTools", () => {
       );
     });
 
-    it("builder creates agent with own workspace as default cwd", async () => {
+    it("builder creates helper with own workspace as default cwd", async () => {
       vi.mocked(getAgent).mockReturnValue({
         type: "builder",
         parent: "orchestrator",
@@ -171,13 +171,13 @@ describe("createAgentTools", () => {
 
       createAgentTools(builderCtx());
       const result = await callTool("agent_create", {
-        type: "agent",
-        name: "agent-tests",
+        type: "helper",
+        name: "helper-tests",
         task_id: "bd-789",
       });
 
       expect(result.isError).toBeUndefined();
-      expect(createAgentAgent).toHaveBeenCalledWith(
+      expect(createHelper).toHaveBeenCalledWith(
         expect.objectContaining({
           cwd: "/tmp/ws/builder-auth",
           parent: "builder-auth",
@@ -199,7 +199,7 @@ describe("createAgentTools", () => {
             workspace: "/tmp/ws/builder-auth",
             epicId: "bd-100",
             createdAt: new Date().toISOString(),
-            children: ["agent-lint"],
+            children: ["helper-lint"],
           },
         },
       ]);
@@ -257,7 +257,7 @@ describe("createAgentTools", () => {
 
     it("builder cannot inspect non-child", async () => {
       vi.mocked(getAgent).mockReturnValue({
-        type: "agent",
+        type: "helper",
         parent: "builder-other",
         sessionId: null,
         status: "active",
@@ -267,7 +267,7 @@ describe("createAgentTools", () => {
       });
 
       createAgentTools(builderCtx());
-      const result = await callTool("agent_status", { name: "agent-foreign" });
+      const result = await callTool("agent_status", { name: "helper-foreign" });
 
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("not a child");
@@ -286,7 +286,7 @@ describe("createAgentTools", () => {
   describe("agent_destroy", () => {
     it("orchestrator can destroy an agent", async () => {
       vi.mocked(getAgent).mockReturnValue({
-        type: "agent",
+        type: "helper",
         parent: "builder-auth",
         sessionId: null,
         status: "active",
@@ -296,10 +296,10 @@ describe("createAgentTools", () => {
       });
 
       createAgentTools(orchestratorCtx());
-      const result = await callTool("agent_destroy", { name: "agent-cleanup" });
+      const result = await callTool("agent_destroy", { name: "helper-cleanup" });
 
       expect(result.isError).toBeUndefined();
-      expect(destroyAgentByName).toHaveBeenCalledWith("agent-cleanup");
+      expect(destroyAgentByName).toHaveBeenCalledWith("helper-cleanup");
     });
 
     it("cannot destroy the orchestrator", async () => {
@@ -320,7 +320,7 @@ describe("createAgentTools", () => {
 
     it("builder can only destroy own children", async () => {
       vi.mocked(getAgent).mockReturnValue({
-        type: "agent",
+        type: "helper",
         parent: "builder-other",
         sessionId: null,
         status: "active",
@@ -330,7 +330,7 @@ describe("createAgentTools", () => {
       });
 
       createAgentTools(builderCtx());
-      const result = await callTool("agent_destroy", { name: "agent-foreign" });
+      const result = await callTool("agent_destroy", { name: "helper-foreign" });
 
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("only destroy its own children");

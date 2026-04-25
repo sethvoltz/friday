@@ -18,6 +18,14 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("delegate");
     expect(prompt).toContain("agent_create");
 
+    // Availability — stay responsive
+    expect(prompt).toContain("Stay available");
+    expect(prompt).toContain("Never block");
+
+    // Naming — descriptive, unique, permanent
+    expect(prompt).toContain("Naming agents");
+    expect(prompt).toContain("never be reused");
+
     // Mail processing — must read mail itself
     expect(prompt).toContain("mail_read");
     expect(prompt).toContain("mail_check");
@@ -70,15 +78,15 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain(BEADS_DIR);
   });
 
-  it("builds agent prompt with task and parent context", () => {
+  it("builds helper prompt with task and parent context", () => {
     const prompt = buildAgentSystemPrompt({
-      agentName: "agent-auth-tests",
-      agentType: "agent",
+      agentName: "helper-auth-tests",
+      agentType: "helper",
       cwd: "/tmp/workspaces/builder-auth",
       parent: "builder-auth",
       taskId: "bd-c3d4",
     });
-    expect(prompt).toContain('Agent "agent-auth-tests"');
+    expect(prompt).toContain('Helper "helper-auth-tests"');
     expect(prompt).toContain("bd-c3d4");
     expect(prompt).toContain("builder-auth");
 
@@ -128,10 +136,10 @@ describe("buildFirstTurnPrompt", () => {
     expect(prompt).toContain("mail_check");
   });
 
-  it("agent with task reads it", () => {
+  it("helper with task reads it", () => {
     const prompt = buildFirstTurnPrompt({
-      agentName: "agent-tests",
-      agentType: "agent",
+      agentName: "helper-tests",
+      agentType: "helper",
       cwd: "/tmp",
       taskId: "bd-c3d4",
     });
@@ -140,10 +148,10 @@ describe("buildFirstTurnPrompt", () => {
     expect(prompt).toContain("mail your parent");
   });
 
-  it("agent without task checks mail", () => {
+  it("helper without task checks mail", () => {
     const prompt = buildFirstTurnPrompt({
-      agentName: "agent-x",
-      agentType: "agent",
+      agentName: "helper-x",
+      agentType: "helper",
       cwd: "/tmp",
       taskId: null,
     });

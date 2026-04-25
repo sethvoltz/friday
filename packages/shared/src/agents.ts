@@ -5,7 +5,7 @@ export const AGENTS_PATH = join(FRIDAY_DIR, "agents.json");
 export const REPOS_DIR = join(FRIDAY_DIR, "repos");
 export const BEADS_DIR = join(FRIDAY_DIR, "beads");
 
-export type AgentType = "orchestrator" | "builder" | "agent";
+export type AgentType = "orchestrator" | "builder" | "helper";
 /** Session type includes AgentType plus "bare" for untyped Slack sessions (DMs, non-orchestrator channels) */
 export type SessionType = AgentType | "bare";
 export type AgentStatus = "active" | "idle" | "destroyed";
@@ -33,8 +33,8 @@ export interface BuilderEntry {
   formerSessionIds?: string[];
 }
 
-export interface AgentEntry {
-  type: "agent";
+export interface HelperEntry {
+  type: "helper";
   parent: string;
   sessionId: string | null;
   status: AgentStatus;
@@ -45,7 +45,7 @@ export interface AgentEntry {
   formerSessionIds?: string[];
 }
 
-export type RegistryEntry = OrchestratorEntry | BuilderEntry | AgentEntry;
+export type RegistryEntry = OrchestratorEntry | BuilderEntry | HelperEntry;
 
 export interface AgentRegistry {
   [name: string]: RegistryEntry;
@@ -64,7 +64,7 @@ export function isValidAgentName(name: string): boolean {
  * Agents: "agent-<parent-project>-<descriptor>"
  */
 export function buildAgentName(
-  type: "builder" | "agent",
+  type: "builder" | "helper",
   parentName: string,
   descriptor: string
 ): string {
@@ -72,7 +72,7 @@ export function buildAgentName(
   if (type === "builder") {
     return `builder-${safe}`;
   }
-  // For agents, namespace under parent. Strip "builder-" prefix from parent for brevity.
+  // For helpers, namespace under parent. Strip "builder-" prefix from parent for brevity.
   const parentShort = parentName.replace(/^builder-/, "");
-  return `agent-${parentShort}-${safe}`;
+  return `helper-${parentShort}-${safe}`;
 }

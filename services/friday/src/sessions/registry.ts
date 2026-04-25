@@ -5,7 +5,7 @@ import {
   type RegistryEntry,
   type AgentStatus,
   type BuilderEntry,
-  type AgentEntry,
+  type HelperEntry,
   type OrchestratorEntry,
   isValidAgentName,
 } from "@friday/shared";
@@ -13,17 +13,6 @@ import { log } from "../log.js";
 import { eventBus } from "../events/bus.js";
 
 let registry: AgentRegistry = {};
-
-/**
- * Collect former session IDs from a destroyed entry being replaced.
- * Prepends the entry's current sessionId to its existing formerSessionIds.
- */
-function collectFormerSessions(existing: RegistryEntry | undefined): string[] {
-  if (!existing) return [];
-  const former = existing.formerSessionIds ? [...existing.formerSessionIds] : [];
-  if (existing.sessionId) former.unshift(existing.sessionId);
-  return former;
-}
 
 export function loadRegistry(): void {
   if (existsSync(AGENTS_PATH)) {
@@ -88,8 +77,10 @@ export function registerBuilder(
     throw new Error(`Invalid agent name: "${name}"`);
   }
   const existing = registry[name];
-  if (existing && existing.status !== "destroyed") {
-    throw new Error(`Agent "${name}" already exists and is ${existing.status}`);
+  if (existing) {
+    throw new Error(
+      `Agent name "${name}" is already taken (status: ${existing.status}). Choose a more descriptive, unique name.`
+    );
   }
 
   const parentEntry = registry[parent];
@@ -100,9 +91,6 @@ export function registerBuilder(
     throw new Error(`Only the Orchestrator can create Builders`);
   }
 
-  // Preserve session history from the destroyed entry being replaced
-  const formerSessionIds = collectFormerSessions(existing);
-
   const entry: BuilderEntry = {
     type: "builder",
     parent,
@@ -112,7 +100,6 @@ export function registerBuilder(
     epicId,
     createdAt: new Date().toISOString(),
     children: [],
-    ...(formerSessionIds.length > 0 ? { formerSessionIds } : {}),
   };
 
   registry[name] = entry;
@@ -125,39 +112,38 @@ export function registerBuilder(
   return entry;
 }
 
-export function registerAgent(
+export function registerHelper(
   name: string,
   parent: string,
   taskId: string | null,
   cwd: string
-): AgentEntry {
+): HelperEntry {
   if (!isValidAgentName(name)) {
     throw new Error(`Invalid agent name: "${name}"`);
   }
   const existing = registry[name];
-  if (existing && existing.status !== "destroyed") {
-    throw new Error(`Agent "${name}" already exists and is ${existing.status}`);
+  if (existing) {
+    throw new Error(
+      `Agent name "${name}" is already taken (status: ${existing.status}). Choose a more descriptive, unique name.`
+    );
   }
 
   const parentEntry = registry[parent];
   if (!parentEntry) {
     throw new Error(`Parent agent "${parent}" not found`);
   }
-  if (parentEntry.type === "agent") {
-    throw new Error(`Agents cannot create other Agents`);
+  if (parentEntry.type === "helper") {
+    throw new Error(`Helpers cannot create other Helpers`);
   }
 
-  const formerSessionIds = collectFormerSessions(existing);
-
-  const entry: AgentEntry = {
-    type: "agent",
+  const entry: HelperEntry = {
+    type: "helper",
     parent,
     sessionId: null,
     status: "active",
     taskId,
     cwd,
     createdAt: new Date().toISOString(),
-    ...(formerSessionIds.length > 0 ? { formerSessionIds } : {}),
   };
 
   registry[name] = entry;
@@ -166,7 +152,7 @@ export function registerAgent(
   }
   saveRegistry();
   eventBus.publish({ type: "agent:created", agentName: name, entry });
-  log("info", "agent_registered", { name, type: "agent", parent });
+  log("info", "agent_registered", { name, type: "helper", parent });
   return entry;
 }
 

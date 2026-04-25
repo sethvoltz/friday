@@ -8,7 +8,7 @@ import {
 } from "../sessions/registry.js";
 import {
   createBuilder,
-  createAgentAgent,
+  createHelper,
   destroyAgentByName,
   isAgentRunning,
 } from "./lifecycle.js";
@@ -52,17 +52,19 @@ export function createAgentTools(ctx: AgentToolsContext) {
 
       tool(
         "agent_create",
-        "Create a new Builder or Agent. " +
-          "Orchestrator can create Builders (with workspace and optional epic) or Agents. " +
-          "Builders can only create Agents within their own workspace. " +
+        "Create a new Builder or Helper. " +
+          "Orchestrator can create Builders (with workspace and optional epic) or Helpers. " +
+          "Builders can only create Helpers within their own workspace. " +
           "For Builders: provide repos (list of repo paths or URLs) to set up workspaces with git worktrees. " +
-          "For Agents: provide the working directory (cwd) where the agent should operate.",
+          "For Helpers: provide the working directory (cwd) where the helper should operate.",
         {
-          type: z.enum(["builder", "agent"]).describe("Type of agent to create"),
+          type: z.enum(["builder", "helper"]).describe("Type of agent to create"),
           name: z
             .string()
             .describe(
-              "Agent name. Must be lowercase alphanumeric with hyphens (e.g., 'builder-auth', 'agent-lint-check')"
+              "Agent name in <type>-<kebab-case-descriptor> format. Must be descriptive and unique — names can never be reused, even after destruction. " +
+              "Good: 'builder-blog-redesign-2026', 'helper-cli-perf-audit'. " +
+              "Bad: 'builder-blog' (too generic, will collide if you ever need another blog builder)."
             ),
           epic_id: z
             .string()
@@ -86,7 +88,7 @@ export function createAgentTools(ctx: AgentToolsContext) {
           cwd: z
             .string()
             .optional()
-            .describe("Working directory for an Agent. Defaults to the caller's workspace."),
+            .describe("Working directory for a Helper. Defaults to the caller's workspace."),
         },
         async (args) => {
           try {
@@ -137,43 +139,43 @@ export function createAgentTools(ctx: AgentToolsContext) {
               );
             }
 
-            // Agent creation
+            // Helper creation
             const callerEntry = getAgent(ctx.callerName);
-            const agentCwd =
+            const helperCwd =
               args.cwd ??
               (callerEntry && "workspace" in callerEntry
                 ? callerEntry.workspace
                 : undefined);
 
-            if (!agentCwd) {
+            if (!helperCwd) {
               return errorResult(
                 "No working directory specified and caller has no workspace."
               );
             }
 
-            await createAgentAgent({
+            await createHelper({
               name: args.name,
               parent: ctx.callerName,
               taskId: args.task_id ?? null,
-              cwd: agentCwd,
+              cwd: helperCwd,
               model: ctx.model,
               mcpServers: ctx.mcpServers,
             });
 
             if (ctx.postToSlack) {
               await ctx.postToSlack(
-                `\u{26A1} Agent *${args.name}* spawned` +
+                `\u{26A1} Helper *${args.name}* spawned` +
                   (args.task_id ? ` on task \`${args.task_id}\`` : "") +
                   `. Running independently.`
               ).catch(() => {});
             }
 
             return okResult(
-              `Agent "${args.name}" created and running in background.\n` +
+              `Helper "${args.name}" created and running in background.\n` +
                 `Parent: ${ctx.callerName}\n` +
                 `Task: ${args.task_id ?? "none"}\n` +
-                `CWD: ${agentCwd}\n\n` +
-                `YOUR TURN IS DONE. Respond briefly and stop. Do NOT do the agent's work.`
+                `CWD: ${helperCwd}\n\n` +
+                `YOUR TURN IS DONE. Respond briefly and stop. Do NOT do the helper's work.`
             );
           } catch (err) {
             return errorResult(errMsg(err));
@@ -190,7 +192,7 @@ export function createAgentTools(ctx: AgentToolsContext) {
             .optional()
             .describe("Filter by status. Omit to see all."),
           type: z
-            .enum(["orchestrator", "builder", "agent"])
+            .enum(["orchestrator", "builder", "helper"])
             .optional()
             .describe("Filter by agent type."),
         },
@@ -282,7 +284,7 @@ export function createAgentTools(ctx: AgentToolsContext) {
       tool(
         "agent_destroy",
         "Destroy an agent, stopping its loop and cleaning up its workspace (if Builder). " +
-          "Builders can only destroy their own Agents. " +
+          "Builders can only destroy their own Helpers. " +
           "Recursively destroys any children of the target agent.",
         {
           name: z.string().describe("Name of the agent to destroy"),

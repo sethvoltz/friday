@@ -20,7 +20,7 @@ const {
   listAgents,
   registerOrchestrator,
   registerBuilder,
-  registerAgent,
+  registerHelper,
   updateAgentSession,
   updateAgentStatus,
   destroyAgent,
@@ -84,36 +84,35 @@ describe("agent registry", () => {
     ).toThrow("Invalid agent name");
   });
 
-  it("rejects duplicate active agent name", () => {
+  it("rejects duplicate agent name", () => {
     registerOrchestrator();
     registerBuilder("builder-auth", "orchestrator", "/tmp", null);
     expect(() =>
       registerBuilder("builder-auth", "orchestrator", "/tmp", null)
-    ).toThrow("already exists");
+    ).toThrow("already taken");
   });
 
-  it("allows re-registering a destroyed builder name", () => {
+  it("rejects re-registering a destroyed builder name", () => {
     registerOrchestrator();
     registerBuilder("builder-auth", "orchestrator", "/tmp/old", "epic-1");
     destroyAgent("builder-auth");
     expect(getAgent("builder-auth")!.status).toBe("destroyed");
 
-    const fresh = registerBuilder("builder-auth", "orchestrator", "/tmp/new", "epic-2");
-    expect(fresh.status).toBe("active");
-    expect(fresh.workspace).toBe("/tmp/new");
-    expect(fresh.epicId).toBe("epic-2");
+    expect(() =>
+      registerBuilder("builder-auth", "orchestrator", "/tmp/new", "epic-2")
+    ).toThrow("already taken");
   });
 
-  it("allows re-registering a destroyed agent name", () => {
+  it("rejects re-registering a destroyed helper name", () => {
     registerOrchestrator();
     registerBuilder("builder-x", "orchestrator", "/tmp", null);
-    registerAgent("agent-task", "builder-x", "task-1", "/tmp/cwd");
-    destroyAgent("agent-task");
-    expect(getAgent("agent-task")!.status).toBe("destroyed");
+    registerHelper("helper-task", "builder-x", "task-1", "/tmp/cwd");
+    destroyAgent("helper-task");
+    expect(getAgent("helper-task")!.status).toBe("destroyed");
 
-    const fresh = registerAgent("agent-task", "builder-x", "task-2", "/tmp/cwd2");
-    expect(fresh.status).toBe("active");
-    expect(fresh.taskId).toBe("task-2");
+    expect(() =>
+      registerHelper("helper-task", "builder-x", "task-2", "/tmp/cwd2")
+    ).toThrow("already taken");
   });
 
   it("rejects builder created by non-orchestrator", () => {
@@ -124,37 +123,37 @@ describe("agent registry", () => {
     ).toThrow("Only the Orchestrator");
   });
 
-  it("registers agent under orchestrator or builder", () => {
+  it("registers helper under orchestrator or builder", () => {
     registerOrchestrator();
     registerBuilder("builder-auth", "orchestrator", "/tmp", null);
 
-    const agentUnderOrch = registerAgent(
-      "agent-orchestrator-cleanup",
+    const helperUnderOrch = registerHelper(
+      "helper-orchestrator-cleanup",
       "orchestrator",
       "bd-c3d4",
       "/tmp"
     );
-    expect(agentUnderOrch.type).toBe("agent");
-    expect(agentUnderOrch.parent).toBe("orchestrator");
+    expect(helperUnderOrch.type).toBe("helper");
+    expect(helperUnderOrch.parent).toBe("orchestrator");
 
-    const agentUnderBuilder = registerAgent(
-      "agent-auth-tests",
+    const helperUnderBuilder = registerHelper(
+      "helper-auth-tests",
       "builder-auth",
       "bd-e5f6",
       "/tmp/workspace/builder-auth"
     );
-    expect(agentUnderBuilder.parent).toBe("builder-auth");
+    expect(helperUnderBuilder.parent).toBe("builder-auth");
 
     const builder = getAgent("builder-auth")!;
-    expect("children" in builder && builder.children).toContain("agent-auth-tests");
+    expect("children" in builder && builder.children).toContain("helper-auth-tests");
   });
 
-  it("rejects agent created by another agent", () => {
+  it("rejects helper created by another helper", () => {
     registerOrchestrator();
-    registerAgent("agent-orchestrator-first", "orchestrator", null, "/tmp");
+    registerHelper("helper-orchestrator-first", "orchestrator", null, "/tmp");
     expect(() =>
-      registerAgent("agent-nested", "agent-orchestrator-first", null, "/tmp")
-    ).toThrow("Agents cannot create");
+      registerHelper("helper-nested", "helper-orchestrator-first", null, "/tmp")
+    ).toThrow("Helpers cannot create");
   });
 
   it("updates agent session ID", () => {
@@ -183,12 +182,12 @@ describe("agent registry", () => {
   it("recursively destroys children when destroying builder", () => {
     registerOrchestrator();
     registerBuilder("builder-auth", "orchestrator", "/tmp", null);
-    registerAgent("agent-auth-tests", "builder-auth", null, "/tmp");
+    registerHelper("helper-auth-tests", "builder-auth", null, "/tmp");
 
     destroyAgent("builder-auth");
 
     expect(getAgent("builder-auth")!.status).toBe("destroyed");
-    expect(getAgent("agent-auth-tests")!.status).toBe("destroyed");
+    expect(getAgent("helper-auth-tests")!.status).toBe("destroyed");
   });
 
   it("cannot destroy orchestrator", () => {
@@ -199,7 +198,7 @@ describe("agent registry", () => {
   it("lists agents with filters", () => {
     registerOrchestrator();
     registerBuilder("builder-auth", "orchestrator", "/tmp", null);
-    registerAgent("agent-auth-tests", "builder-auth", null, "/tmp");
+    registerHelper("helper-auth-tests", "builder-auth", null, "/tmp");
 
     const all = listAgents();
     expect(all).toHaveLength(3);

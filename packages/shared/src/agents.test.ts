@@ -4,7 +4,7 @@ import { isValidAgentName, buildAgentName } from "./agents.js";
 describe("isValidAgentName", () => {
   it("accepts valid names", () => {
     expect(isValidAgentName("builder-auth")).toBe(true);
-    expect(isValidAgentName("agent-auth-tests")).toBe(true);
+    expect(isValidAgentName("helper-auth-tests")).toBe(true);
     expect(isValidAgentName("orchestrator")).toBe(true);
     expect(isValidAgentName("ab")).toBe(true);
   });
@@ -39,15 +39,15 @@ describe("buildAgentName", () => {
     );
   });
 
-  it("builds agent names namespaced to parent", () => {
+  it("builds helper names namespaced to parent", () => {
     expect(
-      buildAgentName("agent", "builder-auth-refactor", "unit tests")
-    ).toBe("agent-auth-refactor-unit-tests");
+      buildAgentName("helper", "builder-auth-refactor", "unit tests")
+    ).toBe("helper-auth-refactor-unit-tests");
   });
 
-  it("strips builder- prefix from parent for agent names", () => {
-    expect(buildAgentName("agent", "builder-blog", "deploy")).toBe(
-      "agent-blog-deploy"
+  it("strips builder- prefix from parent for helper names", () => {
+    expect(buildAgentName("helper", "builder-blog", "deploy")).toBe(
+      "helper-blog-deploy"
     );
   });
 
