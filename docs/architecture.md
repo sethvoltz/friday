@@ -27,16 +27,16 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | Module | Responsibility |
 |--------|---------------|
 | `src/config.ts` | Loads `~/.friday/config.json` + `~/.friday/.env`, validates required fields, merges with defaults |
-| `src/log.ts` | Structured JSON logger — all output goes through this (`ts`, `level`, `event`, context fields) |
+| `src/log.ts` | Structured JSON logger — all output goes through this (`ts`, `level`, `event`, context fields). Tees to `~/.friday/daemon.jsonl` and stdout/stderr. |
 | `src/slack/app.ts` | Creates `@slack/bolt` App with Socket Mode, global error handler |
 | `src/slack/events.ts` | Message handler, `/friday` commands, per-channel FIFO queue, streaming, compaction detection |
 | `src/agent/client.ts` | Wraps Agent SDK `query()`, streams text chunks, detects compaction, logs usage, passes MCP servers and system prompt |
 | `src/agent/tools.ts` | Slack MCP tools (`slack_reply`) injected into agent sessions via `createSdkMcpServer` |
 | `src/agent/agent-tools.ts` | Agent management MCP tools (`agent_create`, `agent_list`, `agent_status`, `agent_destroy`, `worktree_add`, `worktree_remove`) |
-| `src/agent/lifecycle.ts` | Agent lifecycle — create/destroy Builders and Agents, spawn/stop agent loops, restore on daemon restart |
+| `src/agent/lifecycle.ts` | Agent lifecycle — create/destroy Builders and Helpers, spawn/stop agent loops, restore on daemon restart |
 | `src/agent/workspace.ts` | Workspace and git worktree management for Builder agents |
 | `src/agent/prime.ts` | System prompt and first-turn prompt generation for typed agent sessions (Orchestrator, Builder, Helper) |
-| `src/sessions/registry.ts` | Agent registry CRUD — persisted to `~/.friday/agents.json`, hierarchy enforcement, session tracking |
+| `src/sessions/registry.ts` | Agent registry CRUD — persisted to `~/.friday/agents.json`, hierarchy enforcement, unique name enforcement, session tracking |
 | `src/sessions/manager.ts` | Channel → session ID mapping (in-memory + persisted to `~/.friday/sessions/channels.json`) |
 | `src/sessions/queue.ts` | Per-channel FIFO queue with edit/delete support, emoji lifecycle helpers |
 | `src/monitor/usage.ts` | Appends per-turn usage entries to `~/.friday/usage.jsonl` |
@@ -45,7 +45,7 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | `src/monitor/agent-health.ts` | Periodic agent health checks — detects stalled agents (no turn progress) and crashed agents (loop exited but status active). Notifies orchestrator via mail. |
 | `src/memory/memory-tools.ts` | Memory MCP tools (`memory_search`, `memory_save`, `memory_get`, `memory_forget`) for Orchestrator and Bare sessions |
 | `src/slack/preflight.ts` | Boot-time Slack cleanup — patches interrupted messages and removes dangling emoji reactions from previous crashes |
-| `src/comms/mail.ts` | Beads-backed inter-agent mail system with push delivery via EventEmitter |
+| `src/comms/mail.ts` | Beads-backed inter-agent mail system with push delivery via EventEmitter. Uses `execFileSync` (not shell) to avoid injection. |
 | `src/comms/mail-tools.ts` | Mail MCP tools (`mail_send`, `mail_check`, `mail_read`, `mail_close`) |
 | `src/comms/mail-poller.ts` | Polls for orchestrator mail and triggers turns via `sendToAgent` |
 | `src/events/bus.ts` | Singleton EventBus — typed EventEmitter with monotonic seq, ring buffer (200 events), replay for SSE reconnects |
@@ -166,7 +166,8 @@ All persistent state lives in `~/.friday/`:
 │   ├── entries/         — Memory entries as markdown with YAML frontmatter
 │   └── events.jsonl     — Memory operation audit log
 ├── beads/               — Beads task/epic tracker data
-└── usage.jsonl          — Per-turn usage log (cost, tokens, cache hits, duration)
+├── usage.jsonl          — Per-turn usage log (cost, tokens, cache hits, duration)
+└── daemon.jsonl         — Daemon structured log (JSONL, teed from stdout)
 ```
 
 Agent SDK sessions are stored by Claude Code in `~/.claude/projects/<encoded-cwd>/`.
@@ -218,9 +219,18 @@ Orchestrator (singular, root)
 | **Builder** | Long-lived, daemon-managed loop | Helpers (not Builders) | Workspace with git worktrees, project-scoped work, plan-then-execute |
 | **Helper** | Short-lived, daemon-managed loop | Nothing | Single-task execution, reports to parent |
 
+### Agent Naming
+
+Agent names are permanent — once used, a name can never be reused, even after the agent is destroyed. Names follow the format `<type>-<kebab-case-descriptor>` and must be descriptive enough to avoid collisions:
+
+- Good: `builder-blog-redesign-2026`, `helper-cli-perf-audit`
+- Bad: `builder-blog` (too generic, will collide if another blog builder is ever needed)
+
+The orchestrator and builder system prompts include this guidance. The registry rejects duplicate names with an error suggesting a more descriptive alternative.
+
 ### Agent Lifecycle
 
-Builders and Agents run as background loops in the daemon:
+Builders and Helpers run as background loops in the daemon:
 
 1. **Create** — register in `~/.friday/agents.json`, set up workspace (Builders), spawn loop
 2. **Loop** — `query()` turn with system prompt and first-turn prompt → process result → mark idle

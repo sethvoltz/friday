@@ -151,7 +151,7 @@
 **Contract:**
 - Single entrypoint: `node dist/index.js`
 - Reads config from `~/.friday/`
-- Logs structured JSON to stdout
+- Logs structured JSON to stdout and `~/.friday/daemon.jsonl`
 - Handles SIGTERM/SIGINT for graceful shutdown
 - Non-zero exit on unrecoverable error
 - Process manager handles restart, log routing, boot start
@@ -227,3 +227,67 @@
 - Search quality is limited to keyword matching — semantically similar but differently-worded queries may miss relevant entries
 - No automatic memory consolidation or pruning — the store grows unbounded. Acceptable for V1 scale.
 - File-per-entry means listing all memories requires reading the directory — fine up to thousands of entries
+
+---
+
+## ADR-017: Agent Names Are Permanent and Must Be Descriptive
+
+**Date:** 2026-04-25
+**Status:** Accepted
+
+**Context:** When agent names were allowed to be reused after destruction (e.g., `builder-blog` destroyed, then `builder-blog` recreated), agents picked generic names that collided. The orchestrator would append numbers (`builder-blog2`) which is opaque and uninformative.
+
+**Decision:** Agent names are permanently reserved. Once a name is used — even if the agent is later destroyed — it cannot be reused. The registry rejects duplicates regardless of status. System prompts guide agents to pick descriptive, specific names in `<type>-<kebab-case-descriptor>` format.
+
+**Rationale:**
+- Forces descriptive names that communicate intent: `builder-blog-redesign-2026` vs `builder-blog`
+- Eliminates ambiguity in logs, transcripts, and the registry — every name maps to exactly one agent ever
+- Simplifies the registry — no need to track `formerSessionIds` across reincarnations
+- The cost is minimal: kebab-case has effectively unlimited namespace
+
+**Consequences:**
+- Destroyed agents remain in the registry indefinitely. May need periodic compaction if the registry grows very large (unlikely in practice).
+- Agents that fail on first run and are destroyed "waste" a name. Acceptable tradeoff.
+
+---
+
+## ADR-018: execFileSync Over execSync for External Commands
+
+**Date:** 2026-04-25
+**Status:** Accepted
+
+**Context:** The mail system and workspace manager used `execSync` with string interpolation to build shell commands. Message subjects and bodies containing quotes, newlines, backticks, `$()`, or other shell metacharacters were interpreted by the shell, causing garbled or empty content.
+
+**Decision:** All external command execution uses `execFileSync` with an args array. Never pass user-controlled content through a shell.
+
+**Rationale:**
+- `execFileSync(cmd, args)` bypasses the shell entirely — each arg is passed directly to the process as a discrete argv entry
+- `execSync(string)` spawns a shell and subjects the entire string to shell interpretation
+- This is a standard defense against shell injection (CWE-78)
+
+**Consequences:**
+- Slightly more verbose call sites (array of args vs template string)
+- Cannot use shell features (pipes, redirects, globbing) — not needed for our use cases
+- `doctor.ts` still uses `execSync` for hardcoded commands with no user input — safe but could be standardized for consistency
+
+---
+
+## ADR-019: Daemon Log File (JSONL)
+
+**Date:** 2026-04-25
+**Status:** Accepted
+
+**Context:** The daemon logs structured JSON to stdout, but stdout is only captured if the process manager routes it to a file. In dev mode (`tsx watch`), logs scroll past in the terminal and are lost. Debugging agent issues after the fact requires the logs.
+
+**Decision:** The daemon tees all log output to `~/.friday/daemon.jsonl` in addition to stdout/stderr. The file is opened once at module load (`openSync` in append mode) and written synchronously per line.
+
+**Rationale:**
+- All log output is already one JSON object per line — no format change needed
+- JSONL is append-only and crash-safe (each line is a complete document)
+- Sync writes are fine for the daemon's log volume (low frequency, small payloads)
+- File descriptor opened once avoids per-write open/close overhead
+- Consistent with the existing `usage.jsonl` pattern
+
+**Consequences:**
+- Log file grows unbounded. May need rotation or size-based truncation in the future.
+- Sync writes could theoretically block the event loop on a very slow disk — negligible in practice
