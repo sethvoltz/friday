@@ -1,11 +1,17 @@
 import type { WebClient } from "@slack/web-api";
 
+export interface ImageAttachment {
+  data: string; // base64-encoded bytes
+  mediaType: string; // e.g. "image/png"
+}
+
 export interface QueuedMessage {
   id: string; // Slack message ts
   channelId: string;
   text: string;
   userId: string;
   wasQueued?: boolean;
+  images?: ImageAttachment[];
 }
 
 interface ChannelQueue {
