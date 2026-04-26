@@ -305,8 +305,8 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
   });
 
   app.message(async ({ message, client, say }) => {
-    // Ignore bot messages, message edits, etc.
-    if (message.subtype) return;
+    // Ignore bot messages, message edits, etc. — but allow file_share (image uploads)
+    if (message.subtype && message.subtype !== "file_share") return;
     if (!("user" in message)) return;
 
     const rawMsg = message as any;
