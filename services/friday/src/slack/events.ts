@@ -23,6 +23,9 @@ import {
   removeQueued,
   swapToProcessing,
   clearProcessingEmoji,
+  addStatusReaction,
+  removeStatusReaction,
+  swapStatusReaction,
   type QueuedMessage,
 } from "../sessions/queue.js";
 import {
@@ -435,6 +438,8 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
 
       // Thinking indicator message — declared outside try so catch can clean up
       let thinkingMsgTs: string | null = null;
+      // Current tool reaction emoji on the last batch message
+      let currentToolEmoji: string | null = null;
 
       try {
         const isOrchestrator = sessionType === "orchestrator";
@@ -486,6 +491,7 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
         };
 
         // Thinking indicator — posted when agent takes too long, deleted on first content
+        // Also adds a 🤔 reaction on the last batch message alongside the text message.
         const thinkingCallbacks: AgentCallbacks = {
           onThinkingStart: (elapsedSec) => {
             client.chat
@@ -497,6 +503,7 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
                 thinkingMsgTs = res.ts ?? null;
               })
               .catch(() => {});
+            addStatusReaction(client, batch, emojis.thinking).catch(() => {});
           },
           onThinkingTick: (elapsedSec) => {
             if (thinkingMsgTs) {
@@ -516,38 +523,32 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
                 .catch(() => {});
               thinkingMsgTs = null;
             }
+            removeStatusReaction(client, batch, emojis.thinking).catch(() => {});
           },
         };
 
-        // Compaction status message — posted on start, updated on end
-        let compactMsgTs: string | null = null;
+        // Tool use reactions — swap emoji on the last batch message as tools fire.
+        function toolEmojiFor(toolName: string): string {
+          const codingTools = new Set(["Read", "Write", "Edit", "Bash", "Glob", "Grep"]);
+          const webTools = new Set(["WebFetch", "WebSearch"]);
+          if (codingTools.has(toolName)) return emojis.toolCoding;
+          if (webTools.has(toolName) || toolName.toLowerCase().includes("browser")) return emojis.toolWeb;
+          return emojis.toolGeneric;
+        }
+
+        // Compaction — ✍ reaction on start, removed on end.
         const agentCallbacks: AgentCallbacks = {
           ...thinkingCallbacks,
-          onCompactStart: () => {
-            client.chat
-              .postMessage({
-                channel: channelId,
-                text: ":hourglass_flowing_sand: _Compacting conversation..._",
-              })
-              .then((res) => {
-                compactMsgTs = res.ts ?? null;
-              })
-              .catch(() => {});
+          onToolUse: (toolName) => {
+            const newEmoji = toolEmojiFor(toolName);
+            swapStatusReaction(client, batch, currentToolEmoji, newEmoji).catch(() => {});
+            currentToolEmoji = newEmoji;
           },
-          onCompactEnd: (result) => {
-            const text =
-              result === "success"
-                ? ":clamp: _Conversation was compacted_"
-                : ":warning: _Compaction failed_";
-            if (compactMsgTs) {
-              client.chat
-                .update({ channel: channelId, ts: compactMsgTs, text })
-                .catch(() => {});
-            } else {
-              client.chat
-                .postMessage({ channel: channelId, text })
-                .catch(() => {});
-            }
+          onCompactStart: () => {
+            addStatusReaction(client, batch, emojis.compacting).catch(() => {});
+          },
+          onCompactEnd: () => {
+            removeStatusReaction(client, batch, emojis.compacting).catch(() => {});
           },
         };
 
@@ -637,8 +638,13 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
           // Ignore
         }
       } finally {
-        // Clear processing emoji from all batch messages
+        // Clear processing emoji and any status reactions from batch messages
         await clearProcessingEmoji(client, batch, emojis.processing);
+        await removeStatusReaction(client, batch, emojis.thinking).catch(() => {});
+        if (currentToolEmoji) {
+          await removeStatusReaction(client, batch, currentToolEmoji).catch(() => {});
+        }
+        await removeStatusReaction(client, batch, emojis.compacting).catch(() => {});
       }
 
       // Loop to check if more messages arrived while we were processing
