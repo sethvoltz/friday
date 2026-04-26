@@ -26,6 +26,11 @@ export interface EmojiConfig {
   queued: string;
   error: string;
   complete: string | null;
+  thinking: string;
+  toolCoding: string;
+  toolWeb: string;
+  toolGeneric: string;
+  compacting: string;
 }
 
 export interface SlackFormattingConfig {
@@ -76,6 +81,11 @@ const DEFAULT_CONFIG: FridayConfig = {
       queued: "clock1",
       error: "x",
       complete: null,
+      thinking: "thinking_face",
+      toolCoding: "technologist",
+      toolWeb: "zap",
+      toolGeneric: "fire",
+      compacting: "writing_hand",
     },
   },
   monitoring: {
