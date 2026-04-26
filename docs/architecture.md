@@ -46,7 +46,8 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | `src/monitor/session-stats.ts` | Reads usage log, computes session aggregates (cost, tokens, cache hit rate, duration) |
 | `src/monitor/health.ts` | Writes `~/.friday/health.json` heartbeat every 30s (pid, uptime, last heartbeat). Removed on clean shutdown. |
 | `src/monitor/agent-health.ts` | Periodic agent health checks — detects stalled agents (no turn progress) and crashed agents (loop exited but status active). Notifies orchestrator via mail. |
-| `src/memory/memory-tools.ts` | Memory MCP tools (`memory_search`, `memory_save`, `memory_get`, `memory_forget`) for Orchestrator and Bare sessions |
+| `src/memory/memory-tools.ts` | Memory MCP tools (`memory_search`, `memory_save`, `memory_update`, `memory_get`, `memory_forget`) for Orchestrator and Bare sessions |
+| `src/memory/auto-recall.ts` | Builds a `<memory-context>` block prepended to each Orchestrator/Bare prompt — runs hybrid keyword search and embeds top-N entries verbatim so the agent never has to call `memory_search` first |
 | `src/slack/preflight.ts` | Boot-time Slack cleanup — patches interrupted messages and removes dangling emoji reactions from previous crashes |
 | `src/slack/image-fetch.ts` | Authenticated download of Slack private image files; returns base64-encoded `ImageAttachment[]` |
 | `src/comms/mail.ts` | Beads-backed inter-agent mail system with push delivery via EventEmitter. Uses `execFileSync` (not shell) to avoid injection. |
@@ -82,7 +83,9 @@ Optional SvelteKit app for management. Reads `~/.friday/` state files via server
 
 **Pages:**
 - `/` — Home dashboard: status, usage stats, daily cost chart, agents, sessions, memory, config. Live: stats/charts/tables refresh on new turns.
-- `/sessions` — Session explorer with hierarchical sidebar (agent tree + bare sessions) and transcript viewer. Live: streaming text, turn completion, agent lifecycle changes.
+- `/sessions` — Session explorer with hierarchical sidebar (agent tree + bare sessions) and transcript viewer. Live: streaming text, turn completion, agent lifecycle changes. Transcripts render markdown for prompts and responses (tool-call JSON and mid-turn streaming text stay plain).
+- `/schedules` and `/schedules/<name>` — Scheduled agent list and detail. Detail page shows the assembled `taskPrompt`, `state.md`, and `last-run.md`, all rendered as markdown. Status overlays update live as runs trigger and complete.
+- `/memory` and `/memory/<id>` — Memory explorer. Lists entries with tag filters and recall counts; detail page renders the markdown body.
 
 ## Message Flow
 
@@ -291,7 +294,7 @@ Agents interact with the system via MCP tool servers injected into their session
 | `friday-agents` | `agent_create`, `agent_list`, `agent_status`, `agent_destroy`, `agent_inspect`, `worktree_add`, `worktree_remove`, `workspace_cleanup` | Orchestrator, Builders (scoped to own children) |
 | `friday-mail` | `mail_send`, `mail_check`, `mail_read`, `mail_close` | All agent types |
 | `friday-scheduler` | `schedule_create`, `schedule_list`, `schedule_show`, `schedule_preview`, `schedule_pause`, `schedule_resume`, `schedule_update`, `schedule_revert`, `schedule_delete`, `schedule_trigger` | Orchestrator |
-| `friday-memory` | `memory_search`, `memory_save`, `memory_get`, `memory_forget` | Orchestrator, Bare sessions |
+| `friday-memory` | `memory_search`, `memory_save`, `memory_update`, `memory_get`, `memory_forget` | Orchestrator, Bare sessions (auto-recall context block injected before every turn) |
 
 ### Workspaces
 
@@ -367,7 +370,7 @@ pnpm --filter @friday/cli exec vitest run src/commands/start.test.ts
 | `@friday/shared` | `config.test.ts`, `agents.test.ts`, `transcript.test.ts`, `inspect.test.ts` | Path derivation, defaults, deep merge, agent name validation, name building, JSONL transcript parsing, turn grouping, tool call tracking, formatting, agent inspection (path resolution, result building, plain/markdown formatting) |
 | `@friday/memory` | `store.test.ts`, `search.test.ts` | Memory CRUD, serialization roundtrip, recall tracking, hybrid search scoring, tag filtering, recall frequency boosting, event logging |
 | `@friday/cli` | `help.test.ts`, `services.test.ts`, 8× command tests | Help text, PID management, isRunning, parseServiceArg, findMonorepoRoot, all CLI commands including inspect, transcript, and schedule management |
-| `@friday/daemon` | `queue.test.ts`, `manager.test.ts`, `helpers.test.ts`, `usage.test.ts`, `config.test.ts`, `registry.test.ts`, `workspace.test.ts`, `prime.test.ts`, `client.test.ts`, `agent-tools.test.ts`, `preflight.test.ts`, `agent-health.test.ts`, `mail.test.ts`, `mail-tools.test.ts`, `mail-poller.test.ts`, `lifecycle.test.ts`, `events/bus.test.ts`, `events/server.test.ts`, `scheduler/scheduler.test.ts`, `scheduler/trigger.test.ts` | FIFO queue ops, session persistence, Slack helpers, usage logging, runtime config, agent registry CRUD, workspace/worktree lifecycle, system prompt generation, thinking indicator, MCP agent tools, boot preflight cleanup, agent health monitoring (stall/crash detection), mail CRUD and delivery, mail poller deduplication and push/poll delivery, agent loop idle-wait invariant (no stale-prompt reinjection), EventBus publish/replay/ring buffer, SSE server endpoints/streaming/reconnect replay, scheduler check loop and cron parsing, scheduled agent triggering and state injection |
+| `@friday/daemon` | `queue.test.ts`, `manager.test.ts`, `helpers.test.ts`, `usage.test.ts`, `config.test.ts`, `registry.test.ts`, `workspace.test.ts`, `workspace-guard.test.ts`, `prime.test.ts`, `client.test.ts`, `agent-tools.test.ts`, `preflight.test.ts`, `image-fetch.test.ts`, `agent-health.test.ts`, `mail.test.ts`, `mail-poller.test.ts`, `lifecycle.test.ts`, `auto-recall.test.ts`, `events/bus.test.ts`, `events/server.test.ts`, `scheduler/scheduler.test.ts`, `scheduler/trigger.test.ts` | FIFO queue ops, session persistence, Slack helpers, usage logging, runtime config, agent registry CRUD, workspace/worktree lifecycle, builder workspace path guard (PreToolCall hook), system prompt generation, thinking indicator and status callbacks, MCP agent tools, boot preflight cleanup, Slack image fetch and base64 encoding, agent health monitoring (stall/crash detection), mail CRUD and push/poll delivery, agent loop idle-wait invariant (no stale-prompt reinjection), memory auto-recall context block assembly, EventBus publish/replay/ring buffer, SSE server endpoints/streaming/reconnect replay, scheduler check loop and cron parsing, scheduled agent triggering and state injection |
 
 ### Conventions
 

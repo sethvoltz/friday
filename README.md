@@ -22,13 +22,13 @@ Slack (Socket Mode) --> Friday Daemon --> Claude Agent SDK --> Claude Code --> Y
 
 **Key features:**
 
-- **Persistent sessions** -- each Slack channel maps to a Claude Code session with full conversation history
-- **Message queuing** -- send messages while the agent is busy; they queue up and batch automatically
-- **Streaming responses** -- see the agent's output as it types, not after it finishes
-- **Slash commands** -- `/friday reset`, `/friday session`, `/friday help`
-- **Usage tracking** -- per-turn cost, token, and cache hit rate logging
-- **Management CLI** -- `friday start`, `friday stop`, `friday status`, `friday usage`
-- **Dashboard** -- optional SvelteKit web UI for monitoring
+- **Multi-agent orchestration** -- the orchestrator spins up isolated **Builder** agents for project work in their own git worktrees, and short-lived **Helpers** for delegated tasks. Builders are workspace-confined by a tool-call guard. Agents communicate via an inter-agent **mail** system.
+- **Scheduled agents** -- autonomous cron and one-shot agents run unattended, persist a `state.md` between runs (auto-injected into the next prompt), and escalate to the orchestrator via mail if anything goes sideways. Catch up missed runs on restart, cooperatively abort on shutdown.
+- **Proactive memory** -- file-based markdown memories with hybrid keyword search and recall-frequency boosting. The daemon **auto-recalls relevant memories** and prepends them to the orchestrator's prompt — no `memory_search` call required.
+- **Multimodal** -- image attachments in Slack are fetched with the bot token, base64-encoded, and forwarded to Claude as vision content alongside the text.
+- **Live dashboard** -- SvelteKit UI streams real-time updates over SSE. Browse session transcripts (with markdown rendering), monitor schedules and their state files, explore the memory store, and watch agents tick through turns as they happen.
+- **Persistent sessions** -- each Slack channel maps to a Claude Code session resumed across daemon restarts. Full prompt-cache benefits (~58% cost reduction on resumed turns).
+- **Resilient message handling** -- per-channel FIFO queue with edit/delete support, status-emoji reactions (thinking, tools, compacting), streaming responses throttled at 1/sec, and boot-time Slack cleanup that patches dangling state from crashes.
 
 ## Quick Start
 
@@ -92,6 +92,9 @@ friday usage                    # Cost/token report
 friday usage -v                 # Verbose token breakdown
 friday config                   # Print resolved config
 friday config --validate        # Validate config
+friday inspect <agent>          # Show last N turns from an agent's transcript (--follow tails)
+friday transcript <agent>       # Export full session transcript as markdown
+friday schedule                 # Manage scheduled agents (list, create, pause, trigger, ...)
 friday dev start [service]      # Dev mode with hot reload
 ```
 
@@ -100,7 +103,8 @@ friday dev start [service]      # Dev mode with hot reload
 ```
 agent-friday/
 ├── packages/
-│   ├── shared/          # Shared types and config (FridayConfig, UsageEntry)
+│   ├── shared/          # Shared types and config (FridayConfig, UsageEntry, agents)
+│   ├── memory/          # File-based memory store with hybrid search
 │   └── cli/             # CLI entrypoint (@friday/cli)
 ├── services/
 │   ├── friday/          # Bridge daemon (@friday/daemon)
@@ -134,13 +138,14 @@ pnpm build        # Build all packages
 ### Testing
 
 ```bash
-# Full suite (110 tests across 3 packages)
+# Full suite (~400 tests across 4 packages)
 pnpm test
 
 # Single package
 pnpm --filter @friday/cli run test
 pnpm --filter @friday/daemon run test
 pnpm --filter @friday/shared run test
+pnpm --filter @friday/memory run test
 ```
 
 Tests are co-located with source as `*.test.ts` and run via Vitest. All tests are deterministic -- no network calls, no real Slack or Claude connections. See [docs/architecture.md](docs/architecture.md#testing) for conventions.
