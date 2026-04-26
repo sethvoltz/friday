@@ -28,6 +28,7 @@ export interface AgentCallbacks {
   onThinkingStart?: (elapsedSec: number) => void;
   onThinkingTick?: (elapsedSec: number) => void;
   onThinkingEnd?: () => void;
+  onToolUse?: (toolName: string) => void;
 }
 
 async function* multimodalStream(mp: MultimodalPrompt): AsyncIterable<SDKUserMessage> {
@@ -165,6 +166,11 @@ export async function sendToAgent(
             eventBus.publish({ type: "turn:streaming", agentName: eventAgentName, sessionId, text: responseText });
           }
         }
+      }
+
+      // Detect tool invocations
+      if (message.type === "tool_progress") {
+        callbacks.onToolUse?.((message as any).tool_name);
       }
 
       // Detect compaction status changes — pause thinking during compaction
