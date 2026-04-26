@@ -364,20 +364,27 @@ async function runAgentLoop(
       continue; // Next iteration runs the turn with mail prompt
     }
 
-    // No mail — go idle. Wait for push notification or 60s fallback poll.
+    // No mail — go idle. Keep waiting until real mail arrives or abort.
+    // The inner loop guards against spurious wakeups (60s fallback timer,
+    // push events for already-processed messages) re-entering the outer loop
+    // with a stale prompt.
     updateAgentStatus(agentName, "idle");
     log("info", "agent_loop_idle", { agent: agentName });
 
-    await waitForMail(agentName, signal);
-    if (signal.aborted) break;
+    while (!signal.aborted) {
+      await waitForMail(agentName, signal);
+      if (signal.aborted) break;
 
-    // Re-check mail after wakeup
-    const idleMailPrompt = buildMailPrompt(agentName);
-    if (idleMailPrompt) {
-      prompt = idleMailPrompt;
-      updateAgentStatus(agentName, "active");
-      log("info", "agent_loop_mail_wakeup_from_idle", { agent: agentName });
-      continue;
+      const idleMailPrompt = buildMailPrompt(agentName);
+      if (idleMailPrompt) {
+        prompt = idleMailPrompt;
+        updateAgentStatus(agentName, "active");
+        log("info", "agent_loop_mail_wakeup_from_idle", { agent: agentName });
+        break;
+      }
+      // Spurious wakeup: 60s timer fired with no pending mail, or a push
+      // event arrived for a message already processed. Stay idle.
+      log("info", "agent_loop_idle_spurious_wakeup", { agent: agentName });
     }
   }
 
