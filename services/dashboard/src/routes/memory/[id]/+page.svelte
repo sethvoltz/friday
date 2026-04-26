@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { MemoryEntry } from "@friday/memory";
+  import Markdown from "$lib/Markdown.svelte";
 
   let { data } = $props();
   const entry: MemoryEntry = $derived(data.entry);
@@ -49,7 +50,7 @@
   </header>
 
   <div class="detail-body">
-    <pre class="memory-content">{entry.content}</pre>
+    <div class="memory-content"><Markdown source={entry.content} /></div>
   </div>
 </div>
 
@@ -112,12 +113,6 @@
 
   .memory-content {
     margin: 0;
-    font-size: 0.85rem;
-    line-height: 1.6;
-    color: var(--text-primary);
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    font-family: inherit;
     max-width: 65ch;
   }
 </style>

@@ -14,7 +14,9 @@
 	"dependencies": {
 		"@friday/memory": "workspace:*",
 		"@friday/shared": "workspace:*",
-		"bits-ui": "^2.18.0"
+		"bits-ui": "^2.18.0",
+		"isomorphic-dompurify": "^3.10.0",
+		"marked": "^18.0.2"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^7.0.1",

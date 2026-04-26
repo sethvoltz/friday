@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getStreamingText, getDataVersion, clearStreaming } from '$lib/events.svelte';
+  import Markdown from '$lib/Markdown.svelte';
   import { invalidateAll, goto } from '$app/navigation';
 
   let { data } = $props();
@@ -232,7 +233,7 @@
             {#if turn.prompt}
               <div class="message user-message">
                 <div class="message-role">User</div>
-                <div class="message-content">{turn.prompt}</div>
+                <div class="message-content"><Markdown source={turn.prompt} /></div>
               </div>
             {/if}
 
@@ -260,7 +261,7 @@
             {#if turn.response}
               <div class="message assistant-message">
                 <div class="message-role">Assistant</div>
-                <div class="message-content">{turn.response}</div>
+                <div class="message-content"><Markdown source={turn.response} /></div>
               </div>
             {/if}
           </div>

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ScheduledEntry } from "@friday/shared";
   import { getLiveStatus } from "$lib/events.svelte";
+  import Markdown from "$lib/Markdown.svelte";
   import { onMount } from "svelte";
 
   let { data } = $props();
@@ -113,7 +114,7 @@
 
     <div class="task-prompt">
       <span class="meta-label">Task</span>
-      <p class="task-text">{entry.taskPrompt}</p>
+      <div class="task-text"><Markdown source={entry.taskPrompt} /></div>
     </div>
   </header>
 
@@ -121,14 +122,14 @@
     {#if lastRunContent}
       <section class="state-section">
         <h3>Last Run</h3>
-        <pre class="state-content">{lastRunContent}</pre>
+        <div class="state-content"><Markdown source={lastRunContent} /></div>
       </section>
     {/if}
 
     {#if stateContent}
       <section class="state-section">
         <h3>Run State</h3>
-        <pre class="state-content">{stateContent}</pre>
+        <div class="state-content"><Markdown source={stateContent} /></div>
       </section>
     {/if}
 
@@ -216,9 +217,6 @@
 
   .task-text {
     margin: 0.25rem 0 0;
-    font-size: 0.85rem;
-    line-height: 1.5;
-    color: var(--text-primary);
     max-width: 65ch;
   }
 
@@ -244,12 +242,6 @@
   .state-content {
     margin: 0;
     padding: 1rem;
-    font-size: 0.8rem;
-    line-height: 1.6;
-    color: var(--text-primary);
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    font-family: var(--font-mono);
     background: var(--bg-secondary);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
