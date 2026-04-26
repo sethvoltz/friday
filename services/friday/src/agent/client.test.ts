@@ -219,6 +219,65 @@ describe("sendToAgent thinking indicator", () => {
     expect(onThinkingStart).not.toHaveBeenCalled();
   });
 
+  it("fires onToolUse with tool name when tool_progress event arrives", async () => {
+    const toolProgressMessage = {
+      type: "tool_progress",
+      tool_use_id: "tu-1",
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 0.5,
+      uuid: "uuid-1",
+      session_id: "sess-123",
+    };
+
+    mockQuery.mockReturnValue(
+      fakeStream([toolProgressMessage, assistantMessage("done"), resultMessage])
+    );
+
+    const onToolUse = vi.fn();
+    await sendToAgent("test", baseOptions, { onToolUse });
+
+    expect(onToolUse).toHaveBeenCalledTimes(1);
+    expect(onToolUse).toHaveBeenCalledWith("Bash");
+  });
+
+  it("fires onToolUse multiple times for multiple tool events", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "tool_progress", tool_use_id: "tu-1", tool_name: "Read", parent_tool_use_id: null, elapsed_time_seconds: 0.1, uuid: "u1", session_id: "sess-123" },
+        { type: "tool_progress", tool_use_id: "tu-2", tool_name: "WebFetch", parent_tool_use_id: null, elapsed_time_seconds: 0.2, uuid: "u2", session_id: "sess-123" },
+        { type: "tool_progress", tool_use_id: "tu-3", tool_name: "Agent", parent_tool_use_id: null, elapsed_time_seconds: 0.3, uuid: "u3", session_id: "sess-123" },
+        assistantMessage("result"),
+        resultMessage,
+      ])
+    );
+
+    const onToolUse = vi.fn();
+    await sendToAgent("test", baseOptions, { onToolUse });
+
+    expect(onToolUse).toHaveBeenCalledTimes(3);
+    expect(onToolUse.mock.calls.map((c) => c[0])).toEqual(["Read", "WebFetch", "Agent"]);
+  });
+
+  it("does not call onToolUse when callback is not provided", async () => {
+    const toolProgressMessage = {
+      type: "tool_progress",
+      tool_use_id: "tu-1",
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 0.5,
+      uuid: "uuid-1",
+      session_id: "sess-123",
+    };
+
+    mockQuery.mockReturnValue(
+      fakeStream([toolProgressMessage, assistantMessage("done"), resultMessage])
+    );
+
+    // Should not throw even without callback
+    await expect(sendToAgent("test", baseOptions, {})).resolves.toBe("done");
+  });
+
   it("defaults to 30s when thinkingIndicatorDelaySec not set", async () => {
     let resolve: () => void;
     const gate = new Promise<void>((r) => { resolve = r; });

@@ -109,6 +109,35 @@ describe("loadConfig", () => {
     expect(config.slack_formatting.maxMessageLength).toBe(4000);
   });
 
+  it("has correct defaults for status reaction emojis", () => {
+    const config = loadConfig();
+    const r = config.slack_formatting.emojiReactions;
+    expect(r.thinking).toBe("thinking_face");
+    expect(r.toolCoding).toBe("technologist");
+    expect(r.toolWeb).toBe("zap");
+    expect(r.toolGeneric).toBe("fire");
+    expect(r.compacting).toBe("writing_hand");
+  });
+
+  it("allows overriding individual status reaction emojis", () => {
+    writeFileSync(
+      join(fridayDir, "config.json"),
+      JSON.stringify({
+        slack_formatting: {
+          emojiReactions: { thinking: "brain", toolCoding: "computer" },
+        },
+      })
+    );
+    const config = loadConfig();
+    expect(config.slack_formatting.emojiReactions.thinking).toBe("brain");
+    expect(config.slack_formatting.emojiReactions.toolCoding).toBe("computer");
+    // Other new fields still have defaults
+    expect(config.slack_formatting.emojiReactions.toolWeb).toBe("zap");
+    expect(config.slack_formatting.emojiReactions.compacting).toBe("writing_hand");
+    // Original fields intact
+    expect(config.slack_formatting.emojiReactions.processing).toBe("eyes");
+  });
+
   it("preserves full agent config when all fields overridden", () => {
     writeFileSync(
       join(fridayDir, "config.json"),

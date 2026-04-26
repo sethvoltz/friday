@@ -8,6 +8,9 @@ import {
   removeQueued,
   swapToProcessing,
   clearProcessingEmoji,
+  addStatusReaction,
+  removeStatusReaction,
+  swapStatusReaction,
   _resetAllQueues,
   type QueuedMessage,
 } from "./queue.js";
@@ -192,6 +195,78 @@ describe("queue — emoji helpers", () => {
       channel: "C1",
       timestamp: "ts-1",
       name: "eyes",
+    });
+  });
+
+  it("addStatusReaction adds emoji to the last message only", async () => {
+    const client = mockClient();
+    const msgs = [
+      makeMsg({ id: "ts-1", channelId: "C1" }),
+      makeMsg({ id: "ts-2", channelId: "C1" }),
+    ];
+
+    await addStatusReaction(client, msgs, "thinking_face");
+
+    expect(client.reactions.add).toHaveBeenCalledTimes(1);
+    expect(client.reactions.add).toHaveBeenCalledWith({
+      channel: "C1",
+      timestamp: "ts-2",
+      name: "thinking_face",
+    });
+  });
+
+  it("addStatusReaction does nothing for empty message list", async () => {
+    const client = mockClient();
+    await addStatusReaction(client, [], "thinking_face");
+    expect(client.reactions.add).not.toHaveBeenCalled();
+  });
+
+  it("removeStatusReaction removes emoji from the last message only", async () => {
+    const client = mockClient();
+    const msgs = [
+      makeMsg({ id: "ts-1", channelId: "C1" }),
+      makeMsg({ id: "ts-2", channelId: "C1" }),
+    ];
+
+    await removeStatusReaction(client, msgs, "thinking_face");
+
+    expect(client.reactions.remove).toHaveBeenCalledTimes(1);
+    expect(client.reactions.remove).toHaveBeenCalledWith({
+      channel: "C1",
+      timestamp: "ts-2",
+      name: "thinking_face",
+    });
+  });
+
+  it("swapStatusReaction removes old emoji and adds new emoji", async () => {
+    const client = mockClient();
+    const msgs = [makeMsg({ id: "ts-1", channelId: "C1" })];
+
+    await swapStatusReaction(client, msgs, "technologist", "zap");
+
+    expect(client.reactions.remove).toHaveBeenCalledWith({
+      channel: "C1",
+      timestamp: "ts-1",
+      name: "technologist",
+    });
+    expect(client.reactions.add).toHaveBeenCalledWith({
+      channel: "C1",
+      timestamp: "ts-1",
+      name: "zap",
+    });
+  });
+
+  it("swapStatusReaction only adds when oldEmoji is null", async () => {
+    const client = mockClient();
+    const msgs = [makeMsg({ id: "ts-1", channelId: "C1" })];
+
+    await swapStatusReaction(client, msgs, null, "fire");
+
+    expect(client.reactions.remove).not.toHaveBeenCalled();
+    expect(client.reactions.add).toHaveBeenCalledWith({
+      channel: "C1",
+      timestamp: "ts-1",
+      name: "fire",
     });
   });
 
