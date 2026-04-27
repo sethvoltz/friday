@@ -72,3 +72,9 @@ export {
   applyProposal,
   rejectProposal,
 } from "./apply.js";
+
+export {
+  type DispatchResult,
+  type DispatchOptions,
+  dispatchCodeProposal,
+} from "./dispatch.js";

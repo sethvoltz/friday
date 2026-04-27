@@ -1,9 +1,17 @@
 import { saveEntry } from "@friday/memory";
 import { readRawConfig, writeConfig, type FridayConfig } from "@friday/shared";
 import { getProposal, updateProposal, type Proposal } from "./store.js";
+import { dispatchCodeProposal } from "./dispatch.js";
 
 export type ApplyOutcome =
-  | { ok: true; proposal: Proposal; appliedRef: string; restartHint?: string }
+  | {
+      ok: true;
+      proposal: Proposal;
+      appliedRef: string;
+      restartHint?: string;
+      /** Phase 5: set when a code proposal seeds a Beads epic. */
+      epicId?: string;
+    }
   | { ok: false; reason: string };
 
 /**
@@ -18,17 +26,23 @@ const SELF_MOD_GUARD = "scheduled-meta-";
 export interface ApplyOptions {
   /** Identifier of who's applying — "orchestrator", "dashboard", "cli", etc. */
   appliedBy: string;
+  /** Inject a custom bd runner — used by tests so we don't spawn real bd. */
+  runBd?: (args: string[]) => string;
+  /** Override Beads workspace — used by tests. */
+  beadsWorkspace?: string;
 }
 
 /**
- * Apply an approved proposal to the system. Phase 2 wires only `memory`
- * proposals through to `@friday/memory.saveEntry`. Other types are accepted
- * (status moves to `approved`) but materialization is deferred to later phases:
- *   - prompt/config → Phase 3 (in-process config writer)
- *   - code         → Phase 5 (Beads epic dispatch)
+ * Apply an approved proposal to the system. Each type lands on a different
+ * surface:
+ *   - memory  → `@friday/memory.saveEntry`
+ *   - prompt  → writes `agent.systemPrompt` in `~/.friday/config.json`
+ *   - config  → deep-merges JSON body into `~/.friday/config.json`
+ *   - code    → seeds a Beads epic + mails the orchestrator to dispatch a Builder
  *
- * The caller decides whether "approved-but-not-applied" is acceptable; this
- * function is honest about which proposals end up fully applied vs. queued.
+ * For code proposals, "applied" means the work is queued — we never spawn a
+ * Builder ourselves because Builder creation is high-blast-radius and always
+ * goes through the user-approval flow the orchestrator already owns.
  */
 export function applyProposal(id: string, opts: ApplyOptions): ApplyOutcome {
   const proposal = getProposal(id);
@@ -107,16 +121,31 @@ export function applyProposal(id: string, opts: ApplyOptions): ApplyOutcome {
     };
   }
 
-  // code proposals — Phase 5 will dispatch to a Builder via Beads.
-  const updated = updateProposal(id, {
-    status: "approved",
-    appliedAt: null,
-    appliedBy: opts.appliedBy,
-  });
-  return {
-    ok: false,
-    reason: `auto-apply for type "${proposal.type}" lands in a later phase; proposal marked approved (id ${updated?.id ?? id})`,
-  };
+  if (proposal.type === "code") {
+    let dispatched: { epicId: string; mailId: string };
+    try {
+      dispatched = dispatchCodeProposal(proposal, {
+        appliedBy: opts.appliedBy,
+        runBd: opts.runBd,
+        workspace: opts.beadsWorkspace,
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `code dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    const applied = markApplied(proposal, opts.appliedBy, `epic:${dispatched.epicId}`);
+    return {
+      ...applied,
+      epicId: dispatched.epicId,
+      restartHint:
+        `Mail ${dispatched.mailId} sent to orchestrator. ` +
+        `Confirm scope before the Builder is dispatched.`,
+    };
+  }
+
+  return { ok: false, reason: `unknown proposal type: ${proposal.type}` };
 }
 
 function markApplied(

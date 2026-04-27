@@ -68,7 +68,64 @@ describe("applyProposal", () => {
     expect(body).toContain("evolve");
   });
 
-  it("does not auto-apply code-type proposals (Phase 5 lands those)", () => {
+  it("dispatches a code-type proposal to a Beads epic and mails the orchestrator", () => {
+    const p = saveProposal({
+      title: "Refactor mail poller",
+      type: "code",
+      proposedChange: "Move to push-based delivery via SSE.",
+      signals: [
+        {
+          ...baseSignal,
+          evidencePointers: [
+            { kind: "daemon", path: "~/.friday/daemon.jsonl", line: 42 },
+          ],
+        },
+      ],
+      blastRadius: "high",
+      appliesTo: ["services/friday/src/comms/mail-poller.ts"],
+      createdBy: "cli",
+    });
+
+    const calls: string[][] = [];
+    const runBd = (args: string[]): string => {
+      calls.push(args);
+      return calls.length === 1 ? "friday-42" : "friday-43";
+    };
+
+    const outcome = applyProposal(p.id, { appliedBy: "orchestrator", runBd });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.epicId).toBe("friday-42");
+    expect(outcome.appliedRef).toBe("epic:friday-42");
+    expect(outcome.restartHint).toMatch(/friday-43/);
+    expect(outcome.restartHint).toMatch(/orchestrator/i);
+
+    expect(calls).toHaveLength(2);
+    // First call seeds the epic.
+    expect(calls[0][0]).toBe("create");
+    expect(calls[0][1]).toMatch(/^Evolve: /);
+    expect(calls[0]).toContain("--epic");
+    const epicBody = calls[0][calls[0].indexOf("-d") + 1];
+    expect(epicBody).toContain("Move to push-based delivery via SSE.");
+    expect(epicBody).toContain("daemon.jsonl");
+    expect(epicBody).toContain("services/friday/src/comms/mail-poller.ts");
+    // Second call mails the orchestrator with from:evolve label.
+    expect(calls[1][0]).toBe("create");
+    expect(calls[1]).toContain("orchestrator");
+    const labels = calls[1][calls[1].indexOf("-l") + 1];
+    expect(labels).toContain("from:evolve:orchestrator");
+    expect(labels).toContain("delivery:pending");
+    const mailBody = calls[1][calls[1].indexOf("-d") + 1];
+    expect(mailBody).toContain("friday-42");
+    expect(mailBody).toContain(p.id);
+
+    const reloaded = getProposal(p.id);
+    expect(reloaded?.status).toBe("applied");
+    expect(reloaded?.appliedBy).toBe("orchestrator");
+    expect(reloaded?.appliedAt).toBeTruthy();
+  });
+
+  it("returns ok=false when bd dispatch throws, leaving the proposal unapplied", () => {
     const p = saveProposal({
       title: "Refactor mail poller",
       type: "code",
@@ -79,10 +136,18 @@ describe("applyProposal", () => {
       createdBy: "cli",
     });
 
-    const outcome = applyProposal(p.id, { appliedBy: "orchestrator" });
+    const runBd = (): string => {
+      throw new Error("bd: command not found");
+    };
+
+    const outcome = applyProposal(p.id, { appliedBy: "orchestrator", runBd });
     expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.reason).toMatch(/code dispatch failed/);
+    expect(outcome.reason).toMatch(/bd: command not found/);
+
     const reloaded = getProposal(p.id);
-    expect(reloaded?.status).toBe("approved");
+    expect(reloaded?.status).toBe("open");
     expect(reloaded?.appliedAt).toBeNull();
   });
 
