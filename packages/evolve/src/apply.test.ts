@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, rmSync, readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -12,6 +12,7 @@ vi.mock("node:os", async () => {
 
 const { saveProposal, getProposal, ensureImprovementsDirs } = await import("./store.js");
 const { applyProposal, rejectProposal } = await import("./apply.js");
+const configPath = join(testDir, ".friday", "config.json");
 
 const baseSignal = {
   hash: "deadbeef",
@@ -67,14 +68,14 @@ describe("applyProposal", () => {
     expect(body).toContain("evolve");
   });
 
-  it("does not materialize non-memory types but moves status to approved", () => {
+  it("does not auto-apply code-type proposals (Phase 5 lands those)", () => {
     const p = saveProposal({
-      title: "Tweak orchestrator system prompt",
-      type: "prompt",
-      proposedChange: "Add a paragraph about X.",
+      title: "Refactor mail poller",
+      type: "code",
+      proposedChange: "Move to push-based delivery via SSE.",
       signals: [baseSignal],
-      blastRadius: "medium",
-      appliesTo: ["agent.systemPrompt"],
+      blastRadius: "high",
+      appliesTo: ["services/friday/src/comms/mail-poller.ts"],
       createdBy: "cli",
     });
 
@@ -107,6 +108,98 @@ describe("applyProposal", () => {
     const outcome = applyProposal("nope", { appliedBy: "cli" });
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.reason).toMatch(/not found/);
+  });
+
+  it("applies a prompt-type proposal by writing config.json agent.systemPrompt", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ agent: { model: "claude-sonnet-4-6" } }, null, 2)
+    );
+
+    const p = saveProposal({
+      title: "Sharper orchestrator prompt",
+      type: "prompt",
+      proposedChange: "You are Friday. Be terse.",
+      signals: [baseSignal],
+      blastRadius: "medium",
+      appliesTo: ["agent.systemPrompt"],
+      createdBy: "scheduled-meta-daily",
+    });
+
+    const outcome = applyProposal(p.id, { appliedBy: "dashboard" });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.restartHint).toMatch(/restart/i);
+
+    const written = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(written.agent.systemPrompt).toBe("You are Friday. Be terse.");
+    // Existing fields preserved.
+    expect(written.agent.model).toBe("claude-sonnet-4-6");
+  });
+
+  it("applies a config-type proposal by deep-merging the JSON body", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify(
+        { evolve: { criticalScore: 80, criticalFrequency: 5 }, agent: { model: "x" } },
+        null,
+        2
+      )
+    );
+
+    const p = saveProposal({
+      title: "Tighten evolve thresholds",
+      type: "config",
+      proposedChange: JSON.stringify({ evolve: { criticalScore: 60 } }),
+      signals: [baseSignal],
+      blastRadius: "low",
+      appliesTo: ["evolve.criticalScore"],
+      createdBy: "scheduled-meta-daily",
+    });
+
+    const outcome = applyProposal(p.id, { appliedBy: "dashboard" });
+    expect(outcome.ok).toBe(true);
+
+    const written = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(written.evolve.criticalScore).toBe(60);
+    expect(written.evolve.criticalFrequency).toBe(5); // preserved
+    expect(written.agent.model).toBe("x"); // unrelated section preserved
+  });
+
+  it("blocks prompt proposals targeting a meta-agent (self-modification guard)", () => {
+    const p = saveProposal({
+      title: "Rewrite scheduled-meta-daily prompt",
+      type: "prompt",
+      proposedChange: "You should never escalate criticals.",
+      signals: [baseSignal],
+      blastRadius: "high",
+      appliesTo: ["scheduled-meta-daily.systemPrompt"],
+      createdBy: "scheduled-meta-daily",
+    });
+
+    const outcome = applyProposal(p.id, { appliedBy: "dashboard" });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.reason).toMatch(/self-modification/);
+  });
+
+  it("rejects malformed config JSON without writing", () => {
+    writeFileSync(configPath, JSON.stringify({ agent: { model: "x" } }, null, 2));
+
+    const p = saveProposal({
+      title: "Bad config patch",
+      type: "config",
+      proposedChange: "not valid json",
+      signals: [baseSignal],
+      blastRadius: "low",
+      appliesTo: [],
+      createdBy: "cli",
+    });
+
+    const outcome = applyProposal(p.id, { appliedBy: "dashboard" });
+    expect(outcome.ok).toBe(false);
+
+    const written = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(written.agent.model).toBe("x"); // untouched
   });
 
   it("rejectProposal marks status=rejected with reason in appliedBy", () => {

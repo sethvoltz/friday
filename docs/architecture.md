@@ -85,7 +85,7 @@ Self-improvement pipeline. Scans Friday's own logs for recurring pain (crashes, 
 - `scan.ts` — Deterministic scanner over `~/.friday/daemon.jsonl`. Self-excludes events from `scheduled-meta-*` agents to prevent feedback loops.
 - `rank.ts` — Pure scoring: severity floor + log2 frequency + distinct-signal boost − blast-radius penalty. `isCritical()` requires score ≥ 80 AND (high severity OR count ≥ 5).
 - `propose.ts` — Merges new occurrences into existing open proposals by signal hash; creates fresh ones for new hashes. `rerankAll()` recomputes scores at end of run.
-- `apply.ts` — `applyProposal()` materializes `memory`-type proposals via `@friday/memory.saveEntry`. Other types (prompt/config/code) are accepted but materialization lands in later phases.
+- `apply.ts` — `applyProposal()` materializes `memory` proposals via `@friday/memory.saveEntry`, writes `prompt` proposals to `config.json` `agent.systemPrompt`, and deep-merges `config` proposals (JSON body) into `config.json`. A self-modification guard refuses prompt/config changes targeting any `scheduled-meta-*` agent. `code` proposals are recorded as approved but defer to Phase 5 (Beads dispatch).
 - `runs.ts` — Per-run audit log at `~/.friday/evolve/runs.jsonl`.
 - `cli.ts` — `friday-evolve scan|list|show` invoked by the daily meta-agent.
 
@@ -102,6 +102,7 @@ Optional SvelteKit app for management. Reads `~/.friday/` state files via server
 - `/sessions` — Session explorer with hierarchical sidebar (agent tree + bare sessions) and transcript viewer. Live: streaming text, turn completion, agent lifecycle changes. Transcripts render markdown for prompts and responses (tool-call JSON and mid-turn streaming text stay plain).
 - `/schedules` and `/schedules/<name>` — Scheduled agent list and detail. Detail page shows the assembled `taskPrompt`, `state.md`, and `last-run.md`, all rendered as markdown. Status overlays update live as runs trigger and complete.
 - `/memory` and `/memory/<id>` — Memory explorer. Lists entries with tag filters and recall counts; detail page renders the markdown body.
+- `/evolve` and `/evolve/<id>` — Self-improvement backlog. Lists proposals with status filters (defaults to open + critical + approved); detail page renders signals and rationale, with Approve & apply / Reject form actions. Memory-type proposals materialize a new memory entry on approve. Prompt/config types write to `~/.friday/config.json` (with a self-modification guard for `scheduled-meta-*` targets).
 
 ## Message Flow
 

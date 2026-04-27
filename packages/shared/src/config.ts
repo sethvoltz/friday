@@ -1,5 +1,5 @@
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 export const FRIDAY_DIR = join(homedir(), ".friday");
@@ -134,4 +134,25 @@ export function loadConfig(): FridayConfig {
     eventServer: { ...DEFAULT_CONFIG.eventServer, ...userConfig.eventServer },
     evolve: { ...DEFAULT_CONFIG.evolve, ...userConfig.evolve },
   };
+}
+
+/**
+ * Read whatever's currently on disk at CONFIG_PATH (raw, no defaults applied).
+ * Returns {} when the file doesn't exist. Used by the evolve auto-apply path
+ * so we merge into the user's actual config rather than into defaults — that
+ * way the rewritten file doesn't suddenly grow every default field.
+ */
+export function readRawConfig(): Partial<FridayConfig> {
+  if (!existsSync(CONFIG_PATH)) return {};
+  return JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as Partial<FridayConfig>;
+}
+
+/**
+ * Write the user's config back to CONFIG_PATH. The caller is responsible for
+ * supplying a fully-formed object — this function does not merge defaults.
+ * Creates the directory if it doesn't exist.
+ */
+export function writeConfig(config: Partial<FridayConfig>): void {
+  mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
 }

@@ -93,6 +93,7 @@
         <a href="/sessions" class:active={$page.url.pathname.startsWith('/sessions')}>Sessions</a>
         <a href="/schedules" class:active={$page.url.pathname.startsWith('/schedules')}>Schedules</a>
         <a href="/memory" class:active={$page.url.pathname.startsWith('/memory')}>Memory</a>
+        <a href="/evolve" class:active={$page.url.pathname.startsWith('/evolve')}>Evolve</a>
       </nav>
       <button class="theme-toggle" onclick={toggleTheme} title="Toggle theme">
         {theme === 'dark' ? '☀' : '☾'}

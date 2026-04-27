@@ -75,6 +75,9 @@ importers:
 
   services/dashboard:
     dependencies:
+      '@friday/evolve':
+        specifier: workspace:*
+        version: link:../../packages/evolve
       '@friday/memory':
         specifier: workspace:*
         version: link:../../packages/memory
