@@ -257,6 +257,8 @@ export interface UsageScanOptions {
   since?: string;
   /** Multiple of the per-agent median above which a single turn is flagged. Default 4×. */
   spikeMultiplier?: number;
+  /** Override agents.json path — used by tests to isolate from the real registry. */
+  agentsPath?: string;
 }
 
 /**
@@ -277,7 +279,7 @@ export function scanUsageLog(opts: UsageScanOptions = {}): Signal[] {
   const sinceMs = opts.since ? Date.parse(opts.since) : 0;
   const multiplier = opts.spikeMultiplier ?? 4;
 
-  const metaSessions = collectMetaSessions();
+  const metaSessions = collectMetaSessions(opts.agentsPath);
   const perAgent = new Map<string, { tokens: number; ts: string; line: number }[]>();
 
   const raw = readFileSync(path, "utf-8");
@@ -351,6 +353,8 @@ interface TranscriptScanOptions {
   similarityThreshold?: number;
   /** Maximum gap (seconds) between user messages for retry consideration. Default 300. */
   windowSeconds?: number;
+  /** Override agents.json path — used by tests to isolate from the real registry. */
+  agentsPath?: string;
 }
 
 interface TranscriptUserTurn {
@@ -375,7 +379,7 @@ export function scanTranscripts(opts: TranscriptScanOptions = {}): Signal[] {
   const threshold = opts.similarityThreshold ?? 0.6;
   const windowMs = (opts.windowSeconds ?? 300) * 1000;
 
-  const metaSessions = collectMetaSessions();
+  const metaSessions = collectMetaSessions(opts.agentsPath);
   const buckets = new Map<string, Signal>();
 
   const projectDirs = safeReaddir(projectsRoot);
@@ -464,11 +468,11 @@ function bucketAppend(
  * Failures (missing file, parse error) intentionally return an empty set:
  * better to over-include than to crash a scan because of a malformed registry.
  */
-function collectMetaSessions(): Set<string> {
+function collectMetaSessions(agentsPath: string = AGENTS_PATH): Set<string> {
   const out = new Set<string>();
-  if (!existsSync(AGENTS_PATH)) return out;
+  if (!existsSync(agentsPath)) return out;
   try {
-    const registry = JSON.parse(readFileSync(AGENTS_PATH, "utf-8")) as AgentRegistry;
+    const registry = JSON.parse(readFileSync(agentsPath, "utf-8")) as AgentRegistry;
     for (const [name, entry] of Object.entries(registry)) {
       if (!name.startsWith(META_AGENT_PREFIX)) continue;
       const sid = (entry as { sessionId?: string | null }).sessionId;

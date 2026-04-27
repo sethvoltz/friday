@@ -177,6 +177,24 @@ describe("scanFeedback", () => {
     expect(burst!.severity).toBe("medium");
   });
 
+  it("does not emit slack_retry_burst at fewer than 3 edits", () => {
+    // Pin the boundary: 2 edits to the same message must NOT trigger burst.
+    writeFileSync(
+      path,
+      Array.from({ length: 2 }, (_, i) =>
+        JSON.stringify({
+          ts: `2026-04-26T00:00:${String(i).padStart(2, "0")}.000Z`,
+          kind: "edited",
+          channelId: "C1",
+          messageTs: "same-message",
+        })
+      ).join("\n") + "\n"
+    );
+
+    const signals = scanFeedback({ feedbackLogPath: path });
+    expect(signals.find((s) => s.key === "slack_retry_burst")).toBeUndefined();
+  });
+
   it("excludes feedback whose agent is the meta-agent", () => {
     writeFileSync(
       path,
@@ -195,10 +213,12 @@ describe("scanFeedback", () => {
 describe("scanUsageLog", () => {
   let dir: string;
   let path: string;
+  let agentsPath: string;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "friday-evolve-usage-"));
     path = join(dir, "usage.jsonl");
+    agentsPath = join(dir, "agents.json"); // missing — collectMetaSessions returns empty
   });
 
   afterEach(() => {
@@ -206,7 +226,7 @@ describe("scanUsageLog", () => {
   });
 
   it("returns nothing when log is missing", () => {
-    expect(scanUsageLog({ usageLogPath: join(dir, "missing.jsonl") })).toEqual([]);
+    expect(scanUsageLog({ usageLogPath: join(dir, "missing.jsonl"), agentsPath })).toEqual([]);
   });
 
   it("flags a turn that exceeds the spike multiplier", () => {
@@ -226,7 +246,7 @@ describe("scanUsageLog", () => {
     };
     writeFileSync(path, [...baseline, spike].map((o) => JSON.stringify(o)).join("\n") + "\n");
 
-    const signals = scanUsageLog({ usageLogPath: path, spikeMultiplier: 4 });
+    const signals = scanUsageLog({ usageLogPath: path, spikeMultiplier: 4, agentsPath });
     expect(signals).toHaveLength(1);
     expect(signals[0].key).toBe("usage_token_spike");
     expect(signals[0].agent).toBe("builder-foo");
@@ -242,7 +262,7 @@ describe("scanUsageLog", () => {
       ].join("\n") + "\n"
     );
 
-    expect(scanUsageLog({ usageLogPath: path })).toEqual([]);
+    expect(scanUsageLog({ usageLogPath: path, agentsPath })).toEqual([]);
   });
 
   it("excludes meta-agent sessions by name prefix", () => {
@@ -258,15 +278,56 @@ describe("scanUsageLog", () => {
     };
     writeFileSync(path, [...baseline, spike].map((o) => JSON.stringify(o)).join("\n") + "\n");
 
-    expect(scanUsageLog({ usageLogPath: path })).toEqual([]);
+    expect(scanUsageLog({ usageLogPath: path, agentsPath })).toEqual([]);
+  });
+
+  it("excludes meta-agent sessions resolved via agents.json", () => {
+    // Real-world path: a meta-agent's session id appears in usage.jsonl tagged
+    // with a *different* agent name (e.g. left over from before a rename).
+    // The scanner must still filter it via the agents.json session lookup.
+    writeFileSync(
+      agentsPath,
+      JSON.stringify({
+        "scheduled-meta-daily": {
+          type: "scheduled",
+          sessionId: "meta-session-xyz",
+          status: "idle",
+          createdAt: "2026-04-26T00:00:00.000Z",
+          schedule: { cron: "0 4 * * *" },
+          taskPrompt: "x",
+          cwd: "/tmp",
+          stateDir: "/tmp",
+          lastRunAt: null,
+          nextRunAt: null,
+          paused: false,
+        },
+      })
+    );
+    const turns = Array.from({ length: 5 }, (_, i) => ({
+      ts: `2026-04-26T00:00:${String(i).padStart(2, "0")}.000Z`,
+      agent: "looks-innocent",
+      sessionId: "meta-session-xyz",
+      inputTokens: 1000,
+    }));
+    const spike = {
+      ts: "2026-04-26T00:00:10.000Z",
+      agent: "looks-innocent",
+      sessionId: "meta-session-xyz",
+      inputTokens: 999999,
+    };
+    writeFileSync(path, [...turns, spike].map((o) => JSON.stringify(o)).join("\n") + "\n");
+
+    expect(scanUsageLog({ usageLogPath: path, agentsPath })).toEqual([]);
   });
 });
 
 describe("scanTranscripts", () => {
   let dir: string;
+  let agentsPath: string;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "friday-evolve-tx-"));
+    agentsPath = join(dir, "agents.json"); // missing — keeps tests isolated from real registry
   });
 
   afterEach(() => {
@@ -274,7 +335,7 @@ describe("scanTranscripts", () => {
   });
 
   it("returns nothing when projects root is missing", () => {
-    expect(scanTranscripts({ projectsRoot: join(dir, "missing") })).toEqual([]);
+    expect(scanTranscripts({ projectsRoot: join(dir, "missing"), agentsPath })).toEqual([]);
   });
 
   it("detects a retry from two near-duplicate user messages within window", () => {
@@ -297,7 +358,7 @@ describe("scanTranscripts", () => {
       ].join("\n") + "\n"
     );
 
-    const signals = scanTranscripts({ projectsRoot: dir });
+    const signals = scanTranscripts({ projectsRoot: dir, agentsPath });
     expect(signals).toHaveLength(1);
     expect(signals[0].key).toBe("transcript_user_retry");
     expect(signals[0].evidencePointers[0].sessionId).toBe("session-abc");
@@ -323,6 +384,48 @@ describe("scanTranscripts", () => {
       ].join("\n") + "\n"
     );
 
-    expect(scanTranscripts({ projectsRoot: dir })).toEqual([]);
+    expect(scanTranscripts({ projectsRoot: dir, agentsPath })).toEqual([]);
+  });
+
+  it("skips transcripts whose session belongs to a meta-agent", () => {
+    // Same content as the positive test, but the session id is registered
+    // to scheduled-meta-daily. Must produce zero signals.
+    writeFileSync(
+      agentsPath,
+      JSON.stringify({
+        "scheduled-meta-daily": {
+          type: "scheduled",
+          sessionId: "session-meta",
+          status: "idle",
+          createdAt: "2026-04-26T00:00:00.000Z",
+          schedule: { cron: "0 4 * * *" },
+          taskPrompt: "x",
+          cwd: "/tmp",
+          stateDir: "/tmp",
+          lastRunAt: null,
+          nextRunAt: null,
+          paused: false,
+        },
+      })
+    );
+    const project = join(dir, "proj-a");
+    mkdirSync(project, { recursive: true });
+    writeFileSync(
+      join(project, "session-meta.jsonl"),
+      [
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-04-26T00:00:00.000Z",
+          message: { role: "user", content: "please summarize the recent build failures" },
+        }),
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-04-26T00:01:00.000Z",
+          message: { role: "user", content: "please summarize recent build failures again" },
+        }),
+      ].join("\n") + "\n"
+    );
+
+    expect(scanTranscripts({ projectsRoot: dir, agentsPath })).toEqual([]);
   });
 });
