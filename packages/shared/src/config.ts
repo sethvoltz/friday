@@ -8,6 +8,7 @@ export const ENV_PATH = join(FRIDAY_DIR, ".env");
 export const SESSIONS_DIR = join(FRIDAY_DIR, "sessions");
 export const USAGE_LOG_PATH = join(FRIDAY_DIR, "usage.jsonl");
 export const DAEMON_LOG_PATH = join(FRIDAY_DIR, "daemon.jsonl");
+export const EVOLVE_DIR = join(FRIDAY_DIR, "evolve");
 
 export interface SlackConfig {
   orchestratorChannelId: string;
@@ -49,6 +50,13 @@ export interface EventServerConfig {
   port: number;
 }
 
+export interface EvolveConfig {
+  /** Score (0-100) at or above which a proposal is promoted to "critical". */
+  criticalScore: number;
+  /** Signal frequency at or above which a proposal is promoted to "critical". */
+  criticalFrequency: number;
+}
+
 export interface FridayConfig {
   slack: SlackConfig;
   agent: AgentConfig;
@@ -56,6 +64,7 @@ export interface FridayConfig {
   slack_formatting: SlackFormattingConfig;
   monitoring: MonitoringConfig;
   eventServer: EventServerConfig;
+  evolve: EvolveConfig;
 }
 
 const DEFAULT_CONFIG: FridayConfig = {
@@ -95,6 +104,10 @@ const DEFAULT_CONFIG: FridayConfig = {
   eventServer: {
     port: 7444,
   },
+  evolve: {
+    criticalScore: 80,
+    criticalFrequency: 5,
+  },
 };
 
 export function loadConfig(): FridayConfig {
@@ -119,5 +132,6 @@ export function loadConfig(): FridayConfig {
     },
     monitoring: { ...DEFAULT_CONFIG.monitoring, ...userConfig.monitoring },
     eventServer: { ...DEFAULT_CONFIG.eventServer, ...userConfig.eventServer },
+    evolve: { ...DEFAULT_CONFIG.evolve, ...userConfig.evolve },
   };
 }

@@ -20,6 +20,7 @@ import { buildMemoryContext } from "./memory/auto-recall.js";
 import { startScheduler, stopScheduler } from "./scheduler/scheduler.js";
 import { drainScheduledRuns } from "./scheduler/trigger.js";
 import { createScheduleTools } from "./scheduler/schedule-tools.js";
+import { seedScheduledMetaAgents } from "./evolve/seed.js";
 
 async function main() {
   const startTime = Date.now();
@@ -173,6 +174,11 @@ async function main() {
 
   // Restore agents that were active before shutdown
   restoreActiveAgents(config.agent.model);
+
+  // Idempotently seed the daily self-improvement analyst before the scheduler
+  // starts checking — otherwise its nextRunAt won't be considered until the
+  // following 30s tick.
+  seedScheduledMetaAgents({ cwd: config.agent.workingDirectory });
 
   // Start the scheduler for cron/one-shot scheduled agents
   startScheduler({ model: config.agent.model });
