@@ -22,6 +22,7 @@ This project has living documentation that must stay current with the code:
 - **Preserve over delete.** Default to keeping data (logs, state, chat messages) rather than removing it. Patch and update rather than delete. Exceptions are fine case-by-case, but the default is always preserve.
 - **Workspace containment.** Builders work exclusively in their assigned worktrees. The orchestrator never touches a Builder's workspace. Agents stay in their assigned directory.
 - **User approval gates.** The orchestrator confirms plans with the user before creating Builders. Builders do not push or open PRs without explicit user approval relayed through the orchestrator.
+- **Static imports only.** No inline `require()` or dynamic `import()` inside function bodies — tests excepted. The shared package ships as ESM (`"type": "module"`), so an inline `require("node:fs")` throws `ReferenceError: require is not defined` and the surrounding `try/catch` silently turns the failure into a `null`/no-op. If you need a Node API, import it at the top of the file.
 
 ## Structure
 

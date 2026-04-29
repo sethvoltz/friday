@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join, basename } from "node:path";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import type { RegistryEntry } from "./agents.js";
 import {
   parseTranscript,
@@ -122,6 +122,8 @@ export function getSessionDateRange(
  * transcript indexer, which already discovered the path via directory walk
  * and shouldn't have to round-trip a possibly-lossy CWD encoding.
  */
+const TS_REGEX = /"timestamp":"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)"/;
+
 export function readJsonlDateRange(
   jsonlPath: string,
 ): { firstAt: string; lastAt: string } | null {
@@ -132,7 +134,6 @@ export function readJsonlDateRange(
 
   let fd: number | null = null;
   try {
-    const { statSync, openSync, readSync, closeSync } = require("node:fs") as typeof import("node:fs");
     const stat = statSync(jsonlPath);
     if (stat.size === 0) return null;
 
@@ -165,6 +166,16 @@ export function readJsonlDateRange(
       } catch { /* incomplete first line, keep looking */ }
     }
 
+    // Fallback: when the first record is bigger than HEAD_BYTES (e.g. a giant
+    // file-history-snapshot or a queue-operation with embedded payload), the
+    // line-parse loop above never sees a complete object. Pick the first
+    // ISO-8601 timestamp out of the buffer directly. The session-start
+    // timestamp is what we want, and it's invariably near the top of the file.
+    if (!firstAt) {
+      const m = headText.match(TS_REGEX);
+      if (m) firstAt = m[1];
+    }
+
     // Find the last complete JSON line in the tail (skip partial first line if tail doesn't start at 0)
     let lastAt = "";
     const tailLines = tailText.split("\n");
@@ -178,11 +189,18 @@ export function readJsonlDateRange(
       } catch { /* skip */ }
     }
 
+    // Same fallback for the tail — match the *last* timestamp in the buffer.
+    if (!lastAt) {
+      let m: RegExpExecArray | null;
+      const re = new RegExp(TS_REGEX, "g");
+      while ((m = re.exec(tailText)) !== null) lastAt = m[1];
+    }
+
     if (!firstAt) return null;
     return { firstAt, lastAt: lastAt || firstAt };
   } catch {
     if (fd != null) {
-      try { (require("node:fs") as typeof import("node:fs")).closeSync(fd); } catch { /* ignore */ }
+      try { closeSync(fd); } catch { /* ignore */ }
     }
     return null;
   }

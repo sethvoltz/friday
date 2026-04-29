@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import {
   SESSIONS_DIR,
   FRIDAY_DIR,
+  loadConfig,
   parseTranscript,
   findMostRecentSession,
   getSessionStats,
@@ -56,7 +57,6 @@ export const load: PageServerLoad = async ({ params }) => {
     // For bare sessions, we need to figure out the CWD used.
     // Bare sessions use config.agent.workingDirectory (orchestrator channel) or
     // config.independentAgent.workingDirectory. We try the most common patterns.
-    const { loadConfig } = await import("@friday/shared");
     const config = loadConfig();
     const possibleCwds = [
       config.agent.workingDirectory,

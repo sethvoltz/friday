@@ -7,6 +7,7 @@ import {
   buildInspectResult,
   formatInspectPlain,
   formatInspectMarkdown,
+  readJsonlDateRange,
 } from "./inspect.js";
 import type {
   OrchestratorEntry,
@@ -87,6 +88,68 @@ describe("resolveTranscriptPath", () => {
       children: [],
     };
     expect(resolveTranscriptPath(entry)).toBeNull();
+  });
+});
+
+// ── readJsonlDateRange ─────────────────────────────────────────
+
+describe("readJsonlDateRange", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "rjdr-"));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("returns null for missing or empty files", () => {
+    expect(readJsonlDateRange(join(tempDir, "nope.jsonl"))).toBeNull();
+
+    const empty = join(tempDir, "empty.jsonl");
+    writeFileSync(empty, "");
+    expect(readJsonlDateRange(empty)).toBeNull();
+  });
+
+  it("parses first/last timestamps from well-formed JSONL", () => {
+    const path = join(tempDir, "ok.jsonl");
+    writeFileSync(
+      path,
+      [
+        JSON.stringify({ type: "user", timestamp: "2026-04-23T10:00:00.000Z" }),
+        JSON.stringify({ type: "assistant", timestamp: "2026-04-23T10:00:05.000Z" }),
+        JSON.stringify({ type: "user", timestamp: "2026-04-23T10:01:00.000Z" }),
+      ].join("\n") + "\n",
+    );
+    expect(readJsonlDateRange(path)).toEqual({
+      firstAt: "2026-04-23T10:00:00.000Z",
+      lastAt: "2026-04-23T10:01:00.000Z",
+    });
+  });
+
+  it("falls back to regex when the first record is larger than HEAD_BYTES", () => {
+    // Real-world shape: leading metadata records with no `timestamp`, followed
+    // by a giant first user record whose JSON body extends past the 4 KB head
+    // window. The line-parse path can't complete the JSON; the regex fallback
+    // recovers the timestamp from the buffer.
+    const path = join(tempDir, "huge-first.jsonl");
+    const filler = "x".repeat(8000);
+    writeFileSync(
+      path,
+      [
+        JSON.stringify({ type: "permission-mode", permissionMode: "default" }),
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-04-23T10:00:00.000Z",
+          payload: filler,
+        }),
+        JSON.stringify({ type: "assistant", timestamp: "2026-04-23T10:00:05.000Z" }),
+      ].join("\n") + "\n",
+    );
+    const range = readJsonlDateRange(path);
+    expect(range?.firstAt).toBe("2026-04-23T10:00:00.000Z");
+    expect(range?.lastAt).toBe("2026-04-23T10:00:05.000Z");
   });
 });
 
