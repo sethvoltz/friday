@@ -91,8 +91,100 @@
     return { dailyCost, maxDailyCost, maxDailyTokens, models, modelColors };
   });
 
+  // Calendar bucket helpers (separate from rolling-window stat cards above)
+  function dayKey(d: Date): string {
+    return d.toLocaleDateString('en-CA');
+  }
+  function weekKey(d: Date): string {
+    const day = d.getDay() || 7; // Monday-anchored, Sunday becomes 7
+    const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - day + 1);
+    return dayKey(monday);
+  }
+  function monthKey(d: Date): string {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }
+  function mean(values: number[]): number {
+    return values.length ? values.reduce((s, v) => s + v, 0) / values.length : 0;
+  }
+  function median(values: number[]): number {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  const nowDate = new Date();
+  const todayKey = dayKey(nowDate);
+  const thisWeekKey = weekKey(nowDate);
+  const thisMonthKey = monthKey(nowDate);
+
+  type TokenStats = { input: number; output: number; cacheCreation: number; cacheRead: number; cost: number };
+  function emptyStats(): TokenStats { return { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, cost: 0 }; }
+
+  const buckets = $derived.by(() => {
+    const day = new Map<string, TokenStats>();
+    const week = new Map<string, TokenStats>();
+    const month = new Map<string, TokenStats>();
+    const upsert = (m: Map<string, TokenStats>, k: string, e: typeof entries[number]) => {
+      let b = m.get(k);
+      if (!b) { b = emptyStats(); m.set(k, b); }
+      // "Input" matches the existing card meaning: full input including cache reads/creates
+      b.input += e.inputTokens + e.cacheCreationTokens + e.cacheReadTokens;
+      b.output += e.outputTokens;
+      b.cacheCreation += e.cacheCreationTokens;
+      b.cacheRead += e.cacheReadTokens;
+      b.cost += e.costUsd ?? 0;
+    };
+    for (const e of entries) {
+      const d = new Date(e.timestamp);
+      upsert(day, dayKey(d), e);
+      upsert(week, weekKey(d), e);
+      upsert(month, monthKey(d), e);
+    }
+    return { day, week, month };
+  });
+
+  type Period = 'day' | 'week' | 'month';
+  const PERIODS: Period[] = ['day', 'week', 'month'];
+  let tokenPeriod = $state<Period>('day');
+  const periodLabels: Record<Period, string> = { day: 'Today', week: 'This Week', month: 'This Month' };
+  const periodCurrentKey: Record<Period, string> = { day: todayKey, week: thisWeekKey, month: thisMonthKey };
+
+  const tokenView = $derived.by(() => {
+    const map = buckets[tokenPeriod];
+    const current = map.get(periodCurrentKey[tokenPeriod]) ?? emptyStats();
+    const all = [...map.values()];
+    const aggs = (key: keyof TokenStats) => {
+      const values = all.map(b => b[key]);
+      return { mean: mean(values), median: median(values) };
+    };
+    const cacheTotal = current.cacheCreation + current.cacheRead;
+    return {
+      input: { value: current.input, ...aggs('input') },
+      output: { value: current.output, ...aggs('output') },
+      cacheCreation: { value: current.cacheCreation, ...aggs('cacheCreation') },
+      cacheRead: { value: current.cacheRead, ...aggs('cacheRead') },
+      cacheRate: cacheTotal > 0 ? Math.round((current.cacheRead / cacheTotal) * 100) : 0,
+    };
+  });
+
+  const costSummary = $derived({
+    thisWeek: buckets.week.get(thisWeekKey)?.cost ?? 0,
+    thisMonth: buckets.month.get(thisMonthKey)?.cost ?? 0,
+  });
+
+  const DAILY_DEFAULT = 5;
+  let showAllDays = $state(false);
+  const visibleDailyCost = $derived(showAllDays ? dailyCost : dailyCost.slice(-DAILY_DEFAULT));
+
   // Helpers
   function fmtCost(n: number) { return `$${n.toFixed(4)}`; }
+  function fmtCostShort(n: number) { return `$${n.toFixed(2)}`; }
+  function fmtTokensShort(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return Math.round(n).toString();
+  }
   function fmtDuration(ms: number) {
     const s = Math.floor(ms / 1000);
     if (s < 60) return `${s}s`;
@@ -217,7 +309,14 @@
     <div class="card chart-card">
       <div class="card-header">
         <h2>Daily Cost</h2>
-        <span class="stat-detail">{dailyCost.length} days</span>
+        <span class="stat-detail">
+          Week {fmtCostShort(costSummary.thisWeek)} &middot; Month {fmtCostShort(costSummary.thisMonth)}
+          {#if dailyCost.length > DAILY_DEFAULT}
+            <button class="toggle-link" onclick={() => showAllDays = !showAllDays}>
+              {showAllDays ? `Show last ${DAILY_DEFAULT}` : `Show all ${dailyCost.length}`}
+            </button>
+          {/if}
+        </span>
       </div>
       <div class="chart-legend">
         {#each models as model}
@@ -242,80 +341,74 @@
       </div>
       <Tooltip.Provider delayDuration={150}>
       <div class="bar-chart">
-        {#each dailyCost as day}
+        {#each visibleDailyCost as day}
           <div class="day-group">
             <span class="bar-label">{day.day.slice(5)}</span>
-            <div class="day-bars">
-              <div class="day-bar-row">
-                <div class="bar-track">
-                  {#each models as model}
-                    {@const seg = day.costByModel[model] ?? 0}
-                    {#if seg > 0}
-                      <Tooltip.Root>
-                        <Tooltip.Trigger
-                          class="bar-fill-segment"
-                          style="width: {(seg / maxDailyCost) * 100}%; background: {modelColors[model]}"
-                        />
-                        <Tooltip.Portal>
-                          <Tooltip.Content class="segment-tooltip" sideOffset={6}>
-                            <span class="segment-tooltip-label">{model}</span>
-                            <span class="segment-tooltip-value">{fmtCost(seg)}</span>
-                          </Tooltip.Content>
-                        </Tooltip.Portal>
-                      </Tooltip.Root>
-                    {/if}
-                  {/each}
-                </div>
-                <span class="bar-value">{fmtCost(day.totalCost)}</span>
-              </div>
-              <div class="day-bar-row token-row">
-                <div class="bar-track">
-                  {#if day.inputUncached > 0}
-                    <Tooltip.Root>
-                      <Tooltip.Trigger
-                        class="bar-fill-segment"
-                        style="width: {(day.inputUncached / maxDailyTokens) * 100}%; background: var(--chart-input, #818cf8)"
-                      />
-                      <Tooltip.Portal>
-                        <Tooltip.Content class="segment-tooltip" sideOffset={6}>
-                          <span class="segment-tooltip-label">Input</span>
-                          <span class="segment-tooltip-value">{fmtTokens(day.inputUncached)}</span>
-                        </Tooltip.Content>
-                      </Tooltip.Portal>
-                    </Tooltip.Root>
-                  {/if}
-                  {#if day.inputCached > 0}
-                    <Tooltip.Root>
-                      <Tooltip.Trigger
-                        class="bar-fill-segment"
-                        style="width: {(day.inputCached / maxDailyTokens) * 100}%; background: var(--chart-input-cached, #a5b4fc)"
-                      />
-                      <Tooltip.Portal>
-                        <Tooltip.Content class="segment-tooltip" sideOffset={6}>
-                          <span class="segment-tooltip-label">Cached</span>
-                          <span class="segment-tooltip-value">{fmtTokens(day.inputCached)}</span>
-                        </Tooltip.Content>
-                      </Tooltip.Portal>
-                    </Tooltip.Root>
-                  {/if}
-                  {#if day.output > 0}
-                    <Tooltip.Root>
-                      <Tooltip.Trigger
-                        class="bar-fill-segment"
-                        style="width: {(day.output / maxDailyTokens) * 100}%; background: var(--chart-output, #f59e0b)"
-                      />
-                      <Tooltip.Portal>
-                        <Tooltip.Content class="segment-tooltip" sideOffset={6}>
-                          <span class="segment-tooltip-label">Output</span>
-                          <span class="segment-tooltip-value">{fmtTokens(day.output)}</span>
-                        </Tooltip.Content>
-                      </Tooltip.Portal>
-                    </Tooltip.Root>
-                  {/if}
-                </div>
-                <span class="bar-value">{fmtTokens(day.totalTokens)}</span>
-              </div>
+            <div class="bar-track">
+              {#each models as model}
+                {@const seg = day.costByModel[model] ?? 0}
+                {#if seg > 0}
+                  <Tooltip.Root>
+                    <Tooltip.Trigger
+                      class="bar-fill-segment"
+                      style="width: {(seg / maxDailyCost) * 100}%; background: {modelColors[model]}"
+                    />
+                    <Tooltip.Portal>
+                      <Tooltip.Content class="segment-tooltip" sideOffset={6}>
+                        <span class="segment-tooltip-label">{model}</span>
+                        <span class="segment-tooltip-value">{fmtCost(seg)}</span>
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                {/if}
+              {/each}
             </div>
+            <span class="bar-value">{fmtCost(day.totalCost)}</span>
+            <div class="bar-track token-track">
+              {#if day.inputUncached > 0}
+                <Tooltip.Root>
+                  <Tooltip.Trigger
+                    class="bar-fill-segment"
+                    style="width: {(day.inputUncached / maxDailyTokens) * 100}%; background: var(--chart-input, #818cf8)"
+                  />
+                  <Tooltip.Portal>
+                    <Tooltip.Content class="segment-tooltip" sideOffset={6}>
+                      <span class="segment-tooltip-label">Input</span>
+                      <span class="segment-tooltip-value">{fmtTokens(day.inputUncached)}</span>
+                    </Tooltip.Content>
+                  </Tooltip.Portal>
+                </Tooltip.Root>
+              {/if}
+              {#if day.inputCached > 0}
+                <Tooltip.Root>
+                  <Tooltip.Trigger
+                    class="bar-fill-segment"
+                    style="width: {(day.inputCached / maxDailyTokens) * 100}%; background: var(--chart-input-cached, #a5b4fc)"
+                  />
+                  <Tooltip.Portal>
+                    <Tooltip.Content class="segment-tooltip" sideOffset={6}>
+                      <span class="segment-tooltip-label">Cached</span>
+                      <span class="segment-tooltip-value">{fmtTokens(day.inputCached)}</span>
+                    </Tooltip.Content>
+                  </Tooltip.Portal>
+                </Tooltip.Root>
+              {/if}
+              {#if day.output > 0}
+                <Tooltip.Root>
+                  <Tooltip.Trigger
+                    class="bar-fill-segment"
+                    style="width: {(day.output / maxDailyTokens) * 100}%; background: var(--chart-output, #f59e0b)"
+                  />
+                  <Tooltip.Portal>
+                    <Tooltip.Content class="segment-tooltip" sideOffset={6}>
+                      <span class="segment-tooltip-label">Output</span>
+                      <span class="segment-tooltip-value">{fmtTokens(day.output)}</span>
+                    </Tooltip.Content>
+                  </Tooltip.Portal>
+                </Tooltip.Root>
+              {/if}
+            </div>
+            <span class="bar-value">{fmtTokens(day.totalTokens)}</span>
           </div>
         {/each}
         {#if dailyCost.length === 0}
@@ -329,24 +422,56 @@
     <div class="card">
       <div class="card-header">
         <h2>Token Breakdown</h2>
-        <span class="stat-detail">All time</span>
+        <div class="period-tabs">
+          {#each PERIODS as p}
+            <button
+              class="period-tab"
+              class:active={tokenPeriod === p}
+              onclick={() => tokenPeriod = p}
+            >{periodLabels[p]}</button>
+          {/each}
+        </div>
       </div>
       <div class="token-grid">
         <div class="token-item">
           <span class="token-label">Input</span>
-          <span class="token-value">{fmtTokens(allStats.input)}</span>
+          <div class="token-value-row">
+            <span class="token-value">{fmtTokens(tokenView.input.value)}</span>
+            <div class="token-aggs">
+              <span>avg {fmtTokensShort(tokenView.input.mean)}</span>
+              <span>med {fmtTokensShort(tokenView.input.median)}</span>
+            </div>
+          </div>
         </div>
         <div class="token-item">
           <span class="token-label">Output</span>
-          <span class="token-value">{fmtTokens(allStats.output)}</span>
+          <div class="token-value-row">
+            <span class="token-value">{fmtTokens(tokenView.output.value)}</span>
+            <div class="token-aggs">
+              <span>avg {fmtTokensShort(tokenView.output.mean)}</span>
+              <span>med {fmtTokensShort(tokenView.output.median)}</span>
+            </div>
+          </div>
         </div>
         <div class="token-item">
           <span class="token-label">Cache Creation</span>
-          <span class="token-value">{fmtTokens(allStats.cacheCreation)}</span>
+          <div class="token-value-row">
+            <span class="token-value">{fmtTokens(tokenView.cacheCreation.value)}</span>
+            <div class="token-aggs">
+              <span>avg {fmtTokensShort(tokenView.cacheCreation.mean)}</span>
+              <span>med {fmtTokensShort(tokenView.cacheCreation.median)}</span>
+            </div>
+          </div>
         </div>
         <div class="token-item accent">
           <span class="token-label">Cache Read</span>
-          <span class="token-value">{fmtTokens(allStats.cacheRead)}</span>
+          <div class="token-value-row">
+            <span class="token-value">{fmtTokens(tokenView.cacheRead.value)}</span>
+            <div class="token-aggs">
+              <span>avg {fmtTokensShort(tokenView.cacheRead.mean)}</span>
+              <span>med {fmtTokensShort(tokenView.cacheRead.median)}</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -354,9 +479,9 @@
       <div class="cache-bar">
         <div class="cache-bar-label">Cache efficiency</div>
         <div class="cache-bar-track">
-          <div class="cache-bar-read" style="width: {allStats.cacheRate}%"></div>
+          <div class="cache-bar-read" style="width: {tokenView.cacheRate}%"></div>
         </div>
-        <div class="cache-bar-pct">{allStats.cacheRate}%</div>
+        <div class="cache-bar-pct">{tokenView.cacheRate}%</div>
       </div>
     </div>
 
@@ -549,8 +674,14 @@
     color: white;
   }
 
-  /* Bar chart — ~10 rows visible */
+  /* Bar chart — grid so the value column auto-sizes to the widest number
+     and stays snug, while the bar column takes the remaining space. */
   .bar-chart {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    column-gap: 0.75rem;
+    row-gap: 0.6rem;
+    align-items: center;
     max-height: 16rem;
     overflow-y: auto;
   }
@@ -611,43 +742,41 @@
   }
 
   .day-group {
-    display: flex;
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    grid-template-rows: auto auto;
+    column-gap: 0.75rem;
+    row-gap: 0.075rem;
     align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 0.6rem;
   }
 
   .day-group .bar-label {
-    align-self: flex-start;
+    grid-row: 1 / 3;
+    grid-column: 1;
+    align-self: start;
     padding-top: 0.15rem;
   }
 
-  .day-bars {
-    flex: 1;
+  .day-group .bar-track {
+    grid-column: 2;
+    display: flex;
+    width: 100%;
     min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.075rem;
-  }
-
-  .day-bar-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
-
-  .day-bar-row .bar-track {
-    flex: 1;
-    min-width: 0;
-    display: flex;
     height: 1.1rem;
     background: var(--bg-tertiary);
     border-radius: 3px;
     overflow: hidden;
   }
 
-  .token-row .bar-track {
+  .day-group .token-track {
     height: 0.6rem;
+  }
+
+  .day-group .bar-value {
+    grid-column: 3;
+    width: auto;
+    white-space: nowrap;
   }
 
   .legend-sep {
@@ -711,6 +840,52 @@
     font-size: 1.05rem;
     font-weight: 600;
     color: var(--text-primary);
+  }
+
+  .token-value-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .token-aggs {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.05rem;
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    line-height: 1.1;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+
+  /* Period tabs (Today / Week / Month) */
+  .period-tabs {
+    display: flex;
+    gap: 0.25rem;
+  }
+
+  .period-tab {
+    padding: 0.2rem 0.6rem;
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    color: var(--text-tertiary);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+  .period-tab:hover {
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+  }
+  .period-tab.active {
+    color: var(--accent-primary);
+    background: var(--accent-glow);
+    border-color: var(--accent-primary);
   }
 
   /* Cache bar */
