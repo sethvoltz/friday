@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -225,5 +225,62 @@ describe("agent registry", () => {
     loadRegistry();
     expect(listAgents()).toHaveLength(2);
     expect(getAgent("builder-auth")!.type).toBe("builder");
+  });
+
+  describe("saveRegistry — cross-process read-merge-write", () => {
+    it("preserves on-disk entries written by another process", () => {
+      // Process A's view: orchestrator + one builder.
+      registerOrchestrator();
+      registerBuilder("builder-from-a", "orchestrator", "/tmp/a", null);
+
+      // Simulate process B writing a row that A doesn't know about.
+      const onDisk = JSON.parse(readFileSync(agentsPath, "utf-8"));
+      onDisk["builder-from-b"] = {
+        type: "builder",
+        parent: "orchestrator",
+        sessionId: "sess-from-b",
+        status: "active",
+        workspace: "/tmp/b",
+        epicId: null,
+        createdAt: new Date().toISOString(),
+        children: [],
+      };
+      writeFileSync(agentsPath, JSON.stringify(onDisk, null, 2));
+
+      // Process A persists a change — must not clobber B's row.
+      updateAgentSession("builder-from-a", "sess-from-a");
+
+      const persisted = JSON.parse(readFileSync(agentsPath, "utf-8"));
+      expect(persisted["builder-from-b"]).toBeDefined();
+      expect(persisted["builder-from-b"].sessionId).toBe("sess-from-b");
+      expect(persisted["builder-from-a"].sessionId).toBe("sess-from-a");
+    });
+
+    it("in-memory writes win for rows the writer owns", () => {
+      registerOrchestrator();
+      registerBuilder("builder-owned", "orchestrator", "/tmp", null);
+
+      // Simulate stale on-disk value for the same row.
+      const onDisk = JSON.parse(readFileSync(agentsPath, "utf-8"));
+      onDisk["builder-owned"].sessionId = "stale-sess";
+      writeFileSync(agentsPath, JSON.stringify(onDisk, null, 2));
+
+      updateAgentSession("builder-owned", "fresh-sess");
+
+      const persisted = JSON.parse(readFileSync(agentsPath, "utf-8"));
+      expect(persisted["builder-owned"].sessionId).toBe("fresh-sess");
+    });
+
+    it("falls back to in-memory snapshot when on-disk file is corrupt", () => {
+      registerOrchestrator();
+
+      writeFileSync(agentsPath, "{ not valid json");
+
+      // Should not throw — corrupt file just means we lose the merge benefit.
+      expect(() => updateAgentSession("orchestrator", "sess-recover")).not.toThrow();
+
+      const persisted = JSON.parse(readFileSync(agentsPath, "utf-8"));
+      expect(persisted.orchestrator.sessionId).toBe("sess-recover");
+    });
   });
 });

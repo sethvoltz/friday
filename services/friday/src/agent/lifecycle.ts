@@ -452,7 +452,11 @@ function handleWorkerEvent(
 
     case "session-update":
       running.sessionId = event.sessionId;
-      // updateAgentSession is called inside worker.ts directly (shared registry file)
+      // The daemon parent is the sole writer for the live agent registry path;
+      // the worker only emits IPC events. See ideas.md "Cross-Process Registry
+      // Write Race" — when the worker also wrote the registry, its sessionId
+      // would get clobbered by any subsequent parent saveRegistry().
+      updateAgentSession(agentName, event.sessionId);
       break;
 
     case "usage":

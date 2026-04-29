@@ -14,7 +14,6 @@ import { mailCheck, mailEvents, buildMailPrompt } from "../comms/mail.js";
 import { createAgentTools } from "./agent-tools.js";
 import { logUsage } from "../monitor/usage.js";
 import { log } from "../log.js";
-import { loadRegistry, updateAgentSession, updateAgentStatus } from "../sessions/registry.js";
 import type { WorkerCommand, WorkerEvent, WorkerSpawnOptions } from "./worker-protocol.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -45,10 +44,9 @@ let started = false;
 process.on("message", (msg: WorkerCommand) => {
   if (msg.type === "start" && !started) {
     started = true;
-    // Forked children get a fresh module instance, so registry state from the
-    // parent isn't inherited. Bootstrap from agents.json before the loop calls
-    // updateAgentSession/updateAgentStatus.
-    loadRegistry();
+    // Workers are stateless w.r.t. the registry — the daemon parent is the
+    // sole writer. We just emit IPC events (session-update, status-change)
+    // and the parent persists them.
     runAgentLoop(msg.options, abort.signal).catch((err) => {
       emit({ type: "error", message: err instanceof Error ? err.message : String(err) });
       process.exit(1);
@@ -196,7 +194,6 @@ async function runAgentLoop(
             sessionId = message.session_id;
             turnNumber++;
 
-            updateAgentSession(agentName, sessionId);
             emit({ type: "session-update", sessionId });
 
             const usage = (message as any).usage;
@@ -269,7 +266,6 @@ async function runAgentLoop(
     }
 
     // Going idle — signal to supervisor that we're not stalled, just waiting
-    updateAgentStatus(agentName, "idle");
     emit({ type: "status-change", status: "idle" });
     emit({ type: "mail-sent" });
     log("info", "worker_loop_idle", { agent: agentName });
@@ -282,7 +278,6 @@ async function runAgentLoop(
       const idleMailPrompt = buildMailPrompt(agentName);
       if (idleMailPrompt) {
         prompt = idleMailPrompt;
-        updateAgentStatus(agentName, "active");
         emit({ type: "status-change", status: "active" });
         log("info", "worker_loop_mail_wakeup_from_idle", { agent: agentName });
         break;

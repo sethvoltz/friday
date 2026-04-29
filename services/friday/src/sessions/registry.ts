@@ -32,7 +32,23 @@ export function loadRegistry(): void {
 }
 
 function saveRegistry(): void {
-  atomicWriteFileSync(AGENTS_PATH, JSON.stringify(registry, null, 2));
+  // Defense against cross-process writers (the `friday schedule` and
+  // `friday dev` CLIs both call atomicWriteFileSync on AGENTS_PATH).
+  // Re-read the on-disk view and overlay our entries on top — keeps any
+  // concurrent change to a row we don't own, and our in-memory mutations
+  // win for rows we do. The narrow read→write window remains, but the
+  // whole-file stomp is gone. The principled long-term home is the SQLite
+  // layer from ADR-020; this is the cheap stop-gap.
+  let onDisk: AgentRegistry = {};
+  if (existsSync(AGENTS_PATH)) {
+    try {
+      onDisk = JSON.parse(readFileSync(AGENTS_PATH, "utf-8"));
+    } catch {
+      // File is mid-write or corrupt — fall back to our in-memory snapshot.
+    }
+  }
+  const merged: AgentRegistry = { ...onDisk, ...registry };
+  atomicWriteFileSync(AGENTS_PATH, JSON.stringify(merged, null, 2));
 }
 
 export function getAgent(name: string): RegistryEntry | undefined {

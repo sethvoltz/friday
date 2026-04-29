@@ -384,3 +384,24 @@ Key design choices:
 - Daily scan latency increases by the Haiku batch time (rough order: a few seconds at typical volume) plus the Sonnet enrichment time per stale proposal. This is fine on a cron-driven agent.
 - Friction signals can produce noisy proposals if Haiku grades a sarcastic-but-positive turn as `correction`. The severity floor (≥ 2) and the `none` category are the main guardrails; if false-positive rate is a problem, raise the floor or add a second confirmation pass.
 - Templated proposal bodies remain readable on first sight — the enrichment pass is additive, not gating. Listing/show works even before enrichment runs.
+
+## ADR-023: Daemon Parent Is the Sole Writer to the Agent Registry
+
+**Date:** 2026-04-29
+**Status:** Accepted
+
+**Context:** ADR-021 introduced `child_process.fork()` workers but left the registry (`~/.friday/agents.json`) writable by both the daemon parent and each forked worker. Each process loaded its own in-memory copy and rewrote the entire file on every mutation via `atomicWriteFileSync` — atomic at the filesystem level, but not coordinated between processes. In practice the parent's stale-snapshot writes clobbered the worker's `sessionId` updates, leaving newly-spawned builders with `sessionId: null` on disk even though their transcripts were being recorded normally. Downstream effects: `agent_inspect` reported "no transcript yet" and the health monitor reported spurious stalls.
+
+**Decision:** The daemon parent is the sole writer to the live agent registry path. Workers communicate state changes via existing IPC events (`session-update`, `status-change`) and never call `loadRegistry`/`updateAgentSession`/`updateAgentStatus` directly. The IPC handler in `lifecycle.ts` persists what the worker reports.
+
+For the remaining cross-process writers (`friday schedule` and `friday dev` CLI commands), `saveRegistry()` does read-merge-write — re-reads the on-disk view and overlays in-memory entries before writing — so concurrent edits to *different* rows survive. Same-row conflicts still go to last-writer-wins; that's acceptable since same-row contention only happens between the daemon and a CLI the user is actively running.
+
+**Rationale:**
+- Single-writer for the live path is correct by construction — eliminates the race rather than narrowing it.
+- The IPC protocol already carried the information; the worker's direct registry calls were redundant duplication.
+- Read-merge-write is a 5-line stop-gap for the rare CLI-vs-daemon case. The principled long-term home is the SQLite layer from ADR-020 (an `agents` table with WAL-mode concurrent writes).
+
+**Consequences:**
+- Workers no longer load the registry at startup. They are stateless w.r.t. on-disk agent state.
+- A still-narrow read→write window remains in `saveRegistry()` for cross-process writers; full safety requires either a file lock or the SQLite migration.
+- Tests must drive registry persistence through the IPC handler, not direct worker writes.

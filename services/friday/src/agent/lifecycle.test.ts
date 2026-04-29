@@ -446,6 +446,34 @@ describe("stall state tracking via IPC events", () => {
   });
 });
 
+describe("IPC-driven registry writes — parent is the sole writer", () => {
+  it("persists sessionId to the registry on session-update event", async () => {
+    mockRegistry.getAgent.mockReturnValue(null);
+    spawnBuilder("builder-session-persist");
+    const child = mockProcesses[mockProcesses.length - 1];
+
+    child.simulateEvent({ type: "session-update", sessionId: "sess-from-worker" });
+
+    expect(mockRegistry.updateAgentSession).toHaveBeenCalledWith(
+      "builder-session-persist",
+      "sess-from-worker"
+    );
+  });
+
+  it("persists status changes to the registry on status-change event", async () => {
+    mockRegistry.getAgent.mockReturnValue(null);
+    spawnBuilder("builder-status-persist");
+    const child = mockProcesses[mockProcesses.length - 1];
+
+    child.simulateEvent({ type: "status-change", status: "idle" });
+
+    expect(mockRegistry.updateAgentStatus).toHaveBeenCalledWith(
+      "builder-status-persist",
+      "idle"
+    );
+  });
+});
+
 describe("mail forwarding", () => {
   it("forwards mail-wakeup event to child worker via IPC", async () => {
     mockRegistry.getAgent.mockReturnValue(null);
