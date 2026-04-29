@@ -68,7 +68,11 @@ export const load: PageServerLoad = async ({ params, parent }) => {
       try {
         turns = await parseTranscript(jsonlPath);
         totalTurns = turns.length;
-      } catch { /* skip */ }
+      } catch (err) {
+        console.error(
+          `parseTranscript failed for ${jsonlPath}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
     }
   }
 
