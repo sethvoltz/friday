@@ -30,7 +30,7 @@
       output += e.outputTokens;
       cacheCreation += e.cacheCreationTokens;
       cacheRead += e.cacheReadTokens;
-      duration += e.durationMs;
+      duration += e.durationMs ?? 0;
     }
     // Total input = non-cached + cache creation + cache read
     const input = inputRaw + cacheCreation + cacheRead;
