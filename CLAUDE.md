@@ -44,6 +44,7 @@ pnpm --filter @friday/daemon exec vitest run src/path/to/file.test.ts  # Single 
 - TypeScript throughout, Vitest for tests, pnpm workspaces + Turborepo
 - Tests are co-located with source as `*.test.ts`
 - All state lives in `~/.friday/` — never hardcode paths, use constants from `@friday/shared`
+- **`@friday/shared` is consumed via its built `dist/` (see `packages/shared/package.json` `exports`).** When you edit shared source, run `pnpm --filter @friday/shared build` before exercising the change in the daemon or dashboard — vitest reads source directly so tests will pass even when consumers still see the stale dist.
 
 ## Versioning
 
