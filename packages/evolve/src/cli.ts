@@ -6,6 +6,7 @@ import {
   scanFeedback,
   scanUsageLog,
   scanTranscripts,
+  scanFriction,
   sinceHoursAgo,
   proposeFromSignals,
   rerankAll,
@@ -57,12 +58,20 @@ async function main(): Promise<void> {
     const now = new Date();
     const since = sinceHoursAgo(hours, now);
 
-    const signals = [
-      ...scanDaemonLog({ since }),
-      ...scanFeedback({ since }),
-      ...scanUsageLog({ since }),
-      ...scanTranscripts({ since }),
-    ];
+    // Friction is async (Haiku-graded) and may fail on transient API errors —
+    // never let it sink the rest of the scan. Other scanners are pure I/O and
+    // run in parallel.
+    const [daemon, feedback, usage, transcripts, friction] = await Promise.all([
+      Promise.resolve(scanDaemonLog({ since })),
+      Promise.resolve(scanFeedback({ since })),
+      Promise.resolve(scanUsageLog({ since })),
+      Promise.resolve(scanTranscripts({ since })),
+      scanFriction({ since }).catch((err) => {
+        console.error(`friction scanner failed: ${err instanceof Error ? err.message : String(err)}`);
+        return [];
+      }),
+    ]);
+    const signals = [...daemon, ...feedback, ...usage, ...transcripts, ...friction];
     const result = proposeFromSignals(signals, {
       rule: config.evolve,
       createdBy: process.env.FRIDAY_AGENT_NAME ?? "cli",

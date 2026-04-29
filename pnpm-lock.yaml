@@ -36,6 +36,9 @@ importers:
 
   packages/evolve:
     dependencies:
+      '@anthropic-ai/claude-agent-sdk':
+        specifier: ^0.2.117
+        version: 0.2.117(zod@4.3.6)
       '@friday/memory':
         specifier: workspace:*
         version: link:../memory

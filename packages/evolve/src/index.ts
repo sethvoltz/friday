@@ -34,6 +34,22 @@ export {
 } from "./scan.js";
 
 export {
+  type FrictionCategory,
+  type FrictionScanOptions,
+  type ScoredTurn,
+  type ScoreFn,
+  type TurnForScoring,
+  scanFriction,
+} from "./scan-friction.js";
+
+export {
+  type ChatOptions,
+  type ChatResult,
+  chat,
+  extractJson,
+} from "./llm.js";
+
+export {
   type Cluster,
   type MergeOptions,
   type MergeResult,
