@@ -39,43 +39,44 @@
     cells: Cell[];
   }
 
-  const weeks: Week[] = [];
-  let currentWeek: Cell[] = [];
-  const d = new Date(startDay);
+  const { weeks, numWeeks, allCells, nonZero } = $derived.by(() => {
+    const weeks: Week[] = [];
+    let currentWeek: Cell[] = [];
+    const d = new Date(startDay);
 
-  while (d <= endDay) {
-    const iso = d.toLocaleDateString("en-CA");
-    const jsDow = d.getDay(); // 0=Sun
-    const activity = activityByDate[iso];
-    const isFuture = d > today;
+    while (d <= endDay) {
+      const iso = d.toLocaleDateString("en-CA");
+      const jsDow = d.getDay(); // 0=Sun
+      const activity = activityByDate[iso];
+      const isFuture = d > today;
 
-    if (!isFuture) {
-      currentWeek.push({
-        date: iso,
-        row: jsDow,
-        count: activity?.count ?? 0,
-        cost: activity?.cost ?? 0,
-      });
-    }
-
-    // End of week (Saturday = 6) -> push column
-    if (jsDow === 6) {
-      if (currentWeek.length > 0) {
-        weeks.push({ cells: currentWeek });
+      if (!isFuture) {
+        currentWeek.push({
+          date: iso,
+          row: jsDow,
+          count: activity?.count ?? 0,
+          cost: activity?.cost ?? 0,
+        });
       }
-      currentWeek = [];
+
+      // End of week (Saturday = 6) -> push column
+      if (jsDow === 6) {
+        if (currentWeek.length > 0) {
+          weeks.push({ cells: currentWeek });
+        }
+        currentWeek = [];
+      }
+      d.setDate(d.getDate() + 1);
     }
-    d.setDate(d.getDate() + 1);
-  }
-  if (currentWeek.length > 0) {
-    weeks.push({ cells: currentWeek });
-  }
+    if (currentWeek.length > 0) {
+      weeks.push({ cells: currentWeek });
+    }
 
-  const numWeeks = weeks.length;
-
-  // Quantile-based intensity levels
-  const allCells = weeks.flatMap((w) => w.cells);
-  const nonZero = allCells.map((c) => c.count).filter((c) => c > 0).sort((a, b) => a - b);
+    const numWeeks = weeks.length;
+    const allCells = weeks.flatMap((w) => w.cells);
+    const nonZero = allCells.map((c) => c.count).filter((c) => c > 0).sort((a, b) => a - b);
+    return { weeks, numWeeks, allCells, nonZero };
+  });
 
   function getLevel(count: number): number {
     if (count === 0 || nonZero.length === 0) return 0;
@@ -95,23 +96,26 @@
     col: number; // week index
   }
 
-  const monthLabels: MonthLabel[] = [];
-  let lastMonth = -1;
-  for (let wi = 0; wi < weeks.length; wi++) {
-    const firstCell = weeks[wi].cells[0];
-    if (!firstCell) continue;
-    const month = parseInt(firstCell.date.slice(5, 7), 10) - 1;
-    if (month !== lastMonth) {
-      let col = wi;
-      // Nudge right by one week if this would collide with the previous label
-      const prev = monthLabels[monthLabels.length - 1];
-      if (prev && col - prev.col < 2) {
-        col = col + 1;
+  const monthLabels = $derived.by(() => {
+    const labels: MonthLabel[] = [];
+    let lastMonth = -1;
+    for (let wi = 0; wi < weeks.length; wi++) {
+      const firstCell = weeks[wi].cells[0];
+      if (!firstCell) continue;
+      const month = parseInt(firstCell.date.slice(5, 7), 10) - 1;
+      if (month !== lastMonth) {
+        let col = wi;
+        // Nudge right by one week if this would collide with the previous label
+        const prev = labels[labels.length - 1];
+        if (prev && col - prev.col < 2) {
+          col = col + 1;
+        }
+        labels.push({ text: monthNames[month], col });
+        lastMonth = month;
       }
-      monthLabels.push({ text: monthNames[month], col });
-      lastMonth = month;
     }
-  }
+    return labels;
+  });
 
   // Day labels — GitHub shows Mon/Wed/Fri aligned to rows 1/3/5 (Sun=0)
   const dayLabelRows = [
@@ -121,7 +125,7 @@
   ];
 
   const DAY_LABEL_W = 30; // px
-  const gridW = numWeeks * PITCH - GAP;
+  const gridW = $derived(numWeeks * PITCH - GAP);
   const gridH = 7 * PITCH - GAP;
 
   function fmtCost(n: number) {

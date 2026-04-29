@@ -326,7 +326,39 @@ User-editable files (`config.json`, `agents.json`, `*.md`) stay as files. The DB
 - The transcript indexer must skip live sessions (sessionId in the registry) because the SDK is still appending; otherwise it could cache a stale `lastTimestamp`.
 - See `.claude/rules/drizzle-migrations.md` for migration discipline future agents must follow.
 
-## ADR-021: Two-Tier LLM Evolve Pipeline (Haiku Breadth + Sonnet Depth)
+## ADR-021: Fork-Based Agent Process Tree with IPC Heartbeats
+
+**Date:** 2026-04-28
+**Status:** Accepted
+
+**Context:** The original architecture ran each Builder and Helper as an `async` loop inside the daemon process. This meant:
+- A misbehaving agent could hang the whole daemon
+- There was no way to kill an agent's in-flight turn without killing the daemon
+- Stall detection was time-based (last activity > threshold), producing false positives during legitimate long tool calls (e.g., `npm install`)
+- The user had no mid-task interrupt path from Slack
+
+**Decision:** Replace the async-loop-per-agent model with `child_process.fork()`. Each agent runs in an isolated Node.js process supervised by the daemon.
+
+Key design choices:
+- Each worker emits IPC heartbeats (`chunk-received`, `tool-start`, `tool-end`, `mail-sent`) so the supervisor has fine-grained state without polling
+- Stall detection uses 3 conditions simultaneously: `lastChunkAt` stale + `!toolCallActive` + `!waitingForMail`. A slow build with an active tool call is never flagged
+- `WorkerSpawnOptions` is fully serialisable (no functions/closures) so workers can be killed and re-forked with identical config; MCP servers are reconstructed inside the worker
+- Kill sequence: `agent_kill` (soft/hard), SIGTERM → 5s → SIGKILL for graceful destroy; re-fork preserves workspace + session ID
+- Worker path uses `import.meta.url.endsWith(".ts")` to pick `.ts` in dev (tsx) vs `.js` in prod; `execArgv: process.execArgv` propagates the tsx loader to child processes
+
+**Rationale:**
+- Process isolation prevents agent runaway from affecting the supervisor or other agents
+- IPC heartbeats provide richer signal than timestamps: a tool-active agent is never a stall, even if no text has been generated in 10 minutes
+- Re-fork without workspace teardown enables the Orchestrator to restart a stuck agent mid-epic without losing work
+- The `/friday kill <agent>` Slack command gives users an escape hatch for runaway agents from their phone
+
+**Consequences:**
+- Each agent now consumes an OS process slot. In practice the system runs ≤10 agents, so this is not a concern.
+- Workers must reconstruct MCP servers (mail, agent-tools) internally from serialisable `WorkerSpawnOptions` — these cannot be passed via IPC.
+- Orphaned child processes are possible if the daemon crashes uncleanly. On restart, `restoreActiveAgents()` spawns fresh workers, leaving the orphans to be collected by the OS when they exit naturally. No durable PID registry is maintained.
+- The `spawnOptions` cache is in-memory only. If a daemon restart occurs between `killAgentByName` and `reforkAgentByName`, the refork will fail (no stored options). The workaround is `restoreActiveAgents()` on restart, which rebuilds options from the registry.
+
+## ADR-022: Two-Tier LLM Evolve Pipeline (Haiku Breadth + Sonnet Depth)
 
 **Date:** 2026-04-27
 **Status:** Accepted

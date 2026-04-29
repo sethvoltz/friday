@@ -7,7 +7,7 @@ import { createSlackApp } from "./slack/app.js";
 import { registerEventHandlers } from "./slack/events.js";
 import { loadSessions } from "./sessions/manager.js";
 import { loadRegistry } from "./sessions/registry.js";
-import { initOrchestrator, restoreActiveAgents, isAgentRunning } from "./agent/lifecycle.js";
+import { initOrchestrator, restoreActiveAgents, isAgentRunning, getAgentStallState, killAllAgents } from "./agent/lifecycle.js";
 import { log } from "./log.js";
 import { startHealthHeartbeat, stopHealthHeartbeat } from "./monitor/health.js";
 import { startAgentHealthCheck, stopAgentHealthCheck } from "./monitor/agent-health.js";
@@ -66,6 +66,8 @@ async function main() {
     stopMailPoller();
     stopScheduler();
     stopTranscriptIndexer();
+    // Kill all forked agent worker processes before draining scheduled runs.
+    await killAllAgents(5_000);
     // Wait for in-flight scheduled runs to abort cleanly before exiting.
     // Without this, SIGTERM mid-run leaves orphan SDK subprocesses and stale "active" status.
     try {
@@ -197,8 +199,8 @@ async function main() {
   // Start the scheduler for cron/one-shot scheduled agents
   startScheduler({ model: config.agent.model });
 
-  // Start agent health monitoring
-  startAgentHealthCheck({ isAgentRunning });
+  // Start agent health monitoring with IPC-based stall detection
+  startAgentHealthCheck({ isAgentRunning, getStallState: getAgentStallState });
 
   log("info", "friday_ready", {
     pid: process.pid,

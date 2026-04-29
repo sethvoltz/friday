@@ -26,8 +26,9 @@
   const connection = $derived(getConnection());
 
   // Live uptime ticker
-  let uptimeMs = $state(data.health ? Date.now() - new Date(data.health.startedAt).getTime() : 0);
+  let uptimeMs = $state(0);
   onMount(() => {
+    if (data.health) uptimeMs = Date.now() - new Date(data.health.startedAt).getTime();
     const interval = setInterval(() => {
       if (data.health) {
         uptimeMs = Date.now() - new Date(data.health.startedAt).getTime();

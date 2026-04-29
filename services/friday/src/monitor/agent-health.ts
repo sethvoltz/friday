@@ -1,67 +1,73 @@
-import { listAgents, getAgent, updateAgentStatus } from "../sessions/registry.js";
+import { listAgents, updateAgentStatus } from "../sessions/registry.js";
 import { mailSend } from "../comms/mail.js";
 import { log } from "../log.js";
 
-// ── Activity tracking ──────────────────────────────────────────
+// ── Activity tracking ──────────────────────────────────────────────────────
 
 /** Timestamp of the last turn completion per agent */
 const lastActivity = new Map<string, number>();
 
-/**
- * Record that an agent just completed a turn.
- * Called from the agent loop after each successful query() result.
- */
 export function recordActivity(agentName: string): void {
   lastActivity.set(agentName, Date.now());
 }
 
-/**
- * Remove activity tracking for a destroyed agent.
- */
 export function clearActivity(agentName: string): void {
   lastActivity.delete(agentName);
 }
 
-/**
- * Get the last activity timestamp for an agent, or null if never recorded.
- */
 export function getLastActivity(agentName: string): number | null {
   return lastActivity.get(agentName) ?? null;
 }
 
-// ── Health check ───────────────────────────────────────────────
+// ── Stall state interface ─────────────────────────────────────────────────
+
+/** IPC-derived stall state for an agent worker process */
+export interface AgentStallState {
+  /** Timestamp of last chunk-received heartbeat */
+  lastChunkAt: number;
+  /** Whether a tool call is currently active */
+  toolCallActive: boolean;
+  /** Whether the agent is idle, waiting for mail */
+  waitingForMail: boolean;
+}
+
+// ── Health check config ────────────────────────────────────────────────────
 
 export interface HealthCheckConfig {
-  /** How long an "active" agent can go without a turn before it's stalled (ms) */
+  /**
+   * How long with no chunk AND no active tool AND not waiting for mail
+   * before an agent is declared stalled. Default: 30 seconds.
+   */
   stallThresholdMs: number;
-  /** How often to run the health check (ms) */
+  /** How often to run the health check. Default: 60 seconds. */
   intervalMs: number;
-  /** Function to check if an agent's loop is actually running */
+  /** Returns true if an agent's worker process is running */
   isAgentRunning: (name: string) => boolean;
+  /**
+   * Returns the IPC-derived stall state for a running agent, or null if
+   * no stall state is available (e.g., legacy agent not using fork).
+   */
+  getStallState?: (name: string) => AgentStallState | null;
 }
 
 const DEFAULT_CONFIG: HealthCheckConfig = {
-  stallThresholdMs: 10 * 60 * 1000, // 10 minutes
-  intervalMs: 60 * 1000, // check every 60 seconds
+  stallThresholdMs: 30_000,
+  intervalMs: 60_000,
   isAgentRunning: () => false,
 };
 
 let checkInterval: ReturnType<typeof setInterval> | null = null;
 let currentConfig: HealthCheckConfig = DEFAULT_CONFIG;
 
-/** Agents we've already notified about — don't spam the orchestrator */
 const notifiedStalled = new Set<string>();
 const notifiedCrashed = new Set<string>();
 
-/**
- * Start periodic agent health checks.
- */
+// ── Start / Stop ───────────────────────────────────────────────────────────
+
 export function startAgentHealthCheck(config?: Partial<HealthCheckConfig>): void {
   currentConfig = { ...DEFAULT_CONFIG, ...config };
 
-  if (checkInterval) {
-    clearInterval(checkInterval);
-  }
+  if (checkInterval) clearInterval(checkInterval);
 
   checkInterval = setInterval(() => {
     runHealthCheck(currentConfig);
@@ -75,9 +81,6 @@ export function startAgentHealthCheck(config?: Partial<HealthCheckConfig>): void
   });
 }
 
-/**
- * Stop the health check loop.
- */
 export function stopAgentHealthCheck(): void {
   if (checkInterval) {
     clearInterval(checkInterval);
@@ -85,75 +88,100 @@ export function stopAgentHealthCheck(): void {
   }
 }
 
+// ── Health check ───────────────────────────────────────────────────────────
+
 /**
- * Run a single health check pass. Exported for testing.
+ * Run one health-check pass.
+ *
+ * Stall detection: all three must hold simultaneously —
+ *   1. No chunk-received heartbeat in the last stallThresholdMs
+ *   2. No tool call currently active
+ *   3. Not in idle-wait-for-mail state
+ *
+ * Crash detection: process exited but registry still shows active/idle.
  */
 export function runHealthCheck(config: HealthCheckConfig): HealthIssue[] {
   const issues: HealthIssue[] = [];
   const now = Date.now();
 
-  // Check all non-orchestrator, non-destroyed agents
-  const agents = listAgents();
-
-  for (const { name, entry } of agents) {
+  for (const { name, entry } of listAgents()) {
     if (entry.type === "orchestrator") continue;
-    if (entry.type === "scheduled") continue; // Dormant between runs is normal
+    if (entry.type === "scheduled") continue;
     if (entry.status === "destroyed") continue;
 
     const loopRunning = config.isAgentRunning(name);
 
-    // Crash detection: agent is active/idle in registry but loop is not running
+    // ── Crash detection ──────────────────────────────────────────────────
     if ((entry.status === "active" || entry.status === "idle") && !loopRunning) {
       if (!notifiedCrashed.has(name)) {
         const issue: HealthIssue = {
           type: "crashed",
           agentName: name,
           agentType: entry.type,
-          message: `Agent "${name}" (${entry.type}) has no running loop but status is "${entry.status}". It may have crashed.`,
+          message:
+            `Agent "${name}" (${entry.type}) has no running process but ` +
+            `registry status is "${entry.status}".`,
         };
         issues.push(issue);
         notifiedCrashed.add(name);
-
-        // Update status
         updateAgentStatus(name, "idle");
-
-        // Notify orchestrator
         notifyOrchestrator(issue);
-
         log("warn", "agent_health_crashed", { agent: name, type: entry.type });
       }
     } else if (loopRunning) {
-      // If loop is running, clear crash notification
       notifiedCrashed.delete(name);
     }
 
-    // Stall detection: agent is "active" and loop is running,
-    // but no turn has completed in stallThresholdMs
-    if (entry.status === "active" && loopRunning) {
-      const lastTs = lastActivity.get(name);
-      if (lastTs && now - lastTs > config.stallThresholdMs) {
-        if (!notifiedStalled.has(name)) {
-          const stalledMinutes = Math.round((now - lastTs) / 60_000);
-          const issue: HealthIssue = {
-            type: "stalled",
-            agentName: name,
-            agentType: entry.type,
-            message: `Agent "${name}" (${entry.type}) has been active with no turn progress for ${stalledMinutes} minutes.`,
-          };
-          issues.push(issue);
-          notifiedStalled.add(name);
+    // ── Stall detection (3-condition IPC-based) ──────────────────────────
+    if (entry.status === "active" && loopRunning && config.getStallState) {
+      const stallState = config.getStallState(name);
 
-          notifyOrchestrator(issue);
+      if (stallState) {
+        const isStalled =
+          !stallState.toolCallActive &&
+          !stallState.waitingForMail &&
+          now - stallState.lastChunkAt > config.stallThresholdMs;
 
-          log("warn", "agent_health_stalled", {
-            agent: name,
-            type: entry.type,
-            stalledMinutes,
-          });
+        if (isStalled) {
+          if (!notifiedStalled.has(name)) {
+            const stalledSec = Math.round((now - stallState.lastChunkAt) / 1000);
+            const issue: HealthIssue = {
+              type: "stalled",
+              agentName: name,
+              agentType: entry.type,
+              message:
+                `Agent "${name}" (${entry.type}) stalled: no stream progress for ` +
+                `${stalledSec}s (no chunk, no active tool, not waiting for mail).`,
+            };
+            issues.push(issue);
+            notifiedStalled.add(name);
+            notifyOrchestrator(issue);
+            log("warn", "agent_health_stalled", { agent: name, stalledSec });
+          }
+        } else {
+          notifiedStalled.delete(name);
         }
       } else {
-        // If activity resumed, clear stall notification
-        notifiedStalled.delete(name);
+        // No IPC stall state available — fall back to last-activity timestamp
+        const lastTs = getLastActivity(name);
+        if (lastTs && now - lastTs > config.stallThresholdMs) {
+          if (!notifiedStalled.has(name)) {
+            const stalledSec = Math.round((now - lastTs) / 1000);
+            const issue: HealthIssue = {
+              type: "stalled",
+              agentName: name,
+              agentType: entry.type,
+              message:
+                `Agent "${name}" (${entry.type}) stalled: no turn activity for ${stalledSec}s.`,
+            };
+            issues.push(issue);
+            notifiedStalled.add(name);
+            notifyOrchestrator(issue);
+            log("warn", "agent_health_stalled_legacy", { agent: name, stalledSec });
+          }
+        } else if (lastTs) {
+          notifiedStalled.delete(name);
+        }
       }
     }
   }
@@ -161,7 +189,7 @@ export function runHealthCheck(config: HealthCheckConfig): HealthIssue[] {
   return issues;
 }
 
-// ── Types ──────────────────────────────────────────────────────
+// ── Types ──────────────────────────────────────────────────────────────────
 
 export interface HealthIssue {
   type: "stalled" | "crashed";
@@ -170,7 +198,7 @@ export interface HealthIssue {
   message: string;
 }
 
-// ── Notification ───────────────────────────────────────────────
+// ── Notification ───────────────────────────────────────────────────────────
 
 function notifyOrchestrator(issue: HealthIssue): void {
   try {
@@ -188,9 +216,6 @@ function notifyOrchestrator(issue: HealthIssue): void {
   }
 }
 
-/**
- * Reset notification state — for testing or when an agent is restarted.
- */
 export function clearNotifications(agentName?: string): void {
   if (agentName) {
     notifiedStalled.delete(agentName);

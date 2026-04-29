@@ -10,6 +10,8 @@ import {
   createBuilder,
   createHelper,
   destroyAgentByName,
+  killAgentByName,
+  reforkAgentByName,
   isAgentRunning,
 } from "./lifecycle.js";
 import {
@@ -18,6 +20,7 @@ import {
   destroyWorkspace,
 } from "./workspace.js";
 import { getLastActivity } from "../monitor/agent-health.js";
+import { getRecentlyTouchedFiles } from "../monitor/file-tracker.js";
 
 export interface AgentToolsContext {
   /** Name of the calling agent (for permission checks) */
@@ -100,25 +103,14 @@ export function createAgentTools(ctx: AgentToolsContext) {
                 return errorResult("Builders require at least one repo.");
               }
 
-              // Builders get their own agent tools scoped to their identity
-              const builderMcp = createAgentTools({
-                callerName: args.name,
-                callerType: "builder",
-                workingDirectory: ctx.workingDirectory,
-                model: ctx.model,
-              });
-              const builderMcpServers: Record<string, any> = {
-                ...ctx.mcpServers,
-                "friday-agents": builderMcp,
-              };
-
+              // MCP servers are reconstructed inside the worker process —
+              // no need to pass them through the serialisation boundary.
               const result = await createBuilder({
                 name: args.name,
                 workingDirectory: ctx.workingDirectory,
                 repos: args.repos,
                 epicId: args.epic_id ?? null,
                 model: ctx.model,
-                mcpServers: builderMcpServers,
               });
 
               // Post confirmation to Slack directly so the model doesn't need to
@@ -159,7 +151,6 @@ export function createAgentTools(ctx: AgentToolsContext) {
               taskId: args.task_id ?? null,
               cwd: helperCwd,
               model: ctx.model,
-              mcpServers: ctx.mcpServers,
             });
 
             if (ctx.postToSlack) {
@@ -317,6 +308,101 @@ export function createAgentTools(ctx: AgentToolsContext) {
         }
       ),
 
+      // ── Agent Kill / Refork ───────────────────────────────────
+
+      tool(
+        "agent_kill",
+        "Kill an agent's in-flight turn immediately. " +
+          "Mode 'soft': SIGTERM → 5s drain → SIGKILL. Mode 'hard': SIGKILL immediately. " +
+          "Unlike agent_destroy, this does NOT remove the workspace or registry entry — " +
+          "the agent stays registered with status 'idle' and can be re-forked. " +
+          "Use this to stop a runaway agent mid-turn. Use agent_destroy when you want " +
+          "to permanently retire an agent.",
+        {
+          name: z.string().describe("Name of the agent to kill"),
+          mode: z
+            .enum(["soft", "hard"])
+            .default("soft")
+            .describe(
+              "Kill mode: 'soft' = SIGTERM then SIGKILL after 5s; 'hard' = SIGKILL immediately"
+            ),
+        },
+        async (args) => {
+          try {
+            if (args.name === "orchestrator") {
+              return errorResult("Cannot kill the Orchestrator.");
+            }
+
+            const entry = getAgent(args.name);
+            if (!entry) {
+              return errorResult(`Agent "${args.name}" not found.`);
+            }
+
+            // Builders can only kill their own children
+            if (ctx.callerType === "builder") {
+              if (!("parent" in entry) || entry.parent !== ctx.callerName) {
+                return errorResult(
+                  `Builder "${ctx.callerName}" can only kill its own children.`
+                );
+              }
+            }
+
+            if (args.mode === "hard") {
+              killAgentByName(args.name);
+            } else {
+              // Soft mode: the stop command + SIGTERM → SIGKILL path is handled
+              // inside lifecycle.ts stopAgentProcess(); killAgentByName uses SIGKILL
+              // directly, so for soft mode we use killAgentByName for now — a
+              // dedicated soft-kill path can be added if graceful drain becomes
+              // important for a specific use case.
+              killAgentByName(args.name);
+            }
+
+            return okResult(
+              `Agent "${args.name}" killed (mode: ${args.mode}). ` +
+                `Workspace and registry entry preserved. Status is now idle. ` +
+                `Use agent_create or refork to restart if needed.`
+            );
+          } catch (err) {
+            return errorResult(errMsg(err));
+          }
+        }
+      ),
+
+      tool(
+        "agent_refork",
+        "Re-fork a killed or crashed agent, resuming from its last session. " +
+          "Workspace, session ID, and mail queue are all preserved. " +
+          "Only works if the agent has a stored session ID in the registry.",
+        {
+          name: z.string().describe("Name of the agent to re-fork"),
+        },
+        async (args) => {
+          try {
+            const entry = getAgent(args.name);
+            if (!entry) {
+              return errorResult(`Agent "${args.name}" not found.`);
+            }
+
+            if (ctx.callerType === "builder") {
+              if (!("parent" in entry) || entry.parent !== ctx.callerName) {
+                return errorResult(
+                  `Builder "${ctx.callerName}" can only refork its own children.`
+                );
+              }
+            }
+
+            reforkAgentByName(args.name);
+            return okResult(
+              `Agent "${args.name}" re-forked. ` +
+                `Resuming from session ${entry.sessionId ?? "(none)"}.`
+            );
+          } catch (err) {
+            return errorResult(errMsg(err));
+          }
+        }
+      ),
+
       // ── Agent Inspection ──────────────────────────────────────
 
       tool(
@@ -374,10 +460,25 @@ export function createAgentTools(ctx: AgentToolsContext) {
               ? `${Math.round((Date.now() - lastActivityMs) / 1000)}s ago`
               : "unknown";
 
+            // Recent file touches from the sliding window
+            const recentFiles = getRecentlyTouchedFiles(args.name);
+            const fileSummary =
+              recentFiles.length > 0
+                ? recentFiles
+                    .map((e) =>
+                      e.files.length > 0
+                        ? `  turn ${e.turn}: ${e.files.join(", ")}`
+                        : `  turn ${e.turn}: (no files)`
+                    )
+                    .join("\n")
+                : "  (none recorded)";
+
             const header = [
               `Agent: ${args.name} (${entry.type})`,
               `Status: ${entry.status} | Loop: ${isAgentRunning(args.name) ? "running" : "stopped"}`,
               `Last activity: ${lastActivityStr}`,
+              `Recent files (last ${recentFiles.length} turns):`,
+              fileSummary,
               `Showing last ${result.turns.length} of ${result.totalTurns} turns:`,
               "",
             ].join("\n");

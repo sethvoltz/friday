@@ -18,6 +18,8 @@ export interface QueuedMessage {
   userId: string;
   wasQueued?: boolean;
   images?: ImageAttachment[];
+  /** Set true when the message matches the interrupt-signal heuristic */
+  interrupt?: boolean;
 }
 
 interface ChannelQueue {

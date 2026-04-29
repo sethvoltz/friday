@@ -8,6 +8,8 @@ import { createMailTools } from "../comms/mail-tools.js";
 import { log } from "../log.js";
 import { resetSession, getSessionId } from "../sessions/manager.js";
 import { listAgents, getAgent } from "../sessions/registry.js";
+import { killAgentByName, getAgentStallState } from "../agent/lifecycle.js";
+import { getRecentlyTouchedFiles } from "../monitor/file-tracker.js";
 import { buildInspectResult, formatTurns } from "@friday/shared";
 import {
   getSessionStats,
@@ -35,6 +37,7 @@ import {
   buildBlockquote,
   formatErrorResponse,
   buildSessionFields,
+  isInterruptSignal,
   type MultimodalPrompt,
 } from "./helpers.js";
 import { fetchSlackImages } from "./image-fetch.js";
@@ -114,6 +117,7 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
         return;
       }
 
+      const now = Date.now();
       const lines = agents.map(({ name, entry }) => {
         const typeLabel =
           entry.type === "orchestrator"
@@ -125,8 +129,24 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
           "workspace" in entry ? `  ·  \`${entry.workspace}\`` : "";
         const parent =
           "parent" in entry ? `  ·  _parent: ${entry.parent}_` : "";
+
+        // Last-activity label
+        const stall = getAgentStallState(name);
+        const lastChunkAge = stall ? Math.round((now - stall.lastChunkAt) / 1000) : null;
+        const activityStr = lastChunkAge !== null ? `  ·  _${lastChunkAge}s ago_` : "";
+
+        // Stall indicator (only for active agents with stall state)
+        const STALL_THRESHOLD_DISPLAY = 30_000;
+        const isStalled =
+          stall !== null &&
+          entry.status === "active" &&
+          !stall.toolCallActive &&
+          !stall.waitingForMail &&
+          now - stall.lastChunkAt > STALL_THRESHOLD_DISPLAY;
+        const stallIndicator = isStalled ? "  :warning: *stall*" : "";
+
         const status = entry.status === "active" ? ":large_green_circle:" : ":white_circle:";
-        return `${status} ${typeLabel}  *${name}*  \`${entry.type}\`${parent}${workspace}`;
+        return `${status} ${typeLabel}  *${name}*  \`${entry.type}\`${parent}${workspace}${activityStr}${stallIndicator}`;
       });
 
       await client.chat.postEphemeral({
@@ -150,6 +170,54 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
           },
         ],
       });
+    } else if (args.startsWith("kill")) {
+      const agentName = args.replace(/^kill\s*/, "").trim();
+      if (!agentName) {
+        await respond("Usage: `/friday kill <agent-name>`");
+        return;
+      }
+      if (agentName === "orchestrator") {
+        await respond(":no_entry:  Cannot kill the Orchestrator.");
+        return;
+      }
+      const killEntry = getAgent(agentName);
+      if (!killEntry) {
+        await respond(
+          `:x:  Agent \`${agentName}\` not found. Use \`/friday agents\` to see available agents.`
+        );
+        return;
+      }
+      try {
+        killAgentByName(agentName);
+
+        // Report recently touched files so the user knows what was in-flight
+        const touched = getRecentlyTouchedFiles(agentName, 1);
+        const touchedFiles =
+          touched.length > 0 && touched[0].files.length > 0
+            ? `\nFiles touched in the killed turn: ${touched[0].files.join(", ")}`
+            : "";
+
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: command.user_id,
+          text: `:skull:  Agent *${agentName}* killed. Workspace preserved.${touchedFiles}`,
+          blocks: [
+            {
+              type: "section",
+              text: {
+                type: "mrkdwn",
+                text:
+                  `:skull:  Agent *${agentName}* killed. Workspace preserved.` +
+                  (touchedFiles ? `\n${touchedFiles}` : ""),
+              },
+            },
+          ],
+        });
+      } catch (err) {
+        await respond(
+          `:x:  Failed to kill \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
     } else if (args === "session") {
       const sessionId = getSessionId(channelId);
       if (!sessionId) {
@@ -263,7 +331,8 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
         "*Friday commands:*\n" +
           "• `/friday reset` — Clear session, start fresh\n" +
           "• `/friday session` — Show current session info\n" +
-          "• `/friday agents` — List active agents\n" +
+          "• `/friday agents` — List active agents (with stall indicators)\n" +
+          "• `/friday kill <agent>` — Force-kill a running agent (workspace preserved)\n" +
           "• `/friday inspect <agent>` — Inspect agent's recent transcript\n" +
           "• `/friday help` — Show this message"
       );
@@ -360,6 +429,7 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
       userId,
       wasQueued: isProcessing(channelId),
       images: images && images.length > 0 ? images : undefined,
+      interrupt: sessionType === "orchestrator" && isInterruptSignal(text),
     };
 
     if (queuedMsg.wasQueued) {

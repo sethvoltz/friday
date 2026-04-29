@@ -32,8 +32,10 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | `src/slack/events.ts` | Message handler, `/friday` commands, per-channel FIFO queue, streaming, compaction detection, image attachment handling |
 | `src/agent/client.ts` | Wraps Agent SDK `query()`, streams text chunks, detects compaction, logs usage, passes MCP servers and system prompt; accepts multimodal prompts (text + images) |
 | `src/agent/tools.ts` | Slack MCP tools (`slack_reply`) injected into agent sessions via `createSdkMcpServer` |
-| `src/agent/agent-tools.ts` | Agent management MCP tools (`agent_create`, `agent_list`, `agent_status`, `agent_destroy`, `worktree_add`, `worktree_remove`) |
-| `src/agent/lifecycle.ts` | Agent lifecycle — create/destroy Builders and Helpers, spawn/stop agent loops, restore on daemon restart |
+| `src/agent/agent-tools.ts` | Agent management MCP tools (`agent_create`, `agent_list`, `agent_status`, `agent_destroy`, `agent_kill`, `agent_refork`, `worktree_add`, `worktree_remove`) |
+| `src/agent/lifecycle.ts` | Fork-based agent supervisor — spawns each agent as a `child_process.fork()` worker, tracks IPC stall state, handles kill/refork, restores on restart |
+| `src/agent/worker.ts` | Forked child process entrypoint — runs the Claude SDK query loop in isolation, emits IPC heartbeats (`chunk-received`, `tool-start/end`, `mail-sent`, `file-access`) |
+| `src/agent/worker-protocol.ts` | IPC message types between supervisor and worker (`WorkerCommand`, `WorkerEvent`, `WorkerSpawnOptions`) |
 | `src/agent/workspace.ts` | Workspace and git worktree management for Builder agents |
 | `src/agent/prime.ts` | System prompt and first-turn prompt generation for typed agent sessions (Orchestrator, Builder, Helper, Scheduled) |
 | `src/scheduler/scheduler.ts` | Scheduler loop — 30s interval checks for due scheduled agents, triggers execution, catches up missed runs on restart |
@@ -45,7 +47,8 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | `src/monitor/usage.ts` | Appends per-turn usage entries to `~/.friday/usage.jsonl` |
 | `src/monitor/session-stats.ts` | Reads usage log, computes session aggregates (cost, tokens, cache hit rate, duration) |
 | `src/monitor/health.ts` | Writes `~/.friday/health.json` heartbeat every 30s (pid, uptime, last heartbeat). Removed on clean shutdown. |
-| `src/monitor/agent-health.ts` | Periodic agent health checks — detects stalled agents (no turn progress) and crashed agents (loop exited but status active). Notifies orchestrator via mail. |
+| `src/monitor/agent-health.ts` | Periodic agent health checks — 3-condition IPC stall detection (no chunk + no tool active + not waiting on mail) and crash detection. Notifies orchestrator via mail. |
+| `src/monitor/file-tracker.ts` | Per-agent sliding window of files touched per turn (default 10 turns). Used by `/friday kill` to report recently modified files. |
 | `src/memory/memory-tools.ts` | Memory MCP tools (`memory_search`, `memory_save`, `memory_update`, `memory_get`, `memory_forget`) for Orchestrator and Bare sessions |
 | `src/memory/auto-recall.ts` | Builds a `<memory-context>` block prepended to each Orchestrator/Bare prompt — runs hybrid keyword search and embeds top-N entries verbatim so the agent never has to call `memory_search` first |
 | `src/evolve/seed.ts` | Boot-time idempotent seed of the `scheduled-meta-daily` (cron `0 4 * * *`) and `scheduled-meta-weekly` (cron `0 5 * * 0`) agents — daily 24h scan + escalation, weekly 7-day scan + Jaccard re-cluster |
@@ -187,7 +190,8 @@ When the Agent SDK detects conversation compaction:
 |---------|----------|
 | `/friday reset` | Clears channel session, posts confirmation. Blocked on the orchestrator channel (long-lived session). |
 | `/friday session` | Shows session stats: ID, turns, cost, cache rate, age, duration, working dir (channel-visible) |
-| `/friday agents` | Lists all active agents with type, name, status |
+| `/friday agents` | Lists all active agents with type, name, status, last-activity age, and stall indicator (⚠ if stalled) |
+| `/friday kill <agent>` | Kills an agent's in-flight turn via SIGKILL; reports recently touched files so the orchestrator can brief the user |
 | `/friday inspect <agent>` | Shows compact summary of agent's last 3 turns: status, parent, tool calls, cost (ephemeral) |
 | `/friday help` | Lists commands (ephemeral, user-only) |
 
@@ -316,23 +320,39 @@ The orchestrator and builder system prompts include this guidance. The registry 
 
 ### Agent Lifecycle
 
-Builders and Helpers run as background loops in the daemon:
+Each Builder and Helper runs as a **separate `child_process.fork()` worker**. The daemon is the supervisor; workers are isolated Node.js processes.
 
-1. **Create** — register in `~/.friday/agents.json`, set up workspace (Builders), spawn loop
-2. **Loop** — `query()` turn with system prompt and first-turn prompt → process result → mark idle
-3. **Destroy** — stop loop, destroy workspace (Builders), remove from registry (recursive for children)
+**Process tree:**
+```
+daemon (supervisor)
+ ├── builder-xyz worker  (fork)
+ ├── helper-abc worker   (fork)
+ └── ...
+```
 
-On daemon restart, active agents are restored from the registry and their loops are resumed using stored session IDs.
+1. **Create** — register in `~/.friday/agents.json`, set up workspace (Builders), `fork()` worker, send `{type:"start", options}` via IPC
+2. **Run** — worker runs the Claude SDK query loop, emits IPC heartbeats; supervisor updates stall state per heartbeat
+3. **Idle** — after a turn with no pending mail, worker emits `mail-sent` and waits; supervisor forwards `mail-wakeup` IPC when mail arrives
+4. **Kill** — `agent_kill` / `/friday kill` sends SIGKILL immediately; agent stays in registry as idle, can be re-forked
+5. **Destroy** — SIGTERM → 5s grace → SIGKILL; workspace preserved, registry entry removed
+6. **Restart** — `reforkAgentByName()` kills current process and forks a fresh one with stored `spawnOptions` + current `sessionId`
 
-**Mail-delivery loop contract** (`src/agent/lifecycle.ts`):
+On daemon restart, active/idle agents are re-forked with stored `sessionId` so Claude Code resumes the session.
 
-The outer agent loop runs a `query()` turn **only when `prompt` has been freshly assigned from real pending mail** (or on initial startup). After a turn completes:
+**IPC heartbeat protocol** (`src/agent/worker-protocol.ts`):
 
-1. An inter-turn `buildMailPrompt()` check runs. If mail is found, `prompt` is set and the outer loop continues immediately.
-2. If no mail, the agent goes idle and enters an **inner wait loop** that repeatedly calls `waitForMail()` until mail actually arrives. The inner loop handles spurious wakeups (the 60-second fallback timer fires; a push event arrives for an already-processed message) by staying idle rather than falling through.
-3. Only when the inner loop finds pending mail does it set `prompt`, update status to `active`, and break out — allowing the outer loop to run the next turn.
+| Event (worker → supervisor) | Effect on stall state |
+|-----------------------------|----------------------|
+| `chunk-received` | `lastChunkAt = now`, clears `toolCallActive`, `waitingForMail` |
+| `tool-start` | `toolCallActive = true`, `waitingForMail = false` |
+| `tool-end` | `toolCallActive = false` |
+| `mail-sent` | `waitingForMail = true` |
+| `status-change: active` | `waitingForMail = false` |
+| `status-change: idle` | `waitingForMail = true` |
 
-This invariant prevents stale-prompt reinjection: if the 60-second fallback timer fires and `buildMailPrompt()` returns null, the agent stays idle and does not re-run a query turn with the previous mail notification as the prompt.
+**3-condition stall detection** (`src/monitor/agent-health.ts`):
+
+A running agent is flagged as stalled only when ALL THREE are true: `lastChunkAt` older than threshold AND `!toolCallActive` AND `!waitingForMail`. This prevents false positives on legitimate long-running tool calls (e.g., a 3-minute `npm install`) and on idle agents waiting for mail.
 
 ### Scheduled Agents
 
@@ -447,7 +467,7 @@ pnpm --filter @friday/cli exec vitest run src/commands/start.test.ts
 | `@friday/memory` | `store.test.ts`, `search.test.ts` | Memory CRUD, serialization roundtrip, recall tracking, hybrid search scoring, tag filtering, recall frequency boosting, event logging |
 | `@friday/evolve` | `store.test.ts`, `scan.test.ts`, `rank.test.ts`, `propose.test.ts`, `clusters.test.ts`, `apply.test.ts` | Proposal CRUD + frontmatter roundtrip; deterministic scanners with `scheduled-meta-*` self-exclusion (daemon, feedback, usage spike, transcript retry); scoring + critical thresholds; merge-by-hash and rerank-all; Jaccard cluster merge with union-find; apply pipeline for memory/prompt/config/code (code dispatches via injected `bd` runner — asserts epic body, mail labels, error propagation, self-modification guard) |
 | `@friday/cli` | `help.test.ts`, `services.test.ts`, 8× command tests | Help text, PID management, isRunning, parseServiceArg, findMonorepoRoot, all CLI commands including inspect, transcript, and schedule management |
-| `@friday/daemon` | `queue.test.ts`, `manager.test.ts`, `helpers.test.ts`, `usage.test.ts`, `config.test.ts`, `registry.test.ts`, `workspace.test.ts`, `workspace-guard.test.ts`, `prime.test.ts`, `client.test.ts`, `agent-tools.test.ts`, `preflight.test.ts`, `image-fetch.test.ts`, `agent-health.test.ts`, `mail.test.ts`, `mail-poller.test.ts`, `lifecycle.test.ts`, `auto-recall.test.ts`, `events/bus.test.ts`, `events/server.test.ts`, `scheduler/scheduler.test.ts`, `scheduler/trigger.test.ts` | FIFO queue ops, session persistence, Slack helpers, usage logging, runtime config, agent registry CRUD, workspace/worktree lifecycle, builder workspace path guard (PreToolCall hook), system prompt generation, thinking indicator and status callbacks, MCP agent tools, boot preflight cleanup, Slack image fetch and base64 encoding, agent health monitoring (stall/crash detection), mail CRUD and push/poll delivery, agent loop idle-wait invariant (no stale-prompt reinjection), memory auto-recall context block assembly, EventBus publish/replay/ring buffer, SSE server endpoints/streaming/reconnect replay, scheduler check loop and cron parsing, scheduled agent triggering and state injection |
+| `@friday/daemon` | `queue.test.ts`, `manager.test.ts`, `helpers.test.ts`, `usage.test.ts`, `config.test.ts`, `registry.test.ts`, `workspace.test.ts`, `workspace-guard.test.ts`, `prime.test.ts`, `client.test.ts`, `agent-tools.test.ts`, `preflight.test.ts`, `image-fetch.test.ts`, `agent-health.test.ts`, `file-tracker.test.ts`, `interrupt.test.ts`, `mail.test.ts`, `mail-poller.test.ts`, `lifecycle.test.ts`, `auto-recall.test.ts`, `events/bus.test.ts`, `events/server.test.ts`, `scheduler/scheduler.test.ts`, `scheduler/trigger.test.ts` | FIFO queue ops, session persistence, Slack helpers (including interrupt signal detection), usage logging, runtime config, agent registry CRUD, workspace/worktree lifecycle, builder workspace path guard (PreToolCall hook), system prompt generation, thinking indicator and status callbacks, MCP agent tools (including `agent_kill`/`agent_refork`), boot preflight cleanup, Slack image fetch and base64 encoding, 3-condition IPC stall detection and crash detection, turn-scoped file tracking sliding window, mail CRUD and push/poll delivery, fork-based agent supervisor (spawn/kill/SIGKILL-fallback/refork/multi-agent isolation/daemon restart restore), memory auto-recall context block assembly, EventBus publish/replay/ring buffer, SSE server endpoints/streaming/reconnect replay, scheduler check loop and cron parsing, scheduled agent triggering and state injection |
 
 ### Conventions
 
