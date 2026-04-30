@@ -43,8 +43,10 @@ export {
 } from "./scan-friction.js";
 
 export {
+  type AbortReason,
   type ChatOptions,
   type ChatResult,
+  ChatAbortError,
   chat,
   extractJson,
 } from "./llm.js";

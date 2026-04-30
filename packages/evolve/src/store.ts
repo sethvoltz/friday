@@ -72,6 +72,10 @@ export interface Proposal {
   enrichedAt: string | null;
   /** Model used for the enrichment call. NULL if the body is still templated. */
   enrichedBy: string | null;
+  /** Error message from the last failed enrichment attempt. Cleared on success. */
+  lastEnrichError: string | null;
+  /** ISO timestamp of the last failed enrichment attempt. Cleared on success. */
+  lastEnrichFailedAt: string | null;
 }
 
 export function ensureImprovementsDirs(): void {
@@ -116,6 +120,8 @@ export function parseProposal(id: string, raw: string): Proposal {
     appliedBy: fields.appliedBy ?? null,
     enrichedAt: fields.enrichedAt ?? null,
     enrichedBy: fields.enrichedBy ?? null,
+    lastEnrichError: fields.lastEnrichError ?? null,
+    lastEnrichFailedAt: fields.lastEnrichFailedAt ?? null,
   };
 }
 
@@ -138,6 +144,8 @@ export function serializeProposal(p: Proposal): string {
     `appliedBy: ${p.appliedBy ? `"${p.appliedBy}"` : "null"}`,
     `enrichedAt: ${p.enrichedAt ? `"${p.enrichedAt}"` : "null"}`,
     `enrichedBy: ${p.enrichedBy ? `"${p.enrichedBy}"` : "null"}`,
+    `lastEnrichError: ${p.lastEnrichError ? JSON.stringify(p.lastEnrichError) : "null"}`,
+    `lastEnrichFailedAt: ${p.lastEnrichFailedAt ? `"${p.lastEnrichFailedAt}"` : "null"}`,
     `signals: ${JSON.stringify(p.signals)}`,
     "---",
     "",
@@ -188,6 +196,8 @@ export function saveProposal(input: SaveProposalInput): Proposal {
     appliedBy: null,
     enrichedAt: null,
     enrichedBy: null,
+    lastEnrichError: null,
+    lastEnrichFailedAt: null,
   };
 
   writeFileSync(filePath(id), serializeProposal(proposal));
@@ -214,6 +224,8 @@ export interface UpdateProposalInput {
   appliedBy?: string | null;
   enrichedAt?: string | null;
   enrichedBy?: string | null;
+  lastEnrichError?: string | null;
+  lastEnrichFailedAt?: string | null;
   /** Override the auto-assigned `updatedAt`. Pass when a write needs `enrichedAt` and `updatedAt` to share a timestamp so idempotency checks survive sub-millisecond races. */
   updatedAt?: string;
 }

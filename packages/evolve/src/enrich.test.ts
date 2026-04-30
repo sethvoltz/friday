@@ -11,6 +11,7 @@ vi.mock("node:os", async () => {
 });
 
 import type { Signal } from "./store.js";
+import { ChatAbortError } from "./llm.js";
 
 const { enrichProposals, hydrateEvidence } = await import("./enrich.js");
 const { saveProposal, getProposal, ensureImprovementsDirs } = await import("./store.js");
@@ -152,7 +153,7 @@ describe("enrichProposals", () => {
     expect(result.enriched.map((e) => e.id)).toContain(p2.id);
   });
 
-it("records limit-reached skips when more proposals than --limit", async () => {
+  it("records limit-reached skips when more proposals than --limit", async () => {
     const ids: string[] = [];
     for (let i = 0; i < 3; i++) {
       const p = saveProposal({
@@ -176,6 +177,95 @@ it("records limit-reached skips when more proposals than --limit", async () => {
     const result = await enrichProposals({ all: true, enrichFn, limit: 1 });
     expect(result.enriched).toHaveLength(1);
     expect(result.skipped.some((s) => s.reason === "limit reached")).toBe(true);
+  });
+
+  it("persists lastEnrichError on failure and clears it on success", async () => {
+    const p = saveProposal({
+      title: "error-then-success",
+      type: "memory",
+      proposedChange: "stub",
+      signals: [makeSignal()],
+      blastRadius: "low",
+      appliesTo: [],
+      createdBy: "cli",
+    });
+
+    const failFn = vi.fn().mockRejectedValue(new Error("boom"));
+    await enrichProposals({ id: p.id, enrichFn: failFn });
+
+    const afterFail = getProposal(p.id);
+    expect(afterFail?.lastEnrichError).toBe("boom");
+    expect(afterFail?.lastEnrichFailedAt).toBeTruthy();
+
+    const successFn = vi.fn().mockResolvedValue({
+      body: "fixed",
+      type: "memory" as const,
+      blastRadius: "low" as const,
+    });
+    await enrichProposals({ id: p.id, enrichFn: successFn });
+
+    const afterSuccess = getProposal(p.id);
+    expect(afterSuccess?.lastEnrichError).toBeNull();
+    expect(afterSuccess?.lastEnrichFailedAt).toBeNull();
+    expect(afterSuccess?.proposedChange).toBe("fixed");
+  });
+
+  it("surfaces abortReason in failed array when ChatAbortError thrown", async () => {
+    const p = saveProposal({
+      title: "abort-test",
+      type: "memory",
+      proposedChange: "stub",
+      signals: [makeSignal()],
+      blastRadius: "low",
+      appliesTo: [],
+      createdBy: "cli",
+    });
+
+    const abortFn = vi.fn().mockRejectedValue(
+      new ChatAbortError("interrupted", "enrichment aborted (SIGINT or parent session lifecycle)")
+    );
+    const result = await enrichProposals({ id: p.id, enrichFn: abortFn });
+
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].abortReason).toBe("interrupted");
+    expect(result.failed[0].error).toContain("aborted");
+    expect(getProposal(p.id)?.lastEnrichError).toContain("aborted");
+  });
+
+  it("--retry-failed targets only proposals with lastEnrichError set", async () => {
+    const failed = saveProposal({
+      title: "failed-proposal",
+      type: "memory",
+      proposedChange: "stub",
+      signals: [makeSignal({ hash: "h-fail" })],
+      blastRadius: "low",
+      appliesTo: [],
+      createdBy: "cli",
+    });
+    const clean = saveProposal({
+      title: "clean-proposal",
+      type: "memory",
+      proposedChange: "stub",
+      signals: [makeSignal({ hash: "h-clean" })],
+      blastRadius: "low",
+      appliesTo: [],
+      createdBy: "cli",
+    });
+
+    // Simulate a previous failure on 'failed'.
+    const failFn = vi.fn().mockRejectedValue(new Error("abort"));
+    await enrichProposals({ id: failed.id, enrichFn: failFn });
+
+    const successFn = vi.fn().mockResolvedValue({
+      body: "retried",
+      type: "memory" as const,
+      blastRadius: "low" as const,
+    });
+    const result = await enrichProposals({ retryFailed: true, enrichFn: successFn });
+
+    expect(result.enriched.map((e) => e.id)).toContain(failed.id);
+    expect(result.enriched.map((e) => e.id)).not.toContain(clean.id);
+    expect(successFn).toHaveBeenCalledTimes(1);
   });
 });
 

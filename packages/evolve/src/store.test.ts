@@ -135,6 +135,37 @@ describe("improvements store", () => {
     expect(all).toHaveLength(2);
   });
 
+  it("roundtrips lastEnrichError and lastEnrichFailedAt", () => {
+    const p = saveProposal({
+      title: "error fields",
+      type: "memory",
+      proposedChange: "stub",
+      signals: [baseSignal],
+      blastRadius: "low",
+      appliesTo: [],
+      createdBy: "cli",
+    });
+
+    expect(p.lastEnrichError).toBeNull();
+    expect(p.lastEnrichFailedAt).toBeNull();
+
+    const errMsg = 'enrichment aborted (SIGINT or parent session lifecycle)';
+    const now = new Date().toISOString();
+    const withError = updateProposal(p.id, { lastEnrichError: errMsg, lastEnrichFailedAt: now });
+    expect(withError?.lastEnrichError).toBe(errMsg);
+    expect(withError?.lastEnrichFailedAt).toBe(now);
+
+    // Verify it survives a serialize/parse round-trip.
+    const fetched = getProposal(p.id);
+    expect(fetched?.lastEnrichError).toBe(errMsg);
+    expect(fetched?.lastEnrichFailedAt).toBe(now);
+
+    // Clearing works.
+    const cleared = updateProposal(p.id, { lastEnrichError: null, lastEnrichFailedAt: null });
+    expect(cleared?.lastEnrichError).toBeNull();
+    expect(cleared?.lastEnrichFailedAt).toBeNull();
+  });
+
   it("finds an open proposal by signal hash", () => {
     const p = saveProposal({
       title: "open one",

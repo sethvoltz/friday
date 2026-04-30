@@ -1,5 +1,17 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
+export type AbortReason = "timeout" | "interrupted" | "api-error" | "unknown";
+
+/** Thrown by `chat()` with a discriminated reason so callers can log meaningfully. */
+export class ChatAbortError extends Error {
+  readonly reason: AbortReason;
+  constructor(reason: AbortReason, message: string) {
+    super(message);
+    this.name = "ChatAbortError";
+    this.reason = reason;
+  }
+}
+
 export interface ChatOptions {
   prompt: string;
   systemPrompt: string;
@@ -32,7 +44,11 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
   const startedAt = Date.now();
   const timeoutMs = opts.timeoutMs ?? 60_000;
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    abort.abort();
+  }, timeoutMs);
 
   const queryOptions: Record<string, unknown> = {
     allowedTools: [],
@@ -90,6 +106,30 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
         if (typeof m.total_cost_usd === "number") costUsd = m.total_cost_usd;
       }
     }
+  } catch (err) {
+    // Classify the error so callers and logs can show a meaningful reason.
+    const isAbortLike =
+      err instanceof Error &&
+      (err.name === "AbortError" ||
+        err.message.toLowerCase().includes("aborted") ||
+        err.message.toLowerCase().includes("abort"));
+
+    if (isAbortLike) {
+      if (timedOut) {
+        throw new ChatAbortError(
+          "timeout",
+          `enrichment timed out after ${timeoutMs / 1000}s`
+        );
+      }
+      throw new ChatAbortError(
+        "interrupted",
+        "enrichment aborted (SIGINT or parent session lifecycle)"
+      );
+    }
+
+    // Non-abort SDK/network errors.
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new ChatAbortError("api-error", `enrichment API error: ${msg}`);
   } finally {
     clearTimeout(timer);
   }

@@ -8,13 +8,15 @@ import {
   type Signal,
   type EvidencePointer,
 } from "./store.js";
-import { chat, extractJson } from "./llm.js";
+import { chat, extractJson, ChatAbortError } from "./llm.js";
 
 export interface EnrichOptions {
-  /** Enrich only this proposal id. Mutually exclusive with `all`. */
+  /** Enrich only this proposal id. Mutually exclusive with `retryFailed`. */
   id?: string;
   /** Enrich every open/critical proposal that needs it. */
   all?: boolean;
+  /** Enrich only proposals that have a recorded lastEnrichError (previously failed). */
+  retryFailed?: boolean;
   /** Re-enrich even if `enrichedAt` is fresh. */
   force?: boolean;
   /** Sonnet model id. Default current Sonnet 4.6. */
@@ -30,7 +32,7 @@ export interface EnrichOptions {
 export interface EnrichResult {
   enriched: Proposal[];
   skipped: Array<{ id: string; reason: string }>;
-  failed: Array<{ id: string; error: string }>;
+  failed: Array<{ id: string; error: string; abortReason?: string }>;
 }
 
 export interface EnrichedProposal {
@@ -97,10 +99,15 @@ export async function enrichProposals(opts: EnrichOptions = {}): Promise<EnrichR
     try {
       enriched = await enrich(proposal, context, model);
     } catch (err) {
-      result.failed.push({
-        id: proposal.id,
-        error: err instanceof Error ? err.message : String(err),
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const abortReason = err instanceof ChatAbortError ? err.reason : undefined;
+      const now = new Date().toISOString();
+      // Persist failure so --retry-failed can target this proposal next run.
+      updateProposal(proposal.id, {
+        lastEnrichError: errorMsg,
+        lastEnrichFailedAt: now,
       });
+      result.failed.push({ id: proposal.id, error: errorMsg, abortReason });
       continue;
     }
 
@@ -112,6 +119,8 @@ export async function enrichProposals(opts: EnrichOptions = {}): Promise<EnrichR
       enrichedAt: now,
       enrichedBy: model,
       updatedAt: now,
+      lastEnrichError: null,
+      lastEnrichFailedAt: null,
     });
     if (updated) {
       result.enriched.push(updated);
@@ -129,11 +138,13 @@ function selectTargets(opts: EnrichOptions): Proposal[] {
     const p = getProposal(opts.id);
     return p ? [p] : [];
   }
-  if (opts.all) {
-    return listProposals().filter((p) => p.status === "open" || p.status === "critical");
+  const active = listProposals().filter(
+    (p) => p.status === "open" || p.status === "critical"
+  );
+  if (opts.retryFailed) {
+    return active.filter((p) => p.lastEnrichError !== null);
   }
-  // Default: same as --all when no id given.
-  return listProposals().filter((p) => p.status === "open" || p.status === "critical");
+  return active;
 }
 
 function needsEnrichment(p: Proposal): boolean {

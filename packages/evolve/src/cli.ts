@@ -24,16 +24,27 @@ function help(): void {
       "friday-evolve — local self-improvement pipeline (Evolve with Intent)",
       "",
       "Usage:",
-      "  friday-evolve scan [--since-hours N]              Run scan + propose + rerank, write a run record.",
-      "  friday-evolve enrich [--id ID|--all] [--force]    Replace templated bodies with Sonnet-written analysis.",
-      "  friday-evolve cluster                             Re-cluster open proposals via Jaccard merge.",
-      "  friday-evolve list [--status STATUS]              List proposals (optionally filter by status).",
-      "  friday-evolve show <id>                           Print a single proposal as JSON.",
-      "  friday-evolve help                                Show this help.",
+      "  friday-evolve scan [--since-hours N]                   Run scan + propose + rerank, write a run record.",
+      "  friday-evolve enrich [--id ID|--all|--retry-failed]    Replace templated bodies with Sonnet-written analysis.",
+      "                        [--force] [--limit N]",
+      "  friday-evolve cluster                                  Re-cluster open proposals via Jaccard merge.",
+      "  friday-evolve list [--status STATUS] [--needs-enrich]  List proposals.",
+      "  friday-evolve show <id>                                Print a single proposal as JSON.",
+      "  friday-evolve help                                     Show this help.",
+      "",
+      "Enrich flags:",
+      "  --id ID          Target a single proposal by id.",
+      "  --all            Target all open/critical proposals (default when no --id/--retry-failed).",
+      "  --retry-failed   Target only proposals that have a recorded lastEnrichError.",
+      "  --force          Re-enrich even if enrichedAt is fresh.",
+      "  --limit N        Cap enrichments at N per run (default 50).",
+      "",
+      "List flags:",
+      "  --status STATUS  Filter by status (open, critical, applied, …).",
+      "  --needs-enrich   Show only proposals that need enrichment (pending or failed).",
       "",
       "Defaults:",
       "  --since-hours 24",
-      "  enrich: --all when neither --id nor --all is passed",
     ].join("\n")
   );
 }
@@ -100,6 +111,7 @@ async function main(): Promise<void> {
   if (cmd === "enrich") {
     const id = getFlag("--id");
     const all = args.includes("--all");
+    const retryFailed = args.includes("--retry-failed");
     const force = args.includes("--force");
     const limitRaw = getFlag("--limit");
     const limit = limitRaw ? Number(limitRaw) : undefined;
@@ -107,10 +119,15 @@ async function main(): Promise<void> {
       console.error("Error: --limit must be a positive number.");
       process.exit(2);
     }
+    if (retryFailed && id) {
+      console.error("Error: --retry-failed and --id are mutually exclusive.");
+      process.exit(2);
+    }
 
     const result = await enrichProposals({
       id,
-      all: all || !id,
+      all: all || (!id && !retryFailed),
+      retryFailed,
       force,
       limit,
     });
@@ -140,8 +157,16 @@ async function main(): Promise<void> {
 
   if (cmd === "list") {
     const status = getFlag("--status");
+    const needsEnrich = args.includes("--needs-enrich");
     let proposals = listProposals();
     if (status) proposals = proposals.filter((p) => p.status === status);
+    if (needsEnrich) {
+      proposals = proposals.filter(
+        (p) =>
+          (p.status === "open" || p.status === "critical") &&
+          (p.lastEnrichError !== null || !p.enrichedAt)
+      );
+    }
     proposals.sort((a, b) => b.score - a.score);
 
     if (proposals.length === 0) {
@@ -150,7 +175,12 @@ async function main(): Promise<void> {
     }
 
     for (const p of proposals) {
-      console.log(`[${p.status}] (${p.score}) ${p.id}  —  ${p.title}`);
+      const enrichStatus = p.lastEnrichError
+        ? "failed"
+        : p.enrichedAt
+          ? "ok"
+          : "pending";
+      console.log(`[${p.status}] (${p.score}) ${p.id}  enrich:${enrichStatus}  —  ${p.title}`);
     }
     return;
   }
