@@ -97,6 +97,50 @@ describe("statusCommand (human output)", () => {
     mock.mockRestore();
   });
 
+  it("crashed message suggests both attach (inspect) and restart (relaunch)", () => {
+    writeState("dashboard", {
+      pid: 7001, mode: "dev", tmuxSession: "friday-dashboard",
+      startedAt: "2026-05-01T15:00:00Z",
+      command: ["friday", "start", "dashboard", "--dev"],
+      logPath: join(fridayDir, "logs", "dashboard.jsonl"),
+    });
+    mockIsRunning.mockReturnValue(false);
+    mockHasSession.mockReturnValue(true);
+    mockIsPaneDead.mockReturnValue(true);
+
+    const logs: string[] = [];
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+
+    statusCommand(["dashboard"]);
+    const out = logs.join("\n");
+    expect(out).toContain("crashed");
+    expect(out).toContain("friday attach dashboard");
+    expect(out).toContain("friday restart dashboard");
+
+    mock.mockRestore();
+  });
+
+  it("stale message suggests `friday start [--dev]` for recovery", () => {
+    writeState("dashboard", {
+      pid: 99999, mode: "dev", tmuxSession: "friday-dashboard",
+      startedAt: "2026-05-01T15:00:00Z",
+      command: ["friday", "start", "dashboard", "--dev"],
+      logPath: join(fridayDir, "logs", "dashboard.jsonl"),
+    });
+    mockIsRunning.mockReturnValue(false);
+    mockHasSession.mockReturnValue(false);
+
+    const logs: string[] = [];
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+
+    statusCommand(["dashboard"]);
+    const out = logs.join("\n");
+    expect(out).toContain("stale");
+    expect(out).toContain("friday start dashboard --dev");
+
+    mock.mockRestore();
+  });
+
   it("reports crashed when tmux session exists but pane is dead", () => {
     writeState("dashboard", {
       pid: 7001, panePid: 7000, mode: "dev",

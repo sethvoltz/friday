@@ -115,6 +115,26 @@ describe("startCommand", () => {
     errMock.mockRestore();
   });
 
+  it("recovers from stale state (pid dead) by launching fresh", () => {
+    mockParseServiceArg.mockReturnValue("dashboard");
+    mockReadState.mockReturnValue({
+      pid: 99999, mode: "dev", tmuxSession: "friday-dashboard",
+      startedAt: "x", command: ["a"], logPath: "p",
+    });
+    mockIsRunning.mockReturnValue(false); // stale: state file lingers, process gone
+
+    const logs: string[] = [];
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+
+    startCommand(["dashboard", "--dev"]);
+
+    // No conflict error — we fell through to launchDev despite the stale state file
+    expect(mockLaunchDev).toHaveBeenCalledWith("dashboard", "/fake/root");
+    expect(logs.join("\n")).toContain("started in dev mode");
+
+    mock.mockRestore();
+  });
+
   it("surfaces launch errors to the user (e.g. stale dist)", () => {
     mockLaunchProd.mockImplementationOnce(() => {
       throw new Error("friday: build required: pnpm --filter @friday/daemon build");

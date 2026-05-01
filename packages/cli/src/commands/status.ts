@@ -99,6 +99,18 @@ function buildStatusJson(service: ServiceName): ServiceStatusJson {
   };
 }
 
+function recoveryHint(s: ServiceStatusJson): string {
+  const svc = s.service;
+  if (s.state === "crashed") {
+    return `\`friday attach ${svc}\` to inspect; \`friday restart ${svc}\` to relaunch`;
+  }
+  if (s.state === "stale") {
+    const flag = s.mode === "dev" ? " --dev" : "";
+    return `\`friday start ${svc}${flag}\` to relaunch (handles stale state)`;
+  }
+  return "";
+}
+
 function printHumanLine(s: ServiceStatusJson): void {
   const info = SERVICES[s.service];
   const icons: Record<ServiceStatusState, string> = {
@@ -107,14 +119,16 @@ function printHumanLine(s: ServiceStatusJson): void {
     crashed: "⚠",
     stale: "⚠",
   };
-  const detail =
-    s.state === "running"
-      ? `running (${s.mode}, PID ${s.pid}${s.tmuxSession ? `, tmux ${s.tmuxSession}` : ""})`
-      : s.state === "crashed"
-      ? `crashed (tmux ${s.tmuxSession} alive but pane dead — \`friday attach ${s.service}\` to inspect)`
-      : s.state === "stale"
-      ? `stale (state file out of sync with reality — \`friday stop ${s.service}\` to clean up)`
-      : "not running";
+  let detail: string;
+  if (s.state === "running") {
+    detail = `running (${s.mode}, PID ${s.pid}${s.tmuxSession ? `, tmux ${s.tmuxSession}` : ""})`;
+  } else if (s.state === "crashed") {
+    detail = `crashed (tmux ${s.tmuxSession} alive but pane dead) — ${recoveryHint(s)}`;
+  } else if (s.state === "stale") {
+    detail = `stale (state file out of sync with reality) — ${recoveryHint(s)}`;
+  } else {
+    detail = "not running";
+  }
   console.log(`  ${icons[s.state]} ${info.label}: ${detail}`);
 }
 

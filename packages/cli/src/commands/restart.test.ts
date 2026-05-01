@@ -140,6 +140,29 @@ describe("restartCommand", () => {
     exitMock.mockRestore();
   });
 
+  it("preserves state on launch failure so status reports `stale` not `stopped`", () => {
+    mockReadState.mockReturnValue({
+      pid: 100, mode: "prod", startedAt: "x", command: ["a"], logPath: "p",
+    });
+    mockLaunchProd.mockImplementationOnce(() => {
+      throw new Error("friday: build required: pnpm --filter @friday/daemon build");
+    });
+    const errs: string[] = [];
+    const errMock = vi.spyOn(console, "error").mockImplementation((m) => errs.push(String(m)));
+    const exitMock = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("process.exit");
+    }) as any);
+
+    expect(() => restartCommand(["daemon"])).toThrow("process.exit");
+    expect(mockRemoveState).not.toHaveBeenCalled();
+    expect(errs.join("\n")).toContain("friday: build required:");
+    expect(errs.join("\n")).toContain("state file preserved for diagnosis");
+    expect(errs.join("\n")).toContain("Recover with: friday start daemon");
+
+    errMock.mockRestore();
+    exitMock.mockRestore();
+  });
+
   it("errors on unknown service", () => {
     const errs: string[] = [];
     const errMock = vi.spyOn(console, "error").mockImplementation((m) => errs.push(String(m)));

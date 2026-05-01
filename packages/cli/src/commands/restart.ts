@@ -90,7 +90,10 @@ export function restartCommand(args: string[]): void {
   console.log(`Restarting ${info.label} in ${mode} mode...`);
 
   killService(state);
-  removeState(service);
+  // Don't removeState preemptively. launchDev/launchProd overwrite state on
+  // success; on failure we want the old (now stale) state to linger as a
+  // breadcrumb so `friday status` reports `stale` instead of silently
+  // forgetting the service ever existed.
 
   try {
     if (mode === "dev") {
@@ -102,6 +105,8 @@ export function restartCommand(args: string[]): void {
     }
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
+    console.error(`${info.label} did not relaunch — state file preserved for diagnosis.`);
+    console.error(`Recover with: friday start ${service}${mode === "dev" ? " --dev" : ""}`);
     process.exit(1);
   }
 }

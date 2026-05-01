@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { SERVICES, parseServiceArg, type ServiceName } from "../services.js";
 import { readState } from "../state.js";
-import { hasSession, hasTmuxAvailable } from "../tmux.js";
+import { hasSession, hasTmuxAvailable, isPaneDead } from "../tmux.js";
 
 export function attachCommand(args: string[]): void {
   const target = parseServiceArg(args[0]);
@@ -33,9 +33,14 @@ export function attachCommand(args: string[]): void {
     process.exit(1);
   }
   if (!hasSession(sessionName)) {
-    console.error(`tmux session ${sessionName} does not exist (state may be stale).`);
-    console.error(`Try: friday stop ${service} && friday start ${service} --dev`);
+    console.error(`tmux session ${sessionName} does not exist (state is stale).`);
+    console.error(`Recover with: friday start ${service} --dev`);
     process.exit(1);
+  }
+
+  if (isPaneDead(sessionName)) {
+    console.error(`Note: the dev process has exited. Attaching to inspect the post-mortem.`);
+    console.error(`Press Ctrl-b d to detach, then \`friday restart ${service}\` to relaunch.`);
   }
 
   // Hand off to tmux. stdio: "inherit" so we get a real interactive session;
