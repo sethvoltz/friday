@@ -2,6 +2,7 @@ import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import type { Database as DatabaseType } from "better-sqlite3";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
 import type { FridayDb } from "./client.js";
 
 /**
@@ -9,20 +10,35 @@ import type { FridayDb } from "./client.js";
  *   src/db/migrate.ts   (dev / tsx)        → ../../drizzle
  *   dist/db/migrate.js  (compiled output)  → ../../drizzle
  * Both resolve to packages/shared/drizzle.
+ *
+ * Returns null when the folder isn't present at the expected location —
+ * e.g. when @friday/shared has been bundled into a downstream service
+ * (dashboard via adapter-node) and the relative path no longer points at
+ * the source-tree drizzle/ directory. The daemon owns migrations; other
+ * processes opening the same DB can safely skip.
  */
-function resolveMigrationsFolder(): string {
+function resolveMigrationsFolder(): string | null {
   const here = dirname(fileURLToPath(import.meta.url));
-  return join(here, "..", "..", "drizzle");
+  const folder = join(here, "..", "..", "drizzle");
+  if (!existsSync(join(folder, "meta", "_journal.json"))) return null;
+  return folder;
 }
 
 /**
  * Apply pending migrations and ensure FTS5 tables/triggers exist.
  * Drizzle does not model FTS5 virtual tables, so they live in raw SQL
  * inside the migration file appended after the generated DDL.
+ *
+ * If the migrations folder isn't resolvable, skip the migrate step but
+ * still re-assert the FTS5 schema (idempotent). This makes the dashboard
+ * (which bundles shared via adapter-node) tolerant of being launched
+ * before its own resolution can find the drizzle folder. The daemon —
+ * running from `services/friday/dist/` with shared still co-located —
+ * always resolves the folder and migrates as before.
  */
 export function runMigrations(_db: FridayDb, raw: DatabaseType): void {
   const folder = resolveMigrationsFolder();
-  migrate(_db, { migrationsFolder: folder });
+  if (folder) migrate(_db, { migrationsFolder: folder });
   ensureFts5(raw);
 }
 
