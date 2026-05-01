@@ -1,5 +1,7 @@
-import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { setTimeout as setTimeoutPromise } from "node:timers/promises";
+import { dirname, basename, join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { getLogPath } from "@friday/shared";
 import { type ServiceName, parseServiceArg } from "../services.js";
 import { readState } from "../state.js";
@@ -30,7 +32,7 @@ function parseLogsArgs(args: string[]): { service: string | undefined; opts: Log
   return { service: positional[0], opts };
 }
 
-function readTail(path: string, lines: number): string[] {
+function readTailActive(path: string, lines: number): string[] {
   if (!existsSync(path)) return [];
   // Read in 64 KiB chunks from the end until we have enough newlines.
   const fd = openSync(path, "r");
@@ -51,6 +53,47 @@ function readTail(path: string, lines: number): string[] {
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * Find rotated siblings for an active log path: same directory, names of the
+ * form `<base>-<timestamp>.jsonl.gz` where `<base>` is the active file's stem.
+ * Returns paths sorted oldest-first by filename (timestamps are ISO and sort
+ * lexicographically).
+ */
+function listRotated(activePath: string): string[] {
+  const dir = dirname(activePath);
+  const base = basename(activePath).replace(/\.jsonl$/, "");
+  if (!existsSync(dir)) return [];
+  const prefix = `${base}-`;
+  const suffix = ".jsonl.gz";
+  return readdirSync(dir)
+    .filter((f) => f.startsWith(prefix) && f.endsWith(suffix))
+    .sort()
+    .map((f) => join(dir, f));
+}
+
+/**
+ * Tail across the active log + any rotated gzip siblings. Walks newest-first
+ * and stops once `lines` lines are accumulated. Decompresses lazily — only
+ * reads as far back into the rotated history as needed.
+ */
+function readTail(activePath: string, lines: number): string[] {
+  const fromActive = readTailActive(activePath, lines);
+  if (fromActive.length >= lines) return fromActive.slice(-lines);
+
+  const rotated = listRotated(activePath); // oldest-first
+  let collected = fromActive;
+  for (let i = rotated.length - 1; i >= 0 && collected.length < lines; i--) {
+    try {
+      const text = gunzipSync(readFileSync(rotated[i])).toString("utf-8");
+      const fileLines = text.split("\n").filter(Boolean);
+      collected = [...fileLines, ...collected];
+    } catch {
+      // Corrupted gz — skip and keep walking. Don't fail the whole tail.
+    }
+  }
+  return collected.slice(-lines);
 }
 
 const COLORS: Record<string, string> = {
@@ -86,22 +129,30 @@ function emit(line: string, opts: LogsOptions): void {
 
 async function followLog(path: string, opts: LogsOptions): Promise<void> {
   let position = existsSync(path) ? statSync(path).size : 0;
+  let inode = existsSync(path) ? statSync(path).ino : 0;
+
   while (true) {
     if (!existsSync(path)) {
       await setTimeoutPromise(500);
       continue;
     }
-    const size = statSync(path).size;
-    if (size < position) {
-      // Truncated/rotated
+    const st = statSync(path);
+    // Rotation: gzip+rename created a new file at this path. Inode differs;
+    // start tailing the new file from offset 0. The just-rotated file is
+    // not followed (it's frozen and gzip'd).
+    if (st.ino !== inode) {
+      inode = st.ino;
+      position = 0;
+    } else if (st.size < position) {
+      // Truncation without inode change (rare) — start over from the top.
       position = 0;
     }
-    if (size > position) {
+    if (st.size > position) {
       const fd = openSync(path, "r");
       try {
-        const buf = Buffer.alloc(size - position);
-        readSync(fd, buf, 0, size - position, position);
-        position = size;
+        const buf = Buffer.alloc(st.size - position);
+        readSync(fd, buf, 0, st.size - position, position);
+        position = st.size;
         const text = buf.toString("utf-8");
         for (const line of text.split("\n")) {
           if (line.length > 0) emit(line, opts);
