@@ -8,11 +8,11 @@ A local-first Slack-to-Claude-Code bridge with a multi-agent orchestration syste
 
 This project has living documentation that must stay current with the code:
 
-- `docs/architecture.md` — System overview, components, message flow, state layout, agent hierarchy, testing
-- `docs/decisions.md` — Architecture Decision Records (ADRs); see ADR-020 for the SQLite + Drizzle layer
+- `docs/architecture.md` — System overview, components, message flow, state layout, service lifecycle, logging, agent hierarchy, testing
+- `docs/decisions.md` — Architecture Decision Records (ADRs); see ADR-020 for SQLite + Drizzle, ADR-024 for the tmux-backed daemonization model
 - `docs/configure-friday.md` — Config file reference
 - `docs/setup-friday.md` — Setup guide
-- `docs/running.md` — How to run the daemon and services
+- `docs/running.md` — How to run the daemon and services (commands, modes, status JSON contract)
 - `.claude/rules/drizzle-migrations.md` — Rules for evolving the DB schema
 
 **When you make changes**, update the relevant docs. If you add a module, update the architecture table. If you change message flow, update the flow diagrams. If you make an architectural decision, add an ADR. If you add a test file, update the testing coverage table. Documentation that drifts from the code is worse than no documentation.
@@ -27,10 +27,12 @@ This project has living documentation that must stay current with the code:
 ## Structure
 
 ```
-packages/shared    — Shared types and config
-packages/cli       — CLI (@friday/cli)
+packages/shared    — Shared types, config, structured logger, DB layer
+packages/cli       — CLI (@friday/cli) — service lifecycle, status, logs, attach
+packages/memory    — File-based memory store + DB-backed FTS5 index
+packages/evolve    — Self-improvement pipeline (scan → propose → rank → apply)
 services/friday    — Bridge daemon
-services/dashboard — Management GUI (SvelteKit)
+services/dashboard — Management GUI (SvelteKit, adapter-node)
 docs/              — Documentation
 ```
 

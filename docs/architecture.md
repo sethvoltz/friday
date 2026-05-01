@@ -27,7 +27,7 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | Module | Responsibility |
 |--------|---------------|
 | `src/config.ts` | Loads `~/.friday/config.json` + `~/.friday/.env`, validates required fields, merges with defaults |
-| `src/log.ts` | Structured JSON logger — all output goes through this (`ts`, `level`, `event`, context fields). Tees to `~/.friday/daemon.jsonl` and stdout/stderr. |
+| `src/log.ts` | Thin shim over `createLogger` from `@friday/shared`. All output goes through this (`ts`, `level`, `event`, context fields). Writes JSONL to `~/.friday/logs/daemon.jsonl` and (optionally) stdout/stderr — see Logging § below. |
 | `src/slack/app.ts` | Creates `@slack/bolt` App with Socket Mode, global error handler |
 | `src/slack/events.ts` | Message handler, `/friday` commands, per-channel FIFO queue, streaming, compaction detection, image attachment handling |
 | `src/agent/client.ts` | Wraps Agent SDK `query()`, streams text chunks, detects compaction, logs usage, passes MCP servers and system prompt; accepts multimodal prompts (text + images) |
@@ -66,12 +66,14 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 
 TypeScript types and utilities shared across services:
 
-- `config.ts` — `FridayConfig` type, default values, `loadConfig()` function, path constants
+- `config.ts` — `FridayConfig` type, default values, `loadConfig()` function, path constants (including `LOGS_DIR`, `getLogPath(service)`)
+- `log.ts` — `createLogger({ service, stdoutMode, rotateBytes? })` — the structured JSONL logger consumed by both daemon and dashboard. Lazy FD open, in-process size-based rotation (default 1 MiB → gzip + timestamp, kept forever), `FRIDAY_LOG_STDOUT=json|off` env-controlled stdout sink.
 - `agents.ts` — Agent types (`AgentType`, `AgentStatus`), registry types (`OrchestratorEntry`, `BuilderEntry`, `HelperEntry`, `ScheduledEntry`), schedule spec, name validation
 - `usage.ts` — `UsageEntry` type for the JSONL usage log
 - `transcript.ts` — Session JSONL transcript parser: parses Claude Code session files into structured turns, supports full parse and last-N-turns, streaming tail via `fs.watch`, and human-readable formatting
 - `inspect.ts` — Shared agent inspection logic: resolves agent → transcript path, builds structured `InspectResult`, formats as plain text or markdown. Used by CLI, Slack command, MCP tool, and dashboard.
 - `events.ts` — `FridayEvent` discriminated union type for SSE events (agent lifecycle, turn streaming/completion, usage logging)
+- `db/migrate.ts` — Drizzle migration runner. Skips gracefully when the migrations folder isn't resolvable from the bundle (dashboard via adapter-node bundles shared and can't see the source-tree `drizzle/`); the daemon owns migrations.
 
 ### Memory Package (`packages/memory`)
 
@@ -114,7 +116,9 @@ The orchestrator surfaces proposals via `friday-evolve` MCP tools.
 
 ### Dashboard (`services/dashboard`)
 
-Optional SvelteKit app for management. Reads `~/.friday/` state files via server-side load functions. Works offline (static data), but connects to the daemon's SSE event server (port 7444) for real-time updates when the daemon is running.
+Optional SvelteKit app for management. Builds via `@sveltejs/adapter-node` for production (`pnpm --filter @friday/dashboard run start` → `node build/index.js`); `vite dev` for hot reload. Reads `~/.friday/` state files via server-side load functions. Works offline (static data), but connects to the daemon's SSE event server (port 7444) for real-time updates when the daemon is running.
+
+**Server-side logging:** `src/hooks.server.ts` logs every inbound request and unhandled error via `createLogger({ service: "dashboard" })` from `@friday/shared`. Output lands at `~/.friday/logs/dashboard.jsonl` (rotated at 1 MiB, gzip'd, kept forever) and — in dev — also to the tmux pane.
 
 **Live updates:** The root layout connects to the daemon's SSE endpoint via `EventSource`. Events trigger `invalidateAll()` to re-fetch server data. Transcript pages show in-progress streaming text. Sidebar status dots update via live overlays. Auto-reconnects on disconnect.
 
@@ -206,6 +210,12 @@ All persistent state lives in `~/.friday/`:
 ├── health.json          — Daemon heartbeat (pid, uptime, last beat, eventServerPort). Present = running.
 ├── agents.json          — Agent registry (type, status, session IDs, parent/children, workspace)
 ├── friday.db            — SQLite (WAL): usage log, memory FTS5 index, transcript index, db_meta
+├── state/               — Per-service state files written by `friday start/stop/restart` (see CLI § below)
+│   ├── daemon.json      — { pid, panePid?, mode, startedAt, command, tmuxSession?, logPath }
+│   └── dashboard.json
+├── logs/                — Structured JSONL service logs (rotated at 1 MiB into <svc>-<ts>.jsonl.gz, kept forever)
+│   ├── daemon.jsonl
+│   └── dashboard.jsonl
 ├── sessions/
 │   ├── channels.json    — Channel ID → Agent SDK session ID mapping (atomic writes)
 │   └── channel-history.json — Former session IDs by channel
@@ -217,11 +227,54 @@ All persistent state lives in `~/.friday/`:
 │   └── events.jsonl     — Memory operation audit log
 ├── beads/               — Beads task/epic tracker data
 ├── schedules/           — Scheduled agent state directories (<name>/state.md, last-run.md)
-├── usage.jsonl.migrated-<date> — Archived JSONL log (renamed after migration; see Database layer)
-└── daemon.jsonl         — Daemon structured log (JSONL, teed from stdout)
+└── usage.jsonl.migrated-<date> — Archived JSONL log (renamed after migration; see Database layer)
 ```
 
 Agent SDK sessions are stored by Claude Code in `~/.claude/projects/<encoded-cwd>/`.
+
+## Service Lifecycle
+
+Services (daemon, dashboard) are managed by the `friday` CLI in one of two modes — both expose the same agent-readable surface so an autonomous agent can answer "is this service up, in what shape, where are the logs" without sniffing process state directly.
+
+**Modes:**
+- **prod** — `friday start <svc>` spawns the built artifact (`node services/<svc>/dist/index.js` for daemon, `node services/<svc>/build/index.js` for dashboard) detached, with `FRIDAY_LOG_STDOUT=off`. The CLI checks artifact freshness (mtime of `dist`/`build` entry vs. newest source under `src/`) and refuses to start with stale builds, returning an agent-parseable error pointing at the exact `pnpm --filter <pkg> build` to run.
+- **dev** — `friday start <svc> --dev` launches the dev script (`tsx watch …` for daemon, `vite dev` for dashboard) inside a per-service tmux session named `friday-<svc>`, with `remain-on-exit on` so a crashed pane lingers as `[pane dead]` for post-mortem inspection. `friday attach <svc>` drops the user into that pane.
+
+**State file** (`~/.friday/state/<svc>.json`):
+
+```jsonc
+{
+  "pid": 7001,                  // inner PID (vite/tsx/node) — what stop SIGTERMs
+  "panePid": 7000,              // tmux pane's foreground process (pnpm) — dev only
+  "mode": "dev",                // "dev" | "prod"
+  "startedAt": "2026-05-01T15:23:11Z",
+  "command": ["friday", "start", "dashboard", "--dev"],
+  "tmuxSession": "friday-dashboard",   // dev only
+  "logPath": "/Users/seth/.friday/logs/dashboard.jsonl"
+}
+```
+
+The CLI rather than the file is the documented interface for agents — `friday status [<svc>] --json` cross-checks the state file against `kill -0 <pid>` and `tmux has-session` to classify each service into one of four states:
+
+| State    | Meaning                                                          |
+|----------|------------------------------------------------------------------|
+| `running` | pid alive (and pane alive in dev)                               |
+| `crashed` | dev only: tmux session exists but pane is dead                  |
+| `stale`   | state file lingers but neither pid nor session can be confirmed |
+| `stopped` | no state file                                                   |
+
+**Mode contract:** `friday start` requires an explicit mode (`--dev` or none → prod). `friday restart` preserves the running mode and refuses `--dev`/`--prod` flags as assertion mismatches; switching modes is always `friday stop && friday start [--dev]` so mode changes are explicit. `friday stop` deletes the state file. `friday restart` does **not** delete state preemptively — if the relaunch fails, the old (now-stale) state lingers as a breadcrumb so `friday status` reports `stale` instead of `stopped`.
+
+## Logging
+
+Both services emit structured JSONL through a shared logger (`createLogger` in `@friday/shared/log.ts`):
+
+- **File sink (always on):** `~/.friday/logs/<service>.jsonl`. Rotated in-process when the active file passes 1 MiB — gzipped into `<service>-<ISO-timestamp>-<rand>.jsonl.gz` and a fresh active file is opened. Rotated files are kept forever (no retention sweep yet). Sortable filenames; same-millisecond rotations disambiguate via a 4-char random hex suffix. The threshold is a code constant (`DEFAULT_ROTATE_BYTES`), exposable via config when rotated files start piling up.
+- **Stdout sink (mode-controlled):** `FRIDAY_LOG_STDOUT=json|off` env var, set by `friday start`: `json` in dev (so the tmux pane shows live logs), `off` in prod (file only). Unset defaults to `json` so a service launched outside the CLI still streams to stdout.
+
+`friday logs <svc> [-f] [--pretty] [-n N]` reads from `state.logPath` (falling back to convention) and spans rotated `.jsonl.gz` siblings when `-n` exceeds the active file's line count. `-f` survives a rotation by tracking inode and reopening when it changes.
+
+The dashboard's `src/hooks.server.ts` plus `src/lib/server/log.ts` wire the same logger into SvelteKit — every inbound request and unhandled error lands in `dashboard.jsonl`. Vite/HMR internals stay in the tmux pane only; only application-level events are persisted.
 
 ## Database Layer
 
@@ -418,9 +471,8 @@ agent-friday/
 Unified command-line interface for managing Friday. Provides both standalone commands (no daemon needed) and service management.
 
 **Standalone commands:**
-- `friday usage` — reads `~/.friday/usage.jsonl`, reports cost/token/cache stats
+- `friday usage` — reports cost/token/cache stats from the `usage` table in `friday.db`
 - `friday config` — prints/validates `~/.friday/config.json`
-- `friday status` — checks PID files and health.json for service state
 - `friday inspect <agent>` — show last N turns from an agent's session transcript (supports `--turns N`, `--full`, `--follow/-f`, `--no-tools`)
 - `friday transcript <agent>` — export full session transcript as markdown (supports `--output <file>`)
 - `friday schedule` — manage scheduled agents (list, create, pause, resume, trigger, delete)
@@ -463,10 +515,10 @@ pnpm --filter @friday/cli exec vitest run src/commands/start.test.ts
 
 | Package | Test files | What's tested |
 |---------|-----------|---------------|
-| `@friday/shared` | `config.test.ts`, `agents.test.ts`, `transcript.test.ts`, `inspect.test.ts` | Path derivation, defaults, deep merge, agent name validation, name building, JSONL transcript parsing, turn grouping, tool call tracking, formatting, agent inspection (path resolution, result building, plain/markdown formatting) |
+| `@friday/shared` | `config.test.ts`, `agents.test.ts`, `transcript.test.ts`, `inspect.test.ts`, `log.test.ts` | Path derivation, defaults, deep merge, agent name validation, name building, JSONL transcript parsing, turn grouping, tool call tracking, formatting, agent inspection; structured logger (lazy FD, JSONL output, size-based rotation with gzip + sortable filenames, post-rotation reopen, close idempotency) |
 | `@friday/memory` | `store.test.ts`, `search.test.ts` | Memory CRUD, serialization roundtrip, recall tracking, hybrid search scoring, tag filtering, recall frequency boosting, event logging |
 | `@friday/evolve` | `store.test.ts`, `scan.test.ts`, `rank.test.ts`, `propose.test.ts`, `clusters.test.ts`, `apply.test.ts` | Proposal CRUD + frontmatter roundtrip; deterministic scanners with `scheduled-meta-*` self-exclusion (daemon, feedback, usage spike, transcript retry); scoring + critical thresholds; merge-by-hash and rerank-all; Jaccard cluster merge with union-find; apply pipeline for memory/prompt/config/code (code dispatches via injected `bd` runner — asserts epic body, mail labels, error propagation, self-modification guard) |
-| `@friday/cli` | `help.test.ts`, `services.test.ts`, 8× command tests | Help text, PID management, isRunning, parseServiceArg, findMonorepoRoot, all CLI commands including inspect, transcript, and schedule management |
+| `@friday/cli` | `help.test.ts`, `services.test.ts`, `state.test.ts`, `migrate.test.ts`, `tmux.ts` (no test — exec wrapper), `freshness.test.ts`, command tests for `start/stop/restart/status/attach/logs/reset-orchestrator/inspect/transcript/schedule/setup/usage/config/doctor` | Help text, state-backed PID management, isRunning, parseServiceArg, findMonorepoRoot, state file round-trip + atomicity, legacy pids → state migration with PID validation, prod artifact freshness check, full command surface including `--dev` paths, mode-preserving restart and assertion-flag rejection, four-state status with `--json` contract, log tail spanning rotated `.gz` siblings, attach error paths and crashed-pane notice, recovery hints |
 | `@friday/daemon` | `queue.test.ts`, `manager.test.ts`, `helpers.test.ts`, `usage.test.ts`, `config.test.ts`, `registry.test.ts`, `workspace.test.ts`, `workspace-guard.test.ts`, `prime.test.ts`, `client.test.ts`, `agent-tools.test.ts`, `preflight.test.ts`, `image-fetch.test.ts`, `agent-health.test.ts`, `file-tracker.test.ts`, `interrupt.test.ts`, `mail.test.ts`, `mail-poller.test.ts`, `lifecycle.test.ts`, `auto-recall.test.ts`, `events/bus.test.ts`, `events/server.test.ts`, `scheduler/scheduler.test.ts`, `scheduler/trigger.test.ts` | FIFO queue ops, session persistence, Slack helpers (including interrupt signal detection), usage logging, runtime config, agent registry CRUD, workspace/worktree lifecycle, builder workspace path guard (PreToolCall hook), system prompt generation, thinking indicator and status callbacks, MCP agent tools (including `agent_kill`/`agent_refork`), boot preflight cleanup, Slack image fetch and base64 encoding, 3-condition IPC stall detection and crash detection, turn-scoped file tracking sliding window, mail CRUD and push/poll delivery, fork-based agent supervisor (spawn/kill/SIGKILL-fallback/refork/multi-agent isolation/daemon restart restore), memory auto-recall context block assembly, EventBus publish/replay/ring buffer, SSE server endpoints/streaming/reconnect replay, scheduler check loop and cron parsing, scheduled agent triggering and state injection |
 
 ### Conventions

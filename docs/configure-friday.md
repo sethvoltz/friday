@@ -100,14 +100,18 @@ Optional config for non-orchestrator channel sessions. Same fields as `agent`. D
 ├── health.json          -- Daemon heartbeat (present = running)
 ├── agents.json          -- Agent registry (managed by daemon, do not edit manually)
 ├── slack-names.json     -- Cached Slack channel/user display names (auto-generated)
+├── friday.db            -- SQLite (WAL): usage, memory FTS5 index, transcript index
 ├── beads/               -- Beads database (task/epic tracking, inter-agent mail)
 ├── memory/
 │   └── entries/         -- Persistent memory entries (markdown with YAML frontmatter)
-├── pids/                -- PID files for managed services
+├── state/               -- Per-service state files written by `friday start/stop` (see docs/running.md)
+│   └── <service>.json   -- { pid, mode, startedAt, command, tmuxSession?, logPath, ... }
+├── logs/                -- Structured JSONL service logs (rotated at 1 MiB, gzipped, kept forever)
+│   ├── daemon.jsonl
+│   └── dashboard.jsonl
 ├── sessions/
 │   └── channels.json    -- Channel ID → Agent SDK session ID mapping
 ├── working/
 │   └── workspaces/      -- Builder workspaces (git worktrees)
-├── repos/               -- Bare clone cache for remote repos
-└── usage.jsonl          -- Per-turn usage log (cost, tokens, cache hits, duration)
+└── repos/               -- Bare clone cache for remote repos
 ```

@@ -151,7 +151,7 @@
 **Contract:**
 - Single entrypoint: `node dist/index.js`
 - Reads config from `~/.friday/`
-- Logs structured JSON to stdout and `~/.friday/daemon.jsonl`
+- Logs structured JSONL to `~/.friday/logs/daemon.jsonl` (rotated, see ADR-024); optionally also to stdout via `FRIDAY_LOG_STDOUT=json`
 - Handles SIGTERM/SIGINT for graceful shutdown
 - Non-zero exit on unrecoverable error
 - Process manager handles restart, log routing, boot start
@@ -275,7 +275,7 @@
 ## ADR-019: Daemon Log File (JSONL)
 
 **Date:** 2026-04-25
-**Status:** Accepted
+**Status:** Superseded by ADR-024
 
 **Context:** The daemon logs structured JSON to stdout, but stdout is only captured if the process manager routes it to a file. In dev mode (`tsx watch`), logs scroll past in the terminal and are lost. Debugging agent issues after the fact requires the logs.
 
@@ -291,6 +291,8 @@
 **Consequences:**
 - Log file grows unbounded. May need rotation or size-based truncation in the future.
 - Sync writes could theoretically block the event loop on a very slow disk — negligible in practice
+
+**Superseded by ADR-024**, which generalizes the logger to `@friday/shared`, moves files to `~/.friday/logs/<service>.jsonl`, adds size-based rotation, and gates the stdout sink on a mode flag.
 
 ---
 
@@ -394,7 +396,7 @@ Key design choices:
 
 **Decision:** The daemon parent is the sole writer to the live agent registry path. Workers communicate state changes via existing IPC events (`session-update`, `status-change`) and never call `loadRegistry`/`updateAgentSession`/`updateAgentStatus` directly. The IPC handler in `lifecycle.ts` persists what the worker reports.
 
-For the remaining cross-process writers (`friday schedule` and `friday dev` CLI commands), `saveRegistry()` does read-merge-write — re-reads the on-disk view and overlays in-memory entries before writing — so concurrent edits to *different* rows survive. Same-row conflicts still go to last-writer-wins; that's acceptable since same-row contention only happens between the daemon and a CLI the user is actively running.
+For the remaining cross-process writers (`friday schedule` and the `friday reset-orchestrator` CLI command), `saveRegistry()` does read-merge-write — re-reads the on-disk view and overlays in-memory entries before writing — so concurrent edits to *different* rows survive. Same-row conflicts still go to last-writer-wins; that's acceptable since same-row contention only happens between the daemon and a CLI the user is actively running.
 
 **Rationale:**
 - Single-writer for the live path is correct by construction — eliminates the race rather than narrowing it.
@@ -405,3 +407,41 @@ For the remaining cross-process writers (`friday schedule` and `friday dev` CLI 
 - Workers no longer load the registry at startup. They are stateless w.r.t. on-disk agent state.
 - A still-narrow read→write window remains in `saveRegistry()` for cross-process writers; full safety requires either a file lock or the SQLite migration.
 - Tests must drive registry persistence through the IPC handler, not direct worker writes.
+
+---
+
+## ADR-024: Tmux-Backed Daemonization with State Files and Rotated JSONL Logs
+
+**Date:** 2026-05-01
+**Status:** Accepted (supersedes ADR-019)
+
+**Context:** The CLI had two parallel command trees: `start/stop/restart` (prod, detached, no log streaming) and `dev start/dev restart` (dev mode, foreground, no PID tracking, terminal-bound). Agents driving Friday couldn't programmatically start, attach to, or restart dev-mode services — dev mode required a human terminal. Mode wasn't recorded anywhere, so an agent picking up a running service had no way to answer "should this code change get a hot reload or a hard restart?". `~/.friday/pids/<svc>.pid` only stored a PID, with no metadata. Logs were daemon-only (`~/.friday/daemon.jsonl`); the dashboard had `console.error` in one route and was otherwise invisible. The log file grew unbounded.
+
+**Decision:** Unify the surface behind a `--dev` flag. Each service runs in one of two modes:
+
+- **prod:** spawn the built artifact directly (`node services/<svc>/dist/index.js`), detached, with `FRIDAY_LOG_STDOUT=off`. Refuse to start with stale `dist`/`build`; error is agent-parseable (`friday: build required: pnpm --filter <pkg> build`).
+- **dev:** create a per-service tmux session `friday-<svc>` running the dev script (`tsx watch …` / `vite dev`) inside `pnpm exec` (one fewer layer than `pnpm run`). `remain-on-exit on` so a crashed pane lingers as `[pane dead]` for post-mortem. `friday attach <svc>` drops into the pane.
+
+State for each service lives at `~/.friday/state/<svc>.json` (`{ pid, panePid?, mode, startedAt, command, tmuxSession?, logPath }`), replacing the bare `~/.friday/pids/<svc>.pid` files. A one-shot migration runs at the top of every CLI invocation, validates legacy PIDs against `ps -p` to avoid promoting recycled PIDs, and drops the legacy dir when drained.
+
+`friday status [<svc>] --json` is the documented contract for agents. It cross-checks the state file against `kill -0` and `tmux has-session` and classifies into `running` / `crashed` / `stale` / `stopped`. `friday restart` is mode-preserving and refuses `--dev`/`--prod` flags as assertion mismatches; mode switches require explicit stop + start. `friday restart` does *not* delete state on launch failure — the old (now-stale) state lingers as a breadcrumb so `status` reports `stale` instead of `stopped`.
+
+The logger is generalized to `@friday/shared` (`createLogger({ service, stdoutMode, rotateBytes? })`) and consumed by both daemon and dashboard. Output goes to `~/.friday/logs/<service>.jsonl`. When the active file passes 1 MiB it is gzipped synchronously into `<service>-<ISO>-<rand>.jsonl.gz` and a fresh file is opened. Rotated files are kept forever. The stdout sink is gated by `FRIDAY_LOG_STDOUT=json|off` (the CLI sets this per mode). `friday logs <svc>` spans rotated siblings for `-n` and survives rotation in `-f` via inode tracking.
+
+The daemon's existing `SIGTERM`/`SIGINT` handler is now the load-bearing graceful-shutdown path (it drains agents, scheduled runs, event server, Slack). Two long-standing leaks were patched: `closeDb()` is now called on shutdown, and the log FD is closed as the *last* step (after the final `shutdown_complete` line — closing earlier throws EBADF and breaks the daemon's exit message).
+
+The `friday dev` command tree is removed entirely; `friday dev reset-orchestrator` is promoted to top-level `friday reset-orchestrator`.
+
+**Rationale:**
+- **Tmux as the dev abstraction:** session existence is itself a liveness signal; `tmux send-keys` and `kill-session` are well-understood mechanisms; a human and an agent see the *same* state. Alternative considered: foreground-with-tee. Rejected because agents have no TTY and parallel "start a foreground thing for a human, also tee logs for an agent" is two interfaces drifting.
+- **State file over richer PID file:** captures argv / mode / start time so `restart` can reproduce the exact launch and `status --json` can answer agent questions without recomputing them.
+- **Mode-preserving restart, never sticky:** explicit at start time, forgotten at stop. Sticky mode (remembering the last mode after stop) was the leading anti-pattern from the design discussion — it makes `friday start` parameter-free behavior depend on hidden state.
+- **In-process rotation:** one place to get right. External rotators introduce a "did the rotator run today?" question to answer. 1 MiB threshold matches the agent look-back use case the logs exist for; gzip-and-keep-forever matches the project's "preserve over delete" principle. Threshold is a code constant, exposable via config when (if) rotated files start piling up.
+- **`friday status --json` as the contract:** agents call the CLI rather than reading `state/<svc>.json` directly so the on-disk shape stays free to evolve. The JSON shape is documented in `docs/running.md` as the stable interface.
+
+**Consequences:**
+- `tmux` is now a hard dep for dev mode (added to `Brewfile`).
+- `vite preview` no longer suffices for dashboard prod — that command serves only the static client build, so `+page.server.ts` routes 404. The dashboard now uses `@sveltejs/adapter-node` and `pnpm --filter @friday/dashboard run start` runs `node build/index.js`. Cross-cutting: `runMigrations()` skips gracefully when the drizzle folder isn't resolvable from the bundle (the dashboard inlines `@friday/shared` via adapter-node and can't see the source-tree `drizzle/` dir; the daemon owns migrations).
+- The daemon imports its logger via a shim that re-exports `createLogger({ service: "daemon" })` — the 21 daemon files (109 call sites) didn't move.
+- Rotated log files accumulate without retention. Worth revisiting if the directory grows uncomfortable, but with gzip + 1 MiB threshold a high-traffic week is on the order of tens of MB.
+- The migration step (`migratePidsToState`) is dead weight once every machine has been migrated; safe to delete in a few weeks.
