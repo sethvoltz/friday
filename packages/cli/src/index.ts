@@ -6,13 +6,18 @@ import { startCommand } from "./commands/start.js";
 import { stopCommand } from "./commands/stop.js";
 import { restartCommand } from "./commands/restart.js";
 import { statusCommand } from "./commands/status.js";
-import { devCommand } from "./commands/dev.js";
+import { attachCommand } from "./commands/attach.js";
+import { logsCommand } from "./commands/logs.js";
+import { resetOrchestratorCommand } from "./commands/reset-orchestrator.js";
 import { mailCommand } from "./commands/mail.js";
 import { inspectCommand } from "./commands/inspect.js";
 import { transcriptCommand } from "./commands/transcript.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { setupCommand } from "./commands/setup.js";
 import { scheduleCommand } from "./commands/schedule.js";
+import { migratePidsToState } from "./migrate.js";
+
+migratePidsToState();
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -53,12 +58,25 @@ switch (command) {
 
   case "status":
     if (hasHelpFlag(commandArgs)) { showHelp("status"); break; }
-    statusCommand();
+    statusCommand(commandArgs);
     break;
 
-  case "dev":
-    if (hasHelpFlag(commandArgs)) { showHelp("dev"); break; }
-    devCommand(commandArgs);
+  case "attach":
+    if (hasHelpFlag(commandArgs)) { showHelp("attach"); break; }
+    attachCommand(commandArgs);
+    break;
+
+  case "logs":
+    if (hasHelpFlag(commandArgs)) { showHelp("logs"); break; }
+    logsCommand(commandArgs).catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
+    break;
+
+  case "reset-orchestrator":
+    if (hasHelpFlag(commandArgs)) { showHelp("reset-orchestrator"); break; }
+    resetOrchestratorCommand();
     break;
 
   case "mail":

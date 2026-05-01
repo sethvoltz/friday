@@ -3,86 +3,187 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const testDir = join(tmpdir(), `friday-status-test-${process.pid}-${Date.now()}`);
-const fridayDir = join(testDir, ".friday");
+const testHome = join(tmpdir(), `friday-status-test-${process.pid}-${Date.now()}`);
+const fridayDir = join(testHome, ".friday");
 
-vi.mock("@friday/shared", () => ({
-  FRIDAY_DIR: fridayDir,
-}));
+vi.mock("node:os", async () => {
+  const actual = await vi.importActual<typeof import("node:os")>("node:os");
+  return { ...actual, homedir: () => testHome };
+});
 
-// Mock services so we don't read real PID files
-vi.mock("../services.js", () => ({
-  SERVICES: {
-    daemon: { label: "Friday daemon", package: "@friday/daemon", script: "start" },
-    dashboard: { label: "Dashboard", package: "@friday/dashboard", script: "preview" },
-  },
-  readPid: vi.fn().mockReturnValue(null),
-  isRunning: vi.fn().mockReturnValue(false),
-  removePid: vi.fn(),
+const mockIsRunning = vi.fn();
+const mockHasSession = vi.fn();
+const mockIsPaneDead = vi.fn();
+
+vi.mock("../services.js", async () => {
+  const actual = await vi.importActual<any>("../services.js");
+  return {
+    ...actual,
+    isRunning: (...args: any[]) => mockIsRunning(...args),
+  };
+});
+
+vi.mock("../tmux.js", () => ({
+  hasSession: (...args: any[]) => mockHasSession(...args),
+  isPaneDead: (...args: any[]) => mockIsPaneDead(...args),
 }));
 
 const { statusCommand } = await import("./status.js");
+const { writeState } = await import("../state.js");
 
-describe("statusCommand", () => {
+describe("statusCommand (human output)", () => {
   beforeEach(() => {
     mkdirSync(fridayDir, { recursive: true });
+    mockIsRunning.mockReturnValue(false);
+    mockHasSession.mockReturnValue(false);
+    mockIsPaneDead.mockReturnValue(false);
   });
 
   afterEach(() => {
-    rmSync(testDir, { recursive: true, force: true });
+    rmSync(testHome, { recursive: true, force: true });
   });
 
-  it("reports services as not running when no PIDs", () => {
+  it("reports services as stopped when no state files exist", () => {
     const logs: string[] = [];
-    const mock = vi.spyOn(console, "log").mockImplementation((msg) => logs.push(String(msg)));
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
 
     statusCommand();
-    const output = logs.join("\n");
-    expect(output).toContain("Friday Status");
-    expect(output).toContain("Friday daemon");
-    expect(output).toContain("Dashboard");
-    expect(output).toContain("\u2717"); // ✗ not running
+    const out = logs.join("\n");
+    expect(out).toContain("Friday Status");
+    expect(out).toContain("Friday daemon: not running");
+    expect(out).toContain("Dashboard: not running");
 
     mock.mockRestore();
   });
 
-  it("displays health info when health.json exists", () => {
-    const healthData = {
-      pid: 12345,
+  it("reports running prod service with mode label", () => {
+    writeState("daemon", {
+      pid: 12345, mode: "prod",
       startedAt: new Date().toISOString(),
-      lastHeartbeat: new Date().toISOString(),
-      uptimeMs: 120000,
-    };
-    writeFileSync(join(fridayDir, "health.json"), JSON.stringify(healthData));
+      command: ["friday", "start", "daemon"],
+      logPath: join(fridayDir, "logs", "daemon.jsonl"),
+    });
+    mockIsRunning.mockReturnValue(true);
 
     const logs: string[] = [];
-    const mock = vi.spyOn(console, "log").mockImplementation((msg) => logs.push(String(msg)));
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
 
     statusCommand();
-    const output = logs.join("\n");
-    expect(output).toContain("Daemon health:");
-    expect(output).toContain("PID:            12345");
-    expect(output).toContain("2m 0s"); // 120000ms
+    const out = logs.join("\n");
+    expect(out).toContain("running (prod, PID 12345)");
 
     mock.mockRestore();
   });
 
-  it("marks stale heartbeat", () => {
-    const staleTime = new Date(Date.now() - 120_000).toISOString(); // 2 min ago
-    writeFileSync(
-      join(fridayDir, "health.json"),
-      JSON.stringify({
-        pid: 99, startedAt: staleTime,
-        lastHeartbeat: staleTime, uptimeMs: 5000,
-      })
-    );
+  it("reports running dev service with tmux session", () => {
+    writeState("dashboard", {
+      pid: 7001, panePid: 7000, mode: "dev",
+      tmuxSession: "friday-dashboard",
+      startedAt: new Date().toISOString(),
+      command: ["friday", "start", "dashboard", "--dev"],
+      logPath: join(fridayDir, "logs", "dashboard.jsonl"),
+    });
+    mockIsRunning.mockReturnValue(true);
+    mockHasSession.mockReturnValue(true);
+    mockIsPaneDead.mockReturnValue(false);
 
     const logs: string[] = [];
-    const mock = vi.spyOn(console, "log").mockImplementation((msg) => logs.push(String(msg)));
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
 
     statusCommand();
-    const output = logs.join("\n");
-    expect(output).toContain("(stale)");
+    const out = logs.join("\n");
+    expect(out).toContain("running (dev, PID 7001, tmux friday-dashboard)");
+
+    mock.mockRestore();
+  });
+
+  it("reports crashed when tmux session exists but pane is dead", () => {
+    writeState("dashboard", {
+      pid: 7001, panePid: 7000, mode: "dev",
+      tmuxSession: "friday-dashboard",
+      startedAt: new Date().toISOString(),
+      command: ["friday", "start", "dashboard", "--dev"],
+      logPath: join(fridayDir, "logs", "dashboard.jsonl"),
+    });
+    mockIsRunning.mockReturnValue(false);
+    mockHasSession.mockReturnValue(true);
+    mockIsPaneDead.mockReturnValue(true);
+
+    const logs: string[] = [];
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+
+    statusCommand();
+    expect(logs.join("\n")).toContain("crashed");
+
+    mock.mockRestore();
+  });
+
+  it("reports stale when state file exists but neither pid nor session", () => {
+    writeState("dashboard", {
+      pid: 99999, mode: "dev",
+      tmuxSession: "friday-dashboard",
+      startedAt: new Date().toISOString(),
+      command: ["friday", "start", "dashboard", "--dev"],
+      logPath: join(fridayDir, "logs", "dashboard.jsonl"),
+    });
+    mockIsRunning.mockReturnValue(false);
+    mockHasSession.mockReturnValue(false);
+
+    const logs: string[] = [];
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+
+    statusCommand();
+    expect(logs.join("\n")).toContain("stale");
+
+    mock.mockRestore();
+  });
+});
+
+describe("statusCommand (--json)", () => {
+  beforeEach(() => {
+    mkdirSync(fridayDir, { recursive: true });
+    mockIsRunning.mockReturnValue(false);
+    mockHasSession.mockReturnValue(false);
+    mockIsPaneDead.mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    rmSync(testHome, { recursive: true, force: true });
+  });
+
+  it("emits the contract shape for a single running service", () => {
+    writeState("daemon", {
+      pid: 100, mode: "prod",
+      startedAt: "2026-05-01T15:00:00.000Z",
+      command: ["friday", "start", "daemon"],
+      logPath: join(fridayDir, "logs", "daemon.jsonl"),
+    });
+    mockIsRunning.mockReturnValue(true);
+
+    const logs: string[] = [];
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+
+    statusCommand(["daemon", "--json"]);
+    const obj = JSON.parse(logs.join("\n"));
+    expect(obj.service).toBe("daemon");
+    expect(obj.state).toBe("running");
+    expect(obj.mode).toBe("prod");
+    expect(obj.pid).toBe(100);
+    expect(obj.startedAt).toBe("2026-05-01T15:00:00.000Z");
+    expect(obj.startCommand).toEqual(["friday", "start", "daemon"]);
+
+    mock.mockRestore();
+  });
+
+  it("emits an array when no service is specified", () => {
+    const logs: string[] = [];
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+
+    statusCommand(["--json"]);
+    const obj = JSON.parse(logs.join("\n"));
+    expect(Array.isArray(obj)).toBe(true);
+    expect(obj.map((x: { service: string }) => x.service)).toEqual(["daemon", "dashboard"]);
+    for (const entry of obj) expect(entry.state).toBe("stopped");
 
     mock.mockRestore();
   });

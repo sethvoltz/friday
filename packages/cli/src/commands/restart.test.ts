@@ -1,26 +1,40 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const mockReadPid = vi.fn();
-const mockWritePid = vi.fn();
-const mockRemovePid = vi.fn();
+const mockReadState = vi.fn();
+const mockRemoveState = vi.fn();
 const mockIsRunning = vi.fn();
-const mockFindMonorepoRoot = vi.fn();
+const mockFindMonorepoRoot = vi.fn().mockReturnValue("/fake/root");
+const mockHasSession = vi.fn().mockReturnValue(false);
+const mockKillSession = vi.fn();
+const mockLaunchProd = vi.fn().mockReturnValue(43);
+const mockLaunchDev = vi.fn().mockReturnValue({ innerPid: 7002, sessionName: "friday-dashboard" });
 
 vi.mock("../services.js", () => ({
   SERVICES: {
-    daemon: { label: "Friday daemon", package: "@friday/daemon", script: "start" },
-    dashboard: { label: "Dashboard", package: "@friday/dashboard", script: "preview" },
+    daemon: { label: "Friday daemon" },
+    dashboard: { label: "Dashboard" },
   },
-  readPid: (...args: any[]) => mockReadPid(...args),
-  writePid: (...args: any[]) => mockWritePid(...args),
-  removePid: (...args: any[]) => mockRemovePid(...args),
   isRunning: (...args: any[]) => mockIsRunning(...args),
   findMonorepoRoot: () => mockFindMonorepoRoot(),
 }));
 
-const mockSpawn = vi.fn().mockReturnValue({ pid: 77, unref: vi.fn() });
+vi.mock("../state.js", () => ({
+  readState: (...args: any[]) => mockReadState(...args),
+  removeState: (...args: any[]) => mockRemoveState(...args),
+}));
+
+vi.mock("../tmux.js", () => ({
+  hasSession: (...args: any[]) => mockHasSession(...args),
+  killSession: (...args: any[]) => mockKillSession(...args),
+}));
+
+vi.mock("../launch.js", () => ({
+  launchProd: (...args: any[]) => mockLaunchProd(...args),
+  launchDev: (...args: any[]) => mockLaunchDev(...args),
+}));
+
 vi.mock("node:child_process", () => ({
-  spawn: (...args: any[]) => mockSpawn(...args),
+  execFileSync: vi.fn(),
 }));
 
 const { restartCommand } = await import("./restart.js");
@@ -28,53 +42,115 @@ const { restartCommand } = await import("./restart.js");
 describe("restartCommand", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockFindMonorepoRoot.mockReturnValue("/fake/root");
-    mockReadPid.mockReturnValue(null);
+    mockIsRunning.mockReturnValue(false);
+    mockHasSession.mockReturnValue(false);
   });
 
-  it("requires a service argument", () => {
-    const mockExit = vi.spyOn(process, "exit").mockImplementation((() => {
-      throw new Error("process.exit");
-    }) as any);
-    const mockErr = vi.spyOn(console, "error").mockImplementation(() => {});
-
-    expect(() => restartCommand([])).toThrow("process.exit");
-
-    mockExit.mockRestore();
-    mockErr.mockRestore();
-  });
-
-  it("stops running service then starts it", () => {
-    mockReadPid.mockReturnValue(555);
-    mockIsRunning.mockReturnValue(true);
-    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-
+  it("preserves prod mode when restarting a prod service", () => {
+    mockReadState.mockReturnValue({
+      pid: 100, mode: "prod", startedAt: "x", command: ["a"], logPath: "p",
+    });
     const logs: string[] = [];
-    const mock = vi.spyOn(console, "log").mockImplementation((msg) => logs.push(String(msg)));
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
 
     restartCommand(["daemon"]);
 
-    expect(killSpy).toHaveBeenCalledWith(555, "SIGTERM");
-    expect(mockRemovePid).toHaveBeenCalledWith("daemon");
-    expect(mockSpawn).toHaveBeenCalled();
-    expect(mockWritePid).toHaveBeenCalledWith("daemon", 77);
-    const output = logs.join("\n");
-    expect(output).toContain("stopped");
-    expect(output).toContain("started");
+    expect(mockLaunchProd).toHaveBeenCalledWith("daemon", "/fake/root");
+    expect(mockLaunchDev).not.toHaveBeenCalled();
+    expect(logs.join("\n")).toContain("Restarting Friday daemon in prod mode");
 
-    killSpy.mockRestore();
     mock.mockRestore();
   });
 
-  it("rejects unknown service names", () => {
-    const mockExit = vi.spyOn(process, "exit").mockImplementation((() => {
+  it("preserves dev mode when restarting a dev service", () => {
+    mockReadState.mockReturnValue({
+      pid: 7001, panePid: 7000, mode: "dev",
+      tmuxSession: "friday-dashboard",
+      startedAt: "x", command: ["a"], logPath: "p",
+    });
+    mockHasSession.mockReturnValue(true);
+    const logs: string[] = [];
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+
+    restartCommand(["dashboard"]);
+
+    expect(mockLaunchDev).toHaveBeenCalledWith("dashboard", "/fake/root");
+    expect(mockLaunchProd).not.toHaveBeenCalled();
+    expect(mockKillSession).toHaveBeenCalledWith("friday-dashboard");
+    expect(logs.join("\n")).toContain("Restarting Dashboard in dev mode");
+
+    mock.mockRestore();
+  });
+
+  it("rejects --dev as an explicit flag (assertion mismatch)", () => {
+    const errs: string[] = [];
+    const errMock = vi.spyOn(console, "error").mockImplementation((m) => errs.push(String(m)));
+    const exitMock = vi.spyOn(process, "exit").mockImplementation((() => {
       throw new Error("process.exit");
     }) as any);
-    const mockErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(() => restartCommand(["daemon", "--dev"])).toThrow("process.exit");
+    expect(errs.join("\n")).toContain("restart does not accept --dev");
+
+    errMock.mockRestore();
+    exitMock.mockRestore();
+  });
+
+  it("rejects --prod as an explicit flag", () => {
+    const errs: string[] = [];
+    const errMock = vi.spyOn(console, "error").mockImplementation((m) => errs.push(String(m)));
+    const exitMock = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("process.exit");
+    }) as any);
+
+    expect(() => restartCommand(["daemon", "--prod"])).toThrow("process.exit");
+    expect(errs.join("\n")).toContain("restart does not accept --prod");
+
+    errMock.mockRestore();
+    exitMock.mockRestore();
+  });
+
+  it("errors when service is not running (no state)", () => {
+    mockReadState.mockReturnValue(null);
+    const errs: string[] = [];
+    const errMock = vi.spyOn(console, "error").mockImplementation((m) => errs.push(String(m)));
+    const exitMock = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("process.exit");
+    }) as any);
+
+    expect(() => restartCommand(["daemon"])).toThrow("process.exit");
+    expect(errs.join("\n")).toContain("not running");
+    expect(errs.join("\n")).toContain("friday start daemon");
+
+    errMock.mockRestore();
+    exitMock.mockRestore();
+  });
+
+  it("errors when no service name supplied", () => {
+    const errs: string[] = [];
+    const errMock = vi.spyOn(console, "error").mockImplementation((m) => errs.push(String(m)));
+    const exitMock = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("process.exit");
+    }) as any);
+
+    expect(() => restartCommand([])).toThrow("process.exit");
+    expect(errs.join("\n")).toContain("Usage: friday restart");
+
+    errMock.mockRestore();
+    exitMock.mockRestore();
+  });
+
+  it("errors on unknown service", () => {
+    const errs: string[] = [];
+    const errMock = vi.spyOn(console, "error").mockImplementation((m) => errs.push(String(m)));
+    const exitMock = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("process.exit");
+    }) as any);
 
     expect(() => restartCommand(["bogus"])).toThrow("process.exit");
+    expect(errs.join("\n")).toContain("Unknown service: bogus");
 
-    mockExit.mockRestore();
-    mockErr.mockRestore();
+    errMock.mockRestore();
+    exitMock.mockRestore();
   });
 });

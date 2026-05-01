@@ -3,12 +3,13 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const testDir = join(tmpdir(), `friday-cli-svc-${process.pid}-${Date.now()}`);
-const fridayDir = join(testDir, ".friday");
+const testHome = join(tmpdir(), `friday-cli-svc-${process.pid}-${Date.now()}`);
+const fridayDir = join(testHome, ".friday");
 
-vi.mock("@friday/shared", () => ({
-  FRIDAY_DIR: fridayDir,
-}));
+vi.mock("node:os", async () => {
+  const actual = await vi.importActual<typeof import("node:os")>("node:os");
+  return { ...actual, homedir: () => testHome };
+});
 
 const { readPid, writePid, removePid, isRunning, parseServiceArg, SERVICES, findMonorepoRoot } =
   await import("./services.js");
@@ -22,25 +23,25 @@ describe("SERVICES registry", () => {
   });
 });
 
-describe("PID file management", () => {
+describe("PID accessors (state-backed)", () => {
   beforeEach(() => {
-    mkdirSync(join(fridayDir, "pids"), { recursive: true });
+    mkdirSync(fridayDir, { recursive: true });
   });
 
   afterEach(() => {
-    rmSync(testDir, { recursive: true, force: true });
+    rmSync(testHome, { recursive: true, force: true });
   });
 
-  it("writePid creates and readPid reads a PID file", () => {
+  it("writePid creates and readPid reads back the pid", () => {
     writePid("daemon", 12345);
     expect(readPid("daemon")).toBe(12345);
   });
 
-  it("readPid returns null when no PID file exists", () => {
+  it("readPid returns null when no state file exists", () => {
     expect(readPid("dashboard")).toBeNull();
   });
 
-  it("removePid deletes the PID file", () => {
+  it("removePid deletes the state file", () => {
     writePid("daemon", 12345);
     removePid("daemon");
     expect(readPid("daemon")).toBeNull();
@@ -48,6 +49,23 @@ describe("PID file management", () => {
 
   it("removePid is safe when file doesn't exist", () => {
     expect(() => removePid("daemon")).not.toThrow();
+  });
+
+  it("writePid synthesizes a default state record (mode prod) on first write", () => {
+    writePid("daemon", 12345);
+    const state = JSON.parse(
+      readFileSync(join(fridayDir, "state", "daemon.json"), "utf-8")
+    );
+    expect(state.pid).toBe(12345);
+    expect(state.mode).toBe("prod");
+    expect(state.command).toEqual(["friday", "start", "daemon"]);
+    expect(state.logPath).toBe(join(fridayDir, "logs", "daemon.jsonl"));
+  });
+
+  it("readPid returns null when state JSON is malformed", () => {
+    mkdirSync(join(fridayDir, "state"), { recursive: true });
+    writeFileSync(join(fridayDir, "state", "daemon.json"), "{not valid json");
+    expect(readPid("daemon")).toBeNull();
   });
 });
 
@@ -84,23 +102,6 @@ describe("parseServiceArg", () => {
     expect(() => parseServiceArg("bogus")).toThrow("process.exit");
     mockExit.mockRestore();
     mockErr.mockRestore();
-  });
-});
-
-describe("readPid edge cases", () => {
-  beforeEach(() => {
-    mkdirSync(join(fridayDir, "pids"), { recursive: true });
-  });
-
-  afterEach(() => {
-    rmSync(testDir, { recursive: true, force: true });
-  });
-
-  it("returns null for non-numeric PID file content", () => {
-    writePid("daemon", 12345);
-    // Overwrite with garbage
-    writeFileSync(join(fridayDir, "pids", "daemon.pid"), "not-a-number");
-    expect(readPid("daemon")).toBeNull();
   });
 });
 

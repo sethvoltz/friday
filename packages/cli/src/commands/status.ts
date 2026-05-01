@@ -1,13 +1,30 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { FRIDAY_DIR } from "@friday/shared";
-import { type ServiceName, SERVICES, readPid, isRunning, removePid } from "../services.js";
+import { type ServiceName, SERVICES, isRunning } from "../services.js";
+import { readState, type ServiceState } from "../state.js";
+import { hasSession, isPaneDead } from "../tmux.js";
 
 interface HealthData {
   pid: number;
   startedAt: string;
   lastHeartbeat: string;
   uptimeMs: number;
+}
+
+export type ServiceStatusState = "stopped" | "running" | "crashed" | "stale";
+
+export interface ServiceStatusJson {
+  service: ServiceName;
+  state: ServiceStatusState;
+  mode: "dev" | "prod" | null;
+  pid: number | null;
+  tmuxSession: string | null;
+  startedAt: string | null;
+  startCommand: string[] | null;
+  logPath: string | null;
+  /** ISO timestamp of the last line in the JSONL log, or null if missing/empty. */
+  lastLogTs: string | null;
 }
 
 function formatDuration(ms: number): string {
@@ -21,44 +38,125 @@ function formatDuration(ms: number): string {
   return `${hours}h ${remainingMinutes}m`;
 }
 
-function serviceStatus(service: ServiceName): { running: boolean; pid: number | null; detail: string } {
-  const pid = readPid(service);
-  if (!pid) return { running: false, pid: null, detail: "not running" };
-
-  if (!isRunning(pid)) {
-    removePid(service);
-    return { running: false, pid, detail: "not running (stale PID cleaned)" };
+/**
+ * Read the last JSONL line of `path` and return its `ts` field. Reads the
+ * tail of the file (up to 4 KiB) — enough for the structured logger's lines
+ * which are well under that, and avoids loading multi-megabyte logs.
+ */
+function readLastLogTs(path: string): string | null {
+  if (!existsSync(path)) return null;
+  try {
+    const size = statSync(path).size;
+    if (size === 0) return null;
+    const tailSize = Math.min(4096, size);
+    const buf = Buffer.alloc(tailSize);
+    const fd = openSync(path, "r");
+    try {
+      readSync(fd, buf, 0, tailSize, size - tailSize);
+    } finally {
+      closeSync(fd);
+    }
+    const text = buf.toString("utf-8");
+    const lines = text.split("\n").filter(Boolean);
+    if (lines.length === 0) return null;
+    const last = lines[lines.length - 1];
+    const obj = JSON.parse(last);
+    return typeof obj.ts === "string" ? obj.ts : null;
+  } catch {
+    return null;
   }
-
-  return { running: true, pid, detail: `running (PID ${pid})` };
 }
 
-export function statusCommand(): void {
-  console.log("\nFriday Status");
-  console.log("\u2550".repeat(40));
+function classify(state: ServiceState | null): ServiceStatusState {
+  if (!state) return "stopped";
+  const pidAlive = isRunning(state.pid);
+  if (state.mode === "dev") {
+    const session = state.tmuxSession ?? "";
+    const sessionLive = session && hasSession(session);
+    if (sessionLive && pidAlive && !isPaneDead(session)) return "running";
+    if (sessionLive && (!pidAlive || isPaneDead(session))) return "crashed";
+    if (!sessionLive && !pidAlive) return "stale";
+    if (!sessionLive && pidAlive) return "stale"; // mismatch: process alive but no session
+    return "running";
+  }
+  // prod
+  return pidAlive ? "running" : "stale";
+}
 
-  // Service status
-  for (const [name, info] of Object.entries(SERVICES)) {
-    const { running, detail } = serviceStatus(name as ServiceName);
-    const icon = running ? "\u2713" : "\u2717";
-    console.log(`  ${icon} ${info.label}: ${detail}`);
+function buildStatusJson(service: ServiceName): ServiceStatusJson {
+  const state = readState(service);
+  const stateName = classify(state);
+  return {
+    service,
+    state: stateName,
+    mode: state?.mode ?? null,
+    pid: state?.pid ?? null,
+    tmuxSession: state?.tmuxSession ?? null,
+    startedAt: state?.startedAt ?? null,
+    startCommand: state?.command ?? null,
+    logPath: state?.logPath ?? null,
+    lastLogTs: state?.logPath ? readLastLogTs(state.logPath) : null,
+  };
+}
+
+function printHumanLine(s: ServiceStatusJson): void {
+  const info = SERVICES[s.service];
+  const icons: Record<ServiceStatusState, string> = {
+    running: "✓",
+    stopped: "✗",
+    crashed: "⚠",
+    stale: "⚠",
+  };
+  const detail =
+    s.state === "running"
+      ? `running (${s.mode}, PID ${s.pid}${s.tmuxSession ? `, tmux ${s.tmuxSession}` : ""})`
+      : s.state === "crashed"
+      ? `crashed (tmux ${s.tmuxSession} alive but pane dead — \`friday attach ${s.service}\` to inspect)`
+      : s.state === "stale"
+      ? `stale (state file out of sync with reality — \`friday stop ${s.service}\` to clean up)`
+      : "not running";
+  console.log(`  ${icons[s.state]} ${info.label}: ${detail}`);
+}
+
+export function statusCommand(args: string[] = []): void {
+  const wantJson = args.includes("--json");
+  const positional = args.filter((a) => !a.startsWith("--"));
+  const targetService = positional[0] as ServiceName | undefined;
+
+  const services: ServiceName[] = targetService
+    ? [targetService]
+    : (Object.keys(SERVICES) as ServiceName[]);
+
+  if (wantJson) {
+    const out = services.map(buildStatusJson);
+    console.log(JSON.stringify(targetService ? out[0] : out, null, 2));
+    return;
   }
 
-  // Health file (daemon heartbeat)
-  const healthPath = join(FRIDAY_DIR, "health.json");
-  if (existsSync(healthPath)) {
-    try {
-      const health: HealthData = JSON.parse(readFileSync(healthPath, "utf-8"));
-      const age = Date.now() - new Date(health.lastHeartbeat).getTime();
-      const fresh = age < 60_000;
+  console.log("\nFriday Status");
+  console.log("═".repeat(40));
 
-      console.log();
-      console.log("  Daemon health:");
-      console.log(`    PID:            ${health.pid}`);
-      console.log(`    Uptime:         ${formatDuration(health.uptimeMs)}`);
-      console.log(`    Last heartbeat: ${fresh ? `${Math.floor(age / 1000)}s ago` : `${Math.floor(age / 60000)}m ago (stale)`}`);
-    } catch {
-      // Malformed health file
+  for (const svc of services) {
+    printHumanLine(buildStatusJson(svc));
+  }
+
+  // Health file (daemon heartbeat) — supplement, only when targeting daemon or all
+  if (!targetService || targetService === "daemon") {
+    const healthPath = join(FRIDAY_DIR, "health.json");
+    if (existsSync(healthPath)) {
+      try {
+        const health: HealthData = JSON.parse(readFileSync(healthPath, "utf-8"));
+        const age = Date.now() - new Date(health.lastHeartbeat).getTime();
+        const fresh = age < 60_000;
+
+        console.log();
+        console.log("  Daemon health:");
+        console.log(`    PID:            ${health.pid}`);
+        console.log(`    Uptime:         ${formatDuration(health.uptimeMs)}`);
+        console.log(`    Last heartbeat: ${fresh ? `${Math.floor(age / 1000)}s ago` : `${Math.floor(age / 60000)}m ago (stale)`}`);
+      } catch {
+        // Malformed health file
+      }
     }
   }
 

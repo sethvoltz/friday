@@ -29,7 +29,9 @@ Commands:
   mail               Inter-agent mail (check, read, send)
   send               Shorthand for 'friday mail send'
   schedule           Manage scheduled (cron) agents
-  dev                Development mode commands
+  attach <service>   Attach to a dev-mode service's tmux session
+  logs <service>     Tail a service's structured JSONL log
+  reset-orchestrator Clear orchestrator session (daemon must be stopped)
   doctor             Validate your Friday installation
   setup              Bootstrap a new Friday installation
   help               Show this help message
@@ -69,7 +71,7 @@ Options:
 const START_HELP = `
 friday start — Start services
 
-Usage: friday start [service]
+Usage: friday start [service] [--dev]
 
 Services:
   daemon             The Friday bridge daemon
@@ -77,7 +79,16 @@ Services:
 
 If no service is specified, starts all services.
 
+Modes:
+  default (prod)     Runs the built artifact (node dist/index.js).
+                     Errors if the artifact is missing or stale —
+                     run \`pnpm --filter <pkg> build\` first.
+  --dev              Runs the dev script (hot reload) inside a tmux
+                     session named friday-<svc>. Attach via:
+                     friday attach <svc>
+
 Options:
+  --dev              Start in dev mode (tmux + hot reload)
   --help, -h         Show this help
 `.trim();
 
@@ -114,33 +125,30 @@ Options:
 const STATUS_HELP = `
 friday status — Show running services and health
 
-Usage: friday status
+Usage: friday status [service] [--json]
 
-Checks PID files and health.json to report the state of
-Friday services.
-
-Options:
-  --help, -h         Show this help
-`.trim();
-
-const DEV_HELP = `
-friday dev — Development mode commands
-
-Usage: friday dev <command> [service]
-
-Commands:
-  start [service]         Start services in dev mode (tsx watch, hot reload)
-  restart <service>       Restart a specific service in dev mode
-  reset-orchestrator      Clear orchestrator session (daemon must be stopped)
-
-Services:
-  daemon             The Friday bridge daemon
-  dashboard          The management dashboard
-
-If no service is specified for 'start', starts all services.
+States:
+  running     Service is up (and pane alive in dev mode)
+  crashed     dev: tmux session exists but pane is dead
+  stale       state file present but process is gone
+  stopped     no state file (service not started)
 
 Options:
+  --json             Emit machine-readable JSON (the contract for agents)
   --help, -h         Show this help
+
+JSON shape:
+  {
+    "service": "dashboard",
+    "state": "running",
+    "mode": "dev",
+    "pid": 12345,
+    "tmuxSession": "friday-dashboard",
+    "startedAt": "ISO 8601",
+    "startCommand": ["friday", "start", "dashboard", "--dev"],
+    "logPath": "/Users/.../.friday/logs/dashboard.jsonl",
+    "lastLogTs": "ISO 8601 of last log line, or null"
+  }
 `.trim();
 
 const MAIL_HELP = `
@@ -273,6 +281,59 @@ Options:
   --help, -h         Show this help
 `.trim();
 
+const LOGS_HELP = `
+friday logs — Tail a service's structured JSONL log
+
+Usage: friday logs <service> [-f] [--pretty] [-n N]
+
+Reads from ~/.friday/logs/<service>.jsonl. Works regardless of mode —
+in dev mode the same JSONL events that show up in the tmux pane are
+also persisted here.
+
+Options:
+  -f, --follow       Tail and follow new lines (like tail -f)
+  -n, --lines N      Print the last N lines (default: 50)
+  --pretty           Colorize and pretty-print (default: raw JSON)
+  --json             Force JSON output (raw)
+  --help, -h         Show this help
+`.trim();
+
+const RESET_ORCH_HELP = `
+friday reset-orchestrator — Clear the orchestrator's session
+
+Usage: friday reset-orchestrator
+
+Wipes the orchestrator session ID from agents.json and the channel
+mapping from sessions/channels.json. The daemon must be stopped first
+(this command refuses to run while it's alive).
+
+Use this when an orchestrator session is wedged and a clean restart
+is needed. The next \`friday start daemon\` will create a fresh session.
+
+Options:
+  --help, -h         Show this help
+`.trim();
+
+const ATTACH_HELP = `
+friday attach — Attach to a dev-mode service's tmux session
+
+Usage: friday attach <service>
+
+Lands you in the service's interactive tmux session (vite/tsx watcher
+output, HMR overlays, etc.). Detach with the standard tmux prefix +
+d (default: Ctrl-b d).
+
+Errors if the service is not running or is in prod mode.
+For prod mode, use \`friday logs <service> -f\` instead.
+
+Services:
+  daemon             The Friday bridge daemon
+  dashboard          The management dashboard
+
+Options:
+  --help, -h         Show this help
+`.trim();
+
 export const HELP: Record<string, string> = {
   main: MAIN_HELP,
   usage: USAGE_HELP,
@@ -282,7 +343,9 @@ export const HELP: Record<string, string> = {
   restart: RESTART_HELP,
   status: STATUS_HELP,
   mail: MAIL_HELP,
-  dev: DEV_HELP,
+  attach: ATTACH_HELP,
+  logs: LOGS_HELP,
+  "reset-orchestrator": RESET_ORCH_HELP,
   inspect: INSPECT_HELP,
   transcript: TRANSCRIPT_HELP,
   doctor: DOCTOR_HELP,

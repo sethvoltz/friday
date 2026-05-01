@@ -65,11 +65,14 @@ Add tokens to `~/.friday/.env`, set your orchestrator channel in `~/.friday/conf
 ### 4. Run
 
 ```bash
-# Start everything in dev mode (daemon + dashboard with hot reload)
-./bin/friday dev start
+# Start everything in dev mode (daemon + dashboard, each in its own tmux session)
+./bin/friday start all --dev
 
 # Or start just the daemon
-./bin/friday dev start daemon
+./bin/friday start daemon --dev
+
+# Attach to the live tmux pane (Ctrl-b d to detach)
+./bin/friday attach daemon
 ```
 
 Send a message in your orchestrator channel. Friday will pick it up.
@@ -85,18 +88,20 @@ The `friday` CLI manages services and reports usage without needing the daemon r
 ./bin/friday <command>
 
 # Commands:
-friday status                   # Check what's running
-friday start [daemon|dashboard] # Start services (detached)
-friday stop [daemon|dashboard]  # Stop services
-friday restart <service>        # Restart a service
-friday usage                    # Cost/token report
-friday usage -v                 # Verbose token breakdown
-friday config                   # Print resolved config
-friday config --validate        # Validate config
-friday inspect <agent>          # Show last N turns from an agent's transcript (--follow tails)
-friday transcript <agent>       # Export full session transcript as markdown
-friday schedule                 # Manage scheduled agents (list, create, pause, trigger, ...)
-friday dev start [service]      # Dev mode with hot reload
+friday status [service] [--json]  # Check what's running (--json: agent contract)
+friday start [service] [--dev]    # Start in prod (default) or dev (tmux + hot reload)
+friday stop [service]             # Stop a service or all
+friday restart <service>          # Mode-preserving restart
+friday attach <service>           # Attach to a dev-mode tmux session
+friday logs <service> [-f] [--pretty] [-n N]  # Tail ~/.friday/logs/<svc>.jsonl
+friday reset-orchestrator         # Wipe orchestrator session (daemon must be stopped)
+friday usage                      # Cost/token report
+friday usage -v                   # Verbose token breakdown
+friday config                     # Print resolved config
+friday config --validate          # Validate config
+friday inspect <agent>            # Show last N turns from an agent's transcript (--follow tails)
+friday transcript <agent>         # Export full session transcript as markdown
+friday schedule                   # Manage scheduled agents (list, create, pause, trigger, ...)
 ```
 
 ## Project Structure
@@ -128,12 +133,16 @@ pnpm build        # Build all packages
 ### Dev mode
 
 ```bash
-# Start everything with hot reload
-./bin/friday dev start
+# Start everything with hot reload (each service in its own tmux session)
+./bin/friday start all --dev
 
 # Or start a specific service
-./bin/friday dev start daemon
-./bin/friday dev start dashboard
+./bin/friday start daemon --dev
+./bin/friday start dashboard --dev
+
+# Attach to a live session, or follow logs without attaching
+./bin/friday attach dashboard
+./bin/friday logs dashboard -f --pretty
 ```
 
 ### Testing

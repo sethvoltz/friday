@@ -3,7 +3,11 @@ import { HELP, hasHelpFlag, showHelp } from "./help.js";
 
 describe("help texts", () => {
   it("has help for all known commands", () => {
-    const expected = ["main", "usage", "config", "start", "stop", "restart", "status", "dev"];
+    const expected = [
+      "main", "usage", "config",
+      "start", "stop", "restart", "status",
+      "attach", "logs", "reset-orchestrator",
+    ];
     for (const cmd of expected) {
       expect(HELP[cmd]).toBeDefined();
     }
@@ -17,8 +21,14 @@ describe("help texts", () => {
     expect(main).toContain("stop");
     expect(main).toContain("restart");
     expect(main).toContain("status");
-    expect(main).toContain("dev");
+    expect(main).toContain("attach");
+    expect(main).toContain("logs");
+    expect(main).toContain("reset-orchestrator");
     expect(main).toContain("help");
+  });
+
+  it("main help no longer mentions the removed `dev` subcommand tree", () => {
+    expect(HELP.main).not.toContain("Development mode commands");
   });
 });
 

@@ -1,15 +1,62 @@
-import { spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import {
   type ServiceName,
   SERVICES,
-  readPid,
-  writePid,
-  removePid,
   isRunning,
   findMonorepoRoot,
 } from "../services.js";
+import { readState, removeState, type ServiceState } from "../state.js";
+import { hasSession, killSession } from "../tmux.js";
+import { launchProd, launchDev } from "../launch.js";
+
+const SIGTERM_GRACE_MS = 5000;
+const POLL_INTERVAL_MS = 100;
+
+function sleepSync(ms: number): void {
+  try {
+    execFileSync("sleep", [(ms / 1000).toFixed(3)], { stdio: "ignore" });
+  } catch {
+    /* fall through */
+  }
+}
+
+function waitForExit(pid: number, timeoutMs: number): boolean {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isRunning(pid)) return true;
+    sleepSync(POLL_INTERVAL_MS);
+  }
+  return !isRunning(pid);
+}
+
+function killService(state: ServiceState): void {
+  if (isRunning(state.pid)) {
+    try { process.kill(state.pid, "SIGTERM"); } catch { /* gone */ }
+    if (!waitForExit(state.pid, SIGTERM_GRACE_MS)) {
+      try { process.kill(state.pid, "SIGKILL"); } catch { /* ignore */ }
+      waitForExit(state.pid, 1000);
+    }
+  }
+  if (state.mode === "dev" && state.tmuxSession && hasSession(state.tmuxSession)) {
+    killSession(state.tmuxSession);
+  }
+}
+
+function rejectModeFlags(args: string[]): void {
+  for (const a of args) {
+    if (a === "--dev" || a === "--prod") {
+      console.error(
+        `restart does not accept ${a}. Restart preserves the current mode.\n` +
+        `To switch modes: friday stop <service> && friday start <service>${a === "--dev" ? " --dev" : ""}`
+      );
+      process.exit(1);
+    }
+  }
+}
 
 export function restartCommand(args: string[]): void {
+  rejectModeFlags(args);
+
   const serviceName = args[0];
   if (!serviceName) {
     console.error("Usage: friday restart <service>");
@@ -31,31 +78,30 @@ export function restartCommand(args: string[]): void {
 
   const service: ServiceName = serviceName;
   const info = SERVICES[service];
+  const state = readState(service);
 
-  // Stop
-  const pid = readPid(service);
-  if (pid && isRunning(pid)) {
-    try {
-      process.kill(pid, "SIGTERM");
-      console.log(`  ${info.label} stopped (PID ${pid})`);
-    } catch {
-      // Already gone
-    }
-    removePid(service);
+  if (!state) {
+    console.error(`${info.label} is not running.`);
+    console.error(`Use 'friday start ${service}' to start it.`);
+    process.exit(1);
   }
 
-  // Start
-  const child = spawn("pnpm", ["--filter", info.package, "run", info.script], {
-    cwd: root,
-    stdio: "ignore",
-    detached: true,
-  });
+  const mode = state.mode;
+  console.log(`Restarting ${info.label} in ${mode} mode...`);
 
-  if (child.pid) {
-    writePid(service, child.pid);
-    child.unref();
-    console.log(`  ${info.label} started (PID ${child.pid})`);
-  } else {
-    console.error(`  Failed to start ${info.label}`);
+  killService(state);
+  removeState(service);
+
+  try {
+    if (mode === "dev") {
+      const { innerPid, sessionName } = launchDev(service, root);
+      console.log(`  ${info.label} started in dev mode (PID ${innerPid}, tmux session ${sessionName})`);
+    } else {
+      const pid = launchProd(service, root);
+      console.log(`  ${info.label} started in prod mode (PID ${pid})`);
+    }
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
   }
 }

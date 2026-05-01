@@ -426,13 +426,13 @@ Unified command-line interface for managing Friday. Provides both standalone com
 - `friday schedule` — manage scheduled agents (list, create, pause, resume, trigger, delete)
 
 **Service management:**
-- `friday start [service]` — start daemon, dashboard, or all (detached, PID tracked in `~/.friday/pids/`)
-- `friday stop [service]` — stop services via SIGTERM
-- `friday restart <service>` — restart a specific service (required argument)
-
-**Dev mode:**
-- `friday dev start [service]` — start with tsx watch / hot reload (uses turbo for all)
-- `friday dev restart <service>` — restart a specific service in dev mode
+- `friday start [service] [--dev]` — start in prod (default) or dev (per-service tmux session). State recorded at `~/.friday/state/<svc>.json`.
+- `friday stop [service]` — graceful SIGTERM → 5s grace → SIGKILL fallback → tmux session cleanup for dev.
+- `friday restart <service>` — mode-preserving (errors if `--dev`/`--prod` is passed; switching modes requires explicit stop + start).
+- `friday attach <service>` — drop into a dev-mode tmux session (Ctrl-b d to detach).
+- `friday logs <service> [-f] [--pretty] [-n N]` — tail `~/.friday/logs/<svc>.jsonl`.
+- `friday status [service] [--json]` — four states: stopped/running/crashed/stale. `--json` is the documented contract for agents.
+- `friday reset-orchestrator` — wipe orchestrator session state (daemon must be stopped).
 
 **Entry points:**
 - `bin/friday` — dev shim, runs `packages/cli/src/index.ts` via tsx

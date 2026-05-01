@@ -240,6 +240,11 @@ const checks: Check[] = [
     name: "bd",
     run: () => checkBrewTool({ bin: "bd", pkg: "beads", isCask: false, severity: "warn" }),
   },
+  {
+    group: "Tools",
+    name: "tmux",
+    run: () => checkBrewTool({ bin: "tmux", pkg: "tmux", isCask: false, severity: "warn" }),
+  },
 
   // ── Services ──────────────────────────────────
   {

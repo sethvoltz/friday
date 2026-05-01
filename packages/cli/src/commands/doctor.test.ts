@@ -134,7 +134,7 @@ describe("friday doctor", () => {
 
   it("returns results for all checks grouped", async () => {
     const results = await runChecks();
-    expect(results.length).toBe(12);
+    expect(results.length).toBe(13);
     const groups = [...new Set(results.map((r) => r.group))];
     expect(groups).toEqual(["Configuration", "Tools", "Services"]);
     for (const r of results) {
