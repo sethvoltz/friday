@@ -1,4 +1,4 @@
-import { getDb } from "@friday/shared";
+import { getDb, closeDb } from "@friday/shared";
 import { reconcileMemories } from "@friday/memory";
 import { loadRuntimeConfig } from "./config.js";
 import { migrateUsageLog } from "./monitor/usage.js";
@@ -8,7 +8,7 @@ import { registerEventHandlers } from "./slack/events.js";
 import { loadSessions } from "./sessions/manager.js";
 import { loadRegistry } from "./sessions/registry.js";
 import { initOrchestrator, restoreActiveAgents, isAgentRunning, getAgentStallState, killAllAgents } from "./agent/lifecycle.js";
-import { log } from "./log.js";
+import { log, closeLog } from "./log.js";
 import { startHealthHeartbeat, stopHealthHeartbeat } from "./monitor/health.js";
 import { startAgentHealthCheck, stopAgentHealthCheck } from "./monitor/agent-health.js";
 import { startMailPoller, stopMailPoller } from "./comms/mail-poller.js";
@@ -84,7 +84,16 @@ async function main() {
       // Ignore stop errors during shutdown
     }
 
+    try {
+      closeDb();
+    } catch (err) {
+      log("error", "db_close_error", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     log("info", "shutdown_complete", {});
+    closeLog();
     process.exit(0);
   };
 

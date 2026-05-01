@@ -12,6 +12,7 @@ import {
   type RegistryEntry,
   type Turn,
 } from "@friday/shared";
+import { logger } from "$lib/server/log";
 
 export interface ScheduledRun {
   sessionId: string;
@@ -69,9 +70,10 @@ export const load: PageServerLoad = async ({ params, parent }) => {
         turns = await parseTranscript(jsonlPath);
         totalTurns = turns.length;
       } catch (err) {
-        console.error(
-          `parseTranscript failed for ${jsonlPath}: ${err instanceof Error ? err.message : String(err)}`
-        );
+        logger.log("error", "transcript_parse_failed", {
+          path: jsonlPath,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   }
