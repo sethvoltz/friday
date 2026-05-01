@@ -31,7 +31,7 @@ The inter-agent task and mail system uses Beads as its backing store:
 
 ```bash
 # Install beads (see beads repo for latest instructions)
-npm install -g @anthropic-ai/beads
+npm install -g @beads/bd
 
 # Initialize the Friday beads database
 mkdir -p ~/.friday/beads
