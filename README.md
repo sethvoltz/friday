@@ -77,7 +77,7 @@ Add tokens to `~/.friday/.env`, set your orchestrator channel in `~/.friday/conf
 
 Send a message in your orchestrator channel. Friday will pick it up.
 
-> **Tip:** Add `./bin` to your PATH to use `friday` directly, or invoke the shim as `./bin/friday` from the repo root.
+> **Tip:** Add `./bin` to your PATH to use `friday` and `friday-evolve` directly, or invoke the shims as `./bin/friday` / `./bin/friday-evolve` from the repo root.
 
 ## CLI
 
@@ -115,7 +115,7 @@ agent-friday/
 ├── services/
 │   ├── friday/          # Bridge daemon (@friday/daemon)
 │   └── dashboard/       # SvelteKit management UI
-├── bin/friday            # Dev shim
+├── bin/                  # Dev shims (friday, friday-evolve) — runs source via tsx
 └── docs/                # Documentation index, setup, config, architecture
 ```
 

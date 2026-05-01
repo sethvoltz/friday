@@ -458,7 +458,9 @@ agent-friday/
 ├── packages/evolve      — Self-improvement pipeline (scan → propose → rank → apply)
 ├── services/friday      — Bridge daemon
 ├── services/dashboard   — Management GUI (SvelteKit)
-├── bin/friday           — Dev shim (runs @friday/cli via tsx)
+├── bin/                 — Dev shims that run source via tsx
+│   ├── friday           — @friday/cli entry
+│   └── friday-evolve    — @friday/evolve CLI entry (scan / enrich / cluster / list / show)
 └── docs/                — Documentation index, setup, config, architecture
 ```
 
@@ -488,7 +490,8 @@ Unified command-line interface for managing Friday. Provides both standalone com
 
 **Entry points:**
 - `bin/friday` — dev shim, runs `packages/cli/src/index.ts` via tsx
-- `npm install -g @friday/cli` — production install puts `friday` on PATH via npm bin linking
+- `bin/friday-evolve` — dev shim for the `@friday/evolve` CLI (mirrors `bin/friday` so the meta-agents that invoke `friday-evolve` rely only on the in-repo entry, not a user dotfile setup)
+- `npm install -g @friday/cli @friday/evolve` — production install puts both on PATH via npm bin linking
 
 ## Testing
 
