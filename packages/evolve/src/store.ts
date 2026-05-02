@@ -66,7 +66,7 @@ export interface Proposal {
   appliedAt: string | null;
   appliedBy: string | null;
   /**
-   * Set by `friday-evolve enrich`. Marks when the body was rewritten by the
+   * Set by `friday evolve enrich`. Marks when the body was rewritten by the
    * Sonnet pass. Stale if `updatedAt > enrichedAt` (signals changed since).
    */
   enrichedAt: string | null;

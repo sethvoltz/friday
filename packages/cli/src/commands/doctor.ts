@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, accessSync, constants } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
+import { defineCommand } from "citty";
 import {
   FRIDAY_DIR,
   CONFIG_PATH,
@@ -9,7 +10,7 @@ import {
   loadConfig,
 } from "@friday/shared";
 import { readPid, isRunning } from "../services.js";
-import { BANNER } from "../help.js";
+import { BANNER, dim, bold, green, yellow, red } from "../branding.js";
 
 export interface CheckResult {
   status: "pass" | "warn" | "fail";
@@ -115,12 +116,6 @@ function checkBrewTool(opts: {
   return pass("Tools", bin, version ?? "found on PATH");
 }
 
-// ── ANSI helpers ────────────────────────────────────────────────────────
-const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
-const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
-const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
-const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
 
 const ICON = {
   pass: green("\u2713"),
@@ -346,6 +341,17 @@ export function printResults(results: CheckResult[], durationMs?: number): void 
   }
   console.log();
 }
+
+export const doctorCommandCitty = defineCommand({
+  meta: {
+    name: "doctor",
+    description:
+      "Validate your Friday installation. Checks ~/.friday/, config, .env tokens, working directory, beads database, CLI tools, Node, pnpm, and services. Exits 1 on any failure.",
+  },
+  async run() {
+    await doctorCommand();
+  },
+});
 
 export async function doctorCommand(): Promise<void> {
   console.log(BANNER);

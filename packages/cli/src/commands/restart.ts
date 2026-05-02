@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { defineCommand } from "citty";
 import {
   type ServiceName,
   SERVICES,
@@ -53,6 +54,30 @@ function rejectModeFlags(args: string[]): void {
     }
   }
 }
+
+export const restartCommandCitty = defineCommand({
+  meta: {
+    name: "restart",
+    description:
+      "Restart a service (daemon or dashboard). Preserves the current mode — does not accept --dev/--prod.",
+  },
+  args: {
+    service: {
+      type: "positional",
+      required: true,
+      description: "daemon | dashboard",
+    },
+  },
+  run({ args, rawArgs }) {
+    const argv: string[] = [];
+    if (typeof args.service === "string") argv.push(args.service);
+    // Preserve mode-flag rejection: forward any --dev/--prod the user typed.
+    for (const a of rawArgs) {
+      if (a === "--dev" || a === "--prod") argv.push(a);
+    }
+    restartCommand(argv);
+  },
+});
 
 export function restartCommand(args: string[]): void {
   rejectModeFlags(args);

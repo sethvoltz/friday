@@ -1,8 +1,20 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { defineCommand } from "citty";
 import { FRIDAY_DIR, AGENTS_PATH, SESSIONS_DIR } from "@friday/shared";
 import { readState } from "../state.js";
 import { isRunning } from "../services.js";
+
+export const resetOrchestratorCommandCitty = defineCommand({
+  meta: {
+    name: "reset-orchestrator",
+    description:
+      "Clear the orchestrator's session ID from agents.json and channels.json. The daemon must be stopped first.",
+  },
+  run() {
+    resetOrchestratorCommand();
+  },
+});
 
 /**
  * Wipe the orchestrator's session ID from agents.json and the channel

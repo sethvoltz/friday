@@ -1,7 +1,28 @@
 import { spawnSync } from "node:child_process";
+import { defineCommand } from "citty";
 import { SERVICES, parseServiceArg, type ServiceName } from "../services.js";
 import { readState } from "../state.js";
 import { hasSession, hasTmuxAvailable, isPaneDead } from "../tmux.js";
+
+export const attachCommandCitty = defineCommand({
+  meta: {
+    name: "attach",
+    description:
+      "Attach to a dev-mode service's tmux session. Detach with the standard tmux prefix + d (Ctrl-b d). Errors if the service is in prod mode — use 'friday logs <service> -f' instead.",
+  },
+  args: {
+    service: {
+      type: "positional",
+      required: true,
+      description: "daemon | dashboard",
+    },
+  },
+  run({ args }) {
+    const argv: string[] = [];
+    if (typeof args.service === "string") argv.push(args.service);
+    attachCommand(argv);
+  },
+});
 
 export function attachCommand(args: string[]): void {
   const target = parseServiceArg(args[0]);

@@ -88,7 +88,7 @@ interface Draft {
 }
 
 /**
- * Templated proposal body keyed off the daemon event name. The `friday-evolve
+ * Templated proposal body keyed off the daemon event name. The `friday evolve
  * enrich` pass replaces this body with Sonnet-generated root-cause analysis +
  * suggested change once a proposal lands; until then this stub gives the
  * dashboard and the meta-agent something readable.
@@ -106,7 +106,7 @@ function draftFromSignal(signal: Signal): Draft {
     "",
     `**Evidence**: ${signal.evidencePointers.length} pointer${signal.evidencePointers.length === 1 ? "" : "s"} into \`${signal.source}\` source.`,
     "",
-    `_Awaiting enrichment. Run \`friday-evolve enrich\` to replace this with root-cause analysis and a concrete suggested change._`,
+    `_Awaiting enrichment. Run \`friday evolve enrich\` to replace this with root-cause analysis and a concrete suggested change._`,
   ].join("\n");
 
   // Phase 1 only emits "memory" type proposals: the safest surface to apply

@@ -232,3 +232,37 @@ describe("statusCommand (--json)", () => {
     mock.mockRestore();
   });
 });
+
+describe("statusCommandCitty (parity via citty runCommand)", () => {
+  beforeEach(() => {
+    mkdirSync(fridayDir, { recursive: true });
+    mockIsRunning.mockReturnValue(false);
+    mockHasSession.mockReturnValue(false);
+    mockIsPaneDead.mockReturnValue(false);
+  });
+  afterEach(() => {
+    rmSync(testHome, { recursive: true, force: true });
+  });
+
+  it("--json yields the same shape as the legacy entrypoint", async () => {
+    writeState("daemon", {
+      pid: 100, mode: "prod",
+      startedAt: "2026-05-01T15:00:00.000Z",
+      command: ["friday", "start", "daemon"],
+      logPath: join(fridayDir, "logs", "daemon.jsonl"),
+    });
+    mockIsRunning.mockReturnValue(true);
+
+    const { runCommand } = await import("citty");
+    const { statusCommandCitty } = await import("./status.js");
+
+    const logs: string[] = [];
+    const mock = vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+    await runCommand(statusCommandCitty, { rawArgs: ["daemon", "--json"] });
+    const obj = JSON.parse(logs.join("\n"));
+    expect(obj.service).toBe("daemon");
+    expect(obj.state).toBe("running");
+    expect(obj.pid).toBe(100);
+    mock.mockRestore();
+  });
+});

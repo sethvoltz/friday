@@ -116,3 +116,45 @@ describe("mailCommand", () => {
     vi.restoreAllMocks();
   });
 });
+
+describe("mail citty wrappers (parity)", () => {
+  it("mail with no rawArgs lists orchestrator mail", async () => {
+    execResults.set("query", "[]");
+    const { runCommand } = await import("citty");
+    const { mailCommandCitty } = await import("./mail.js");
+
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+    await runCommand(mailCommandCitty, { rawArgs: [] });
+    expect(logs.join("\n")).toContain("No pending messages");
+    vi.restoreAllMocks();
+  });
+
+  it("mail send subcommand creates a beads issue", async () => {
+    execResults.set("create", "friday-zzz");
+    const { runCommand } = await import("citty");
+    const { mailCommandCitty } = await import("./mail.js");
+
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+    await runCommand(mailCommandCitty, {
+      rawArgs: ["send", "--to", "builder-blog", "--subject", "Hi", "--body", "B"],
+    });
+    expect(logs.join("\n")).toContain("Message sent to builder-blog");
+    vi.restoreAllMocks();
+  });
+
+  it("send alias works at top level via mailSendCmd", async () => {
+    execResults.set("create", "friday-alias");
+    const { runCommand } = await import("citty");
+    const { mailSendCmd } = await import("./mail.js");
+
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((m) => logs.push(String(m)));
+    await runCommand(mailSendCmd, {
+      rawArgs: ["--to", "agent-x", "--subject", "S", "--body", "B"],
+    });
+    expect(logs.join("\n")).toContain("Message sent to agent-x");
+    vi.restoreAllMocks();
+  });
+});

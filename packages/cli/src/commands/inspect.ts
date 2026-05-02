@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
+import { defineCommand } from "citty";
 import {
   AGENTS_PATH,
   loadConfig,
@@ -10,6 +11,52 @@ import {
   type AgentRegistry,
   type RegistryEntry,
 } from "@friday/shared";
+
+export const inspectCommandCitty = defineCommand({
+  meta: {
+    name: "inspect",
+    description:
+      "Inspect an agent's recent transcript. Shows the last N turns from the Claude Code session.",
+  },
+  args: {
+    agent: {
+      type: "positional",
+      required: true,
+      description: "Agent name",
+    },
+    turns: {
+      type: "string",
+      description: "Number of recent turns to show (default: 5)",
+    },
+    full: {
+      type: "boolean",
+      description: "Show the entire transcript",
+      default: false,
+    },
+    follow: {
+      type: "boolean",
+      alias: "f",
+      description: "Tail the transcript live",
+      default: false,
+    },
+    "no-tools": {
+      type: "boolean",
+      description: "Hide tool call details",
+      default: false,
+    },
+  },
+  async run({ args }) {
+    const argv: string[] = [];
+    if (typeof args.agent === "string") argv.push(args.agent);
+    if (typeof args.turns === "string" && args.turns.length > 0) {
+      argv.push("--turns", args.turns);
+    }
+    if (args.full) argv.push("--full");
+    if (args.follow) argv.push("--follow");
+    if (args["no-tools"]) argv.push("--no-tools");
+    await inspectCommand(argv);
+  },
+});
 
 function flagValue(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);

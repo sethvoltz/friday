@@ -445,3 +445,42 @@ The `friday dev` command tree is removed entirely; `friday dev reset-orchestrato
 - The daemon imports its logger via a shim that re-exports `createLogger({ service: "daemon" })` — the 21 daemon files (109 call sites) didn't move.
 - Rotated log files accumulate without retention. Worth revisiting if the directory grows uncomfortable, but with gzip + 1 MiB threshold a high-traffic week is on the order of tens of MB.
 - The migration step (`migratePidsToState`) is dead weight once every machine has been migrated; safe to delete in a few weeks.
+
+---
+
+## ADR-025: citty for the CLI; absorb friday-evolve as `friday evolve`
+
+**Date:** 2026-05-01
+**Status:** Accepted (supersedes parts of ADR-024 — the dispatcher and help-string layout)
+
+**Context:** `@friday/cli` was hand-rolled: a 134-line switch dispatcher in `index.ts`, 18 commands, a 362-line parallel `help.ts` keyed by command name, and a duplicated `flagValue` helper inlined across at least seven files. Help text drifted from parsers because the two lived in separate files with no shared schema. Unknown flags passed silently (`friday start --devv` would launch in prod). No tab completion. `setup.ts` reimplemented readline ask/confirm with hand-rolled ANSI helpers. Each CLI invocation re-ran the `migratePidsToState` shim from a top-level call.
+
+Separately, `@friday/evolve` shipped a sibling binary (`friday-evolve`) with five subcommands (scan/enrich/cluster/list/show). It shared all state with `friday` via `~/.friday/` and `@friday/shared` and had no functional overlap with the main CLI — but two CLIs meant two binaries on PATH, two install paths, two help systems, two argument parsers. Meta-agent prompts hard-coded the binary name.
+
+**Decision:**
+1. Replace the dispatcher and per-command flag parsers with [citty](https://github.com/unjs/citty) (UnJS, ESM-first, tiny). Every command is a `defineCommand({ meta, args, run })`; the root in `cli.ts` wires them into `subCommands`. `index.ts` becomes a 3-line `runMain(cli)`.
+2. Absorb `friday-evolve` into the main CLI as `friday evolve <sub>`. `commands/evolve.ts` declares the subtree but does **no** static imports of `@friday/evolve` — every subcommand `run()` does `await import("@friday/evolve")` so unrelated commands (`friday status`, `friday logs`) don't pay the `@anthropic-ai/claude-agent-sdk` import cost.
+3. `friday send` is preserved as a hidden top-level alias that reuses the `mail send` `defineCommand`, so flag parsing and help match exactly.
+4. `migratePidsToState` runs via citty's root-level `setup` hook (fires once per invocation, before subcommand resolution). It must stay silent on the no-op path so `--help` output is clean.
+5. Bundle three orthogonal swaps:
+   - **picocolors** for the hand-rolled ANSI helpers in `setup.ts`, `doctor.ts`, `logs.ts` (and the `BANNER` constant relocated to `branding.ts`).
+   - **@clack/prompts** for `setup.ts`'s readline `ask`/`confirm` flow, gated on `process.stdin.isTTY && !nonInteractive` so `--yes` and CI runs skip clack entirely.
+   - **Static shell completion** via `friday completion <zsh|bash>`, generated from a hand-maintained `COMPLETION_MANIFEST` in `branding.ts`. **Static, not citty-tree-walking** — otherwise tab completion would trigger the `@friday/evolve` lazy import on every keystroke.
+6. Delete `bin/friday-evolve`, the `bin` field in `packages/evolve/package.json`, and `packages/evolve/src/cli.ts`. Meta-agent seed prompts in `services/friday/src/evolve/seed.ts` rewritten from `friday-evolve scan` → `friday evolve scan`.
+
+The MCP server name `"friday-evolve"` is **preserved** (it's a tool-call namespace, not a shell command — renaming it would invalidate orchestrator turn caching and tool-call IDs).
+
+**Rationale:**
+- **citty over Commander/Yargs/oclif:** citty is ESM-first, types flow from `args` schema to handler, it auto-generates help, has lazy `subCommands` (via function-returning-promise resolvers), and the surface is small enough to fully read in one sitting. Commander is the safer "boring" pick but offers less in exchange for similar size; oclif is overkill for 23 commands; citty matches the project's terse, low-dep style.
+- **Lazy-load `@friday/evolve`:** the SDK ships an Anthropic client tree that's not free to import. Static-importing it from `cli.ts` would slow every command's cold start. The dynamic-import boundary is verifiable: `grep import dist/commands/evolve.js` shows only `await import` for the heavy modules.
+- **Static completion script:** dynamic completion that walks citty's subcommand tree would defeat the lazy-load — every Tab keystroke would resolve the resolvers, including evolve's. A hand-maintained manifest is a small ongoing tax (add a line when a subcommand lands) for fast, side-effect-free completion.
+- **Single CLI:** every "two binaries" claim about UX, install, learnability, and PATH hygiene applied here. Folding evolve in cost ~250 lines of glue and deleted the entire standalone CLI module; the underlying scan/enrich/cluster/list/show logic in `@friday/evolve` is untouched.
+- **clack TTY-gated:** `friday setup --yes` runs in scripted installs and CI without a TTY; clack would render a half-broken UI in those contexts. The gate falls back cleanly to no-prompt mode.
+
+**Consequences:**
+- New runtime deps on `@friday/cli`: `citty ^0.1.6`, `picocolors ^1.1.1`, `@clack/prompts ^1.3.0`, plus a workspace dep on `@friday/evolve` (lazy-loaded, so no startup cost for non-evolve commands).
+- **Breaking change**: `friday mail <agent>` shorthand (e.g. `friday mail builder-blog`) is removed; use `friday mail list <agent>`. The shorthand was undocumented; the explicit form is what `--help` advertises.
+- `bin/friday-evolve` is gone. Anything that hard-codes the binary path (CI scripts, dotfiles, scheduled-meta agent prompts) needs to switch to `friday evolve <sub>`.
+- `help.ts` (362 lines), `hasHelpFlag`, and the per-command `--help` short-circuits in `index.ts` are deleted. Help is generated from `meta.description` and the `args` schema.
+- Tests refactored in place. The legacy `<name>Command(args: string[])` exports are kept as internal helpers for now (existing tests still call them); citty wrappers delegate to them. They can be inlined in a future cleanup.
+- Tab completion is now installable: `friday completion zsh > ~/.zsh/completions/_friday`. Updates require regenerating after a new subcommand lands.

@@ -1,5 +1,6 @@
 import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { defineCommand } from "citty";
 import {
   AGENTS_PATH,
   SCHEDULES_DIR,
@@ -11,6 +12,93 @@ import {
   isValidAgentName,
   FRIDAY_DIR,
 } from "@friday/shared";
+
+export const scheduleListCmd = defineCommand({
+  meta: { name: "list", description: "List all scheduled agents." },
+  run() {
+    scheduleCommand(["list"]);
+  },
+});
+
+export const scheduleCreateCmd = defineCommand({
+  meta: { name: "create", description: "Create a new scheduled agent." },
+  args: {
+    name: { type: "string", required: true, description: "Agent name (will be prefixed with 'scheduled-')" },
+    cron: { type: "string", description: "5-field cron expression (e.g. '0 */6 * * *')" },
+    "run-at": { type: "string", description: "ISO 8601 timestamp for one-shot execution" },
+    timezone: { type: "string", alias: "tz", description: "Timezone for cron (e.g. 'America/New_York')" },
+    task: { type: "string", required: true, description: "Task prompt — what the agent does each run" },
+    cwd: { type: "string", description: "Working directory (default: ~/.friday/working)" },
+    "system-prompt": { type: "string", description: "Additional system prompt context" },
+  },
+  run({ args }) {
+    const argv: string[] = ["create"];
+    if (typeof args.name === "string") argv.push("--name", args.name);
+    if (typeof args.cron === "string" && args.cron.length > 0) argv.push("--cron", args.cron);
+    if (typeof args["run-at"] === "string" && args["run-at"].length > 0) argv.push("--run-at", args["run-at"]);
+    if (typeof args.timezone === "string" && args.timezone.length > 0) argv.push("--timezone", args.timezone);
+    if (typeof args.task === "string") argv.push("--task", args.task);
+    if (typeof args.cwd === "string" && args.cwd.length > 0) argv.push("--cwd", args.cwd);
+    if (typeof args["system-prompt"] === "string" && args["system-prompt"].length > 0) {
+      argv.push("--system-prompt", args["system-prompt"]);
+    }
+    scheduleCommand(argv);
+  },
+});
+
+export const schedulePauseCmd = defineCommand({
+  meta: { name: "pause", description: "Pause a scheduled agent." },
+  args: { name: { type: "positional", required: true, description: "Agent name" } },
+  run({ args }) {
+    scheduleCommand(["pause", typeof args.name === "string" ? args.name : ""]);
+  },
+});
+
+export const scheduleResumeCmd = defineCommand({
+  meta: { name: "resume", description: "Resume a paused scheduled agent." },
+  args: { name: { type: "positional", required: true, description: "Agent name" } },
+  run({ args }) {
+    scheduleCommand(["resume", typeof args.name === "string" ? args.name : ""]);
+  },
+});
+
+export const scheduleTriggerCmd = defineCommand({
+  meta: { name: "trigger", description: "Queue an immediate run." },
+  args: { name: { type: "positional", required: true, description: "Agent name" } },
+  run({ args }) {
+    scheduleCommand(["trigger", typeof args.name === "string" ? args.name : ""]);
+  },
+});
+
+export const scheduleDeleteCmd = defineCommand({
+  meta: { name: "delete", description: "Soft-delete a scheduled agent." },
+  args: { name: { type: "positional", required: true, description: "Agent name" } },
+  run({ args }) {
+    scheduleCommand(["delete", typeof args.name === "string" ? args.name : ""]);
+  },
+});
+
+export const scheduleCommandCitty = defineCommand({
+  meta: {
+    name: "schedule",
+    description:
+      "Manage scheduled (cron) agents. Subcommands: list, create, pause, resume, trigger, delete.",
+  },
+  subCommands: {
+    list: scheduleListCmd,
+    create: scheduleCreateCmd,
+    pause: schedulePauseCmd,
+    resume: scheduleResumeCmd,
+    trigger: scheduleTriggerCmd,
+    delete: scheduleDeleteCmd,
+  },
+  run({ args }) {
+    // Default action when no subcommand: list.
+    if (args._.length === 0) {
+      scheduleCommand(["list"]);
+    }
+  },
+});
 
 function loadRegistry(): AgentRegistry {
   if (!existsSync(AGENTS_PATH)) return {};

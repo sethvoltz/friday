@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { defineCommand } from "citty";
 import {
   type ServiceName,
   SERVICES,
@@ -78,6 +79,27 @@ function stopService(service: ServiceName): void {
   removeState(service);
   console.log(`  ${info.label} stopped (PID ${pid})`);
 }
+
+export const stopCommandCitty = defineCommand({
+  meta: {
+    name: "stop",
+    description: "Stop services (daemon, dashboard, or all).",
+  },
+  args: {
+    service: {
+      type: "positional",
+      required: false,
+      description: "daemon | dashboard (default: all)",
+    },
+  },
+  run({ args }) {
+    const argv: string[] = [];
+    if (typeof args.service === "string" && args.service.length > 0) {
+      argv.push(args.service);
+    }
+    stopCommand(argv);
+  },
+});
 
 export function stopCommand(args: string[]): void {
   const target = parseServiceArg(args[0]);

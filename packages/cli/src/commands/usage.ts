@@ -1,3 +1,4 @@
+import { defineCommand } from "citty";
 import { getAllUsageEntries, type UsageEntryRow } from "@friday/shared";
 
 interface PeriodStats {
@@ -59,6 +60,25 @@ function printStats(label: string, stats: PeriodStats): void {
   const avgCost = stats.turns > 0 ? formatCost(stats.cost / stats.turns) : "\u2014";
   console.log(`  ${label}: ${formatCost(stats.cost)} across ${stats.turns} turns (avg ${avgCost}/turn)`);
 }
+
+export const usageCommandCitty = defineCommand({
+  meta: {
+    name: "usage",
+    description:
+      "Show usage stats (cost, tokens, cache hit rate). Reads ~/.friday/usage.jsonl. Does not make any LLM calls.",
+  },
+  args: {
+    verbose: {
+      type: "boolean",
+      alias: "v",
+      description: "Show token breakdown",
+      default: false,
+    },
+  },
+  run({ args }) {
+    usageCommand(args.verbose ? ["--verbose"] : []);
+  },
+});
 
 export function usageCommand(args: string[]): void {
   const verbose = args.includes("--verbose") || args.includes("-v");

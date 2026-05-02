@@ -49,7 +49,7 @@ describe("logsCommand", () => {
     mock.mockRestore();
   });
 
-  it("--pretty colorizes output", async () => {
+  it("--pretty reformats lines (level, event, ts visible; not raw JSON)", async () => {
     writeJsonlLines([{ ts: "T1", level: "error", event: "boom", err: "x" }]);
 
     const logs: string[] = [];
@@ -57,9 +57,11 @@ describe("logsCommand", () => {
 
     await logsCommand(["daemon", "--pretty"]);
 
-    expect(logs[0]).toContain("\x1b[31m"); // red for error level
     expect(logs[0]).toContain("error");
     expect(logs[0]).toContain("boom");
+    expect(logs[0]).toContain("T1");
+    // Pretty output is not raw JSON — should not contain the surrounding {"ts":...
+    expect(logs[0]).not.toMatch(/^\{"ts":/);
 
     mock.mockRestore();
   });

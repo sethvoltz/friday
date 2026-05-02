@@ -24,7 +24,7 @@ Slack (Socket Mode) --> Friday Daemon --> Claude Agent SDK --> Claude Code --> Y
 
 - **Multi-agent orchestration** -- the orchestrator spins up isolated **Builder** agents for project work in their own git worktrees, and short-lived **Helpers** for delegated tasks. Builders are workspace-confined by a tool-call guard. Agents communicate via an inter-agent **mail** system.
 - **Scheduled agents** -- autonomous cron and one-shot agents run unattended, persist a `state.md` between runs (auto-injected into the next prompt), and escalate to the orchestrator via mail if anything goes sideways. Catch up missed runs on restart, cooperatively abort on shutdown.
-- **Self-improvement loop** -- the `friday-evolve` pipeline scans daemon logs, usage, transcripts, and feedback for friction signals (Haiku grades orchestrator turns for correction, frustration, and redirect), then Sonnet rewrites the top-ranked proposals with root-cause analysis. Daily and weekly meta-agents run it unattended and surface a prioritized backlog of system improvements in the dashboard.
+- **Self-improvement loop** -- the `friday evolve` pipeline scans daemon logs, usage, transcripts, and feedback for friction signals (Haiku grades orchestrator turns for correction, frustration, and redirect), then Sonnet rewrites the top-ranked proposals with root-cause analysis. Daily and weekly meta-agents run it unattended and surface a prioritized backlog of system improvements in the dashboard.
 - **Proactive memory** -- file-based markdown memories with hybrid keyword search and recall-frequency boosting. The daemon **auto-recalls relevant memories** and prepends them to the orchestrator's prompt — no `memory_search` call required.
 - **Multimodal** -- image attachments in Slack are fetched with the bot token, base64-encoded, and forwarded to Claude as vision content alongside the text.
 - **Live dashboard** -- SvelteKit UI streams real-time updates over SSE. Browse session transcripts (with markdown rendering), monitor schedules and their state files, explore the memory store, and watch agents tick through turns as they happen.
@@ -77,7 +77,7 @@ Add tokens to `~/.friday/.env`, set your orchestrator channel in `~/.friday/conf
 
 Send a message in your orchestrator channel. Friday will pick it up.
 
-> **Tip:** Add `./bin` to your PATH to use `friday` and `friday-evolve` directly, or invoke the shims as `./bin/friday` / `./bin/friday-evolve` from the repo root.
+> **Tip:** Add `./bin` to your PATH to use `friday` directly, or invoke the shim as `./bin/friday` from the repo root. The evolve pipeline lives at `friday evolve <subcommand>` (no separate binary).
 
 ## CLI
 
@@ -115,7 +115,7 @@ agent-friday/
 ├── services/
 │   ├── friday/          # Bridge daemon (@friday/daemon)
 │   └── dashboard/       # SvelteKit management UI
-├── bin/                  # Dev shims (friday, friday-evolve) — runs source via tsx
+├── bin/                  # Dev shim (friday) — runs source via tsx
 └── docs/                # Documentation index, setup, config, architecture
 ```
 

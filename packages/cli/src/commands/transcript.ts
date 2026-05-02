@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { defineCommand } from "citty";
 import {
   AGENTS_PATH,
   loadConfig,
@@ -7,6 +8,33 @@ import {
   type AgentRegistry,
   type RegistryEntry,
 } from "@friday/shared";
+
+export const transcriptCommandCitty = defineCommand({
+  meta: {
+    name: "transcript",
+    description: "Export an agent's full transcript as markdown.",
+  },
+  args: {
+    agent: {
+      type: "positional",
+      required: true,
+      description: "Agent name",
+    },
+    output: {
+      type: "string",
+      alias: "o",
+      description: "Write to file instead of stdout",
+    },
+  },
+  async run({ args }) {
+    const argv: string[] = [];
+    if (typeof args.agent === "string") argv.push(args.agent);
+    if (typeof args.output === "string" && args.output.length > 0) {
+      argv.push("--output", args.output);
+    }
+    await transcriptCommand(argv);
+  },
+});
 
 function flagValue(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);

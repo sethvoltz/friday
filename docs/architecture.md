@@ -100,19 +100,19 @@ A two-tier LLM split runs alongside the deterministic scanners:
 - `scan-friction.ts` — Haiku-graded friction pass over orchestrator transcripts (current + former session ids only). Strips `<memory-context>` blocks, skips tool-result-only turns, batches 30 turns per call. Categories: `correction|confusion|repeat|reset|frustration|doubt|redirect|none`. Severity tiering: 4-5 → high, 3 → medium, 2 → low; below 2 dropped. Emits one signal per category with up to 3 highest-friction evidence pointers. Failure-isolated in the CLI: a transient API error returns `[]` instead of sinking the rest of the scan.
 - `llm.ts` — Thin wrapper around `query()` from `@anthropic-ai/claude-agent-sdk` (`allowedTools: []`, no MCP, `bypassPermissions`). Used by both the friction scanner and the enrichment pass — keeps Pro/Max billing (ADR-003).
 - `rank.ts` — Pure scoring: severity floor + log2 frequency + distinct-signal boost − blast-radius penalty. `isCritical()` requires score ≥ 80 AND (high severity OR count ≥ 5).
-- `propose.ts` — Merges new occurrences into existing open proposals by signal hash; creates fresh ones for new hashes. `rerankAll()` recomputes scores at end of run. Templated body points the reader at `friday-evolve enrich`.
+- `propose.ts` — Merges new occurrences into existing open proposals by signal hash; creates fresh ones for new hashes. `rerankAll()` recomputes scores at end of run. Templated body points the reader at `friday evolve enrich`.
 - `enrich.ts` — Sonnet rewrite of templated proposal bodies. Hydrates evidence pointers with ±2 lines of context, asks Sonnet for `{body, type, blastRadius}` with sections **Signal summary** | **Root cause** | **Suggested change**. Idempotent: skips when `enrichedAt >= updatedAt` unless `--force`. Friction signals are flagged in the system prompt as first-class trust-erosion indicators.
 - `clusters.ts` — `mergeClusters()` runs Jaccard overlap (≥ 0.5 default) on signal-hash sets across open proposals; uses union-find to collapse groups; writes one cluster file per component to `~/.friday/evolve/clusters/<id>.md` and stamps `clusterId` on members. Non-destructive: proposal ids are preserved.
 - `apply.ts` — `applyProposal()` materializes `memory` proposals via `@friday/memory.saveEntry`, writes `prompt` proposals to `config.json` `agent.systemPrompt`, and deep-merges `config` proposals (JSON body) into `config.json`. A self-modification guard refuses prompt/config changes targeting any `scheduled-meta-*` agent. `code` proposals are dispatched to the orchestrator via `dispatch.ts`.
 - `dispatch.ts` — `dispatchCodeProposal()` shells out to `bd` to (1) seed a Beads epic with the proposal body, targets, evidence pointers, and acceptance criteria, then (2) mail the orchestrator (`type:message,delivery:pending,from:evolve:<applier>`) with the epic id. Builder creation stays gated on the orchestrator's existing user-approval flow — evolve never spawns a Builder itself.
 - `runs.ts` — Per-run audit log at `~/.friday/evolve/runs.jsonl`.
-- `cli.ts` — `friday-evolve scan|enrich|cluster|list|show` invoked by the meta-agents.
+- Subcommands `scan|enrich|cluster|list|show` are exposed via `friday evolve <sub>` (in `@friday/cli`, `commands/evolve.ts`) — invoked by the meta-agents. The original standalone `friday-evolve` binary was retired in favor of a single CLI entrypoint (see ADRs).
 
 Two meta-agents are seeded idempotently at daemon boot:
 - `scheduled-meta-daily` (cron `0 4 * * *`) — 24h scan (incl. friction) → enrich → list; mails the orchestrator urgently when criticals exist.
 - `scheduled-meta-weekly` (cron `0 5 * * 0`) — 7-day scan → enrich → Jaccard re-cluster; surfaces slow-burn patterns the daily run misses.
 
-The orchestrator surfaces proposals via `friday-evolve` MCP tools.
+The orchestrator surfaces proposals via the `friday-evolve` MCP server (the MCP namespace name is preserved for tool-call ID stability; the standalone shell binary of the same name was retired).
 
 ### Dashboard (`services/dashboard`)
 
@@ -458,9 +458,8 @@ agent-friday/
 ├── packages/evolve      — Self-improvement pipeline (scan → propose → rank → apply)
 ├── services/friday      — Bridge daemon
 ├── services/dashboard   — Management GUI (SvelteKit)
-├── bin/                 — Dev shims that run source via tsx
-│   ├── friday           — @friday/cli entry
-│   └── friday-evolve    — @friday/evolve CLI entry (scan / enrich / cluster / list / show)
+├── bin/                 — Dev shim that runs source via tsx
+│   └── friday           — @friday/cli entry (single CLI; evolve subcommands live under `friday evolve <sub>`)
 └── docs/                — Documentation index, setup, config, architecture
 ```
 
@@ -478,6 +477,8 @@ Unified command-line interface for managing Friday. Provides both standalone com
 - `friday inspect <agent>` — show last N turns from an agent's session transcript (supports `--turns N`, `--full`, `--follow/-f`, `--no-tools`)
 - `friday transcript <agent>` — export full session transcript as markdown (supports `--output <file>`)
 - `friday schedule` — manage scheduled agents (list, create, pause, resume, trigger, delete)
+- `friday evolve <sub>` — local self-improvement pipeline (scan, enrich, cluster, list, show); subcommand handlers in `@friday/evolve` are lazy-loaded so unrelated commands don't pay the `@anthropic-ai/claude-agent-sdk` import cost
+- `friday completion <zsh|bash>` — print a static shell completion script (no citty-tree walking; safe to install for tab completion)
 
 **Service management:**
 - `friday start [service] [--dev]` — start in prod (default) or dev (per-service tmux session). State recorded at `~/.friday/state/<svc>.json`.
@@ -489,9 +490,8 @@ Unified command-line interface for managing Friday. Provides both standalone com
 - `friday reset-orchestrator` — wipe orchestrator session state (daemon must be stopped).
 
 **Entry points:**
-- `bin/friday` — dev shim, runs `packages/cli/src/index.ts` via tsx
-- `bin/friday-evolve` — dev shim for the `@friday/evolve` CLI (mirrors `bin/friday` so the meta-agents that invoke `friday-evolve` rely only on the in-repo entry, not a user dotfile setup)
-- `npm install -g @friday/cli @friday/evolve` — production install puts both on PATH via npm bin linking
+- `bin/friday` — dev shim, runs `packages/cli/src/index.ts` via tsx. `index.ts` is a 3-line `runMain(cli)` over `cli.ts`'s root `defineCommand` (citty); the dispatcher, help text, and per-command flag parsing all flow from typed `args` schemas declared on each command's `defineCommand`.
+- `npm install -g @friday/cli` — production install puts `friday` on PATH via npm bin linking. The evolve pipeline lives at `friday evolve <sub>`; `@friday/evolve` is a workspace dep but its modules are dynamically imported only when an evolve subcommand runs.
 
 ## Testing
 

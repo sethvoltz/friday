@@ -26,9 +26,9 @@ const DAILY_TASK_PROMPT = [
   "and escalate critical items.",
   "",
   "Steps:",
-  "1. Run: `FRIDAY_AGENT_NAME=scheduled-meta-daily friday-evolve scan --since-hours 24`",
+  "1. Run: `FRIDAY_AGENT_NAME=scheduled-meta-daily friday evolve scan --since-hours 24`",
   "   The JSON output includes a `promotedToCritical` count.",
-  "2. Run: `friday-evolve list --status critical`",
+  "2. Run: `friday evolve list --status critical`",
   "3. If there are critical proposals, send ONE urgent mail to the orchestrator:",
   "   `mail_send` to=\"orchestrator\" priority=\"urgent\"",
   "   subject: \"Critical evolve proposals (<N>)\"",
@@ -52,11 +52,11 @@ const WEEKLY_TASK_PROMPT = [
   "proposals stop appearing in isolation.",
   "",
   "Steps:",
-  "1. Run: `FRIDAY_AGENT_NAME=scheduled-meta-weekly friday-evolve scan --since-hours 168`",
+  "1. Run: `FRIDAY_AGENT_NAME=scheduled-meta-weekly friday evolve scan --since-hours 168`",
   "   This pulls 7 days of daemon, usage, transcript, and feedback signals.",
-  "2. Run: `friday-evolve cluster`",
+  "2. Run: `friday evolve cluster`",
   "   Jaccard merge attaches `clusterId` to proposals whose signal sets overlap.",
-  "3. Run: `friday-evolve list --status critical`",
+  "3. Run: `friday evolve list --status critical`",
   "4. If there are critical proposals, send ONE urgent mail to the orchestrator:",
   "   `mail_send` to=\"orchestrator\" priority=\"urgent\"",
   "   subject: \"Weekly evolve digest — <N> critical, <C> clusters\"",
@@ -71,13 +71,13 @@ const WEEKLY_TASK_PROMPT = [
 
 const DAILY_SYSTEM_PROMPT_SUFFIX = [
   "You are scheduled-meta-daily, the evolve analyst for Friday.",
-  "Your only job is to run the friday-evolve CLI and summarize results.",
+  "Your only job is to run the `friday evolve` CLI and summarize results.",
   "Never act on behalf of the user. Never propose changes outside the pipeline.",
 ].join("\n");
 
 const WEEKLY_SYSTEM_PROMPT_SUFFIX = [
   "You are scheduled-meta-weekly, the deep evolve analyst for Friday.",
-  "Your only job is to run friday-evolve scan + cluster and summarize results.",
+  "Your only job is to run `friday evolve scan + cluster` and summarize results.",
   "Never act on behalf of the user. Never propose changes outside the pipeline.",
 ].join("\n");
 

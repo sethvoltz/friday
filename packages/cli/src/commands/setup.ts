@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { createInterface, type Interface } from "node:readline";
+import { defineCommand } from "citty";
+import * as clack from "@clack/prompts";
 import {
   FRIDAY_DIR,
   CONFIG_PATH,
@@ -11,13 +12,28 @@ import {
   type FridayConfig,
 } from "@friday/shared";
 import { runChecks, printResults } from "./doctor.js";
-import { BANNER } from "../help.js";
+import { BANNER, dim, bold, green, yellow } from "../branding.js";
 
-// ── ANSI helpers ────────────────────────────────────────────────────────
-const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
-const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
-const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
+export const setupCommandCitty = defineCommand({
+  meta: {
+    name: "setup",
+    description:
+      "Bootstrap a new Friday installation. Creates ~/.friday/, prompts for Slack tokens and orchestrator channel, writes config.json and .env, initializes the beads database, and runs doctor. Safe to re-run.",
+  },
+  args: {
+    yes: {
+      type: "boolean",
+      alias: "y",
+      description: "Accept defaults without prompting (for scripted installs)",
+      default: false,
+    },
+  },
+  async run({ args }) {
+    const argv: string[] = [];
+    if (args.yes) argv.push("--yes");
+    await setupCommand(argv);
+  },
+});
 
 const OK = green("\u2713");
 const WARN = yellow("\u26A0");
@@ -43,57 +59,54 @@ function parseEnvFile(path: string): Record<string, string> {
   return vars;
 }
 
-/** Ask user for a value. Shows current value as default (enter to keep). */
+function unwrap<T>(value: T | symbol): T {
+  if (clack.isCancel(value)) {
+    clack.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+  return value as T;
+}
+
+/** Ask for a value via clack. Shows current value as default (Enter to keep). */
 async function ask(
-  rl: Interface,
   label: string,
   current: string | undefined,
   opts: { secret?: boolean; required?: boolean } = {},
 ): Promise<string> {
   const { secret = false, required = false } = opts;
+  const placeholder = current ? preview(current, secret) : undefined;
 
-  if (current) {
-    const shown = preview(current, secret);
-    return new Promise((resolve) => {
-      rl.question(`     ${label} ${dim(`[${shown}]`)}: `, (answer) => {
-        resolve(answer.trim() || current);
-      });
-    });
-  }
+  const validate = required
+    ? (v: string | undefined) =>
+        (v ?? "").trim().length === 0 && !current ? "Required — please enter a value" : undefined
+    : undefined;
 
-  // No existing value — prompt until we get one if required
-  return new Promise((resolve) => {
-    const doAsk = () => {
-      rl.question(`     ${label}: `, (answer) => {
-        const val = answer.trim();
-        if (!val && required) {
-          console.log(`     ${yellow("Required")} — please enter a value`);
-          doAsk();
-        } else {
-          resolve(val);
-        }
-      });
-    };
-    doAsk();
-  });
+  const ask$ = secret && !current ? clack.password : clack.text;
+  const value = unwrap(
+    await ask$({
+      message: label,
+      placeholder,
+      defaultValue: current,
+      validate,
+    }),
+  );
+  const trimmed = (typeof value === "string" ? value : "").trim();
+  return trimmed.length === 0 && current ? current : trimmed;
 }
 
-/** Ask yes/no. Returns true for yes. */
-async function confirm(rl: Interface, question: string, defaultYes = true): Promise<boolean> {
-  const hint = defaultYes ? "Y/n" : "y/N";
-  return new Promise((resolve) => {
-    rl.question(`     ${question} ${dim(`[${hint}]`)}: `, (answer) => {
-      const a = answer.trim().toLowerCase();
-      if (!a) return resolve(defaultYes);
-      resolve(a === "y" || a === "yes");
-    });
-  });
+/** Ask yes/no via clack. */
+async function confirm(question: string, defaultYes = true): Promise<boolean> {
+  const value = unwrap(
+    await clack.confirm({ message: question, initialValue: defaultYes }),
+  );
+  return value === true;
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
 
 export async function setupCommand(args: string[]): Promise<void> {
-  const nonInteractive = args.includes("--yes") || args.includes("-y");
+  const nonInteractive =
+    args.includes("--yes") || args.includes("-y") || !process.stdin.isTTY;
 
   console.log(BANNER);
   console.log(`  ${bold("Friday Setup")}`);
@@ -129,27 +142,23 @@ export async function setupCommand(args: string[]): Promise<void> {
     if (slackBotToken) console.log(`     ${OK} SLACK_BOT_TOKEN  ${dim(maskSecret(slackBotToken))}`);
     else console.log(`     ${WARN} SLACK_BOT_TOKEN  not set`);
   } else {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-
     if (slackAppToken) {
-      const keep = await confirm(rl, `SLACK_APP_TOKEN is set ${dim(`(${maskSecret(slackAppToken)})`)} — keep?`);
+      const keep = await confirm(`SLACK_APP_TOKEN is set (${maskSecret(slackAppToken)}) — keep?`);
       if (!keep) {
-        slackAppToken = await ask(rl, "New SLACK_APP_TOKEN (xapp-...)", undefined, { required: true });
+        slackAppToken = await ask("New SLACK_APP_TOKEN (xapp-...)", undefined, { required: true });
       }
     } else {
-      slackAppToken = await ask(rl, "SLACK_APP_TOKEN (xapp-...)", undefined, { secret: true, required: true });
+      slackAppToken = await ask("SLACK_APP_TOKEN (xapp-...)", undefined, { secret: true, required: true });
     }
 
     if (slackBotToken) {
-      const keep = await confirm(rl, `SLACK_BOT_TOKEN is set ${dim(`(${maskSecret(slackBotToken)})`)} — keep?`);
+      const keep = await confirm(`SLACK_BOT_TOKEN is set (${maskSecret(slackBotToken)}) — keep?`);
       if (!keep) {
-        slackBotToken = await ask(rl, "New SLACK_BOT_TOKEN (xoxb-...)", undefined, { required: true });
+        slackBotToken = await ask("New SLACK_BOT_TOKEN (xoxb-...)", undefined, { required: true });
       }
     } else {
-      slackBotToken = await ask(rl, "SLACK_BOT_TOKEN (xoxb-...)", undefined, { secret: true, required: true });
+      slackBotToken = await ask("SLACK_BOT_TOKEN (xoxb-...)", undefined, { secret: true, required: true });
     }
-
-    rl.close();
   }
 
   // Write .env (preserve any extra vars the user may have added)
@@ -177,37 +186,34 @@ export async function setupCommand(args: string[]): Promise<void> {
     if (channelId) console.log(`     ${OK} Orchestrator channel  ${dim(channelId)}`);
     else console.log(`     ${WARN} Orchestrator channel  not set`);
   } else {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-
     if (channelId) {
-      const keep = await confirm(rl, `Orchestrator channel is ${dim(channelId)} — keep?`);
+      const keep = await confirm(`Orchestrator channel is ${channelId} — keep?`);
       if (!keep) {
-        channelId = await ask(rl, "New orchestrator channel ID", undefined, { required: true });
+        channelId = await ask("New orchestrator channel ID", undefined, { required: true });
       }
     } else {
-      channelId = await ask(rl, "Orchestrator channel ID", undefined, { required: true });
+      channelId = await ask("Orchestrator channel ID", undefined, { required: true });
     }
 
     // Working directory
     const wd = baseConfig.agent.workingDirectory;
-    const keepWd = await confirm(rl, `Working directory is ${dim(wd)} — keep?`);
+    const keepWd = await confirm(`Working directory is ${wd} — keep?`);
     let newWd = wd;
     if (!keepWd) {
-      newWd = await ask(rl, "New working directory", wd);
+      newWd = await ask("New working directory", wd);
       mkdirSync(newWd, { recursive: true });
     }
 
     // Model
     const model = baseConfig.agent.model;
-    const keepModel = await confirm(rl, `Agent model is ${dim(model)} — keep?`);
+    const keepModel = await confirm(`Agent model is ${model} — keep?`);
     let newModel = model;
     if (!keepModel) {
-      newModel = await ask(rl, "New model", model);
+      newModel = await ask("New model", model);
     }
 
     baseConfig.agent.workingDirectory = newWd;
     baseConfig.agent.model = newModel;
-    rl.close();
   }
 
   const mergedConfig: FridayConfig = {

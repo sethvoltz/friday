@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, cl
 import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import { dirname, basename, join } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { defineCommand } from "citty";
 import { getLogPath } from "@friday/shared";
 import { type ServiceName, parseServiceArg } from "../services.js";
 import { readState } from "../state.js";
@@ -96,19 +97,20 @@ function readTail(activePath: string, lines: number): string[] {
   return collected.slice(-lines);
 }
 
-const COLORS: Record<string, string> = {
-  debug: "\x1b[2m",   // dim
-  info: "\x1b[39m",   // default
-  warn: "\x1b[33m",   // yellow
-  error: "\x1b[31m",  // red
-  fatal: "\x1b[1;31m", // bold red
+import pc from "picocolors";
+
+const COLORIZE: Record<string, (s: string) => string> = {
+  debug: pc.dim,
+  info: (s) => s,
+  warn: pc.yellow,
+  error: pc.red,
+  fatal: (s) => pc.bold(pc.red(s)),
 };
-const RESET = "\x1b[0m";
 
 function formatPretty(line: string): string {
   try {
     const obj = JSON.parse(line) as { ts?: string; level?: string; event?: string };
-    const color = COLORS[obj.level ?? "info"] ?? "";
+    const colorize = COLORIZE[obj.level ?? "info"] ?? ((s: string) => s);
     const ts = obj.ts ?? "";
     const level = (obj.level ?? "info").padEnd(5);
     const event = obj.event ?? "";
@@ -117,7 +119,7 @@ function formatPretty(line: string): string {
     delete rest.level;
     delete rest.event;
     const tail = Object.keys(rest).length > 0 ? " " + JSON.stringify(rest) : "";
-    return `${color}${ts}  ${level}  ${event}${tail}${RESET}`;
+    return colorize(`${ts}  ${level}  ${event}${tail}`);
   } catch {
     return line;
   }
@@ -164,6 +166,53 @@ async function followLog(path: string, opts: LogsOptions): Promise<void> {
     await setTimeoutPromise(250);
   }
 }
+
+export const logsCommandCitty = defineCommand({
+  meta: {
+    name: "logs",
+    description:
+      "Tail a service's structured JSONL log from ~/.friday/logs/<service>.jsonl. Works in both prod and dev modes.",
+  },
+  args: {
+    service: {
+      type: "positional",
+      required: true,
+      description: "daemon | dashboard",
+    },
+    follow: {
+      type: "boolean",
+      alias: "f",
+      description: "Tail and follow new lines",
+      default: false,
+    },
+    lines: {
+      type: "string",
+      alias: "n",
+      description: "Print the last N lines (default: 50)",
+    },
+    pretty: {
+      type: "boolean",
+      description: "Colorize and pretty-print",
+      default: false,
+    },
+    json: {
+      type: "boolean",
+      description: "Force raw JSON output",
+      default: false,
+    },
+  },
+  async run({ args }) {
+    const argv: string[] = [];
+    if (typeof args.service === "string") argv.push(args.service);
+    if (args.follow) argv.push("-f");
+    if (args.pretty) argv.push("--pretty");
+    if (args.json) argv.push("--json");
+    if (typeof args.lines === "string" && args.lines.length > 0) {
+      argv.push("-n", args.lines);
+    }
+    await logsCommand(argv);
+  },
+});
 
 export async function logsCommand(args: string[]): Promise<void> {
   const { service: serviceArg, opts } = parseLogsArgs(args);

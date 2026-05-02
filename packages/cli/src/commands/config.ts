@@ -1,5 +1,31 @@
 import { existsSync } from "node:fs";
+import { defineCommand } from "citty";
 import { loadConfig, CONFIG_PATH } from "@friday/shared";
+
+export const configCommandCitty = defineCommand({
+  meta: {
+    name: "config",
+    description: "Print current configuration (~/.friday/config.json merged with defaults).",
+  },
+  args: {
+    validate: {
+      type: "boolean",
+      description: "Validate config and report issues",
+      default: false,
+    },
+    path: {
+      type: "boolean",
+      description: "Print config file path only",
+      default: false,
+    },
+  },
+  run({ args }) {
+    const argv: string[] = [];
+    if (args.validate) argv.push("--validate");
+    if (args.path) argv.push("--path");
+    configCommand(argv);
+  },
+});
 
 export function configCommand(args: string[]): void {
   if (args.includes("--path")) {

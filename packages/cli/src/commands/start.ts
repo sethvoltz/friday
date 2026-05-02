@@ -1,3 +1,4 @@
+import { defineCommand } from "citty";
 import {
   type ServiceName,
   SERVICES,
@@ -56,6 +57,34 @@ function startService(service: ServiceName, root: string, opts: StartOptions): v
     process.exit(1);
   }
 }
+
+export const startCommandCitty = defineCommand({
+  meta: {
+    name: "start",
+    description:
+      "Start services (daemon, dashboard, or all). Default mode runs the built artifact; --dev runs the watcher inside a tmux session.",
+  },
+  args: {
+    service: {
+      type: "positional",
+      required: false,
+      description: "daemon | dashboard (default: all)",
+    },
+    dev: {
+      type: "boolean",
+      description: "Start in dev mode (tmux + hot reload)",
+      default: false,
+    },
+  },
+  run({ args }) {
+    const argv: string[] = [];
+    if (typeof args.service === "string" && args.service.length > 0) {
+      argv.push(args.service);
+    }
+    if (args.dev) argv.push("--dev");
+    startCommand(argv);
+  },
+});
 
 export function startCommand(args: string[]): void {
   const root = findMonorepoRoot();

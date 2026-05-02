@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { defineCommand } from "citty";
 import { BEADS_DIR } from "@friday/shared";
 
 const BEADS_WORKSPACE = BEADS_DIR;
@@ -147,6 +148,104 @@ function flagValue(args: string[], flag: string): string | undefined {
   if (idx === -1 || idx + 1 >= args.length) return undefined;
   return args[idx + 1];
 }
+
+export const mailListCmd = defineCommand({
+  meta: {
+    name: "list",
+    description: "List pending mail for an agent (default: orchestrator).",
+  },
+  args: {
+    agent: {
+      type: "positional",
+      required: false,
+      description: "Agent name (default: orchestrator)",
+    },
+  },
+  run({ args }) {
+    const a = typeof args.agent === "string" && args.agent.length > 0 ? args.agent : "orchestrator";
+    listMail(a);
+  },
+});
+
+export const mailReadCmd = defineCommand({
+  meta: {
+    name: "read",
+    description: "Read a specific message by id.",
+  },
+  args: {
+    id: {
+      type: "positional",
+      required: true,
+      description: "Message id (e.g. friday-a3f2dd)",
+    },
+  },
+  run({ args }) {
+    if (typeof args.id !== "string") {
+      console.error("Usage: friday mail read <id>");
+      process.exit(1);
+    }
+    readMail(args.id);
+  },
+});
+
+export const mailSendCmd = defineCommand({
+  meta: {
+    name: "send",
+    description: "Send a message to an agent.",
+  },
+  args: {
+    to: {
+      type: "string",
+      description: "Recipient agent name (required)",
+      required: true,
+    },
+    subject: {
+      type: "string",
+      alias: "s",
+      description: "Subject line (required)",
+      required: true,
+    },
+    body: {
+      type: "string",
+      alias: "b",
+      description: "Message body (required)",
+      required: true,
+    },
+    urgent: {
+      type: "boolean",
+      description: "Mark as urgent priority",
+      default: false,
+    },
+  },
+  run({ args }) {
+    const argv: string[] = [];
+    if (typeof args.to === "string") argv.push("--to", args.to);
+    if (typeof args.subject === "string") argv.push("--subject", args.subject);
+    if (typeof args.body === "string") argv.push("--body", args.body);
+    if (args.urgent) argv.push("--urgent");
+    sendMail(argv);
+  },
+});
+
+export const mailCommandCitty = defineCommand({
+  meta: {
+    name: "mail",
+    description:
+      "Inter-agent mail. With no subcommand, lists the orchestrator's pending mail. Subcommands: list, read, send.",
+  },
+  subCommands: {
+    list: mailListCmd,
+    read: mailReadCmd,
+    send: mailSendCmd,
+  },
+  run({ args }) {
+    // citty calls this AFTER the subcommand. args._ contains the matched
+    // subcommand name when one ran — skip the default in that case.
+    if (args._.length === 0) {
+      listMail("orchestrator");
+    }
+  },
+});
 
 export function mailCommand(args: string[]): void {
   const sub = args[0];

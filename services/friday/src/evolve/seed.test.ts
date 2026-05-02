@@ -32,14 +32,14 @@ describe("seedScheduledMetaAgents", () => {
     const daily = calls.find((c) => c[0] === "scheduled-meta-daily");
     expect(daily).toBeDefined();
     expect(daily![1]).toEqual({ cron: "0 4 * * *" });
-    expect(daily![2]).toContain("friday-evolve scan");
+    expect(daily![2]).toContain("friday evolve scan");
     expect(daily![2]).toContain("mail_send");
     expect(daily![2]).toContain("priority=\"urgent\"");
 
     const weekly = calls.find((c) => c[0] === "scheduled-meta-weekly");
     expect(weekly).toBeDefined();
     expect(weekly![1]).toEqual({ cron: "0 5 * * 0" });
-    expect(weekly![2]).toContain("friday-evolve cluster");
+    expect(weekly![2]).toContain("friday evolve cluster");
     expect(weekly![2]).toContain("--since-hours 168");
   });
 

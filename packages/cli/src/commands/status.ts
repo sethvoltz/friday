@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
+import { defineCommand } from "citty";
 import { FRIDAY_DIR } from "@friday/shared";
 import { type ServiceName, SERVICES, isRunning } from "../services.js";
 import { readState, type ServiceState } from "../state.js";
@@ -131,6 +132,33 @@ function printHumanLine(s: ServiceStatusJson): void {
   }
   console.log(`  ${icons[s.state]} ${info.label}: ${detail}`);
 }
+
+export const statusCommandCitty = defineCommand({
+  meta: {
+    name: "status",
+    description: "Show running services and health. States: running | crashed | stale | stopped.",
+  },
+  args: {
+    service: {
+      type: "positional",
+      required: false,
+      description: "daemon | dashboard (default: all)",
+    },
+    json: {
+      type: "boolean",
+      description: "Emit machine-readable JSON (the contract for agents)",
+      default: false,
+    },
+  },
+  run({ args }) {
+    const argv: string[] = [];
+    if (args.json) argv.push("--json");
+    if (typeof args.service === "string" && args.service.length > 0) {
+      argv.push(args.service);
+    }
+    statusCommand(argv);
+  },
+});
 
 export function statusCommand(args: string[] = []): void {
   const wantJson = args.includes("--json");

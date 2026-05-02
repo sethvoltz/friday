@@ -110,6 +110,29 @@ From the repo root, run the interactive setup. It creates `~/.friday/`, prompts 
 
 Pass `--yes` to skip prompts and accept current/default values. Setup ends by running `friday doctor` so you can confirm everything is wired up.
 
+## 5. Shell Completion (Optional)
+
+Friday ships static completion scripts for zsh and bash. They list subcommands from a hand-maintained manifest, so tab completion never triggers heavy lazy imports.
+
+### zsh
+
+```bash
+mkdir -p ~/.zsh/completions
+friday completion zsh > ~/.zsh/completions/_friday
+echo 'fpath=(~/.zsh/completions $fpath)' >> ~/.zshrc
+echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
+```
+
+### bash
+
+```bash
+friday completion bash > ~/.local/share/bash-completion/completions/friday
+# or, source it directly from your bashrc:
+echo 'source <(friday completion bash)' >> ~/.bashrc
+```
+
+Restart your shell, then `friday <Tab>` lists subcommands and `friday evolve <Tab>` lists evolve subcommands.
+
 ## Next Steps
 
 - [Configure Friday](configure-friday.md) — config file reference and tunable options
