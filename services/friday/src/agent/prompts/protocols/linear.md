@@ -75,6 +75,48 @@ When you decide to start work on a ticket — either user said "build FRI-X" or 
 
 If any step fails (network blip, Linear unavailable), surface the partial state to the user. Don't try to roll back automatically — the user can complete the missing steps via Linear directly.
 
+## Net-new work (no existing ticket)
+
+When the user asks for work and there's **no existing Linear ticket** ("can you build me X", "let's add Y to the daemon"), default behavior is **always file a Linear ticket first** — Linear is the durable backlog and silent local-only work breaks the visibility invariant.
+
+**Step 1 — Duplicate check (mandatory).** Before creating a ticket, search for unclosed work that already covers this:
+
+```
+linear_searchIssues(query="<2–4 keywords from the user's request>")
+```
+
+Filter results to states other than Done/Cancelled. If you get plausible matches:
+
+> :mag: Found existing tickets that might cover this:
+> • <url|FRI-46> — Auto-rebuild dist artifacts (Backlog, High)
+> • <url|FRI-22> — Explore hook system (Backlog, Medium)
+>
+> Did you mean one of these, or should I file a new ticket?
+
+If the user picks one → **run the standard claim flow against it.** Don't create a duplicate.
+
+If the user says "new ticket" or none match → proceed to step 2.
+
+**Step 2 — File and claim in one motion.**
+
+```
+linear_createIssue(
+  teamId=<Friday team id>,
+  title="<concise title from the user's request>",
+  description="<1–2 sentence framing of the ask, plus any context the user gave>",
+  stateId=<Backlog state id>,
+  priority=<3 Normal by default; bump to 2 High if the user signaled urgency>
+)
+```
+
+Then immediately run the standard claim flow against the newly-created ticket (the explicit user request is the triage signal — bypass Todo, go Backlog → In Progress).
+
+Reply once:
+
+> Filed <url|FRI-100> + spawned `builder-foo`. Will update.
+
+**Opt-out: throwaway / one-off requests.** If the user explicitly signals the work is throwaway — keywords like "quick", "one-off", "scratch", "experiment", "just this once", or similar — skip the Linear ticket entirely. Create a local-only Beads epic via `bd create` (no `linear_ticket` metadata) and spawn a Builder with `epic_id` only (no `linear_ticket` argument). Reply: "On it locally — no Linear ticket since you said quick/one-off." This is the *only* path that produces a builder without Linear visibility; use it sparingly and only when the user explicitly asks for it.
+
 ## Lifecycle transitions during a build
 
 - **Builder mails "work complete"** (with PR link or evidence): flip Linear → **Ready for Review**, post a summary comment.
@@ -95,13 +137,19 @@ If any step fails (network blip, Linear unavailable), surface the partial state 
 
 - **Ready for Review → In Progress** (review surfaced more work needed): flip back, no comment required unless context is useful.
 
-- **Builder reports blocked-by-X.** Look up X in Linear (`linear_searchIssues(query="...")`); if it doesn't exist, create it (`linear_createIssue(...)`). Then add the relation:
+- **Builder reports blocked-by-X.** First search Linear for an unclosed ticket matching X:
+
+  ```
+  linear_searchIssues(query="<keywords from the blocker description>")
+  ```
+
+  Filter to states other than Done/Cancelled. **If a plausible match exists, silently reuse it** — don't ask the user, don't create a duplicate. Only create a new ticket (`linear_createIssue` in Backlog) when nothing matches. Then add the relation:
 
   ```
   linear_createIssueRelation(issueId="FRI-X", relatedIssueId="FRI-Y", type="blocks")
   ```
 
-  Status **stays In Progress**. Tell the user in Slack what's blocking.
+  Status of FRI-X **stays In Progress**. Tell the user in Slack what's blocking, including the blocker's URL and whether you reused an existing ticket or filed a new one.
 
 - **Cancelled.** When the user explicitly drops work:
 
