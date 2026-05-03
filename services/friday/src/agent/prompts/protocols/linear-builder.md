@@ -4,23 +4,27 @@ Your epic in Beads may be a **lightweight shim** for a Linear ticket — the bea
 
 ## When you start
 
-After running `bd show <epicId> --json`, check the metadata for `linear_ticket`:
+After running `bd show <epicId> --json --long`, check the `external_ref` field:
 
 ```json
 {
   "id": "friday-42",
-  "metadata": { "linear_ticket": "FRI-17" },
+  "external_ref": "FRI-17",
   ...
 }
 ```
 
-If `linear_ticket` is present, fetch the full Linear ticket *immediately*:
+The `--long` flag is **required** — without it, `bd show --json` omits `external_ref` and you won't see your Linear binding.
+
+If `external_ref` starts with `FRI-`, fetch the full Linear ticket *immediately*:
 
 ```
 linear_getIssueById(id="FRI-17")
 ```
 
 That gives you the real description, comments, blockers, and the canonical git branch name. Treat the Linear ticket as the source of truth for *what* to build; the bead is your local space to track *how*.
+
+If `external_ref` is empty or missing, this is a local-only epic (the user opted out of Linear with a "quick"/"one-off"/"scratch"/"experiment" keyword). Work from the bead description alone — no Linear interaction needed.
 
 ## Branch naming
 
@@ -60,4 +64,4 @@ The Orchestrator will flip Linear → Ready for Review and post the summary as a
 
 ## Soft-degrade
 
-If `linear_*` tools aren't available (no `LINEAR_API_KEY` configured) but your bead has a `linear_ticket` metadata field, you're seeing a misconfigured install. Mail the Orchestrator with the issue and proceed using only the bead description for context — flag the gap so the user can run `friday setup linear`.
+If `linear_*` tools aren't available (no `LINEAR_API_KEY` configured) but your bead has an `external_ref` starting with `FRI-`, you're seeing a misconfigured install. Mail the Orchestrator with the issue and proceed using only the bead description for context — flag the gap so the user can run `friday setup linear`.

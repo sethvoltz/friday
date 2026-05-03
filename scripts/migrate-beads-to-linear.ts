@@ -13,8 +13,8 @@
  *      epic's title and description, the `evolve` label if it appears to
  *      have come from evolve dispatch (title starts with "Evolve: "),
  *      priority mapped from any associated proposal score (else Normal).
- *      Sets `linear_ticket=FRI-XX` metadata on the bead. Posts the
- *      Friday-bead back-reference comment on Linear.
+ *      Sets the bead's `external_ref` to the Linear identifier (FRI-XX).
+ *      Posts the Friday-bead back-reference comment on Linear.
  *   4. Surveys `~/.friday/evolve/proposals/*.md`. Reports counts by status.
  *      `open` / `critical` / `approved` proposals not yet dispatched are
  *      left untouched — the next `friday evolve apply` run will land them
@@ -45,8 +45,8 @@ interface BeadEpic {
   id: string;
   title: string;
   description?: string;
-  state: string;
-  metadata?: Record<string, string>;
+  status: string;
+  external_ref?: string;
 }
 
 async function main(): Promise<void> {
@@ -57,19 +57,19 @@ async function main(): Promise<void> {
   }
   if (DRY_RUN) console.log("DRY RUN — no writes will occur.\n");
 
-  // 1. List beads epics
-  const epicsRaw = bd(["list", "--type", "epic", "--json"]);
+  // 1. List beads epics. --long is required to include external_ref in the JSON.
+  const epicsRaw = bd(["list", "--type", "epic", "--json", "--long"]);
   const epics = JSON.parse(epicsRaw) as BeadEpic[];
   console.log(`Found ${epics.length} beads epics total.`);
 
   // 2. Filter to active (non-closed)
   const active = epics.filter(
-    (e) => e.state !== "closed" && e.state !== "done"
+    (e) => e.status !== "closed" && e.status !== "done"
   );
   console.log(`  ${active.length} active (the rest stay as historical record).\n`);
 
   // Skip epics already linked to Linear (idempotency for re-runs)
-  const unlinked = active.filter((e) => !e.metadata?.linear_ticket);
+  const unlinked = active.filter((e) => !e.external_ref);
   console.log(`  ${unlinked.length} not yet linked to Linear.\n`);
 
   // 3. Per-epic migration
@@ -99,7 +99,7 @@ async function main(): Promise<void> {
       labelIds: labels,
     });
 
-    bd(["meta", "set", epic.id, "linear_ticket", created.identifier]);
+    bd(["update", epic.id, "--external-ref", created.identifier]);
     await postBackRefComment(created.id, epic.id);
     console.log(`    → ${created.identifier} ${created.url}`);
     migrated++;

@@ -39,19 +39,16 @@ When you decide to start work on a ticket — either user said "build FRI-X" or 
 
 2. **Flip status to In Progress.** `linear_updateIssue(id="FRI-X", stateId=<id-of-In-Progress-state-on-Friday-team>)`. (You may need to call `linear_getWorkflowStates(teamId=...)` once per session to learn state IDs.)
 
-3. **Create the local Beads epic shim** via Bash (the bead is intentionally lightweight — a 1–2 line summary, not a full mirror of the Linear ticket):
+3. **Create the local Beads epic shim** via Bash. The `--external-ref` flag binds the bead to its Linear ticket in one shot — no separate metadata command needed (the bead is intentionally lightweight: a 1–2 line summary, not a full mirror):
 
    ```
    cd ~/.friday/beads && bd create "FRI-X: <ticket title>" --type epic \
      --description "Mirror of Linear FRI-X — see Linear for full description, comments, and relations." \
-     --json
+     --external-ref FRI-X \
+     --silent
    ```
 
-   Capture the returned bead identifier (e.g., `friday-42`). Then attach the Linear ticket metadata:
-
-   ```
-   cd ~/.friday/beads && bd meta set friday-42 linear_ticket FRI-X
-   ```
+   `--silent` outputs only the bare bead identifier (e.g., `friday-42`) — capture it for the next steps.
 
 4. **Back-link from Linear to the bead.** Post a comment on the Linear ticket with the marker so future reconciliation can find the bead:
 
