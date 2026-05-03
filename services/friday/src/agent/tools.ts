@@ -4,12 +4,20 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { WebClient } from "@slack/web-api";
+import { chunkMessage } from "../slack/helpers.js";
+
+const DEFAULT_MAX_MESSAGE_LENGTH = 4000;
 
 /**
  * Creates MCP tools that give the agent proactive access to Slack.
  * These are injected into the Agent SDK session via mcpServers config.
  */
-export function createSlackTools(client: WebClient) {
+export function createSlackTools(
+  client: WebClient,
+  opts?: { maxMessageLength?: number }
+) {
+  const maxLen = opts?.maxMessageLength ?? DEFAULT_MAX_MESSAGE_LENGTH;
+
   return createSdkMcpServer({
     name: "friday-slack",
     tools: [
@@ -32,13 +40,18 @@ export function createSlackTools(client: WebClient) {
         },
         async (args) => {
           try {
-            const res = await client.chat.postMessage({
-              channel: args.channel_id,
-              text: args.text,
-              ...(args.thread_ts ? { thread_ts: args.thread_ts } : {}),
-            });
+            const chunks = chunkMessage(args.text, maxLen);
+            let lastTs: string | undefined;
+            for (const chunk of chunks) {
+              const res = await client.chat.postMessage({
+                channel: args.channel_id,
+                text: chunk,
+                ...(args.thread_ts ? { thread_ts: args.thread_ts } : {}),
+              });
+              lastTs = res.ts;
+            }
             return {
-              content: [{ type: "text" as const, text: `Message posted. ts=${res.ts}` }],
+              content: [{ type: "text" as const, text: `Message posted. ts=${lastTs}` }],
             };
           } catch (err) {
             const msg = err instanceof Error ? err.message : "Unknown error";

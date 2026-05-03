@@ -10,12 +10,19 @@ import { log } from "../log.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
+export interface PendingReaction {
+  channelId: string;
+  messageTs: string;
+  emojiName: string;
+}
+
 export interface ThreadConnection {
   agentName: string;
   channelId: string;
   threadTs: string;
   lastActivityAt: Date;
   idleTimer: ReturnType<typeof setTimeout>;
+  pendingReaction?: PendingReaction;
 }
 
 export type DisconnectReason = "idle_timeout" | "manual" | "stolen";
@@ -159,6 +166,33 @@ export function touchActivity(agentName: string): void {
   conn.idleTimer = startIdleTimer(agentName);
   conn.lastActivityAt = new Date();
   updateThreadActivity(agentName, conn.lastActivityAt.getTime());
+}
+
+/**
+ * Record that a processing emoji was added to the user's message while waiting
+ * for the connected agent to respond. Cleared by clearPendingReaction().
+ */
+export function setPendingReaction(
+  agentName: string,
+  channelId: string,
+  messageTs: string,
+  emojiName: string
+): void {
+  const conn = byAgent.get(agentName);
+  if (!conn) return;
+  conn.pendingReaction = { channelId, messageTs, emojiName };
+}
+
+/**
+ * Retrieve and clear the pending reaction for an agent. Returns undefined if
+ * no reaction was pending (e.g., already cleared or agent not connected).
+ */
+export function clearPendingReaction(agentName: string): PendingReaction | undefined {
+  const conn = byAgent.get(agentName);
+  if (!conn) return undefined;
+  const pending = conn.pendingReaction;
+  conn.pendingReaction = undefined;
+  return pending;
 }
 
 /**

@@ -21,6 +21,7 @@ import {
 } from "./workspace.js";
 import { buildAgentSystemPrompt, buildFirstTurnPrompt } from "./prime.js";
 import { mailEvents } from "../comms/mail.js";
+import { clearPendingReaction } from "../slack/thread-registry.js";
 import { logUsage } from "../monitor/usage.js";
 import { log } from "../log.js";
 import { recordActivity, clearActivity } from "../monitor/agent-health.js";
@@ -62,6 +63,20 @@ interface RunningAgent {
 
 /** Tracks running agent processes by agent name */
 const runningAgents = new Map<string, RunningAgent>();
+
+// ── Thread reaction hook ──────────────────────────────────────────────────
+
+type ReactionRemoveFn = (channelId: string, messageTs: string, emojiName: string) => void;
+let _removeReaction: ReactionRemoveFn | null = null;
+
+/**
+ * Inject a Slack reactions.remove callback so the lifecycle handler can clear
+ * pending thread-message reactions when an agent calls slack_reply.
+ * Called once at daemon startup, after the Slack app is initialized.
+ */
+export function setReactionRemover(fn: ReactionRemoveFn): void {
+  _removeReaction = fn;
+}
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -533,6 +548,12 @@ function handleWorkerEvent(
       stall.toolCallActive = true;
       stall.waitingForMail = false;
       recordActivity(agentName);
+      if (event.toolName === "slack_reply" && _removeReaction) {
+        const pending = clearPendingReaction(agentName);
+        if (pending) {
+          _removeReaction(pending.channelId, pending.messageTs, pending.emojiName);
+        }
+      }
       break;
 
     case "tool-end":

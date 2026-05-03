@@ -31,7 +31,7 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | `src/slack/app.ts` | Creates `@slack/bolt` App with Socket Mode, global error handler |
 | `src/slack/events.ts` | Message handler, `/friday` commands, per-channel FIFO queue, streaming, compaction detection, image attachment handling |
 | `src/agent/client.ts` | Wraps Agent SDK `query()`, streams text chunks, detects compaction, logs usage, passes MCP servers and system prompt; accepts multimodal prompts (text + images) |
-| `src/agent/tools.ts` | Slack MCP tools (`slack_reply`) injected into agent sessions via `createSdkMcpServer` |
+| `src/agent/tools.ts` | Slack MCP tools (`slack_reply`) injected into agent sessions via `createSdkMcpServer`; chunks long messages via `chunkMessage` |
 | `src/agent/agent-tools.ts` | Agent management MCP tools (`agent_create`, `agent_list`, `agent_status`, `agent_destroy`, `agent_kill`, `agent_refork`, `worktree_add`, `worktree_remove`) |
 | `src/agent/lifecycle.ts` | Fork-based agent supervisor — spawns each agent as a `child_process.fork()` worker, tracks IPC stall state, handles kill/refork, restores on restart |
 | `src/agent/worker.ts` | Forked child process entrypoint — runs the Claude SDK query loop in isolation, emits IPC heartbeats (`chunk-received`, `tool-start/end`, `mail-sent`, `file-access`) |
@@ -205,9 +205,11 @@ When a Slack thread is connected to a Builder or Helper, messages in that thread
 3. thread-registry.getByThread(thread_ts) returns the connected agent
 4. mailSend({ to: agentName, subject: '[thread] <text>', ... }) forwards the message
 5. touchActivity(agentName) resets the 2-hour idle timer
-6. :eyes: reaction added briefly for acknowledgment, removed after 3s
+6. :eyes: reaction added; pending reaction stored in thread-registry entry
 7. Agent receives the mail and wakes up (mail-wakeup IPC)
-8. Agent calls slack_reply with channel_id + thread_ts to reply directly in thread
+8. Agent calls slack_reply with channel_id + thread_ts to reply into thread
+9. lifecycle.ts tool-start handler detects slack_reply, clears the pending reaction
+10. slack_reply chunks long messages (> maxMessageLength) into sequential posts
 ```
 
 Thread replies from unconnected threads fall through to normal processing.

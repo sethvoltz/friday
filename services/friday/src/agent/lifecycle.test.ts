@@ -112,6 +112,11 @@ vi.mock("../events/bus.js", () => ({
 }));
 vi.mock("../log.js", () => ({ log: vi.fn() }));
 
+const mockClearPendingReaction = vi.fn();
+vi.mock("../slack/thread-registry.js", () => ({
+  clearPendingReaction: mockClearPendingReaction,
+}));
+
 // ── Import under test ──────────────────────────────────────────────────────
 
 const {
@@ -124,6 +129,7 @@ const {
   getAgentStallState,
   restoreActiveAgents,
   killAllAgents,
+  setReactionRemover,
 } = await import("./lifecycle.js");
 
 const { mailEvents } = await import("../comms/mail.js");
@@ -598,6 +604,53 @@ describe("restoreActiveAgents — daemon restart", () => {
 
     expect(mockProcesses.length).toBe(initialForkCount);
     expect(mockRegistry.updateAgentStatus).toHaveBeenCalledWith("builder-no-session", "idle");
+  });
+});
+
+describe("thread reaction clearing on slack_reply tool-start", () => {
+  it("calls removeReaction when tool-start fires for slack_reply and a pending reaction exists", () => {
+    mockClearPendingReaction.mockReturnValue({
+      channelId: "C123",
+      messageTs: "1234567890.123",
+      emojiName: "eyes",
+    });
+    const removeReaction = vi.fn();
+    setReactionRemover(removeReaction);
+
+    spawnBuilder("builder-react-clear");
+    const child = mockProcesses[mockProcesses.length - 1];
+    child.simulateEvent({ type: "tool-start", toolName: "slack_reply" });
+
+    expect(mockClearPendingReaction).toHaveBeenCalledWith("builder-react-clear");
+    expect(removeReaction).toHaveBeenCalledWith("C123", "1234567890.123", "eyes");
+  });
+
+  it("does not call removeReaction when tool-start fires for a non-slack_reply tool", () => {
+    mockClearPendingReaction.mockReturnValue({
+      channelId: "C123",
+      messageTs: "1234567890.123",
+      emojiName: "eyes",
+    });
+    const removeReaction = vi.fn();
+    setReactionRemover(removeReaction);
+
+    spawnBuilder("builder-other-tool");
+    const child = mockProcesses[mockProcesses.length - 1];
+    child.simulateEvent({ type: "tool-start", toolName: "Bash" });
+
+    expect(removeReaction).not.toHaveBeenCalled();
+  });
+
+  it("does not call removeReaction when clearPendingReaction returns undefined", () => {
+    mockClearPendingReaction.mockReturnValue(undefined);
+    const removeReaction = vi.fn();
+    setReactionRemover(removeReaction);
+
+    spawnBuilder("builder-no-pending");
+    const child = mockProcesses[mockProcesses.length - 1];
+    child.simulateEvent({ type: "tool-start", toolName: "slack_reply" });
+
+    expect(removeReaction).not.toHaveBeenCalled();
   });
 });
 

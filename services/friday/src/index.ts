@@ -7,7 +7,7 @@ import { createSlackApp } from "./slack/app.js";
 import { registerEventHandlers } from "./slack/events.js";
 import { loadSessions } from "./sessions/manager.js";
 import { loadRegistry } from "./sessions/registry.js";
-import { initOrchestrator, restoreActiveAgents, isAgentRunning, getAgentStallState, killAllAgents } from "./agent/lifecycle.js";
+import { initOrchestrator, restoreActiveAgents, isAgentRunning, getAgentStallState, killAllAgents, setReactionRemover } from "./agent/lifecycle.js";
 import { log, closeLog } from "./log.js";
 import { startHealthHeartbeat, stopHealthHeartbeat } from "./monitor/health.js";
 import { startAgentHealthCheck, stopAgentHealthCheck } from "./monitor/agent-health.js";
@@ -58,6 +58,10 @@ async function main() {
 
   const app = createSlackApp(config);
   registerEventHandlers(app, config);
+
+  setReactionRemover((channel, ts, name) => {
+    app.client.reactions.remove({ channel, timestamp: ts, name }).catch(() => {});
+  });
 
   // Graceful shutdown
   let shuttingDown = false;

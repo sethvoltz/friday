@@ -34,6 +34,8 @@ import {
   getByThread,
   touchActivity,
   initThreadRegistry,
+  setPendingReaction,
+  clearPendingReaction,
 } from "./thread-registry.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -196,6 +198,37 @@ describe("thread-registry", () => {
     expect(getByAgent("builder-live")).toMatchObject({ agentName: "builder-live" });
     expect(getByThread("222.333")).toMatchObject({ agentName: "builder-live" });
     expect(deleteThreadConnection).not.toHaveBeenCalled();
+  });
+
+  // ── pendingReaction ──────────────────────────────────────────────────
+
+  it("setPendingReaction: stores reaction on connected agent", () => {
+    connect("builder-foo", "C001", "111.222");
+    setPendingReaction("builder-foo", "C001", "ts-abc", "eyes");
+    const conn = getByAgent("builder-foo");
+    expect(conn?.pendingReaction).toEqual({ channelId: "C001", messageTs: "ts-abc", emojiName: "eyes" });
+  });
+
+  it("clearPendingReaction: returns and removes the pending reaction", () => {
+    connect("builder-foo", "C001", "111.222");
+    setPendingReaction("builder-foo", "C001", "ts-abc", "eyes");
+    const pending = clearPendingReaction("builder-foo");
+    expect(pending).toEqual({ channelId: "C001", messageTs: "ts-abc", emojiName: "eyes" });
+    expect(getByAgent("builder-foo")?.pendingReaction).toBeUndefined();
+  });
+
+  it("clearPendingReaction: returns undefined when no reaction is pending", () => {
+    connect("builder-foo", "C001", "111.222");
+    expect(clearPendingReaction("builder-foo")).toBeUndefined();
+  });
+
+  it("clearPendingReaction: returns undefined when agent is not connected", () => {
+    expect(clearPendingReaction("nobody")).toBeUndefined();
+  });
+
+  it("setPendingReaction: is a no-op when agent is not connected", () => {
+    setPendingReaction("nobody", "C001", "ts-abc", "eyes");
+    // Should not throw
   });
 
   it("initThreadRegistry: restored connection fires idle timer with remaining time", () => {

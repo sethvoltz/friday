@@ -52,7 +52,7 @@ import { createEvolveTools } from "../evolve/evolve-tools.js";
 import { buildLinearMcpServer } from "../linear/mcp.js";
 import { LINEAR_MCP_NAME } from "../linear/constants.js";
 import { logFeedback } from "./feedback.js";
-import { getByThread, touchActivity } from "./thread-registry.js";
+import { getByThread, touchActivity, setPendingReaction } from "./thread-registry.js";
 import { createThreadTools } from "./thread-tools.js";
 import { mailSend } from "../comms/mail.js";
 import { getSkillRegistry } from "../skills/registry.js";
@@ -447,11 +447,8 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
           body: text,
         });
         touchActivity(threadConn.agentName);
-        // Show processing emoji briefly so the user knows the message was received
         await client.reactions.add({ channel: channelId, timestamp: ts, name: emojis.processing }).catch(() => {});
-        setTimeout(() => {
-          client.reactions.remove({ channel: channelId, timestamp: ts, name: emojis.processing }).catch(() => {});
-        }, 3000);
+        setPendingReaction(threadConn.agentName, channelId, ts, emojis.processing);
         return;
       }
       // Thread not connected — fall through to normal processing
