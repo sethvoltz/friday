@@ -47,6 +47,9 @@
     const h = Math.floor(m / 60);
     return `${h}h ${m % 60}m`;
   }
+
+  let menuOpen = $state(false);
+  function closeMenu() { menuOpen = false; }
 </script>
 
 <svelte:head>
@@ -66,7 +69,7 @@
       <span class="header-sep"></span>
       <div class="header-status">
         <span class="pulse" class:offline={!data.daemonOnline}></span>
-        <span class="header-status-text">
+        <span class="header-status-text desktop-status">
           Bot
           {#if data.daemonOnline}
             {#if data.health}
@@ -76,29 +79,36 @@
             &middot; offline
           {/if}
         </span>
+        <span class="header-status-label mobile-status">B</span>
         <span class="header-sep"></span>
         <span class="pulse" class:offline={!connection.connected}></span>
-        <span class="header-status-text">
+        <span class="header-status-text desktop-status">
           Live
           {#if !connection.connected}
             &middot; disconnected
           {/if}
         </span>
+        <span class="header-status-label mobile-status">L</span>
       </div>
     </div>
     <div class="header-right">
-      <span class="badge" class:ok={data.configExists} class:warn={!data.configExists}>
+      <span class="badge config-badge" class:ok={data.configExists} class:warn={!data.configExists}>
         {data.configExists ? 'Config loaded' : 'Using defaults'}
       </span>
-      <nav class="header-nav">
-        <a href="/" class:active={$page.url.pathname === '/'}>Dashboard</a>
-        <a href="/sessions" class:active={$page.url.pathname.startsWith('/sessions')}>Sessions</a>
-        <a href="/schedules" class:active={$page.url.pathname.startsWith('/schedules')}>Schedules</a>
-        <a href="/memory" class:active={$page.url.pathname.startsWith('/memory')}>Memory</a>
-        <a href="/evolve" class:active={$page.url.pathname.startsWith('/evolve')}>Evolve</a>
+      <nav class="header-nav" class:open={menuOpen}>
+        <a href="/" class:active={$page.url.pathname === '/'} onclick={closeMenu}>Dashboard</a>
+        <a href="/sessions" class:active={$page.url.pathname.startsWith('/sessions')} onclick={closeMenu}>Sessions</a>
+        <a href="/schedules" class:active={$page.url.pathname.startsWith('/schedules')} onclick={closeMenu}>Schedules</a>
+        <a href="/memory" class:active={$page.url.pathname.startsWith('/memory')} onclick={closeMenu}>Memory</a>
+        <a href="/evolve" class:active={$page.url.pathname.startsWith('/evolve')} onclick={closeMenu}>Evolve</a>
       </nav>
       <button class="theme-toggle" onclick={toggleTheme} title="Toggle theme">
         {theme === 'dark' ? '☀' : '☾'}
+      </button>
+      <button class="hamburger-btn" onclick={() => menuOpen = !menuOpen} aria-label="Toggle navigation">
+        <span></span>
+        <span></span>
+        <span></span>
       </button>
     </div>
   </header>
@@ -148,6 +158,7 @@
     align-items: center;
     gap: 0.75rem;
     flex-shrink: 0;
+    position: relative;
   }
 
   .logo {
@@ -226,5 +237,80 @@
     margin: 0 auto;
     padding: 1.5rem;
     padding-top: 5.5rem;
+  }
+
+  .header-status-label {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .mobile-status { display: none; }
+
+  .hamburger-btn {
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.25rem;
+    flex-shrink: 0;
+  }
+
+  .hamburger-btn span {
+    display: block;
+    width: 1.25rem;
+    height: 2px;
+    background: var(--text-primary);
+    border-radius: 2px;
+    transition: background var(--transition-fast);
+  }
+
+  .hamburger-btn:hover span {
+    background: var(--accent-primary);
+  }
+
+  @media (max-width: 640px) {
+    .app-header {
+      border-radius: var(--radius-lg);
+    }
+
+    .desktop-status { display: none; }
+    .mobile-status { display: inline; }
+    .config-badge { display: none; }
+    .hamburger-btn { display: flex; }
+
+    .header-nav {
+      display: none;
+      position: absolute;
+      top: calc(100% + 0.5rem);
+      right: 0;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-lg);
+      padding: 0.375rem;
+      flex-direction: column;
+      min-width: 11rem;
+      z-index: 200;
+    }
+
+    .header-nav.open {
+      display: flex;
+    }
+
+    .header-nav a {
+      padding: 0.6rem 1rem;
+      font-size: 0.875rem;
+      border-radius: var(--radius-sm);
+    }
+
+    .app-main {
+      padding: 1rem;
+      padding-top: 5rem;
+    }
   }
 </style>

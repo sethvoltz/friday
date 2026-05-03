@@ -500,6 +500,7 @@
       {#if displayAgents.length === 0}
         <p class="empty-state">No agents registered</p>
       {:else}
+        <div class="table-scroll-wrapper">
         <table class="data-table">
           <thead>
             <tr>
@@ -542,6 +543,7 @@
             {/each}
           </tbody>
         </table>
+        </div>
       {/if}
     </div>
 
@@ -621,6 +623,11 @@
   .agents-card,
   .config-card {
     grid-column: 1 / -1;
+  }
+
+  .table-scroll-wrapper {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .agent-name {
