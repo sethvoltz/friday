@@ -1,17 +1,24 @@
-import { mailCheck, mailEvents, buildMailPrompt } from "./mail.js";
+import { mailCheck, mailEvents } from "./mail.js";
 import { log } from "../log.js";
 
 const FALLBACK_POLL_MS = 60_000; // 60s fallback for CLI-sent mail
+
+export interface MailNotification {
+  /** True if any of the newly-detected messages has priority="urgent" */
+  hasUrgent: boolean;
+}
 
 export interface MailPollerOptions {
   /** Agent name to poll inbox for */
   agentName: string;
   /**
-   * Called when new mail is detected. The poller provides a prompt describing
-   * the pending messages. The callback should trigger an orchestrator turn
-   * with this prompt (e.g. via sendToAgent) and post the response to Slack.
+   * Called when new mail is detected. The poller signals existence and reports
+   * whether any new message is urgent so the caller can pick a queue priority.
+   * The callback should trigger an orchestrator turn that builds the prompt
+   * fresh at run-time (so coalesced/queued triggers always see the current
+   * mailbox state).
    */
-  onMail: (prompt: string) => Promise<void>;
+  onMail: (info: MailNotification) => void | Promise<void>;
 }
 
 let fallbackTimer: ReturnType<typeof setInterval> | null = null;
@@ -67,7 +74,7 @@ export function stopMailPoller(): void {
 /** Check for new mail and call onMail if any unnotified messages exist */
 async function checkAndNotify(
   agentName: string,
-  onMail: (prompt: string) => Promise<void>
+  onMail: (info: MailNotification) => void | Promise<void>
 ): Promise<void> {
   try {
     const pending = mailCheck(agentName);
@@ -85,18 +92,15 @@ async function checkAndNotify(
     // Mark as notified before triggering (prevents re-trigger during async processing)
     for (const m of newMessages) notifiedIds.add(m.id);
 
-    // Build prompt — the poller adds orchestrator-specific guidance
-    const basePrompt = buildMailPrompt(agentName);
-    if (!basePrompt) return;
-
-    const prompt = basePrompt + "\nRelay anything important to the user via Slack.";
+    const hasUrgent = newMessages.some((m) => m.priority === "urgent");
 
     log("info", "mail_poller_notified", {
       agentName,
       messageCount: newMessages.length,
+      hasUrgent,
     });
 
-    await onMail(prompt);
+    await onMail({ hasUrgent });
   } catch (err) {
     log("error", "mail_poller_error", {
       agentName,

@@ -17,6 +17,8 @@ import { sendToAgent } from "./agent/client.js";
 import { createSlackTools } from "./agent/tools.js";
 import { createAgentTools } from "./agent/agent-tools.js";
 import { createMailTools } from "./comms/mail-tools.js";
+import { buildMailPrompt } from "./comms/mail.js";
+import { enqueueTurn } from "./sessions/turn-queue.js";
 import { buildSystemPrompt, chunkMessage } from "./slack/helpers.js";
 import { slackPreflight } from "./slack/preflight.js";
 import { createMemoryTools } from "./memory/memory-tools.js";
@@ -129,72 +131,86 @@ async function main() {
     botUserId,
   });
 
-  // Mail poller: when agents mail the orchestrator, trigger a real orchestrator
-  // turn via sendToAgent and post the response to Slack.
+  // Mail poller: when agents mail the orchestrator, enqueue a turn through
+  // the per-channel turn-queue so it serializes against in-flight Slack turns.
+  // Building the prompt inside run() (not at notify time) keeps the mailbox
+  // read fresh — coalesced or queued mail triggers always see current state.
 
   startMailPoller({
     agentName: "orchestrator",
-    onMail: async (prompt) => {
-      try {
-        const slackMcp = createSlackTools(app.client);
-        const agentMcp = createAgentTools({
-          callerName: "orchestrator",
-          callerType: "orchestrator",
-          workingDirectory: config.agent.workingDirectory,
-          model: config.agent.model,
-          postToSlack: async (text) => {
-            await app.client.chat.postMessage({ channel: orchChannelId, text });
-          },
-          slackChannelId: orchChannelId,
-        });
-        const mailMcp = createMailTools({ callerName: "orchestrator" });
+    onMail: ({ hasUrgent }) => {
+      enqueueTurn({
+        channelId: orchChannelId,
+        source: "mail",
+        priority: hasUrgent ? "urgent" : "normal",
+        run: async () => {
+          try {
+            const basePrompt = buildMailPrompt("orchestrator");
+            if (!basePrompt) return; // mailbox already drained by an earlier turn
 
-        // Auto-recall: inject relevant memories into the mail prompt
-        const memoryContext = buildMemoryContext(prompt);
-        const enrichedPrompt = memoryContext
-          ? `${memoryContext}\n\n${prompt}`
-          : prompt;
+            const prompt = basePrompt + "\nRelay anything important to the user via Slack.";
 
-        const response = await sendToAgent(enrichedPrompt, {
-          channelId: orchChannelId,
-          sessionType: "orchestrator",
-          workingDirectory: config.agent.workingDirectory,
-          allowedTools: config.agent.allowedTools,
-          model: config.agent.model,
-          mcpServers: {
-            "friday-slack": slackMcp,
-            "friday-agents": agentMcp,
-            "friday-mail": mailMcp,
-            "friday-memory": createMemoryTools({ callerName: "orchestrator" }),
-            "friday-scheduler": createScheduleTools({
+            const slackMcp = createSlackTools(app.client);
+            const agentMcp = createAgentTools({
+              callerName: "orchestrator",
+              callerType: "orchestrator",
+              workingDirectory: config.agent.workingDirectory,
               model: config.agent.model,
-              defaultCwd: config.agent.workingDirectory,
-            }),
-            "friday-evolve": createEvolveTools({ callerName: "orchestrator" }),
-          },
-          systemPrompt: buildSystemPrompt(
-            config,
-            "orchestrator",
-            orchChannelId,
-            config.agent.workingDirectory
-          ),
-        });
+              postToSlack: async (text) => {
+                await app.client.chat.postMessage({ channel: orchChannelId, text });
+              },
+              slackChannelId: orchChannelId,
+            });
+            const mailMcp = createMailTools({ callerName: "orchestrator" });
 
-        // Post the orchestrator's response to Slack (skip if no text output)
-        if (response) {
-          const chunks = chunkMessage(response, maxLen);
-          for (const chunk of chunks) {
-            await app.client.chat.postMessage({
-              channel: orchChannelId,
-              text: chunk,
+            // Auto-recall: inject relevant memories into the mail prompt
+            const memoryContext = buildMemoryContext(prompt);
+            const enrichedPrompt = memoryContext
+              ? `${memoryContext}\n\n${prompt}`
+              : prompt;
+
+            const response = await sendToAgent(enrichedPrompt, {
+              channelId: orchChannelId,
+              sessionType: "orchestrator",
+              workingDirectory: config.agent.workingDirectory,
+              allowedTools: config.agent.allowedTools,
+              model: config.agent.model,
+              mcpServers: {
+                "friday-slack": slackMcp,
+                "friday-agents": agentMcp,
+                "friday-mail": mailMcp,
+                "friday-memory": createMemoryTools({ callerName: "orchestrator" }),
+                "friday-scheduler": createScheduleTools({
+                  model: config.agent.model,
+                  defaultCwd: config.agent.workingDirectory,
+                }),
+                "friday-evolve": createEvolveTools({ callerName: "orchestrator" }),
+              },
+              systemPrompt: buildSystemPrompt(
+                config,
+                "orchestrator",
+                orchChannelId,
+                config.agent.workingDirectory
+              ),
+            });
+
+            // Post the orchestrator's response to Slack (skip if no text output)
+            if (response) {
+              const chunks = chunkMessage(response, maxLen);
+              for (const chunk of chunks) {
+                await app.client.chat.postMessage({
+                  channel: orchChannelId,
+                  text: chunk,
+                });
+              }
+            }
+          } catch (err) {
+            log("error", "mail_poller_turn_error", {
+              error: err instanceof Error ? err.message : String(err),
             });
           }
-        }
-      } catch (err) {
-        log("error", "mail_poller_turn_error", {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+        },
+      });
     },
   });
 

@@ -19,7 +19,7 @@ import {
 import {
   enqueue,
   drain,
-  isProcessing,
+  isProcessing as isSlackInnerProcessing,
   finishProcessing,
   updateQueued,
   removeQueued,
@@ -30,6 +30,10 @@ import {
   swapStatusReaction,
   type QueuedMessage,
 } from "../sessions/queue.js";
+import {
+  enqueueTurn,
+  isProcessing as isTurnProcessing,
+} from "../sessions/turn-queue.js";
 import {
   buildSystemPrompt,
   chunkMessage,
@@ -428,19 +432,27 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
       ? await fetchSlackImages(rawMsg.files, config.slackBotToken)
       : undefined;
 
+    // wasQueued (UI affordance — :clock: emoji) reflects whether ANY turn
+    // is in flight or queued for this channel, including a mail turn.
+    // slackInFlight tells us whether processQueue is mid drain-loop right
+    // now; if so, the new message will be picked up by the in-flight
+    // drain and we don't need to enqueue a fresh slack trigger.
+    const wasQueued = isTurnProcessing(channelId);
+    const slackInFlight = isSlackInnerProcessing(channelId);
+
     const queuedMsg: QueuedMessage = {
       id: ts,
       channelId,
       text,
       userId,
-      wasQueued: isProcessing(channelId),
+      wasQueued,
       images: images && images.length > 0 ? images : undefined,
       interrupt: sessionType === "orchestrator" && isInterruptSignal(text),
     };
 
-    if (queuedMsg.wasQueued) {
-      // Agent is busy — queue with 🕐
-      enqueue(queuedMsg);
+    enqueue(queuedMsg);
+
+    if (wasQueued) {
       try {
         await client.reactions.add({
           channel: channelId,
@@ -450,12 +462,16 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
       } catch {
         // Ignore
       }
-      return;
     }
 
-    // Not busy — process immediately
-    enqueue(queuedMsg);
-    await processQueue(channelId, sessionType, config, client, say);
+    if (!slackInFlight) {
+      enqueueTurn({
+        channelId,
+        source: "slack",
+        label: ts,
+        run: () => processQueue(channelId, sessionType, config, client, say),
+      });
+    }
   });
 
   async function processQueue(
