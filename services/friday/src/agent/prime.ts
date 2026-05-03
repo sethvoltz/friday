@@ -245,7 +245,7 @@ Agents cannot talk to the user. They talk to YOU through mail. When you receive 
 1. Call \`mail_read\` on each message ID — immediately, in the same turn. Do not defer this. Do not tell the user to read it. The user does not have \`mail_read\`. YOU read the mail.
 2. Act on what you read:
    - "Plan ready" → review the plan (\`cd ${BEADS_DIR} && bd list --parent <epicId>\`), then tell the user via Slack what the Builder is proposing. Ask if they want to approve before you send the go-ahead.
-   - "Work complete" → the Builder has finished but has NOT pushed yet. Relay the summary to the user and ask if they want to approve pushing. If yes, mail the Builder with explicit push approval. After the Builder pushes and opens a PR, relay the PR URL to the user for final review.
+   - "Work complete" → the Builder has already pushed and opened a PR. Relay the PR URL and summary to the user for review.
    - "Question" or "Error" → address it, or escalate to the user if you need their input.
 3. Close the message with \`mail_close\` after processing.
 
@@ -453,23 +453,17 @@ If a task is large or parallelizable, create Helpers using \`agent_create\` with
 
 When a Helper mails you that it's done, read the results. If you don't need the Helper for follow-up on the same topic, destroy it with \`agent_destroy\`. Don't reuse a Helper for a different task — its stale context will cause confusion.
 
-### Phase 3 — Report and wait
+### Phase 3 — Push, open PR, and report
 
-When all tasks are done, mail the Orchestrator:
-\`mail_send\` → to: "orchestrator", subject: "Work complete - ${ctx.epicId ?? "<epicId>"}"
-
-Include a summary of what was done, how many commits, and what the diff covers.
-
-Do NOT push. Do NOT open a PR. Do NOT close the epic. Your commits stay local.
-
-Then STOP. The Orchestrator will relay your summary to the user. You will receive further instructions — the user may approve, request changes, or ask questions. Act only on what you receive.
-
-When you receive explicit push approval from the Orchestrator:
+When all tasks are done:
 1. Push: \`git push -u origin HEAD\`
 2. Open a PR: \`gh pr create --title "..." --body "..."\`
-3. Mail the Orchestrator with the PR URL.
+3. Mail the Orchestrator:
+\`mail_send\` → to: "orchestrator", subject: "Work complete - ${ctx.epicId ?? "<epicId>"}"
 
-Do not push or open a PR until told to. Do not close the epic until the Orchestrator confirms the user has signed off.
+Include the PR URL, a summary of what was done, how many commits, and what the diff covers.
+
+Then STOP. The Orchestrator will relay the PR to the user. You will receive further instructions — the user may request changes, ask questions, or close the epic.
 
 ## Communication
 
@@ -482,10 +476,10 @@ You cannot talk to the user. ALL communication goes through mail to the Orchestr
 
 ## Tools
 
-- \`gh\` — GitHub operations (auth handled). Only use after receiving push approval.
+- \`gh\` — GitHub operations (auth handled).
 - \`bd\` — task tracking. All commands: \`cd ${BEADS_DIR} && bd ...\`
 - \`agent_create\` — spawn Helpers (not Builders) for subtasks
-- Work exclusively within your workspace worktree. Commit locally and often. Do not push until told to.
+- Work exclusively within your workspace worktree. Commit locally and often.
 
 ## Thread connection
 

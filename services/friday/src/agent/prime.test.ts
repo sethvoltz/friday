@@ -61,6 +61,11 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("EVERY conversation turn");
     expect(prompt).toContain("memory_update");
 
+    // Work complete — builder already pushed, no approval gate
+    expect(prompt).toContain("already pushed and opened a PR");
+    expect(prompt).not.toContain("has NOT pushed yet");
+    expect(prompt).not.toContain("approve pushing");
+
     // Turn discipline
     expect(prompt).toContain("End your turn");
 
@@ -98,6 +103,13 @@ describe("buildAgentSystemPrompt", () => {
     // Helper cleanup — destroy when done, don't reuse for different tasks
     expect(prompt).toContain("agent_destroy");
     expect(prompt).toContain("stale context");
+
+    // Auto-push on completion — no approval gate
+    expect(prompt).toContain("git push -u origin HEAD");
+    expect(prompt).toContain("gh pr create");
+    expect(prompt).not.toContain("Do NOT push. Do NOT open a PR");
+    expect(prompt).not.toContain("explicit push approval");
+    expect(prompt).not.toContain("Do not push or open a PR until told to");
 
     // Beads dir
     expect(prompt).toContain(BEADS_DIR);
