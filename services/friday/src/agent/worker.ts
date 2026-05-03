@@ -159,11 +159,21 @@ async function runAgentLoop(
     };
 
     try {
+      emit({ type: "query-started" });
       for await (const message of query({
         prompt: prompt!,
         options: sessionId ? { ...queryOptions, resume: sessionId } : queryOptions,
       })) {
         if (signal.aborted) break;
+
+        // SDK status 'requesting' → API call in flight (model thinking, no output yet)
+        if (
+          message.type === "system" &&
+          (message as any).subtype === "status" &&
+          (message as any).status === "requesting"
+        ) {
+          emit({ type: "api-active" });
+        }
 
         // Text output → chunk heartbeat (also ends any pending tool)
         if (message.type === "assistant") {

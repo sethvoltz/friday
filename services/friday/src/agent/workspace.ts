@@ -178,20 +178,45 @@ function addWorktree(
 
 /**
  * Get the default branch of a repository.
+ * Prefers the origin tracking ref when available so new worktrees start
+ * from the latest upstream commit rather than a potentially stale local ref.
  */
 function getDefaultBranch(repoPath: string): string {
   try {
-    // For bare repos, check HEAD
     const head = execFileSync("git", ["symbolic-ref", "HEAD"], {
       cwd: repoPath,
       stdio: "pipe",
     })
       .toString()
       .trim();
-    return head.replace("refs/heads/", "");
+    const branchName = head.replace("refs/heads/", "");
+    // Use origin tracking ref when present (local repos after fetch)
+    try {
+      execFileSync("git", ["rev-parse", `origin/${branchName}`], {
+        cwd: repoPath,
+        stdio: "pipe",
+      });
+      return `origin/${branchName}`;
+    } catch {
+      return branchName;
+    }
   } catch {
-    // Fallback
     return "main";
+  }
+}
+
+/**
+ * Fetch from origin on a local repo so the worktree starts from latest upstream.
+ * Failures are logged but not fatal — we proceed with whatever is local.
+ */
+function fetchOriginSilently(repoPath: string): void {
+  try {
+    execFileSync("git", ["fetch", "origin"], { cwd: repoPath, stdio: "pipe" });
+  } catch (err) {
+    log("warn", "workspace_local_fetch_failed", {
+      path: repoPath,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -260,6 +285,7 @@ export function createWorkspace(options: WorkspaceCreateOptions): WorkspaceInfo 
       if (!isGitRepo(localPath)) {
         throw new Error(`Local path is not a git repository: ${localPath}`);
       }
+      fetchOriginSilently(localPath);
       sourceRepoPath = localPath;
       log("info", "worktree_from_local", { repo: localPath, worktreePath });
     } else {
@@ -314,6 +340,7 @@ export function addWorktreeToWorkspace(
     if (!existsSync(localPath) || !isGitRepo(localPath)) {
       throw new Error(`Invalid local git repository: ${localPath}`);
     }
+    fetchOriginSilently(localPath);
     sourceRepoPath = localPath;
   } else {
     sourceRepoPath = ensureBareClone(repo.repo);

@@ -47,7 +47,7 @@ The primary service. Connects to Slack via Socket Mode, routes messages to Agent
 | `src/monitor/usage.ts` | Appends per-turn usage entries to `~/.friday/usage.jsonl` |
 | `src/monitor/session-stats.ts` | Reads usage log, computes session aggregates (cost, tokens, cache hit rate, duration) |
 | `src/monitor/health.ts` | Writes `~/.friday/health.json` heartbeat every 30s (pid, uptime, last heartbeat). Removed on clean shutdown. |
-| `src/monitor/agent-health.ts` | Periodic agent health checks — 3-condition IPC stall detection (no chunk + no tool active + not waiting on mail) and crash detection. Notifies orchestrator via mail. |
+| `src/monitor/agent-health.ts` | Periodic agent health checks — 3-condition IPC stall detection (no chunk + no tool active + not waiting on mail) and crash detection. 0-turn agents use `createdAt` + `startupGracePeriodMs` as baseline to avoid false-positive alerts during silent planning phases. Notifies orchestrator via mail. |
 | `src/monitor/file-tracker.ts` | Per-agent sliding window of files touched per turn (default 10 turns). Used by `/friday kill` to report recently modified files. |
 | `src/memory/memory-tools.ts` | Memory MCP tools (`memory_search`, `memory_save`, `memory_update`, `memory_get`, `memory_forget`) for Orchestrator and Bare sessions |
 | `src/memory/auto-recall.ts` | Builds a `<memory-context>` block prepended to each Orchestrator/Bare prompt — runs hybrid keyword search and embeds top-N entries verbatim so the agent never has to call `memory_search` first |

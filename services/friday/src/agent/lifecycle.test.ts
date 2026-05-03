@@ -413,6 +413,47 @@ describe("stall state tracking via IPC events", () => {
     expect(after).toBeGreaterThanOrEqual(before);
   });
 
+  it("sets queryInFlight=true on query-started, false on turn-complete", async () => {
+    mockRegistry.getAgent.mockReturnValue(null);
+    spawnBuilder("builder-query-inflight");
+    const child = mockProcesses[mockProcesses.length - 1];
+
+    expect(getAgentStallState("builder-query-inflight")!.queryInFlight).toBe(false);
+
+    child.simulateEvent({ type: "query-started" });
+    expect(getAgentStallState("builder-query-inflight")!.queryInFlight).toBe(true);
+
+    child.simulateEvent({ type: "turn-complete", sessionId: "sess-1" });
+    expect(getAgentStallState("builder-query-inflight")!.queryInFlight).toBe(false);
+  });
+
+  it("updates lastChunkAt on api-active event (silent planning phase heartbeat)", async () => {
+    mockRegistry.getAgent.mockReturnValue(null);
+    spawnBuilder("builder-api-active");
+    const child = mockProcesses[mockProcesses.length - 1];
+
+    const before = getAgentStallState("builder-api-active")!.lastChunkAt;
+    await new Promise((r) => setTimeout(r, 5)); // small delay
+
+    child.simulateEvent({ type: "api-active" });
+    const after = getAgentStallState("builder-api-active")!.lastChunkAt;
+    expect(after).toBeGreaterThanOrEqual(before);
+  });
+
+  it("clears toolCallActive and waitingForMail on api-active event", async () => {
+    mockRegistry.getAgent.mockReturnValue(null);
+    spawnBuilder("builder-api-active-clears");
+    const child = mockProcesses[mockProcesses.length - 1];
+
+    child.simulateEvent({ type: "tool-start", toolName: "Bash" });
+    child.simulateEvent({ type: "mail-sent" });
+
+    child.simulateEvent({ type: "api-active" });
+    const state = getAgentStallState("builder-api-active-clears")!;
+    expect(state.toolCallActive).toBe(false);
+    expect(state.waitingForMail).toBe(false);
+  });
+
   it("sets toolCallActive=true on tool-start, false on tool-end", async () => {
     mockRegistry.getAgent.mockReturnValue(null);
     spawnBuilder("builder-tool-tracking");
