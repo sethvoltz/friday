@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, existsSync, rmSync, readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -19,6 +19,7 @@ const {
   repoName,
   repoCachePath,
   isGitRepo,
+  getDefaultBranch,
   createWorkspace,
   destroyWorkspace,
 } = await import("./workspace.js");
@@ -207,5 +208,109 @@ describe("workspace lifecycle", () => {
     });
 
     expect(result.worktrees[0].branch).toBe("feature/custom");
+  });
+});
+
+describe("getDefaultBranch — bare clone refs/remotes/origin/* behavior", () => {
+  const bareTestDir = join(testDir, "bare-test");
+  let originRepoPath: string;
+  let bareCachePath: string;
+
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "test",
+    GIT_AUTHOR_EMAIL: "test@test.com",
+    GIT_COMMITTER_NAME: "test",
+    GIT_COMMITTER_EMAIL: "test@test.com",
+  };
+
+  beforeEach(() => {
+    mkdirSync(bareTestDir, { recursive: true });
+    originRepoPath = join(bareTestDir, "origin");
+    bareCachePath = join(bareTestDir, "cache.git");
+
+    // Create a non-bare "origin" repo
+    mkdirSync(originRepoPath, { recursive: true });
+    execSync("git init", { cwd: originRepoPath, stdio: "pipe" });
+    execSync("git checkout -b main", { cwd: originRepoPath, stdio: "pipe" });
+    execSync('git commit --allow-empty -m "initial"', {
+      cwd: originRepoPath,
+      stdio: "pipe",
+      env: gitEnv,
+    });
+
+    // Bare clone — simulates what ensureBareClone does on first call
+    execSync(`git clone --bare "${originRepoPath}" "${bareCachePath}"`, {
+      stdio: "pipe",
+    });
+  });
+
+  afterEach(() => {
+    rmSync(bareTestDir, { recursive: true, force: true });
+  });
+
+  it("git clone --bare does not create refs/remotes/origin/main", () => {
+    let hasRemoteRef = true;
+    try {
+      execFileSync("git", ["rev-parse", "refs/remotes/origin/main"], {
+        cwd: bareCachePath,
+        stdio: "pipe",
+      });
+    } catch {
+      hasRemoteRef = false;
+    }
+    expect(hasRemoteRef).toBe(false);
+  });
+
+  it("getDefaultBranch falls back to branch name when refs/remotes/origin/* absent", () => {
+    // No fetch has run yet — refs/remotes/origin/main does not exist
+    expect(getDefaultBranch(bareCachePath)).toBe("main");
+  });
+
+  it("getDefaultBranch returns origin/<branch> after fetch populates refs/remotes/origin/*", () => {
+    execFileSync(
+      "git",
+      ["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"],
+      { cwd: bareCachePath, stdio: "pipe" }
+    );
+    expect(getDefaultBranch(bareCachePath)).toBe("origin/main");
+  });
+
+  it("fetch updates refs/remotes/origin/main to current remote HEAD after origin advances", () => {
+    // Advance origin past the initial commit
+    execSync('git commit --allow-empty -m "second"', {
+      cwd: originRepoPath,
+      stdio: "pipe",
+      env: gitEnv,
+    });
+    const newHead = execSync("git rev-parse HEAD", {
+      cwd: originRepoPath,
+      stdio: "pipe",
+    })
+      .toString()
+      .trim();
+
+    // Run the same fetch that ensureBareClone now always executes
+    execFileSync(
+      "git",
+      [
+        "fetch",
+        "origin",
+        "+refs/heads/*:refs/heads/*",
+        "+refs/heads/*:refs/remotes/origin/*",
+      ],
+      { cwd: bareCachePath, stdio: "pipe" }
+    );
+
+    const remoteMain = execFileSync(
+      "git",
+      ["rev-parse", "refs/remotes/origin/main"],
+      { cwd: bareCachePath, stdio: "pipe" }
+    )
+      .toString()
+      .trim();
+
+    expect(remoteMain).toBe(newHead);
+    expect(getDefaultBranch(bareCachePath)).toBe("origin/main");
   });
 });

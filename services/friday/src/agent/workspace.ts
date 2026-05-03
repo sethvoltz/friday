@@ -111,45 +111,47 @@ function resolveCloneUrl(repo: string): string {
 function ensureBareClone(repo: string): string {
   const cachePath = repoCachePath(repo);
 
-  if (existsSync(cachePath)) {
-    // Fetch latest. Two refspecs: keep refs/heads/* current AND populate
-    // refs/remotes/origin/* so getDefaultBranch can return origin/<branch>
-    // and new worktrees always start from the remote tracking ref.
-    log("info", "repo_cache_fetch", { repo, cachePath });
-    try {
-      execFileSync(
-        "git",
-        [
-          "fetch",
-          "origin",
-          "+refs/heads/*:refs/heads/*",
-          "+refs/heads/*:refs/remotes/origin/*",
-        ],
-        { cwd: cachePath, stdio: "pipe" }
-      );
-    } catch (err) {
-      log("warn", "repo_cache_fetch_failed", {
-        repo,
-        error: err instanceof Error ? err.message : String(err),
+  if (!existsSync(cachePath)) {
+    mkdirSync(join(cachePath, ".."), { recursive: true });
+
+    // Use gh for GitHub repos (handles auth), git clone --bare for others
+    const isGhShorthand = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo);
+    if (isGhShorthand || repo.includes("github.com")) {
+      const target = isGhShorthand ? repo : resolveCloneUrl(repo);
+      log("info", "repo_cache_clone_gh", { repo, cachePath });
+      execFileSync("gh", ["repo", "clone", target, cachePath, "--", "--bare"], {
+        stdio: "pipe",
+      });
+    } else {
+      log("info", "repo_cache_clone_git", { repo, cachePath });
+      execFileSync("git", ["clone", "--bare", resolveCloneUrl(repo), cachePath], {
+        stdio: "pipe",
       });
     }
-    return cachePath;
+    // Fall through to fetch: git clone --bare does not create
+    // refs/remotes/origin/*, so we must fetch explicitly to populate it.
   }
 
-  mkdirSync(join(cachePath, ".."), { recursive: true });
-
-  // Use gh for GitHub repos (handles auth), git clone --bare for others
-  const isGhShorthand = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo);
-  if (isGhShorthand || repo.includes("github.com")) {
-    const target = isGhShorthand ? repo : resolveCloneUrl(repo);
-    log("info", "repo_cache_clone_gh", { repo, cachePath });
-    execFileSync("gh", ["repo", "clone", target, cachePath, "--", "--bare"], {
-      stdio: "pipe",
-    });
-  } else {
-    log("info", "repo_cache_clone_git", { repo, cachePath });
-    execFileSync("git", ["clone", "--bare", resolveCloneUrl(repo), cachePath], {
-      stdio: "pipe",
+  // Always fetch — both after a fresh clone and for cached repos.
+  // Two refspecs: keep refs/heads/* current AND write refs/remotes/origin/*
+  // so getDefaultBranch returns origin/<branch> and addWorktree always
+  // starts the new worktree from the actual current remote HEAD.
+  log("info", "repo_cache_fetch", { repo, cachePath });
+  try {
+    execFileSync(
+      "git",
+      [
+        "fetch",
+        "origin",
+        "+refs/heads/*:refs/heads/*",
+        "+refs/heads/*:refs/remotes/origin/*",
+      ],
+      { cwd: cachePath, stdio: "pipe" }
+    );
+  } catch (err) {
+    log("warn", "repo_cache_fetch_failed", {
+      repo,
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 
@@ -423,4 +425,4 @@ export function destroyWorkspace(workspacePath: string): void {
 }
 
 // Exported for testing
-export { isRemoteRepo, repoName, repoCachePath, isGitRepo };
+export { isRemoteRepo, repoName, repoCachePath, isGitRepo, getDefaultBranch };
