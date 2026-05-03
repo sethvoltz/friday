@@ -4,6 +4,22 @@ You have access to the Linear MCP (tools prefixed `linear_*`). Linear is the **d
 
 This protocol tells you how to read, claim, and report on Linear tickets. Follow it precisely — humans rely on the lifecycle states being accurate.
 
+## String parameter formatting
+
+When passing multi-line content to Linear MCP tools, use **actual newline characters** in string parameters like `description` and `body`. Do **not** use `\n` escape sequences — the MCP layer passes strings verbatim to the Linear API, so a literal backslash-n appears as-is in the Linear UI.
+
+```
+# Correct — real newline in the body
+linear_createComment(issueId="FRI-17", body="Work complete.
+
+PR: https://github.com/org/repo/pull/42")
+
+# Wrong — \\n appears as literal text in Linear
+linear_createComment(issueId="FRI-17", body="Work complete.\nPR: https://github.com/org/repo/pull/42")
+```
+
+Claude Code writes real newlines in string arguments by default — no special escaping is needed or desired.
+
 ## Status lifecycle
 
 ```

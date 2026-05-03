@@ -112,10 +112,21 @@ function ensureBareClone(repo: string): string {
   const cachePath = repoCachePath(repo);
 
   if (existsSync(cachePath)) {
-    // Fetch latest
+    // Fetch latest. Two refspecs: keep refs/heads/* current AND populate
+    // refs/remotes/origin/* so getDefaultBranch can return origin/<branch>
+    // and new worktrees always start from the remote tracking ref.
     log("info", "repo_cache_fetch", { repo, cachePath });
     try {
-      execFileSync("git", ["fetch", "--all"], { cwd: cachePath, stdio: "pipe" });
+      execFileSync(
+        "git",
+        [
+          "fetch",
+          "origin",
+          "+refs/heads/*:refs/heads/*",
+          "+refs/heads/*:refs/remotes/origin/*",
+        ],
+        { cwd: cachePath, stdio: "pipe" }
+      );
     } catch (err) {
       log("warn", "repo_cache_fetch_failed", {
         repo,

@@ -48,6 +48,8 @@ If you skip this convention, the orchestrator will have to flip the Linear statu
   linear_createComment(issueId="FRI-17", body="Looks like FRI-22 is closely related — same hook system question.")
   ```
 
+  Use **actual newline characters** in multi-line `body` strings — not `\n` escape sequences. The MCP layer passes strings verbatim; a literal backslash-n appears as-is in Linear.
+
 **You must not:**
 - Flip Linear status (Backlog/Todo/In Progress/Ready for Review/Done/Cancelled). The Orchestrator owns lifecycle transitions.
 - Claim other Linear tickets. If you find work that needs a separate ticket, mail the Orchestrator and let it triage.
