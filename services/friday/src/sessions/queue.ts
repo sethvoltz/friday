@@ -20,6 +20,8 @@ export interface QueuedMessage {
   images?: ImageAttachment[];
   /** Set true when the message matches the interrupt-signal heuristic */
   interrupt?: boolean;
+  /** Slack thread_ts when the message arrived as a reply in an unconnected thread */
+  threadTs?: string;
 }
 
 interface ChannelQueue {

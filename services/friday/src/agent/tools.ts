@@ -32,13 +32,13 @@ export function createSlackTools(client: WebClient) {
         },
         async (args) => {
           try {
-            await client.chat.postMessage({
+            const res = await client.chat.postMessage({
               channel: args.channel_id,
               text: args.text,
               ...(args.thread_ts ? { thread_ts: args.thread_ts } : {}),
             });
             return {
-              content: [{ type: "text" as const, text: "Message posted." }],
+              content: [{ type: "text" as const, text: `Message posted. ts=${res.ts}` }],
             };
           } catch (err) {
             const msg = err instanceof Error ? err.message : "Unknown error";

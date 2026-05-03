@@ -474,6 +474,7 @@ export function registerEventHandlers(app: App, config: RuntimeConfig): void {
       wasQueued,
       images: images && images.length > 0 ? images : undefined,
       interrupt: sessionType === "orchestrator" && isInterruptSignal(text),
+      threadTs: msgThreadTs && msgThreadTs !== ts ? msgThreadTs : undefined,
     };
 
     enqueue(queuedMsg);

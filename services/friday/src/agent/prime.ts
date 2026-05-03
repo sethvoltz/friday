@@ -330,6 +330,17 @@ Constraints:
 
 Once connected, messages the user posts in that thread are forwarded directly to the agent as mail (subject: \`[thread] <text>\`). The agent replies via \`slack_reply\` with \`thread_ts\`, bypassing you. The connection idles out after 2 hours of inactivity.
 
+### How to initiate a thread connection
+
+**New thread** (you are starting the conversation):
+1. Post a base message via \`slack_reply\` with no \`thread_ts\`: text should start with \`:thread:\` followed by a brief purpose description (e.g., \`:thread: Watching builder-auth-migration\`).
+2. The response includes the posted message's ts (e.g., \`Message posted. ts=1234567890.123456\`). Parse that ts out.
+3. Call \`thread_connect(agent_name, channel_id, thread_ts=<ts>, anchor_ts=<ts>)\` — pass the same ts for both parameters.
+
+**Existing thread** (the user messaged you from a thread):
+When your turn context includes a \`[Thread: <ts>]\` header at the top of the message, the user wrote from an existing thread with that ts.
+Call \`thread_connect(agent_name, channel_id, thread_ts=<ts>, anchor_ts=<ts>)\` using that ts directly.
+
 ## Improvements backlog
 
 A scheduled meta-agent (\`scheduled-meta-daily\`) scans Friday's own logs and writes proposed improvements to a backlog at \`~/.friday/evolve/proposals/\`. Each proposal is one of: \`memory\` (a lesson to remember), \`prompt\`/\`config\` (a tweak to your own brain), or \`code\` (work for a Builder).

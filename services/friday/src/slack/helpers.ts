@@ -136,20 +136,19 @@ export function buildBatchContent(
 ): string | MultimodalPrompt {
   const allImages = messages.flatMap((m) => m.images ?? []);
   const hasInterrupt = messages.some((m) => m.interrupt);
+  const threadTs = messages.find((m) => m.threadTs)?.threadTs;
 
-  const rawText = buildBatchPrompt(messages.map((m) => m.text.trim() || "[image]"));
-  const text = hasInterrupt
-    ? `[INTERRUPT] The user is redirecting the current task:\n\n${rawText}`
-    : rawText;
+  const prefix =
+    (threadTs ? `[Thread: ${threadTs}]\n\n` : "") +
+    (hasInterrupt ? "[INTERRUPT] The user is redirecting the current task:\n\n" : "");
 
   if (allImages.length === 0) {
     const textOnly = buildBatchPrompt(messages.map((m) => m.text));
-    return hasInterrupt
-      ? `[INTERRUPT] The user is redirecting the current task:\n\n${textOnly}`
-      : textOnly;
+    return `${prefix}${textOnly}`;
   }
 
-  return { text, images: allImages };
+  const rawText = buildBatchPrompt(messages.map((m) => m.text.trim() || "[image]"));
+  return { text: `${prefix}${rawText}`, images: allImages };
 }
 
 /**
