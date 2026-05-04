@@ -17,7 +17,7 @@ interface HealthData {
   uptimeMs: number;
 }
 
-export const load = async () => {
+export const load = async ({ url }) => {
   const config = loadConfig();
   const configExists = existsSync(CONFIG_PATH);
 
@@ -54,7 +54,7 @@ export const load = async () => {
   }
 
   return {
-    eventServerUrl: `http://localhost:${eventServerPort}/events`,
+    eventServerUrl: `http://${url.hostname}:${eventServerPort}/events`,
     health,
     daemonOnline,
     configExists,
