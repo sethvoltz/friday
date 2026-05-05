@@ -50,7 +50,7 @@
   const weekStats = $derived(sumEntries(weekEntries));
 
   // Daily cost stacked by model + token breakdown
-  const { dailyCost, maxDailyCost, maxDailyTokens, models, modelColors } = $derived.by(() => {
+  const { dailyCost, maxDailyCost, maxDailyTokens, maxDailyTokensNoCached, models, modelColors } = $derived.by(() => {
     const dailyMap = new Map<string, { costByModel: Map<string, number>; inputUncached: number; inputCached: number; output: number }>();
     const modelSet = new Set<string>();
     for (const e of entries) {
@@ -78,6 +78,7 @@
       }));
     const maxDailyCost = Math.max(...dailyCost.map(d => d.totalCost), 0.01);
     const maxDailyTokens = Math.max(...dailyCost.map(d => d.totalTokens), 1);
+    const maxDailyTokensNoCached = Math.max(...dailyCost.map(d => d.inputUncached + d.output), 1);
     const palette = [
       'var(--chart-bar, #60a5fa)',
       'var(--chart-cache, #34d399)',
@@ -88,7 +89,7 @@
     ];
     const modelColors: Record<string, string> = {};
     models.forEach((m, i) => { modelColors[m] = palette[i % palette.length]; });
-    return { dailyCost, maxDailyCost, maxDailyTokens, models, modelColors };
+    return { dailyCost, maxDailyCost, maxDailyTokens, maxDailyTokensNoCached, models, modelColors };
   });
 
   // Calendar bucket helpers (separate from rolling-window stat cards above)
@@ -175,6 +176,7 @@
 
   const DAILY_DEFAULT = 5;
   let showAllDays = $state(false);
+  let showCachedTokens = $state(false);
   const visibleDailyCost = $derived(showAllDays ? dailyCost : dailyCost.slice(-DAILY_DEFAULT));
 
   // Helpers
@@ -309,14 +311,21 @@
     <div class="card chart-card">
       <div class="card-header">
         <h2>Daily Cost</h2>
-        <span class="stat-detail">
-          Week {fmtCostShort(costSummary.thisWeek)} &middot; Month {fmtCostShort(costSummary.thisMonth)}
-          {#if dailyCost.length > DAILY_DEFAULT}
-            <button class="toggle-link" onclick={() => showAllDays = !showAllDays}>
-              {showAllDays ? `Show last ${DAILY_DEFAULT}` : `Show all ${dailyCost.length}`}
-            </button>
-          {/if}
-        </span>
+        <div class="card-header-right">
+          <label class="cached-toggle" title="{showCachedTokens ? 'Hide' : 'Show'} cached token segment">
+            <input type="checkbox" bind:checked={showCachedTokens} />
+            <span class="cached-toggle-track"><span class="cached-toggle-knob"></span></span>
+            <span class="cached-toggle-label">cached</span>
+          </label>
+          <span class="stat-detail">
+            Week {fmtCostShort(costSummary.thisWeek)} &middot; Month {fmtCostShort(costSummary.thisMonth)}
+            {#if dailyCost.length > DAILY_DEFAULT}
+              <button class="toggle-link" onclick={() => showAllDays = !showAllDays}>
+                {showAllDays ? `Show last ${DAILY_DEFAULT}` : `Show all ${dailyCost.length}`}
+              </button>
+            {/if}
+          </span>
+        </div>
       </div>
       <div class="chart-legend">
         {#each models as model}
@@ -330,10 +339,12 @@
           <span class="legend-swatch" style="background: var(--chart-input, #818cf8)"></span>
           input
         </span>
+        {#if showCachedTokens}
         <span class="legend-item">
           <span class="legend-swatch" style="background: var(--chart-input-cached, #a5b4fc)"></span>
           cached
         </span>
+        {/if}
         <span class="legend-item">
           <span class="legend-swatch" style="background: var(--chart-output, #f59e0b)"></span>
           output
@@ -369,7 +380,7 @@
                 <Tooltip.Root>
                   <Tooltip.Trigger
                     class="bar-fill-segment"
-                    style="width: {(day.inputUncached / maxDailyTokens) * 100}%; background: var(--chart-input, #818cf8)"
+                    style="width: {(day.inputUncached / (showCachedTokens ? maxDailyTokens : maxDailyTokensNoCached)) * 100}%; background: var(--chart-input, #818cf8)"
                   />
                   <Tooltip.Portal>
                     <Tooltip.Content class="segment-tooltip" sideOffset={6}>
@@ -379,7 +390,7 @@
                   </Tooltip.Portal>
                 </Tooltip.Root>
               {/if}
-              {#if day.inputCached > 0}
+              {#if showCachedTokens && day.inputCached > 0}
                 <Tooltip.Root>
                   <Tooltip.Trigger
                     class="bar-fill-segment"
@@ -397,7 +408,7 @@
                 <Tooltip.Root>
                   <Tooltip.Trigger
                     class="bar-fill-segment"
-                    style="width: {(day.output / maxDailyTokens) * 100}%; background: var(--chart-output, #f59e0b)"
+                    style="width: {(day.output / (showCachedTokens ? maxDailyTokens : maxDailyTokensNoCached)) * 100}%; background: var(--chart-output, #f59e0b)"
                   />
                   <Tooltip.Portal>
                     <Tooltip.Content class="segment-tooltip" sideOffset={6}>
@@ -408,7 +419,7 @@
                 </Tooltip.Root>
               {/if}
             </div>
-            <span class="bar-value">{fmtTokens(day.totalTokens)}</span>
+            <span class="bar-value">{fmtTokens(showCachedTokens ? day.totalTokens : day.inputUncached + day.output)}</span>
           </div>
         {/each}
         {#if dailyCost.length === 0}
@@ -812,6 +823,67 @@
     width: 0.6rem;
     height: 0.6rem;
     border-radius: 2px;
+  }
+
+  /* Card header right-side flex group */
+  .card-header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  /* iOS-style cached token toggle */
+  .cached-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .cached-toggle input[type='checkbox'] {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+  }
+
+  .cached-toggle-track {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    width: 30px;
+    height: 17px;
+    border-radius: 9px;
+    background: var(--border-primary);
+    transition: background var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .cached-toggle input[type='checkbox']:checked ~ .cached-toggle-track {
+    background: var(--accent-primary);
+  }
+
+  .cached-toggle-knob {
+    position: absolute;
+    left: 2px;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform var(--transition-fast);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  }
+
+  .cached-toggle input[type='checkbox']:checked ~ .cached-toggle-track .cached-toggle-knob {
+    transform: translateX(13px);
+  }
+
+  .cached-toggle-label {
+    font-size: 0.72rem;
+    color: var(--text-tertiary);
+    line-height: 1;
   }
 
   /* Token grid */
