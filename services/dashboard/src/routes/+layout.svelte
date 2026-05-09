@@ -40,9 +40,33 @@
       if (data.daemonOnline) uptimeMs += 1000;
     }, 1000);
     if (signedIn && !isLogin) startSSE();
+
+    // Mobile keyboard handling: when the soft keyboard opens, iOS Safari
+    // scrolls the visual viewport up inside the layout viewport, which
+    // drags `position: fixed` elements (the floating header, in
+    // particular) out of view. Track visualViewport.offsetTop in a CSS
+    // var so the header can stay anchored to the *visible* top edge.
+    const vv = window.visualViewport;
+    let vvUpdate: (() => void) | undefined;
+    if (vv) {
+      vvUpdate = () => {
+        document.documentElement.style.setProperty(
+          "--vv-offset-top",
+          `${vv.offsetTop}px`,
+        );
+      };
+      vvUpdate();
+      vv.addEventListener("resize", vvUpdate);
+      vv.addEventListener("scroll", vvUpdate);
+    }
+
     return () => {
       clearInterval(i);
       stopSSE();
+      if (vv && vvUpdate) {
+        vv.removeEventListener("resize", vvUpdate);
+        vv.removeEventListener("scroll", vvUpdate);
+      }
     };
   });
   function fmtDuration(ms: number) {
@@ -141,7 +165,10 @@
     border: 1px solid var(--border-subtle);
     background: var(--header-float-bg);
     position: fixed;
-    top: 1rem;
+    /* --vv-offset-top is set from visualViewport in +layout.svelte and
+       keeps the header pinned to the top of the *visible* viewport when
+       the mobile keyboard is open. Defaults to 0 on desktop. */
+    top: calc(1rem + var(--vv-offset-top, 0px));
     left: 50%;
     transform: translateX(-50%);
     width: calc(100% - 2rem);
