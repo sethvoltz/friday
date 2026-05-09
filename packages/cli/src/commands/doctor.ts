@@ -13,10 +13,12 @@ import {
   schema,
 } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
+import { BANNER } from "../lib/branding.js";
 
 export const doctorCommand = defineCommand({
   meta: { name: "doctor", description: "Check system health" },
   async run() {
+    console.log(BANNER);
     const checks: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
     checks.push(check(`data dir ${DATA_DIR}`, existsSync(DATA_DIR)));

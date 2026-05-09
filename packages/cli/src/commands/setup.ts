@@ -17,6 +17,7 @@ import {
   runMigrations,
   schema,
 } from "@friday/shared";
+import { BANNER } from "../lib/branding.js";
 
 export const setupCommand = defineCommand({
   meta: {
@@ -31,6 +32,7 @@ export const setupCommand = defineCommand({
     },
   },
   async run({ args }) {
+    console.log(BANNER);
     intro(pc.bold(pc.cyan("Friday — setup")));
 
     ensureDirs();
