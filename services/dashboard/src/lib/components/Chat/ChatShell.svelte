@@ -80,7 +80,10 @@
     if (!inputEl || !scrollEl) return;
     const ro = new ResizeObserver(([entry]) => {
       const h = entry.contentRect.height;
-      scrollEl?.style.setProperty("--chat-input-h", `${h}px`);
+      // Set on the document root so the chat-scroll padding *and* the
+      // sibling floating pills (.jump-to-bottom-wrap, .loading-older) all
+      // see the same live value via inheritance.
+      document.documentElement.style.setProperty("--chat-input-h", `${h}px`);
       if (pinnedToBottom && scrollEl) {
         scrollEl.scrollTop = scrollEl.scrollHeight;
       }
@@ -111,8 +114,8 @@
   // Reset --chat-input-h when there's no input rendered, so messages can
   // scroll all the way to the bottom of the viewport in read-only mode.
   $effect(() => {
-    if (readonly && scrollEl) {
-      scrollEl.style.setProperty("--chat-input-h", "0px");
+    if (readonly) {
+      document.documentElement.style.setProperty("--chat-input-h", "0px");
     }
   });
 </script>
@@ -158,7 +161,9 @@
 <style>
   .chat-scroll,
   .chat-sidebar-floating,
-  .chat-input-floating {
+  .chat-input-floating,
+  .jump-to-bottom-wrap,
+  .loading-older {
     --page-gutter: max(1rem, calc((100vw - 1200px) / 2));
     --sidebar-w: 240px;
     --chat-inset: 1rem;
