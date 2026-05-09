@@ -286,13 +286,20 @@ export class ChatState {
   /**
    * Fetch and prepend the next older page of turns. Idempotent on re-entry
    * via `loadingOlder`. Stops once a fetch returns empty (`reachedOldest`).
+   *
+   * Holds `loadingOlder = true` for at least MIN_LOADING_MS so the floating
+   * indicator pill is actually visible — localhost pagination commonly
+   * completes in <50ms, which would otherwise mean a single-frame flicker
+   * the user can't perceive.
    */
   async loadOlderTurns(): Promise<void> {
     if (this.loadingOlder || this.reachedOldest) return;
     if (this.oldestDbId === null) return;
+    const MIN_LOADING_MS = 350;
     const agent = this.focusedAgent;
     const beforeId = this.oldestDbId;
     this.loadingOlder = true;
+    const startedAt = Date.now();
     try {
       const r = await fetch(
         `/api/agents/${agent}/turns?limit=50&beforeId=${beforeId}`,
@@ -313,6 +320,12 @@ export class ChatState {
     } catch {
       // ignore
     } finally {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < MIN_LOADING_MS) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, MIN_LOADING_MS - elapsed),
+        );
+      }
       this.loadingOlder = false;
     }
   }
