@@ -204,6 +204,37 @@ function computeNext(spec: ScheduleSpec): number | null {
   return null;
 }
 
+/**
+ * First-turn prompt for the daily meta-agent. Until the scan/enrich/cluster
+ * pipeline lifts (roadmap Phase 4), the meta-agent's job is degenerate but
+ * still useful: list open proposals, summarize movement since last run, mail
+ * the orchestrator about any `severity: critical` or status changes worth
+ * surfacing. Once the pipeline ships, this prompt is replaced with one that
+ * actually drives scan → enrich → cluster.
+ */
+const META_DAILY_PROMPT = [
+  "You are the daily evolve meta-agent. Your job for this run:",
+  "",
+  "1. Call `evolve_list({ status: 'open' })` and `evolve_list({ status: 'critical' })`.",
+  "2. Compare against the last run's `state.md` (auto-injected above).",
+  "3. For any new `critical` proposals or proposals that have changed since the last run, mail the orchestrator with a short summary (`mail_send({ to: 'friday', type: 'notification', body: ... })`).",
+  "4. Update `state.md` with the latest proposal counts + ids you saw, so tomorrow's run knows what's new.",
+  "5. Be quiet by default. Skip the mail if nothing actionable changed.",
+  "",
+  "Do NOT call `friday evolve scan` / `enrich` / `cluster` — those CLI subcommands are placeholders. The auto-population pipeline lands in a future phase.",
+].join("\n");
+
+const META_WEEKLY_PROMPT = [
+  "You are the weekly evolve meta-agent. Same shape as the daily run, but with a wider lens:",
+  "",
+  "1. Call `evolve_list({})` (all statuses) and read the bodies of anything not yet `applied` or `rejected`.",
+  "2. From `state.md`, identify proposals that have been `open` for > 7 days without movement.",
+  "3. Mail the orchestrator with a triage summary: counts by status, the stale-open list, and any `critical` items.",
+  "4. Update `state.md` with the snapshot for next week.",
+  "",
+  "Do not auto-apply or dismiss; that's the orchestrator's call.",
+].join("\n");
+
 export function seedMetaAgents(): void {
   const existing = getDb()
     .select()
@@ -214,7 +245,7 @@ export function seedMetaAgents(): void {
     upsertSchedule({
       name: "scheduled-meta-daily",
       cron: "0 4 * * *",
-      taskPrompt: "Run friday evolve scan, then enrich, then list.",
+      taskPrompt: META_DAILY_PROMPT,
     });
   }
   const weekly = getDb()
@@ -226,8 +257,7 @@ export function seedMetaAgents(): void {
     upsertSchedule({
       name: "scheduled-meta-weekly",
       cron: "0 5 * * 0",
-      taskPrompt:
-        "Run friday evolve scan with --window=7d, enrich, re-cluster proposals.",
+      taskPrompt: META_WEEKLY_PROMPT,
     });
   }
 }

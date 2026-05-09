@@ -32,7 +32,8 @@
   </div>
   {#if proposals.length === 0}
     <p class="empty-state">
-      No proposals yet. The full pipeline lands in v1.x; meta-agents seed automatically at boot.
+      No proposals yet. Use <code>evolve_save</code> from the orchestrator chat to capture an
+      improvement, or wait for the daily meta-agent's run.
     </p>
   {:else}
     <table class="data-table">
