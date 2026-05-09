@@ -289,6 +289,14 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         }
       }
 
+      // Drop SDK Task sub-agent traffic. Their stream/assistant/user messages
+      // carry `parent_tool_use_id` set to the spawning Task's tool_use id;
+      // emitting them would tag sub-agent tool blocks with the orchestrator's
+      // agent + turn_id and bleed them into the parent's chat.
+      if (typeof m.parent_tool_use_id === "string" && m.parent_tool_use_id) {
+        continue;
+      }
+
       if (m.type === "stream_event") {
         const e = (m.event ?? {}) as {
           type?: string;

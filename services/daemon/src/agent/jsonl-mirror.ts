@@ -127,6 +127,14 @@ function ingestEntry(
     return;
   }
 
+  // SDK Task sub-agent entries are written into the same JSONL with
+  // `isSidechain: true`. Skip them so reload/replay doesn't surface sub-agent
+  // tool blocks in the orchestrator's chat (mirroring the live-stream filter
+  // applied in the worker).
+  if ((e.entry as { isSidechain?: boolean }).isSidechain === true) {
+    return;
+  }
+
   const role = entryRole(e.entry);
   const ts = entryTs(e.entry);
   const seq = eventBus.currentSeq() + 1;
