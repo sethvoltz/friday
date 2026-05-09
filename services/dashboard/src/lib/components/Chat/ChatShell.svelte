@@ -34,6 +34,11 @@
     if (!scrollEl) return;
     pinnedToBottom = isNearBottom(scrollEl);
   }
+  function jumpToBottom() {
+    if (!scrollEl) return;
+    scrollEl.scrollTop = scrollEl.scrollHeight;
+    pinnedToBottom = true;
+  }
 
   // Active mode: keep focusedAgent in sync with the current route, reload
   // turns whenever the agent changes.
@@ -125,6 +130,12 @@
   <ChatMessages messages={readonly ? pastMessages : undefined} />
 </section>
 
+{#if !readonly && !pinnedToBottom}
+  <button class="jump-to-bottom" type="button" onclick={jumpToBottom} aria-label="Scroll to latest">
+    ↓ Latest
+  </button>
+{/if}
+
 {#if !readonly}
   <div class="chat-input-floating" bind:this={inputEl}>
     <ChatInput />
@@ -193,6 +204,25 @@
     border-radius: var(--radius-md);
     color: var(--text-secondary);
     font-size: 0.85rem;
+  }
+
+  .jump-to-bottom {
+    position: fixed;
+    bottom: calc(var(--chat-input-h, 6rem) + 2.5rem);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 0.4rem 0.85rem;
+    border-radius: var(--radius-md);
+    background: var(--accent-primary);
+    color: var(--text-inverse);
+    border: 1px solid var(--accent-primary);
+    box-shadow: var(--shadow-lg);
+    font-size: 0.8rem;
+    cursor: pointer;
+    z-index: 95;
+  }
+  .jump-to-bottom:hover {
+    filter: brightness(1.05);
   }
 
   @media (max-width: 768px) {

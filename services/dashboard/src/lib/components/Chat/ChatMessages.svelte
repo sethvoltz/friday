@@ -6,9 +6,55 @@
 
   let { messages }: { messages?: ChatMessage[] } = $props();
   let list = $derived(messages ?? chat.messages);
+  let readonly = $derived(messages !== undefined);
+
+  // Top-sentinel pagination. When the user scrolls up to the top of the
+  // chat, the sentinel comes into view and we fetch the next 50 older
+  // turns from /api/agents/:name/turns?beforeId=…. Read-only / past-session
+  // mode uses its own messages array (passed in via `messages` prop) and
+  // doesn't paginate — those views show a single fixed session.
+  let topSentinel: HTMLDivElement | undefined = $state();
+
+  $effect(() => {
+    if (readonly) return;
+    if (!topSentinel) return;
+    const el = topSentinel;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          if (chat.loadingOlder || chat.reachedOldest) continue;
+          // Capture scroll-anchor: keep the user looking at roughly the same
+          // turn after we prepend, instead of jumping to the new top.
+          const scroller = el.closest(".chat-scroll") as HTMLElement | null;
+          const beforeHeight = scroller?.scrollHeight ?? 0;
+          const beforeTop = scroller?.scrollTop ?? 0;
+          void chat.loadOlderTurns().then(() => {
+            if (!scroller) return;
+            queueMicrotask(() => {
+              const delta = scroller.scrollHeight - beforeHeight;
+              if (delta > 0) scroller.scrollTop = beforeTop + delta;
+            });
+          });
+        }
+      },
+      { rootMargin: "200px 0px 0px 0px" },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  });
 </script>
 
 <div class="list">
+  {#if !readonly}
+    <div bind:this={topSentinel} class="top-sentinel" aria-hidden="true">
+      {#if chat.loadingOlder}
+        <span class="hint">Loading older messages…</span>
+      {:else if chat.reachedOldest && list.length > 0}
+        <span class="hint dim">Beginning of history</span>
+      {/if}
+    </div>
+  {/if}
   {#if list.length === 0}
     <div class="empty">
       <h2>👑 Friday</h2>
@@ -111,5 +157,17 @@
     color: var(--text-primary);
     font-size: 1.4rem;
     margin-bottom: 0.5rem;
+  }
+  .top-sentinel {
+    min-height: 1px;
+    text-align: center;
+    padding: 0.5rem 0;
+  }
+  .hint {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+  }
+  .hint.dim {
+    opacity: 0.6;
   }
 </style>

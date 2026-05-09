@@ -29,6 +29,11 @@ export interface ChatMessage {
 
   // Thinking-specific
   blockId?: string;
+
+  /** Source DB row id for the JSONL turn this message was parsed from.
+   * Used as the pagination cursor when loading older history. Live SSE
+   * deltas don't carry one. */
+  dbTurnId?: number;
 }
 
 export interface AgentInfo {
@@ -51,6 +56,12 @@ export class ChatState {
   lastSeq = $state(0);
   inflightTurnId = $state<string | null>(null);
   connected = $state(false);
+  /** Smallest `dbTurnId` we've loaded; pagination cursor for older turns. */
+  oldestDbId = $state<number | null>(null);
+  /** True while a paginated fetch is in flight; prevents re-entrant calls. */
+  loadingOlder = $state(false);
+  /** True once we've fetched and gotten back an empty page (no more history). */
+  reachedOldest = $state(false);
 
   addUser(text: string): void {
     const id = `u_${Date.now()}`;
@@ -254,13 +265,51 @@ export class ChatState {
     // Clear immediately so switching agents doesn't briefly show the prior
     // agent's messages while turns are fetching.
     this.messages = [];
+    this.oldestDbId = null;
+    this.reachedOldest = false;
     try {
-      const r = await fetch(`/api/agents/${agent}/turns?limit=200`);
+      const r = await fetch(`/api/agents/${agent}/turns?limit=50`);
       if (!r.ok) return;
       const turns = (await r.json()) as TurnRow[];
       this.messages = parseTurns(turns, agent);
+      this.oldestDbId = oldestDbTurnId(turns);
+      if (turns.length === 0) this.reachedOldest = true;
     } catch {
       // ignore network errors
+    }
+  }
+
+  /**
+   * Fetch and prepend the next older page of turns. Idempotent on re-entry
+   * via `loadingOlder`. Stops once a fetch returns empty (`reachedOldest`).
+   */
+  async loadOlderTurns(): Promise<void> {
+    if (this.loadingOlder || this.reachedOldest) return;
+    if (this.oldestDbId === null) return;
+    const agent = this.focusedAgent;
+    const beforeId = this.oldestDbId;
+    this.loadingOlder = true;
+    try {
+      const r = await fetch(
+        `/api/agents/${agent}/turns?limit=50&beforeId=${beforeId}`,
+      );
+      if (!r.ok) return;
+      const turns = (await r.json()) as TurnRow[];
+      if (turns.length === 0) {
+        this.reachedOldest = true;
+        return;
+      }
+      const older = parseTurns(turns, agent);
+      // Prepend, dedup-by-id (SSE may have surfaced something we now also
+      // see in DB).
+      const seen = new Set(this.messages.map((m) => m.id));
+      const fresh = older.filter((m) => !seen.has(m.id));
+      this.messages = [...fresh, ...this.messages];
+      this.oldestDbId = oldestDbTurnId(turns);
+    } catch {
+      // ignore
+    } finally {
+      this.loadingOlder = false;
     }
   }
 
@@ -376,6 +425,7 @@ export function parseTurns(turns: TurnRow[], agent: string): ChatMessage[] {
           status: "complete",
           ts: t.ts,
           agent,
+          dbTurnId: t.id,
         });
       } else if (b.kind === "tool_use") {
         const msg: ChatMessage = {
@@ -387,6 +437,7 @@ export function parseTurns(turns: TurnRow[], agent: string): ChatMessage[] {
           toolName: b.toolName,
           input: b.input,
           ts: t.ts,
+          dbTurnId: t.id,
         };
         out.push(msg);
         toolByToolId.set(b.toolId, msg);
@@ -405,6 +456,7 @@ export function parseTurns(turns: TurnRow[], agent: string): ChatMessage[] {
             toolName: "(unknown)",
             output: b.text,
             ts: t.ts,
+            dbTurnId: t.id,
           });
         }
       } else if (b.kind === "thinking") {
@@ -418,11 +470,21 @@ export function parseTurns(turns: TurnRow[], agent: string): ChatMessage[] {
           status: "done",
           blockId,
           ts: t.ts,
+          dbTurnId: t.id,
         });
       }
     }
   }
   return out;
+}
+
+/** Returns the smallest `id` among the given turn rows, or null if empty. */
+function oldestDbTurnId(turns: TurnRow[]): number | null {
+  let oldest: number | null = null;
+  for (const t of turns) {
+    if (oldest === null || t.id < oldest) oldest = t.id;
+  }
+  return oldest;
 }
 
 /** Extracted block from a JSONL entry, ordered as it appears in the file. */
