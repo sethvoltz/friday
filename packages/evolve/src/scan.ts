@@ -483,7 +483,10 @@ function cosine(a: Map<string, number>, b: Map<string, number>): number {
 }
 
 /**
- * Run all scanners and return the merged signal list.
+ * Run synchronous scanners and return the merged signal list.
+ *
+ * Friction scanning is async (Haiku-driven) and lives in scan-friction.ts;
+ * call `scanFriction()` separately and concat the results.
  */
 export function scanAll(opts: ScanOptions & UsageScanOptions = {}): Signal[] {
   return [

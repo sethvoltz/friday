@@ -69,6 +69,9 @@ importers:
       '@friday/shared':
         specifier: workspace:*
         version: link:../shared
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@types/better-sqlite3@7.6.13)(better-sqlite3@11.10.0)(kysely@0.28.17)
     devDependencies:
       typescript:
         specifier: ^5.7.0

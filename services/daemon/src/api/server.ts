@@ -51,6 +51,7 @@ import {
   rerankAll,
   saveProposal,
   scanAll,
+  scanFriction,
   sinceHoursAgo,
   appendRun,
   updateProposal,
@@ -663,13 +664,26 @@ async function handle(
   }
 
   if (method === "POST" && path === "/api/evolve/scan") {
-    const body = await readJson<{ windowHours?: number }>(req);
+    const body = await readJson<{
+      windowHours?: number;
+      includeFriction?: boolean;
+    }>(req);
     const windowHours = body.windowHours ?? 24;
+    const includeFriction = body.includeFriction !== false;
     const callerName = String(req.headers["x-friday-caller-name"] ?? "scan");
     const since = sinceHoursAgo(windowHours);
     const windowEnd = new Date().toISOString();
     try {
-      const signals = scanAll({ since });
+      const syncSignals = scanAll({ since });
+      const frictionSignals = includeFriction
+        ? await scanFriction({ since }).catch((err) => {
+            logger.log("warn", "evolve.scan.friction-error", {
+              message: err instanceof Error ? err.message : String(err),
+            });
+            return [] as typeof syncSignals;
+          })
+        : [];
+      const signals = [...syncSignals, ...frictionSignals];
       const propose = proposeFromSignals(signals, {
         rule: DEFAULT_RULE,
         createdBy: callerName,
