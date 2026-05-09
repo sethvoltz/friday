@@ -1,16 +1,75 @@
 <script lang="ts">
   import { marked } from "marked";
   import DOMPurify from "isomorphic-dompurify";
+  import { onMount } from "svelte";
+  import { getMarkedExtensions } from "@friday/shared/markdown";
+  import "katex/dist/katex.min.css";
 
   let { source }: { source: string | null | undefined } = $props();
 
+  // Install KaTeX + mermaid marker extension once. Module-level: every
+  // Markdown instance shares the same `marked` configuration.
+  let installed = false;
+  function ensureInstalled() {
+    if (installed) return;
+    marked.use(...getMarkedExtensions());
+    installed = true;
+  }
+  ensureInstalled();
+
   const html = $derived.by(() => {
     const raw = marked.parse(source ?? "", { gfm: true, breaks: true, async: false }) as string;
-    return DOMPurify.sanitize(raw);
+    // KaTeX emits MathML; allow it. The mermaid marker is a plain <pre class>.
+    return DOMPurify.sanitize(raw, { USE_PROFILES: { html: true, mathMl: true, svg: true } });
+  });
+
+  // After every render, rescan for `.mermaid` blocks and mount diagrams. The
+  // mermaid library is loaded once on first need.
+  let container: HTMLDivElement;
+  let mermaidLoaded = false;
+  type MermaidApi = {
+    initialize: (cfg: Record<string, unknown>) => void;
+    run: (opts: { nodes: HTMLElement[] }) => Promise<void>;
+  };
+  let mermaidApi: MermaidApi | null = null;
+
+  async function renderMermaid() {
+    if (!container) return;
+    const blocks = Array.from(
+      container.querySelectorAll<HTMLElement>("pre.mermaid:not([data-mermaid-rendered])"),
+    );
+    if (blocks.length === 0) return;
+    if (!mermaidApi) {
+      const mod = await import("mermaid");
+      mermaidApi = (mod.default ?? (mod as unknown)) as MermaidApi;
+      mermaidApi.initialize({ startOnLoad: false, securityLevel: "strict" });
+      mermaidLoaded = true;
+    }
+    // Mark before run so re-renders during the same `source` don't double-mount.
+    for (const b of blocks) b.setAttribute("data-mermaid-rendered", "true");
+    try {
+      await mermaidApi.run({ nodes: blocks });
+    } catch (err) {
+      // On parse error, mermaid leaves an error message inline; surface to
+      // console for debug.
+      // eslint-disable-next-line no-console
+      console.warn("mermaid render failed:", err);
+    }
+  }
+
+  $effect(() => {
+    // Recompute on html change. Microtask defer so `{@html}` has flushed.
+    void html;
+    queueMicrotask(renderMermaid);
+  });
+
+  onMount(() => {
+    void mermaidLoaded;
+    renderMermaid();
   });
 </script>
 
-<div class="markdown">{@html html}</div>
+<div class="markdown" bind:this={container}>{@html html}</div>
 
 <style>
   :global(.markdown) {
@@ -82,6 +141,18 @@
     border: none;
     font-size: 0.78rem;
     line-height: 1.5;
+  }
+
+  /* Mermaid renders SVG into the pre.mermaid block; let it breathe. */
+  :global(.markdown pre.mermaid) {
+    background: transparent;
+    border: 1px solid var(--border-subtle);
+    text-align: center;
+    overflow-x: auto;
+  }
+  :global(.markdown pre.mermaid svg) {
+    max-width: 100%;
+    height: auto;
   }
 
   :global(.markdown a) {
