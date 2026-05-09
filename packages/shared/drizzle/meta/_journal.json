@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1778129604734,
+      "tag": "0000_loud_flatman",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1778264150130,
+      "tag": "0001_low_ulik",
+      "breakpoints": true
+    }
+  ]
+}

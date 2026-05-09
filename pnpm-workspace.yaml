@@ -1,0 +1,4 @@
+packages:
+  - 'services/*'
+  - 'packages/*'
+  - 'packages/integrations/*'

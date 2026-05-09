@@ -1,0 +1,179 @@
+import {
+  closeDb,
+  ensureDirs,
+  ensureFridayEnv,
+  ensureSoul,
+  getRawDb,
+  loadConfig,
+  normalizeModelConfig,
+  runMigrations,
+} from "@friday/shared";
+import { logger } from "./log.js";
+import { startServer } from "./api/server.js";
+import { startHealthHeartbeat, clearHealth } from "./monitor/health.js";
+import { backfillUsageFromLegacyJsonl, replayPending } from "@friday/shared/services";
+import { seedMetaAgents, startScheduler } from "./scheduler/scheduler.js";
+import { reconcile as reconcileLinear } from "@friday/integrations-linear";
+import * as registry from "./agent/registry.js";
+import { startMirror } from "./agent/jsonl-mirror.js";
+import { startMailBridge } from "./comms/mail-bridge.js";
+import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
+import { dispatchTurn } from "./agent/lifecycle.js";
+import {
+  composeSystemPrompt,
+  readPromptStack,
+} from "@friday/shared";
+import { inbox as mailInbox } from "@friday/shared/services";
+import { buildMailPrompt } from "./comms/mail-prompt.js";
+import { randomUUID } from "node:crypto";
+
+async function main(): Promise<void> {
+  ensureDirs();
+  ensureFridayEnv();
+  runMigrations();
+  ensureSoul();
+
+  const backfill = backfillUsageFromLegacyJsonl();
+  if ("skipped" in backfill && backfill.skipped) {
+    logger.log("info", "usage.backfill.skip", { reason: backfill.reason });
+  } else {
+    logger.log("info", "usage.backfill.done", {
+      inserted: backfill.inserted,
+      source: backfill.source,
+    });
+  }
+
+  const cfg = loadConfig();
+  const server = startServer({ port: cfg.daemonPort });
+  const heartbeat = startHealthHeartbeat();
+
+  // Boot recovery
+  startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
+  replayPending();
+  seedMetaAgents();
+  recoverAgents(cfg);
+  const schedTick = startScheduler();
+  const watchdog = startWatchdog();
+  void reconcileLinear().catch((err) =>
+    logger.log("warn", "linear.reconcile.error", {
+      message: err instanceof Error ? err.message : String(err),
+    }),
+  );
+
+  const modelCfg = normalizeModelConfig(cfg.model);
+  logger.log("info", "daemon.ready", {
+    port: cfg.daemonPort,
+    model: modelCfg.name,
+    thinking: modelCfg.thinking?.type ?? "default",
+    effort: modelCfg.effort ?? "default",
+  });
+
+  const shutdown = (signal: string) => {
+    logger.log("info", "daemon.shutdown", { signal });
+    clearInterval(heartbeat);
+    clearInterval(schedTick);
+    void watchdog;
+    stopWatchdog();
+    clearHealth();
+    flushDb();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+}
+
+/**
+ * Boot recovery for agents:
+ *  - Reset any `working` status left by a daemon that died mid-turn (no
+ *    worker is alive to drive the turn forward).
+ *  - Re-seed JSONL mirrors for every agent that has a known `sessionId`.
+ *  - For long-lived agents (orchestrator/builder/helper/bare) with non-empty
+ *    inboxes, dispatch a fresh turn so the pending mail isn't stranded.
+ *    `startMirror` is idempotent on filepath.
+ */
+function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
+  for (const a of registry.listAgents()) {
+    if (a.status === "working") {
+      logger.log("info", "agent.recovery.reset-working", { agent: a.name });
+      registry.setStatus(a.name, "idle");
+    }
+    if (a.sessionId) {
+      startMirror({
+        sessionId: a.sessionId,
+        agentName: a.name,
+        workingDirectory: process.cwd(),
+      });
+    }
+
+    if (a.type !== "scheduled" && a.status !== "killed") {
+      const pending = mailInbox(a.name);
+      if (pending.length > 0) {
+        const stack = readPromptStack(a.type, []);
+        const systemPrompt = composeSystemPrompt(stack);
+        const modelCfg = normalizeModelConfig(cfg.model);
+        const turnId = `t_${randomUUID()}`;
+        logger.log("info", "agent.recovery.drain-mail", {
+          agent: a.name,
+          pending: pending.length,
+        });
+        try {
+          dispatchTurn({
+            agentName: a.name,
+            options: {
+              agentName: a.name,
+              agentType: a.type,
+              workingDirectory: process.cwd(),
+              systemPrompt,
+              prompt: buildMailPrompt(a.name, pending),
+              turnId,
+              model: modelCfg.name,
+              thinking: modelCfg.thinking,
+              effort: modelCfg.effort,
+              resumeSessionId: a.sessionId ?? undefined,
+              daemonPort: cfg.daemonPort,
+              parentName:
+                "parentName" in a ? a.parentName ?? undefined : undefined,
+              mode: "long-lived",
+            },
+          });
+        } catch (err) {
+          logger.log("warn", "agent.recovery.dispatch-error", {
+            agent: a.name,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Run a WAL checkpoint (TRUNCATE) and close the DB handle on shutdown.
+ * Without this the WAL file grows unbounded across restarts and the main
+ * `.sqlite` file stays cold. Data is durable either way (NORMAL sync), but
+ * this keeps the on-disk shape sane and reads fast after restart.
+ */
+function flushDb(): void {
+  try {
+    getRawDb().pragma("wal_checkpoint(TRUNCATE)");
+  } catch (err) {
+    logger.log("warn", "db.checkpoint.error", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+  try {
+    closeDb();
+  } catch (err) {
+    logger.log("warn", "db.close.error", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+main().catch((err: unknown) => {
+  logger.log("error", "daemon.fatal", {
+    message: err instanceof Error ? err.message : String(err),
+  });
+  process.exit(1);
+});

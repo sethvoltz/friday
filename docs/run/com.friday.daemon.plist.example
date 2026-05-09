@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd LaunchAgent template for running the Friday daemon at login.
+
+  Usage:
+    1. Replace paths under <string> entries to match your install:
+       - PROJECT_DIR  → e.g. /Users/<you>/Development/Seth/Friday/agent-friday
+       - NODE_BINARY  → output of `which node` (or pnpm); often something like
+                        /Users/<you>/.local/share/mise/installs/node/22/bin/node
+       - LOG_DIR      → e.g. /Users/<you>/.friday/logs
+    2. Save this file as ~/Library/LaunchAgents/com.friday.daemon.plist
+       (drop the `.example` suffix).
+    3. `launchctl load -w ~/Library/LaunchAgents/com.friday.daemon.plist`
+    4. To stop: `launchctl unload ~/Library/LaunchAgents/com.friday.daemon.plist`
+
+  Friday's `friday start` tmux flow remains the canonical interactive option;
+  this file is for hands-off "always running on this machine" setups.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.friday.daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>NODE_BINARY</string>
+    <string>PROJECT_DIR/services/daemon/dist/index.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>PROJECT_DIR</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>LOG_DIR/daemon.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>LOG_DIR/daemon.stderr.log</string>
+</dict>
+</plist>

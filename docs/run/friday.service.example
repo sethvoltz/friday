@@ -1,0 +1,32 @@
+# systemd user unit template for running the Friday daemon on login.
+#
+# Usage:
+#   1. Replace placeholders to match your install:
+#        - PROJECT_DIR  → e.g. /home/<you>/Development/Seth/Friday/agent-friday
+#        - NODE_BINARY  → output of `which node`
+#   2. Copy to ~/.config/systemd/user/friday.service (drop the `.example`).
+#   3. `systemctl --user daemon-reload`
+#   4. `systemctl --user enable --now friday`
+#   5. To stop: `systemctl --user stop friday`
+#      To watch: `journalctl --user-unit friday -f`
+#
+# Friday's `friday start` tmux flow remains the canonical interactive option;
+# this file is for hands-off "always running on this machine" setups.
+
+[Unit]
+Description=Friday daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=PROJECT_DIR
+ExecStart=NODE_BINARY PROJECT_DIR/services/daemon/dist/index.js
+Restart=on-failure
+RestartSec=5
+
+# Optional: set FRIDAY_DATA_DIR to override ~/.friday
+# Environment=FRIDAY_DATA_DIR=%h/.friday
+
+[Install]
+WantedBy=default.target

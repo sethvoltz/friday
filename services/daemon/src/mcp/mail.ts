@@ -1,0 +1,111 @@
+/**
+ * Friday-mail MCP server. Bridges agent → daemon HTTP for the mail bus.
+ * Exposed to all caller types (every agent can send and receive mail).
+ */
+
+import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
+import { daemonFetch } from "./http.js";
+
+export const MAIL_SERVER_NAME = "friday-mail";
+
+export interface BuildMailServerOptions {
+  callerName: string;
+  callerType: string;
+  daemonPort: number;
+}
+
+export function buildMailServer(opts: BuildMailServerOptions) {
+  const ctx = {
+    port: opts.daemonPort,
+    callerName: opts.callerName,
+    callerType: opts.callerType,
+  };
+
+  return createSdkMcpServer({
+    name: MAIL_SERVER_NAME,
+    tools: [
+      tool(
+        "mail_send",
+        "Send mail to another agent. Use for asynchronous coordination — the recipient drains its inbox via mail_inbox.",
+        {
+          to: z.string().describe("Recipient agent name."),
+          body: z.string().describe("Message body. Markdown ok."),
+          type: z
+            .enum(["message", "notification", "task"])
+            .optional()
+            .describe("Mail kind. Defaults to message."),
+          meta: z
+            .record(z.string(), z.unknown())
+            .optional()
+            .describe("Optional structured metadata."),
+        },
+        async (args) => {
+          const row = (await daemonFetch({
+            ...ctx,
+            path: "/api/mail/send",
+            method: "POST",
+            body: {
+              fromAgent: opts.callerName,
+              toAgent: args.to,
+              type: args.type ?? "message",
+              body: args.body,
+              meta: args.meta,
+            },
+          })) as { id: number };
+          return {
+            content: [{ type: "text", text: `mail sent (id=${row.id})` }],
+          };
+        },
+      ),
+      tool(
+        "mail_inbox",
+        "List pending mail addressed to you, oldest first.",
+        {},
+        async () => {
+          const rows = await daemonFetch<unknown[]>({
+            ...ctx,
+            path: `/api/mail/inbox/${encodeURIComponent(opts.callerName)}`,
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(rows, null, 2) }],
+          };
+        },
+      ),
+      tool(
+        "mail_read",
+        "Read a mail item in full and mark it as read.",
+        {
+          id: z.number().int().describe("Mail id from mail_inbox."),
+        },
+        async (args) => {
+          const row = await daemonFetch({
+            ...ctx,
+            path: `/api/mail/${args.id}/read`,
+            method: "POST",
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(row, null, 2) }],
+          };
+        },
+      ),
+      tool(
+        "mail_close",
+        "Close a mail item once you've finished acting on it. After this, it no longer appears in mail_inbox.",
+        {
+          id: z.number().int().describe("Mail id."),
+        },
+        async (args) => {
+          await daemonFetch({
+            ...ctx,
+            path: `/api/mail/${args.id}/close`,
+            method: "POST",
+          });
+          return {
+            content: [{ type: "text", text: `mail ${args.id} closed` }],
+          };
+        },
+      ),
+    ],
+  });
+}

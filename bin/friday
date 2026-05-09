@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Friday CLI shim — invokes the built CLI in packages/cli/dist/.
+# Add this directory to your PATH (e.g. in .zshrc / .bashrc):
+#   export PATH="$HOME/Development/Seth/Friday/agent-friday/bin:$PATH"
+exec node "$(dirname "$0")/../packages/cli/dist/index.js" "$@"
