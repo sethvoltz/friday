@@ -2,7 +2,7 @@
   import { chat } from "$lib/stores/chat.svelte";
   import { goto } from "$app/navigation";
   import { portal } from "$lib/actions/portal";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
 
   interface CommandsResponse {
     system: Array<{ name: string; description: string; destructive?: boolean }>;
@@ -88,6 +88,10 @@
 
     chat.addUser(t);
     text = "";
+    // Wait for the bound textarea value to actually clear before measuring.
+    // Without this, scrollHeight still reflects the multi-line draft and
+    // autoresize sizes the box to the *old* content.
+    await tick();
     autoresize();
     try {
       const r = await fetch("/api/chat/turn", {
@@ -166,6 +170,7 @@
     const args = confirmSummary.resolvedArgs;
     confirmingCommand = null;
     text = "";
+    await tick();
     autoresize();
     await dispatchSystem(name, args);
   }
