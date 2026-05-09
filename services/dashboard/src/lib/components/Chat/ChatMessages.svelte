@@ -28,6 +28,11 @@
   // mode uses its own messages array (passed in via `messages` prop) and
   // doesn't paginate — those views show a single fixed session.
   let topSentinel: HTMLDivElement | undefined = $state();
+  // Bottom sentinel. An IntersectionObserver tracks whether the bottom of
+  // the chat is in view (within 200px); the result drives chat.pinnedToBottom
+  // which gates auto-scroll, the jump-to-latest button, and the DOM-cap
+  // window slice. Replaces the previous scroll-position math in ChatShell.
+  let bottomSentinel: HTMLDivElement | undefined = $state();
 
   $effect(() => {
     if (readonly) return;
@@ -55,6 +60,25 @@
       { rootMargin: "200px 0px 0px 0px" },
     );
     obs.observe(el);
+    return () => obs.disconnect();
+  });
+
+  $effect(() => {
+    if (readonly) return;
+    if (!bottomSentinel) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          chat.pinnedToBottom = e.isIntersecting;
+        }
+      },
+      // Match the old scroll-math threshold: treat "within 200px of the
+      // bottom" as pinned. Positive `bottom` rootMargin extends the
+      // observation root downward, so the sentinel keeps reporting
+      // intersecting for 200px after it scrolls up out of strict view.
+      { rootMargin: "0px 0px 200px 0px" },
+    );
+    obs.observe(bottomSentinel);
     return () => obs.disconnect();
   });
 </script>
@@ -109,6 +133,13 @@
       </div>
     {/if}
   {/each}
+  {#if !readonly}
+    <div
+      bind:this={bottomSentinel}
+      class="bottom-sentinel"
+      aria-hidden="true"
+    ></div>
+  {/if}
 </div>
 
 <style>
@@ -176,6 +207,9 @@
     min-height: 1px;
     text-align: center;
     padding: 0.5rem 0;
+  }
+  .bottom-sentinel {
+    min-height: 1px;
   }
   .hint {
     font-size: 0.75rem;

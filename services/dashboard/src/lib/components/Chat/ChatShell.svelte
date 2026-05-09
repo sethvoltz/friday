@@ -22,23 +22,21 @@
 
   let scrollEl: HTMLElement | undefined = $state();
   let inputEl: HTMLDivElement | undefined = $state();
-  let pinnedToBottom = $state(true);
+
+  // Read-only past-session views auto-pin to bottom on initial load and
+  // never get SSE updates afterward, so they don't need the live observer.
+  // Live mode reads from `chat.pinnedToBottom`, which the bottom sentinel
+  // in ChatMessages maintains via IntersectionObserver.
+  let pinnedToBottom = $derived(readonly ? true : chat.pinnedToBottom);
 
   // Read-only mode keeps its own messages list so SSE doesn't mutate it.
   let pastMessages = $state<ChatMessage[]>([]);
 
-  function isNearBottom(el: HTMLElement): boolean {
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 200;
-  }
-  function onScroll() {
-    if (!scrollEl) return;
-    pinnedToBottom = isNearBottom(scrollEl);
-    if (!readonly) chat.pinnedToBottom = pinnedToBottom;
-  }
   function jumpToBottom() {
     if (!scrollEl) return;
     scrollEl.scrollTop = scrollEl.scrollHeight;
-    pinnedToBottom = true;
+    // Optimistic update so the jump-button hides immediately; the
+    // bottom-sentinel observer will confirm on its next tick.
     if (!readonly) chat.pinnedToBottom = true;
   }
 
@@ -123,7 +121,7 @@
   <Sidebar />
 </aside>
 
-<section class="chat-scroll" bind:this={scrollEl} onscroll={onScroll}>
+<section class="chat-scroll" bind:this={scrollEl}>
   {#if readonly}
     <div class="readonly-banner">
       Past session — read only
