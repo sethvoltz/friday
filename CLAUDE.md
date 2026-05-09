@@ -4,8 +4,13 @@ A local-first, headless agent daemon with a SvelteKit dashboard exposed via Clou
 
 ## Documentation
 
-- `docs/architecture.md` — System overview, components, message flow, prompt stack, agent hierarchy.
-- `docs/decisions.md` — ADRs.
+- `docs/architecture.md` — System overview, components, topology, wire protocol, prompt stack, agent lifecycle.
+- `docs/chat-ux.md` — Single-chat UX, sidebar, focus model, slash commands, attachments, markdown rendering.
+- `docs/mobile-ux.md` — Priority+ navigation, virtualization, PWA, mobile autocomplete.
+- `docs/mcp.md` — MCP server surface table (Friday + user-configured).
+- `docs/schema.md` — DB schema reference.
+- `docs/decisions.md` — ADRs + watch list.
+- `docs/roadmap.md` — Open work, sequenced for execution.
 - `docs/setup.md` — Setup guide including CFT walkthrough.
 - `docs/running.md` — How to run the daemon and dashboard.
 

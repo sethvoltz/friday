@@ -59,3 +59,46 @@ Single-user system. `friday setup` is the only path to create the primary accoun
 **Status:** accepted
 
 User-spawned ad-hoc sessions use the existing Bare agent type. Bares already exist in the system as interactive-but-headless agents (used for evolve enrichment, etc.). Promoting them to first-class chat citizens avoids duplicating Helper's purpose. Helpers remain orchestrator-spawned for scoped sub-tasks.
+
+## ADR-011 — Daemon binds one port for HTTP + SSE
+
+**Status:** accepted
+
+The early plan called for two daemon ports (HTTP API + SSE) — a holdover from the old Slack-era event server. SSE is just a long-lived HTTP response; there's no operational reason to split. One port keeps `friday doctor`, port-conflict diagnostics, and the dashboard's reverse proxy simpler. The dashboard's `/api/events` proxies to the same `daemonPort` everything else hits.
+
+## ADR-012 — JSONL `turn_index` is the byte offset; no streaming preview rows
+
+**Status:** accepted
+
+`turn_index` in the `turns` table is the absolute byte offset of the JSONL line in `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`. That value is monotonic by construction, unique within a session, and re-drainable: if the daemon restarts mid-session, re-walking the file lands on the same `(session_id, turn_index)` rows and `upsertTurn` is idempotent.
+
+An earlier plan called for streaming preview rows at `turn_index = 0` to surface in-flight text before the JSONL finalized. We did not implement it — streaming text is delivered live via SSE `text_delta` events, and the `turns` table only carries canonical post-JSONL rows. Means there's nothing to reconcile.
+
+## ADR-013 — `agents.json` and per-channel session files removed; SQLite is the registry
+
+**Status:** accepted
+
+The old Friday tracked agents in `~/.friday/agents.json` and per-Slack-channel session metadata in JSON files under `~/.friday/sessions/`. The new system collapses both into the `agents` SQLite table. Single writer (the daemon), atomic updates, queryable, indexed. Boot recovery scans the table; no more JSON-rewrite races.
+
+## ADR-014 — Mail bus event names: `mail:to:<agent>` + `mail:any`
+
+**Status:** accepted
+
+The shared `mailBus` EventEmitter (`packages/shared/src/services/mail.ts`) emits two events on every `sendMail()` call: a per-recipient `mail:to:<agentName>` for direct subscription, and a generic `mail:any` for spectator subscribers (the daemon's mail-bridge re-publishes both as SSE `mail_delivered` and IPC `mail-wakeup`). Event-name collisions are prevented by the agent-name regex (`/^[a-z0-9][a-z0-9-]{0,62}$/`).
+
+## ADR-015 — BetterAuth tables in our Drizzle schema, BetterAuth owns its migrations
+
+**Status:** accepted
+
+`accounts`, `sessions`, `users`, `verification` are declared in `schema.ts` for typed access from the rest of the app, but BetterAuth's CLI (`@better-auth/cli`) handles the actual table creation. Field names match BetterAuth's defaults. If they ever drift, BetterAuth's runtime wins and we update our typed declarations to match.
+
+## Watch list
+
+Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.
+
+- **Streaming Bash stdout in chat** vs. the current "summary + DB-fetch on expand" model. Watch how it feels in practice; revisit if tool-result expansion becomes a high-frequency action.
+- **Memory-pressure auto-action.** Currently alert-only. If runaway workers become a recurring problem, consider auto-pause (not auto-kill) at threshold.
+- **Multi-chat / scratch-chat archival.** Single persistent chat is the v1 design; `agent_name` on `turns` already supports multi-chat as a UI addition.
+- **At-rest encryption for `~/.friday/`.** v1 relies on FileVault/BitLocker on the host. Native encryption can layer on later.
+- **Other ticket integrations.** GH Issues, Jira, Linear-Cycles all slot into `ticket_external_links` cleanly (per ADR-006); no schema change required.
+- **Mail thread/subject metadata.** Old Friday's mail had a `subject` separate from `body`. New schema only has `body` + `type`. If thread-grouping bites, add `subject text` and `thread_id text` columns + a migration.

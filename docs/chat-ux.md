@@ -1,0 +1,99 @@
+# Chat UX
+
+The dashboard's home `/` is a single persistent chat with Friday. This doc captures the UX shape: focus model, sidebar, slash commands, attachments, markdown rendering. Mobile-specific behaviors live in `docs/mobile-ux.md`.
+
+## Single persistent chat
+
+- Home `/` is *the* chat with Friday. One persistent orchestrator named "Friday" (or whatever the user names it).
+- No conversation list, no "new chat" button. Memory + compaction handle long-term context.
+- When the orchestrator spawns a sub-agent (builder/helper/bare), the spawning event renders inline in the orchestrator's transcript as a **clickable reference** (agent name + status badge + brief context). Clicking the reference switches the chat pane to that agent — full transcript, live streaming, all chat features.
+- **No collapsible / inline expansion.** Sub-agents are first-class chats you switch into, not nested views.
+- The user navigates back to Friday by clicking Friday in the sidebar (or the `Friday 👑` entry at the top), or via a back-affordance in the sub-agent's chat header.
+- Today's home-page content (status overview, usage stats, daily cost chart, agents/sessions/memory/config tables) lives at **`/dashboard`** — a separate destination in the nav. Tables and charts refresh on new turns via the SSE channel.
+
+## Sidebar
+
+- **Friday 👑 pinned at the top** as the orchestrator entry. Always present, always first.
+- Below: all other non-killed sessions (active + idle builders, helpers, bare, scheduled-mid-run) with status dots (idle / working / stalled / error) and unread badges (`agent_message` count).
+- Click any entry → chat pane switches focus to that agent's transcript.
+- Killed agents drop out of this sidebar but remain visible on `/sessions` (history).
+
+## Multi-agent focus model
+
+- One explicit focused agent per browser session. Click is the only signal — no inferred disinterest.
+- Non-focused agents: status updates (sidebar dots), badge increment **only on `agent_message`** events. `text_delta` events from non-focused agents drop on the floor (still in DB).
+- Focus switch flow: load DB turns + cursor → resume SSE deltas where `seq > cursor` → done.
+
+## Slash commands and skills
+
+Two flavors, one input:
+
+### System commands
+
+TypeScript-defined, deterministic, no LLM:
+
+```
+/kill <agent>    /restart        /status         /inspect <agent>
+/reset-context   /jump <date>    /scratch [name]
+```
+
+System commands return immediately. `/reset-context`, `/restart` and other destructive commands gate behind a confirmation modal.
+
+### Skills
+
+Markdown-defined, LLM-mediated. Frontmatter:
+
+```yaml
+---
+name: plan-week
+description: Plan the upcoming week from calendar + active tickets
+agents: [orchestrator, helper]   # restriction; omit for "all types"
+allowed_tools: [tickets_search, mail_send]   # optional subset restriction
+auto_invoke: true                # default true; built-ins set false
+---
+```
+
+- **Built-in skills** live in `packages/shared/src/prompts/skills/*.md`. (Empty in v1; placeholder dir exists.)
+- **User-additive skills** live in `~/.friday/skills/*.md`. Daemon watches both; collisions warn and the user file wins.
+- Auto-invoke is essentially free via the Claude Agent SDK's skill dispatch.
+- Manual invocation: typing `/<skill> args` at the start of a chat message injects the skill body as a `<skill-context>` block in the system prompt for that turn only. The remaining text becomes the user message.
+- When a skill declares `allowed_tools`, the daemon assembles the SDK call with the **intersection** of the agent's normal tool set and the skill's declared tools. Per-turn, restriction-only — never expansion.
+
+## Stop button
+
+- Replaces Send during in-flight turns (same physical slot).
+- `POST /api/chat/turn/<id>/abort` → daemon `AbortController.abort()`.
+- Aborts at next SDK iteration. Tool calls already in flight finish; no next step. Honest UI copy: *Stop prevents future steps. It can't undo a step already started.*
+
+## Chat input
+
+- Plain text → orchestrator turn.
+- `/` opens autocomplete — system commands first (badged "system"), skills second.
+- On mobile: tap-to-insert preserves keyboard focus. `pointerdown` + `preventDefault` on the autocomplete entry so the input never blurs. (Slack mobile is the reference; see `docs/mobile-ux.md`.)
+- Paperclip button + drag-drop + paste for attachments.
+- Mobile camera via `<input type="file" capture="environment">`. No PWA permissions dance.
+
+## Attachments
+
+- Images (jpg/png/webp/heic), text files, PDFs as first-class. Anything else stored, path-passed to the agent.
+- Content-addressed at `~/.friday/uploads/<sha-bucket>/<sha>.<ext>` (ADR-007).
+- **Dedup is DB-driven**: hash incoming bytes → `SELECT * FROM attachments WHERE sha256 = ?`. If a row exists, reuse it (and verify the file is present on disk; re-write from incoming bytes if missing). If no row exists, write the file + insert the row. Path-existence alone is never authoritative.
+- HEIC → PNG via sharp at upload. Conversion happens **before** the sha256 hash so dedup operates on the converted bytes.
+- Oversized images downscaled to 2048×2048 (longest edge, no enlargement) in the same pass.
+- Lazy-loaded in chat via `IntersectionObserver`.
+- Preserve forever in v1; no GC.
+
+## Markdown rendering
+
+- `marked` parser + Svelte 5 wrapper component + DOMPurify sanitizer.
+- Shiki for syntax highlighting (Catppuccin Latte / Mocha themes), grammars lazy-loaded per language.
+- Streaming: re-parse at 5Hz debounce. Smooth, not thrashy.
+- Code blocks: copy button, language label, **horizontal scroll on all viewports**. No wrap.
+- Tool calls / tool results render as structured cards, not markdown.
+- `<memory-context>`, `<skill-context>`, `<attachment>` blocks are stripped from rendered display.
+- Plugin slots in `packages/shared/src/markdown/plugins.ts` for future KaTeX + Mermaid (see `docs/roadmap.md`).
+- Server sends raw markdown text; client renders + sanitizes. One sanitization layer.
+
+## Sub-agent reference rendering
+
+When `agent_lifecycle event="spawn"` arrives during an in-flight orchestrator turn, the chat appends a markdown blockquote with the spawned agent's name + a clickable affordance. The Sidebar separately picks up the new agent via the registry; click-to-focus switches the chat pane.
