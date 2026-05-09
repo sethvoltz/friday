@@ -102,7 +102,7 @@ interface PostTurnBody {
 export function startServer(opts: StartServerOptions) {
   const cfg = loadConfig();
   const server = createServer((req, res) => handle(req, res, cfg));
-  server.listen(opts.port, "localhost");
+  server.listen(opts.port, "127.0.0.1");
   logger.log("info", "api.listening", { port: opts.port });
   return server;
 }
