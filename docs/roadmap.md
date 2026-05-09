@@ -10,10 +10,10 @@ All shipped (do not re-touch):
 - **Phase 1 quick wins** — daemon `/restart` comment clarified, scheduled-meta task prompts wired, CLI evolve list/show, `/evolve` empty-state copy.
 - **Phase 2** — KaTeX + Mermaid markdown plugins (KaTeX inline + display math, Mermaid via dynamic import in dashboard).
 - **Phase 3** — Linear `reconcile()` (real GraphQL client, orphan/stale detection, `system_banner` SSE on boot), `linear_import` / `linear_reconcile` MCP tools, `friday-integrations` server.
-- **Phase 4** — full evolve scan / enrich / cluster / apply pipeline lifted from old SlackAgents. New `evolve_scan` / `evolve_enrich` / `evolve_cluster` MCP tools. Scheduled-meta-{daily,weekly} now drive the full pipeline. `friday evolve scan/enrich/cluster` CLI subcommands real.
-- **Phase 5** — paginated older-turn loading via top sentinel, jump-to-latest button, scroll-anchor preservation when prepending history.
+- **Phase 4** — full evolve scan / enrich / cluster / apply pipeline lifted from old SlackAgents, including **scan-friction** (Haiku-driven friction scoring over orchestrator transcripts via the SQLite turns table). New `evolve_scan` / `evolve_enrich` / `evolve_cluster` MCP tools. Scheduled-meta-{daily,weekly} drive the full pipeline. `friday evolve scan/enrich/cluster` CLI subcommands real.
+- **Phase 5** — paginated older-turn loading via top sentinel, jump-to-latest button, scroll-anchor preservation when prepending history, **DOM windowing** that caps rendered messages to last 200 when bottom-pinned.
 - **Hardening** — builder workspace path-guard hook, `agent_inspect` markdown formatting, `/reset-context` real wiring, skill body injection.
-- **Polish** — HEIC → PNG via sharp, CLI `friday tickets create` clack flow, PWA placeholder icons + regen script.
+- **Polish** — HEIC → PNG via sharp, CLI `friday tickets create` clack flow, PWA placeholder icons + regen script, **mail subject + threadId** schema migration with `mail_send` updated to expose them.
 
 The execution path is complete. Remaining items live in the **Watch list** below — promote one to a phase when its trigger fires.
 
@@ -170,15 +170,12 @@ Replace `friday evolve scan/enrich/cluster` placeholders with real implementatio
 
 ---
 
-## Watch list (no immediate trigger)
+## Watch list (PLAN §18 — no immediate trigger)
 
-Tracked here for visibility; promote to a phase when usage demands it.
+Tracked here for visibility. Promote to a phase when usage demands it.
 
 - **Streaming Bash stdout in chat** vs. the current "summary + DB-fetch on expand" model.
 - **Memory-pressure auto-action.** Currently alert-only.
 - **Multi-chat / scratch-chat archival.** Single chat is v1; schema already supports it via `agents.name` on `turns`.
 - **At-rest encryption for `~/.friday/`.** Relies on FileVault / BitLocker today.
 - **Other ticket integrations** — GitHub Issues, Jira, Linear-Cycles. ADR-006 + `ticket_external_links` is ready.
-- **Mail subject + thread metadata.** Schema migration if thread-grouping becomes a real need.
-- **DOM windowing in chat virtualization.** Phase 5 paginates older turns + bounds initial load to 50; if SSE-driven append-forever bites perf, add the windowed render slice on top.
-- **`scan-friction.ts` port** from the old codebase. Slack-era per-channel friction grading; not portable to the dashboard model as-is, but the underlying idea (detect human/orchestrator trust erosion) is worth a fresh implementation tied to dashboard interactions.
