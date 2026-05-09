@@ -1,23 +1,21 @@
 # Roadmap
 
-Open work, sequenced for execution. This file is a working punch list — items get deleted as they ship. Architectural decisions live in `docs/decisions.md` (ADRs); user-facing usage lives in `docs/architecture.md`, `docs/chat-ux.md`, `docs/mobile-ux.md`, `docs/mcp.md`, and `docs/schema.md`.
+Open work, sequenced for execution. Items get deleted as they ship. Architectural decisions live in `docs/decisions.md` (ADRs); user-facing usage in `docs/architecture.md`, `docs/chat-ux.md`, `docs/mobile-ux.md`, `docs/mcp.md`, and `docs/schema.md`.
 
 ## Status snapshot
 
-Already shipped (do not re-touch):
+All shipped (do not re-touch):
 
-- MCP foundation + agent multi-process subsystem (mail/chat/agents/memory/tickets/schedule/evolve servers; long-lived worker loop; mail-bridge spawn-on-mail; scheduled fork-and-exit with state.md/last-run.md continuity; stall watchdog with optional refork; per-agent abort).
-- HEIC → PNG via sharp at upload.
-- CLI `friday tickets create` interactive clack flow.
-- PWA placeholder icons + regen script.
-- Builder workspace path-guard hook.
-- `agent_inspect` markdown formatting.
-- `/reset-context` real wiring.
-- Skill body injection on `/<skill>` invocation.
-- Auto-memory disable + `friday-memory` MCP server.
-- Evolve store + MCP foundation (markdown CRUD, apply→ticket).
+- **MCP foundation + agent multi-process** — mail / chat / agents / memory / tickets / schedule / evolve / integrations servers; long-lived worker loop; mail-bridge spawn-on-mail; scheduled fork-and-exit with `state.md` / `last-run.md` continuity; stall watchdog with optional refork; per-agent abort; auto-memory disable.
+- **Phase 1 quick wins** — daemon `/restart` comment clarified, scheduled-meta task prompts wired, CLI evolve list/show, `/evolve` empty-state copy.
+- **Phase 2** — KaTeX + Mermaid markdown plugins (KaTeX inline + display math, Mermaid via dynamic import in dashboard).
+- **Phase 3** — Linear `reconcile()` (real GraphQL client, orphan/stale detection, `system_banner` SSE on boot), `linear_import` / `linear_reconcile` MCP tools, `friday-integrations` server.
+- **Phase 4** — full evolve scan / enrich / cluster / apply pipeline lifted from old SlackAgents. New `evolve_scan` / `evolve_enrich` / `evolve_cluster` MCP tools. Scheduled-meta-{daily,weekly} now drive the full pipeline. `friday evolve scan/enrich/cluster` CLI subcommands real.
+- **Phase 5** — paginated older-turn loading via top sentinel, jump-to-latest button, scroll-anchor preservation when prepending history.
+- **Hardening** — builder workspace path-guard hook, `agent_inspect` markdown formatting, `/reset-context` real wiring, skill body injection.
+- **Polish** — HEIC → PNG via sharp, CLI `friday tickets create` clack flow, PWA placeholder icons + regen script.
 
-What's left, in execution order below.
+The execution path is complete. Remaining items live in the **Watch list** below — promote one to a phase when its trigger fires.
 
 ---
 
@@ -174,22 +172,13 @@ Replace `friday evolve scan/enrich/cluster` placeholders with real implementatio
 
 ## Watch list (no immediate trigger)
 
-Tracked here for visibility; promote to a phase when usage demands it. Originally PLAN §18.
+Tracked here for visibility; promote to a phase when usage demands it.
 
 - **Streaming Bash stdout in chat** vs. the current "summary + DB-fetch on expand" model.
 - **Memory-pressure auto-action.** Currently alert-only.
-- **Multi-chat / scratch-chat archival.** Single chat is v1.
-- **At-rest encryption for `~/.friday/`.**
-- **Other ticket integrations** (GitHub Issues, Jira, Linear-Cycles).
+- **Multi-chat / scratch-chat archival.** Single chat is v1; schema already supports it via `agents.name` on `turns`.
+- **At-rest encryption for `~/.friday/`.** Relies on FileVault / BitLocker today.
+- **Other ticket integrations** — GitHub Issues, Jira, Linear-Cycles. ADR-006 + `ticket_external_links` is ready.
 - **Mail subject + thread metadata.** Schema migration if thread-grouping becomes a real need.
-
----
-
-## Sequencing rationale
-
-- **Phase 1 first** because all four items are < 1 hour each and remove user-visible cracks. Nothing depends on them; they can ship before any new feature.
-- **Phase 2 + 3 in parallel** are both medium and independent. Pull whichever feels pressing first. KaTeX is the smaller of the two.
-- **Phase 4 last among the implementations** because it's the largest port and the meta-agent prompts only get a real job once it's in place. Phase 1.2 is the temporary patch until then.
-- **Phase 5 is dashboard polish** — schedule when chat performance bites or when mobile UX is the focus of a sprint.
-
-Watch-list items don't need ordering until a trigger fires. Add to a phase when one does.
+- **DOM windowing in chat virtualization.** Phase 5 paginates older turns + bounds initial load to 50; if SSE-driven append-forever bites perf, add the windowed render slice on top.
+- **`scan-friction.ts` port** from the old codebase. Slack-era per-channel friction grading; not portable to the dashboard model as-is, but the underlying idea (detect human/orchestrator trust erosion) is worth a fresh implementation tied to dashboard interactions.
