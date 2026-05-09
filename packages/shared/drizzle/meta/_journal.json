@@ -15,6 +15,13 @@
       "when": 1778264150130,
       "tag": "0001_low_ulik",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1778314250337,
+      "tag": "0002_majestic_chameleon",
+      "breakpoints": true
     }
   ]
 }

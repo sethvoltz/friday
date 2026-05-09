@@ -35,6 +35,18 @@ export function buildMailServer(opts: BuildMailServerOptions) {
             .enum(["message", "notification", "task"])
             .optional()
             .describe("Mail kind. Defaults to message."),
+          subject: z
+            .string()
+            .optional()
+            .describe(
+              "Optional one-line subject; surfaces in the inbox card.",
+            ),
+          threadId: z
+            .string()
+            .optional()
+            .describe(
+              "Optional thread id. Use to group related back-and-forth — pass the same id on each reply.",
+            ),
           meta: z
             .record(z.string(), z.unknown())
             .optional()
@@ -49,6 +61,8 @@ export function buildMailServer(opts: BuildMailServerOptions) {
               fromAgent: opts.callerName,
               toAgent: args.to,
               type: args.type ?? "message",
+              subject: args.subject,
+              threadId: args.threadId,
               body: args.body,
               meta: args.meta,
             },

@@ -124,6 +124,10 @@ export const mail = sqliteTable(
     toAgent: text("to_agent").notNull(),
     type: text("type").notNull(), // message|notification|task
     delivery: text("delivery").notNull(), // pending|delivered|read|closed
+    /** Optional short subject. Senders include it for inbox-scanning UX. */
+    subject: text("subject"),
+    /** Optional thread id; messages with the same id render grouped. */
+    threadId: text("thread_id"),
     body: text("body").notNull(),
     metaJson: text("meta_json"),
     ts: integer("ts").notNull(),
@@ -132,6 +136,7 @@ export const mail = sqliteTable(
   },
   (t) => ({
     inboxIdx: index("mail_inbox").on(t.toAgent, t.delivery, t.ts),
+    threadIdx: index("mail_thread").on(t.threadId, t.ts),
   }),
 );
 

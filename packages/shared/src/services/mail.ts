@@ -12,6 +12,10 @@ export interface SendMailInput {
   type: MailType;
   body: string;
   meta?: Record<string, unknown>;
+  /** Optional short subject — surfaces in inbox UX. */
+  subject?: string;
+  /** Optional thread id. Messages with the same id render grouped. */
+  threadId?: string;
 }
 
 export interface MailRow {
@@ -20,6 +24,8 @@ export interface MailRow {
   toAgent: string;
   type: MailType;
   delivery: MailDelivery;
+  subject: string | null;
+  threadId: string | null;
   body: string;
   meta: Record<string, unknown> | null;
   ts: number;
@@ -44,6 +50,8 @@ export function sendMail(input: SendMailInput): MailRow {
       toAgent: input.toAgent,
       type: input.type,
       delivery: "pending",
+      subject: input.subject ?? null,
+      threadId: input.threadId ?? null,
       body: input.body,
       metaJson: input.meta ? JSON.stringify(input.meta) : null,
       ts,
@@ -135,6 +143,8 @@ function rowToMail(r: typeof schema.mail.$inferSelect): MailRow {
     toAgent: r.toAgent,
     type: r.type as MailType,
     delivery: r.delivery as MailDelivery,
+    subject: r.subject,
+    threadId: r.threadId,
     body: r.body,
     meta: r.metaJson ? (JSON.parse(r.metaJson) as Record<string, unknown>) : null,
     ts: r.ts,
