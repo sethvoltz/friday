@@ -12,6 +12,11 @@
   let text = $state("");
   let textarea: HTMLTextAreaElement | undefined = $state();
   let busy = $derived(chat.inflightTurnId !== null);
+  // Touch keyboards (phones, tablets without a hardware keyboard) treat
+  // Enter as "newline" — sending happens via the on-screen send button. We
+  // detect that via the `(pointer: coarse)` media query. The flag is kept
+  // reactive so plugging in a Bluetooth keyboard switches behavior.
+  let isCoarsePointer = $state(false);
 
   let commands = $state<CommandsResponse>({ system: [], skills: [] });
   let confirmingCommand = $state<{
@@ -25,6 +30,12 @@
       .then((r) => r.json())
       .then((c: CommandsResponse) => (commands = c))
       .catch(() => undefined);
+
+    const mq = window.matchMedia("(pointer: coarse)");
+    isCoarsePointer = mq.matches;
+    const onChange = (e: MediaQueryListEvent) => (isCoarsePointer = e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
   });
 
   let showAutocomplete = $derived(text.startsWith("/") && !text.includes("\n"));
@@ -182,7 +193,10 @@
         return;
       }
     }
-    if (e.key === "Enter" && !e.shiftKey) {
+    // On touch devices Enter inserts a newline; the send button is the only
+    // way to submit. Hardware-keyboard users (desktop + tablets with a
+    // keyboard attached) keep Enter-to-send / Shift+Enter-newline.
+    if (e.key === "Enter" && !e.shiftKey && !isCoarsePointer) {
       e.preventDefault();
       void submit();
     }
