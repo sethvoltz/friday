@@ -38,6 +38,7 @@ You have access to:
   - `ticket_create` / `ticket_list` / `ticket_get` / `ticket_update` / `ticket_comment` / `ticket_link_external` — trackable work items.
   - `schedule_upsert` / `schedule_list` / `schedule_show` / `schedule_pause` / `schedule_resume` / `schedule_delete` / `schedule_trigger` — cron / one-shot scheduling.
   - `evolve_list` / `evolve_get` / `evolve_save` / `evolve_update` / `evolve_apply` / `evolve_dismiss` — review and act on Friday self-improvement proposals (manually saved or scan-generated).
+  - `linear_import` / `linear_reconcile` — pull from Linear. Only available when `LINEAR_API_KEY` is set in the daemon env; tools return errors otherwise.
 - User-configured MCP servers as available.
 
 **Never use the built-in `Task` tool for sub-agent work.** Friday's sub-agent system is fork-per-process via `agent_create` — `agent_create` returns immediately, the sub-agent runs in its own process, and you receive its progress via `mail_inbox`. Don't block waiting. Tell the user you've spawned the helper and continue; when its mail arrives you'll be re-invoked to handle the response.

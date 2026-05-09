@@ -51,6 +51,10 @@ import {
   type UpdateProposalInput,
 } from "@friday/evolve";
 import {
+  importIssue as linearImportIssue,
+  reconcile as linearReconcile,
+} from "@friday/integrations-linear";
+import {
   deleteSchedule,
   getSchedule,
   listSchedules,
@@ -650,6 +654,32 @@ async function handle(
     return json(res, 200, updated);
   }
 
+  // --- Integrations: Linear ---
+  if (method === "POST" && path === "/api/integrations/linear/import") {
+    const body = await readJson<{ identifier?: string }>(req);
+    if (!body.identifier) {
+      return json(res, 400, { error: "identifier required" });
+    }
+    try {
+      const result = await linearImportIssue({ identifier: body.identifier });
+      return json(res, 200, result);
+    } catch (err) {
+      return json(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (method === "POST" && path === "/api/integrations/linear/reconcile") {
+    try {
+      const result = await linearReconcile();
+      return json(res, 200, result);
+    } catch (err) {
+      return json(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // --- Mail ---
   if (method === "GET" && /^\/api\/mail\/inbox\/[^/]+$/.test(path)) {
     const agent = path.split("/")[4];
@@ -849,8 +879,10 @@ function handleSystemCommand(
       return json(res, 200, { ok: true });
     }
     case "restart": {
-      // Self-restart deferred to v1.x — exit and let tmux's process supervisor
-      // restart us. For now, signal SIGTERM to ourselves.
+      // We rely on the process supervisor (tmux via `friday start`, or a
+      // launchd / systemd unit per docs/run/) to respawn us. SIGTERM-then-let-
+      // supervisor-restart is correct for any of those; a daemon launched
+      // bare (no supervisor) will simply exit.
       setTimeout(() => process.kill(process.pid, "SIGTERM"), 100);
       return json(res, 200, { ok: true });
     }

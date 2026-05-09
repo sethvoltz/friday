@@ -18,6 +18,10 @@ import { buildMemoryServer, MEMORY_SERVER_NAME } from "./memory.js";
 import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
 import { buildScheduleServer, SCHEDULE_SERVER_NAME } from "./schedule.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
+import {
+  buildIntegrationsServer,
+  INTEGRATIONS_SERVER_NAME,
+} from "./integrations.js";
 
 export interface BuildMcpServersOptions {
   callerType: AgentType;
@@ -83,6 +87,13 @@ export function buildMcpServers(
   // dismissing proposals — the meta-agent surfaces them via the orchestrator.
   if (opts.callerType === "orchestrator") {
     servers[EVOLVE_SERVER_NAME] = buildEvolveServer(ctx);
+  }
+
+  // friday-integrations: orchestrator only. Cross-system imports (Linear
+  // today; future GH Issues, Jira). Gracefully no-ops if the relevant API
+  // key isn't set on the daemon.
+  if (opts.callerType === "orchestrator") {
+    servers[INTEGRATIONS_SERVER_NAME] = buildIntegrationsServer(ctx);
   }
 
   return servers;

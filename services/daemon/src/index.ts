@@ -14,6 +14,7 @@ import { startHealthHeartbeat, clearHealth } from "./monitor/health.js";
 import { backfillUsageFromLegacyJsonl, replayPending } from "@friday/shared/services";
 import { seedMetaAgents, startScheduler } from "./scheduler/scheduler.js";
 import { reconcile as reconcileLinear } from "@friday/integrations-linear";
+import { eventBus } from "./events/bus.js";
 import * as registry from "./agent/registry.js";
 import { startMirror } from "./agent/jsonl-mirror.js";
 import { startMailBridge } from "./comms/mail-bridge.js";
@@ -54,11 +55,42 @@ async function main(): Promise<void> {
   recoverAgents(cfg);
   const schedTick = startScheduler();
   const watchdog = startWatchdog();
-  void reconcileLinear().catch((err) =>
-    logger.log("warn", "linear.reconcile.error", {
-      message: err instanceof Error ? err.message : String(err),
-    }),
-  );
+  void reconcileLinear()
+    .then((result) => {
+      if (!result.ran) {
+        logger.log("debug", "linear.reconcile.skip", { reason: result.reason });
+        return;
+      }
+      if (result.orphans.length > 0) {
+        const sample = result.orphans
+          .slice(0, 3)
+          .map((o) => o.identifier)
+          .join(", ");
+        eventBus.publish({
+          v: 1,
+          type: "system_banner",
+          level: "info",
+          text: `Linear: ${result.orphans.length} active ticket${
+            result.orphans.length === 1 ? "" : "s"
+          } not linked to Friday — first few: ${sample}`,
+        });
+        logger.log("info", "linear.reconcile.orphans", {
+          count: result.orphans.length,
+          stale: result.staleLinks.length,
+          linked: result.linkedCount,
+        });
+      } else {
+        logger.log("info", "linear.reconcile.clean", {
+          linked: result.linkedCount,
+          stale: result.staleLinks.length,
+        });
+      }
+    })
+    .catch((err) =>
+      logger.log("warn", "linear.reconcile.error", {
+        message: err instanceof Error ? err.message : String(err),
+      }),
+    );
 
   const modelCfg = normalizeModelConfig(cfg.model);
   logger.log("info", "daemon.ready", {

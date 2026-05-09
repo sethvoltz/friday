@@ -170,6 +170,36 @@ export function linkExternal(input: {
     .run();
 }
 
+export interface TicketExternalLinkRow {
+  ticketId: string;
+  system: string;
+  externalId: string;
+  url: string | null;
+  meta: Record<string, unknown> | null;
+  linkedAt: number;
+}
+
+export function externalLinksBySystem(
+  system: string,
+): TicketExternalLinkRow[] {
+  const db = getDb();
+  return db
+    .select()
+    .from(schema.ticketExternalLinks)
+    .where(eq(schema.ticketExternalLinks.system, system))
+    .all()
+    .map((r) => ({
+      ticketId: r.ticketId,
+      system: r.system,
+      externalId: r.externalId,
+      url: r.url,
+      meta: r.metaJson
+        ? (JSON.parse(r.metaJson) as Record<string, unknown>)
+        : null,
+      linkedAt: r.linkedAt,
+    }));
+}
+
 export function externalLinks(ticketId: string): Array<{
   system: string;
   externalId: string;
