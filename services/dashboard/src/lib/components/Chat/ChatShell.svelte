@@ -130,10 +130,23 @@
   <ChatMessages messages={readonly ? pastMessages : undefined} />
 </section>
 
+{#if !readonly && chat.loadingOlder}
+  <div class="floating-pill loading-older" aria-live="polite">
+    <span class="spinner" aria-hidden="true"></span>
+    Loading older messages…
+  </div>
+{/if}
+
 {#if !readonly && !pinnedToBottom}
-  <button class="jump-to-bottom" type="button" onclick={jumpToBottom} aria-label="Scroll to latest">
-    ↓ Latest
-  </button>
+  <div class="jump-to-bottom-wrap">
+    <button
+      class="floating-pill jump-to-bottom"
+      type="button"
+      onclick={jumpToBottom}
+      aria-label="Scroll to latest">
+      ↓ Latest
+    </button>
+  </div>
 {/if}
 
 {#if !readonly}
@@ -206,23 +219,70 @@
     font-size: 0.85rem;
   }
 
-  .jump-to-bottom {
+  /* Wrapper spans the chat content area and centers the button within it,
+     so "centered" means centered on the chat (not on the window). The
+     wrapper is pointer-events:none so the area below the button still
+     scrolls / receives clicks for the chat itself. */
+  .jump-to-bottom-wrap {
     position: fixed;
-    bottom: calc(var(--chat-input-h, 6rem) + 2.5rem);
-    left: 50%;
-    transform: translateX(-50%);
-    padding: 0.4rem 0.85rem;
-    border-radius: var(--radius-md);
-    background: var(--accent-primary);
-    color: var(--text-inverse);
-    border: 1px solid var(--accent-primary);
-    box-shadow: var(--shadow-lg);
-    font-size: 0.8rem;
-    cursor: pointer;
+    bottom: calc(var(--chat-input-h, 6rem) + 3rem);
+    left: var(--content-left);
+    right: var(--page-gutter);
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
     z-index: 95;
   }
-  .jump-to-bottom:hover {
-    filter: brightness(1.05);
+  /* Loading-older pill mirrors the jump-to-bottom: same floating + blurred
+     style, centered on the chat area, anchored just below the chat header. */
+  .loading-older {
+    position: fixed;
+    top: calc(var(--chat-top) + 0.5rem);
+    left: var(--content-left);
+    right: var(--page-gutter);
+    margin: 0 auto;
+    width: max-content;
+    z-index: 95;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* Shared bordered + blurred-background style for floating chat affordances. */
+  .floating-pill {
+    pointer-events: auto;
+    padding: 0.45rem 0.95rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--header-float-bg);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    font-weight: 500;
+    box-shadow: var(--shadow-md);
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  button.floating-pill {
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button.floating-pill:hover {
+    background: var(--bg-card);
+    border-color: var(--border-primary);
+  }
+  .spinner {
+    width: 0.85rem;
+    height: 0.85rem;
+    border: 2px solid var(--border-subtle);
+    border-top-color: var(--accent-primary);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   @media (max-width: 768px) {
@@ -242,6 +302,15 @@
     .chat-input-floating {
       left: var(--page-gutter);
       right: var(--page-gutter);
+    }
+    /* Mobile: full-width chat means the centering wrapper spans gutter to gutter. */
+    .jump-to-bottom-wrap,
+    .loading-older {
+      left: var(--page-gutter);
+      right: var(--page-gutter);
+    }
+    .loading-older {
+      top: calc(var(--chat-top) + 3.75rem);
     }
   }
 

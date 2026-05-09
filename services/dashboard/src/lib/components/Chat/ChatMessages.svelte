@@ -86,11 +86,13 @@
 <div class="list">
   {#if !readonly}
     <div bind:this={topSentinel} class="top-sentinel" aria-hidden="true">
-      {#if chat.loadingOlder}
-        <span class="hint">Loading older messages…</span>
-      {:else if chat.reachedOldest && list.length > 0}
+      {#if chat.reachedOldest && list.length > 0}
         <span class="hint dim">Beginning of history</span>
       {/if}
+      <!-- The transient `loadingOlder` indicator now lives in ChatShell as a
+           floating pill so it's actually visible while pagination runs;
+           inline-here got missed because it was hidden in the same scroll
+           zone the user just left. -->
     </div>
   {/if}
   {#if list.length === 0}
