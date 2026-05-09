@@ -559,6 +559,9 @@
     background: var(--status-error);
   }
   @media (max-width: 768px) {
+    /* iOS Safari zooms the page when you focus an input whose font-size is
+       below 16px. Bump the textarea to 16px on mobile to suppress that. */
+    textarea { font-size: 16px; }
     .modal {
       max-width: 100%;
       height: 100vh;
