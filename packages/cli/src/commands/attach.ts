@@ -1,6 +1,5 @@
 import { defineCommand } from "citty";
 import pc from "picocolors";
-import { SERVICES, type ServiceName } from "@friday/shared";
 import { attachSession, hasSession } from "../lib/tmux.js";
 import { tmuxSessionFor } from "../lib/state.js";
 
@@ -13,14 +12,23 @@ export const attachCommand = defineCommand({
     service: {
       type: "positional",
       required: true,
-      description: `daemon | dashboard`,
+      description: "daemon | dashboard",
     },
   },
   run({ args }) {
     const target = (args.service as string).toLowerCase();
+    if (target === "tunnel") {
+      console.error(
+        pc.red(`tunnel runs as a background daemon, not a tmux session.`),
+      );
+      console.error(
+        `  watch it: ${pc.cyan(`friday logs tunnel -f`)}`,
+      );
+      process.exit(1);
+    }
     if (!validateService(target)) {
       console.error(
-        pc.red(`unknown service: ${target}`) + ` (expected: ${SERVICES.join(" | ")})`,
+        pc.red(`unknown service: ${target}`) + ` (expected: daemon | dashboard)`,
       );
       process.exit(1);
     }
@@ -34,6 +42,6 @@ export const attachCommand = defineCommand({
   },
 });
 
-function validateService(s: string): s is ServiceName {
+function validateService(s: string): s is "daemon" | "dashboard" {
   return s === "daemon" || s === "dashboard";
 }

@@ -11,6 +11,7 @@ import {
   ensureFridayEnv,
   ensureSoul,
   loadConfig,
+  upsertEnvVar,
   writeConfig,
   getDb,
   getRawDb,
@@ -30,6 +31,12 @@ export const setupCommand = defineCommand({
       description: "Reset the primary user's password",
       default: false,
     },
+    cloudflare: {
+      type: "boolean",
+      description:
+        "Skip account flow; configure Cloudflare Tunnel token + public URL only",
+      default: false,
+    },
   },
   async run({ args }) {
     console.log(BANNER);
@@ -43,6 +50,12 @@ export const setupCommand = defineCommand({
     if (!existsSync(CONFIG_PATH)) {
       writeConfig(DEFAULT_CONFIG);
       console.log(pc.dim(`  wrote ${CONFIG_PATH}`));
+    }
+
+    if (args.cloudflare) {
+      await runCloudflareSetup({ force: true });
+      outro(pc.green("Cloudflare Tunnel configured."));
+      return;
     }
 
     // Spin up a local BetterAuth instance with sign-up *temporarily* enabled.
@@ -134,6 +147,45 @@ export const setupCommand = defineCommand({
       }
     }
 
+    await runCloudflareSetup({ force: false });
+
     outro(pc.green("Setup complete."));
   },
 });
+
+async function runCloudflareSetup({ force }: { force: boolean }): Promise<void> {
+  const tokenAlreadySet = !!process.env.CLOUDFLARE_TUNNEL_TOKEN;
+  const cfg = loadConfig();
+  const message = tokenAlreadySet
+    ? "Replace existing Cloudflare Tunnel token?"
+    : "Set up Cloudflare Tunnel for public access? (optional)";
+
+  if (!force) {
+    const proceed = (await confirm({
+      message,
+      initialValue: false,
+    })) as boolean | symbol;
+    if (typeof proceed !== "boolean" || !proceed) return;
+  }
+
+  const token = (await password({
+    message: "Connector token (Cloudflare Zero Trust → Networks → Tunnels):",
+    mask: "•",
+    validate: (v) =>
+      v && v.length > 20 ? undefined : "token looks too short",
+  })) as string;
+
+  const initialUrl = cfg.publicUrl ?? "https://friday.example.com";
+  const publicUrl = (await text({
+    message: "Public URL (e.g. https://friday.example.com):",
+    initialValue: initialUrl,
+    validate: (v) =>
+      v && /^https?:\/\//.test(v) ? undefined : "must start with http(s)://",
+  })) as string;
+
+  upsertEnvVar("CLOUDFLARE_TUNNEL_TOKEN", token);
+  cfg.publicUrl = publicUrl.trim();
+  writeConfig(cfg);
+  console.log(pc.green(`  token saved → ~/.friday/.env`));
+  console.log(pc.green(`  publicUrl saved → ${cfg.publicUrl}`));
+}

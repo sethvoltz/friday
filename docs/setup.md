@@ -71,49 +71,34 @@ Open `http://localhost:5173` and sign in with the credentials you set in step 3.
 
 ## 6. Public access via Cloudflare Tunnel
 
-Friday is designed to be reachable from your phone or any browser via a Cloudflare hostname while still running on your laptop.
+Friday manages the tunnel for you. You provide one connector token; `friday start` runs `cloudflared` alongside the daemon and dashboard, and `friday stop` tears it down.
 
-### One-time tunnel setup
+### Create the tunnel in Cloudflare
 
-```bash
-# Authenticate cloudflared with your Cloudflare account
-cloudflared tunnel login
+1. Cloudflare Zero Trust dashboard → **Networks → Connectors → Create a tunnel**.
+2. Pick the **Cloudflared** connector, name it `friday`, and copy the **connector token** shown on the install screen.
+3. Under **Public Hostname**, add a route: `friday.<your-domain>.com` → `http://127.0.0.1:5173`.
 
-# Create a named tunnel — pick a name like "friday"
-cloudflared tunnel create friday
-
-# Note the Tunnel ID printed; you'll reference it below.
-```
-
-### Configure the tunnel
-
-Create `~/.cloudflared/config.yml`:
-
-```yaml
-tunnel: <YOUR_TUNNEL_ID>
-credentials-file: /Users/<you>/.cloudflared/<YOUR_TUNNEL_ID>.json
-
-ingress:
-  - hostname: friday.<your-domain>.com
-    service: http://127.0.0.1:5173
-  - service: http_status:404
-```
-
-Replace `<YOUR_TUNNEL_ID>` with the id from `cloudflared tunnel create`, and pick a hostname under a domain you have on Cloudflare.
-
-### Route the hostname
+### Configure Friday
 
 ```bash
-cloudflared tunnel route dns friday friday.<your-domain>.com
+friday setup --cloudflare
 ```
 
-### Run the tunnel
+Paste the token and your public URL (e.g. `https://friday.example.com`). The token is written to `~/.friday/.env` as `CLOUDFLARE_TUNNEL_TOKEN`; the public URL is stored in `~/.friday/config.json` for display.
+
+### Run
+
+`friday start` brings the tunnel up automatically when a token is present:
 
 ```bash
-cloudflared tunnel run friday
+friday start          # daemon + dashboard + tunnel
+friday status         # shows the public URL when the tunnel is up
+friday logs tunnel -f # tail cloudflared output
+friday stop           # tears all three down
 ```
 
-You can run this in a separate tmux window or as a launchd service. Once it's up, browsing to `https://friday.<your-domain>.com` will hit your local dashboard through the tunnel.
+If `cloudflared` is missing from `PATH` or the token is unset, the tunnel is skipped with a one-line note and the daemon + dashboard still come up. `friday doctor` surfaces both conditions.
 
 ### Important: dashboard listens on localhost
 
@@ -121,10 +106,9 @@ The dashboard binds to `127.0.0.1`. The tunnel forwards public traffic to that l
 
 ### Verify
 
-1. Open the public hostname in a private browser window.
-2. You should see the sign-in page.
-3. Sign in with your account; you should land on the chat home.
-4. Test from your phone over cellular — same flow.
+1. Open the public hostname in a private browser window — you should see the sign-in page.
+2. Sign in with your account; you should land on the chat home.
+3. Test from your phone over cellular — same flow.
 
 ### Optional hardening (not v1)
 
@@ -149,5 +133,5 @@ Edit `~/.friday/SOUL.md` to customize Friday's voice and identity. Source upgrad
 | Login page won't accept credentials | `friday setup --reset-password` |
 | Daemon won't start | `friday doctor`; check `~/.friday/logs/daemon.jsonl` |
 | Dashboard shows "daemon not reachable" | Confirm daemon is running: `friday status` |
-| Tunnel won't connect | `cloudflared tunnel info friday` |
+| Tunnel won't connect | `friday doctor` then `friday logs tunnel -f` |
 | SSE drops on phone | Check Cloudflare Tunnel timeout; the daemon sends keepalives every 20s |

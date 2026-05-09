@@ -16,7 +16,7 @@ export const restartCommand = defineCommand({
     service: {
       type: "positional",
       required: false,
-      description: "daemon | dashboard (default: both)",
+      description: `${SERVICES.join(" | ")} (default: all running)`,
     },
   },
   async run({ args, rawArgs }) {
@@ -70,7 +70,7 @@ export const restartCommand = defineCommand({
 });
 
 function validateService(s: string): s is ServiceName {
-  return s === "daemon" || s === "dashboard";
+  return (SERVICES as readonly string[]).includes(s);
 }
 
 function detectMode(service: ServiceName): ServiceMode | null {

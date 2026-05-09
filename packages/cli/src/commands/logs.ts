@@ -1,15 +1,18 @@
 import { defineCommand } from "citty";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { getLogPath } from "@friday/shared";
+import { getLogPath, SERVICES } from "@friday/shared";
 
 export const logsCommand = defineCommand({
-  meta: { name: "logs", description: "Tail logs (daemon|dashboard)" },
+  meta: {
+    name: "logs",
+    description: `Tail logs (${SERVICES.join("|")})`,
+  },
   args: {
     service: {
       type: "positional",
       required: false,
-      description: "daemon | dashboard (default: daemon)",
+      description: `${SERVICES.join(" | ")} (default: daemon)`,
     },
     follow: { type: "boolean", alias: "f", default: false },
   },

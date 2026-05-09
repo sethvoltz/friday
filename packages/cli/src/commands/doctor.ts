@@ -9,6 +9,7 @@ import {
   ENV_PATH,
   LOGS_DIR,
   SOUL_PATH,
+  ensureFridayEnv,
   getDb,
   schema,
 } from "@friday/shared";
@@ -19,7 +20,13 @@ export const doctorCommand = defineCommand({
   meta: { name: "doctor", description: "Check system health" },
   async run() {
     console.log(BANNER);
-    const checks: Array<{ name: string; ok: boolean; detail?: string }> = [];
+    if (existsSync(ENV_PATH)) ensureFridayEnv();
+    const checks: Array<{
+      name: string;
+      ok: boolean;
+      warn?: boolean;
+      detail?: string;
+    }> = [];
 
     checks.push(check(`data dir ${DATA_DIR}`, existsSync(DATA_DIR)));
     checks.push(check(`config ${CONFIG_PATH}`, existsSync(CONFIG_PATH)));
@@ -51,6 +58,41 @@ export const doctorCommand = defineCommand({
     const gh = spawnSync("which", ["gh"], { encoding: "utf8" });
     checks.push(check("gh CLI installed", gh.status === 0));
 
+    // Cloudflare Tunnel — token + binary. Token-set-but-binary-missing is
+    // a hard failure (user opted in); everything else is informational.
+    const tunnelTokenSet = !!process.env.CLOUDFLARE_TUNNEL_TOKEN;
+    const cloudflaredOk =
+      spawnSync("which", ["cloudflared"], { encoding: "utf8" }).status === 0;
+    if (tunnelTokenSet) {
+      checks.push(check("Cloudflare Tunnel token", true));
+      checks.push(
+        check(
+          "cloudflared binary",
+          cloudflaredOk,
+          cloudflaredOk
+            ? undefined
+            : "token configured but cloudflared not on PATH — `brew install cloudflared`",
+        ),
+      );
+    } else {
+      checks.push(
+        warn(
+          "Cloudflare Tunnel token",
+          "not configured — public tunnel disabled (run `friday setup --cloudflare` to enable)",
+        ),
+      );
+      if (!cloudflaredOk) {
+        checks.push(
+          warn(
+            "cloudflared binary",
+            "not installed — only required for public tunnel",
+          ),
+        );
+      } else {
+        checks.push(check("cloudflared binary", true));
+      }
+    }
+
     // daemon reachable
     const client = new DaemonClient();
     const reachable = await client.ping();
@@ -65,22 +107,31 @@ export const doctorCommand = defineCommand({
     }
 
     let okCount = 0;
+    let failCount = 0;
     for (const c of checks) {
+      const detail = c.detail ? pc.dim(` — ${c.detail}`) : "";
       if (c.ok) {
         okCount++;
         console.log(`  ${pc.green("✓")} ${c.name}`);
+      } else if (c.warn) {
+        console.log(`  ${pc.yellow("⚠")} ${c.name}${detail}`);
       } else {
-        console.log(`  ${pc.red("✗")} ${c.name}${c.detail ? pc.dim(` — ${c.detail}`) : ""}`);
+        failCount++;
+        console.log(`  ${pc.red("✗")} ${c.name}${detail}`);
       }
     }
     console.log();
     console.log(
       pc.bold(`${okCount}/${checks.length} checks passed.`),
     );
-    if (okCount < checks.length) process.exit(1);
+    if (failCount > 0) process.exit(1);
   },
 });
 
 function check(name: string, ok: boolean, detail?: string) {
   return { name, ok, detail };
+}
+
+function warn(name: string, detail?: string) {
+  return { name, ok: false, warn: true, detail };
 }

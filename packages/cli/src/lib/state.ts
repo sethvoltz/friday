@@ -17,7 +17,10 @@ export type ServiceMode = "dev" | "prod";
 export interface ServiceState {
   service: ServiceName;
   mode: ServiceMode;
-  tmuxSession: string;
+  /** Set for tmux-supervised services (daemon, dashboard). */
+  tmuxSession?: string;
+  /** Set for pid-supervised services (tunnel). */
+  pid?: number;
   startedAt: string;
 }
 

@@ -2,21 +2,22 @@ import { defineCommand } from "citty";
 import pc from "picocolors";
 import { SERVICES, type ServiceName } from "@friday/shared";
 import { hasSession, killSession } from "../lib/tmux.js";
-import { clearState, tmuxSessionFor } from "../lib/state.js";
+import { clearState, readState, tmuxSessionFor } from "../lib/state.js";
+import { isAlive, stopPid } from "../lib/proc.js";
 
 export const stopCommand = defineCommand({
   meta: {
     name: "stop",
-    description: "Stop a service. `stop` (no arg) stops both daemon + dashboard.",
+    description: "Stop a service. `stop` (no arg) stops daemon, dashboard, and tunnel.",
   },
   args: {
     service: {
       type: "positional",
       required: false,
-      description: "daemon | dashboard (default: both)",
+      description: `${SERVICES.join(" | ")} (default: all)`,
     },
   },
-  run({ args }) {
+  async run({ args }) {
     const target = (args.service as string | undefined)?.toLowerCase();
     const services: ServiceName[] = target
       ? validateService(target)
@@ -31,6 +32,27 @@ export const stopCommand = defineCommand({
 
     let stopped = 0;
     for (const svc of services) {
+      if (svc === "tunnel") {
+        const state = readState("tunnel");
+        if (state?.pid && isAlive(state.pid)) {
+          const ok = await stopPid(state.pid);
+          clearState("tunnel");
+          if (ok) {
+            console.log(`  ${pc.green("✓")} stopped tunnel (pid ${state.pid})`);
+            stopped++;
+          } else {
+            console.log(
+              `  ${pc.red("✗")} tunnel pid ${state.pid} did not exit cleanly`,
+            );
+          }
+        } else {
+          // Stale state file (process gone but state lingered) — clear it.
+          if (state) clearState("tunnel");
+          console.log(pc.dim(`  · tunnel not running`));
+        }
+        continue;
+      }
+
       const session = tmuxSessionFor(svc);
       if (hasSession(session)) {
         killSession(session);
@@ -52,10 +74,18 @@ export const stopCommand = defineCommand({
       stopped++;
     }
 
+    // Migration cleanup: if a previous run created a tmux session for the
+    // tunnel (now superseded by the daemon-style supervision), kill it.
+    if (hasSession("friday-tunnel")) {
+      killSession("friday-tunnel");
+      console.log(`  ${pc.green("✓")} stopped legacy tunnel tmux session`);
+      stopped++;
+    }
+
     if (stopped === 0) console.log(pc.dim("nothing to stop."));
   },
 });
 
 function validateService(s: string): s is ServiceName {
-  return s === "daemon" || s === "dashboard";
+  return (SERVICES as readonly string[]).includes(s);
 }

@@ -25,15 +25,18 @@ export const DAEMON_LOG_PATH = join(LOGS_DIR, "daemon.jsonl");
 export const SCHEDULES_DIR = join(DATA_DIR, "schedules");
 export const STATE_DIR = join(DATA_DIR, "state");
 
-export type ServiceName = "daemon" | "dashboard";
-export const SERVICES: ServiceName[] = ["daemon", "dashboard"];
+export type ServiceName = "daemon" | "dashboard" | "tunnel";
+export const SERVICES: ServiceName[] = ["daemon", "dashboard", "tunnel"];
 
 export function statePathFor(service: ServiceName): string {
   return join(STATE_DIR, `${service}.json`);
 }
 
 export function getLogPath(service: string): string {
-  return join(LOGS_DIR, `${service}.jsonl`);
+  // cloudflared writes plain text, not JSONL — use .log so consumers
+  // (and `tail`) don't get tripped up by mixed formats.
+  const ext = service === "tunnel" ? "log" : "jsonl";
+  return join(LOGS_DIR, `${service}.${ext}`);
 }
 
 export type ThinkingEffort = "low" | "medium" | "high";
@@ -73,6 +76,12 @@ export interface FridayConfig {
   orchestratorName: string;
   /** Worker stall watchdog tuning. */
   watchdog?: WatchdogConfig;
+  /**
+   * Public URL the Cloudflare Tunnel exposes Friday on, e.g.
+   * `https://friday.example.com`. Display-only — `cloudflared` learns the
+   * route from the connector token. Set via `friday setup --cloudflare`.
+   */
+  publicUrl?: string;
 }
 
 export interface WatchdogConfig {
