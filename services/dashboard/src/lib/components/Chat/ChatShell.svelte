@@ -33,11 +33,13 @@
   function onScroll() {
     if (!scrollEl) return;
     pinnedToBottom = isNearBottom(scrollEl);
+    if (!readonly) chat.pinnedToBottom = pinnedToBottom;
   }
   function jumpToBottom() {
     if (!scrollEl) return;
     scrollEl.scrollTop = scrollEl.scrollHeight;
     pinnedToBottom = true;
+    if (!readonly) chat.pinnedToBottom = true;
   }
 
   // Active mode: keep focusedAgent in sync with the current route, reload

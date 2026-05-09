@@ -5,8 +5,22 @@
   import ThinkingBlock from "$lib/components/Chat/ThinkingBlock.svelte";
 
   let { messages }: { messages?: ChatMessage[] } = $props();
-  let list = $derived(messages ?? chat.messages);
+  let allMessages = $derived(messages ?? chat.messages);
   let readonly = $derived(messages !== undefined);
+
+  // DOM windowing. When the user is bottom-pinned (scrolled to or near the
+  // latest), only render the last WINDOW_SIZE messages — keeps the DOM
+  // bounded for long-running chats. The moment the user scrolls up to read
+  // older history we render everything, including any pages already loaded
+  // via top-sentinel pagination, so they can browse freely. Read-only
+  // session views always render the full passed-in array.
+  const WINDOW_SIZE = 200;
+  let list = $derived.by(() => {
+    if (readonly) return allMessages;
+    if (!chat.pinnedToBottom) return allMessages;
+    if (allMessages.length <= WINDOW_SIZE) return allMessages;
+    return allMessages.slice(allMessages.length - WINDOW_SIZE);
+  });
 
   // Top-sentinel pagination. When the user scrolls up to the top of the
   // chat, the sentinel comes into view and we fetch the next 50 older

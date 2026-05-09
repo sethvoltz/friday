@@ -62,6 +62,10 @@ export class ChatState {
   loadingOlder = $state(false);
   /** True once we've fetched and gotten back an empty page (no more history). */
   reachedOldest = $state(false);
+  /** Set by ChatShell from its scroll handler. ChatMessages reads it to
+   * decide whether to slice the rendered list (cap at WINDOW when bottom-
+   * pinned) or render everything (when the user is reading older history). */
+  pinnedToBottom = $state(true);
 
   addUser(text: string): void {
     const id = `u_${Date.now()}`;
