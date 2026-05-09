@@ -113,6 +113,121 @@ export function getAllUsageEntries(): UsageEntryRow[] {
     .all() as UsageEntryRow[];
 }
 
+export interface UsageStats {
+  turns: number;
+  cost: number;
+  /** input_tokens + cache_creation + cache_read (matches dashboard semantics). */
+  input: number;
+  output: number;
+  cacheCreation: number;
+  cacheRead: number;
+  duration: number;
+  cacheRate: number;
+  avgCost: number;
+}
+
+function emptyUsageStats(): UsageStats {
+  return {
+    turns: 0,
+    cost: 0,
+    input: 0,
+    output: 0,
+    cacheCreation: 0,
+    cacheRead: 0,
+    duration: 0,
+    cacheRate: 0,
+    avgCost: 0,
+  };
+}
+
+/** Aggregate stats over `[sinceIso, ?)`. `sinceIso` omitted = lifetime. */
+export function getUsageStats(sinceIso?: string): UsageStats {
+  const sql =
+    sinceIso === undefined
+      ? `SELECT COUNT(*)                               AS turns,
+                COALESCE(SUM(cost_usd), 0)             AS cost,
+                COALESCE(SUM(input_tokens), 0)         AS inputRaw,
+                COALESCE(SUM(output_tokens), 0)        AS output,
+                COALESCE(SUM(cache_creation_tokens),0) AS cacheCreation,
+                COALESCE(SUM(cache_read_tokens), 0)    AS cacheRead,
+                COALESCE(SUM(duration_ms), 0)          AS duration
+         FROM usage`
+      : `SELECT COUNT(*)                               AS turns,
+                COALESCE(SUM(cost_usd), 0)             AS cost,
+                COALESCE(SUM(input_tokens), 0)         AS inputRaw,
+                COALESCE(SUM(output_tokens), 0)        AS output,
+                COALESCE(SUM(cache_creation_tokens),0) AS cacheCreation,
+                COALESCE(SUM(cache_read_tokens), 0)    AS cacheRead,
+                COALESCE(SUM(duration_ms), 0)          AS duration
+         FROM usage WHERE timestamp >= ?`;
+  const row = (
+    sinceIso === undefined
+      ? getRawDb().prepare(sql).get()
+      : getRawDb().prepare(sql).get(sinceIso)
+  ) as
+    | {
+        turns: number;
+        cost: number;
+        inputRaw: number;
+        output: number;
+        cacheCreation: number;
+        cacheRead: number;
+        duration: number;
+      }
+    | undefined;
+  if (!row || row.turns === 0) return emptyUsageStats();
+  const cacheTotal = row.cacheCreation + row.cacheRead;
+  return {
+    turns: row.turns,
+    cost: row.cost,
+    input: row.inputRaw + row.cacheCreation + row.cacheRead,
+    output: row.output,
+    cacheCreation: row.cacheCreation,
+    cacheRead: row.cacheRead,
+    duration: row.duration,
+    cacheRate:
+      cacheTotal > 0 ? Math.round((row.cacheRead / cacheTotal) * 100) : 0,
+    avgCost: row.turns > 0 ? row.cost / row.turns : 0,
+  };
+}
+
+export interface DailyByModelRow {
+  /** Local-tz YYYY-MM-DD. */
+  day: string;
+  model: string;
+  cost: number;
+  rawInput: number;
+  cacheCreation: number;
+  cacheRead: number;
+  output: number;
+  turns: number;
+}
+
+/** Per-day, per-model aggregates. Buckets by the daemon's local timezone so
+ * day boundaries match what the user sees. `sinceIso` omitted = all time. */
+export function getDailyByModel(sinceIso?: string): DailyByModelRow[] {
+  const projection = `date(timestamp, 'localtime')                AS day,
+              COALESCE(model, 'unknown')                          AS model,
+              COALESCE(SUM(cost_usd), 0)                          AS cost,
+              COALESCE(SUM(input_tokens), 0)                      AS rawInput,
+              COALESCE(SUM(cache_creation_tokens), 0)             AS cacheCreation,
+              COALESCE(SUM(cache_read_tokens), 0)                 AS cacheRead,
+              COALESCE(SUM(output_tokens), 0)                     AS output,
+              COUNT(*)                                            AS turns`;
+  if (sinceIso === undefined) {
+    return getRawDb()
+      .prepare(
+        `SELECT ${projection} FROM usage GROUP BY day, model ORDER BY day`,
+      )
+      .all() as DailyByModelRow[];
+  }
+  return getRawDb()
+    .prepare(
+      `SELECT ${projection} FROM usage WHERE timestamp >= ? GROUP BY day, model ORDER BY day`,
+    )
+    .all(sinceIso) as DailyByModelRow[];
+}
+
 /** Total cost summed by agent_name. NULL agent_name (bare/unknown) excluded. */
 export function getCostByAgent(): Record<string, number> {
   const rows = getRawDb()

@@ -17,107 +17,24 @@
     }
   });
 
-  const entries = $derived(data.usageEntries);
   const now = Date.now();
-  const todayStart = new Date().setHours(0, 0, 0, 0);
-  const weekStart = todayStart - 6 * 24 * 60 * 60 * 1000;
 
-  function sumEntries(list: typeof data.usageEntries) {
-    let cost = 0,
-      inputRaw = 0,
-      output = 0,
-      cacheCreation = 0,
-      cacheRead = 0,
-      duration = 0;
-    for (const e of list) {
-      cost += e.costUsd ?? 0;
-      inputRaw += e.inputTokens;
-      output += e.outputTokens;
-      cacheCreation += e.cacheCreationTokens;
-      cacheRead += e.cacheReadTokens;
-      duration += e.durationMs ?? 0;
-    }
-    const input = inputRaw + cacheCreation + cacheRead;
-    const cacheTotal = cacheCreation + cacheRead;
-    return {
-      turns: list.length,
-      cost,
-      input,
-      output,
-      cacheCreation,
-      cacheRead,
-      duration,
-      cacheRate: cacheTotal > 0 ? Math.round((cacheRead / cacheTotal) * 100) : 0,
-      avgCost: list.length > 0 ? cost / list.length : 0,
-    };
-  }
+  const todayStats = $derived(data.stats.today);
+  const weekStats = $derived(data.stats.week);
+  const allStats = $derived(data.stats.all);
 
-  const todayEntries = $derived(
-    entries.filter((e) => new Date(e.timestamp).getTime() >= todayStart),
+  const dailyCost = $derived(data.dailyCost);
+  const models = $derived(data.models);
+  const maxDailyCost = $derived(
+    Math.max(...dailyCost.map((d) => d.totalCost), 0.01),
   );
-  const weekEntries = $derived(
-    entries.filter((e) => new Date(e.timestamp).getTime() >= weekStart),
+  const maxDailyTokens = $derived(
+    Math.max(...dailyCost.map((d) => d.totalTokens), 1),
   );
-  const allStats = $derived(sumEntries(entries));
-  const todayStats = $derived(sumEntries(todayEntries));
-  const weekStats = $derived(sumEntries(weekEntries));
-
-  const {
-    dailyCost,
-    maxDailyCost,
-    maxDailyTokens,
-    maxDailyTokensNoCached,
-    models,
-    modelColors,
-  } = $derived.by(() => {
-    const dailyMap = new Map<
-      string,
-      {
-        costByModel: Map<string, number>;
-        inputUncached: number;
-        inputCached: number;
-        output: number;
-      }
-    >();
-    const modelSet = new Set<string>();
-    for (const e of entries) {
-      const day = new Date(e.timestamp).toLocaleDateString("en-CA");
-      const model = e.model ?? "unknown";
-      modelSet.add(model);
-      if (!dailyMap.has(day))
-        dailyMap.set(day, {
-          costByModel: new Map(),
-          inputUncached: 0,
-          inputCached: 0,
-          output: 0,
-        });
-      const d = dailyMap.get(day)!;
-      d.costByModel.set(
-        model,
-        (d.costByModel.get(model) ?? 0) + (e.costUsd ?? 0),
-      );
-      d.inputUncached += e.inputTokens + e.cacheCreationTokens;
-      d.inputCached += e.cacheReadTokens;
-      d.output += e.outputTokens;
-    }
-    const models = [...modelSet].sort();
-    const dailyCost = [...dailyMap.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([day, d]) => ({
-        day,
-        totalCost: [...d.costByModel.values()].reduce((s, v) => s + v, 0),
-        costByModel: Object.fromEntries(d.costByModel),
-        inputUncached: d.inputUncached,
-        inputCached: d.inputCached,
-        output: d.output,
-        totalTokens: d.inputUncached + d.inputCached + d.output,
-      }));
-    const maxDailyCost = Math.max(...dailyCost.map((d) => d.totalCost), 0.01);
-    const maxDailyTokens = Math.max(...dailyCost.map((d) => d.totalTokens), 1);
-    const maxDailyTokensNoCached = Math.max(
-      ...dailyCost.map((d) => d.inputUncached + d.output),
-      1,
-    );
+  const maxDailyTokensNoCached = $derived(
+    Math.max(...dailyCost.map((d) => d.inputUncached + d.output), 1),
+  );
+  const modelColors = $derived.by(() => {
     const palette = [
       "var(--chart-1, #60a5fa)",
       "var(--chart-cache, #34d399)",
@@ -126,88 +43,11 @@
       "#a78bfa",
       "#fb923c",
     ];
-    const modelColors: Record<string, string> = {};
+    const out: Record<string, string> = {};
     models.forEach((m, i) => {
-      modelColors[m] = palette[i % palette.length];
+      out[m] = palette[i % palette.length];
     });
-    return {
-      dailyCost,
-      maxDailyCost,
-      maxDailyTokens,
-      maxDailyTokensNoCached,
-      models,
-      modelColors,
-    };
-  });
-
-  function dayKey(d: Date): string {
-    return d.toLocaleDateString("en-CA");
-  }
-  function weekKey(d: Date): string {
-    const day = d.getDay() || 7;
-    const monday = new Date(
-      d.getFullYear(),
-      d.getMonth(),
-      d.getDate() - day + 1,
-    );
-    return dayKey(monday);
-  }
-  function monthKey(d: Date): string {
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-  }
-  function mean(values: number[]): number {
-    return values.length ? values.reduce((s, v) => s + v, 0) / values.length : 0;
-  }
-  function median(values: number[]): number {
-    if (values.length === 0) return 0;
-    const sorted = [...values].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  }
-
-  const nowDate = new Date();
-  const todayKey = dayKey(nowDate);
-  const thisWeekKey = weekKey(nowDate);
-  const thisMonthKey = monthKey(nowDate);
-
-  type TokenStats = {
-    input: number;
-    output: number;
-    cacheCreation: number;
-    cacheRead: number;
-    cost: number;
-  };
-  function emptyStats(): TokenStats {
-    return { input: 0, output: 0, cacheCreation: 0, cacheRead: 0, cost: 0 };
-  }
-
-  const buckets = $derived.by(() => {
-    const day = new Map<string, TokenStats>();
-    const week = new Map<string, TokenStats>();
-    const month = new Map<string, TokenStats>();
-    const upsert = (
-      m: Map<string, TokenStats>,
-      k: string,
-      e: (typeof entries)[number],
-    ) => {
-      let b = m.get(k);
-      if (!b) {
-        b = emptyStats();
-        m.set(k, b);
-      }
-      b.input += e.inputTokens + e.cacheCreationTokens + e.cacheReadTokens;
-      b.output += e.outputTokens;
-      b.cacheCreation += e.cacheCreationTokens;
-      b.cacheRead += e.cacheReadTokens;
-      b.cost += e.costUsd ?? 0;
-    };
-    for (const e of entries) {
-      const d = new Date(e.timestamp);
-      upsert(day, dayKey(d), e);
-      upsert(week, weekKey(d), e);
-      upsert(month, monthKey(d), e);
-    }
-    return { day, week, month };
+    return out;
   });
 
   type Period = "day" | "week" | "month";
@@ -218,38 +58,22 @@
     week: "This Week",
     month: "This Month",
   };
-  const periodCurrentKey: Record<Period, string> = {
-    day: todayKey,
-    week: thisWeekKey,
-    month: thisMonthKey,
-  };
 
   const tokenView = $derived.by(() => {
-    const map = buckets[tokenPeriod];
-    const current = map.get(periodCurrentKey[tokenPeriod]) ?? emptyStats();
-    const all = [...map.values()];
-    const aggs = (key: keyof TokenStats) => {
-      const values = all.map((b) => b[key]);
-      return { mean: mean(values), median: median(values) };
-    };
-    const cacheTotal = current.cacheCreation + current.cacheRead;
+    const v = data.tokenViews[tokenPeriod];
     return {
-      input: { value: current.input, ...aggs("input") },
-      output: { value: current.output, ...aggs("output") },
+      input: { value: v.current.input, ...v.aggs.input },
+      output: { value: v.current.output, ...v.aggs.output },
       cacheCreation: {
-        value: current.cacheCreation,
-        ...aggs("cacheCreation"),
+        value: v.current.cacheCreation,
+        ...v.aggs.cacheCreation,
       },
-      cacheRead: { value: current.cacheRead, ...aggs("cacheRead") },
-      cacheRate:
-        cacheTotal > 0 ? Math.round((current.cacheRead / cacheTotal) * 100) : 0,
+      cacheRead: { value: v.current.cacheRead, ...v.aggs.cacheRead },
+      cacheRate: v.cacheRate,
     };
   });
 
-  const costSummary = $derived({
-    thisWeek: buckets.week.get(thisWeekKey)?.cost ?? 0,
-    thisMonth: buckets.month.get(thisMonthKey)?.cost ?? 0,
-  });
+  const costSummary = $derived(data.costSummary);
 
   const DAILY_DEFAULT = 5;
   let showAllDays = $state(false);
