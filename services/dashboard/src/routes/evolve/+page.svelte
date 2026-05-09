@@ -32,8 +32,10 @@
   </div>
   {#if proposals.length === 0}
     <p class="empty-state">
-      No proposals yet. Use <code>evolve_save</code> from the orchestrator chat to capture an
-      improvement, or wait for the daily meta-agent's run.
+      No proposals yet. Friday's daily meta-agent runs at 04:00 and scans the daemon log,
+      usage table, and transcripts for patterns worth improving. You can also trigger a scan
+      on demand from the orchestrator chat with <code>evolve_scan</code>, or capture a
+      proposal manually via <code>evolve_save</code>.
     </p>
   {:else}
     <table class="data-table">

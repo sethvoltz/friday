@@ -205,32 +205,34 @@ function computeNext(spec: ScheduleSpec): number | null {
 }
 
 /**
- * First-turn prompt for the daily meta-agent. Until the scan/enrich/cluster
- * pipeline lifts (roadmap Phase 4), the meta-agent's job is degenerate but
- * still useful: list open proposals, summarize movement since last run, mail
- * the orchestrator about any `severity: critical` or status changes worth
- * surfacing. Once the pipeline ships, this prompt is replaced with one that
- * actually drives scan → enrich → cluster.
+ * First-turn prompt for the daily meta-agent. Drives the full evolve
+ * pipeline: scan logs/usage/transcripts → enrich open proposals → cluster
+ * near-duplicates → surface anything `critical` to the orchestrator via
+ * mail. Maintains continuity across runs through `state.md`.
  */
 const META_DAILY_PROMPT = [
   "You are the daily evolve meta-agent. Your job for this run:",
   "",
-  "1. Call `evolve_list({ status: 'open' })` and `evolve_list({ status: 'critical' })`.",
-  "2. Compare against the last run's `state.md` (auto-injected above).",
-  "3. For any new `critical` proposals or proposals that have changed since the last run, mail the orchestrator with a short summary (`mail_send({ to: 'friday', type: 'notification', body: ... })`).",
-  "4. Update `state.md` with the latest proposal counts + ids you saw, so tomorrow's run knows what's new.",
-  "5. Be quiet by default. Skip the mail if nothing actionable changed.",
+  "1. Call `evolve_scan({ windowHours: 24 })` to walk the daemon log + usage + transcripts and create or merge proposals from any new signals.",
+  "2. Call `evolve_enrich({ limit: 20 })` to replace templated proposal bodies with Sonnet-generated root-cause analysis on the highest-priority unenriched items.",
+  "3. Call `evolve_cluster({})` to group near-duplicate proposals.",
+  "4. Call `evolve_list({ status: 'critical' })` and compare against the last run's `state.md` (auto-injected above).",
+  "5. For any new `critical` proposals — or proposals that gained signals since yesterday — mail the orchestrator with a short summary (`mail_send({ to: 'friday', type: 'notification', body: ... })`). Include proposal ids so the orchestrator can `evolve_get` them.",
+  "6. Update `state.md` with the run's proposal counts + critical ids you saw, so tomorrow knows what's new.",
+  "7. Be quiet by default. Skip the mail if nothing actionable changed.",
   "",
-  "Do NOT call `friday evolve scan` / `enrich` / `cluster` — those CLI subcommands are placeholders. The auto-population pipeline lands in a future phase.",
+  "Do NOT auto-apply or dismiss proposals — that is the orchestrator's call.",
 ].join("\n");
 
 const META_WEEKLY_PROMPT = [
-  "You are the weekly evolve meta-agent. Same shape as the daily run, but with a wider lens:",
+  "You are the weekly evolve meta-agent. Same shape as the daily run, but with a wider lens.",
   "",
-  "1. Call `evolve_list({})` (all statuses) and read the bodies of anything not yet `applied` or `rejected`.",
-  "2. From `state.md`, identify proposals that have been `open` for > 7 days without movement.",
-  "3. Mail the orchestrator with a triage summary: counts by status, the stale-open list, and any `critical` items.",
-  "4. Update `state.md` with the snapshot for next week.",
+  "1. Call `evolve_scan({ windowHours: 168 })` for a 7-day re-scan (catches signals that took a few days to recur).",
+  "2. Call `evolve_enrich({ limit: 50 })` and `evolve_cluster({})`.",
+  "3. Call `evolve_list({})` (all statuses) and read the bodies of anything not yet `applied` or `rejected`.",
+  "4. From `state.md`, identify proposals that have been `open` for > 7 days without movement.",
+  "5. Mail the orchestrator with a triage summary: counts by status, the stale-open list, and any `critical` items.",
+  "6. Update `state.md` with the snapshot for next week.",
   "",
   "Do not auto-apply or dismiss; that's the orchestrator's call.",
 ].join("\n");

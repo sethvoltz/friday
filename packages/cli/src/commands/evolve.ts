@@ -1,9 +1,17 @@
 import { defineCommand } from "citty";
 import pc from "picocolors";
-import { getProposal, listProposals } from "@friday/evolve";
-
-const PIPELINE_HINT =
-  "(scan/enrich/cluster auto-population lands in roadmap Phase 4. Use the orchestrator's `evolve_save` / `evolve_apply` MCP tools to capture proposals manually until then.)";
+import {
+  enrichProposals,
+  getProposal,
+  listProposals,
+  mergeClusters,
+  proposeFromSignals,
+  rerankAll,
+  scanAll,
+  sinceHoursAgo,
+  appendRun,
+  DEFAULT_RULE,
+} from "@friday/evolve";
 
 export const evolveCommand = defineCommand({
   meta: { name: "evolve", description: "Self-improvement pipeline" },
@@ -34,7 +42,11 @@ export const evolveCommand = defineCommand({
             `${pc.dim(p.id.padEnd(48))} ${pc.cyan(status)} ${pc.yellow(score)}  ${p.title}`,
           );
         }
-        console.log(pc.dim(`\n${filtered.length} of ${all.length} proposal${all.length === 1 ? "" : "s"}`));
+        console.log(
+          pc.dim(
+            `\n${filtered.length} of ${all.length} proposal${all.length === 1 ? "" : "s"}`,
+          ),
+        );
       },
     }),
     show: defineCommand({
@@ -52,28 +64,100 @@ export const evolveCommand = defineCommand({
     scan: defineCommand({
       meta: {
         name: "scan",
-        description: "Scan logs for improvement signals (pending pipeline lift)",
+        description: "Walk daemon log + usage + transcripts → emit proposals",
       },
-      run() {
-        console.log(pc.dim(PIPELINE_HINT));
+      args: {
+        windowHours: { type: "string" },
+      },
+      run({ args }) {
+        const windowHours = args.windowHours
+          ? Number(args.windowHours)
+          : 24;
+        const since = sinceHoursAgo(windowHours);
+        const windowEnd = new Date().toISOString();
+        const signals = scanAll({ since });
+        const propose = proposeFromSignals(signals, {
+          rule: DEFAULT_RULE,
+          createdBy: "cli",
+        });
+        const reranked = rerankAll(DEFAULT_RULE);
+        appendRun({
+          ts: windowEnd,
+          by: "cli",
+          windowStart: since,
+          windowEnd,
+          signalsScanned: signals.length,
+          proposalsCreated: propose.created.length,
+          proposalsUpdated: propose.updated.length,
+          promotedToCritical: propose.promotedToCritical.length,
+        });
+        console.log(
+          JSON.stringify(
+            {
+              signals: signals.length,
+              created: propose.created.length,
+              updated: propose.updated.length,
+              promotedToCritical: propose.promotedToCritical.length,
+              reranked: reranked.reranked.length,
+              promotedFromRerank: reranked.promoted.length,
+            },
+            null,
+            2,
+          ),
+        );
       },
     }),
     enrich: defineCommand({
       meta: {
         name: "enrich",
-        description: "Enrich proposal bodies via Sonnet (pending)",
+        description: "Replace templated proposal bodies with Sonnet output",
       },
-      run() {
-        console.log(pc.dim(PIPELINE_HINT));
+      args: {
+        id: { type: "string" },
+        force: { type: "boolean" },
+        limit: { type: "string" },
+      },
+      async run({ args }) {
+        const result = await enrichProposals({
+          id: args.id as string | undefined,
+          force: !!args.force,
+          limit: args.limit ? Number(args.limit) : undefined,
+        });
+        console.log(
+          JSON.stringify(
+            {
+              enriched: result.enriched.length,
+              skipped: result.skipped,
+              failed: result.failed,
+            },
+            null,
+            2,
+          ),
+        );
       },
     }),
     cluster: defineCommand({
       meta: {
         name: "cluster",
-        description: "Cluster near-duplicate proposals (pending)",
+        description: "Group near-duplicate proposals into clusters",
       },
-      run() {
-        console.log(pc.dim(PIPELINE_HINT));
+      args: {
+        threshold: { type: "string" },
+      },
+      run({ args }) {
+        const threshold = args.threshold ? Number(args.threshold) : undefined;
+        const result = mergeClusters({ threshold });
+        console.log(
+          JSON.stringify(
+            {
+              clustersCreated: result.clustersCreated.length,
+              clustersUpdated: result.clustersUpdated.length,
+              proposalsAttached: result.proposalsAttached,
+            },
+            null,
+            2,
+          ),
+        );
       },
     }),
   },

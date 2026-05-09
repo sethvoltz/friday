@@ -41,10 +41,18 @@ import {
   type MemoryEntry,
 } from "@friday/memory";
 import {
+  DEFAULT_RULE,
   deleteProposal,
+  enrichProposals,
   getProposal,
   listProposals,
+  mergeClusters,
+  proposeFromSignals,
+  rerankAll,
   saveProposal,
+  scanAll,
+  sinceHoursAgo,
+  appendRun,
   updateProposal,
   type Proposal,
   type SaveProposalInput,
@@ -652,6 +660,89 @@ async function handle(
       proposedChange: newBody,
     });
     return json(res, 200, updated);
+  }
+
+  if (method === "POST" && path === "/api/evolve/scan") {
+    const body = await readJson<{ windowHours?: number }>(req);
+    const windowHours = body.windowHours ?? 24;
+    const callerName = String(req.headers["x-friday-caller-name"] ?? "scan");
+    const since = sinceHoursAgo(windowHours);
+    const windowEnd = new Date().toISOString();
+    try {
+      const signals = scanAll({ since });
+      const propose = proposeFromSignals(signals, {
+        rule: DEFAULT_RULE,
+        createdBy: callerName,
+      });
+      const reranked = rerankAll(DEFAULT_RULE);
+      appendRun({
+        ts: windowEnd,
+        by: callerName,
+        windowStart: since,
+        windowEnd,
+        signalsScanned: signals.length,
+        proposalsCreated: propose.created.length,
+        proposalsUpdated: propose.updated.length,
+        promotedToCritical: propose.promotedToCritical.length,
+      });
+      return json(res, 200, {
+        signals: signals.length,
+        created: propose.created.length,
+        updated: propose.updated.length,
+        promotedToCritical: propose.promotedToCritical.length,
+        reranked: reranked.reranked.length,
+        promotedFromRerank: reranked.promoted.length,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      appendRun({
+        ts: windowEnd,
+        by: callerName,
+        windowStart: since,
+        windowEnd,
+        signalsScanned: 0,
+        proposalsCreated: 0,
+        proposalsUpdated: 0,
+        promotedToCritical: 0,
+        note: `error: ${message}`,
+      });
+      return json(res, 500, { error: message });
+    }
+  }
+  if (method === "POST" && path === "/api/evolve/enrich") {
+    const body = await readJson<{
+      id?: string;
+      retryFailed?: boolean;
+      force?: boolean;
+      limit?: number;
+    }>(req);
+    try {
+      const result = await enrichProposals(body);
+      return json(res, 200, {
+        enriched: result.enriched.length,
+        skipped: result.skipped,
+        failed: result.failed,
+      });
+    } catch (err) {
+      return json(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (method === "POST" && path === "/api/evolve/cluster") {
+    const body = await readJson<{ threshold?: number }>(req);
+    try {
+      const result = mergeClusters({ threshold: body.threshold });
+      return json(res, 200, {
+        clustersCreated: result.clustersCreated.length,
+        clustersUpdated: result.clustersUpdated.length,
+        proposalsAttached: result.proposalsAttached,
+      });
+    } catch (err) {
+      return json(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // --- Integrations: Linear ---

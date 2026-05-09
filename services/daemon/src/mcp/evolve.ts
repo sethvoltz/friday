@@ -182,6 +182,98 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
           };
         },
       ),
+      tool(
+        "evolve_scan",
+        "Walk the daemon log + usage table + Claude transcripts and emit fresh proposals from any signals not already covered. Returns a summary of new + merged + promoted-to-critical proposals plus an audit run record.",
+        {
+          windowHours: z
+            .number()
+            .min(1)
+            .max(24 * 30)
+            .optional()
+            .describe(
+              "Look-back window in hours. Default 24 (the daily meta-agent's pass).",
+            ),
+        },
+        async (args) => {
+          const result = await daemonFetch({
+            ...ctx,
+            path: "/api/evolve/scan",
+            method: "POST",
+            body: { windowHours: args.windowHours },
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        },
+      ),
+      tool(
+        "evolve_enrich",
+        "Run Sonnet over open/critical proposals to replace templated bodies with root-cause analysis + a concrete suggested change. Idempotent: skips proposals already enriched unless `force: true`.",
+        {
+          id: z
+            .string()
+            .optional()
+            .describe(
+              "Enrich only this proposal id. Mutually exclusive with `retryFailed`.",
+            ),
+          retryFailed: z
+            .boolean()
+            .optional()
+            .describe(
+              "Enrich only proposals that have a recorded lastEnrichError.",
+            ),
+          force: z
+            .boolean()
+            .optional()
+            .describe(
+              "Re-enrich even if `enrichedAt` is fresh. Use sparingly.",
+            ),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(50)
+            .optional()
+            .describe("Max proposals enriched per run. Default 50."),
+        },
+        async (args) => {
+          const result = await daemonFetch({
+            ...ctx,
+            path: "/api/evolve/enrich",
+            method: "POST",
+            body: args,
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        },
+      ),
+      tool(
+        "evolve_cluster",
+        "Group near-duplicate open/critical proposals by Jaccard overlap of their signal-hash sets. Each component becomes (or refreshes) a cluster file at `~/.friday/evolve/clusters/<id>.md`; member proposals get their `clusterId` stamped.",
+        {
+          threshold: z
+            .number()
+            .min(0)
+            .max(1)
+            .optional()
+            .describe(
+              "Jaccard overlap threshold above which two proposals merge. Default 0.5.",
+            ),
+        },
+        async (args) => {
+          const result = await daemonFetch({
+            ...ctx,
+            path: "/api/evolve/cluster",
+            method: "POST",
+            body: { threshold: args.threshold },
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        },
+      ),
     ],
   });
 }

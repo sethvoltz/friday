@@ -21,6 +21,8 @@ export const FEEDBACK_LOG_PATH = join(EVOLVE_DIR, "feedback.jsonl");
 export const RUNS_LOG_PATH = join(EVOLVE_DIR, "runs.jsonl");
 export const HEALTH_PATH = join(DATA_DIR, "health.json");
 export const USAGE_LOG_PATH = join(DATA_DIR, "usage.jsonl");
+export const DAEMON_LOG_PATH = join(LOGS_DIR, "daemon.jsonl");
+export const SCHEDULES_DIR = join(DATA_DIR, "schedules");
 export const STATE_DIR = join(DATA_DIR, "state");
 
 export type ServiceName = "daemon" | "dashboard";
