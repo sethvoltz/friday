@@ -34,6 +34,16 @@ export interface ChatMessage {
    * Used as the pagination cursor when loading older history. Live SSE
    * deltas don't carry one. */
   dbTurnId?: number;
+
+  /** Optimistic-send queue id. When set, this user bubble represents a
+   * message that is waiting to flush — render with a "queued" pill so the
+   * user can see it didn't actually reach the daemon yet. Cleared as soon
+   * as the queue successfully POSTs the message. */
+  queueId?: string;
+
+  /** Attachments included on the user message (rendered inline as chips
+   * for non-images, thumbnails for images). */
+  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
 }
 
 export interface AgentInfo {
@@ -67,7 +77,13 @@ export class ChatState {
    * pinned) or render everything (when the user is reading older history). */
   pinnedToBottom = $state(true);
 
-  addUser(text: string): void {
+  addUser(
+    text: string,
+    opts?: {
+      queueId?: string;
+      attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+    },
+  ): string {
     const id = `u_${Date.now()}`;
     this.messages.push({
       id,
@@ -75,7 +91,19 @@ export class ChatState {
       text,
       status: "complete",
       ts: Date.now(),
+      queueId: opts?.queueId,
+      attachments: opts?.attachments,
     });
+    return id;
+  }
+
+  /** Clear `queueId` from the user bubble matching this queue id, if any.
+   *  Called when the send-queue successfully flushes a previously queued
+   *  message — the bubble is no longer "queued", just sent. */
+  clearQueueMarker(queueId: string): void {
+    for (const m of this.messages) {
+      if (m.queueId === queueId) m.queueId = undefined;
+    }
   }
 
   startAssistantTurn(turnId: string, agent: string): void {

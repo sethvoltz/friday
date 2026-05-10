@@ -6,6 +6,8 @@
   import { onMount } from "svelte";
   import { sseConnected, startSSE, stopSSE } from "$lib/stores/sse.svelte";
   import { KEYS, loadString, saveString } from "$lib/stores/persistent";
+  import { sendQueue } from "$lib/stores/send-queue.svelte";
+  import { chat } from "$lib/stores/chat.svelte";
   import type { LayoutData } from "./$types";
   import type { Snippet } from "svelte";
 
@@ -21,6 +23,23 @@
   $effect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     saveString(KEYS.theme, theme);
+  });
+
+  // Flush the optimistic-send queue every time SSE reconnects. The queue
+  // itself is idempotent (in-flight POST is guarded by `flushing`), so
+  // multiple triggers in quick succession are safe.
+  let lastConnected = $state(false);
+  $effect(() => {
+    const c = sseConnected.value;
+    if (c && !lastConnected && sendQueue.items.length > 0) {
+      void sendQueue.flush().then((sent) => {
+        for (const s of sent) {
+          chat.clearQueueMarker(s.queueId);
+          chat.inflightTurnId = s.turnId;
+        }
+      });
+    }
+    lastConnected = c;
   });
   function toggleTheme() {
     theme = theme === "dark" ? "light" : "dark";
@@ -48,6 +67,17 @@
       if (data.daemonOnline) uptimeMs += 1000;
     }, 1000);
     if (signedIn && !isLogin) startSSE();
+
+    // Best-effort flush on initial mount — drains anything left in
+    // localStorage from a previous session that ended offline.
+    if (signedIn && !isLogin && sendQueue.items.length > 0) {
+      void sendQueue.flush().then((sent) => {
+        for (const s of sent) {
+          chat.clearQueueMarker(s.queueId);
+          chat.inflightTurnId = s.turnId;
+        }
+      });
+    }
 
     // Mobile keyboard handling: when the soft keyboard opens, iOS Safari
     // scrolls the visual viewport up inside the layout viewport, which

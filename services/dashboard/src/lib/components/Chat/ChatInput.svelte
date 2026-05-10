@@ -3,6 +3,7 @@
   import { goto } from "$app/navigation";
   import { portal } from "$lib/actions/portal";
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
+  import { sendQueue } from "$lib/stores/send-queue.svelte";
   import { onMount, tick } from "svelte";
 
   interface CommandsResponse {
@@ -108,43 +109,28 @@
       }
     }
 
-    chat.addUser(t);
+    // Optimistic: enqueue first, render the user bubble with a "queued" pill,
+    // then attempt to flush. If the network is down or the daemon is
+    // unreachable, the bubble stays "queued" until a reconnect drains the
+    // queue (see +layout.svelte's flush effect).
+    const queueItem = sendQueue.enqueue({
+      agent: chat.focusedAgent,
+      text: t,
+    });
+    chat.addUser(t, { queueId: queueItem.id });
     text = "";
     // Wait for the bound textarea value to actually clear before measuring.
     // Without this, scrollHeight still reflects the multi-line draft and
     // autoresize sizes the box to the *old* content.
     await tick();
     autoresize();
-    try {
-      const r = await fetch("/api/chat/turn", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: t, agent: chat.focusedAgent }),
-      });
-      if (!r.ok) {
-        const err = await r.text();
-        chat.messages.push({
-          id: `err_${Date.now()}`,
-          role: "assistant",
-          text: `Error: ${err}`,
-          status: "error",
-          ts: Date.now(),
-        });
-        return;
-      }
-      const { turn_id } = (await r.json()) as { turn_id: string };
-      // Don't pre-mount the assistant bubble. The chat store creates it
-      // lazily when the first text_delta arrives, so any thinking or tool
-      // blocks that fire earlier render in their natural order above it.
-      chat.inflightTurnId = turn_id;
-    } catch (err: unknown) {
-      chat.messages.push({
-        id: `err_${Date.now()}`,
-        role: "assistant",
-        text: `Network error: ${err instanceof Error ? err.message : String(err)}`,
-        status: "error",
-        ts: Date.now(),
-      });
+    const sent = await sendQueue.flush();
+    for (const s of sent) {
+      chat.clearQueueMarker(s.queueId);
+      // Set the inflight turn for the most recently-sent message so the UI
+      // shows the Stop button. Multi-message flushes only need the last one
+      // tracked — earlier messages have already produced their own turns.
+      chat.inflightTurnId = s.turnId;
     }
   }
 

@@ -121,6 +121,24 @@
         <div class="bubble">
           {#if msg.role === "user"}
             <div class="text user-text">{msg.text}</div>
+            {#if msg.attachments && msg.attachments.length > 0}
+              <div class="attachments">
+                {#each msg.attachments as a}
+                  {#if a.mime.startsWith("image/")}
+                    <a class="attachment-thumb" href={`/api/uploads/${a.sha256}`} target="_blank" rel="noopener">
+                      <img src={`/api/uploads/${a.sha256}`} alt={a.filename} />
+                    </a>
+                  {:else}
+                    <a class="attachment-chip" href={`/api/uploads/${a.sha256}`} target="_blank" rel="noopener">
+                      📎 {a.filename}
+                    </a>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
+            {#if msg.queueId}
+              <div class="footer-tag queued">Queued — waiting to send</div>
+            {/if}
           {:else}
             <Markdown source={msg.text} />
             {#if msg.status === "aborted"}
@@ -194,6 +212,43 @@
   }
   .footer-tag.streaming {
     color: var(--accent-primary);
+  }
+  .footer-tag.queued {
+    color: var(--text-inverse);
+    opacity: 0.85;
+  }
+  .attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+  }
+  .attachment-thumb {
+    display: block;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.15);
+    line-height: 0;
+  }
+  .attachment-thumb img {
+    max-width: 220px;
+    max-height: 220px;
+    display: block;
+  }
+  .attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.6rem;
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: var(--radius-sm);
+    font-size: 0.8rem;
+    color: var(--text-inverse);
+    text-decoration: none;
+    word-break: break-all;
+  }
+  .attachment-chip:hover {
+    background: rgba(255, 255, 255, 0.28);
   }
   .empty {
     text-align: center;
