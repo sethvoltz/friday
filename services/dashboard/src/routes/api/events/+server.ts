@@ -13,7 +13,14 @@ export const GET: RequestHandler = async ({ request, locals }) => {
   const cfg = loadConfig();
   const headers: Record<string, string> = {};
   const lastId = request.headers.get("last-event-id");
-  if (lastId) headers["last-event-id"] = lastId;
+  // Only forward the header when it's a finite non-negative integer. A
+  // malformed or absent value would coerce to NaN at the daemon, which
+  // `replaySince` doesn't guard — better to drop it here than rely on
+  // the upstream parsing being defensive.
+  if (lastId) {
+    const n = Number(lastId);
+    if (Number.isFinite(n) && n >= 0) headers["last-event-id"] = String(n);
+  }
 
   const upstream = await fetch(
     `http://localhost:${cfg.daemonPort}/api/events`,

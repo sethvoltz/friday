@@ -15,6 +15,11 @@ let backoffMs = 0;
 let visListener: (() => void) | null = null;
 let onlineListener: (() => void) | null = null;
 let stopped = false;
+/** Monotonic counter incremented on every `connect()`. Captured in the
+ *  closure of each EventSource's handlers so a stale `onerror` from a
+ *  previous, abandoned connection can't null out a freshly-opened one
+ *  (or apply events to it that the new connection should be receiving). */
+let connectionId = 0;
 
 const BACKOFF_INITIAL = 1000;
 const BACKOFF_MAX = 30_000;
@@ -57,29 +62,56 @@ const HANDLED_TYPES = new Set([
 function connect(): void {
   if (es) return;
   if (stopped) return;
-  es = new EventSource("/api/events");
-  es.onopen = () => {
+  // Mint a new connection id; every handler closes over `myId` and ignores
+  // its event if the global cursor has moved on (the connection was
+  // replaced). Without this, a stale onerror firing after a reconnect
+  // would null out the *new* EventSource.
+  const myId = ++connectionId;
+  // Whether we've ever seen a `seq` from this specific connection. Used to
+  // detect a daemon restart on the FIRST event we receive: if the daemon's
+  // counter has rolled back below our cached `chat.lastSeq`, the daemon
+  // restarted its bus and we need to reset our cursor. A transient network
+  // blip without a daemon restart leaves the seq monotonically higher and
+  // we keep the cursor — preventing duplicate `applyEvent` for events
+  // that already had effect.
+  let firstSeqSeen = false;
+  const ev = new EventSource("/api/events");
+  es = ev;
+  ev.onopen = () => {
+    if (myId !== connectionId) return;
     sseConnected.value = true;
     chat.connected = true;
     backoffMs = 0;
-    // Daemon restart resets its seq counter to small values; without a reset
-    // here, our (stale, high) lastSeq would filter every new event out.
-    chat.lastSeq = 0;
   };
-  es.onerror = () => {
+  ev.onerror = () => {
+    if (myId !== connectionId) return; // stale handler — ignore.
     sseConnected.value = false;
     chat.connected = false;
     // EventSource's built-in reconnect uses a fixed ~3s interval and doesn't
     // back off, so a daemon that's down for a while produces a request flood.
     // Manage reconnection ourselves with exponential backoff capped at 30s.
-    es?.close();
-    es = null;
+    ev.close();
+    if (es === ev) es = null;
     scheduleReconnect();
   };
   for (const t of HANDLED_TYPES) {
-    es.addEventListener(t, (e: MessageEvent) => {
+    ev.addEventListener(t, (e: MessageEvent) => {
+      if (myId !== connectionId) return;
       try {
-        chat.applyEvent(JSON.parse(e.data) as WireEvent);
+        const parsed = JSON.parse(e.data) as WireEvent;
+        if (!firstSeqSeen) {
+          firstSeqSeen = true;
+          // Daemon restart? If the first seq from a fresh connection is
+          // *lower* than our cached cursor, the daemon's bus counter has
+          // rolled back; reset our cursor so we accept the replay. If
+          // it's higher (the normal blip-and-reconnect case), keep the
+          // cursor and let `applyEvent`'s seq check drop already-applied
+          // events.
+          if (typeof parsed.seq === "number" && parsed.seq < chat.lastSeq) {
+            chat.lastSeq = 0;
+          }
+        }
+        chat.applyEvent(parsed);
       } catch {
         /* ignore */
       }

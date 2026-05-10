@@ -963,9 +963,11 @@ function handleEvents(
   res.flushHeaders();
   res.write(": connected\n\n");
 
-  // Replay since Last-Event-ID
+  // Replay since Last-Event-ID. `Number("garbage")` is NaN, which most
+  // bus implementations don't guard — coerce to a safe finite >= 0.
   const lastEventIdHeader = req.headers["last-event-id"];
-  const lastSeq = lastEventIdHeader ? Number(lastEventIdHeader) : 0;
+  const parsed = lastEventIdHeader ? Number(lastEventIdHeader) : 0;
+  const lastSeq = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
   for (const e of eventBus.replaySince(lastSeq)) {
     writeEvent(res, e);
   }
