@@ -6,7 +6,7 @@
 |---|---|
 | `friday start [--dev]` | Launch daemon + dashboard via tmux. `--dev` enables hot reload. |
 | `friday stop` | Kill the tmux session. |
-| `friday restart [<service>\|all]` | Default: restart the daemon only. Pass `all` (or specific service) to bounce dashboard / tunnel too. Daemon-only avoids a full browser reload triggered by vite's HMR client when the dashboard process bounces in dev. |
+| `friday restart <daemon\|dashboard\|tunnel\|all>` | Restart a service (or `all`). Target is required — bare `friday restart` errors with usage. Restarting `dashboard` or `all` in dev bounces vite, which triggers a full browser reload on reconnect; prefer `friday restart daemon` when only daemon state needs refreshing. |
 | `friday status` | Show pids, ports, uptime. |
 | `friday doctor` | Health check. |
 | `friday logs [daemon\|dashboard] [--follow]` | Tail logs. |

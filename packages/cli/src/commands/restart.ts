@@ -10,13 +10,13 @@ export const restartCommand = defineCommand({
   meta: {
     name: "restart",
     description:
-      "Restart a service in the same mode it was started in. With no arg restarts the daemon only; pass `all` to also bounce dashboard + tunnel. Does not accept --dev/--prod.",
+      "Restart one service (or `all`) in the same mode it was started in. A target is required — there's no default. Does not accept --dev/--prod.",
   },
   args: {
     service: {
       type: "positional",
       required: false,
-      description: `${SERVICES.join(" | ")} | all (default: daemon only)`,
+      description: `${SERVICES.join(" | ")} | all (required)`,
     },
   },
   async run({ args, rawArgs }) {
@@ -33,26 +33,33 @@ export const restartCommand = defineCommand({
     }
 
     const target = (args.service as string | undefined)?.toLowerCase();
-    // The historical default was "all services". In dev that bounces vite,
-    // and vite's HMR client triggers a full browser reload on reconnect —
-    // which throws away any unsent chat draft, scroll position, and stream
-    // state for what is in practice almost always a "restart the daemon"
-    // request. Default to daemon-only; `friday restart all` keeps the old
-    // behavior for the rare case the user actually wants everything bounced.
+    // No silent default. Bouncing every service was a footgun (vite HMR
+    // reloads the browser tab); silently restarting just the daemon would
+    // surprise users who expected the old behavior. Force an explicit
+    // target so the user always knows what they're restarting.
+    if (!target) {
+      console.error(pc.red("friday restart: a target is required."));
+      console.error(
+        `  usage: ${pc.cyan(`friday restart <${SERVICES.join("|")}|all>`)}`,
+      );
+      console.error(`    daemon     — restart just the API daemon`);
+      console.error(`    dashboard  — restart just the SvelteKit dashboard`);
+      console.error(`    tunnel     — restart just the Cloudflare Tunnel`);
+      console.error(`    all        — restart every running service`);
+      process.exit(1);
+    }
     const services: ServiceName[] =
-      !target
-        ? ["daemon"]
-        : target === "all"
-          ? [...SERVICES]
-          : validateService(target)
-            ? [target as ServiceName]
-            : ((): ServiceName[] => {
-                console.error(
-                  pc.red(`unknown service: ${target}`) +
-                    ` (expected: ${SERVICES.join(" | ")} | all)`,
-                );
-                process.exit(1);
-              })();
+      target === "all"
+        ? [...SERVICES]
+        : validateService(target)
+          ? [target as ServiceName]
+          : ((): ServiceName[] => {
+              console.error(
+                pc.red(`unknown service: ${target}`) +
+                  ` (expected: ${SERVICES.join(" | ")} | all)`,
+              );
+              process.exit(1);
+            })();
 
     const self = fileURLToPath(import.meta.url).replace(
       /restart\.[jt]s$/,

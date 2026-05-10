@@ -1,0 +1,8 @@
+fix(cli): require an explicit target for friday restart
+
+Per Seth: silently defaulting to daemon-only is the inverse footgun of
+the previous bounce-everything default — both surprise the user.
+Require a target. Bare `friday restart` now exits non-zero with a
+usage line listing the four valid targets (daemon, dashboard, tunnel,
+all). `friday restart all` continues to bounce everything; specific
+service forms are unchanged.
