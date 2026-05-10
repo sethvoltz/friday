@@ -2,6 +2,7 @@
   import { chat, type AgentInfo } from "$lib/stores/chat.svelte";
   import { goto } from "$app/navigation";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
+  import { loadJSON, saveJSON } from "$lib/stores/persistent";
   import { onMount } from "svelte";
 
   interface SessionSummary {
@@ -36,9 +37,11 @@
     void goto(hrefFor(name, type));
   }
 
-  // Filters
-  let showKilled = $state(false);
-  let showInactive = $state(false);
+  // Filters — persisted across reloads so the user's preference survives.
+  let showKilled = $state(loadJSON<boolean>("sidebar:showKilled", false));
+  let showInactive = $state(loadJSON<boolean>("sidebar:showInactive", false));
+  $effect(() => saveJSON("sidebar:showKilled", showKilled));
+  $effect(() => saveJSON("sidebar:showInactive", showInactive));
 
   function isActive(status: string): boolean {
     return status === "idle" || status === "working";

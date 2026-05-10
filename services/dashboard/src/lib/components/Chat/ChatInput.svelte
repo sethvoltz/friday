@@ -2,6 +2,7 @@
   import { chat } from "$lib/stores/chat.svelte";
   import { goto } from "$app/navigation";
   import { portal } from "$lib/actions/portal";
+  import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
   import { onMount, tick } from "svelte";
 
   interface CommandsResponse {
@@ -36,6 +37,27 @@
     const onChange = (e: MediaQueryListEvent) => (isCoarsePointer = e.matches);
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
+  });
+
+  // Per-agent draft persistence. We key by `chat.focusedAgent` so switching
+  // agents preserves each agent's unsent draft independently. Restore happens
+  // whenever the focused agent changes (component is reused across routes via
+  // SvelteKit's preserve-state behavior); save on every keystroke.
+  let lastRestoredAgent = $state<string | null>(null);
+  $effect(() => {
+    const a = chat.focusedAgent;
+    if (a !== lastRestoredAgent) {
+      lastRestoredAgent = a;
+      const stored = loadString(KEYS.draft(a));
+      text = stored ?? "";
+      void tick().then(autoresize);
+    }
+  });
+  $effect(() => {
+    const a = chat.focusedAgent;
+    if (a !== lastRestoredAgent) return;
+    if (text) saveString(KEYS.draft(a), text);
+    else removeKey(KEYS.draft(a));
   });
 
   let showAutocomplete = $derived(text.startsWith("/") && !text.includes("\n"));

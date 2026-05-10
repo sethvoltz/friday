@@ -5,14 +5,22 @@
   import { page } from "$app/stores";
   import { onMount } from "svelte";
   import { sseConnected, startSSE, stopSSE } from "$lib/stores/sse.svelte";
+  import { KEYS, loadString, saveString } from "$lib/stores/persistent";
   import type { LayoutData } from "./$types";
   import type { Snippet } from "svelte";
 
   let { data, children }: { data: LayoutData; children: Snippet } = $props();
 
   let theme = $state<"light" | "dark">("dark");
+  // Restore theme from localStorage on mount (after $state is set up so the
+  // initial render uses the persisted value before $effect fires).
+  if (typeof document !== "undefined") {
+    const stored = loadString(KEYS.theme);
+    if (stored === "light" || stored === "dark") theme = stored;
+  }
   $effect(() => {
     document.documentElement.setAttribute("data-theme", theme);
+    saveString(KEYS.theme, theme);
   });
   function toggleTheme() {
     theme = theme === "dark" ? "light" : "dark";
