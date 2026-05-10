@@ -1,6 +1,7 @@
 import type { WireEvent } from "@friday/shared";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { KEYS, loadJSON, saveJSON } from "./persistent";
+import { sendQueue } from "./send-queue.svelte";
 
 export interface ChatMessage {
   /** turn_id for assistant; "u_<n>" for user; "t_<toolId>"; "th_<blockId>". */
@@ -316,6 +317,26 @@ export class ChatState {
       this.messages = parseTurns(cached, agent);
       this.oldestDbId = oldestDbTurnId(cached);
     }
+
+    // Synthesize user bubbles for any queued-but-not-yet-sent messages
+    // belonging to this agent. Without this, a page reload while a
+    // message is queued (offline / 5xx) hides the bubble — the message
+    // is still in the queue and the layout-mount flush will try to send
+    // it, but the user has no idea it exists. For `failed` entries the
+    // bubble exposes the Retry/Remove affordances that would otherwise
+    // be unreachable.
+    for (const q of sendQueue.forAgent(agent)) {
+      this.messages.push({
+        id: `u_queue_${q.id}`,
+        role: "user",
+        text: q.text,
+        status: "complete",
+        ts: q.createdAt,
+        queueId: q.id,
+        attachments: q.attachments,
+      });
+    }
+
     this.loadingInitial = cached.length === 0;
 
     try {
