@@ -16,6 +16,7 @@ import {
   closeMail,
   createTicket,
   externalLinks,
+  getAttachment,
   getMail,
   getTicket,
   inbox,
@@ -25,9 +26,11 @@ import {
   listTickets,
   listTurns,
   markRead,
+  readAttachmentBytes,
   sendMail,
   sessionCountsByAgent,
   updateTicket,
+  uploadAttachment,
 } from "@friday/shared/services";
 import {
   buildAutoRecallBlock,
@@ -807,6 +810,74 @@ async function handle(
     if (!row) return json(res, 404, { error: "mail not found" });
     closeMail(id);
     return json(res, 200, { ok: true });
+  }
+
+  // --- Attachments / uploads ---
+  // Body is the raw file bytes; headers carry the metadata. Avoids the
+  // multipart-parsing complexity that adds nothing for a single-file form.
+  // Dashboard hits this with `fetch(url, { method: "POST", body: file,
+  // headers: { "content-type": file.type, "x-filename": file.name } })`.
+  if (method === "POST" && path === "/api/uploads") {
+    const contentLength = Number(req.headers["content-length"] ?? 0);
+    const MAX_BYTES = 25 * 1024 * 1024; // 25MB; mirrors common chat-attachment caps.
+    if (contentLength > MAX_BYTES) {
+      return json(res, 413, {
+        error: `file exceeds ${MAX_BYTES} bytes`,
+      });
+    }
+    const filename = String(req.headers["x-filename"] ?? "upload").slice(0, 255);
+    const mime = String(req.headers["content-type"] ?? "application/octet-stream");
+    const chunks: Buffer[] = [];
+    let received = 0;
+    try {
+      for await (const c of req) {
+        const buf = c as Buffer;
+        received += buf.length;
+        if (received > MAX_BYTES) {
+          return json(res, 413, {
+            error: `file exceeds ${MAX_BYTES} bytes`,
+          });
+        }
+        chunks.push(buf);
+      }
+    } catch (err) {
+      return json(res, 400, {
+        error: `read failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+    const bytes = Buffer.concat(chunks);
+    if (bytes.length === 0) {
+      return json(res, 400, { error: "empty body" });
+    }
+    try {
+      const att = await uploadAttachment({ bytes, filename, mime });
+      return json(res, 200, {
+        sha256: att.sha256,
+        filename: att.filename,
+        mime: att.mime,
+        sizeBytes: att.sizeBytes,
+      });
+    } catch (err) {
+      return json(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (method === "GET" && /^\/api\/uploads\/[a-f0-9]{64}$/.test(path)) {
+    const sha = path.split("/")[3];
+    const bytes = readAttachmentBytes(sha);
+    if (!bytes) return json(res, 404, { error: "not found" });
+    // Resolve content-type from the DB row so image renders work.
+    const meta = getAttachment(sha);
+    const ct = meta?.mime ?? "application/octet-stream";
+    res.writeHead(200, {
+      "content-type": ct,
+      "content-length": String(bytes.length),
+      "cache-control": "private, max-age=31536000, immutable",
+    });
+    res.end(bytes);
+    return;
   }
 
   // --- Chat reply (agents post user-facing messages) ---
