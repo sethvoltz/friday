@@ -89,9 +89,140 @@
     selectedIdx = 0;
   });
 
+  interface PendingAttachment {
+    /** Local key for keyed-each rendering and removal. */
+    key: string;
+    filename: string;
+    mime: string;
+    /** Local preview URL for image thumbnails. Revoked on remove. */
+    previewUrl?: string;
+    /** "uploading" until the daemon returns the sha; "done" once we have it;
+     *  "error" if upload failed (chip stays so the user can dismiss). */
+    status: "uploading" | "done" | "error";
+    sha256?: string;
+    error?: string;
+  }
+  let pendingAttachments = $state<PendingAttachment[]>([]);
+  let fileInput: HTMLInputElement | undefined = $state();
+  let dragDepth = $state(0);
+  let isDragging = $derived(dragDepth > 0);
+
+  async function uploadFile(file: File): Promise<void> {
+    const key = `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const previewUrl = file.type.startsWith("image/")
+      ? URL.createObjectURL(file)
+      : undefined;
+    const entry: PendingAttachment = {
+      key,
+      filename: file.name || "upload",
+      mime: file.type || "application/octet-stream",
+      previewUrl,
+      status: "uploading",
+    };
+    pendingAttachments.push(entry);
+    try {
+      const r = await fetch("/api/uploads", {
+        method: "POST",
+        headers: {
+          "content-type": entry.mime,
+          "x-filename": entry.filename,
+        },
+        body: file,
+      });
+      const found = pendingAttachments.find((a) => a.key === key);
+      if (!found) return; // user removed before response
+      if (!r.ok) {
+        const err = await r.text().catch(() => "upload failed");
+        found.status = "error";
+        found.error = err.slice(0, 200);
+        return;
+      }
+      const data = (await r.json()) as {
+        sha256: string;
+        filename: string;
+        mime: string;
+      };
+      found.status = "done";
+      found.sha256 = data.sha256;
+      // The daemon may have rewritten filename/mime (e.g. HEIC → PNG); reflect
+      // that back so the chip and the eventual turn body match what's stored.
+      found.filename = data.filename;
+      found.mime = data.mime;
+    } catch (err) {
+      const found = pendingAttachments.find((a) => a.key === key);
+      if (!found) return;
+      found.status = "error";
+      found.error = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  function addFiles(files: FileList | File[] | null | undefined): void {
+    if (!files) return;
+    for (const f of Array.from(files)) {
+      void uploadFile(f);
+    }
+  }
+
+  function removeAttachment(key: string): void {
+    const idx = pendingAttachments.findIndex((a) => a.key === key);
+    if (idx < 0) return;
+    const a = pendingAttachments[idx];
+    if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+    pendingAttachments.splice(idx, 1);
+  }
+
+  function onFilePick(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    addFiles(input.files);
+    // Reset so picking the same file twice still fires `change`.
+    input.value = "";
+  }
+
+  function onPaste(e: ClipboardEvent): void {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (const it of Array.from(items)) {
+      if (it.kind === "file") {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      addFiles(files);
+    }
+  }
+
+  function onDragEnter(e: DragEvent): void {
+    if (!e.dataTransfer?.types.includes("Files")) return;
+    e.preventDefault();
+    dragDepth += 1;
+  }
+  function onDragOver(e: DragEvent): void {
+    if (!e.dataTransfer?.types.includes("Files")) return;
+    e.preventDefault();
+  }
+  function onDragLeave(e: DragEvent): void {
+    if (!e.dataTransfer?.types.includes("Files")) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+  }
+  function onDrop(e: DragEvent): void {
+    if (!e.dataTransfer?.files || e.dataTransfer.files.length === 0) return;
+    e.preventDefault();
+    dragDepth = 0;
+    addFiles(e.dataTransfer.files);
+  }
+
   async function submit() {
     const t = text.trim();
-    if (!t || busy) return;
+    // Allow attachment-only sends (text empty but at least one ready
+    // attachment) once we have anything ready.
+    const ready = pendingAttachments.filter((a) => a.status === "done" && a.sha256);
+    if ((!t && ready.length === 0) || busy) return;
+    // Block while any attachment is still uploading; otherwise the message
+    // would land without the file the user clearly meant to include.
+    if (pendingAttachments.some((a) => a.status === "uploading")) return;
 
     if (t.startsWith("/")) {
       const space = t.indexOf(" ");
@@ -113,11 +244,25 @@
     // then attempt to flush. If the network is down or the daemon is
     // unreachable, the bubble stays "queued" until a reconnect drains the
     // queue (see +layout.svelte's flush effect).
+    const attachments = ready.map((a) => ({
+      sha256: a.sha256!,
+      filename: a.filename,
+      mime: a.mime,
+    }));
     const queueItem = sendQueue.enqueue({
       agent: chat.focusedAgent,
       text: t,
+      attachments: attachments.length > 0 ? attachments : undefined,
     });
-    chat.addUser(t, { queueId: queueItem.id });
+    chat.addUser(t, {
+      queueId: queueItem.id,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    });
+    // Release object URLs and clear the chip row.
+    for (const a of pendingAttachments) {
+      if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+    }
+    pendingAttachments = [];
     text = "";
     // Wait for the bound textarea value to actually clear before measuring.
     // Without this, scrollHeight still reflects the multi-line draft and
@@ -363,7 +508,41 @@
   }
 </script>
 
-<div class="input-wrap">
+<div
+  class="input-wrap"
+  class:dragging={isDragging}
+  ondragenter={onDragEnter}
+  ondragover={onDragOver}
+  ondragleave={onDragLeave}
+  ondrop={onDrop}
+  role="presentation">
+  {#if pendingAttachments.length > 0}
+    <div class="chips" aria-label="Attachments">
+      {#each pendingAttachments as a (a.key)}
+        <div class="chip" class:err={a.status === "error"} title={a.error ?? a.filename}>
+          {#if a.previewUrl && a.mime.startsWith("image/")}
+            <img class="chip-thumb" src={a.previewUrl} alt={a.filename} />
+          {:else}
+            <span class="chip-icon">📎</span>
+          {/if}
+          <span class="chip-name">{a.filename}</span>
+          {#if a.status === "uploading"}
+            <span class="chip-status" aria-label="Uploading">⏳</span>
+          {:else if a.status === "error"}
+            <span class="chip-status" aria-label="Upload failed">⚠</span>
+          {/if}
+          <button
+            type="button"
+            class="chip-remove"
+            onclick={() => removeAttachment(a.key)}
+            aria-label={`Remove ${a.filename}`}>×</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+  {#if isDragging}
+    <div class="drop-overlay" aria-hidden="true">Drop to attach</div>
+  {/if}
   {#if showAutocomplete && suggestions.length > 0}
     <div class="autocomplete" role="listbox">
       {#each suggestions as s, i}
@@ -383,11 +562,25 @@
   {/if}
 
   <form class="input" onsubmit={(e) => { e.preventDefault(); void submit(); }}>
+    <input
+      bind:this={fileInput}
+      type="file"
+      accept="image/*,application/pdf"
+      multiple
+      class="hidden-file"
+      onchange={onFilePick} />
+    <button
+      type="button"
+      class="attach"
+      onclick={() => fileInput?.click()}
+      aria-label="Attach file"
+      title="Attach file">📎</button>
     <textarea
       bind:this={textarea}
       bind:value={text}
       onkeydown={onKeydown}
       oninput={autoresize}
+      onpaste={onPaste}
       placeholder="Message Friday… or /command"
       rows="1"
       autocomplete="off"
@@ -396,7 +589,10 @@
     {#if busy}
       <button type="button" class="stop" onclick={stop}>Stop</button>
     {:else}
-      <button type="submit" class="send" disabled={!text.trim()}>Send</button>
+      <button
+        type="submit"
+        class="send"
+        disabled={(!text.trim() && pendingAttachments.filter((a) => a.status === "done").length === 0) || pendingAttachments.some((a) => a.status === "uploading")}>Send</button>
     {/if}
   </form>
 </div>
@@ -429,6 +625,89 @@
   .input-wrap {
     position: relative;
     width: 100%;
+  }
+  .input-wrap.dragging {
+    outline: 2px dashed var(--accent-primary);
+    outline-offset: -2px;
+    border-radius: var(--radius-md);
+  }
+  .drop-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent-glow);
+    color: var(--accent-primary);
+    font-weight: 600;
+    border-radius: var(--radius-md);
+    pointer-events: none;
+    z-index: 5;
+  }
+  .hidden-file { display: none; }
+  .attach {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-sm);
+    padding: 0.45rem 0.55rem;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 1rem;
+    line-height: 1;
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+  .attach:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0.5rem 1rem 0;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 0.4rem 0.25rem 0.5rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    font-size: 0.75rem;
+    max-width: 14rem;
+  }
+  .chip.err {
+    border-color: var(--status-error);
+    color: var(--status-error);
+  }
+  .chip-thumb {
+    width: 1.5rem;
+    height: 1.5rem;
+    object-fit: cover;
+    border-radius: 50%;
+  }
+  .chip-icon { line-height: 1; }
+  .chip-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chip-status { font-size: 0.7rem; }
+  .chip-remove {
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.25rem;
+    border-radius: 50%;
+  }
+  .chip-remove:hover {
+    background: var(--bg-card);
+    color: var(--text-primary);
   }
   .input {
     display: flex;
