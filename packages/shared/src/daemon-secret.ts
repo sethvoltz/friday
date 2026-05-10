@@ -25,16 +25,33 @@ let cached: string | null = null;
 
 export function getDaemonSecret(): string {
   if (cached) return cached;
-  if (!existsSync(DAEMON_SECRET_PATH)) {
+  // Race-safe creation. If daemon and dashboard cold-start concurrently and
+  // both observe the file missing, naive existsSync+write lets both win
+  // the existsSync but then fight at write — last-write wins on disk while
+  // the loser caches its own value forever. Use `wx` (exclusive create)
+  // and fall through to a read on EEXIST.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      cached = readFileSync(DAEMON_SECRET_PATH, "utf8").trim();
+      if (cached) return cached;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
     const dir = dirname(DAEMON_SECRET_PATH);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const secret = randomBytes(32).toString("hex");
-    writeFileSync(DAEMON_SECRET_PATH, secret, { mode: 0o600 });
-    cached = secret;
-    return secret;
+    try {
+      writeFileSync(DAEMON_SECRET_PATH, randomBytes(32).toString("hex"), {
+        mode: 0o600,
+        flag: "wx",
+      });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // Lost the race — loop back and read what the winner wrote.
+    }
   }
-  cached = readFileSync(DAEMON_SECRET_PATH, "utf8").trim();
-  return cached;
+  throw new Error(
+    `failed to read or create daemon secret at ${DAEMON_SECRET_PATH}`,
+  );
 }
 
 export const DAEMON_SECRET_HEADER = "x-friday-daemon-secret";
