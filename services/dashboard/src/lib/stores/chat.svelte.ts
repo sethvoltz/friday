@@ -1,4 +1,5 @@
 import type { WireEvent } from "@friday/shared";
+import { KEYS, loadJSON, saveJSON } from "./persistent";
 
 export interface ChatMessage {
   /** turn_id for assistant; "u_<n>" for user; "t_<toolId>"; "th_<blockId>". */
@@ -299,15 +300,33 @@ export class ChatState {
     this.messages = [];
     this.oldestDbId = null;
     this.reachedOldest = false;
+
+    // Last-known transcript from a previous session. Render the cached turns
+    // immediately so a slow / offline first-paint doesn't show an empty
+    // chat. The live fetch below replaces this once it lands; the bubble
+    // ids are stable across cache → fresh, so any in-flight stream attaches
+    // cleanly.
+    const cached = loadJSON<TurnRow[]>(KEYS.transcript(agent), []);
+    if (cached.length > 0) {
+      this.messages = parseTurns(cached, agent);
+      this.oldestDbId = oldestDbTurnId(cached);
+    }
+
     try {
       const r = await fetch(`/api/agents/${agent}/turns?limit=5`);
       if (!r.ok) return;
       const turns = (await r.json()) as TurnRow[];
       this.messages = parseTurns(turns, agent);
       this.oldestDbId = oldestDbTurnId(turns);
-      if (turns.length === 0) this.reachedOldest = true;
+      if (turns.length === 0) {
+        this.reachedOldest = true;
+      } else {
+        // Trim before persisting: localStorage caps around 5MB per origin
+        // and contentJson can carry sizable tool inputs/outputs.
+        saveJSON(KEYS.transcript(agent), turns.slice(0, 5));
+      }
     } catch {
-      // ignore network errors
+      // Network down — keep the cached render in place.
     }
   }
 
