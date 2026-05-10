@@ -1,5 +1,5 @@
 import { json, type RequestHandler } from "@sveltejs/kit";
-import { DAEMON_BASE } from "$lib/server/daemon";
+import { DAEMON_BASE, daemonAuthHeaders } from "$lib/server/daemon";
 
 const UPLOAD_TIMEOUT_MS = 60_000;
 
@@ -12,6 +12,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
     headers: {
       "content-type": contentType,
       "x-filename": filename,
+      ...daemonAuthHeaders(),
     },
     // Forward the raw body. `duplex: "half"` is required for streaming bodies
     // in newer Node fetch implementations.

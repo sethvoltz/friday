@@ -4,6 +4,9 @@ import { logger } from "../log.js";
 import { eventBus } from "../events/bus.js";
 import {
   type AgentEntry,
+  DAEMON_SECRET_HEADER,
+  getDaemonSecret,
+  isLocalHost,
   loadConfig,
   composeSystemPrompt,
   loadSkills,
@@ -817,7 +820,17 @@ async function handle(
   // multipart-parsing complexity that adds nothing for a single-file form.
   // Dashboard hits this with `fetch(url, { method: "POST", body: file,
   // headers: { "content-type": file.type, "x-filename": file.name } })`.
+  //
+  // Auth: same-machine shared-secret header + Host-header check. The daemon
+  // binds 127.0.0.1, but that alone doesn't stop DNS-rebind attacks (a
+  // hostile page resolving an attacker hostname to 127.0.0.1) or other
+  // local processes. The shared secret is generated on first run, mode
+  // 0600, and read by the dashboard at startup so its proxy can inject the
+  // header.
   if (method === "POST" && path === "/api/uploads") {
+    if (!authorizeSameHost(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
     const contentLength = Number(req.headers["content-length"] ?? 0);
     const MAX_BYTES = 25 * 1024 * 1024; // 25MB; mirrors common chat-attachment caps.
     if (contentLength > MAX_BYTES) {
@@ -827,13 +840,26 @@ async function handle(
     }
     const filename = String(req.headers["x-filename"] ?? "upload").slice(0, 255);
     const mime = String(req.headers["content-type"] ?? "application/octet-stream");
+    if (!ATTACHMENT_MIME_ALLOWLIST.has(mime.toLowerCase())) {
+      return json(res, 415, {
+        error: `unsupported mime: ${mime}`,
+        allowed: [...ATTACHMENT_MIME_ALLOWLIST],
+      });
+    }
     const chunks: Buffer[] = [];
     let received = 0;
+    let aborted = false;
     try {
       for await (const c of req) {
         const buf = c as Buffer;
         received += buf.length;
         if (received > MAX_BYTES) {
+          // Tear down the connection. Without `req.destroy()` the loop's
+          // early return doesn't actually stop the client from sending; a
+          // chunked request that lies about content-length could keep
+          // amplifying memory until the network runs out of patience.
+          aborted = true;
+          req.destroy();
           return json(res, 413, {
             error: `file exceeds ${MAX_BYTES} bytes`,
           });
@@ -841,6 +867,7 @@ async function handle(
         chunks.push(buf);
       }
     } catch (err) {
+      if (aborted) return; // already responded
       return json(res, 400, {
         error: `read failed: ${err instanceof Error ? err.message : String(err)}`,
       });
@@ -865,17 +892,32 @@ async function handle(
   }
 
   if (method === "GET" && /^\/api\/uploads\/[a-f0-9]{64}$/.test(path)) {
+    if (!authorizeSameHost(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
     const sha = path.split("/")[3];
     const bytes = readAttachmentBytes(sha);
     if (!bytes) return json(res, 404, { error: "not found" });
-    // Resolve content-type from the DB row so image renders work.
     const meta = getAttachment(sha);
-    const ct = meta?.mime ?? "application/octet-stream";
-    res.writeHead(200, {
-      "content-type": ct,
+    const rawMime = (meta?.mime ?? "application/octet-stream").toLowerCase();
+    // Only allow inline rendering for a small, well-understood set of
+    // MIME types. Anything else is forced to `application/octet-stream`
+    // with `Content-Disposition: attachment` so the browser downloads
+    // rather than parses it. `nosniff` blocks browser MIME-sniffing,
+    // which would otherwise re-derive a dangerous type from the bytes.
+    const inlineSafe = INLINE_SERVE_MIME_ALLOWLIST.has(rawMime);
+    const contentType = inlineSafe ? rawMime : "application/octet-stream";
+    const safeFilename = sanitizeFilenameForHeader(meta?.filename ?? sha);
+    const headers: Record<string, string> = {
+      "content-type": contentType,
       "content-length": String(bytes.length),
       "cache-control": "private, max-age=31536000, immutable",
-    });
+      "x-content-type-options": "nosniff",
+    };
+    if (!inlineSafe) {
+      headers["content-disposition"] = `attachment; filename="${safeFilename.ascii}"; filename*=UTF-8''${safeFilename.rfc5987}`;
+    }
+    res.writeHead(200, headers);
     res.end(bytes);
     return;
   }
@@ -1143,4 +1185,81 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
+}
+
+/**
+ * Allowlist of MIME types we accept for new uploads. Mirrors the dashboard's
+ * file-picker `accept` attribute so the contract is consistent end-to-end.
+ * The picker is a UI hint only — drag-drop and paste can deliver other
+ * types — so the server enforces the same set.
+ */
+const ATTACHMENT_MIME_ALLOWLIST = new Set<string>([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/gif",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+  "application/pdf",
+]);
+
+/**
+ * Subset of allowed MIMEs that are safe to serve inline (rendered by the
+ * browser in-place). Anything outside this set is forced to download via
+ * `Content-Disposition: attachment`. Conservative: even for a closed-loop
+ * single-user daemon, we don't want the upload route to ever serve content
+ * that could execute as script on the daemon's origin.
+ */
+const INLINE_SERVE_MIME_ALLOWLIST = new Set<string>([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+]);
+
+/**
+ * Same-host authorization for write/read endpoints. Two layers of defense:
+ *
+ *  1. Shared secret on `x-friday-daemon-secret` (defeats other local
+ *     processes that haven't read `~/.friday/.daemon-secret`).
+ *  2. Host header must be a loopback name (defeats DNS-rebind: a hostile
+ *     page resolving `attacker.example` to 127.0.0.1 will send
+ *     `Host: attacker.example` and fail this check).
+ */
+function authorizeSameHost(req: IncomingMessage): boolean {
+  if (!isLocalHost(req.headers.host)) return false;
+  const provided = req.headers[DAEMON_SECRET_HEADER];
+  if (typeof provided !== "string") return false;
+  // Constant-time comparison to avoid timing oracles. The secret is short
+  // enough that the loop cost is negligible.
+  const expected = getDaemonSecret();
+  if (provided.length !== expected.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < expected.length; i++) {
+    mismatch |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
+/**
+ * Render a filename for `Content-Disposition`. Returns both an ASCII
+ * fallback (for legacy clients) and an RFC 5987 percent-encoded form. We
+ * strip control chars and double quotes, replace path separators, and cap
+ * the length so the header never carries unbounded user input.
+ */
+function sanitizeFilenameForHeader(raw: string): {
+  ascii: string;
+  rfc5987: string;
+} {
+  // Strip path separators, control chars, and quotes that would break the
+  // ASCII `filename="..."` form.
+  // eslint-disable-next-line no-control-regex
+  const cleaned = raw.replace(/[\x00-\x1f\x7f"\\/]/g, "_").slice(0, 200);
+  const ascii =
+    cleaned.replace(/[^\x20-\x7e]/g, "_") || "attachment";
+  const rfc5987 = encodeURIComponent(cleaned).replace(/['()]/g, escape);
+  return { ascii, rfc5987 };
 }
