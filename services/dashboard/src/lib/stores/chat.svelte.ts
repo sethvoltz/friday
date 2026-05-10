@@ -300,7 +300,7 @@ export class ChatState {
     this.oldestDbId = null;
     this.reachedOldest = false;
     try {
-      const r = await fetch(`/api/agents/${agent}/turns?limit=50`);
+      const r = await fetch(`/api/agents/${agent}/turns?limit=5`);
       if (!r.ok) return;
       const turns = (await r.json()) as TurnRow[];
       this.messages = parseTurns(turns, agent);
