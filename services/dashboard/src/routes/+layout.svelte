@@ -243,7 +243,11 @@
     transform: translateX(-50%);
     width: calc(100% - 2rem);
     max-width: 1260px;
-    z-index: 100;
+    /* Higher than the chat sidebar (50) AND its open dropdown (200 inside
+       Sidebar.svelte) — without this, on the mobile breakpoint where the
+       sidebar trigger spans the full content width, a tap on the hamburger
+       at the top-right can route to the sidebar's stacking context first. */
+    z-index: 250;
     backdrop-filter: blur(20px) saturate(160%);
     -webkit-backdrop-filter: blur(20px) saturate(160%);
     border-radius: 999px;
