@@ -96,10 +96,18 @@
     </div>
   {/if}
   {#if list.length === 0}
-    <div class="empty">
-      <h2>👑 Friday</h2>
-      <p>Say hi or ask for what you want done.</p>
-    </div>
+    {#if !readonly && chat.loadingInitial}
+      <div class="skeleton-list" aria-hidden="true">
+        <div class="skeleton-bubble assistant"></div>
+        <div class="skeleton-bubble user"></div>
+        <div class="skeleton-bubble assistant"></div>
+      </div>
+    {:else}
+      <div class="empty">
+        <h2>👑 Friday</h2>
+        <p>Say hi or ask for what you want done.</p>
+      </div>
+    {/if}
   {/if}
   {#each list as msg (msg.id)}
     {#if msg.role === "tool"}
@@ -271,6 +279,37 @@
   .hint {
     font-size: 0.75rem;
     color: var(--text-tertiary);
+  }
+  .skeleton-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1rem 0;
+  }
+  .skeleton-bubble {
+    height: 3.5rem;
+    border-radius: var(--radius-md);
+    background: linear-gradient(
+      90deg,
+      var(--bg-card) 0%,
+      var(--bg-tertiary) 50%,
+      var(--bg-card) 100%
+    );
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.4s linear infinite;
+    max-width: 70%;
+  }
+  .skeleton-bubble.user {
+    align-self: flex-end;
+    width: 50%;
+  }
+  .skeleton-bubble.assistant {
+    align-self: flex-start;
+    width: 70%;
+  }
+  @keyframes skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
   }
   .hint.dim {
     opacity: 0.6;

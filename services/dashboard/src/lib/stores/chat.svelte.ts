@@ -1,4 +1,5 @@
 import type { WireEvent } from "@friday/shared";
+import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { KEYS, loadJSON, saveJSON } from "./persistent";
 
 export interface ChatMessage {
@@ -73,6 +74,10 @@ export class ChatState {
   loadingOlder = $state(false);
   /** True once we've fetched and gotten back an empty page (no more history). */
   reachedOldest = $state(false);
+  /** True while the initial fetch for the focused agent is in flight and we
+   *  have nothing (cached or otherwise) to show. Drives the skeleton state
+   *  in ChatMessages so a slow first paint isn't a blank page. */
+  loadingInitial = $state(false);
   /** Set by ChatShell from its scroll handler. ChatMessages reads it to
    * decide whether to slice the rendered list (cap at WINDOW when bottom-
    * pinned) or render everything (when the user is reading older history). */
@@ -311,9 +316,12 @@ export class ChatState {
       this.messages = parseTurns(cached, agent);
       this.oldestDbId = oldestDbTurnId(cached);
     }
+    this.loadingInitial = cached.length === 0;
 
     try {
-      const r = await fetch(`/api/agents/${agent}/turns?limit=5`);
+      const r = await fetchWithTimeout(`/api/agents/${agent}/turns?limit=5`, {
+        timeoutMs: 15_000,
+      });
       if (!r.ok) return;
       const turns = (await r.json()) as TurnRow[];
       this.messages = parseTurns(turns, agent);
@@ -327,6 +335,8 @@ export class ChatState {
       }
     } catch {
       // Network down — keep the cached render in place.
+    } finally {
+      this.loadingInitial = false;
     }
   }
 
@@ -348,8 +358,9 @@ export class ChatState {
     this.loadingOlder = true;
     const startedAt = Date.now();
     try {
-      const r = await fetch(
+      const r = await fetchWithTimeout(
         `/api/agents/${agent}/turns?limit=50&beforeId=${beforeId}`,
+        { timeoutMs: 15_000 },
       );
       if (!r.ok) return;
       const turns = (await r.json()) as TurnRow[];

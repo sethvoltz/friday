@@ -107,6 +107,19 @@
       }
     };
   });
+  // Offline banner: only show after the SSE has been disconnected for a few
+  // seconds, so a momentary blip during reconnect doesn't flash a banner.
+  let showOfflineBanner = $state(false);
+  $effect(() => {
+    if (sseConnected.value) {
+      showOfflineBanner = false;
+      return;
+    }
+    const t = setTimeout(() => {
+      if (!sseConnected.value) showOfflineBanner = true;
+    }, 5000);
+    return () => clearTimeout(t);
+  });
   function fmtDuration(ms: number) {
     const s = Math.max(0, Math.floor(ms / 1000));
     if (s < 60) return `${s}s`;
@@ -130,6 +143,11 @@
 </svelte:head>
 
 <div data-theme={theme} class="app-shell">
+  {#if signedIn && !isLogin && showOfflineBanner}
+    <div class="offline-banner" role="status" aria-live="polite">
+      Daemon unreachable — retrying. Sent messages are queued and will flush on reconnect.
+    </div>
+  {/if}
   {#if signedIn && !isLogin}
     <header class="app-header">
       <div class="header-left">
@@ -193,6 +211,20 @@
     min-height: 100vh;
     background: var(--bg-primary);
     transition: background var(--transition-normal);
+  }
+
+  .offline-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 300;
+    padding: 0.5rem 1rem;
+    text-align: center;
+    background: var(--status-warn, #b45309);
+    color: var(--text-inverse, #fff);
+    font-size: 0.8rem;
+    font-weight: 500;
   }
 
   .app-header {
