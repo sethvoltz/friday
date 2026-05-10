@@ -1,8 +1,22 @@
 <script lang="ts">
   import { chat, type ChatMessage } from "$lib/stores/chat.svelte";
+  import { sendQueue } from "$lib/stores/send-queue.svelte";
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import ToolBlock from "$lib/components/Chat/ToolBlock.svelte";
   import ThinkingBlock from "$lib/components/Chat/ThinkingBlock.svelte";
+
+  function queueEntry(queueId: string | undefined) {
+    if (!queueId) return undefined;
+    return sendQueue.items.find((q) => q.id === queueId);
+  }
+
+  async function retryQueued(queueId: string) {
+    const sent = await sendQueue.retry(queueId);
+    for (const s of sent) {
+      chat.clearQueueMarker(s.queueId);
+      chat.inflightTurnId = s.turnId;
+    }
+  }
 
   let { messages }: { messages?: ChatMessage[] } = $props();
   let allMessages = $derived(messages ?? chat.messages);
@@ -145,7 +159,18 @@
               </div>
             {/if}
             {#if msg.queueId}
-              <div class="footer-tag queued">Queued — waiting to send</div>
+              {@const q = queueEntry(msg.queueId)}
+              {#if q?.status === "failed"}
+                <div class="footer-tag failed-row">
+                  <span>Failed{q.lastError ? ` — ${q.lastError}` : ""}</span>
+                  <button type="button" class="queue-action" onclick={() => retryQueued(q.id)}>Retry</button>
+                  <button type="button" class="queue-action" onclick={() => sendQueue.remove(q.id)}>Remove</button>
+                </div>
+              {:else if q?.status === "retrying"}
+                <div class="footer-tag queued">Retrying… ({q.attempts}/5)</div>
+              {:else}
+                <div class="footer-tag queued">Queued — waiting to send</div>
+              {/if}
             {/if}
           {:else}
             <Markdown source={msg.text} />
@@ -224,6 +249,27 @@
   .footer-tag.queued {
     color: var(--text-inverse);
     opacity: 0.85;
+  }
+  .footer-tag.failed-row {
+    color: var(--text-inverse);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .queue-action {
+    background: rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    color: var(--text-inverse);
+    padding: 0.15rem 0.5rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.7rem;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .queue-action:hover {
+    background: rgba(255, 255, 255, 0.28);
   }
   .attachments {
     display: flex;
