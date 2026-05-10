@@ -4,7 +4,7 @@
   import { portal } from "$lib/actions/portal";
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
-  import { onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
 
   interface CommandsResponse {
     system: Array<{ name: string; description: string; destructive?: boolean }>;
@@ -41,22 +41,32 @@
   });
 
   // Per-agent draft persistence. We key by `chat.focusedAgent` so switching
-  // agents preserves each agent's unsent draft independently. Restore happens
-  // whenever the focused agent changes (component is reused across routes via
-  // SvelteKit's preserve-state behavior); save on every keystroke.
-  let lastRestoredAgent = $state<string | null>(null);
+  // agents preserves each agent's unsent draft independently. Restore
+  // happens whenever the focused agent changes (component is reused across
+  // routes via SvelteKit's preserve-state behavior); save on every
+  // keystroke.
+  //
+  // Subtlety: when `chat.focusedAgent` flips, naively splitting restore
+  // and save across two effects can race — the save effect can observe
+  // the *old* text with the *new* agent and contaminate the new agent's
+  // draft key. Track the agent we last *saved* under so we only persist
+  // when the captured agent matches the current one, and treat the very
+  // first run after a switch as a restore-only step regardless of what
+  // `text` happens to hold.
+  let lastSavedAgent = $state<string | null>(null);
   $effect(() => {
     const a = chat.focusedAgent;
-    if (a !== lastRestoredAgent) {
-      lastRestoredAgent = a;
+    if (a !== lastSavedAgent) {
+      // First observation of this agent: pull its persisted draft into
+      // `text`. Don't write anything — `text` may still hold the previous
+      // agent's content for a single tick.
       const stored = loadString(KEYS.draft(a));
       text = stored ?? "";
+      lastSavedAgent = a;
       void tick().then(autoresize);
+      return;
     }
-  });
-  $effect(() => {
-    const a = chat.focusedAgent;
-    if (a !== lastRestoredAgent) return;
+    // Steady state: persist the current text under the current agent.
     if (text) saveString(KEYS.draft(a), text);
     else removeKey(KEYS.draft(a));
   });
@@ -135,6 +145,13 @@
         const err = await r.text().catch(() => "upload failed");
         found.status = "error";
         found.error = err.slice(0, 200);
+        // Free the blob URL — an error chip never needs the preview again,
+        // and holding it alive is just a memory leak waiting on a manual
+        // remove.
+        if (found.previewUrl) {
+          URL.revokeObjectURL(found.previewUrl);
+          found.previewUrl = undefined;
+        }
         return;
       }
       const data = (await r.json()) as {
@@ -153,8 +170,43 @@
       if (!found) return;
       found.status = "error";
       found.error = err instanceof Error ? err.message : String(err);
+      if (found.previewUrl) {
+        URL.revokeObjectURL(found.previewUrl);
+        found.previewUrl = undefined;
+      }
     }
   }
+
+  /** Revoke every pending attachment's blob URL and clear the array.
+   *  Used on unmount and on agent switch — pending attachments are an
+   *  ephemeral compose-time concept; unlike drafts, they do not survive
+   *  navigation. */
+  function clearPendingAttachments(): void {
+    for (const a of pendingAttachments) {
+      if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+    }
+    pendingAttachments = [];
+  }
+
+  // Per-agent: pending attachments are scoped to the compose box for the
+  // currently focused agent. Switching agents clears them and revokes the
+  // associated blob URLs so we don't accumulate.
+  let lastAttachmentAgent = $state<string | null>(null);
+  $effect(() => {
+    const a = chat.focusedAgent;
+    if (lastAttachmentAgent === null) {
+      lastAttachmentAgent = a;
+      return;
+    }
+    if (a !== lastAttachmentAgent) {
+      clearPendingAttachments();
+      lastAttachmentAgent = a;
+    }
+  });
+
+  onDestroy(() => {
+    clearPendingAttachments();
+  });
 
   function addFiles(files: FileList | File[] | null | undefined): void {
     if (!files) return;

@@ -14,16 +14,16 @@ declare const self: ServiceWorkerGlobalScope;
  * `files` (everything in /static). Precache both at install so a cold network
  * still paints the shell. Runtime cache strategy:
  *
- * - Precached assets: cache-first.
- * - Same-origin GET that's *not* /api/*: stale-while-revalidate. Pages and
- *   icons feel instant on resume even if the network is degraded.
- * - /api/*: network-only. The API talks to localhost / a Cloudflare Tunnel;
- *   serving a cached agent list, transcript, or SSE stream would actively
- *   mislead the user. Cached transcripts live in localStorage where the app
- *   can decide how to merge them with fresh data.
+ * - Precached assets (the build + static files set): cache-first.
+ * - Everything else same-origin: pass through to the network. We
+ *   deliberately do NOT cache rendered HTML or any other dynamic GET —
+ *   SvelteKit pages are personalized for the authenticated user, and a
+ *   cached `/sessions/*` shell would still be served after logout /
+ *   cookie expiry, exposing the previous session's UI to the next user.
+ * - /api/*: bypass. SSE, agent lists, transcripts — serving cached
+ *   versions of those would actively mislead the UI.
  *
- * No skipWaiting/clients.claim — the user gets the new worker on next reload,
- * which lines up with how the app's own state is rehydrated.
+ * No skipWaiting/clients.claim — the user gets the new worker on next reload.
  */
 
 const CACHE = `friday-shell-${version}`;
@@ -59,13 +59,17 @@ self.addEventListener("fetch", (event) => {
   // /api/* always hits the network — cached responses would mislead the UI.
   if (url.pathname.startsWith("/api/")) return;
 
+  // Static asset from the precache set: cache-first. These are
+  // content-versioned by SvelteKit (filenames include a hash) so we never
+  // serve stale code, and they don't carry user state.
   if (ASSETS.includes(url.pathname)) {
     event.respondWith(cacheFirst(request));
     return;
   }
 
-  // Page navigations + everything else same-origin: stale-while-revalidate.
-  event.respondWith(staleWhileRevalidate(request));
+  // Everything else (rendered HTML, dynamic responses): pass through to
+  // the network without caching. We don't trust ourselves to know which
+  // responses safely outlive a logout, so we cache none of them.
 });
 
 async function cacheFirst(request: Request): Promise<Response> {
@@ -80,30 +84,4 @@ async function cacheFirst(request: Request): Promise<Response> {
     if (cached) return cached;
     throw err;
   }
-}
-
-async function staleWhileRevalidate(request: Request): Promise<Response> {
-  const cache = await caches.open(CACHE);
-  const cached = await cache.match(request);
-  const network = fetch(request)
-    .then((res) => {
-      if (res.ok && res.type === "basic") cache.put(request, res.clone());
-      return res;
-    })
-    .catch(() => undefined);
-  if (cached) {
-    // Kick off the revalidation but don't wait on it.
-    void network;
-    return cached;
-  }
-  const fresh = await network;
-  if (fresh) return fresh;
-  // Last resort: navigation request with neither cache nor network. Serve
-  // the precached root HTML so the SPA shell still mounts and can render
-  // its own offline UI from localStorage.
-  if (request.mode === "navigate") {
-    const fallback = await cache.match("/");
-    if (fallback) return fallback;
-  }
-  return new Response("offline", { status: 503, statusText: "offline" });
 }

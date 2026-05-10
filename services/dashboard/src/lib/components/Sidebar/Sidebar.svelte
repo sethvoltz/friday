@@ -38,10 +38,26 @@
   }
 
   // Filters — persisted across reloads so the user's preference survives.
-  let showKilled = $state(loadJSON<boolean>("sidebar:showKilled", false));
-  let showInactive = $state(loadJSON<boolean>("sidebar:showInactive", false));
-  $effect(() => saveJSON("sidebar:showKilled", showKilled));
-  $effect(() => saveJSON("sidebar:showInactive", showInactive));
+  // Initialize to defaults at SSR; rehydrate from localStorage inside
+  // onMount so the server-rendered HTML matches the first client render
+  // (no hydration mismatch warnings, no flash of unfiltered content if
+  // the persisted value differs from the default).
+  let showKilled = $state(false);
+  let showInactive = $state(false);
+  let filtersHydrated = $state(false);
+  onMount(() => {
+    showKilled = loadJSON<boolean>("sidebar:showKilled", false);
+    showInactive = loadJSON<boolean>("sidebar:showInactive", false);
+    filtersHydrated = true;
+  });
+  $effect(() => {
+    if (!filtersHydrated) return;
+    saveJSON("sidebar:showKilled", showKilled);
+  });
+  $effect(() => {
+    if (!filtersHydrated) return;
+    saveJSON("sidebar:showInactive", showInactive);
+  });
 
   function isActive(status: string): boolean {
     return status === "idle" || status === "working";

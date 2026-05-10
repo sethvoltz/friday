@@ -14,15 +14,10 @@
   let { data, children }: { data: LayoutData; children: Snippet } = $props();
 
   let theme = $state<"light" | "dark">("dark");
-  // Restore theme from localStorage on mount (after $state is set up so the
-  // initial render uses the persisted value before $effect fires).
-  if (typeof document !== "undefined") {
-    const stored = loadString(KEYS.theme);
-    if (stored === "light" || stored === "dark") theme = stored;
-  }
+  let themeHydrated = $state(false);
   $effect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-    saveString(KEYS.theme, theme);
+    if (themeHydrated) saveString(KEYS.theme, theme);
   });
 
   // Flush the optimistic-send queue every time SSE reconnects. The queue
@@ -60,6 +55,14 @@
   // Live uptime ticker + global SSE connection (one EventSource for all pages)
   let uptimeMs = $state(0);
   onMount(() => {
+    // Hydrate persisted theme on the client. Doing this in onMount (rather
+    // than at module init) keeps the initial render identical between SSR
+    // and CSR — no hydration mismatch warning, no flash if the persisted
+    // value differs from the default.
+    const storedTheme = loadString(KEYS.theme);
+    if (storedTheme === "light" || storedTheme === "dark") theme = storedTheme;
+    themeHydrated = true;
+
     if (data.health?.uptimeSec !== undefined) {
       uptimeMs = data.health.uptimeSec * 1000;
     }
