@@ -8,16 +8,22 @@
     "dev": "turbo run dev",
     "check": "turbo run check",
     "clean": "turbo run clean",
-    "drizzle:generate": "pnpm --filter @friday/shared run drizzle:generate"
+    "drizzle:generate": "pnpm --filter @friday/shared run drizzle:generate",
+    "prepare": "husky"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "husky": "^9.1.7",
     "turbo": "^2.5.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.5"
   },
   "packageManager": "pnpm@10.23.0",
   "pnpm": {
-    "onlyBuiltDependencies": ["better-sqlite3", "esbuild", "sharp"]
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild",
+      "sharp"
+    ]
   }
 }

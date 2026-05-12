@@ -1,0 +1,9 @@
+# FIX_FORWARD 7.3: prevent stale-dist commits. Every package consumed via
+# its `dist/` (notably @friday/shared) must be rebuilt before any commit so
+# the artifacts in the staged source tree match the source itself.
+#
+# turbo's build cache makes this cheap on no-source-change commits and
+# correct on source-change commits. If you're committing a one-line README
+# fix and want to skip the build, pass `--no-verify` — but the default is
+# to never trust dist drift past a commit boundary.
+pnpm -r build

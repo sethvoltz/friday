@@ -121,6 +121,39 @@ function cloudflaredOnPath(): boolean {
 }
 
 /**
+ * Build every workspace package (`packages/*`) before launching services
+ * (FIX_FORWARD 7.2). Both daemon and dashboard import `@friday/*` packages
+ * via their compiled `dist/`, so a stale dist after a source edit silently
+ * runs old code. Building here closes that loophole.
+ *
+ * Skipped when neither daemon nor dashboard is in the services list — e.g.
+ * `friday start tunnel` doesn't need package builds.
+ */
+function buildPackagesOrAbort(repoRoot: string): void {
+  const r = spawnSync(
+    "pnpm",
+    ["exec", "turbo", "build", "--filter=./packages/*"],
+    {
+      cwd: repoRoot,
+      stdio: "inherit",
+    },
+  );
+  if (r.status !== 0) {
+    console.error(
+      pc.red(
+        "package build failed — refusing to start daemon/dashboard against a stale dist.",
+      ),
+    );
+    console.error(
+      pc.dim(
+        "  fix the build errors above and re-run `friday start`, or run `pnpm -r build` for the full output.",
+      ),
+    );
+    process.exit(1);
+  }
+}
+
+/**
  * Resolve why the tunnel can't start, if anything. Returns null when ready.
  */
 function tunnelBlocker(): string | null {
@@ -184,6 +217,17 @@ export const startCommand = defineCommand({
       }
       services = services.filter((s) => s !== "tunnel");
       console.log(pc.dim(`  · tunnel skipped — ${blocker}`));
+    }
+
+    // Build workspace packages before launching anything that imports their
+    // dist/. The tunnel doesn't need them, so skip when only tunnel is
+    // queued (FIX_FORWARD 7.2).
+    const needsPackages = services.some(
+      (s) => s === "daemon" || s === "dashboard",
+    );
+    if (needsPackages) {
+      console.log(pc.dim("  · building workspace packages…"));
+      buildPackagesOrAbort(repoRoot);
     }
 
     console.log(pc.green(`starting ${services.join(" + ")} in ${mode} mode`));

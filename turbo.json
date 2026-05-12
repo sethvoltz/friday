@@ -9,6 +9,16 @@
       "persistent": true,
       "cache": false
     },
+    "@friday/daemon#dev": {
+      "dependsOn": ["^build"],
+      "persistent": true,
+      "cache": false
+    },
+    "@friday/dashboard#dev": {
+      "dependsOn": ["^build"],
+      "persistent": true,
+      "cache": false
+    },
     "check": {
       "dependsOn": ["^build"]
     },
