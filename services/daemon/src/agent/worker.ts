@@ -161,18 +161,49 @@ async function fetchInboxQuiet(
 
 /**
  * Per-turn block tracking. The SDK gives us `index` for content blocks inside
- * `content_block_start/delta/stop` events (not stable ids). For tool_use we
- * have a real id from the block; for thinking we synthesize a stable block id
- * from the message id + content index.
+ * `content_block_start/delta/stop` events. We mint a `clientBlockId` that's
+ * unique within this worker process (so duplicate indices across messages
+ * stay separate) and the daemon correlates start/delta/stop by that id.
  */
 interface BlockState {
+  clientBlockId: string;
   kind: "text" | "tool_use" | "thinking";
-  /** Stable id surfaced to consumers (block.id for tool_use, synthesized for thinking). */
-  emittedId?: string;
-  /** Cached tool name for tool-end emission. */
+  blockIndex: number;
+  messageId?: string;
+  /** Stable tool id from the SDK content block; only set when kind === 'tool_use'. */
+  toolId?: string;
   toolName?: string;
-  /** Accumulated `input_json_delta.partial_json` for tool_use blocks; parsed on stop. */
+  /** Accumulated text for text/thinking; assembled for the final block-stop. */
+  text: string;
+  /** Accumulated `input_json_delta.partial_json` for tool_use blocks. */
   inputJson?: string;
+}
+
+function nextClientBlockId(): string {
+  return `b_${randomUUID()}`;
+}
+
+function finalizeBlockContent(b: BlockState): string {
+  if (b.kind === "text") {
+    return JSON.stringify({ text: b.text });
+  }
+  if (b.kind === "thinking") {
+    return JSON.stringify({ text: b.text });
+  }
+  // tool_use
+  let input: unknown = {};
+  if (b.inputJson && b.inputJson.length > 0) {
+    try {
+      input = JSON.parse(b.inputJson);
+    } catch {
+      input = { _raw: b.inputJson };
+    }
+  }
+  return JSON.stringify({
+    tool_use_id: b.toolId ?? "",
+    name: b.toolName ?? "",
+    input,
+  });
 }
 
 async function runQuery(p: WorkerPromptCommand): Promise<void> {
@@ -194,6 +225,9 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   let sessionId = p.resumeSessionId ?? lastSessionId;
   let sessionAnnounced = false;
   let currentMessageId = "";
+  // Keyed by SDK content-block index *within the current assistant message*.
+  // We mint a fresh `clientBlockId` per block-start so the daemon can
+  // correlate without relying on the SDK index (which resets each message).
   const blocks = new Map<number, BlockState>();
 
   const DEFAULT_THINKING_BUDGET = 8192;
@@ -318,79 +352,108 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         if (e.type === "content_block_start" && typeof e.index === "number") {
           const cb = e.content_block ?? {};
           if (cb.type === "tool_use") {
-            const id = cb.id ?? `tool_${e.index}`;
-            blocks.set(e.index, {
+            const toolId = cb.id ?? `tool_${e.index}`;
+            const state: BlockState = {
+              clientBlockId: nextClientBlockId(),
               kind: "tool_use",
-              emittedId: id,
+              blockIndex: e.index,
+              messageId: currentMessageId || undefined,
+              toolId,
               toolName: cb.name ?? "",
-            });
+              text: "",
+              inputJson: "",
+            };
+            blocks.set(e.index, state);
             emit({
-              type: "tool-start",
-              toolId: id,
-              toolName: cb.name ?? "",
-              input: {},
+              type: "block-start",
+              clientBlockId: state.clientBlockId,
+              kind: "tool_use",
+              blockIndex: e.index,
+              messageId: state.messageId,
+              tool: { id: toolId, name: state.toolName ?? "" },
             });
           } else if (cb.type === "thinking") {
-            const id = `${currentMessageId}_${e.index}`;
-            blocks.set(e.index, { kind: "thinking", emittedId: id });
-            emit({ type: "thinking-start", blockId: id });
+            const state: BlockState = {
+              clientBlockId: nextClientBlockId(),
+              kind: "thinking",
+              blockIndex: e.index,
+              messageId: currentMessageId || undefined,
+              text: "",
+            };
+            blocks.set(e.index, state);
+            emit({
+              type: "block-start",
+              clientBlockId: state.clientBlockId,
+              kind: "thinking",
+              blockIndex: e.index,
+              messageId: state.messageId,
+            });
           } else {
-            blocks.set(e.index, { kind: "text" });
+            const state: BlockState = {
+              clientBlockId: nextClientBlockId(),
+              kind: "text",
+              blockIndex: e.index,
+              messageId: currentMessageId || undefined,
+              text: "",
+            };
+            blocks.set(e.index, state);
+            emit({
+              type: "block-start",
+              clientBlockId: state.clientBlockId,
+              kind: "text",
+              blockIndex: e.index,
+              messageId: state.messageId,
+            });
           }
           continue;
         }
 
         if (e.type === "content_block_delta" && typeof e.index === "number") {
           const block = blocks.get(e.index);
+          if (!block) continue;
           const d = e.delta ?? {};
-          if (d.type === "text_delta" && typeof d.text === "string") {
+          if (d.type === "text_delta" && typeof d.text === "string" && block.kind === "text") {
+            block.text += d.text;
             emit({
-              type: "text-delta",
-              text: d.text,
-              messageId: currentMessageId || undefined,
+              type: "block-delta",
+              clientBlockId: block.clientBlockId,
+              delta: { text: d.text },
             });
           } else if (
             d.type === "thinking_delta" &&
             typeof d.thinking === "string" &&
-            block?.kind === "thinking" &&
-            block.emittedId
+            block.kind === "thinking"
           ) {
+            block.text += d.thinking;
             emit({
-              type: "thinking-delta",
-              blockId: block.emittedId,
-              text: d.thinking,
+              type: "block-delta",
+              clientBlockId: block.clientBlockId,
+              delta: { text: d.thinking },
             });
           } else if (
             d.type === "input_json_delta" &&
             typeof d.partial_json === "string" &&
-            block?.kind === "tool_use"
+            block.kind === "tool_use"
           ) {
             block.inputJson = (block.inputJson ?? "") + d.partial_json;
+            emit({
+              type: "block-delta",
+              clientBlockId: block.clientBlockId,
+              delta: { partial_json: d.partial_json },
+            });
           }
           continue;
         }
 
         if (e.type === "content_block_stop" && typeof e.index === "number") {
           const block = blocks.get(e.index);
-          if (block?.kind === "thinking" && block.emittedId) {
-            emit({ type: "thinking-end", blockId: block.emittedId });
-          }
-          if (block?.kind === "tool_use" && block.emittedId && block.inputJson) {
-            try {
-              const parsed = JSON.parse(block.inputJson);
-              emit({
-                type: "tool-input",
-                toolId: block.emittedId,
-                input: parsed,
-              });
-            } catch {
-              emit({
-                type: "tool-input",
-                toolId: block.emittedId,
-                input: { _raw: block.inputJson },
-              });
-            }
-          }
+          if (!block) continue;
+          emit({
+            type: "block-stop",
+            clientBlockId: block.clientBlockId,
+            contentJson: finalizeBlockContent(block),
+            status: "complete",
+          });
           continue;
         }
 
@@ -400,43 +463,51 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       if (m.type === "assistant") continue;
 
       if (m.type === "user") {
-        const content = (m.message as { content?: unknown[] } | undefined)
-          ?.content;
+        const userMsg = m.message as
+          | { id?: string; content?: unknown[] }
+          | undefined;
+        const content = userMsg?.content;
         if (Array.isArray(content)) {
-          for (const block of content as Array<{
-            type?: string;
-            tool_use_id?: string;
-            content?: unknown;
-            is_error?: boolean;
-          }>) {
+          content.forEach((rawBlock, idx) => {
+            const block = rawBlock as {
+              type?: string;
+              tool_use_id?: string;
+              content?: unknown;
+              is_error?: boolean;
+            };
             if (block.type === "tool_result" && block.tool_use_id) {
-              let toolName = "";
-              for (const b of blocks.values()) {
-                if (b.emittedId === block.tool_use_id) {
-                  toolName = b.toolName ?? "";
-                  break;
-                }
-              }
+              const clientBlockId = nextClientBlockId();
+              const status: "complete" | "error" = block.is_error
+                ? "error"
+                : "complete";
+              const text = stringifyToolResult(block.content);
               emit({
-                type: "tool-end",
-                toolId: block.tool_use_id,
-                toolName,
-                status: block.is_error ? "error" : "ok",
-                output: stringifyToolResult(block.content),
+                type: "block-start",
+                clientBlockId,
+                kind: "tool_result",
+                blockIndex: idx,
+                messageId: userMsg?.id,
+                tool: { id: block.tool_use_id, name: "" },
+              });
+              emit({
+                type: "block-stop",
+                clientBlockId,
+                contentJson: JSON.stringify({
+                  tool_use_id: block.tool_use_id,
+                  text,
+                  is_error: block.is_error === true,
+                }),
+                status,
               });
             }
-          }
+          });
         }
         continue;
       }
 
-      const subtype = m.subtype as string | undefined;
-      if (m.type === "system" && subtype === "compact_boundary_started") {
-        emit({ type: "compaction-start" });
-      }
-      if (m.type === "system" && subtype === "compact_boundary_ended") {
-        emit({ type: "compaction-end", result: "success" });
-      }
+      // FIX_FORWARD 1.5 removed the compaction_* wire events; the SDK's
+      // `compact_boundary_started/ended` system frames no longer surface as
+      // SSE traffic. Compaction stays an invisible runtime concern.
     }
 
     lastSessionId = sessionId ?? lastSessionId;

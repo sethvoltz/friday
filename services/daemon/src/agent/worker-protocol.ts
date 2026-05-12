@@ -56,24 +56,48 @@ export type WorkerCommand =
   | { type: "abort" }
   | { type: "mail-wakeup" };
 
+/**
+ * Worker → parent block events. Each content block (text / thinking / tool_use
+ * / tool_result) starts with `block-start`, accumulates content via zero or
+ * more `block-delta`s, and finishes with `block-stop`. The worker assigns a
+ * `clientBlockId` that's unique within the worker process — the daemon mints
+ * the final UUID stored as `block_id` in the DB and uses `clientBlockId`
+ * only to correlate delta/stop with the originating start.
+ */
+export type WorkerBlockKind = "text" | "thinking" | "tool_use" | "tool_result";
+
+export interface WorkerBlockStart {
+  type: "block-start";
+  clientBlockId: string;
+  kind: WorkerBlockKind;
+  blockIndex: number;
+  messageId?: string;
+  /** Present when kind === 'tool_use'. */
+  tool?: { id: string; name: string };
+}
+
+export interface WorkerBlockDelta {
+  type: "block-delta";
+  clientBlockId: string;
+  /** Free-form delta. text for text/thinking; partial_json for tool_use input. */
+  delta: { text?: string; partial_json?: string };
+}
+
+export interface WorkerBlockStop {
+  type: "block-stop";
+  clientBlockId: string;
+  /** Final assembled JSON payload for the block, ready for DB persistence.
+   * Daemon stores this verbatim as `content_json`. */
+  contentJson: string;
+  status: "complete" | "aborted" | "error";
+}
+
 export type WorkerEvent =
   | { type: "ready" }
   | { type: "session-update"; sessionId: string }
-  | { type: "text-delta"; text: string; messageId?: string }
-  | { type: "tool-start"; toolId: string; toolName: string; input: unknown }
-  | { type: "tool-input"; toolId: string; input: unknown }
-  | {
-      type: "tool-end";
-      toolId: string;
-      toolName: string;
-      status: "ok" | "error";
-      output?: string;
-    }
-  | { type: "thinking-start"; blockId: string }
-  | { type: "thinking-delta"; blockId: string; text: string }
-  | { type: "thinking-end"; blockId: string }
-  | { type: "compaction-start" }
-  | { type: "compaction-end"; result: "success" | "failed" }
+  | WorkerBlockStart
+  | WorkerBlockDelta
+  | WorkerBlockStop
   | {
       type: "turn-complete";
       sessionId: string;

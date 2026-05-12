@@ -16,7 +16,7 @@ import { seedMetaAgents, startScheduler } from "./scheduler/scheduler.js";
 import { reconcile as reconcileLinear } from "@friday/integrations-linear";
 import { eventBus } from "./events/bus.js";
 import * as registry from "./agent/registry.js";
-import { startMirror } from "./agent/jsonl-mirror.js";
+import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js";
 import { startMailBridge } from "./comms/mail-bridge.js";
 import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
 import { dispatchTurn } from "./agent/lifecycle.js";
@@ -119,12 +119,13 @@ async function main(): Promise<void> {
  * Boot recovery for agents:
  *  - Reset any `working` status left by a daemon that died mid-turn (no
  *    worker is alive to drive the turn forward).
- *  - Re-seed JSONL mirrors for every agent that has a known `sessionId`.
+ *  - Reconcile each agent's JSONL against the blocks table once (FIX_FORWARD
+ *    1.3). No live tail-watcher; live writes flow through worker IPC.
  *  - For long-lived agents (orchestrator/builder/helper/bare) with non-empty
  *    inboxes, dispatch a fresh turn so the pending mail isn't stranded.
- *    `startMirror` is idempotent on filepath.
  */
 function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
+  const jsonlAgents: RecoveryAgent[] = [];
   for (const a of registry.listAgents()) {
     if (a.status === "working") {
       logger.log("info", "agent.recovery.reset-working", { agent: a.name });
@@ -132,9 +133,9 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
     }
     const cwd = registry.workingDirectoryFor(a);
     if (a.sessionId) {
-      startMirror({
-        sessionId: a.sessionId,
+      jsonlAgents.push({
         agentName: a.name,
+        sessionId: a.sessionId,
         workingDirectory: cwd,
       });
     }
@@ -177,6 +178,16 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
           });
         }
       }
+    }
+  }
+
+  if (jsonlAgents.length > 0) {
+    try {
+      recoverFromJsonl(jsonlAgents);
+    } catch (err) {
+      logger.log("warn", "agent.recovery.jsonl-error", {
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }

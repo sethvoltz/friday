@@ -23,7 +23,12 @@ import {
 import { inbox, mailBus, type MailRow } from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
-import { dispatchTurn, isAgentLive, wakeAgent } from "../agent/lifecycle.js";
+import {
+  dispatchTurn,
+  isAgentLive,
+  recordUserBlock,
+  wakeAgent,
+} from "../agent/lifecycle.js";
 import * as registry from "../agent/registry.js";
 import { randomUUID } from "node:crypto";
 import { buildMailPrompt } from "./mail-prompt.js";
@@ -42,6 +47,27 @@ export function startMailBridge(): void {
       from: row.fromAgent,
       to: row.toAgent,
     });
+
+    // Materialize the mail body as a user-role block in the recipient's chat
+    // (FIX_FORWARD 1.2). The block carries `source='mail'` and the sender
+    // name inside content_json so the dashboard can render attribution.
+    try {
+      const recipient = registry.getAgent(row.toAgent);
+      recordUserBlock({
+        turnId: `mail_${row.id}`,
+        agentName: row.toAgent,
+        sessionId: recipient?.sessionId ?? undefined,
+        text: row.body,
+        source: "mail",
+        fromAgent: row.fromAgent,
+      });
+    } catch (err) {
+      logger.log("warn", "mail.bridge.user-block.error", {
+        to: row.toAgent,
+        mailId: row.id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     try {
       if (isAgentLive(row.toAgent)) {

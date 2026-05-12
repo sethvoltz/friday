@@ -6,21 +6,19 @@
  *
  * All events carry `v: 1` for forward-compat. Server-assigned `seq` is used
  * for replay via `Last-Event-ID`.
+ *
+ * FIX_FORWARD 1.5 collapsed token-level streaming events (`text_delta`,
+ * `thinking_*`, `tool_use_*`, `compaction_*`) into the block-level lifecycle
+ * (`block_start`, `block_delta`, `block_complete`, `block_reload`). The
+ * `connection_established` event is sent first on every new SSE connection
+ * to carry the daemon's `boot_id` (FIX_FORWARD 1.6) — clients reset their
+ * per-agent cursors on `boot_id` mismatch.
  */
 
 import type { AgentStatus, AgentType } from "../agents.js";
 
 export type WireEvent =
   | TurnStartedEvent
-  | TextDeltaEvent
-  | ToolUseStartEvent
-  | ToolUseInputEvent
-  | ToolUseEndEvent
-  | ThinkingStartEvent
-  | ThinkingDeltaEvent
-  | ThinkingEndEvent
-  | CompactionStartEvent
-  | CompactionEndEvent
   | TurnErrorEvent
   | TurnDoneEvent
   | AgentMessageEvent
@@ -29,7 +27,12 @@ export type WireEvent =
   | MailDeliveredEvent
   | ScheduleFiredEvent
   | EvolveCriticalEvent
-  | SystemBannerEvent;
+  | SystemBannerEvent
+  | BlockStartEvent
+  | BlockDeltaEvent
+  | BlockCompleteEvent
+  | BlockReloadEvent
+  | ConnectionEstablishedEvent;
 
 export interface BaseEvent {
   v: 1;
@@ -42,84 +45,6 @@ export interface TurnStartedEvent extends BaseEvent {
   turn_id: string;
   agent: string;
   ts: number;
-}
-
-export interface TextDeltaEvent extends BaseEvent {
-  type: "text_delta";
-  turn_id: string;
-  /** Agent that owns this turn — required so the dashboard can route deltas
-   * to the right chat view without a turn_id→agent lookup table. */
-  agent: string;
-  text: string;
-  /** SDK message id for the assistant message this delta belongs to. The
-   * dashboard uses it to dedupe against DB-loaded bubbles (whose stable id
-   * is also derived from this message id), so a refresh mid-stream doesn't
-   * leave two copies of the same content. */
-  message_id?: string;
-}
-
-export interface ToolUseStartEvent extends BaseEvent {
-  type: "tool_use_start";
-  turn_id: string;
-  agent: string;
-  tool_id: string;
-  tool_name: string;
-  input: unknown;
-}
-
-export interface ToolUseInputEvent extends BaseEvent {
-  type: "tool_use_input";
-  turn_id: string;
-  agent: string;
-  tool_id: string;
-  /** The fully-assembled input JSON, parsed from streamed `input_json_delta`. */
-  input: unknown;
-}
-
-export interface ToolUseEndEvent extends BaseEvent {
-  type: "tool_use_end";
-  turn_id: string;
-  agent: string;
-  tool_id: string;
-  status: "ok" | "error";
-  /** Full tool result text. Matches what `extractBlocks` reads from the
-   * persisted JSONL row, so live and historical render are identical. */
-  output?: string;
-}
-
-export interface ThinkingStartEvent extends BaseEvent {
-  type: "thinking_start";
-  turn_id: string;
-  agent: string;
-  block_id: string;
-}
-
-export interface ThinkingDeltaEvent extends BaseEvent {
-  type: "thinking_delta";
-  turn_id: string;
-  agent: string;
-  block_id: string;
-  text: string;
-}
-
-export interface ThinkingEndEvent extends BaseEvent {
-  type: "thinking_end";
-  turn_id: string;
-  agent: string;
-  block_id: string;
-}
-
-export interface CompactionStartEvent extends BaseEvent {
-  type: "compaction_start";
-  turn_id?: string;
-  agent: string;
-}
-
-export interface CompactionEndEvent extends BaseEvent {
-  type: "compaction_end";
-  turn_id?: string;
-  agent: string;
-  result: "success" | "failed";
 }
 
 export interface TurnErrorEvent extends BaseEvent {
@@ -197,4 +122,90 @@ export interface SystemBannerEvent extends BaseEvent {
   type: "system_banner";
   level: "info" | "warn" | "error";
   text: string;
+}
+
+/* ---------------- Block-level streaming events (FIX_FORWARD WS-1) ---------------- */
+// Per-content-block lifecycle: start → delta(s) → complete. The daemon writes
+// the canonical `blocks` row before each `block_start` / `block_complete` so
+// the row's `last_event_seq` always advances strictly before the matching SSE
+// event lands (ADR-004 at block granularity, FIX_FORWARD 1.10).
+
+export type BlockKind = "text" | "thinking" | "tool_use" | "tool_result";
+
+export interface BlockStartEvent extends BaseEvent {
+  type: "block_start";
+  turn_id: string;
+  agent: string;
+  block_id: string;
+  /** SDK assistant message id when available; null for user/system blocks. */
+  message_id: string | null;
+  block_index: number;
+  /** 'user' | 'assistant' | 'system'. */
+  role: string;
+  kind: BlockKind;
+  /** 'user_chat' | 'mail' | 'queue_inject' | 'sdk' | null. */
+  source: string | null;
+  /** Tool metadata captured at start, when kind === 'tool_use'. */
+  tool?: { id: string; name: string };
+  ts: number;
+}
+
+export interface BlockDeltaEvent extends BaseEvent {
+  type: "block_delta";
+  turn_id: string;
+  agent: string;
+  block_id: string;
+  /** Incremental payload. For text/thinking it's the delta string. For
+   * tool_use it's a partial JSON fragment of the tool input. */
+  delta: { text?: string; partial_json?: string };
+}
+
+export interface BlockCompleteEvent extends BaseEvent {
+  type: "block_complete";
+  turn_id: string;
+  agent: string;
+  block_id: string;
+  message_id: string | null;
+  block_index: number;
+  role: string;
+  kind: BlockKind;
+  source: string | null;
+  /** Final serialized content payload for the block; same shape as the
+   * `content_json` column in the blocks table. */
+  content_json: string;
+  status: "complete" | "aborted" | "error";
+  ts: number;
+}
+
+/**
+ * Emitted by the daemon when boot-time JSONL recovery (FIX_FORWARD 1.3) has
+ * INSERTed or UPDATEd canonical blocks that an SSE client should refetch.
+ * Carries the affected block ids so clients can decide whether to refetch
+ * the focused agent's history.
+ */
+export interface BlockReloadEvent extends BaseEvent {
+  type: "block_reload";
+  agent: string;
+  /** Sessions touched by the recovery scan. */
+  session_id: string;
+  block_ids: string[];
+  /** Number of net-new blocks inserted by recovery. */
+  inserted: number;
+  /** Number of existing blocks whose content was refreshed. */
+  updated: number;
+  ts: number;
+}
+
+/**
+ * First SSE event the daemon emits on every new connection (FIX_FORWARD 1.6).
+ * Carries the daemon's `boot_id` so clients can detect a daemon restart and
+ * reset their per-agent cursors (`lastSeqByAgent`).
+ */
+export interface ConnectionEstablishedEvent extends BaseEvent {
+  type: "connection_established";
+  /** Stable UUID minted once per daemon boot. */
+  boot_id: string;
+  /** Current ring-buffer head when the connection landed. */
+  current_seq: number;
+  ts: number;
 }

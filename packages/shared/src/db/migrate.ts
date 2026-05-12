@@ -32,6 +32,9 @@ function ensureFtsTables(): void {
     CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
       content_json, content='turns', content_rowid='id'
     );
+    CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
+      content_json, content='blocks', content_rowid='id'
+    );
     CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
       title, content, tags_json,
       content='memory_entries', content_rowid='rowid'
@@ -48,6 +51,19 @@ function ensureFtsTables(): void {
       INSERT INTO turns_fts(turns_fts, rowid, content_json)
         VALUES ('delete', old.id, old.content_json);
       INSERT INTO turns_fts(rowid, content_json) VALUES (new.id, new.content_json);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS blocks_ai AFTER INSERT ON blocks BEGIN
+      INSERT INTO blocks_fts(rowid, content_json) VALUES (new.id, new.content_json);
+    END;
+    CREATE TRIGGER IF NOT EXISTS blocks_ad AFTER DELETE ON blocks BEGIN
+      INSERT INTO blocks_fts(blocks_fts, rowid, content_json)
+        VALUES ('delete', old.id, old.content_json);
+    END;
+    CREATE TRIGGER IF NOT EXISTS blocks_au AFTER UPDATE ON blocks BEGIN
+      INSERT INTO blocks_fts(blocks_fts, rowid, content_json)
+        VALUES ('delete', old.id, old.content_json);
+      INSERT INTO blocks_fts(rowid, content_json) VALUES (new.id, new.content_json);
     END;
   `);
 }

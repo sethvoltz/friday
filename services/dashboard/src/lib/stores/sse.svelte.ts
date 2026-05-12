@@ -31,15 +31,6 @@ export const sseConnected = new SseConnected();
 
 const HANDLED_TYPES = new Set([
   "turn_started",
-  "text_delta",
-  "tool_use_start",
-  "tool_use_input",
-  "tool_use_end",
-  "thinking_start",
-  "thinking_delta",
-  "thinking_end",
-  "compaction_start",
-  "compaction_end",
   "error",
   "turn_done",
   "agent_message",
@@ -49,7 +40,21 @@ const HANDLED_TYPES = new Set([
   "schedule_fired",
   "evolve_critical",
   "system_banner",
+  // Block-level streaming (FIX_FORWARD 1.5).
+  "block_start",
+  "block_delta",
+  "block_complete",
+  "block_reload",
+  // Connection handshake (FIX_FORWARD 1.6).
+  "connection_established",
 ]);
+
+/**
+ * Cached boot_id from the most recent `connection_established` event.
+ * `null` until the first connection lands. On mismatch we drop the cursor
+ * and let the daemon's replay re-seed state.
+ */
+let cachedBootId: string | null = null;
 
 /**
  * Open the EventSource. The browser auto-attaches `Last-Event-ID` based on the
@@ -67,14 +72,6 @@ function connect(): void {
   // replaced). Without this, a stale onerror firing after a reconnect
   // would null out the *new* EventSource.
   const myId = ++connectionId;
-  // Whether we've ever seen a `seq` from this specific connection. Used to
-  // detect a daemon restart on the FIRST event we receive: if the daemon's
-  // counter has rolled back below our cached `chat.lastSeq`, the daemon
-  // restarted its bus and we need to reset our cursor. A transient network
-  // blip without a daemon restart leaves the seq monotonically higher and
-  // we keep the cursor — preventing duplicate `applyEvent` for events
-  // that already had effect.
-  let firstSeqSeen = false;
   const ev = new EventSource("/api/events");
   es = ev;
   ev.onopen = () => {
@@ -99,17 +96,20 @@ function connect(): void {
       if (myId !== connectionId) return;
       try {
         const parsed = JSON.parse(e.data) as WireEvent;
-        if (!firstSeqSeen) {
-          firstSeqSeen = true;
-          // Daemon restart? If the first seq from a fresh connection is
-          // *lower* than our cached cursor, the daemon's bus counter has
-          // rolled back; reset our cursor so we accept the replay. If
-          // it's higher (the normal blip-and-reconnect case), keep the
-          // cursor and let `applyEvent`'s seq check drop already-applied
-          // events.
-          if (typeof parsed.seq === "number" && parsed.seq < chat.lastSeq) {
-            chat.lastSeq = 0;
+        // FIX_FORWARD 1.6/1.7: connection_established is the boot_id
+        // handshake. It always lands first on a fresh connection. On
+        // mismatch we clear the per-agent cursors so the daemon's
+        // subsequent replay re-applies cleanly. A canonical refetch for
+        // the focused agent runs through loadAgentTurns below.
+        if (parsed.type === "connection_established") {
+          const incoming = parsed.boot_id;
+          if (cachedBootId !== null && cachedBootId !== incoming) {
+            chat.lastSeqByAgent = {};
+            void chat.loadAgentTurns(chat.focusedAgent);
           }
+          cachedBootId = incoming;
+          chat.bootId = incoming;
+          return;
         }
         chat.applyEvent(parsed);
       } catch {

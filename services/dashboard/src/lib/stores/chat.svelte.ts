@@ -61,12 +61,23 @@ export interface AgentInfo {
   sessionCount?: number;
 }
 
+/** Sentinel agent bucket for SSE events that don't carry an `agent` field
+ *  (system_banner, mail_delivered, schedule_fired, evolve_critical). */
+export const SYSTEM_BUCKET = "__system__";
+
 export class ChatState {
   messages = $state<ChatMessage[]>([]);
   agents = $state<AgentInfo[]>([]);
   focusedAgent = $state("friday");
-  /** Cursor for race-free SSE catchup; bumped after each event applied. */
-  lastSeq = $state(0);
+  /**
+   * Per-agent cursor for race-free SSE catchup (FIX_FORWARD 1.7). Keyed by
+   * `event.agent`, plus the `__system__` bucket for events that don't carry
+   * one. Dedup compares `event.seq` against the bucket's current value; a
+   * fresh value is written after each event is applied.
+   */
+  lastSeqByAgent = $state<Record<string, number>>({});
+  /** Cached daemon boot_id from connection_established (FIX_FORWARD 1.6). */
+  bootId = $state<string | null>(null);
   inflightTurnId = $state<string | null>(null);
   connected = $state(false);
   /** Smallest `dbTurnId` we've loaded; pagination cursor for older turns. */
@@ -483,48 +494,47 @@ export class ChatState {
     }
   }
 
+  /** Per-agent dedup. Returns true if the event should be applied (the
+   * seq is strictly greater than the agent's current cursor); also bumps
+   * the cursor. Events without an `agent` field land in `__system__`. */
+  private acceptEvent(event: WireEvent): boolean {
+    const bucket =
+      "agent" in event && typeof event.agent === "string"
+        ? event.agent
+        : SYSTEM_BUCKET;
+    const cur = this.lastSeqByAgent[bucket] ?? 0;
+    if (event.seq <= cur) return false;
+    this.lastSeqByAgent[bucket] = event.seq;
+    return true;
+  }
+
   applyEvent(event: WireEvent): void {
-    if (event.seq <= this.lastSeq) return;
-    this.lastSeq = event.seq;
+    if (!this.acceptEvent(event)) return;
 
     switch (event.type) {
       case "turn_started":
-        // Don't pre-mount the assistant bubble. Thinking blocks frequently
-        // arrive *before* the first text_delta, and pre-mounting forces them
-        // visually below the (empty) bubble. `appendDelta` lazily creates
-        // the bubble when the first text token arrives, after any preceding
-        // thinking/tool blocks have already been pushed.
         if (event.agent === this.focusedAgent) {
           this.inflightTurnId = event.turn_id;
         }
         break;
-      case "text_delta":
+      case "block_start":
         if (event.agent !== this.focusedAgent) break;
-        this.appendDelta(event.turn_id, event.text, event.message_id);
+        this.handleBlockStart(event);
         break;
-      case "tool_use_start":
+      case "block_delta":
         if (event.agent !== this.focusedAgent) break;
-        this.pushTool(event.tool_id, event.tool_name, event.input);
+        this.handleBlockDelta(event);
         break;
-      case "tool_use_input":
+      case "block_complete":
         if (event.agent !== this.focusedAgent) break;
-        this.setToolInput(event.tool_id, event.input);
+        this.handleBlockComplete(event);
         break;
-      case "tool_use_end":
+      case "block_reload":
         if (event.agent !== this.focusedAgent) break;
-        this.finishTool(event.tool_id, event.status, event.output);
-        break;
-      case "thinking_start":
-        if (event.agent !== this.focusedAgent) break;
-        this.pushThinking(event.block_id);
-        break;
-      case "thinking_delta":
-        if (event.agent !== this.focusedAgent) break;
-        this.appendThinking(event.block_id, event.text);
-        break;
-      case "thinking_end":
-        if (event.agent !== this.focusedAgent) break;
-        this.finishThinking(event.block_id);
+        // Daemon's JSONL recovery scan inserted/updated rows for this agent
+        // (FIX_FORWARD 1.3). Re-seed history so the dashboard mirrors the
+        // canonical blocks table.
+        void this.loadAgentTurns(event.agent);
         break;
       case "turn_done":
         if (event.agent !== this.focusedAgent) break;
@@ -535,22 +545,6 @@ export class ChatState {
         if (event.turn_id) this.finishTurn(event.turn_id, "error");
         break;
       case "agent_lifecycle":
-        // Attach the spawn message to the SPAWNER's chat, not the focused
-        // agent's. Without parentName we can't route reliably, so only render
-        // it when the focused agent is the spawner.
-        if (
-          event.event === "spawn" &&
-          event.parentName === this.focusedAgent &&
-          this.inflightTurnId
-        ) {
-          this.appendDelta(
-            this.inflightTurnId,
-            `\n\n> 🤖 Spawned **${event.agentType}** \`${event.agent}\` — _click in the sidebar to switch focus_\n\n`,
-          );
-        }
-        // Lazy-insert: a freshly spawned agent isn't in chat.agents until
-        // the next /api/agents poll. Without this, its status events are
-        // dropped and the sidebar lags by up to 5s before the dot lights up.
         if (event.event === "spawn") {
           this.upsertAgent(event.agent, {
             type: event.agentType,
@@ -565,9 +559,216 @@ export class ChatState {
         break;
     }
   }
+
+  /* ------------ Block-level streaming handlers (FIX_FORWARD 1.7) ------------ */
+
+  private handleBlockStart(event: {
+    block_id: string;
+    block_index: number;
+    role: string;
+    kind: "text" | "thinking" | "tool_use" | "tool_result";
+    turn_id: string;
+    tool?: { id: string; name: string };
+    ts: number;
+  }): void {
+    if (event.kind === "text") {
+      const id = `b_${event.block_id}`;
+      if (this.messages.some((m) => m.id === id)) return;
+      const role = event.role === "user" ? "user" : "assistant";
+      this.messages.push({
+        id,
+        role,
+        text: "",
+        status: role === "user" ? "complete" : "streaming",
+        agent: this.focusedAgent,
+        turnId: event.turn_id,
+        ts: event.ts,
+      });
+      return;
+    }
+    if (event.kind === "thinking") {
+      const id = `th_${event.block_id}`;
+      if (this.messages.some((m) => m.id === id)) return;
+      this.messages.push({
+        id,
+        role: "thinking",
+        text: "",
+        status: "running",
+        blockId: event.block_id,
+        ts: event.ts,
+      });
+      return;
+    }
+    if (event.kind === "tool_use") {
+      const toolId = event.tool?.id ?? event.block_id;
+      const id = `t_${toolId}`;
+      if (this.messages.some((m) => m.id === id)) return;
+      this.messages.push({
+        id,
+        role: "tool",
+        text: "",
+        status: "running",
+        toolId,
+        toolName: event.tool?.name ?? "",
+        ts: event.ts,
+      });
+      return;
+    }
+    // tool_result: created lazily on block_complete (we need content_json
+    // to know which tool_use_id it belongs to).
+  }
+
+  private handleBlockDelta(event: {
+    block_id: string;
+    delta: { text?: string; partial_json?: string };
+  }): void {
+    const textId = `b_${event.block_id}`;
+    const thinkId = `th_${event.block_id}`;
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const m = this.messages[i];
+      if (m.id === textId) {
+        if (typeof event.delta.text === "string" && m.status === "streaming") {
+          m.text += event.delta.text;
+        }
+        return;
+      }
+      if (m.id === thinkId) {
+        if (typeof event.delta.text === "string" && m.status === "running") {
+          m.text += event.delta.text;
+        }
+        return;
+      }
+    }
+    // tool_use input deltas don't render incrementally — the canonical input
+    // arrives via block_complete's content_json.
+  }
+
+  private handleBlockComplete(event: {
+    block_id: string;
+    kind: "text" | "thinking" | "tool_use" | "tool_result";
+    content_json: string;
+    status: "complete" | "aborted" | "error";
+    turn_id: string;
+    role: string;
+    ts: number;
+  }): void {
+    const parsed = parseBlockContent(event.content_json);
+    if (event.kind === "text") {
+      const id = `b_${event.block_id}`;
+      for (const m of this.messages) {
+        if (m.id !== id) continue;
+        if (typeof parsed.text === "string") m.text = parsed.text;
+        m.status =
+          event.status === "complete"
+            ? "complete"
+            : event.status === "aborted"
+              ? "aborted"
+              : "error";
+        return;
+      }
+      // Late mount: block_start was evicted from the ring.
+      const role = event.role === "user" ? "user" : "assistant";
+      this.messages.push({
+        id,
+        role,
+        text: parsed.text ?? "",
+        status:
+          event.status === "complete"
+            ? "complete"
+            : event.status === "aborted"
+              ? "aborted"
+              : "error",
+        agent: this.focusedAgent,
+        turnId: event.turn_id,
+        ts: event.ts,
+      });
+      return;
+    }
+    if (event.kind === "thinking") {
+      const id = `th_${event.block_id}`;
+      for (const m of this.messages) {
+        if (m.id !== id) continue;
+        if (typeof parsed.text === "string") m.text = parsed.text;
+        m.status = "done";
+        return;
+      }
+      this.messages.push({
+        id,
+        role: "thinking",
+        text: parsed.text ?? "",
+        status: "done",
+        blockId: event.block_id,
+        ts: event.ts,
+      });
+      return;
+    }
+    if (event.kind === "tool_use") {
+      const toolId = parsed.tool_use_id ?? "";
+      const id = `t_${toolId}`;
+      for (const m of this.messages) {
+        if (m.id !== id) continue;
+        m.input = parsed.input;
+        if (parsed.name && !m.toolName) m.toolName = parsed.name;
+        return;
+      }
+      // Late mount.
+      this.messages.push({
+        id,
+        role: "tool",
+        text: "",
+        status: "running",
+        toolId,
+        toolName: parsed.name ?? "",
+        input: parsed.input,
+        ts: event.ts,
+      });
+      return;
+    }
+    if (event.kind === "tool_result") {
+      const toolId = parsed.tool_use_id ?? "";
+      const id = `t_${toolId}`;
+      for (const m of this.messages) {
+        if (m.id !== id) continue;
+        m.status = parsed.is_error ? "error" : "done";
+        if (typeof parsed.text === "string") m.output = parsed.text;
+        return;
+      }
+      // No preceding tool_use bubble — likely a ring eviction. Synthesize one.
+      this.messages.push({
+        id,
+        role: "tool",
+        text: "",
+        status: parsed.is_error ? "error" : "done",
+        toolId,
+        toolName: "(unknown)",
+        output: parsed.text ?? "",
+        ts: event.ts,
+      });
+    }
+  }
 }
 
 export const chat = new ChatState();
+
+/** Parsed shape of a block row's `content_json`. Mirrors what the daemon
+ *  writes for each block kind (FIX_FORWARD 1.2 + 1.3). */
+interface ParsedBlockContent {
+  text?: string;
+  thinking?: string;
+  tool_use_id?: string;
+  name?: string;
+  input?: unknown;
+  is_error?: boolean;
+  from_agent?: string;
+}
+
+function parseBlockContent(contentJson: string): ParsedBlockContent {
+  try {
+    return JSON.parse(contentJson) as ParsedBlockContent;
+  } catch {
+    return {};
+  }
+}
 
 export interface TurnRow {
   id: number;

@@ -22,6 +22,13 @@
       "when": 1778314250337,
       "tag": "0002_majestic_chameleon",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1778625282101,
+      "tag": "0003_pink_fenris",
+      "breakpoints": true
     }
   ]
 }

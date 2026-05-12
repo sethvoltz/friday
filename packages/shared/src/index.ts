@@ -16,15 +16,6 @@ export * as schema from "./db/schema.js";
 export type {
   WireEvent,
   TurnStartedEvent,
-  TextDeltaEvent,
-  ToolUseStartEvent,
-  ToolUseInputEvent,
-  ToolUseEndEvent,
-  ThinkingStartEvent,
-  ThinkingDeltaEvent,
-  ThinkingEndEvent,
-  CompactionStartEvent,
-  CompactionEndEvent,
   TurnErrorEvent,
   TurnDoneEvent,
   AgentMessageEvent,
@@ -35,6 +26,12 @@ export type {
   EvolveCriticalEvent,
   SystemBannerEvent,
   TurnUsage,
+  BlockKind,
+  BlockStartEvent,
+  BlockDeltaEvent,
+  BlockCompleteEvent,
+  BlockReloadEvent,
+  ConnectionEstablishedEvent,
 } from "./wire/events.js";
 
 export { stringifyToolResult } from "./wire/tool-result.js";

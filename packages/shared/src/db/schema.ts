@@ -87,7 +87,12 @@ export const agents = sqliteTable(
   }),
 );
 
-/* ---------------- Turns (Claude JSONL mirror) ---------------- */
+/* ---------------- Turns (legacy; superseded by blocks) ---------------- */
+// The turns table is kept here until WS-1 items 1.2–1.10 migrate every caller
+// onto the new blocks model. After the one-time user data migration runs
+// (scripts/migrate-turns-to-blocks.ts), the physical table is dropped; this
+// schema export becomes dead code at that point and a follow-up removal will
+// land alongside the last caller cleanup.
 
 export const turns = sqliteTable(
   "turns",
@@ -111,6 +116,42 @@ export const turns = sqliteTable(
       t.turnIndex,
     ),
     agentTsIdx: index("turns_agent_ts").on(t.agentName, t.ts),
+  }),
+);
+
+/* ---------------- Blocks (per-content-block chat persistence) ---------------- */
+// One row per content block (text / thinking / tool_use / tool_result, plus
+// user-typed and mail-delivered user-role blocks). `block_id` is a
+// daemon-minted UUID and the stable client-facing identity. `turn_id` groups
+// blocks belonging to one user-prompt cycle. `last_event_seq` enforces the
+// ADR-004 ordering invariant at block granularity (see FIX_FORWARD 1.10).
+
+export const blocks = sqliteTable(
+  "blocks",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    blockId: text("block_id").notNull().unique(),
+    turnId: text("turn_id").notNull(),
+    agentName: text("agent_name").notNull(),
+    sessionId: text("session_id").notNull(),
+    messageId: text("message_id"),
+    blockIndex: integer("block_index").notNull(),
+    role: text("role").notNull(), // user|assistant|system
+    kind: text("kind").notNull(), // text|thinking|tool_use|tool_result
+    source: text("source"), // user_chat|mail|queue_inject|sdk (null for assistant)
+    contentJson: text("content_json").notNull(),
+    status: text("status").notNull(), // streaming|complete|aborted|error
+    ts: integer("ts").notNull(),
+    lastEventSeq: integer("last_event_seq").notNull(),
+  },
+  (t) => ({
+    agentTsIdx: index("blocks_agent_ts").on(t.agentName, t.ts),
+    sessionMsgIdx: index("blocks_session_msg").on(
+      t.sessionId,
+      t.messageId,
+      t.blockIndex,
+    ),
+    turnIdx: index("blocks_turn").on(t.turnId),
   }),
 );
 
@@ -296,6 +337,9 @@ export const dbMeta = sqliteTable("db_meta", {
 export const FTS_SETUP_SQL = sql`
   CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
     content_json, content='turns', content_rowid='id'
+  );
+  CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
+    content_json, content='blocks', content_rowid='id'
   );
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     title, content, tags_json,

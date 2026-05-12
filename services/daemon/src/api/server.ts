@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { logger } from "../log.js";
-import { eventBus } from "../events/bus.js";
+import { eventBus, getBootId } from "../events/bus.js";
 import {
   type AgentEntry,
   DAEMON_SECRET_HEADER,
@@ -19,6 +19,7 @@ import {
   closeMail,
   createTicket,
   externalLinks,
+  fetchBlocksByAgent,
   getAttachment,
   getMail,
   getTicket,
@@ -84,6 +85,7 @@ import {
   dispatchTurn,
   killAgent,
   peekLiveWorker,
+  recordUserBlock,
 } from "../agent/lifecycle.js";
 import { generateScratchName } from "../agent/scratch-names.js";
 import {
@@ -176,6 +178,25 @@ async function handle(
     const wrappedPrompt = recallBlock
       ? `${recallBlock}\n\n${userText}`
       : userText;
+
+    // Persist the user's typed prompt as a `role='user'`, `source='user_chat'`
+    // block before dispatching. Stays scoped to the user's literal input —
+    // recall-block / skill scaffolding is internal and not part of the
+    // user-visible message stream (FIX_FORWARD 1.2).
+    try {
+      recordUserBlock({
+        turnId,
+        agentName,
+        sessionId: resumeSessionId,
+        text: body.text,
+        source: "user_chat",
+      });
+    } catch (err) {
+      logger.log("warn", "chat.turn.user-block.error", {
+        agent: agentName,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     const modelCfg = normalizeModelConfig(cfg.model);
     dispatchTurn({
@@ -394,6 +415,40 @@ async function handle(
       beforeId: beforeParam ? Number(beforeParam) : undefined,
     });
     return json(res, 200, turns);
+  }
+  if (method === "GET" && /^\/api\/agents\/[^/]+\/blocks$/.test(path)) {
+    const agentName = path.split("/")[3];
+    const limit = numericParam(url, "limit");
+    const before = url.searchParams.get("before") ?? undefined;
+    const after = url.searchParams.get("after") ?? undefined;
+    const aroundTs = numericParam(url, "around_ts");
+    const beforeLimit = numericParam(url, "before_limit");
+    const afterLimit = numericParam(url, "after_limit");
+    const match = url.searchParams.get("match") ?? undefined;
+    try {
+      const result = fetchBlocksByAgent({
+        agentName,
+        limit,
+        beforeBlockId: before,
+        afterBlockId: after,
+        aroundTs,
+        beforeLimit,
+        afterLimit,
+        match,
+      });
+      return json(res, 200, {
+        blocks: result.blocks,
+        last_event_seq: result.lastEventSeq,
+      });
+    } catch (err) {
+      // FTS5 MATCH expressions can throw on syntactically invalid queries
+      // (e.g. unbalanced quotes). Return a clean 400 instead of a 500 so
+      // the dashboard can surface a "couldn't search" toast.
+      return json(res, 400, {
+        error: "invalid_query",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // --- Tickets ---
@@ -977,12 +1032,37 @@ function handleEvents(
   res.flushHeaders();
   res.write(": connected\n\n");
 
-  // Replay since Last-Event-ID. `Number("garbage")` is NaN, which most
-  // bus implementations don't guard — coerce to a safe finite >= 0.
+  // First event on every new connection: connection_established carries the
+  // daemon's boot_id (FIX_FORWARD 1.6). Clients cache it and reset their
+  // per-agent cursors on mismatch — the canonical signal of a daemon
+  // restart. We do NOT advance the bus seq for this event; it carries a
+  // sentinel seq=0 since clients should never use it for replay cursoring.
+  writeRawEvent(res, {
+    v: 1,
+    seq: 0,
+    type: "connection_established",
+    boot_id: getBootId(),
+    current_seq: eventBus.currentSeq(),
+    ts: Date.now(),
+  });
+
+  // Replay strategy (FIX_FORWARD 1.9):
+  //   - With Last-Event-ID: replay strictly newer events. The browser sets
+  //     this header automatically across EventSource reconnects, so a
+  //     transient blip resumes seamlessly.
+  //   - Without Last-Event-ID (fresh page load): walk back 500 events from
+  //     the current head so any in-flight block_start/block_delta the
+  //     client missed is delivered. The chat-side per-agent dedup
+  //     (FIX_FORWARD 1.7) handles duplicates against the canonical-blocks
+  //     fetch that the client also issues on mount.
   const lastEventIdHeader = req.headers["last-event-id"];
-  const parsed = lastEventIdHeader ? Number(lastEventIdHeader) : 0;
-  const lastSeq = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
-  for (const e of eventBus.replaySince(lastSeq)) {
+  const parsedLast = lastEventIdHeader ? Number(lastEventIdHeader) : NaN;
+  const BACKWALK = 500;
+  const replayFrom =
+    Number.isFinite(parsedLast) && parsedLast >= 0
+      ? (parsedLast as number)
+      : Math.max(0, eventBus.currentSeq() - BACKWALK);
+  for (const e of eventBus.replaySince(replayFrom)) {
     writeEvent(res, e);
   }
 
@@ -1004,6 +1084,24 @@ function handleEvents(
 function writeEvent(res: ServerResponse, e: { type: string; seq: number }): void {
   try {
     res.write(`id: ${e.seq}\n`);
+    res.write(`event: ${e.type}\n`);
+    res.write(`data: ${JSON.stringify(e)}\n\n`);
+  } catch {
+    // socket closed
+  }
+}
+
+/**
+ * Write an SSE event that is NOT in the ring buffer — used for the
+ * connection-handshake `connection_established` event. We skip the `id:`
+ * line so the browser's `Last-Event-ID` cursor doesn't advance to seq=0,
+ * which would defeat replay on the next reconnect.
+ */
+function writeRawEvent(
+  res: ServerResponse,
+  e: { type: string; [k: string]: unknown },
+): void {
+  try {
     res.write(`event: ${e.type}\n`);
     res.write(`data: ${JSON.stringify(e)}\n\n`);
   } catch {
@@ -1201,6 +1299,14 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
+}
+
+/** Parse an integer-shaped query param. Returns `undefined` if absent or NaN. */
+function numericParam(url: URL, key: string): number | undefined {
+  const raw = url.searchParams.get(key);
+  if (raw === null) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 /**

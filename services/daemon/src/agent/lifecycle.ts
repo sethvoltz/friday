@@ -16,14 +16,20 @@
  */
 
 import { fork, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentType } from "@friday/shared";
-import { insertUsage } from "@friday/shared/services";
+import type { AgentType, BlockKind } from "@friday/shared";
+import {
+  insertBlock,
+  insertUsage,
+  updateBlock,
+  type BlockSource,
+} from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import * as registry from "./registry.js";
-import { startMirror } from "./jsonl-mirror.js";
+import * as liveTurns from "./live-turns.js";
 import type {
   WorkerCommand,
   WorkerEvent,
@@ -55,7 +61,6 @@ interface LiveWorker {
    * JSONL mirror needs this to compute the right ~/.claude/projects file. */
   workingDirectory: string;
   abortRequested: boolean;
-  textAccumulator: string;
   lastHeartbeat: number;
   /** Wall-clock start of the *current* turn, for usage duration. */
   turnStart: number;
@@ -116,7 +121,6 @@ export function spawnTurn(input: SpawnTurnInput): void {
     turnId: input.options.turnId,
     workingDirectory: input.options.workingDirectory,
     abortRequested: false,
-    textAccumulator: "",
     lastHeartbeat: Date.now(),
     turnStart: Date.now(),
     spawnedAt: Date.now(),
@@ -138,6 +142,10 @@ export function spawnTurn(input: SpawnTurnInput): void {
       code,
       signal,
     });
+    // If the worker died mid-turn the in-flight registry entry would leak —
+    // drop it here so the daemon doesn't hold accumulator state for a turn
+    // that can no longer make progress.
+    liveTurns.dropTurn(w.turnId);
     live.delete(input.agentName);
     registry.setStatus(input.agentName, "idle");
     eventBus.publish({
@@ -314,103 +322,22 @@ function handleEvent(w: LiveWorker, e: WorkerEvent): void {
     case "session-update":
       w.sessionId = e.sessionId;
       registry.setSession(w.agentName, e.sessionId);
-      // Mirror has to watch the same cwd the SDK writes under — for builders
-      // that's the worktree, not process.cwd().
-      startMirror({
-        sessionId: e.sessionId,
-        agentName: w.agentName,
-        workingDirectory: w.workingDirectory,
-      });
+      // No live JSONL tail-watcher: blocks are persisted directly via the
+      // worker → daemon IPC pipeline (FIX_FORWARD 1.2). JSONL is reconciled
+      // only at boot (FIX_FORWARD 1.3).
       break;
-    case "text-delta": {
-      w.textAccumulator += e.text;
-      eventBus.publish({
-        v: 1,
-        type: "text_delta",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        text: e.text,
-        message_id: e.messageId,
-      });
+    case "block-start": {
+      handleBlockStart(w, e);
       break;
     }
-    case "tool-start":
-      eventBus.publish({
-        v: 1,
-        type: "tool_use_start",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        tool_id: e.toolId,
-        tool_name: e.toolName,
-        input: e.input,
-      });
+    case "block-delta": {
+      handleBlockDelta(w, e);
       break;
-    case "tool-input":
-      eventBus.publish({
-        v: 1,
-        type: "tool_use_input",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        tool_id: e.toolId,
-        input: e.input,
-      });
+    }
+    case "block-stop": {
+      handleBlockStop(w, e);
       break;
-    case "tool-end":
-      eventBus.publish({
-        v: 1,
-        type: "tool_use_end",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        tool_id: e.toolId,
-        status: e.status,
-        output: e.output,
-      });
-      break;
-    case "thinking-start":
-      eventBus.publish({
-        v: 1,
-        type: "thinking_start",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        block_id: e.blockId,
-      });
-      break;
-    case "thinking-delta":
-      eventBus.publish({
-        v: 1,
-        type: "thinking_delta",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        block_id: e.blockId,
-        text: e.text,
-      });
-      break;
-    case "thinking-end":
-      eventBus.publish({
-        v: 1,
-        type: "thinking_end",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        block_id: e.blockId,
-      });
-      break;
-    case "compaction-start":
-      eventBus.publish({
-        v: 1,
-        type: "compaction_start",
-        turn_id: w.turnId,
-        agent: w.agentName,
-      });
-      break;
-    case "compaction-end":
-      eventBus.publish({
-        v: 1,
-        type: "compaction_end",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        result: e.result,
-      });
-      break;
+    }
     case "error":
       w.lastExitStatus = w.abortRequested ? "aborted" : "error";
       eventBus.publish({
@@ -473,6 +400,10 @@ function handleEvent(w: LiveWorker, e: WorkerEvent): void {
           });
         }
       }
+      // The in-flight registry holds per-turn block accumulators (FIX_FORWARD
+      // 1.4). Drop the entry once the turn completes; canonical block content
+      // already lives in the `blocks` table.
+      liveTurns.dropTurn(w.turnId);
       // Long-lived worker: flush queued prompt if any. Don't send `stop` — the
       // worker manages its own lifecycle.
       w.status = "idle";
@@ -495,4 +426,262 @@ function handleEvent(w: LiveWorker, e: WorkerEvent): void {
 
 function send(child: ChildProcess, cmd: WorkerCommand): void {
   if (child.send) child.send(cmd);
+}
+
+/* ---------------- DB-before-SSE atomic helper (FIX_FORWARD 1.10) ---------------- */
+// Pins ADR-004 at block granularity: every SSE event tied to a `blocks` row
+// is preceded by a synchronous DB write that stamps the row's
+// `last_event_seq` with the same value the SSE event will carry. Because
+// Node is single-threaded and `dbWrite` is synchronous (better-sqlite3) and
+// no other eventBus.publish() calls run between `currentSeq() + 1` and our
+// `eventBus.publish(...)`, the captured `seq` is exactly what publish()
+// assigns. If a future refactor were to violate that, the assertion below
+// flags the skew so it's caught before reaching SSE consumers.
+
+type PublishableEvent = Parameters<typeof eventBus.publish>[0];
+
+function writeAndPublish<E extends PublishableEvent>(
+  event: E,
+  dbWrite: (seq: number) => void,
+): { seq: number } {
+  const seq = eventBus.currentSeq() + 1;
+  dbWrite(seq);
+  const full = eventBus.publish(event);
+  if (full.seq !== seq) {
+    logger.log("warn", "block.seq-skew", {
+      expected: seq,
+      actual: full.seq,
+      type: full.type,
+    });
+  }
+  return { seq: full.seq };
+}
+
+/* ---------------- Block IPC handlers (FIX_FORWARD 1.2) ---------------- */
+
+/**
+ * INSERT a blocks row (status='streaming'), then publish the SSE block_start.
+ * The DB write strictly precedes the SSE emit so any client that fetches the
+ * canonical block on `block_start` sees a row whose `last_event_seq` already
+ * matches the event seq.
+ */
+function handleBlockStart(
+  w: LiveWorker,
+  e: {
+    clientBlockId: string;
+    kind: BlockKind;
+    blockIndex: number;
+    messageId?: string;
+    tool?: { id: string; name: string };
+  },
+): void {
+  const sessionId = w.sessionId ?? "__pending__";
+  const blockId = randomUUID();
+  const ts = Date.now();
+  // Tool_result arrives in a `user` SDK message but its block is the agent's
+  // tool output, so we treat it as role='assistant' — chat persistence keeps
+  // tool calls and their results grouped under the assistant's turn.
+  const role = "assistant";
+  const source: BlockSource = null;
+
+  let insertOk = true;
+  let assignedSeq = 0;
+  try {
+    const result = writeAndPublish(
+      {
+        v: 1,
+        type: "block_start",
+        turn_id: w.turnId,
+        agent: w.agentName,
+        block_id: blockId,
+        message_id: e.messageId ?? null,
+        block_index: e.blockIndex,
+        role,
+        kind: e.kind,
+        source,
+        tool: e.tool,
+        ts,
+      },
+      (seq) => {
+        insertBlock({
+          blockId,
+          turnId: w.turnId,
+          agentName: w.agentName,
+          sessionId,
+          messageId: e.messageId ?? null,
+          blockIndex: e.blockIndex,
+          role,
+          kind: e.kind,
+          source,
+          contentJson: "",
+          status: "streaming",
+          ts,
+          lastEventSeq: seq,
+        });
+      },
+    );
+    assignedSeq = result.seq;
+  } catch (err) {
+    insertOk = false;
+    logger.log("warn", "blocks.insert.error", {
+      agent: w.agentName,
+      blockId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+  if (!insertOk) return;
+
+  liveTurns.startBlock({
+    turnId: w.turnId,
+    agentName: w.agentName,
+    sessionId,
+    clientBlockId: e.clientBlockId,
+    blockId,
+    messageId: e.messageId ?? null,
+    blockIndex: e.blockIndex,
+    role,
+    kind: e.kind,
+    source,
+    tool: e.tool,
+    ts,
+    seq: assignedSeq,
+  });
+}
+
+function handleBlockDelta(
+  w: LiveWorker,
+  e: { clientBlockId: string; delta: { text?: string; partial_json?: string } },
+): void {
+  const nextSeq = eventBus.currentSeq() + 1;
+  const live = liveTurns.appendDelta(
+    w.turnId,
+    e.clientBlockId,
+    e.delta,
+    nextSeq,
+  );
+  if (!live) return;
+  eventBus.publish({
+    v: 1,
+    type: "block_delta",
+    turn_id: w.turnId,
+    agent: w.agentName,
+    block_id: live.blockId,
+    delta: e.delta,
+  });
+}
+
+function handleBlockStop(
+  w: LiveWorker,
+  e: {
+    clientBlockId: string;
+    contentJson: string;
+    status: "complete" | "aborted" | "error";
+  },
+): void {
+  const ts = Date.now();
+  // Peek at the upcoming seq so live-turns sees the same value we'll stamp
+  // onto the row + SSE event. `writeAndPublish` validates this binding
+  // holds at publish time.
+  const peekSeq = eventBus.currentSeq() + 1;
+  const live = liveTurns.finishBlock(w.turnId, e.clientBlockId, peekSeq);
+  if (!live) return;
+  writeAndPublish(
+    {
+      v: 1,
+      type: "block_complete",
+      turn_id: w.turnId,
+      agent: w.agentName,
+      block_id: live.blockId,
+      message_id: live.messageId,
+      block_index: live.blockIndex,
+      role: live.role,
+      kind: live.kind,
+      source: live.source,
+      content_json: e.contentJson,
+      status: e.status,
+      ts,
+    },
+    (seq) => {
+      try {
+        updateBlock(live.blockId, {
+          contentJson: e.contentJson,
+          status: e.status,
+          ts,
+          lastEventSeq: seq,
+        });
+      } catch (err) {
+        logger.log("warn", "blocks.update.error", {
+          agent: w.agentName,
+          blockId: live.blockId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+}
+
+/* ---------------- User-typed block insertion (FIX_FORWARD 1.2) ---------------- */
+
+export interface RecordUserBlockInput {
+  turnId: string;
+  agentName: string;
+  /** Falls back to '__pending__' if the agent doesn't yet have a session. */
+  sessionId?: string;
+  text: string;
+  source: "user_chat" | "mail" | "queue_inject";
+  /** Mail-derived blocks carry sender metadata inside content_json. */
+  fromAgent?: string;
+}
+
+/**
+ * Persist a user-role block ahead of (or alongside) a dispatched turn. The
+ * row lands with `status='complete'` immediately — there's no streaming
+ * lifecycle for user-typed or mail-derived content.
+ */
+export function recordUserBlock(input: RecordUserBlockInput): {
+  blockId: string;
+  seq: number;
+} {
+  const blockId = randomUUID();
+  const ts = Date.now();
+  const content =
+    input.source === "mail" && input.fromAgent
+      ? { text: input.text, from_agent: input.fromAgent }
+      : { text: input.text };
+  const contentJson = JSON.stringify(content);
+  const { seq } = writeAndPublish(
+    {
+      v: 1,
+      type: "block_complete",
+      turn_id: input.turnId,
+      agent: input.agentName,
+      block_id: blockId,
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: input.source,
+      content_json: contentJson,
+      status: "complete",
+      ts,
+    },
+    (assignedSeq) => {
+      insertBlock({
+        blockId,
+        turnId: input.turnId,
+        agentName: input.agentName,
+        sessionId: input.sessionId ?? "__pending__",
+        messageId: null,
+        blockIndex: 0,
+        role: "user",
+        kind: "text",
+        source: input.source,
+        contentJson,
+        status: "complete",
+        ts,
+        lastEventSeq: assignedSeq,
+      });
+    },
+  );
+  return { blockId, seq };
 }
