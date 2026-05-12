@@ -124,3 +124,16 @@ function rowToEntry(r: typeof schema.agents.$inferSelect): AgentEntry {
       } as AgentEntry;
   }
 }
+
+/**
+ * Resolve the cwd a worker should run under for a given agent. Builders run
+ * inside their git worktree; everything else runs under the daemon's cwd.
+ * Centralized here so all dispatch paths (initial create, mail-driven,
+ * watchdog refork, recovery) agree — divergence means the SDK's JSONL
+ * transcript ends up in a different `~/.claude/projects/<encoded-cwd>/`
+ * directory than the mirror is watching, which silently drops history.
+ */
+export function workingDirectoryFor(a: AgentEntry): string {
+  if ("worktreePath" in a && a.worktreePath) return a.worktreePath;
+  return process.cwd();
+}

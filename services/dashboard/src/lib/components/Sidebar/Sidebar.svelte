@@ -173,7 +173,11 @@
     class:pinned={isPinned}
     class:active={chat.focusedAgent === a.name}>
     <button class="row-main" onclick={() => focusAgent(a.name, a.type)}>
-      <span class="dot" style:background={statusDot(a.status)}></span>
+      <span
+        class="dot"
+        class:pulse={a.status === "working"}
+        style:background={statusDot(a.status)}
+      ></span>
       {#if isPinned}
         <span class="crown">👑</span>
         <span class="name">Friday</span>
@@ -238,7 +242,11 @@
       class="trigger"
       aria-expanded={open}
       onclick={() => (open = !open)}>
-      <span class="dot" style:background={statusDot(focused.status)}></span>
+      <span
+        class="dot"
+        class:pulse={focused.status === "working"}
+        style:background={statusDot(focused.status)}
+      ></span>
       {#if focused.type === "orchestrator"}
         <span class="crown">👑</span>
         <span class="name">Friday</span>
@@ -409,6 +417,28 @@
     height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
+  }
+  /* Working agents pulse a soft outer ring so the live state reads at a
+     glance — a static colored dot is too easy to miss against the row
+     hover/active backgrounds. The dot's own color comes from `statusDot`,
+     so the ring uses `currentColor` indirectly via the box-shadow color. */
+  .dot.pulse {
+    box-shadow: 0 0 0 0 var(--status-ok);
+    animation: dot-pulse 1.6s ease-out infinite;
+  }
+  @keyframes dot-pulse {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-ok) 70%, transparent);
+    }
+    70% {
+      box-shadow: 0 0 0 6px color-mix(in srgb, var(--status-ok) 0%, transparent);
+    }
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-ok) 0%, transparent);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dot.pulse { animation: none; }
   }
   .crown { font-size: 1rem; }
   .type {

@@ -83,6 +83,7 @@ import {
   abortTurn,
   dispatchTurn,
   killAgent,
+  peekLiveWorker,
 } from "../agent/lifecycle.js";
 import { generateScratchName } from "../agent/scratch-names.js";
 import {
@@ -182,7 +183,7 @@ async function handle(
       options: {
         agentName,
         agentType: agentRow.type,
-        workingDirectory: process.cwd(),
+        workingDirectory: registry.workingDirectoryFor(agentRow),
         systemPrompt,
         prompt: wrappedPrompt,
         turnId,
@@ -215,9 +216,18 @@ async function handle(
   // --- Agents ---
   if (method === "GET" && path === "/api/agents") {
     const all: AgentEntry[] = registry.listAgents();
+    // Prefer the in-memory live worker's status over the DB column whenever
+    // an agent has a forked worker — the DB lags by however long it takes
+    // for setStatus() to land between the worker's status-change and the
+    // next poll, which is enough to make the sidebar dot read "idle" while
+    // the agent is mid-turn. The live map is the real-time source of truth.
+    const merged: AgentEntry[] = all.map((a) => {
+      const live = peekLiveWorker(a.name);
+      return live ? { ...a, status: live.status } : a;
+    });
     const typeFilter = url.searchParams.get("type");
     const statusFilter = url.searchParams.get("status");
-    const filtered = all.filter(
+    const filtered = merged.filter(
       (a) =>
         (!typeFilter || a.type === typeFilter) &&
         (!statusFilter || a.status === statusFilter),
@@ -362,7 +372,11 @@ async function handle(
   // --- Sessions / turns ---
   if (method === "GET" && /^\/api\/sessions\/[^/]+\/turns$/.test(path)) {
     const sessionId = path.split("/")[3];
-    const turns = listTurns({ sessionId, limit: 100 });
+    const limitParam = url.searchParams.get("limit");
+    const turns = listTurns({
+      sessionId,
+      limit: limitParam ? Number(limitParam) : 200,
+    });
     return json(res, 200, turns);
   }
   if (method === "GET" && /^\/api\/agents\/[^/]+\/turns$/.test(path)) {

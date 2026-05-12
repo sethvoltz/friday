@@ -79,10 +79,69 @@ export class ChatState {
    *  have nothing (cached or otherwise) to show. Drives the skeleton state
    *  in ChatMessages so a slow first paint isn't a blank page. */
   loadingInitial = $state(false);
+  /** Set when the initial history fetch fails with no cached fallback to
+   * paper over it. ChatMessages renders this as a banner with a Retry
+   * button — distinguishes "actually empty" from "couldn't reach daemon". */
+  historyError = $state<string | null>(null);
   /** Set by ChatShell from its scroll handler. ChatMessages reads it to
    * decide whether to slice the rendered list (cap at WINDOW when bottom-
    * pinned) or render everything (when the user is reading older history). */
   pinnedToBottom = $state(true);
+
+  /** Per-agent debounce timers for working→idle transitions. Long-lived
+   * workers emit `status-change: idle` between back-to-back turns
+   * (worker.ts waits for the next prompt in an idle loop), which would
+   * otherwise flicker the sidebar dot grey for a fraction of a second.
+   * If a fresh `working` arrives before the timer fires, the idle is
+   * cancelled and the dot stays green. */
+  private idleDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+  private static readonly IDLE_DEBOUNCE_MS = 750;
+
+  /** Insert or refresh a local AgentInfo entry. Used when SSE events arrive
+   * for an agent the 5s `/api/agents` poll hasn't reported yet (newly
+   * spawned). The next poll fills in details we don't know here. */
+  upsertAgent(
+    name: string,
+    patch: Partial<Omit<AgentInfo, "name">>,
+  ): void {
+    const i = this.agents.findIndex((a) => a.name === name);
+    if (i === -1) {
+      this.agents.push({
+        name,
+        type: patch.type ?? "unknown",
+        status: patch.status ?? "idle",
+        sessionId: patch.sessionId,
+        sessionCount: patch.sessionCount,
+      });
+      return;
+    }
+    const cur = this.agents[i];
+    this.agents[i] = { ...cur, ...patch };
+  }
+
+  /** Apply an agent_status event with a debounce on working→idle so brief
+   * inter-turn idle pulses don't flicker the dot. Working transitions and
+   * non-binary states (stalled/error/killed) apply immediately. */
+  private applyAgentStatus(name: string, status: string): void {
+    const existing = this.agents.find((a) => a.name === name);
+    const prev = existing?.status;
+
+    if (status === "idle" && prev === "working") {
+      const t = setTimeout(() => {
+        this.idleDebounce.delete(name);
+        this.upsertAgent(name, { status });
+      }, ChatState.IDLE_DEBOUNCE_MS);
+      this.idleDebounce.set(name, t);
+      return;
+    }
+
+    const pending = this.idleDebounce.get(name);
+    if (pending) {
+      clearTimeout(pending);
+      this.idleDebounce.delete(name);
+    }
+    this.upsertAgent(name, { status });
+  }
 
   addUser(
     text: string,
@@ -306,6 +365,7 @@ export class ChatState {
     this.messages = [];
     this.oldestDbId = null;
     this.reachedOldest = false;
+    this.historyError = null;
 
     // Last-known transcript from a previous session. Render the cached turns
     // immediately so a slow / offline first-paint doesn't show an empty
@@ -343,8 +403,18 @@ export class ChatState {
       const r = await fetchWithTimeout(`/api/agents/${agent}/turns?limit=5`, {
         timeoutMs: 15_000,
       });
-      if (!r.ok) return;
+      // The user may have switched agents while we were awaiting. Bail
+      // before mutating shared state so a late-resolving fetch from a
+      // prior agent doesn't overwrite the just-loaded current agent.
+      if (this.focusedAgent !== agent) return;
+      if (!r.ok) {
+        if (cached.length === 0) {
+          this.historyError = `Couldn't load history (HTTP ${r.status})`;
+        }
+        return;
+      }
       const turns = (await r.json()) as TurnRow[];
+      if (this.focusedAgent !== agent) return;
       this.messages = parseTurns(turns, agent);
       this.oldestDbId = oldestDbTurnId(turns);
       if (turns.length === 0) {
@@ -355,9 +425,13 @@ export class ChatState {
         saveJSON(KEYS.transcript(agent), turns.slice(0, 5));
       }
     } catch {
-      // Network down — keep the cached render in place.
+      // Network/timeout. If a cached render is in place, leave it; otherwise
+      // surface a banner so the empty chat isn't ambiguous.
+      if (this.focusedAgent === agent && cached.length === 0) {
+        this.historyError = "Couldn't load history (network)";
+      }
     } finally {
-      this.loadingInitial = false;
+      if (this.focusedAgent === agent) this.loadingInitial = false;
     }
   }
 
@@ -474,11 +548,18 @@ export class ChatState {
             `\n\n> 🤖 Spawned **${event.agentType}** \`${event.agent}\` — _click in the sidebar to switch focus_\n\n`,
           );
         }
+        // Lazy-insert: a freshly spawned agent isn't in chat.agents until
+        // the next /api/agents poll. Without this, its status events are
+        // dropped and the sidebar lags by up to 5s before the dot lights up.
+        if (event.event === "spawn") {
+          this.upsertAgent(event.agent, {
+            type: event.agentType,
+            status: "working",
+          });
+        }
         break;
       case "agent_status":
-        for (const a of this.agents) {
-          if (a.name === event.agent) a.status = event.status;
-        }
+        this.applyAgentStatus(event.agent, event.status);
         break;
       default:
         break;

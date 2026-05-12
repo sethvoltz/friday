@@ -130,11 +130,12 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
       logger.log("info", "agent.recovery.reset-working", { agent: a.name });
       registry.setStatus(a.name, "idle");
     }
+    const cwd = registry.workingDirectoryFor(a);
     if (a.sessionId) {
       startMirror({
         sessionId: a.sessionId,
         agentName: a.name,
-        workingDirectory: process.cwd(),
+        workingDirectory: cwd,
       });
     }
 
@@ -155,7 +156,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
             options: {
               agentName: a.name,
               agentType: a.type,
-              workingDirectory: process.cwd(),
+              workingDirectory: cwd,
               systemPrompt,
               prompt: buildMailPrompt(a.name, pending),
               turnId,

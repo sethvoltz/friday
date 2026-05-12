@@ -128,7 +128,7 @@ function refork(agentName: string): void {
     options: {
       agentName,
       agentType: a.type,
-      workingDirectory: process.cwd(),
+      workingDirectory: registry.workingDirectoryFor(a),
       systemPrompt,
       prompt,
       turnId: `t_${randomUUID()}`,

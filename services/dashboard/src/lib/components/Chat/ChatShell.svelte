@@ -31,6 +31,37 @@
 
   // Read-only mode keeps its own messages list so SSE doesn't mutate it.
   let pastMessages = $state<ChatMessage[]>([]);
+  let pastLoading = $state(false);
+  let pastError = $state<string | null>(null);
+
+  function loadPastSession() {
+    if (!readonly || !sessionId) return;
+    const sid = sessionId;
+    const a = agent;
+    pastError = null;
+    pastLoading = true;
+    void (async () => {
+      try {
+        const r = await fetch(`/api/sessions/${sid}/turns?limit=500`);
+        // Bail if user navigated to a different past session mid-fetch —
+        // a late-resolving request must not overwrite the new view.
+        if (sid !== sessionId) return;
+        if (!r.ok) {
+          pastError = `Couldn't load session (HTTP ${r.status})`;
+          return;
+        }
+        const turns = (await r.json()) as TurnRow[];
+        if (sid !== sessionId) return;
+        pastMessages = parseTurns(turns, a);
+      } catch {
+        if (sid === sessionId) {
+          pastError = "Couldn't load session (network)";
+        }
+      } finally {
+        if (sid === sessionId) pastLoading = false;
+      }
+    })();
+  }
 
   function jumpToBottom() {
     if (!scrollEl) return;
@@ -51,20 +82,10 @@
     });
   });
 
-  // Read-only mode: load past session turns once.
+  // Read-only mode: load past session turns whenever sessionId changes.
   $effect(() => {
-    if (!readonly || !sessionId) return;
-    const sid = sessionId;
-    void (async () => {
-      try {
-        const r = await fetch(`/api/sessions/${sid}/turns?limit=500`);
-        if (!r.ok) return;
-        const turns = (await r.json()) as TurnRow[];
-        pastMessages = parseTurns(turns, agent);
-      } catch {
-        // ignore
-      }
-    })();
+    sessionId; // track
+    loadPastSession();
   });
 
   // Initial scroll-to-bottom + scroll-pin while streaming.
@@ -130,7 +151,11 @@
       Past session — read only
     </div>
   {/if}
-  <ChatMessages messages={readonly ? pastMessages : undefined} />
+  <ChatMessages
+    messages={readonly ? pastMessages : undefined}
+    pastLoading={readonly ? pastLoading : false}
+    pastError={readonly ? pastError : null}
+    onRetryPast={readonly ? loadPastSession : undefined} />
 </section>
 
 {#if !readonly && chat.loadingOlder}

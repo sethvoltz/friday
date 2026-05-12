@@ -18,7 +18,20 @@
     }
   }
 
-  let { messages }: { messages?: ChatMessage[] } = $props();
+  interface Props {
+    /** When provided, this is a read-only past-session view; no SSE wiring,
+     * no live-mode store reads. */
+    messages?: ChatMessage[];
+    /** Read-only loading flag. While true, render skeleton instead of empty
+     * hero. Wired up by ChatShell when fetching a past session. */
+    pastLoading?: boolean;
+    /** Read-only error message. When set with an empty list, render a Retry
+     * banner instead of the empty hero. */
+    pastError?: string | null;
+    /** Called by the Retry button in read-only mode. */
+    onRetryPast?: () => void;
+  }
+  let { messages, pastLoading = false, pastError = null, onRetryPast }: Props = $props();
   let allMessages = $derived(messages ?? chat.messages);
   let readonly = $derived(messages !== undefined);
 
@@ -110,11 +123,35 @@
     </div>
   {/if}
   {#if list.length === 0}
-    {#if !readonly && chat.loadingInitial}
+    {#if (!readonly && chat.loadingInitial) || (readonly && pastLoading)}
       <div class="skeleton-list" aria-hidden="true">
         <div class="skeleton-bubble assistant"></div>
         <div class="skeleton-bubble user"></div>
         <div class="skeleton-bubble assistant"></div>
+      </div>
+    {:else if !readonly && chat.historyError}
+      <div class="error-banner" role="alert">
+        <span class="error-msg">{chat.historyError}</span>
+        <button
+          type="button"
+          class="retry-btn"
+          onclick={() => chat.loadAgentTurns(chat.focusedAgent)}>
+          Retry
+        </button>
+      </div>
+    {:else if readonly && pastError}
+      <div class="error-banner" role="alert">
+        <span class="error-msg">{pastError}</span>
+        {#if onRetryPast}
+          <button type="button" class="retry-btn" onclick={() => onRetryPast?.()}>
+            Retry
+          </button>
+        {/if}
+      </div>
+    {:else if readonly}
+      <div class="empty">
+        <h2>Empty session</h2>
+        <p>This session has no recorded turns.</p>
       </div>
     {:else}
       <div class="empty">
@@ -313,6 +350,35 @@
     color: var(--text-primary);
     font-size: 1.4rem;
     margin-bottom: 0.5rem;
+  }
+  .error-banner {
+    margin: 4rem auto 0;
+    max-width: 28rem;
+    padding: 0.75rem 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border: 1px solid var(--status-error, #d44);
+    background: color-mix(in srgb, var(--status-error, #d44) 10%, transparent);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+  }
+  .error-msg { flex: 1; }
+  .retry-btn {
+    background: var(--status-error, #d44);
+    color: var(--bg-primary);
+    border: none;
+    padding: 0.35rem 0.85rem;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .retry-btn:hover {
+    filter: brightness(1.1);
   }
   .top-sentinel {
     min-height: 1px;

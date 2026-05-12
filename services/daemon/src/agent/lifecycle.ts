@@ -50,6 +50,10 @@ interface LiveWorker {
   /** Active turn id; updated on each prompt dispatch. */
   turnId: string;
   sessionId?: string;
+  /** The cwd the SDK runs under (== JSONL transcript dir). For builders this
+   * is the worktree path; for in-process types it's the daemon's cwd. The
+   * JSONL mirror needs this to compute the right ~/.claude/projects file. */
+  workingDirectory: string;
   abortRequested: boolean;
   textAccumulator: string;
   lastHeartbeat: number;
@@ -110,6 +114,7 @@ export function spawnTurn(input: SpawnTurnInput): void {
     agentType: input.options.agentType,
     model: input.options.model,
     turnId: input.options.turnId,
+    workingDirectory: input.options.workingDirectory,
     abortRequested: false,
     textAccumulator: "",
     lastHeartbeat: Date.now(),
@@ -309,10 +314,12 @@ function handleEvent(w: LiveWorker, e: WorkerEvent): void {
     case "session-update":
       w.sessionId = e.sessionId;
       registry.setSession(w.agentName, e.sessionId);
+      // Mirror has to watch the same cwd the SDK writes under — for builders
+      // that's the worktree, not process.cwd().
       startMirror({
         sessionId: e.sessionId,
         agentName: w.agentName,
-        workingDirectory: process.cwd(),
+        workingDirectory: w.workingDirectory,
       });
       break;
     case "text-delta": {

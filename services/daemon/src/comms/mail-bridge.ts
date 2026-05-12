@@ -87,7 +87,7 @@ function maybeSpawnFromMail(agentName: string): void {
     options: {
       agentName,
       agentType: agentRow.type,
-      workingDirectory: process.cwd(),
+      workingDirectory: registry.workingDirectoryFor(agentRow),
       systemPrompt,
       prompt: buildMailPrompt(agentName, pending),
       turnId,
