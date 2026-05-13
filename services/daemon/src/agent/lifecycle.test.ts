@@ -28,7 +28,11 @@ beforeEach(async () => {
 });
 
 describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
-  it("recordUserBlock writes the row before publishing block_complete", async () => {
+  it("user_chat source persists the row but does NOT publish SSE", async () => {
+    // The `user_chat` path collides with the dashboard's optimistic bubble
+    // (the POST /api/chat/turn response would race the SSE frame). The
+    // row still has to land in the blocks table — reload hydrates the
+    // chat from /api/agents/:name/blocks — but no SSE event must fire.
     const { recordUserBlock } = await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
     const { getBlockById } = await import("@friday/shared/services");
@@ -42,6 +46,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
       captured.push(e as { type?: string; block_id?: string; seq?: number }),
     );
 
+    const before = eventBus.currentSeq();
     const { blockId, seq } = recordUserBlock({
       turnId: "turn-adr-1",
       agentName: "alpha",
@@ -50,36 +55,59 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     });
     unsub();
 
-    // The DB row exists and its last_event_seq matches the published seq.
+    // Row landed.
     const row = getBlockById(blockId);
     expect(row).not.toBeNull();
-    expect(row!.lastEventSeq).toBe(seq);
+    expect(row!.source).toBe("user_chat");
+    expect(JSON.parse(row!.contentJson)).toEqual({ text: "hello adr" });
+    // No SSE event was published.
+    expect(captured.find((e) => e.block_id === blockId)).toBeUndefined();
+    expect(eventBus.currentSeq()).toBe(before);
+    // The returned seq is the sentinel 0 (no event → no seq).
+    expect(seq).toBe(0);
+  });
 
-    // The SSE event was published and carries the same seq + block_id.
+  it("mail source publishes SSE and the row's seq matches the event seq", async () => {
+    // Non-user_chat paths have no upstream optimistic bubble, so the SSE
+    // emit is the canonical materialization signal. The row's
+    // last_event_seq must match the published event's seq (ADR-004).
+    const { recordUserBlock } = await import("./lifecycle.js");
+    const { eventBus } = await import("../events/bus.js");
+    const { getBlockById } = await import("@friday/shared/services");
+
+    const captured: Array<{
+      type?: string;
+      block_id?: string;
+      seq?: number;
+    }> = [];
+    const unsub = eventBus.subscribe((e) =>
+      captured.push(e as { type?: string; block_id?: string; seq?: number }),
+    );
+
+    const before = eventBus.currentSeq();
+    const { blockId, seq } = recordUserBlock({
+      turnId: "turn-adr-2",
+      agentName: "alpha",
+      text: "mail body",
+      source: "mail",
+      fromAgent: "beta",
+    });
+    unsub();
+
+    // The bus advanced at least once (block_complete). `maybeEmitAgentMessage`
+    // also fires for mail sources, so >1 is acceptable; the load-bearing
+    // claim is that the block_complete carried the returned seq.
+    expect(eventBus.currentSeq()).toBeGreaterThan(before);
+    expect(seq).toBe(before + 1);
+
     const evt = captured.find(
       (e) => e.type === "block_complete" && e.block_id === blockId,
     );
     expect(evt).toBeDefined();
     expect(evt!.seq).toBe(seq);
-  });
 
-  it("seq returned by recordUserBlock matches eventBus' actual assignment", async () => {
-    const { recordUserBlock } = await import("./lifecycle.js");
-    const { eventBus } = await import("../events/bus.js");
-
-    const before = eventBus.currentSeq();
-    const { seq } = recordUserBlock({
-      turnId: "turn-adr-2",
-      agentName: "alpha",
-      text: "seq lock",
-      source: "user_chat",
-    });
-    const after = eventBus.currentSeq();
-
-    // Exactly one event was published; seq advanced by 1; the returned seq
-    // is the published seq.
-    expect(after).toBe(before + 1);
-    expect(seq).toBe(after);
+    const row = getBlockById(blockId);
+    expect(row!.lastEventSeq).toBe(seq);
   });
 
   it("mail-derived blocks include from_agent in content_json", async () => {
@@ -103,7 +131,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(row!.source).toBe("mail");
   });
 
-  it("two back-to-back recordUserBlock calls produce strictly monotonic seqs and rows", async () => {
+  it("two back-to-back mail recordUserBlock calls produce strictly monotonic seqs", async () => {
     const { recordUserBlock } = await import("./lifecycle.js");
     const { getBlockById } = await import("@friday/shared/services");
 
@@ -111,16 +139,21 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
       turnId: "t1",
       agentName: "alpha",
       text: "first",
-      source: "user_chat",
+      source: "mail",
+      fromAgent: "beta",
     });
     const r2 = recordUserBlock({
       turnId: "t2",
       agentName: "alpha",
       text: "second",
-      source: "user_chat",
+      source: "mail",
+      fromAgent: "beta",
     });
 
-    expect(r2.seq).toBe(r1.seq + 1);
+    // Monotonic, but `maybeEmitAgentMessage` interleaves an agent_message
+    // event between the two block_completes for mail-derived blocks, so the
+    // gap isn't necessarily exactly 1.
+    expect(r2.seq).toBeGreaterThan(r1.seq);
     expect(getBlockById(r1.blockId)!.lastEventSeq).toBe(r1.seq);
     expect(getBlockById(r2.blockId)!.lastEventSeq).toBe(r2.seq);
   });

@@ -122,8 +122,9 @@ export class ChatState {
   /** Bubble id to highlight after a `/jump` (FIX_FORWARD 6.1). The
    *  matching ChatMessage element scrolls into view and pulses briefly. */
   highlightedMessageId = $state<string | null>(null);
-  /** Smallest `dbTurnId` we've loaded; pagination cursor for older turns. */
-  oldestDbId = $state<number | null>(null);
+  /** Oldest `block_id` we've loaded; pagination cursor for older blocks.
+   *  Used as the `before` query param on `/api/agents/:name/blocks`. */
+  oldestBlockId = $state<string | null>(null);
   /** True while a paginated fetch is in flight; prevents re-entrant calls. */
   loadingOlder = $state(false);
   /** True once we've fetched and gotten back an empty page (no more history). */
@@ -263,16 +264,35 @@ export class ChatState {
    * eventual `block_complete` SSE event finds the same id and is a no-op.
    */
   confirmPending(queueId: string, turnId: string): void {
-    for (const m of this.messages) {
-      if (m.queueId !== queueId) continue;
-      m.id = userBlockIdForTurn(turnId);
-      m.turnId = turnId;
-      m.pending = false;
-      m.failed = false;
-      m.retrying = false;
-      m.queueId = undefined;
+    const targetId = userBlockIdForTurn(turnId);
+    const optIdx = this.messages.findIndex((m) => m.queueId === queueId);
+    if (optIdx < 0) return;
+    // Defense in depth against an SSE-first race: if the daemon's
+    // `block_complete` SSE frame arrived *before* the POST /api/chat/turn
+    // response (and so before this confirmPending call), `handleBlockComplete`
+    // already pushed a canonical bubble with `id=userBlockIdForTurn(turnId)`.
+    // Re-keying the optimistic in place would create two messages sharing
+    // the same id, crashing the keyed `{#each}`. Drop the optimistic in
+    // that case — the SSE bubble is the canonical one.
+    //
+    // The daemon-side change in `recordUserBlock` (skipping the SSE emit
+    // for `user_chat` source) should make this path unreachable in
+    // practice, but the check stays as belt-and-braces for the `mail` /
+    // `scheduled` SSE paths where the SSE frame is the sole source.
+    const sseAlreadyHere = this.messages.some(
+      (m, i) => i !== optIdx && m.id === targetId,
+    );
+    if (sseAlreadyHere) {
+      this.messages = this.messages.filter((_, i) => i !== optIdx);
       return;
     }
+    const m = this.messages[optIdx];
+    m.id = targetId;
+    m.turnId = turnId;
+    m.pending = false;
+    m.failed = false;
+    m.retrying = false;
+    m.queueId = undefined;
   }
 
   /** Mark the pending bubble for this queueId as failed (4xx) so the UI
@@ -559,7 +579,7 @@ export class ChatState {
     // Clear immediately so switching agents doesn't briefly show the prior
     // agent's messages while turns are fetching.
     this.messages = [];
-    this.oldestDbId = null;
+    this.oldestBlockId = null;
     this.reachedOldest = false;
     this.historyError = null;
     // Clear any stale loading-older flag from the previous agent. Without
@@ -570,34 +590,33 @@ export class ChatState {
     // that stale call won't clobber B's state.
     this.loadingOlder = false;
 
-    // Last-known transcript from a previous session. Render the cached turns
-    // immediately so a slow / offline first-paint doesn't show an empty
-    // chat. The live fetch below replaces this once it lands; the bubble
-    // ids are stable across cache → fresh, so any in-flight stream attaches
-    // cleanly.
-    const cached = loadJSON<TurnRow[]>(KEYS.transcript(agent), []);
-    if (cached.length > 0) {
-      this.messages = parseTurns(cached, agent);
-      this.oldestDbId = oldestDbTurnId(cached);
-    }
+    // Build the queue-synth bubbles once — we append them after both the
+    // cached-render and the live-fetch overwrite so they're never wiped
+    // by `this.messages = parseBlocks(...)`. Without this, a page reload
+    // while a message is queued (offline / 5xx) would briefly show the
+    // bubble and then lose it.
+    const queueSynth: ChatMessage[] = sendQueue.forAgent(agent).map((q) => ({
+      id: `u_queue_${q.id}`,
+      role: "user" as const,
+      text: q.text,
+      status: "complete" as const,
+      ts: q.createdAt,
+      queueId: q.id,
+      attachments: q.attachments,
+    }));
 
-    // Synthesize user bubbles for any queued-but-not-yet-sent messages
-    // belonging to this agent. Without this, a page reload while a
-    // message is queued (offline / 5xx) hides the bubble — the message
-    // is still in the queue and the layout-mount flush will try to send
-    // it, but the user has no idea it exists. For `failed` entries the
-    // bubble exposes the Retry/Remove affordances that would otherwise
-    // be unreachable.
-    for (const q of sendQueue.forAgent(agent)) {
-      this.messages.push({
-        id: `u_queue_${q.id}`,
-        role: "user",
-        text: q.text,
-        status: "complete",
-        ts: q.createdAt,
-        queueId: q.id,
-        attachments: q.attachments,
-      });
+    // Last-known transcript from a previous session. Render the cached
+    // blocks immediately so a slow / offline first-paint doesn't show an
+    // empty chat. The live fetch below replaces this once it lands; the
+    // bubble ids are stable across cache → fresh (parseBlocks uses
+    // userBlockIdForTurn for user blocks and b_<blockId> for assistant),
+    // so any in-flight SSE deltas attach cleanly.
+    const cached = loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
+    if (cached.length > 0) {
+      this.messages = [...parseBlocks(cached, agent), ...queueSynth];
+      this.oldestBlockId = oldestBlockCursor(cached);
+    } else if (queueSynth.length > 0) {
+      this.messages = [...queueSynth];
     }
 
     this.loadingInitial = cached.length === 0;
@@ -607,7 +626,7 @@ export class ChatState {
       // + network class. Server clamps to ≤200 regardless.
       const limit = initialPageSize();
       const r = await fetchWithTimeout(
-        `/api/agents/${agent}/turns?limit=${limit}`,
+        `/api/agents/${agent}/blocks?limit=${limit}`,
         { timeoutMs: 15_000 },
       );
       // The user may have switched agents while we were awaiting. Bail
@@ -620,17 +639,25 @@ export class ChatState {
         }
         return;
       }
-      const turns = (await r.json()) as TurnRow[];
+      const payload = (await r.json()) as { blocks: BlockRow[] };
       if (this.focusedAgent !== agent) return;
-      this.messages = parseTurns(turns, agent);
-      this.oldestDbId = oldestDbTurnId(turns);
-      if (turns.length === 0) {
+      const blocks = payload.blocks ?? [];
+      // Queue-synth is appended AFTER the live blocks so queued bubbles
+      // survive the wholesale array replacement. parseBlocks returns in
+      // chronological order (oldest first); the queue items represent
+      // not-yet-sent user input that conceptually sits at the bottom
+      // until the daemon assigns turn_ids and the SSE confirmation
+      // arrives.
+      this.messages = [...parseBlocks(blocks, agent), ...queueSynth];
+      this.oldestBlockId = oldestBlockCursor(blocks);
+      if (blocks.length === 0) {
         this.reachedOldest = true;
       } else {
         // Trim before persisting: localStorage caps around 5MB per origin
-        // and contentJson can carry sizable tool inputs/outputs. Cap at the
-        // initial-page heuristic so the cached payload tracks first-paint.
-        saveJSON(KEYS.transcript(agent), turns.slice(0, limit));
+        // and content_json can carry sizable tool inputs/outputs. Cap at
+        // the initial-page heuristic so the cached payload tracks the
+        // first-paint window.
+        saveJSON(KEYS.transcript(agent), blocks.slice(0, limit));
       }
     } catch {
       // Network/timeout. If a cached render is in place, leave it; otherwise
@@ -640,6 +667,41 @@ export class ChatState {
       }
     } finally {
       if (this.focusedAgent === agent) this.loadingInitial = false;
+    }
+
+    // Restore `inflightTurnId` so the Send button correctly shows Stop on
+    // reload-during-turn. Without this, a hard refresh while the daemon
+    // is mid-turn leaves the UI claiming the agent is idle even though
+    // SSE deltas may still arrive. The probe is best-effort: on network
+    // failure, `inflightTurnId` stays null and the next `turn_started`
+    // SSE frame populates it.
+    if (this.focusedAgent !== agent) return;
+    try {
+      const ar = await fetchWithTimeout(
+        `/api/agents/${encodeURIComponent(agent)}`,
+        { timeoutMs: 5_000 },
+      );
+      if (!ar.ok) return;
+      if (this.focusedAgent !== agent) return;
+      const entry = (await ar.json()) as { status?: string };
+      if (entry.status !== "working") return;
+      // Find the most recent bubble carrying a turnId — that's the
+      // current in-flight turn. Prefer streaming assistant blocks, fall
+      // back to the latest bubble overall. If no turnId is recoverable
+      // (worker just spawned, no blocks emitted yet), leave
+      // `inflightTurnId` null; the next `turn_started` SSE frame will
+      // populate it.
+      let latestTurnId: string | undefined;
+      for (let i = this.messages.length - 1; i >= 0; i--) {
+        const m = this.messages[i];
+        if (m.turnId) {
+          latestTurnId = m.turnId;
+          break;
+        }
+      }
+      if (latestTurnId) this.inflightTurnId = latestTurnId;
+    } catch {
+      // ignore — fallback path is the next turn_started SSE frame.
     }
   }
 
@@ -662,36 +724,37 @@ export class ChatState {
     onPrepended?: () => void;
   }): Promise<void> {
     if (this.loadingOlder || this.reachedOldest) return;
-    if (this.oldestDbId === null) return;
+    if (this.oldestBlockId === null) return;
     const MIN_LOADING_MS = 350;
     const agent = this.focusedAgent;
-    const beforeId = this.oldestDbId;
+    const before = this.oldestBlockId;
     this.loadingOlder = true;
     const startedAt = Date.now();
     try {
       const r = await fetchWithTimeout(
-        `/api/agents/${agent}/turns?limit=50&beforeId=${beforeId}`,
+        `/api/agents/${agent}/blocks?limit=50&before=${encodeURIComponent(before)}`,
         { timeoutMs: 15_000 },
       );
       if (!r.ok) return;
-      const turns = (await r.json()) as TurnRow[];
+      const payload = (await r.json()) as { blocks: BlockRow[] };
       // Bail if the user switched agents while the fetch was in flight.
-      // Without this we would prepend the prior agent's turns onto the
-      // new agent's messages and overwrite `oldestDbId` with a value
+      // Without this we would prepend the prior agent's blocks onto the
+      // new agent's messages and overwrite `oldestBlockId` with a value
       // that doesn't belong to the focused agent — subsequent
       // pagination would fetch wrong data or trip `reachedOldest`.
       if (this.focusedAgent !== agent) return;
-      if (turns.length === 0) {
+      const blocks = payload.blocks ?? [];
+      if (blocks.length === 0) {
         this.reachedOldest = true;
         return;
       }
-      const older = parseTurns(turns, agent);
+      const older = parseBlocks(blocks, agent);
       // Prepend, dedup-by-id (SSE may have surfaced something we now also
       // see in DB).
       const seen = new Set(this.messages.map((m) => m.id));
       const fresh = older.filter((m) => !seen.has(m.id));
       this.messages = [...fresh, ...this.messages];
-      this.oldestDbId = oldestDbTurnId(turns);
+      this.oldestBlockId = oldestBlockCursor(blocks);
       opts?.onPrepended?.();
     } catch {
       // ignore

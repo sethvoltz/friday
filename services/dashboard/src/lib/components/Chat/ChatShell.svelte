@@ -123,7 +123,7 @@
   // real bug — if the previous agent was scrolled to the top, the new
   // agent's chat would land at scrollTop=0, the top sentinel would
   // already be in view, and the IntersectionObserver wouldn't re-fire
-  // after `chat.oldestDbId` became valid (no intersection change → no
+  // after `chat.oldestBlockId` became valid (no intersection change → no
   // callback), leaving the user with one page and no way to load more.
   $effect(() => {
     if (readonly) return;

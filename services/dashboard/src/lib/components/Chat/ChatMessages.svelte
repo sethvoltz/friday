@@ -242,14 +242,20 @@
   $effect(() => {
     if (readonly) return;
     // Track the gates the callback checks. When any of these flips to a
-    // pagination-permitting value, re-emit.
-    const oldest = chat.oldestDbId;
+    // pagination-permitting value, re-emit. `chat.focusedAgent` covers
+    // agent-switch; `chat.oldestBlockId` transitions from null → string
+    // when an initial load completes; the other two cover the small-chat
+    // case where reachedOldest had been true on the previous agent.
+    //
+    // We deliberately do NOT track `chat.messages.length` here. That used
+    // to be in the deps and produced a serious regression: every send
+    // (`addUser` increments the length) re-emitted the IO callback, which
+    // fired a spurious `loadOlderTurns` that — when it returned empty —
+    // set `reachedOldest = true` and broke subsequent pagination.
+    chat.focusedAgent;
+    const oldest = chat.oldestBlockId;
     chat.loadingOlder;
     chat.reachedOldest;
-    // Also re-emit when the message list itself changes — covers the
-    // agent-switch case where the load completes and the rendered DOM
-    // settles into a new layout.
-    chat.messages.length;
 
     untrack(() => {
       if (oldest === null) return;

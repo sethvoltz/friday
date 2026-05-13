@@ -763,40 +763,69 @@ export function recordUserBlock(input: RecordUserBlockInput): {
       ? { text: input.text, from_agent: input.fromAgent }
       : { text: input.text };
   const contentJson = JSON.stringify(content);
-  const { seq } = writeAndPublish(
-    {
-      v: 1,
-      type: "block_complete",
-      turn_id: input.turnId,
-      agent: input.agentName,
-      block_id: blockId,
-      message_id: null,
-      block_index: 0,
+  // The `user_chat` path has the dashboard's optimistic bubble already
+  // rendered before POST /api/chat/turn returns. Emitting the canonical
+  // `block_complete` SSE frame here races the POST response, and when the
+  // SSE wins, the dashboard ends up with two user-role bubbles for the
+  // same turn (one re-keyed by `confirmPending`, one freshly-pushed by
+  // `handleBlockComplete`). Skip the SSE publish for `user_chat`; the
+  // block row is still persisted so reloads via `/api/agents/:name/blocks`
+  // return the message. Mail / scheduled / queue-injected user blocks
+  // have no upstream optimistic bubble, so their SSE frames still emit.
+  let seq: number;
+  if (input.source === "user_chat") {
+    seq = 0; // not in the event bus; not consumed by callers either
+    insertBlock({
+      blockId,
+      turnId: input.turnId,
+      agentName: input.agentName,
+      sessionId: input.sessionId ?? "__pending__",
+      messageId: null,
+      blockIndex: 0,
       role: "user",
       kind: "text",
       source: input.source,
-      content_json: contentJson,
+      contentJson,
       status: "complete",
       ts,
-    },
-    (assignedSeq) => {
-      insertBlock({
-        blockId,
-        turnId: input.turnId,
-        agentName: input.agentName,
-        sessionId: input.sessionId ?? "__pending__",
-        messageId: null,
-        blockIndex: 0,
+      lastEventSeq: seq,
+    });
+  } else {
+    seq = writeAndPublish(
+      {
+        v: 1,
+        type: "block_complete",
+        turn_id: input.turnId,
+        agent: input.agentName,
+        block_id: blockId,
+        message_id: null,
+        block_index: 0,
         role: "user",
         kind: "text",
         source: input.source,
-        contentJson,
+        content_json: contentJson,
         status: "complete",
         ts,
-        lastEventSeq: assignedSeq,
-      });
-    },
-  );
+      },
+      (assignedSeq) => {
+        insertBlock({
+          blockId,
+          turnId: input.turnId,
+          agentName: input.agentName,
+          sessionId: input.sessionId ?? "__pending__",
+          messageId: null,
+          blockIndex: 0,
+          role: "user",
+          kind: "text",
+          source: input.source,
+          contentJson,
+          status: "complete",
+          ts,
+          lastEventSeq: assignedSeq,
+        });
+      },
+    ).seq;
+  }
   // FIX_FORWARD 2.8: mail-derived user blocks badge the recipient agent
   // (a piece of user-visible content just landed in their chat).
   // user_chat / queue_inject blocks are typed by the user themselves and
