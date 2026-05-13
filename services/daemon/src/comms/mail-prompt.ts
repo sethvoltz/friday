@@ -20,15 +20,11 @@ export function buildMailPrompt(agentName: string, inbox: MailRow[]): string {
     const flat = preview.replace(/\n+/g, " ");
     return `- mail #${m.id} from \`${m.fromAgent}\` (${m.type}, ${new Date(m.ts).toISOString()}): ${flat}`;
   });
-  const replyHint =
-    agentName === "orchestrator" || /^bare-/.test(agentName)
-      ? "Reply to the user via `chat_reply`"
-      : "Reply to the sender via `mail_send`";
   return [
     `You have ${inbox.length} pending mail item${inbox.length === 1 ? "" : "s"}.`,
     "",
     ...lines,
     "",
-    `Use \`mail_read({id})\` to read each in full, then \`mail_close({id})\` once handled. ${replyHint} as appropriate.`,
+    `Use \`mail_read({id})\` to read each in full, then \`mail_close({id})\` once handled. Reply via \`mail_send\` as appropriate — the user sees orchestrator + bare assistant output directly in the chat.`,
   ].join("\n");
 }

@@ -54,7 +54,22 @@ export type WorkerCommand =
   | { type: "prompt"; options: WorkerPromptCommand }
   | { type: "stop" }
   | { type: "abort" }
-  | { type: "mail-wakeup" };
+  | { type: "mail-wakeup" }
+  /**
+   * Critical-priority mail just landed for this worker (FIX_FORWARD 2.4).
+   * The worker breaks the current SDK iterator at the next assistant-
+   * message boundary and lets `mainLoop` drain the inbox normally — the
+   * critical mail will be the (at minimum) first row.
+   */
+  | { type: "mail-wakeup-critical" }
+  /**
+   * The parent has queued one or more user prompts for this worker via
+   * `nextPrompts`. The worker breaks the current SDK iterator at the next
+   * assistant-message boundary, emits `turn-complete`, and lets the
+   * parent's turn-complete handler shift the queue and send a fresh
+   * `prompt` IPC. FIX_FORWARD 2.4.
+   */
+  | { type: "prompts-pending" };
 
 /**
  * Worker → parent block events. Each content block (text / thinking / tool_use

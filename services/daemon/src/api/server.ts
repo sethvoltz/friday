@@ -37,7 +37,6 @@ import {
   uploadAttachment,
 } from "@friday/shared/services";
 import {
-  buildAutoRecallBlock,
   forgetEntry,
   getEntry,
   listEntries,
@@ -47,6 +46,7 @@ import {
   updateEntry,
   type MemoryEntry,
 } from "@friday/memory";
+import { wrapWithRecall } from "../agent/recall.js";
 import {
   DEFAULT_RULE,
   deleteProposal,
@@ -174,10 +174,7 @@ async function handle(
       : baseSystemPrompt;
     const allowedToolsOverride = skillMatch?.skill.allowedTools ?? undefined;
 
-    const recallBlock = safeRecall(userText);
-    const wrappedPrompt = recallBlock
-      ? `${recallBlock}\n\n${userText}`
-      : userText;
+    const wrappedPrompt = wrapWithRecall(userText, userText, "user_chat");
 
     // Persist the user's typed prompt as a `role='user'`, `source='user_chat'`
     // block before dispatching. Stays scoped to the user's literal input —
@@ -333,6 +330,11 @@ async function handle(
         ? `${baseSystemPrompt}\n\n---\n\nYou are running in a git worktree at \`${worktreePath}\` on branch \`${branch}\`. **Do not read, write, or modify files outside this directory.** All Bash commands run with this directory as cwd by default; do not \`cd\` outside it.`
         : baseSystemPrompt;
     const modelCfg = normalizeModelConfig(cfg.model);
+    const wrappedSpawnPrompt = wrapWithRecall(
+      body.prompt,
+      body.prompt,
+      "agent_spawn",
+    );
     dispatchTurn({
       agentName: body.name,
       options: {
@@ -340,7 +342,7 @@ async function handle(
         agentType: body.type,
         workingDirectory,
         systemPrompt,
-        prompt: body.prompt,
+        prompt: wrappedSpawnPrompt,
         turnId,
         model: body.model ?? modelCfg.name,
         thinking: modelCfg.thinking,
@@ -991,27 +993,6 @@ async function handle(
     return;
   }
 
-  // --- Chat reply (agents post user-facing messages) ---
-  if (method === "POST" && path === "/api/chat/reply") {
-    const body = await readJson<{
-      from: string;
-      fromType?: string;
-      text: string;
-      kind?: string;
-    }>(req);
-    const turnId = `t_${randomUUID()}`;
-    const preview =
-      body.text.length > 240 ? body.text.slice(0, 240) + "…" : body.text;
-    eventBus.publish({
-      v: 1,
-      type: "agent_message",
-      agent: body.from,
-      turn_id: turnId,
-      preview,
-    });
-    return json(res, 200, { ok: true, turn_id: turnId });
-  }
-
   return json(res, 404, { error: "not found", path });
 }
 
@@ -1184,6 +1165,7 @@ function handleSystemCommand(
         const stack = readPromptStack("bare", []);
         const systemPrompt = composeSystemPrompt(stack);
         const modelCfg = normalizeModelConfig(cfg.model);
+        const wrappedTopic = wrapWithRecall(topic, topic, "scratch");
         dispatchTurn({
           agentName: name,
           options: {
@@ -1191,7 +1173,7 @@ function handleSystemCommand(
             agentType: "bare",
             workingDirectory: process.cwd(),
             systemPrompt,
-            prompt: topic,
+            prompt: wrappedTopic,
             turnId: seedTurnId,
             model: modelCfg.name,
             thinking: modelCfg.thinking,
@@ -1275,18 +1257,6 @@ function slugifyMemoryId(s: string): string {
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);
-}
-
-/** Memory recall is best-effort; failures don't block the turn. */
-function safeRecall(userText: string): string {
-  try {
-    return buildAutoRecallBlock(userText);
-  } catch (err) {
-    logger.log("warn", "memory.recall.error", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return "";
-  }
 }
 
 async function readJson<T>(req: IncomingMessage): Promise<T> {

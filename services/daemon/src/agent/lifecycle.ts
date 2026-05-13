@@ -222,6 +222,11 @@ export function dispatchTurn(input: SpawnTurnInput): void {
     sendPrompt(existing, promptCmd);
   } else {
     existing.nextPrompts.push(promptCmd);
+    // FIX_FORWARD 2.4: signal the worker so it can break at the next SDK
+    // iteration boundary. The worker emits `turn-complete` on the break;
+    // our existing turn-complete handler then pops nextPrompts and sends
+    // the queued prompt forward via the normal `prompt` IPC.
+    send(existing.child, { type: "prompts-pending" });
     logger.log("info", "worker.prompt.queued", {
       agent: input.agentName,
       turnId: promptCmd.turnId,
@@ -284,6 +289,19 @@ export function wakeAgent(agentName: string): boolean {
   const w = live.get(agentName);
   if (!w) return false;
   send(w.child, { type: "mail-wakeup" });
+  return true;
+}
+
+/**
+ * Send a `mail-wakeup-critical` IPC. The worker breaks its current SDK
+ * iterator at the next assistant-message boundary (FIX_FORWARD 2.4) and
+ * drains the inbox — the critical mail row is at minimum the first to be
+ * included in the resulting mail prompt.
+ */
+export function wakeAgentCritical(agentName: string): boolean {
+  const w = live.get(agentName);
+  if (!w) return false;
+  send(w.child, { type: "mail-wakeup-critical" });
   return true;
 }
 
@@ -426,6 +444,57 @@ function handleEvent(w: LiveWorker, e: WorkerEvent): void {
 
 function send(child: ChildProcess, cmd: WorkerCommand): void {
   if (child.send) child.send(cmd);
+}
+
+/* ---------------- Agent message notification (FIX_FORWARD 2.8) ---------------- */
+
+/**
+ * Emit an `agent_message` SSE event when a text block_complete lands with
+ * role=assistant or role=user+source=mail. Replaces the old `chat_reply`
+ * notification surface (removed in 2.1) and is now sourced exclusively
+ * from real block commits.
+ *
+ * Tool / thinking blocks don't fire this — those are mechanism, not
+ * user-visible chat content.
+ */
+function maybeEmitAgentMessage(opts: {
+  agent: string;
+  turnId: string;
+  blockId: string;
+  role: string;
+  kind: BlockKind | string;
+  source: BlockSource;
+  status: string;
+  contentJson: string;
+}): void {
+  if (opts.kind !== "text") return;
+  if (opts.status !== "complete") return;
+  const isAssistant = opts.role === "assistant";
+  const isMail = opts.role === "user" && opts.source === "mail";
+  if (!isAssistant && !isMail) return;
+  let text = "";
+  try {
+    const parsed = JSON.parse(opts.contentJson) as { text?: string };
+    if (typeof parsed.text === "string") text = parsed.text;
+  } catch {
+    // Malformed content_json — leave preview undefined.
+  }
+  const trimmed = text.trim();
+  const preview =
+    trimmed.length === 0
+      ? undefined
+      : trimmed.length > 240
+        ? trimmed.slice(0, 240).trim() + "…"
+        : trimmed;
+  eventBus.publish({
+    v: 1,
+    type: "agent_message",
+    agent: opts.agent,
+    turn_id: opts.turnId,
+    block_id: opts.blockId,
+    kind: "block_complete",
+    preview,
+  });
 }
 
 /* ---------------- DB-before-SSE atomic helper (FIX_FORWARD 1.10) ---------------- */
@@ -618,6 +687,18 @@ function handleBlockStop(
       }
     },
   );
+  // FIX_FORWARD 2.8: badge the agent when the block is user-visible chat
+  // content. Tool/thinking blocks don't fire this.
+  maybeEmitAgentMessage({
+    agent: w.agentName,
+    turnId: w.turnId,
+    blockId: live.blockId,
+    role: live.role,
+    kind: live.kind,
+    source: live.source,
+    status: e.status,
+    contentJson: e.contentJson,
+  });
 }
 
 /* ---------------- User-typed block insertion (FIX_FORWARD 1.2) ---------------- */
@@ -683,5 +764,19 @@ export function recordUserBlock(input: RecordUserBlockInput): {
       });
     },
   );
+  // FIX_FORWARD 2.8: mail-derived user blocks badge the recipient agent
+  // (a piece of user-visible content just landed in their chat).
+  // user_chat / queue_inject blocks are typed by the user themselves and
+  // need no notification.
+  maybeEmitAgentMessage({
+    agent: input.agentName,
+    turnId: input.turnId,
+    blockId,
+    role: "user",
+    kind: "text",
+    source: input.source,
+    status: "complete",
+    contentJson,
+  });
   return { blockId, seq };
 }

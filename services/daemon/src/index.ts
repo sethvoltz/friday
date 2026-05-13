@@ -20,6 +20,7 @@ import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js"
 import { startMailBridge } from "./comms/mail-bridge.js";
 import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
 import { dispatchTurn } from "./agent/lifecycle.js";
+import { wrapWithRecall } from "./agent/recall.js";
 import {
   composeSystemPrompt,
   readPromptStack,
@@ -152,6 +153,9 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
           pending: pending.length,
         });
         try {
+          // FIX_FORWARD 2.5: wrap with recall on the joined mail bodies.
+          const intent = pending.map((m) => m.body).join("\n\n");
+          const mailPrompt = buildMailPrompt(a.name, pending);
           dispatchTurn({
             agentName: a.name,
             options: {
@@ -159,7 +163,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
               agentType: a.type,
               workingDirectory: cwd,
               systemPrompt,
-              prompt: buildMailPrompt(a.name, pending),
+              prompt: wrapWithRecall(intent, mailPrompt, "mail"),
               turnId,
               model: modelCfg.name,
               thinking: modelCfg.thinking,

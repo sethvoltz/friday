@@ -27,11 +27,13 @@
   $effect(() => {
     const c = sseConnected.value;
     if (c && !lastConnected && sendQueue.items.length > 0) {
-      void sendQueue.flush().then((sent) => {
-        for (const s of sent) {
-          chat.clearQueueMarker(s.queueId);
+      void sendQueue.flush().then((result) => {
+        for (const s of result.sent) {
+          chat.confirmPending(s.queueId, s.turnId);
           chat.inflightTurnId = s.turnId;
         }
+        for (const qid of result.failed) chat.markPendingFailed(qid);
+        for (const qid of result.retrying) chat.markPendingRetrying(qid);
       });
     }
     lastConnected = c;
@@ -74,11 +76,13 @@
     // Best-effort flush on initial mount — drains anything left in
     // localStorage from a previous session that ended offline.
     if (signedIn && !isLogin && sendQueue.items.length > 0) {
-      void sendQueue.flush().then((sent) => {
-        for (const s of sent) {
-          chat.clearQueueMarker(s.queueId);
+      void sendQueue.flush().then((result) => {
+        for (const s of result.sent) {
+          chat.confirmPending(s.queueId, s.turnId);
           chat.inflightTurnId = s.turnId;
         }
+        for (const qid of result.failed) chat.markPendingFailed(qid);
+        for (const qid of result.retrying) chat.markPendingRetrying(qid);
       });
     }
 

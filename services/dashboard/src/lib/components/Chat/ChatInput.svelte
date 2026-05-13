@@ -321,14 +321,19 @@
     // autoresize sizes the box to the *old* content.
     await tick();
     autoresize();
-    const sent = await sendQueue.flush();
-    for (const s of sent) {
-      chat.clearQueueMarker(s.queueId);
+    const result = await sendQueue.flush();
+    for (const s of result.sent) {
+      // FIX_FORWARD 2.6: re-key the pending bubble to its canonical
+      // turn-derived id so the daemon's `block_complete` for the user-role
+      // block overwrites this exact row instead of creating a duplicate.
+      chat.confirmPending(s.queueId, s.turnId);
       // Set the inflight turn for the most recently-sent message so the UI
       // shows the Stop button. Multi-message flushes only need the last one
       // tracked — earlier messages have already produced their own turns.
       chat.inflightTurnId = s.turnId;
     }
+    for (const qid of result.failed) chat.markPendingFailed(qid);
+    for (const qid of result.retrying) chat.markPendingRetrying(qid);
   }
 
   async function dispatchSystem(name: string, args: string): Promise<void> {

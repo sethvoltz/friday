@@ -27,7 +27,13 @@ export function buildMailServer(opts: BuildMailServerOptions) {
     tools: [
       tool(
         "mail_send",
-        "Send mail to another agent. Use for asynchronous coordination — the recipient drains its inbox via mail_inbox.",
+        [
+          "Send mail to another agent. Use for asynchronous coordination — the recipient drains its inbox via mail_inbox.",
+          "",
+          "Priority semantics:",
+          "  - `normal` (default): recipient picks this up at the next turn boundary — i.e. after their current turn finishes. Use for non-urgent coordination, status updates, completed work hand-offs.",
+          "  - `critical`: recipient picks this up at the next SDK iteration boundary inside their current turn (mid-turn injection). Use sparingly. The orchestrator may use `critical` freely for time-sensitive reroutes; helpers/builders should reserve `critical` for sub-agent-return-style replies to a parent that is mid-turn waiting for your result.",
+        ].join("\n"),
         {
           to: z.string().describe("Recipient agent name."),
           body: z.string().describe("Message body. Markdown ok."),
@@ -35,6 +41,12 @@ export function buildMailServer(opts: BuildMailServerOptions) {
             .enum(["message", "notification", "task"])
             .optional()
             .describe("Mail kind. Defaults to message."),
+          priority: z
+            .enum(["normal", "critical"])
+            .optional()
+            .describe(
+              "Delivery urgency. `normal` (default) drains at the next turn boundary; `critical` drains mid-turn at the next SDK iteration. See tool description for usage guidance.",
+            ),
           subject: z
             .string()
             .optional()
@@ -61,6 +73,7 @@ export function buildMailServer(opts: BuildMailServerOptions) {
               fromAgent: opts.callerName,
               toAgent: args.to,
               type: args.type ?? "message",
+              priority: args.priority ?? "normal",
               subject: args.subject,
               threadId: args.threadId,
               body: args.body,

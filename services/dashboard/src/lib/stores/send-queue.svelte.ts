@@ -57,6 +57,17 @@ class SendQueue {
     }
   }
 
+  /** Drop every queued message, including failed/retrying ones. Wired to the
+   *  "Discard all and continue" affordance the failed-state UI surfaces
+   *  after MAX_ATTEMPTS retries (FIX_FORWARD 2.7). Returns the queue ids
+   *  that were cleared so callers can clean up their pending bubbles. */
+  discardAll(): string[] {
+    const ids = this.items.map((m) => m.id);
+    this.items.splice(0, this.items.length);
+    this.persist();
+    return ids;
+  }
+
   forAgent(agent: string): QueuedMessage[] {
     return this.items.filter((m) => m.agent === agent);
   }
@@ -64,9 +75,13 @@ class SendQueue {
   /** Reset a `failed` entry to `queued` so the next flush picks it up,
    *  then immediately flush so the retry feels instant. Wired to the
    *  per-bubble "retry" affordance in the UI. */
-  async retry(id: string): Promise<Array<{ queueId: string; turnId: string; agent: string }>> {
+  async retry(id: string): Promise<{
+    sent: Array<{ queueId: string; turnId: string; agent: string }>;
+    failed: string[];
+    retrying: string[];
+  }> {
     const m = this.items.find((x) => x.id === id);
-    if (!m) return [];
+    if (!m) return { sent: [], failed: [], retrying: [] };
     m.status = "queued";
     m.attempts = 0;
     m.lastError = undefined;
@@ -82,14 +97,23 @@ class SendQueue {
    * of the queue forever. Idempotent on re-entry via `flushing`.
    *
    * Returns the {queueId, turnId, agent} tuples for messages successfully
-   * sent on this pass — callers wire those back into the chat UI (clearing
-   * the "queued" pill, setting `inflightTurnId`).
+   * sent on this pass — callers wire those back into the chat UI (re-keying
+   * the pending bubble, setting `inflightTurnId`). The complementary
+   * `failed` / `retrying` queueId lists let the caller mirror per-bubble
+   * UI affordances (FIX_FORWARD 2.6).
    */
-  async flush(): Promise<Array<{ queueId: string; turnId: string; agent: string }>> {
-    if (this.flushing) return [];
-    if (this.items.length === 0) return [];
+  async flush(): Promise<{
+    sent: Array<{ queueId: string; turnId: string; agent: string }>;
+    failed: string[];
+    retrying: string[];
+  }> {
+    const empty = { sent: [] as Array<{ queueId: string; turnId: string; agent: string }>, failed: [] as string[], retrying: [] as string[] };
+    if (this.flushing) return empty;
+    if (this.items.length === 0) return empty;
     this.flushing = true;
     const sent: Array<{ queueId: string; turnId: string; agent: string }> = [];
+    const failed: string[] = [];
+    const retrying: string[] = [];
     try {
       const ids = this.items.map((m) => m.id);
       for (const id of ids) {
@@ -116,12 +140,14 @@ class SendQueue {
             const nonRetryable = r.status >= 400 && r.status < 500;
             if (nonRetryable || m.attempts >= MAX_ATTEMPTS) {
               m.status = "failed";
+              failed.push(m.id);
               this.persist();
               continue;
             }
             m.status = "retrying";
+            retrying.push(m.id);
             this.persist();
-            return sent; // 5xx: stop the run, try again on next reconnect.
+            return { sent, failed, retrying }; // 5xx: stop the run, try again on next reconnect.
           }
           const data = (await r.json().catch(() => ({}))) as { turn_id?: string };
           this.remove(id);
@@ -135,18 +161,20 @@ class SendQueue {
           m.lastError = err instanceof Error ? err.message : String(err);
           if (m.attempts >= MAX_ATTEMPTS) {
             m.status = "failed";
+            failed.push(m.id);
             this.persist();
             continue;
           }
           m.status = "retrying";
+          retrying.push(m.id);
           this.persist();
-          return sent;
+          return { sent, failed, retrying };
         }
       }
     } finally {
       this.flushing = false;
     }
-    return sent;
+    return { sent, failed, retrying };
   }
 }
 

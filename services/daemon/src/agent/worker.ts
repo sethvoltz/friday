@@ -35,6 +35,20 @@ let stopped = false;
 let mainLoopRunning = false;
 let pendingPrompt: WorkerPromptCommand | null = null;
 let mailWakeupPending = false;
+/**
+ * Set when a `mail-wakeup-critical` IPC arrives. Read at the next SDK
+ * iteration boundary inside `runQuery`; on set, the worker breaks the
+ * iterator and lets `mainLoop` drain the inbox (FIX_FORWARD 2.4).
+ */
+let pendingCriticalMail = false;
+/**
+ * Set when the parent has queued user prompts and signalled
+ * `prompts-pending`. Read at the next SDK iteration boundary; on set, the
+ * worker breaks the iterator and emits `turn-complete`. The parent's
+ * existing turn-complete handler then pops `nextPrompts` and sends a
+ * fresh `prompt` IPC (FIX_FORWARD 2.4).
+ */
+let promptsPending = false;
 let idleResolve: (() => void) | null = null;
 let workerOpts: WorkerSpawnOptions | null = null;
 let lastSessionId: string | undefined;
@@ -80,6 +94,13 @@ process.on("message", (msg: WorkerCommand) => {
       wakeIdle();
     } else if (msg.type === "mail-wakeup") {
       mailWakeupPending = true;
+      wakeIdle();
+    } else if (msg.type === "mail-wakeup-critical") {
+      mailWakeupPending = true;
+      pendingCriticalMail = true;
+      wakeIdle();
+    } else if (msg.type === "prompts-pending") {
+      promptsPending = true;
       wakeIdle();
     }
   } catch (err: unknown) {
@@ -460,7 +481,20 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         continue;
       }
 
-      if (m.type === "assistant") continue;
+      if (m.type === "assistant") {
+        // FIX_FORWARD 2.4: SDK iteration boundary. Each assistant message
+        // marks the end of one model step (tool calls land in the
+        // subsequent `user` message). Check whether we have queued user
+        // prompts or critical mail to inject — if so, break the iterator
+        // gracefully. The parent's turn-complete handler will drain the
+        // next prompt; `mainLoop` drains the inbox for critical mail.
+        if (promptsPending || pendingCriticalMail) {
+          promptsPending = false;
+          pendingCriticalMail = false;
+          break;
+        }
+        continue;
+      }
 
       if (m.type === "user") {
         const userMsg = m.message as

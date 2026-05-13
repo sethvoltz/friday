@@ -11,11 +11,26 @@
   }
 
   async function retryQueued(queueId: string) {
-    const sent = await sendQueue.retry(queueId);
-    for (const s of sent) {
-      chat.clearQueueMarker(s.queueId);
+    const result = await sendQueue.retry(queueId);
+    for (const s of result.sent) {
+      chat.confirmPending(s.queueId, s.turnId);
       chat.inflightTurnId = s.turnId;
     }
+    for (const qid of result.failed) chat.markPendingFailed(qid);
+    for (const qid of result.retrying) chat.markPendingRetrying(qid);
+  }
+
+  function discardOne(queueId: string) {
+    sendQueue.remove(queueId);
+    chat.discardPending(queueId);
+  }
+
+  function discardAll() {
+    const ids = sendQueue.discardAll();
+    for (const id of ids) chat.discardPending(id);
+    // Defensive: any pending bubble that lost its queue entry mid-flight
+    // should also be cleared.
+    chat.discardAllPending();
   }
 
   interface Props {
@@ -32,8 +47,20 @@
     onRetryPast?: () => void;
   }
   let { messages, pastLoading = false, pastError = null, onRetryPast }: Props = $props();
-  let allMessages = $derived(messages ?? chat.messages);
+  let rawMessages = $derived(messages ?? chat.messages);
   let readonly = $derived(messages !== undefined);
+
+  // FIX_FORWARD 2.6: pin pending bubbles to the bottom regardless of natural
+  // sort. A pending user bubble might otherwise drift above a server-sent
+  // message if the server message lands later in the array — pinning makes
+  // the "you just typed this" affordance always render below the
+  // conversation. Read-only views skip this since they have no pending state.
+  let allMessages = $derived.by(() => {
+    if (readonly) return rawMessages;
+    const nonPending = rawMessages.filter((m) => !m.pending);
+    const pending = rawMessages.filter((m) => m.pending);
+    return pending.length === 0 ? rawMessages : [...nonPending, ...pending];
+  });
 
   // DOM windowing. When the user is bottom-pinned (scrolled to or near the
   // latest), only render the last WINDOW_SIZE messages — keeps the DOM
@@ -200,8 +227,9 @@
               {#if q?.status === "failed"}
                 <div class="footer-tag failed-row">
                   <span>Failed{q.lastError ? ` — ${q.lastError}` : ""}</span>
-                  <button type="button" class="queue-action" onclick={() => retryQueued(q.id)}>Retry</button>
-                  <button type="button" class="queue-action" onclick={() => sendQueue.remove(q.id)}>Remove</button>
+                  <button type="button" class="queue-action" onclick={() => retryQueued(q.id)}>Keep retrying</button>
+                  <button type="button" class="queue-action" onclick={() => discardOne(q.id)}>Discard and continue</button>
+                  <button type="button" class="queue-action" onclick={discardAll}>Discard all and continue</button>
                 </div>
               {:else if q?.status === "retrying"}
                 <div class="footer-tag queued">Retrying… ({q.attempts}/5)</div>

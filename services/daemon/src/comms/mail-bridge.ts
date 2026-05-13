@@ -28,7 +28,9 @@ import {
   isAgentLive,
   recordUserBlock,
   wakeAgent,
+  wakeAgentCritical,
 } from "../agent/lifecycle.js";
+import { wrapWithRecall } from "../agent/recall.js";
 import * as registry from "../agent/registry.js";
 import { randomUUID } from "node:crypto";
 import { buildMailPrompt } from "./mail-prompt.js";
@@ -71,7 +73,15 @@ export function startMailBridge(): void {
 
     try {
       if (isAgentLive(row.toAgent)) {
-        wakeAgent(row.toAgent);
+        // FIX_FORWARD 2.4: critical mail triggers mid-turn injection (the
+        // worker breaks at the next SDK iteration boundary). Normal mail
+        // just wakes the worker so it drains at the outer query boundary
+        // when idle.
+        if (row.priority === "critical") {
+          wakeAgentCritical(row.toAgent);
+        } else {
+          wakeAgent(row.toAgent);
+        }
         return;
       }
       maybeSpawnFromMail(row.toAgent);
@@ -108,6 +118,11 @@ function maybeSpawnFromMail(agentName: string): void {
   const modelCfg = normalizeModelConfig(cfg.model);
   const turnId = `t_${randomUUID()}`;
 
+  // FIX_FORWARD 2.5: wrap with recall. Use the joined mail bodies as the
+  // intent text so the memory query reflects what the recipient is being
+  // asked to act on, not the surrounding mail-listing prose.
+  const intent = pending.map((m) => m.body).join("\n\n");
+  const mailPrompt = buildMailPrompt(agentName, pending);
   dispatchTurn({
     agentName,
     options: {
@@ -115,7 +130,7 @@ function maybeSpawnFromMail(agentName: string): void {
       agentType: agentRow.type,
       workingDirectory: registry.workingDirectoryFor(agentRow),
       systemPrompt,
-      prompt: buildMailPrompt(agentName, pending),
+      prompt: wrapWithRecall(intent, mailPrompt, "mail"),
       turnId,
       model: modelCfg.name,
       thinking: modelCfg.thinking,

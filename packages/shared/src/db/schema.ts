@@ -174,6 +174,9 @@ export const mail = sqliteTable(
     ts: integer("ts").notNull(),
     readAt: integer("read_at"),
     closedAt: integer("closed_at"),
+    /** 'normal' drains at the next turn boundary; 'critical' drains at the
+     *  next SDK iteration boundary inside the worker (FIX_FORWARD 2.3/2.4). */
+    priority: text("priority").notNull().default("normal"),
   },
   (t) => ({
     inboxIdx: index("mail_inbox").on(t.toAgent, t.delivery, t.ts),

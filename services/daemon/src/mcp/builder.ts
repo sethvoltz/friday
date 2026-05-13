@@ -12,7 +12,6 @@ import type { AgentType } from "@friday/shared";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { buildEchoServer, ECHO_SERVER_NAME } from "./echo.js";
 import { buildMailServer, MAIL_SERVER_NAME } from "./mail.js";
-import { buildChatServer, CHAT_SERVER_NAME } from "./chat.js";
 import { buildAgentsServer, AGENTS_SERVER_NAME } from "./agents.js";
 import { buildMemoryServer, MEMORY_SERVER_NAME } from "./memory.js";
 import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
@@ -44,14 +43,9 @@ export function buildMcpServers(
   // is reliable.
   servers[ECHO_SERVER_NAME] = buildEchoServer();
 
-  // Every agent type can send/receive mail.
+  // Every agent type can send/receive mail. Mail is the universal delivery
+  // primitive (FIX_FORWARD 2.1/2.2); there is no separate `chat_reply` tool.
   servers[MAIL_SERVER_NAME] = buildMailServer(ctx);
-
-  // chat_reply: orchestrator, helper, scheduled, bare. Builders communicate
-  // via mail + PR and don't get chat surfaces.
-  if (opts.callerType !== "builder") {
-    servers[CHAT_SERVER_NAME] = buildChatServer(ctx);
-  }
 
   // agent_create / agent_list / agent_kill / etc.: orchestrator only.
   // Builder/helper/bare/scheduled don't see agent_* tools at all.

@@ -47,6 +47,23 @@ export interface ChatMessage {
   /** Attachments included on the user message (rendered inline as chips
    * for non-images, thumbnails for images). */
   attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+
+  /** Where the bubble originated. Carries through to the canonical block
+   *  (matches the `source` column in the blocks table). FIX_FORWARD 2.6. */
+  source?: "user_chat" | "mail" | "queue_inject" | "sdk";
+
+  /** True from the moment a user types until `/api/chat/turn` confirms
+   *  the dispatch with `{turn_id}`. Pending bubbles render pinned to the
+   *  bottom regardless of natural ts sort (FIX_FORWARD 2.6). */
+  pending?: boolean;
+
+  /** Set when the send-queue's flush returned a 4xx — surface a
+   *  retry/discard affordance (FIX_FORWARD 2.6). */
+  failed?: boolean;
+
+  /** Set when the send-queue's flush returned a 5xx / network error and
+   *  the queue is scheduling a backoff retry (FIX_FORWARD 2.6). */
+  retrying?: boolean;
 }
 
 export interface AgentInfo {
@@ -64,6 +81,17 @@ export interface AgentInfo {
 /** Sentinel agent bucket for SSE events that don't carry an `agent` field
  *  (system_banner, mail_delivered, schedule_fired, evolve_critical). */
 export const SYSTEM_BUCKET = "__system__";
+
+/**
+ * Stable bubble id for a user-role chat message keyed by its turn_id. Used
+ * both client-side (when `/api/chat/turn` confirms a dispatch) and on the
+ * SSE handler (when the daemon emits the canonical `block_complete` for the
+ * user-role block) so the two paths converge on the same ChatMessage row.
+ * FIX_FORWARD 2.6.
+ */
+export function userBlockIdForTurn(turnId: string): string {
+  return `user_${turnId}`;
+}
 
 export class ChatState {
   messages = $state<ChatMessage[]>([]);
@@ -161,13 +189,24 @@ export class ChatState {
       attachments?: Array<{ sha256: string; filename: string; mime: string }>;
     },
   ): string {
-    const id = `u_${Date.now()}`;
+    // FIX_FORWARD 2.6: mint a `pending_<uuid>` id and `pending: true` so
+    // the bubble pins to the bottom of the chat until the dispatch lands.
+    // `confirmPending` re-keys to the daemon-issued turn_id once
+    // /api/chat/turn returns; the canonical user-role block carries the
+    // same id and overwrites this entry in-place.
+    const id = `pending_${
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? (crypto as { randomUUID: () => string }).randomUUID()
+        : `${Date.now()}_${Math.random().toString(36).slice(2)}`
+    }`;
     this.messages.push({
       id,
       role: "user",
       text,
       status: "complete",
       ts: Date.now(),
+      source: "user_chat",
+      pending: true,
       queueId: opts?.queueId,
       attachments: opts?.attachments,
     });
@@ -181,6 +220,61 @@ export class ChatState {
     for (const m of this.messages) {
       if (m.queueId === queueId) m.queueId = undefined;
     }
+  }
+
+  /**
+   * The pending user bubble (matched by `queueId`) has been confirmed by
+   * `/api/chat/turn` returning `{turn_id}` (FIX_FORWARD 2.6). Re-key the
+   * bubble id to the daemon-issued user-block id (mirroring the canonical
+   * block id daemon's `recordUserBlock` will emit on the SSE stream), drop
+   * `pending`, drop transient send-queue state. Natural sort restores; the
+   * eventual `block_complete` SSE event finds the same id and is a no-op.
+   */
+  confirmPending(queueId: string, turnId: string): void {
+    for (const m of this.messages) {
+      if (m.queueId !== queueId) continue;
+      m.id = userBlockIdForTurn(turnId);
+      m.turnId = turnId;
+      m.pending = false;
+      m.failed = false;
+      m.retrying = false;
+      m.queueId = undefined;
+      return;
+    }
+  }
+
+  /** Mark the pending bubble for this queueId as failed (4xx) so the UI
+   *  surfaces retry/discard. FIX_FORWARD 2.6. */
+  markPendingFailed(queueId: string): void {
+    for (const m of this.messages) {
+      if (m.queueId !== queueId) continue;
+      m.failed = true;
+      m.retrying = false;
+      return;
+    }
+  }
+
+  /** Mark the pending bubble for this queueId as retrying (5xx / network).
+   *  FIX_FORWARD 2.6. */
+  markPendingRetrying(queueId: string): void {
+    for (const m of this.messages) {
+      if (m.queueId !== queueId) continue;
+      m.retrying = true;
+      m.failed = false;
+      return;
+    }
+  }
+
+  /** Remove the pending bubble matching `queueId` (FIX_FORWARD 2.7 — used
+   *  when the user picks "Discard and continue" or "Discard all"). */
+  discardPending(queueId: string): void {
+    this.messages = this.messages.filter((m) => m.queueId !== queueId);
+  }
+
+  /** Remove every pending bubble in one go (FIX_FORWARD 2.7 — "Discard all
+   *  and continue"). */
+  discardAllPending(): void {
+    this.messages = this.messages.filter((m) => !m.pending);
   }
 
   startAssistantTurn(turnId: string, agent: string): void {
@@ -572,9 +666,13 @@ export class ChatState {
     ts: number;
   }): void {
     if (event.kind === "text") {
-      const id = `b_${event.block_id}`;
-      if (this.messages.some((m) => m.id === id)) return;
       const role = event.role === "user" ? "user" : "assistant";
+      // FIX_FORWARD 2.6: user blocks key by turn_id so the local pending
+      // bubble (re-keyed on POST-success) and the canonical block from the
+      // daemon converge on the same row.
+      const id =
+        role === "user" ? userBlockIdForTurn(event.turn_id) : `b_${event.block_id}`;
+      if (this.messages.some((m) => m.id === id)) return;
       this.messages.push({
         id,
         role,
@@ -654,7 +752,10 @@ export class ChatState {
   }): void {
     const parsed = parseBlockContent(event.content_json);
     if (event.kind === "text") {
-      const id = `b_${event.block_id}`;
+      const id =
+        event.role === "user"
+          ? userBlockIdForTurn(event.turn_id)
+          : `b_${event.block_id}`;
       for (const m of this.messages) {
         if (m.id !== id) continue;
         if (typeof parsed.text === "string") m.text = parsed.text;

@@ -294,6 +294,12 @@ Then per turn:
 
 See ADR-005 for the full rationale.
 
+### Universal auto-recall wrapping (FIX_FORWARD 2.5)
+
+`wrapWithRecall(intentText, body, intent)` from `services/daemon/src/agent/recall.ts` is the single chokepoint for `<memory-context>` injection. Every dispatch site prepends the block: `/api/chat/turn`, mail-bridge dispatch, scheduler spawn, scratch seeding, `/api/agents` POST, recoverAgents mail drain. Recall is best-effort — a memory-store error never blocks the turn.
+
+The `intent` arg (`user_chat | mail | scheduled | scratch | agent_spawn`) is presently unused by the recall builder: every caller produces a uniform `<memory-context>` block. It's captured as a forward-compat hook for an eventual memory MCP that filters by intent (e.g. a mail-derived turn pulls recall tagged for cross-agent context, a scheduled fire pulls recall tagged for the schedule's purpose). The wire shape of `<memory-context>` stays uniform across that change — the filter happens upstream of block construction.
+
 ## Agent lifecycle
 
 Hybrid worker model:

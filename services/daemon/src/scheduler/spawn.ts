@@ -21,6 +21,7 @@ import {
 } from "@friday/shared";
 import { logger } from "../log.js";
 import { dispatchTurn } from "../agent/lifecycle.js";
+import { wrapWithRecall } from "../agent/recall.js";
 import * as registry from "../agent/registry.js";
 import {
   buildFirstTurnWithState,
@@ -48,10 +49,18 @@ export function spawnScheduledRun(
   const systemPrompt = composeSystemPrompt(stack);
   const modelCfg = normalizeModelConfig(cfg.model);
 
-  const prompt = buildFirstTurnWithState({
+  // FIX_FORWARD 2.5: wrap with recall against the raw task prompt — the
+  // first-turn template adds state-injection scaffolding that would noise
+  // the memory query otherwise.
+  const promptBody = buildFirstTurnWithState({
     scheduleName: scheduleRow.name,
     taskPrompt: scheduleRow.taskPrompt,
   });
+  const prompt = wrapWithRecall(
+    scheduleRow.taskPrompt,
+    promptBody,
+    "scheduled",
+  );
 
   const turnId = `t_${randomUUID()}`;
 

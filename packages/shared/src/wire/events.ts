@@ -72,11 +72,24 @@ export interface TurnUsage {
   cost_usd: number;
 }
 
+/**
+ * Notification that a user-visible block landed for `agent` (FIX_FORWARD
+ * 2.8). Emitted whenever the daemon publishes a `block_complete` with
+ * `role='assistant'` OR (`role='user'` AND `source='mail'`). The dashboard
+ * uses this to decide whether to badge the agent in the sidebar — focused
+ * agents drop the badge locally, unfocused agents accumulate it.
+ *
+ * `chat_reply` has been removed (FIX_FORWARD 2.1); this event is now
+ * sourced exclusively from real block commits.
+ */
 export interface AgentMessageEvent extends BaseEvent {
   type: "agent_message";
   agent: string;
   turn_id: string;
-  preview: string;
+  block_id: string;
+  kind: "block_complete";
+  /** Short truncated preview of the block content, for inbox-style UI. */
+  preview?: string;
 }
 
 export interface AgentLifecycleEvent extends BaseEvent {

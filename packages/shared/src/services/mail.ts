@@ -5,6 +5,13 @@ import * as schema from "../db/schema.js";
 
 export type MailType = "message" | "notification" | "task";
 export type MailDelivery = "pending" | "delivered" | "read" | "closed";
+/**
+ * `normal` mail drains at the next turn boundary (between full turns, as
+ * today). `critical` mail drains at the next SDK iteration boundary —
+ * mid-turn injection (FIX_FORWARD 2.3/2.4). Used sparingly by helpers and
+ * builders for sub-agent-return-style replies to a parent that's mid-turn.
+ */
+export type MailPriority = "normal" | "critical";
 
 export interface SendMailInput {
   fromAgent: string;
@@ -16,6 +23,8 @@ export interface SendMailInput {
   subject?: string;
   /** Optional thread id. Messages with the same id render grouped. */
   threadId?: string;
+  /** Defaults to 'normal'. See MailPriority docs. */
+  priority?: MailPriority;
 }
 
 export interface MailRow {
@@ -31,6 +40,7 @@ export interface MailRow {
   ts: number;
   readAt: number | null;
   closedAt: number | null;
+  priority: MailPriority;
 }
 
 /**
@@ -43,6 +53,7 @@ export const mailBus = new EventEmitter();
 export function sendMail(input: SendMailInput): MailRow {
   const db = getDb();
   const ts = Date.now();
+  const priority: MailPriority = input.priority ?? "normal";
   const inserted = db
     .insert(schema.mail)
     .values({
@@ -55,12 +66,19 @@ export function sendMail(input: SendMailInput): MailRow {
       body: input.body,
       metaJson: input.meta ? JSON.stringify(input.meta) : null,
       ts,
+      priority,
     })
     .returning()
     .get();
   const row = rowToMail(inserted);
-  // Push delivery
+  // Push delivery. The mail-bridge subscribes to `mail:any`; the worker may
+  // subscribe to its own `mail:to:<recipient>` channel. Critical mail emits
+  // an extra `mail:critical:<recipient>` so 2.4's mid-turn-injection check
+  // has a dedicated signal without inspecting the full inbox.
   mailBus.emit(`mail:to:${input.toAgent}`, row);
+  if (priority === "critical") {
+    mailBus.emit(`mail:critical:${input.toAgent}`, row);
+  }
   mailBus.emit("mail:any", row);
   return row;
 }
@@ -150,5 +168,6 @@ function rowToMail(r: typeof schema.mail.$inferSelect): MailRow {
     ts: r.ts,
     readAt: r.readAt,
     closedAt: r.closedAt,
+    priority: (r.priority as MailPriority) ?? "normal",
   };
 }
