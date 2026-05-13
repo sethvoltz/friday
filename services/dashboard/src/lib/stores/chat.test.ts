@@ -321,6 +321,61 @@ describe("reload-mid-turn replay → SSE resumption", () => {
     expect(after?.text).toBe("partial continuation");
   });
 
+  it("seeds the per-agent SSE cursor from payload.lastEventSeq so replayed deltas don't double-append", async () => {
+    // The companion to the daemon-side fix where `handleBlockDelta`
+    // persists the accumulated text + advances the row's
+    // `last_event_seq` on every delta. The cursor seed here is what
+    // makes that fix safe: without it, the SSE replay would re-emit
+    // every delta with seq <= row.lastEventSeq and `applyEvent` would
+    // re-append the text — producing a duplicated message or
+    // corrupted markdown.
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            { id: 1, blockId: "blk-1", turnId: "t-1", role: "assistant", kind: "text", contentJson: '{"text":"partial "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 42 },
+          ],
+          lastEventSeq: 42,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "working" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+
+    expect(chat.lastSeqByAgent["friday"]).toBe(42);
+
+    // A replayed delta at seq=30 (older than the cursor) must be
+    // dropped — its text is already in the row's content_json.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      block_id: "blk-1",
+      turn_id: "t-1",
+      agent: "friday",
+      delta: { text: "REPLAY" },
+      seq: 30,
+      ts: 110,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages[0]?.text, "replayed delta must not append").toBe(
+      "partial ",
+    );
+
+    // A live delta at seq=50 (newer than cursor) applies normally.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      block_id: "blk-1",
+      turn_id: "t-1",
+      agent: "friday",
+      delta: { text: "live" },
+      seq: 50,
+      ts: 120,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages[0]?.text).toBe("partial live");
+  });
+
   it("preserves running status on thinking blocks so block_delta keeps appending", async () => {
     mockFetchWithTimeout
       .mockResolvedValueOnce(

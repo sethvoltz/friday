@@ -639,7 +639,10 @@ export class ChatState {
         }
         return;
       }
-      const payload = (await r.json()) as { blocks: BlockRow[] };
+      const payload = (await r.json()) as {
+        blocks: BlockRow[];
+        lastEventSeq?: number;
+      };
       if (this.focusedAgent !== agent) return;
       const blocks = payload.blocks ?? [];
       // Queue-synth is appended AFTER the live blocks so queued bubbles
@@ -650,6 +653,22 @@ export class ChatState {
       // arrives.
       this.messages = [...parseBlocks(blocks, agent), ...queueSynth];
       this.oldestBlockId = oldestBlockCursor(blocks);
+      // Seed the per-agent SSE cursor from the snapshot's high-water
+      // mark. The daemon updates `last_event_seq` on every block_delta
+      // (so the row's content_json reflects deltas up to that seq);
+      // by advancing the cursor to match, replayed deltas with
+      // `seq <= cursor` are dropped by `acceptEvent` and we don't
+      // double-append the partial text that's already in the row.
+      // Without this seeding, a mid-turn reload would render the
+      // partial text from /blocks and then re-append the same deltas
+      // when SSE replays them — corrupt markdown, duplicate content.
+      const seqHwm = payload.lastEventSeq ?? 0;
+      if (seqHwm > 0) {
+        this.lastSeqByAgent[agent] = Math.max(
+          this.lastSeqByAgent[agent] ?? 0,
+          seqHwm,
+        );
+      }
       if (blocks.length === 0) {
         this.reachedOldest = true;
       } else {

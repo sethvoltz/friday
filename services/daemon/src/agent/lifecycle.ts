@@ -662,6 +662,36 @@ function handleBlockDelta(
     nextSeq,
   );
   if (!live) return;
+  // Persist the accumulated text + bump `last_event_seq` so a mid-turn
+  // reload picks up the partial content from /api/agents/:name/blocks
+  // and skips the replayed deltas via the per-agent SSE cursor. Without
+  // this the row stays at `content_json=""` until block_complete, the
+  // dashboard's parseBlocks renders an empty bubble, the resumed SSE
+  // deltas append from "" — and if the ring buffer evicted the early
+  // deltas, the user sees only the late half. We only write text
+  // accumulation here; tool_use blocks accumulate `partial_json` and
+  // don't render incrementally on the client, so their canonical
+  // content arrives via block_complete as before.
+  if (
+    typeof e.delta.text === "string" &&
+    (live.kind === "text" || live.kind === "thinking")
+  ) {
+    try {
+      updateBlock(live.blockId, {
+        contentJson: JSON.stringify({ text: live.text }),
+        lastEventSeq: nextSeq,
+      });
+    } catch (err) {
+      // A DB write failure here doesn't break the live stream — the
+      // SSE event still publishes below. Mid-stream reload would
+      // fall back to empty content (the prior failure mode).
+      logger.log("warn", "blocks.delta.update.fail", {
+        agent: w.agentName,
+        blockId: live.blockId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   eventBus.publish({
     v: 1,
     type: "block_delta",
