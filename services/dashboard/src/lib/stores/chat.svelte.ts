@@ -1116,27 +1116,42 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
       const role = b.role === "user" ? "user" : "assistant";
       const id =
         role === "user" ? userBlockIdForTurn(b.turnId) : `b_${b.blockId}`;
+      // Preserve the row's `streaming` state. On reload during a turn,
+      // the assistant block is still being filled — collapsing it to
+      // `complete` here would make `handleBlockDelta` reject every
+      // subsequent SSE delta (it gates on `m.status === "streaming"`)
+      // and the user would see a frozen replay instead of a live
+      // resumption. User blocks are always finalized at insert time
+      // so they map cleanly to `complete`.
+      const status: ChatMessage["status"] =
+        role === "user"
+          ? "complete"
+          : b.status === "streaming"
+            ? "streaming"
+            : b.status === "complete"
+              ? "complete"
+              : b.status === "aborted"
+                ? "aborted"
+                : "error";
       out.push({
         id,
         role,
         text: parsed.text ?? "",
-        status:
-          b.status === "complete" || b.status === "streaming"
-            ? "complete"
-            : b.status === "aborted"
-              ? "aborted"
-              : "error",
+        status,
         agent,
         turnId: b.turnId,
         ts: b.ts,
         source: (b.source as ChatMessage["source"]) ?? undefined,
       });
     } else if (b.kind === "thinking") {
+      // Same shape for thinking blocks. `handleBlockDelta` gates on
+      // `m.status === "running"` for thinking; preserve "running"
+      // for streaming rows so reload-mid-turn deltas append.
       out.push({
         id: `th_${b.blockId}`,
         role: "thinking",
         text: parsed.text ?? "",
-        status: "done",
+        status: b.status === "streaming" ? "running" : "done",
         blockId: b.blockId,
         ts: b.ts,
       });

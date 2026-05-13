@@ -276,6 +276,85 @@ describe("confirmPending", () => {
   });
 });
 
+describe("reload-mid-turn replay → SSE resumption", () => {
+  it("preserves streaming status on assistant blocks so block_delta keeps appending", async () => {
+    // Reproduces the exact symptom of "hard refresh shows the bubble
+    // but never streams." Before the fix `parseBlocks` collapsed every
+    // status into `complete`, and `handleBlockDelta` rejects deltas
+    // whose target bubble isn't `streaming`. Result: a frozen replay
+    // with no live continuation.
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            { id: 1, blockId: "blk-asst-live", turnId: "turn-live", role: "assistant", kind: "text", contentJson: '{"text":"partial "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+          ],
+          lastEventSeq: 1,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "working" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+
+    const asst = chat.messages.find((m) => m.id === "b_blk-asst-live");
+    expect(asst, "assistant block should be in messages after reload").toBeDefined();
+    // Load-bearing: the status must be `streaming`, not `complete`,
+    // otherwise the next block_delta drops on the floor.
+    expect(asst?.status).toBe("streaming");
+
+    // Now simulate the SSE block_delta the daemon emits to continue
+    // filling this block. The text must append onto the existing
+    // partial content.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      block_id: "blk-asst-live",
+      turn_id: "turn-live",
+      agent: "friday",
+      delta: { text: "continuation" },
+      seq: 2,
+      ts: 110,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const after = chat.messages.find((m) => m.id === "b_blk-asst-live");
+    expect(after?.text).toBe("partial continuation");
+  });
+
+  it("preserves running status on thinking blocks so block_delta keeps appending", async () => {
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            { id: 1, blockId: "blk-think-live", turnId: "turn-think", role: "assistant", kind: "thinking", contentJson: '{"text":"thought so far "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+          ],
+          lastEventSeq: 1,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "working" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+
+    const think = chat.messages.find((m) => m.id === "th_blk-think-live");
+    expect(think?.status).toBe("running");
+
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      block_id: "blk-think-live",
+      turn_id: "turn-think",
+      agent: "friday",
+      delta: { text: "more" },
+      seq: 2,
+      ts: 110,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const after = chat.messages.find((m) => m.id === "th_blk-think-live");
+    expect(after?.text).toBe("thought so far more");
+  });
+});
+
 describe("inflight-state probe on reload", () => {
   it("sets inflightTurnId when the agent status is 'working' and a streaming block exists", async () => {
     mockFetchWithTimeout
