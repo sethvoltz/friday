@@ -21,6 +21,7 @@ The Claude `claude_code` preset provides Read, Write, Edit, Bash, Glob, Grep. Fr
 | `friday-schedule` | `schedule_upsert`, `schedule_list`, `schedule_show`, `schedule_pause`, `schedule_resume`, `schedule_delete`, `schedule_trigger` | ✓ | — | — | — | — |
 | `friday-evolve` | `evolve_list`, `evolve_get`, `evolve_save`, `evolve_update`, `evolve_apply`, `evolve_dismiss`, `evolve_scan`, `evolve_enrich`, `evolve_cluster` | ✓ | — | — | — | — |
 | `friday-echo` | `echo` (sanity check) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `playwright` | `browser_navigate`, `browser_click`, `browser_type`, `browser_snapshot`, `browser_take_screenshot`, `browser_evaluate`, `browser_console_messages`, `browser_network_requests`, … (full `@playwright/mcp` surface) | — | ✓ | ✓ | ✓ | ✓ |
 
 ### Gating notes
 
@@ -30,6 +31,7 @@ The Claude `claude_code` preset provides Read, Write, Edit, Bash, Glob, Grep. Fr
 - Builder gets `memory_search` / `memory_get` only — builders consult memory but mail the orchestrator with anything worth saving as canonical memory.
 - Bare and scheduled don't touch tickets directly. Scheduled meta-agents push proposals through evolve, which the orchestrator turns into tickets.
 - Schedule and evolve mutation are orchestrator-only — sub-agents shouldn't be modifying their own schedules or applying proposals.
+- **`playwright`** is the only stdio (out-of-process) built-in. It launches Microsoft's `@playwright/mcp` via `npx -y @playwright/mcp@latest --headless --isolated` per worker — one fresh Chromium per agent, no shared profile (`SingletonLock` prevents that anyway). Orchestrator is excluded so long-running browser calls never block user responsiveness; browser work belongs in a spawned sub-agent. Shared logins across agents are deferred to a future `friday-secrets` MCP.
 
 ## Tool handlers — HTTP loopback
 
@@ -53,16 +55,23 @@ In `~/.friday/config.json`:
       "name": "gcal",
       "command": "npx",
       "args": ["-y", "@some-org/mcp-gcal"],
-      "env": { "GCAL_TOKEN": "$GCAL_TOKEN" },
+      "env": { "GCAL_TOKEN": "..." },
       "scope": ["orchestrator", "helper", "bare"]
     }
   ]
 }
 ```
 
-- `scope` restricts by agent type. Default: all agent types.
-- Env interpolation reads from `~/.friday/.env`.
-- Settings UI exposes a list view + "Add MCP server" form. Direct file edits also supported.
+- Stdio transport only (the `command` / `args` / `env` shape). HTTP/SSE
+  transports aren't wired yet.
+- `scope` restricts by agent type. Empty or missing = all agent types.
+- Names starting with `friday-` are reserved for in-process built-ins. The
+  name `playwright` is also reserved (built-in browser MCP). Reserved names
+  in user config are rejected with a warning in the daemon log.
+- Malformed entries (e.g. missing `command`) are skipped, not fatal — a typo
+  in config never blocks a worker from starting.
+- The daemon reloads `~/.friday/config.json` on every spawn, so edits take
+  effect on the next agent fork without a restart.
 
 ## Skill-driven tool restriction
 

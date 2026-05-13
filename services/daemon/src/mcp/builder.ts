@@ -8,8 +8,12 @@
  * tools as `mcp__<server-name>__<tool-name>`.
  */
 
-import type { AgentType } from "@friday/shared";
-import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
+import type { AgentType, McpServerConfig } from "@friday/shared";
+import type {
+  McpSdkServerConfigWithInstance,
+  McpStdioServerConfig,
+} from "@anthropic-ai/claude-agent-sdk";
+import { logger } from "../log.js";
 import { buildEchoServer, ECHO_SERVER_NAME } from "./echo.js";
 import { buildMailServer, MAIL_SERVER_NAME } from "./mail.js";
 import { buildAgentsServer, AGENTS_SERVER_NAME } from "./agents.js";
@@ -27,12 +31,23 @@ export interface BuildMcpServersOptions {
   callerName: string;
   daemonPort: number;
   parentName?: string;
+  /**
+   * User-configured stdio MCP servers (`~/.friday/config.json` → `mcpServers`).
+   * Filtered by `scope` against `callerType`; entries whose name shadows a
+   * built-in (`friday-*`) are rejected.
+   */
+  userMcpServers?: McpServerConfig[];
 }
+
+export type AssembledMcpServers = Record<
+  string,
+  McpSdkServerConfigWithInstance | McpStdioServerConfig
+>;
 
 export function buildMcpServers(
   opts: BuildMcpServersOptions,
-): Record<string, McpSdkServerConfigWithInstance> {
-  const servers: Record<string, McpSdkServerConfigWithInstance> = {};
+): AssembledMcpServers {
+  const servers: AssembledMcpServers = {};
   const ctx = {
     callerName: opts.callerName,
     callerType: opts.callerType,
@@ -90,5 +105,58 @@ export function buildMcpServers(
     servers[INTEGRATIONS_SERVER_NAME] = buildIntegrationsServer(ctx);
   }
 
+  // playwright: built-in browser automation via Microsoft's @playwright/mcp.
+  // Excluded for orchestrator to keep it responsive — long-running browser
+  // calls belong in a spawned sub-agent. Headless + isolated so background
+  // and parallel agents don't clobber each other (Chromium's SingletonLock
+  // prevents shared profiles across processes anyway).
+  if (opts.callerType !== "orchestrator") {
+    servers[BROWSER_SERVER_NAME] = {
+      type: "stdio",
+      command: "npx",
+      args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated"],
+      env: {},
+    };
+  }
+
+  // User-configured stdio MCP servers from `~/.friday/config.json`. Each is
+  // gated by its `scope` against the caller's agent type (no/empty scope =
+  // all types). Reserved names (`friday-*` and built-ins like `playwright`)
+  // are rejected to keep built-in tool namespaces clean. Malformed entries
+  // are skipped, not thrown — a typo in config shouldn't break a worker.
+  for (const s of opts.userMcpServers ?? []) {
+    if (s.name.startsWith("friday-") || RESERVED_NAMES.has(s.name)) {
+      logger.log("warn", "mcp.user.shadows-builtin", {
+        name: s.name,
+        callerType: opts.callerType,
+        callerName: opts.callerName,
+      });
+      continue;
+    }
+    const inScope =
+      !s.scope || s.scope.length === 0 || s.scope.includes(opts.callerType);
+    if (!inScope) continue;
+    if (!s.command) {
+      logger.log("warn", "mcp.user.missing-command", {
+        name: s.name,
+        callerType: opts.callerType,
+        callerName: opts.callerName,
+      });
+      continue;
+    }
+    servers[s.name] = {
+      type: "stdio",
+      command: s.command,
+      args: s.args ?? [],
+      env: s.env ?? {},
+    };
+  }
+
   return servers;
 }
+
+export const BROWSER_SERVER_NAME = "playwright";
+
+/** Names that user config cannot use (built-in stdio MCPs). The `friday-`
+ * prefix check covers all in-process built-ins separately. */
+const RESERVED_NAMES = new Set<string>([BROWSER_SERVER_NAME]);

@@ -5,7 +5,12 @@
  * Worker → Parent: WorkerEvent
  */
 
-import type { AgentType, ThinkingConfig, ThinkingEffort } from "@friday/shared";
+import type {
+  AgentType,
+  McpServerConfig,
+  ThinkingConfig,
+  ThinkingEffort,
+} from "@friday/shared";
 
 export interface WorkerSpawnOptions {
   agentName: string;
@@ -35,6 +40,13 @@ export interface WorkerSpawnOptions {
    * an explicit stop. `one-shot` exits after `query()` finishes (scheduled).
    */
   mode: "long-lived" | "one-shot";
+  /**
+   * User-configured stdio MCP servers from `~/.friday/config.json`. Filtered
+   * by the recipient worker's agent type against each entry's `scope`. The
+   * daemon fills this from `loadConfig()` at spawn time; callers don't need
+   * to set it themselves.
+   */
+  userMcpServers?: McpServerConfig[];
 }
 
 /**

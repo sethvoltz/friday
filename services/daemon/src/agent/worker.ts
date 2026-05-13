@@ -267,6 +267,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
     callerName: opts.agentName,
     daemonPort: opts.daemonPort,
     parentName: opts.parentName,
+    userMcpServers: opts.userMcpServers,
   });
 
   const allowedTools = p.allowedToolsOverride ?? opts.allowedToolsOverride;

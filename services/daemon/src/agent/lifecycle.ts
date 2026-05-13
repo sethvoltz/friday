@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentType, BlockKind } from "@friday/shared";
+import { loadConfig } from "@friday/shared";
 import {
   insertBlock,
   insertUsage,
@@ -178,9 +179,17 @@ export function spawnTurn(input: SpawnTurnInput): void {
     }
   });
 
-  // Send `start` after the worker emits its first `ready`.
+  // Send `start` after the worker emits its first `ready`. Inject
+  // user-configured MCP servers from `~/.friday/config.json` here so callers
+  // don't each have to remember to wire them; tests can pre-set
+  // `input.options.userMcpServers` to bypass the disk read.
   child.once("message", () => {
-    send(child, { type: "start", options: input.options });
+    const userMcpServers =
+      input.options.userMcpServers ?? loadConfig().mcpServers ?? [];
+    send(child, {
+      type: "start",
+      options: { ...input.options, userMcpServers },
+    });
   });
 
   eventBus.publish({
