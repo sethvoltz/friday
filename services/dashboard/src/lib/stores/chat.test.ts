@@ -25,7 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mockFetchWithTimeout = vi.fn<
   (url: string, opts?: { timeoutMs?: number }) => Promise<Response>
 >();
-vi.mock("../util/fetch-with-timeout", () => ({
+vi.mock("$lib/util/fetch-with-timeout", () => ({
   fetchWithTimeout: mockFetchWithTimeout,
 }));
 
@@ -34,7 +34,7 @@ vi.mock("../util/fetch-with-timeout", () => ({
 // jsdom store between cases.
 const mockLoadJSON = vi.fn();
 const mockSaveJSON = vi.fn();
-vi.mock("./persistent", () => ({
+vi.mock("$lib/stores/persistent", () => ({
   loadJSON: mockLoadJSON,
   saveJSON: mockSaveJSON,
   KEYS: { transcript: (agent: string) => `transcript:${agent}` },
@@ -43,7 +43,7 @@ vi.mock("./persistent", () => ({
 // `sendQueue` is a singleton with internal $state. We stub the methods
 // the chat store reaches into so we can drive the queue from tests.
 const mockForAgent = vi.fn<(agent: string) => unknown[]>(() => []);
-vi.mock("./send-queue.svelte", () => ({
+vi.mock("$lib/stores/send-queue.svelte", () => ({
   sendQueue: {
     forAgent: mockForAgent,
     enqueue: vi.fn(),
@@ -54,7 +54,7 @@ vi.mock("./send-queue.svelte", () => ({
 
 // `initialPageSize` returns a fixed page size for predictable URL
 // assertions.
-vi.mock("../util/page-size", () => ({
+vi.mock("$lib/util/page-size", () => ({
   initialPageSize: () => 25,
 }));
 
