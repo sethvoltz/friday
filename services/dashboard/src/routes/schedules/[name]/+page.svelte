@@ -156,6 +156,16 @@
         <span class="row-value text-mono">{data.schedule.lastRunId}</span>
       </div>
     {/if}
+    <div class="row">
+      <span class="row-label">Session</span>
+      <span class="row-value">
+        {#if data.schedule.lastRunAt}
+          <a class="session-link" href="/sessions/{encodeURIComponent(data.schedule.name)}">View session</a>
+        {:else}
+          <span class="text-tertiary">not run yet</span>
+        {/if}
+      </span>
+    </div>
     <div class="actions">
       <button class="ghost" onclick={pauseResume}>
         {data.schedule.paused ? "Resume" : "Pause"}
@@ -346,6 +356,24 @@
   }
   .wide {
     grid-column: 1 / -1;
+  }
+  .grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  @media (max-width: 720px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
+  .session-link {
+    color: var(--accent-primary);
+    text-decoration: none;
+  }
+  .session-link:hover {
+    text-decoration: underline;
+  }
+  .text-tertiary {
+    color: var(--text-tertiary);
   }
   .md-preview {
     margin: 0.5rem 0 0;

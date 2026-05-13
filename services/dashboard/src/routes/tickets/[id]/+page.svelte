@@ -457,6 +457,14 @@
   .wide {
     grid-column: 1 / -1;
   }
+  .grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  @media (max-width: 720px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
   .link-list {
     list-style: none;
     padding: 0;
