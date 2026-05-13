@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { chat, type ChatMessage } from "$lib/stores/chat.svelte";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
@@ -88,6 +89,14 @@
   const WINDOW_SIZE = 200;
   let list = $derived.by(() => {
     if (readonly) return allMessages;
+    // Defensive: while a load-older is in flight, never apply the
+    // pinnedToBottom window slice. If the bottom IntersectionObserver
+    // ever fires mid-mutation and flips `pinnedToBottom` true (the
+    // observed WebKit paint bug had a different cause, but this guards
+    // against a related theoretical race), the rendered DOM would chop
+    // down to the last 200 items right as the user is reading older
+    // history. Cheap to gate; keep it.
+    if (chat.loadingOlder) return allMessages;
     if (!chat.pinnedToBottom) return allMessages;
     if (allMessages.length <= WINDOW_SIZE) return allMessages;
     return allMessages.slice(allMessages.length - WINDOW_SIZE);
@@ -117,29 +126,88 @@
             if (!onLoadOlderPast || pastReachedOldest || loadingOlderPast)
               continue;
             const scroller = el.closest(".chat-scroll") as HTMLElement | null;
-            const beforeHeight = scroller?.scrollHeight ?? 0;
-            const beforeTop = scroller?.scrollTop ?? 0;
-            void Promise.resolve(onLoadOlderPast()).then(() => {
+            const anchorEl =
+              scroller?.querySelector<HTMLElement>("[data-msg-id]") ?? null;
+            const anchorId = anchorEl?.getAttribute("data-msg-id") ?? null;
+            const anchorOffset =
+              anchorEl && scroller
+                ? anchorEl.getBoundingClientRect().top -
+                  scroller.getBoundingClientRect().top
+                : 0;
+            void Promise.resolve(onLoadOlderPast()).then(async () => {
+              if (!scroller || !anchorId) return;
+              await tick();
               if (!scroller) return;
-              queueMicrotask(() => {
-                const delta = scroller.scrollHeight - beforeHeight;
-                if (delta > 0) scroller.scrollTop = beforeTop + delta;
-              });
+              const target = scroller.querySelector<HTMLElement>(
+                `[data-msg-id="${CSS.escape(anchorId)}"]`,
+              );
+              if (!target) return;
+              const newOffset =
+                target.getBoundingClientRect().top -
+                scroller.getBoundingClientRect().top;
+              const delta = newOffset - anchorOffset;
+              // WebKit scroll-thread paint deferral fix — see the
+              // matching block in the live-chat onPrepended above for
+              // full rationale.
+              const prevOverflowY = scroller.style.overflowY;
+              scroller.style.overflowY = "hidden";
+              scroller.scrollTop += delta;
+              setTimeout(() => {
+                if (scroller) scroller.style.overflowY = prevOverflowY;
+              }, 0);
             });
             continue;
           }
           if (chat.loadingOlder || chat.reachedOldest) continue;
-          // Capture scroll-anchor: keep the user looking at roughly the same
-          // turn after we prepend, instead of jumping to the new top.
+          // Anchor on a concrete rendered message rather than scrollHeight
+          // math: capture the first currently-rendered bubble's id + its
+          // distance from the viewport top, then after prepend, scroll so
+          // that same bubble lands at the same offset. Works identically
+          // in Chromium and WebKit; `scrollHeight - beforeHeight` did not
+          // (WebKit's layout flush ordering left the read stale).
           const scroller = el.closest(".chat-scroll") as HTMLElement | null;
-          const beforeHeight = scroller?.scrollHeight ?? 0;
-          const beforeTop = scroller?.scrollTop ?? 0;
-          void chat.loadOlderTurns().then(() => {
-            if (!scroller) return;
-            queueMicrotask(() => {
-              const delta = scroller.scrollHeight - beforeHeight;
-              if (delta > 0) scroller.scrollTop = beforeTop + delta;
-            });
+          const anchorEl =
+            scroller?.querySelector<HTMLElement>("[data-msg-id]") ?? null;
+          const anchorId = anchorEl?.getAttribute("data-msg-id") ?? null;
+          const anchorOffset =
+            anchorEl && scroller
+              ? anchorEl.getBoundingClientRect().top -
+                scroller.getBoundingClientRect().top
+              : 0;
+          void chat.loadOlderTurns({
+            onPrepended: async () => {
+              if (!scroller || !anchorId) return;
+              // `tick()` flushes Svelte's pending DOM updates so the
+              // freshly-prepended bubbles are in the document.
+              await tick();
+              if (!scroller) return;
+              const target = scroller.querySelector<HTMLElement>(
+                `[data-msg-id="${CSS.escape(anchorId)}"]`,
+              );
+              if (!target) return;
+              const newOffset =
+                target.getBoundingClientRect().top -
+                scroller.getBoundingClientRect().top;
+              const delta = newOffset - anchorOffset;
+              // WebKit/Safari/Orion paint-deferral fix (virtua PR #862 /
+              // inokawa#362, originally `prud/ios-overflow-scroll-to-top`).
+              // A programmatic `scrollTop` write that lands while WebKit's
+              // scroll thread is still hot (fast-scroll just stopped,
+              // momentum, recent input) defers both the scroll commit and
+              // the paint of the newly-revealed region until the next
+              // user scroll event. The DOM is correct; the GPU paint is
+              // stale. Toggling `overflow-y: hidden` synchronously detaches
+              // the element from the scroll thread, forcing WebKit to
+              // commit + flush a full paint. The async restore (setTimeout
+              // 0) reattaches it correctly painted — a synchronous restore
+              // reproduces the bug, so the tick is load-bearing.
+              const prevOverflowY = scroller.style.overflowY;
+              scroller.style.overflowY = "hidden";
+              scroller.scrollTop += delta;
+              setTimeout(() => {
+                if (scroller) scroller.style.overflowY = prevOverflowY;
+              }, 0);
+            },
           });
         }
       },

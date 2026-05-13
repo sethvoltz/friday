@@ -26,6 +26,19 @@ The dashboard's home `/` is a single persistent chat with Friday. This doc captu
 - **Streaming fidelity = post-load fidelity.** A mid-turn refresh returns exactly the bytes the live stream had, because both sources read the same `blocks` rows. There's no separate "canonical" rendering after the turn ends — what you saw stream is what's persisted.
 - Focus switch flow: paginated load of `blocks` for the new agent → resume SSE deltas where `seq > cursor` → done. A `boot_id` mismatch on `connection_established` invalidates the cursor and triggers a full reload.
 
+## Scroll behavior
+
+`ChatMessages.svelte` runs two `IntersectionObserver`s on sentinel divs at the top and bottom of the message list:
+
+- **Bottom sentinel.** Sets `chat.pinnedToBottom` based on whether the bottom of the list is within 200px of the viewport. Drives the jump-to-latest pill, the auto-scroll-on-new-message effect, and the DOM-windowing slice.
+- **Top sentinel.** Triggers `chat.loadOlderTurns()` when the user scrolls within 200px of the top. Fetches up to 50 older turns via `/api/agents/:name/turns?beforeId=...`, prepends them, and re-anchors the scroll so the user keeps looking at the same content rather than jumping to the new top.
+
+**DOM windowing.** When `pinnedToBottom` is true and the list exceeds 200 messages, only the last 200 are rendered — keeps the DOM bounded for long chats. The slice is suppressed while `chat.loadingOlder` is true so a mid-mutation IntersectionObserver hiccup can't shrink the rendered set out from under the user.
+
+**Scroll-anchor preservation on prepend.** Naive `scrollTop = beforeTop + (newScrollHeight - oldScrollHeight)` arithmetic is sensitive to layout-flush timing and dies on subpixel rounding. Instead we capture the first rendered bubble's `data-msg-id` and its `getBoundingClientRect().top` *before* triggering the load; after `await tick()` finds the same bubble in the new DOM, we shift `scrollTop` by the difference between its old and new offsets. Concrete elements, no scrollHeight math.
+
+**WebKit / Safari / Orion paint-deferral.** Setting `scrollTop` while WebKit's scroll thread is still hot (fast-scroll just stopped, momentum still resolving) makes WebKit defer both the scroll-position commit and the paint of the newly-revealed region until the next user-originated scroll event. The DOM and layout are correct; the GPU paint is stale. Symptom: blank chat below a thin top band, fixed by any 1px scroll. We wrap the `scrollTop` write in a synchronous `overflow-y: hidden` → write → `setTimeout(0)` restore. Setting `overflow-y: hidden` detaches the element from the scroll thread, forcing WebKit to commit + paint synchronously; the async restore reattaches it once paint has happened. Synchronous restore reproduces the bug — the `setTimeout` tick is load-bearing. Pattern lifted from `inokawa/virtua` (PR #862, originally `prud/ios-overflow-scroll-to-top`). See ADR-019.
+
 ## Slash commands and skills
 
 Two flavors, one input:

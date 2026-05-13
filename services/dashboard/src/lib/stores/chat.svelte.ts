@@ -645,7 +645,15 @@ export class ChatState {
    * completes in <50ms, which would otherwise mean a single-frame flicker
    * the user can't perceive.
    */
-  async loadOlderTurns(): Promise<void> {
+  async loadOlderTurns(opts?: {
+    /** Fires synchronously after `chat.messages` is prepended and before
+     *  the artificial MIN_LOADING_MS spinner-hold delay. The IntersectionObserver
+     *  that triggered this call needs the hook here (not on the promise
+     *  resolution, which is gated by the delay) so it can fix scrollTop
+     *  immediately after the DOM has the new content — otherwise the user
+     *  sees ~350ms of unanchored scroll before the fix lands. */
+    onPrepended?: () => void;
+  }): Promise<void> {
     if (this.loadingOlder || this.reachedOldest) return;
     if (this.oldestDbId === null) return;
     const MIN_LOADING_MS = 350;
@@ -671,6 +679,7 @@ export class ChatState {
       const fresh = older.filter((m) => !seen.has(m.id));
       this.messages = [...fresh, ...this.messages];
       this.oldestDbId = oldestDbTurnId(turns);
+      opts?.onPrepended?.();
     } catch {
       // ignore
     } finally {
@@ -1050,6 +1059,9 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
       });
     } else if (b.kind === "tool_use") {
       const toolId = parsed.tool_use_id ?? b.blockId;
+      // Dedup duplicate tool_use rows for the same id — JSONL replay
+      // artifacts and refork retries can both produce them.
+      if (toolByToolId.has(toolId)) continue;
       const msg: ChatMessage = {
         id: `t_${toolId}`,
         role: "tool",
@@ -1070,7 +1082,7 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         existing.status = status;
         existing.output = parsed.text ?? "";
       } else {
-        out.push({
+        const synth: ChatMessage = {
           id: `t_${toolId}`,
           role: "tool",
           text: "",
@@ -1079,7 +1091,9 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
           toolName: "(unknown)",
           output: parsed.text ?? "",
           ts: b.ts,
-        });
+        };
+        out.push(synth);
+        toolByToolId.set(toolId, synth);
       }
     }
   }
@@ -1183,6 +1197,11 @@ export function parseTurns(turns: TurnRow[], agent: string): ChatMessage[] {
           dbTurnId: t.id,
         });
       } else if (b.kind === "tool_use") {
+        // Same tool_use_id can appear in the JSONL more than once when a
+        // worker resumed mid-stream or the mirror ingested the same
+        // session twice. Dedup so the Svelte each-key stays unique;
+        // input/toolName from the first occurrence wins.
+        if (toolByToolId.has(b.toolId)) continue;
         const msg: ChatMessage = {
           id: `t_${b.toolId}`,
           role: "tool",
@@ -1202,7 +1221,10 @@ export function parseTurns(turns: TurnRow[], agent: string): ChatMessage[] {
           msg.status = b.isError ? "error" : "done";
           msg.output = b.text;
         } else {
-          out.push({
+          // Orphan tool_result (the preceding tool_use was evicted or
+          // missing). Synthesize a bubble, but register it so a second
+          // orphan with the same id doesn't collide.
+          const synth: ChatMessage = {
             id: `t_${b.toolId}`,
             role: "tool",
             text: "",
@@ -1212,7 +1234,9 @@ export function parseTurns(turns: TurnRow[], agent: string): ChatMessage[] {
             output: b.text,
             ts: t.ts,
             dbTurnId: t.id,
-          });
+          };
+          out.push(synth);
+          toolByToolId.set(b.toolId, synth);
         }
       } else if (b.kind === "thinking") {
         const blockId = b.messageId

@@ -257,6 +257,13 @@
     position: fixed;
     inset: 0;
     overflow-y: auto;
+    /* Chromium-side belt-and-braces: disable the browser's scroll-
+       anchoring heuristic so it doesn't fight the manual scrollTop fix
+       in ChatMessages.svelte → onPrepended. No-op on WebKit, free.
+       The WebKit-specific paint-deferral fix lives at the call site
+       (overflow-y toggle around the scrollTop write); CSS-level layer
+       promotion isn't the right tool for that bug. */
+    overflow-anchor: none;
     padding-top: var(--chat-top);
     padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset));
     padding-left: var(--content-left);
