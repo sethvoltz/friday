@@ -2,6 +2,7 @@
   import type { PageData } from "./$types";
   import { invalidateAll } from "$app/navigation";
   import { KEYS, saveString, loadString } from "$lib/stores/persistent";
+  import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
   import { onMount } from "svelte";
   let { data }: { data: PageData } = $props();
 
@@ -110,16 +111,18 @@
     await patchSettings({ watchdogRefork: next });
   }
 
-  // FIX_FORWARD 6.3: nuke every auth:* rate-limit bucket. Gated by a
-  // confirm() since the operator should explicitly acknowledge they're
-  // unlocking the sign-in surface.
+  // FIX_FORWARD 6.3: nuke every auth:* rate-limit bucket. Gated since the
+  // operator should explicitly acknowledge they're unlocking the sign-in
+  // surface.
   async function resetAuthLimits() {
-    if (
-      !confirm(
+    const ok = await confirmDialog({
+      title: "Clear auth rate-limits?",
+      description:
         "Clear every auth rate-limit and lockout? Pending sign-in attempts will start from zero.",
-      )
-    )
-      return;
+      confirmLabel: "Clear",
+      danger: true,
+    });
+    if (!ok) return;
     const r = await fetch("/api/settings/reset-auth-limits", {
       method: "POST",
     });
@@ -154,12 +157,14 @@
   }
 
   async function revokeAll() {
-    if (
-      !confirm(
+    const ok = await confirmDialog({
+      title: "Sign out everywhere?",
+      description:
         "Sign out every session, including this one? You'll need to log back in.",
-      )
-    )
-      return;
+      confirmLabel: "Sign out everywhere",
+      danger: true,
+    });
+    if (!ok) return;
     await fetch("/api/sessions/revoke-all", { method: "POST" });
     window.location.href = "/login";
   }

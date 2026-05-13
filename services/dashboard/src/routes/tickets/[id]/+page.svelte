@@ -2,6 +2,7 @@
   import type { PageData } from "./$types";
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import { invalidateAll } from "$app/navigation";
+  import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
   import type { TicketStatus } from "@friday/shared/services";
 
   let { data }: { data: PageData } = $props();
@@ -161,7 +162,13 @@
   }
 
   async function removeLink(system: string, externalId: string) {
-    if (!confirm(`Detach link ${system}:${externalId}?`)) return;
+    const ok = await confirmDialog({
+      title: "Detach link?",
+      description: `Detach link ${system}:${externalId}?`,
+      confirmLabel: "Detach",
+      danger: true,
+    });
+    if (!ok) return;
     const qs = `?system=${encodeURIComponent(system)}&externalId=${encodeURIComponent(externalId)}`;
     const r = await fetch(`/api/tickets/${t.id}/links${qs}`, {
       method: "DELETE",

@@ -2,6 +2,7 @@
   import type { PageData } from "./$types";
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import { goto, invalidateAll } from "$app/navigation";
+  import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
 
   let { data }: { data: PageData } = $props();
 
@@ -63,12 +64,13 @@
   }
 
   async function remove() {
-    if (
-      !confirm(
-        `Delete memory "${entry.title}" (${entry.id})? This cannot be undone.`,
-      )
-    )
-      return;
+    const ok = await confirmDialog({
+      title: `Delete memory "${entry.title}"?`,
+      description: `Delete memory ${entry.id}? This cannot be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     const r = await fetch(`/api/memory/${encodeURIComponent(entry.id)}`, {
       method: "DELETE",
     });

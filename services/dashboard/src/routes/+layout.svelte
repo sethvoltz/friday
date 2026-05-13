@@ -7,6 +7,7 @@
   import { sseConnected, startSSE, stopSSE } from "$lib/stores/sse.svelte";
   import { startConnectivity } from "$lib/stores/connectivity.svelte";
   import ConnectivityWidget from "$lib/components/Connectivity/ConnectivityWidget.svelte";
+  import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
   import { KEYS, loadString, saveString } from "$lib/stores/persistent";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
   import { chat } from "$lib/stores/chat.svelte";
@@ -203,6 +204,8 @@
     {@render children()}
   </main>
 </div>
+
+<ConfirmDialog />
 
 <style>
   .app-shell {

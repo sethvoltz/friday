@@ -2,6 +2,7 @@
   import type { PageData } from "./$types";
   import { isValidCron, nextRuns } from "@friday/shared/cron";
   import { invalidateAll, goto } from "$app/navigation";
+  import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
 
   let { data }: { data: PageData } = $props();
 
@@ -98,12 +99,13 @@
   }
 
   async function deleteSchedule() {
-    if (
-      !confirm(
-        `Delete schedule "${data.schedule.name}"? The row is removed; state.md / last-run.md stay on disk.`,
-      )
-    )
-      return;
+    const ok = await confirmDialog({
+      title: `Delete schedule "${data.schedule.name}"?`,
+      description: "The row is removed; state.md / last-run.md stay on disk.",
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     const r = await fetch(
       `/api/schedules/${encodeURIComponent(data.schedule.name)}`,
       { method: "DELETE" },

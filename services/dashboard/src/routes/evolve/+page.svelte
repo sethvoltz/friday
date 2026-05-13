@@ -2,6 +2,7 @@
   import type { PageData } from "./$types";
   import type { Proposal } from "@friday/evolve";
   import { invalidateAll } from "$app/navigation";
+  import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
 
   let { data }: { data: PageData } = $props();
 
@@ -181,12 +182,12 @@
   async function bulkApply() {
     const ids = [...selected];
     if (ids.length === 0) return;
-    if (
-      !confirm(
-        `Apply ${ids.length} proposal${ids.length === 1 ? "" : "s"}? A ticket will be created for each.`,
-      )
-    )
-      return;
+    const confirmed = await confirmDialog({
+      title: `Apply ${ids.length} proposal${ids.length === 1 ? "" : "s"}?`,
+      description: "A ticket will be created for each.",
+      confirmLabel: "Apply",
+    });
+    if (!confirmed) return;
     busy = `bulk apply (${ids.length})`;
     let ok = 0;
     let fail = 0;

@@ -2,6 +2,7 @@
   import type { PageData } from "./$types";
   import type { ScheduleRow } from "./+page.server";
   import { nextRuns } from "@friday/shared/cron";
+  import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
 
   let { data }: { data: PageData } = $props();
 
@@ -81,12 +82,13 @@
   }
 
   async function deleteSchedule(name: string) {
-    if (
-      !confirm(
-        `Delete schedule "${name}"? This removes the row but leaves ~/.friday/schedules/${name}/ on disk so state.md isn't lost.`,
-      )
-    )
-      return;
+    const ok = await confirmDialog({
+      title: `Delete schedule "${name}"?`,
+      description: `This removes the row but leaves ~/.friday/schedules/${name}/ on disk so state.md isn't lost.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     busy = `delete ${name}`;
     try {
       const r = await fetch(`/api/schedules/${encodeURIComponent(name)}`, {
