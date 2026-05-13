@@ -259,16 +259,23 @@ export function abortTurn(agentName: string): boolean {
   return true;
 }
 
-export function killAgent(agentName: string): boolean {
+/**
+ * Tear down a live worker and clean its registry row. FIX_FORWARD 4.1: the
+ * returned promise resolves only after the child process has actually
+ * exited (or after a 5s SIGKILL fallback fires). The watchdog's refork
+ * path awaits this so it can't race the next fork against the dying
+ * worker's lingering IPC traffic.
+ *
+ * Fire-and-forget callers (REST kill endpoints, system commands) can
+ * ignore the returned promise — the side-effects (registry destroy,
+ * agent_lifecycle event, live-map remove) happen synchronously up front.
+ */
+export function killAgent(agentName: string): Promise<void> {
   const w = live.get(agentName);
-  if (w) {
-    send(w.child, { type: "stop" });
-    // Hard-kill backstop: if worker doesn't exit on its own, force.
-    setTimeout(() => {
-      if (!w.child.killed) w.child.kill("SIGTERM");
-    }, 5_000).unref();
-    live.delete(agentName);
-  }
+  // Synchronous side-effects: drop from the live map so subsequent
+  // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
+  // before the child has fully exited.
+  if (w) live.delete(agentName);
   registry.destroyAgent(agentName);
   eventBus.publish({
     v: 1,
@@ -277,7 +284,33 @@ export function killAgent(agentName: string): boolean {
     agentType: w?.agentType ?? "orchestrator",
     event: "kill",
   });
-  return true;
+  if (!w) return Promise.resolve();
+
+  // Ask the worker to stop gracefully, then wait for the actual exit
+  // event. SIGKILL backstop after 5s if the child ignores `stop`.
+  send(w.child, { type: "stop" });
+  if (w.child.exitCode !== null || w.child.killed) return Promise.resolve();
+
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    w.child.once("exit", finish);
+    setTimeout(() => {
+      if (done) return;
+      // Graceful stop ignored — force a SIGKILL. The `exit` listener
+      // resolves the promise once the kernel reaps the process.
+      try {
+        w.child.kill("SIGKILL");
+      } catch {
+        // Already gone.
+        finish();
+      }
+    }, 5_000).unref();
+  });
 }
 
 /**

@@ -92,6 +92,33 @@ export interface WatchdogConfig {
    * the stall threshold isn't catching false positives.
    */
   refork?: boolean;
+  /**
+   * Per-agent-type stall thresholds in milliseconds (FIX_FORWARD 4.2).
+   * Workers whose `lastHeartbeat` is older than the bucket value for their
+   * type are marked `stalled`. Scheduled agents get a much longer
+   * threshold because legitimate one-shot runs (large research jobs,
+   * lengthy backfills) can run for tens of minutes between heartbeats.
+   */
+  thresholdsMs?: Partial<Record<AgentTypeName, number>>;
+}
+
+/** Default stall thresholds applied when WatchdogConfig.thresholdsMs is
+ *  absent or partial. Matches the FIX_FORWARD 4.2 spec values. */
+export const DEFAULT_WATCHDOG_THRESHOLDS_MS: Record<AgentTypeName, number> = {
+  orchestrator: 90_000,
+  helper: 90_000,
+  builder: 90_000,
+  bare: 90_000,
+  scheduled: 3_600_000,
+};
+
+export function watchdogThresholdMs(
+  cfg: WatchdogConfig | undefined,
+  type: AgentTypeName,
+): number {
+  return (
+    cfg?.thresholdsMs?.[type] ?? DEFAULT_WATCHDOG_THRESHOLDS_MS[type]
+  );
 }
 
 /**
@@ -135,7 +162,11 @@ export const DEFAULT_CONFIG: FridayConfig = {
   workerMemoryBudgetMb: 2048,
   mcpServers: [],
   orchestratorName: "friday",
-  watchdog: { refork: false },
+  // FIX_FORWARD 4.3: refork on by default. Per-agent-type thresholds
+  // (FIX_FORWARD 4.2) keep this from firing on legitimate long
+  // scheduled runs. Users who want observe-only can set
+  // `watchdog.refork: false` in ~/.friday/config.json.
+  watchdog: { refork: true },
 };
 
 export function ensureDirs(): void {

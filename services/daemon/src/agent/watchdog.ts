@@ -17,6 +17,7 @@ import {
   loadConfig,
   normalizeModelConfig,
   readPromptStack,
+  watchdogThresholdMs,
 } from "@friday/shared";
 import { randomUUID } from "node:crypto";
 import { eventBus } from "../events/bus.js";
@@ -30,7 +31,8 @@ import {
 } from "./lifecycle.js";
 
 const TICK_INTERVAL_MS = 30_000;
-const STALL_THRESHOLD_MS = 90_000;
+// Per-agent-type stall thresholds live on `config.watchdog.thresholdsMs`
+// (FIX_FORWARD 4.2) — see `watchdogThresholdMs` for resolution.
 
 let interval: NodeJS.Timeout | null = null;
 const flagged = new Set<string>();
@@ -52,6 +54,7 @@ export function stopWatchdog(): void {
 
 function tick(): void {
   const now = Date.now();
+  const cfg = loadConfig();
   const seen = new Set<string>();
   for (const name of liveAgentNames()) {
     seen.add(name);
@@ -66,11 +69,14 @@ function tick(): void {
       continue;
     }
     const sinceHb = now - w.lastHeartbeat;
-    if (sinceHb > STALL_THRESHOLD_MS && !flagged.has(name)) {
+    const thresholdMs = watchdogThresholdMs(cfg.watchdog, w.agentType);
+    if (sinceHb > thresholdMs && !flagged.has(name)) {
       flagged.add(name);
       logger.log("warn", "watchdog.stall.detected", {
         agent: name,
+        type: w.agentType,
         sinceHeartbeatMs: sinceHb,
+        thresholdMs,
       });
       eventBus.publish({
         v: 1,
@@ -80,16 +86,15 @@ function tick(): void {
         since: now,
       });
 
-      const cfg = loadConfig();
       if (cfg.watchdog?.refork) {
-        try {
-          refork(name);
-        } catch (err) {
+        // Fire-and-forget: refork awaits killAgent so the new fork can't
+        // race the old worker's lingering exit handler (FIX_FORWARD 4.1).
+        void refork(name).catch((err) => {
           logger.log("warn", "watchdog.refork.error", {
             agent: name,
             message: err instanceof Error ? err.message : String(err),
           });
-        }
+        });
       }
     }
   }
@@ -99,7 +104,7 @@ function tick(): void {
   }
 }
 
-function refork(agentName: string): void {
+async function refork(agentName: string): Promise<void> {
   const a = registry.getAgent(agentName);
   if (!a) return;
   // Scheduled agents are one-shot — let them die naturally.
@@ -110,7 +115,23 @@ function refork(agentName: string): void {
     sessionId: a.sessionId ?? null,
   });
 
-  killAgent(agentName);
+  // FIX_FORWARD 4.1: wait for the old worker to actually exit before
+  // dispatching the replacement. Without this, the new fork sometimes
+  // raced the dying worker's exit handler, which then live.delete()d
+  // the *new* worker's slot.
+  await killAgent(agentName);
+
+  // The registry row was destroyed by killAgent. Re-register so the new
+  // turn has a row to bind onto.
+  registry.registerAgent({
+    name: agentName,
+    type: a.type,
+    parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
+    ticketId: "ticketId" in a ? a.ticketId ?? undefined : undefined,
+    worktreePath:
+      "worktreePath" in a ? a.worktreePath ?? undefined : undefined,
+    branch: "branch" in a ? a.branch ?? undefined : undefined,
+  });
 
   const cfg = loadConfig();
   const stack = readPromptStack(a.type, []);

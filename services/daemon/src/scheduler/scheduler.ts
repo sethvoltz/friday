@@ -130,9 +130,24 @@ function tick(): void {
     );
   for (const r of due) {
     if (isAgentLive(r.name)) {
-      // Previous fire still running; skip this tick. nextRunAt stays so we
-      // retry on the following tick once the worker exits.
-      logger.log("info", "schedule.skip-busy", { name: r.name });
+      // FIX_FORWARD 4.4: previous fire still running. Don't leave
+      // nextRunAt in the past (that would re-fire on every subsequent
+      // tick); advance to the next cron-derived fire so the schedule
+      // resumes its natural cadence once the current worker finishes.
+      const nextAt = computeNext({
+        name: r.name,
+        cron: r.cron ?? undefined,
+        runAt: r.runAt ?? undefined,
+        taskPrompt: r.taskPrompt,
+      });
+      db.update(schema.schedules)
+        .set({ nextRunAt: nextAt })
+        .where(eq(schema.schedules.name, r.name))
+        .run();
+      logger.log("info", "schedule.skip-busy", {
+        name: r.name,
+        nextRunAt: nextAt,
+      });
       continue;
     }
     fireSchedule(r);
