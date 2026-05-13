@@ -4,6 +4,7 @@
   import { dashboardData } from "$lib/stores/dashboard-data.svelte";
   import ActivityGrid from "$lib/components/Dashboard/ActivityGrid.svelte";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
+  import { fmtTokensCompact } from "$lib/util/format";
   import type { PageData } from "./$types";
 
   let { data }: { data: PageData } = $props();
@@ -55,8 +56,8 @@
   let tokenPeriod = $state<Period>("day");
   const periodLabels: Record<Period, string> = {
     day: "Today",
-    week: "This Week",
-    month: "This Month",
+    week: "Past 7 Days",
+    month: "Past 30 Days",
   };
 
   const tokenView = $derived.by(() => {
@@ -218,7 +219,7 @@
     </div>
     <div class="card stat-card">
       <div class="stat">
-        <span class="stat-label">This Week</span>
+        <span class="stat-label">Past 7 Days</span>
         <span class="stat-value">{fmtCost(weekStats.cost)}</span>
         <span class="stat-detail"
           >{weekStats.turns} turns &middot; avg {fmtCost(weekStats.avgCost)}</span
@@ -267,7 +268,7 @@
             title="{showCachedTokens ? 'Hide' : 'Show'} cached token segment"
           />
           <span class="stat-detail">
-            Week {fmtCostShort(costSummary.thisWeek)} &middot; Month {fmtCostShort(
+            7d {fmtCostShort(costSummary.thisWeek)} &middot; 30d {fmtCostShort(
               costSummary.thisMonth,
             )}
             {#if dailyCost.length > DAILY_DEFAULT}
@@ -444,7 +445,7 @@
         <div class="token-item">
           <span class="token-label">Input</span>
           <div class="token-value-row">
-            <span class="token-value">{fmtTokens(tokenView.input.value)}</span>
+            <span class="token-value">{fmtTokensCompact(tokenView.input.value)}</span>
             <div class="token-aggs">
               <span>avg {fmtTokensShort(tokenView.input.mean)}</span>
               <span>med {fmtTokensShort(tokenView.input.median)}</span>
@@ -454,7 +455,7 @@
         <div class="token-item">
           <span class="token-label">Output</span>
           <div class="token-value-row">
-            <span class="token-value">{fmtTokens(tokenView.output.value)}</span>
+            <span class="token-value">{fmtTokensCompact(tokenView.output.value)}</span>
             <div class="token-aggs">
               <span>avg {fmtTokensShort(tokenView.output.mean)}</span>
               <span>med {fmtTokensShort(tokenView.output.median)}</span>
@@ -465,7 +466,7 @@
           <span class="token-label">Cache Creation</span>
           <div class="token-value-row">
             <span class="token-value"
-              >{fmtTokens(tokenView.cacheCreation.value)}</span
+              >{fmtTokensCompact(tokenView.cacheCreation.value)}</span
             >
             <div class="token-aggs">
               <span>avg {fmtTokensShort(tokenView.cacheCreation.mean)}</span>
@@ -477,7 +478,7 @@
           <span class="token-label">Cache Read</span>
           <div class="token-value-row">
             <span class="token-value"
-              >{fmtTokens(tokenView.cacheRead.value)}</span
+              >{fmtTokensCompact(tokenView.cacheRead.value)}</span
             >
             <div class="token-aggs">
               <span>avg {fmtTokensShort(tokenView.cacheRead.mean)}</span>

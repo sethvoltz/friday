@@ -48,7 +48,7 @@ export interface ExitInfo {
   status: "complete" | "aborted" | "error";
 }
 
-interface LiveWorker {
+export interface LiveWorker {
   child: ChildProcess;
   agentName: string;
   agentType: AgentType;
@@ -367,7 +367,7 @@ export function peekLiveWorker(agentName: string): {
   };
 }
 
-function handleEvent(w: LiveWorker, e: WorkerEvent): void {
+export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
   w.lastHeartbeat = Date.now();
   switch (e.type) {
     case "session-update":

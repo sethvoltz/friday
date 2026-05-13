@@ -25,6 +25,7 @@ import type {
   WorkerPromptCommand,
   WorkerSpawnOptions,
 } from "./worker-protocol.js";
+import { extractUsageFromResult, type FinalUsage } from "./usage-capture.js";
 import { buildMcpServers } from "../mcp/builder.js";
 import { buildMailPrompt } from "../comms/mail-prompt.js";
 import { daemonFetch } from "../mcp/http.js";
@@ -246,6 +247,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   let sessionId = p.resumeSessionId ?? lastSessionId;
   let sessionAnnounced = false;
   let currentMessageId = "";
+  let finalUsage: FinalUsage | undefined;
   // Keyed by SDK content-block index *within the current assistant message*.
   // We mint a fresh `clientBlockId` per block-start so the daemon can
   // correlate without relying on the SDK index (which resets each message).
@@ -349,6 +351,12 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       // emitting them would tag sub-agent tool blocks with the orchestrator's
       // agent + turn_id and bleed them into the parent's chat.
       if (typeof m.parent_tool_use_id === "string" && m.parent_tool_use_id) {
+        continue;
+      }
+
+      const captured = extractUsageFromResult(m);
+      if (captured) {
+        finalUsage = captured;
         continue;
       }
 
@@ -545,7 +553,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
     }
 
     lastSessionId = sessionId ?? lastSessionId;
-    emit({ type: "turn-complete", sessionId: sessionId ?? "" });
+    emit({ type: "turn-complete", sessionId: sessionId ?? "", usage: finalUsage });
     emit({ type: "status-change", status: "idle" });
   } catch (err: unknown) {
     if (abortController.signal.aborted) {
