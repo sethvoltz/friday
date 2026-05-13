@@ -104,7 +104,7 @@
 
   // Top-sentinel pagination. When the user scrolls up to the top of the
   // chat, the sentinel comes into view and we fetch the next 50 older
-  // turns from /api/agents/:name/turns?beforeId=…. Read-only / past-session
+  // blocks from /api/agents/:name/blocks?before=…. Read-only / past-session
   // mode uses its own messages array (passed in via `messages` prop) and
   // doesn't paginate — those views show a single fixed session.
   let topSentinel: HTMLDivElement | undefined = $state();

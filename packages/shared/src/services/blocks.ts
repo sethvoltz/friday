@@ -380,3 +380,60 @@ export function matchBlocks(opts: MatchBlocksOpts): BlockRow[] {
         .all(opts.match, limit) as RawBlockRow[]);
   return rows.map(rowFromRaw);
 }
+
+/* ---------------- Agent-session summaries (FIX_FORWARD G) ---------------- */
+
+export interface AgentSessionSummary {
+  sessionId: string;
+  firstTs: number;
+  lastTs: number;
+  /** Number of distinct turns observed in this session. Each turn may
+   *  contain many blocks; the count here is the number of unique turn
+   *  ids, which corresponds to "rounds of interaction". */
+  turnCount: number;
+}
+
+/**
+ * Distinct sessions for an agent, sorted most-recent first. Used by the
+ * sidebar to expand an agent row into its prior sessions list. Ported
+ * to the `blocks` table at FIX_FORWARD G — the legacy `turns`-table
+ * implementation stopped growing post-WS-1.
+ */
+export function listAgentSessions(agentName: string): AgentSessionSummary[] {
+  const db = getDb();
+  const rows = db
+    .select({
+      sessionId: schema.blocks.sessionId,
+      firstTs: sql<number>`MIN(${schema.blocks.ts})`,
+      lastTs: sql<number>`MAX(${schema.blocks.ts})`,
+      turnCount: sql<number>`COUNT(DISTINCT ${schema.blocks.turnId})`,
+    })
+    .from(schema.blocks)
+    .where(eq(schema.blocks.agentName, agentName))
+    .groupBy(schema.blocks.sessionId)
+    .orderBy(desc(sql<number>`MAX(${schema.blocks.ts})`))
+    .all();
+  return rows as AgentSessionSummary[];
+}
+
+/**
+ * Distinct session counts keyed by agent name. One query supplying
+ * counts for the entire registry, so `/api/agents` can decide which
+ * rows show an expand-history button without N+1 follow-up calls.
+ */
+export function sessionCountsByAgent(): Record<string, number> {
+  const db = getDb();
+  const rows = db
+    .select({
+      agentName: schema.blocks.agentName,
+      count: sql<number>`COUNT(DISTINCT ${schema.blocks.sessionId})`,
+    })
+    .from(schema.blocks)
+    .groupBy(schema.blocks.agentName)
+    .all();
+  const out: Record<string, number> = {};
+  for (const r of rows as Array<{ agentName: string | null; count: number }>) {
+    if (r.agentName) out[r.agentName] = r.count;
+  }
+  return out;
+}

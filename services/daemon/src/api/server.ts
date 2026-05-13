@@ -30,7 +30,6 @@ import {
   listAgentSessions,
   listComments,
   listTickets,
-  listTurns,
   markRead,
   readAttachmentBytes,
   sendMail,
@@ -412,32 +411,7 @@ async function handle(
     return json(res, 200, { aborted });
   }
 
-  // --- Sessions / turns ---
-  if (method === "GET" && /^\/api\/sessions\/[^/]+\/turns$/.test(path)) {
-    const sessionId = path.split("/")[3];
-    const limitParam = url.searchParams.get("limit");
-    const turns = listTurns({
-      sessionId,
-      limit: limitParam ? Number(limitParam) : 200,
-    });
-    return json(res, 200, turns);
-  }
-  if (method === "GET" && /^\/api\/agents\/[^/]+\/turns$/.test(path)) {
-    const agentName = path.split("/")[3];
-    const limitParam = url.searchParams.get("limit");
-    const beforeParam = url.searchParams.get("beforeId");
-    // The orchestrator is a single persistent thread across the agent's
-    // entire lifetime, regardless of how many internal SDK session_ids
-    // accrued from resumes/restarts. Return all turns for the agent in
-    // reverse-chronological order; the client paginates with `beforeId`
-    // for older content. Memory + compaction handle long-term context.
-    const turns = listTurns({
-      agentName,
-      limit: limitParam ? Number(limitParam) : 50,
-      beforeId: beforeParam ? Number(beforeParam) : undefined,
-    });
-    return json(res, 200, turns);
-  }
+  // --- Blocks (canonical transcript) ---
   if (method === "GET" && /^\/api\/agents\/[^/]+\/blocks$/.test(path)) {
     const agentName = path.split("/")[3];
     const limit = numericParam(url, "limit");

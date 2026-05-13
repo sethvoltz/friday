@@ -12,73 +12,66 @@ import { z } from "zod";
 import type { AgentType } from "@friday/shared";
 import { daemonFetch } from "./http.js";
 
-interface TurnRow {
+interface BlockRow {
   id: number;
+  blockId: string;
+  turnId: string;
   sessionId: string;
-  agentName: string | null;
-  turnIndex: number;
-  ts: number;
+  agentName: string;
   role: string;
   kind: string;
+  source: string | null;
   contentJson: string;
+  status: string;
+  ts: number;
 }
 
 const INSPECT_BLOCK_PREVIEW_CHARS = 320;
 
-function formatTurnsAsMarkdown(agentName: string, turns: TurnRow[]): string {
-  if (turns.length === 0) return `_No turns yet for \`${agentName}\`._`;
-  // /api/agents/:name/turns returns desc by id; render oldest-first for reading.
-  const ordered = [...turns].reverse();
-  const lines: string[] = [`# ${agentName} — last ${ordered.length} turns\n`];
-  for (const t of ordered) {
-    const ts = new Date(t.ts).toISOString();
-    lines.push(`## ${t.role} • ${t.kind} • ${ts} • turn ${t.id}`);
+function formatBlocksAsMarkdown(agentName: string, blocks: BlockRow[]): string {
+  if (blocks.length === 0) return `_No blocks yet for \`${agentName}\`._`;
+  // /api/agents/:name/blocks returns desc by id; render oldest-first for reading.
+  const ordered = [...blocks].sort((a, b) => a.id - b.id);
+  const lines: string[] = [`# ${agentName} — last ${ordered.length} blocks\n`];
+  for (const b of ordered) {
+    const ts = new Date(b.ts).toISOString();
+    lines.push(
+      `## ${b.role} • ${b.kind} • ${ts} • block ${b.blockId.slice(0, 8)} (turn ${b.turnId.slice(0, 8)}) • ${b.status}`,
+    );
     lines.push("");
-    lines.push(...summarizeContent(t.contentJson));
+    lines.push(summarizeBlock(b));
     lines.push("");
   }
   return lines.join("\n");
 }
 
-function summarizeContent(contentJson: string): string[] {
-  let parsed: unknown;
+function summarizeBlock(b: BlockRow): string {
+  let parsed: Record<string, unknown> = {};
   try {
-    parsed = JSON.parse(contentJson);
+    parsed = JSON.parse(b.contentJson) as Record<string, unknown>;
   } catch {
-    return [truncate(contentJson)];
+    return truncate(b.contentJson);
   }
-  const obj = parsed as Record<string, unknown>;
-  const message = obj.message as Record<string, unknown> | undefined;
-  const content = message?.content;
-  if (Array.isArray(content)) {
-    const out: string[] = [];
-    for (const block of content as Array<Record<string, unknown>>) {
-      if (block.type === "text" && typeof block.text === "string") {
-        out.push(truncate(block.text));
-      } else if (block.type === "thinking") {
-        out.push(`*[thinking]* ${truncate(String(block.thinking ?? ""))}`);
-      } else if (block.type === "tool_use") {
-        const name = String(block.name ?? "?");
-        const input = JSON.stringify(block.input ?? {});
-        out.push(
-          `🔧 \`${name}\`(${truncate(input, 120)}) — id=${String(block.id ?? "")}`,
-        );
-      } else if (block.type === "tool_result") {
-        const result =
-          typeof block.content === "string"
-            ? block.content
-            : JSON.stringify(block.content);
-        out.push(
-          `↳ tool_result (${block.is_error ? "error" : "ok"}): ${truncate(result)}`,
-        );
-      }
-    }
-    return out.length > 0 ? out : ["_(empty)_"];
+  if (b.kind === "text") {
+    return truncate(String(parsed.text ?? ""));
   }
-  if (typeof message?.content === "string") {
-    return [truncate(message.content as string)];
+  if (b.kind === "thinking") {
+    return `*[thinking]* ${truncate(String(parsed.text ?? ""))}`;
   }
-  return [truncate(contentJson, 200)];
+  if (b.kind === "tool_use") {
+    const name = String(parsed.name ?? "?");
+    const input = JSON.stringify(parsed.input ?? {});
+    const toolId = String(parsed.tool_use_id ?? "");
+    return `🔧 \`${name}\`(${truncate(input, 120)}) — id=${toolId.slice(0, 8)}`;
+  }
+  if (b.kind === "tool_result") {
+    const result =
+      typeof parsed.text === "string"
+        ? parsed.text
+        : JSON.stringify(parsed.text ?? "");
+    return `↳ tool_result (${parsed.is_error ? "error" : "ok"}): ${truncate(result)}`;
+  }
+  return truncate(b.contentJson, 200);
 }
 
 function truncate(s: string, max = INSPECT_BLOCK_PREVIEW_CHARS): string {
@@ -224,7 +217,7 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
       ),
       tool(
         "agent_inspect",
-        "Read recent turns from a sub-agent's transcript. Default `markdown` format gives a compact human-readable summary; pass `format: 'json'` for raw turn rows.",
+        "Read recent content blocks from a sub-agent's transcript. Default `markdown` format gives a compact human-readable summary; pass `format: 'json'` for raw block rows.",
         {
           name: z.string(),
           limit: z
@@ -233,7 +226,7 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
             .min(1)
             .max(200)
             .optional()
-            .describe("Max number of turns. Default 30."),
+            .describe("Max number of blocks. Default 30."),
           format: z
             .enum(["markdown", "json"])
             .optional()
@@ -243,18 +236,22 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
           const params = new URLSearchParams();
           params.set("limit", String(args.limit ?? 30));
           const qs = `?${params.toString()}`;
-          const turns = (await daemonFetch({
+          const payload = (await daemonFetch({
             ...ctx,
-            path: `/api/agents/${encodeURIComponent(args.name)}/turns${qs}`,
-          })) as TurnRow[];
+            path: `/api/agents/${encodeURIComponent(args.name)}/blocks${qs}`,
+          })) as { blocks: BlockRow[] };
+          const blocks = payload.blocks ?? [];
           if (args.format === "json") {
             return {
-              content: [{ type: "text", text: JSON.stringify(turns, null, 2) }],
+              content: [{ type: "text", text: JSON.stringify(blocks, null, 2) }],
             };
           }
           return {
             content: [
-              { type: "text", text: formatTurnsAsMarkdown(args.name, turns) },
+              {
+                type: "text",
+                text: formatBlocksAsMarkdown(args.name, blocks),
+              },
             ],
           };
         },
