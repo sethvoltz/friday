@@ -450,9 +450,6 @@
     color: var(--accent-primary);
     border-color: var(--accent-primary);
   }
-  button.danger {
-    color: var(--status-error);
-  }
   button.compact {
     padding: 0.25rem 0.55rem;
     font-size: 0.75rem;

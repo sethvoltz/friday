@@ -375,6 +375,7 @@
     color: var(--accent-primary);
     font-family: var(--font-mono);
     text-decoration: none;
+    white-space: nowrap;
   }
   .link-title {
     color: var(--text-primary);

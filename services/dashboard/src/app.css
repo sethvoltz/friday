@@ -183,15 +183,12 @@ button.ghost:hover {
 }
 
 button.danger {
-  background: var(--status-error);
-  color: var(--text-inverse);
-  border: none;
-  border-radius: var(--radius-sm);
-  padding: 0.55rem 1rem;
-  font-weight: 600;
-  font-size: 0.9rem;
-  cursor: pointer;
-  font-family: inherit;
+  color: var(--status-error);
+  border-color: var(--status-error);
+}
+button.danger:hover {
+  color: var(--status-error);
+  background: var(--status-error-bg);
 }
 
 input.page-input,

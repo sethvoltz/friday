@@ -12,7 +12,8 @@
     "./services": "./dist/services/index.js",
     "./markdown": "./dist/markdown/plugins.js",
     "./markdown/streaming-mermaid": "./dist/markdown/streaming-mermaid.js",
-    "./markdown/code-highlight": "./dist/markdown/code-highlight.js"
+    "./markdown/code-highlight": "./dist/markdown/code-highlight.js",
+    "./cron": "./dist/cron.js"
   },
   "scripts": {
     "build": "tsc && node ./scripts/copy-prompts.mjs",

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { PageData } from "./$types";
   import type { ScheduleRow } from "./+page.server";
-  import { nextRuns } from "@friday/shared";
+  import { nextRuns } from "@friday/shared/cron";
 
   let { data }: { data: PageData } = $props();
 
@@ -165,48 +165,50 @@
               {/if}
             </td>
             <td class="actions-cell">
-              {#if s.paused}
+              <div class="actions-row">
+                {#if s.paused}
+                  <button
+                    class="ghost compact"
+                    onclick={() =>
+                      action(
+                        s.name,
+                        "resume",
+                        `/api/schedules/${encodeURIComponent(s.name)}/resume`,
+                      )}
+                    disabled={busy !== null}>
+                    Resume
+                  </button>
+                {:else}
+                  <button
+                    class="ghost compact"
+                    onclick={() =>
+                      action(
+                        s.name,
+                        "pause",
+                        `/api/schedules/${encodeURIComponent(s.name)}/pause`,
+                      )}
+                    disabled={busy !== null}>
+                    Pause
+                  </button>
+                {/if}
                 <button
                   class="ghost compact"
                   onclick={() =>
                     action(
                       s.name,
-                      "resume",
-                      `/api/schedules/${encodeURIComponent(s.name)}/resume`,
+                      "trigger",
+                      `/api/schedules/${encodeURIComponent(s.name)}/trigger`,
                     )}
                   disabled={busy !== null}>
-                  Resume
+                  Trigger
                 </button>
-              {:else}
                 <button
-                  class="ghost compact"
-                  onclick={() =>
-                    action(
-                      s.name,
-                      "pause",
-                      `/api/schedules/${encodeURIComponent(s.name)}/pause`,
-                    )}
+                  class="ghost compact danger"
+                  onclick={() => deleteSchedule(s.name)}
                   disabled={busy !== null}>
-                  Pause
+                  Delete
                 </button>
-              {/if}
-              <button
-                class="ghost compact"
-                onclick={() =>
-                  action(
-                    s.name,
-                    "trigger",
-                    `/api/schedules/${encodeURIComponent(s.name)}/trigger`,
-                  )}
-                disabled={busy !== null}>
-                Trigger
-              </button>
-              <button
-                class="ghost compact danger"
-                onclick={() => deleteSchedule(s.name)}
-                disabled={busy !== null}>
-                Delete
-              </button>
+              </div>
             </td>
           </tr>
         {/each}
@@ -243,17 +245,18 @@
     color: var(--text-tertiary);
   }
   .actions-cell {
-    display: flex;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .actions-row {
+    display: inline-flex;
     gap: 0.3rem;
-    justify-content: flex-end;
     flex-wrap: wrap;
+    justify-content: flex-end;
   }
   .ghost.compact {
     font-size: 0.75rem;
     padding: 0.25rem 0.55rem;
-  }
-  button.danger {
-    color: var(--status-error);
   }
   .fires {
     margin-top: 0.3rem;

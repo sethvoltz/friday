@@ -499,7 +499,6 @@
   }
   .session-expires { color: var(--text-tertiary); }
   .session-revoke { font-size: 0.75rem; padding: 0.25rem 0.6rem; }
-  button.danger { color: var(--status-error); }
 
   @media (max-width: 640px) {
     .session-row {

@@ -214,9 +214,6 @@
     color: var(--accent-primary);
     border-color: var(--accent-primary);
   }
-  button.danger {
-    color: var(--status-error);
-  }
   .toast {
     position: fixed;
     bottom: 1.5rem;

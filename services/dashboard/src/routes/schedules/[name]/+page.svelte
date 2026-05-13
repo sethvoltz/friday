@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { PageData } from "./$types";
-  import { isValidCron, nextRuns } from "@friday/shared";
+  import { isValidCron, nextRuns } from "@friday/shared/cron";
   import { invalidateAll, goto } from "$app/navigation";
 
   let { data }: { data: PageData } = $props();
@@ -286,9 +286,6 @@
     display: flex;
     gap: 0.5rem;
     flex-wrap: wrap;
-  }
-  button.danger {
-    color: var(--status-error);
   }
   button.primary {
     color: var(--accent-primary);

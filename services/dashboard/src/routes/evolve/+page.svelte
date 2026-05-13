@@ -375,25 +375,27 @@
             <td class="text-mono text-right">{p.score}</td>
             <td class="text-mono">{signalSummary(p)}</td>
             <td class="actions-cell">
-              {#if p.status !== "applied" && p.status !== "rejected"}
-                <button
-                  class="ghost compact"
-                  onclick={() => applyOne(p)}
-                  disabled={busy !== null}>
-                  Apply
-                </button>
-                <button
-                  class="ghost compact danger"
-                  onclick={() => dismissOne(p)}
-                  disabled={busy !== null}>
-                  Dismiss
-                </button>
-              {:else if p.status === "applied" && p.appliedTicketId}
-                <a class="link" href="/tickets/{p.appliedTicketId}"
-                  >ticket {p.appliedTicketId}</a>
-              {:else}
-                <span class="muted">—</span>
-              {/if}
+              <div class="actions-row">
+                {#if p.status !== "applied" && p.status !== "rejected"}
+                  <button
+                    class="ghost compact"
+                    onclick={() => applyOne(p)}
+                    disabled={busy !== null}>
+                    Apply
+                  </button>
+                  <button
+                    class="ghost compact danger"
+                    onclick={() => dismissOne(p)}
+                    disabled={busy !== null}>
+                    Dismiss
+                  </button>
+                {:else if p.status === "applied" && p.appliedTicketId}
+                  <a class="link" href="/tickets/{p.appliedTicketId}"
+                    >ticket {p.appliedTicketId}</a>
+                {:else}
+                  <span class="muted">—</span>
+                {/if}
+              </div>
             </td>
           </tr>
           {#if expanded.has(p.id)}
@@ -502,7 +504,11 @@
     letter-spacing: 0.05em;
   }
   .actions-cell {
-    display: flex;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .actions-row {
+    display: inline-flex;
     gap: 0.35rem;
     flex-wrap: wrap;
     justify-content: flex-end;
@@ -510,9 +516,6 @@
   .ghost.compact {
     font-size: 0.75rem;
     padding: 0.25rem 0.5rem;
-  }
-  button.danger {
-    color: var(--status-error);
   }
   .bulk-bar {
     display: flex;
