@@ -114,9 +114,20 @@ export class ChatState {
   /** Transient toast surfaced by client-side commands (FIX_FORWARD 6.1).
    *  `null` when no toast is active. ChatShell mounts a floating pill. */
   toast = $state<{ message: string; level: "info" | "warn" } | null>(null);
-  /** Bubble id to highlight after a `/jump` (FIX_FORWARD 6.1). The
-   *  matching ChatMessage element scrolls into view and pulses briefly. */
+  /** Bubble id to highlight after a `/jump <term>` (FIX_FORWARD 6.1). The
+   *  matching ChatMessage element gets a one-shot pulse animation via the
+   *  `jump-highlight` class. Self-clears via the bubble's `animationend`
+   *  handler when the CSS animation finishes, so the class state mirrors
+   *  the animation lifecycle — no setTimeout coordination, and a follow-
+   *  up `/jump` to the same id re-toggles the class to re-trigger. */
   highlightedMessageId = $state<string | null>(null);
+  /** Nonce-keyed scroll target. ChatMessages watches this and calls
+   *  `scrollIntoView` for the matching element. The nonce changes on every
+   *  request, so repeated jumps to the same bubble id still trigger a fresh
+   *  scroll. Set by `jumpTo` (both date- and term-mode paths). Separate
+   *  from `highlightedMessageId` so date jumps scroll without a pulse. */
+  scrollTarget = $state<{ id: string; nonce: number } | null>(null);
+  private scrollNonce = 0;
   /** Oldest `block_id` we've loaded; pagination cursor for older blocks.
    *  Used as the `before` query param on `/api/agents/:name/blocks`. */
   oldestBlockId = $state<string | null>(null);
@@ -336,11 +347,21 @@ export class ChatState {
   /**
    * Implements `/jump <date|term>` (FIX_FORWARD 6.1).
    *
-   * Tries to interpret `arg` as a date first (Date.parse + a few NL
-   * keywords). On a finite parse, requests the `around_ts` window;
-   * otherwise hits `match=` for FTS lookup. Replaces `messages` with
-   * the returned block window and marks the first hit for highlight.
-   * Surfaces a toast if no blocks come back.
+   * Two modes, decided by `parseJumpDate`:
+   *  - Date jump: fetch a window of blocks around the target timestamp,
+   *    merge into the current chat (so the user's history isn't blown
+   *    away), and scroll to the earliest block on or after the target
+   *    date. No pulse — date jumps are navigational, not search results.
+   *  - Term jump: FTS search over the agent's blocks, merge results into
+   *    the chat, scroll to and pulse the top-ranked hit, surface a toast
+   *    with the match count. Highlight clears on the next keystroke (see
+   *    `ChatInput.onInput`).
+   *
+   * Pin-to-bottom is explicitly released before mutating state so the
+   * auto-scroll effect in `ChatShell` doesn't race the `scrollIntoView`
+   * call back down to the latest. If the bottom sentinel is still in
+   * view after the jump, the IntersectionObserver will flip it back to
+   * `true` on its own.
    */
   async jumpTo(agent: string, arg: string): Promise<void> {
     const trimmed = arg.trim();
@@ -349,10 +370,12 @@ export class ChatState {
       return;
     }
     const ts = parseJumpDate(trimmed);
-    const url =
-      ts !== null
-        ? `/api/agents/${encodeURIComponent(agent)}/blocks?around_ts=${ts}&before_limit=10&after_limit=40`
-        : `/api/agents/${encodeURIComponent(agent)}/blocks?match=${encodeURIComponent(trimmed)}&limit=20`;
+    const isDateJump = ts !== null;
+    const url = isDateJump
+      ? `/api/agents/${encodeURIComponent(agent)}/blocks?around_ts=${ts}&before_limit=10&after_limit=40`
+      : `/api/agents/${encodeURIComponent(agent)}/blocks?match=${encodeURIComponent(trimmed)}&limit=20`;
+
+    let rawBlocks: BlockRow[];
     try {
       const r = await fetch(url);
       if (!r.ok) {
@@ -360,26 +383,127 @@ export class ChatState {
         return;
       }
       const data = (await r.json()) as { blocks: BlockRow[] };
-      if (!data.blocks || data.blocks.length === 0) {
-        this.setToast("No match in this chat.", "warn");
-        return;
-      }
-      const parsed = parseBlocks(data.blocks, agent);
-      this.messages = parsed;
-      // First match: for `around_ts` that's the block at or just after
-      // the target ts; for `match` that's the top-ranked hit (first
-      // returned, then parseBlocks sorted by id asc so it's the oldest
-      // in the result set). Either way, the first non-tool, non-
-      // thinking bubble is what the user is looking for.
-      const target = parsed.find(
-        (m) => m.role === "user" || m.role === "assistant",
-      );
-      this.highlightedMessageId = target?.id ?? null;
+      rawBlocks = data.blocks ?? [];
     } catch (err) {
       this.setToast(
         err instanceof Error ? err.message : "Jump failed.",
         "warn",
       );
+      return;
+    }
+
+    if (rawBlocks.length === 0) {
+      this.setToast(
+        isDateJump ? "No chat on that date." : "No matches.",
+        "warn",
+      );
+      return;
+    }
+
+    // For date jumps: detect "out of range" — no block falls on or after
+    // the target date. Around_ts always returns the closest blocks, so an
+    // empty after-range tells us the user jumped past the end of history.
+    if (isDateJump) {
+      const hasOnOrAfter = rawBlocks.some((b) => b.ts >= (ts as number));
+      const hasBefore = rawBlocks.some((b) => b.ts < (ts as number));
+      if (!hasOnOrAfter || !hasBefore) {
+        // No after-blocks → date is past the end of chat.
+        // No before-blocks → date is before any chat. Either way, the
+        // window is clipped on one side; tell the user.
+        if (!hasOnOrAfter) {
+          this.setToast("Date is past the end of this chat.", "warn");
+          return;
+        }
+        // hasOnOrAfter && !hasBefore: this is OK — we just don't have
+        // anything earlier. Don't toast; scroll to whatever we got.
+      }
+    }
+
+    const parsed = parseBlocks(rawBlocks, agent);
+
+    // Find the scroll target BEFORE the merge so we can compute it
+    // against the raw response (which preserves FTS rank order for term
+    // mode and chronology for date mode).
+    let targetId: string | undefined;
+    if (isDateJump) {
+      // Earliest block on or after the target ts (the user typed a date —
+      // they want to land at the start of that day, not in the middle of
+      // yesterday's tail).
+      const targetTs = ts as number;
+      const candidate =
+        rawBlocks
+          .slice()
+          .sort((a, b) => a.ts - b.ts)
+          .find(
+            (b) =>
+              b.ts >= targetTs &&
+              (b.role === "user" || b.role === "assistant") &&
+              b.kind === "text",
+          ) ??
+        rawBlocks
+          .slice()
+          .sort((a, b) => a.ts - b.ts)
+          .find((b) => b.role === "user" || b.role === "assistant");
+      if (candidate) {
+        targetId =
+          candidate.role === "user"
+            ? userBlockIdForTurn(candidate.turnId)
+            : `b_${candidate.blockId}`;
+      }
+    } else {
+      // FTS: matchBlocks returned ORDER BY rank, so the first row is the
+      // top-ranked hit. parseBlocks re-sorts by id, which is why we pick
+      // the target id from the raw response.
+      const top = rawBlocks.find(
+        (b) =>
+          (b.role === "user" || b.role === "assistant") && b.kind === "text",
+      );
+      if (top) {
+        targetId =
+          top.role === "user"
+            ? userBlockIdForTurn(top.turnId)
+            : `b_${top.blockId}`;
+      }
+    }
+
+    // Merge parsed into existing messages. Dedup by id; existing entries
+    // win so streaming/running statuses survive (a /jump landing mid-turn
+    // shouldn't collapse the in-flight bubble's state). Re-sort settled
+    // messages by ts; pending bubbles stay at the bottom.
+    const byId = new Map<string, ChatMessage>();
+    for (const m of this.messages) byId.set(m.id, m);
+    for (const m of parsed) if (!byId.has(m.id)) byId.set(m.id, m);
+    const all = [...byId.values()];
+    const pending = all.filter((m) => m.pending);
+    const settled = all.filter((m) => !m.pending);
+    settled.sort((a, b) => a.ts - b.ts);
+
+    // Release the bottom pin BEFORE writing the messages array so the
+    // length-watching effect in ChatShell sees `pinnedToBottom=false` and
+    // skips its auto-scroll-to-bottom. The bottom-sentinel IO will flip
+    // it back to true if the user is genuinely at the bottom after the
+    // jump (e.g. /jump to a very recent message).
+    this.pinnedToBottom = false;
+    this.messages = [...settled, ...pending];
+
+    if (targetId) {
+      this.scrollNonce += 1;
+      this.scrollTarget = { id: targetId, nonce: this.scrollNonce };
+      if (!isDateJump) {
+        this.highlightedMessageId = targetId;
+        const matchCount = rawBlocks.filter(
+          (b) =>
+            (b.role === "user" || b.role === "assistant") && b.kind === "text",
+        ).length;
+        this.setToast(
+          `${matchCount} match${matchCount === 1 ? "" : "es"}`,
+          "info",
+        );
+      }
+    } else if (!isDateJump) {
+      // Term mode returned only tool/thinking rows — nothing the user
+      // can meaningfully be shown.
+      this.setToast("No matches.", "warn");
     }
   }
 
@@ -1240,13 +1364,13 @@ export function parseJumpDate(input: string): number | null {
   if (trimmed === "now") return now;
   if (trimmed === "today") {
     const d = new Date();
-    d.setHours(12, 0, 0, 0);
+    d.setHours(0, 0, 0, 0);
     return d.getTime();
   }
   if (trimmed === "yesterday") {
     const d = new Date();
     d.setDate(d.getDate() - 1);
-    d.setHours(12, 0, 0, 0);
+    d.setHours(0, 0, 0, 0);
     return d.getTime();
   }
   const rel = trimmed.match(/^(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks)\s+ago$/);

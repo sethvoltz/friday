@@ -1231,10 +1231,6 @@ function handleSystemCommand(
 
       return json(res, 200, { ok: true, agent: name });
     }
-    case "jump": {
-      // Pure UI command — daemon has no role; included for completeness.
-      return json(res, 200, { ok: true });
-    }
     case "restart": {
       // We rely on the process supervisor (tmux via `friday start`, or a
       // launchd / systemd unit per docs/run/) to respawn us. SIGTERM-then-let-

@@ -448,3 +448,322 @@ describe("inflight-state probe on reload", () => {
     expect(chat.inflightTurnId).toBeNull();
   });
 });
+
+describe("jumpTo (/jump <date|term>)", () => {
+  // jumpTo uses the raw `fetch` (not fetchWithTimeout) so we stub the
+  // global. The mock is reinstalled per test so a stray vi.fn carry-over
+  // doesn't cross-contaminate assertions.
+  let mockFetch: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function makeBlock(overrides: Partial<{
+    id: number;
+    blockId: string;
+    turnId: string;
+    role: "user" | "assistant";
+    kind: "text" | "thinking" | "tool_use" | "tool_result";
+    text: string;
+    ts: number;
+    status: string;
+  }> = {}) {
+    const id = overrides.id ?? 1;
+    return {
+      id,
+      blockId: overrides.blockId ?? `blk-${id}`,
+      turnId: overrides.turnId ?? `t-${id}`,
+      agentName: "friday",
+      sessionId: "s",
+      messageId: null,
+      blockIndex: 0,
+      role: overrides.role ?? "assistant",
+      kind: overrides.kind ?? "text",
+      source: null,
+      contentJson: JSON.stringify({ text: overrides.text ?? `body-${id}` }),
+      status: overrides.status ?? "complete",
+      ts: overrides.ts ?? id * 100,
+      lastEventSeq: id,
+    };
+  }
+
+  it("merges results into existing messages instead of replacing them", async () => {
+    // The bug this guards against: pre-fix, `jumpTo` did
+    // `this.messages = parsed`, wiping the user's chat history. After
+    // /jump the chat showed only the search-window blocks; the rest of
+    // the conversation vanished until reload. Merge keeps both.
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [
+          makeBlock({ id: 10, blockId: "blk-jump", turnId: "t-jump", role: "user", text: "found me", ts: 5000 }),
+        ],
+      }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Pre-existing chat history that /jump must NOT clobber.
+    chat.messages = [
+      { id: "user_t-pre", role: "user", text: "earlier", status: "complete", ts: 1000 },
+      { id: "b_blk-pre", role: "assistant", text: "earlier reply", status: "complete", ts: 1100, turnId: "t-pre" },
+    ];
+    await chat.jumpTo("friday", "found");
+    const ids = chat.messages.map((m) => m.id);
+    expect(ids).toContain("user_t-pre");
+    expect(ids).toContain("b_blk-pre");
+    // And the jumped-to block landed too.
+    expect(ids).toContain("user_t-jump");
+  });
+
+  it("date jump: picks the earliest block on or after the target ts", async () => {
+    // /jump today should land at the day's earliest block, not at the
+    // tail of yesterday. parseJumpDate("today") returns midnight; the
+    // server returns ~10 blocks before midnight + ~40 blocks after.
+    // The scroll target must be the first AFTER-midnight block.
+    const todayMidnight = (() => {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      return d.getTime();
+    })();
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [
+          // Two yesterday blocks (before midnight).
+          makeBlock({ id: 1, blockId: "blk-y1", turnId: "t-y1", role: "user", ts: todayMidnight - 7_200_000 }),
+          makeBlock({ id: 2, blockId: "blk-y2", turnId: "t-y1", role: "assistant", ts: todayMidnight - 7_100_000 }),
+          // Today's earliest block — the scroll target.
+          makeBlock({ id: 3, blockId: "blk-t1", turnId: "t-t1", role: "user", ts: todayMidnight + 1_000 }),
+          makeBlock({ id: 4, blockId: "blk-t2", turnId: "t-t1", role: "assistant", ts: todayMidnight + 2_000 }),
+        ],
+      }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.jumpTo("friday", "today");
+    expect(chat.scrollTarget?.id).toBe("user_t-t1");
+    // Date jumps don't pulse — that's reserved for term mode.
+    expect(chat.highlightedMessageId).toBeNull();
+  });
+
+  it("date jump: uses around_ts query, not match", async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [makeBlock({ id: 1, role: "user", ts: 1000 })],
+      }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.jumpTo("friday", "today");
+    const url = mockFetch.mock.calls[0]![0] as string;
+    expect(url).toContain("around_ts=");
+    expect(url).not.toContain("match=");
+  });
+
+  it("term jump: target id comes from the top-ranked raw block, not first by id", async () => {
+    // matchBlocks returns ORDER BY rank, so blocks[0] is the best
+    // match. parseBlocks then re-sorts by id ascending, which would
+    // pick the *oldest* hit if we picked from the parsed list. The
+    // target must be derived from the raw response order.
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [
+          // Top-ranked: id=42 (later by id, but ranked first by FTS).
+          makeBlock({ id: 42, blockId: "blk-best", turnId: "t-best", role: "assistant", text: "the unique token here", ts: 500 }),
+          // Lower-ranked: id=10 (earlier by id).
+          makeBlock({ id: 10, blockId: "blk-meh", turnId: "t-meh", role: "user", text: "vaguely the token", ts: 100 }),
+        ],
+      }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.jumpTo("friday", "uniqueTermXYZ");
+    expect(chat.scrollTarget?.id).toBe("b_blk-best");
+    expect(chat.highlightedMessageId).toBe("b_blk-best");
+  });
+
+  it("term jump: toast carries the match count", async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [
+          makeBlock({ id: 1, role: "user", text: "hit one" }),
+          makeBlock({ id: 2, role: "assistant", text: "hit two" }),
+          makeBlock({ id: 3, role: "user", text: "hit three" }),
+        ],
+      }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.jumpTo("friday", "hit");
+    expect(chat.toast?.message).toBe("3 matches");
+    expect(chat.toast?.level).toBe("info");
+  });
+
+  it("term jump: singular toast for exactly one match", async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [makeBlock({ id: 1, role: "user", text: "only one" })],
+      }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.jumpTo("friday", "only");
+    expect(chat.toast?.message).toBe("1 match");
+  });
+
+  it("term jump: empty result shows a no-matches toast and does not scroll", async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse({ blocks: [] }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Seed existing messages so we can prove merge didn't run.
+    chat.messages = [
+      { id: "user_t-pre", role: "user", text: "before", status: "complete", ts: 1 },
+    ];
+    await chat.jumpTo("friday", "zzzznomatch");
+    expect(chat.toast?.message).toBe("No matches.");
+    expect(chat.scrollTarget).toBeNull();
+    expect(chat.highlightedMessageId).toBeNull();
+    expect(chat.messages.map((m) => m.id)).toEqual(["user_t-pre"]);
+  });
+
+  it("date jump out-of-range (no blocks on/after target): toast, no scroll", async () => {
+    // around_ts past the end of chat: server returns the latest blocks
+    // before the target, but nothing on or after. That's the
+    // "out-of-range date" the manual test calls out.
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [
+          makeBlock({ id: 1, role: "user", ts: 1_000_000 }),
+          makeBlock({ id: 2, role: "assistant", ts: 1_000_100 }),
+        ],
+      }),
+    );
+    const { ChatState, parseJumpDate } = await import("./chat.svelte");
+    const futureTs = parseJumpDate("2099-01-01") as number;
+    expect(futureTs).toBeGreaterThan(0);
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.jumpTo("friday", "2099-01-01");
+    expect(chat.toast?.message).toBe("Date is past the end of this chat.");
+    expect(chat.scrollTarget).toBeNull();
+  });
+
+  it("releases pinnedToBottom so the auto-scroll effect doesn't override scrollIntoView", async () => {
+    // The "scroll locks" symptom. While pinned to bottom, the
+    // ResizeObserver in ChatShell pins scrollTop=scrollHeight every
+    // time the message list changes height, beating the scrollIntoView
+    // from the highlight effect. jumpTo must release the pin before
+    // mutating messages.
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [makeBlock({ id: 1, role: "user", text: "hit", ts: 500 })],
+      }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.pinnedToBottom = true;
+    await chat.jumpTo("friday", "hit");
+    expect(chat.pinnedToBottom).toBe(false);
+  });
+
+  it("empty arg surfaces the usage toast and never hits the network", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.jumpTo("friday", "   ");
+    expect(chat.toast?.message).toMatch(/usage:/i);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("fetch failure: warn toast, messages untouched", async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response("oh no", { status: 500 }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.messages = [
+      { id: "b_blk-pre", role: "assistant", text: "existing", status: "complete", ts: 1, turnId: "t-pre" },
+    ];
+    await chat.jumpTo("friday", "anything");
+    expect(chat.toast?.level).toBe("warn");
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0]!.id).toBe("b_blk-pre");
+  });
+
+  it("scrollTarget nonce advances on every jump so repeats re-trigger the effect", async () => {
+    // The effect that runs scrollIntoView watches `chat.scrollTarget`
+    // by reference; a fresh nonce per request lets two consecutive
+    // jumps to the same bubble id both fire the scroll.
+    mockFetch
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [makeBlock({ id: 1, blockId: "blk-x", turnId: "t-x", role: "user", text: "same", ts: 100 })],
+        }),
+      )
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [makeBlock({ id: 1, blockId: "blk-x", turnId: "t-x", role: "user", text: "same", ts: 100 })],
+        }),
+      );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.jumpTo("friday", "same");
+    const firstNonce = chat.scrollTarget?.nonce ?? -1;
+    expect(firstNonce).toBeGreaterThan(0);
+    await chat.jumpTo("friday", "same");
+    expect(chat.scrollTarget?.id).toBe("user_t-x");
+    expect(chat.scrollTarget?.nonce).toBeGreaterThan(firstNonce);
+  });
+});
+
+describe("parseJumpDate", () => {
+  it("today returns midnight, not noon — earliest block first", async () => {
+    const { parseJumpDate } = await import("./chat.svelte");
+    const ts = parseJumpDate("today");
+    expect(ts).not.toBeNull();
+    const d = new Date(ts as number);
+    expect(d.getHours()).toBe(0);
+    expect(d.getMinutes()).toBe(0);
+    expect(d.getSeconds()).toBe(0);
+  });
+
+  it("yesterday returns midnight of yesterday", async () => {
+    const { parseJumpDate } = await import("./chat.svelte");
+    const ts = parseJumpDate("yesterday") as number;
+    const todayMidnight = (() => {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      return d.getTime();
+    })();
+    // 86_400_000 ms in a day. DST transitions can shift this by an
+    // hour, so compare within a small window.
+    const delta = todayMidnight - ts;
+    expect(delta).toBeGreaterThan(82_000_000);
+    expect(delta).toBeLessThan(90_000_000);
+  });
+
+  it("ISO date returns midnight of that day", async () => {
+    const { parseJumpDate } = await import("./chat.svelte");
+    const ts = parseJumpDate("2026-05-10");
+    expect(ts).not.toBeNull();
+    // Date.parse on a bare ISO date returns midnight UTC.
+    expect(ts).toBe(Date.UTC(2026, 4, 10));
+  });
+
+  it("nonsense term returns null so the caller falls back to FTS", async () => {
+    const { parseJumpDate } = await import("./chat.svelte");
+    expect(parseJumpDate("not a date at all banana")).toBeNull();
+  });
+});

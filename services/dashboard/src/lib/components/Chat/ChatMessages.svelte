@@ -285,33 +285,23 @@
     return () => obs.disconnect();
   });
 
-  // FIX_FORWARD 6.1: when chat.highlightedMessageId changes, scroll the
-  // matching bubble into view and pulse the highlight ring. The
-  // animation lives in CSS (.jump-highlight); we just need to make sure
-  // the element is visible.
-  //
-  // The cleanup MUST be returned from the effect body itself, not from
-  // inside `queueMicrotask` — a return from a microtask callback is
-  // discarded, so a fast `/jump A` → `/jump B` sequence used to leave
-  // the first timer dangling and clear the wrong message's highlight.
+  // FIX_FORWARD 6.1: scroll target. Date and term jumps both write to
+  // `chat.scrollTarget` (a nonce-keyed `{id, nonce}`). The nonce changes
+  // on every request so re-jumping to the same bubble id still triggers
+  // a fresh scrollIntoView. Highlight pulse — when applicable — comes
+  // from a separate `chat.highlightedMessageId` and is cleared by
+  // ChatInput on the next keystroke (not on a timer).
   $effect(() => {
     if (readonly) return;
-    const id = chat.highlightedMessageId;
-    if (!id) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const target = chat.scrollTarget;
+    if (!target) return;
     queueMicrotask(() => {
       const el = document.querySelector<HTMLElement>(
-        `[data-msg-id="${CSS.escape(id)}"]`,
+        `[data-msg-id="${CSS.escape(target.id)}"]`,
       );
       if (!el) return;
       el.scrollIntoView({ behavior: "smooth", block: "center" });
-      timer = setTimeout(() => {
-        if (chat.highlightedMessageId === id) chat.highlightedMessageId = null;
-      }, 2500);
     });
-    return () => {
-      if (timer !== undefined) clearTimeout(timer);
-    };
   });
 </script>
 
@@ -384,6 +374,18 @@
       <div
         class="message {msg.role}"
         class:jump-highlight={!readonly && chat.highlightedMessageId === msg.id}
+        onanimationend={(e: AnimationEvent) => {
+          // Self-clear the highlight state when the CSS pulse animation
+          // completes. animationend bubbles up from the inner .bubble
+          // element. Filter by name in case other animations are added
+          // to this subtree later.
+          if (
+            e.animationName === "jump-pulse" &&
+            chat.highlightedMessageId === msg.id
+          ) {
+            chat.highlightedMessageId = null;
+          }
+        }}
         data-status={msg.status}
         data-msg-id={msg.id}>
         <div class="bubble">
