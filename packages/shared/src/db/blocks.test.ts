@@ -191,9 +191,41 @@ describe("blocks schema (FIX_FORWARD 1.1)", () => {
     ).toThrow(/UNIQUE/i);
   });
 
-  it("runMigrations is idempotent on a re-run", async () => {
+  it("runMigrations preserves existing rows and triggers on a re-run", async () => {
     const { runMigrations } = await import("./migrate.js");
+
+    // First run sets the schema up. Seed a sentinel row and capture the
+    // trigger / index counts the migrations are responsible for.
     runMigrations();
-    expect(() => runMigrations()).not.toThrow();
+    insertBlock({ block_id: "blk-survive", content_json: '{"text":"sentinel"}' });
+    const trigCount = () =>
+      (
+        raw
+          .prepare(
+            `SELECT count(*) AS n FROM sqlite_master WHERE type='trigger'`,
+          )
+          .get() as { n: number }
+      ).n;
+    const idxCount = () =>
+      (
+        raw
+          .prepare(
+            `SELECT count(*) AS n FROM sqlite_master WHERE type='index'`,
+          )
+          .get() as { n: number }
+      ).n;
+    const trigBefore = trigCount();
+    const idxBefore = idxCount();
+
+    // A naive "drop + recreate" regression would wipe the row; a naive
+    // "drop triggers" regression would change the counts.
+    runMigrations();
+
+    expect(trigCount()).toBe(trigBefore);
+    expect(idxCount()).toBe(idxBefore);
+    const survivor = raw
+      .prepare(`SELECT content_json FROM blocks WHERE block_id = ?`)
+      .get("blk-survive") as { content_json: string } | undefined;
+    expect(survivor?.content_json).toBe('{"text":"sentinel"}');
   });
 });

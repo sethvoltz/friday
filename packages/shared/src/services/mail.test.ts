@@ -29,7 +29,7 @@ afterEach(() => {
 
 describe("mail priority (FIX_FORWARD 2.3)", () => {
   it("sendMail defaults priority to 'normal'", async () => {
-    const { sendMail, mailBus } = await import("./mail.js");
+    const { sendMail } = await import("./mail.js");
     const row = sendMail({
       fromAgent: "alpha",
       toAgent: "beta",
@@ -37,8 +37,6 @@ describe("mail priority (FIX_FORWARD 2.3)", () => {
       body: "default priority",
     });
     expect(row.priority).toBe("normal");
-    // mailBus is a singleton; just ensure nothing throws.
-    expect(mailBus).toBeDefined();
   });
 
   it("sendMail persists priority='critical' when set", async () => {

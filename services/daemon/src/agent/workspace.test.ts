@@ -73,7 +73,7 @@ describe("assertInsideWorkspacesRoot", () => {
     expect(() => assertInsideWorkspacesRoot(missing)).toThrow(/not found/);
   });
 
-  it("falls back to the normalized form when existsRequired is false", () => {
+  it("accepts a not-yet-created path inside the root when existsRequired is false", () => {
     const missing = join(workspacesRoot(), "tolerant-check");
     expect(() =>
       assertInsideWorkspacesRoot(missing, { existsRequired: false }),

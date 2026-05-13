@@ -31,9 +31,9 @@ afterEach(() => {
 });
 
 describe("blocks service (FIX_FORWARD 1.2)", () => {
-  it("insertBlock writes a row that can be fetched by blockId", async () => {
+  it("insertBlock persists every field, retrievable by getBlockById", async () => {
     const { insertBlock, getBlockById } = await import("./blocks.js");
-    const row = insertBlock({
+    insertBlock({
       blockId: "blk-svc-1",
       turnId: "turn-svc-1",
       agentName: "alpha",
@@ -48,12 +48,26 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
       ts: 1000,
       lastEventSeq: 1,
     });
-    expect(row.blockId).toBe("blk-svc-1");
-    expect(row.status).toBe("streaming");
 
+    // Load-bearing: this verifies the column mapping is correct end-to-end.
+    // A regression that drops a field or maps it to the wrong column
+    // surfaces here. `id` is the autoincrement PK so we match it loosely.
     const fetched = getBlockById("blk-svc-1");
-    expect(fetched).not.toBeNull();
-    expect(fetched!.contentJson).toBe('{"text":"hello"}');
+    expect(fetched).toMatchObject({
+      blockId: "blk-svc-1",
+      turnId: "turn-svc-1",
+      agentName: "alpha",
+      sessionId: "sess-1",
+      messageId: "msg-1",
+      blockIndex: 0,
+      role: "assistant",
+      kind: "text",
+      source: null,
+      contentJson: '{"text":"hello"}',
+      status: "streaming",
+      ts: 1000,
+      lastEventSeq: 1,
+    });
   });
 
   it("updateBlock replaces content and bumps last_event_seq", async () => {
@@ -173,7 +187,7 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
     expect(maxSeqByAgent("alpha")).toBe(7);
   });
 
-  it("fetchBlocksByAgent default mode returns most-recent N capped at 200", async () => {
+  it("fetchBlocksByAgent default mode returns most-recent N in desc order", async () => {
     const { insertBlock, fetchBlocksByAgent } = await import("./blocks.js");
     for (let i = 0; i < 5; i++) {
       insertBlock({
@@ -197,11 +211,36 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
       "blk-fb-2",
     ]);
     expect(r.lastEventSeq).toBe(5);
+  });
 
-    // Asking for limit=1000 clamps to MAX_LIMIT (200), which is more than the
-    // 5 rows we inserted — just returns all 5.
-    const big = fetchBlocksByAgent({ agentName: "alpha", limit: 1000 });
-    expect(big.blocks.length).toBe(5);
+  it("fetchBlocksByAgent clamps limit to MAX_LIMIT (200)", async () => {
+    const { insertBlock, fetchBlocksByAgent } = await import("./blocks.js");
+    // Insert 250 rows so the cap actually matters. Using batch sql here
+    // (insertBlock per-row is fine but 250 is enough that explicit-loop
+    // readability beats further factoring).
+    for (let i = 0; i < 250; i++) {
+      insertBlock({
+        blockId: `blk-cap-${i.toString().padStart(3, "0")}`,
+        turnId: "turn-cap",
+        agentName: "alpha",
+        sessionId: "sess-cap",
+        blockIndex: i,
+        role: "assistant",
+        kind: "text",
+        contentJson: "{}",
+        status: "complete",
+        ts: 1000 + i,
+        lastEventSeq: i + 1,
+      });
+    }
+    const r = fetchBlocksByAgent({ agentName: "alpha", limit: 1000 });
+    // The cap is the load-bearing claim. The newest row (`blk-cap-249`)
+    // must be first; the 200th in the returned list is `blk-cap-050`
+    // (250 - 200 = 50). If the regression returns 250, the boundary
+    // check fails.
+    expect(r.blocks.length).toBe(200);
+    expect(r.blocks[0]!.blockId).toBe("blk-cap-249");
+    expect(r.blocks[199]!.blockId).toBe("blk-cap-050");
   });
 
   it("fetchBlocksByAgent before/after paginates by block_id cursor", async () => {

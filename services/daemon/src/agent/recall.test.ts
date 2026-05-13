@@ -27,9 +27,11 @@ afterAll(async () => {
 describe("recall helpers (FIX_FORWARD 2.5)", () => {
   it("wrapWithRecall returns the body verbatim when memory is empty", async () => {
     const { wrapWithRecall } = await import("./recall.js");
-    const body = "hello world";
-    const out = wrapWithRecall(body, body, "user_chat");
-    expect(out).toBe(body);
+    // Distinct intentText vs body so a regression that accidentally
+    // emitted the intent into the output (instead of the body) would
+    // surface — the previous version passed body for both.
+    const out = wrapWithRecall("recall query", "response body", "user_chat");
+    expect(out).toBe("response body");
   });
 
   it("wrapWithRecall preserves the body when buildAutoRecallBlock throws", async () => {
@@ -55,8 +57,12 @@ describe("recall helpers (FIX_FORWARD 2.5)", () => {
     const { wrapWithRecall } = await import("./recall.js");
     const body = "actual prompt body";
     const out = wrapWithRecall("intent", body, "scheduled");
-    expect(out.startsWith("<memory-context>")).toBe(true);
-    expect(out.endsWith(body)).toBe(true);
+    // Pin the exact join — `\n\n` between the block and the body is the
+    // documented contract. `startsWith` + `endsWith` would let a regression
+    // that fused the two (`...</memory-context>actual prompt body`) pass.
+    expect(out).toBe(
+      "<memory-context>\nrelevant fact\n</memory-context>\n\n" + body,
+    );
     vi.unmock("@friday/memory");
     vi.resetModules();
   });
