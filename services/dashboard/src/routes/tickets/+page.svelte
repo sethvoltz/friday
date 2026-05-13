@@ -28,7 +28,9 @@
     "closed",
   ];
 
-  const assignees = $derived(() => {
+  // `$derived(() => ...)` would make the derived value the closure
+  // itself; we want the closure's *result*, memoized. That's `$derived.by`.
+  const assignees = $derived.by<string[]>(() => {
     const set = new Set<string>();
     for (const t of tickets) if (t.assignee) set.add(t.assignee);
     return [...set].sort();
@@ -38,7 +40,7 @@
     return tickets.filter((t) => t.status === s).length;
   }
 
-  const filtered = $derived(() => {
+  const filtered = $derived.by<Ticket[]>(() => {
     let out = tickets;
     if (statusFilter !== "all") {
       out = out.filter((t) => t.status === statusFilter);
@@ -181,7 +183,7 @@
       onclick={() => (assigneeFilter = "unassigned")}>
       unassigned
     </button>
-    {#each assignees() as a (a)}
+    {#each assignees as a (a)}
       <button
         type="button"
         class="chip"
@@ -235,9 +237,9 @@
 <div class="card">
   <div class="card-header">
     <h2>Tickets</h2>
-    <span class="stat-detail">{filtered().length} shown · {tickets.length} total</span>
+    <span class="stat-detail">{filtered.length} shown · {tickets.length} total</span>
   </div>
-  {#if filtered().length === 0}
+  {#if filtered.length === 0}
     <p class="empty-state">
       No tickets match. Loosen the filters above or create one.
     </p>
@@ -262,7 +264,7 @@
         </tr>
       </thead>
       <tbody>
-        {#each filtered() as t (t.id)}
+        {#each filtered as t (t.id)}
           <tr>
             <td><a href="/tickets/{t.id}" class="link-mono">{t.id}</a></td>
             <td><a href="/tickets/{t.id}" class="link-title">{t.title}</a></td>

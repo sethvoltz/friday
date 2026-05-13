@@ -376,6 +376,15 @@ async function handle(
       return json(res, 400, {
         error: "agent is not a builder; no workspace to clean up",
       });
+    // FIX_FORWARD 6.4 follow-up: refuse to nuke a live worker's worktree
+    // from under it. Caller must kill the agent first (or the agent must
+    // have crashed itself into `error`). Allow `error` because that
+    // state indicates the worker is gone.
+    if (a.status !== "killed" && a.status !== "error") {
+      return json(res, 409, {
+        error: `agent ${name} is ${a.status}; kill it before deleting the workspace`,
+      });
+    }
     const repo = process.cwd();
     try {
       destroyWorkspace(name, repo);
@@ -650,7 +659,14 @@ async function handle(
     const id = decodeURIComponent(path.split("/")[3]);
     const e = getEntry(id);
     if (!e) return json(res, 404, { error: "not found" });
-    touchRecall(id);
+    // FIX_FORWARD 6.8 follow-up: bumping `recallCount` on every dashboard
+    // page view (load, edit, delete, invalidateAll) pollutes the metric
+    // that's supposed to reflect agent-side recall frequency. Require an
+    // explicit `?recall=1` from callers that want the bump (the
+    // auto-recall block uses `searchMemories`, which touches on its own).
+    if (url.searchParams.get("recall") === "1") {
+      touchRecall(id);
+    }
     return json(res, 200, e);
   }
   if (method === "PATCH" && /^\/api\/memory\/[^/]+$/.test(path)) {

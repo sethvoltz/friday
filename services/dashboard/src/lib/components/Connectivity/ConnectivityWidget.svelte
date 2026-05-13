@@ -27,32 +27,38 @@
     class={statusClass(view.internet.status)}
     title={view.internet.tooltip}
     aria-label={view.internet.tooltip}>
-    <span class="dot" class:pulse={view.internet.status === "live" || view.internet.status === "reconnecting"}></span>
+    <span class="dot"></span>
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <circle cx="12" cy="12" r="10" />
       <line x1="2" y1="12" x2="22" y2="12" />
       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
     </svg>
   </span>
-  <span class="sep" aria-hidden="true">⋯▸</span>
+  <svg class="sep" viewBox="0 0 20 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <line x1="1" y1="7" x2="13" y2="7" stroke-dasharray="2 3" />
+    <polyline points="12,4 16,7 12,10" />
+  </svg>
   <span
     class={statusClass(view.sse.status)}
     title={view.sse.tooltip}
     aria-label={view.sse.tooltip}>
-    <span class="dot" class:pulse={view.sse.status === "live" || view.sse.status === "reconnecting"}></span>
+    <span class="dot"></span>
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M5 12.55a11 11 0 0 1 14 0" />
-      <path d="M1.42 9a16 16 0 0 1 21.16 0" />
-      <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
-      <line x1="12" y1="20" x2="12.01" y2="20" />
+      <path d="M4 10a7.31 7.31 0 0 0 10 10Z" />
+      <path d="m9 15 3-3" />
+      <path d="M17 13a6 6 0 0 0-6-6" />
+      <path d="M21 13A10 10 0 0 0 11 3" />
     </svg>
   </span>
-  <span class="sep" aria-hidden="true">⋯▸</span>
+  <svg class="sep" viewBox="0 0 20 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <line x1="1" y1="7" x2="13" y2="7" stroke-dasharray="2 3" />
+    <polyline points="12,4 16,7 12,10" />
+  </svg>
   <span
     class={statusClass(view.daemon.status)}
     title={view.daemon.tooltip}
     aria-label={view.daemon.tooltip}>
-    <span class="dot" class:pulse={view.daemon.status === "live" || view.daemon.status === "reconnecting"}></span>
+    <span class="dot"></span>
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <rect x="4" y="4" width="16" height="16" rx="2" />
       <rect x="9" y="9" width="6" height="6" />
@@ -74,10 +80,19 @@
 </div>
 
 <style>
+  /* One CSS variable per stage — `--stage-color` is the single source of
+     truth for the dot fill, icon stroke, and pulse halo. State transitions
+     only mutate this variable, never the animation itself, so the three
+     dots stay in phase across status changes. */
+  .stage-live { --stage-color: var(--status-ok); }
+  .stage-reconnecting { --stage-color: var(--status-warn); }
+  .stage-down { --stage-color: var(--status-error); }
+  .stage-unknown { --stage-color: var(--text-tertiary); }
+
   .widget {
     display: inline-flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: 0.05rem;
     font-size: 0.8rem;
     color: var(--text-secondary);
     font-family: var(--font-mono);
@@ -88,46 +103,45 @@
     gap: 0.3rem;
     padding: 0.15rem 0.3rem;
     border-radius: var(--radius-sm);
+    color: var(--stage-color);
     cursor: help;
+    transition: color 200ms ease;
   }
   .stage:hover {
     background: var(--bg-tertiary);
   }
   .sep {
+    width: 20px;
+    height: 14px;
     color: var(--text-tertiary);
-    user-select: none;
+    flex-shrink: 0;
   }
   .icon {
     width: 14px;
     height: 14px;
+    color: var(--stage-color);
+    transition: color 200ms ease;
   }
   .dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
+    background: var(--stage-color);
+    /* The animation is ALWAYS running on every dot — that's how we keep
+       the three pulses in sync. State transitions mutate `--stage-color`
+       only; the timeline never restarts. `color-mix` re-resolves each
+       frame so the halo follows the dot's current color. */
+    animation: stage-pulse 1.6s ease-out infinite;
+    transition: background-color 200ms ease;
   }
-  /* Status palettes. Pulse animation triggers on live/reconnecting; static
-     on down/unknown. */
-  .stage-live { color: var(--status-ok); }
-  .stage-live .dot { background: var(--status-ok); }
-  .stage-reconnecting { color: var(--status-warn); }
-  .stage-reconnecting .dot { background: var(--status-warn); }
-  .stage-down { color: var(--status-error); }
-  .stage-down .dot { background: var(--status-error); }
-  .stage-unknown { color: var(--text-tertiary); }
-  .stage-unknown .dot { background: var(--text-tertiary); }
-
-  .dot.pulse {
-    animation: dot-pulse 1.6s ease-out infinite;
-  }
-  @keyframes dot-pulse {
-    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 70%, transparent); }
-    70%  { box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 0%, transparent); }
-    100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent); }
+  @keyframes stage-pulse {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--stage-color) 65%, transparent); }
+    70%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--stage-color) 0%, transparent); }
+    100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--stage-color) 0%, transparent); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .dot.pulse { animation: none; }
+    .dot { animation: none; }
   }
 
   .uptime {

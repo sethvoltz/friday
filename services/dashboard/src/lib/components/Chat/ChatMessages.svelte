@@ -172,23 +172,29 @@
   // matching bubble into view and pulse the highlight ring. The
   // animation lives in CSS (.jump-highlight); we just need to make sure
   // the element is visible.
+  //
+  // The cleanup MUST be returned from the effect body itself, not from
+  // inside `queueMicrotask` — a return from a microtask callback is
+  // discarded, so a fast `/jump A` → `/jump B` sequence used to leave
+  // the first timer dangling and clear the wrong message's highlight.
   $effect(() => {
     if (readonly) return;
     const id = chat.highlightedMessageId;
     if (!id) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     queueMicrotask(() => {
       const el = document.querySelector<HTMLElement>(
         `[data-msg-id="${CSS.escape(id)}"]`,
       );
       if (!el) return;
       el.scrollIntoView({ behavior: "smooth", block: "center" });
-      // Clear the highlight after the animation finishes so a re-jump to
-      // the same id still triggers a fresh pulse.
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         if (chat.highlightedMessageId === id) chat.highlightedMessageId = null;
       }, 2500);
-      return () => clearTimeout(timer);
     });
+    return () => {
+      if (timer !== undefined) clearTimeout(timer);
+    };
   });
 </script>
 

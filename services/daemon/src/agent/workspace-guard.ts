@@ -26,6 +26,14 @@ const EXEMPT_COMMANDS = ["friday"];
  * System-owned prefixes that are safe to reference in Bash command strings.
  * These are executables and system resources, not user data.
  */
+// FIX_FORWARD 6.4 follow-up: do NOT exempt `/private/` here. On macOS,
+// `/private/var/folders/<hash>/T/` is the per-user temp directory and
+// `/private/var/folders/<hash>/C/` is per-user caches — exempting the
+// whole `/private/` prefix lets a builder Bash-read any user's tempfiles
+// without hitting the workspace containment check. System paths like
+// `/etc`, `/usr`, `/bin` are unaffected: macOS surfaces them under their
+// canonical (non-/private) names, and the realpath check in
+// `isOutside` handles the rare cases that resolve into `/private/etc`.
 const SYSTEM_PATH_PREFIXES = [
   "/usr/",
   "/bin/",
@@ -38,7 +46,6 @@ const SYSTEM_PATH_PREFIXES = [
   "/dev/",
   "/proc/",
   "/run/",
-  "/private/",
   "/nix/",
   "/tmp/",
 ];

@@ -1,7 +1,7 @@
 import { redirect, type Handle } from "@sveltejs/kit";
 import { auth } from "$lib/server/auth";
 import { logger } from "$lib/server/log";
-import { consumeRateLimit } from "@friday/shared/services";
+import { consumeRateLimit, resetRateLimit } from "@friday/shared/services";
 
 const PUBLIC_PATHS = new Set(["/login", "/api/auth"]);
 
@@ -12,6 +12,22 @@ const SIGN_IN_WINDOW_MS = 15 * 60 * 1000;
 const SIGN_IN_MAX = 5;
 const SIGN_IN_LOCKOUT_MS = 30 * 60 * 1000;
 
+/**
+ * Extract the real client IP. Behind Cloudflare Tunnel the only reliable
+ * source is `cf-connecting-ip`; `x-forwarded-for` is often unset or
+ * loopback because cloudflared proxies via the local socket. Falling back
+ * to `getClientAddress()` would put every CF tunnel user in one shared
+ * rate-limit bucket — five bad sign-ins across the household would lock
+ * everyone out for 30 minutes.
+ */
+function clientIp(event: Parameters<Handle>[0]["event"]): string {
+  const cf = event.request.headers.get("cf-connecting-ip");
+  if (cf) return cf.trim();
+  const fwd = event.request.headers.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0]!.trim();
+  return event.getClientAddress();
+}
+
 export const handle: Handle = async ({ event, resolve }) => {
   const start = Date.now();
 
@@ -19,13 +35,11 @@ export const handle: Handle = async ({ event, resolve }) => {
   if (event.url.pathname.startsWith("/api/auth")) {
     // Rate-limit the sign-in attempt before forwarding. /api/auth/sign-in/*
     // covers /sign-in/email; /api/auth/sign-out etc. pass through.
-    if (
+    const isSignIn =
       event.url.pathname.startsWith("/api/auth/sign-in") &&
-      event.request.method === "POST"
-    ) {
-      const ip =
-        event.request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-        event.getClientAddress();
+      event.request.method === "POST";
+    const ip = isSignIn ? clientIp(event) : null;
+    if (isSignIn && ip) {
       const r = consumeRateLimit({
         key: `auth:${ip}`,
         windowMs: SIGN_IN_WINDOW_MS,
@@ -48,7 +62,15 @@ export const handle: Handle = async ({ event, resolve }) => {
         );
       }
     }
-    return auth.handler(event.request);
+    const response = await auth.handler(event.request);
+    // Successful sign-in: drop the bucket so a household sharing one
+    // public IP (typical CF tunnel deployment) isn't penalized for every
+    // legitimate login. The pre-consume above still throttles bursts of
+    // bad attempts even before they reach BetterAuth.
+    if (isSignIn && ip && response.status >= 200 && response.status < 300) {
+      resetRateLimit(`auth:${ip}`);
+    }
+    return response;
   }
 
   // Resolve session

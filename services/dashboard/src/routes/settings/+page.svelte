@@ -36,21 +36,65 @@
     { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 — fast / cheap" },
   ];
 
+  // svelte-ignore state_referenced_locally
+  let priorModel = $state(data.settings.model);
+  // svelte-ignore state_referenced_locally
+  let priorWatchdog = $state(data.settings.watchdogRefork);
+  let settingsToast = $state<{ msg: string; kind: "ok" | "err" } | null>(null);
+
+  function showSettingsToast(msg: string, kind: "ok" | "err") {
+    settingsToast = { msg, kind };
+    setTimeout(() => {
+      settingsToast = null;
+    }, 4500);
+  }
+
   async function patchSettings(body: Record<string, unknown>) {
     savingSettings = true;
     try {
-      const r = await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!r.ok) return;
-      const data = (await r.json()) as {
+      let r: Response;
+      try {
+        r = await fetch("/api/settings", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        // Network failed entirely — revert and surface so the user
+        // doesn't see a control sitting on the failed value.
+        model = priorModel;
+        watchdogRefork = priorWatchdog;
+        showSettingsToast(
+          `save failed: ${err instanceof Error ? err.message : String(err)}`,
+          "err",
+        );
+        return;
+      }
+      if (!r.ok) {
+        const detail = await r
+          .json()
+          .then((j: { detail?: string }) => j.detail)
+          .catch(() => null);
+        model = priorModel;
+        watchdogRefork = priorWatchdog;
+        showSettingsToast(
+          detail ? `save failed: ${detail}` : `save failed (${r.status})`,
+          "err",
+        );
+        return;
+      }
+      const fresh = (await r.json()) as {
         model: string;
         watchdogRefork: boolean;
       };
-      model = data.model;
-      watchdogRefork = data.watchdogRefork;
+      model = fresh.model;
+      watchdogRefork = fresh.watchdogRefork;
+      priorModel = fresh.model;
+      priorWatchdog = fresh.watchdogRefork;
+      // Config is written to disk, but the running daemon caches its
+      // config at boot — these changes take effect for the next daemon
+      // start, not the next turn.
+      showSettingsToast("saved · restart daemon for changes to take effect", "ok");
     } finally {
       savingSettings = false;
     }
@@ -295,6 +339,15 @@
   </div>
 </div>
 
+{#if settingsToast}
+  <div
+    class="settings-toast toast-{settingsToast.kind}"
+    role="status"
+    aria-live="polite">
+    {settingsToast.msg}
+  </div>
+{/if}
+
 <style>
   .row {
     display: flex;
@@ -453,5 +506,24 @@
       grid-template-columns: 1fr;
     }
     .session-times { align-items: flex-start; }
+  }
+
+  .settings-toast {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    padding: 0.6rem 0.9rem;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-md);
+    font-size: 0.85rem;
+    z-index: 50;
+    max-width: min(420px, 90vw);
+  }
+  .settings-toast.toast-ok { border-color: var(--status-success); }
+  .settings-toast.toast-err {
+    border-color: var(--status-error);
+    color: var(--status-error);
   }
 </style>

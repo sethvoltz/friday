@@ -6,12 +6,17 @@
 
   let { data }: { data: PageData } = $props();
 
-  // svelte-ignore state_referenced_locally
-  let t = $state(data.ticket);
+  // Track the server-loaded ticket directly. Every mutation handler calls
+  // `invalidateAll()` after a successful PATCH/POST/DELETE; SvelteKit
+  // re-runs the load function, `data.ticket` updates, and this derived
+  // ref follows. The previous version mirrored `data.ticket` into a
+  // local $state and shallow-cloned on each mutation, which left stale
+  // comment/external-link arrays whenever two mutations interleaved.
+  const t = $derived(data.ticket);
   let savingStatus = $state(false);
   let savingAssignee = $state(false);
   // svelte-ignore state_referenced_locally
-  let assigneeInput = $state(t.assignee ?? "");
+  let assigneeInput = $state(data.ticket.assignee ?? "");
   let commentBody = $state("");
   let postingComment = $state(false);
   let toast = $state<{ msg: string; kind: "ok" | "err" | "info" } | null>(null);
@@ -74,7 +79,7 @@
         showToast(`status update failed (${r.status})`, "err");
         return;
       }
-      t = { ...t, status };
+      await invalidateAll();
       showToast(`status → ${status}`);
     } finally {
       savingStatus = false;
@@ -95,7 +100,7 @@
         showToast(`assignee update failed (${r.status})`, "err");
         return;
       }
-      t = { ...t, assignee: next };
+      await invalidateAll();
       showToast(next ? `assigned → ${next}` : "unassigned");
     } finally {
       savingAssignee = false;
@@ -121,7 +126,6 @@
       }
       commentBody = "";
       await invalidateAll();
-      t = data.ticket;
       showToast("comment posted");
     } finally {
       postingComment = false;
@@ -150,7 +154,6 @@
       linkExternalId = "";
       linkUrl = "";
       await invalidateAll();
-      t = data.ticket;
       showToast("link added");
     } finally {
       linking = false;
@@ -168,7 +171,6 @@
       return;
     }
     await invalidateAll();
-    t = data.ticket;
     showToast("link removed");
   }
 </script>

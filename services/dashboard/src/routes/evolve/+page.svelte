@@ -70,15 +70,30 @@
   }
 
   async function runOp(name: string, path: string, body: unknown = {}) {
-    if (busy) return;
+    if (busy) return null;
     busy = name;
     try {
-      const r = await fetch(path, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+      let r: Response;
+      try {
+        r = await fetch(path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        // Network errored before a status came back (offline, daemon
+        // down at TLS layer, etc). Without this catch the rejection
+        // bubbles past the awaiter and the button just un-spinners
+        // silently — user thinks nothing happened.
+        showToast(
+          `${name} failed: ${err instanceof Error ? err.message : String(err)}`,
+          "err",
+        );
+        return null;
+      }
+      const data = (await r
+        .json()
+        .catch(() => ({}))) as Record<string, unknown>;
       if (!r.ok) {
         showToast(
           typeof data.detail === "string"
@@ -176,16 +191,21 @@
     let ok = 0;
     let fail = 0;
     for (const id of ids) {
-      const r = await fetch(
-        `/api/evolve/proposals/${encodeURIComponent(id)}/apply`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: "{}",
-        },
-      );
-      if (r.ok) ok++;
-      else fail++;
+      try {
+        const r = await fetch(
+          `/api/evolve/proposals/${encodeURIComponent(id)}/apply`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          },
+        );
+        if (r.ok) ok++;
+        else fail++;
+      } catch {
+        // Network error on one row shouldn't abort the whole batch.
+        fail++;
+      }
     }
     busy = null;
     selected = new Set();
@@ -209,16 +229,20 @@
     let ok = 0;
     let fail = 0;
     for (const id of ids) {
-      const r = await fetch(
-        `/api/evolve/proposals/${encodeURIComponent(id)}/dismiss`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(reason ? { reason } : {}),
-        },
-      );
-      if (r.ok) ok++;
-      else fail++;
+      try {
+        const r = await fetch(
+          `/api/evolve/proposals/${encodeURIComponent(id)}/dismiss`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(reason ? { reason } : {}),
+          },
+        );
+        if (r.ok) ok++;
+        else fail++;
+      } catch {
+        fail++;
+      }
     }
     busy = null;
     selected = new Set();

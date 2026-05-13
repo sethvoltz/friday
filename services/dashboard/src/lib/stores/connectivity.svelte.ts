@@ -69,7 +69,14 @@ export function startConnectivity(): void {
   tickInterval = setInterval(() => {
     connectivity.tick += 1;
   }, 5_000);
-  if (tickInterval && "unref" in tickInterval) {
+  // Node returns a Timeout object; the browser returns a number. The
+  // `in` check would throw `TypeError` on the primitive, so probe via
+  // typeof first.
+  if (
+    tickInterval !== null &&
+    typeof tickInterval === "object" &&
+    "unref" in tickInterval
+  ) {
     (tickInterval as { unref?: () => void }).unref?.();
   }
 }
@@ -106,20 +113,36 @@ export function resolveWidget(): WidgetView {
   const _ = connectivity.tick;
   void _;
   const now = Date.now();
-  const freshSuccess = now - connectivity.lastSuccessAt < SUCCESS_FRESH_MS;
-  const staleSuccess = now - connectivity.lastSuccessAt > SUCCESS_STALE_MS;
+  // `lastSuccessAt` is bumped by every SSE chunk we read. It's a proxy
+  // for "the SSE stream is delivering bytes" — *not* general internet
+  // reachability. We only treat its absence as a signal once we've had
+  // at least one success; otherwise a fresh page load would always
+  // start "stale" simply because no chunk has arrived yet.
+  const haveSuccess = connectivity.lastSuccessAt > 0;
+  const sseFresh =
+    haveSuccess && now - connectivity.lastSuccessAt < SUCCESS_FRESH_MS;
+  const sseStale =
+    haveSuccess && now - connectivity.lastSuccessAt > SUCCESS_STALE_MS;
 
-  let internet: StageStatus;
-  if (!connectivity.online || staleSuccess) internet = "down";
-  else if (freshSuccess) internet = "live";
-  else if (connectivity.inFlight > 0) internet = "reconnecting";
-  else internet = "reconnecting";
+  // Stage 1 — Internet. The page itself rendered, so we know HTTP works
+  // when the dashboard server is reachable from the browser. The honest
+  // signal here is just `navigator.onLine`; SSE-chunk freshness belongs
+  // to stage 2.
+  const internet: StageStatus = connectivity.online ? "live" : "down";
 
-  // Cascade grey: stage 2/3 unknown if stage 1 not live.
+  // Stage 2 — SSE. Cascades grey if internet isn't live. Otherwise:
+  // connected + recent chunk = live; connected but stale = reconnecting;
+  // not connected = reconnecting (the manager loops with backoff).
   let sse: StageStatus;
   if (internet !== "live") {
     sse = "unknown";
-  } else if (sseConnected.value) {
+  } else if (!sseConnected.value) {
+    sse = "reconnecting";
+  } else if (sseStale) {
+    sse = "reconnecting";
+  } else if (sseFresh || !haveSuccess) {
+    // `!haveSuccess` covers the brief window between TCP-connected and
+    // first chunk — render live so we don't blink orange on every load.
     sse = "live";
   } else {
     sse = "reconnecting";
@@ -140,9 +163,13 @@ export function resolveWidget(): WidgetView {
     internet: {
       status: internet,
       label: "Internet",
-      tooltip: internetTooltip(internet, freshSuccess, staleSuccess),
+      tooltip: internetTooltip(internet),
     },
-    sse: { status: sse, label: "SSE", tooltip: sseTooltip(sse) },
+    sse: {
+      status: sse,
+      label: "SSE",
+      tooltip: sseTooltip(sse, sseFresh, sseStale, haveSuccess),
+    },
     daemon: {
       status: daemon,
       label: "Daemon",
@@ -152,23 +179,28 @@ export function resolveWidget(): WidgetView {
   };
 }
 
-function internetTooltip(
+function internetTooltip(s: StageStatus): string {
+  if (s === "down") return "Internet — browser is offline (navigator.onLine = false)";
+  return "Internet — browser is online";
+}
+
+function sseTooltip(
   s: StageStatus,
   fresh: boolean,
   stale: boolean,
+  haveSuccess: boolean,
 ): string {
-  if (!connectivity.online) return "Internet — offline (browser reports navigator.onLine = false)";
-  if (s === "live") return "Internet — reachable; last response under 30s ago";
-  if (stale) return "Internet — no successful response in 60+ seconds";
-  if (fresh) return "Internet — reachable";
-  return "Internet — checking";
-}
-
-function sseTooltip(s: StageStatus): string {
-  if (s === "live") return "SSE — connected; live events streaming";
-  if (s === "reconnecting") return "SSE — reconnecting";
+  if (s === "unknown") return "SSE — waiting on internet";
+  if (s === "live") {
+    return fresh
+      ? "SSE — connected; last frame under 30s ago"
+      : "SSE — connected";
+  }
   if (s === "down") return "SSE — disconnected";
-  return "SSE — waiting on internet";
+  // reconnecting
+  if (stale) return "SSE — no frame in 60+ seconds; reconnecting";
+  if (!haveSuccess) return "SSE — connecting";
+  return "SSE — reconnecting";
 }
 
 function daemonTooltip(s: StageStatus, uptimeMs: number | null): string {
