@@ -62,6 +62,14 @@ export function startMailBridge(): void {
         text: row.body,
         source: "mail",
         fromAgent: row.fromAgent,
+        mailMeta: {
+          id: row.id,
+          subject: row.subject,
+          type: row.type,
+          priority: row.priority,
+          threadId: row.threadId,
+          ts: row.ts,
+        },
       });
     } catch (err) {
       logger.log("warn", "mail.bridge.user-block.error", {

@@ -5,6 +5,7 @@
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import ToolBlock from "$lib/components/Chat/ToolBlock.svelte";
   import ThinkingBlock from "$lib/components/Chat/ThinkingBlock.svelte";
+  import MailBlock from "$lib/components/Chat/MailBlock.svelte";
 
   function queueEntry(queueId: string | undefined) {
     if (!queueId) return undefined;
@@ -369,6 +370,25 @@
         <ThinkingBlock
           text={msg.text}
           status={msg.status === "done" ? "done" : "running"} />
+      </div>
+    {:else if msg.role === "user" && msg.source === "mail"}
+      <div
+        class="message inline"
+        class:jump-highlight={!readonly && chat.highlightedMessageId === msg.id}
+        onanimationend={(e: AnimationEvent) => {
+          if (
+            e.animationName === "jump-pulse" &&
+            chat.highlightedMessageId === msg.id
+          ) {
+            chat.highlightedMessageId = null;
+          }
+        }}
+        data-status={msg.status}
+        data-msg-id={msg.id}>
+        <MailBlock
+          fromAgent={msg.fromAgent ?? "unknown agent"}
+          body={msg.text}
+          meta={msg.mailMeta} />
       </div>
     {:else}
       <div

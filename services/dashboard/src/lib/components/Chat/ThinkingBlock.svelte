@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { Brain } from "lucide-svelte";
+
   interface Props {
     text: string;
     status: "running" | "done";
@@ -15,12 +17,12 @@
     class="thinking-head"
     onclick={() => (open = !open)}
     aria-expanded={open}>
-    <span class="emoji">💭</span>
+    <span class="thinking-icon" aria-hidden="true"><Brain size={16} /></span>
     <span class="label">
       Thinking{status === "running" ? "…" : ""}
     </span>
     {#if status === "running"}<span class="dots">●●●</span>{/if}
-    <span class="caret">{open ? "▾" : "▸"}</span>
+    <span class="expand-toggle" aria-hidden="true">{open ? "−" : "+"}</span>
   </button>
   {#if open}
     {#if hasText}
@@ -56,7 +58,11 @@
     cursor: pointer;
     user-select: none;
   }
-  .emoji { font-size: 0.9rem; }
+  .thinking-icon {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-tertiary);
+  }
   .label {
     font-style: italic;
   }
@@ -70,10 +76,22 @@
     0%, 100% { opacity: 0.3; }
     50% { opacity: 1; }
   }
-  .caret {
+  .expand-toggle {
     margin-left: auto;
+    width: 1.4rem;
+    height: 1.4rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-tertiary);
-    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    line-height: 1;
+    border-radius: var(--radius-sm);
+  }
+  .thinking-head:hover .expand-toggle {
+    background: var(--bg-card);
+    color: var(--text-secondary);
   }
   .thinking-body {
     margin: 0.4rem 0.75rem 0.25rem 1.25rem;

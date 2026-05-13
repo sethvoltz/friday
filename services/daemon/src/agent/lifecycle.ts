@@ -1026,6 +1026,18 @@ export interface RecordUserBlockInput {
   source: "user_chat" | "mail" | "queue_inject";
   /** Mail-derived blocks carry sender metadata inside content_json. */
   fromAgent?: string;
+  /** Mail-derived blocks: extra MailRow metadata serialized into
+   *  content_json so the dashboard can render rich detail (id, subject,
+   *  type, priority, threadId, ts) on the collapsed `MailBlock` without
+   *  a separate fetch. */
+  mailMeta?: {
+    id: number;
+    subject: string | null;
+    type: string;
+    priority: string;
+    threadId: string | null;
+    ts: number;
+  };
 }
 
 /**
@@ -1041,7 +1053,20 @@ export function recordUserBlock(input: RecordUserBlockInput): {
   const ts = Date.now();
   const content =
     input.source === "mail" && input.fromAgent
-      ? { text: input.text, from_agent: input.fromAgent }
+      ? {
+          text: input.text,
+          from_agent: input.fromAgent,
+          ...(input.mailMeta
+            ? {
+                mail_id: input.mailMeta.id,
+                mail_subject: input.mailMeta.subject,
+                mail_type: input.mailMeta.type,
+                mail_priority: input.mailMeta.priority,
+                mail_thread_id: input.mailMeta.threadId,
+                mail_ts: input.mailMeta.ts,
+              }
+            : {}),
+        }
       : { text: input.text };
   const contentJson = JSON.stringify(content);
   // The `user_chat` path has the dashboard's optimistic bubble already

@@ -48,6 +48,24 @@ export interface ChatMessage {
    *  (matches the `source` column in the blocks table). FIX_FORWARD 2.6. */
   source?: "user_chat" | "mail" | "queue_inject" | "sdk";
 
+  /** Sender attribution for `source='mail'` blocks. Pulled from
+   *  `content_json.from_agent`, written by `recordUserBlock` at
+   *  daemon/agent/lifecycle.ts when the mail-bridge materializes incoming
+   *  mail. Undefined for non-mail user blocks. */
+  fromAgent?: string;
+
+  /** Extra mail-row metadata for `source='mail'` blocks (id/subject/type/
+   *  priority/threadId/ts). Serialized into content_json by the daemon
+   *  so MailBlock can render rich detail without a separate fetch. */
+  mailMeta?: {
+    id: number;
+    subject: string | null;
+    type: string;
+    priority: string;
+    threadId: string | null;
+    ts: number;
+  };
+
   /** True from the moment a user types until `/api/chat/turn` confirms
    *  the dispatch with `{turn_id}`. Pending bubbles render pinned to the
    *  bottom regardless of natural ts sort (FIX_FORWARD 2.6). */
@@ -1095,6 +1113,7 @@ export class ChatState {
     status: "complete" | "aborted" | "error";
     turn_id: string;
     role: string;
+    source: string | null;
     ts: number;
   }): void {
     const parsed = parseBlockContent(event.content_json);
@@ -1112,9 +1131,20 @@ export class ChatState {
             : event.status === "aborted"
               ? "aborted"
               : "error";
+        // Backfill source/fromAgent if a prior block_start mounted the row
+        // without them. recordUserBlock for mail emits only block_complete
+        // (no block_start), so today this path is not hit for mail; the
+        // defensive backfill protects against future churn.
+        if (m.source === undefined && event.source) {
+          m.source = event.source as ChatMessage["source"];
+        }
+        if (m.fromAgent === undefined && parsed.from_agent) {
+          m.fromAgent = parsed.from_agent;
+        }
         return;
       }
-      // Late mount: block_start was evicted from the ring.
+      // Late mount: block_start was evicted from the ring (or — for mail
+      // — was never emitted in the first place).
       const role = event.role === "user" ? "user" : "assistant";
       this.messages.push({
         id,
@@ -1129,6 +1159,9 @@ export class ChatState {
         agent: this.focusedAgent,
         turnId: event.turn_id,
         ts: event.ts,
+        source: (event.source as ChatMessage["source"]) ?? undefined,
+        fromAgent: parsed.from_agent,
+        mailMeta: extractMailMeta(parsed),
       });
       return;
     }
@@ -1208,6 +1241,14 @@ interface ParsedBlockContent {
   input?: unknown;
   is_error?: boolean;
   from_agent?: string;
+  /** Mail-source block extras (see daemon/agent/lifecycle.ts
+   *  recordUserBlock). */
+  mail_id?: number;
+  mail_subject?: string | null;
+  mail_type?: string;
+  mail_priority?: string;
+  mail_thread_id?: string | null;
+  mail_ts?: number;
 }
 
 function parseBlockContent(contentJson: string): ParsedBlockContent {
@@ -1216,6 +1257,24 @@ function parseBlockContent(contentJson: string): ParsedBlockContent {
   } catch {
     return {};
   }
+}
+
+/** Pull the mail metadata out of a parsed content_json, if present. The
+ *  daemon writes these fields only for `source='mail'` blocks; older mail
+ *  rows persisted before the schema gained these fields will return
+ *  undefined and MailBlock will fall back to a header-only view. */
+function extractMailMeta(
+  parsed: ParsedBlockContent,
+): ChatMessage["mailMeta"] | undefined {
+  if (typeof parsed.mail_id !== "number") return undefined;
+  return {
+    id: parsed.mail_id,
+    subject: parsed.mail_subject ?? null,
+    type: parsed.mail_type ?? "message",
+    priority: parsed.mail_priority ?? "normal",
+    threadId: parsed.mail_thread_id ?? null,
+    ts: parsed.mail_ts ?? 0,
+  };
 }
 
 /** Wire shape of a row from `GET /api/agents/:name/blocks`. Mirrors the
@@ -1280,6 +1339,8 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         turnId: b.turnId,
         ts: b.ts,
         source: (b.source as ChatMessage["source"]) ?? undefined,
+        fromAgent: parsed.from_agent,
+        mailMeta: extractMailMeta(parsed),
       });
     } else if (b.kind === "thinking") {
       // Same shape for thinking blocks. `handleBlockDelta` gates on

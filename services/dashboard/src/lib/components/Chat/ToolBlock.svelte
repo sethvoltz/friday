@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { Wrench } from "lucide-svelte";
+
   interface Props {
     toolName: string;
     status: "running" | "done" | "error";
@@ -41,11 +43,11 @@
     onclick={() => canExpand && (open = !open)}
     aria-expanded={canExpand ? open : undefined}
     disabled={!canExpand}>
-    <span class="tool-icon">⚙</span>
+    <span class="tool-icon" aria-hidden="true"><Wrench size={16} /></span>
     <code class="tool-name">{toolName}</code>
     <span class="badge {badgeClass(status)}">{statusLabel(status)}</span>
     {#if canExpand}
-      <span class="caret">{open ? "▾" : "▸"}</span>
+      <span class="expand-toggle" aria-hidden="true">{open ? "−" : "+"}</span>
     {/if}
   </button>
   {#if open && hasInput}
@@ -64,10 +66,8 @@
 
 <style>
   .tool-block {
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
+    border-left: 2px solid var(--status-warn);
+    padding: 0.25rem 0;
     font-size: 0.85rem;
   }
   .tool-head {
@@ -75,7 +75,7 @@
     align-items: center;
     gap: 0.5rem;
     width: 100%;
-    padding: 0.5rem 0.75rem;
+    padding: 0.25rem 0.75rem;
     background: transparent;
     border: none;
     color: inherit;
@@ -88,7 +88,9 @@
     cursor: default;
   }
   .tool-icon {
-    color: var(--text-tertiary);
+    display: inline-flex;
+    align-items: center;
+    color: var(--status-warn);
   }
   .tool-name {
     color: var(--accent-primary);
@@ -98,14 +100,28 @@
     border: none;
     padding: 0;
   }
-  .caret {
+  .expand-toggle {
     margin-left: auto;
+    width: 1.4rem;
+    height: 1.4rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-tertiary);
-    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    line-height: 1;
+    border-radius: var(--radius-sm);
+  }
+  .tool-head:hover .expand-toggle {
+    background: var(--bg-card);
+    color: var(--text-secondary);
   }
   .block-section {
-    border-top: 1px solid var(--border-subtle);
+    margin: 0.4rem 0.75rem 0.25rem 1.25rem;
     padding: 0.5rem 0.75rem;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
   }
   .block-label {
     font-size: 0.65rem;

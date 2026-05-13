@@ -767,3 +767,180 @@ describe("parseJumpDate", () => {
     expect(parseJumpDate("not a date at all banana")).toBeNull();
   });
 });
+
+describe("mail block rendering", () => {
+  // Mail-bridge materializes incoming mail as a role='user' block with
+  // source='mail' and from_agent inside content_json (see
+  // daemon/src/comms/mail-bridge.ts and daemon/src/agent/lifecycle.ts).
+  // The dashboard must surface source + fromAgent so the renderer can
+  // style mail as an incoming agent message rather than a user bubble.
+  it("live SSE: block_complete with source=mail surfaces source + fromAgent on the ChatMessage", async () => {
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "mail_42",
+      agent: "friday",
+      block_id: "blk-mail-1",
+      message_id: null,
+      block_index: 0,
+      kind: "text",
+      role: "user",
+      source: "mail",
+      content_json:
+        '{"text":"Page title: Example Domain","from_agent":"builtin-browser-1"}',
+      status: "complete",
+      ts: 1000,
+      seq: 5,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages.length).toBe(1);
+    const m = chat.messages[0]!;
+    expect(m.id).toBe(userBlockIdForTurn("mail_42"));
+    expect(m.role).toBe("user");
+    expect(m.source).toBe("mail");
+    expect(m.fromAgent).toBe("builtin-browser-1");
+    expect(m.text).toBe("Page title: Example Domain");
+  });
+
+  it("reload path: parseBlocks surfaces fromAgent from content_json", async () => {
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            {
+              id: 1,
+              blockId: "blk-mail-reload",
+              turnId: "mail_99",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              role: "user",
+              kind: "text",
+              source: "mail",
+              contentJson:
+                '{"text":"reload body","from_agent":"scope-sanity-2"}',
+              status: "complete",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+          ],
+          lastEventSeq: 1,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    const mail = chat.messages.find(
+      (x) => x.id === userBlockIdForTurn("mail_99"),
+    );
+    expect(mail, "mail block must be present after reload").toBeDefined();
+    expect(mail?.source).toBe("mail");
+    expect(mail?.fromAgent).toBe("scope-sanity-2");
+    expect(mail?.text).toBe("reload body");
+  });
+
+  it("live SSE: mail metadata (id/subject/type/priority/threadId/ts) is extracted from content_json", async () => {
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "mail_77",
+      agent: "friday",
+      block_id: "blk-mail-meta",
+      message_id: null,
+      block_index: 0,
+      kind: "text",
+      role: "user",
+      source: "mail",
+      content_json: JSON.stringify({
+        text: "rich body",
+        from_agent: "builder-7",
+        mail_id: 77,
+        mail_subject: "kickoff",
+        mail_type: "message",
+        mail_priority: "critical",
+        mail_thread_id: "th-abc",
+        mail_ts: 1700000000000,
+      }),
+      status: "complete",
+      ts: 1700000000050,
+      seq: 9,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const m = chat.messages.find(
+      (x) => x.id === userBlockIdForTurn("mail_77"),
+    );
+    expect(m, "mail block must be present").toBeDefined();
+    expect(m?.mailMeta).toEqual({
+      id: 77,
+      subject: "kickoff",
+      type: "message",
+      priority: "critical",
+      threadId: "th-abc",
+      ts: 1700000000000,
+    });
+  });
+
+  it("legacy mail block (no mail_id in content_json) leaves mailMeta undefined", async () => {
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "mail_old",
+      agent: "friday",
+      block_id: "blk-legacy",
+      message_id: null,
+      block_index: 0,
+      kind: "text",
+      role: "user",
+      source: "mail",
+      content_json: '{"text":"legacy body","from_agent":"old-agent"}',
+      status: "complete",
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const m = chat.messages.find(
+      (x) => x.id === userBlockIdForTurn("mail_old"),
+    );
+    expect(m?.source).toBe("mail");
+    expect(m?.fromAgent).toBe("old-agent");
+    expect(m?.mailMeta).toBeUndefined();
+  });
+
+  it("regression guard: source=user_chat blocks do NOT pick up fromAgent", async () => {
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "turn-uc-1",
+      agent: "friday",
+      block_id: "blk-uc",
+      message_id: null,
+      block_index: 0,
+      kind: "text",
+      role: "user",
+      source: "user_chat",
+      content_json: '{"text":"typed by seth"}',
+      status: "complete",
+      ts: 200,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const uc = chat.messages.find(
+      (x) => x.id === userBlockIdForTurn("turn-uc-1"),
+    );
+    expect(uc, "user_chat block should be present").toBeDefined();
+    expect(uc?.source).toBe("user_chat");
+    expect(uc?.fromAgent).toBeUndefined();
+    expect(uc?.text).toBe("typed by seth");
+  });
+});
