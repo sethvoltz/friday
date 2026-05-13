@@ -62,7 +62,7 @@ export function buildMcpServers(
   // primitive (FIX_FORWARD 2.1/2.2); there is no separate `chat_reply` tool.
   servers[MAIL_SERVER_NAME] = buildMailServer(ctx);
 
-  // agent_create / agent_list / agent_kill / etc.: orchestrator only.
+  // agent_create / agent_list / agent_archive / etc.: orchestrator only.
   // Builder/helper/bare/scheduled don't see agent_* tools at all.
   if (opts.callerType === "orchestrator") {
     servers[AGENTS_SERVER_NAME] = buildAgentsServer({

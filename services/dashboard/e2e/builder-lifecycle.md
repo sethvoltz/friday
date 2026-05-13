@@ -2,7 +2,8 @@
 
 End-to-end happy-path test for the full Builder lifecycle as driven through
 the dashboard. Validates the new spawn chain (M2 sandbox-exec + M4 pgrp + M5
-ulimit), workspace isolation, mail loop, and destroy/branch-delete (PF-2).
+ulimit), workspace isolation, mail loop, and archive (which for builders
+also removes the worktree + force-deletes the branch — PF-2).
 
 This is **not** a CI test. It runs a real Claude turn (cost), modifies real
 state in `~/.friday/`, and depends on the user being logged in. Run manually
@@ -26,17 +27,17 @@ when validating substantial daemon changes that touch the spawn chain.
 
 ## Flow
 
-| # | Actor      | Step                                                                    |
-| - | ---------- | ----------------------------------------------------------------------- |
-| 1 | Playwright | Navigate dashboard, find orchestrator chat input.                       |
-| 2 | Playwright | Type spawn prompt (see below). Submit.                                  |
-| 3 | Wait       | Up to 90s for `agent_create` MCP tool call + builder spawn.             |
-| 4 | Bash       | Assertions A: worktree created, marker file, profile file, branch.     |
-| 5 | Wait       | Builder runs `ls docs/`, mails orchestrator. Orchestrator surfaces.    |
-| 6 | Bash       | Assertions D: parent repo `git status --porcelain` matches baseline.    |
-| 7 | Playwright | Type "wrap up". Submit. Orchestrator calls `agent_kill` + asks confirm. |
-| 8 | Playwright | Type "yes — delete it". Orchestrator calls `agent_delete_workspace`.   |
-| 9 | Bash       | Assertions F: worktree gone, branch deleted (PF-2), profile cleaned.   |
+| # | Actor      | Step                                                                         |
+| - | ---------- | ---------------------------------------------------------------------------- |
+| 1 | Playwright | Navigate dashboard, find orchestrator chat input.                            |
+| 2 | Playwright | Type spawn prompt (see below). Submit.                                       |
+| 3 | Wait       | Up to 90s for `agent_create` MCP tool call + builder spawn.                  |
+| 4 | Bash       | Assertions A: worktree created, marker file, profile file, branch.          |
+| 5 | Wait       | Builder runs `ls docs/`, mails orchestrator. Orchestrator surfaces.         |
+| 6 | Bash       | Assertions D: parent repo `git status --porcelain` matches baseline.         |
+| 7 | Playwright | Type "wrap up". Orchestrator proposes `agent_archive` and waits for consent. |
+| 8 | Playwright | Type "yes — archive it". Orchestrator calls `agent_archive`.                 |
+| 9 | Bash       | Assertions F: worktree gone, branch deleted (PF-2), profile cleaned.        |
 
 ## Spawn prompt
 
@@ -44,8 +45,8 @@ when validating substantial daemon changes that touch the spawn chain.
 Spin up a builder named friday-e2e-probe against this repo. Default
 settings — friday/friday-e2e-probe branch off main is fine. Task:
 `ls docs/` inside its worktree and mail me the output. When I say
-"wrap up" later, kill it and (after asking me to confirm) delete the
-workspace. No need for a plan — proceed directly.
+"wrap up" later, archive it (ask me to confirm first since archive
+removes its worktree and branch). No need for a plan — proceed directly.
 ```
 
 ## Bash assertion blocks
@@ -80,7 +81,7 @@ find /Users/seth/Development/Seth/Friday/agent-friday/services \
   ! -path '*/.svelte-kit/*'                                  # empty
 ```
 
-### F — Destroy + cleanup
+### F — Archive + cleanup
 
 ```bash
 test ! -d ~/.friday/workspaces/friday-e2e-probe              # gone
@@ -92,34 +93,25 @@ git -C /Users/seth/Development/Seth/Friday/agent-friday \
 pgrep -af friday-e2e-probe; test $? -ne 0                    # no orphans
 ```
 
-## Known quirks observed during first run
+## Known quirks observed during prior runs
 
-1. **Two-step kill needed for destroy.** When the orchestrator calls
-   `agent_kill` followed by `agent_delete_workspace`, the first kill is
-   *graceful* — it sends a `stop` IPC and waits for the worker to exit.
-   The agent status doesn't flip from `idle`→`killed` instantly. If
-   `agent_delete_workspace` arrives before the worker exits, the API
-   returns `409 agent friday-e2e-probe is idle; kill it before deleting`.
-   The orchestrator handled this in our run by retrying after re-checking
-   status. **Worth tightening at some point** — either have `agent_kill`
-   return synchronously after status=killed, or have `agent_delete_workspace`
-   wait/poll briefly.
-
-2. **Destroyed Builder disappears from sidebar.** Once `agent_delete_workspace`
-   succeeds, the Builder is gone from the active list AND doesn't appear in
-   any "history" section — even with "Show killed" checked. Killed helpers
-   and bare agents DO show up. Either the sidebar filters builders by
-   worktreePath existence (intentional product decision: a builder without
-   a workspace isn't a builder anymore), or it's a gap. Confirm before
-   pinning as an assertion.
-
-3. **`process.execArgv` must be forwarded.** When the spawn chain became
+1. **`process.execArgv` must be forwarded.** When the spawn chain became
    `bash -c '...; exec node ...'` instead of `fork()`, the inner `node`
    started without the parent's loader hooks (tsx-watch's `--import`
    loader). Result: `Cannot find module '.../worker.js'` because tsx wasn't
    resolving `.js`→`.ts`. Fixed in `lifecycle.ts` by including
    `...process.execArgv` in the bash positional args. Regression-tested by
    `lifecycle-spawn-ipc.test.ts`.
+
+2. **Archive race (resolved in PR A).** Earlier the orchestrator had to call
+   archive twice — first call would race the worker's `exit` handler, which
+   reset status from `archived` back to `idle`, and the workspace cleanup
+   subsequently 409'd. PR A fixed the exit handler to leave terminal
+   statuses alone and made `POST /archive` await the worker exit.
+
+3. **Archived agents stay in the sidebar (PR B).** Previously a builder
+   that finished archiving vanished from the sidebar entirely. Now archived
+   rows persist; toggle "Show archived" to surface them.
 
 ## What the run *doesn't* verify
 

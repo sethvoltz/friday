@@ -131,17 +131,17 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
   return { path, branch: opts.branch, baseRepo: opts.baseRepo };
 }
 
-export interface DestroyWorkspaceOptions {
+export interface ArchiveWorkspaceOptions {
   /** Branch to delete from the parent repo after the worktree is removed.
    * Optional for backward compat — older callers without branch metadata
    * skip the branch delete. New code should always pass it. */
   branch?: string;
 }
 
-export function destroyWorkspace(
+export function archiveWorkspace(
   name: string,
   baseRepo: string,
-  opts: DestroyWorkspaceOptions = {},
+  opts: ArchiveWorkspaceOptions = {},
 ): void {
   const path = workspacePath(name);
   // The worktree directory might already be gone (manual cleanup, prior

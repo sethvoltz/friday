@@ -86,15 +86,15 @@ import {
 import * as registry from "../agent/registry.js";
 import {
   abortTurn,
+  archiveAgent,
   dispatchTurn,
-  killAgent,
   peekLiveWorker,
   recordUserBlock,
 } from "../agent/lifecycle.js";
 import { generateScratchName } from "../agent/scratch-names.js";
 import {
+  archiveWorkspace,
   createWorkspace,
-  destroyWorkspace,
   workspacePath,
 } from "../agent/workspace.js";
 import { commandsApi } from "./commands.js";
@@ -364,51 +364,42 @@ async function handle(
     });
     return json(res, 201, { name: body.name, turn_id: turnId });
   }
-  if (
-    method === "DELETE" &&
-    /^\/api\/agents\/[^/]+\/workspace$/.test(path)
-  ) {
-    const name = path.split("/")[3];
-    const a = registry.getAgent(name);
-    if (!a) return json(res, 404, { error: "not found" });
-    if (a.type !== "builder")
-      return json(res, 400, {
-        error: "agent is not a builder; no workspace to clean up",
-      });
-    // FIX_FORWARD 6.4 follow-up: refuse to nuke a live worker's worktree
-    // from under it. Caller must kill the agent first (or the agent must
-    // have crashed itself into `error`). Allow `error` because that
-    // state indicates the worker is gone.
-    if (a.status !== "killed" && a.status !== "error") {
-      return json(res, 409, {
-        error: `agent ${name} is ${a.status}; kill it before deleting the workspace`,
-      });
-    }
-    const repo = process.cwd();
-    try {
-      // PF-2: pass the branch so destroyWorkspace also force-deletes the
-      // friday/<name> branch from the parent repo. The work has either
-      // been merged (PR landed) or is being explicitly thrown away.
-      const branch =
-        a.type === "builder" && "branch" in a ? a.branch : undefined;
-      destroyWorkspace(name, repo, { branch });
-      return json(res, 200, { ok: true, path: workspacePath(name) });
-    } catch (err) {
-      return json(res, 500, {
-        error: `workspace cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
-  }
   if (method === "GET" && /^\/api\/agents\/[^/]+$/.test(path)) {
     const name = path.split("/")[3];
     const a = registry.getAgent(name);
     if (!a) return json(res, 404, { error: "not found" });
     return json(res, 200, a);
   }
-  if (method === "POST" && /^\/api\/agents\/[^/]+\/kill$/.test(path)) {
+  if (method === "POST" && /^\/api\/agents\/[^/]+\/archive$/.test(path)) {
+    // Archive an agent: stop it from receiving work, set status=archived,
+    // and (for builders) remove the worktree + force-delete the branch.
+    // Sessions persist in perpetuity — this just frees the disk and stops
+    // future work. Merged form of the old POST /kill + DELETE /workspace.
     const name = path.split("/")[3];
-    killAgent(name);
-    return json(res, 200, { ok: true });
+    const a = registry.getAgent(name);
+    if (!a) return json(res, 404, { error: "not found" });
+    const branch =
+      a.type === "builder" && "branch" in a ? a.branch : undefined;
+    const repo = process.cwd();
+    // F1-B: await the archive so the response is a strong "actually
+    // archived" signal — no race against the worker's exit handler.
+    await archiveAgent(name);
+    // Workspace cleanup happens only for builders, after archive. Failure
+    // here (e.g., worktree dir locked) is non-fatal — log and return the
+    // archive result anyway; the agent is already off.
+    let workspacePathRemoved: string | undefined;
+    if (a.type === "builder") {
+      try {
+        workspacePathRemoved = workspacePath(name);
+        archiveWorkspace(name, repo, { branch });
+      } catch (err) {
+        logger.log("warn", "agent.archive.workspace.fail", {
+          agent: name,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return json(res, 200, { ok: true, workspacePath: workspacePathRemoved });
   }
   if (method === "POST" && /^\/api\/agents\/[^/]+\/abort$/.test(path)) {
     const name = path.split("/")[3];
@@ -1145,10 +1136,10 @@ function handleSystemCommand(
 ): void {
   const args = (body.args ?? "").trim();
   switch (body.command) {
-    case "kill": {
+    case "archive": {
       if (!args) return json(res, 400, { error: "agent name required" });
-      killAgent(args);
-      return json(res, 200, { ok: true, message: `killed ${args}` });
+      archiveAgent(args);
+      return json(res, 200, { ok: true, message: `archived ${args}` });
     }
     case "status": {
       return json(res, 200, {
@@ -1167,10 +1158,10 @@ function handleSystemCommand(
       const name = args || cfg.orchestratorName;
       const a = registry.getAgent(name);
       if (!a) return json(res, 404, { error: `agent not found: ${name}` });
-      // If a worker is currently running, stop it so the next turn forks a
-      // fresh process with no `resume` arg. setStatus + clearSession alone
+      // If a worker is currently running, archive it so the next turn forks
+      // a fresh process with no `resume` arg. setStatus + clearSession alone
       // wouldn't take effect until the worker exits naturally.
-      killAgent(name);
+      void archiveAgent(name);
       registry.clearSession(name);
       eventBus.publish({
         v: 1,

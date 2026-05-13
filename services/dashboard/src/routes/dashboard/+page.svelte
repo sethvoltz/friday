@@ -157,21 +157,25 @@
   );
 
   const ONE_HOUR = 60 * 60 * 1000;
-  const liveAgents = $derived(allAgents.filter((a) => a.status !== "killed"));
-  const killedAgents = $derived(allAgents.filter((a) => a.status === "killed"));
-  const recentlyKilled = $derived(
-    killedAgents.filter((a) => now - new Date(a.createdAt).getTime() < ONE_HOUR),
+  const liveAgents = $derived(allAgents.filter((a) => a.status !== "archived"));
+  const archivedAgents = $derived(
+    allAgents.filter((a) => a.status === "archived"),
   );
-  const olderKilled = $derived(
-    killedAgents.filter(
+  const recentlyArchived = $derived(
+    archivedAgents.filter(
+      (a) => now - new Date(a.createdAt).getTime() < ONE_HOUR,
+    ),
+  );
+  const olderArchived = $derived(
+    archivedAgents.filter(
       (a) => now - new Date(a.createdAt).getTime() >= ONE_HOUR,
     ),
   );
-  const agentList = $derived([...liveAgents, ...recentlyKilled]);
+  const agentList = $derived([...liveAgents, ...recentlyArchived]);
   const activeAgentCount = $derived(liveAgents.length);
-  let showAllKilled = $state(false);
+  let showAllArchived = $state(false);
   const displayAgents = $derived(
-    showAllKilled ? [...agentList, ...olderKilled] : agentList,
+    showAllArchived ? [...agentList, ...olderArchived] : agentList,
   );
 
   function agentTypeIcon(type: string) {
@@ -192,7 +196,7 @@
   function statusBadgeClass(status: string): string {
     if (status === "idle" || status === "working") return "ok";
     if (status === "stalled") return "warn";
-    if (status === "error" || status === "killed") return "err";
+    if (status === "error" || status === "archived") return "err";
     return "";
   }
 
@@ -505,13 +509,13 @@
       <div class="card-header">
         <h2>Agents</h2>
         <span class="stat-detail">
-          {activeAgentCount} active{#if olderKilled.length > 0}
+          {activeAgentCount} active{#if olderArchived.length > 0}
             <button
               class="toggle-link"
-              onclick={() => (showAllKilled = !showAllKilled)}
+              onclick={() => (showAllArchived = !showAllArchived)}
             >
-              {showAllKilled ? "Hide" : "Show"}
-              {olderKilled.length} killed
+              {showAllArchived ? "Hide" : "Show"}
+              {olderArchived.length} archived
             </button>
           {/if}
         </span>
@@ -537,7 +541,7 @@
             </thead>
             <tbody>
               {#each displayAgents as agent}
-                <tr class:destroyed={agent.status === "killed"}>
+                <tr class:archived={agent.status === "archived"}>
                   <td class="agent-name">{agent.name}</td>
                   <td>
                     <span class="agent-type-badge" data-type={agent.type}>
@@ -668,7 +672,7 @@
     font-size: 0.8rem;
   }
 
-  tr.destroyed {
+  tr.archived {
     opacity: 0.4;
   }
 

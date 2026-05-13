@@ -78,8 +78,8 @@ export function clearSession(name: string): void {
     .run();
 }
 
-export function destroyAgent(name: string): void {
-  setStatus(name, "killed");
+export function archiveAgent(name: string): void {
+  setStatus(name, "archived");
 }
 
 function rowToEntry(r: typeof schema.agents.$inferSelect): AgentEntry {

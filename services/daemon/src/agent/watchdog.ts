@@ -6,10 +6,10 @@
  * to all the regular events that update `lastHeartbeat`). Idle agents — i.e.
  * those waiting on mail — emit `status-change idle` and are excluded.
  *
- * If `config.watchdog.refork: true`, a stalled long-lived worker is killed
- * and respawned with `resume: sessionId` so it picks up where it left off.
- * Default behavior is observe-only — surface `agent_status: stalled` and
- * let the operator decide.
+ * If `config.watchdog.refork: true`, a stalled long-lived worker is
+ * archived and respawned with `resume: sessionId` so it picks up where it
+ * left off. Default behavior is observe-only — surface `agent_status:
+ * stalled` and let the operator decide.
  */
 
 import {
@@ -25,7 +25,7 @@ import { logger } from "../log.js";
 import * as registry from "./registry.js";
 import {
   dispatchTurn,
-  killAgent,
+  archiveAgent,
   liveAgentNames,
   peekLiveWorker,
 } from "./lifecycle.js";
@@ -87,7 +87,7 @@ function tick(): void {
       });
 
       if (cfg.watchdog?.refork) {
-        // Fire-and-forget: refork awaits killAgent so the new fork can't
+        // Fire-and-forget: refork awaits archiveAgent so the new fork can't
         // race the old worker's lingering exit handler (FIX_FORWARD 4.1).
         void refork(name).catch((err) => {
           logger.log("warn", "watchdog.refork.error", {
@@ -119,9 +119,9 @@ async function refork(agentName: string): Promise<void> {
   // dispatching the replacement. Without this, the new fork sometimes
   // raced the dying worker's exit handler, which then live.delete()d
   // the *new* worker's slot.
-  await killAgent(agentName);
+  await archiveAgent(agentName);
 
-  // The registry row was destroyed by killAgent. Re-register so the new
+  // The registry row was archived by archiveAgent. Re-register so the new
   // turn has a row to bind onto.
   registry.registerAgent({
     name: agentName,

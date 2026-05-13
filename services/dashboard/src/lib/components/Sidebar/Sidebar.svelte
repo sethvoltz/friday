@@ -45,17 +45,22 @@
   // onMount so the server-rendered HTML matches the first client render
   // (no hydration mismatch warnings, no flash of unfiltered content if
   // the persisted value differs from the default).
-  let showKilled = $state(false);
+  let showArchived = $state(false);
   let showInactive = $state(false);
   let filtersHydrated = $state(false);
   onMount(() => {
-    showKilled = loadJSON<boolean>("sidebar:showKilled", false);
+    // Migrate legacy `sidebar:showKilled` key (PR 0 rename).
+    const legacyKilled = loadJSON<boolean | null>("sidebar:showKilled", null);
+    showArchived = loadJSON<boolean>(
+      "sidebar:showArchived",
+      legacyKilled ?? false,
+    );
     showInactive = loadJSON<boolean>("sidebar:showInactive", false);
     filtersHydrated = true;
   });
   $effect(() => {
     if (!filtersHydrated) return;
-    saveJSON("sidebar:showKilled", showKilled);
+    saveJSON("sidebar:showArchived", showArchived);
   });
   $effect(() => {
     if (!filtersHydrated) return;
@@ -77,7 +82,7 @@
     chat.agents
       .filter((a) => a.type !== "orchestrator")
       .filter((a) => {
-        if (a.status === "killed") return showKilled;
+        if (a.status === "archived") return showArchived;
         if (!isActive(a.status)) return showInactive;
         return true;
       })
@@ -94,7 +99,7 @@
         ? "var(--status-warn)"
         : status === "error"
           ? "var(--status-error)"
-          : status === "killed"
+          : status === "archived"
             ? "var(--text-tertiary)"
             : "var(--text-tertiary)";
   }
@@ -240,7 +245,7 @@
     {/if}
   </div>
   <div class="filters">
-    <Toggle block bind:checked={showKilled} label="Show killed" />
+    <Toggle block bind:checked={showArchived} label="Show archived" />
     <Toggle block bind:checked={showInactive} label="Show inactive" />
   </div>
 {/snippet}

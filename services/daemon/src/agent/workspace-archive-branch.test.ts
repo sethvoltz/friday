@@ -1,8 +1,8 @@
 /**
- * PF-2: destroyWorkspace also force-deletes the branch in the parent repo.
+ * PF-2: archiveWorkspace also force-deletes the branch in the parent repo.
  *
- * Semantic: "destroy means destroy." By the time we destroy a Builder, the
- * work has either been merged via PR or is being explicitly thrown away.
+ * Semantic: archiving an agent means it stops receiving work and (for
+ * builders) its disk resources are freed. Sessions persist as history.
  * Leaving the friday/<name> branch behind accumulates dead refs and breaks
  * re-creating a Builder of the same name (`git worktree add -b <branch>`
  * fails on an existing branch).
@@ -25,16 +25,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // macOS resolves /var/folders/... → /private/var/folders/..., and `git
 // worktree list` reports the realpath'd path. Realpath the dataRoot up
 // front so workspacePath() matches what git emits.
-const dataRoot = realpathSync(mkdtempSync(join(tmpdir(), "friday-ws-destroy-")));
+const dataRoot = realpathSync(mkdtempSync(join(tmpdir(), "friday-ws-archive-")));
 process.env.FRIDAY_DATA_DIR = dataRoot;
 
 // Fresh module load so WORKSPACES_ROOT picks up our FRIDAY_DATA_DIR.
-const { createWorkspace, destroyWorkspace, workspacePath } = await import(
+const { createWorkspace, archiveWorkspace, workspacePath } = await import(
   "./workspace.js"
 );
 
 const baseRepo = realpathSync(
-  mkdtempSync(join(tmpdir(), "friday-ws-destroy-repo-")),
+  mkdtempSync(join(tmpdir(), "friday-ws-archive-repo-")),
 );
 
 function git(args: string[], cwd = baseRepo): string {
@@ -70,7 +70,7 @@ afterAll(() => {
   rmSync(baseRepo, { recursive: true, force: true });
 });
 
-describe("destroyWorkspace + branch deletion", () => {
+describe("archiveWorkspace + branch deletion", () => {
   it("deletes both the worktree and the branch when branch is passed", () => {
     const name = "alpha";
     const branch = "friday/alpha";
@@ -80,7 +80,7 @@ describe("destroyWorkspace + branch deletion", () => {
     expect(listBranches()).toContain(branch);
     expect(listWorktrees()).toContain(workspacePath(name));
 
-    destroyWorkspace(name, baseRepo, { branch });
+    archiveWorkspace(name, baseRepo, { branch });
 
     expect(listWorktrees()).not.toContain(workspacePath(name));
     expect(listBranches()).not.toContain(branch);
@@ -92,13 +92,13 @@ describe("destroyWorkspace + branch deletion", () => {
     createWorkspace({ name, baseRepo, branch });
 
     // Add an unmerged commit to the worktree so a non-force branch delete
-    // would fail. destroyWorkspace must still succeed (uses `branch -D`).
+    // would fail. archiveWorkspace must still succeed (uses `branch -D`).
     const wt = workspacePath(name);
     writeFileSync(join(wt, "scratch.txt"), "wip\n");
     execFileSync("git", ["add", "scratch.txt"], { cwd: wt });
     execFileSync("git", ["commit", "-q", "-m", "wip"], { cwd: wt });
 
-    destroyWorkspace(name, baseRepo, { branch });
+    archiveWorkspace(name, baseRepo, { branch });
 
     expect(listBranches()).not.toContain(branch);
   });
@@ -109,7 +109,7 @@ describe("destroyWorkspace + branch deletion", () => {
     createWorkspace({ name, baseRepo, branch });
     expect(listBranches()).toContain(branch);
 
-    destroyWorkspace(name, baseRepo);
+    archiveWorkspace(name, baseRepo);
 
     expect(listWorktrees()).not.toContain(workspacePath(name));
     // Branch left in place for callers that haven't migrated to passing it.
@@ -131,21 +131,21 @@ describe("destroyWorkspace + branch deletion", () => {
     });
     execFileSync("git", ["branch", "-D", branch], { cwd: baseRepo });
 
-    // destroyWorkspace should not throw even though both pieces are already gone.
+    // archiveWorkspace should not throw even though both pieces are already gone.
     expect(() =>
-      destroyWorkspace(name, baseRepo, { branch }),
+      archiveWorkspace(name, baseRepo, { branch }),
     ).not.toThrow();
     expect(listBranches()).not.toContain(branch);
   });
 
-  it("destroys the worktree even when only the directory is left over", () => {
+  it("archives the worktree even when only the directory is left over", () => {
     // Pre-create a stray directory under workspaces root without a real
     // worktree backing it (simulating a partially-failed prior run).
     const name = "epsilon";
     mkdirSync(workspacePath(name), { recursive: true });
     writeFileSync(join(workspacePath(name), "stray.txt"), "x");
 
-    // destroyWorkspace removes the directory even without a branch arg.
-    expect(() => destroyWorkspace(name, baseRepo)).not.toThrow();
+    // archiveWorkspace removes the directory even without a branch arg.
+    expect(() => archiveWorkspace(name, baseRepo)).not.toThrow();
   });
 });

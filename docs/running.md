@@ -26,7 +26,7 @@
 
 | Command | What it does |
 |---|---|
-| `friday agents kill <name>` | Kill an agent. |
+| `friday agents archive <name>` | Archive an agent. For builders this also removes the worktree and force-deletes the `friday/<name>` branch. |
 | `friday tickets create --title ... --body ...` | Create a ticket. |
 | `friday tickets update <id> --status ...` | Update status. |
 | `friday tickets comment <id> --author --body` | Add a comment. |

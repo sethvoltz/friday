@@ -22,8 +22,8 @@ describe("M5: checkStalledWorkers", () => {
       lastBlockStop: now - 31 * MIN, // 31 min ago > 30 min threshold
     };
     const kill = vi.fn();
-    const killed = checkStalledWorkers([w], now, 30 * MIN, kill);
-    expect(killed).toEqual(["alpha"]);
+    const terminated = checkStalledWorkers([w], now, 30 * MIN, kill);
+    expect(terminated).toEqual(["alpha"]);
     expect(kill).toHaveBeenCalledWith(12345, "SIGTERM");
   });
 
@@ -37,8 +37,8 @@ describe("M5: checkStalledWorkers", () => {
       lastBlockStop: now - 1 * MIN,
     };
     const kill = vi.fn();
-    const killed = checkStalledWorkers([w], now, 30 * MIN, kill);
-    expect(killed).toEqual([]);
+    const terminated = checkStalledWorkers([w], now, 30 * MIN, kill);
+    expect(terminated).toEqual([]);
     expect(kill).not.toHaveBeenCalled();
   });
 
@@ -52,8 +52,8 @@ describe("M5: checkStalledWorkers", () => {
       lastBlockStop: now - 24 * 60 * MIN,
     };
     const kill = vi.fn();
-    const killed = checkStalledWorkers([w], now, 30 * MIN, kill);
-    expect(killed).toEqual([]);
+    const terminated = checkStalledWorkers([w], now, 30 * MIN, kill);
+    expect(terminated).toEqual([]);
     expect(kill).not.toHaveBeenCalled();
   });
 
@@ -104,12 +104,12 @@ describe("M5: checkStalledWorkers", () => {
       },
     ];
     const kill = vi.fn();
-    const killed = checkStalledWorkers(ws, now, 30 * MIN, kill);
-    expect(killed.sort()).toEqual(["stuck", "stuck2"]);
-    const killedPgids = kill.mock.calls
+    const terminated = checkStalledWorkers(ws, now, 30 * MIN, kill);
+    expect(terminated.sort()).toEqual(["stuck", "stuck2"]);
+    const terminatedPgids = kill.mock.calls
       .filter((c) => c[1] === "SIGTERM")
       .map((c) => c[0])
       .sort((a, b) => a - b);
-    expect(killedPgids).toEqual([1001, 1004]);
+    expect(terminatedPgids).toEqual([1001, 1004]);
   });
 });

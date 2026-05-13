@@ -197,8 +197,9 @@ export class ChatState {
     this.agents[i] = { ...cur, ...patch };
   }
 
-  /** Drop an agent from the sidebar list. Called on
-   *  `agent_lifecycle: kill` (FIX_FORWARD 3.6). */
+  /** Drop an agent from the sidebar list. Reserved for future cleanup
+   *  paths; the `agent_lifecycle: archive` handler marks status instead so
+   *  the row stays in the sidebar under "Show archived". */
   removeAgent(name: string): void {
     this.agents = this.agents.filter((a) => a.name !== name);
     delete this.unreadByAgent[name];
@@ -217,7 +218,7 @@ export class ChatState {
 
   /** Apply an agent_status event with a debounce on working→idle so brief
    * inter-turn idle pulses don't flicker the dot. Working transitions and
-   * non-binary states (stalled/error/killed) apply immediately. */
+   * non-binary states (stalled/error/archived) apply immediately. */
   private applyAgentStatus(name: string, status: string): void {
     const existing = this.agents.find((a) => a.name === name);
     const prev = existing?.status;
@@ -988,10 +989,10 @@ export class ChatState {
             type: event.agentType,
             status: "working",
           });
-        } else if (event.event === "kill") {
-          // FIX_FORWARD 3.6: daemon destroyed the agent's registry row.
-          // Drop the sidebar entry locally rather than waiting for a poll.
-          this.removeAgent(event.agent);
+        } else if (event.event === "archive") {
+          // Mark as archived; row stays in chat.agents so "Show archived"
+          // can surface it. Sessions persist as history forever.
+          this.upsertAgent(event.agent, { status: "archived" });
         }
         break;
       case "agent_status":

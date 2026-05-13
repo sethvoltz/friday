@@ -112,8 +112,8 @@ function maybeSpawnFromMail(agentName: string): void {
   }
   // Scheduled agents are spawned by the cron tick, not by mail.
   if (agentRow.type === "scheduled") return;
-  if (agentRow.status === "killed") {
-    logger.log("debug", "mail.bridge.killed-recipient", { agent: agentName });
+  if (agentRow.status === "archived") {
+    logger.log("debug", "mail.bridge.archived-recipient", { agent: agentName });
     return;
   }
 

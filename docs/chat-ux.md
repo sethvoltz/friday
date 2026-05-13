@@ -14,9 +14,9 @@ The dashboard's home `/` is a single persistent chat with Friday. This doc captu
 ## Sidebar
 
 - **Friday 👑 pinned at the top** as the orchestrator entry. Always present, always first.
-- Below: all other non-killed sessions (active + idle builders, helpers, bare, scheduled-mid-run) with status dots (idle / working / stalled / error) and unread badges (`agent_message` count).
+- Below: all other non-archived sessions (active + idle builders, helpers, bare, scheduled-mid-run) with status dots (idle / working / stalled / error) and unread badges (`agent_message` count).
 - Click any entry → chat pane switches focus to that agent's transcript.
-- Killed agents drop out of this sidebar but remain visible on `/sessions` (history).
+- Archived agents are hidden by default; toggle "Show archived" to surface them. Sessions persist in perpetuity — archive just stops the agent from receiving work and (for builders) frees the worktree.
 
 ## Multi-agent focus model
 
@@ -48,7 +48,7 @@ Two flavors, one input:
 TypeScript-defined, deterministic, no LLM:
 
 ```
-/kill <agent>    /restart        /status         /inspect <agent>
+/archive <agent> /restart        /status         /inspect <agent>
 /reset-context   /jump <date|term>    /scratch [name]
 ```
 

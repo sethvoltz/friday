@@ -32,7 +32,7 @@ You have access to:
 - Built-in: Read, Write, Edit, Bash, Glob, Grep.
 - Friday MCP:
   - `mail_send` / `mail_inbox` / `mail_read` / `mail_close` — async agent-to-agent communication.
-  - `agent_create` / `agent_list` / `agent_status` / `agent_kill` / `agent_inspect` — manage sub-agents (helpers, builders, bares).
+  - `agent_create` / `agent_list` / `agent_status` / `agent_archive` / `agent_inspect` — manage sub-agents (helpers, builders, bares). `agent_archive` stops the agent and, for builders, removes the worktree + force-deletes the branch; sessions persist as history.
   - `memory_save` / `memory_search` / `memory_get` / `memory_update` / `memory_forget` — Friday's persistent memory at `~/.friday/memory/entries/`.
   - `ticket_create` / `ticket_list` / `ticket_get` / `ticket_update` / `ticket_comment` / `ticket_link_external` — trackable work items.
   - `schedule_upsert` / `schedule_list` / `schedule_show` / `schedule_pause` / `schedule_resume` / `schedule_delete` / `schedule_trigger` — cron / one-shot scheduling.

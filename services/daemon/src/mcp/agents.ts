@@ -169,7 +169,7 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
             .enum(["orchestrator", "builder", "helper", "scheduled", "bare"])
             .optional(),
           status: z
-            .enum(["idle", "working", "stalled", "error", "killed"])
+            .enum(["idle", "working", "stalled", "error", "archived"])
             .optional(),
         },
         async (args) => {
@@ -201,17 +201,22 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
         },
       ),
       tool(
-        "agent_kill",
-        "Kill a sub-agent. The worker is signalled to stop and the registry row is marked killed.",
+        "agent_archive",
+        // Merged form of the prior agent_kill + agent_delete_workspace.
+        // FIX_FORWARD 6.4: the archive action is destructive (for builders
+        // it removes the worktree and force-deletes the branch). The model
+        // MUST NOT autonomously invoke this. Every call must be preceded
+        // by an explicit user "yes" in the conversation.
+        "Archive a sub-agent: stop it from receiving work, set status=archived. For builders, also remove the git worktree under `~/.friday/workspaces/<name>/` and force-delete the `friday/<name>` branch from the parent repo. Sessions persist in perpetuity — this just frees the disk and prevents future work. NEVER auto-invoke this tool. Always present the proposed archive to the user (which agent, which workspace path for builders) and wait for explicit confirmation before calling. The user MUST say yes by message before this tool is called. The daemon double-checks that the resolved workspace path is inside `~/.friday/workspaces/` before any filesystem op.",
         { name: z.string() },
         async (args) => {
-          await daemonFetch({
+          const row = await daemonFetch({
             ...ctx,
-            path: `/api/agents/${encodeURIComponent(args.name)}/kill`,
+            path: `/api/agents/${encodeURIComponent(args.name)}/archive`,
             method: "POST",
           });
           return {
-            content: [{ type: "text", text: `agent ${args.name} killed` }],
+            content: [{ type: "text", text: JSON.stringify(row, null, 2) }],
           };
         },
       ),
@@ -253,24 +258,6 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
                 text: formatBlocksAsMarkdown(args.name, blocks),
               },
             ],
-          };
-        },
-      ),
-      tool(
-        "agent_delete_workspace",
-        // FIX_FORWARD 6.4: the deletion language is the contract. The
-        // model MUST NOT autonomously invoke this tool. Every call must
-        // be preceded by an explicit user "yes" in the conversation.
-        "Permanently delete a builder's workspace — both the git worktree and the parent folder under `~/.friday/workspaces/<name>/`. NEVER auto-invoke this tool. Always present the proposed deletion to the user (which agent, which workspace path) and wait for explicit confirmation before calling. The user MUST say yes by message before this tool is called. Suitable only after the builder has been killed and its branch is merged or abandoned. The daemon double-checks that the resolved path is inside `~/.friday/workspaces/` before any filesystem op.",
-        { name: z.string().describe("Builder agent name.") },
-        async (args) => {
-          const row = await daemonFetch({
-            ...ctx,
-            path: `/api/agents/${encodeURIComponent(args.name)}/workspace`,
-            method: "DELETE",
-          });
-          return {
-            content: [{ type: "text", text: JSON.stringify(row, null, 2) }],
           };
         },
       ),

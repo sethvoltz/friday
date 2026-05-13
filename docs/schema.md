@@ -90,7 +90,7 @@ The agent registry — replaces the old `agents.json` (ADR-013).
 |---|---|
 | `name` | TEXT primary key |
 | `type` | `orchestrator` / `builder` / `helper` / `scheduled` / `bare` |
-| `status` | `idle` / `working` / `stalled` / `error` / `killed` |
+| `status` | `idle` / `working` / `stalled` / `error` / `archived` |
 | `session_id` | current SDK session, nullable |
 | `parent_name` | nullable; orchestrator name for builder/helper/bare |
 | `worktree_path`, `branch`, `ticket_id` | builder-specific |

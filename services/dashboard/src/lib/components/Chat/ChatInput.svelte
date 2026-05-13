@@ -508,7 +508,7 @@
     confirmLabel: string;
     /** Args that should actually be sent to the daemon if the user confirms.
      * Populated from typed args, with sensible fallbacks (e.g. focused agent
-     * for /kill with no target). */
+     * for /archive with no target). */
     resolvedArgs: string;
   }
 
@@ -519,15 +519,15 @@
   ): ConfirmSummary {
     const provided = args.trim();
     switch (name) {
-      case "kill": {
+      case "archive": {
         const target = provided || focused;
         const found = chat.agents.find((a) => a.name === target);
         if (!target) {
           return {
             valid: false,
-            title: "No agent to kill",
+            title: "No agent to archive",
             details:
-              "There's no agent currently focused. Type `/kill <agent>` with a name.",
+              "There's no agent currently focused. Type `/archive <agent>` with a name.",
             confirmLabel: "",
             resolvedArgs: "",
           };
@@ -545,10 +545,10 @@
         }
         return {
           valid: true,
-          title: `Kill agent ${target}?`,
+          title: `Archive agent ${target}?`,
           details:
-            "The agent will be stopped and marked killed. Its persisted turn history remains.",
-          confirmLabel: "Kill the agent",
+            "The agent stops receiving work and is marked archived. For builders, the worktree is removed and the friday/<name> branch is force-deleted. Chat history is preserved.",
+          confirmLabel: "Archive the agent",
           resolvedArgs: target,
         };
       }

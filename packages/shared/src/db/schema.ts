@@ -71,7 +71,7 @@ export const agents = sqliteTable(
   {
     name: text("name").primaryKey(),
     type: text("type").notNull(), // orchestrator|builder|helper|scheduled|bare
-    status: text("status").notNull(), // idle|working|stalled|error|killed
+    status: text("status").notNull(), // idle|working|stalled|error|archived
     sessionId: text("session_id"),
     parentName: text("parent_name"), // for builder/helper/bare
     worktreePath: text("worktree_path"), // for builder

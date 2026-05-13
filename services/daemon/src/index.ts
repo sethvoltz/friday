@@ -164,7 +164,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
       });
     }
 
-    if (a.type !== "scheduled" && a.status !== "killed") {
+    if (a.type !== "scheduled" && a.status !== "archived") {
       const pending = mailInbox(a.name);
       if (pending.length > 0) {
         const stack = readPromptStack(a.type, []);

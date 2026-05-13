@@ -101,7 +101,7 @@ export interface AgentLifecycleEvent extends BaseEvent {
    * agent's, which may be unrelated). Undefined for top-level agents like the
    * orchestrator and bare scratch agents created from a system command. */
   parentName?: string;
-  event: "spawn" | "kill" | "crash" | "refork" | "complete";
+  event: "spawn" | "archive" | "crash" | "refork" | "complete";
   reason?: string;
 }
 

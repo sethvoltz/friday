@@ -19,7 +19,7 @@ export const agentsCommand = defineCommand({
               ? pc.green("●")
               : a.status === "idle"
                 ? pc.yellow("●")
-                : a.status === "killed"
+                : a.status === "archived"
                   ? pc.dim("●")
                   : pc.red("●");
           console.log(`  ${dot} ${a.type.padEnd(12)} ${a.name}`);
@@ -35,22 +35,15 @@ export const agentsCommand = defineCommand({
         console.log(JSON.stringify(a, null, 2));
       },
     }),
-    kill: defineCommand({
-      meta: { name: "kill", description: "Kill an agent" },
-      args: { name: { type: "positional", required: true } },
-      async run({ args }) {
-        const c = new DaemonClient();
-        await c.post(`/api/agents/${args.name}/kill`, {});
-        console.log(pc.green(`killed ${args.name}`));
-      },
-    }),
-    "rm-workspace": defineCommand({
-      // FIX_FORWARD 6.4: irreversible. The CLI prompts for a literal "yes"
-      // unless --force is passed. The daemon-side endpoint still re-checks
-      // path containment, so a bypass here can't escape ~/.friday/workspaces/.
+    archive: defineCommand({
+      // Archives the agent: stops it from receiving work, marks status=archived,
+      // and for builders also removes the worktree + force-deletes the branch.
+      // Sessions persist in perpetuity. Irreversible for builders (worktree
+      // cleanup); the CLI prompts for a literal "yes" unless --force is passed.
       meta: {
-        name: "rm-workspace",
-        description: "Permanently delete a builder's workspace folder",
+        name: "archive",
+        description:
+          "Archive an agent (stop work; for builders also free the worktree)",
       },
       args: {
         name: { type: "positional", required: true },
@@ -66,7 +59,7 @@ export const agentsCommand = defineCommand({
           const rl = createInterface({ input: stdin, output: stdout });
           const answer = await rl.question(
             pc.yellow(
-              `Delete workspace for "${args.name}"? This wipes ~/.friday/workspaces/${args.name}/. Type "yes" to confirm: `,
+              `Archive "${args.name}"? For builders this also wipes ~/.friday/workspaces/${args.name}/ and force-deletes friday/${args.name}. Type "yes" to confirm: `,
             ),
           );
           rl.close();
@@ -75,10 +68,15 @@ export const agentsCommand = defineCommand({
             return;
           }
         }
-        const res = await c.del<{ ok: boolean; path: string }>(
-          `/api/agents/${args.name}/workspace`,
+        const res = await c.post<{ ok: boolean; workspacePath?: string }>(
+          `/api/agents/${args.name}/archive`,
+          {},
         );
-        console.log(pc.green(`removed ${res.path}`));
+        if (res.workspacePath) {
+          console.log(pc.green(`archived ${args.name} (removed ${res.workspacePath})`));
+        } else {
+          console.log(pc.green(`archived ${args.name}`));
+        }
       },
     }),
   },

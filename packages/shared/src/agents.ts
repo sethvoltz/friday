@@ -7,7 +7,7 @@ export type AgentStatus =
   | "working"
   | "stalled"
   | "error"
-  | "killed";
+  | "archived";
 
 export interface BaseAgentEntry {
   name: string;

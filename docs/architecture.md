@@ -265,7 +265,7 @@ Turn / agent envelope:
 - `turn_done` — `{turn_id, status: 'complete'|'aborted'|'error', usage?}`
 - `error` — `{turn_id?, code, message, recoverable}` (codes include `aborted`)
 - `compaction_start` / `compaction_end`
-- `agent_lifecycle` — spawn / kill / crash / refork / complete
+- `agent_lifecycle` — spawn / archive / crash / refork / complete
 - `agent_status` — `{agent, status, since}` for sidebar dots
 - `mail_delivered` — `{agent, priority}` — sidebar badges; `priority='critical'` may trigger mid-turn injection (see below)
 - `schedule_fired`
@@ -345,7 +345,7 @@ Parent-side queue ensures multiple `prompt` IPCs don't race in-flight events wit
 - Push delivery: `sendMail()` writes row → emits `mail:to:<agent>` + `mail:any` (ADR-014) → daemon's `mail-bridge` republishes as `mail_delivered` SSE and sends `mail-wakeup` IPC to the live worker, or spawns a fresh turn for an idle long-lived agent.
 - **Universal delivery primitive** (ADR-017, FIX_FORWARD 8.5): mail is the only way to deliver anything user-visible. The old `chat_reply` MCP tool and `/api/chat/reply` endpoint were removed; user-facing replies are `mail_send` to recipient `friday` (the orchestrator's box), which the mail-bridge surfaces as `mail` block rows in the chat. Builders and helpers address the user the same way.
 - **Priority field** (ADR-014 amendment): `priority='critical'` triggers mid-turn injection on a live worker via `mail-wakeup-critical` IPC. `priority='normal'` (default) waits for the next turn boundary.
-- Boot recovery: `replayPending()` re-emits all pending rows on startup; `recoverAgents()` drains inboxes for non-killed long-lived agents.
+- Boot recovery: `replayPending()` re-emits all pending rows on startup; `recoverAgents()` drains inboxes for non-archived long-lived agents.
 
 ### Tickets
 

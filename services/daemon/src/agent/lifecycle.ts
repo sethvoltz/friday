@@ -414,23 +414,23 @@ export function abortTurn(agentName: string): boolean {
  * path awaits this so it can't race the next fork against the dying
  * worker's lingering IPC traffic.
  *
- * Fire-and-forget callers (REST kill endpoints, system commands) can
- * ignore the returned promise — the side-effects (registry destroy,
+ * Fire-and-forget callers (REST archive endpoints, system commands) can
+ * ignore the returned promise — the side-effects (registry archive,
  * agent_lifecycle event, live-map remove) happen synchronously up front.
  */
-export function killAgent(agentName: string): Promise<void> {
+export function archiveAgent(agentName: string): Promise<void> {
   const w = live.get(agentName);
   // Synchronous side-effects: drop from the live map so subsequent
   // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
   // before the child has fully exited.
   if (w) live.delete(agentName);
-  registry.destroyAgent(agentName);
+  registry.archiveAgent(agentName);
   eventBus.publish({
     v: 1,
     type: "agent_lifecycle",
     agent: agentName,
     agentType: w?.agentType ?? "orchestrator",
-    event: "kill",
+    event: "archive",
   });
   if (!w) return Promise.resolve();
 
@@ -514,7 +514,7 @@ export function checkStalledWorkers(
   threshold: number,
   kill: (pgid: number, signal: "SIGTERM" | "SIGKILL") => void,
 ): string[] {
-  const killed: string[] = [];
+  const terminated: string[] = [];
   for (const w of workers) {
     if (w.status !== "working") continue;
     const since = now - w.lastBlockStop;
@@ -528,10 +528,10 @@ export function checkStalledWorkers(
       kill(w.pgid, "SIGTERM");
       setTimeout(() => kill(w.pgid, "SIGKILL"), 2_000).unref();
       w.lastBlockStop = now;
-      killed.push(w.agentName);
+      terminated.push(w.agentName);
     }
   }
-  return killed;
+  return terminated;
 }
 
 /**
