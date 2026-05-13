@@ -287,7 +287,15 @@ export function spawnTurn(input: SpawnTurnInput): void {
     // that can no longer make progress.
     liveTurns.dropTurn(w.turnId);
     live.delete(input.agentName);
-    registry.setStatus(input.agentName, "idle");
+    // F1-A: preserve terminal statuses. If the worker just exited because
+    // `archiveAgent` asked it to stop, the row is already "archived" — we
+    // must not overwrite it back to "idle" or the workspace-cleanup half
+    // of an archive call would race the wrong status. Same for "error":
+    // a crash-marked row stays crashed.
+    const cur = registry.getAgent(input.agentName);
+    if (cur && cur.status !== "archived" && cur.status !== "error") {
+      registry.setStatus(input.agentName, "idle");
+    }
     eventBus.publish({
       v: 1,
       type: "agent_lifecycle",
