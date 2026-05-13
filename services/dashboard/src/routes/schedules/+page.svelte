@@ -51,7 +51,12 @@
     }
   }
 
-  async function action(name: string, label: string, path: string) {
+  async function action(
+    name: string,
+    label: string,
+    past: string,
+    path: string,
+  ) {
     if (busy) return;
     busy = `${label} ${name}`;
     try {
@@ -67,7 +72,8 @@
         showToast(`${label} failed: ${detail}`, "err");
         return;
       }
-      showToast(`${label}d ${name}`);
+      const runId = typeof body.runId === "string" ? body.runId : null;
+      showToast(runId ? `${past} ${name} (run ${runId})` : `${past} ${name}`);
       await refresh();
     } finally {
       busy = null;
@@ -173,6 +179,7 @@
                       action(
                         s.name,
                         "resume",
+                        "resumed",
                         `/api/schedules/${encodeURIComponent(s.name)}/resume`,
                       )}
                     disabled={busy !== null}>
@@ -185,6 +192,7 @@
                       action(
                         s.name,
                         "pause",
+                        "paused",
                         `/api/schedules/${encodeURIComponent(s.name)}/pause`,
                       )}
                     disabled={busy !== null}>
@@ -197,6 +205,7 @@
                     action(
                       s.name,
                       "trigger",
+                      "triggered",
                       `/api/schedules/${encodeURIComponent(s.name)}/trigger`,
                     )}
                   disabled={busy !== null}>
