@@ -131,32 +131,70 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
   return { path, branch: opts.branch, baseRepo: opts.baseRepo };
 }
 
-export function destroyWorkspace(name: string, baseRepo: string): void {
+export interface DestroyWorkspaceOptions {
+  /** Branch to delete from the parent repo after the worktree is removed.
+   * Optional for backward compat — older callers without branch metadata
+   * skip the branch delete. New code should always pass it. */
+  branch?: string;
+}
+
+export function destroyWorkspace(
+  name: string,
+  baseRepo: string,
+  opts: DestroyWorkspaceOptions = {},
+): void {
   const path = workspacePath(name);
-  if (!existsSync(path)) return;
-  // FIX_FORWARD 6.4: containment check before any rm-equivalent op.
-  // Resolves symlinks so we never delete outside ~/.friday/workspaces/.
-  assertInsideWorkspacesRoot(path);
-  try {
-    execFileSync("git", ["worktree", "remove", "--force", path], {
-      cwd: baseRepo,
-      stdio: "inherit",
-    });
-  } catch (err) {
-    logger.log("warn", "workspace.destroy.fail", {
-      name,
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
-  // The worktree-remove leaves the parent directory in place if anything
-  // non-tracked accumulated there (logs, build artifacts). Wipe whatever
-  // remains so the next `agent_create` with the same name can succeed.
+  // The worktree directory might already be gone (manual cleanup, prior
+  // failed run); the branch may still exist independently, so we don't
+  // early-return when the dir is missing.
   if (existsSync(path)) {
+    // FIX_FORWARD 6.4: containment check before any rm-equivalent op.
+    // Resolves symlinks so we never delete outside ~/.friday/workspaces/.
+    assertInsideWorkspacesRoot(path);
     try {
-      rmSync(path, { recursive: true, force: true });
+      execFileSync("git", ["worktree", "remove", "--force", path], {
+        cwd: baseRepo,
+        stdio: "inherit",
+      });
     } catch (err) {
-      logger.log("warn", "workspace.rmdir.fail", {
+      logger.log("warn", "workspace.destroy.fail", {
         name,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // The worktree-remove leaves the parent directory in place if anything
+    // non-tracked accumulated there (logs, build artifacts). Wipe whatever
+    // remains so the next `agent_create` with the same name can succeed.
+    if (existsSync(path)) {
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch (err) {
+        logger.log("warn", "workspace.rmdir.fail", {
+          name,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+  // Delete the branch from the parent repo. "Destroy means destroy" — by the
+  // time the user (or orchestrator) destroys a workspace the work has either
+  // been merged via PR or been explicitly thrown away. Leaving the branch
+  // behind accumulates dead refs, and re-creating a builder of the same
+  // name would fail at `git worktree add -b <branch>`.
+  //
+  // `branch -D` is force-delete; works even on unmerged branches. We tolerate
+  // failure (branch already gone, never existed, etc.) — that's not a
+  // destroy-blocker.
+  if (opts.branch) {
+    try {
+      execFileSync("git", ["branch", "-D", opts.branch], {
+        cwd: baseRepo,
+        stdio: "pipe",
+      });
+    } catch (err) {
+      logger.log("warn", "workspace.branch.delete.fail", {
+        name,
+        branch: opts.branch,
         message: err instanceof Error ? err.message : String(err),
       });
     }

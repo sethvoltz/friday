@@ -15,7 +15,11 @@
  *     in-flight turn keep their original turn_id.
  */
 
-import { fork, type ChildProcess } from "node:child_process";
+import {
+  spawn,
+  type ChildProcess,
+  type SpawnOptions,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +35,12 @@ import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import * as registry from "./registry.js";
 import * as liveTurns from "./live-turns.js";
+import {
+  profileInputsFor,
+  removeProfile,
+  sandboxExecAvailable,
+  writeProfile,
+} from "./sandbox-profile.js";
 import type {
   WorkerCommand,
   WorkerEvent,
@@ -51,6 +61,12 @@ export interface ExitInfo {
 
 export interface LiveWorker {
   child: ChildProcess;
+  /** Process-group id of the worker. With `detached: true` this equals
+   * child.pid, which lets `kill(-pgid)` reap descendants the worker leaked
+   * (e.g. `(sleep 200 &); disown`). In-memory only — not persisted, since
+   * boot recovery deliberately doesn't reap by stored pgid (PID-reuse risk
+   * on a long daemon downtime). */
+  pgid: number;
   agentName: string;
   agentType: AgentType;
   model: string;
@@ -67,6 +83,10 @@ export interface LiveWorker {
   turnStart: number;
   /** Wall-clock start of the worker process; used for one-shot duration. */
   spawnedAt: number;
+  /** Wall-clock of the most recent block-stop. The turn-stall timer uses
+   * this as the "model is making progress" signal — heartbeats don't count
+   * because a stuck SDK still emits them. */
+  lastBlockStop: number;
   /** Idle vs working, mirrored from worker `status-change` events. */
   status: "idle" | "working";
   /**
@@ -83,6 +103,33 @@ export interface LiveWorker {
 }
 
 const live = new Map<string, LiveWorker>();
+
+/**
+ * SIGTERM (or SIGKILL) the entire process group of a worker. With
+ * `detached:true` at fork time, the worker's pgid is the same as its pid,
+ * and `process.kill(-pgid, sig)` reaches every descendant — including
+ * `(sleep 200 &); disown` style leaks that wouldn't be caught by killing
+ * the worker pid alone. Safe to call even when the group is already gone;
+ * ESRCH is swallowed.
+ *
+ * Exported only so the integration test can drive it directly against a
+ * real subprocess tree.
+ */
+export function killPgrp(pgid: number, signal: "SIGTERM" | "SIGKILL"): void {
+  if (!pgid || pgid <= 1) return;
+  try {
+    process.kill(-pgid, signal);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH" && code !== "EPERM") {
+      logger.log("warn", "worker.pgrp.kill.fail", {
+        pgid,
+        signal,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
 
 export interface SpawnTurnInput {
   agentName: string;
@@ -102,20 +149,108 @@ export function spawnTurn(input: SpawnTurnInput): void {
   }
   registry.setStatus(input.agentName, "working");
 
+  // M2: builders run under `sandbox-exec` so the kernel denies writes to
+  // credentials, dotfiles, LaunchAgents, Keychains, and Friday's own state
+  // even if the M1 PreToolUse hook misses (e.g. a PATH-wrapped binary that
+  // the regex didn't spot). Non-builder agents run with the daemon's
+  // permissions because their working directory is the daemon repo and
+  // they legitimately need broader filesystem access.
+  const sandboxStatus = sandboxExecAvailable();
+  const wrapWithSandbox =
+    input.options.agentType === "builder" && sandboxStatus.available;
+  let profilePath: string | undefined;
+  if (wrapWithSandbox) {
+    profilePath = writeProfile(
+      input.agentName,
+      profileInputsFor(input.options.workingDirectory),
+    );
+  }
+
   logger.log("info", "worker.fork", {
     agent: input.agentName,
     type: input.options.agentType,
     mode: input.options.mode,
     turnId: input.options.turnId,
     resumeSessionId: input.options.resumeSessionId ?? null,
+    sandboxed: wrapWithSandbox,
+    sandboxReason: wrapWithSandbox ? "ok" : sandboxStatus.reason,
   });
 
-  const child = fork(WORKER_PATH, [], {
+  // env block shared between worker spawn paths.
+  //
+  // We deliberately do NOT set NPM_CONFIG_IGNORE_SCRIPTS / equivalent here.
+  // pnpm v9+ already requires explicit opt-in via `pnpm.onlyBuiltDependencies`
+  // (or `pnpm approve-builds`) before any postinstall fires — a blanket
+  // disable would break legitimate flows like Husky `prepare` hooks and
+  // repo-vetted native-module builds. M1's package-manager rule keeps npm /
+  // yarn behind `--ignore-scripts` (those run all postinstalls by default);
+  // for pnpm we trust the repo's own gating.
+  const env = {
+    ...process.env,
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+    CI: "1",
+  };
+
+  // M5: ulimit wrapper for CPU + nofile. The bash prelude applies the
+  // rlimits before exec'ing node so the limits are in effect from worker.js
+  // line 0. `exec "$@"` passes positional args through unmodified, avoiding
+  // shell quoting of paths.
+  //
+  // Defaults: 1h CPU (catches honest infinite loops without hitting on
+  // legitimate long Builder turns; wall-clock is enforced by the M5 turn
+  // stall watchdog separately), 4096 file descriptors (generous).
+  // Overridable via env for emergency tuning.
+  const cpuLimit = process.env.FRIDAY_WORKER_CPU_LIMIT ?? "3600";
+  const nofileLimit = process.env.FRIDAY_WORKER_NOFILE_LIMIT ?? "4096";
+  const ULIMIT_PRELUDE = `ulimit -t ${cpuLimit}; ulimit -n ${nofileLimit}; exec "$@"`;
+
+  const spawnOpts: SpawnOptions = {
     stdio: ["ignore", "inherit", "inherit", "ipc"],
-    env: { ...process.env },
-  });
+    // M4: detached makes the worker its own process-group leader so we can
+    // SIGTERM the whole group on destroy. Without this, a leaked descendant
+    // (`(sleep 200 &); disown`) survives the worker exit.
+    detached: true,
+    env,
+  };
+
+  // Both paths terminate in `bash -c 'ulimit …; exec "$@"' -- node <execArgv> WORKER`.
+  // The triple chain (sandbox-exec → bash → node) preserves NODE_CHANNEL_FD
+  // through both exec()s; verified by sandbox-profile-kernel.test.ts and
+  // lifecycle-spawn-ipc.test.ts.
+  //
+  // We forward `process.execArgv` so loader hooks on the parent (`--import
+  // tsx/esm` under `tsx watch`, `--experimental-vm-modules`, etc.) reach the
+  // worker too — otherwise the worker's plain `node WORKER_PATH` can't
+  // resolve `.ts` sources in dev. `fork()` does this implicitly; we have to
+  // do it ourselves now that we go through bash.
+  const nodeArgs = [...process.execArgv, WORKER_PATH];
+  const child: ChildProcess = wrapWithSandbox
+    ? spawn(
+        "/usr/bin/sandbox-exec",
+        [
+          "-f",
+          profilePath!,
+          "/bin/bash",
+          "-c",
+          ULIMIT_PRELUDE,
+          "--",
+          process.execPath,
+          ...nodeArgs,
+        ],
+        spawnOpts,
+      )
+    : spawn(
+        "/bin/bash",
+        ["-c", ULIMIT_PRELUDE, "--", process.execPath, ...nodeArgs],
+        spawnOpts,
+      );
+  // With detached:true the child is the leader of its own process group, so
+  // pgid === child.pid. If fork failed pid will be undefined; we keep 0 as
+  // a sentinel so killPgrp can skip safely.
+  const pgid = child.pid ?? 0;
   const w: LiveWorker = {
     child,
+    pgid,
     agentName: input.agentName,
     agentType: input.options.agentType,
     model: input.options.model,
@@ -125,6 +260,7 @@ export function spawnTurn(input: SpawnTurnInput): void {
     lastHeartbeat: Date.now(),
     turnStart: Date.now(),
     spawnedAt: Date.now(),
+    lastBlockStop: Date.now(),
     status: "working",
     nextPrompts: [],
     mode: input.options.mode,
@@ -143,6 +279,9 @@ export function spawnTurn(input: SpawnTurnInput): void {
       code,
       signal,
     });
+    // M2: clean up the per-worker SBPL profile. Best-effort; the file is
+    // owner-only and idempotent so a leak is harmless beyond the disk space.
+    if (profilePath) removeProfile(profilePath);
     // If the worker died mid-turn the in-flight registry entry would leak —
     // drop it here so the daemon doesn't hold accumulator state for a turn
     // that can no longer make progress.
@@ -296,9 +435,15 @@ export function killAgent(agentName: string): Promise<void> {
   if (!w) return Promise.resolve();
 
   // Ask the worker to stop gracefully, then wait for the actual exit
-  // event. SIGKILL backstop after 5s if the child ignores `stop`.
+  // event. SIGTERM-on-pgrp backstop at 5s catches descendants the worker
+  // leaked; SIGKILL-on-pgrp at 7s is the hard floor.
   send(w.child, { type: "stop" });
-  if (w.child.exitCode !== null || w.child.killed) return Promise.resolve();
+  if (w.child.exitCode !== null || w.child.killed) {
+    // Child is already gone, but descendants may still be running.
+    killPgrp(w.pgid, "SIGTERM");
+    setTimeout(() => killPgrp(w.pgid, "SIGKILL"), 2_000).unref();
+    return Promise.resolve();
+  }
 
   return new Promise<void>((resolve) => {
     let done = false;
@@ -307,19 +452,112 @@ export function killAgent(agentName: string): Promise<void> {
       done = true;
       resolve();
     };
-    w.child.once("exit", finish);
+    w.child.once("exit", () => {
+      // Even on clean child exit, send a pgrp SIGTERM to reap any leaked
+      // descendants (`(sleep &); disown`). No-op if the group is empty.
+      killPgrp(w.pgid, "SIGTERM");
+      setTimeout(() => killPgrp(w.pgid, "SIGKILL"), 2_000).unref();
+      finish();
+    });
     setTimeout(() => {
       if (done) return;
-      // Graceful stop ignored — force a SIGKILL. The `exit` listener
-      // resolves the promise once the kernel reaps the process.
-      try {
-        w.child.kill("SIGKILL");
-      } catch {
-        // Already gone.
-        finish();
-      }
+      // Graceful stop ignored — SIGTERM the whole pgrp (catches leaked
+      // descendants too). The `exit` listener resolves the promise once
+      // the kernel reaps the worker process.
+      killPgrp(w.pgid, "SIGTERM");
+      // 2 s after that, SIGKILL the group if anything is still alive.
+      setTimeout(() => killPgrp(w.pgid, "SIGKILL"), 2_000).unref();
     }, 5_000).unref();
   });
+}
+
+/**
+ * Synchronously SIGTERM every live worker's process group. Called from the
+ * daemon shutdown handler so descendants don't get orphaned to launchd on
+ * normal SIGTERM/SIGINT. Doesn't wait for exits — the daemon shutdown has
+ * its own 2 s ceiling.
+ */
+export function reapAllLiveWorkers(): void {
+  for (const w of live.values()) {
+    killPgrp(w.pgid, "SIGTERM");
+  }
+}
+
+/* ---------------- Turn-stall watchdog (M5) ---------------- */
+
+const DEFAULT_TURN_STALL_MS = 30 * 60 * 1000; // 30 minutes
+const TURN_STALL_CHECK_MS = 60 * 1000; // 1 minute
+
+let stallInterval: NodeJS.Timeout | undefined;
+
+/**
+ * The shape of a stalled-worker check input. Decoupled from LiveWorker so
+ * the inner loop is testable without populating the live map.
+ */
+export interface StallCandidate {
+  agentName: string;
+  turnId: string;
+  pgid: number;
+  status: "idle" | "working";
+  lastBlockStop: number;
+}
+
+/**
+ * Pure stall-detector. Returns the list of worker names that exceeded the
+ * threshold and invokes `kill` on each (test injects a spy). Mutates each
+ * candidate's `lastBlockStop` to `now` so a follow-up tick before the
+ * worker's `exit` event doesn't re-fire.
+ */
+export function checkStalledWorkers(
+  workers: Iterable<StallCandidate>,
+  now: number,
+  threshold: number,
+  kill: (pgid: number, signal: "SIGTERM" | "SIGKILL") => void,
+): string[] {
+  const killed: string[] = [];
+  for (const w of workers) {
+    if (w.status !== "working") continue;
+    const since = now - w.lastBlockStop;
+    if (since > threshold) {
+      logger.log("warn", "worker.turn.stalled", {
+        agent: w.agentName,
+        turnId: w.turnId,
+        stalledMs: since,
+        thresholdMs: threshold,
+      });
+      kill(w.pgid, "SIGTERM");
+      setTimeout(() => kill(w.pgid, "SIGKILL"), 2_000).unref();
+      w.lastBlockStop = now;
+      killed.push(w.agentName);
+    }
+  }
+  return killed;
+}
+
+/**
+ * Start the per-turn stall watchdog. Periodically scans live workers; if a
+ * worker has been in `working` status for longer than the stall threshold
+ * without any block-stop, pgrp-SIGTERM it. Honest runaway loops (no model
+ * output for half an hour) get reaped before they cost real money or
+ * burn a day's worth of background CPU. Threshold overridable via
+ * `FRIDAY_TURN_STALL_MS` env (milliseconds).
+ */
+export function startTurnStallWatchdog(): void {
+  if (stallInterval) return;
+  const threshold = Number(
+    process.env.FRIDAY_TURN_STALL_MS ?? DEFAULT_TURN_STALL_MS,
+  );
+  stallInterval = setInterval(() => {
+    checkStalledWorkers(live.values(), Date.now(), threshold, killPgrp);
+  }, TURN_STALL_CHECK_MS);
+  stallInterval.unref();
+}
+
+export function stopTurnStallWatchdog(): void {
+  if (stallInterval) {
+    clearInterval(stallInterval);
+    stallInterval = undefined;
+  }
 }
 
 /**
@@ -395,6 +633,10 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       break;
     }
     case "block-stop": {
+      // M5: block-stop is the canonical "model made progress" signal for
+      // the turn-stall watchdog. Heartbeats don't count — a hung SDK still
+      // emits them, but no block ever lands.
+      w.lastBlockStop = Date.now();
       handleBlockStop(w, e);
       break;
     }

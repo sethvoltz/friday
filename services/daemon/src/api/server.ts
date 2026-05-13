@@ -386,7 +386,12 @@ async function handle(
     }
     const repo = process.cwd();
     try {
-      destroyWorkspace(name, repo);
+      // PF-2: pass the branch so destroyWorkspace also force-deletes the
+      // friday/<name> branch from the parent repo. The work has either
+      // been merged (PR landed) or is being explicitly thrown away.
+      const branch =
+        a.type === "builder" && "branch" in a ? a.branch : undefined;
+      destroyWorkspace(name, repo, { branch });
       return json(res, 200, { ok: true, path: workspacePath(name) });
     } catch (err) {
       return json(res, 500, {

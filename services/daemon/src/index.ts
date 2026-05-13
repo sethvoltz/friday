@@ -19,7 +19,13 @@ import * as registry from "./agent/registry.js";
 import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js";
 import { startMailBridge } from "./comms/mail-bridge.js";
 import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
-import { dispatchTurn } from "./agent/lifecycle.js";
+import {
+  dispatchTurn,
+  reapAllLiveWorkers,
+  startTurnStallWatchdog,
+  stopTurnStallWatchdog,
+} from "./agent/lifecycle.js";
+import { sandboxExecAvailable } from "./agent/sandbox-profile.js";
 import { wrapWithRecall } from "./agent/recall.js";
 import {
   composeSystemPrompt,
@@ -56,6 +62,7 @@ async function main(): Promise<void> {
   recoverAgents(cfg);
   const schedTick = startScheduler();
   const watchdog = startWatchdog();
+  startTurnStallWatchdog();
   void reconcileLinear()
     .then((result) => {
       if (!result.ran) {
@@ -101,12 +108,28 @@ async function main(): Promise<void> {
     effort: modelCfg.effort ?? "default",
   });
 
+  // M2: Surface the kernel-sandbox status loudly at boot so an accidental
+  // disable (FRIDAY_SANDBOX_EXEC=0) or a missing binary doesn't fail silent.
+  const sb = sandboxExecAvailable();
+  logger.log(sb.available ? "info" : "warn", "daemon.sandbox-exec", {
+    enabled: sb.available,
+    reason: sb.reason,
+    note: sb.available
+      ? "builders run under sandbox-exec; M2 kernel backstop active"
+      : "builders NOT sandboxed; relying on M1 PreToolUse + M4 pgrp only",
+  });
+
   const shutdown = (signal: string) => {
     logger.log("info", "daemon.shutdown", { signal });
+    // M4: SIGTERM every live worker's process group before we exit so leaked
+    // descendants don't get orphaned to launchd. Doesn't wait for the kill
+    // to complete — the 2s ceiling below is the hard floor.
+    reapAllLiveWorkers();
     clearInterval(heartbeat);
     clearInterval(schedTick);
     void watchdog;
     stopWatchdog();
+    stopTurnStallWatchdog();
     clearHealth();
     flushDb();
     server.close(() => process.exit(0));

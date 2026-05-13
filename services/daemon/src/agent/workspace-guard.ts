@@ -15,6 +15,7 @@
 
 import { basename, dirname, isAbsolute, join, normalize } from "node:path";
 import { realpathSync } from "node:fs";
+import { checkBashForDisaster } from "./disaster-patterns.js";
 
 /**
  * Meta-commands that are workspace-agnostic — skip path checks for these.
@@ -165,6 +166,13 @@ export function checkToolCall(
           return `Bash blocked — command references "${p}" outside workspace "${workspaceReal}"`;
         }
       }
+
+      // M1: catastrophe-pattern checks (rm -r outside worktree, find -delete,
+      // redirections to ~/.ssh / ~/.zshrc / LaunchAgents, persistence binaries,
+      // git --force/filter-branch/etc., package-manager lifecycle scripts,
+      // workspace marker protection, command-substitution-in-catastrophe-position).
+      const disaster = checkBashForDisaster(cmd, workspaceReal);
+      if (disaster) return disaster;
       break;
     }
   }
