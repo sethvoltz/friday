@@ -10,7 +10,7 @@
     type ChatMessage,
   } from "$lib/stores/chat.svelte";
   import { initialPageSize } from "$lib/util/page-size";
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
 
   interface Props {
     /** Agent whose chat to display. */
@@ -117,13 +117,26 @@
   }
 
   // Active mode: keep focusedAgent in sync with the current route, reload
-  // turns whenever the agent changes.
+  // turns whenever the agent changes, and pin to the bottom of the new
+  // agent's chat. Each agent is a separate conversation; carrying over
+  // the previous agent's scrollTop made no sense as UX and produced a
+  // real bug — if the previous agent was scrolled to the top, the new
+  // agent's chat would land at scrollTop=0, the top sentinel would
+  // already be in view, and the IntersectionObserver wouldn't re-fire
+  // after `chat.oldestDbId` became valid (no intersection change → no
+  // callback), leaving the user with one page and no way to load more.
   $effect(() => {
     if (readonly) return;
     const a = agent;
     untrack(() => {
       if (chat.focusedAgent !== a) chat.focusedAgent = a;
-      void chat.loadAgentTurns(a);
+      void chat.loadAgentTurns(a).then(async () => {
+        await tick();
+        if (scrollEl) {
+          scrollEl.scrollTop = scrollEl.scrollHeight;
+          chat.pinnedToBottom = true;
+        }
+      });
     });
   });
 

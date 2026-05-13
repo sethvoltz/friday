@@ -562,6 +562,13 @@ export class ChatState {
     this.oldestDbId = null;
     this.reachedOldest = false;
     this.historyError = null;
+    // Clear any stale loading-older flag from the previous agent. Without
+    // this, if the user scrolled up in agent A and clicked away before
+    // the load finished, A's `loadingOlder=true` would persist into B's
+    // chat and block B's first pagination request until A's stale finally
+    // fires (~350ms later). The new guards in `loadOlderTurns` ensure
+    // that stale call won't clobber B's state.
+    this.loadingOlder = false;
 
     // Last-known transcript from a previous session. Render the cached turns
     // immediately so a slow / offline first-paint doesn't show an empty
@@ -668,6 +675,12 @@ export class ChatState {
       );
       if (!r.ok) return;
       const turns = (await r.json()) as TurnRow[];
+      // Bail if the user switched agents while the fetch was in flight.
+      // Without this we would prepend the prior agent's turns onto the
+      // new agent's messages and overwrite `oldestDbId` with a value
+      // that doesn't belong to the focused agent — subsequent
+      // pagination would fetch wrong data or trip `reachedOldest`.
+      if (this.focusedAgent !== agent) return;
       if (turns.length === 0) {
         this.reachedOldest = true;
         return;
@@ -689,7 +702,14 @@ export class ChatState {
           setTimeout(resolve, MIN_LOADING_MS - elapsed),
         );
       }
-      this.loadingOlder = false;
+      // Only clear the flag if we still own this load — if the user
+      // switched agents mid-flight, `loadAgentTurns` already reset
+      // `loadingOlder` for the new agent and a fresh `loadOlderTurns`
+      // may have set it back to `true`. Clobbering that here would
+      // confuse the IntersectionObserver guard.
+      if (this.focusedAgent === agent) {
+        this.loadingOlder = false;
+      }
     }
   }
 

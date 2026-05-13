@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import { chat, type ChatMessage } from "$lib/stores/chat.svelte";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
@@ -113,6 +113,10 @@
   // which gates auto-scroll, the jump-to-latest button, and the DOM-cap
   // window slice. Replaces the previous scroll-position math in ChatShell.
   let bottomSentinel: HTMLDivElement | undefined = $state();
+  // Track the live top-sentinel IntersectionObserver so a sibling effect
+  // can force it to re-emit its current intersection state when pagination
+  // state transitions allow a previously-bailed callback to succeed.
+  let topSentinelObserver: IntersectionObserver | null = null;
 
   $effect(() => {
     if (!topSentinel) return;
@@ -214,7 +218,46 @@
       { rootMargin: "200px 0px 0px 0px" },
     );
     obs.observe(el);
-    return () => obs.disconnect();
+    topSentinelObserver = obs;
+    return () => {
+      obs.disconnect();
+      if (topSentinelObserver === obs) topSentinelObserver = null;
+    };
+  });
+
+  // Force the top-sentinel IntersectionObserver to re-emit a callback
+  // when state transitions make pagination newly possible. IO callbacks
+  // only fire on intersection CHANGES; if the sentinel was already in
+  // view when a guard was active (e.g. switching from a small chat
+  // where `reachedOldest=true` made the previous callback a no-op),
+  // it won't re-fire on its own after state clears. For chats whose
+  // content fits in one viewport the user can't scroll to nudge it
+  // either — so pagination would silently never trigger.
+  //
+  // Unobserve + re-observe forces an immediate fresh callback with the
+  // current intersection state. If the sentinel is in view, the IO
+  // callback runs against now-current guards and fires `loadOlder`. If
+  // it's out of view (content > viewport), the re-observe is a no-op
+  // and the user's next scroll-up will trigger pagination normally.
+  $effect(() => {
+    if (readonly) return;
+    // Track the gates the callback checks. When any of these flips to a
+    // pagination-permitting value, re-emit.
+    const oldest = chat.oldestDbId;
+    chat.loadingOlder;
+    chat.reachedOldest;
+    // Also re-emit when the message list itself changes — covers the
+    // agent-switch case where the load completes and the rendered DOM
+    // settles into a new layout.
+    chat.messages.length;
+
+    untrack(() => {
+      if (oldest === null) return;
+      if (chat.loadingOlder || chat.reachedOldest) return;
+      if (!topSentinelObserver || !topSentinel) return;
+      topSentinelObserver.unobserve(topSentinel);
+      topSentinelObserver.observe(topSentinel);
+    });
   });
 
   $effect(() => {
