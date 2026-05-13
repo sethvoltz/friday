@@ -22,12 +22,23 @@
     }
   }
 
-  // FIX_FORWARD 3.6: sidebar is SSE-driven. Single fetch on mount seeds the
-  // list; subsequent add/remove flow from `agent_lifecycle`, status changes
-  // from `agent_status`, and unread badges from `agent_message` /
-  // `mail_delivered`. No 5s polling.
+  // F2-A: SSE drives the sidebar (lifecycle / status / message events
+  // update chat.agents inline), but a periodic /api/agents poll
+  // self-heals any missed event (cross-tab divergence, reconnect gap,
+  // tab hidden during a flurry). 30s default; overridable via
+  // FRIDAY_AGENTS_POLL_MS for power users with a custom build.
+  const POLL_MS = (() => {
+    const env = (
+      import.meta as unknown as { env?: Record<string, string | undefined> }
+    ).env;
+    const raw = env?.PUBLIC_FRIDAY_AGENTS_POLL_MS;
+    const n = raw ? Number(raw) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : 30_000;
+  })();
   onMount(() => {
     void loadAgents();
+    const id = setInterval(() => void loadAgents(), POLL_MS);
+    return () => clearInterval(id);
   });
 
   function hrefFor(name: string, type: string): string {
@@ -82,6 +93,11 @@
     chat.agents
       .filter((a) => a.type !== "orchestrator")
       .filter((a) => {
+        // F2-D: always show the focused row, regardless of the filter
+        // state — the user is reading that agent's chat in the main
+        // pane, so losing the sidebar row when the agent gets archived
+        // mid-view is a UX cliff.
+        if (a.name === chat.focusedAgent) return true;
         if (a.status === "archived") return showArchived;
         if (!isActive(a.status)) return showInactive;
         return true;

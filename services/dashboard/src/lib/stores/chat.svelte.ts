@@ -176,17 +176,25 @@ export class ChatState {
   private static readonly IDLE_DEBOUNCE_MS = 750;
 
   /** Insert or refresh a local AgentInfo entry. Used when SSE events arrive
-   * for an agent the 5s `/api/agents` poll hasn't reported yet (newly
-   * spawned). The next poll fills in details we don't know here. */
+   * for an agent the periodic `/api/agents` poll hasn't reported yet
+   * (newly spawned). The next poll fills in details we don't know here.
+   *
+   * F2-B: refuse to insert without a known `type`. SSE events like
+   * `agent_status` carry no type, so an event for an agent we haven't
+   * seen before used to create a row with type="unknown" — which
+   * rendered as a literal UNKNOWN label in the sidebar until the next
+   * spawn event landed. Better to drop the upsert and wait for either
+   * a lifecycle event (which has `type`) or the next /api/agents poll. */
   upsertAgent(
     name: string,
     patch: Partial<Omit<AgentInfo, "name">>,
   ): void {
     const i = this.agents.findIndex((a) => a.name === name);
     if (i === -1) {
+      if (!patch.type) return;
       this.agents.push({
         name,
-        type: patch.type ?? "unknown",
+        type: patch.type,
         status: patch.status ?? "idle",
         sessionId: patch.sessionId,
         sessionCount: patch.sessionCount,
@@ -993,6 +1001,14 @@ export class ChatState {
           // Mark as archived; row stays in chat.agents so "Show archived"
           // can surface it. Sessions persist as history forever.
           this.upsertAgent(event.agent, { status: "archived" });
+        } else if (event.event === "complete") {
+          // F2-A: worker exited cleanly. The daemon already flipped
+          // status to idle (F1-A); reflect it locally so tabs that
+          // missed the prior agent_status: idle don't drift. upsertAgent
+          // refuses to create with type="unknown" (F2-B), so a stray
+          // complete for an unknown agent is a safe no-op — the next
+          // /api/agents poll will surface it.
+          this.upsertAgent(event.agent, { status: "idle" });
         }
         break;
       case "agent_status":

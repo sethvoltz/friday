@@ -944,3 +944,108 @@ describe("mail block rendering", () => {
     expect(uc?.text).toBe("typed by seth");
   });
 });
+
+// PR B — sidebar realtime / UNKNOWN type / Show-archived.
+describe("agent_lifecycle handling (PR B)", () => {
+  it("F2-B: agent_status for an unknown agent does NOT insert a row", async () => {
+    // The bug we're guarding: an agent_status SSE event arrived for an
+    // agent the dashboard hadn't yet seen (still mid-spawn, or replayed
+    // after /api/agents fetched). upsertAgent used to default
+    // type="unknown" and render a literal UNKNOWN-typed row. Now it
+    // refuses the insert until a lifecycle event with `type` lands.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.agents = [];
+    chat.applyEvent({
+      v: 1,
+      type: "agent_status",
+      agent: "ghost-agent",
+      status: "working",
+      since: 1,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.agents.find((a) => a.name === "ghost-agent")).toBeUndefined();
+  });
+
+  it("F2-B: agent_status for a known agent updates status without changing type", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.agents = [
+      {
+        name: "alpha",
+        type: "builder",
+        status: "working",
+      },
+    ];
+    chat.applyEvent({
+      v: 1,
+      type: "agent_status",
+      agent: "alpha",
+      status: "stalled",
+      since: 2,
+      seq: 2,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const a = chat.agents.find((x) => x.name === "alpha");
+    expect(a?.type).toBe("builder");
+    expect(a?.status).toBe("stalled");
+  });
+
+  it("F2-C: agent_lifecycle: archive marks status=archived (does NOT remove the row)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.agents = [
+      {
+        name: "beta",
+        type: "builder",
+        status: "working",
+      },
+    ];
+    chat.applyEvent({
+      v: 1,
+      type: "agent_lifecycle",
+      agent: "beta",
+      agentType: "builder",
+      event: "archive",
+      seq: 3,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const b = chat.agents.find((x) => x.name === "beta");
+    expect(b, "row stays in agents list").toBeDefined();
+    expect(b?.status).toBe("archived");
+  });
+
+  it("F2-A: agent_lifecycle: complete flips a known agent to idle", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.agents = [
+      {
+        name: "gamma",
+        type: "helper",
+        status: "working",
+      },
+    ];
+    chat.applyEvent({
+      v: 1,
+      type: "agent_lifecycle",
+      agent: "gamma",
+      agentType: "helper",
+      event: "complete",
+      seq: 4,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.agents.find((x) => x.name === "gamma")?.status).toBe("idle");
+  });
+
+  it("F2-A: agent_lifecycle: complete for an unknown agent is a no-op", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.agents = [];
+    chat.applyEvent({
+      v: 1,
+      type: "agent_lifecycle",
+      agent: "ghost",
+      agentType: "helper",
+      event: "complete",
+      seq: 5,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.agents).toHaveLength(0);
+  });
+});
