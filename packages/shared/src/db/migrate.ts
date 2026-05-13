@@ -65,5 +65,20 @@ function ensureFtsTables(): void {
         VALUES ('delete', old.id, old.content_json);
       INSERT INTO blocks_fts(rowid, content_json) VALUES (new.id, new.content_json);
     END;
+
+    CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory_entries BEGIN
+      INSERT INTO memory_fts(rowid, title, content, tags_json)
+        VALUES (new.rowid, new.title, new.content, new.tags_json);
+    END;
+    CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory_entries BEGIN
+      INSERT INTO memory_fts(memory_fts, rowid, title, content, tags_json)
+        VALUES ('delete', old.rowid, old.title, old.content, old.tags_json);
+    END;
+    CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory_entries BEGIN
+      INSERT INTO memory_fts(memory_fts, rowid, title, content, tags_json)
+        VALUES ('delete', old.rowid, old.title, old.content, old.tags_json);
+      INSERT INTO memory_fts(rowid, title, content, tags_json)
+        VALUES (new.rowid, new.title, new.content, new.tags_json);
+    END;
   `);
 }

@@ -18,6 +18,10 @@ import {
   runMigrations,
   schema,
 } from "@friday/shared";
+import {
+  resetRateLimitPrefix,
+  revokeAllSessionsForUser,
+} from "@friday/shared/services";
 import { BANNER } from "../lib/branding.js";
 
 export const setupCommand = defineCommand({
@@ -118,7 +122,27 @@ export const setupCommand = defineCommand({
           .set({ password: hashed, updatedAt: new Date() })
           .where(eq(schema.accounts.userId, user.id))
           .run();
+        // FIX_FORWARD 5.7: a legitimate password reset should clear any
+        // pending sign-in lockouts left by the forgotten attempts that
+        // led the user here.
+        const cleared = resetRateLimitPrefix("auth:");
+        // FIX_FORWARD 5.11: revoke every active session — a forgotten
+        // password is a security-event class, and any old cookie an
+        // attacker may have lifted should stop working immediately.
+        const revoked = revokeAllSessionsForUser(user.id);
         console.log(pc.green(`  password updated for ${user.email}`));
+        if (revoked > 0) {
+          console.log(
+            pc.dim(
+              `  revoked ${revoked} active session${revoked === 1 ? "" : "s"}`,
+            ),
+          );
+        }
+        if (cleared > 0) {
+          console.log(
+            pc.dim(`  cleared ${cleared} stale auth rate-limit entr${cleared === 1 ? "y" : "ies"}`),
+          );
+        }
       } catch (err) {
         console.error(
           pc.red(

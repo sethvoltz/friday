@@ -1,14 +1,53 @@
 import { redirect, type Handle } from "@sveltejs/kit";
 import { auth } from "$lib/server/auth";
 import { logger } from "$lib/server/log";
+import { consumeRateLimit } from "@friday/shared/services";
 
 const PUBLIC_PATHS = new Set(["/login", "/api/auth"]);
+
+/** FIX_FORWARD 5.7: sign-in rate limit — 5 attempts per 15-minute window
+ *  per client IP, with a 30-minute lockout once the 6th attempt arrives.
+ *  Bypassed for non-sign-in auth routes (sign-out, session, etc). */
+const SIGN_IN_WINDOW_MS = 15 * 60 * 1000;
+const SIGN_IN_MAX = 5;
+const SIGN_IN_LOCKOUT_MS = 30 * 60 * 1000;
 
 export const handle: Handle = async ({ event, resolve }) => {
   const start = Date.now();
 
   // BetterAuth route handler — handles /api/auth/* itself
   if (event.url.pathname.startsWith("/api/auth")) {
+    // Rate-limit the sign-in attempt before forwarding. /api/auth/sign-in/*
+    // covers /sign-in/email; /api/auth/sign-out etc. pass through.
+    if (
+      event.url.pathname.startsWith("/api/auth/sign-in") &&
+      event.request.method === "POST"
+    ) {
+      const ip =
+        event.request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+        event.getClientAddress();
+      const r = consumeRateLimit({
+        key: `auth:${ip}`,
+        windowMs: SIGN_IN_WINDOW_MS,
+        max: SIGN_IN_MAX,
+        lockoutMs: SIGN_IN_LOCKOUT_MS,
+      });
+      if (!r.allowed) {
+        return new Response(
+          JSON.stringify({
+            error: "rate_limited",
+            retry_after_ms: r.retryAfterMs,
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "retry-after": String(Math.ceil((r.retryAfterMs ?? 0) / 1000)),
+            },
+          },
+        );
+      }
+    }
     return auth.handler(event.request);
   }
 

@@ -19,8 +19,12 @@
 
   const html = $derived.by(() => {
     const raw = marked.parse(source ?? "", { gfm: true, breaks: true, async: false }) as string;
-    // KaTeX emits MathML; allow it. The mermaid marker is a plain <pre class>.
-    return DOMPurify.sanitize(raw, { USE_PROFILES: { html: true, mathMl: true, svg: true } });
+    // KaTeX emits MathML; allow it. The mermaid marker is a plain
+    // <pre class="mermaid">…</pre> placeholder that the post-DOMPurify
+    // pass swaps for a rendered diagram, so we do NOT need to allow raw
+    // SVG through DOMPurify (FIX_FORWARD 5.2 — narrowing the surface
+    // closes a class of SVG-borne XSS / use-after-paint vectors).
+    return DOMPurify.sanitize(raw, { USE_PROFILES: { html: true, mathMl: true } });
   });
 
   // After every render, rescan for `.mermaid` blocks and mount diagrams. The

@@ -28,6 +28,16 @@ export interface UploadInput {
 /** Pixel-dimension cap on the longest edge when downscaling oversized images. */
 const IMAGE_MAX_DIMENSION = 2048;
 
+/* ---------------- Image-pipeline safety bounds (FIX_FORWARD 5.4) ---------------- */
+/** Hard upper bound on total decoded pixels. sharp's libvips internally
+ *  enforces this — a malicious image that decompresses to billions of
+ *  pixels would otherwise pin a worker for ages and consume gigs of RAM. */
+const SHARP_LIMIT_INPUT_PIXELS = 100_000_000;
+/** Pre-pipeline metadata sanity bounds. */
+const META_MAX_DIMENSION = 32_768;
+/** Conversion-pipeline wall-clock budget. */
+const CONVERSION_TIMEOUT_MS = 10_000;
+
 /**
  * Idempotent upload. DB row is the dedup primary; path existence is a
  * resilience check (we re-write from incoming bytes if the file went missing).
@@ -45,15 +55,7 @@ export async function uploadAttachment(
   let mime = input.mime;
 
   if (isHeic(input.bytes, input.mime)) {
-    bytes = await sharp(input.bytes)
-      .resize({
-        width: IMAGE_MAX_DIMENSION,
-        height: IMAGE_MAX_DIMENSION,
-        fit: "inside",
-        withoutEnlargement: true,
-      })
-      .toFormat("png")
-      .toBuffer();
+    bytes = await convertHeicToPng(input.bytes);
     mime = "image/png";
     filename = swapExt(input.filename, ".png");
   }
@@ -164,4 +166,65 @@ function rowToAttachment(
     firstTurnId: r.firstTurnId,
     path,
   };
+}
+
+/**
+ * Convert a HEIC/HEIF buffer to PNG with FIX_FORWARD 5.4 safety bounds:
+ *   - `limitInputPixels: 100M` rejects pathological decompression bombs.
+ *   - `failOn: 'warning'` aborts on libvips warnings (truncated headers,
+ *     suspicious metadata) instead of silently producing garbage.
+ *   - Pre-pipeline `metadata()` validates that width/height are present
+ *     and within sane bounds — guards against zero / negative / overflow
+ *     dimensions that the decoder might accept but a downstream consumer
+ *     would crash on.
+ *   - The whole pipeline races a 10s timeout. A truly slow decode would
+ *     otherwise tie up the daemon's upload handler indefinitely.
+ */
+async function convertHeicToPng(input: Buffer): Promise<Buffer> {
+  const meta = await sharp(input, {
+    limitInputPixels: SHARP_LIMIT_INPUT_PIXELS,
+    failOn: "warning",
+  }).metadata();
+  if (
+    !meta.width ||
+    !meta.height ||
+    meta.width <= 0 ||
+    meta.height <= 0 ||
+    meta.width > META_MAX_DIMENSION ||
+    meta.height > META_MAX_DIMENSION
+  ) {
+    throw new Error(
+      `image dimensions out of bounds: ${meta.width ?? "?"}×${meta.height ?? "?"}`,
+    );
+  }
+
+  const pipeline = sharp(input, {
+    limitInputPixels: SHARP_LIMIT_INPUT_PIXELS,
+    failOn: "warning",
+  })
+    .resize({
+      width: IMAGE_MAX_DIMENSION,
+      height: IMAGE_MAX_DIMENSION,
+      fit: "inside",
+      withoutEnlargement: true,
+    })
+    .toFormat("png")
+    .toBuffer();
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `image conversion timed out after ${CONVERSION_TIMEOUT_MS}ms`,
+        ),
+      );
+    }, CONVERSION_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([pipeline, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

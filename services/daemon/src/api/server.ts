@@ -17,6 +17,7 @@ import {
 import {
   addComment,
   closeMail,
+  consumeRateLimit,
   createTicket,
   externalLinks,
   fetchBlocksByAgent,
@@ -127,6 +128,12 @@ async function handle(
 
   // --- Health ---
   if (method === "GET" && path === "/api/health") {
+    // FIX_FORWARD 5.8: gate /api/health behind the same-host secret so a
+    // local web page (or a DNS-rebind attacker) can't probe daemon status
+    // without first reading ~/.friday/.daemon-secret.
+    if (!authorizeSameHost(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
     return json(res, 200, { ok: true, ts: Date.now() });
   }
 
@@ -871,6 +878,21 @@ async function handle(
   }
   if (method === "POST" && path === "/api/mail/send") {
     const body = await readJson<Parameters<typeof sendMail>[0]>(req);
+    // FIX_FORWARD 5.7: per-agent mail rate limit — 50 mails / 5min / from.
+    // A runaway tool that spams the orchestrator can't drown the mail bus.
+    const fromAgent = body.fromAgent || "__unknown__";
+    const r = consumeRateLimit({
+      key: `mail:${fromAgent}`,
+      windowMs: 5 * 60 * 1000,
+      max: 50,
+    });
+    if (!r.allowed) {
+      return json(res, 429, {
+        error: "rate_limited",
+        detail: `agent ${fromAgent} exceeded 50 mails / 5 min`,
+        retry_after_ms: r.retryAfterMs,
+      });
+    }
     return json(res, 200, sendMail(body));
   }
   if (method === "POST" && /^\/api\/mail\/\d+\/read$/.test(path)) {
@@ -905,7 +927,11 @@ async function handle(
       return json(res, 401, { error: "unauthorized" });
     }
     const contentLength = Number(req.headers["content-length"] ?? 0);
-    const MAX_BYTES = 25 * 1024 * 1024; // 25MB; mirrors common chat-attachment caps.
+    // FIX_FORWARD 5.5: 15 MB hard cap, enforced at stream-receive so a
+    // pathological client can't pump gigabytes before sharp gets involved.
+    // Anthropic's vision API caps attachments around 20 MB; 15 MB leaves
+    // headroom for downstream re-encodes while still bounding daemon RAM.
+    const MAX_BYTES = 15 * 1024 * 1024;
     if (contentLength > MAX_BYTES) {
       return json(res, 413, {
         error: `file exceeds ${MAX_BYTES} bytes`,

@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { DATA_DIR } from "./config.js";
@@ -32,8 +38,12 @@ export function getDaemonSecret(): string {
   // and fall through to a read on EEXIST.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      cached = readFileSync(DAEMON_SECRET_PATH, "utf8").trim();
-      if (cached) return cached;
+      const value = readFileSync(DAEMON_SECRET_PATH, "utf8").trim();
+      if (value) {
+        verifyDaemonSecretPermissions();
+        cached = value;
+        return cached;
+      }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
@@ -52,6 +62,28 @@ export function getDaemonSecret(): string {
   throw new Error(
     `failed to read or create daemon secret at ${DAEMON_SECRET_PATH}`,
   );
+}
+
+/**
+ * FIX_FORWARD 5.9: after reading the daemon-secret file, assert that no
+ * group/other bits are set (`mode & 0o077 === 0`). If the file is
+ * group- or world-readable, any other user on a shared machine could
+ * impersonate the daemon's clients — log fatally and exit immediately
+ * so the operator sees the issue at startup, not after the breach.
+ */
+function verifyDaemonSecretPermissions(): void {
+  // Windows reports mode bits as 0666; the check is meaningful only on
+  // unix-y filesystems where chmod 0600 is enforced.
+  if (process.platform === "win32") return;
+  const st = statSync(DAEMON_SECRET_PATH);
+  const perm = st.mode & 0o777;
+  if ((perm & 0o077) !== 0) {
+    const octal = perm.toString(8).padStart(3, "0");
+    const msg = `FATAL: daemon-secret file ${DAEMON_SECRET_PATH} has mode ${octal} (group/other bits set). Run: chmod 0600 ${DAEMON_SECRET_PATH}`;
+    // eslint-disable-next-line no-console
+    console.error(msg);
+    process.exit(1);
+  }
 }
 
 export const DAEMON_SECRET_HEADER = "x-friday-daemon-secret";
