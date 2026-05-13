@@ -1,10 +1,12 @@
 import type { PageServerLoad } from "./$types";
 import { daemonGet } from "$lib/server/daemon";
+import type { MemoryEntry } from "@friday/memory";
 
 export const load: PageServerLoad = async () => {
   try {
-    return { entries: await daemonGet<unknown[]>("/api/memory") };
+    const entries = await daemonGet<MemoryEntry[]>("/api/memory");
+    return { entries };
   } catch {
-    return { entries: [] };
+    return { entries: [] as MemoryEntry[] };
   }
 };

@@ -116,6 +116,12 @@ export class ChatState {
    *  `agent_message` events while another agent is focused; cleared when
    *  the user focuses the agent. */
   unreadByAgent = $state<Record<string, number>>({});
+  /** Transient toast surfaced by client-side commands (FIX_FORWARD 6.1).
+   *  `null` when no toast is active. ChatShell mounts a floating pill. */
+  toast = $state<{ message: string; level: "info" | "warn" } | null>(null);
+  /** Bubble id to highlight after a `/jump` (FIX_FORWARD 6.1). The
+   *  matching ChatMessage element scrolls into view and pulses briefly. */
+  highlightedMessageId = $state<string | null>(null);
   /** Smallest `dbTurnId` we've loaded; pagination cursor for older turns. */
   oldestDbId = $state<number | null>(null);
   /** True while a paginated fetch is in flight; prevents re-entrant calls. */
@@ -301,6 +307,65 @@ export class ChatState {
    *  and continue"). */
   discardAllPending(): void {
     this.messages = this.messages.filter((m) => !m.pending);
+  }
+
+  /** Show a transient toast for `ms` (default 4000). FIX_FORWARD 6.1. */
+  setToast(message: string, level: "info" | "warn" = "info", ms = 4000): void {
+    this.toast = { message, level };
+    setTimeout(() => {
+      // Don't clobber a later toast that landed during the timeout.
+      if (this.toast && this.toast.message === message) this.toast = null;
+    }, ms);
+  }
+
+  /**
+   * Implements `/jump <date|term>` (FIX_FORWARD 6.1).
+   *
+   * Tries to interpret `arg` as a date first (Date.parse + a few NL
+   * keywords). On a finite parse, requests the `around_ts` window;
+   * otherwise hits `match=` for FTS lookup. Replaces `messages` with
+   * the returned block window and marks the first hit for highlight.
+   * Surfaces a toast if no blocks come back.
+   */
+  async jumpTo(agent: string, arg: string): Promise<void> {
+    const trimmed = arg.trim();
+    if (!trimmed) {
+      this.setToast("Usage: /jump <date|term>", "warn");
+      return;
+    }
+    const ts = parseJumpDate(trimmed);
+    const url =
+      ts !== null
+        ? `/api/agents/${encodeURIComponent(agent)}/blocks?around_ts=${ts}&before_limit=10&after_limit=40`
+        : `/api/agents/${encodeURIComponent(agent)}/blocks?match=${encodeURIComponent(trimmed)}&limit=20`;
+    try {
+      const r = await fetch(url);
+      if (!r.ok) {
+        this.setToast("Couldn't search this chat.", "warn");
+        return;
+      }
+      const data = (await r.json()) as { blocks: BlockRow[] };
+      if (!data.blocks || data.blocks.length === 0) {
+        this.setToast("No match in this chat.", "warn");
+        return;
+      }
+      const parsed = parseBlocks(data.blocks, agent);
+      this.messages = parsed;
+      // First match: for `around_ts` that's the block at or just after
+      // the target ts; for `match` that's the top-ranked hit (first
+      // returned, then parseBlocks sorted by id asc so it's the oldest
+      // in the result set). Either way, the first non-tool, non-
+      // thinking bubble is what the user is looking for.
+      const target = parsed.find(
+        (m) => m.role === "user" || m.role === "assistant",
+      );
+      this.highlightedMessageId = target?.id ?? null;
+    } catch (err) {
+      this.setToast(
+        err instanceof Error ? err.message : "Jump failed.",
+        "warn",
+      );
+    }
   }
 
   startAssistantTurn(turnId: string, agent: string): void {
@@ -1029,6 +1094,57 @@ export function oldestBlockCursor(blocks: BlockRow[]): string | null {
     if (oldest === null || b.id < oldest.id) oldest = b;
   }
   return oldest?.blockId ?? null;
+}
+
+/**
+ * Lightweight NL-ish date parser for `/jump` (FIX_FORWARD 6.1). Recognizes
+ * the most common cases:
+ *   - "today", "yesterday", "now"
+ *   - "N days ago" / "N hours ago" / "N minutes ago"
+ *   - ISO 8601, RFC 2822, or anything else Date.parse handles
+ *
+ * Returns the matched timestamp in unix ms, or `null` to fall through to
+ * the term-search path. A full chrono-node integration could replace this
+ * later without changing the public API.
+ */
+export function parseJumpDate(input: string): number | null {
+  const trimmed = input.trim().toLowerCase();
+  if (!trimmed) return null;
+  const now = Date.now();
+  if (trimmed === "now") return now;
+  if (trimmed === "today") {
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    return d.getTime();
+  }
+  if (trimmed === "yesterday") {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    d.setHours(12, 0, 0, 0);
+    return d.getTime();
+  }
+  const rel = trimmed.match(/^(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks)\s+ago$/);
+  if (rel) {
+    const n = Number(rel[1]);
+    const unit = rel[2];
+    const ms =
+      unit.startsWith("minute")
+        ? n * 60_000
+        : unit.startsWith("hour")
+          ? n * 3_600_000
+          : unit.startsWith("week")
+            ? n * 7 * 86_400_000
+            : n * 86_400_000;
+    return now - ms;
+  }
+  // Last resort: Date.parse. Filter out values too far from "now" to be
+  // a real date the user typed — bare integers like "42" coerce to
+  // 1970-01-01, which we don't want to treat as a date.
+  const parsed = Date.parse(input);
+  if (!Number.isFinite(parsed)) return null;
+  const year = new Date(parsed).getFullYear();
+  if (year < 2000 || year > 2100) return null;
+  return parsed;
 }
 
 export interface TurnRow {

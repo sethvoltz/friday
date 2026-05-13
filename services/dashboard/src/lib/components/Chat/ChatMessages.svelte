@@ -167,6 +167,29 @@
     obs.observe(bottomSentinel);
     return () => obs.disconnect();
   });
+
+  // FIX_FORWARD 6.1: when chat.highlightedMessageId changes, scroll the
+  // matching bubble into view and pulse the highlight ring. The
+  // animation lives in CSS (.jump-highlight); we just need to make sure
+  // the element is visible.
+  $effect(() => {
+    if (readonly) return;
+    const id = chat.highlightedMessageId;
+    if (!id) return;
+    queueMicrotask(() => {
+      const el = document.querySelector<HTMLElement>(
+        `[data-msg-id="${CSS.escape(id)}"]`,
+      );
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      // Clear the highlight after the animation finishes so a re-jump to
+      // the same id still triggers a fresh pulse.
+      const timer = setTimeout(() => {
+        if (chat.highlightedMessageId === id) chat.highlightedMessageId = null;
+      }, 2500);
+      return () => clearTimeout(timer);
+    });
+  });
 </script>
 
 <div class="list">
@@ -235,7 +258,11 @@
           status={msg.status === "done" ? "done" : "running"} />
       </div>
     {:else}
-      <div class="message {msg.role}" data-status={msg.status}>
+      <div
+        class="message {msg.role}"
+        class:jump-highlight={!readonly && chat.highlightedMessageId === msg.id}
+        data-status={msg.status}
+        data-msg-id={msg.id}>
         <div class="bubble">
           {#if msg.role === "user"}
             <div class="text user-text">{msg.text}</div>
@@ -304,6 +331,26 @@
   }
   .message.user {
     justify-content: flex-end;
+  }
+  /* FIX_FORWARD 6.1: /jump match highlight. Bright outline that fades
+     after ~2s — long enough for the user to see what was matched. */
+  .message.jump-highlight :global(.bubble) {
+    animation: jump-pulse 2s ease-out 1;
+    border-radius: var(--radius-md);
+  }
+  @keyframes jump-pulse {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary) 60%, transparent);
+    }
+    30% {
+      box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent-primary) 25%, transparent);
+    }
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-primary) 0%, transparent);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .message.jump-highlight :global(.bubble) { animation: none; }
   }
   .message.assistant {
     justify-content: flex-start;

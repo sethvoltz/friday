@@ -260,8 +260,11 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
         },
       ),
       tool(
-        "workspace_cleanup",
-        "Remove a builder's git worktree once its work has merged. Only call after the builder is killed and its branch is merged or abandoned.",
+        "agent_delete_workspace",
+        // FIX_FORWARD 6.4: the deletion language is the contract. The
+        // model MUST NOT autonomously invoke this tool. Every call must
+        // be preceded by an explicit user "yes" in the conversation.
+        "Permanently delete a builder's workspace — both the git worktree and the parent folder under `~/.friday/workspaces/<name>/`. NEVER auto-invoke this tool. Always present the proposed deletion to the user (which agent, which workspace path) and wait for explicit confirmation before calling. The user MUST say yes by message before this tool is called. Suitable only after the builder has been killed and its branch is merged or abandoned. The daemon double-checks that the resolved path is inside `~/.friday/workspaces/` before any filesystem op.",
         { name: z.string().describe("Builder agent name.") },
         async (args) => {
           const row = await daemonFetch({

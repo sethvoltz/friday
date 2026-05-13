@@ -81,22 +81,50 @@
     const sp = text.indexOf(" ");
     return sp === -1 ? "" : text.slice(sp + 1);
   });
+  /** Purely client-side slash commands — intercepted in ChatInput before
+   *  the system-command lookup. Surfaced in autocomplete alongside daemon
+   *  system commands. FIX_FORWARD 6.1. */
+  const CLIENT_COMMANDS: Array<{
+    name: string;
+    description: string;
+  }> = [
+    {
+      name: "jump",
+      description:
+        "Search this chat. /jump <term> for FTS match, /jump <date> for a time window (today, yesterday, '2 hours ago', ISO date).",
+    },
+  ];
+
   let suggestions = $derived.by(() => {
     if (!showAutocomplete) return [];
     const q = slashPart.toLowerCase();
     const sys = commands.system
       .filter((c) => c.name.toLowerCase().startsWith(q))
       .map((c) => ({ ...c, kind: "system" as const }));
+    const client = CLIENT_COMMANDS.filter((c) =>
+      c.name.toLowerCase().startsWith(q),
+    ).map((c) => ({ ...c, kind: "system" as const }));
     const sk = commands.skills
       .filter((s) => s.name.toLowerCase().startsWith(q))
       .map((s) => ({ ...s, kind: "skill" as const }));
-    return [...sys, ...sk];
+    return [...client, ...sys, ...sk];
   });
 
   let selectedIdx = $state(0);
+  /** FIX_FORWARD 6.2: Slack-style menu nav. `false` until the user
+   *  arrow-keys into the menu — then the textarea hides its caret and
+   *  the highlighted item paints actively. Reset to false on typing /
+   *  Esc / apply / menu close. */
+  let inMenu = $state(false);
   $effect(() => {
     suggestions.length;
     selectedIdx = 0;
+    if (suggestions.length === 0) inMenu = false;
+  });
+  // Hand focus back to the input the moment the menu closes (no
+  // suggestions, or autocomplete trigger gone).
+  $effect(() => {
+    if (!showAutocomplete) inMenu = false;
   });
 
   interface PendingAttachment {
@@ -280,6 +308,15 @@
       const space = t.indexOf(" ");
       const name = (space === -1 ? t.slice(1) : t.slice(1, space)).toLowerCase();
       const args = space === -1 ? "" : t.slice(space + 1);
+      // FIX_FORWARD 6.1: /jump is a purely client-side command — it
+      // searches the current agent's blocks and re-paints the chat to
+      // the matched window. Intercepted before the system-command lookup
+      // so the daemon never sees it.
+      if (name === "jump") {
+        text = "";
+        await chat.jumpTo(chat.focusedAgent, args);
+        return;
+      }
       const sysCmd = commands.system.find((c) => c.name === name);
       if (sysCmd) {
         if (sysCmd.destructive) {
@@ -394,17 +431,40 @@
     if (showAutocomplete && suggestions.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        selectedIdx = (selectedIdx + 1) % suggestions.length;
+        if (!inMenu) {
+          // FIX_FORWARD 6.2: first arrow press transfers nav into the
+          // menu. Keep the current selectedIdx so the user lands on the
+          // visible first item.
+          inMenu = true;
+        } else {
+          selectedIdx = (selectedIdx + 1) % suggestions.length;
+        }
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        selectedIdx = (selectedIdx - 1 + suggestions.length) % suggestions.length;
+        if (!inMenu) {
+          inMenu = true;
+          selectedIdx = suggestions.length - 1;
+        } else {
+          selectedIdx =
+            (selectedIdx - 1 + suggestions.length) % suggestions.length;
+        }
         return;
       }
-      if (e.key === "Tab") {
+      if (e.key === "Tab" || (e.key === "Enter" && inMenu)) {
+        // Tab always applies; Enter only when the user actively navigated
+        // into the menu, so plain Enter without arrowing still submits.
         e.preventDefault();
         applySuggestion(selectedIdx);
+        inMenu = false;
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        inMenu = false;
+        // Close menu without consuming the input — same behavior Slack
+        // uses, lets the user keep typing the literal `/foo` text.
         return;
       }
     }
@@ -415,6 +475,14 @@
       e.preventDefault();
       void submit();
     }
+  }
+
+  // FIX_FORWARD 6.2: any keystroke that mutates input text yanks nav back
+  // out of the menu (typing should keep updating the autocomplete filter
+  // rather than fighting it). Hooked on `input` so it fires after the
+  // bound `text` has updated.
+  function onInput() {
+    if (inMenu) inMenu = false;
   }
 
   function applySuggestion(idx: number) {
@@ -601,11 +669,12 @@
     <div class="drop-overlay" aria-hidden="true">Drop to attach</div>
   {/if}
   {#if showAutocomplete && suggestions.length > 0}
-    <div class="autocomplete" role="listbox">
+    <div class="autocomplete" role="listbox" class:in-menu={inMenu}>
       {#each suggestions as s, i}
         <div
           class="row"
           class:selected={i === selectedIdx}
+          class:active={inMenu && i === selectedIdx}
           role="option"
           tabindex="-1"
           aria-selected={i === selectedIdx}
@@ -635,8 +704,9 @@
     <textarea
       bind:this={textarea}
       bind:value={text}
+      class:nav-in-menu={inMenu}
       onkeydown={onKeydown}
-      oninput={autoresize}
+      oninput={() => { onInput(); autoresize(); }}
       onpaste={onPaste}
       placeholder="Message Friday… or /command"
       rows="1"
@@ -840,9 +910,21 @@
     min-height: 44px;
     transition: background var(--transition-fast);
   }
+  /* FIX_FORWARD 6.2: passive selection (selectedIdx default) is subtle;
+     the active state — when the user has arrow-key'd into the menu —
+     paints with the accent so it reads as the focused row. */
   .row.selected,
   .row:hover {
     background: var(--bg-card-hover);
+  }
+  .row.active {
+    background: var(--accent-glow);
+    box-shadow: inset 2px 0 0 var(--accent-primary);
+  }
+  /* When nav has transferred into the menu, hide the textarea's caret so
+     the user has a clear visual that Enter applies the highlight. */
+  textarea.nav-in-menu {
+    caret-color: transparent;
   }
   .name {
     color: var(--accent-primary);

@@ -90,6 +90,30 @@ export interface LastRunMetadata {
   summary?: string;
 }
 
+export interface ScheduleArtifacts {
+  state: string | null;
+  lastRun: string | null;
+  stateDir: string;
+}
+
+/**
+ * FIX_FORWARD 6.6: surface the schedule's `state.md` + `last-run.md` to the
+ * dashboard. Both files are bounded — the worker overwrites them on each
+ * fire, so size never grows unboundedly — but we still cap reads at 256 KiB
+ * defensively in case the agent went off-script.
+ */
+export function readScheduleArtifacts(scheduleName: string): ScheduleArtifacts {
+  const dir = scheduleStateDir(scheduleName);
+  const state = readIfExists(join(dir, "state.md"));
+  const lastRun = readIfExists(join(dir, "last-run.md"));
+  const cap = 256 * 1024;
+  return {
+    state: state ? state.slice(0, cap) : null,
+    lastRun: lastRun ? lastRun.slice(0, cap) : null,
+    stateDir: dir,
+  };
+}
+
 export function writeLastRun(
   scheduleName: string,
   meta: LastRunMetadata,

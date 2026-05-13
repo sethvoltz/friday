@@ -85,6 +85,34 @@ export async function daemonPost<T>(
   return (await r.json()) as T;
 }
 
+export async function daemonPatch<T>(
+  path: string,
+  body: unknown,
+  opts?: DaemonFetchOpts,
+): Promise<T> {
+  const r = await fetch(`${BASE}${path}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...daemonAuthHeaders() },
+    body: JSON.stringify(body),
+    signal: buildSignal(opts),
+  });
+  if (!r.ok) throw new Error(`daemon PATCH ${path} → ${r.status}`);
+  return (await r.json()) as T;
+}
+
+export async function daemonDelete<T>(
+  path: string,
+  opts?: DaemonFetchOpts,
+): Promise<T> {
+  const r = await fetch(`${BASE}${path}`, {
+    method: "DELETE",
+    headers: daemonAuthHeaders(),
+    signal: buildSignal(opts),
+  });
+  if (!r.ok) throw new Error(`daemon DELETE ${path} → ${r.status}`);
+  return (await r.json()) as T;
+}
+
 export function daemonStream(path: string, init?: RequestInit): Promise<Response> {
   // SSE proxies pass through init.signal verbatim and set NO timeout — the
   // stream is long-lived by design. Aborts come from the upstream request.

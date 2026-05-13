@@ -1,16 +1,97 @@
 <script lang="ts">
   import type { PageData } from "./$types";
   import { invalidateAll } from "$app/navigation";
+  import { KEYS, saveString, loadString } from "$lib/stores/persistent";
+  import { onMount } from "svelte";
   let { data }: { data: PageData } = $props();
+
+  // FIX_FORWARD 6.3: explicit theme selector. The header still has the
+  // quick toggle; this widget surfaces and persists the choice.
+  let theme = $state<"light" | "dark">("dark");
+  onMount(() => {
+    const stored = loadString(KEYS.theme);
+    if (stored === "light" || stored === "dark") theme = stored;
+    else if (document.documentElement.dataset.theme === "light")
+      theme = "light";
+  });
+  function applyTheme(next: "light" | "dark") {
+    theme = next;
+    document.documentElement.dataset.theme = next;
+    saveString(KEYS.theme, next);
+  }
+
+  // FIX_FORWARD 6.3: configurable Friday settings (model + watchdog).
+  // PATCH writes back to ~/.friday/config.json via the dashboard's
+  // /api/settings endpoint. The server snapshot seeds these once; user
+  // edits are reflected locally from the PATCH response.
+  // svelte-ignore state_referenced_locally
+  let model = $state(data.settings.model);
+  // svelte-ignore state_referenced_locally
+  let watchdogRefork = $state(data.settings.watchdogRefork);
+  let savingSettings = $state(false);
+
+  const MODEL_OPTIONS: Array<{ id: string; label: string }> = [
+    { id: "claude-opus-4-7", label: "Claude Opus 4.7 — best for reasoning" },
+    { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 — balanced" },
+    { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 — fast / cheap" },
+  ];
+
+  async function patchSettings(body: Record<string, unknown>) {
+    savingSettings = true;
+    try {
+      const r = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) return;
+      const data = (await r.json()) as {
+        model: string;
+        watchdogRefork: boolean;
+      };
+      model = data.model;
+      watchdogRefork = data.watchdogRefork;
+    } finally {
+      savingSettings = false;
+    }
+  }
+
+  async function onModelChange(e: Event) {
+    const next = (e.target as HTMLSelectElement).value;
+    await patchSettings({ model: next });
+  }
+
+  async function onWatchdogChange(e: Event) {
+    const next = (e.target as HTMLInputElement).checked;
+    await patchSettings({ watchdogRefork: next });
+  }
+
+  // FIX_FORWARD 6.3: nuke every auth:* rate-limit bucket. Gated by a
+  // confirm() since the operator should explicitly acknowledge they're
+  // unlocking the sign-in surface.
+  async function resetAuthLimits() {
+    if (
+      !confirm(
+        "Clear every auth rate-limit and lockout? Pending sign-in attempts will start from zero.",
+      )
+    )
+      return;
+    const r = await fetch("/api/settings/reset-auth-limits", {
+      method: "POST",
+    });
+    if (r.ok) {
+      const { cleared } = (await r.json()) as { cleared: number };
+      alert(
+        cleared > 0
+          ? `Cleared ${cleared} rate-limit entr${cleared === 1 ? "y" : "ies"}.`
+          : "No pending rate-limit entries to clear.",
+      );
+    }
+  }
 
   async function signOut() {
     await fetch("/api/auth/sign-out", { method: "POST" });
     window.location.href = "/login";
-  }
-
-  function toggleTheme() {
-    const cur = document.documentElement.dataset.theme ?? "dark";
-    document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark";
   }
 
   /** FIX_FORWARD 5.11: revoke one session. If it's the current one, the
@@ -87,9 +168,80 @@
 
   <div class="card">
     <div class="card-header"><h2>Theme</h2></div>
-    <p class="row-value">Toggle between Friday's warm sunrise (light) and cool moody night (dark) palettes.</p>
+    <p class="row-value">
+      Friday ships a warm sunrise palette and a cool moody night palette. The
+      header has a quick toggle; pick one here and we'll remember it across
+      sessions.
+    </p>
+    <div class="theme-picker" role="radiogroup" aria-label="Theme">
+      <button
+        type="button"
+        class="theme-option"
+        class:selected={theme === "light"}
+        aria-pressed={theme === "light"}
+        onclick={() => applyTheme("light")}>
+        <span class="theme-swatch swatch-light"></span>
+        Light
+      </button>
+      <button
+        type="button"
+        class="theme-option"
+        class:selected={theme === "dark"}
+        aria-pressed={theme === "dark"}
+        onclick={() => applyTheme("dark")}>
+        <span class="theme-swatch swatch-dark"></span>
+        Dark
+      </button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Model</h2></div>
+    <p class="row-value">
+      Default Claude model the daemon uses for new turns. Existing forked
+      workers keep their current model until they exit.
+    </p>
     <div class="actions">
-      <button class="ghost" onclick={toggleTheme}>Toggle theme</button>
+      <select
+        class="model-select"
+        value={model}
+        onchange={onModelChange}
+        disabled={savingSettings}>
+        {#each MODEL_OPTIONS as opt (opt.id)}
+          <option value={opt.id}>{opt.label}</option>
+        {/each}
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Watchdog</h2></div>
+    <p class="row-value">
+      When an agent's worker process crashes mid-turn the watchdog can re-fork
+      it automatically. Turn this off if you'd rather diagnose the cause by
+      hand before letting Friday retry.
+    </p>
+    <label class="toggle-row">
+      <input
+        type="checkbox"
+        checked={watchdogRefork}
+        onchange={onWatchdogChange}
+        disabled={savingSettings} />
+      <span>Auto-refork crashed workers</span>
+    </label>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Rate limits</h2></div>
+    <p class="row-value">
+      Sign-in attempts and password resets are rate-limited per IP and per
+      email. Clear every <code>auth:*</code> bucket if you're locked out and
+      can't wait for the window to expire.
+    </p>
+    <div class="actions">
+      <button class="ghost danger" onclick={resetAuthLimits}>
+        Reset auth rate-limits
+      </button>
     </div>
   </div>
 
@@ -176,6 +328,63 @@
   }
   .config-card { grid-column: 1 / -1; }
   .sessions-card { grid-column: 1 / -1; }
+
+  .theme-picker {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+  .theme-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.8rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  .theme-option.selected {
+    border-color: var(--accent-primary);
+    background: var(--accent-glow);
+  }
+  .theme-swatch {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 1px solid var(--border-subtle);
+  }
+  .swatch-light {
+    background: linear-gradient(135deg, #fff4e0 0%, #ffd28a 100%);
+  }
+  .swatch-dark {
+    background: linear-gradient(135deg, #1c1f26 0%, #2a2f3a 100%);
+  }
+
+  .model-select {
+    padding: 0.45rem 0.6rem;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    min-width: 280px;
+  }
+  .model-select:disabled { opacity: 0.6; }
+
+  .toggle-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  .toggle-row input[type="checkbox"] { cursor: pointer; }
+  .toggle-row input[type="checkbox"]:disabled { cursor: default; }
 
   .session-list {
     list-style: none;

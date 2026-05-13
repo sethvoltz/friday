@@ -170,6 +170,30 @@ export function linkExternal(input: {
     .run();
 }
 
+/**
+ * FIX_FORWARD 6.7: detach an external link from a ticket. Returns true if a
+ * row was deleted, false otherwise. The (ticketId, system, externalId)
+ * triple is the PK so the delete is unambiguous.
+ */
+export function unlinkExternal(input: {
+  ticketId: string;
+  system: string;
+  externalId: string;
+}): boolean {
+  const db = getDb();
+  const result = db
+    .delete(schema.ticketExternalLinks)
+    .where(
+      and(
+        eq(schema.ticketExternalLinks.ticketId, input.ticketId),
+        eq(schema.ticketExternalLinks.system, input.system),
+        eq(schema.ticketExternalLinks.externalId, input.externalId),
+      ),
+    )
+    .run();
+  return (result.changes ?? 0) > 0;
+}
+
 export interface TicketExternalLinkRow {
   ticketId: string;
   system: string;

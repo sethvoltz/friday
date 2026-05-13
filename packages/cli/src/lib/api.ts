@@ -46,6 +46,25 @@ export class DaemonClient {
     return (await r.json()) as T;
   }
 
+  async patch<T>(path: string, body: unknown): Promise<T> {
+    const r = await fetch(`${this.base}${path}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...this.authHeaders() },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`PATCH ${path} → ${r.status}`);
+    return (await r.json()) as T;
+  }
+
+  async del<T>(path: string): Promise<T> {
+    const r = await fetch(`${this.base}${path}`, {
+      method: "DELETE",
+      headers: this.authHeaders(),
+    });
+    if (!r.ok) throw new Error(`DELETE ${path} → ${r.status}`);
+    return (await r.json()) as T;
+  }
+
   async ping(): Promise<boolean> {
     try {
       const r = await fetch(`${this.base}/api/health`, {

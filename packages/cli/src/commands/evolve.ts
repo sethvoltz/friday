@@ -12,6 +12,7 @@ import {
   appendRun,
   DEFAULT_RULE,
 } from "@friday/evolve";
+import { DaemonClient } from "../lib/api.js";
 
 export const evolveCommand = defineCommand({
   meta: { name: "evolve", description: "Self-improvement pipeline" },
@@ -158,6 +159,56 @@ export const evolveCommand = defineCommand({
             2,
           ),
         );
+      },
+    }),
+    apply: defineCommand({
+      // FIX_FORWARD 6.9: routes through the daemon so ticket creation + status
+      // update happen in one consistent transaction (same as the dashboard +
+      // MCP path). Local-only apply would miss the FRI- ticket id.
+      meta: {
+        name: "apply",
+        description: "Apply a proposal — creates a Friday ticket and marks it applied",
+      },
+      args: {
+        id: { type: "positional", required: true },
+        kind: {
+          type: "string",
+          description: "Ticket kind: task|epic|bug|chore (default: task)",
+        },
+        assignee: { type: "string" },
+      },
+      async run({ args }) {
+        const c = new DaemonClient();
+        const out = await c.post<{
+          proposal: { id: string; status: string; appliedTicketId: string };
+          ticket: { id: string };
+        }>(`/api/evolve/proposals/${encodeURIComponent(args.id as string)}/apply`, {
+          ticketKind: args.kind,
+          assignee: args.assignee,
+        });
+        console.log(
+          pc.green(`applied ${out.proposal.id} → ticket ${out.ticket.id}`),
+        );
+      },
+    }),
+    dismiss: defineCommand({
+      meta: {
+        name: "dismiss",
+        description: "Mark a proposal rejected with an optional reason",
+      },
+      args: {
+        id: { type: "positional", required: true },
+        reason: { type: "string" },
+      },
+      async run({ args }) {
+        const c = new DaemonClient();
+        const body: Record<string, unknown> = {};
+        if (args.reason) body.reason = args.reason;
+        await c.post(
+          `/api/evolve/proposals/${encodeURIComponent(args.id as string)}/dismiss`,
+          body,
+        );
+        console.log(pc.green(`dismissed ${args.id}`));
       },
     }),
   },

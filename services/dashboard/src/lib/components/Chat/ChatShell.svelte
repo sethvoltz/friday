@@ -225,6 +225,14 @@
   </div>
 {/if}
 
+<!-- FIX_FORWARD 6.1: transient toast surfaced by /jump and other client-
+     side commands. Auto-dismisses via chat.setToast(message, level, ms). -->
+{#if !readonly && chat.toast}
+  <div class="toast toast-{chat.toast.level}" role="status" aria-live="polite">
+    {chat.toast.message}
+  </div>
+{/if}
+
 {#if !readonly}
   <div class="chat-input-floating" bind:this={inputEl}>
     <ChatInput />
@@ -348,6 +356,28 @@
   button.floating-pill:hover {
     background: var(--bg-card);
     border-color: var(--border-primary);
+  }
+
+  /* FIX_FORWARD 6.1: jump/search toast. Bottom-center pill with status
+     colors. Auto-dismissed by chat.setToast's setTimeout. */
+  .toast {
+    position: fixed;
+    bottom: 6rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 40;
+    padding: 0.5rem 1rem;
+    border-radius: var(--radius-lg);
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-family: var(--font-mono);
+    box-shadow: var(--shadow-lg);
+  }
+  .toast-warn {
+    border-color: var(--status-warn, var(--accent-primary));
+    color: var(--status-warn, var(--accent-primary));
   }
   .spinner {
     width: 0.85rem;

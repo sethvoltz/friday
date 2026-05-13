@@ -23,6 +23,8 @@ import { json } from "@sveltejs/kit";
 import {
   daemonGet,
   daemonPost,
+  daemonPatch,
+  daemonDelete,
   daemonStream,
   type DaemonFetchOpts,
 } from "./daemon";
@@ -30,12 +32,16 @@ import {
 export interface DaemonClient {
   get<T>(path: string, opts?: DaemonFetchOpts): Promise<T>;
   post<T>(path: string, body: unknown, opts?: DaemonFetchOpts): Promise<T>;
+  patch<T>(path: string, body: unknown, opts?: DaemonFetchOpts): Promise<T>;
+  del<T>(path: string, opts?: DaemonFetchOpts): Promise<T>;
   stream(path: string, init?: RequestInit): Promise<Response>;
 }
 
 const daemon: DaemonClient = {
   get: daemonGet,
   post: daemonPost,
+  patch: daemonPatch,
+  del: daemonDelete,
   stream: daemonStream,
 };
 

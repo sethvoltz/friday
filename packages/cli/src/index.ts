@@ -14,6 +14,7 @@ import { mailCommand } from "./commands/mail.js";
 import { ticketsCommand } from "./commands/tickets.js";
 import { memoryCommand } from "./commands/memory.js";
 import { evolveCommand } from "./commands/evolve.js";
+import { schedulesCommand } from "./commands/schedules.js";
 
 const main = defineCommand({
   meta: {
@@ -36,6 +37,7 @@ const main = defineCommand({
     tickets: ticketsCommand,
     memory: memoryCommand,
     evolve: evolveCommand,
+    schedules: schedulesCommand,
   },
 });
 

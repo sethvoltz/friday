@@ -1,5 +1,6 @@
 import { redirect, type ServerLoad } from "@sveltejs/kit";
 import { listActiveSessionsForUser } from "@friday/shared/services";
+import { loadConfig, normalizeModelConfig } from "@friday/shared";
 
 export interface SessionSummary {
   id: string;
@@ -8,6 +9,11 @@ export interface SessionSummary {
   ipAddress: string | null;
   userAgent: string | null;
   isCurrent: boolean;
+}
+
+export interface SettingsSnapshot {
+  model: string;
+  watchdogRefork: boolean;
 }
 
 export const load: ServerLoad = async ({ locals }) => {
@@ -27,5 +33,12 @@ export const load: ServerLoad = async ({ locals }) => {
     isCurrent: locals.session?.id === r.id,
   }));
 
-  return { user: locals.user, sessions };
+  // FIX_FORWARD 6.3: configurable knobs surfaced in the settings page.
+  const cfg = loadConfig();
+  const settings: SettingsSnapshot = {
+    model: normalizeModelConfig(cfg.model).name,
+    watchdogRefork: cfg.watchdog?.refork ?? false,
+  };
+
+  return { user: locals.user, sessions, settings };
 };

@@ -26,6 +26,7 @@ import {
   getTicket,
   inbox,
   linkExternal,
+  unlinkExternal,
   listAgentSessions,
   listComments,
   listTickets,
@@ -80,6 +81,9 @@ import {
   triggerSchedule,
   upsertSchedule,
 } from "../scheduler/scheduler.js";
+import {
+  readScheduleArtifacts,
+} from "../scheduler/state.js";
 import * as registry from "../agent/registry.js";
 import {
   abortTurn,
@@ -524,6 +528,20 @@ async function handle(
     });
     return json(res, 200, { ok: true });
   }
+  if (method === "DELETE" && /^\/api\/tickets\/[^/]+\/links$/.test(path)) {
+    const id = path.split("/")[3];
+    if (!getTicket(id)) return json(res, 404, { error: "ticket not found" });
+    const system = url.searchParams.get("system");
+    const externalId = url.searchParams.get("externalId");
+    if (!system || !externalId) {
+      return json(res, 400, {
+        error: "system and externalId query params required",
+      });
+    }
+    const removed = unlinkExternal({ ticketId: id, system, externalId });
+    if (!removed) return json(res, 404, { error: "link not found" });
+    return json(res, 200, { ok: true });
+  }
 
   // --- Schedules ---
   if (method === "GET" && path === "/api/schedules") {
@@ -562,6 +580,12 @@ async function handle(
     const r = getSchedule(name);
     if (!r) return json(res, 404, { error: "schedule not found" });
     return json(res, 200, r);
+  }
+  if (method === "GET" && /^\/api\/schedules\/[^/]+\/state$/.test(path)) {
+    const name = decodeURIComponent(path.split("/")[3]);
+    if (!getSchedule(name))
+      return json(res, 404, { error: "schedule not found" });
+    return json(res, 200, readScheduleArtifacts(name));
   }
   if (method === "DELETE" && /^\/api\/schedules\/[^/]+$/.test(path)) {
     const name = decodeURIComponent(path.split("/")[3]);
