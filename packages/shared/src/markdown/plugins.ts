@@ -34,11 +34,59 @@ export function getMarkedExtensions(
     exts.push(markedKatex({ throwOnError: false }));
   }
 
+  // Order matters: marked calls renderer overrides last-registered-first
+  // with fall-through on `false`. Chrome is registered before mermaid so
+  // mermaid is checked first; on non-mermaid langs it returns false and
+  // chrome takes over.
+  exts.push(codeChromeExtension());
+
   if (opts.mermaid !== false) {
     exts.push(mermaidCodeBlockExtension());
   }
 
   return exts;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * Wraps every non-mermaid fenced code block in chrome — a header with
+ * the language label and a Copy button, plus the `<pre><code>` body that
+ * the dashboard's shiki pass later highlights into.
+ *
+ * The Copy button has no inline handler (DOMPurify would strip it and
+ * inline JS is bad form anyway); it's marked with `data-copy-action` so
+ * a single delegated click listener in `Markdown.svelte` can handle every
+ * code block in the document.
+ */
+function codeChromeExtension(): MarkedExtension {
+  return {
+    renderer: {
+      code(token: Tokens.Code) {
+        const lang = (token.lang ?? "").trim();
+        const langClass = lang ? ` class="language-${escapeHtml(lang)}"` : "";
+        const langLabel = lang
+          ? `<span class="code-lang">${escapeHtml(lang)}</span>`
+          : `<span class="code-lang code-lang-empty" aria-hidden="true"></span>`;
+        const body = `<pre><code${langClass}>${escapeHtml(token.text)}</code></pre>`;
+        return (
+          `<div class="code-block">` +
+          `<div class="code-header">` +
+          langLabel +
+          `<button type="button" class="code-copy" data-copy-action aria-label="Copy code">Copy</button>` +
+          `</div>` +
+          body +
+          `</div>`
+        );
+      },
+    },
+  };
 }
 
 /**

@@ -7,6 +7,7 @@
     applyStreamingMermaidGate,
     invalidateRenderedMermaid,
   } from "@friday/shared/markdown/streaming-mermaid";
+  import { applyCodeHighlight } from "@friday/shared/markdown/code-highlight";
   import { theme } from "$lib/stores/theme.svelte";
   import "katex/dist/katex.min.css";
 
@@ -25,8 +26,34 @@
   }
   ensureInstalled();
 
+  // Streaming markdown re-parse is throttled to 5Hz (200ms) so deep deltas
+  // don't pay the full marked + DOMPurify + shiki cost per SSE event. The
+  // final state always lands: as soon as `streaming` flips to false we
+  // flush immediately so the user sees the complete message without the
+  // last debounce window's latency.
+  const DEBOUNCE_MS = 200;
+  let debouncedSource = $state<string>("");
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  $effect(() => {
+    const src = source ?? "";
+    if (!streaming) {
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+      debouncedSource = src;
+      return;
+    }
+    if (debounceTimer) return;
+    debounceTimer = setTimeout(() => {
+      debouncedSource = source ?? "";
+      debounceTimer = null;
+    }, DEBOUNCE_MS);
+  });
+
   const html = $derived.by(() => {
-    const raw = marked.parse(source ?? "", { gfm: true, breaks: true, async: false }) as string;
+    const raw = marked.parse(debouncedSource, { gfm: true, breaks: true, async: false }) as string;
     // KaTeX emits MathML; allow it. The mermaid marker is a plain
     // <pre class="mermaid">…</pre> placeholder that the post-DOMPurify
     // pass swaps for a rendered diagram, so we do NOT need to allow raw
@@ -46,6 +73,50 @@
     run: (opts: { nodes: HTMLElement[] }) => Promise<void>;
   };
   let mermaidApi: MermaidApi | null = null;
+
+  // Shiki is dual-themed (Catppuccin Latte + Mocha) with defaultColor:false
+  // so every span carries both `--shiki-light` and `--shiki-dark` CSS
+  // variables. Theme switching is then pure CSS — no re-highlight on
+  // toggle, unlike mermaid which bakes colors into the SVG.
+  type ShikiApi = {
+    codeToHtml: (
+      code: string,
+      opts: {
+        lang: string;
+        themes: { light: string; dark: string };
+        defaultColor?: false;
+      },
+    ) => Promise<string>;
+  };
+  let shikiApi: ShikiApi | null = null;
+
+  async function highlightCode() {
+    if (!container) return;
+    const hasUnhighlighted = container.querySelector(
+      "pre > code[class*='language-']:not([data-shiki-rendered])",
+    );
+    if (!hasUnhighlighted) return;
+    if (!shikiApi) {
+      const mod = await import("shiki");
+      shikiApi = mod as unknown as ShikiApi;
+    }
+    await applyCodeHighlight(container, {
+      streaming,
+      highlight: async (code, lang) => {
+        const out = await shikiApi!.codeToHtml(code, {
+          lang,
+          themes: { light: "catppuccin-latte", dark: "catppuccin-mocha" },
+          defaultColor: false,
+        });
+        // Shiki returns a full <pre class="shiki"><code>…</code></pre>;
+        // we only want the inner token spans so they slot into our own
+        // chrome-wrapped <code> element.
+        const tmp = document.createElement("div");
+        tmp.innerHTML = out;
+        return tmp.querySelector("code")?.innerHTML ?? "";
+      },
+    });
+  }
 
   async function renderMermaid() {
     if (!container) return;
@@ -103,12 +174,35 @@
     queueMicrotask(() => {
       if (themeChanged && container) invalidateRenderedMermaid(container);
       void renderMermaid();
+      void highlightCode();
     });
   });
 
   onMount(() => {
     void mermaidLoaded;
     renderMermaid();
+    void highlightCode();
+    // Delegated copy-button handler — one listener for every code block in
+    // this Markdown instance. The button is emitted by codeChromeExtension
+    // (packages/shared/src/markdown/plugins.ts) with `data-copy-action`.
+    const onClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      const btn = target?.closest<HTMLElement>("[data-copy-action]");
+      if (!btn) return;
+      const block = btn.closest<HTMLElement>(".code-block");
+      const code = block?.querySelector<HTMLElement>("pre > code");
+      if (!code) return;
+      void navigator.clipboard.writeText(code.textContent ?? "");
+      const original = btn.textContent;
+      btn.textContent = "Copied!";
+      btn.classList.add("copied");
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.classList.remove("copied");
+      }, 1200);
+    };
+    container.addEventListener("click", onClick);
+    return () => container.removeEventListener("click", onClick);
   });
 </script>
 
@@ -161,6 +255,8 @@
     color: var(--text-secondary);
   }
 
+  /* Inline code (between single backticks). The `.code-block` wrapper
+     resets these — see below. */
   :global(.markdown code) {
     font-family: var(--font-mono);
     font-size: 0.8em;
@@ -170,21 +266,99 @@
     border-radius: var(--radius-sm, 4px);
   }
 
-  :global(.markdown pre) {
+  /* Fenced code block — chrome (lang chip + copy button) plus the pre/code
+     body. Emitted by codeChromeExtension in @friday/shared/markdown. */
+  :global(.markdown .code-block) {
     margin: 0.5rem 0;
-    padding: 0.75rem;
-    background: var(--bg-secondary);
+    background: var(--bg-code, var(--bg-secondary));
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
-    overflow-x: auto;
+    overflow: hidden;
   }
-  :global(.markdown pre code) {
+  :global(.markdown .code-block .code-header) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.3rem 0.6rem;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-subtle);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+  }
+  :global(.markdown .code-block .code-lang) {
+    color: var(--text-secondary);
+    text-transform: lowercase;
+    letter-spacing: 0.02em;
+  }
+  :global(.markdown .code-block .code-lang.code-lang-empty) {
+    visibility: hidden;
+  }
+  :global(.markdown .code-block .code-copy) {
+    appearance: none;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    padding: 0.1rem 0.5rem;
+    border-radius: var(--radius-sm, 4px);
+    cursor: pointer;
+    transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+  }
+  :global(.markdown .code-block .code-copy:hover) {
+    color: var(--text-primary);
+    border-color: var(--border-subtle);
+    background: var(--bg-secondary);
+  }
+  :global(.markdown .code-block .code-copy.copied) {
+    color: var(--accent-primary);
+    border-color: var(--accent-muted);
+  }
+  /* Touch devices need ≥44×44 tap targets (mobile-ux spec). Bump the
+     button + header padding without changing the desktop look. */
+  @media (pointer: coarse) {
+    :global(.markdown .code-block .code-header) {
+      padding: 0.35rem 0.6rem;
+    }
+    :global(.markdown .code-block .code-copy) {
+      min-height: 44px;
+      min-width: 44px;
+      padding: 0.5rem 0.85rem;
+    }
+  }
+  /* The body of the chrome — horizontal scroll, no wrap, per spec. */
+  :global(.markdown .code-block pre) {
+    margin: 0;
+    padding: 0.75rem;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    overflow-x: auto;
+    white-space: pre;
+    word-wrap: normal;
+  }
+  :global(.markdown .code-block pre > code) {
+    display: block;
     padding: 0;
     background: transparent;
     border: none;
+    border-radius: 0;
+    font-family: var(--font-mono);
     font-size: 0.78rem;
     line-height: 1.5;
+    white-space: pre;
+    color: var(--text-primary);
   }
+  /* Shiki dual-theme: every token span carries both --shiki-light and
+     --shiki-dark CSS variables (via defaultColor:false). We pick which
+     one to use based on the dashboard theme attribute on <html>. No
+     re-highlight is needed on theme toggle. */
+  :global(.markdown .code-block pre > code span) {
+    color: var(--shiki-light);
+  }
+  :global([data-theme="dark"] .markdown .code-block pre > code span) {
+    color: var(--shiki-dark);
+  }
+
 
   /* Mermaid renders SVG into the pre.mermaid block; let it breathe. */
   :global(.markdown pre.mermaid) {

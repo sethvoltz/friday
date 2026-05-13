@@ -190,6 +190,105 @@
     });
   });
 
+  // Async DOM mutations from mermaid (SVG mount), KaTeX (MathML layout),
+  // shiki (token spans changing line heights), and any future late-mount
+  // content land *after* Svelte's reactive effects have already committed
+  // their scroll math. Without compensation, two visible bugs:
+  //   1. Pinned-to-bottom users end up looking at the top of the late
+  //      content instead of the bottom (extra height pushed below them).
+  //   2. Mid-history users (scrolled up) see the viewport jump as
+  //      content above the visible area expands and shifts everything
+  //      down — classic broken-scroll-anchor UX.
+  //
+  // Browser-native `overflow-anchor: auto` would handle case 2, but the
+  // dashboard disables it explicitly (see .chat-scroll's overflow-anchor:
+  // none) to avoid fighting the manual scrollTop math in the pagination
+  // prepend handler. So we implement scroll anchoring ourselves: cache
+  // the topmost message that's visible (its id + offset from the scroller
+  // top) on every scroll event, then on every ResizeObserver tick adjust
+  // scrollTop by whatever delta that anchor moved, returning the user's
+  // viewport to where they were looking.
+  $effect(() => {
+    if (!scrollEl) return;
+    const inner = scrollEl.querySelector(".list");
+    if (!inner) return;
+
+    let anchorEl: HTMLElement | null = null;
+    let anchorOffset = 0;
+
+    function snapshotAnchor() {
+      if (!scrollEl) return;
+      const scrollerTop = scrollEl.getBoundingClientRect().top;
+      // First message bubble whose bottom is still inside (or below) the
+      // viewport top — i.e. the topmost element the user can actually see
+      // (or the one that just scrolled off the top by a hair).
+      const bubbles = scrollEl.querySelectorAll<HTMLElement>("[data-msg-id]");
+      for (const el of bubbles) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom > scrollerTop) {
+          anchorEl = el;
+          anchorOffset = r.top - scrollerTop;
+          return;
+        }
+      }
+      anchorEl = null;
+    }
+
+    snapshotAnchor();
+    scrollEl.addEventListener("scroll", snapshotAnchor, { passive: true });
+
+    // WebKit/iOS Safari paint-defer fix (same shape as the pagination
+    // prepend handler in ChatMessages.svelte). A programmatic scrollTop
+    // write that lands while the scroll thread is still hot (mid-momentum
+    // or just-stopped) defers paint of the newly-revealed region until
+    // the next user scroll. Toggling overflow-y: hidden synchronously
+    // detaches the element from the scroll thread, forcing a paint
+    // commit; the async restore reattaches with a fresh paint. Mobile-
+    // critical: without this, iOS users get blank regions during
+    // late-render-driven scroll adjustments.
+    function writeScrollTop(newTop: number) {
+      if (!scrollEl) return;
+      const prev = scrollEl.style.overflowY;
+      scrollEl.style.overflowY = "hidden";
+      scrollEl.scrollTop = newTop;
+      setTimeout(() => {
+        if (scrollEl) scrollEl.style.overflowY = prev;
+      }, 0);
+    }
+
+    const ro = new ResizeObserver(() => {
+      if (!scrollEl) return;
+      // Bottom-pinned: keep them at the bottom regardless of where the
+      // growth happened. This is the case our naive earlier version
+      // already handled.
+      if (pinnedToBottom) {
+        writeScrollTop(scrollEl.scrollHeight);
+        return;
+      }
+      // Mid-history: anchor-restore. If our cached anchor is gone (DOM
+      // re-rendered the bubble) or never existed, re-snapshot and bail —
+      // we have no "before" to compare to this tick.
+      if (!anchorEl || !scrollEl.contains(anchorEl)) {
+        snapshotAnchor();
+        return;
+      }
+      const scrollerTop = scrollEl.getBoundingClientRect().top;
+      const newOffset = anchorEl.getBoundingClientRect().top - scrollerTop;
+      const delta = newOffset - anchorOffset;
+      if (delta === 0) return;
+      writeScrollTop(scrollEl.scrollTop + delta);
+      // We don't update anchorOffset here — the scrollTop write should
+      // restore the anchor to its original offset, and the scroll
+      // event the write triggers will re-snapshot anyway.
+    });
+    ro.observe(inner);
+
+    return () => {
+      ro.disconnect();
+      scrollEl?.removeEventListener("scroll", snapshotAnchor);
+    };
+  });
+
   // Reset --chat-input-h when there's no input rendered, so messages can
   // scroll all the way to the bottom of the viewport in read-only mode.
   $effect(() => {

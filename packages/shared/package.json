@@ -11,7 +11,8 @@
     "./prompts": "./dist/prompts/loader.js",
     "./services": "./dist/services/index.js",
     "./markdown": "./dist/markdown/plugins.js",
-    "./markdown/streaming-mermaid": "./dist/markdown/streaming-mermaid.js"
+    "./markdown/streaming-mermaid": "./dist/markdown/streaming-mermaid.js",
+    "./markdown/code-highlight": "./dist/markdown/code-highlight.js"
   },
   "scripts": {
     "build": "tsc && node ./scripts/copy-prompts.mjs",
