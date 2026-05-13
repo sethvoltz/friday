@@ -10,7 +10,8 @@
     "./wire": "./dist/wire/events.js",
     "./prompts": "./dist/prompts/loader.js",
     "./services": "./dist/services/index.js",
-    "./markdown": "./dist/markdown/plugins.js"
+    "./markdown": "./dist/markdown/plugins.js",
+    "./markdown/streaming-mermaid": "./dist/markdown/streaming-mermaid.js"
   },
   "scripts": {
     "build": "tsc && node ./scripts/copy-prompts.mjs",
@@ -32,6 +33,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "drizzle-kit": "^0.31.10",
+    "jsdom": "^25.0.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.5"
   }

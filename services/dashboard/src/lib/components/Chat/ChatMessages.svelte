@@ -420,7 +420,7 @@
               {/if}
             {/if}
           {:else}
-            <Markdown source={msg.text} />
+            <Markdown source={msg.text} streaming={msg.status === "streaming"} />
             {#if msg.status === "aborted"}
               <div class="footer-tag">Stopped</div>
             {:else if msg.status === "error"}

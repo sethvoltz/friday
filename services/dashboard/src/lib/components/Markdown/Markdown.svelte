@@ -3,9 +3,17 @@
   import DOMPurify from "isomorphic-dompurify";
   import { onMount } from "svelte";
   import { getMarkedExtensions } from "@friday/shared/markdown";
+  import {
+    applyStreamingMermaidGate,
+    invalidateRenderedMermaid,
+  } from "@friday/shared/markdown/streaming-mermaid";
+  import { theme } from "$lib/stores/theme.svelte";
   import "katex/dist/katex.min.css";
 
-  let { source }: { source: string | null | undefined } = $props();
+  let {
+    source,
+    streaming = false,
+  }: { source: string | null | undefined; streaming?: boolean } = $props();
 
   // Install KaTeX + mermaid marker extension once. Module-level: every
   // Markdown instance shares the same `marked` configuration.
@@ -27,32 +35,46 @@
     return DOMPurify.sanitize(raw, { USE_PROFILES: { html: true, mathMl: true } });
   });
 
-  // After every render, rescan for `.mermaid` blocks and mount diagrams. The
-  // mermaid library is loaded once on first need.
+  // After every render, route unmounted `.mermaid` blocks through the gate,
+  // which decides which are safe to render now and marks the rest as
+  // pending placeholders.
   let container: HTMLDivElement;
   let mermaidLoaded = false;
   type MermaidApi = {
     initialize: (cfg: Record<string, unknown>) => void;
+    parse: (text: string, opts: { suppressErrors: true }) => Promise<unknown>;
     run: (opts: { nodes: HTMLElement[] }) => Promise<void>;
   };
   let mermaidApi: MermaidApi | null = null;
 
   async function renderMermaid() {
     if (!container) return;
-    const blocks = Array.from(
-      container.querySelectorAll<HTMLElement>("pre.mermaid:not([data-mermaid-rendered])"),
+    // Cheap pre-check: nothing to do if there are no unmounted mermaid
+    // blocks. Avoids the dynamic import on prose-only renders.
+    const hasUnmounted = container.querySelector(
+      "pre.mermaid:not([data-mermaid-rendered])",
     );
-    if (blocks.length === 0) return;
+    if (!hasUnmounted) return;
     if (!mermaidApi) {
       const mod = await import("mermaid");
       mermaidApi = (mod.default ?? (mod as unknown)) as MermaidApi;
-      mermaidApi.initialize({ startOnLoad: false, securityLevel: "strict" });
       mermaidLoaded = true;
     }
-    // Mark before run so re-renders during the same `source` don't double-mount.
-    for (const b of blocks) b.setAttribute("data-mermaid-rendered", "true");
+    // Mermaid stamps colors into the SVG at render time, so the theme has
+    // to be set before each `run()`. Re-calling initialize is idempotent
+    // and is the documented way to swap themes between renders.
+    mermaidApi.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: theme.current === "dark" ? "dark" : "default",
+    });
+    const toRun = await applyStreamingMermaidGate(container, {
+      streaming,
+      parse: (t) => mermaidApi!.parse(t, { suppressErrors: true }),
+    });
+    if (toRun.length === 0) return;
     try {
-      await mermaidApi.run({ nodes: blocks });
+      await mermaidApi.run({ nodes: toRun });
     } catch (err) {
       // On parse error, mermaid leaves an error message inline; surface to
       // console for debug.
@@ -61,10 +83,27 @@
     }
   }
 
+  // Track the theme-version this component has rendered against, so the
+  // effect can tell a "theme actually changed" tick apart from a normal
+  // re-render tick (html / streaming change). Only the former needs to
+  // invalidate existing diagrams; the latter would needlessly thrash.
+  let lastThemeVersion = -1;
+
   $effect(() => {
-    // Recompute on html change. Microtask defer so `{@html}` has flushed.
+    // Re-fire on html change, streaming flip, OR theme toggle. Microtask
+    // defer so `{@html}` has flushed before we walk the DOM. Streaming →
+    // complete transitions retry any block that was pending purely on
+    // the trailing gate. Theme toggles invalidate all rendered diagrams
+    // so the next renderMermaid pass re-runs them against the new theme.
     void html;
-    queueMicrotask(renderMermaid);
+    void streaming;
+    const tv = theme.version;
+    const themeChanged = tv !== lastThemeVersion && lastThemeVersion !== -1;
+    lastThemeVersion = tv;
+    queueMicrotask(() => {
+      if (themeChanged && container) invalidateRenderedMermaid(container);
+      void renderMermaid();
+    });
   });
 
   onMount(() => {
@@ -157,6 +196,31 @@
   :global(.markdown pre.mermaid svg) {
     max-width: 100%;
     height: auto;
+  }
+
+  /* Placeholder shown while a streamed mermaid block is still arriving or
+     is mid-syntax-error. The partial source is hidden (font-size: 0) and a
+     ::before pseudo carries a muted, slowly-pulsing label. When the block
+     resolves to a real render, mermaid replaces the textContent with an
+     <svg>, the pending attribute clears, and the placeholder vanishes. */
+  :global(.markdown pre.mermaid[data-mermaid-pending="true"]) {
+    font-size: 0;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    padding: 1rem;
+  }
+  :global(.markdown pre.mermaid[data-mermaid-pending="true"])::before {
+    content: "Rendering Mermaid diagram…";
+    display: inline-block;
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-style: italic;
+    color: var(--text-secondary);
+    animation: mermaid-pending-pulse 3s ease-in-out infinite;
+  }
+  @keyframes mermaid-pending-pulse {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 1; }
   }
 
   :global(.markdown a) {
