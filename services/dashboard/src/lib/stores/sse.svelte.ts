@@ -2,6 +2,7 @@ import type { WireEvent } from "@friday/shared";
 import { chat } from "./chat.svelte";
 import { connectivity } from "./connectivity.svelte";
 import { bumpDashboardData } from "./dashboard-data.svelte";
+import { saveJSON } from "./persistent";
 
 /**
  * SSE client (FIX_FORWARD 3.1). Backed by `fetch` + `response.body.getReader()`
@@ -243,7 +244,13 @@ function handleEvent(evt: ParsedEvent, myId: number): void {
   if (parsed.type === "connection_established") {
     const incoming = parsed.boot_id;
     if (cachedBootId !== null && cachedBootId !== incoming) {
+      // F3-C: new boot_id means the old seqs are stale (different daemon
+      // process — its ring buffer started from 0). Drop both in-memory
+      // and persisted cursors so the next ring-buffer replay starts
+      // clean instead of dropping legit events that happen to have
+      // lower seqs than our pre-restart cursor.
       chat.lastSeqByAgent = {};
+      saveJSON("chat:lastSeqByAgent", {});
       void chat.loadAgentTurns(chat.focusedAgent);
     }
     cachedBootId = incoming;

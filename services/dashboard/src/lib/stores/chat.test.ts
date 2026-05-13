@@ -1049,3 +1049,113 @@ describe("agent_lifecycle handling (PR B)", () => {
     expect(chat.agents).toHaveLength(0);
   });
 });
+
+// PR C — phantom orchestrator badges.
+describe("unread badge gating (PR C)", () => {
+  it("F3-A guard verified at the consumer: agent_message increments only for that agent's badge", async () => {
+    // The dashboard's side of F3-A: assistant `agent_message` bumps a
+    // non-focused agent's badge. The daemon-side change (only emitting
+    // for role=assistant) is enforced by maybeEmitAgentMessage and
+    // covered separately. Here we verify the dashboard still bumps when
+    // an event arrives.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "agent_message",
+      agent: "alpha",
+      turn_id: "t-1",
+      block_id: "b-1",
+      kind: "block_complete",
+      preview: "hi",
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.unreadByAgent["alpha"]).toBe(1);
+  });
+
+  it("F3-A: focused agent's own agent_message does NOT bump (existing behavior)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "agent_message",
+      agent: "friday",
+      turn_id: "t-1",
+      block_id: "b-1",
+      kind: "block_complete",
+      preview: "hi",
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.unreadByAgent["friday"]).toBeUndefined();
+  });
+
+  it("F3-B: mail_delivered events do NOT bump the unread badge", async () => {
+    // The phantom orchestrator badge problem: every inter-agent mail
+    // triggered a mail_delivered bump AND a later agent_message bump
+    // for the recipient's user-role mail block. Net: 2+ badges per
+    // logical mail event. F3-B drops the mail_delivered bump; the
+    // assistant reply that follows is the load-bearing signal.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "mail_delivered",
+      agent: "builder-1",
+      to: "friday-2",
+      priority: "normal",
+      seq: 1,
+    } as unknown as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.unreadByAgent["friday-2"]).toBeUndefined();
+  });
+
+  it("F3-C: lastSeqByAgent advances on accepted events (cursor mechanism)", async () => {
+    // The cursor mechanism is what F3-C persists. This test pins the
+    // in-memory advance; the localStorage persistence is exercised
+    // through the mocked saveJSON helper.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "agent_message",
+      agent: "beta",
+      turn_id: "t-1",
+      block_id: "b-1",
+      kind: "block_complete",
+      preview: "x",
+      seq: 7,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.lastSeqByAgent["beta"]).toBe(7);
+    // saveJSON should have been called with the updated map.
+    expect(mockSaveJSON).toHaveBeenCalledWith(
+      "chat:lastSeqByAgent",
+      expect.objectContaining({ beta: 7 }),
+    );
+  });
+
+  it("F3-C: stale seqs are dropped (dedup against persisted cursor)", async () => {
+    // If the persisted cursor for an agent is N, a replayed event with
+    // seq <= N must be dropped — no badge bump, no state churn.
+    mockLoadJSON.mockImplementation((key: string) => {
+      if (key === "chat:lastSeqByAgent") return { gamma: 5 };
+      return [];
+    });
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "agent_message",
+      agent: "gamma",
+      turn_id: "t-1",
+      block_id: "b-1",
+      kind: "block_complete",
+      preview: "stale",
+      seq: 3, // <= persisted cursor 5
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.unreadByAgent["gamma"]).toBeUndefined();
+  });
+});

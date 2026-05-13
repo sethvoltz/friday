@@ -175,6 +175,26 @@ export class ChatState {
   private idleDebounce = new Map<string, ReturnType<typeof setTimeout>>();
   private static readonly IDLE_DEBOUNCE_MS = 750;
 
+  /** localStorage key for F3-C cursor persistence. Cleared when the
+   *  daemon's boot_id changes (different process — old seqs are stale). */
+  private static readonly LAST_SEQ_KEY = "chat:lastSeqByAgent";
+
+  constructor() {
+    // F3-C (PR C): hydrate the per-agent SSE dedup cursor from
+    // localStorage. Without this, every page reload reset the cursor to
+    // empty and the daemon's ring-buffer replay re-counted old
+    // `agent_message` events, producing phantom unread badges. The cursor
+    // is invalidated separately when the connection_established event
+    // carries a new boot_id (see acceptConnectionEstablished).
+    const persisted = loadJSON<Record<string, number>>(
+      ChatState.LAST_SEQ_KEY,
+      {},
+    );
+    if (persisted && typeof persisted === "object") {
+      this.lastSeqByAgent = { ...persisted };
+    }
+  }
+
   /** Insert or refresh a local AgentInfo entry. Used when SSE events arrive
    * for an agent the periodic `/api/agents` poll hasn't reported yet
    * (newly spawned). The next poll fills in details we don't know here.
@@ -952,6 +972,10 @@ export class ChatState {
     const cur = this.lastSeqByAgent[bucket] ?? 0;
     if (event.seq <= cur) return false;
     this.lastSeqByAgent[bucket] = event.seq;
+    // F3-C: persist after each advance so a page reload doesn't lose the
+    // cursor and re-count replayed events. saveJSON is synchronous + small;
+    // the volume of accepted events is low enough that this isn't hot.
+    saveJSON(ChatState.LAST_SEQ_KEY, this.lastSeqByAgent);
     return true;
   }
 
@@ -1023,13 +1047,12 @@ export class ChatState {
         }
         break;
       case "mail_delivered":
-        // Treat as a (lighter-weight) unread signal — recipient just got
-        // mail, which warrants a sidebar nudge. The canonical block lands
-        // separately via `agent_message` once the recipient acts on the
-        // mail; this just gets the badge up faster.
-        if (event.to !== this.focusedAgent) {
-          this.bumpUnread(event.to);
-        }
+        // F3-B (PR C): we used to bump unread here as a faster nudge
+        // before the recipient's assistant reply landed. That produced
+        // double-counts (mail_delivered + later assistant agent_message
+        // → two badges per logical event). The assistant reply is the
+        // signal that warrants a badge; until then the chat shows
+        // nothing the user can act on. Intentional no-op here.
         break;
       default:
         break;

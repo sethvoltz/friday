@@ -761,9 +761,13 @@ function maybeEmitAgentMessage(opts: {
 }): void {
   if (opts.kind !== "text") return;
   if (opts.status !== "complete") return;
-  const isAssistant = opts.role === "assistant";
-  const isMail = opts.role === "user" && opts.source === "mail";
-  if (!isAssistant && !isMail) return;
+  // F3-A (PR C): badge only on assistant text. Mail blocks (role=user
+  // source=mail) are visible in the recipient's chat scroller, but the
+  // orchestrator's *response* to the mail is the user-relevant signal —
+  // badging both produced phantom counts (mail-block + later assistant
+  // reply → two badges per logical event). The assistant reply that
+  // follows mail still triggers exactly one badge.
+  if (opts.role !== "assistant") return;
   let text = "";
   try {
     const parsed = JSON.parse(opts.contentJson) as { text?: string };
