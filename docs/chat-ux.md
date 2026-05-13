@@ -21,8 +21,10 @@ The dashboard's home `/` is a single persistent chat with Friday. This doc captu
 ## Multi-agent focus model
 
 - One explicit focused agent per browser session. Click is the only signal — no inferred disinterest.
-- Non-focused agents: status updates (sidebar dots), badge increment **only on `agent_message`** events. `text_delta` events from non-focused agents drop on the floor (still in DB).
-- Focus switch flow: load DB turns + cursor → resume SSE deltas where `seq > cursor` → done.
+- **Per-agent isolation.** The SSE store keeps a separate `lastSeqByAgent` cursor (with a `__system__` bucket for non-agent envelope events). Switching focus is local to the client: each agent has its own block list, its own cursor, and they don't bleed.
+- Non-focused agents: status updates (sidebar dots), badge increment **only on `mail_delivered`** events. `block_delta` events from non-focused agents drop on the floor (still in DB).
+- **Streaming fidelity = post-load fidelity.** A mid-turn refresh returns exactly the bytes the live stream had, because both sources read the same `blocks` rows. There's no separate "canonical" rendering after the turn ends — what you saw stream is what's persisted.
+- Focus switch flow: paginated load of `blocks` for the new agent → resume SSE deltas where `seq > cursor` → done. A `boot_id` mismatch on `connection_established` invalidates the cursor and triggers a full reload.
 
 ## Slash commands and skills
 
@@ -34,10 +36,17 @@ TypeScript-defined, deterministic, no LLM:
 
 ```
 /kill <agent>    /restart        /status         /inspect <agent>
-/reset-context   /jump <date>    /scratch [name]
+/reset-context   /jump <date|term>    /scratch [name]
 ```
 
 System commands return immediately. `/reset-context`, `/restart` and other destructive commands gate behind a confirmation modal.
+
+**`/jump <date|term>`** (FIX_FORWARD 6.1). Two modes:
+
+- `/jump 2026-03-05` — date jump. Loads the block list with `around_ts` cursor centered on midnight of the requested day. Accepts `today`, `yesterday`, weekday names, `Nd ago` shorthand.
+- `/jump <term>` — content jump. Runs `blocks_fts MATCH ?` against the current agent's blocks, picks the most recent match, and scrolls + highlights the target block (jump-pulse animation).
+
+A toast pill surfaces match counts and lets the user step through additional results. Highlighting clears on next user input.
 
 ### Skills
 
@@ -69,9 +78,21 @@ auto_invoke: true                # default true; built-ins set false
 
 - Plain text → orchestrator turn.
 - `/` opens autocomplete — system commands first (badged "system"), skills second.
+- **Slack-style keyboard nav** (FIX_FORWARD 6.2). With the menu open: first ArrowDown / ArrowUp transfers focus *into* the menu (the input caret stops blinking, the menu item highlights). Subsequent arrows navigate items. **Tab** or **Enter** applies the selection and returns focus to the input with the cursor at end. **Esc** closes the menu and keeps focus in the input. Enter with the menu closed submits the turn as usual.
 - On mobile: tap-to-insert preserves keyboard focus. `pointerdown` + `preventDefault` on the autocomplete entry so the input never blurs. (Slack mobile is the reference; see `docs/mobile-ux.md`.)
 - Paperclip button + drag-drop + paste for attachments.
 - Mobile camera via `<input type="file" capture="environment">`. No PWA permissions dance.
+
+## Pending message lifecycle
+
+User messages render optimistically the moment Send fires. Each in-flight message carries a small status badge:
+
+- `pending` — POSTed to `/api/chat/turn`, not yet acked.
+- `failed` — POST failed; a retry affordance appears next to the bubble.
+- `retrying` — user clicked retry; we resubmit and re-enter `pending`.
+- (acknowledged) — daemon returned a `turn_id`; the optimistic bubble is replaced by the real `user`-kind block row when SSE delivers it.
+
+Queued messages (received during a still-running turn) get synthesized bubbles on page load so a refresh doesn't lose them visually before the daemon drains the queue.
 
 ## Attachments
 

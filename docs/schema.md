@@ -10,29 +10,38 @@ This doc is a reference index for the tables and their relationships. The TypeSc
 
 `accounts`, `sessions`, `users`, `verification` — declared in `schema.ts` for typed access from the rest of the app, but BetterAuth's CLI owns the migrations (ADR-015). Field names match BetterAuth's defaults.
 
-### `turns`
+### `blocks`
 
-Mirror of Claude session JSONL files, plus dashboard-write rows (chat replies, etc.).
+Per-content-block row model — the live transcript store (ADR-016, FIX_FORWARD 1.1). One row per content block, written directly from worker IPC.
 
 | Column | Notes |
 |---|---|
-| `id` | autoincrement |
+| `block_id` | TEXT primary key — stable UUID assigned by the daemon |
+| `turn_id` | parent turn id (synthetic; not the SDK session id) |
 | `session_id` | Claude SDK session id |
-| `agent_name` | nullable; identifies the speaker for synthesized rows |
-| `turn_index` | byte offset into the source JSONL (ADR-012). Monotonic + unique within session. |
+| `agent_name` | speaker / owner |
+| `seq` | EventBus sequence at write time |
 | `ts` | unix ms |
+| `kind` | `text` / `thinking` / `tool_use` / `tool_result` / `user` / `mail` |
 | `role` | `user` / `assistant` / `system` |
-| `kind` | `user` / `assistant` / `system` / `tool_use` / `tool_result` |
-| `content_json` | raw JSONL line |
-| `source_file` | absolute path to the JSONL |
-| `source_byte_off` | duplicate of `turn_index`; kept for potential schema migrations |
-| `last_event_seq` | EventBus sequence at the moment this row was committed (ADR-004) |
+| `content` | block text / serialized JSON depending on kind |
+| `streaming` | int (0/1) — 1 while the block is being filled by deltas |
+| `source` | `worker` (live, from IPC) or `jsonl` (boot recovery back-fill) |
+| `last_event_seq` | per-row cursor (ADR-004 amendment). DB-written *before* the matching SSE frame is emitted. |
 
-UNIQUE `(session_id, turn_index)`.
+INDEXes on `(agent_name, ts)`, `(turn_id, seq)`. The `source` field exists so a boot-recovery insert can be distinguished from a live worker write — useful for diagnostics when the JSONL and the live stream diverged.
+
+### `blocks_fts` (FTS5)
+
+External-content FTS5 virtual table over `blocks.content`, maintained by `blocks_fts_ai/ad/au` triggers (insert/delete/update). Powers `/jump <term>` content search and dashboard memory-search auto-completion.
+
+### `turns` (legacy, read-only)
+
+Predecessor of `blocks`. No longer written by the daemon. Retained for read-side compatibility while in-flight migration data is reconciled; the one-shot script under `scripts/migrate-turns-to-blocks.ts` is the operator-run migration.
 
 ### `turns_fts` (FTS5)
 
-Contentless FTS index over `turns.content_json`.
+Legacy FTS index over `turns.content_json`. Read-only alongside `turns`.
 
 ### `mail`
 
@@ -41,6 +50,7 @@ Contentless FTS index over `turns.content_json`.
 | `id` | autoincrement |
 | `from_agent`, `to_agent` | agent names |
 | `type` | `message` / `notification` / `task` |
+| `priority` | `normal` (default) / `critical` (mid-turn injection — ADR-014 amendment, FIX_FORWARD 2.4) |
 | `delivery` | `pending` / `delivered` / `read` / `closed` |
 | `body` | markdown |
 | `meta_json` | optional structured metadata |

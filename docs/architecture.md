@@ -195,13 +195,15 @@ Full schema reference: see `docs/schema.md`.
   usage.jsonl                       # per-turn usage records
 ```
 
-### Claude JSONL mirror
+### Block model and in-flight state
 
-- The daemon tail-watches `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` for every active agent.
-- Each parsed turn lands in the `turns` table within a single transaction that also bumps `last_event_seq`. The SSE event is emitted only after the DB write commits (ADR-004).
-- DB is the read API. JSONL is the recovery source: on DB wipe, the daemon scans `~/.claude/projects/` and rebuilds idempotently keyed on `(session_id, turn_index)`.
-- `turn_index` is the byte offset in the JSONL file (ADR-012) — monotonic by construction, unique within a session, idempotent across re-drains.
-- Pagination is mandatory at the DB layer.
+- The chat is modeled as a **`blocks` table** — one row per content block, not per turn. Block kinds are `text`, `thinking`, `tool_use`, `tool_result`, `user`, and `mail`. Each row has a stable UUID `block_id`, a parent `turn_id`, a `seq` cursor, a `streaming` boolean, and a `source` enum (`worker` for live streaming, `jsonl` for boot recovery). FTS5 lives on the content column via the `blocks_fts` virtual table.
+- The daemon writes those rows **directly from worker IPC** (`block-start` / `block-delta` / `block-stop`), inside the same transaction that bumps the row's `last_event_seq`. The SSE frame for that delta is emitted only after the DB write commits (ADR-004, per-block granularity).
+- **In-flight state** lives in an in-memory `liveTurns` registry on the daemon process — partial JSON, half-assembled tool-use args, the working buffer for the next delta. Nothing fragile is persisted between deltas; the only durable state is the block rows themselves. Crashes lose the in-flight buffer; the persisted rows are unaffected.
+- **JSONL is boot-recovery only** (ADR-012, revised): on daemon restart, `services/daemon/src/agent/jsonl-recovery.ts` walks each session's `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` once and back-fills any blocks that should exist but don't (worker crashed between `block-stop` and DB write, or daemon crashed mid-emit). Idempotent on `block_id`.
+- Pagination is mandatory at the DB layer; `fetchBlocksByAgent` supports `before` / `after` / `around_ts` cursors for the chat UI.
+
+See ADR-016 for the full rationale on why `blocks` replaced `turns`.
 
 ## Auth
 
@@ -225,7 +227,8 @@ Full schema reference: see `docs/schema.md`.
 - SvelteKit + Svelte 5 + adapter-node. Production: `node build/index.js`. Dev: `vite dev`.
 - Public surface, gated by BetterAuth. Every API route checks the session before forwarding to the daemon.
 - `hooks.server.ts` logs all requests + unhandled errors via `@friday/shared` logger.
-- Long-lived `EventSource('/api/events')` proxies to the daemon's SSE channel.
+- Long-lived fetch+ReadableStream SSE client (`lib/stores/sse.svelte.ts`) proxies to the daemon's `/api/events`. Two-ladder reconnect schedule, 40s keepalive watchdog.
+- **Connectivity widget** in the header (ADR-018): three sequential dots — Internet / SSE / Daemon. Grey-cascade when an upstream stage is down so the user gets honest "unknown because upstream broke" instead of a misleading red on a derived state. Tooltips are informational only.
 
 ### CLI
 
@@ -233,7 +236,7 @@ Full schema reference: see `docs/schema.md`.
 
 ## Wire protocol
 
-Single SSE channel. One `EventSource('/api/events')` from the browser. Long-lived. Native `Last-Event-ID` reconnect against the daemon's ring buffer.
+Single SSE channel. One long-lived stream from the browser to `/api/events`. The dashboard's client (`services/dashboard/src/lib/stores/sse.svelte.ts`) uses a fetch + ReadableStream parser rather than the browser-native `EventSource` so it can ride out timeouts gracefully — see ADR-018 for the connectivity widget that surfaces stream health to the user.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
@@ -241,41 +244,50 @@ Single SSE channel. One `EventSource('/api/events')` from the browser. Long-live
 | `POST /api/chat/turn/<id>/abort` | POST | Stop button — daemon calls `AbortController.abort()`. |
 | `POST /api/agents/:name/abort` | POST | Per-agent abort. |
 | `GET /api/events` | SSE | Single persistent stream. All events flow here. |
+| `GET /api/agents/:name/blocks` | GET | Paginated block fetch for an agent (before/after/around_ts cursors). |
 | Other REST | GET/POST/PATCH/DELETE | CRUD for tickets, mail, memory, evolve, agents, schedules, attachments, settings. |
 
 ### SSE event types
 
 Every payload includes `v: 1` for forward-compat. Schema in `packages/shared/src/wire/events.ts` (TS discriminated union — single source of truth shared by daemon producer, SvelteKit proxy, browser consumer).
 
+Block streaming (post-FIX_FORWARD):
+
+- `connection_established` — first frame on every (re)connect. Carries the daemon's `boot_id`. A boot_id mismatch on reconnect tells the client to drop its cached cursor and reload from the DB.
+- `block_start` — `{block_id, turn_id, agent, kind, ts}`
+- `block_delta` — `{block_id, delta}` (text/JSON deltas, incremental tool_use input)
+- `block_complete` — `{block_id, status?}` (`streaming = 0` is flipped in DB *before* this emits)
+- `block_reload` — coarse hint that the agent's block list changed materially (e.g. boot recovery insert); clients refetch via `GET /api/agents/:name/blocks`.
+
+Turn / agent envelope:
+
 - `turn_started` — `{turn_id, agent, ts}`
-- `text_delta` — `{turn_id, text, message_id?}`
-- `tool_use_start` — `{turn_id, tool_id, tool_name, input}`
-- `tool_use_input` — `{turn_id, tool_id, input}` (final input after streaming)
-- `tool_use_end` — `{turn_id, tool_id, status, output?}`
-- `thinking_start` / `thinking_delta` / `thinking_end`
-- `compaction_start` / `compaction_end`
-- `error` — `{turn_id?, code, message, recoverable}` (codes include `aborted`)
 - `turn_done` — `{turn_id, status: 'complete'|'aborted'|'error', usage?}`
-- `agent_message` — agent-initiated user-facing message (`chat_reply`); sidebar badge increments when target is non-focused
+- `error` — `{turn_id?, code, message, recoverable}` (codes include `aborted`)
+- `compaction_start` / `compaction_end`
 - `agent_lifecycle` — spawn / kill / crash / refork / complete
 - `agent_status` — `{agent, status, since}` for sidebar dots
-- `mail_delivered` — sidebar badges
+- `mail_delivered` — `{agent, priority}` — sidebar badges; `priority='critical'` may trigger mid-turn injection (see below)
 - `schedule_fired`
 - `evolve_critical`
 - `system_banner` — `{level, text}`
 - `:keepalive` comment line every 20s to keep CFT happy
 
+### Mid-turn priority injection
+
+`mail.priority='critical'` (ADR-014 amendment, FIX_FORWARD 8.4) lets a sender interrupt a running turn. On critical mail delivery the daemon sends a `mail-wakeup-critical` IPC; the worker checks for pending critical mail at each SDK iteration boundary and breaks out early so the next iteration sees the new mail. The parent's existing turn-complete handler then drains the queued prompts. Normal mail stays between-turn. The parent also signals `prompts-pending` IPC when a follow-up user prompt arrives mid-turn for the same agent, so the worker can short-circuit to the next iteration boundary without losing the queue if the daemon reforks.
+
 ### Race-free rendering (ADR-004)
 
-The daemon's contract: **DB write before SSE emit, in a single transaction.** Each event has a monotonic `seq` from the EventBus. The turn's row is updated with `last_event_seq = N` *before* the SSE event with `seq=N` is broadcast.
+The daemon's contract: **DB write before SSE emit, in a single transaction.** Each event has a monotonic `seq` from the EventBus. The block's row is updated with `last_event_seq = N` *before* the SSE event with `seq=N` is broadcast. Granularity is per block row (FIX_FORWARD 1.6); the turn-level `last_event_seq` is gone.
 
 Browser cursor pattern on focus switch:
 
-1. Always-open `EventSource` keeps running.
-2. Load DB turns for new agent (paginated). Latest may be in-flight, carries `last_event_seq = K`.
+1. Long-lived SSE stream keeps running.
+2. Load DB blocks for new agent (paginated). Latest may be in-flight, carries `last_event_seq = K`.
 3. Live-render only events with `seq > K`. Earlier events were already applied via DB load.
 
-Prevents both double-application and missed events under any reconnect / focus-switch scenario.
+Across a daemon restart, `boot_id` on `connection_established` resets the cached per-agent cursor; without it, integer sequence numbers reused across boots would silently mask events. See ADR-004's amendment.
 
 ## Identity / prompt stack
 
@@ -315,13 +327,15 @@ spawnTurn() / dispatchTurn()
   → child sends { type: "ready" }
   → parent sends { type: "start", options }
   → parent may later send { type: "prompt", options } (long-lived; user follow-up turn)
-  → parent may send { type: "mail-wakeup" } when mail-bridge sees mail for this agent
-  → worker emits text-delta, tool-start/end, compaction-start/end, heartbeat, turn-complete
-  → parent translates each into eventBus.publish(...) and DB writes (cursor first)
+  → parent may send { type: "prompts-pending" } when the queue grows mid-turn
+  → parent may send { type: "mail-wakeup" } when mail-bridge sees normal mail for this agent
+  → parent may send { type: "mail-wakeup-critical" } for priority='critical' mail (mid-turn break)
+  → worker emits block-start, block-delta, block-stop (per content block), heartbeat, turn-complete
+  → parent writes block rows + bumps last_event_seq, then publishes the SSE frame
   → worker exits on stop / abort / fatal error / one-shot completion
 ```
 
-Parent-side queue ensures multiple `prompt` IPCs don't race in-flight events with stale `turn_id`s.
+Parent-side queue ensures multiple `prompt` IPCs don't race in-flight events with stale `turn_id`s. The queue is mirrored in `liveTurns` (in-memory) so a refork survives — the new worker sees the same pending prompts on `start`.
 
 ## Mail and tickets
 
@@ -329,6 +343,8 @@ Parent-side queue ensures multiple `prompt` IPCs don't race in-flight events wit
 
 - All-SQLite. The `mail` table is the persistence layer. The in-process `mailBus` EventEmitter is the wakeup signal.
 - Push delivery: `sendMail()` writes row → emits `mail:to:<agent>` + `mail:any` (ADR-014) → daemon's `mail-bridge` republishes as `mail_delivered` SSE and sends `mail-wakeup` IPC to the live worker, or spawns a fresh turn for an idle long-lived agent.
+- **Universal delivery primitive** (ADR-017, FIX_FORWARD 8.5): mail is the only way to deliver anything user-visible. The old `chat_reply` MCP tool and `/api/chat/reply` endpoint were removed; user-facing replies are `mail_send` to recipient `friday` (the orchestrator's box), which the mail-bridge surfaces as `mail` block rows in the chat. Builders and helpers address the user the same way.
+- **Priority field** (ADR-014 amendment): `priority='critical'` triggers mid-turn injection on a live worker via `mail-wakeup-critical` IPC. `priority='normal'` (default) waits for the next turn boundary.
 - Boot recovery: `replayPending()` re-emits all pending rows on startup; `recoverAgents()` drains inboxes for non-killed long-lived agents.
 
 ### Tickets
@@ -341,7 +357,7 @@ Parent-side queue ensures multiple `prompt` IPCs don't race in-flight events wit
 
 | Storage | Lives at | Owns |
 |---|---|---|
-| SQLite (WAL) | `~/.friday/db.sqlite` | accounts/sessions/users (BetterAuth), turns, mail, tickets, ticket_relations, ticket_external_links, ticket_comments, attachments, agents, schedules, memory_entries, db_meta. FTS5 indexes on turns + memory. |
+| SQLite (WAL) | `~/.friday/db.sqlite` | accounts/sessions/users (BetterAuth), blocks (live + audit), mail, tickets, ticket_relations, ticket_external_links, ticket_comments, attachments, agents, schedules, memory_entries, db_meta. FTS5 indexes on blocks + memory + turns. |
 | Filesystem | `~/.friday/` | SOUL.md, skills/*.md, uploads/<sha-bucket>/<sha>.<ext>, memory/entries/*.md, evolve/proposals/*.md, schedules/<name>/{state,last-run}.md, workspaces/<name>/, logs/*.jsonl |
 | Memory (process) | daemon | EventBus ring buffer (5000 events) |
 
@@ -363,9 +379,10 @@ Lifted nearly verbatim:
 
 Replaced:
 
-- Slack interface — gone entirely. `chat_reply` MCP tool replaces `slack_reply`.
+- Slack interface — gone entirely. Mail is the universal delivery primitive (ADR-017); `slack_reply` and its short-lived successor `chat_reply` are both retired.
 - Beads — replaced with the SQLite mail + tickets schema (ADR-006, ADR-014).
 - `agents.json` and per-channel session files — replaced by the `agents` SQLite table (ADR-013).
+- `turns` table as the live store — replaced by `blocks` (ADR-016); old `turns` rows are retained read-side until the migration window closes.
 
 Pending lift (`docs/roadmap.md`):
 

@@ -2,7 +2,7 @@
 
 Friday exposes its services to agents through MCP servers reconstructed inside each forked worker. Servers are gated by **caller type** at the worker boundary — the model only sees tools its agent type is authorized to use.
 
-Server registration: `services/daemon/src/mcp/builder.ts`. Each server is built by a sibling file (`mail.ts`, `chat.ts`, `agents.ts`, `memory.ts`, `tickets.ts`, `schedule.ts`, `evolve.ts`, `echo.ts`).
+Server registration: `services/daemon/src/mcp/builder.ts`. Each server is built by a sibling file (`mail.ts`, `agents.ts`, `memory.ts`, `tickets.ts`, `schedule.ts`, `evolve.ts`, `integrations.ts`, `echo.ts`). The old `chat.ts` (`chat_reply` tool) was removed by FIX_FORWARD 8.5 — mail is the universal delivery primitive (ADR-017).
 
 Tool names appear to the model as `mcp__<server-name>__<tool-name>` (e.g. `mcp__friday-mail__mail_send`).
 
@@ -14,19 +14,20 @@ The Claude `claude_code` preset provides Read, Write, Edit, Bash, Glob, Grep. Fr
 
 | Server | Tools | Orchestrator | Builder | Helper | Scheduled | Bare |
 |---|---|:-:|:-:|:-:|:-:|:-:|
-| `friday-chat` | `chat_reply` | ✓ | — | ✓ | ✓ | ✓ |
-| `friday-mail` | `mail_send`, `mail_inbox`, `mail_read`, `mail_close` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `friday-agents` | `agent_create`, `agent_list`, `agent_status`, `agent_kill`, `agent_inspect`, `workspace_cleanup` | ✓ | — | — | — | — |
+| `friday-mail` | `mail_send` (with `priority: 'normal' \| 'critical'`), `mail_inbox`, `mail_read`, `mail_close` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `friday-agents` | `agent_create`, `agent_list`, `agent_status`, `agent_kill`, `agent_inspect`, `agent_delete_workspace` | ✓ | — | — | — | — |
 | `friday-memory` | `memory_search`, `memory_get` (read-only); `memory_save`, `memory_update`, `memory_forget` (write) | ✓ R/W | ✓ R | ✓ R/W | ✓ R/W | ✓ R/W |
 | `friday-tickets` | `ticket_create`, `ticket_list`, `ticket_get`, `ticket_update`, `ticket_comment`, `ticket_link_external` | ✓ | ✓ | ✓ | — | — |
 | `friday-schedule` | `schedule_upsert`, `schedule_list`, `schedule_show`, `schedule_pause`, `schedule_resume`, `schedule_delete`, `schedule_trigger` | ✓ | — | — | — | — |
-| `friday-evolve` | `evolve_list`, `evolve_get`, `evolve_save`, `evolve_update`, `evolve_apply`, `evolve_dismiss` | ✓ | — | — | — | — |
+| `friday-evolve` | `evolve_list`, `evolve_get`, `evolve_save`, `evolve_update`, `evolve_apply`, `evolve_dismiss`, `evolve_scan`, `evolve_enrich`, `evolve_cluster` | ✓ | — | — | — | — |
 | `friday-echo` | `echo` (sanity check) | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ### Gating notes
 
+- **No more `chat_reply` / `friday-chat`** (ADR-017). All user-visible deliveries go through `mail_send` with recipient `friday`; the orchestrator's mail-bridge surfaces them as `mail`-kind block rows in the chat. Builders and helpers address the user the same way.
+- **`mail_send.priority`** (ADR-014 amendment). `'normal'` (default) queues for the next turn boundary; `'critical'` triggers mid-turn injection via `mail-wakeup-critical` IPC. Use sparingly — interrupting tool loops costs work in flight.
+- **`agent_delete_workspace`** (FIX_FORWARD 6.4) is the strict-confirmation replacement for the old `workspace_cleanup`. The tool description language is contractual: the model MUST present the proposed deletion to the user and wait for an explicit "yes" message before invoking. The daemon also re-checks realpath containment under `~/.friday/workspaces/` before any rm-equivalent op.
 - Builder gets `memory_search` / `memory_get` only — builders consult memory but mail the orchestrator with anything worth saving as canonical memory.
-- Builder doesn't get `chat_reply`. Builders communicate via mail + PR; chatting to the user is the orchestrator's job.
 - Bare and scheduled don't touch tickets directly. Scheduled meta-agents push proposals through evolve, which the orchestrator turns into tickets.
 - Schedule and evolve mutation are orchestrator-only — sub-agents shouldn't be modifying their own schedules or applying proposals.
 
@@ -70,4 +71,3 @@ When a skill declares `allowed_tools`, the daemon assembles the SDK call with th
 ## Pending tools (`docs/roadmap.md`)
 
 - Linear `linear_import` — once `reconcile()` is wired.
-- Friday-evolve scan-trigger tools (`evolve_scan`, `evolve_enrich`, `evolve_cluster`) — when the pipeline lifts from the old codebase.
