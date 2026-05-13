@@ -5,6 +5,8 @@
   import { page } from "$app/stores";
   import { onMount } from "svelte";
   import { sseConnected, startSSE, stopSSE } from "$lib/stores/sse.svelte";
+  import { startConnectivity } from "$lib/stores/connectivity.svelte";
+  import ConnectivityWidget from "$lib/components/Connectivity/ConnectivityWidget.svelte";
   import { KEYS, loadString, saveString } from "$lib/stores/persistent";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
   import { chat } from "$lib/stores/chat.svelte";
@@ -71,7 +73,10 @@
     const i = setInterval(() => {
       if (data.daemonOnline) uptimeMs += 1000;
     }, 1000);
-    if (signedIn && !isLogin) startSSE();
+    if (signedIn && !isLogin) {
+      startSSE();
+      startConnectivity();
+    }
 
     // Best-effort flush on initial mount — drains anything left in
     // localStorage from a previous session that ended offline.
@@ -163,24 +168,10 @@
           <span>Friday</span>
         </a>
         <span class="header-sep"></span>
-        <div class="header-status">
-          <span class="pulse" class:offline={!data.daemonOnline}></span>
-          <span class="header-status-text desktop-status">
-            Bot
-            {#if data.daemonOnline && data.health}
-              &middot; PID {data.health.pid} &middot; up {fmtDuration(uptimeMs)}
-            {:else if !data.daemonOnline}
-              &middot; offline
-            {/if}
-          </span>
-          <span class="header-status-label mobile-status">B</span>
-          <span class="header-sep"></span>
-          <span class="pulse" class:offline={!sseConnected.value}></span>
-          <span class="header-status-text desktop-status">
-            Live{#if !sseConnected.value} &middot; disconnected{/if}
-          </span>
-          <span class="header-status-label mobile-status">L</span>
-        </div>
+        <!-- FIX_FORWARD 3.10: connectivity-chain widget replaces the
+             previous Bot/Live dots. Three stages: Internet / SSE /
+             Daemon with cascade-grey and a daemon-uptime tail. -->
+        <ConnectivityWidget />
       </div>
       <div class="header-right">
         <nav class="header-nav" class:open={menuOpen}>
@@ -266,20 +257,6 @@
   .header-right { display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; position: relative; }
 
   .header-sep { width: 1px; height: 1.2rem; background: var(--border-primary); flex-shrink: 0; }
-  .header-status { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
-  .header-status-text {
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    white-space: nowrap;
-  }
-  .header-status-label {
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
-  .mobile-status { display: none; }
 
   .logo {
     display: flex; align-items: center; gap: 0.5rem;
@@ -329,7 +306,5 @@
   @media (max-width: 640px) {
     .app-header { border-radius: var(--radius-lg); }
     .app-main { padding: 1rem; padding-top: 5rem; }
-    .desktop-status { display: none; }
-    .mobile-status { display: inline; }
   }
 </style>

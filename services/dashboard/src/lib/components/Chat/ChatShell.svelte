@@ -4,10 +4,12 @@
   import Sidebar from "$lib/components/Sidebar/Sidebar.svelte";
   import {
     chat,
-    parseTurns,
+    parseBlocks,
+    oldestBlockCursor,
+    type BlockRow,
     type ChatMessage,
-    type TurnRow,
   } from "$lib/stores/chat.svelte";
+  import { initialPageSize } from "$lib/util/page-size";
   import { onMount, untrack } from "svelte";
 
   interface Props {
@@ -33,34 +35,77 @@
   let pastMessages = $state<ChatMessage[]>([]);
   let pastLoading = $state(false);
   let pastError = $state<string | null>(null);
+  // FIX_FORWARD 3.7: paginated past-session loads.
+  // FIX_FORWARD 3.8: client-controlled initial page size based on viewport +
+  // network class. Older-page-loads stay at a steady 25 so scrolling up
+  // doesn't cliff into 10-row pages on slow links.
+  const PAST_PAGE_SIZE_OLDER = 25;
+  let oldestPastBlockId = $state<string | null>(null);
+  let pastReachedOldest = $state(false);
+  let loadingOlderPast = $state(false);
 
-  function loadPastSession() {
+  async function loadPastSession() {
     if (!readonly || !sessionId) return;
     const sid = sessionId;
     const a = agent;
     pastError = null;
     pastLoading = true;
-    void (async () => {
-      try {
-        const r = await fetch(`/api/sessions/${sid}/turns?limit=500`);
-        // Bail if user navigated to a different past session mid-fetch —
-        // a late-resolving request must not overwrite the new view.
-        if (sid !== sessionId) return;
-        if (!r.ok) {
-          pastError = `Couldn't load session (HTTP ${r.status})`;
-          return;
-        }
-        const turns = (await r.json()) as TurnRow[];
-        if (sid !== sessionId) return;
-        pastMessages = parseTurns(turns, a);
-      } catch {
-        if (sid === sessionId) {
-          pastError = "Couldn't load session (network)";
-        }
-      } finally {
-        if (sid === sessionId) pastLoading = false;
+    pastMessages = [];
+    oldestPastBlockId = null;
+    pastReachedOldest = false;
+    const initialLimit = initialPageSize();
+    try {
+      const r = await fetch(
+        `/api/agents/${a}/blocks?session_id=${encodeURIComponent(sid)}&limit=${initialLimit}`,
+      );
+      // Bail if user navigated to a different past session mid-fetch.
+      if (sid !== sessionId) return;
+      if (!r.ok) {
+        pastError = `Couldn't load session (HTTP ${r.status})`;
+        return;
       }
-    })();
+      const data = (await r.json()) as { blocks: BlockRow[] };
+      if (sid !== sessionId) return;
+      pastMessages = parseBlocks(data.blocks, a);
+      oldestPastBlockId = oldestBlockCursor(data.blocks);
+      if (data.blocks.length < initialLimit) pastReachedOldest = true;
+    } catch {
+      if (sid === sessionId) {
+        pastError = "Couldn't load session (network)";
+      }
+    } finally {
+      if (sid === sessionId) pastLoading = false;
+    }
+  }
+
+  async function loadOlderPastBlocks(): Promise<void> {
+    if (!readonly || !sessionId) return;
+    if (pastReachedOldest || loadingOlderPast || !oldestPastBlockId) return;
+    const sid = sessionId;
+    const a = agent;
+    const before = oldestPastBlockId;
+    loadingOlderPast = true;
+    try {
+      const r = await fetch(
+        `/api/agents/${a}/blocks?session_id=${encodeURIComponent(sid)}&before=${encodeURIComponent(before)}&limit=${PAST_PAGE_SIZE_OLDER}`,
+      );
+      if (sid !== sessionId) return;
+      if (!r.ok) return;
+      const data = (await r.json()) as { blocks: BlockRow[] };
+      if (sid !== sessionId) return;
+      if (data.blocks.length === 0) {
+        pastReachedOldest = true;
+        return;
+      }
+      const older = parseBlocks(data.blocks, a);
+      const seen = new Set(pastMessages.map((m) => m.id));
+      const fresh = older.filter((m) => !seen.has(m.id));
+      pastMessages = [...fresh, ...pastMessages];
+      oldestPastBlockId = oldestBlockCursor(data.blocks);
+      if (data.blocks.length < PAST_PAGE_SIZE_OLDER) pastReachedOldest = true;
+    } finally {
+      if (sid === sessionId) loadingOlderPast = false;
+    }
   }
 
   function jumpToBottom() {
@@ -155,7 +200,10 @@
     messages={readonly ? pastMessages : undefined}
     pastLoading={readonly ? pastLoading : false}
     pastError={readonly ? pastError : null}
-    onRetryPast={readonly ? loadPastSession : undefined} />
+    onRetryPast={readonly ? loadPastSession : undefined}
+    onLoadOlderPast={readonly ? loadOlderPastBlocks : undefined}
+    pastReachedOldest={readonly ? pastReachedOldest : false}
+    loadingOlderPast={readonly ? loadingOlderPast : false} />
 </section>
 
 {#if !readonly && chat.loadingOlder}

@@ -1,6 +1,29 @@
 import type { WireEvent } from "@friday/shared";
 import { chat } from "./chat.svelte";
+import { connectivity } from "./connectivity.svelte";
 import { bumpDashboardData } from "./dashboard-data.svelte";
+
+/**
+ * SSE client (FIX_FORWARD 3.1). Backed by `fetch` + `response.body.getReader()`
+ * with a manual SSE parser instead of the browser's `EventSource`:
+ *
+ *   - We own the lifecycle. `AbortController` tears down a connection
+ *     instantly on tab visibility loss / `online` change / `stopSSE()`,
+ *     instead of waiting for the browser's opaque reconnect timer.
+ *   - `Last-Event-ID` is set explicitly on each fetch so resumption
+ *     after a daemon-side restart is deterministic.
+ *   - No background "auto-reconnect with fixed 3s interval" surprise:
+ *     reconnection is governed entirely by our backoff schedule.
+ *
+ * Connection lifecycle:
+ *   1. `startSSE` arms one connection; on visibility/online it forces
+ *      a reconnect.
+ *   2. Each connection runs until its reader closes or its abort
+ *      controller fires. On close we schedule the next reconnect via
+ *      backoff (initial 1s, doubling to 30s, ±25% jitter).
+ *   3. The `connectionId` counter fences stale handlers — events read
+ *      from an abandoned connection don't apply to the current one.
+ */
 
 const DASHBOARD_BUMP_TYPES = new Set([
   "turn_done",
@@ -8,26 +31,6 @@ const DASHBOARD_BUMP_TYPES = new Set([
   "agent_status",
   "schedule_fired",
 ]);
-
-let es: EventSource | null = null;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let backoffMs = 0;
-let visListener: (() => void) | null = null;
-let onlineListener: (() => void) | null = null;
-let stopped = false;
-/** Monotonic counter incremented on every `connect()`. Captured in the
- *  closure of each EventSource's handlers so a stale `onerror` from a
- *  previous, abandoned connection can't null out a freshly-opened one
- *  (or apply events to it that the new connection should be receiving). */
-let connectionId = 0;
-
-const BACKOFF_INITIAL = 1000;
-const BACKOFF_MAX = 30_000;
-
-class SseConnected {
-  value = $state(false);
-}
-export const sseConnected = new SseConnected();
 
 const HANDLED_TYPES = new Set([
   "turn_started",
@@ -40,118 +43,257 @@ const HANDLED_TYPES = new Set([
   "schedule_fired",
   "evolve_critical",
   "system_banner",
-  // Block-level streaming (FIX_FORWARD 1.5).
   "block_start",
   "block_delta",
   "block_complete",
   "block_reload",
-  // Connection handshake (FIX_FORWARD 1.6).
   "connection_established",
 ]);
 
-/**
- * Cached boot_id from the most recent `connection_established` event.
- * `null` until the first connection lands. On mismatch we drop the cursor
- * and let the daemon's replay re-seed state.
- */
+// Keepalive watchdog (FIX_FORWARD 3.3). Daemon writes `:keepalive` every
+// 20s (`cfg.sseKeepaliveSec`). If we go 40s with no bytes at all from the
+// connection (2 missed keepalives), declare it dead and force a reconnect
+// — the underlying TCP connection has stalled in a way the OS hasn't yet
+// surfaced.
+const KEEPALIVE_DEAD_AFTER_MS = 40_000;
+const KEEPALIVE_CHECK_INTERVAL_MS = 5_000;
+
+// Reconnect schedule (FIX_FORWARD 3.2). Two ladders:
+//   - Fresh page load: cold start, the user just opened the tab and
+//     expects quick liveness. Try immediately, then escalate gently.
+//   - Mid-session disconnect: an established connection dropped.
+//     Backoff a touch longer up front to avoid hammering a daemon that
+//     just bounced.
+// Both cap at 10s and stay there indefinitely — no max retry count.
+// ±20% jitter per attempt smooths thundering-herd on daemon reboot.
+const FRESH_LOAD_LADDER_MS = [0, 250, 500, 1000, 2000, 5000, 10_000];
+const MID_SESSION_LADDER_MS = [500, 1000, 2000, 5000, 10_000];
+const RECONNECT_CAP_MS = 10_000;
+const RECONNECT_JITTER = 0.2;
+
+class SseConnected {
+  value = $state(false);
+}
+export const sseConnected = new SseConnected();
+
+let abortController: AbortController | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let stopped = false;
+/** True until the first time a connection lands. Drives the cold-start
+ *  ladder (FIX_FORWARD 3.2). Flipped to false on first successful
+ *  `connection_established` so subsequent drops use the mid-session
+ *  ladder. */
+let freshLoad = true;
+/** Count of reconnect attempts since the last successful connection.
+ *  Indexes into the active ladder; past the end we hold at the cap. */
+let attempt = 0;
+let visListener: (() => void) | null = null;
+let onlineListener: (() => void) | null = null;
+/** Monotonic counter incremented on every `connect()`. Captured in the
+ *  closure of each fetch's reader loop so a stale chunk arriving on an
+ *  abandoned connection can't apply events to the current one. */
+let connectionId = 0;
+/** Last `id:` field we saw on the wire. Sent as `Last-Event-ID` on the
+ *  next reconnect so the daemon resumes from `replaySince(lastEventId)`. */
+let lastEventId: string | null = null;
+/** Cached daemon boot_id from the most recent `connection_established`.
+ *  `null` until the first connection lands; on mismatch we drop the
+ *  per-agent cursors and refetch the focused agent's history. */
 let cachedBootId: string | null = null;
 
-/**
- * Open the EventSource. The browser auto-attaches `Last-Event-ID` based on the
- * last `id:` line we received, so a clean reconnect resumes from the daemon's
- * `eventBus.replaySince()` cursor without us tracking it manually. The chat
- * store's `applyEvent` is idempotent on `seq`, so a daemon restart that resets
- * the bus counter still converges (the first replayed event's seq will be
- * lower than our client cursor, but `applyEvent` ignores duplicates by id).
- */
-function connect(): void {
-  if (es) return;
+async function connect(): Promise<void> {
+  if (abortController) return;
   if (stopped) return;
-  // Mint a new connection id; every handler closes over `myId` and ignores
-  // its event if the global cursor has moved on (the connection was
-  // replaced). Without this, a stale onerror firing after a reconnect
-  // would null out the *new* EventSource.
   const myId = ++connectionId;
-  const ev = new EventSource("/api/events");
-  es = ev;
-  ev.onopen = () => {
+  const ctrl = new AbortController();
+  abortController = ctrl;
+  try {
+    const headers: HeadersInit = {
+      accept: "text/event-stream",
+    };
+    if (lastEventId !== null) headers["last-event-id"] = lastEventId;
+    const res = await fetch("/api/events", {
+      headers,
+      signal: ctrl.signal,
+      // Defensive: SSE responses must NOT be cached by intermediaries; the
+      // daemon already sets `cache-control: no-cache`, but be belt-and-braces.
+      cache: "no-store",
+    });
     if (myId !== connectionId) return;
+    if (!res.ok || !res.body) {
+      throw new Error(`/api/events returned ${res.status}`);
+    }
     sseConnected.value = true;
     chat.connected = true;
-    backoffMs = 0;
-  };
-  ev.onerror = () => {
-    if (myId !== connectionId) return; // stale handler — ignore.
-    sseConnected.value = false;
-    chat.connected = false;
-    // EventSource's built-in reconnect uses a fixed ~3s interval and doesn't
-    // back off, so a daemon that's down for a while produces a request flood.
-    // Manage reconnection ourselves with exponential backoff capped at 30s.
-    ev.close();
-    if (es === ev) es = null;
-    scheduleReconnect();
-  };
-  for (const t of HANDLED_TYPES) {
-    ev.addEventListener(t, (e: MessageEvent) => {
-      if (myId !== connectionId) return;
-      try {
-        const parsed = JSON.parse(e.data) as WireEvent;
-        // FIX_FORWARD 1.6/1.7: connection_established is the boot_id
-        // handshake. It always lands first on a fresh connection. On
-        // mismatch we clear the per-agent cursors so the daemon's
-        // subsequent replay re-applies cleanly. A canonical refetch for
-        // the focused agent runs through loadAgentTurns below.
-        if (parsed.type === "connection_established") {
-          const incoming = parsed.boot_id;
-          if (cachedBootId !== null && cachedBootId !== incoming) {
-            chat.lastSeqByAgent = {};
-            void chat.loadAgentTurns(chat.focusedAgent);
-          }
-          cachedBootId = incoming;
-          chat.bootId = incoming;
-          return;
-        }
-        chat.applyEvent(parsed);
-      } catch {
-        /* ignore */
-      }
-      if (DASHBOARD_BUMP_TYPES.has(t)) bumpDashboardData();
-    });
+    // Successful connection — reset the ladder cursor and graduate
+    // from the cold-start schedule (FIX_FORWARD 3.2).
+    attempt = 0;
+    freshLoad = false;
+
+    await readEvents(res.body, myId, ctrl);
+  } catch (err) {
+    if ((err as { name?: string }).name === "AbortError") return;
+    // Surface only — the finally block schedules the retry.
+  } finally {
+    if (myId === connectionId) {
+      sseConnected.value = false;
+      chat.connected = false;
+      if (abortController === ctrl) abortController = null;
+      if (!stopped) scheduleReconnect();
+    }
   }
+}
+
+async function readEvents(
+  body: ReadableStream<Uint8Array>,
+  myId: number,
+  ctrl: AbortController,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buf = "";
+  // Keepalive watchdog timestamp — every chunk (including `:keepalive`
+  // comments) updates this. The interval below aborts the connection if
+  // we go silent for too long.
+  let lastChunkAt = Date.now();
+  const watchdog = setInterval(() => {
+    if (myId !== connectionId) return;
+    if (Date.now() - lastChunkAt > KEEPALIVE_DEAD_AFTER_MS) {
+      // Force the fetch + reader loop to unwind so the finally block
+      // schedules the next reconnect via the normal ladder.
+      ctrl.abort();
+    }
+  }, KEEPALIVE_CHECK_INTERVAL_MS);
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (myId !== connectionId) {
+        ctrl.abort();
+        break;
+      }
+      lastChunkAt = Date.now();
+      // Every chunk (including `:keepalive`) is proof the client → daemon
+      // path is live (FIX_FORWARD 3.10 stage 1).
+      connectivity.markSuccess();
+      buf += decoder.decode(value, { stream: true });
+      // SSE event terminator is a blank line (\n\n or \r\n\r\n). Split on
+      // both — some intermediaries normalize line endings.
+      while (true) {
+        const sep = buf.search(/\r?\n\r?\n/);
+        if (sep < 0) break;
+        const block = buf.slice(0, sep);
+        const skip = buf.slice(sep).match(/^\r?\n\r?\n/)![0].length;
+        buf = buf.slice(sep + skip);
+        const parsed = parseEvent(block);
+        if (parsed) handleEvent(parsed, myId);
+      }
+    }
+  } finally {
+    clearInterval(watchdog);
+    try {
+      reader.releaseLock();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+interface ParsedEvent {
+  id?: string;
+  event?: string;
+  data: string;
+}
+
+function parseEvent(block: string): ParsedEvent | null {
+  const lines = block.split(/\r?\n/);
+  const dataParts: string[] = [];
+  let id: string | undefined;
+  let event: string | undefined;
+  for (const raw of lines) {
+    if (!raw || raw.startsWith(":")) continue; // empty / comment
+    const colon = raw.indexOf(":");
+    const field = colon < 0 ? raw : raw.slice(0, colon);
+    let value = colon < 0 ? "" : raw.slice(colon + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "id") id = value;
+    else if (field === "event") event = value;
+    else if (field === "data") dataParts.push(value);
+  }
+  if (dataParts.length === 0 && event === undefined && id === undefined)
+    return null;
+  return { id, event, data: dataParts.join("\n") };
+}
+
+function handleEvent(evt: ParsedEvent, myId: number): void {
+  if (myId !== connectionId) return;
+  // Update Last-Event-ID cursor (used on the next reconnect's headers).
+  // `connection_established` deliberately skips `id:` so the cursor only
+  // ever advances to real bus seqs.
+  if (evt.id !== undefined && evt.id !== "") lastEventId = evt.id;
+
+  const type = evt.event ?? "";
+  if (!HANDLED_TYPES.has(type)) return;
+  let parsed: WireEvent;
+  try {
+    parsed = JSON.parse(evt.data) as WireEvent;
+  } catch {
+    return;
+  }
+  if (parsed.type === "connection_established") {
+    const incoming = parsed.boot_id;
+    if (cachedBootId !== null && cachedBootId !== incoming) {
+      chat.lastSeqByAgent = {};
+      void chat.loadAgentTurns(chat.focusedAgent);
+    }
+    cachedBootId = incoming;
+    chat.bootId = incoming;
+    chat.bootTs = parsed.boot_ts;
+    return;
+  }
+  chat.applyEvent(parsed);
+  if (DASHBOARD_BUMP_TYPES.has(type)) bumpDashboardData();
+}
+
+function nextBackoffMs(): number {
+  const ladder = freshLoad ? FRESH_LOAD_LADDER_MS : MID_SESSION_LADDER_MS;
+  const base = attempt >= ladder.length ? RECONNECT_CAP_MS : ladder[attempt];
+  attempt += 1;
+  if (base === 0) return 0;
+  // ±20% jitter (FIX_FORWARD 3.2).
+  const span = base * RECONNECT_JITTER;
+  return Math.max(0, base + (Math.random() * 2 - 1) * span);
 }
 
 function scheduleReconnect(): void {
   if (reconnectTimer || stopped) return;
-  backoffMs =
-    backoffMs === 0
-      ? BACKOFF_INITIAL
-      : Math.min(backoffMs * 2, BACKOFF_MAX);
-  // Jitter: ±25% so we don't thundering-herd a daemon coming back up.
-  const jitter = backoffMs * (0.75 + Math.random() * 0.5);
+  const delay = nextBackoffMs();
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    connect();
-  }, jitter);
+    void connect();
+  }, delay);
 }
 
-/** Force an immediate reconnect attempt (drop any pending backoff). Called
- *  when the page becomes visible or the network reports back online — both
- *  are strong hints that whatever broke the previous connection is fixed. */
+/** Drop any pending backoff and reconnect immediately. Called on
+ *  `visibilitychange → visible` and `online` events — strong hints that
+ *  whatever broke the previous connection is fixed. */
 function reconnectNow(): void {
   if (stopped) return;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
-  if (es) return; // already connected (or trying)
-  backoffMs = 0;
-  connect();
+  if (abortController) return; // already connecting / connected
+  attempt = 0;
+  void connect();
 }
 
 export function startSSE(): void {
-  if (es || reconnectTimer) return;
+  if (abortController || reconnectTimer) return;
   stopped = false;
-  connect();
+  freshLoad = true;
+  attempt = 0;
+  void connect();
   if (typeof document !== "undefined" && !visListener) {
     visListener = () => {
       if (document.visibilityState === "visible" && !sseConnected.value) {
@@ -172,8 +314,8 @@ export function stopSSE(): void {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
-  es?.close();
-  es = null;
+  abortController?.abort();
+  abortController = null;
   sseConnected.value = false;
   if (visListener && typeof document !== "undefined") {
     document.removeEventListener("visibilitychange", visListener);

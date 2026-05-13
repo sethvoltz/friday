@@ -45,8 +45,25 @@
     pastError?: string | null;
     /** Called by the Retry button in read-only mode. */
     onRetryPast?: () => void;
+    /** FIX_FORWARD 3.7: read-only top-sentinel callback. Past-session view
+     * paginates older blocks via /api/agents/:name/blocks?before=…. */
+    onLoadOlderPast?: () => Promise<void> | void;
+    /** When true, no older past blocks remain — the top sentinel doesn't
+     * fire any more loads (FIX_FORWARD 3.7). */
+    pastReachedOldest?: boolean;
+    /** Active flag for the past-page-load — drives the "Loading older…"
+     * pill so the user knows the scroll-up triggered something. */
+    loadingOlderPast?: boolean;
   }
-  let { messages, pastLoading = false, pastError = null, onRetryPast }: Props = $props();
+  let {
+    messages,
+    pastLoading = false,
+    pastError = null,
+    onRetryPast,
+    onLoadOlderPast,
+    pastReachedOldest = false,
+    loadingOlderPast = false,
+  }: Props = $props();
   let rawMessages = $derived(messages ?? chat.messages);
   let readonly = $derived(messages !== undefined);
 
@@ -89,13 +106,28 @@
   let bottomSentinel: HTMLDivElement | undefined = $state();
 
   $effect(() => {
-    if (readonly) return;
     if (!topSentinel) return;
     const el = topSentinel;
     const obs = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
           if (!e.isIntersecting) continue;
+          // FIX_FORWARD 3.7: past-session paginates older blocks too.
+          if (readonly) {
+            if (!onLoadOlderPast || pastReachedOldest || loadingOlderPast)
+              continue;
+            const scroller = el.closest(".chat-scroll") as HTMLElement | null;
+            const beforeHeight = scroller?.scrollHeight ?? 0;
+            const beforeTop = scroller?.scrollTop ?? 0;
+            void Promise.resolve(onLoadOlderPast()).then(() => {
+              if (!scroller) return;
+              queueMicrotask(() => {
+                const delta = scroller.scrollHeight - beforeHeight;
+                if (delta > 0) scroller.scrollTop = beforeTop + delta;
+              });
+            });
+            continue;
+          }
           if (chat.loadingOlder || chat.reachedOldest) continue;
           // Capture scroll-anchor: keep the user looking at roughly the same
           // turn after we prepend, instead of jumping to the new top.

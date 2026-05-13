@@ -22,10 +22,12 @@
     }
   }
 
+  // FIX_FORWARD 3.6: sidebar is SSE-driven. Single fetch on mount seeds the
+  // list; subsequent add/remove flow from `agent_lifecycle`, status changes
+  // from `agent_status`, and unread badges from `agent_message` /
+  // `mail_delivered`. No 5s polling.
   onMount(() => {
     void loadAgents();
-    const i = setInterval(loadAgents, 5000);
-    return () => clearInterval(i);
   });
 
   function hrefFor(name: string, type: string): string {
@@ -34,6 +36,7 @@
 
   function focusAgent(name: string, type: string) {
     open = false;
+    chat.clearUnread(name);
     void goto(hrefFor(name, type));
   }
 
@@ -184,6 +187,13 @@
       {:else}
         <span class="type">{a.type}</span>
         <span class="name">{a.name}</span>
+      {/if}
+      {#if (chat.unreadByAgent[a.name] ?? 0) > 0}
+        <span
+          class="unread"
+          aria-label={`${chat.unreadByAgent[a.name]} unread`}>
+          {chat.unreadByAgent[a.name]}
+        </span>
       {/if}
     </button>
     {#if (a.sessionCount ?? 0) > 1 || (a.sessionCount === 1 && !a.sessionId)}
@@ -458,6 +468,21 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: var(--font-mono);
+  }
+  /* Unread badge — small pill on the right edge of the row when the agent
+     has produced user-visible content while another agent was focused.
+     FIX_FORWARD 3.6. */
+  .unread {
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 0.1rem 0.4rem;
+    border-radius: 99px;
+    background: var(--accent-primary, var(--status-ok));
+    color: var(--accent-on-bg, white);
+    font-family: var(--font-mono);
+    min-width: 1.2rem;
+    text-align: center;
   }
   .divider {
     color: var(--text-tertiary);

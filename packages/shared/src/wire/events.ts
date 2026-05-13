@@ -218,6 +218,10 @@ export interface ConnectionEstablishedEvent extends BaseEvent {
   type: "connection_established";
   /** Stable UUID minted once per daemon boot. */
   boot_id: string;
+  /** Wall-clock time when this daemon process started, in unix ms. The
+   *  connectivity widget (FIX_FORWARD 3.10) shows daemon uptime computed
+   *  from `Date.now() - boot_ts`. */
+  boot_ts: number;
   /** Current ring-buffer head when the connection landed. */
   current_seq: number;
   ts: number;

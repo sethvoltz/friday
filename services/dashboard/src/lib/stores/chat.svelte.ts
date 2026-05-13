@@ -1,5 +1,6 @@
 import type { WireEvent } from "@friday/shared";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
+import { initialPageSize } from "../util/page-size";
 import { KEYS, loadJSON, saveJSON } from "./persistent";
 import { sendQueue } from "./send-queue.svelte";
 
@@ -106,8 +107,15 @@ export class ChatState {
   lastSeqByAgent = $state<Record<string, number>>({});
   /** Cached daemon boot_id from connection_established (FIX_FORWARD 1.6). */
   bootId = $state<string | null>(null);
+  /** Daemon boot timestamp (unix ms) from connection_established. Drives
+   *  the connectivity widget's uptime tail (FIX_FORWARD 3.10). */
+  bootTs = $state<number | null>(null);
   inflightTurnId = $state<string | null>(null);
   connected = $state(false);
+  /** Per-agent unread badge counts (FIX_FORWARD 3.6). Bumped by SSE
+   *  `agent_message` events while another agent is focused; cleared when
+   *  the user focuses the agent. */
+  unreadByAgent = $state<Record<string, number>>({});
   /** Smallest `dbTurnId` we've loaded; pagination cursor for older turns. */
   oldestDbId = $state<number | null>(null);
   /** True while a paginated fetch is in flight; prevents re-entrant calls. */
@@ -156,6 +164,24 @@ export class ChatState {
     }
     const cur = this.agents[i];
     this.agents[i] = { ...cur, ...patch };
+  }
+
+  /** Drop an agent from the sidebar list. Called on
+   *  `agent_lifecycle: kill` (FIX_FORWARD 3.6). */
+  removeAgent(name: string): void {
+    this.agents = this.agents.filter((a) => a.name !== name);
+    delete this.unreadByAgent[name];
+  }
+
+  /** Increment the unread badge for an agent (FIX_FORWARD 3.6). */
+  bumpUnread(agent: string): void {
+    this.unreadByAgent[agent] = (this.unreadByAgent[agent] ?? 0) + 1;
+  }
+
+  /** Clear the unread badge for an agent — called by the sidebar when
+   *  the user focuses it (FIX_FORWARD 3.6). */
+  clearUnread(agent: string): void {
+    if (agent in this.unreadByAgent) delete this.unreadByAgent[agent];
   }
 
   /** Apply an agent_status event with a debounce on working→idle so brief
@@ -505,9 +531,13 @@ export class ChatState {
     this.loadingInitial = cached.length === 0;
 
     try {
-      const r = await fetchWithTimeout(`/api/agents/${agent}/turns?limit=5`, {
-        timeoutMs: 15_000,
-      });
+      // FIX_FORWARD 3.8: client-picked initial page size based on viewport
+      // + network class. Server clamps to ≤200 regardless.
+      const limit = initialPageSize();
+      const r = await fetchWithTimeout(
+        `/api/agents/${agent}/turns?limit=${limit}`,
+        { timeoutMs: 15_000 },
+      );
       // The user may have switched agents while we were awaiting. Bail
       // before mutating shared state so a late-resolving fetch from a
       // prior agent doesn't overwrite the just-loaded current agent.
@@ -526,8 +556,9 @@ export class ChatState {
         this.reachedOldest = true;
       } else {
         // Trim before persisting: localStorage caps around 5MB per origin
-        // and contentJson can carry sizable tool inputs/outputs.
-        saveJSON(KEYS.transcript(agent), turns.slice(0, 5));
+        // and contentJson can carry sizable tool inputs/outputs. Cap at the
+        // initial-page heuristic so the cached payload tracks first-paint.
+        saveJSON(KEYS.transcript(agent), turns.slice(0, limit));
       }
     } catch {
       // Network/timeout. If a cached render is in place, leave it; otherwise
@@ -644,10 +675,31 @@ export class ChatState {
             type: event.agentType,
             status: "working",
           });
+        } else if (event.event === "kill") {
+          // FIX_FORWARD 3.6: daemon destroyed the agent's registry row.
+          // Drop the sidebar entry locally rather than waiting for a poll.
+          this.removeAgent(event.agent);
         }
         break;
       case "agent_status":
         this.applyAgentStatus(event.agent, event.status);
+        break;
+      case "agent_message":
+        // FIX_FORWARD 3.6: badge unfocused agents on new user-visible
+        // block_complete. The focused agent never accumulates a badge —
+        // the user is already reading the chat.
+        if (event.agent !== this.focusedAgent) {
+          this.bumpUnread(event.agent);
+        }
+        break;
+      case "mail_delivered":
+        // Treat as a (lighter-weight) unread signal — recipient just got
+        // mail, which warrants a sidebar nudge. The canonical block lands
+        // separately via `agent_message` once the recipient acts on the
+        // mail; this just gets the badge up faster.
+        if (event.to !== this.focusedAgent) {
+          this.bumpUnread(event.to);
+        }
         break;
       default:
         break;
@@ -869,6 +921,114 @@ function parseBlockContent(contentJson: string): ParsedBlockContent {
   } catch {
     return {};
   }
+}
+
+/** Wire shape of a row from `GET /api/agents/:name/blocks`. Mirrors the
+ *  `blocks` table columns (FIX_FORWARD 1.1). */
+export interface BlockRow {
+  id: number;
+  blockId: string;
+  turnId: string;
+  agentName: string;
+  sessionId: string;
+  messageId: string | null;
+  blockIndex: number;
+  role: string;
+  kind: string;
+  source: string | null;
+  contentJson: string;
+  status: string;
+  ts: number;
+  lastEventSeq: number;
+}
+
+/**
+ * Convert BlockRow[] (from /api/agents/:name/blocks) into the ChatMessage[]
+ * the chat UI renders. Mirrors `handleBlockComplete`'s id scheme so a
+ * canonical block row + a live block_complete SSE event converge on the
+ * same bubble id (FIX_FORWARD 3.7 + 2.6).
+ */
+export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  const toolByToolId = new Map<string, ChatMessage>();
+  // Newest-first arrives from the API; chronological for rendering.
+  const sorted = [...blocks].sort((a, b) => a.id - b.id);
+  for (const b of sorted) {
+    const parsed = parseBlockContent(b.contentJson);
+    if (b.kind === "text") {
+      const role = b.role === "user" ? "user" : "assistant";
+      const id =
+        role === "user" ? userBlockIdForTurn(b.turnId) : `b_${b.blockId}`;
+      out.push({
+        id,
+        role,
+        text: parsed.text ?? "",
+        status:
+          b.status === "complete" || b.status === "streaming"
+            ? "complete"
+            : b.status === "aborted"
+              ? "aborted"
+              : "error",
+        agent,
+        turnId: b.turnId,
+        ts: b.ts,
+        source: (b.source as ChatMessage["source"]) ?? undefined,
+      });
+    } else if (b.kind === "thinking") {
+      out.push({
+        id: `th_${b.blockId}`,
+        role: "thinking",
+        text: parsed.text ?? "",
+        status: "done",
+        blockId: b.blockId,
+        ts: b.ts,
+      });
+    } else if (b.kind === "tool_use") {
+      const toolId = parsed.tool_use_id ?? b.blockId;
+      const msg: ChatMessage = {
+        id: `t_${toolId}`,
+        role: "tool",
+        text: "",
+        status: "running",
+        toolId,
+        toolName: parsed.name ?? "",
+        input: parsed.input,
+        ts: b.ts,
+      };
+      out.push(msg);
+      toolByToolId.set(toolId, msg);
+    } else if (b.kind === "tool_result") {
+      const toolId = parsed.tool_use_id ?? "";
+      const status = parsed.is_error ? "error" : "done";
+      const existing = toolByToolId.get(toolId);
+      if (existing) {
+        existing.status = status;
+        existing.output = parsed.text ?? "";
+      } else {
+        out.push({
+          id: `t_${toolId}`,
+          role: "tool",
+          text: "",
+          status,
+          toolId,
+          toolName: "(unknown)",
+          output: parsed.text ?? "",
+          ts: b.ts,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/** Lowest block_id across an array. Used as the next `before` cursor for
+ *  scroll-up pagination (FIX_FORWARD 3.7). */
+export function oldestBlockCursor(blocks: BlockRow[]): string | null {
+  let oldest: BlockRow | null = null;
+  for (const b of blocks) {
+    if (oldest === null || b.id < oldest.id) oldest = b;
+  }
+  return oldest?.blockId ?? null;
 }
 
 export interface TurnRow {

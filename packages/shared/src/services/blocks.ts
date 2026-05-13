@@ -187,6 +187,9 @@ export function maxSeqByAgent(agentName: string): number {
 
 export interface FetchBlocksOpts {
   agentName: string;
+  /** When set, restrict the result to a single SDK session (FIX_FORWARD 3.7
+   *  — past-session view). */
+  sessionId?: string;
   limit?: number;
   /** Return blocks strictly older than this block_id. */
   beforeBlockId?: string;
@@ -235,7 +238,12 @@ export function fetchBlocksByAgent(opts: FetchBlocksOpts): FetchBlocksResult {
       match: opts.match,
       limit: clampLimit(opts.limit, 20),
     });
-    return { blocks: rows, lastEventSeq: maxSeq(rows) };
+    // matchBlocks doesn't filter by session today — apply post-hoc so the
+    // /jump <term> search in a past-session view stays scoped.
+    const filtered = opts.sessionId
+      ? rows.filter((r) => r.sessionId === opts.sessionId)
+      : rows;
+    return { blocks: filtered, lastEventSeq: maxSeq(filtered) };
   }
   if (typeof opts.aroundTs === "number") {
     return fetchAroundTs(opts);
@@ -245,6 +253,7 @@ export function fetchBlocksByAgent(opts: FetchBlocksOpts): FetchBlocksResult {
     if (!anchor) return { blocks: [], lastEventSeq: 0 };
     const rows = listBlocks({
       agentName: opts.agentName,
+      sessionId: opts.sessionId,
       beforeId: anchor.id,
       limit: clampLimit(opts.limit),
     });
@@ -255,6 +264,7 @@ export function fetchBlocksByAgent(opts: FetchBlocksOpts): FetchBlocksResult {
     if (!anchor) return { blocks: [], lastEventSeq: 0 };
     const rows = listBlocks({
       agentName: opts.agentName,
+      sessionId: opts.sessionId,
       afterId: anchor.id,
       limit: clampLimit(opts.limit),
       ascending: true,
@@ -263,6 +273,7 @@ export function fetchBlocksByAgent(opts: FetchBlocksOpts): FetchBlocksResult {
   }
   const rows = listBlocks({
     agentName: opts.agentName,
+    sessionId: opts.sessionId,
     limit: clampLimit(opts.limit),
   });
   return { blocks: rows, lastEventSeq: maxSeq(rows) };
@@ -273,24 +284,29 @@ function fetchAroundTs(opts: FetchBlocksOpts): FetchBlocksResult {
   const db = getDb();
   const beforeLimit = clampLimit(opts.beforeLimit, 10);
   const afterLimit = clampLimit(opts.afterLimit, 40);
+  const beforeConds = [
+    eq(schema.blocks.agentName, opts.agentName),
+    lt(schema.blocks.ts, aroundTs),
+  ];
+  const afterConds = [
+    eq(schema.blocks.agentName, opts.agentName),
+    gt(schema.blocks.ts, aroundTs - 1),
+  ];
+  if (opts.sessionId) {
+    beforeConds.push(eq(schema.blocks.sessionId, opts.sessionId));
+    afterConds.push(eq(schema.blocks.sessionId, opts.sessionId));
+  }
   const beforeRows = db
     .select()
     .from(schema.blocks)
-    .where(
-      and(eq(schema.blocks.agentName, opts.agentName), lt(schema.blocks.ts, aroundTs)),
-    )
+    .where(and(...beforeConds))
     .orderBy(desc(schema.blocks.ts))
     .limit(beforeLimit)
     .all() as BlockRow[];
   const afterRows = db
     .select()
     .from(schema.blocks)
-    .where(
-      and(
-        eq(schema.blocks.agentName, opts.agentName),
-        gt(schema.blocks.ts, aroundTs - 1),
-      ),
-    )
+    .where(and(...afterConds))
     .orderBy(asc(schema.blocks.ts))
     .limit(afterLimit)
     .all() as BlockRow[];

@@ -1,8 +1,9 @@
-import { json, type RequestHandler } from "@sveltejs/kit";
-import { daemonGet } from "$lib/server/daemon";
+import { type RequestHandler } from "@sveltejs/kit";
+import { withDaemon } from "$lib/server/with-daemon";
 
-export const GET: RequestHandler = async ({ locals }) => {
+export const GET: RequestHandler = async ({ locals, request }) => {
   if (!locals.user) return new Response("unauthorized", { status: 401 });
-  const agents = await daemonGet<unknown[]>("/api/agents");
-  return json(agents);
+  return withDaemon((d) =>
+    d.get<unknown[]>("/api/agents", { signal: request.signal }),
+  );
 };

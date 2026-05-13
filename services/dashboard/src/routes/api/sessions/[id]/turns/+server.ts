@@ -1,11 +1,12 @@
-import { json, type RequestHandler } from "@sveltejs/kit";
-import { daemonGet } from "$lib/server/daemon";
+import { type RequestHandler } from "@sveltejs/kit";
+import { withDaemon } from "$lib/server/with-daemon";
 
-export const GET: RequestHandler = async ({ params, url, locals }) => {
+export const GET: RequestHandler = async ({ params, url, locals, request }) => {
   if (!locals.user) return new Response("unauthorized", { status: 401 });
   const limit = url.searchParams.get("limit") ?? "200";
-  const turns = await daemonGet<unknown[]>(
-    `/api/sessions/${params.id}/turns?limit=${limit}`,
+  return withDaemon((d) =>
+    d.get<unknown[]>(`/api/sessions/${params.id}/turns?limit=${limit}`, {
+      signal: request.signal,
+    }),
   );
-  return json(turns);
 };

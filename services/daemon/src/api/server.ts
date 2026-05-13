@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { logger } from "../log.js";
-import { eventBus, getBootId } from "../events/bus.js";
+import { eventBus, getBootId, getBootTs } from "../events/bus.js";
 import {
   type AgentEntry,
   DAEMON_SECRET_HEADER,
@@ -427,9 +427,11 @@ async function handle(
     const beforeLimit = numericParam(url, "before_limit");
     const afterLimit = numericParam(url, "after_limit");
     const match = url.searchParams.get("match") ?? undefined;
+    const sessionId = url.searchParams.get("session_id") ?? undefined;
     try {
       const result = fetchBlocksByAgent({
         agentName,
+        sessionId,
         limit,
         beforeBlockId: before,
         afterBlockId: after,
@@ -1023,6 +1025,7 @@ function handleEvents(
     seq: 0,
     type: "connection_established",
     boot_id: getBootId(),
+    boot_ts: getBootTs(),
     current_seq: eventBus.currentSeq(),
     ts: Date.now(),
   });

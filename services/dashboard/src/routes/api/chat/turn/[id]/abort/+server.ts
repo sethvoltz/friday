@@ -1,8 +1,11 @@
-import { json, type RequestHandler } from "@sveltejs/kit";
-import { daemonPost } from "$lib/server/daemon";
+import { type RequestHandler } from "@sveltejs/kit";
+import { withDaemon } from "$lib/server/with-daemon";
 
-export const POST: RequestHandler = async ({ params, locals }) => {
+export const POST: RequestHandler = async ({ params, locals, request }) => {
   if (!locals.user) return new Response("unauthorized", { status: 401 });
-  const r = await daemonPost(`/api/chat/turn/${params.id}/abort`, {});
-  return json(r);
+  return withDaemon((d) =>
+    d.post(`/api/chat/turn/${params.id}/abort`, {}, {
+      signal: request.signal,
+    }),
+  );
 };

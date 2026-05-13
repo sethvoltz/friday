@@ -11,15 +11,15 @@ declare const self: ServiceWorkerGlobalScope;
  * App-shell service worker.
  *
  * SvelteKit emits `build` (the JS/CSS chunks the SSR HTML references) and
- * `files` (everything in /static). Precache both at install so a cold network
- * still paints the shell. Runtime cache strategy:
+ * `files` (everything in /static). Precache both at install so a cold
+ * network still paints the shell. Runtime cache strategy (FIX_FORWARD 3.9):
  *
- * - Precached assets (the build + static files set): cache-first.
- * - Everything else same-origin: pass through to the network. We
- *   deliberately do NOT cache rendered HTML or any other dynamic GET —
- *   SvelteKit pages are personalized for the authenticated user, and a
- *   cached `/sessions/*` shell would still be served after logout /
- *   cookie expiry, exposing the previous session's UI to the next user.
+ * - Precached assets (hashed JS/CSS, static files): cache-first. Filenames
+ *   are content-versioned, so a cached entry is always correct for its url.
+ * - Navigation requests (HTML): network-first, fall back to cache on
+ *   network failure. A successful network response is written to cache so
+ *   offline reloads survive. `/login` is excluded — we don't want to
+ *   serve a stale auth page after a server-side rotation.
  * - /api/*: bypass. SSE, agent lists, transcripts — serving cached
  *   versions of those would actively mislead the UI.
  *
@@ -67,10 +67,21 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Everything else (rendered HTML, dynamic responses): pass through to
-  // the network without caching. We don't trust ourselves to know which
-  // responses safely outlive a logout, so we cache none of them.
+  // Navigation / HTML responses: network-first with cache fallback
+  // (FIX_FORWARD 3.9). Offline reload serves the last successful response.
+  if (isHtmlRequest(request)) {
+    event.respondWith(networkFirstHtml(request, url));
+    return;
+  }
+
+  // Everything else: pass through to the network without caching.
 });
+
+function isHtmlRequest(request: Request): boolean {
+  if (request.mode === "navigate") return true;
+  const accept = request.headers.get("accept") ?? "";
+  return accept.includes("text/html");
+}
 
 async function cacheFirst(request: Request): Promise<Response> {
   const cache = await caches.open(CACHE);
@@ -82,6 +93,31 @@ async function cacheFirst(request: Request): Promise<Response> {
     return fresh;
   } catch (err) {
     if (cached) return cached;
+    throw err;
+  }
+}
+
+async function networkFirstHtml(
+  request: Request,
+  url: URL,
+): Promise<Response> {
+  const cache = await caches.open(CACHE);
+  try {
+    const fresh = await fetch(request);
+    // Cache 2xx HTML responses for the offline-fallback path. Skip /login
+    // so we never re-serve a stale auth page after a server-side
+    // credential rotation; same for any other auth-flow endpoints.
+    if (fresh.ok && !url.pathname.startsWith("/login")) {
+      cache.put(request, fresh.clone());
+    }
+    return fresh;
+  } catch (err) {
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    // Last-resort: try `/` (the dashboard shell). The SPA boot will
+    // re-route the client to the current path once it's interactive.
+    const rootCached = await cache.match(new Request(`${url.origin}/`));
+    if (rootCached) return rootCached;
     throw err;
   }
 }
