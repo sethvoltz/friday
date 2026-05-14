@@ -35,7 +35,11 @@ export function buildMailServer(opts: BuildMailServerOptions) {
           "  - `critical`: recipient picks this up at the next SDK iteration boundary inside their current turn (mid-turn injection). Use sparingly. The orchestrator may use `critical` freely for time-sensitive reroutes; helpers/builders should reserve `critical` for sub-agent-return-style replies to a parent that is mid-turn waiting for your result.",
         ].join("\n"),
         {
-          to: z.string().describe("Recipient agent name."),
+          to: z
+            .string()
+            .describe(
+              "Recipient agent name. Must be a literal registered agent name, or the symbolic `parent` (your spawner) or `self`. Role names like `orchestrator` / `builder` / `helper` are rejected.",
+            ),
           body: z.string().describe("Message body. Markdown ok."),
           type: z
             .enum(["message", "notification", "task"])

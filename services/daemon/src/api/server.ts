@@ -48,6 +48,7 @@ import {
   type MemoryEntry,
 } from "@friday/memory";
 import { wrapWithRecall } from "../agent/recall.js";
+import { resolveRecipient, validateRecipient } from "../comms/recipient.js";
 import {
   DEFAULT_RULE,
   deleteProposal,
@@ -171,7 +172,12 @@ async function handle(
     const resumeSessionId = agentRow.sessionId ?? undefined;
 
     const stack = readPromptStack(agentRow.type, []);
-    const baseSystemPrompt = composeSystemPrompt(stack);
+    const baseSystemPrompt = composeSystemPrompt(stack, {
+      agentName: agentRow.name,
+      agentType: agentRow.type,
+      parentName:
+        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+    });
 
     // Skill detection: if the user typed `/<name> <args>`, look up the skill
     // and inject its body as a per-turn `<skill-context>` block. The user
@@ -344,7 +350,11 @@ async function handle(
 
     const turnId = `t_${randomUUID()}`;
     const stack = readPromptStack(body.type, []);
-    const baseSystemPrompt = composeSystemPrompt(stack);
+    const baseSystemPrompt = composeSystemPrompt(stack, {
+      agentName: body.name,
+      agentType: body.type,
+      parentName: body.parentName,
+    });
     const systemPrompt =
       body.type === "builder" && worktreePath
         ? `${baseSystemPrompt}\n\n---\n\nYou are running in a git worktree at \`${worktreePath}\` on branch \`${branch}\`. **Do not read, write, or modify files outside this directory.** All Bash commands run with this directory as cwd by default; do not \`cd\` outside it.`
@@ -913,7 +923,24 @@ async function handle(
         retry_after_ms: r.retryAfterMs,
       });
     }
-    return json(res, 200, sendMail(body));
+    // FRI-11 F3: resolve symbolic recipients ("parent" / "self") against the
+    // caller's registry row before validation. Literal names pass through.
+    const resolved = resolveRecipient(fromAgent, body.toAgent);
+    if (!resolved.ok) {
+      return json(res, 400, { error: resolved.error });
+    }
+    // FRI-11 F2: reject mail to unknown recipients before persisting the row.
+    // The MCP tool surfaces this 400 to the caller as a daemonFetch error —
+    // the agent sees the suggestion immediately instead of silently writing
+    // an undeliverable mail row.
+    const check = validateRecipient(resolved.agent);
+    if (!check.ok) {
+      return json(res, 400, {
+        error: check.error,
+        suggestion: check.suggestion,
+      });
+    }
+    return json(res, 200, sendMail({ ...body, toAgent: check.agent }));
   }
   if (method === "POST" && /^\/api\/mail\/\d+\/read$/.test(path)) {
     const id = Number(path.split("/")[3]);
@@ -1212,7 +1239,10 @@ function handleSystemCommand(
       if (topic) {
         const seedTurnId = `t_${randomUUID()}`;
         const stack = readPromptStack("bare", []);
-        const systemPrompt = composeSystemPrompt(stack);
+        const systemPrompt = composeSystemPrompt(stack, {
+          agentName: name,
+          agentType: "bare",
+        });
         const modelCfg = normalizeModelConfig(cfg.model);
         const wrappedTopic = wrapWithRecall(topic, topic, "scratch");
         dispatchTurn({

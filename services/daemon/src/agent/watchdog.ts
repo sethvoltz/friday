@@ -142,7 +142,11 @@ async function refork(agentName: string): Promise<void> {
 
   const cfg = loadConfig();
   const stack = readPromptStack(a.type, []);
-  const systemPrompt = composeSystemPrompt(stack);
+  const systemPrompt = composeSystemPrompt(stack, {
+    agentName,
+    agentType: a.type,
+    parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
+  });
   const modelCfg = normalizeModelConfig(cfg.model);
 
   // Empty prompt — the worker will idle and drain mail on its own (the long-

@@ -122,7 +122,12 @@ function maybeSpawnFromMail(agentName: string): void {
 
   const cfg = loadConfig();
   const stack = readPromptStack(agentRow.type, []);
-  const systemPrompt = composeSystemPrompt(stack);
+  const systemPrompt = composeSystemPrompt(stack, {
+    agentName: agentRow.name,
+    agentType: agentRow.type,
+    parentName:
+      "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+  });
   const modelCfg = normalizeModelConfig(cfg.model);
   const turnId = `t_${randomUUID()}`;
 
