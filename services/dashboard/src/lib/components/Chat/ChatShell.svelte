@@ -125,6 +125,14 @@
   // already be in view, and the IntersectionObserver wouldn't re-fire
   // after `chat.oldestBlockId` became valid (no intersection change → no
   // callback), leaving the user with one page and no way to load more.
+  //
+  // Readonly mode (past-session view) deliberately does NOT touch
+  // chat.focusedAgent — that signal means "the agent the user is
+  // live-chatting with right now," and a past-session view isn't a
+  // live chat. The sidebar's active-row highlight derives from the
+  // route ($page.params.agent) instead, so past-session views still
+  // visually pin their agent in the sidebar without polluting the
+  // live-state signal.
   $effect(() => {
     if (readonly) return;
     const a = agent;

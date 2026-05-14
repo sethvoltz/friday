@@ -1,16 +1,31 @@
 <script lang="ts">
-  import { chat, type AgentInfo } from "$lib/stores/chat.svelte";
+  import {
+    chat,
+    type AgentInfo,
+    type SidebarSessionSummary,
+  } from "$lib/stores/chat.svelte";
   import { goto } from "$app/navigation";
+  import { page } from "$app/stores";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import { loadJSON, saveJSON } from "$lib/stores/persistent";
   import { onMount } from "svelte";
 
-  interface SessionSummary {
-    sessionId: string;
-    firstTs: number;
-    lastTs: number;
-    turnCount: number;
-  }
+  // The route is the authoritative source for which sidebar row is
+  // active and how deep the menu should be expanded. `/` → orchestrator
+  // pinned row. `/sessions/<agent>` → that agent's primary row.
+  // `/sessions/<agent>/<session>` → that agent's row + a highlighted
+  // history-row matching the session id.
+  //
+  // We deliberately derive the active highlight from the route, NOT
+  // from `chat.focusedAgent`, because past-session (readonly) views
+  // don't update focusedAgent — that signal means "the agent the user
+  // is live-chatting with." Past sessions are inspection, not chat;
+  // the sidebar should pin them visually without polluting the live
+  // signal that drives SSE filtering and the inflight-turn indicator.
+  let routeAgent = $derived($page.params.agent ?? "");
+  let routeSession = $derived($page.params.session ?? "");
+  // "friday" is the orchestrator's pinned name and the default for `/`.
+  let activeAgent = $derived(routeAgent || "friday");
 
   async function loadAgents() {
     try {
@@ -93,11 +108,13 @@
     chat.agents
       .filter((a) => a.type !== "orchestrator")
       .filter((a) => {
-        // F2-D: always show the focused row, regardless of the filter
-        // state — the user is reading that agent's chat in the main
-        // pane, so losing the sidebar row when the agent gets archived
-        // mid-view is a UX cliff.
-        if (a.name === chat.focusedAgent) return true;
+        // F2-D: always show the route-active row, regardless of the
+        // filter state — the user is reading that agent's chat in the
+        // main pane, so losing the sidebar row when the agent gets
+        // archived mid-view is a UX cliff. Uses activeAgent (route
+        // derived) instead of focusedAgent so past-session views of
+        // archived agents stay pinned too.
+        if (a.name === activeAgent) return true;
         if (a.status === "archived") return showArchived;
         if (!isActive(a.status)) return showInactive;
         return true;
@@ -105,7 +122,7 @@
       .sort((a, b) => a.name.localeCompare(b.name)),
   );
   // Counts of agents hidden by each filter switch. Excludes the
-  // orchestrator and the focused row (both always show). When the
+  // orchestrator and the route-active row (both always show). When the
   // toggle is on, nothing is being hidden by that toggle → count is 0
   // and the label hides the parenthetical.
   let archivedHidden = $derived(
@@ -114,7 +131,7 @@
       : chat.agents.filter(
           (a) =>
             a.type !== "orchestrator" &&
-            a.name !== chat.focusedAgent &&
+            a.name !== activeAgent &&
             a.status === "archived",
         ).length,
   );
@@ -124,7 +141,7 @@
       : chat.agents.filter(
           (a) =>
             a.type !== "orchestrator" &&
-            a.name !== chat.focusedAgent &&
+            a.name !== activeAgent &&
             a.status !== "archived" &&
             !isActive(a.status),
         ).length,
@@ -145,28 +162,63 @@
             : "var(--text-tertiary)";
   }
 
-  // Per-agent expanded-history state.
-  let expanded = $state<Record<string, boolean>>({});
-  let pastSessions = $state<Record<string, SessionSummary[]>>({});
-  let loadingSessions = $state<Record<string, boolean>>({});
+  // Expand state + session cache live on the chat store so they survive
+  // ChatShell re-mounts. The Sidebar is mounted inside ChatShell, which
+  // is mounted per-route by each page's +page.svelte — so every nav
+  // between /, /sessions/<a>, /sessions/<a>/<s> wiped this state until
+  // we moved it.
+  function isExpanded(name: string): boolean {
+    // Route-forced expansion: when the URL points at a past session of
+    // this agent, force its history submenu open so the user can see
+    // (and the active-row highlight can land on) the session they're
+    // viewing. User can still toggle other rows freely; clicking the
+    // collapse button on the route's agent is the only place that
+    // contention surfaces, and route wins.
+    if (routeAgent === name && routeSession) return true;
+    return chat.sidebarExpanded[name] ?? false;
+  }
 
   async function toggleHistory(name: string) {
-    expanded[name] = !expanded[name];
-    if (expanded[name] && !pastSessions[name] && !loadingSessions[name]) {
-      loadingSessions[name] = true;
-      try {
-        const r = await fetch(`/api/agents/${name}/sessions`);
-        if (r.ok) {
-          pastSessions[name] = (await r.json()) as SessionSummary[];
-        }
-      } finally {
-        loadingSessions[name] = false;
-      }
+    // If the route forces this row open we no-op the user click —
+    // collapsing-then-immediately-re-expanding via route effect would
+    // be jarring. User can always navigate away to truly collapse.
+    if (routeAgent === name && routeSession) return;
+    chat.sidebarExpanded[name] = !chat.sidebarExpanded[name];
+    if (
+      chat.sidebarExpanded[name] &&
+      !chat.sidebarPastSessions[name] &&
+      !chat.sidebarLoadingSessions[name]
+    ) {
+      await loadPastSessions(name);
     }
   }
 
-  function pastFor(agent: AgentInfo): SessionSummary[] {
-    const all = pastSessions[agent.name] ?? [];
+  async function loadPastSessions(name: string): Promise<void> {
+    chat.sidebarLoadingSessions[name] = true;
+    try {
+      const r = await fetch(`/api/agents/${name}/sessions`);
+      if (r.ok) {
+        chat.sidebarPastSessions[name] =
+          (await r.json()) as SidebarSessionSummary[];
+      }
+    } finally {
+      chat.sidebarLoadingSessions[name] = false;
+    }
+  }
+
+  // When the route points at a past session, kick off a sessions fetch
+  // if we don't already have one cached — otherwise the auto-expanded
+  // submenu would render "Loading…" forever (we'd never trigger the
+  // fetch because the user didn't click).
+  $effect(() => {
+    if (!routeAgent || !routeSession) return;
+    if (chat.sidebarPastSessions[routeAgent]) return;
+    if (chat.sidebarLoadingSessions[routeAgent]) return;
+    void loadPastSessions(routeAgent);
+  });
+
+  function pastFor(agent: AgentInfo): SidebarSessionSummary[] {
+    const all = chat.sidebarPastSessions[agent.name] ?? [];
     // Drop the agent's currently-active session — that one is reached via the
     // parent row's primary click. Show only true past sessions here.
     return agent.sessionId ? all.filter((s) => s.sessionId !== agent.sessionId) : all;
@@ -220,7 +272,7 @@
   <div
     class="row"
     class:pinned={isPinned}
-    class:active={chat.focusedAgent === a.name}>
+    class:active={a.name === activeAgent}>
     <button
       class="row-main"
       title={isPinned ? "Friday" : `${a.type} · ${a.name}`}
@@ -249,17 +301,17 @@
       <button
         type="button"
         class="expand-btn"
-        class:open={expanded[a.name]}
-        aria-label={expanded[a.name] ? "Hide history" : "Show history"}
-        aria-expanded={expanded[a.name] ? true : false}
+        class:open={isExpanded(a.name)}
+        aria-label={isExpanded(a.name) ? "Hide history" : "Show history"}
+        aria-expanded={isExpanded(a.name) ? true : false}
         onclick={() => toggleHistory(a.name)}>
-        {expanded[a.name] ? "−" : "+"}
+        {isExpanded(a.name) ? "−" : "+"}
       </button>
     {/if}
   </div>
-  {#if expanded[a.name]}
+  {#if isExpanded(a.name)}
     <div class="history">
-      {#if loadingSessions[a.name]}
+      {#if chat.sidebarLoadingSessions[a.name]}
         <div class="history-empty">Loading…</div>
       {:else if pastFor(a).length === 0}
         <div class="history-empty">No past sessions</div>
@@ -268,6 +320,7 @@
           <button
             type="button"
             class="history-row"
+            class:active={routeAgent === a.name && routeSession === s.sessionId}
             title={`${a.name} · ${new Date(s.lastTs).toLocaleString()} · ${s.turnCount} turn${s.turnCount === 1 ? "" : "s"}`}
             onclick={() => navTo(`/sessions/${a.name}/${s.sessionId}`)}>
             <span class="history-ts">{fmtSessionTs(s.lastTs)}</span>
@@ -476,6 +529,10 @@
   .history-row:hover {
     background: var(--bg-tertiary);
     color: var(--text-primary);
+  }
+  .history-row.active {
+    background: var(--accent-glow);
+    color: var(--accent-primary);
   }
   .history-ts {
     font-family: var(--font-mono);

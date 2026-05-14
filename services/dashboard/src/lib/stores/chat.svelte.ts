@@ -92,6 +92,15 @@ export interface AgentInfo {
   sessionCount?: number;
 }
 
+/** Shape returned by `/api/agents/:name/sessions` and cached on the chat
+ *  store for the sidebar's history submenu. */
+export interface SidebarSessionSummary {
+  sessionId: string;
+  firstTs: number;
+  lastTs: number;
+  turnCount: number;
+}
+
 /** Sentinel agent bucket for SSE events that don't carry an `agent` field
  *  (system_banner, mail_delivered, schedule_fired, evolve_critical). */
 export const SYSTEM_BUCKET = "__system__";
@@ -174,6 +183,17 @@ export class ChatState {
    * cancelled and the dot stays green. */
   private idleDebounce = new Map<string, ReturnType<typeof setTimeout>>();
   private static readonly IDLE_DEBOUNCE_MS = 750;
+
+  /** Sidebar history-expand state. Lives on the chat store (not the
+   *  Sidebar component) so it survives ChatShell re-mounts on route
+   *  navigation — without this, every nav between `/` and
+   *  `/sessions/<agent>` collapsed every expand the user had open. */
+  sidebarExpanded = $state<Record<string, boolean>>({});
+  /** Cached past-session summaries keyed by agent name. Fetched once on
+   *  first expand; persists across Sidebar mounts. */
+  sidebarPastSessions = $state<Record<string, SidebarSessionSummary[]>>({});
+  /** Per-agent inflight flag for the sessions fetch. */
+  sidebarLoadingSessions = $state<Record<string, boolean>>({});
 
   /** localStorage key for F3-C cursor persistence. Cleared when the
    *  daemon's boot_id changes (different process — old seqs are stale). */
