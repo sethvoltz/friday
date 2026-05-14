@@ -190,6 +190,14 @@ async function handle(
     // block before dispatching. Stays scoped to the user's literal input —
     // recall-block / skill scaffolding is internal and not part of the
     // user-visible message stream (FIX_FORWARD 1.2).
+    // Filter out any attachment entries we wouldn't be able to resolve
+    // server-side. The dashboard only sends shas that came back from
+    // POST /api/uploads, so this is defense in depth against a malformed
+    // or stale client body.
+    const attachments = (body.attachments ?? []).filter(
+      (a) => typeof a.sha256 === "string" && /^[a-f0-9]{64}$/.test(a.sha256),
+    );
+
     try {
       recordUserBlock({
         turnId,
@@ -197,6 +205,7 @@ async function handle(
         sessionId: resumeSessionId,
         text: body.text,
         source: "user_chat",
+        attachments: attachments.length > 0 ? attachments : undefined,
       });
     } catch (err) {
       logger.log("warn", "chat.turn.user-block.error", {
@@ -214,6 +223,7 @@ async function handle(
         workingDirectory: registry.workingDirectoryFor(agentRow),
         systemPrompt,
         prompt: wrappedPrompt,
+        attachments: attachments.length > 0 ? attachments : undefined,
         turnId,
         model: modelCfg.name,
         thinking: modelCfg.thinking,

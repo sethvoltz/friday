@@ -22,6 +22,11 @@ export interface WorkerSpawnOptions {
   allowedToolsOverride?: string[];
   /** Initial user prompt; the worker calls SDK `query()` with it. */
   prompt: string;
+  /** Attachments referenced by the initial prompt. Empty/omitted on
+   *  non-user_chat dispatch paths (mail, scheduled). When present, the
+   *  worker switches to the SDK's async-iterable form and embeds
+   *  `{type:"image"|"document"}` content blocks alongside the text. */
+  attachments?: WorkerAttachment[];
   /** Caller-supplied turn id (the daemon assigns one before spawn). */
   turnId: string;
   model: string;
@@ -56,9 +61,19 @@ export interface WorkerSpawnOptions {
  */
 export interface WorkerPromptCommand {
   prompt: string;
+  /** Attachments referenced by this prompt. Treated as empty when omitted. */
+  attachments?: WorkerAttachment[];
   turnId: string;
   resumeSessionId?: string;
   allowedToolsOverride?: string[];
+}
+
+/** Metadata for an attachment referenced by a turn. Resolved to bytes on
+ *  disk by the worker when building the SDK user message. */
+export interface WorkerAttachment {
+  sha256: string;
+  filename: string;
+  mime: string;
 }
 
 export type WorkerCommand =

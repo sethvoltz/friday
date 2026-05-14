@@ -446,9 +446,14 @@
                 </div>
               {:else if q?.status === "retrying"}
                 <div class="footer-tag queued">Retrying… ({q.attempts}/5)</div>
-              {:else}
+              {:else if q}
                 <div class="footer-tag queued">Queued — waiting to send</div>
               {/if}
+              <!-- No else for the missing-entry case: a bubble can keep a
+                   stale queueId (e.g. a 200 response whose body lacked
+                   turn_id — sendQueue.remove already ran, confirmPending
+                   never did) and a pill claiming "queued" while the
+                   queue is empty is worse than no pill. FRI-6. -->
             {/if}
           {:else}
             <Markdown source={msg.text} streaming={msg.status === "streaming"} />

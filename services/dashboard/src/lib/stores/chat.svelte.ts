@@ -1222,6 +1222,9 @@ export class ChatState {
         if (m.fromAgent === undefined && parsed.from_agent) {
           m.fromAgent = parsed.from_agent;
         }
+        if (m.attachments === undefined && parsed.attachments) {
+          m.attachments = parsed.attachments;
+        }
         return;
       }
       // Late mount: block_start was evicted from the ring (or — for mail
@@ -1243,6 +1246,7 @@ export class ChatState {
         source: (event.source as ChatMessage["source"]) ?? undefined,
         fromAgent: parsed.from_agent,
         mailMeta: extractMailMeta(parsed),
+        attachments: parsed.attachments,
       });
       return;
     }
@@ -1330,6 +1334,11 @@ interface ParsedBlockContent {
   mail_priority?: string;
   mail_thread_id?: string | null;
   mail_ts?: number;
+  /** user_chat blocks for paste/drop/file-pick sends carry the attachment
+   *  metadata the daemon persisted alongside the text. Reload reads this
+   *  back so the bubble's image thumb / file chip survives across page
+   *  loads (FRI-6). */
+  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
 }
 
 function parseBlockContent(contentJson: string): ParsedBlockContent {
@@ -1422,6 +1431,7 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         source: (b.source as ChatMessage["source"]) ?? undefined,
         fromAgent: parsed.from_agent,
         mailMeta: extractMailMeta(parsed),
+        attachments: parsed.attachments,
       });
     } else if (b.kind === "thinking") {
       // Same shape for thinking blocks. `handleBlockDelta` gates on

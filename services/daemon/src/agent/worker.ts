@@ -16,10 +16,11 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { stringifyToolResult } from "@friday/shared";
-import type { MailRow } from "@friday/shared/services";
+import { readAttachmentBytes, type MailRow } from "@friday/shared/services";
 import type {
+  WorkerAttachment,
   WorkerCommand,
   WorkerEvent,
   WorkerPromptCommand,
@@ -74,6 +75,7 @@ process.on("message", (msg: WorkerCommand) => {
         lastSessionId = msg.options.resumeSessionId;
         pendingPrompt = {
           prompt: msg.options.prompt,
+          attachments: msg.options.attachments,
           turnId: msg.options.turnId,
           resumeSessionId: msg.options.resumeSessionId,
           allowedToolsOverride: msg.options.allowedToolsOverride,
@@ -205,6 +207,97 @@ function nextClientBlockId(): string {
   return `b_${randomUUID()}`;
 }
 
+/** MIME types Anthropic's vision API will accept as `image` content
+ *  blocks. `image/jpg` is folded into `image/jpeg`. Anything outside this
+ *  set (and outside `application/pdf`, handled as a document block) is
+ *  dropped with a warning so the model never sees an unsupported mime. */
+const IMAGE_MEDIA_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+]);
+
+function normalizeMediaType(mime: string): string {
+  const m = mime.toLowerCase();
+  return m === "image/jpg" ? "image/jpeg" : m;
+}
+
+/**
+ * Build the SDK's async-iterable prompt form when a turn carries
+ * attachments. Yields a single `SDKUserMessage` whose `content` is the
+ * text followed by one image/document block per attachment. The iterator
+ * resolves immediately — the SDK collects the message synchronously and
+ * runs the turn as if the caller had streamed it in.
+ *
+ * Resolution failures are non-fatal: a missing sha (e.g. the file rotted
+ * out of `~/.friday/uploads`) drops that single attachment with a
+ * `[image unavailable: <filename>]` text fragment so the model has some
+ * signal that the user intended an attachment.
+ */
+function buildAttachmentPromptStream(
+  text: string,
+  attachments: WorkerAttachment[],
+): AsyncIterable<SDKUserMessage> {
+  const content: Array<Record<string, unknown>> = [];
+  if (text.length > 0) {
+    content.push({ type: "text", text });
+  }
+  for (const a of attachments) {
+    const bytes = readAttachmentBytes(a.sha256);
+    if (!bytes) {
+      content.push({
+        type: "text",
+        text: `[attachment unavailable: ${a.filename}]`,
+      });
+      continue;
+    }
+    const data = bytes.toString("base64");
+    const mediaType = normalizeMediaType(a.mime);
+    if (mediaType === "application/pdf") {
+      content.push({
+        type: "document",
+        source: { type: "base64", media_type: mediaType, data },
+        title: a.filename,
+      });
+    } else if (IMAGE_MEDIA_TYPES.has(mediaType)) {
+      content.push({
+        type: "image",
+        source: { type: "base64", media_type: mediaType, data },
+      });
+    } else {
+      content.push({
+        type: "text",
+        text: `[attachment ${a.filename} has unsupported mime ${a.mime}]`,
+      });
+    }
+  }
+  // The SDK won't accept an empty content array — fall back to a single
+  // empty-text block to keep the message valid. The dashboard's submit
+  // gates already block empty-text-and-no-ready-attachments sends, so
+  // this branch is purely defensive.
+  if (content.length === 0) {
+    content.push({ type: "text", text: "" });
+  }
+  return {
+    [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
+      let yielded = false;
+      return {
+        next(): Promise<IteratorResult<SDKUserMessage>> {
+          if (yielded) return Promise.resolve({ value: undefined, done: true });
+          yielded = true;
+          const msg: SDKUserMessage = {
+            type: "user",
+            message: { role: "user", content: content as never },
+            parent_tool_use_id: null,
+          };
+          return Promise.resolve({ value: msg, done: false });
+        },
+      };
+    },
+  };
+}
+
 function finalizeBlockContent(b: BlockState): string {
   if (b.kind === "text") {
     return JSON.stringify({ text: b.text });
@@ -311,9 +404,21 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         }
       : undefined;
 
+  // When the dispatch carries attachments, the SDK's plain `prompt: string`
+  // form can't represent them — image/document content blocks have to ride
+  // on a `MessageParam` whose `content` is an array. Switch to the
+  // async-iterable form for that case and build the user message inline
+  // from bytes on disk. The fallback (no attachments) stays on the simpler
+  // string form so the mail / scheduled / queue-injected paths are
+  // unchanged.
+  const promptInput =
+    p.attachments && p.attachments.length > 0
+      ? buildAttachmentPromptStream(p.prompt, p.attachments)
+      : p.prompt;
+
   try {
     for await (const msg of query({
-      prompt: p.prompt,
+      prompt: promptInput,
       options: {
         cwd: opts.workingDirectory,
         model: opts.model,
