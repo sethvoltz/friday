@@ -105,6 +105,18 @@ export interface SidebarSessionSummary {
  *  (system_banner, mail_delivered, schedule_fired, evolve_critical). */
 export const SYSTEM_BUCKET = "__system__";
 
+/** Claude Agent SDK tombstone for turns that ended without assistant output.
+ *  The SDK writes this literal into the session JSONL so resumed sessions
+ *  preserve the "this turn happened but produced nothing" signal. The
+ *  daemon's jsonl-mirror faithfully ingests it as a `text` block; we keep
+ *  the row on disk (preserve-over-delete) but suppress it from the chat
+ *  UI so it doesn't render as a ghost assistant bubble. */
+const SDK_NO_RESPONSE_SENTINEL = "No response requested.";
+
+function isNoResponseSentinel(role: string, text: string | undefined): boolean {
+  return role !== "user" && text?.trim() === SDK_NO_RESPONSE_SENTINEL;
+}
+
 /**
  * Stable bubble id for a user-role chat message keyed by its turn_id. Used
  * both client-side (when `/api/chat/turn` confirms a dispatch) and on the
@@ -1213,6 +1225,7 @@ export class ChatState {
   }): void {
     const parsed = parseBlockContent(event.content_json);
     if (event.kind === "text") {
+      if (isNoResponseSentinel(event.role, parsed.text)) return;
       const id =
         event.role === "user"
           ? userBlockIdForTurn(event.turn_id)
@@ -1439,6 +1452,7 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
     const parsed = parseBlockContent(b.contentJson);
     if (b.kind === "text") {
       const role = b.role === "user" ? "user" : "assistant";
+      if (isNoResponseSentinel(b.role, parsed.text)) continue;
       const id =
         role === "user" ? userBlockIdForTurn(b.turnId) : `b_${b.blockId}`;
       // Preserve the row's `streaming` state. On reload during a turn,
