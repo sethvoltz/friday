@@ -19,5 +19,10 @@ export const load: LayoutServerLoad = async ({ locals }) => {
       // ignore
     }
   }
-  return { user: locals.user, health, daemonOnline };
+  return {
+    user: locals.user,
+    health,
+    daemonOnline,
+    homeDir: process.env.HOME ?? null,
+  };
 };

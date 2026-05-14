@@ -1,5 +1,7 @@
 <script lang="ts">
   import { Wrench } from "lucide-svelte";
+  import { page } from "$app/stores";
+  import { synthesizeHeadline } from "./tool-headlines";
 
   interface Props {
     toolName: string;
@@ -19,11 +21,16 @@
       return String(v);
     }
   }
+  let homeDir = $derived(
+    (($page.data as { homeDir?: string | null } | undefined)?.homeDir) ?? null,
+  );
   let description = $derived.by(() => {
     if (input && typeof input === "object" && !Array.isArray(input)) {
       const d = (input as Record<string, unknown>).description;
       if (typeof d === "string" && d.trim().length > 0) return d.trim();
     }
+    const synth = synthesizeHeadline(toolName, input, { homeDir });
+    if (typeof synth === "string" && synth.length > 0) return synth;
     return "";
   });
   let inputText = $derived(fmtInput(input));
