@@ -104,6 +104,31 @@
       })
       .sort((a, b) => a.name.localeCompare(b.name)),
   );
+  // Counts of agents hidden by each filter switch. Excludes the
+  // orchestrator and the focused row (both always show). When the
+  // toggle is on, nothing is being hidden by that toggle → count is 0
+  // and the label hides the parenthetical.
+  let archivedHidden = $derived(
+    showArchived
+      ? 0
+      : chat.agents.filter(
+          (a) =>
+            a.type !== "orchestrator" &&
+            a.name !== chat.focusedAgent &&
+            a.status === "archived",
+        ).length,
+  );
+  let inactiveHidden = $derived(
+    showInactive
+      ? 0
+      : chat.agents.filter(
+          (a) =>
+            a.type !== "orchestrator" &&
+            a.name !== chat.focusedAgent &&
+            a.status !== "archived" &&
+            !isActive(a.status),
+        ).length,
+  );
   let focused = $derived<AgentInfo>(
     chat.agents.find((a) => a.name === chat.focusedAgent) ?? pinned,
   );
@@ -196,7 +221,10 @@
     class="row"
     class:pinned={isPinned}
     class:active={chat.focusedAgent === a.name}>
-    <button class="row-main" onclick={() => focusAgent(a.name, a.type)}>
+    <button
+      class="row-main"
+      title={isPinned ? "Friday" : `${a.type} · ${a.name}`}
+      onclick={() => focusAgent(a.name, a.type)}>
       <span
         class="dot"
         class:pulse={a.status === "working"}
@@ -240,6 +268,7 @@
           <button
             type="button"
             class="history-row"
+            title={`${a.name} · ${new Date(s.lastTs).toLocaleString()} · ${s.turnCount} turn${s.turnCount === 1 ? "" : "s"}`}
             onclick={() => navTo(`/sessions/${a.name}/${s.sessionId}`)}>
             <span class="history-ts">{fmtSessionTs(s.lastTs)}</span>
             <span class="history-count">{s.turnCount} turn{s.turnCount === 1 ? "" : "s"}</span>
@@ -261,8 +290,20 @@
     {/if}
   </div>
   <div class="filters">
-    <Toggle block bind:checked={showArchived} label="Show archived" />
-    <Toggle block bind:checked={showInactive} label="Show inactive" />
+    <Toggle
+      block
+      bind:checked={showArchived}
+      label={archivedHidden > 0
+        ? `Show archived (${archivedHidden})`
+        : "Show archived"}
+    />
+    <Toggle
+      block
+      bind:checked={showInactive}
+      label={inactiveHidden > 0
+        ? `Show inactive (${inactiveHidden})`
+        : "Show inactive"}
+    />
   </div>
 {/snippet}
 
@@ -272,6 +313,9 @@
       type="button"
       class="trigger"
       aria-expanded={open}
+      title={focused.type === "orchestrator"
+        ? "Friday"
+        : `${focused.type} · ${focused.name}`}
       onclick={() => (open = !open)}>
       <span
         class="dot"
