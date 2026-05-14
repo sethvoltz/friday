@@ -914,6 +914,14 @@
     left: 50%;
     transform: translateX(-50%) scaleX(calc(100cqw / 100cqh));
     transform-origin: center;
+    /* Force the shape to stay on its own dynamic compositing layer for
+       the entire animation lifetime. Without this, Chromium and Safari
+       were observed to cache the post-mask rasterization mid-animation
+       and then only invalidate the inner region per frame — freezing
+       the outer ring while the inner band kept moving. Hinting that
+       transform changes is enough to keep the layer dirty-tracked even
+       though our actual animation is on a custom property. */
+    will-change: transform;
     background: conic-gradient(
       from var(--friday-rotate-outer),
       var(--friday-blue) 0deg,
