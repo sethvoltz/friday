@@ -377,6 +377,20 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         continue;
       }
 
+      // The SDK emits `{ type: 'system', subtype: 'api_retry' }` immediately
+      // before retrying a failed request (default 2 retries on 408/409/429/
+      // 5xx — including Cloudflare 522s from the upstream API). The retry
+      // starts a fresh `message_start` with new ids, so the prior attempt's
+      // blocks never receive their own `block-stop`. Close them out as
+      // aborted here; otherwise the dashboard renders both the failed
+      // attempt's stuck-running bubbles and the retry's fresh ones (the
+      // duplicate-messages report on FRI-4). The retry trail stays visible
+      // — preserve over delete — but each attempt's status is honest.
+      if (m.type === "system" && m.subtype === "api_retry") {
+        flushInflightBlocks("aborted");
+        continue;
+      }
+
       const captured = extractUsageFromResult(m);
       if (captured) {
         finalUsage = captured;
