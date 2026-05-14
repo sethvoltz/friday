@@ -171,7 +171,12 @@ async function handle(
     const resumeSessionId = agentRow.sessionId ?? undefined;
 
     const stack = readPromptStack(agentRow.type, []);
-    const baseSystemPrompt = composeSystemPrompt(stack);
+    const baseSystemPrompt = composeSystemPrompt(stack, {
+      agentName: agentRow.name,
+      agentType: agentRow.type,
+      parentName:
+        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+    });
 
     // Skill detection: if the user typed `/<name> <args>`, look up the skill
     // and inject its body as a per-turn `<skill-context>` block. The user
@@ -344,7 +349,11 @@ async function handle(
 
     const turnId = `t_${randomUUID()}`;
     const stack = readPromptStack(body.type, []);
-    const baseSystemPrompt = composeSystemPrompt(stack);
+    const baseSystemPrompt = composeSystemPrompt(stack, {
+      agentName: body.name,
+      agentType: body.type,
+      parentName: body.parentName,
+    });
     const systemPrompt =
       body.type === "builder" && worktreePath
         ? `${baseSystemPrompt}\n\n---\n\nYou are running in a git worktree at \`${worktreePath}\` on branch \`${branch}\`. **Do not read, write, or modify files outside this directory.** All Bash commands run with this directory as cwd by default; do not \`cd\` outside it.`
@@ -1212,7 +1221,10 @@ function handleSystemCommand(
       if (topic) {
         const seedTurnId = `t_${randomUUID()}`;
         const stack = readPromptStack("bare", []);
-        const systemPrompt = composeSystemPrompt(stack);
+        const systemPrompt = composeSystemPrompt(stack, {
+          agentName: name,
+          agentType: "bare",
+        });
         const modelCfg = normalizeModelConfig(cfg.model);
         const wrappedTopic = wrapWithRecall(topic, topic, "scratch");
         dispatchTurn({

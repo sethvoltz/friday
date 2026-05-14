@@ -46,7 +46,10 @@ export function spawnScheduledRun(
   }
 
   const stack = readPromptStack("scheduled", []);
-  const systemPrompt = composeSystemPrompt(stack);
+  const systemPrompt = composeSystemPrompt(stack, {
+    agentName: scheduleRow.name,
+    agentType: "scheduled",
+  });
   const modelCfg = normalizeModelConfig(cfg.model);
 
   // FIX_FORWARD 2.5: wrap with recall against the raw task prompt — the

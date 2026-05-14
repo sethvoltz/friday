@@ -209,7 +209,12 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
       const pending = mailInbox(a.name);
       if (pending.length > 0) {
         const stack = readPromptStack(a.type, []);
-        const systemPrompt = composeSystemPrompt(stack);
+        const systemPrompt = composeSystemPrompt(stack, {
+          agentName: a.name,
+          agentType: a.type,
+          parentName:
+            "parentName" in a ? a.parentName ?? undefined : undefined,
+        });
         const modelCfg = normalizeModelConfig(cfg.model);
         const turnId = `t_${randomUUID()}`;
         logger.log("info", "agent.recovery.drain-mail", {

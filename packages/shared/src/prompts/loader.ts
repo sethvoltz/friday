@@ -53,15 +53,55 @@ export function readPromptStack(
   return { constitution, soul, agentBase, protocols };
 }
 
+export interface AgentIdentity {
+  agentName: string;
+  agentType: AgentBaseKey;
+  parentName?: string;
+}
+
+/**
+ * Identity preamble. Anchors the child on its literal name + parent name so it
+ * never has to guess "who am I, who spawned me" — semantic substitutions like
+ * `mail_send({to: "orchestrator"})` (a role, not a name) get dropped silently.
+ * See FRI-11.
+ */
+export function renderIdentityBlock(identity: AgentIdentity): string {
+  const lines: string[] = ["# Identity"];
+  lines.push(`- Your agent name is \`${identity.agentName}\`.`);
+  lines.push(`- Your agent type is \`${identity.agentType}\`.`);
+  if (identity.parentName) {
+    lines.push(`- Your parent agent is named \`${identity.parentName}\`.`);
+    lines.push(
+      `- To send mail back, use \`mail_send({to: "${identity.parentName}", ...})\` — or the symbolic \`mail_send({to: "parent", ...})\`. Never use role names like \`orchestrator\`, \`builder\`, \`helper\` — the daemon will reject them.`,
+    );
+  } else {
+    lines.push(
+      "- You have no parent agent. Mail recipients must be literal agent names (run `agent_list` to discover them).",
+    );
+  }
+  return lines.join("\n");
+}
+
 /**
  * Compose the system prompt in the canonical order:
  *   1. CONSTITUTION
  *   2. SOUL
- *   3. agents/<type>
- *   4. protocols/*
+ *   3. Identity (when provided — FRI-11)
+ *   4. agents/<type>
+ *   5. protocols/*
  */
-export function composeSystemPrompt(stack: PromptStack): string {
-  return [stack.constitution, stack.soul, stack.agentBase, stack.protocols]
+export function composeSystemPrompt(
+  stack: PromptStack,
+  identity?: AgentIdentity,
+): string {
+  const identityBlock = identity ? renderIdentityBlock(identity) : "";
+  return [
+    stack.constitution,
+    stack.soul,
+    identityBlock,
+    stack.agentBase,
+    stack.protocols,
+  ]
     .filter(Boolean)
     .join("\n\n---\n\n");
 }
