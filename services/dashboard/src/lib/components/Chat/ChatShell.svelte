@@ -31,6 +31,23 @@
   // in ChatMessages maintains via IntersectionObserver.
   let pinnedToBottom = $derived(readonly ? true : chat.pinnedToBottom);
 
+  // True iff at least one message in the active chat is still being
+  // produced (assistant streaming text deltas or a tool/thinking block
+  // marked running). Gates the content-resize auto-scroll-to-bottom
+  // below: when no turn is active, any height growth (tool expand,
+  // late mermaid mount, code-highlight settle) anchor-restores instead
+  // of force-snapping to the bottom. The "scrolled to bottom" sentinel
+  // signal alone is too eager — being at the bottom shouldn't mean
+  // "follow every future content growth," only "follow the current
+  // turn's output."
+  let turnActive = $derived(
+    readonly
+      ? false
+      : chat.messages.some(
+          (m) => m.status === "streaming" || m.status === "running",
+        ),
+  );
+
   // Read-only mode keeps its own messages list so SSE doesn't mutate it.
   let pastMessages = $state<ChatMessage[]>([]);
   let pastLoading = $state(false);
@@ -254,28 +271,44 @@
     // commit; the async restore reattaches with a fresh paint. Mobile-
     // critical: without this, iOS users get blank regions during
     // late-render-driven scroll adjustments.
+    //
+    // Re-entrancy: the restore always targets "" (let CSS overflow-y:
+    // auto resume) rather than a snapshotted `prev`. The pagination
+    // prepend handler in ChatMessages.svelte writes "hidden" and the
+    // resulting `.list` height change synchronously fires this RO,
+    // which used to capture `prev = "hidden"`. The trailing restore
+    // then re-applied "hidden", permanently locking the scroller until
+    // the element unmounted (matching the reported "switch session to
+    // recover" workaround). Nothing else writes scrollEl.style.overflowY,
+    // so "" — falling back to .chat-scroll's CSS auto — is the correct
+    // steady state for every caller.
     function writeScrollTop(newTop: number) {
       if (!scrollEl) return;
-      const prev = scrollEl.style.overflowY;
       scrollEl.style.overflowY = "hidden";
       scrollEl.scrollTop = newTop;
       setTimeout(() => {
-        if (scrollEl) scrollEl.style.overflowY = prev;
+        if (scrollEl) scrollEl.style.overflowY = "";
       }, 0);
     }
 
     const ro = new ResizeObserver(() => {
       if (!scrollEl) return;
-      // Bottom-pinned: keep them at the bottom regardless of where the
-      // growth happened. This is the case our naive earlier version
-      // already handled.
-      if (pinnedToBottom) {
+      // Bottom-pinned *and* a turn is active: follow new output to the
+      // bottom. Without the turn-active gate, every content-height
+      // change snapped at-bottom users to the bottom — including idle
+      // interactions like expanding a tool block, which would yank the
+      // history up the screen before the user could read the expanded
+      // content. Anchor-restore (below) is the right behavior outside
+      // of an active turn; the streaming-text follow path lives in the
+      // message-data effect above and doesn't go through this RO.
+      if (pinnedToBottom && turnActive) {
         writeScrollTop(scrollEl.scrollHeight);
         return;
       }
-      // Mid-history: anchor-restore. If our cached anchor is gone (DOM
-      // re-rendered the bubble) or never existed, re-snapshot and bail —
-      // we have no "before" to compare to this tick.
+      // Mid-history (or idle-at-bottom): anchor-restore. If our cached
+      // anchor is gone (DOM re-rendered the bubble) or never existed,
+      // re-snapshot and bail — we have no "before" to compare to this
+      // tick.
       if (!anchorEl || !scrollEl.contains(anchorEl)) {
         snapshotAnchor();
         return;

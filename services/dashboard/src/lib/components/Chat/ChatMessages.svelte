@@ -152,13 +152,13 @@
                 scroller.getBoundingClientRect().top;
               const delta = newOffset - anchorOffset;
               // WebKit scroll-thread paint deferral fix — see the
-              // matching block in the live-chat onPrepended above for
-              // full rationale.
-              const prevOverflowY = scroller.style.overflowY;
+              // matching block in the live-chat onPrepended below for
+              // full rationale, including the re-entrancy note on why
+              // we restore to "" instead of a snapshotted prev.
               scroller.style.overflowY = "hidden";
               scroller.scrollTop += delta;
               setTimeout(() => {
-                if (scroller) scroller.style.overflowY = prevOverflowY;
+                if (scroller) scroller.style.overflowY = "";
               }, 0);
             });
             continue;
@@ -206,11 +206,20 @@
               // commit + flush a full paint. The async restore (setTimeout
               // 0) reattaches it correctly painted — a synchronous restore
               // reproduces the bug, so the tick is load-bearing.
-              const prevOverflowY = scroller.style.overflowY;
+              //
+              // Re-entrancy: the restore targets "" (let .chat-scroll's
+              // CSS overflow-y: auto resume), not a snapshotted prev. The
+              // prepend's height change synchronously fires the ChatShell
+              // content ResizeObserver, which calls its own writeScrollTop
+              // mid-handler — before this setTimeout has run. With prev-
+              // capture, that nested call would snapshot prev = "hidden"
+              // and its trailing restore would re-apply "hidden", locking
+              // the scroller permanently until the element unmounted (the
+              // reported "have to switch session to recover" bug).
               scroller.style.overflowY = "hidden";
               scroller.scrollTop += delta;
               setTimeout(() => {
-                if (scroller) scroller.style.overflowY = prevOverflowY;
+                if (scroller) scroller.style.overflowY = "";
               }, 0);
             },
           });
