@@ -844,6 +844,54 @@ describe("mail block rendering", () => {
     expect(mail?.text).toBe("reload body");
   });
 
+  it("reload path: parseBlocks surfaces attachments from content_json (FRI-6)", async () => {
+    // The daemon persists user-chat attachments under
+    // `content_json.attachments`. Reload reads the row back via
+    // /api/agents/:name/blocks; the user-bubble must regain its chip
+    // row or the image vanishes from the chat after a page refresh.
+    const atts = [
+      { sha256: "a".repeat(64), filename: "shot.png", mime: "image/png" },
+    ];
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            {
+              id: 1,
+              blockId: "blk-att-reload",
+              turnId: "turn_paste_1",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              role: "user",
+              kind: "text",
+              source: "user_chat",
+              contentJson: JSON.stringify({
+                text: "look at this",
+                attachments: atts,
+              }),
+              status: "complete",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+          ],
+          lastEventSeq: 1,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    const m = chat.messages.find(
+      (x) => x.id === userBlockIdForTurn("turn_paste_1"),
+    );
+    expect(m, "user block must be present after reload").toBeDefined();
+    expect(m?.text).toBe("look at this");
+    expect(m?.attachments).toEqual(atts);
+  });
+
   it("live SSE: mail metadata (id/subject/type/priority/threadId/ts) is extracted from content_json", async () => {
     const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
     const chat = new ChatState();
