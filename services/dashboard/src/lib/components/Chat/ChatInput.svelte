@@ -675,7 +675,9 @@
     .busy toggles. Pointer-events: none so input clicks pass through.
   -->
   <div class="aurora" aria-hidden="true">
-    <div class="aurora-shape"></div>
+    <div class="aurora-mask">
+      <div class="aurora-shape"></div>
+    </div>
   </div>
   {#if pendingAttachments.length > 0}
     <div class="chips" aria-label="Attachments">
@@ -851,12 +853,21 @@
     initial-value: 0deg;
     inherits: false;
   }
-  /* Aurora wrapper: owns the blur and the opacity transition. The blur
-     applies to its child (.aurora-shape) AFTER that child's mask has
-     painted, so the inner crop edge becomes a soft fade instead of a
-     hard line. The wrapper extends 10px past the wrap; combined with
-     the 14px blur, the outside bleed reaches ~24px into the surrounding
-     chrome — matching the original wide glow look. */
+  /* Three-layer aurora:
+       .aurora — owns blur, opacity, and the size container. container-
+                 type:size lets the inner shape read this box's dimensions
+                 via cqw/cqh so the scaleX compensation is dynamic.
+       .aurora-mask — owns the frame mask + padding so only the outer
+                 ring + small inner bleed shows. The mask cuts before
+                 .aurora's blur fires (filter on the parent fires AFTER
+                 children render), so the inner cutoff blurs softly.
+       .aurora-shape — renders the conic in a SQUARE coordinate system
+                 (height:100%, aspect-ratio:1/1 → square at the box's
+                 height) then scales horizontally by the box's
+                 width/height ratio. The conic's angle math is computed
+                 in the square's own coords, so a wide rect's top edge
+                 spans only ~90° of the gradient instead of ~180°,
+                 making each color band visually wider on top/bottom. */
   .aurora {
     position: absolute;
     inset: -10px;
@@ -869,26 +880,40 @@
        backdrop-blur pass on the slice that sits inside the wrap, so
        the inside still reads as soft. */
     filter: blur(8px);
+    container-type: size;
   }
   .input-wrap.busy .aurora { opacity: 1; }
-  /* Aurora shape: the conic gradient itself, with a frame mask that
-     paints color in a band running from the wrapper's outer edge inward
-     by `padding` (per side). The deep center is hidden — and because
-     the parent's blur fires after this mask, the cut is blurred into a
-     soft inward fade rather than a sharp line. The outer edge of the
-     gradient has no mask, so the outside stays full-strength under the
-     parent's blur (the original wide soft glow). */
-  .aurora-shape {
+  .aurora-mask {
     position: absolute;
     inset: 0;
-    /* Padding sets how far inside the wrapper edge the mask cuts. With
-       inset:-10px on the wrapper, the wrapper edge sits 10px outside
-       the wrap. padding:14px → frame covers the 10px outside + 4px
-       inside the wrap; the parent's blur softens both edges so color
-       continues to bleed slightly past either side. */
     padding: 14px;
     box-sizing: border-box;
     border-radius: calc(var(--radius-md) + 10px);
+    -webkit-mask:
+      linear-gradient(#000 0 0) padding-box,
+      linear-gradient(#000 0 0) content-box;
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) padding-box,
+      linear-gradient(#000 0 0) content-box;
+    mask-composite: exclude;
+    overflow: visible;
+  }
+  .aurora-shape {
+    position: absolute;
+    /* Square at the parent's height — width auto-derived to equal
+       height via aspect-ratio. Centered horizontally with translateX
+       then stretched horizontally by the parent's aspect ratio so the
+       rendered square fills the wide rect. The conic gradient inside
+       computes angles in the square's own coord space, then those
+       angles get visually stretched horizontally — virtually turning
+       the conic's apex into a horizontal line. */
+    height: 100%;
+    aspect-ratio: 1 / 1;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%) scaleX(calc(100cqw / 100cqh));
+    transform-origin: center;
     background: conic-gradient(
       from var(--friday-rotate-outer),
       var(--friday-blue) 0deg,
@@ -899,14 +924,6 @@
       transparent 330deg,
       var(--friday-blue) 360deg
     );
-    -webkit-mask:
-      linear-gradient(#000 0 0) padding-box,
-      linear-gradient(#000 0 0) content-box;
-    -webkit-mask-composite: xor;
-    mask:
-      linear-gradient(#000 0 0) padding-box,
-      linear-gradient(#000 0 0) content-box;
-    mask-composite: exclude;
     animation: friday-rotate-outer 9s linear infinite;
   }
   @keyframes friday-rotate-outer {
