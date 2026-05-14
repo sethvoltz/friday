@@ -283,6 +283,17 @@ export function spawnTurn(input: SpawnTurnInput): void {
     // M2: clean up the per-worker SBPL profile. Best-effort; the file is
     // owner-only and idempotent so a leak is harmless beyond the disk space.
     if (profilePath) removeProfile(profilePath);
+    // F4-A: any in-flight blocks for the current turn never got their own
+    // `block-stop` because the worker died without going through
+    // `runQuery`'s try/catch. Common path: stall watchdog SIGTERM at 30
+    // min — the kernel reaps the process before any user-space cleanup
+    // runs, so no `error` IPC event, no DB transition, and the
+    // dashboard's tool/thinking bubbles stay `running` forever. Walk the
+    // live registry here and finalize anything still streaming as
+    // `status='error'`. The normal IPC-driven `handleBlockStop` path
+    // would have already emptied the map for clean exits; this is
+    // strictly the SIGTERM / SIGKILL / OOM / crash safety net.
+    finalizeInflightBlocksOnExit(w);
     // If the worker died mid-turn the in-flight registry entry would leak —
     // drop it here so the daemon doesn't hold accumulator state for a turn
     // that can no longer make progress.
@@ -1054,6 +1065,93 @@ function handleBlockStop(
     status: e.status,
     contentJson: e.contentJson,
   });
+}
+
+/* ---------------- In-flight teardown on worker exit (F4-A) ---------------- */
+
+/**
+ * Finalize any blocks that were still streaming when the worker process
+ * exited. Mirrors `handleBlockStop`'s DB-before-SSE atomic pattern but is
+ * driven from the parent's `child.on("exit")` handler instead of an IPC
+ * event — for cases where the worker can't emit `block-stop` itself
+ * (SIGTERM from the stall watchdog, SIGKILL, OOM, crash).
+ *
+ * Status is always `'error'`. Distinguishing SIGTERM-from-our-watchdog
+ * vs. an unrelated kill isn't worth plumbing through; the dashboard
+ * already treats `error` and `aborted` similarly for tool/thinking
+ * bubbles.
+ */
+export function finalizeInflightBlocksOnExit(w: LiveWorker): void {
+  const lt = liveTurns.getLiveTurn(w.turnId);
+  if (!lt) return;
+  for (const live of lt.blocks.values()) {
+    const ts = Date.now();
+    const contentJson = finalizeLiveBlockContent(live);
+    try {
+      writeAndPublish(
+        {
+          v: 1,
+          type: "block_complete",
+          turn_id: w.turnId,
+          agent: w.agentName,
+          block_id: live.blockId,
+          message_id: live.messageId,
+          block_index: live.blockIndex,
+          role: live.role,
+          kind: live.kind,
+          source: live.source,
+          content_json: contentJson,
+          status: "error",
+          ts,
+        },
+        (seq) => {
+          updateBlock(live.blockId, {
+            contentJson,
+            status: "error",
+            ts,
+            lastEventSeq: seq,
+          });
+        },
+      );
+    } catch (err) {
+      logger.log("warn", "worker.exit.finalize.error", {
+        agent: w.agentName,
+        blockId: live.blockId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+/**
+ * Assemble a content_json payload from a `LiveBlockState` whose worker
+ * died without sending `block-stop`. Best-effort: text and thinking get
+ * whatever delta text accumulated; tool_use input may be incomplete JSON.
+ */
+function finalizeLiveBlockContent(live: liveTurns.LiveBlockState): string {
+  if (live.kind === "text" || live.kind === "thinking") {
+    return JSON.stringify({ text: live.text });
+  }
+  if (live.kind === "tool_use") {
+    let input: unknown = {};
+    if (live.partialJson && live.partialJson.length > 0) {
+      try {
+        input = JSON.parse(live.partialJson);
+      } catch {
+        input = { _raw: live.partialJson };
+      }
+    }
+    return JSON.stringify({
+      tool_use_id: live.tool?.id ?? "",
+      name: live.tool?.name ?? "",
+      input,
+    });
+  }
+  // tool_result blocks are emitted block-start + block-stop in the same
+  // tick by worker.ts's user-message handler, so they almost never sit in
+  // liveTurns at exit time. If one does, emit an empty payload — the
+  // dashboard will render the bubble as errored without output.
+  return JSON.stringify({ tool_use_id: live.tool?.id ?? "", text: "", is_error: true });
 }
 
 /* ---------------- User-typed block insertion (FIX_FORWARD 1.2) ---------------- */
