@@ -1249,6 +1249,113 @@ describe("unread badge gating (PR C)", () => {
     expect(chat.inflightTurnId).toBeNull();
   });
 
+  it("FRI-9 reload path: assistant text block whose only content is the SDK 'No response requested.' sentinel is not rendered", async () => {
+    // The Claude Agent SDK writes the literal string 'No response requested.'
+    // into the session JSONL as a tombstone for turns that produce no
+    // assistant output. jsonl-mirror persists it as a normal text block;
+    // the dashboard must filter it out so the user does not see a ghost
+    // assistant bubble.
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            {
+              id: 1,
+              blockId: "blk-real",
+              turnId: "t-real",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "m-real",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "text",
+              source: "sdk",
+              contentJson: '{"text":"hello"}',
+              status: "complete",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+            {
+              id: 2,
+              blockId: "blk-sentinel",
+              turnId: "t-empty",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "m-empty",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "text",
+              source: "sdk",
+              contentJson: '{"text":"No response requested."}',
+              status: "complete",
+              ts: 200,
+              lastEventSeq: 2,
+            },
+          ],
+          lastEventSeq: 2,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    const ids = chat.messages.map((m) => m.id);
+    expect(ids).toEqual(["b_blk-real"]);
+    expect(chat.messages[0]!.text).toBe("hello");
+  });
+
+  it("FRI-9 live SSE: block_complete carrying the SDK sentinel does not mount a bubble", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "t-empty",
+      agent: "friday",
+      block_id: "blk-sentinel-sse",
+      message_id: "m-empty",
+      block_index: 0,
+      kind: "text",
+      role: "assistant",
+      source: "sdk",
+      content_json: '{"text":"No response requested."}',
+      status: "complete",
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages).toEqual([]);
+  });
+
+  it("FRI-9: a user message containing the same literal text is NOT filtered", async () => {
+    // The sentinel only applies to assistant-role blocks. A user who
+    // literally types "No response requested." must still see their
+    // message echoed back.
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "t-user",
+      agent: "friday",
+      block_id: "blk-user",
+      message_id: null,
+      block_index: 0,
+      kind: "text",
+      role: "user",
+      source: "user_chat",
+      content_json: '{"text":"No response requested."}',
+      status: "complete",
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const m = chat.messages.find((x) => x.id === userBlockIdForTurn("t-user"));
+    expect(m).toBeDefined();
+    expect(m?.text).toBe("No response requested.");
+  });
+
   it("F3-C: stale seqs are dropped (dedup against persisted cursor)", async () => {
     // If the persisted cursor for an agent is N, a replayed event with
     // seq <= N must be dropped — no badge bump, no state churn.
