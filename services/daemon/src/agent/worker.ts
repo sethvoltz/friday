@@ -253,6 +253,28 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   // correlate without relying on the SDK index (which resets each message).
   const blocks = new Map<number, BlockState>();
 
+  // Flush any in-flight blocks with a terminal status. Called from two places
+  // that need to honestly close out partial streams instead of leaving them
+  // stuck at `status='streaming'` in DB + spinning forever in the dashboard:
+  //   - `api_retry` system message (the SDK is about to retry; the prior
+  //     attempt's blocks won't get their own block-stop because the SDK
+  //     starts a fresh message_start with new ids)
+  //   - the iterator's catch handler (hard error; we owe a terminal status
+  //     to every block we already announced)
+  const flushInflightBlocks = (
+    status: "aborted" | "error",
+  ): void => {
+    for (const block of blocks.values()) {
+      emit({
+        type: "block-stop",
+        clientBlockId: block.clientBlockId,
+        contentJson: finalizeBlockContent(block),
+        status,
+      });
+    }
+    blocks.clear();
+  };
+
   const DEFAULT_THINKING_BUDGET = 8192;
   const thinking =
     opts.thinking?.type === "enabled"
@@ -557,7 +579,13 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
     emit({ type: "turn-complete", sessionId: sessionId ?? "", usage: finalUsage });
     emit({ type: "status-change", status: "idle" });
   } catch (err: unknown) {
-    if (abortController.signal.aborted) {
+    const aborted = abortController.signal.aborted;
+    // Close out any in-flight blocks so the daemon can flip their DB rows
+    // off `status='streaming'` (the dashboard's `tool` / `thinking` bubbles
+    // otherwise stay 'running' forever — `finishTurn` only walks assistant
+    // text bubbles).
+    flushInflightBlocks(aborted ? "aborted" : "error");
+    if (aborted) {
       emit({ type: "error", message: "aborted", recoverable: true });
     } else {
       emit({
