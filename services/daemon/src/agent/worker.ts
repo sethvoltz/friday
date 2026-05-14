@@ -520,6 +520,10 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
             contentJson: finalizeBlockContent(block),
             status: "complete",
           });
+          // Remove from the in-flight map so `flushInflightBlocks` (the
+          // error-catch and prompts-pending paths) doesn't double-emit
+          // `block-stop` for blocks that closed cleanly.
+          blocks.delete(e.index);
           continue;
         }
 
@@ -534,6 +538,18 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         // gracefully. The parent's turn-complete handler will drain the
         // next prompt; `mainLoop` drains the inbox for critical mail.
         if (promptsPending || pendingCriticalMail) {
+          // FRI-4 #2: if the SDK abandoned an in-flight content block
+          // without emitting `content_block_stop` (observed live —
+          // empty content_json, no deltas, no stop), the `blocks` map
+          // still has its entry. Without this flush, the daemon's
+          // `dropTurn` (on the incoming `turn-complete`) wipes the
+          // liveTurns entry, `handleBlockStop` early-returns on any
+          // late-arriving stop, and the DB row stays at
+          // `status='streaming'` forever (the dashboard's
+          // `thinking`/`tool` bubble pulses indefinitely). Close
+          // anything still in flight as `aborted` so the daemon
+          // transitions the row off `streaming`.
+          flushInflightBlocks("aborted");
           promptsPending = false;
           pendingCriticalMail = false;
           break;
