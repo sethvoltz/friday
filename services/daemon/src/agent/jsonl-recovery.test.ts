@@ -280,4 +280,102 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     );
     expect(rows[0].status).toBe("complete");
   });
+
+  it("reconciles tool_result entries with null message.id (the JSONL norm)", async () => {
+    // The Claude SDK writes tool_result user entries without a message.id
+    // — the SDK flushes user-role messages before the API assigns ids. The
+    // pre-fix recovery code skipped these entirely (messageId required at
+    // the natural-key dedup), orphaning every tool_result in DB. Recovery
+    // now uses (session_id, tool_use_id) as the dedup key for this kind,
+    // so null message_id is fine.
+    const cwd = "/tmp/some/cwd";
+    const sessionId = "sess-nullmsgid";
+    writeSessionJsonl(cwd, sessionId, [
+      {
+        type: "assistant",
+        timestamp: "2026-05-12T10:00:00.000Z",
+        message: {
+          id: "msg-assistant-1",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_NULL_MSG_1",
+              name: "Bash",
+              input: { command: "ls" },
+            },
+          ],
+        },
+      },
+      {
+        // Note: no message.id field at all (or id: null).
+        type: "user",
+        timestamp: "2026-05-12T10:00:01.000Z",
+        message: {
+          // id intentionally omitted — this is the actual SDK JSONL shape
+          // for tool_result-bearing user messages.
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_NULL_MSG_1",
+              content: "ok\n",
+              is_error: false,
+            },
+          ],
+        },
+      },
+    ]);
+
+    const { recoverFromJsonl } = await import("./jsonl-recovery.js");
+    const stats = recoverFromJsonl([
+      { agentName: "alpha", sessionId, workingDirectory: cwd },
+    ]);
+    expect(stats.inserted).toBe(2); // tool_use + tool_result
+    expect(stats.skipped).toBe(0);
+
+    const rows = await rawBlocks();
+    expect(rows.length).toBe(2);
+    const tr = rows.find((r) => r.kind === "tool_result");
+    expect(tr).toBeDefined();
+    expect(tr?.message_id).toBeNull();
+    const tu = rows.find((r) => r.kind === "tool_use");
+    expect(tu?.message_id).toBe("msg-assistant-1");
+  });
+
+  it("is idempotent for tool_result rows (re-running recovery doesn't duplicate)", async () => {
+    const cwd = "/tmp/some/cwd";
+    const sessionId = "sess-idempot-tr";
+    writeSessionJsonl(cwd, sessionId, [
+      {
+        type: "user",
+        timestamp: "2026-05-12T10:00:01.000Z",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_IDEMPOT_1",
+              content: "result text",
+              is_error: false,
+            },
+          ],
+        },
+      },
+    ]);
+
+    const { recoverFromJsonl } = await import("./jsonl-recovery.js");
+    const first = recoverFromJsonl([
+      { agentName: "alpha", sessionId, workingDirectory: cwd },
+    ]);
+    expect(first.inserted).toBe(1);
+
+    const second = recoverFromJsonl([
+      { agentName: "alpha", sessionId, workingDirectory: cwd },
+    ]);
+    // Same content → skipped, not duplicated.
+    expect(second.inserted).toBe(0);
+    expect(second.updated).toBe(0);
+    expect(second.skipped).toBe(1);
+
+    const rows = await rawBlocks();
+    expect(rows.length).toBe(1);
+  });
 });

@@ -35,6 +35,7 @@ import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import * as registry from "./registry.js";
 import * as liveTurns from "./live-turns.js";
+import { recoverFromJsonl } from "./jsonl-recovery.js";
 import {
   profileInputsFor,
   removeProfile,
@@ -630,7 +631,9 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       registry.setSession(w.agentName, e.sessionId);
       // No live JSONL tail-watcher: blocks are persisted directly via the
       // worker → daemon IPC pipeline (FIX_FORWARD 1.2). JSONL is reconciled
-      // only at boot (FIX_FORWARD 1.3).
+      // at boot (FIX_FORWARD 1.3) and after every turn-complete on this
+      // worker (catches mid-turn iterator-break drift; see the
+      // turn-complete handler below).
       break;
     case "block-start": {
       handleBlockStart(w, e);
@@ -720,6 +723,32 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       w.completedAtLeastOnce = true;
       w.lastExitStatus = w.abortRequested ? "aborted" : "complete";
       registry.setStatus(w.agentName, "idle");
+      // Per-turn recovery sweep: catches any block the live IPC pipeline
+      // dropped this turn — most notably tool_result blocks from a mid-
+      // turn iterator break (FIX_FORWARD 2.4), where the worker exits the
+      // SDK loop at the assistant message boundary before the SDK yields
+      // the subsequent user message containing tool_results. The JSONL
+      // has them either way (SDK writes JSONL synchronously); recovery
+      // backfills into DB. Idempotent + cheap (sub-second on multi-MB
+      // JSONLs); fire-and-forget so the IPC handler stays responsive.
+      const sessionForRecovery = w.sessionId ?? e.sessionId;
+      if (sessionForRecovery) {
+        const wd = w.workingDirectory;
+        const an = w.agentName;
+        setImmediate(() => {
+          try {
+            recoverFromJsonl([
+              { agentName: an, sessionId: sessionForRecovery, workingDirectory: wd },
+            ]);
+          } catch (err) {
+            logger.log("warn", "jsonl-recovery.post-turn.error", {
+              agent: an,
+              session: sessionForRecovery,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        });
+      }
       const next = w.nextPrompts.shift();
       if (next) sendPrompt(w, next);
       break;

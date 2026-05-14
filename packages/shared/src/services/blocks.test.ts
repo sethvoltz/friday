@@ -397,4 +397,71 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
     const betaOnly = matchBlocks({ agentName: "beta", match: "uniqueFtsToken" });
     expect(betaOnly.length).toBe(0);
   });
+
+  it("getToolResultByToolUseId finds a tool_result row by tool_use_id even when message_id is null", async () => {
+    // The case this lookup exists for: jsonl-recovery's reconcile path
+    // for user-role tool_result entries that the SDK writes with null
+    // message_id. The (sessionId, messageId, blockIndex) natural key
+    // can't match (NULL != NULL in SQL); tool_use_id is the stable key.
+    const { insertBlock, getToolResultByToolUseId } = await import(
+      "./blocks.js"
+    );
+    insertBlock({
+      blockId: "blk-tr-1",
+      turnId: "recover_sess-tr",
+      agentName: "alpha",
+      sessionId: "sess-tr",
+      messageId: null,
+      blockIndex: 0,
+      role: "assistant",
+      kind: "tool_result",
+      source: null,
+      contentJson: JSON.stringify({
+        tool_use_id: "toolu_ABC123",
+        text: "ok",
+        is_error: false,
+      }),
+      status: "complete",
+      ts: 100,
+      lastEventSeq: 1,
+    });
+
+    const hit = getToolResultByToolUseId("sess-tr", "toolu_ABC123");
+    expect(hit?.blockId).toBe("blk-tr-1");
+    expect(hit?.kind).toBe("tool_result");
+
+    // Negative: a different session id with the same tool_use_id is a miss.
+    expect(getToolResultByToolUseId("sess-other", "toolu_ABC123")).toBeNull();
+    // Negative: same session, wrong tool_use_id is a miss.
+    expect(getToolResultByToolUseId("sess-tr", "toolu_OTHER")).toBeNull();
+  });
+
+  it("getToolResultByToolUseId only matches kind='tool_result' rows", async () => {
+    // Belt-and-suspenders: even if some other kind happened to embed the
+    // same `tool_use_id` in content_json (tool_use blocks DO carry it),
+    // the lookup must not return them. Otherwise tool_use blocks would
+    // dedup-block tool_result inserts, breaking recovery.
+    const { insertBlock, getToolResultByToolUseId } = await import(
+      "./blocks.js"
+    );
+    insertBlock({
+      blockId: "blk-tu",
+      turnId: "t",
+      agentName: "alpha",
+      sessionId: "sess-tr2",
+      messageId: "msg-1",
+      blockIndex: 0,
+      role: "assistant",
+      kind: "tool_use",
+      contentJson: JSON.stringify({
+        tool_use_id: "toolu_X",
+        name: "Bash",
+        input: {},
+      }),
+      status: "complete",
+      ts: 1,
+      lastEventSeq: 1,
+    });
+    expect(getToolResultByToolUseId("sess-tr2", "toolu_X")).toBeNull();
+  });
 });

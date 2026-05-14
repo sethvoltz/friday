@@ -1,22 +1,42 @@
 /**
- * Boot-time JSONL recovery (FIX_FORWARD 1.3).
+ * JSONL recovery — boot pass + per-turn sweep (FIX_FORWARD 1.3).
  *
  * The live worker writes content blocks straight to the `blocks` table over
- * IPC (FIX_FORWARD 1.2). If the daemon crashes mid-turn the workers die with
- * it, and we may have missed the final block-stop for one or more in-flight
- * blocks. At boot, after migrations land, we walk each known agent's Claude
- * SDK JSONL file and reconcile it against the DB:
+ * IPC (FIX_FORWARD 1.2). Two failure modes leak rows past the live pipeline:
  *
- *  - For each assistant text / thinking / tool_use block and user
- *    `tool_result` block in the transcript, look up `(session_id,
- *    message_id, block_index)`. If missing → INSERT with a fresh UUID and
- *    `status='complete'`. If present but content_json mismatches → UPDATE.
+ *  - Daemon crashes mid-turn — workers die with the daemon and any
+ *    in-flight `block-start` without a matching `block-stop` never lands.
+ *  - Mid-turn iterator break (FIX_FORWARD 2.4) — the worker exits the SDK
+ *    iterator at an assistant-message boundary when there's a queued user
+ *    prompt or critical mail to inject, so the SDK's next yielded message
+ *    (the user-role tool_results from that assistant's tool calls) never
+ *    enters our IPC path. The tool_use's are persisted; their tool_results
+ *    are only in the JSONL, which the SDK writes synchronously.
+ *
+ * `recoverFromJsonl` walks the Claude SDK JSONL for each given agent's
+ * current session and reconciles against the DB:
+ *
+ *  - For each assistant `text` / `thinking` / `tool_use` block, dedup by
+ *    `(session_id, message_id, block_index)`. Missing → INSERT with a
+ *    fresh UUID and `status='complete'`. Mismatched content → UPDATE.
+ *  - For each user `tool_result` block, dedup by
+ *    `(session_id, tool_use_id)`. Tool_result entries in the SDK's JSONL
+ *    never carry a stable `message.id` (they're flushed before the API
+ *    assigns one), so the assistant-style natural key always misses;
+ *    `tool_use_id` is the cross-reference the Anthropic API uses to pair
+ *    use ↔ result.
  *  - User-role text content is ignored: those blocks are written by the
  *    daemon at chat/turn / mail-bridge time, never derived from JSONL.
  *  - A `block_reload` SSE event fires per session with any net changes so
  *    connected dashboards can refetch.
  *
- * No live tail. No periodic scanning. Run once on daemon start.
+ * Invocation sites:
+ *  - Boot: index.ts walks every agent with a sessionId once after
+ *    migrations land.
+ *  - Per turn: lifecycle.ts's `turn-complete` handler schedules a sweep
+ *    for the just-finished agent's session (fire-and-forget via
+ *    setImmediate), so mid-turn-break drift heals within seconds rather
+ *    than waiting for the next daemon restart.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -30,6 +50,7 @@ import {
 } from "@friday/shared";
 import {
   getBlockByNaturalKey,
+  getToolResultByToolUseId,
   insertBlock,
   updateBlock,
 } from "@friday/shared/services";
@@ -215,11 +236,18 @@ function processUserEntry(
   // Only reconcile tool_result blocks from user entries — the user's typed
   // prompts are already persisted via /api/chat/turn (and mail user-blocks
   // via mail-bridge). Importing user-text from JSONL would duplicate them.
+  //
+  // Tool_result entries in the SDK's JSONL never carry a `message.id`
+  // (user-role messages get their ids minted later, often null on flush).
+  // The original `(sessionId, messageId, blockIndex)` natural-key dedup
+  // therefore skipped every tool_result entry — orphaning them in DB
+  // forever even after a daemon restart. We now dedup tool_results by
+  // `(sessionId, tool_use_id)` instead (see reconcileToolResult below),
+  // so a null message_id is fine and we keep walking the content array.
   const msg = entry.message as
-    | { id?: string; content?: unknown[] }
+    | { id?: string | null; content?: unknown[] }
     | undefined;
-  const messageId = msg?.id;
-  if (!messageId || !Array.isArray(msg?.content)) {
+  if (!Array.isArray(msg?.content)) {
     out.skipped += 1;
     return;
   }
@@ -232,14 +260,12 @@ function processUserEntry(
       is_error?: boolean;
     };
     if (b.type !== "tool_result" || !b.tool_use_id) return;
-    reconcileBlock(out, {
+    reconcileToolResult(out, {
       agentName,
       sessionId,
-      messageId,
+      messageId: msg?.id ?? null,
       blockIndex: idx,
-      role: "assistant",
-      kind: "tool_result",
-      source: null,
+      toolUseId: b.tool_use_id,
       contentJson: JSON.stringify({
         tool_use_id: b.tool_use_id,
         text: stringifyToolResult(b.content),
@@ -287,6 +313,64 @@ function reconcileBlock(
       role: input.role,
       kind: input.kind,
       source: input.source,
+      contentJson: input.contentJson,
+      status: "complete",
+      ts: input.ts,
+      lastEventSeq: seq,
+    });
+    out.inserted += 1;
+    out.blockIds.push(blockId);
+    return;
+  }
+  if (existing.contentJson === input.contentJson) {
+    out.skipped += 1;
+    return;
+  }
+  const seq = eventBus.currentSeq() + 1;
+  updateBlock(existing.blockId, {
+    contentJson: input.contentJson,
+    status: "complete",
+    ts: input.ts,
+    lastEventSeq: seq,
+  });
+  out.updated += 1;
+  out.blockIds.push(existing.blockId);
+}
+
+interface ReconcileToolResultInput {
+  agentName: string;
+  sessionId: string;
+  /** Almost always null in practice — see processUserEntry's comment. */
+  messageId: string | null;
+  blockIndex: number;
+  toolUseId: string;
+  contentJson: string;
+  ts: number;
+}
+
+/**
+ * Tool_result variant of reconcileBlock. Dedup is by `(session_id,
+ * tool_use_id)` because the JSONL never carries a stable message_id for
+ * these entries. Inserts with `message_id = null` if absent.
+ */
+function reconcileToolResult(
+  out: ReconcileResult,
+  input: ReconcileToolResultInput,
+): void {
+  const existing = getToolResultByToolUseId(input.sessionId, input.toolUseId);
+  if (!existing) {
+    const blockId = randomUUID();
+    const seq = eventBus.currentSeq() + 1;
+    insertBlock({
+      blockId,
+      turnId: `recover_${input.sessionId}`,
+      agentName: input.agentName,
+      sessionId: input.sessionId,
+      messageId: input.messageId,
+      blockIndex: input.blockIndex,
+      role: "assistant",
+      kind: "tool_result",
+      source: null,
       contentJson: input.contentJson,
       status: "complete",
       ts: input.ts,

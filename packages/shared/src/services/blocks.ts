@@ -144,6 +144,39 @@ export function getBlockByNaturalKey(
   return (r ?? null) as BlockRow | null;
 }
 
+/**
+ * Look up a `tool_result` block by (session_id, tool_use_id). Tool_result
+ * entries in the Claude SDK's JSONL never carry a `message.id` (they're
+ * appended to user-role messages whose ids are generated only at flush
+ * time), so the (sessionId, messageId, blockIndex) natural key used by
+ * `getBlockByNaturalKey` doesn't match. The `tool_use_id` inside
+ * `content_json` is the stable cross-reference here: the Anthropic API
+ * mints one per tool call and uses it to pair use ↔ result.
+ *
+ * Used by jsonl-recovery's tool_result reconcile path so the recovery
+ * pass is idempotent even when message_id is null in both JSONL and DB.
+ */
+export function getToolResultByToolUseId(
+  sessionId: string,
+  toolUseId: string,
+): BlockRow | null {
+  const db = getDb();
+  // json_extract reads the tool_use_id out of the content_json blob. SQLite
+  // built-in JSON1 is available everywhere we run (better-sqlite3 ships it).
+  const r = db
+    .select()
+    .from(schema.blocks)
+    .where(
+      and(
+        eq(schema.blocks.sessionId, sessionId),
+        eq(schema.blocks.kind, "tool_result"),
+        sql`json_extract(${schema.blocks.contentJson}, '$.tool_use_id') = ${toolUseId}`,
+      ),
+    )
+    .get();
+  return (r ?? null) as BlockRow | null;
+}
+
 export interface ListBlocksOpts {
   agentName?: string;
   sessionId?: string;
