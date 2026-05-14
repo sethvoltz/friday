@@ -120,19 +120,28 @@ export function getBlockById(blockId: string): BlockRow | null {
 }
 
 /**
- * Look up a block by its natural key
- * `(session_id, message_id, kind, block_index)`. Used by JSONL recovery
+ * Look up a text or thinking block by its natural key
+ * `(session_id, message_id, kind)`. Used by JSONL recovery
  * (FIX_FORWARD 1.3) to dedup against blocks already written by the live
  * worker.
  *
- * `kind` is part of the key because the Claude SDK splits a single
- * assistant message across multiple JSONL entries (one per content block),
- * each entry's `content` array starting fresh at `index: 0`. Without
- * `kind` in the key, a thinking-chunk and a text-chunk at the same
- * nominal `index: 0` collide; `updateBlock` can't change `kind`, so the
- * row's `content_json` ends up holding (say) a tool_use payload while
- * the row's `kind` is still `thinking`. Including `kind` keeps the three
- * chunks as three distinct rows.
+ * `block_index` is intentionally NOT part of the key. The live worker
+ * stamps the SDK stream's `e.index` (position within the assembled
+ * assistant message — so thinking=0, text=1 in a thinking+text reply),
+ * but the SDK persists JSONL as one entry per content block, each
+ * entry's `content` array starting fresh at `index: 0`. The recovery
+ * walker reads its position from `msg.content.forEach((_, idx))`, which
+ * is always 0 within a split entry. The two indices therefore disagree
+ * for any message with more than one block, and including `block_index`
+ * in the dedup key caused recovery to insert a parallel row for the
+ * same logical content (FRI-4).
+ *
+ * `kind` stays in the key because thinking and text legitimately
+ * coexist in a single message and need separate rows. Multiple
+ * same-kind blocks in one assistant message are not produced by the
+ * Anthropic API in practice; if that ever changes, this dedup would
+ * collapse them — accept that trade vs. the simpler alternative of
+ * carrying an order-tracking counter across JSONL entries.
  *
  * Tool_use and tool_result blocks have a stronger natural key
  * (`tool_use_id`) — see `getToolUseByToolUseId` and
@@ -143,7 +152,6 @@ export function getBlockByNaturalKey(
   sessionId: string,
   messageId: string,
   kind: string,
-  blockIndex: number,
 ): BlockRow | null {
   const db = getDb();
   const r = db
@@ -154,7 +162,6 @@ export function getBlockByNaturalKey(
         eq(schema.blocks.sessionId, sessionId),
         eq(schema.blocks.messageId, messageId),
         eq(schema.blocks.kind, kind),
-        eq(schema.blocks.blockIndex, blockIndex),
       ),
     )
     .get();

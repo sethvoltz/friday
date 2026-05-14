@@ -501,6 +501,62 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     expect(rows[0].block_index).toBe(1); // live row preserved at its idx
   });
 
+  it("text dedup ignores block_index (live IPC at idx=1, JSONL at idx=0) — FRI-4", async () => {
+    // Regression: live worker stamps the SDK stream's e.index (1 here,
+    // because a thinking block precedes the text in the assembled
+    // message). The SDK persists the same message as per-block JSONL
+    // entries — the text entry's content array is just `[text]` at idx
+    // 0. With block_index in the dedup natural key, recovery's idx=0
+    // lookup missed the live row at idx=1 and inserted a parallel row
+    // with a fresh blockId, surfacing as a duplicate text bubble in
+    // chat. Dropping block_index from the key fixes it.
+    const cwd = "/tmp/agent-cwd-text-dedup";
+    const sessionId = "sess-text-dedup";
+    const { insertBlock } = await import("@friday/shared/services");
+
+    // Pre-write the live IPC row: text at block_index=1.
+    insertBlock({
+      blockId: "live-text",
+      turnId: "t-live-text",
+      agentName: "alpha",
+      sessionId,
+      messageId: "msg-textdup",
+      blockIndex: 1,
+      role: "assistant",
+      kind: "text",
+      contentJson: JSON.stringify({ text: "hello world" }),
+      status: "complete",
+      ts: 50,
+      lastEventSeq: 1,
+    });
+
+    // JSONL has the text as its own assistant entry, content[0] = text.
+    writeSessionJsonl(cwd, sessionId, [
+      {
+        type: "assistant",
+        timestamp: "2026-05-12T10:00:00.000Z",
+        message: {
+          id: "msg-textdup",
+          content: [{ type: "text", text: "hello world" }],
+        },
+      },
+    ]);
+
+    const { recoverFromJsonl } = await import("./jsonl-recovery.js");
+    const stats = recoverFromJsonl([
+      { agentName: "alpha", sessionId, workingDirectory: cwd },
+    ]);
+    // Live row matches by (session, message_id, kind) regardless of
+    // index; content matches → skipped, no duplicate inserted.
+    expect(stats.inserted).toBe(0);
+    expect(stats.skipped).toBe(1);
+
+    const rows = await rawBlocks();
+    expect(rows.length).toBe(1);
+    expect(rows[0].block_index).toBe(1); // live row preserved
+    expect(rows[0].kind).toBe("text");
+  });
+
   it("is idempotent for tool_result rows (re-running recovery doesn't duplicate)", async () => {
     const cwd = "/tmp/some/cwd";
     const sessionId = "sess-idempot-tr";
