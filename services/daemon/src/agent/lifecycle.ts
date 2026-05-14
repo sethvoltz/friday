@@ -370,6 +370,7 @@ export function dispatchTurn(input: SpawnTurnInput): void {
   }
   const promptCmd: WorkerPromptCommand = {
     prompt: input.options.prompt,
+    attachments: input.options.attachments,
     turnId: input.options.turnId,
     resumeSessionId:
       input.options.resumeSessionId ?? existing.sessionId ?? undefined,
@@ -1079,6 +1080,11 @@ export interface RecordUserBlockInput {
     threadId: string | null;
     ts: number;
   };
+  /** Attachments referenced by this user block (user_chat path). Persisted
+   *  into `content_json.attachments` so reload-from-DB rehydrates the chip
+   *  row in the dashboard. The bytes live on disk under `~/.friday/uploads`
+   *  and are fetched via `GET /api/uploads/<sha>`. */
+  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
 }
 
 /**
@@ -1092,6 +1098,10 @@ export function recordUserBlock(input: RecordUserBlockInput): {
 } {
   const blockId = randomUUID();
   const ts = Date.now();
+  const attachments =
+    input.attachments && input.attachments.length > 0
+      ? { attachments: input.attachments }
+      : {};
   const content =
     input.source === "mail" && input.fromAgent
       ? {
@@ -1107,8 +1117,9 @@ export function recordUserBlock(input: RecordUserBlockInput): {
                 mail_ts: input.mailMeta.ts,
               }
             : {}),
+          ...attachments,
         }
-      : { text: input.text };
+      : { text: input.text, ...attachments };
   const contentJson = JSON.stringify(content);
   // The `user_chat` path has the dashboard's optimistic bubble already
   // rendered before POST /api/chat/turn returns. Emitting the canonical

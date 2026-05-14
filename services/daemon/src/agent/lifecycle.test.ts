@@ -131,6 +131,55 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(row!.source).toBe("mail");
   });
 
+  it("user_chat attachments land verbatim in content_json (FRI-6)", async () => {
+    const { recordUserBlock } = await import("./lifecycle.js");
+    const { getBlockById } = await import("@friday/shared/services");
+
+    const atts = [
+      {
+        sha256: "a".repeat(64),
+        filename: "screenshot.png",
+        mime: "image/png",
+      },
+      {
+        sha256: "b".repeat(64),
+        filename: "notes.pdf",
+        mime: "application/pdf",
+      },
+    ];
+    const { blockId } = recordUserBlock({
+      turnId: "turn-att-1",
+      agentName: "alpha",
+      text: "look at these",
+      source: "user_chat",
+      attachments: atts,
+    });
+    const row = getBlockById(blockId);
+    expect(JSON.parse(row!.contentJson)).toEqual({
+      text: "look at these",
+      attachments: atts,
+    });
+  });
+
+  it("recordUserBlock without attachments omits the field from content_json", async () => {
+    // Defensive: mail / scheduled / queue-injected callers don't pass
+    // attachments, and the resulting JSON must not gain a stray empty
+    // `attachments: []` key — the dashboard's parseBlockContent has no
+    // reason to interpret one and downstream cache keys would differ
+    // gratuitously.
+    const { recordUserBlock } = await import("./lifecycle.js");
+    const { getBlockById } = await import("@friday/shared/services");
+
+    const { blockId } = recordUserBlock({
+      turnId: "turn-att-2",
+      agentName: "alpha",
+      text: "no attachments",
+      source: "user_chat",
+    });
+    const row = getBlockById(blockId);
+    expect(JSON.parse(row!.contentJson)).toEqual({ text: "no attachments" });
+  });
+
   it("two back-to-back mail recordUserBlock calls produce strictly monotonic seqs", async () => {
     const { recordUserBlock } = await import("./lifecycle.js");
     const { getBlockById } = await import("@friday/shared/services");
