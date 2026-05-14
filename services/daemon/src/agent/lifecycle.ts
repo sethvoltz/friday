@@ -434,12 +434,19 @@ export function abortTurn(agentName: string): boolean {
  * path awaits this so it can't race the next fork against the dying
  * worker's lingering IPC traffic.
  *
- * Fire-and-forget callers (REST archive endpoints, system commands) can
- * ignore the returned promise — the side-effects (registry archive,
+ * F4-B: the resolved value is the captured `nextPrompts` queue. Watchdog
+ * refork redispatches these so user prompts that arrived while the old
+ * worker was hung aren't dropped on archive (FRI-4). Fire-and-forget
+ * callers (REST archive endpoints, system commands) can ignore both the
+ * promise and its value — the side-effects (registry archive,
  * agent_lifecycle event, live-map remove) happen synchronously up front.
  */
-export function archiveAgent(agentName: string): Promise<void> {
+export function archiveAgent(agentName: string): Promise<WorkerPromptCommand[]> {
   const w = live.get(agentName);
+  // Capture queued prompts before we drop the worker from the live map.
+  // The watchdog's refork path uses these to redispatch on the fresh
+  // worker; ad-hoc archive calls just ignore the return value.
+  const drainedPrompts: WorkerPromptCommand[] = w ? [...w.nextPrompts] : [];
   // Synchronous side-effects: drop from the live map so subsequent
   // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
   // before the child has fully exited.
@@ -452,7 +459,7 @@ export function archiveAgent(agentName: string): Promise<void> {
     agentType: w?.agentType ?? "orchestrator",
     event: "archive",
   });
-  if (!w) return Promise.resolve();
+  if (!w) return Promise.resolve(drainedPrompts);
 
   // Ask the worker to stop gracefully, then wait for the actual exit
   // event. SIGTERM-on-pgrp backstop at 5s catches descendants the worker
@@ -462,15 +469,15 @@ export function archiveAgent(agentName: string): Promise<void> {
     // Child is already gone, but descendants may still be running.
     killPgrp(w.pgid, "SIGTERM");
     setTimeout(() => killPgrp(w.pgid, "SIGKILL"), 2_000).unref();
-    return Promise.resolve();
+    return Promise.resolve(drainedPrompts);
   }
 
-  return new Promise<void>((resolve) => {
+  return new Promise<WorkerPromptCommand[]>((resolve) => {
     let done = false;
     const finish = (): void => {
       if (done) return;
       done = true;
-      resolve();
+      resolve(drainedPrompts);
     };
     w.child.once("exit", () => {
       // Even on clean child exit, send a pgrp SIGTERM to reap any leaked
