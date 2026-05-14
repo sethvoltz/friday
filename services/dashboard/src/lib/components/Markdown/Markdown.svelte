@@ -430,4 +430,23 @@
   :global(.markdown em) { font-style: italic; }
 
   :global(.markdown img) { max-width: 100%; height: auto; }
+
+  /* KaTeX overflow guard: wide formulas scroll inside the bubble instead of
+     pushing the page sideways on narrow viewports. */
+  :global(.markdown .katex-display) {
+    overflow-x: auto;
+    overflow-y: hidden;
+    max-width: 100%;
+    -webkit-overflow-scrolling: touch;
+  }
+  :global(.markdown .katex-display > .katex) {
+    white-space: nowrap;
+    max-width: none;
+  }
+  :global(.markdown .katex) {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    vertical-align: middle;
+  }
 </style>
