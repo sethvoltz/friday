@@ -2,7 +2,7 @@ import type { WireEvent } from "@friday/shared";
 import { chat } from "./chat.svelte";
 import { connectivity } from "./connectivity.svelte";
 import { bumpDashboardData } from "./dashboard-data.svelte";
-import { saveJSON } from "./persistent";
+import { loadString, saveJSON, saveString } from "./persistent";
 
 /**
  * SSE client (FIX_FORWARD 3.1). Backed by `fetch` + `response.body.getReader()`
@@ -97,10 +97,22 @@ let connectionId = 0;
 /** Last `id:` field we saw on the wire. Sent as `Last-Event-ID` on the
  *  next reconnect so the daemon resumes from `replaySince(lastEventId)`. */
 let lastEventId: string | null = null;
+/** localStorage key for the last daemon boot_id we connected to. Hydrated
+ *  at module load so a fresh page load can detect a daemon restart on the
+ *  very first `connection_established` event — without this, the
+ *  module-scoped `cachedBootId` would start `null` on every reload, the
+ *  mismatch check below would short-circuit, and the persisted
+ *  `chat.lastSeqByAgent` cursor (FIX_FORWARD 3-C) from the previous daemon
+ *  would silently reject every event from the new daemon (whose `seq`
+ *  counter restarted at 0). FRI-8 regression. */
+const BOOT_ID_KEY = "sse:bootId";
+
 /** Cached daemon boot_id from the most recent `connection_established`.
- *  `null` until the first connection lands; on mismatch we drop the
- *  per-agent cursors and refetch the focused agent's history. */
-let cachedBootId: string | null = null;
+ *  Hydrated from localStorage so we detect daemon restarts that happened
+ *  while no tab was open. Persisted again whenever we learn a fresh
+ *  boot_id. On mismatch we drop the per-agent cursors and refetch the
+ *  focused agent's history. */
+let cachedBootId: string | null = loadString(BOOT_ID_KEY);
 
 async function connect(): Promise<void> {
   if (abortController) return;
@@ -226,6 +238,33 @@ function parseEvent(block: string): ParsedEvent | null {
   return { id, event, data: dataParts.join("\n") };
 }
 
+/**
+ * Reconcile a freshly-arrived `connection_established` against the
+ * cached/persisted boot_id. On mismatch the daemon is a different process
+ * than the one that produced the persisted `chat.lastSeqByAgent` cursor
+ * — its ring buffer started from `seq=0`, so the persisted cursor would
+ * silently reject every new event. Clear it, drop the persisted copy,
+ * and re-seed the focused agent's history from the canonical blocks
+ * endpoint.
+ *
+ * Exported so the FRI-8 regression test can drive it without standing
+ * up a real fetch + SSE reader loop.
+ */
+export function acceptConnectionEstablished(
+  incomingBootId: string,
+  bootTs: number,
+): void {
+  if (cachedBootId !== null && cachedBootId !== incomingBootId) {
+    chat.lastSeqByAgent = {};
+    saveJSON("chat:lastSeqByAgent", {});
+    void chat.loadAgentTurns(chat.focusedAgent);
+  }
+  cachedBootId = incomingBootId;
+  saveString(BOOT_ID_KEY, incomingBootId);
+  chat.bootId = incomingBootId;
+  chat.bootTs = bootTs;
+}
+
 function handleEvent(evt: ParsedEvent, myId: number): void {
   if (myId !== connectionId) return;
   // Update Last-Event-ID cursor (used on the next reconnect's headers).
@@ -242,20 +281,7 @@ function handleEvent(evt: ParsedEvent, myId: number): void {
     return;
   }
   if (parsed.type === "connection_established") {
-    const incoming = parsed.boot_id;
-    if (cachedBootId !== null && cachedBootId !== incoming) {
-      // F3-C: new boot_id means the old seqs are stale (different daemon
-      // process — its ring buffer started from 0). Drop both in-memory
-      // and persisted cursors so the next ring-buffer replay starts
-      // clean instead of dropping legit events that happen to have
-      // lower seqs than our pre-restart cursor.
-      chat.lastSeqByAgent = {};
-      saveJSON("chat:lastSeqByAgent", {});
-      void chat.loadAgentTurns(chat.focusedAgent);
-    }
-    cachedBootId = incoming;
-    chat.bootId = incoming;
-    chat.bootTs = parsed.boot_ts;
+    acceptConnectionEstablished(parsed.boot_id, parsed.boot_ts);
     return;
   }
   chat.applyEvent(parsed);
