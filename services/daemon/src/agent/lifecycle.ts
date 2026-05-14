@@ -293,7 +293,7 @@ export function spawnTurn(input: SpawnTurnInput): void {
     // `status='error'`. The normal IPC-driven `handleBlockStop` path
     // would have already emptied the map for clean exits; this is
     // strictly the SIGTERM / SIGKILL / OOM / crash safety net.
-    finalizeInflightBlocksOnExit(w);
+    finalizeStreamingBlocks(w, "error");
     // If the worker died mid-turn the in-flight registry entry would leak —
     // drop it here so the daemon doesn't hold accumulator state for a turn
     // that can no longer make progress.
@@ -731,6 +731,15 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
           });
         }
       }
+      // FRI-4 #2 (Layer B): if the SDK abandoned a content block
+      // mid-stream and the worker's pre-break flush missed it, the
+      // liveTurns map still has it. `dropTurn` below would wipe it and
+      // any late `block-stop` would no-op via `handleBlockStop`'s
+      // `liveTurns.finishBlock` null-check, leaving the DB row at
+      // `status='streaming'`. Finalize as `aborted` first so the row
+      // transitions cleanly off `streaming` and the dashboard's bubble
+      // moves off `running`.
+      finalizeStreamingBlocks(w, "aborted");
       // The in-flight registry holds per-turn block accumulators (FIX_FORWARD
       // 1.4). Drop the entry once the turn completes; canonical block content
       // already lives in the `blocks` table.
@@ -1074,21 +1083,35 @@ function handleBlockStop(
   });
 }
 
-/* ---------------- In-flight teardown on worker exit (F4-A) ---------------- */
+/* ---------------- In-flight block teardown (F4-A + FRI-4 #2) ---------------- */
 
 /**
- * Finalize any blocks that were still streaming when the worker process
- * exited. Mirrors `handleBlockStop`'s DB-before-SSE atomic pattern but is
- * driven from the parent's `child.on("exit")` handler instead of an IPC
- * event — for cases where the worker can't emit `block-stop` itself
- * (SIGTERM from the stall watchdog, SIGKILL, OOM, crash).
+ * Finalize any blocks still in flight on a turn — i.e., the daemon emitted
+ * `block_start` (DB row at `status='streaming'`, entry in `liveTurns`) but
+ * never received a matching `block-stop` IPC. Walks `liveTurns` for
+ * `w.turnId` and uses the existing `writeAndPublish` atomic helper to UPDATE
+ * the row + publish `block_complete` so the dashboard's bubble transitions
+ * off `running`.
  *
- * Status is always `'error'`. Distinguishing SIGTERM-from-our-watchdog
- * vs. an unrelated kill isn't worth plumbing through; the dashboard
- * already treats `error` and `aborted` similarly for tool/thinking
- * bubbles.
+ * Called from two sites:
+ *
+ *   - `child.on("exit")` with status `'error'`: covers SIGTERM (stall
+ *     watchdog), SIGKILL, OOM, crash — anything that bypasses
+ *     `runQuery`'s try/catch so the worker can't tear down its own
+ *     in-flight blocks.
+ *
+ *   - `case "turn-complete"` with status `'aborted'` (FRI-4 #2,
+ *     Layer B): defensive belt-and-braces for the case where the SDK
+ *     abandoned a content block mid-stream (no `content_block_stop`
+ *     emitted) and the worker's own pre-break flush
+ *     (`flushInflightBlocks`) missed it for any reason. Without this,
+ *     `dropTurn` wipes the liveTurns entry and `handleBlockStop` would
+ *     no-op on any late stop, leaving the row at `status='streaming'`.
  */
-export function finalizeInflightBlocksOnExit(w: LiveWorker): void {
+export function finalizeStreamingBlocks(
+  w: LiveWorker,
+  status: "error" | "aborted",
+): void {
   const lt = liveTurns.getLiveTurn(w.turnId);
   if (!lt) return;
   for (const live of lt.blocks.values()) {
@@ -1108,22 +1131,23 @@ export function finalizeInflightBlocksOnExit(w: LiveWorker): void {
           kind: live.kind,
           source: live.source,
           content_json: contentJson,
-          status: "error",
+          status,
           ts,
         },
         (seq) => {
           updateBlock(live.blockId, {
             contentJson,
-            status: "error",
+            status,
             ts,
             lastEventSeq: seq,
           });
         },
       );
     } catch (err) {
-      logger.log("warn", "worker.exit.finalize.error", {
+      logger.log("warn", "lifecycle.streaming-finalize.error", {
         agent: w.agentName,
         blockId: live.blockId,
+        status,
         message: err instanceof Error ? err.message : String(err),
       });
     }

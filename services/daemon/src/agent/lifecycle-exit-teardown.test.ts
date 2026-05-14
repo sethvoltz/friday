@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 // crash), no `block-stop` IPC ever fires for the in-flight blocks. Before
 // this fix the rows stayed at `status='streaming'` and the dashboard
 // rendered tool/thinking bubbles as `running` forever. The exit handler
-// now finalizes them via `finalizeInflightBlocksOnExit`.
+// now finalizes them via `finalizeStreamingBlocks`.
 
 const dataDir = mkdtempSync(join(tmpdir(), "friday-lifecycle-exit-"));
 process.env.FRIDAY_DATA_DIR = dataDir;
@@ -54,9 +54,9 @@ function makeFakeWorker(): unknown {
   };
 }
 
-describe("finalizeInflightBlocksOnExit (F4-A)", () => {
+describe("finalizeStreamingBlocks (F4-A)", () => {
   it("flips streaming thinking + tool_use rows to error on worker exit", async () => {
-    const { finalizeInflightBlocksOnExit } = await import("./lifecycle.js");
+    const { finalizeStreamingBlocks } = await import("./lifecycle.js");
     const { insertBlock, getBlockById } = await import("@friday/shared/services");
     const liveTurns = await import("./live-turns.js");
 
@@ -129,7 +129,7 @@ describe("finalizeInflightBlocksOnExit (F4-A)", () => {
       3,
     );
 
-    finalizeInflightBlocksOnExit(makeFakeWorker() as never);
+    finalizeStreamingBlocks(makeFakeWorker() as never, "error");
 
     const thinking = getBlockById("th-blk");
     expect(thinking?.status).toBe("error");
@@ -153,11 +153,59 @@ describe("finalizeInflightBlocksOnExit (F4-A)", () => {
   });
 
   it("is a no-op when the worker exited cleanly (no live turn)", async () => {
-    const { finalizeInflightBlocksOnExit } = await import("./lifecycle.js");
+    const { finalizeStreamingBlocks } = await import("./lifecycle.js");
     // No liveTurns entry for `turn-exit-1`. Must not throw, must not
     // touch the DB.
     expect(() => {
-      finalizeInflightBlocksOnExit(makeFakeWorker() as never);
+      finalizeStreamingBlocks(makeFakeWorker() as never, "error");
     }).not.toThrow();
+  });
+
+  it("FRI-4 #2 (Layer B): marks orphan blocks 'aborted' on turn-rotation", async () => {
+    // Reproduces the production scenario: the SDK abandoned a thinking
+    // content block mid-stream (no content_block_stop ever fired). The
+    // worker's pre-break flush is the primary defense; this test pins
+    // the daemon-side belt-and-braces — even if the worker missed it,
+    // the turn-complete handler must transition the DB row off
+    // `streaming` before `dropTurn` wipes the liveTurns entry.
+    const { finalizeStreamingBlocks } = await import("./lifecycle.js");
+    const { insertBlock, getBlockById } = await import(
+      "@friday/shared/services"
+    );
+    const liveTurns = await import("./live-turns.js");
+
+    insertBlock({
+      blockId: "th-orphan",
+      turnId: "turn-exit-1",
+      agentName: "exit-agent",
+      sessionId: "sess-exit-1",
+      messageId: "msg-orphan",
+      blockIndex: 0,
+      role: "assistant",
+      kind: "thinking",
+      contentJson: "",
+      status: "streaming",
+      ts: 1,
+      lastEventSeq: 1,
+    });
+    liveTurns.startBlock({
+      turnId: "turn-exit-1",
+      agentName: "exit-agent",
+      sessionId: "sess-exit-1",
+      clientBlockId: "c-th-orphan",
+      blockId: "th-orphan",
+      messageId: "msg-orphan",
+      blockIndex: 0,
+      role: "assistant",
+      kind: "thinking",
+      source: null,
+      ts: 1,
+      seq: 1,
+    });
+
+    finalizeStreamingBlocks(makeFakeWorker() as never, "aborted");
+
+    const row = getBlockById("th-orphan");
+    expect(row?.status).toBe("aborted");
   });
 });
