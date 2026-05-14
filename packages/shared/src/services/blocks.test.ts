@@ -499,13 +499,12 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
   });
 
   it("getBlockByNaturalKey treats kind as part of the key", async () => {
-    // Why this exists: the Claude SDK splits a multi-block assistant
-    // message into per-block JSONL entries, each starting at content
-    // index 0. Without `kind` in the natural key, a thinking-chunk and
-    // a text-chunk both land at (message, 0) and clobber each other —
-    // updateBlock can't move `kind`, so the row's contentJson ends up
-    // holding text payload while the row's kind stays "thinking". The
-    // fix is to include kind in the dedup key.
+    // Why this exists: thinking and text legitimately coexist in one
+    // assistant message. The dedup key must distinguish them so a
+    // thinking row and a text row with the same `message_id` stay as
+    // two rows — `updateBlock` can't change `kind`, so collapsing them
+    // would leave the row's `kind` mismatched against its
+    // `content_json`.
     const { insertBlock, getBlockByNaturalKey } = await import("./blocks.js");
     insertBlock({
       blockId: "blk-thinking",
@@ -527,7 +526,7 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
       agentName: "alpha",
       sessionId: "sess-nk",
       messageId: "msg-1",
-      blockIndex: 0,
+      blockIndex: 1,
       role: "assistant",
       kind: "text",
       contentJson: JSON.stringify({ text: "text content" }),
@@ -536,16 +535,48 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
       lastEventSeq: 2,
     });
 
-    expect(
-      getBlockByNaturalKey("sess-nk", "msg-1", "thinking", 0)?.blockId,
-    ).toBe("blk-thinking");
-    expect(
-      getBlockByNaturalKey("sess-nk", "msg-1", "text", 0)?.blockId,
-    ).toBe("blk-text");
+    expect(getBlockByNaturalKey("sess-nk", "msg-1", "thinking")?.blockId).toBe(
+      "blk-thinking",
+    );
+    expect(getBlockByNaturalKey("sess-nk", "msg-1", "text")?.blockId).toBe(
+      "blk-text",
+    );
     // Negative: tool_use at the same coords is not present.
-    expect(
-      getBlockByNaturalKey("sess-nk", "msg-1", "tool_use", 0),
-    ).toBeNull();
+    expect(getBlockByNaturalKey("sess-nk", "msg-1", "tool_use")).toBeNull();
+  });
+
+  it("getBlockByNaturalKey ignores block_index (FRI-4)", async () => {
+    // The live worker writes text at the SDK stream's e.index (e.g. 1
+    // when a thinking block precedes it within a single assistant
+    // message). The JSONL recovery walker reads its position from the
+    // split JSONL entry's per-entry content array, which always starts
+    // at 0. If the dedup key included block_index, recovery's idx=0
+    // lookup would miss the live worker's idx=1 row and a parallel
+    // row would be inserted for the same logical text. Verify the
+    // lookup matches regardless of block_index.
+    const { insertBlock, getBlockByNaturalKey } = await import("./blocks.js");
+    insertBlock({
+      blockId: "blk-live-text",
+      turnId: "t-live",
+      agentName: "alpha",
+      sessionId: "sess-fri4",
+      messageId: "msg-fri4",
+      // Live worker stores SDK-stream index — non-zero when a thinking
+      // block precedes the text in the assembled message.
+      blockIndex: 1,
+      role: "assistant",
+      kind: "text",
+      contentJson: JSON.stringify({ text: "live content" }),
+      status: "complete",
+      ts: 1,
+      lastEventSeq: 1,
+    });
+    // Recovery walker would call lookup without knowing the live
+    // index. Returns the live row, so recovery skips/updates instead
+    // of inserting a parallel row.
+    expect(getBlockByNaturalKey("sess-fri4", "msg-fri4", "text")?.blockId).toBe(
+      "blk-live-text",
+    );
   });
 
   it("getToolResultByToolUseId only matches kind='tool_result' rows", async () => {

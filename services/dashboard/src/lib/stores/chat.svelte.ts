@@ -641,9 +641,16 @@ export class ChatState {
     turnId: string,
     status: "complete" | "aborted" | "error",
   ): void {
+    // Safety net for the iterator-error path. The worker now flushes
+    // in-flight blocks with a terminal status on catch, but if any tool /
+    // thinking bubble slips through (eviction, dropped block-stop, JSONL
+    // recovery race), close it here using the turn-level status — never
+    // leave a `running` bubble pinned to a turn the daemon has declared
+    // done. Assistant text bubbles use the same matching rule they always
+    // have.
     for (const m of this.messages) {
-      if (m.role !== "assistant") continue;
-      if (m.id === turnId || m.turnId === turnId) {
+      if (m.id !== turnId && m.turnId !== turnId) continue;
+      if (m.role === "assistant") {
         if (
           m.status === "complete" ||
           m.status === "aborted" ||
@@ -652,6 +659,11 @@ export class ChatState {
           continue;
         }
         m.status = status;
+      } else if (m.role === "tool" || m.role === "thinking") {
+        if (m.status === "done" || m.status === "error" || m.status === "aborted") {
+          continue;
+        }
+        m.status = status === "complete" ? "done" : status;
       }
     }
     if (this.inflightTurnId === turnId) this.inflightTurnId = null;
@@ -1139,6 +1151,7 @@ export class ChatState {
         text: "",
         status: "running",
         blockId: event.block_id,
+        turnId: event.turn_id,
         ts: event.ts,
       });
       return;
@@ -1154,6 +1167,7 @@ export class ChatState {
         status: "running",
         toolId,
         toolName: event.tool?.name ?? "",
+        turnId: event.turn_id,
         ts: event.ts,
       });
       return;
@@ -1252,18 +1266,30 @@ export class ChatState {
     }
     if (event.kind === "thinking") {
       const id = `th_${event.block_id}`;
+      // For thinking blocks, 'complete' (and the un-aborted retry path)
+      // both surface as the user-visible "done" state. Terminal abort/error
+      // — emitted by the worker's tear-down on iterator failure or
+      // `api_retry` — gets the matching state so the bubble isn't left
+      // spinning.
+      const status: ChatMessage["status"] =
+        event.status === "aborted"
+          ? "aborted"
+          : event.status === "error"
+            ? "error"
+            : "done";
       for (const m of this.messages) {
         if (m.id !== id) continue;
         if (typeof parsed.text === "string") m.text = parsed.text;
-        m.status = "done";
+        m.status = status;
         return;
       }
       this.messages.push({
         id,
         role: "thinking",
         text: parsed.text ?? "",
-        status: "done",
+        status,
         blockId: event.block_id,
+        turnId: event.turn_id,
         ts: event.ts,
       });
       return;
@@ -1275,17 +1301,29 @@ export class ChatState {
         if (m.id !== id) continue;
         m.input = parsed.input;
         if (parsed.name && !m.toolName) m.toolName = parsed.name;
+        // A tool_use that completes with aborted/error never gets a
+        // tool_result follow-up to flip the bubble off "running" — honor
+        // the terminal status here.
+        if (event.status === "aborted") m.status = "aborted";
+        else if (event.status === "error") m.status = "error";
         return;
       }
       // Late mount.
+      const status: ChatMessage["status"] =
+        event.status === "aborted"
+          ? "aborted"
+          : event.status === "error"
+            ? "error"
+            : "running";
       this.messages.push({
         id,
         role: "tool",
         text: "",
-        status: "running",
+        status,
         toolId,
         toolName: parsed.name ?? "",
         input: parsed.input,
+        turnId: event.turn_id,
         ts: event.ts,
       });
       return;
@@ -1437,12 +1475,21 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
       // Same shape for thinking blocks. `handleBlockDelta` gates on
       // `m.status === "running"` for thinking; preserve "running"
       // for streaming rows so reload-mid-turn deltas append.
+      const status: ChatMessage["status"] =
+        b.status === "streaming"
+          ? "running"
+          : b.status === "aborted"
+            ? "aborted"
+            : b.status === "error"
+              ? "error"
+              : "done";
       out.push({
         id: `th_${b.blockId}`,
         role: "thinking",
         text: parsed.text ?? "",
-        status: b.status === "streaming" ? "running" : "done",
+        status,
         blockId: b.blockId,
+        turnId: b.turnId,
         ts: b.ts,
       });
     } else if (b.kind === "tool_use") {
@@ -1450,14 +1497,21 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
       // Dedup duplicate tool_use rows for the same id — JSONL replay
       // artifacts and refork retries can both produce them.
       if (toolByToolId.has(toolId)) continue;
+      const status: ChatMessage["status"] =
+        b.status === "aborted"
+          ? "aborted"
+          : b.status === "error"
+            ? "error"
+            : "running";
       const msg: ChatMessage = {
         id: `t_${toolId}`,
         role: "tool",
         text: "",
-        status: "running",
+        status,
         toolId,
         toolName: parsed.name ?? "",
         input: parsed.input,
+        turnId: b.turnId,
         ts: b.ts,
       };
       out.push(msg);

@@ -346,6 +346,28 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   // correlate without relying on the SDK index (which resets each message).
   const blocks = new Map<number, BlockState>();
 
+  // Flush any in-flight blocks with a terminal status. Called from two places
+  // that need to honestly close out partial streams instead of leaving them
+  // stuck at `status='streaming'` in DB + spinning forever in the dashboard:
+  //   - `api_retry` system message (the SDK is about to retry; the prior
+  //     attempt's blocks won't get their own block-stop because the SDK
+  //     starts a fresh message_start with new ids)
+  //   - the iterator's catch handler (hard error; we owe a terminal status
+  //     to every block we already announced)
+  const flushInflightBlocks = (
+    status: "aborted" | "error",
+  ): void => {
+    for (const block of blocks.values()) {
+      emit({
+        type: "block-stop",
+        clientBlockId: block.clientBlockId,
+        contentJson: finalizeBlockContent(block),
+        status,
+      });
+    }
+    blocks.clear();
+  };
+
   const DEFAULT_THINKING_BUDGET = 8192;
   const thinking =
     opts.thinking?.type === "enabled"
@@ -457,6 +479,20 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       // emitting them would tag sub-agent tool blocks with the orchestrator's
       // agent + turn_id and bleed them into the parent's chat.
       if (typeof m.parent_tool_use_id === "string" && m.parent_tool_use_id) {
+        continue;
+      }
+
+      // The SDK emits `{ type: 'system', subtype: 'api_retry' }` immediately
+      // before retrying a failed request (default 2 retries on 408/409/429/
+      // 5xx — including Cloudflare 522s from the upstream API). The retry
+      // starts a fresh `message_start` with new ids, so the prior attempt's
+      // blocks never receive their own `block-stop`. Close them out as
+      // aborted here; otherwise the dashboard renders both the failed
+      // attempt's stuck-running bubbles and the retry's fresh ones (the
+      // duplicate-messages report on FRI-4). The retry trail stays visible
+      // — preserve over delete — but each attempt's status is honest.
+      if (m.type === "system" && m.subtype === "api_retry") {
+        flushInflightBlocks("aborted");
         continue;
       }
 
@@ -589,6 +625,10 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
             contentJson: finalizeBlockContent(block),
             status: "complete",
           });
+          // Remove from the in-flight map so `flushInflightBlocks` (the
+          // error-catch and prompts-pending paths) doesn't double-emit
+          // `block-stop` for blocks that closed cleanly.
+          blocks.delete(e.index);
           continue;
         }
 
@@ -603,6 +643,18 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         // gracefully. The parent's turn-complete handler will drain the
         // next prompt; `mainLoop` drains the inbox for critical mail.
         if (promptsPending || pendingCriticalMail) {
+          // FRI-4 #2: if the SDK abandoned an in-flight content block
+          // without emitting `content_block_stop` (observed live —
+          // empty content_json, no deltas, no stop), the `blocks` map
+          // still has its entry. Without this flush, the daemon's
+          // `dropTurn` (on the incoming `turn-complete`) wipes the
+          // liveTurns entry, `handleBlockStop` early-returns on any
+          // late-arriving stop, and the DB row stays at
+          // `status='streaming'` forever (the dashboard's
+          // `thinking`/`tool` bubble pulses indefinitely). Close
+          // anything still in flight as `aborted` so the daemon
+          // transitions the row off `streaming`.
+          flushInflightBlocks("aborted");
           promptsPending = false;
           pendingCriticalMail = false;
           break;
@@ -662,7 +714,13 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
     emit({ type: "turn-complete", sessionId: sessionId ?? "", usage: finalUsage });
     emit({ type: "status-change", status: "idle" });
   } catch (err: unknown) {
-    if (abortController.signal.aborted) {
+    const aborted = abortController.signal.aborted;
+    // Close out any in-flight blocks so the daemon can flip their DB rows
+    // off `status='streaming'` (the dashboard's `tool` / `thinking` bubbles
+    // otherwise stay 'running' forever — `finishTurn` only walks assistant
+    // text bubbles).
+    flushInflightBlocks(aborted ? "aborted" : "error");
+    if (aborted) {
       emit({ type: "error", message: "aborted", recoverable: true });
     } else {
       emit({

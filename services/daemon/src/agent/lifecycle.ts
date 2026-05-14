@@ -283,6 +283,17 @@ export function spawnTurn(input: SpawnTurnInput): void {
     // M2: clean up the per-worker SBPL profile. Best-effort; the file is
     // owner-only and idempotent so a leak is harmless beyond the disk space.
     if (profilePath) removeProfile(profilePath);
+    // F4-A: any in-flight blocks for the current turn never got their own
+    // `block-stop` because the worker died without going through
+    // `runQuery`'s try/catch. Common path: stall watchdog SIGTERM at 30
+    // min — the kernel reaps the process before any user-space cleanup
+    // runs, so no `error` IPC event, no DB transition, and the
+    // dashboard's tool/thinking bubbles stay `running` forever. Walk the
+    // live registry here and finalize anything still streaming as
+    // `status='error'`. The normal IPC-driven `handleBlockStop` path
+    // would have already emptied the map for clean exits; this is
+    // strictly the SIGTERM / SIGKILL / OOM / crash safety net.
+    finalizeStreamingBlocks(w, "error");
     // If the worker died mid-turn the in-flight registry entry would leak —
     // drop it here so the daemon doesn't hold accumulator state for a turn
     // that can no longer make progress.
@@ -424,12 +435,19 @@ export function abortTurn(agentName: string): boolean {
  * path awaits this so it can't race the next fork against the dying
  * worker's lingering IPC traffic.
  *
- * Fire-and-forget callers (REST archive endpoints, system commands) can
- * ignore the returned promise — the side-effects (registry archive,
+ * F4-B: the resolved value is the captured `nextPrompts` queue. Watchdog
+ * refork redispatches these so user prompts that arrived while the old
+ * worker was hung aren't dropped on archive (FRI-4). Fire-and-forget
+ * callers (REST archive endpoints, system commands) can ignore both the
+ * promise and its value — the side-effects (registry archive,
  * agent_lifecycle event, live-map remove) happen synchronously up front.
  */
-export function archiveAgent(agentName: string): Promise<void> {
+export function archiveAgent(agentName: string): Promise<WorkerPromptCommand[]> {
   const w = live.get(agentName);
+  // Capture queued prompts before we drop the worker from the live map.
+  // The watchdog's refork path uses these to redispatch on the fresh
+  // worker; ad-hoc archive calls just ignore the return value.
+  const drainedPrompts: WorkerPromptCommand[] = w ? [...w.nextPrompts] : [];
   // Synchronous side-effects: drop from the live map so subsequent
   // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
   // before the child has fully exited.
@@ -442,7 +460,7 @@ export function archiveAgent(agentName: string): Promise<void> {
     agentType: w?.agentType ?? "orchestrator",
     event: "archive",
   });
-  if (!w) return Promise.resolve();
+  if (!w) return Promise.resolve(drainedPrompts);
 
   // Ask the worker to stop gracefully, then wait for the actual exit
   // event. SIGTERM-on-pgrp backstop at 5s catches descendants the worker
@@ -452,15 +470,15 @@ export function archiveAgent(agentName: string): Promise<void> {
     // Child is already gone, but descendants may still be running.
     killPgrp(w.pgid, "SIGTERM");
     setTimeout(() => killPgrp(w.pgid, "SIGKILL"), 2_000).unref();
-    return Promise.resolve();
+    return Promise.resolve(drainedPrompts);
   }
 
-  return new Promise<void>((resolve) => {
+  return new Promise<WorkerPromptCommand[]>((resolve) => {
     let done = false;
     const finish = (): void => {
       if (done) return;
       done = true;
-      resolve();
+      resolve(drainedPrompts);
     };
     w.child.once("exit", () => {
       // Even on clean child exit, send a pgrp SIGTERM to reap any leaked
@@ -714,6 +732,15 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
           });
         }
       }
+      // FRI-4 #2 (Layer B): if the SDK abandoned a content block
+      // mid-stream and the worker's pre-break flush missed it, the
+      // liveTurns map still has it. `dropTurn` below would wipe it and
+      // any late `block-stop` would no-op via `handleBlockStop`'s
+      // `liveTurns.finishBlock` null-check, leaving the DB row at
+      // `status='streaming'`. Finalize as `aborted` first so the row
+      // transitions cleanly off `streaming` and the dashboard's bubble
+      // moves off `running`.
+      finalizeStreamingBlocks(w, "aborted");
       // The in-flight registry holds per-turn block accumulators (FIX_FORWARD
       // 1.4). Drop the entry once the turn completes; canonical block content
       // already lives in the `blocks` table.
@@ -1055,6 +1082,108 @@ function handleBlockStop(
     status: e.status,
     contentJson: e.contentJson,
   });
+}
+
+/* ---------------- In-flight block teardown (F4-A + FRI-4 #2) ---------------- */
+
+/**
+ * Finalize any blocks still in flight on a turn — i.e., the daemon emitted
+ * `block_start` (DB row at `status='streaming'`, entry in `liveTurns`) but
+ * never received a matching `block-stop` IPC. Walks `liveTurns` for
+ * `w.turnId` and uses the existing `writeAndPublish` atomic helper to UPDATE
+ * the row + publish `block_complete` so the dashboard's bubble transitions
+ * off `running`.
+ *
+ * Called from two sites:
+ *
+ *   - `child.on("exit")` with status `'error'`: covers SIGTERM (stall
+ *     watchdog), SIGKILL, OOM, crash — anything that bypasses
+ *     `runQuery`'s try/catch so the worker can't tear down its own
+ *     in-flight blocks.
+ *
+ *   - `case "turn-complete"` with status `'aborted'` (FRI-4 #2,
+ *     Layer B): defensive belt-and-braces for the case where the SDK
+ *     abandoned a content block mid-stream (no `content_block_stop`
+ *     emitted) and the worker's own pre-break flush
+ *     (`flushInflightBlocks`) missed it for any reason. Without this,
+ *     `dropTurn` wipes the liveTurns entry and `handleBlockStop` would
+ *     no-op on any late stop, leaving the row at `status='streaming'`.
+ */
+export function finalizeStreamingBlocks(
+  w: LiveWorker,
+  status: "error" | "aborted",
+): void {
+  const lt = liveTurns.getLiveTurn(w.turnId);
+  if (!lt) return;
+  for (const live of lt.blocks.values()) {
+    const ts = Date.now();
+    const contentJson = finalizeLiveBlockContent(live);
+    try {
+      writeAndPublish(
+        {
+          v: 1,
+          type: "block_complete",
+          turn_id: w.turnId,
+          agent: w.agentName,
+          block_id: live.blockId,
+          message_id: live.messageId,
+          block_index: live.blockIndex,
+          role: live.role,
+          kind: live.kind,
+          source: live.source,
+          content_json: contentJson,
+          status,
+          ts,
+        },
+        (seq) => {
+          updateBlock(live.blockId, {
+            contentJson,
+            status,
+            ts,
+            lastEventSeq: seq,
+          });
+        },
+      );
+    } catch (err) {
+      logger.log("warn", "lifecycle.streaming-finalize.error", {
+        agent: w.agentName,
+        blockId: live.blockId,
+        status,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+/**
+ * Assemble a content_json payload from a `LiveBlockState` whose worker
+ * died without sending `block-stop`. Best-effort: text and thinking get
+ * whatever delta text accumulated; tool_use input may be incomplete JSON.
+ */
+function finalizeLiveBlockContent(live: liveTurns.LiveBlockState): string {
+  if (live.kind === "text" || live.kind === "thinking") {
+    return JSON.stringify({ text: live.text });
+  }
+  if (live.kind === "tool_use") {
+    let input: unknown = {};
+    if (live.partialJson && live.partialJson.length > 0) {
+      try {
+        input = JSON.parse(live.partialJson);
+      } catch {
+        input = { _raw: live.partialJson };
+      }
+    }
+    return JSON.stringify({
+      tool_use_id: live.tool?.id ?? "",
+      name: live.tool?.name ?? "",
+      input,
+    });
+  }
+  // tool_result blocks are emitted block-start + block-stop in the same
+  // tick by worker.ts's user-message handler, so they almost never sit in
+  // liveTurns at exit time. If one does, emit an empty payload — the
+  // dashboard will render the bubble as errored without output.
+  return JSON.stringify({ tool_use_id: live.tool?.id ?? "", text: "", is_error: true });
 }
 
 /* ---------------- User-typed block insertion (FIX_FORWARD 1.2) ---------------- */

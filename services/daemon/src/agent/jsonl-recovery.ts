@@ -17,12 +17,15 @@
  * current session and reconciles against the DB:
  *
  *  - For each assistant `text` / `thinking` block, dedup by
- *    `(session_id, message_id, kind, block_index)`. The Claude SDK
- *    splits a multi-block assistant message into per-block JSONL
- *    entries (each starting at content `index: 0`), so a thinking-chunk
- *    and a text-chunk land at the same nominal `(message_id, 0)`. Without
- *    `kind` in the key those collide and one's contentJson gets clobbered
- *    by the other (with no `kind` change — `updateBlock` can't move it).
+ *    `(session_id, message_id, kind)`. The live worker's `block_index`
+ *    is the SDK stream's position within the assembled message
+ *    (thinking=0, text=1 in a thinking+text reply); the JSONL splits
+ *    each content block into its own entry whose `content` array
+ *    starts fresh at index 0, so `forEach((_, idx))` here is always 0.
+ *    The two indices disagree by construction, so including
+ *    `block_index` in the dedup caused recovery to insert a parallel
+ *    row for the same logical text (FRI-4). `kind` stays in the key so
+ *    thinking and text within one message remain separate rows.
  *    Missing → INSERT with a fresh UUID and `status='complete'`.
  *    Mismatched content → UPDATE.
  *  - For each assistant `tool_use` block, dedup by `(session_id,
@@ -307,7 +310,6 @@ function reconcileBlock(
     input.sessionId,
     input.messageId,
     input.kind,
-    input.blockIndex,
   );
   if (!existing) {
     const blockId = randomUUID();

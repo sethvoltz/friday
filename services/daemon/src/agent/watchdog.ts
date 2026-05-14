@@ -119,7 +119,14 @@ async function refork(agentName: string): Promise<void> {
   // dispatching the replacement. Without this, the new fork sometimes
   // raced the dying worker's exit handler, which then live.delete()d
   // the *new* worker's slot.
-  await archiveAgent(agentName);
+  //
+  // F4-B (FRI-4): `archiveAgent` returns whatever prompts the user had
+  // queued on the old worker's `nextPrompts`. Without this, the cheap
+  // failure mode of "user typed a message while the previous turn was
+  // hung; the worker died before the SDK saw it" silently drops their
+  // message. Redispatch them on the fresh worker after the timeout
+  // notice (or as the only payload if they're all we have).
+  const drained = await archiveAgent(agentName);
 
   // The registry row was archived by archiveAgent. Re-register so the new
   // turn has a row to bind onto.
@@ -141,26 +148,44 @@ async function refork(agentName: string): Promise<void> {
   // Empty prompt — the worker will idle and drain mail on its own (the long-
   // lived loop does this when no pendingPrompt is set… but we need to give
   // it *something* to chew on). Stub it with a self-instruction.
-  const prompt =
+  const noticePrompt =
     "(Your previous turn timed out and was reforked. Check your mail inbox via mail_inbox if you were mid-task; otherwise wait for the next instruction.)";
 
-  dispatchTurn({
-    agentName,
-    options: {
+  const dispatch = (prompt: string, turnId: string): void => {
+    dispatchTurn({
       agentName,
-      agentType: a.type,
-      workingDirectory: registry.workingDirectoryFor(a),
-      systemPrompt,
-      prompt,
-      turnId: `t_${randomUUID()}`,
-      model: modelCfg.name,
-      thinking: modelCfg.thinking,
-      effort: modelCfg.effort,
-      resumeSessionId: a.sessionId ?? undefined,
-      daemonPort: cfg.daemonPort,
-      parentName:
-        "parentName" in a ? a.parentName ?? undefined : undefined,
-      mode: "long-lived",
-    },
-  });
+      options: {
+        agentName,
+        agentType: a.type,
+        workingDirectory: registry.workingDirectoryFor(a),
+        systemPrompt,
+        prompt,
+        turnId,
+        model: modelCfg.name,
+        thinking: modelCfg.thinking,
+        effort: modelCfg.effort,
+        resumeSessionId: a.sessionId ?? undefined,
+        daemonPort: cfg.daemonPort,
+        parentName:
+          "parentName" in a ? a.parentName ?? undefined : undefined,
+        mode: "long-lived",
+      },
+    });
+  };
+
+  // Always fork on the notice first so the user sees a turn marker for
+  // the refork itself, then redeliver each drained prompt under its
+  // original turn_id so the user-text block already in DB (recorded by
+  // `recordUserBlock` at POST time) binds back to its assistant
+  // response.
+  dispatch(noticePrompt, `t_${randomUUID()}`);
+  if (drained.length > 0) {
+    logger.log("info", "watchdog.refork.redeliver", {
+      agent: agentName,
+      count: drained.length,
+    });
+    for (const p of drained) {
+      dispatch(p.prompt, p.turnId);
+    }
+  }
 }
