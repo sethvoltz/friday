@@ -15,6 +15,17 @@
   let text = $state("");
   let textarea: HTMLTextAreaElement | undefined = $state();
   let busy = $derived(chat.inflightTurnId !== null);
+  // True between the user clicking Stop and the daemon emitting turn_done
+  // for the stopping turn. Drives the Stop button's disabled/dimmed look
+  // so a second click doesn't fire a redundant abort POST.
+  let isStopping = $derived.by(() => {
+    const id = chat.inflightTurnId;
+    if (!id) return false;
+    const m = chat.messages.find(
+      (x) => x.role === "assistant" && (x.id === id || x.turnId === id),
+    );
+    return m?.status === "stopping";
+  });
   // Touch keyboards (phones, tablets without a hardware keyboard) treat
   // Enter as "newline" — sending happens via the on-screen send button. We
   // detect that via the `(pointer: coarse)` media query. The flag is kept
@@ -424,8 +435,20 @@
   }
 
   async function stop() {
-    if (!chat.inflightTurnId) return;
-    await fetch(`/api/chat/turn/${chat.inflightTurnId}/abort`, { method: "POST" });
+    const id = chat.inflightTurnId;
+    if (!id) return;
+    // Mark the bubble as stopping immediately so the UI flips out of
+    // streaming-grow mode and the Stop button dims. The daemon's eventual
+    // turn_done will overwrite stopping → its terminal status (typically
+    // 'aborted'). Fire-and-forget the POST: the abort endpoint returns
+    // synchronously but the actual SDK unwind happens asynchronously, so
+    // there's nothing useful to await here.
+    chat.requestStop(id);
+    void fetch(`/api/chat/turn/${id}/abort`, { method: "POST" }).catch(() => {
+      /* network errors are tolerable — the next turn_done will reconcile.
+         If it never lands, the user can refresh; we don't want a thrown
+         promise spamming the console. */
+    });
   }
 
   function onKeydown(e: KeyboardEvent) {
@@ -637,11 +660,23 @@
 <div
   class="input-wrap"
   class:dragging={isDragging}
+  class:busy
   ondragenter={onDragEnter}
   ondragover={onDragOver}
   ondragleave={onDragLeave}
   ondrop={onDrop}
   role="presentation">
+  <!--
+    Aurora: nested so the blur owns the parent and the gradient + crop
+    live on a child. Filter on the parent applies AFTER the child's mask
+    paints, so the inner crop edge gets blurred soft (the outer edge of
+    the gradient has no mask, so the outside stays as the wide soft
+    glow). Both layers are always in the DOM; opacity fades 0 ↔ 1 when
+    .busy toggles. Pointer-events: none so input clicks pass through.
+  -->
+  <div class="aurora" aria-hidden="true">
+    <div class="aurora-shape"></div>
+  </div>
   {#if pendingAttachments.length > 0}
     <div class="chips" aria-label="Attachments">
       {#each pendingAttachments as a (a.key)}
@@ -720,9 +755,11 @@
       <button
         type="button"
         class="icon-btn stop"
+        class:stopping={isStopping}
         onclick={stop}
-        aria-label="Stop"
-        title="Stop">
+        disabled={isStopping}
+        aria-label={isStopping ? "Stopping" : "Stop"}
+        title={isStopping ? "Stopping…" : "Stop"}>
         <CircleStop size={18} aria-hidden="true" />
       </button>
     {:else}
@@ -766,10 +803,29 @@
   .input-wrap {
     position: relative;
     width: 100%;
-    background: var(--bg-input);
+    /* Background lives on ::before so that the same element can carry
+       backdrop-filter — needed to blur the aurora that paints behind
+       the input bar AND the chat content scrolling below it (mirroring
+       the header's translucent treatment). The wrap itself stays
+       transparent so its border + focus glow remain crisp. */
+    background: transparent;
     border: 1px solid var(--border-primary);
     border-radius: var(--radius-md);
     transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  }
+  .input-wrap::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: var(--header-float-bg);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    /* Sits between the aurora (z-index: 0) and the form/chips (z-index:
+       2) so its backdrop-filter samples the aurora and the chat content
+       behind, but never the textarea text we put on top. */
+    z-index: 1;
+    pointer-events: none;
   }
   /* Single bordered box — focus on any child (textarea, attach, send/stop)
      lights the whole wrap. Same accent glow the textarea used to wear. */
@@ -780,6 +836,93 @@
   .input-wrap.dragging {
     outline: 2px dashed var(--accent-primary);
     outline-offset: -2px;
+  }
+
+  /* === Aurora ("Friday is thinking") =====================================
+     Two conic-gradient layers that flow around the input bar while a turn
+     is in flight. Outer extends past the wrap and is heavily blurred so
+     it bleeds into the chrome; inner is clipped to the wrap's rounded
+     rect via clip-path so the soft tint inside stays inside the box.
+     Both layers always exist; opacity fades in/out via .busy on the wrap.
+     The two @property declarations let the conic gradient's `from` angle
+     animate smoothly — a plain custom property would step, not tween. */
+  @property --friday-rotate-outer {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+  }
+  /* Aurora wrapper: owns the blur and the opacity transition. The blur
+     applies to its child (.aurora-shape) AFTER that child's mask has
+     painted, so the inner crop edge becomes a soft fade instead of a
+     hard line. The wrapper extends 10px past the wrap; combined with
+     the 14px blur, the outside bleed reaches ~24px into the surrounding
+     chrome — matching the original wide glow look. */
+  .aurora {
+    position: absolute;
+    inset: -10px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 500ms ease;
+    z-index: 0;
+    /* Reduced from 14px → 8px so the conic arcs read as defined bands
+       outside the wrap; the wrap's translucent ::before adds a second
+       backdrop-blur pass on the slice that sits inside the wrap, so
+       the inside still reads as soft. */
+    filter: blur(8px);
+  }
+  .input-wrap.busy .aurora { opacity: 1; }
+  /* Aurora shape: the conic gradient itself, with a frame mask that
+     paints color in a band running from the wrapper's outer edge inward
+     by `padding` (per side). The deep center is hidden — and because
+     the parent's blur fires after this mask, the cut is blurred into a
+     soft inward fade rather than a sharp line. The outer edge of the
+     gradient has no mask, so the outside stays full-strength under the
+     parent's blur (the original wide soft glow). */
+  .aurora-shape {
+    position: absolute;
+    inset: 0;
+    /* Padding sets how far inside the wrapper edge the mask cuts. With
+       inset:-10px on the wrapper, the wrapper edge sits 10px outside
+       the wrap. padding:14px → frame covers the 10px outside + 4px
+       inside the wrap; the parent's blur softens both edges so color
+       continues to bleed slightly past either side. */
+    padding: 14px;
+    box-sizing: border-box;
+    border-radius: calc(var(--radius-md) + 10px);
+    background: conic-gradient(
+      from var(--friday-rotate-outer),
+      var(--friday-blue) 0deg,
+      transparent 80deg,
+      var(--friday-purple) 130deg,
+      transparent 220deg,
+      var(--friday-pink) 260deg,
+      transparent 330deg,
+      var(--friday-blue) 360deg
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) padding-box,
+      linear-gradient(#000 0 0) content-box;
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) padding-box,
+      linear-gradient(#000 0 0) content-box;
+    mask-composite: exclude;
+    animation: friday-rotate-outer 9s linear infinite;
+  }
+  @keyframes friday-rotate-outer {
+    to { --friday-rotate-outer: 360deg; }
+  }
+  /* Reduced motion: a slow opacity pulse on the wrap border replaces the
+     rotating gradients. Same "Friday is working" signal, no parallax. */
+  @media (prefers-reduced-motion: reduce) {
+    .aurora { display: none; }
+    .input-wrap.busy {
+      animation: friday-pulse 2.4s ease-in-out infinite;
+    }
+    @keyframes friday-pulse {
+      0%, 100% { box-shadow: 0 0 0 1px var(--friday-blue); }
+      50% { box-shadow: 0 0 0 2px var(--friday-purple); }
+    }
   }
   .drop-overlay {
     position: absolute;
@@ -833,8 +976,21 @@
   .icon-btn.stop:hover:not(:disabled) {
     color: var(--status-error);
   }
+  /* Stopping: the user already clicked Stop; we're waiting for the daemon
+     to confirm. The button stays in place (no jump back to Send) but
+     dims so a second click is visibly inert. The aurora animation on
+     the wrap keeps running until turn_done lands. */
+  .icon-btn.stop.stopping {
+    color: var(--status-error);
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
   .chips {
     position: relative;
+    /* Sits above the aurora (z-index: 0) and the translucent
+       backdrop-blur pseudo (z-index: 1) so attachment chips remain
+       crisp while the gradient flows behind. */
+    z-index: 2;
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem;
@@ -895,6 +1051,10 @@
     color: var(--text-primary);
   }
   .input {
+    /* Lift the textarea + buttons above the aurora (z-index: 0) and
+       the translucent backdrop-blur pseudo (z-index: 1). */
+    position: relative;
+    z-index: 2;
     display: flex;
     gap: 0.25rem;
     align-items: flex-end;

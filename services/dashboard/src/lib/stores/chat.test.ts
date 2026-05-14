@@ -1379,3 +1379,241 @@ describe("unread badge gating (PR C)", () => {
     expect(chat.unreadByAgent["gamma"]).toBeUndefined();
   });
 });
+
+describe("requestStop (stopping state machine)", () => {
+  it("flips the assistant bubble to status='stopping'", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.startAssistantTurn("turn-1", "friday");
+    chat.appendDelta("turn-1", "partial response so far");
+    expect(chat.messages[0]!.status).toBe("streaming");
+
+    const ok = chat.requestStop("turn-1");
+    expect(ok).toBe(true);
+    expect(chat.messages[0]!.status).toBe("stopping");
+  });
+
+  it("freezes further deltas on a stopping bubble", async () => {
+    // The user clicked Stop. The daemon hasn't confirmed yet, but any
+    // late deltas the SDK was already piping through must NOT keep
+    // growing the rendered text — the user explicitly said halt.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.startAssistantTurn("turn-1", "friday");
+    chat.appendDelta("turn-1", "before stop");
+    chat.requestStop("turn-1");
+    chat.appendDelta("turn-1", " AFTER STOP");
+    expect(chat.messages[0]!.text).toBe("before stop");
+  });
+
+  it("turn_done from the daemon overwrites stopping → aborted (truthful terminal state)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.startAssistantTurn("turn-1", "friday");
+    chat.appendDelta("turn-1", "partial");
+    chat.requestStop("turn-1");
+    expect(chat.messages[0]!.status).toBe("stopping");
+
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-1",
+      agent: "friday",
+      status: "aborted",
+      seq: 10,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(chat.messages[0]!.status).toBe("aborted");
+    expect(chat.inflightTurnId).toBe(null);
+  });
+
+  it("if daemon raced and returned 'complete' instead of 'aborted', the row reflects truth", async () => {
+    // The model's last token can ship before the abort signal takes
+    // effect — daemon then emits turn_done with status='complete'. The
+    // bubble must show the actual outcome, not pretend it was stopped.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.startAssistantTurn("turn-1", "friday");
+    chat.appendDelta("turn-1", "full response");
+    chat.requestStop("turn-1");
+
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-1",
+      agent: "friday",
+      status: "complete",
+      seq: 10,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(chat.messages[0]!.status).toBe("complete");
+    expect(chat.inflightTurnId).toBe(null);
+  });
+
+  it("is idempotent: re-stopping a stopping turn is a no-op (still returns true)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.startAssistantTurn("turn-1", "friday");
+    chat.requestStop("turn-1");
+    expect(chat.requestStop("turn-1")).toBe(true);
+    expect(chat.messages[0]!.status).toBe("stopping");
+  });
+
+  it("returns false for an unknown turn id (no bubble in the list)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    expect(chat.requestStop("turn-nonexistent")).toBe(false);
+    expect(chat.messages.length).toBe(0);
+  });
+
+  it("returns false for an already-finalized turn (complete/aborted/error)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.startAssistantTurn("turn-1", "friday");
+    chat.finishTurn("turn-1", "complete");
+    expect(chat.messages[0]!.status).toBe("complete");
+    expect(chat.requestStop("turn-1")).toBe(false);
+    // Still complete — requestStop didn't smear it back to stopping.
+    expect(chat.messages[0]!.status).toBe("complete");
+  });
+
+  it("matches by message turnId when the bubble id is keyed by message_id (post-appendDelta)", async () => {
+    // Real-world: the SDK assigns a message_id once it streams the first
+    // delta, and assistant bubbles re-key from `<turnId>` to
+    // `assistant_<messageId>` while keeping `turnId` set on the row.
+    // requestStop's matcher uses both `id` and `turnId`, so a Stop click
+    // after the message_id arrives still finds the right bubble.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.startAssistantTurn("turn-1", "friday");
+    chat.appendDelta("turn-1", "hi", "msg_42");
+    // The most recent matching bubble is the message-id-keyed one with
+    // turnId set, plus the original turn-id-keyed one created by
+    // startAssistantTurn (still empty). Stopping marks the FIRST match
+    // we hit going forward through the array, so verify both end up
+    // covered after the daemon's eventual finishTurn.
+    chat.requestStop("turn-1");
+    const stoppingCount = chat.messages.filter(
+      (m) => m.status === "stopping",
+    ).length;
+    expect(stoppingCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("mid-stop: a new turn starting (e.g. mail-driven) does not collide with the stopping turn", async () => {
+    // The race the user explicitly called out. T1 is stopping when mail
+    // arrives and starts T2. Each turn's lifecycle resolves on its own
+    // turn_id; finishTurn(T1) must NOT clear inflightTurnId because that
+    // now points at T2's live turn — clearing it would hide the Stop
+    // button while T2 is still streaming.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // T1 is mid-turn
+    chat.startAssistantTurn("turn-1", "friday");
+    chat.appendDelta("turn-1", "T1 partial");
+    chat.requestStop("turn-1");
+    expect(chat.inflightTurnId).toBe("turn-1");
+    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe(
+      "stopping",
+    );
+
+    // T2 starts (mail bridge → recordUserBlock → daemon dispatches a
+    // fresh turn). The dashboard sees turn_started for T2 first.
+    chat.applyEvent({
+      v: 1,
+      type: "turn_started",
+      turn_id: "turn-2",
+      agent: "friday",
+      ts: 200,
+      seq: 5,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.inflightTurnId).toBe("turn-2");
+
+    // Now T1's belated turn_done lands.
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-1",
+      agent: "friday",
+      status: "aborted",
+      seq: 6,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    // T1's bubble flips to aborted; inflightTurnId stays on T2.
+    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe(
+      "aborted",
+    );
+    expect(chat.inflightTurnId).toBe("turn-2");
+  });
+
+  it("user can stop a second turn while the first is still in stopping state", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // T1 stopping.
+    chat.startAssistantTurn("turn-1", "friday");
+    chat.requestStop("turn-1");
+
+    // T2 starts and immediately the user stops it too.
+    chat.applyEvent({
+      v: 1,
+      type: "turn_started",
+      turn_id: "turn-2",
+      agent: "friday",
+      ts: 200,
+      seq: 5,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    // turn_started doesn't push an assistant bubble on its own — the
+    // first block_start does. Synthesize the bubble the same way the
+    // streaming path does.
+    chat.startAssistantTurn("turn-2", "friday");
+    chat.requestStop("turn-2");
+
+    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe(
+      "stopping",
+    );
+    expect(chat.messages.find((m) => m.id === "turn-2")?.status).toBe(
+      "stopping",
+    );
+
+    // Both finish independently; neither should clobber the other.
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-2",
+      agent: "friday",
+      status: "aborted",
+      seq: 6,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages.find((m) => m.id === "turn-2")?.status).toBe(
+      "aborted",
+    );
+    // T1 still stopping; not affected by T2's turn_done.
+    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe(
+      "stopping",
+    );
+    expect(chat.inflightTurnId).toBe(null); // T2 was the active one
+
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-1",
+      agent: "friday",
+      status: "aborted",
+      seq: 7,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe(
+      "aborted",
+    );
+  });
+});

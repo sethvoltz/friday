@@ -429,6 +429,20 @@ export function abortTurn(agentName: string): boolean {
 }
 
 /**
+ * Find the live agent whose current turn matches `turnId`. Used by the
+ * abort endpoint so a Stop click on agent A doesn't tear down B and C
+ * just because all three happened to be mid-turn. Returns null when the
+ * turn has already completed or never started — the abort caller should
+ * surface that as `aborted: false`.
+ */
+export function findAgentByTurnId(turnId: string): string | null {
+  for (const [name, w] of live) {
+    if (w.turnId === turnId) return name;
+  }
+  return null;
+}
+
+/**
  * Tear down a live worker and clean its registry row. FIX_FORWARD 4.1: the
  * returned promise resolves only after the child process has actually
  * exited (or after a 5s SIGKILL fallback fires). The watchdog's refork

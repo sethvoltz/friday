@@ -89,6 +89,7 @@ import {
   abortTurn,
   archiveAgent,
   dispatchTurn,
+  findAgentByTurnId,
   peekLiveWorker,
   recordUserBlock,
 } from "../agent/lifecycle.js";
@@ -249,12 +250,13 @@ async function handle(
 
   if (method === "POST" && path.startsWith("/api/chat/turn/") && path.endsWith("/abort")) {
     const turnId = path.split("/")[4];
-    // Find the agent owning this turn (Phase 2: orchestrator-only, so just abort).
-    let aborted = false;
-    for (const a of registry.listAgents()) {
-      if (abortTurn(a.name)) aborted = true;
-    }
-    return json(res, 200, { aborted, turn_id: turnId });
+    // Stop targets only the agent whose current turn matches `turnId`. The
+    // previous loop-every-agent behavior tore down unrelated turns running
+    // in parallel — pressing Stop on agent A while B and C were also
+    // mid-turn aborted all three.
+    const agent = findAgentByTurnId(turnId);
+    const aborted = agent ? abortTurn(agent) : false;
+    return json(res, 200, { aborted, turn_id: turnId, agent });
   }
 
   // --- Agents ---
