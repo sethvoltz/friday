@@ -26,6 +26,10 @@ import {
   stopTurnStallWatchdog,
 } from "./agent/lifecycle.js";
 import { sandboxExecAvailable } from "./agent/sandbox-profile.js";
+import {
+  startInvariantAuditor,
+  stopInvariantAuditor,
+} from "./agent/invariants.js";
 import { wrapWithRecall } from "./agent/recall.js";
 import {
   composeSystemPrompt,
@@ -34,6 +38,7 @@ import {
 import { inbox as mailInbox } from "@friday/shared/services";
 import { buildMailPrompt } from "./comms/mail-prompt.js";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 
 async function main(): Promise<void> {
   ensureDirs();
@@ -63,6 +68,7 @@ async function main(): Promise<void> {
   const schedTick = startScheduler();
   const watchdog = startWatchdog();
   startTurnStallWatchdog();
+  startInvariantAuditor();
   void reconcileLinear()
     .then((result) => {
       if (!result.ran) {
@@ -130,6 +136,7 @@ async function main(): Promise<void> {
     void watchdog;
     stopWatchdog();
     stopTurnStallWatchdog();
+    stopInvariantAuditor();
     clearHealth();
     flushDb();
     server.close(() => process.exit(0));
@@ -141,6 +148,10 @@ async function main(): Promise<void> {
 
 /**
  * Boot recovery for agents:
+ *  - Heal orphaned builders: row says builder but the worktree directory
+ *    is gone (e.g. the user archived it pre-F1-A, the buggy exit handler
+ *    reset status to idle, and the workspace was already cleaned up).
+ *    Archive them here so they don't get re-dispatched on every boot.
  *  - Reset any `working` status left by a daemon that died mid-turn (no
  *    worker is alive to drive the turn forward).
  *  - Reconcile each agent's JSONL against the blocks table once (FIX_FORWARD
@@ -151,6 +162,36 @@ async function main(): Promise<void> {
 function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
   const jsonlAgents: RecoveryAgent[] = [];
   for (const a of registry.listAgents()) {
+    // Heal-on-boot: a builder whose worktree was already removed cannot
+    // run another turn. If we don't archive it here, the eligibility
+    // check below would happily re-dispatch (sending it into the
+    // missing-worktree void) every boot, and the dashboard would see a
+    // ghost "working" agent forever. The migration to "archived" only
+    // catches rows whose status was literally "killed" — agents that
+    // were raced into "idle" by the pre-F1-A exit handler slip through
+    // and land here.
+    if (
+      a.type === "builder" &&
+      a.status !== "archived" &&
+      "worktreePath" in a &&
+      a.worktreePath &&
+      !existsSync(a.worktreePath)
+    ) {
+      logger.log("info", "agent.recovery.archive-orphan", {
+        agent: a.name,
+        worktreePath: a.worktreePath,
+      });
+      registry.archiveAgent(a.name);
+      eventBus.publish({
+        v: 1,
+        type: "agent_lifecycle",
+        agent: a.name,
+        agentType: a.type,
+        event: "archive",
+        reason: "orphan-worktree",
+      });
+      continue;
+    }
     if (a.status === "working") {
       logger.log("info", "agent.recovery.reset-working", { agent: a.name });
       registry.setStatus(a.name, "idle");
