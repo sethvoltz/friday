@@ -1136,6 +1136,71 @@ describe("unread badge gating (PR C)", () => {
     );
   });
 
+  it("PR D: stale agent_status for an archived agent does NOT flip status back", async () => {
+    // Scenario: dashboard cold-load, /api/agents returns the agent as
+    // archived, then SSE ring-buffer replays an old agent_status:working
+    // from before the archive. Without this guard the row would flip to
+    // working and the sidebar would render a green pulsing dot on a
+    // corpse.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.agents = [
+      { name: "ghost-builder", type: "builder", status: "archived" },
+    ];
+    chat.applyEvent({
+      v: 1,
+      type: "agent_status",
+      agent: "ghost-builder",
+      status: "working",
+      since: 1,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(
+      chat.agents.find((a) => a.name === "ghost-builder")?.status,
+    ).toBe("archived");
+  });
+
+  it("PR D: stale agent_lifecycle:complete for an archived agent does NOT flip to idle", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.agents = [
+      { name: "ghost-builder", type: "builder", status: "archived" },
+    ];
+    chat.applyEvent({
+      v: 1,
+      type: "agent_lifecycle",
+      agent: "ghost-builder",
+      agentType: "builder",
+      event: "complete",
+      seq: 2,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(
+      chat.agents.find((a) => a.name === "ghost-builder")?.status,
+    ).toBe("archived");
+  });
+
+  it("PR D: stale turn_started for an archived focused agent does NOT set inflightTurnId", async () => {
+    // The "Stop" button on an archived agent's history view came from
+    // here: the ring-buffer replay set inflightTurnId on the focused
+    // archived agent, but no matching turn_done followed (either evicted
+    // from the buffer or the buffer truncated). Guard at the entry.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "ghost-builder";
+    chat.agents = [
+      { name: "ghost-builder", type: "builder", status: "archived" },
+    ];
+    chat.applyEvent({
+      v: 1,
+      type: "turn_started",
+      agent: "ghost-builder",
+      turn_id: "t-stale",
+      ts: 1,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.inflightTurnId).toBeNull();
+  });
+
   it("F3-C: stale seqs are dropped (dedup against persisted cursor)", async () => {
     // If the persisted cursor for an agent is N, a replayed event with
     // seq <= N must be dropped — no badge bump, no state churn.

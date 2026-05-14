@@ -246,9 +246,17 @@ export class ChatState {
 
   /** Apply an agent_status event with a debounce on working→idle so brief
    * inter-turn idle pulses don't flicker the dot. Working transitions and
-   * non-binary states (stalled/error/archived) apply immediately. */
+   * non-binary states (stalled/error/archived) apply immediately.
+   *
+   * Archived is terminal: an SSE ring-buffer replay on cold page load can
+   * deliver stale `agent_status` events for already-archived agents (the
+   * F3-C cursor is empty before the first event accepts). Without a guard
+   * here, the row flips from "archived" back to whatever the replay says,
+   * the sidebar lights up green, and the user sees a corpse mid-turn.
+   * Refusing to overwrite "archived" status closes that hole. */
   private applyAgentStatus(name: string, status: string): void {
     const existing = this.agents.find((a) => a.name === name);
+    if (existing?.status === "archived") return;
     const prev = existing?.status;
 
     if (status === "idle" && prev === "working") {
@@ -983,11 +991,18 @@ export class ChatState {
     if (!this.acceptEvent(event)) return;
 
     switch (event.type) {
-      case "turn_started":
+      case "turn_started": {
+        // Archived agents can't legitimately have an inflight turn.
+        // A ring-buffer replay's stale turn_started for an archived
+        // agent would otherwise set inflightTurnId and surface a "Stop"
+        // button on a frozen chat.
+        const a = this.agents.find((x) => x.name === event.agent);
+        if (a?.status === "archived") break;
         if (event.agent === this.focusedAgent) {
           this.inflightTurnId = event.turn_id;
         }
         break;
+      }
       case "block_start":
         if (event.agent !== this.focusedAgent) break;
         this.handleBlockStart(event);
@@ -1032,6 +1047,12 @@ export class ChatState {
           // refuses to create with type="unknown" (F2-B), so a stray
           // complete for an unknown agent is a safe no-op — the next
           // /api/agents poll will surface it.
+          //
+          // Archived is terminal — see applyAgentStatus comment. A
+          // ring-buffer replay's `complete` for an already-archived
+          // agent must not flip status back to idle.
+          const existing = this.agents.find((a) => a.name === event.agent);
+          if (existing?.status === "archived") break;
           this.upsertAgent(event.agent, { status: "idle" });
         }
         break;
