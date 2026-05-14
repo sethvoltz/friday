@@ -22,6 +22,7 @@
     <h2>System commands</h2>
     <span class="stat-detail">{data.system.length}</span>
   </div>
+  <div class="table-scroll-wrapper">
   <table class="data-table">
     <thead>
       <tr><th>Command</th><th>Description</th></tr>
@@ -40,6 +41,7 @@
       {/each}
     </tbody>
   </table>
+  </div>
 </div>
 
 <div class="card">
@@ -52,6 +54,7 @@
       No skills loaded. Drop markdown files in <code>~/.friday/skills/</code> to add your own.
     </p>
   {:else}
+    <div class="table-scroll-wrapper">
     <table class="data-table">
       <thead>
         <tr><th>Skill</th><th>Description</th><th>Source</th></tr>
@@ -66,6 +69,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   {/if}
 </div>
 
