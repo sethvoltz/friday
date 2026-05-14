@@ -119,6 +119,7 @@
   {#if schedules.length === 0}
     <p class="empty-state">No schedules.</p>
   {:else}
+    <div class="table-scroll-wrapper">
     <table class="data-table">
       <thead>
         <tr>
@@ -225,6 +226,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   {/if}
 </div>
 

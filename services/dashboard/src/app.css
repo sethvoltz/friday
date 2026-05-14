@@ -436,6 +436,11 @@ code, pre {
   background: var(--accent-glow);
 }
 
+.table-scroll-wrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* === Pre/Code === */
 
 pre.code-block {

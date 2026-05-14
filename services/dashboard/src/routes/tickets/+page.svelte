@@ -244,6 +244,7 @@
       No tickets match. Loosen the filters above or create one.
     </p>
   {:else}
+    <div class="table-scroll-wrapper">
     <table class="data-table sortable">
       <thead>
         <tr>
@@ -278,6 +279,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   {/if}
 </div>
 

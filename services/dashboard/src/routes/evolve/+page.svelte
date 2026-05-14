@@ -325,6 +325,7 @@
       trigger a scan on demand with the button above.
     </p>
   {:else}
+    <div class="table-scroll-wrapper">
     <table class="data-table">
       <thead>
         <tr>
@@ -440,6 +441,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   {/if}
 </div>
 
