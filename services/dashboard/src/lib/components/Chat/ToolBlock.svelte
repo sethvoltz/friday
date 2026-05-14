@@ -19,6 +19,13 @@
       return String(v);
     }
   }
+  let description = $derived.by(() => {
+    if (input && typeof input === "object" && !Array.isArray(input)) {
+      const d = (input as Record<string, unknown>).description;
+      if (typeof d === "string" && d.trim().length > 0) return d.trim();
+    }
+    return "";
+  });
   let inputText = $derived(fmtInput(input));
   let hasInput = $derived(inputText.length > 0 && inputText !== "{}");
   let hasOutput = $derived(typeof output === "string" && output.length > 0);
@@ -44,7 +51,12 @@
     aria-expanded={canExpand ? open : undefined}
     disabled={!canExpand}>
     <span class="tool-icon" aria-hidden="true"><Wrench size={16} /></span>
-    <code class="tool-name">{toolName}</code>
+    {#if description}
+      <span class="tool-description">{description}</span>
+      <code class="tool-name tool-name-pill" title={toolName}>{toolName}</code>
+    {:else}
+      <code class="tool-name">{toolName}</code>
+    {/if}
     <span class="badge {badgeClass(status)}">{statusLabel(status)}</span>
     {#if canExpand}
       <span class="expand-toggle" aria-hidden="true">{open ? "−" : "+"}</span>
@@ -99,6 +111,23 @@
     background: transparent;
     border: none;
     padding: 0;
+  }
+  .tool-description {
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .tool-name-pill {
+    font-size: 0.7rem;
+    padding: 0.05rem 0.4rem;
+    background: var(--bg-tertiary);
+    color: var(--text-tertiary);
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
   }
   .expand-toggle {
     margin-left: auto;
