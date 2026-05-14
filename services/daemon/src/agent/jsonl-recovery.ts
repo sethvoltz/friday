@@ -16,13 +16,24 @@
  * `recoverFromJsonl` walks the Claude SDK JSONL for each given agent's
  * current session and reconciles against the DB:
  *
- *  - For each assistant `text` / `thinking` / `tool_use` block, dedup by
- *    `(session_id, message_id, block_index)`. Missing → INSERT with a
- *    fresh UUID and `status='complete'`. Mismatched content → UPDATE.
+ *  - For each assistant `text` / `thinking` block, dedup by
+ *    `(session_id, message_id, kind, block_index)`. The Claude SDK
+ *    splits a multi-block assistant message into per-block JSONL
+ *    entries (each starting at content `index: 0`), so a thinking-chunk
+ *    and a text-chunk land at the same nominal `(message_id, 0)`. Without
+ *    `kind` in the key those collide and one's contentJson gets clobbered
+ *    by the other (with no `kind` change — `updateBlock` can't move it).
+ *    Missing → INSERT with a fresh UUID and `status='complete'`.
+ *    Mismatched content → UPDATE.
+ *  - For each assistant `tool_use` block, dedup by `(session_id,
+ *    tool_use_id)`. The SDK-stream's global `e.index` (what the live IPC
+ *    path stores as block_index) doesn't agree with the JSONL entry's
+ *    content-array position, so `tool_use_id` is the only stable
+ *    cross-reference for matching live ↔ recovered rows.
  *  - For each user `tool_result` block, dedup by
  *    `(session_id, tool_use_id)`. Tool_result entries in the SDK's JSONL
  *    never carry a stable `message.id` (they're flushed before the API
- *    assigns one), so the assistant-style natural key always misses;
+ *    assigns one), so an assistant-style natural key always misses;
  *    `tool_use_id` is the cross-reference the Anthropic API uses to pair
  *    use ↔ result.
  *  - User-role text content is ignored: those blocks are written by the
@@ -51,6 +62,7 @@ import {
 import {
   getBlockByNaturalKey,
   getToolResultByToolUseId,
+  getToolUseByToolUseId,
   insertBlock,
   updateBlock,
 } from "@friday/shared/services";
@@ -208,16 +220,15 @@ function processAssistantEntry(
         ts,
       });
     } else if (b.type === "tool_use") {
-      reconcileBlock(out, {
+      const toolUseId = b.id ?? `idx_${idx}`;
+      reconcileToolUse(out, {
         agentName,
         sessionId,
         messageId,
         blockIndex: idx,
-        role: "assistant",
-        kind: "tool_use",
-        source: null,
+        toolUseId,
         contentJson: JSON.stringify({
-          tool_use_id: b.id ?? `idx_${idx}`,
+          tool_use_id: toolUseId,
           name: b.name ?? "",
           input: b.input ?? {},
         }),
@@ -282,7 +293,7 @@ interface ReconcileInput {
   messageId: string;
   blockIndex: number;
   role: string;
-  kind: "text" | "thinking" | "tool_use" | "tool_result";
+  kind: "text" | "thinking";
   source: null;
   contentJson: string;
   ts: number;
@@ -295,6 +306,7 @@ function reconcileBlock(
   const existing = getBlockByNaturalKey(
     input.sessionId,
     input.messageId,
+    input.kind,
     input.blockIndex,
   );
   if (!existing) {
@@ -313,6 +325,71 @@ function reconcileBlock(
       role: input.role,
       kind: input.kind,
       source: input.source,
+      contentJson: input.contentJson,
+      status: "complete",
+      ts: input.ts,
+      lastEventSeq: seq,
+    });
+    out.inserted += 1;
+    out.blockIds.push(blockId);
+    return;
+  }
+  if (existing.contentJson === input.contentJson) {
+    out.skipped += 1;
+    return;
+  }
+  const seq = eventBus.currentSeq() + 1;
+  updateBlock(existing.blockId, {
+    contentJson: input.contentJson,
+    status: "complete",
+    ts: input.ts,
+    lastEventSeq: seq,
+  });
+  out.updated += 1;
+  out.blockIds.push(existing.blockId);
+}
+
+interface ReconcileToolUseInput {
+  agentName: string;
+  sessionId: string;
+  messageId: string;
+  /** Block index from the JSONL entry's `content` array (usually 0 because
+   *  the SDK splits a multi-block message into per-block entries). The
+   *  live IPC may store the same row at a different block_index — that's
+   *  fine because dedup is by `tool_use_id`, not `(message_id, block_index)`. */
+  blockIndex: number;
+  toolUseId: string;
+  contentJson: string;
+  ts: number;
+}
+
+/**
+ * Tool_use variant of reconcileBlock. Dedup is by `(session_id,
+ * tool_use_id)` because the SDK splits a multi-block assistant message
+ * into per-block JSONL entries (each starting at content `index: 0`),
+ * while the live IPC path stores tool_use at the SDK-stream's global
+ * `e.index`. Those two block_index values don't agree; dedup'ing by
+ * `tool_use_id` (stable, unique) keeps recovery idempotent against
+ * live-written rows regardless of streaming-chunk boundaries.
+ */
+function reconcileToolUse(
+  out: ReconcileResult,
+  input: ReconcileToolUseInput,
+): void {
+  const existing = getToolUseByToolUseId(input.sessionId, input.toolUseId);
+  if (!existing) {
+    const blockId = randomUUID();
+    const seq = eventBus.currentSeq() + 1;
+    insertBlock({
+      blockId,
+      turnId: `recover_${input.sessionId}`,
+      agentName: input.agentName,
+      sessionId: input.sessionId,
+      messageId: input.messageId,
+      blockIndex: input.blockIndex,
+      role: "assistant",
+      kind: "tool_use",
+      source: null,
       contentJson: input.contentJson,
       status: "complete",
       ts: input.ts,

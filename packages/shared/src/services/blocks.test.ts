@@ -436,6 +436,118 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
     expect(getToolResultByToolUseId("sess-tr", "toolu_OTHER")).toBeNull();
   });
 
+  it("getToolUseByToolUseId finds a tool_use row by tool_use_id regardless of block_index", async () => {
+    // Why this exists: jsonl-recovery has to dedup against tool_use rows
+    // the live IPC wrote, but the live IPC stores tool_use at the SDK
+    // stream's global `e.index` (e.g., 1 if thinking precedes), while
+    // the SDK's JSONL splits the message into per-block entries each
+    // starting at content `index: 0`. The `(message_id, block_index)`
+    // coordinates therefore disagree; tool_use_id is the only stable
+    // cross-reference.
+    const { insertBlock, getToolUseByToolUseId } = await import("./blocks.js");
+    insertBlock({
+      blockId: "blk-tu-live",
+      turnId: "t-1",
+      agentName: "alpha",
+      sessionId: "sess-tu",
+      messageId: "msg-1",
+      blockIndex: 1, // live IPC wrote at index 1 (thinking was at 0)
+      role: "assistant",
+      kind: "tool_use",
+      contentJson: JSON.stringify({
+        tool_use_id: "toolu_ZZZ",
+        name: "Bash",
+        input: { command: "ls" },
+      }),
+      status: "complete",
+      ts: 100,
+      lastEventSeq: 1,
+    });
+
+    const hit = getToolUseByToolUseId("sess-tu", "toolu_ZZZ");
+    expect(hit?.blockId).toBe("blk-tu-live");
+    expect(hit?.blockIndex).toBe(1);
+    expect(getToolUseByToolUseId("sess-tu", "toolu_OTHER")).toBeNull();
+    expect(getToolUseByToolUseId("sess-other", "toolu_ZZZ")).toBeNull();
+  });
+
+  it("getToolUseByToolUseId only matches kind='tool_use' rows", async () => {
+    // Symmetric to the kind-filter check on getToolResultByToolUseId.
+    // A tool_result row carries the same tool_use_id in its content_json;
+    // we must not return it from the tool_use lookup, or recovery's dedup
+    // would falsely "find" the result when looking for the use.
+    const { insertBlock, getToolUseByToolUseId } = await import("./blocks.js");
+    insertBlock({
+      blockId: "blk-tr-only",
+      turnId: "t",
+      agentName: "alpha",
+      sessionId: "sess-tu2",
+      messageId: null,
+      blockIndex: 0,
+      role: "assistant",
+      kind: "tool_result",
+      contentJson: JSON.stringify({
+        tool_use_id: "toolu_Y",
+        text: "ok",
+        is_error: false,
+      }),
+      status: "complete",
+      ts: 1,
+      lastEventSeq: 1,
+    });
+    expect(getToolUseByToolUseId("sess-tu2", "toolu_Y")).toBeNull();
+  });
+
+  it("getBlockByNaturalKey treats kind as part of the key", async () => {
+    // Why this exists: the Claude SDK splits a multi-block assistant
+    // message into per-block JSONL entries, each starting at content
+    // index 0. Without `kind` in the natural key, a thinking-chunk and
+    // a text-chunk both land at (message, 0) and clobber each other —
+    // updateBlock can't move `kind`, so the row's contentJson ends up
+    // holding text payload while the row's kind stays "thinking". The
+    // fix is to include kind in the dedup key.
+    const { insertBlock, getBlockByNaturalKey } = await import("./blocks.js");
+    insertBlock({
+      blockId: "blk-thinking",
+      turnId: "t",
+      agentName: "alpha",
+      sessionId: "sess-nk",
+      messageId: "msg-1",
+      blockIndex: 0,
+      role: "assistant",
+      kind: "thinking",
+      contentJson: JSON.stringify({ text: "thinking content" }),
+      status: "complete",
+      ts: 1,
+      lastEventSeq: 1,
+    });
+    insertBlock({
+      blockId: "blk-text",
+      turnId: "t",
+      agentName: "alpha",
+      sessionId: "sess-nk",
+      messageId: "msg-1",
+      blockIndex: 0,
+      role: "assistant",
+      kind: "text",
+      contentJson: JSON.stringify({ text: "text content" }),
+      status: "complete",
+      ts: 1,
+      lastEventSeq: 2,
+    });
+
+    expect(
+      getBlockByNaturalKey("sess-nk", "msg-1", "thinking", 0)?.blockId,
+    ).toBe("blk-thinking");
+    expect(
+      getBlockByNaturalKey("sess-nk", "msg-1", "text", 0)?.blockId,
+    ).toBe("blk-text");
+    // Negative: tool_use at the same coords is not present.
+    expect(
+      getBlockByNaturalKey("sess-nk", "msg-1", "tool_use", 0),
+    ).toBeNull();
+  });
+
   it("getToolResultByToolUseId only matches kind='tool_result' rows", async () => {
     // Belt-and-suspenders: even if some other kind happened to embed the
     // same `tool_use_id` in content_json (tool_use blocks DO carry it),

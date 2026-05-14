@@ -120,13 +120,29 @@ export function getBlockById(blockId: string): BlockRow | null {
 }
 
 /**
- * Look up a block by its natural key (session_id, message_id, block_index).
- * Used by JSONL boot recovery (FIX_FORWARD 1.3) to dedup against blocks
- * already written by the live worker.
+ * Look up a block by its natural key
+ * `(session_id, message_id, kind, block_index)`. Used by JSONL recovery
+ * (FIX_FORWARD 1.3) to dedup against blocks already written by the live
+ * worker.
+ *
+ * `kind` is part of the key because the Claude SDK splits a single
+ * assistant message across multiple JSONL entries (one per content block),
+ * each entry's `content` array starting fresh at `index: 0`. Without
+ * `kind` in the key, a thinking-chunk and a text-chunk at the same
+ * nominal `index: 0` collide; `updateBlock` can't change `kind`, so the
+ * row's `content_json` ends up holding (say) a tool_use payload while
+ * the row's `kind` is still `thinking`. Including `kind` keeps the three
+ * chunks as three distinct rows.
+ *
+ * Tool_use and tool_result blocks have a stronger natural key
+ * (`tool_use_id`) — see `getToolUseByToolUseId` and
+ * `getToolResultByToolUseId`. Use those instead of this function for
+ * those kinds.
  */
 export function getBlockByNaturalKey(
   sessionId: string,
   messageId: string,
+  kind: string,
   blockIndex: number,
 ): BlockRow | null {
   const db = getDb();
@@ -137,7 +153,40 @@ export function getBlockByNaturalKey(
       and(
         eq(schema.blocks.sessionId, sessionId),
         eq(schema.blocks.messageId, messageId),
+        eq(schema.blocks.kind, kind),
         eq(schema.blocks.blockIndex, blockIndex),
+      ),
+    )
+    .get();
+  return (r ?? null) as BlockRow | null;
+}
+
+/**
+ * Look up a `tool_use` block by (session_id, tool_use_id). The Claude SDK
+ * splits a multi-block assistant message into one JSONL entry per content
+ * block, each starting fresh at `index: 0`. The live IPC path, in
+ * contrast, writes tool_use at the SDK-stream's global `e.index` (e.g.,
+ * `1` if a thinking block precedes it). So the `(message_id, block_index)`
+ * coordinates of a tool_use block in JSONL and the same block in DB don't
+ * line up. The Anthropic API's `tool_use_id` is the stable cross-reference
+ * (it appears identically in JSONL `id` and in DB `content_json.tool_use_id`).
+ *
+ * Used by jsonl-recovery's tool_use reconcile path so recovery dedup against
+ * live-IPC rows works regardless of streaming-chunk boundaries.
+ */
+export function getToolUseByToolUseId(
+  sessionId: string,
+  toolUseId: string,
+): BlockRow | null {
+  const db = getDb();
+  const r = db
+    .select()
+    .from(schema.blocks)
+    .where(
+      and(
+        eq(schema.blocks.sessionId, sessionId),
+        eq(schema.blocks.kind, "tool_use"),
+        sql`json_extract(${schema.blocks.contentJson}, '$.tool_use_id') = ${toolUseId}`,
       ),
     )
     .get();

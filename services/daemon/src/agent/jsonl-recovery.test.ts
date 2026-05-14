@@ -341,6 +341,166 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     expect(tu?.message_id).toBe("msg-assistant-1");
   });
 
+  it("preserves all three content kinds when the SDK splits one message across per-block JSONL entries", async () => {
+    // Regression for the data-corruption bug surfaced in the orchestrator's
+    // session: the Claude SDK writes a single assistant message to JSONL
+    // as multiple entries (one per content block), each entry's `content`
+    // array starting fresh at index 0. Pre-fix recovery used
+    // (session_id, message_id, block_index) as the dedup key, so the
+    // thinking-chunk and text-chunk and tool_use-chunk all collided at
+    // (msg-X, 0). updateBlock can't change `kind`, so the row's
+    // content_json got overwritten while its kind stayed "thinking",
+    // and the tool_use row was never persisted — leaving the matching
+    // tool_result orphaned and rendering as "(unknown)" in the dashboard.
+    //
+    // Post-fix: text/thinking dedup by (session, message, kind, idx),
+    // tool_use dedups by (session, tool_use_id). All three chunks land
+    // in DB as their correct kind with their correct content.
+    const cwd = "/tmp/agent-cwd-streaming-chunks";
+    const sessionId = "sess-streaming-chunks";
+    writeSessionJsonl(cwd, sessionId, [
+      {
+        type: "assistant",
+        timestamp: "2026-05-12T10:00:00.000Z",
+        message: {
+          id: "msg-Multi",
+          content: [{ type: "thinking", thinking: "internal reasoning" }],
+        },
+      },
+      {
+        type: "assistant",
+        timestamp: "2026-05-12T10:00:00.500Z",
+        message: {
+          id: "msg-Multi",
+          content: [{ type: "text", text: "user-visible reply" }],
+        },
+      },
+      {
+        type: "assistant",
+        timestamp: "2026-05-12T10:00:01.000Z",
+        message: {
+          id: "msg-Multi",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_MultiX",
+              name: "Bash",
+              input: { command: "ls" },
+            },
+          ],
+        },
+      },
+      {
+        type: "user",
+        timestamp: "2026-05-12T10:00:01.500Z",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_MultiX",
+              content: "file1\nfile2",
+              is_error: false,
+            },
+          ],
+        },
+      },
+    ]);
+
+    const { recoverFromJsonl } = await import("./jsonl-recovery.js");
+    const stats = recoverFromJsonl([
+      { agentName: "alpha", sessionId, workingDirectory: cwd },
+    ]);
+    expect(stats.inserted).toBe(4); // thinking + text + tool_use + tool_result
+
+    const rows = await rawBlocks();
+    const byKind: Record<string, { content_json: string; message_id: string | null }> = {};
+    for (const r of rows) byKind[r.kind] = r;
+
+    // Each chunk landed as its own kind with the correct content.
+    expect(byKind.thinking).toBeDefined();
+    expect(JSON.parse(byKind.thinking.content_json)).toEqual({
+      text: "internal reasoning",
+    });
+    expect(byKind.text).toBeDefined();
+    expect(JSON.parse(byKind.text.content_json)).toEqual({
+      text: "user-visible reply",
+    });
+    expect(byKind.tool_use).toBeDefined();
+    expect(JSON.parse(byKind.tool_use.content_json)).toEqual({
+      tool_use_id: "toolu_MultiX",
+      name: "Bash",
+      input: { command: "ls" },
+    });
+    expect(byKind.tool_result).toBeDefined();
+    // The tool_result is no longer orphaned — its tool_use is in DB.
+    expect(JSON.parse(byKind.tool_result.content_json).tool_use_id).toBe(
+      "toolu_MultiX",
+    );
+  });
+
+  it("tool_use dedup uses tool_use_id (live IPC wrote at a different block_index)", async () => {
+    // The live IPC path stores tool_use at the SDK stream's `e.index`,
+    // which is global within the message (e.g., 1 if thinking is at 0).
+    // The JSONL splits the same message into per-block entries, each at
+    // content index 0. Dedup by (message_id, block_index) would miss
+    // the live row and double-insert. Dedup by tool_use_id matches.
+    const cwd = "/tmp/agent-cwd-tu-dedup";
+    const sessionId = "sess-tu-dedup";
+    const { insertBlock } = await import("@friday/shared/services");
+
+    // Pre-write the row the live IPC would have produced: tool_use at
+    // block_index=1 (after a hypothetical thinking block at 0).
+    insertBlock({
+      blockId: "live-tu",
+      turnId: "t-live",
+      agentName: "alpha",
+      sessionId,
+      messageId: "msg-T",
+      blockIndex: 1,
+      role: "assistant",
+      kind: "tool_use",
+      contentJson: JSON.stringify({
+        tool_use_id: "toolu_LiveFirst",
+        name: "Bash",
+        input: { command: "pwd" },
+      }),
+      status: "complete",
+      ts: 50,
+      lastEventSeq: 1,
+    });
+
+    // JSONL has the tool_use as a standalone entry at content index 0.
+    writeSessionJsonl(cwd, sessionId, [
+      {
+        type: "assistant",
+        timestamp: "2026-05-12T10:00:00.000Z",
+        message: {
+          id: "msg-T",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_LiveFirst",
+              name: "Bash",
+              input: { command: "pwd" },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const { recoverFromJsonl } = await import("./jsonl-recovery.js");
+    const stats = recoverFromJsonl([
+      { agentName: "alpha", sessionId, workingDirectory: cwd },
+    ]);
+    // Content matches → skipped, no duplicate inserted.
+    expect(stats.inserted).toBe(0);
+    expect(stats.skipped).toBe(1);
+
+    const rows = await rawBlocks();
+    expect(rows.length).toBe(1);
+    expect(rows[0].block_index).toBe(1); // live row preserved at its idx
+  });
+
   it("is idempotent for tool_result rows (re-running recovery doesn't duplicate)", async () => {
     const cwd = "/tmp/some/cwd";
     const sessionId = "sess-idempot-tr";
