@@ -337,6 +337,67 @@ spawnTurn() / dispatchTurn()
 
 Parent-side queue ensures multiple `prompt` IPCs don't race in-flight events with stale `turn_id`s. The queue is mirrored in `liveTurns` (in-memory) so a refork survives — the new worker sees the same pending prompts on `start`.
 
+### Agent status semantics
+
+The `agents.status` column has five values:
+
+| Status      | Meaning                                                                                     | Terminal? |
+| ----------- | ------------------------------------------------------------------------------------------- | --------- |
+| `idle`      | Registered, no worker in flight, can be dispatched to                                       | No        |
+| `working`   | A worker is alive and mid-turn                                                              | No        |
+| `stalled`   | Watchdog flagged the worker for missing its heartbeat budget (no exit yet)                  | No        |
+| `error`     | Worker crashed or returned an unrecoverable error                                           | Effectively |
+| `archived`  | Agent stopped receiving work; for builders, the worktree is gone and the branch deleted     | Yes       |
+
+`archived` is the **terminal** state. Once an agent is archived its session(s) remain visible in `/api/agents/:name/blocks` forever — history is history — but no new turns dispatch, no SSE events should mutate its state, and the row is never resurrected by recovery. A deliberate re-create with the same name uses `registerAgent` (status `idle`) and is conceptually a new entity sharing the namespace, not the same agent un-archived.
+
+Sidebar filter buckets reflect these semantics: "Show archived" reveals the terminal bucket; "Show inactive" reveals the transient-error bucket (`stalled`, `error`). The focused row is always shown regardless of filter state.
+
+### State-boundary checks (inline)
+
+Status mutations cluster around three code paths, each of which validates the invariants it owns:
+
+- **Worker exit handler** (`lifecycle.ts:child.on("exit")`, FIX_FORWARD F1-A): reads the current row's status before resetting to `idle`. If status is `archived` or `error`, leaves it alone — terminal states never get downgraded by an exit event, which closes the race that produced the friday-e2e-probe zombie.
+- **`archiveAgent()`** (`lifecycle.ts`): sets `archived` synchronously, publishes `agent_lifecycle:archive`, then awaits the worker's actual exit. Awaiting (via the merged `POST /api/agents/:name/archive`) makes the HTTP response a strong "actually archived" signal.
+- **Dashboard event apply** (`chat.svelte.ts`, PR D): `applyAgentStatus`, the `agent_lifecycle:complete` handler, and the `turn_started` handler all short-circuit when the existing row's status is `archived`. SSE ring-buffer replays for archived agents can't flip them back into the active list.
+
+These are the load-bearing defenses. Most bugs the system has hit lived in code paths that should have validated at one of these points and didn't.
+
+### Continuous invariant auditor (`agent/invariants.ts`)
+
+`startInvariantAuditor()` runs one pass at boot and then every 60 s thereafter. Each pass walks every row in `agents` and checks two invariants against a **named source of truth**:
+
+| # | Rule                                                                  | Source of truth                  | Self-heal                                                              |
+| - | --------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------- |
+| 1 | A builder's worktree directory must exist OR status must be `archived` | Filesystem (`existsSync`)        | `registry.archiveAgent(name)` + publish `agent_lifecycle:archive(reason: orphan-worktree)` |
+| 2 | `status=working` ⇒ the agent is in the in-memory `live` worker map     | `lifecycle.live` (Map)           | `registry.setStatus(name, "idle")` + publish `agent_status:idle`       |
+
+Rule 1 takes precedence (a row that violates both gets archived, not demoted — archived is terminal; demoting an orphan to idle would let it slip back into mail-recovery dispatch on the next boot).
+
+Boot recovery (`recoverAgents` in `index.ts`) runs a one-shot version of rule 1 before its mail-dispatch eligibility check, so the auditor's first scheduled pass isn't the only line of defense at startup.
+
+### Why timer-based (and not event-driven at state boundaries)
+
+The auditor is a **safety net**, not the primary enforcement. Most invariant violations the system has hit are caught at code-controlled state boundaries (see "State-boundary checks" above). The cases the timer exists for are the ones we can't observe from inside the daemon at the moment they happen:
+
+- The user `rm -rf`s a worktree from a terminal.
+- A worker crashes hard enough that `child.on("exit")` doesn't fire (kernel panic, SIGKILL by an external process, OOM).
+- An external process or future code path mutates `~/.friday/db.sqlite` directly.
+
+For these, there's no event to hook into — `fs.watch` on macOS is unreliable for delete events on certain filesystems, and process death without an exit signal can't be detected synchronously. A periodic scan is the right tool: cheap (it's a `listAgents()` + `existsSync()` per builder), idempotent, and bounded in latency to one interval.
+
+The timer's coverage of code-controlled state boundaries is incidental defense-in-depth. If a future refactor adds a new state mutation path that doesn't enforce invariants inline, the auditor will catch it within 60 s — but the goal is for new code to enforce inline, and the auditor to find nothing on most ticks. Tick logs that consistently archive or demote the same agent point at a missing inline check upstream.
+
+### Adding a new invariant
+
+When a new drift mode is discovered:
+
+1. Identify the **source of truth** for the invariant (filesystem, in-memory map, another table, etc.). Name it in the rule comment.
+2. Add the rule to `audit()` in `services/daemon/src/agent/invariants.ts`. Keep checks cheap and idempotent.
+3. Decide precedence relative to existing rules if a row can violate multiple at once. The general guideline: terminal states (archive) over transient states (demote), and "stop the world" over "fix the field."
+4. Add a happy + sad path test in `invariants.test.ts`. If precedence matters, add a test for both rules tripping at once.
+5. If the same drift mode could be prevented at a code-controlled state boundary, add the inline check there too. The auditor stays as the safety net.
+
 ## Mail and tickets
 
 ### Mail
