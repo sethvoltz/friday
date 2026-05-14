@@ -647,11 +647,6 @@
     grid-column: 1 / -1;
   }
 
-  .table-scroll-wrapper {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-
   .agent-name {
     font-family: var(--font-mono);
     font-weight: 600;
