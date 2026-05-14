@@ -19,7 +19,9 @@ process.env.FRIDAY_DATA_DIR = dataRoot;
 
 const { runMigrations, closeDb } = await import("@friday/shared");
 const registry = await import("../agent/registry.js");
-const { validateRecipient, levenshtein } = await import("./recipient.js");
+const { validateRecipient, levenshtein, resolveRecipient } = await import(
+  "./recipient.js"
+);
 
 beforeAll(() => {
   runMigrations();
@@ -86,6 +88,45 @@ describe("validateRecipient", () => {
 
   it("rejects empty input", () => {
     const r = validateRecipient("");
+    expect(r.ok).toBe(false);
+  });
+});
+
+describe("resolveRecipient (FRI-11 F3)", () => {
+  it("passes literal names through unchanged", () => {
+    registry.registerAgent({ name: "friday", type: "orchestrator" });
+    const r = resolveRecipient("friday", "some-other-agent");
+    expect(r).toEqual({ ok: true, agent: "some-other-agent" });
+  });
+
+  it("resolves 'parent' to the caller's registered parentName", () => {
+    registry.registerAgent({ name: "friday", type: "orchestrator" });
+    registry.registerAgent({
+      name: "builder-1",
+      type: "builder",
+      parentName: "friday",
+      worktreePath: "/tmp/b1",
+    });
+    const r = resolveRecipient("builder-1", "parent");
+    expect(r).toEqual({ ok: true, agent: "friday" });
+  });
+
+  it("resolves 'self' to the caller's own name", () => {
+    registry.registerAgent({ name: "friday", type: "orchestrator" });
+    const r = resolveRecipient("friday", "self");
+    expect(r).toEqual({ ok: true, agent: "friday" });
+  });
+
+  it("rejects 'parent' when caller has no parent", () => {
+    registry.registerAgent({ name: "friday", type: "orchestrator" });
+    const r = resolveRecipient("friday", "parent");
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.error).toContain("no registered parent");
+  });
+
+  it("rejects symbolic recipients when caller is not registered", () => {
+    const r = resolveRecipient("ghost", "parent");
     expect(r.ok).toBe(false);
   });
 });

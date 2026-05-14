@@ -48,7 +48,7 @@ import {
   type MemoryEntry,
 } from "@friday/memory";
 import { wrapWithRecall } from "../agent/recall.js";
-import { validateRecipient } from "../comms/recipient.js";
+import { resolveRecipient, validateRecipient } from "../comms/recipient.js";
 import {
   DEFAULT_RULE,
   deleteProposal,
@@ -923,11 +923,17 @@ async function handle(
         retry_after_ms: r.retryAfterMs,
       });
     }
+    // FRI-11 F3: resolve symbolic recipients ("parent" / "self") against the
+    // caller's registry row before validation. Literal names pass through.
+    const resolved = resolveRecipient(fromAgent, body.toAgent);
+    if (!resolved.ok) {
+      return json(res, 400, { error: resolved.error });
+    }
     // FRI-11 F2: reject mail to unknown recipients before persisting the row.
     // The MCP tool surfaces this 400 to the caller as a daemonFetch error —
     // the agent sees the suggestion immediately instead of silently writing
     // an undeliverable mail row.
-    const check = validateRecipient(body.toAgent);
+    const check = validateRecipient(resolved.agent);
     if (!check.ok) {
       return json(res, 400, {
         error: check.error,

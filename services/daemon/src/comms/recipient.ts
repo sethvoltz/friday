@@ -11,6 +11,46 @@
 
 import * as registry from "../agent/registry.js";
 
+/**
+ * Reserved symbolic recipients resolved at the daemon (FRI-11 F3).
+ *
+ * `parent` — the registered parentName of the calling agent.
+ * `self`   — the calling agent itself (symmetric, rarely useful).
+ */
+export const SYMBOLIC_RECIPIENTS = new Set(["parent", "self"]);
+
+export type RecipientResolution =
+  | { ok: true; agent: string }
+  | { ok: false; error: string };
+
+/**
+ * Resolve a symbolic recipient (`parent` / `self`) against the calling
+ * agent's registry row. Literal names pass through unchanged.
+ */
+export function resolveRecipient(
+  fromAgent: string,
+  to: string,
+): RecipientResolution {
+  if (!SYMBOLIC_RECIPIENTS.has(to)) return { ok: true, agent: to };
+  const caller = registry.getAgent(fromAgent);
+  if (!caller) {
+    return {
+      ok: false,
+      error: `cannot resolve "${to}": calling agent "${fromAgent}" is not registered`,
+    };
+  }
+  if (to === "self") return { ok: true, agent: caller.name };
+  // to === "parent"
+  const parent = "parentName" in caller ? caller.parentName : undefined;
+  if (!parent) {
+    return {
+      ok: false,
+      error: `cannot resolve "parent": agent "${fromAgent}" has no registered parent`,
+    };
+  }
+  return { ok: true, agent: parent };
+}
+
 export type RecipientCheck =
   | { ok: true; agent: string }
   | { ok: false; error: string; suggestion?: string };
