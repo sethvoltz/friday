@@ -48,6 +48,7 @@ import {
   type MemoryEntry,
 } from "@friday/memory";
 import { wrapWithRecall } from "../agent/recall.js";
+import { validateRecipient } from "../comms/recipient.js";
 import {
   DEFAULT_RULE,
   deleteProposal,
@@ -922,7 +923,18 @@ async function handle(
         retry_after_ms: r.retryAfterMs,
       });
     }
-    return json(res, 200, sendMail(body));
+    // FRI-11 F2: reject mail to unknown recipients before persisting the row.
+    // The MCP tool surfaces this 400 to the caller as a daemonFetch error —
+    // the agent sees the suggestion immediately instead of silently writing
+    // an undeliverable mail row.
+    const check = validateRecipient(body.toAgent);
+    if (!check.ok) {
+      return json(res, 400, {
+        error: check.error,
+        suggestion: check.suggestion,
+      });
+    }
+    return json(res, 200, sendMail({ ...body, toAgent: check.agent }));
   }
   if (method === "POST" && /^\/api\/mail\/\d+\/read$/.test(path)) {
     const id = Number(path.split("/")[3]);
