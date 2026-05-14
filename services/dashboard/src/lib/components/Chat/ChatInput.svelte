@@ -5,6 +5,7 @@
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
   import { onDestroy, onMount, tick } from "svelte";
+  import { Paperclip } from "lucide-svelte";
 
   interface CommandsResponse {
     system: Array<{ name: string; description: string; destructive?: boolean }>;
@@ -700,7 +701,9 @@
       class="attach"
       onclick={() => fileInput?.click()}
       aria-label="Attach file"
-      title="Attach file">📎</button>
+      title="Attach file">
+      <Paperclip size={18} aria-hidden="true" />
+    </button>
     <textarea
       bind:this={textarea}
       bind:value={text}
@@ -774,14 +777,22 @@
   .hidden-file { display: none; }
   .attach {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: transparent;
     border: 1px solid var(--border-primary);
     border-radius: var(--radius-sm);
-    padding: 0.45rem 0.55rem;
+    /* Match .send/.stop and the single-line textarea: same vertical
+       padding (0.55rem), same line-height/font-size resolved height
+       (0.9rem × 1.4 ≈ 1.26rem line-box), and a 1px border. Horizontal
+       padding stays tighter than .send because the content is an icon,
+       not a word — the button reads as a compact icon affordance. */
+    padding: 0.55rem 0.7rem;
+    line-height: 1.4;
+    font-size: 0.9rem;
     cursor: pointer;
     color: var(--text-secondary);
-    font-size: 1rem;
-    line-height: 1;
     transition: background var(--transition-fast), color var(--transition-fast);
   }
   .attach:hover {
