@@ -9,3 +9,4 @@ build/
 .env.local
 .friday-workspace.json
 .commit-msg.tmp
+.playwright-mcp/
