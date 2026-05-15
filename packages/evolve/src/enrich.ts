@@ -60,6 +60,14 @@ export interface HydratedEvidence {
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_LIMIT = 50;
 const DEFAULT_EVIDENCE_CAP = 2000;
+// First attempt: generous enough for a cold SDK subprocess + Sonnet streaming
+// a ~400-word body. Old value was 90s, which was tight enough that proposals
+// occasionally timed out across consecutive daily scans and never enriched.
+const ENRICH_TIMEOUT_MS = 180_000;
+// Retry budget: a single retry with a longer ceiling. Bounded so a hung SDK
+// can't stall the whole scan.
+const ENRICH_RETRY_TIMEOUT_MS = 300_000;
+const ENRICH_RETRY_BACKOFF_MS = 2_000;
 
 export async function enrichProposals(
   opts: EnrichOptions = {},
@@ -90,7 +98,7 @@ export async function enrichProposals(
 
     let enriched: EnrichedProposal;
     try {
-      enriched = await enrich(proposal, context, model);
+      enriched = await enrichWithRetry(enrich, proposal, context, model);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const abortReason =
@@ -202,13 +210,36 @@ const SYSTEM_PROMPT = [
   "Respond with just the JSON object. No prose, no fences.",
 ].join("\n");
 
+// Tracks per-call timeout so the retry helper can extend it on a second
+// attempt without changing the public EnrichFn signature. Set right before
+// `enrich(...)` is invoked; read by defaultEnrichFn. Synchronous: the call is
+// always followed by an awaited enrich(), so no concurrent writes.
+let currentEnrichTimeoutMs = ENRICH_TIMEOUT_MS;
+
+async function enrichWithRetry(
+  enrich: EnrichFn,
+  proposal: Proposal,
+  context: EnrichContext,
+  model: string,
+): Promise<EnrichedProposal> {
+  currentEnrichTimeoutMs = ENRICH_TIMEOUT_MS;
+  try {
+    return await enrich(proposal, context, model);
+  } catch (err) {
+    if (!(err instanceof ChatAbortError) || err.reason !== "timeout") throw err;
+    await new Promise((r) => setTimeout(r, ENRICH_RETRY_BACKOFF_MS));
+    currentEnrichTimeoutMs = ENRICH_RETRY_TIMEOUT_MS;
+    return enrich(proposal, context, model);
+  }
+}
+
 const defaultEnrichFn: EnrichFn = async (proposal, context, model) => {
   const userPrompt = buildUserPrompt(proposal, context);
   const reply = await chat({
     prompt: userPrompt,
     systemPrompt: SYSTEM_PROMPT,
     model,
-    timeoutMs: 90_000,
+    timeoutMs: currentEnrichTimeoutMs,
   });
 
   const parsed = extractJson<{
