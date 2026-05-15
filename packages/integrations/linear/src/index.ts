@@ -37,12 +37,16 @@ export {
   linearQuery,
   listActiveIssues,
   listTeams,
+  resolveIssueIdByIdentifier,
   setIssueStateByType,
+  updateIssue,
   type CreateIssueInput,
   type CreatedIssue,
   type LinearIssue,
   type LinearStateType,
   type LinearTeam,
+  type UpdateIssueInput,
+  type UpdatedIssue,
 } from "./api.js";
 
 export const LINEAR_SYSTEM_NAME = "linear";
