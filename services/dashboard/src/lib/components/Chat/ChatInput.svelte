@@ -2,6 +2,7 @@
   import { chat } from "$lib/stores/chat.svelte";
   import { chatInputBridge } from "$lib/stores/chat-input-bridge.svelte";
   import { goto } from "$app/navigation";
+  import { page } from "$app/stores";
   import { portal } from "$lib/actions/portal";
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
@@ -405,6 +406,27 @@
       filename: a.filename,
       mime: a.mime,
     }));
+    // FRI-72 instrumentation: catch the leak where chat.focusedAgent
+    // disagrees with the current route at submit time. The route is the
+    // user's intent; if the global store has drifted, log loudly so the
+    // next occurrence is captured in the console with full state.
+    try {
+      const pathname = $page.url.pathname;
+      const expectedAgent =
+        pathname === "/"
+          ? "friday"
+          : pathname.startsWith("/sessions/")
+            ? decodeURIComponent(pathname.split("/")[2] ?? "")
+            : null;
+      if (expectedAgent && expectedAgent !== chat.focusedAgent) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `[chat.submit] focusedAgent="${chat.focusedAgent}" but URL implies "${expectedAgent}" (pathname=${pathname}). Sending to focusedAgent — this is the bug we're hunting.`,
+        );
+      }
+    } catch {
+      /* instrumentation must not break send */
+    }
     const queueItem = sendQueue.enqueue({
       agent: chat.focusedAgent,
       text: t,

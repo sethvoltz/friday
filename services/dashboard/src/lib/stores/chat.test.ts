@@ -447,6 +447,76 @@ describe("inflight-state probe on reload", () => {
     await chat.loadAgentTurns("friday");
     expect(chat.inflightTurnId).toBeNull();
   });
+
+  it("does NOT set inflight to a mail-block's turn_id when no assistant blocks exist yet (FRI-72)", async () => {
+    // Repro: friday gets a mail at ts=100 (turn_id=mail_77), dispatcher
+    // forks a fresh response turn t_<uuid>. User refreshes ~10s later,
+    // before any assistant block has landed for the response turn. The
+    // /blocks snapshot returns just the mail user-block; the probe
+    // reports "working". The old code restored inflight to "mail_77",
+    // which `turn_done(t_<uuid>)` never matches → animation stuck.
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            { id: 1, blockId: "blk-mail", turnId: "mail_77", role: "user", kind: "text", contentJson: '{"text":"hi from another agent"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "mail", lastEventSeq: 1 },
+          ],
+          lastEventSeq: 1,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "working" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    // Slot must NOT carry mail_77. Either null (SSE will fill it on
+    // turn_started replay) or — after this test's fetch sequence ends —
+    // simply unset. The critical assertion is the negative.
+    expect(chat.inflightTurnId).not.toBe("mail_77");
+    expect(chat.inflightTurnId).toBeNull();
+  });
+
+  it("still sets inflight from a streaming assistant block when present (FRI-72 doesn't regress the happy path)", async () => {
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            { id: 1, blockId: "blk-mail", turnId: "mail_77", role: "user", kind: "text", contentJson: '{"text":"hi"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "mail", lastEventSeq: 1 },
+            { id: 2, blockId: "blk-asst", turnId: "t_response_77", role: "assistant", kind: "text", contentJson: '{"text":"thinking..."}', status: "streaming", ts: 110, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 1, source: null, lastEventSeq: 2 },
+          ],
+          lastEventSeq: 2,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "working" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    expect(chat.inflightTurnId).toBe("t_response_77");
+  });
+
+  it("uses user_chat user block's turn_id when only that block is visible (matches response turn_id by construction)", async () => {
+    // user_chat blocks share their turn_id with the response turn (the
+    // daemon's POST /api/chat/turn mints one turn_id and tags both the
+    // user block and the upcoming assistant blocks with it). So if the
+    // only visible bubble is a user_chat one, its turnId is the correct
+    // inflight slot value.
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            { id: 1, blockId: "blk-user", turnId: "t_chat_88", role: "user", kind: "text", contentJson: '{"text":"go"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "user_chat", lastEventSeq: 1 },
+          ],
+          lastEventSeq: 1,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "working" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    expect(chat.inflightTurnId).toBe("t_chat_88");
+  });
 });
 
 describe("jumpTo (/jump <date|term>)", () => {

@@ -167,7 +167,37 @@ export function userBlockIdForTurn(turnId: string): string {
 export class ChatState {
   messages = $state<ChatMessage[]>([]);
   agents = $state<AgentInfo[]>([]);
-  focusedAgent = $state("friday");
+  /**
+   * Instrumentation backing field (FRI-72). The public `focusedAgent`
+   * getter/setter wraps this so every write logs prev/next + URL +
+   * stack — catches the "send went to the wrong agent" leak the next
+   * time it happens. Direct $state would be reactive but invisible to
+   * us; the wrapper preserves reactivity while adding the trace.
+   */
+  private _focusedAgent = $state("friday");
+  get focusedAgent(): string {
+    return this._focusedAgent;
+  }
+  set focusedAgent(value: string) {
+    if (this._focusedAgent !== value) {
+      try {
+        const pathname =
+          typeof window !== "undefined" ? window.location.pathname : "";
+        const stack = new Error().stack ?? "";
+        // Normal lifecycle traffic — every route navigation flips this.
+        // Debug level so log scrapers (evolve, etc.) don't read it as a
+        // problem signal. The submit-time *mismatch* check stays at
+        // error level — that one is actually a bug condition.
+        // eslint-disable-next-line no-console
+        console.debug(
+          `[chat.focusedAgent] ${this._focusedAgent} → ${value} @ ${pathname}\n${stack}`,
+        );
+      } catch {
+        /* trace failure must not block the write */
+      }
+    }
+    this._focusedAgent = value;
+  }
   /**
    * Per-agent cursor for race-free SSE catchup (FIX_FORWARD 1.7). Keyed by
    * `event.agent`, plus the `__system__` bucket for events that don't carry
@@ -1158,20 +1188,28 @@ export class ChatState {
       if (this.focusedAgent !== agent) return;
       const entry = (await ar.json()) as { status?: string };
       if (entry.status !== "working") return;
-      // Find the most recent bubble carrying a turnId — that's the
-      // current in-flight turn. Prefer streaming assistant blocks, fall
-      // back to the latest bubble overall. If no turnId is recoverable
-      // (worker just spawned, no blocks emitted yet), leave
-      // `inflightTurnId` null; the next `turn_started` SSE frame will
-      // populate it.
+      // Find the most recent bubble carrying a turnId from the *response*
+      // turn — that's the in-flight turn the daemon will emit `turn_done`
+      // for. Skip user bubbles whose `source` produces a non-response
+      // turn_id (mail blocks carry `turn_id=mail_<N>`, scratch/schedule/
+      // spawn/refork all have their own conventions). If we picked one
+      // of those, `markInflight` would write the wrong slot value and a
+      // later `turn_done` (for the actual response turn) would fail to
+      // match — leaving the running animation stuck forever (FRI-72).
+      // Assistant bubbles always carry the response turn_id. A
+      // `user_chat`-sourced user bubble also matches the response turn
+      // (recordUserBlock uses the same turn_id for both).
       let latestTurnId: string | undefined;
       for (let i = this.messages.length - 1; i >= 0; i--) {
         const m = this.messages[i];
-        if (m.turnId) {
-          latestTurnId = m.turnId;
-          break;
-        }
+        if (!m.turnId) continue;
+        if (m.role === "user" && m.source && m.source !== "user_chat") continue;
+        latestTurnId = m.turnId;
+        break;
       }
+      // If no usable turnId is recoverable (only mail/scratch/etc. user
+      // bubbles in view), leave the slot null and let SSE replay's
+      // `turn_started` populate it — that's the authoritative signal.
       if (latestTurnId) this.markInflight(agent, latestTurnId);
     } catch {
       // ignore — fallback path is the next turn_started SSE frame.
