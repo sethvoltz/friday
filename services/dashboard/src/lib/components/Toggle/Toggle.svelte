@@ -101,8 +101,12 @@
   }
 
   /* Focus ring for keyboard users — the input is visually hidden, so put
-     a ring on the track when the input is focus-visible. */
+     a ring on the track when the input is focus-visible. Matches the
+     universal focus ring in app.css (2px solid --border-focus). The
+     global rule can't reach this case because <input type="checkbox">
+     isn't a/button/[role="button"] and the input itself is zero-sized,
+     so the visible affordance lives on the sibling track. */
   .toggle input[type="checkbox"]:focus-visible ~ .track {
-    box-shadow: 0 0 0 2px var(--accent-glow);
+    box-shadow: 0 0 0 2px var(--border-focus);
   }
 </style>

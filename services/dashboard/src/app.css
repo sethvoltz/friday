@@ -240,6 +240,23 @@ textarea.page-input:focus {
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
+/* === Keyboard focus ring ===
+   Engines diverge on the default :focus-visible outline (Orion shows
+   purple, Chrome shows a thin blue rect, WebKit drops it for some
+   buttons entirely). Pin a single ring style across the app so every
+   keyboard-tabbable element gets the same affordance using the
+   themed --border-focus token. Components that own a custom focus
+   treatment (Toggle's track ring, ChatInput's wrap, Sidebar row's
+   box-shadow on the row container) override per-element with greater
+   specificity. */
+a:focus-visible,
+button:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
 .empty-state {
   color: var(--text-tertiary);
   padding: 2rem 0;

@@ -641,6 +641,21 @@
   .row.pinned .row-main { font-weight: 600; }
   .row.pinned .name { font-family: var(--font-sans); }
 
+  /* Explicit focus ring on the whole row when .row-main is keyboard-
+     focused. The browser default :focus-visible outline is inconsistent
+     across engines — WebKit notably suppresses it on the pinned/active
+     orchestrator row, so the keyboard focus state effectively vanishes
+     there. Drive it ourselves with box-shadow on the row so it tracks
+     border-radius and draws outside the row's box (above the slot's
+     z-order), and zero the inner button's default outline so we don't
+     get a double ring on engines that *do* draw one. */
+  .row:has(.row-main:focus-visible) {
+    box-shadow: 0 0 0 2px var(--border-focus);
+  }
+  .row-main:focus-visible {
+    outline: none;
+  }
+
   /* Slot owns the gradient fade and the reveal opacity; pointer-events
      are off so clicks in the empty fade zone fall through to .row-main
      (i.e. clicking near the glyph still navigates to the agent). The
