@@ -52,6 +52,34 @@
     return () => mq.removeEventListener("change", onChange);
   });
 
+  // Slack/Messages parity: claim keystrokes for the composer when nothing
+  // else has explicit focus. `document.activeElement` is the source of truth.
+  $effect(() => {
+    function onGlobalKeydown(e: KeyboardEvent) {
+      if (!textarea) return;
+      if (document.activeElement === textarea) return;
+      const active = document.activeElement;
+      const noExplicitFocus =
+        !active || active === document.body || active === document.documentElement;
+      if (!noExplicitFocus) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key.length !== 1) return;
+
+      e.preventDefault();
+      textarea.focus();
+      text = (text ?? "") + e.key;
+      void tick().then(() => {
+        if (!textarea) return;
+        const end = text.length;
+        textarea.setSelectionRange(end, end);
+        autoresize();
+      });
+    }
+    window.addEventListener("keydown", onGlobalKeydown);
+    return () => window.removeEventListener("keydown", onGlobalKeydown);
+  });
+
   // Per-agent draft persistence. We key by `chat.focusedAgent` so switching
   // agents preserves each agent's unsent draft independently. Restore
   // happens whenever the focused agent changes (component is reused across
