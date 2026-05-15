@@ -9,28 +9,8 @@
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import { loadJSON, saveJSON } from "$lib/stores/persistent";
   import { onMount } from "svelte";
-  import {
-    DraftingCompass,
-    LifeBuoy,
-    Hammer,
-    CalendarClock,
-    PawPrint,
-  } from "lucide-svelte";
-
-  // Lucide glyph + color-var per agent type. Bare maps to PawPrint because
-  // Lucide has no literal bear; PawPrint is the closest animal glyph and
-  // reads as the "experimental / wild" agent kind. Tooltip retains the
-  // raw type string so screen-reader users still get the typed label.
-  const AGENT_ICON: Record<string, typeof DraftingCompass> = {
-    orchestrator: DraftingCompass,
-    helper: LifeBuoy,
-    builder: Hammer,
-    scheduled: CalendarClock,
-    bare: PawPrint,
-  };
-  function iconFor(type: string): typeof DraftingCompass {
-    return AGENT_ICON[type] ?? PawPrint;
-  }
+  import { DraftingCompass } from "lucide-svelte";
+  import { agentIconFor } from "$lib/util/agent-icon";
 
   // The route is the authoritative source for which sidebar row is
   // active and how deep the menu should be expanded. `/` → orchestrator
@@ -430,7 +410,7 @@
         </span>
         <span class="name">Friday</span>
       {:else}
-        {@const Icon = iconFor(a.type)}
+        {@const Icon = agentIconFor(a.type)}
         <span class="agent-icon agent-{a.type}" aria-hidden="true">
           <Icon size={16} strokeWidth={2} />
         </span>
@@ -529,7 +509,7 @@
         </span>
         <span class="name">Friday</span>
       {:else}
-        {@const Icon = iconFor(focused.type)}
+        {@const Icon = agentIconFor(focused.type)}
         <span class="agent-icon agent-{focused.type}" aria-hidden="true">
           <Icon size={16} strokeWidth={2} />
         </span>

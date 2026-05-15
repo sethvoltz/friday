@@ -5,6 +5,7 @@
   import ActivityGrid from "$lib/components/Dashboard/ActivityGrid.svelte";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import { fmtTokensCompact } from "$lib/util/format";
+  import { agentIconFor } from "$lib/util/agent-icon";
   import type { PageData } from "./$types";
 
   let { data }: { data: PageData } = $props();
@@ -177,21 +178,6 @@
   const displayAgents = $derived(
     showAllArchived ? [...agentList, ...olderArchived] : agentList,
   );
-
-  function agentTypeIcon(type: string) {
-    switch (type) {
-      case "orchestrator":
-        return "\u{1F451}";
-      case "builder":
-        return "\u{1F528}";
-      case "helper":
-        return "\u{26A1}";
-      case "scheduled":
-        return "\u{1F4C5}";
-      default:
-        return "\u{1F4AD}";
-    }
-  }
 
   function statusBadgeClass(status: string): string {
     if (status === "idle" || status === "working") return "ok";
@@ -541,11 +527,17 @@
             </thead>
             <tbody>
               {#each displayAgents as agent}
+                {@const Icon = agentIconFor(agent.type)}
                 <tr class:archived={agent.status === "archived"}>
                   <td class="agent-name">{agent.name}</td>
                   <td>
                     <span class="agent-type-badge" data-type={agent.type}>
-                      {agentTypeIcon(agent.type)}
+                      <span
+                        class="agent-icon agent-{agent.type}"
+                        aria-hidden="true"
+                      >
+                        <Icon size={16} strokeWidth={2} />
+                      </span>
                       {agent.type}
                     </span>
                   </td>
@@ -653,9 +645,25 @@
   }
 
   .agent-type-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
     font-size: 0.8rem;
     white-space: nowrap;
   }
+  .agent-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+  .agent-icon.agent-orchestrator { color: var(--agent-orchestrator); }
+  .agent-icon.agent-helper { color: var(--agent-helper); }
+  .agent-icon.agent-builder { color: var(--agent-builder); }
+  .agent-icon.agent-scheduled { color: var(--agent-scheduled); }
+  .agent-icon.agent-bare { color: var(--agent-bare); }
 
   .text-muted {
     color: var(--text-tertiary);
