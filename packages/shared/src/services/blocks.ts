@@ -17,6 +17,14 @@ export type BlockSource =
   | "mail"
   | "queue_inject"
   | "sdk"
+  /** Initial seed topic from `/scratch <topic>` — the bare agent's first turn. */
+  | "scratch"
+  /** Initial prompt from `POST /api/agents` (builder / helper / bare spawn). */
+  | "agent_spawn"
+  /** Task prompt fired by the scheduler at each cron tick. */
+  | "schedule"
+  /** Watchdog-injected notice when a stalled worker is reforked. */
+  | "refork_notice"
   | null;
 
 export interface BlockRow {

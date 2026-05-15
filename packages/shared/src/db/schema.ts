@@ -138,7 +138,7 @@ export const blocks = sqliteTable(
     blockIndex: integer("block_index").notNull(),
     role: text("role").notNull(), // user|assistant|system
     kind: text("kind").notNull(), // text|thinking|tool_use|tool_result|error
-    source: text("source"), // user_chat|mail|queue_inject|sdk (null for assistant)
+    source: text("source"), // user_chat|mail|queue_inject|sdk|scratch|agent_spawn|schedule|refork_notice (null for assistant)
     contentJson: text("content_json").notNull(),
     status: text("status").notNull(), // streaming|complete|aborted|error|queued (user blocks awaiting worker dispatch)
     ts: integer("ts").notNull(),

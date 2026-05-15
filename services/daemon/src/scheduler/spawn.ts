@@ -20,7 +20,7 @@ import {
   schema,
 } from "@friday/shared";
 import { logger } from "../log.js";
-import { dispatchTurn } from "../agent/lifecycle.js";
+import { dispatchTurn, recordUserBlock } from "../agent/lifecycle.js";
 import { wrapWithRecall } from "../agent/recall.js";
 import * as registry from "../agent/registry.js";
 import {
@@ -73,6 +73,24 @@ export function spawnScheduledRun(
     turnId,
     stateDir,
   });
+
+  // FRI-71: persist the task prompt as a user block so the scheduled run's
+  // first turn renders with the originating user bubble. Per-fire session
+  // ids are fresh — recordUserBlock falls back to '__pending__' until
+  // post-turn JSONL recovery rewrites with the SDK-assigned id.
+  try {
+    recordUserBlock({
+      turnId,
+      agentName: scheduleRow.name,
+      text: scheduleRow.taskPrompt,
+      source: "schedule",
+    });
+  } catch (err) {
+    logger.log("warn", "schedule.user-block.error", {
+      schedule: scheduleRow.name,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   dispatchTurn({
     agentName: scheduleRow.name,

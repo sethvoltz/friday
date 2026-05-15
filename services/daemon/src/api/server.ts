@@ -528,6 +528,25 @@ async function handle(
       body.prompt,
       "agent_spawn",
     );
+    // FRI-71: persist the spawn-time prompt as a user block so the very first
+    // turn renders with the originating user bubble (not just an orphan
+    // assistant reply). The session id isn't known yet — `recordUserBlock`
+    // falls back to '__pending__' and the post-turn JSONL recovery rewrites
+    // it once the SDK assigns a real id.
+    try {
+      recordUserBlock({
+        turnId,
+        agentName: body.name,
+        text: body.prompt,
+        source: "agent_spawn",
+      });
+    } catch (err) {
+      logger.log("warn", "chat.turn.user-block.error", {
+        agent: body.name,
+        source: "agent_spawn",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
     dispatchTurn({
       agentName: body.name,
       options: {
@@ -1482,6 +1501,22 @@ function handleSystemCommand(
         });
         const modelCfg = normalizeModelConfig(cfg.model);
         const wrappedTopic = wrapWithRecall(topic, topic, "scratch");
+        // FRI-71: persist the seed topic as a user block so the bare agent's
+        // first turn renders with the originating user bubble.
+        try {
+          recordUserBlock({
+            turnId: seedTurnId,
+            agentName: name,
+            text: topic,
+            source: "scratch",
+          });
+        } catch (err) {
+          logger.log("warn", "chat.turn.user-block.error", {
+            agent: name,
+            source: "scratch",
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
         dispatchTurn({
           agentName: name,
           options: {

@@ -54,7 +54,15 @@ export interface ChatMessage {
 
   /** Where the bubble originated. Carries through to the canonical block
    *  (matches the `source` column in the blocks table). FIX_FORWARD 2.6. */
-  source?: "user_chat" | "mail" | "queue_inject" | "sdk";
+  source?:
+    | "user_chat"
+    | "mail"
+    | "queue_inject"
+    | "sdk"
+    | "scratch"
+    | "agent_spawn"
+    | "schedule"
+    | "refork_notice";
 
   /** Sender attribution for `source='mail'` blocks. Pulled from
    *  `content_json.from_agent`, written by `recordUserBlock` at
