@@ -406,6 +406,11 @@ code, pre {
   color: var(--status-error);
 }
 
+.badge.muted {
+  background: var(--bg-tertiary);
+  color: var(--text-tertiary);
+}
+
 /* === Bar chart (CSS-only) === */
 
 .bar-row {

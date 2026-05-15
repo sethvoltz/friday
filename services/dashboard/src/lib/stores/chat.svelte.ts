@@ -1886,8 +1886,14 @@ export interface BlockRow {
 export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
   const out: ChatMessage[] = [];
   const toolByToolId = new Map<string, ChatMessage>();
-  // Newest-first arrives from the API; chronological for rendering.
-  const sorted = [...blocks].sort((a, b) => a.id - b.id);
+  // Newest-first arrives from the API; chronological for rendering. Sort by
+  // `ts` first so boot-time jsonl-recovery rows — which receive a fresh
+  // autoincrement `id` strictly greater than the live retry blocks that came
+  // after the recovered failure — slot into the correct chronological position
+  // (failed attempt before its retry) instead of trailing the successful
+  // retry. `id` stays as the tiebreaker for blocks sharing a ts (a single
+  // live message's thinking + tool_use can land within the same ms).
+  const sorted = [...blocks].sort((a, b) => a.ts - b.ts || a.id - b.id);
   for (const b of sorted) {
     const parsed = parseBlockContent(b.contentJson);
     if (b.kind === "text") {

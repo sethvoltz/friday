@@ -1061,6 +1061,170 @@ describe("mail block rendering", () => {
     expect(uc?.fromAgent).toBeUndefined();
     expect(uc?.text).toBe("typed by seth");
   });
+
+  it("parseBlocks orders by ts when autoincrement id disagrees (jsonl-recovery backfill)", async () => {
+    // Boot-time jsonl-recovery inserts orphan tool_use / tool_result rows
+    // for an aborted API attempt LATER than the live worker wrote the
+    // retry's rows — recovery's autoincrement id therefore comes out
+    // strictly higher than the retry's, even though chronologically the
+    // failure precedes the retry. Sorting by id alone (the pre-fix
+    // behaviour) puts the ERROR tool card after the DONE one. Sort by ts
+    // first so the retry trail renders in the order it actually happened.
+    const aborted = {
+      id: 100, // live aborted thinking
+      blockId: "blk-think-aborted",
+      turnId: "t-orchestrator",
+      agentName: "friday",
+      sessionId: "s",
+      messageId: "msg-1",
+      blockIndex: 0,
+      role: "assistant",
+      kind: "thinking",
+      source: null,
+      contentJson: JSON.stringify({ text: "" }),
+      status: "aborted",
+      ts: 1000,
+      lastEventSeq: 100,
+    };
+    const completeThink = {
+      id: 101, // live retry thinking
+      blockId: "blk-think-complete",
+      turnId: "t-orchestrator",
+      agentName: "friday",
+      sessionId: "s",
+      messageId: "msg-2",
+      blockIndex: 0,
+      role: "assistant",
+      kind: "thinking",
+      source: null,
+      contentJson: JSON.stringify({ text: "" }),
+      status: "complete",
+      ts: 3000,
+      lastEventSeq: 101,
+    };
+    const liveToolUse = {
+      id: 102, // live retry tool_use
+      blockId: "blk-tool-live",
+      turnId: "t-orchestrator",
+      agentName: "friday",
+      sessionId: "s",
+      messageId: "msg-2",
+      blockIndex: 1,
+      role: "assistant",
+      kind: "tool_use",
+      source: null,
+      contentJson: JSON.stringify({
+        tool_use_id: "toolu_LIVE",
+        name: "mcp__friday-mail__mail_read",
+        input: { id: 85 },
+      }),
+      status: "complete",
+      ts: 3001,
+      lastEventSeq: 102,
+    };
+    const liveToolResult = {
+      id: 103, // live retry tool_result
+      blockId: "blk-result-live",
+      turnId: "t-orchestrator",
+      agentName: "friday",
+      sessionId: "s",
+      messageId: null,
+      blockIndex: 2,
+      role: "assistant",
+      kind: "tool_result",
+      source: null,
+      contentJson: JSON.stringify({
+        tool_use_id: "toolu_LIVE",
+        text: "ok",
+        is_error: false,
+      }),
+      status: "complete",
+      ts: 3002,
+      lastEventSeq: 103,
+    };
+    // Recovery rows: greater autoincrement ids, but EARLIER ts than the
+    // live retry — they came from the same session's JSONL after a
+    // SIGTERM/restart picked them up.
+    const recoverToolUse = {
+      id: 200,
+      blockId: "blk-tool-recover",
+      turnId: "recover_s",
+      agentName: "friday",
+      sessionId: "s",
+      messageId: "msg-1",
+      blockIndex: 1,
+      role: "assistant",
+      kind: "tool_use",
+      source: null,
+      contentJson: JSON.stringify({
+        tool_use_id: "toolu_RECOVER",
+        name: "mcp__friday-mail__mail_read",
+        input: { id: 85 },
+      }),
+      status: "complete",
+      ts: 1001,
+      lastEventSeq: 200,
+    };
+    const recoverToolResult = {
+      id: 201,
+      blockId: "blk-result-recover",
+      turnId: "recover_s",
+      agentName: "friday",
+      sessionId: "s",
+      messageId: null,
+      blockIndex: 2,
+      role: "assistant",
+      kind: "tool_result",
+      source: null,
+      contentJson: JSON.stringify({
+        tool_use_id: "toolu_RECOVER",
+        text: "Tool permission stream closed before response received",
+        is_error: true,
+      }),
+      status: "complete",
+      ts: 1002,
+      lastEventSeq: 201,
+    };
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            aborted,
+            completeThink,
+            liveToolUse,
+            liveToolResult,
+            recoverToolUse,
+            recoverToolResult,
+          ],
+          lastEventSeq: 201,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    // Pull thinking + tool entries in render order.
+    const renderable = chat.messages.filter(
+      (m) => m.role === "thinking" || m.role === "tool",
+    );
+    const rendered = renderable.map((m) => ({
+      role: m.role,
+      blockId: m.blockId,
+      toolId: m.toolId,
+      status: m.status,
+    }));
+    expect(rendered).toEqual([
+      // aborted thinking comes first (ts 1000)
+      { role: "thinking", blockId: "blk-think-aborted", toolId: undefined, status: "aborted" },
+      // recovered failed tool slots in BEFORE the successful retry (ts 1001/1002 < 3000)
+      { role: "tool", blockId: undefined, toolId: "toolu_RECOVER", status: "error" },
+      // retry thinking (ts 3000)
+      { role: "thinking", blockId: "blk-think-complete", toolId: undefined, status: "done" },
+      // successful retry tool (ts 3001/3002)
+      { role: "tool", blockId: undefined, toolId: "toolu_LIVE", status: "done" },
+    ]);
+  });
 });
 
 // PR B — sidebar realtime / UNKNOWN type / Show-archived.

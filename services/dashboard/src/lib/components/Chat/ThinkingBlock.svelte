@@ -3,7 +3,7 @@
 
   interface Props {
     text: string;
-    status: "running" | "done";
+    status: "running" | "done" | "aborted";
   }
   let { text, status }: Props = $props();
 
@@ -22,6 +22,7 @@
       Thinking{status === "running" ? "…" : ""}
     </span>
     {#if status === "running"}<span class="dots">●●●</span>{/if}
+    {#if status === "aborted"}<span class="aborted-tag">stopped</span>{/if}
     <span class="expand-toggle" aria-hidden="true">{open ? "−" : "+"}</span>
   </button>
   {#if open}
@@ -71,6 +72,14 @@
     font-size: 0.55rem;
     letter-spacing: 0.1em;
     animation: pulse 1.4s ease-in-out infinite;
+  }
+  .aborted-tag {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-tertiary);
+    font-weight: 600;
+    font-style: normal;
   }
   @keyframes pulse {
     0%, 100% { opacity: 0.3; }

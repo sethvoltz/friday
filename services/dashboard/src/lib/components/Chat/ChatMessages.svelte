@@ -423,7 +423,7 @@
       <div class="message inline">
         <ToolBlock
           toolName={msg.toolName ?? ""}
-          status={(msg.status === "running" || msg.status === "done" || msg.status === "error" ? msg.status : "running") as "running" | "done" | "error"}
+          status={(msg.status === "done" || msg.status === "error" || msg.status === "aborted" ? msg.status : "running") as "running" | "done" | "error" | "aborted"}
           input={msg.input}
           output={msg.output} />
       </div>
@@ -431,7 +431,7 @@
       <div class="message inline">
         <ThinkingBlock
           text={msg.text}
-          status={msg.status === "done" ? "done" : "running"} />
+          status={msg.status === "done" ? "done" : msg.status === "aborted" ? "aborted" : "running"} />
       </div>
     {:else if msg.role === "user" && msg.source === "mail"}
       <div

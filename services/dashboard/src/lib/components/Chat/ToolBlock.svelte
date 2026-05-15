@@ -5,7 +5,7 @@
 
   interface Props {
     toolName: string;
-    status: "running" | "done" | "error";
+    status: "running" | "done" | "error" | "aborted";
     input?: unknown;
     output?: string;
   }
@@ -41,11 +41,13 @@
   function badgeClass(s: string): string {
     if (s === "done") return "ok";
     if (s === "error") return "error";
+    if (s === "aborted") return "muted";
     return "warn"; // running
   }
   function statusLabel(s: string): string {
     if (s === "running") return "running…";
     if (s === "done") return "done";
+    if (s === "aborted") return "stopped";
     return s;
   }
 </script>
