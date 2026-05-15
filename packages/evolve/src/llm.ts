@@ -50,6 +50,20 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
 
   const queryOptions: Record<string, unknown> = {
     allowedTools: [],
+    // Lock the call down to one assistant turn. Belt-and-suspenders alongside
+    // `allowedTools: []`: a model that can't call tools also can't loop, but
+    // pinning `maxTurns: 1` prevents the SDK from spending budget on followups
+    // if a future model decides to "think aloud" mid-stream.
+    maxTurns: 1,
+    // Don't autoload the user's MCP servers from settings.json. Enrichment is
+    // a pure text-gen pass — MCP boot adds seconds (sometimes >>seconds) of
+    // dead-weight startup that ate into our 90s budget and caused timeouts on
+    // proposals that should have enriched in <30s.
+    mcpServers: {},
+    // Same reasoning for SDK auto-memory: it does FS I/O under
+    // ~/.claude/projects/<cwd>/memory/ that we never read. Friday owns memory
+    // via the friday-memory MCP elsewhere.
+    settings: { autoMemoryEnabled: false },
     model: opts.model,
     permissionMode: "bypassPermissions",
     abortController: abort,
