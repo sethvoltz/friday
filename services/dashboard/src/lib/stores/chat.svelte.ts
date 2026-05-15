@@ -112,6 +112,12 @@ export interface AgentInfo {
   /** Distinct session count, populated by /api/agents. Indicates whether
    * the sidebar should show an expand-history button for this agent. */
   sessionCount?: number;
+  /** ISO timestamps from the agents table. Sidebar uses `updatedAt`
+   * (fallback `createdAt`) to bucket rows by age. Optional because SSE-
+   * synthesized entries that arrive before the first /api/agents poll
+   * don't carry them yet. */
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 /** Shape returned by `/api/agents/:name/sessions` and cached on the chat
