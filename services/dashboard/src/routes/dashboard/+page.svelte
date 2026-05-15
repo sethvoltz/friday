@@ -26,15 +26,6 @@
 
   const dailyCost = $derived(data.dailyCost);
   const models = $derived(data.models);
-  const maxDailyCost = $derived(
-    Math.max(...dailyCost.map((d) => d.totalCost), 0.01),
-  );
-  const maxDailyTokens = $derived(
-    Math.max(...dailyCost.map((d) => d.totalTokens), 1),
-  );
-  const maxDailyTokensNoCached = $derived(
-    Math.max(...dailyCost.map((d) => d.inputUncached + d.output), 1),
-  );
   const modelColors = $derived.by(() => {
     const palette = [
       "var(--chart-1, #60a5fa)",
@@ -81,6 +72,15 @@
   let showCachedTokens = $state(false);
   const visibleDailyCost = $derived(
     showAllDays ? dailyCost : dailyCost.slice(-DAILY_DEFAULT),
+  );
+  const maxDailyCost = $derived(
+    Math.max(...visibleDailyCost.map((d) => d.totalCost), 0.01),
+  );
+  const maxDailyTokens = $derived(
+    Math.max(...visibleDailyCost.map((d) => d.totalTokens), 1),
+  );
+  const maxDailyTokensNoCached = $derived(
+    Math.max(...visibleDailyCost.map((d) => d.inputUncached + d.output), 1),
   );
 
   function fmtCost(n: number) {
