@@ -98,12 +98,12 @@ export function buildMcpServers(
     servers[EVOLVE_SERVER_NAME] = buildEvolveServer(ctx);
   }
 
-  // friday-integrations: orchestrator only. Cross-system imports (Linear
-  // today; future GH Issues, Jira). Gracefully no-ops if the relevant API
-  // key isn't set on the daemon.
-  if (opts.callerType === "orchestrator") {
-    servers[INTEGRATIONS_SERVER_NAME] = buildIntegrationsServer(ctx);
-  }
+  // friday-integrations: every non-archived agent type. Cross-system imports
+  // and writes (Linear today; future GH Issues, Jira). Sub-agents need this
+  // so a builder can file a Linear follow-up directly instead of routing
+  // every external write through the orchestrator. Gracefully no-ops if the
+  // relevant API key isn't set on the daemon.
+  servers[INTEGRATIONS_SERVER_NAME] = buildIntegrationsServer(ctx);
 
   // playwright: built-in browser automation via Microsoft's @playwright/mcp.
   // Excluded for orchestrator to keep it responsive — long-running browser
