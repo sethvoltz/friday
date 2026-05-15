@@ -432,6 +432,12 @@ export function dispatchTurn(input: SpawnTurnInput): void {
       agent: input.agentName,
       turnId: promptCmd.turnId,
       depth: existing.nextPrompts.length,
+      // FRI-72: capture daemon's view of why this turn queued. If
+      // `existingStatus` is "working" but the prior turn-complete never
+      // landed, this is the canonical fingerprint of the stuck-status
+      // bug (Seth's "queued for a fraction of a second" symptom).
+      existingStatus: existing.status,
+      existingTurnId: existing.turnId,
     });
   }
 }
@@ -482,12 +488,36 @@ function restampQueuedUserBlock(
   }
 }
 
+/**
+ * FRI-72 instrumentation: every `w.status` transition flows through here so
+ * the daemon log captures who changed it and why. The "queued for a fraction"
+ * symptom (daemon thinks the worker is still working long after its last
+ * turn) points at a missing or out-of-order status update; this trace makes
+ * the misordering visible without changing behavior.
+ */
+function setWorkerStatus(
+  w: LiveWorker,
+  next: "idle" | "working",
+  source: string,
+): void {
+  if (w.status !== next) {
+    logger.log("info", "worker.status.transition", {
+      agent: w.agentName,
+      prev: w.status,
+      next,
+      source,
+      turnId: w.turnId,
+    });
+  }
+  w.status = next;
+}
+
 function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   restampQueuedUserBlock(w.agentName, p.turnId, p.userBlockId);
   w.turnId = p.turnId;
   w.turnStart = Date.now();
   w.abortRequested = false;
-  w.status = "working";
+  setWorkerStatus(w, "working", "sendPrompt");
   registry.setStatus(w.agentName, "working");
   eventBus.publish({
     v: 1,
@@ -517,6 +547,15 @@ export function abortTurn(agentName: string): boolean {
   const w = live.get(agentName);
   if (!w) return false;
   w.abortRequested = true;
+  // FRI-72 instrumentation: pair this with `worker.ipc.recv` so the log
+  // shows whether the worker acknowledged the abort (turn-complete /
+  // status-change / error) before forceKillStuckWorker's 2s deadline.
+  logger.log("info", "worker.ipc.send", {
+    agent: w.agentName,
+    type: "abort",
+    turnId: w.turnId,
+    workerStatus: w.status,
+  });
   send(w.child, { type: "abort" });
   // FRI-12 safety net: if the worker is wedged inside an SDK call (the
   // 529 lockup), the abort IPC is silently ignored — the AbortController's
@@ -591,7 +630,7 @@ function forceKillStuckWorker(w: LiveWorker): void {
   // double-publish block_complete for the same blocks).
   liveTurns.dropTurn(w.turnId);
   w.lastExitStatus = "aborted";
-  w.status = "idle";
+  setWorkerStatus(w, "idle", "forceKillStuckWorker");
   registry.setStatus(w.agentName, "idle");
 
   // Tear down the process group. We've already waited 2s for the worker
@@ -877,6 +916,27 @@ export function removeQueuedPrompt(
 }
 
 export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
+  // FRI-72 instrumentation: log lifecycle-significant IPC arrivals.
+  // Heartbeats and per-block frames are skipped — too chatty and the
+  // canonical block table already records that pipeline. The interesting
+  // diagnostics are turn boundaries, status changes, errors, and ready —
+  // exactly the events whose absence (or out-of-order arrival) causes the
+  // stuck-status family of bugs we're tracking.
+  if (
+    e.type === "turn-complete" ||
+    e.type === "status-change" ||
+    e.type === "error" ||
+    e.type === "ready"
+  ) {
+    logger.log("info", "worker.ipc.recv", {
+      agent: w.agentName,
+      type: e.type,
+      turnId: w.turnId,
+      workerStatus: w.status,
+      msSinceTurnStart: w.turnStart ? Date.now() - w.turnStart : null,
+      msSinceLastHeartbeat: Date.now() - w.lastHeartbeat,
+    });
+  }
   w.lastHeartbeat = Date.now();
   switch (e.type) {
     case "session-update":
@@ -962,7 +1022,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       // failures); reset its bookkeeping so the next prompt dispatches
       // cleanly.
       liveTurns.dropTurn(w.turnId);
-      w.status = "idle";
+      setWorkerStatus(w, "idle", "handleEvent.error");
       w.completedAtLeastOnce = true;
       registry.setStatus(w.agentName, "idle");
       eventBus.publish({
@@ -977,7 +1037,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       break;
     }
     case "status-change":
-      w.status = e.status;
+      setWorkerStatus(w, e.status, "handleEvent.status-change");
       eventBus.publish({
         v: 1,
         type: "agent_status",
@@ -1047,7 +1107,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       liveTurns.dropTurn(w.turnId);
       // Long-lived worker: flush queued prompt if any. Don't send `stop` — the
       // worker manages its own lifecycle.
-      w.status = "idle";
+      setWorkerStatus(w, "idle", "handleEvent.turn-complete");
       w.completedAtLeastOnce = true;
       w.lastExitStatus = w.abortRequested ? "aborted" : "complete";
       registry.setStatus(w.agentName, "idle");

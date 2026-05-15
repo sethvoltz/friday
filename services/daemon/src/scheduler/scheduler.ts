@@ -3,7 +3,22 @@ import { getDb, isValidCron, nextRun, schema } from "@friday/shared";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import { isAgentLive } from "../agent/lifecycle.js";
+import * as registry from "../agent/registry.js";
 import { spawnScheduledRun } from "./spawn.js";
+
+/**
+ * Thrown by `upsertSchedule` when the schedule name collides with an existing
+ * registry agent of a different type (builder/helper/orchestrator/bare). The
+ * API layer maps this to a 409.
+ */
+export class ScheduleNameCollisionError extends Error {
+  constructor(name: string, existingType: string) {
+    super(
+      `cannot create schedule "${name}": an agent with that name already exists as type "${existingType}"`,
+    );
+    this.name = "ScheduleNameCollisionError";
+  }
+}
 
 export interface ScheduleSpec {
   name: string;
@@ -16,6 +31,13 @@ export interface ScheduleSpec {
 export function upsertSchedule(spec: ScheduleSpec): void {
   if (spec.cron && !isValidCron(spec.cron)) {
     throw new Error(`invalid cron: ${spec.cron}`);
+  }
+  // FRI-76: eagerly register a stub agent so mail to this scheduled agent
+  // passes recipient validation before the first cron fire. Reject if a
+  // non-scheduled agent already owns the name — mail would be misrouted.
+  const existingAgent = registry.getAgent(spec.name);
+  if (existingAgent && existingAgent.type !== "scheduled") {
+    throw new ScheduleNameCollisionError(spec.name, existingAgent.type);
   }
   const db = getDb();
   const now = Date.now();
@@ -53,6 +75,13 @@ export function upsertSchedule(spec: ScheduleSpec): void {
         updatedAt: now,
       })
       .run();
+  }
+  // Ensure the registry stub exists. Idempotent: if the agent has already
+  // fired, this leaves the existing row's session/status untouched beyond
+  // the standard registerAgent conflict-update (status=idle), which is the
+  // correct state for a scheduled agent between fires.
+  if (!existingAgent) {
+    registry.registerAgent({ name: spec.name, type: "scheduled" });
   }
 }
 
@@ -104,10 +133,25 @@ export function resumeSchedule(name: string): boolean {
 export function deleteSchedule(name: string): boolean {
   const r = getSchedule(name);
   if (!r) return false;
-  getDb()
-    .delete(schema.schedules)
+  const db = getDb();
+  db.delete(schema.schedules)
     .where(eq(schema.schedules.name, name))
     .run();
+  // FRI-76: if the registry stub was never used (no session, no blocks),
+  // remove it too. Once the agent has fired, the row holds audit history
+  // (sessionId, block rows) and is preserved.
+  const agent = registry.getAgent(name);
+  if (agent && agent.type === "scheduled" && !agent.sessionId) {
+    const blockCount = db
+      .select({ id: schema.blocks.id })
+      .from(schema.blocks)
+      .where(eq(schema.blocks.agentName, name))
+      .limit(1)
+      .all();
+    if (blockCount.length === 0) {
+      registry.deleteAgent(name);
+    }
+  }
   return true;
 }
 

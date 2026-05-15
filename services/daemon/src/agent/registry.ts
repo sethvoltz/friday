@@ -82,6 +82,17 @@ export function archiveAgent(name: string): void {
   setStatus(name, "archived");
 }
 
+/**
+ * Hard-remove a registry row. Reserved for stub rows that have no history
+ * (e.g. a scheduled-agent stub created by `schedule_upsert` whose schedule
+ * was deleted before the first fire). The general policy is preserve-over-
+ * delete; callers must verify the row has no session and no blocks first.
+ */
+export function deleteAgent(name: string): void {
+  const db = getDb();
+  db.delete(schema.agents).where(eq(schema.agents.name, name)).run();
+}
+
 function rowToEntry(r: typeof schema.agents.$inferSelect): AgentEntry {
   const base = {
     name: r.name,
