@@ -22,6 +22,13 @@ import {
   type LinearIssue,
 } from "./api.js";
 
+export {
+  getStateIdByType,
+  LinearApiError,
+  setIssueStateByType,
+  type LinearStateType,
+} from "./api.js";
+
 export const LINEAR_SYSTEM_NAME = "linear";
 
 export interface LinearConfig {

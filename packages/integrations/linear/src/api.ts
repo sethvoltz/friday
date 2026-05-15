@@ -156,3 +156,95 @@ export async function getIssueByIdentifier(opts: {
   );
   return data.issues.nodes[0] ?? null;
 }
+
+/**
+ * Resolve a Linear workflow-state UUID for a given (team key, state type).
+ * Linear allows multiple states per type (e.g., "Done" and "Released" both
+ * `completed`); we return the first match, which is sufficient for archive
+ * propagation.
+ */
+export async function getStateIdByType(opts: {
+  apiKey: string;
+  teamKey: string;
+  stateType: LinearStateType;
+}): Promise<string | null> {
+  interface StatesResult {
+    workflowStates: { nodes: Array<{ id: string; type: LinearStateType }> };
+  }
+  const data: StatesResult = await linearQuery<StatesResult>(
+    opts.apiKey,
+    `query States($filter: WorkflowStateFilter) {
+       workflowStates(filter: $filter, first: 50) {
+         nodes { id type }
+       }
+     }`,
+    {
+      filter: {
+        team: { key: { eq: opts.teamKey } },
+        type: { eq: opts.stateType },
+      },
+    },
+  );
+  return data.workflowStates.nodes[0]?.id ?? null;
+}
+
+/**
+ * Move a Linear issue to the first workflow state matching `stateType` on its
+ * team. Used by the daemon's ticket-close path when a Friday ticket has a
+ * `system='linear'` external link and its agent is archived. One-way write
+ * driven by Friday's authoritative local status (see ADR-006 amendment).
+ */
+export async function setIssueStateByType(opts: {
+  apiKey: string;
+  issueIdentifier: string; // "TEAM-42"
+  stateType: LinearStateType;
+}): Promise<void> {
+  const m = opts.issueIdentifier.match(/^([A-Z][A-Z0-9_]*)-(\d+)$/);
+  if (!m) {
+    throw new LinearApiError(
+      `Invalid Linear identifier: ${opts.issueIdentifier}`,
+    );
+  }
+  const teamKey = m[1];
+
+  const issue = await getIssueByIdentifier({
+    apiKey: opts.apiKey,
+    identifier: opts.issueIdentifier,
+  });
+  if (!issue) {
+    throw new LinearApiError(
+      `Linear issue not found: ${opts.issueIdentifier}`,
+    );
+  }
+  const stateId = await getStateIdByType({
+    apiKey: opts.apiKey,
+    teamKey,
+    stateType: opts.stateType,
+  });
+  if (!stateId) {
+    throw new LinearApiError(
+      `No Linear workflow state of type "${opts.stateType}" on team "${teamKey}"`,
+    );
+  }
+
+  interface UpdateResult {
+    issueUpdate: { success: boolean };
+  }
+  const data: UpdateResult = await linearQuery<UpdateResult>(
+    opts.apiKey,
+    `mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+       issueUpdate(id: $id, input: $input) {
+         success
+       }
+     }`,
+    {
+      id: issue.id,
+      input: { stateId },
+    },
+  );
+  if (!data.issueUpdate.success) {
+    throw new LinearApiError(
+      `Linear issueUpdate returned success=false for ${opts.issueIdentifier}`,
+    );
+  }
+}

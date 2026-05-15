@@ -207,13 +207,17 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
         // it removes the worktree and force-deletes the branch). The model
         // MUST NOT autonomously invoke this. Every call must be preceded
         // by an explicit user "yes" in the conversation.
-        "Archive a sub-agent: stop it from receiving work, set status=archived. For builders, also remove the git worktree under `~/.friday/workspaces/<name>/` and force-delete the `friday/<name>` branch from the parent repo. Sessions persist in perpetuity — this just frees the disk and prevents future work. NEVER auto-invoke this tool. Always present the proposed archive to the user (which agent, which workspace path for builders) and wait for explicit confirmation before calling. The user MUST say yes by message before this tool is called. The daemon double-checks that the resolved workspace path is inside `~/.friday/workspaces/` before any filesystem op.",
-        { name: z.string() },
+        "Archive a sub-agent: stop it from receiving work, set status=archived. For builders, also remove the git worktree under `~/.friday/workspaces/<name>/` and force-delete the `friday/<name>` branch from the parent repo. Sessions persist in perpetuity — this just frees the disk and prevents future work. NEVER auto-invoke this tool. Always present the proposed archive to the user (which agent, which workspace path for builders) and wait for explicit confirmation before calling. The user MUST say yes by message before this tool is called. The daemon double-checks that the resolved workspace path is inside `~/.friday/workspaces/` before any filesystem op. `reason` is required: pass `\"completed\"` if the work landed (linked ticket → done, Linear → completed state), `\"abandoned\"` if the user is dropping the work (ticket → closed, Linear → canceled), or `\"failed\"` if the agent gave up or errored irrecoverably (ticket → closed + failure comment). Ask the user which one before calling — \"archive as done, abandoned, or failed?\"",
+        {
+          name: z.string(),
+          reason: z.enum(["completed", "abandoned", "failed"]),
+        },
         async (args) => {
           const row = await daemonFetch({
             ...ctx,
             path: `/api/agents/${encodeURIComponent(args.name)}/archive`,
             method: "POST",
+            body: { reason: args.reason },
           });
           return {
             content: [{ type: "text", text: JSON.stringify(row, null, 2) }],

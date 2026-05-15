@@ -351,6 +351,19 @@ The `agents.status` column has five values:
 
 `archived` is the **terminal** state. Once an agent is archived its session(s) remain visible in `/api/agents/:name/blocks` forever — history is history — but no new turns dispatch, no SSE events should mutate its state, and the row is never resurrected by recovery. A deliberate re-create with the same name uses `registerAgent` (status `idle`) and is conceptually a new entity sharing the namespace, not the same agent un-archived.
 
+### Archive reason and linked-ticket close
+
+Every call to `archiveAgent(name, { reason })` requires a `reason` — there is no default. The reason both documents intent in logs and drives the linked-ticket close behavior (see ADR-006 amendment and `services/daemon/src/services/ticket-close.ts`):
+
+| `reason` | Friday ticket status | Linear stateType (if linked) | Used by |
+| --- | --- | --- | --- |
+| `completed` | `done` | `completed` | Orchestrator MCP `agent_archive` after a successful build |
+| `abandoned` | `closed` | `canceled` | Orchestrator MCP, REST archive, boot-time orphan sweep, `/archive` slash command |
+| `failed` | `closed` + failure comment | `canceled` | Orchestrator MCP when the agent gave up or errored irrecoverably |
+| `refork` | unchanged | unchanged | Watchdog refork path; `/system reset-context` |
+
+The closer reads the agent row's `ticketId` **before** `registry.archiveAgent` runs — a future refactor that nulls the row's fields on archive would silently break propagation otherwise, so the read order is pinned by a test (`lifecycle-ticket-close.test.ts`). Closer execution is fire-and-forget from `archiveAgent`'s perspective; failures inside the closer (DB error, Linear unreachable, etc.) are logged but never bubble back into the worker-teardown path.
+
 Sidebar filter buckets reflect these semantics: "Show archived" reveals the terminal bucket; "Show inactive" reveals the transient-error bucket (`stalled`, `error`). The focused row is always shown regardless of filter state.
 
 ### State-boundary checks (inline)

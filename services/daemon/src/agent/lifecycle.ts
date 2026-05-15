@@ -33,6 +33,10 @@ import {
 } from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
+import {
+  type ArchiveReason,
+  closeTicketForArchive,
+} from "../services/ticket-close.js";
 import * as registry from "./registry.js";
 import * as liveTurns from "./live-turns.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
@@ -565,13 +569,28 @@ export function findAgentByTurnId(turnId: string): string | null {
  * callers (REST archive endpoints, system commands) can ignore both the
  * promise and its value — the side-effects (registry archive,
  * agent_lifecycle event, live-map remove) happen synchronously up front.
+ *
+ * `opts.reason` is required: it both documents intent (was this a successful
+ * completion, an abandonment, a failure, or an internal refork?) and drives
+ * the linked-ticket close behavior. See `services/ticket-close.ts` for the
+ * mapping. Watchdog refork must pass `"refork"` or the closer will move the
+ * ticket to a terminal status on every transient stall.
  */
-export function archiveAgent(agentName: string): Promise<WorkerPromptCommand[]> {
+export function archiveAgent(
+  agentName: string,
+  opts: { reason: ArchiveReason },
+): Promise<WorkerPromptCommand[]> {
   const w = live.get(agentName);
   // Capture queued prompts before we drop the worker from the live map.
   // The watchdog's refork path uses these to redispatch on the fresh
   // worker; ad-hoc archive calls just ignore the return value.
   const drainedPrompts: WorkerPromptCommand[] = w ? [...w.nextPrompts] : [];
+  // Capture ticketId BEFORE registry.archiveAgent — defensive against a
+  // future refactor that nulls the row's fields on archive. The closer
+  // reads from this captured value, not from the registry.
+  const agentRow = registry.getAgent(agentName);
+  const ticketId =
+    agentRow && "ticketId" in agentRow ? agentRow.ticketId ?? null : null;
   // Synchronous side-effects: drop from the live map so subsequent
   // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
   // before the child has fully exited.
@@ -583,6 +602,13 @@ export function archiveAgent(agentName: string): Promise<WorkerPromptCommand[]> 
     agent: agentName,
     agentType: w?.agentType ?? "orchestrator",
     event: "archive",
+  });
+  // Fire-and-forget: the closer owns its error handling and must never
+  // bubble back into the worker-teardown path.
+  void closeTicketForArchive({
+    ticketId,
+    reason: opts.reason,
+    agentName,
   });
   if (!w) return Promise.resolve(drainedPrompts);
 

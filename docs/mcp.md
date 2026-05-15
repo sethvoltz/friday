@@ -15,7 +15,7 @@ The Claude `claude_code` preset provides Read, Write, Edit, Bash, Glob, Grep. Fr
 | Server | Tools | Orchestrator | Builder | Helper | Scheduled | Bare |
 |---|---|:-:|:-:|:-:|:-:|:-:|
 | `friday-mail` | `mail_send` (with `priority: 'normal' \| 'critical'`), `mail_inbox`, `mail_read`, `mail_close` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `friday-agents` | `agent_create`, `agent_list`, `agent_status`, `agent_kill`, `agent_inspect`, `agent_delete_workspace` | ✓ | — | — | — | — |
+| `friday-agents` | `agent_create`, `agent_list`, `agent_status`, `agent_archive`, `agent_inspect` | ✓ | — | — | — | — |
 | `friday-memory` | `memory_search`, `memory_get` (read-only); `memory_save`, `memory_update`, `memory_forget` (write) | ✓ R/W | ✓ R | ✓ R/W | ✓ R/W | ✓ R/W |
 | `friday-tickets` | `ticket_create`, `ticket_list`, `ticket_get`, `ticket_update`, `ticket_comment`, `ticket_link_external` | ✓ | ✓ | ✓ | — | — |
 | `friday-schedule` | `schedule_upsert`, `schedule_list`, `schedule_show`, `schedule_pause`, `schedule_resume`, `schedule_delete`, `schedule_trigger` | ✓ | — | — | — | — |
@@ -27,7 +27,7 @@ The Claude `claude_code` preset provides Read, Write, Edit, Bash, Glob, Grep. Fr
 
 - **No more `chat_reply` / `friday-chat`** (ADR-017). All user-visible deliveries go through `mail_send` with recipient `friday`; the orchestrator's mail-bridge surfaces them as `mail`-kind block rows in the chat. Builders and helpers address the user the same way.
 - **`mail_send.priority`** (ADR-014 amendment). `'normal'` (default) queues for the next turn boundary; `'critical'` triggers mid-turn injection via `mail-wakeup-critical` IPC. Use sparingly — interrupting tool loops costs work in flight.
-- **`agent_delete_workspace`** (FIX_FORWARD 6.4) is the strict-confirmation replacement for the old `workspace_cleanup`. The tool description language is contractual: the model MUST present the proposed deletion to the user and wait for an explicit "yes" message before invoking. The daemon also re-checks realpath containment under `~/.friday/workspaces/` before any rm-equivalent op.
+- **`agent_archive`** is the merged form of the prior `agent_kill` + `agent_delete_workspace`: for builders it stops the worker, removes the worktree under `~/.friday/workspaces/<name>/`, and force-deletes the `friday/<name>` branch. The tool description is contractual — the model MUST present the proposed archive to the user and wait for an explicit "yes" before invoking. **Required argument:** `reason: "completed" | "abandoned" | "failed"`. The reason drives the linked-ticket close behavior (`completed`→`done`+Linear `completed`; `abandoned`/`failed`→`closed`+Linear `canceled`). The orchestrator should ask the user which outcome applies before calling. See `docs/architecture.md` § "Archive reason and linked-ticket close".
 - Builder gets `memory_search` / `memory_get` only — builders consult memory but mail the orchestrator with anything worth saving as canonical memory.
 - Bare and scheduled don't touch tickets directly. Scheduled meta-agents push proposals through evolve, which the orchestrator turns into tickets.
 - Schedule and evolve mutation are orchestrator-only — sub-agents shouldn't be modifying their own schedules or applying proposals.

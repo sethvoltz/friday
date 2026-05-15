@@ -126,7 +126,9 @@ async function refork(agentName: string): Promise<void> {
   // hung; the worker died before the SDK saw it" silently drops their
   // message. Redispatch them on the fresh worker after the timeout
   // notice (or as the only payload if they're all we have).
-  const drained = await archiveAgent(agentName);
+  // Refork: tear down the hung worker and re-register a fresh one. The
+  // linked ticket (if any) must not be closed — work is continuing.
+  const drained = await archiveAgent(agentName, { reason: "refork" });
 
   // The registry row was archived by archiveAgent. Re-register so the new
   // turn has a row to bind onto.

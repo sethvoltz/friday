@@ -490,12 +490,29 @@ async function handle(
     const name = path.split("/")[3];
     const a = registry.getAgent(name);
     if (!a) return json(res, 404, { error: "not found" });
+    // `reason` is required and drives the linked-ticket close behavior
+    // (completed→done, abandoned/failed→closed). Refork is daemon-internal
+    // and never accepted over the wire.
+    const body = await readJson<{ reason?: string }>(req).catch(
+      () => ({ reason: undefined }) as { reason?: string },
+    );
+    const validReasons = ["completed", "abandoned", "failed"] as const;
+    type ApiReason = (typeof validReasons)[number];
+    if (
+      !body.reason ||
+      !validReasons.includes(body.reason as ApiReason)
+    ) {
+      return json(res, 400, {
+        error: `reason required, one of: ${validReasons.join(", ")}`,
+      });
+    }
+    const reason = body.reason as ApiReason;
     const branch =
       a.type === "builder" && "branch" in a ? a.branch : undefined;
     const repo = process.cwd();
     // F1-B: await the archive so the response is a strong "actually
     // archived" signal — no race against the worker's exit handler.
-    await archiveAgent(name);
+    await archiveAgent(name, { reason });
     // Workspace cleanup happens only for builders, after archive. Failure
     // here (e.g., worktree dir locked) is non-fatal — log and return the
     // archive result anyway; the agent is already off.
@@ -1267,7 +1284,10 @@ function handleSystemCommand(
   switch (body.command) {
     case "archive": {
       if (!args) return json(res, 400, { error: "agent name required" });
-      archiveAgent(args);
+      // Slash-command archive defaults to "abandoned" — the user didn't
+      // signal outcome on the command line. The REST endpoint and MCP tool
+      // require an explicit reason; this is the admin/CLI shortcut surface.
+      void archiveAgent(args, { reason: "abandoned" });
       return json(res, 200, { ok: true, message: `archived ${args}` });
     }
     case "status": {
@@ -1289,8 +1309,10 @@ function handleSystemCommand(
       if (!a) return json(res, 404, { error: `agent not found: ${name}` });
       // If a worker is currently running, archive it so the next turn forks
       // a fresh process with no `resume` arg. setStatus + clearSession alone
-      // wouldn't take effect until the worker exits naturally.
-      void archiveAgent(name);
+      // wouldn't take effect until the worker exits naturally. Use "refork"
+      // so the linked ticket (if any) isn't moved to a terminal status —
+      // the agent is being reset, not closed.
+      void archiveAgent(name, { reason: "refork" });
       registry.clearSession(name);
       eventBus.publish({
         v: 1,

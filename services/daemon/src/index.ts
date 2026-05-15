@@ -31,6 +31,7 @@ import {
   stopInvariantAuditor,
 } from "./agent/invariants.js";
 import { wrapWithRecall } from "./agent/recall.js";
+import { closeTicketForArchive } from "./services/ticket-close.js";
 import {
   composeSystemPrompt,
   readPromptStack,
@@ -181,6 +182,9 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
         agent: a.name,
         worktreePath: a.worktreePath,
       });
+      // Capture ticketId before archive — the closer fires after the
+      // registry row is flipped but reads from this captured value.
+      const ticketId = a.ticketId ?? null;
       registry.archiveAgent(a.name);
       eventBus.publish({
         v: 1,
@@ -189,6 +193,15 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
         agentType: a.type,
         event: "archive",
         reason: "orphan-worktree",
+      });
+      // Newly-discovered orphan whose worktree is gone — work definitely
+      // did not complete. Mark the linked ticket abandoned. Not a backfill
+      // sweep of pre-existing in_progress rows; only orphans we observe
+      // at boot get this treatment.
+      void closeTicketForArchive({
+        ticketId,
+        reason: "abandoned",
+        agentName: a.name,
       });
       continue;
     }
