@@ -121,10 +121,14 @@ function cloudflaredOnPath(): boolean {
 }
 
 /**
- * Build every workspace package (`packages/*`) before launching services
+ * Build every workspace package (`packages/**`) before launching services
  * (FIX_FORWARD 7.2). Both daemon and dashboard import `@friday/*` packages
  * via their compiled `dist/`, so a stale dist after a source edit silently
  * runs old code. Building here closes that loophole.
+ *
+ * The `**` recursion is load-bearing: `./packages/*` would miss nested
+ * workspace packages like `packages/integrations/linear`, letting their
+ * dist/ drift out of sync with source.
  *
  * Skipped when neither daemon nor dashboard is in the services list — e.g.
  * `friday start tunnel` doesn't need package builds.
@@ -132,7 +136,7 @@ function cloudflaredOnPath(): boolean {
 function buildPackagesOrAbort(repoRoot: string): void {
   const r = spawnSync(
     "pnpm",
-    ["exec", "turbo", "build", "--filter=./packages/*"],
+    ["exec", "turbo", "build", "--filter=./packages/**"],
     {
       cwd: repoRoot,
       stdio: "inherit",
