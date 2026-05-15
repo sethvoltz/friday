@@ -40,33 +40,51 @@ export function searchMemories(opts: SearchOptions): SearchResult[] {
       ? allEntries.filter((e) => candidateIds.includes(e.id))
       : allEntries; // FTS5 fallback: scan all
 
-  const lowerQ = q.toLowerCase();
+  const tokens = q
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
   const tags = opts.tags ?? [];
   const results: SearchResult[] = [];
 
   for (const entry of candidatePool) {
     if (tags.length > 0 && !tags.every((t) => entry.tags.includes(t))) continue;
-    let score = 0;
-    const matchedOn: string[] = [];
+    const titleLc = entry.title.toLowerCase();
+    const contentLc = entry.content.toLowerCase();
+    const tagsLc = entry.tags.map((t) => t.toLowerCase());
 
-    if (entry.title.toLowerCase().includes(lowerQ)) {
-      score += 3;
-      matchedOn.push("title");
-    }
-    if (entry.content.toLowerCase().includes(lowerQ)) {
-      score += 1;
-      matchedOn.push("content");
-    }
-    for (const t of entry.tags) {
-      if (t.toLowerCase() === lowerQ) {
-        score += 5;
-        matchedOn.push(`tag:${t}`);
+    let score = 0;
+    const matchedOn = new Set<string>();
+    let allTokensMatch = true;
+
+    for (const tok of tokens) {
+      let tokenMatched = false;
+      if (titleLc.includes(tok)) {
+        score += 3;
+        matchedOn.add("title");
+        tokenMatched = true;
+      }
+      if (contentLc.includes(tok)) {
+        score += 1;
+        matchedOn.add("content");
+        tokenMatched = true;
+      }
+      for (let i = 0; i < tagsLc.length; i++) {
+        if (tagsLc[i] === tok) {
+          score += 5;
+          matchedOn.add(`tag:${entry.tags[i]}`);
+          tokenMatched = true;
+        }
+      }
+      if (!tokenMatched) {
+        allTokensMatch = false;
+        break;
       }
     }
 
-    if (score > 0) {
+    if (allTokensMatch && score > 0) {
       score += Math.log2(entry.recallCount + 1);
-      results.push({ entry, score, matchedOn });
+      results.push({ entry, score, matchedOn: [...matchedOn] });
     }
   }
 
