@@ -3,6 +3,8 @@
   import { invalidateAll } from "$app/navigation";
   import { KEYS, saveString, loadString } from "$lib/stores/persistent";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
+  import { Sun, Moon } from "lucide-svelte";
+  import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import { onMount } from "svelte";
   let { data }: { data: PageData } = $props();
 
@@ -106,10 +108,13 @@
     await patchSettings({ model: next });
   }
 
-  async function onWatchdogChange(e: Event) {
-    const next = (e.target as HTMLInputElement).checked;
-    await patchSettings({ watchdogRefork: next });
-  }
+  // Toggle uses bind:checked, so we react to mutations via $effect instead
+  // of a DOM change handler. Skip the firing that happens on mount with
+  // the initial value by comparing against the last-committed value.
+  $effect(() => {
+    if (watchdogRefork === priorWatchdog) return;
+    void patchSettings({ watchdogRefork });
+  });
 
   // FIX_FORWARD 6.3: nuke every auth:* rate-limit bucket. Gated since the
   // operator should explicitly acknowledge they're unlocking the sign-in
@@ -229,7 +234,9 @@
         class:selected={theme === "light"}
         aria-pressed={theme === "light"}
         onclick={() => applyTheme("light")}>
-        <span class="theme-swatch swatch-light"></span>
+        <span class="theme-icon" aria-hidden="true">
+          <Sun size={16} strokeWidth={2} />
+        </span>
         Light
       </button>
       <button
@@ -238,7 +245,9 @@
         class:selected={theme === "dark"}
         aria-pressed={theme === "dark"}
         onclick={() => applyTheme("dark")}>
-        <span class="theme-swatch swatch-dark"></span>
+        <span class="theme-icon" aria-hidden="true">
+          <Moon size={16} strokeWidth={2} />
+        </span>
         Dark
       </button>
     </div>
@@ -270,14 +279,12 @@
       it automatically. Turn this off if you'd rather diagnose the cause by
       hand before letting Friday retry.
     </p>
-    <label class="toggle-row">
-      <input
-        type="checkbox"
-        checked={watchdogRefork}
-        onchange={onWatchdogChange}
+    <div class="toggle-row">
+      <Toggle
+        bind:checked={watchdogRefork}
+        label="Auto-refork crashed workers"
         disabled={savingSettings} />
-      <span>Auto-refork crashed workers</span>
-    </label>
+    </div>
   </div>
 
   <div class="card">
@@ -408,17 +415,13 @@
     border-color: var(--accent-primary);
     background: var(--accent-glow);
   }
-  .theme-swatch {
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    border: 1px solid var(--border-subtle);
+  .theme-icon {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-secondary);
   }
-  .swatch-light {
-    background: linear-gradient(135deg, #fff4e0 0%, #ffd28a 100%);
-  }
-  .swatch-dark {
-    background: linear-gradient(135deg, #1c1f26 0%, #2a2f3a 100%);
+  .theme-option.selected .theme-icon {
+    color: var(--accent-primary);
   }
 
   .model-select {
@@ -435,14 +438,10 @@
   .toggle-row {
     display: inline-flex;
     align-items: center;
-    gap: 0.5rem;
     margin-top: 0.75rem;
     font-size: 0.9rem;
     color: var(--text-primary);
-    cursor: pointer;
   }
-  .toggle-row input[type="checkbox"] { cursor: pointer; }
-  .toggle-row input[type="checkbox"]:disabled { cursor: default; }
 
   .session-list {
     list-style: none;

@@ -8,6 +8,7 @@
   import { startConnectivity } from "$lib/stores/connectivity.svelte";
   import ConnectivityWidget from "$lib/components/Connectivity/ConnectivityWidget.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
+  import { Sun, Moon } from "lucide-svelte";
   import { KEYS, loadString, saveString } from "$lib/stores/persistent";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
   import { chat } from "$lib/stores/chat.svelte";
@@ -191,7 +192,11 @@
           <a href="/settings" class:active={$page.url.pathname.startsWith("/settings")} onclick={closeMenu}>Settings</a>
         </nav>
         <button class="theme-toggle" onclick={toggleTheme} title="Toggle theme" aria-label="Toggle theme">
-          {theme === "dark" ? "☀" : "☾"}
+          {#if theme === "dark"}
+            <Sun size={16} strokeWidth={2} />
+          {:else}
+            <Moon size={16} strokeWidth={2} />
+          {/if}
         </button>
         <button class="hamburger-btn" onclick={() => (menuOpen = !menuOpen)} aria-label="Toggle navigation">
           <span></span><span></span><span></span>

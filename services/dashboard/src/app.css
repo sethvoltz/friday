@@ -470,13 +470,15 @@ pre.code-block {
 /* === Theme toggle === */
 
 .theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-sm);
-  padding: 0.35rem 0.6rem;
+  padding: 0.4rem;
   cursor: pointer;
   color: var(--text-secondary);
-  font-size: 1rem;
   transition: all var(--transition-fast);
   line-height: 1;
 }

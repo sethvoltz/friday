@@ -9,6 +9,7 @@
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import { loadJSON, saveJSON } from "$lib/stores/persistent";
   import { onMount } from "svelte";
+  import { DraftingCompass } from "lucide-svelte";
 
   // The route is the authoritative source for which sidebar row is
   // active and how deep the menu should be expanded. `/` → orchestrator
@@ -283,7 +284,9 @@
         style:background={statusDot(a.status)}
       ></span>
       {#if isPinned}
-        <span class="crown">👑</span>
+        <span class="friday-icon" aria-hidden="true">
+          <DraftingCompass size={16} strokeWidth={2} />
+        </span>
         <span class="name">Friday</span>
       {:else}
         <span class="type">{a.type}</span>
@@ -376,7 +379,9 @@
         style:background={statusDot(focused.status)}
       ></span>
       {#if focused.type === "orchestrator"}
-        <span class="crown">👑</span>
+        <span class="friday-icon" aria-hidden="true">
+          <DraftingCompass size={16} strokeWidth={2} />
+        </span>
         <span class="name">Friday</span>
       {:else}
         <span class="type">{focused.type}</span>
@@ -572,7 +577,14 @@
   @media (prefers-reduced-motion: reduce) {
     .dot.pulse { animation: none; }
   }
-  .crown { font-size: 1rem; }
+  .friday-icon {
+    display: inline-flex;
+    align-items: center;
+    color: #b45309;
+  }
+  :global([data-theme="dark"]) .friday-icon {
+    color: #fcd34d;
+  }
   .type {
     font-size: 0.62rem;
     color: var(--text-tertiary);

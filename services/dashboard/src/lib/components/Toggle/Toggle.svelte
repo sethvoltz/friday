@@ -9,17 +9,20 @@
     /** Render as a full-width row with hover background — useful in lists
      * (e.g. the sidebar filters). Defaults to false (compact inline). */
     block?: boolean;
+    /** Lock the toggle while a parent operation is in flight. */
+    disabled?: boolean;
   }
   let {
     checked = $bindable(),
     label,
     title,
     block = false,
+    disabled = false,
   }: Props = $props();
 </script>
 
-<label class="toggle" class:block {title}>
-  <input type="checkbox" bind:checked />
+<label class="toggle" class:block class:disabled {title}>
+  <input type="checkbox" bind:checked {disabled} />
   <span class="track"><span class="knob"></span></span>
   {#if label}<span class="lbl">{label}</span>{/if}
 </label>
@@ -31,6 +34,10 @@
     gap: 0.4rem;
     cursor: pointer;
     user-select: none;
+  }
+  .toggle.disabled {
+    cursor: default;
+    opacity: 0.6;
   }
   .toggle.block {
     display: flex;
