@@ -70,7 +70,7 @@ export interface TurnForScoring {
   prev_assistant_text: string;
 }
 
-interface OrchestratorTurn {
+export interface OrchestratorTurn {
   sessionId: string;
   /** Source JSONL file (recorded on the turns row). */
   filePath: string;
@@ -233,7 +233,7 @@ function collectOrchestratorSessions(): Set<string> {
  *
  * Capped at `maxTurns`. Older sessions go first if we hit the cap.
  */
-function collectOrchestratorTurns(
+export function collectOrchestratorTurns(
   sinceMs: number,
   maxTurns: number,
 ): OrchestratorTurn[] {

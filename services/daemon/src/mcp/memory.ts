@@ -18,6 +18,39 @@ import { daemonFetch } from "./http.js";
 
 export const MEMORY_SERVER_NAME = "friday-memory";
 
+/**
+ * Catch tool-call serialization mishaps where the SDK harness folded a
+ * parameter's XML wrapper into a sibling string. Seen in the wild: the model
+ * emitted a `tags` value without its `<parameter name="tags">…</parameter>`
+ * wrapper, so the literal text `</content>\n<tags>["..."]</tags>\n</invoke>`
+ * landed in `content`. The lenient parser persisted that as a real memory
+ * body. We reject those calls so the model gets immediate, visible feedback
+ * instead of silently corrupting the store.
+ *
+ * Returns null when the value is clean; returns a human-readable rejection
+ * message when it isn't.
+ */
+export function validateMemoryField(
+  fieldName: string,
+  value: string,
+): string | null {
+  if (value.includes("</invoke>")) {
+    return `${fieldName} contains the literal string \`</invoke>\` — this is a tool-call serialization error. Re-issue the call with each parameter wrapped in its own \`<parameter name="...">\` block. \`tags\` in particular must be a separate array parameter, not appended to \`content\`.`;
+  }
+  const tail = value.slice(-200);
+  if (/<\/(content|tags|parameter|title)>\s*$/i.test(tail)) {
+    return `${fieldName} ends with a parameter-closing token (e.g. \`</content>\`, \`</tags>\`). That's almost always a tool-call serialization error where a sibling parameter got merged into this field. Re-issue the call with each parameter in its own wrapper.`;
+  }
+  return null;
+}
+
+function rejectionResult(reason: string) {
+  return {
+    content: [{ type: "text" as const, text: `memory tool rejected: ${reason}` }],
+    isError: true,
+  };
+}
+
 export interface BuildMemoryServerOptions {
   callerName: string;
   callerType: AgentType;
@@ -34,7 +67,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
 
   const searchTool = tool(
     "memory_search",
-    "Search Friday's memory store. Returns matched entries with title, id, score, and matchedOn. Use memory_get for full content.",
+    "Search Friday's persistent memory for relevant entries. Returns matches ranked by FTS relevance with a recall-frequency boost (title +3, content +1, exact tag +5). Use this BEFORE saving to avoid creating near-duplicates. Returns title, id, score, and matchedOn; use memory_get for full content.",
     {
       query: z.string().describe("Free-form text query. Required."),
       tags: z
@@ -69,7 +102,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
 
   const getTool = tool(
     "memory_get",
-    "Read a memory entry in full. Bumps its recall counter so the FTS ranker learns which memories are useful.",
+    "Read a memory entry in full by its id. Bumps the entry's recall counter so the FTS ranker learns which memories are useful in practice. Use when a search result's snippet isn't enough and you need the full body.",
     { id: z.string().describe("Memory entry id (slug).") },
     async (args) => {
       const row = await daemonFetch({
@@ -84,7 +117,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
 
   const saveTool = tool(
     "memory_save",
-    "Save a fact, preference, decision, or note that future Friday conversations should remember. Friday's store at `~/.friday/memory/entries/`. **Do not use the built-in Memory tool** — Friday's `autoMemoryEnabled` is disabled and the SDK's project-scoped memory directory is not Friday's store.",
+    "Save a new memory entry. Memories persist across sessions and conversations and surface automatically in the next turn's `<memory-context>` block. Use for decisions, user preferences, project context, lessons learned, external-system pointers — anything worth remembering long-term. **Search first to avoid duplicates** — if a memory on the same topic exists, use `memory_update` to refine it instead. Tag every entry with its type (`user` / `feedback` / `project` / `reference`) plus topical tags; tags weight +5 in the FTS ranker. **Do not use the built-in Memory tool** — Friday's `autoMemoryEnabled` is disabled and the SDK's project-scoped memory directory is not Friday's store.",
     {
       id: z
         .string()
@@ -102,6 +135,10 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
         .describe("Tags for retrieval. Lowercase, no spaces."),
     },
     async (args) => {
+      const titleErr = validateMemoryField("title", args.title);
+      if (titleErr) return rejectionResult(titleErr);
+      const contentErr = validateMemoryField("content", args.content);
+      if (contentErr) return rejectionResult(contentErr);
       const row = await daemonFetch({
         ...ctx,
         path: "/api/memory",
@@ -121,7 +158,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
 
   const updateTool = tool(
     "memory_update",
-    "Update an existing memory entry. Only the fields you pass in `patch` change.",
+    "Update an existing memory entry in place. Preserves recall history and creation metadata. Use this to correct or extend a memory instead of forgetting and re-creating it. Only the fields you pass in `patch` change.",
     {
       id: z.string(),
       patch: z
@@ -133,6 +170,14 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
         .describe("Fields to overwrite. Omitted fields are unchanged."),
     },
     async (args) => {
+      if (args.patch.title !== undefined) {
+        const err = validateMemoryField("patch.title", args.patch.title);
+        if (err) return rejectionResult(err);
+      }
+      if (args.patch.content !== undefined) {
+        const err = validateMemoryField("patch.content", args.patch.content);
+        if (err) return rejectionResult(err);
+      }
       const row = await daemonFetch({
         ...ctx,
         path: `/api/memory/${encodeURIComponent(args.id)}`,
@@ -147,7 +192,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
 
   const forgetTool = tool(
     "memory_forget",
-    "Delete a memory entry permanently. Use sparingly — prefer memory_update to fix wrong details rather than forgetting and re-saving.",
+    "Delete a memory entry permanently. Use when a memory is outdated, contradicted by reality, or no longer relevant. Prefer `memory_update` to correct wrong details rather than forgetting and re-saving — update preserves recall history.",
     { id: z.string() },
     async (args) => {
       await daemonFetch({

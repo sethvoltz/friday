@@ -131,6 +131,18 @@ function draftFromSignal(signal: Signal): Draft {
 
 function titleFor(event: string, agent?: string): string {
   const friendly = event.replace(/[._-]/g, " ");
+  // Preference-class signals are declarative, not recurring crashes; "repeating"
+  // wording doesn't fit. Same for affirmative declarations the user makes once.
+  const declarative =
+    event.startsWith("preference_") ||
+    event === "directive" ||
+    event === "role_context" ||
+    event === "external_pointer";
+  if (declarative) {
+    return agent
+      ? `User signal: ${friendly} (from ${agent})`
+      : `User signal: ${friendly}`;
+  }
   if (agent) return `${friendly} repeating on ${agent}`;
   return `${friendly} repeating`;
 }

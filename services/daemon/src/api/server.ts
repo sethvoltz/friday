@@ -62,6 +62,7 @@ import {
   saveProposal,
   scanAll,
   scanFriction,
+  scanPreferences,
   sinceHoursAgo,
   appendRun,
   updateProposal,
@@ -894,9 +895,11 @@ async function handle(
     const body = await readJson<{
       windowHours?: number;
       includeFriction?: boolean;
+      includePreferences?: boolean;
     }>(req);
     const windowHours = body.windowHours ?? 24;
     const includeFriction = body.includeFriction !== false;
+    const includePreferences = body.includePreferences !== false;
     const callerName = String(req.headers["x-friday-caller-name"] ?? "scan");
     const since = sinceHoursAgo(windowHours);
     const windowEnd = new Date().toISOString();
@@ -910,7 +913,15 @@ async function handle(
             return [] as typeof syncSignals;
           })
         : [];
-      const signals = [...syncSignals, ...frictionSignals];
+      const preferenceSignals = includePreferences
+        ? await scanPreferences({ since }).catch((err) => {
+            logger.log("warn", "evolve.scan.preferences-error", {
+              message: err instanceof Error ? err.message : String(err),
+            });
+            return [] as typeof syncSignals;
+          })
+        : [];
+      const signals = [...syncSignals, ...frictionSignals, ...preferenceSignals];
       const propose = proposeFromSignals(signals, {
         rule: DEFAULT_RULE,
         createdBy: callerName,

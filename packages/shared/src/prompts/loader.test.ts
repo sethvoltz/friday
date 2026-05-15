@@ -69,3 +69,37 @@ describe("composeSystemPrompt with identity", () => {
     expect(composed).not.toContain("# Identity");
   });
 });
+
+describe("default protocols by agent type", () => {
+  it("orchestrator stack auto-includes the memory protocol", () => {
+    const stack = readPromptStack("orchestrator", []);
+    expect(stack.protocols).toContain("# Protocol: Memory");
+    expect(stack.protocols).toContain("Saving — make it reflexive");
+  });
+
+  it("scheduled stack auto-includes the memory protocol", () => {
+    const stack = readPromptStack("scheduled", []);
+    expect(stack.protocols).toContain("# Protocol: Memory");
+  });
+
+  it("bare stack auto-includes the memory protocol", () => {
+    const stack = readPromptStack("bare", []);
+    expect(stack.protocols).toContain("# Protocol: Memory");
+  });
+
+  it("builder stack does NOT include the memory protocol (builders are read-only)", () => {
+    const stack = readPromptStack("builder", []);
+    expect(stack.protocols).not.toContain("# Protocol: Memory");
+  });
+
+  it("helper stack does NOT include the memory protocol", () => {
+    const stack = readPromptStack("helper", []);
+    expect(stack.protocols).not.toContain("# Protocol: Memory");
+  });
+
+  it("does not duplicate the memory protocol when caller passes it explicitly", () => {
+    const stack = readPromptStack("orchestrator", ["memory"]);
+    const occurrences = stack.protocols.split("# Protocol: Memory").length - 1;
+    expect(occurrences).toBe(1);
+  });
+});

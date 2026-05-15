@@ -32,6 +32,22 @@ export type AgentBaseKey =
   | "scheduled"
   | "bare";
 
+/**
+ * Protocols loaded automatically for an agent type, regardless of the
+ * `protocolNames` argument passed to `readPromptStack`. Memory is system
+ * capability — every agent that can write to the memory store needs the
+ * framework. Builders are read-only and helpers are scoped, so they pick up
+ * memory recall behavior from their own agent prompts without the full
+ * save-side guidance.
+ */
+const DEFAULT_PROTOCOLS_BY_TYPE: Record<AgentBaseKey, readonly string[]> = {
+  orchestrator: ["memory"],
+  scheduled: ["memory"],
+  builder: [],
+  helper: [],
+  bare: ["memory"],
+};
+
 export function readPromptStack(
   agentType: AgentBaseKey,
   protocolNames: string[] = [],
@@ -43,7 +59,15 @@ export function readPromptStack(
     join(dir, "agents", `${agentType}.md`),
     "utf8",
   );
-  const protocols = protocolNames
+  // Merge type-default protocols with caller-requested ones, dedup, preserve order.
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const name of [...DEFAULT_PROTOCOLS_BY_TYPE[agentType], ...protocolNames]) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    merged.push(name);
+  }
+  const protocols = merged
     .map((name) => {
       const p = join(dir, "protocols", `${name}.md`);
       return existsSync(p) ? readFileSync(p, "utf8") : "";
