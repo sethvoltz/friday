@@ -23,10 +23,20 @@ import {
 } from "./api.js";
 
 export {
+  createIssue,
+  findTeamByKey,
+  getIssueByIdentifier,
   getStateIdByType,
   LinearApiError,
+  linearQuery,
+  listActiveIssues,
+  listTeams,
   setIssueStateByType,
+  type CreateIssueInput,
+  type CreatedIssue,
+  type LinearIssue,
   type LinearStateType,
+  type LinearTeam,
 } from "./api.js";
 
 export const LINEAR_SYSTEM_NAME = "linear";
