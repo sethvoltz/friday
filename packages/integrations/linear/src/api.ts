@@ -124,6 +124,100 @@ export async function listActiveIssues(opts: {
   return out;
 }
 
+export interface LinearTeam {
+  id: string;
+  key: string;
+  name: string;
+}
+
+/**
+ * Resolve a Linear team by its `key` (e.g. `"FRI"`) to the underlying UUID
+ * that the `issueCreate` mutation requires. Case-insensitive on the key.
+ * Returns `null` if no matching team exists.
+ */
+export async function findTeamByKey(opts: {
+  apiKey: string;
+  key: string;
+}): Promise<LinearTeam | null> {
+  interface TeamsResult {
+    teams: { nodes: LinearTeam[] };
+  }
+  const data = await linearQuery<TeamsResult>(
+    opts.apiKey,
+    `query Teams { teams(first: 250) { nodes { id key name } } }`,
+  );
+  const target = opts.key.toLowerCase();
+  return (
+    data.teams.nodes.find((t) => t.key.toLowerCase() === target) ?? null
+  );
+}
+
+/**
+ * List every team accessible to the API key. Used when no `linear.team`
+ * is configured and we have to fall back to "first team."
+ */
+export async function listTeams(opts: {
+  apiKey: string;
+}): Promise<LinearTeam[]> {
+  interface TeamsResult {
+    teams: { nodes: LinearTeam[] };
+  }
+  const data = await linearQuery<TeamsResult>(
+    opts.apiKey,
+    `query Teams { teams(first: 250) { nodes { id key name } } }`,
+  );
+  return data.teams.nodes;
+}
+
+export interface CreateIssueInput {
+  /** Linear team UUID (not the key). Use `findTeamByKey` to resolve. */
+  teamId: string;
+  title: string;
+  /** Markdown supported. */
+  description?: string;
+}
+
+export interface CreatedIssue {
+  /** Linear's UUID. */
+  id: string;
+  /** Human identifier, e.g. `"FRI-42"`. */
+  identifier: string;
+  url: string;
+}
+
+/**
+ * Create a new Linear issue. Narrow surface — `teamId`, `title`,
+ * `description` only. Add fields (priority, labels, assignee, parent,
+ * project, state) as call sites need them.
+ */
+export async function createIssue(opts: {
+  apiKey: string;
+  input: CreateIssueInput;
+}): Promise<CreatedIssue> {
+  interface CreateResult {
+    issueCreate: {
+      success: boolean;
+      issue: CreatedIssue | null;
+    };
+  }
+  const data = await linearQuery<CreateResult>(
+    opts.apiKey,
+    `mutation IssueCreate($input: IssueCreateInput!) {
+       issueCreate(input: $input) {
+         success
+         issue { id identifier url }
+       }
+     }`,
+    { input: opts.input },
+  );
+  if (!data.issueCreate.success || !data.issueCreate.issue) {
+    throw new LinearApiError(
+      `Linear issueCreate returned success=false for "${opts.input.title}"`,
+    );
+  }
+  return data.issueCreate.issue;
+}
+
 /**
  * Look up a single issue by Linear's `TEAM-N` identifier. Linear's GraphQL
  * doesn't expose this directly, so we filter on team key + number.

@@ -50,6 +50,36 @@ export function buildIntegrationsServer(
         },
       ),
       tool(
+        "linear_create_issue",
+        "WRITES to Linear: create a new Linear issue. Requires LINEAR_API_KEY. The team is resolved from `team` (key or UUID) if provided, otherwise from the FRIDAY_LINEAR_TEAM env var, then `linear.team` in config; if none of those is set the integration falls back to the first team the API key can see and logs a warning.",
+        {
+          title: z.string().describe("Issue title (required)."),
+          body: z
+            .string()
+            .optional()
+            .describe(
+              "Issue description, markdown supported. Maps to Linear's `description` field.",
+            ),
+          team: z
+            .string()
+            .optional()
+            .describe(
+              'Linear team key (e.g. "FRI") or team UUID. Overrides FRIDAY_LINEAR_TEAM and `linear.team` for this call only.',
+            ),
+        },
+        async (args) => {
+          const result = await daemonFetch({
+            ...ctx,
+            path: "/api/integrations/linear/create-issue",
+            method: "POST",
+            body: { title: args.title, body: args.body, team: args.team },
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        },
+      ),
+      tool(
         "linear_reconcile",
         "Run a Linear reconcile pass on demand: list active Linear issues, cross-reference against existing Friday tickets, and report orphans and stale links. Read-only — does not import.",
         {},

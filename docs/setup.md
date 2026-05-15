@@ -123,6 +123,11 @@ Edit `~/.friday/config.json` to:
 - Change the model (`"model": "claude-opus-4-7"`).
 - Adjust ports (`daemonPort`, `dashboardPort`).
 - Add MCP servers under `mcpServers`.
+- Configure the Linear integration team under `linear.team` (accepts a team
+  key like `"FRI"` or a Linear team UUID). Used by `createIssue` when
+  Friday files Linear issues. Overridable per-process with the
+  `FRIDAY_LINEAR_TEAM` env var. When unset, the integration falls back to
+  the first team the API key can see and logs a warning.
 
 Edit `~/.friday/SOUL.md` to customize Friday's voice and identity. Source upgrades never overwrite this file.
 

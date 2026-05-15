@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createIssue,
+  findTeamByKey,
   getStateIdByType,
   LinearApiError,
+  listTeams,
   setIssueStateByType,
 } from "./api.js";
 
@@ -215,5 +218,129 @@ describe("setIssueStateByType", () => {
         stateType: "completed",
       }),
     ).rejects.toBeInstanceOf(LinearApiError);
+  });
+});
+
+describe("createIssue", () => {
+  it("posts the issueCreate mutation with the given input and returns the created issue", async () => {
+    const { calls } = installFetchMock([
+      {
+        data: {
+          issueCreate: {
+            success: true,
+            issue: {
+              id: "uuid-123",
+              identifier: "FRI-42",
+              url: "https://linear.app/team/issue/FRI-42",
+            },
+          },
+        },
+      },
+    ]);
+
+    const result = await createIssue({
+      apiKey: "lin_test_key",
+      input: {
+        teamId: "team-uuid",
+        title: "Mirror FRI-13",
+        description: "## Body\nhello",
+      },
+    });
+
+    expect(result).toEqual({
+      id: "uuid-123",
+      identifier: "FRI-42",
+      url: "https://linear.app/team/issue/FRI-42",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].query).toContain("issueCreate");
+    expect(calls[0].variables).toEqual({
+      input: {
+        teamId: "team-uuid",
+        title: "Mirror FRI-13",
+        description: "## Body\nhello",
+      },
+    });
+  });
+
+  it("throws LinearApiError when issueCreate returns success=false", async () => {
+    installFetchMock([
+      { data: { issueCreate: { success: false, issue: null } } },
+    ]);
+
+    await expect(
+      createIssue({
+        apiKey: "lin_test_key",
+        input: { teamId: "team-uuid", title: "X" },
+      }),
+    ).rejects.toBeInstanceOf(LinearApiError);
+  });
+
+  it("throws LinearApiError when GraphQL returns errors", async () => {
+    installFetchMock([
+      { data: undefined, errors: [{ message: "team not found" }] },
+    ]);
+
+    await expect(
+      createIssue({
+        apiKey: "lin_test_key",
+        input: { teamId: "bad", title: "X" },
+      }),
+    ).rejects.toThrow(/team not found/);
+  });
+});
+
+describe("findTeamByKey", () => {
+  it("matches case-insensitively on team key and returns the team", async () => {
+    installFetchMock([
+      {
+        data: {
+          teams: {
+            nodes: [
+              { id: "u1", key: "ENG", name: "Engineering" },
+              { id: "u2", key: "FRI", name: "Friday" },
+            ],
+          },
+        },
+      },
+    ]);
+
+    const team = await findTeamByKey({ apiKey: "k", key: "fri" });
+    expect(team).toEqual({ id: "u2", key: "FRI", name: "Friday" });
+  });
+
+  it("returns null when no team matches", async () => {
+    installFetchMock([
+      {
+        data: {
+          teams: {
+            nodes: [{ id: "u1", key: "ENG", name: "Engineering" }],
+          },
+        },
+      },
+    ]);
+    const team = await findTeamByKey({ apiKey: "k", key: "FRI" });
+    expect(team).toBeNull();
+  });
+});
+
+describe("listTeams", () => {
+  it("returns the full teams list from the teams query", async () => {
+    installFetchMock([
+      {
+        data: {
+          teams: {
+            nodes: [
+              { id: "u1", key: "ENG", name: "Engineering" },
+              { id: "u2", key: "FRI", name: "Friday" },
+            ],
+          },
+        },
+      },
+    ]);
+    const teams = await listTeams({ apiKey: "k" });
+    expect(teams).toHaveLength(2);
+    expect(teams[0].key).toBe("ENG");
   });
 });

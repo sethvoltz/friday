@@ -82,6 +82,22 @@ export interface FridayConfig {
    * route from the connector token. Set via `friday setup --cloudflare`.
    */
   publicUrl?: string;
+  /** Linear integration settings. Read by `@friday/integrations-linear`. */
+  linear?: LinearIntegrationConfig;
+}
+
+export interface LinearIntegrationConfig {
+  /**
+   * Team to file new Linear issues against. Accepts either:
+   * - a team UUID (what Linear's `issueCreate` mutation wants), or
+   * - a team key like `"FRI"` (resolved to a UUID via `findTeamByKey` at
+   *   call time).
+   *
+   * Overridden by the `FRIDAY_LINEAR_TEAM` env var. When unset, the
+   * createIssue path falls back to the first team returned by Linear with
+   * a `logger.warn`.
+   */
+  team?: string;
 }
 
 export interface WatchdogConfig {
