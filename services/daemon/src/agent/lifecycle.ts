@@ -101,6 +101,17 @@ export interface LiveWorker {
   lastExitStatus: "complete" | "aborted" | "error";
   completedAtLeastOnce: boolean;
   onExit?: (info: ExitInfo) => void;
+  /** Stop force-kill safety net (FRI-12). When `abortTurn` fires, we
+   *  schedule a 2s deadline; if the worker doesn't acknowledge the abort
+   *  by then, `forceKillStuckWorker` finalizes the turn and SIGTERMs the
+   *  process group. The deadline is cleared on any worker response
+   *  (turn-complete, error, status-change) so a worker that aborted
+   *  cleanly doesn't get killed on the way out. */
+  abortDeadline?: NodeJS.Timeout;
+  /** Set when `forceKillStuckWorker` has already finalized this turn and
+   *  killed the worker. Subsequent error/turn-complete IPC messages from
+   *  the dying worker are ignored so we don't double-publish turn_done. */
+  forceKilled?: boolean;
 }
 
 const live = new Map<string, LiveWorker>();
@@ -420,12 +431,111 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   send(w.child, { type: "prompt", options: p });
 }
 
+/**
+ * Test seams: insert / remove a fake LiveWorker without going through the
+ * spawn pipeline. Used by `lifecycle-stop-forcekill.test.ts` to drive
+ * `abortTurn` against a synthetic worker. Not for production use; the
+ * inserted entry has no real child process and skipping the spawn path
+ * means events the spawn handler would normally publish won't fire.
+ */
+export function __putLiveWorkerForTest(name: string, w: LiveWorker): void {
+  live.set(name, w);
+}
+export function __deleteLiveWorkerForTest(name: string): void {
+  live.delete(name);
+}
+
 export function abortTurn(agentName: string): boolean {
   const w = live.get(agentName);
   if (!w) return false;
   w.abortRequested = true;
   send(w.child, { type: "abort" });
+  // FRI-12 safety net: if the worker is wedged inside an SDK call (the
+  // 529 lockup), the abort IPC is silently ignored — the AbortController's
+  // `abort()` only fires inside the worker process, and a stuck SDK loop
+  // never returns control. Without this deadline, the dashboard's bubble
+  // would freeze in 'stopping' forever waiting for a turn_done that's
+  // never coming. Two seconds is generous for a healthy worker (an
+  // honest abort lands in tens of milliseconds) and short enough that
+  // the user's Stop click feels responsive.
+  if (w.abortDeadline) clearTimeout(w.abortDeadline);
+  w.abortDeadline = setTimeout(() => forceKillStuckWorker(w), 2_000);
+  w.abortDeadline.unref();
   return true;
+}
+
+function clearAbortDeadline(w: LiveWorker): void {
+  if (w.abortDeadline) {
+    clearTimeout(w.abortDeadline);
+    w.abortDeadline = undefined;
+  }
+}
+
+/**
+ * The worker didn't respond to abort within the deadline — finalize the
+ * turn ourselves and tear down the process. The next user message will
+ * dispatch a fresh fork via the normal `dispatchTurn → spawnTurn` path.
+ *
+ * Idempotent: re-entry is gated by `w.forceKilled`. The dying worker may
+ * still emit a final IPC message before the kernel reaps it; the error
+ * and turn-complete handlers honor `forceKilled` and bail.
+ */
+function forceKillStuckWorker(w: LiveWorker): void {
+  if (w.forceKilled) return;
+  if (!live.has(w.agentName)) return;
+  w.forceKilled = true;
+  w.abortDeadline = undefined;
+
+  logger.log("warn", "worker.abort.force-kill", {
+    agent: w.agentName,
+    turnId: w.turnId,
+  });
+
+  insertErrorBlock(w, {
+    code: "stopped_forced",
+    headline: "Stopped — worker did not respond to abort, restarted",
+    rawMessage:
+      "Stop deadline exceeded: the worker process ignored the abort signal " +
+      "for 2s. The agent has been killed; the next message will spawn a " +
+      "fresh worker.",
+  });
+  finalizeStreamingBlocks(w, "aborted");
+  // Emit the in-band TurnErrorEvent so any consumers still listening for
+  // it know a force-kill happened (vs. a clean abort).
+  eventBus.publish({
+    v: 1,
+    type: "error",
+    turn_id: w.turnId,
+    agent: w.agentName,
+    code: "stopped_forced",
+    message: "Stop forced — worker unresponsive",
+    recoverable: true,
+  });
+  eventBus.publish({
+    v: 1,
+    type: "turn_done",
+    turn_id: w.turnId,
+    agent: w.agentName,
+    status: "aborted",
+  });
+  // Drop the live-turn entry now so the upcoming child.exit handler's
+  // safety-net `finalizeStreamingBlocks` is a no-op (would otherwise
+  // double-publish block_complete for the same blocks).
+  liveTurns.dropTurn(w.turnId);
+  w.lastExitStatus = "aborted";
+  w.status = "idle";
+  registry.setStatus(w.agentName, "idle");
+
+  // Tear down the process group. We've already waited 2s for the worker
+  // to honor the abort IPC, so skip the graceful 'stop' command and go
+  // straight to SIGTERM. SIGKILL fallback at +1.5s catches anything that
+  // ignored SIGTERM. The child.on("exit") handler removes the agent from
+  // `live` and emits agent_lifecycle/complete; the next dispatchTurn
+  // forks fresh.
+  killPgrp(w.pgid, "SIGTERM");
+  setTimeout(() => {
+    if (live.has(w.agentName)) killPgrp(w.pgid, "SIGKILL");
+  }, 1_500).unref();
 }
 
 /**
@@ -684,18 +794,78 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       handleBlockStop(w, e);
       break;
     }
-    case "error":
-      w.lastExitStatus = w.abortRequested ? "aborted" : "error";
+    case "error": {
+      // FRI-12: a worker response — even an error — means the abort was
+      // honored; cancel the force-kill deadline so we don't redundantly
+      // kill an already-cooperative worker.
+      clearAbortDeadline(w);
+      // forceKillStuckWorker has already finalized this turn. The worker
+      // may still emit a final IPC message before the kernel reaps it;
+      // ignore it so we don't double-publish turn_done.
+      if (w.forceKilled) break;
+      const wasAbort = w.abortRequested;
+      w.lastExitStatus = wasAbort ? "aborted" : "error";
+      // Materialize the failure as a chat-visible error block so the user
+      // sees what happened (was previously silent — the worker emitted an
+      // IPC error but no DB row was written, leaving the bubble in
+      // "running" until reconcile-on-restart). Skipped for plain aborts:
+      // the bubble is already visible via the user's Stop click and the
+      // assistant text bubble flips to "aborted" via finishTurn below.
+      if (!wasAbort) {
+        insertErrorBlock(w, {
+          code: e.code ?? "worker_error",
+          headline: e.headline ?? e.message,
+          httpStatus: e.httpStatus,
+          retryAfterSeconds: e.retryAfterSeconds,
+          requestId: e.requestId,
+          rawMessage: e.rawMessage ?? e.message,
+        });
+      }
+      // Close any blocks left at status='streaming' so their dashboard
+      // bubbles transition off "running". finalizeStreamingBlocks is
+      // idempotent — safe to call even when the inflight set is empty.
+      finalizeStreamingBlocks(w, wasAbort ? "aborted" : "error");
+      // Publish the canonical TurnErrorEvent (kept for any consumer that
+      // listens for it) BEFORE the synthesized turn_done — clients route
+      // both, but ordering means the error metadata is in hand by the time
+      // the turn flips terminal.
       eventBus.publish({
         v: 1,
         type: "error",
         turn_id: w.turnId,
         agent: w.agentName,
-        code: w.abortRequested ? "aborted" : "worker_error",
+        code: wasAbort ? "aborted" : (e.code ?? "worker_error"),
         message: e.message,
         recoverable: e.recoverable,
       });
+      // The missing event that caused the wedge: without turn_done, the
+      // dashboard's inflightTurnId stays pinned to this turn forever.
+      eventBus.publish({
+        v: 1,
+        type: "turn_done",
+        turn_id: w.turnId,
+        agent: w.agentName,
+        status: wasAbort ? "aborted" : "error",
+      });
+      // Clean up live state the way turn-complete would. The worker
+      // process keeps running (long-lived agents stay alive across
+      // failures); reset its bookkeeping so the next prompt dispatches
+      // cleanly.
+      liveTurns.dropTurn(w.turnId);
+      w.status = "idle";
+      w.completedAtLeastOnce = true;
+      registry.setStatus(w.agentName, "idle");
+      eventBus.publish({
+        v: 1,
+        type: "agent_status",
+        agent: w.agentName,
+        status: "idle",
+        since: Date.now(),
+      });
+      const next = w.nextPrompts.shift();
+      if (next) sendPrompt(w, next);
       break;
+    }
     case "status-change":
       w.status = e.status;
       eventBus.publish({
@@ -707,6 +877,12 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       });
       break;
     case "turn-complete": {
+      // FRI-12: same cancellation as the error path. If the worker raced
+      // to completion right around the abort deadline, the in-flight
+      // turn_done is the truthful one — don't kill the worker on top of
+      // a successful (or cleanly-aborted) turn.
+      clearAbortDeadline(w);
+      if (w.forceKilled) break;
       const durationMs = Date.now() - w.turnStart;
       eventBus.publish({
         v: 1,
@@ -1096,6 +1272,112 @@ function handleBlockStop(
     status: e.status,
     contentJson: e.contentJson,
   });
+}
+
+/* ---------------- Error block insertion (FRI-12) ---------------- */
+
+export interface ErrorBlockPayload {
+  code: string;
+  headline: string;
+  httpStatus?: number;
+  retryAfterSeconds?: number;
+  requestId?: string;
+  rawMessage: string;
+}
+
+/**
+ * Persist a synthetic `kind="error"` block for the current turn and publish
+ * the matching `block_start` + `block_complete` SSE pair so the dashboard
+ * materializes it as an error bubble. Used by the worker `error` IPC path
+ * (SDK throws — 529, 429, 401, …) and by the stop force-kill safety net
+ * (worker unresponsive after 2s of abort). Idempotent at the row level via
+ * the unique `block_id`; callers should not re-invoke for the same failure.
+ *
+ * The block_index is computed as `max(existing) + 1` from `liveTurns` when
+ * available, falling back to `9999` after `dropTurn` has cleared the entry.
+ * The exact value doesn't matter for ordering — the dashboard sorts by
+ * `ts` / `block_id` — but we keep it monotonic so DB scans look sane.
+ */
+export function insertErrorBlock(
+  w: LiveWorker,
+  payload: ErrorBlockPayload,
+): { blockId: string } | null {
+  const sessionId = w.sessionId ?? "__pending__";
+  const blockId = randomUUID();
+  const ts = Date.now();
+  const lt = liveTurns.getLiveTurn(w.turnId);
+  let blockIndex = 9999;
+  if (lt) {
+    let max = -1;
+    for (const live of lt.blocks.values()) {
+      if (live.blockIndex > max) max = live.blockIndex;
+    }
+    if (max >= 0) blockIndex = max + 1;
+  }
+  const contentJson = JSON.stringify(payload);
+  try {
+    writeAndPublish(
+      {
+        v: 1,
+        type: "block_start",
+        turn_id: w.turnId,
+        agent: w.agentName,
+        block_id: blockId,
+        message_id: null,
+        block_index: blockIndex,
+        role: "assistant",
+        kind: "error",
+        source: null,
+        ts,
+      },
+      (seq) => {
+        insertBlock({
+          blockId,
+          turnId: w.turnId,
+          agentName: w.agentName,
+          sessionId,
+          messageId: null,
+          blockIndex,
+          role: "assistant",
+          kind: "error",
+          source: null,
+          contentJson,
+          status: "complete",
+          ts,
+          lastEventSeq: seq,
+        });
+      },
+    );
+    writeAndPublish(
+      {
+        v: 1,
+        type: "block_complete",
+        turn_id: w.turnId,
+        agent: w.agentName,
+        block_id: blockId,
+        message_id: null,
+        block_index: blockIndex,
+        role: "assistant",
+        kind: "error",
+        source: null,
+        content_json: contentJson,
+        status: "complete",
+        ts,
+      },
+      (seq) => {
+        updateBlock(blockId, { lastEventSeq: seq });
+      },
+    );
+    return { blockId };
+  } catch (err) {
+    logger.log("warn", "blocks.error.insert.fail", {
+      agent: w.agentName,
+      turnId: w.turnId,
+      blockId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 /* ---------------- In-flight block teardown (F4-A + FRI-4 #2) ---------------- */

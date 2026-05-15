@@ -79,6 +79,20 @@ export interface ChatMessage {
   /** Set when the send-queue's flush returned a 5xx / network error and
    *  the queue is scheduling a backoff retry (FIX_FORWARD 2.6). */
   retrying?: boolean;
+
+  /** When set to `"error"`, this bubble is a synthetic error notification
+   *  (FRI-12) emitted by the daemon when the SDK throws (529, 429, 401,
+   *  network) or the stop force-kill safety net fires. The bubble's
+   *  `role` stays `"assistant"` so it slots into the assistant lane;
+   *  ChatMessages discriminates on `kind` to render the ErrorBlock with
+   *  Resend / Resume / Details affordances. */
+  kind?: "error";
+  errorCode?: string;
+  errorHeadline?: string;
+  httpStatus?: number;
+  retryAfterSeconds?: number;
+  requestId?: string;
+  rawErrorMessage?: string;
 }
 
 export interface AgentInfo {
@@ -145,7 +159,40 @@ export class ChatState {
   /** Daemon boot timestamp (unix ms) from connection_established. Drives
    *  the connectivity widget's uptime tail (FIX_FORWARD 3.10). */
   bootTs = $state<number | null>(null);
-  inflightTurnId = $state<string | null>(null);
+  /**
+   * Per-agent inflight turn tracking (FRI-12). Was previously a single
+   * global value; that meant a wedged turn on agent A leaked into agent
+   * B's input bar — switching to B showed Stop instead of Send because
+   * `busy = chat.inflightTurnId !== null` had no agent context. Now each
+   * agent's slot is tracked independently and the public `inflightTurnId`
+   * getter resolves against the focused agent.
+   */
+  inflightTurnIdByAgent = $state<Record<string, string | null>>({});
+  /**
+   * Backwards-compatible accessor: returns the focused agent's slot, or
+   * null when that agent has no in-flight turn. ChatInput.svelte's
+   * `busy = chat.inflightTurnId !== null` derivation reads this and stays
+   * reactive because the getter touches both `focusedAgent` and the map.
+   */
+  get inflightTurnId(): string | null {
+    return this.inflightTurnIdByAgent[this.focusedAgent] ?? null;
+  }
+  /**
+   * Setter writes to the focused agent's slot. Used by the optimistic-
+   * send path in ChatInput.svelte where the user is, by definition,
+   * acting on the focused agent.
+   */
+  set inflightTurnId(turnId: string | null) {
+    this.inflightTurnIdByAgent[this.focusedAgent] = turnId;
+  }
+  /**
+   * Explicit per-agent setter. Use this when the agent is known but may
+   * not be the focused one (e.g., SSE turn_started for a background
+   * agent).
+   */
+  markInflight(agent: string, turnId: string | null): void {
+    this.inflightTurnIdByAgent[agent] = turnId;
+  }
   connected = $state(false);
   /** Per-agent unread badge counts (FIX_FORWARD 3.6). Bumped by SSE
    *  `agent_message` events while another agent is focused; cleared when
@@ -596,7 +643,7 @@ export class ChatState {
   }
 
   startAssistantTurn(turnId: string, agent: string): void {
-    this.inflightTurnId = turnId;
+    this.markInflight(agent, turnId);
     this.messages.push({
       id: turnId,
       role: "assistant",
@@ -685,7 +732,120 @@ export class ChatState {
         m.status = status === "complete" ? "done" : status;
       }
     }
-    if (this.inflightTurnId === turnId) this.inflightTurnId = null;
+    // Inflight-slot cleanup is delegated to `clearInflightForTurn` so
+    // applyEvent's `turn_done` / `error` cases can clear the slot for
+    // non-focused agents without going through the message-walking
+    // path here (which only ever touches focused-agent messages).
+    this.clearInflightForTurn(turnId);
+  }
+
+  /**
+   * Clear any per-agent inflight slot whose value matches `turnId`.
+   * Preserves the requestStop race invariant — if a mail-driven T2
+   * started on the same agent before T1's terminal event landed, the
+   * slot was already overwritten to T2 and won't be clobbered here.
+   */
+  clearInflightForTurn(turnId: string): void {
+    for (const [agent, slotTurnId] of Object.entries(this.inflightTurnIdByAgent)) {
+      if (slotTurnId === turnId) this.inflightTurnIdByAgent[agent] = null;
+    }
+  }
+
+  /* ------------ FRI-12: Resend / Resume helpers ------------ */
+
+  /** Find the original user text for a turn, when present in the
+   *  currently-loaded messages. Used by the error bubble's CTAs to know
+   *  whether Resend has anything to send. */
+  private originalUserTextForTurn(turnId: string): string | null {
+    // The user-block id is stable across canonical id schemes:
+    // `userBlockIdForTurn(turnId)` for SSE-materialized rows, and a
+    // pending-bubble's id is `p_<queueId>` (different — won't collide).
+    const id = userBlockIdForTurn(turnId);
+    const m = this.messages.find((x) => x.id === id);
+    if (m && m.role === "user" && typeof m.text === "string" && m.text.trim().length > 0) {
+      return m.text;
+    }
+    return null;
+  }
+
+  canResendTurn(turnId: string | undefined): boolean {
+    if (!turnId) return false;
+    if (this.originalUserTextForTurn(turnId) === null) return false;
+    // Resend always queues a fresh turn — no in-flight gating needed
+    // (sendQueue handles its own concurrency).
+    return true;
+  }
+
+  canResumeTurn(turnId: string | undefined, errorCode: string | undefined): boolean {
+    if (!turnId) return false;
+    if (this.originalUserTextForTurn(turnId) === null) return false;
+    // 401 / 403 / 400 / 404 won't get better on retry — re-dispatching
+    // the same prompt to the same model with the same auth produces
+    // the same error.
+    if (errorCode === "unauthorized" || errorCode === "forbidden") return false;
+    if (errorCode === "bad_request" || errorCode === "not_found") return false;
+    // Disable while any other turn is in flight on the focused agent.
+    if (this.inflightTurnId !== null) return false;
+    return true;
+  }
+
+  /**
+   * Recover the original user prompt for a failed turn and queue it as a
+   * fresh send. The new turn gets a new turn_id (the daemon mints one);
+   * the error bubble stays under the failed turn_id and the new turn
+   * appears below it.
+   */
+  resendUserText(turnId: string): void {
+    const text = this.originalUserTextForTurn(turnId);
+    if (text === null) {
+      this.setToast("Cannot resend — original message not found.", "warn");
+      return;
+    }
+    // Mirror ChatInput's send path: enqueue, push the pending bubble,
+    // then flush. The optimistic bubble pins to the bottom until the
+    // daemon's `turn_started` confirms; on confirm, `confirmPending`
+    // re-keys it to its canonical user-block id.
+    const item = sendQueue.enqueue({ agent: this.focusedAgent, text });
+    this.addUser(text, { queueId: item.id });
+    void sendQueue.flush().then((result) => {
+      for (const s of result.sent) {
+        this.confirmPending(s.queueId, s.turnId);
+        this.markInflight(this.focusedAgent, s.turnId);
+      }
+      for (const qid of result.failed) this.markPendingFailed(qid);
+      for (const qid of result.retrying) this.markPendingRetrying(qid);
+    });
+  }
+
+  /**
+   * Re-dispatch the original prompt under the SAME turn_id so the retry's
+   * blocks visually group with the error bubble. Hits the dedicated
+   * `/api/chat/turn/:turnId/resume` endpoint; the daemon looks up the
+   * original user block server-side (so we don't have to send the text
+   * back over the wire) and reuses dispatchTurn.
+   */
+  async resumeTurn(turnId: string): Promise<void> {
+    try {
+      const r = await fetchWithTimeout(
+        `/api/chat/turn/${encodeURIComponent(turnId)}/resume`,
+        { method: "POST", timeoutMs: 10_000 },
+      );
+      if (!r.ok) {
+        let msg = `Resume failed (${r.status})`;
+        try {
+          const body = (await r.json()) as { message?: string; error?: string };
+          if (body.message) msg = `Resume failed: ${body.message}`;
+          else if (body.error) msg = `Resume failed: ${body.error}`;
+        } catch {
+          // ignore — keep the generic message
+        }
+        this.setToast(msg, "warn");
+      }
+      // Success path: the daemon's `turn_started` SSE will arrive next
+      // and populate inflightTurnId. Nothing else to do here.
+    } catch {
+      this.setToast("Resume failed (network).", "warn");
+    }
   }
 
   /**
@@ -991,7 +1151,7 @@ export class ChatState {
           break;
         }
       }
-      if (latestTurnId) this.inflightTurnId = latestTurnId;
+      if (latestTurnId) this.markInflight(agent, latestTurnId);
     } catch {
       // ignore — fallback path is the next turn_started SSE frame.
     }
@@ -1097,9 +1257,11 @@ export class ChatState {
         // button on a frozen chat.
         const a = this.agents.find((x) => x.name === event.agent);
         if (a?.status === "archived") break;
-        if (event.agent === this.focusedAgent) {
-          this.inflightTurnId = event.turn_id;
-        }
+        // FRI-12: write per-agent regardless of focus. The dashboard
+        // pages between agents but the daemon's wedge state is per-
+        // agent — switching focus must not leak agent A's stuck
+        // inflight onto agent B's input bar.
+        this.markInflight(event.agent, event.turn_id);
         break;
       }
       case "block_start":
@@ -1122,10 +1284,20 @@ export class ChatState {
         void this.loadAgentTurns(event.agent);
         break;
       case "turn_done":
+        // FRI-12: always clear the per-agent inflight slot for this
+        // turn — quarantine of inflight state is global state and must
+        // not be gated on focus, otherwise switching to a non-focused
+        // agent leaks the wedge indicator. The bubble-status walk
+        // below stays focus-gated because chat.messages only holds the
+        // focused agent's bubbles.
+        this.clearInflightForTurn(event.turn_id);
         if (event.agent !== this.focusedAgent) break;
         this.finishTurn(event.turn_id, event.status);
         break;
       case "error":
+        // Same per-agent quarantine: clear the slot for this turn even
+        // when the event is for a non-focused agent.
+        if (event.turn_id) this.clearInflightForTurn(event.turn_id);
         if (event.agent !== this.focusedAgent) break;
         if (event.turn_id) this.finishTurn(event.turn_id, "error");
         break;
@@ -1185,11 +1357,15 @@ export class ChatState {
     block_id: string;
     block_index: number;
     role: string;
-    kind: "text" | "thinking" | "tool_use" | "tool_result";
+    kind: "text" | "thinking" | "tool_use" | "tool_result" | "error";
     turn_id: string;
     tool?: { id: string; name: string };
     ts: number;
   }): void {
+    // FRI-12: error blocks ship as a fused start+complete pair from the
+    // daemon. We materialize the bubble on `block_complete` only — the
+    // start carries no useful metadata and would push an empty placeholder.
+    if (event.kind === "error") return;
     if (event.kind === "text") {
       const role = event.role === "user" ? "user" : "assistant";
       // FIX_FORWARD 2.6: user blocks key by turn_id so the local pending
@@ -1270,7 +1446,7 @@ export class ChatState {
 
   private handleBlockComplete(event: {
     block_id: string;
-    kind: "text" | "thinking" | "tool_use" | "tool_result";
+    kind: "text" | "thinking" | "tool_use" | "tool_result" | "error";
     content_json: string;
     status: "complete" | "aborted" | "error";
     turn_id: string;
@@ -1278,6 +1454,38 @@ export class ChatState {
     source: string | null;
     ts: number;
   }): void {
+    if (event.kind === "error") {
+      const errPayload = parseErrorContent(event.content_json);
+      const id = `e_${event.block_id}`;
+      // Idempotent — ring-buffer replay or reload-mid-error must not double-add.
+      const existing = this.messages.find((m) => m.id === id);
+      if (existing) {
+        existing.errorCode = errPayload.code;
+        existing.errorHeadline = errPayload.headline;
+        existing.httpStatus = errPayload.httpStatus;
+        existing.retryAfterSeconds = errPayload.retryAfterSeconds;
+        existing.requestId = errPayload.requestId;
+        existing.rawErrorMessage = errPayload.rawMessage;
+        return;
+      }
+      this.messages.push({
+        id,
+        role: "assistant",
+        kind: "error",
+        text: errPayload.headline,
+        status: "error",
+        agent: this.focusedAgent,
+        turnId: event.turn_id,
+        ts: event.ts,
+        errorCode: errPayload.code,
+        errorHeadline: errPayload.headline,
+        httpStatus: errPayload.httpStatus,
+        retryAfterSeconds: errPayload.retryAfterSeconds,
+        requestId: errPayload.requestId,
+        rawErrorMessage: errPayload.rawMessage,
+      });
+      return;
+    }
     const parsed = parseBlockContent(event.content_json);
     if (event.kind === "text") {
       if (isNoResponseSentinel(event.role, parsed.text)) return;
@@ -1455,6 +1663,40 @@ function parseBlockContent(contentJson: string): ParsedBlockContent {
   }
 }
 
+/** Parsed shape of a `kind="error"` block's content_json. Mirrors the
+ *  daemon-side `ErrorBlockPayload` (services/daemon/src/agent/lifecycle.ts).
+ *  Defensive defaults so a malformed/legacy row still renders something. */
+export interface ParsedErrorContent {
+  code: string;
+  headline: string;
+  httpStatus?: number;
+  retryAfterSeconds?: number;
+  requestId?: string;
+  rawMessage: string;
+}
+
+function parseErrorContent(contentJson: string): ParsedErrorContent {
+  try {
+    const raw = JSON.parse(contentJson) as Partial<ParsedErrorContent>;
+    return {
+      code: typeof raw.code === "string" ? raw.code : "unknown",
+      headline:
+        typeof raw.headline === "string" && raw.headline.length > 0
+          ? raw.headline
+          : "Something went wrong",
+      httpStatus: typeof raw.httpStatus === "number" ? raw.httpStatus : undefined,
+      retryAfterSeconds:
+        typeof raw.retryAfterSeconds === "number" && raw.retryAfterSeconds >= 0
+          ? raw.retryAfterSeconds
+          : undefined,
+      requestId: typeof raw.requestId === "string" ? raw.requestId : undefined,
+      rawMessage: typeof raw.rawMessage === "string" ? raw.rawMessage : contentJson,
+    };
+  } catch {
+    return { code: "unknown", headline: "Something went wrong", rawMessage: contentJson };
+  }
+}
+
 /** Pull the mail metadata out of a parsed content_json, if present. The
  *  daemon writes these fields only for `source='mail'` blocks; older mail
  *  rows persisted before the schema gained these fields will return
@@ -1585,6 +1827,28 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
       };
       out.push(msg);
       toolByToolId.set(toolId, msg);
+    } else if (b.kind === "error") {
+      // FRI-12: synthetic error bubble persisted by the daemon when the
+      // SDK throws or the stop force-kill safety net fires. Mirror the
+      // SSE `block_complete` materialization shape so reload-mid-error
+      // and live-error converge on the same id (e_<blockId>).
+      const errPayload = parseErrorContent(b.contentJson);
+      out.push({
+        id: `e_${b.blockId}`,
+        role: "assistant",
+        kind: "error",
+        text: errPayload.headline,
+        status: "error",
+        agent,
+        turnId: b.turnId,
+        ts: b.ts,
+        errorCode: errPayload.code,
+        errorHeadline: errPayload.headline,
+        httpStatus: errPayload.httpStatus,
+        retryAfterSeconds: errPayload.retryAfterSeconds,
+        requestId: errPayload.requestId,
+        rawErrorMessage: errPayload.rawMessage,
+      });
     } else if (b.kind === "tool_result") {
       const toolId = parsed.tool_use_id ?? "";
       const status = parsed.is_error ? "error" : "done";

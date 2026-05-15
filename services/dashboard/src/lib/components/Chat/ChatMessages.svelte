@@ -6,6 +6,7 @@
   import ToolBlock from "$lib/components/Chat/ToolBlock.svelte";
   import ThinkingBlock from "$lib/components/Chat/ThinkingBlock.svelte";
   import MailBlock from "$lib/components/Chat/MailBlock.svelte";
+  import ErrorBlock from "$lib/components/Chat/ErrorBlock.svelte";
 
   function queueEntry(queueId: string | undefined) {
     if (!queueId) return undefined;
@@ -366,7 +367,31 @@
     {/if}
   {/if}
   {#each list as msg (msg.id)}
-    {#if msg.role === "tool"}
+    {#if msg.kind === "error"}
+      <div
+        class="message inline"
+        class:jump-highlight={!readonly && chat.highlightedMessageId === msg.id}
+        onanimationend={(e: AnimationEvent) => {
+          if (e.animationName === "jump-pulse" && chat.highlightedMessageId === msg.id) {
+            chat.highlightedMessageId = null;
+          }
+        }}
+        data-status="error"
+        data-msg-id={msg.id}>
+        <ErrorBlock
+          headline={msg.errorHeadline ?? msg.text}
+          code={msg.errorCode ?? "unknown"}
+          ts={msg.ts}
+          retryAfterSeconds={msg.retryAfterSeconds}
+          httpStatus={msg.httpStatus}
+          requestId={msg.requestId}
+          rawMessage={msg.rawErrorMessage}
+          canResend={!readonly && chat.canResendTurn(msg.turnId)}
+          canResume={!readonly && chat.canResumeTurn(msg.turnId, msg.errorCode)}
+          onResend={() => msg.turnId && chat.resendUserText(msg.turnId)}
+          onResume={() => msg.turnId && chat.resumeTurn(msg.turnId)} />
+      </div>
+    {:else if msg.role === "tool"}
       <div class="message inline">
         <ToolBlock
           toolName={msg.toolName ?? ""}

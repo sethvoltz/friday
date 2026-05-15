@@ -22,6 +22,7 @@ import {
   externalLinks,
   fetchBlocksByAgent,
   getAttachment,
+  listBlocksByTurn,
   getMail,
   getTicket,
   inbox,
@@ -257,6 +258,95 @@ async function handle(
     const agent = findAgentByTurnId(turnId);
     const aborted = agent ? abortTurn(agent) : false;
     return json(res, 200, { aborted, turn_id: turnId, agent });
+  }
+
+  if (method === "POST" && path.startsWith("/api/chat/turn/") && path.endsWith("/resume")) {
+    // FRI-12: "Resume" CTA on an error bubble. Re-dispatch the original
+    // user prompt under the SAME turn_id so the retry's content blocks
+    // visually group with the error bubble in the chat. The SDK session
+    // is already past that point — this is a fresh prompt; it just
+    // shares the turn label.
+    const turnId = path.split("/")[4];
+    const blocks = listBlocksByTurn(turnId);
+    if (blocks.length === 0) {
+      return json(res, 404, { error: "turn_not_found", turn_id: turnId });
+    }
+    const userBlock = blocks.find(
+      (b) => b.role === "user" && b.kind === "text",
+    );
+    if (!userBlock) {
+      return json(res, 422, {
+        error: "no_user_prompt",
+        turn_id: turnId,
+        message: "Cannot resume — original user prompt not found in turn",
+      });
+    }
+    const agentName = userBlock.agentName;
+    if (findAgentByTurnId(turnId)) {
+      return json(res, 409, {
+        error: "turn_in_flight",
+        turn_id: turnId,
+        message: "A turn is already in flight for this agent",
+      });
+    }
+    const agentRow = registry.getAgent(agentName);
+    if (!agentRow) {
+      return json(res, 404, { error: "agent_not_found", agent: agentName });
+    }
+    const live = peekLiveWorker(agentName);
+    if (live && live.status === "working") {
+      return json(res, 409, {
+        error: "agent_busy",
+        agent: agentName,
+        message: "Agent is currently busy with another turn",
+      });
+    }
+
+    let parsedText = "";
+    try {
+      const parsed = JSON.parse(userBlock.contentJson) as { text?: unknown };
+      if (typeof parsed.text === "string") parsedText = parsed.text;
+    } catch {
+      return json(res, 422, {
+        error: "user_block_corrupt",
+        turn_id: turnId,
+      });
+    }
+    if (!parsedText.trim()) {
+      return json(res, 422, { error: "empty_user_prompt", turn_id: turnId });
+    }
+
+    const stack = readPromptStack(agentRow.type, []);
+    const baseSystemPrompt = composeSystemPrompt(stack, {
+      agentName: agentRow.name,
+      agentType: agentRow.type,
+      parentName:
+        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+    });
+    const wrappedPrompt = wrapWithRecall(parsedText, parsedText, "user_chat");
+    const modelCfg = normalizeModelConfig(cfg.model);
+    dispatchTurn({
+      agentName,
+      options: {
+        agentName,
+        agentType: agentRow.type,
+        workingDirectory: registry.workingDirectoryFor(agentRow),
+        systemPrompt: baseSystemPrompt,
+        prompt: wrappedPrompt,
+        turnId, // <-- reuse the failed turn's id
+        model: modelCfg.name,
+        thinking: modelCfg.thinking,
+        effort: modelCfg.effort,
+        resumeSessionId: agentRow.sessionId ?? undefined,
+        daemonPort: cfg.daemonPort,
+        parentName:
+          "parentName" in agentRow
+            ? agentRow.parentName ?? undefined
+            : undefined,
+        mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
+      },
+    });
+    return json(res, 200, { turn_id: turnId, agent: agentName });
   }
 
   // --- Agents ---

@@ -143,7 +143,7 @@ export interface SystemBannerEvent extends BaseEvent {
 // the row's `last_event_seq` always advances strictly before the matching SSE
 // event lands (ADR-004 at block granularity, FIX_FORWARD 1.10).
 
-export type BlockKind = "text" | "thinking" | "tool_use" | "tool_result";
+export type BlockKind = "text" | "thinking" | "tool_use" | "tool_result" | "error";
 
 export interface BlockStartEvent extends BaseEvent {
   type: "block_start";

@@ -152,5 +152,17 @@ export type WorkerEvent =
       };
     }
   | { type: "status-change"; status: "idle" | "working" }
-  | { type: "error"; message: string; recoverable: boolean }
+  | {
+      type: "error";
+      message: string;
+      recoverable: boolean;
+      /** Structured fields from `classifySdkError`. Absent on the abort
+       *  branch (the daemon synthesizes its own headline for stops). */
+      code?: string;
+      headline?: string;
+      httpStatus?: number;
+      retryAfterSeconds?: number;
+      requestId?: string;
+      rawMessage?: string;
+    }
   | { type: "heartbeat" };

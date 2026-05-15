@@ -1617,3 +1617,261 @@ describe("requestStop (stopping state machine)", () => {
     );
   });
 });
+
+// FRI-12: error visibility + per-agent inflight quarantine.
+//
+// Three regressions covered here:
+//   1. Worker error IPCs (529, 429, 401, …) must materialize as visible
+//      error bubbles — they used to be silent until reconcile-on-restart.
+//   2. The dashboard's `inflightTurnId` was a single global value; a
+//      wedged turn on agent A leaked into agent B's input bar.
+//   3. `turn_done` after an SDK error must clear the inflight slot so the
+//      Stop / aurora UI doesn't hang.
+describe("FRI-12: error block materialization", () => {
+  it("block_complete with kind='error' creates a synthetic error bubble at e_<blockId>", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "turn-err-1",
+      agent: "friday",
+      block_id: "blk-err-1",
+      message_id: null,
+      block_index: 9999,
+      role: "assistant",
+      kind: "error",
+      source: null,
+      content_json: JSON.stringify({
+        code: "overloaded",
+        headline: "Anthropic temporarily overloaded — usually clears in a moment",
+        httpStatus: 529,
+        requestId: "req_abc",
+        rawMessage: `529 {"error":{"message":"Overloaded"}}`,
+      }),
+      status: "complete",
+      ts: 100,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    const bubble = chat.messages.find((m) => m.id === "e_blk-err-1");
+    expect(bubble).toBeDefined();
+    expect(bubble!.kind).toBe("error");
+    expect(bubble!.role).toBe("assistant");
+    expect(bubble!.errorCode).toBe("overloaded");
+    expect(bubble!.httpStatus).toBe(529);
+    expect(bubble!.requestId).toBe("req_abc");
+    expect(bubble!.errorHeadline).toContain("overloaded");
+    expect(bubble!.text).toContain("overloaded"); // text mirrors headline for fallback rendering
+  });
+
+  it("repeated block_complete(error) for the same blockId does not duplicate the bubble", async () => {
+    // Ring-buffer replay scenario: SSE redelivers the same block_complete.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    const event = {
+      v: 1,
+      type: "block_complete",
+      turn_id: "turn-err-2",
+      agent: "friday",
+      block_id: "blk-err-2",
+      message_id: null,
+      block_index: 9999,
+      role: "assistant",
+      kind: "error",
+      source: null,
+      content_json: JSON.stringify({
+        code: "rate_limited",
+        headline: "Rate limited",
+        httpStatus: 429,
+        retryAfterSeconds: 30,
+        rawMessage: "429 ...",
+      }),
+      status: "complete",
+      ts: 100,
+    };
+    chat.applyEvent({ ...event, seq: 1 } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({ ...event, seq: 2 } as Parameters<typeof chat.applyEvent>[0]);
+    const matches = chat.messages.filter((m) => m.id === "e_blk-err-2");
+    expect(matches.length).toBe(1);
+    expect(matches[0].retryAfterSeconds).toBe(30);
+  });
+
+  it("reload-mid-error: parseBlocks materializes the bubble and SSE replay does not double-add", async () => {
+    // Page reload while an error block exists — parseBlocks runs over
+    // the persisted row and must produce the same bubble id that SSE
+    // would have. Replay arrives over the SSE channel; idempotent.
+    const errBlock = {
+      id: 1,
+      blockId: "blk-err-3",
+      turnId: "turn-err-3",
+      agentName: "friday",
+      sessionId: "s",
+      messageId: null,
+      blockIndex: 9999,
+      role: "assistant",
+      kind: "error",
+      source: null,
+      contentJson: JSON.stringify({
+        code: "unauthorized",
+        headline: "Authentication failed — check your Anthropic API key",
+        httpStatus: 401,
+        rawMessage: "401 ...",
+      }),
+      status: "complete",
+      ts: 100,
+      lastEventSeq: 1,
+    };
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(makeResponse({ blocks: [errBlock], lastEventSeq: 1 }))
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+
+    const reloaded = chat.messages.find((m) => m.id === "e_blk-err-3");
+    expect(reloaded).toBeDefined();
+    expect(reloaded!.kind).toBe("error");
+    expect(reloaded!.errorCode).toBe("unauthorized");
+
+    // SSE replay of the same block_complete must not double-add.
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "turn-err-3",
+      agent: "friday",
+      block_id: "blk-err-3",
+      message_id: null,
+      block_index: 9999,
+      role: "assistant",
+      kind: "error",
+      source: null,
+      content_json: errBlock.contentJson,
+      status: "complete",
+      ts: 100,
+      seq: 5,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages.filter((m) => m.id === "e_blk-err-3").length).toBe(1);
+  });
+
+  it("turn_done with status='error' clears inflightTurnId on the affected agent", async () => {
+    // The wedge fix: previously the daemon's TurnErrorEvent landed but
+    // no turn_done followed, leaving `inflightTurnId` pinned forever.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Simulate inflight by setting via the public getter+setter path.
+    chat.markInflight("friday", "turn-wedge-1");
+    expect(chat.inflightTurnId).toBe("turn-wedge-1");
+
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-wedge-1",
+      agent: "friday",
+      status: "error",
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.inflightTurnId).toBe(null);
+  });
+});
+
+describe("FRI-12: per-agent inflight quarantine", () => {
+  it("inflightTurnId resolves against the focused agent, not a global value", async () => {
+    // The user-reported bug: agent A wedges, switching focus to agent B
+    // showed B as also "running" because inflightTurnId was global.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "alpha";
+    chat.markInflight("alpha", "turn-A-1");
+    expect(chat.inflightTurnId).toBe("turn-A-1");
+
+    // Switch focus to agent B (which has no inflight turn). The
+    // ChatInput's `busy = chat.inflightTurnId !== null` derivation must
+    // see null — otherwise B's input bar shows Stop instead of Send.
+    chat.focusedAgent = "beta";
+    expect(chat.inflightTurnId).toBe(null);
+
+    // Switch back to A — its inflight is preserved.
+    chat.focusedAgent = "alpha";
+    expect(chat.inflightTurnId).toBe("turn-A-1");
+  });
+
+  it("turn_started for a non-focused agent records into that agent's slot", async () => {
+    // The pre-fix code gated inflight writes on focused-agent equality.
+    // Now we record into the per-agent slot regardless so a background
+    // agent's wedge state is correctly visible when the user switches.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "alpha";
+    chat.agents = [
+      { name: "beta", type: "orchestrator", status: "working" },
+    ];
+
+    chat.applyEvent({
+      v: 1,
+      type: "turn_started",
+      turn_id: "turn-B-1",
+      agent: "beta",
+      ts: 100,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    // Focused on alpha — inflightTurnId reads alpha's slot (empty).
+    expect(chat.inflightTurnId).toBe(null);
+
+    // Switch to beta — now the inflight resolves.
+    chat.focusedAgent = "beta";
+    expect(chat.inflightTurnId).toBe("turn-B-1");
+  });
+
+  it("finishTurn clears only the slot whose value matches the turnId", async () => {
+    // Each agent has a distinct turn; finishing one must not collaterally
+    // clear another. This guards the cross-agent quarantine on the
+    // termination path.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.markInflight("alpha", "turn-A-1");
+    chat.markInflight("beta", "turn-B-1");
+
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-A-1",
+      agent: "alpha",
+      status: "complete",
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    chat.focusedAgent = "alpha";
+    expect(chat.inflightTurnId).toBe(null);
+    chat.focusedAgent = "beta";
+    expect(chat.inflightTurnId).toBe("turn-B-1");
+  });
+
+  it("archived agent's stale turn_started replay doesn't pin an inflight slot", async () => {
+    // Pre-existing guard at line 1099: archived agents skip the inflight
+    // write. The per-agent refactor must preserve it — otherwise a
+    // ring-buffer replay revives a Stop button on a frozen chat.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "ghost";
+    chat.agents = [
+      { name: "ghost", type: "orchestrator", status: "archived" },
+    ];
+
+    chat.applyEvent({
+      v: 1,
+      type: "turn_started",
+      turn_id: "turn-ghost-1",
+      agent: "ghost",
+      ts: 100,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(chat.inflightTurnId).toBe(null);
+  });
+});

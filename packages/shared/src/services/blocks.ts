@@ -259,6 +259,20 @@ export function listBlocks(opts: ListBlocksOpts = {}): BlockRow[] {
     .all() as BlockRow[];
 }
 
+/** All blocks belonging to a given turn, ordered by insert id. Used by
+ *  the Resume endpoint (FRI-12) to recover the original user prompt
+ *  from a turn that errored, so the user's "Resume" CTA can re-dispatch
+ *  the same prompt under the same turn_id. */
+export function listBlocksByTurn(turnId: string): BlockRow[] {
+  const db = getDb();
+  return db
+    .select()
+    .from(schema.blocks)
+    .where(eq(schema.blocks.turnId, turnId))
+    .orderBy(asc(schema.blocks.id))
+    .all() as BlockRow[];
+}
+
 /** Most-recent block per agent — used by the per-agent cursor (FIX_FORWARD 1.7). */
 export function maxSeqByAgent(agentName: string): number {
   const db = getDb();

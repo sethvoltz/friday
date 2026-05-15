@@ -43,6 +43,13 @@
       "when": 1779047700000,
       "tag": "0005_rename_killed_to_archived",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1779147800000,
+      "tag": "0006_error_block_kind",
+      "breakpoints": true
     }
   ]
 }

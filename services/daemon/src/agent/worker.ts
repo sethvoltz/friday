@@ -27,6 +27,7 @@ import type {
   WorkerSpawnOptions,
 } from "./worker-protocol.js";
 import { extractUsageFromResult, type FinalUsage } from "./usage-capture.js";
+import { classifySdkError } from "./sdk-error.js";
 import { buildMcpServers } from "../mcp/builder.js";
 import { buildMailPrompt } from "../comms/mail-prompt.js";
 import { daemonFetch } from "../mcp/http.js";
@@ -723,10 +724,17 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
     if (aborted) {
       emit({ type: "error", message: "aborted", recoverable: true });
     } else {
+      const classified = classifySdkError(err);
       emit({
         type: "error",
-        message: err instanceof Error ? err.message : String(err),
+        message: classified.headline,
         recoverable: false,
+        code: classified.code,
+        headline: classified.headline,
+        httpStatus: classified.httpStatus,
+        retryAfterSeconds: classified.retryAfterSeconds,
+        requestId: classified.requestId,
+        rawMessage: classified.rawMessage,
       });
     }
     emit({ type: "status-change", status: "idle" });
