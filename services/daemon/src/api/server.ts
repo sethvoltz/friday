@@ -82,6 +82,7 @@ import {
   listSchedules,
   pauseSchedule,
   resumeSchedule,
+  ScheduleNameCollisionError,
   triggerSchedule,
   upsertSchedule,
 } from "../scheduler/scheduler.js";
@@ -747,7 +748,16 @@ async function handle(
   }
   if (method === "POST" && path === "/api/schedules") {
     const body = await readJson<Parameters<typeof upsertSchedule>[0]>(req);
-    upsertSchedule(body);
+    try {
+      upsertSchedule(body);
+    } catch (err) {
+      if (err instanceof ScheduleNameCollisionError) {
+        return json(res, 409, { error: err.message });
+      }
+      return json(res, 400, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     return json(res, 200, { ok: true });
   }
   if (
