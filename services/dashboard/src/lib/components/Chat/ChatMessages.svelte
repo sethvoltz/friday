@@ -602,6 +602,14 @@
     color: var(--text-inverse);
     border-color: var(--accent-primary);
   }
+  .message.assistant .bubble {
+    max-width: 100%;
+    width: 100%;
+    padding: 0;
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+  }
   .user-text {
     white-space: pre-wrap;
     font-size: 0.9rem;
