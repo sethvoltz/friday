@@ -130,7 +130,10 @@ export function composeSystemPrompt(
     .join("\n\n---\n\n");
 }
 
-/** First-boot copy: if ~/.friday/SOUL.md doesn't exist, install the default. */
+/** First-boot copy: if ~/.friday/SOUL.md doesn't exist, install the default.
+ *  Substitutes `{{YOUR_NAME}}` with the shell user's capitalized login name
+ *  (e.g. `seth` → `Seth`) so the Address rule lands ready-to-use. Personal
+ *  SOULs are never touched after first boot — the user owns the file. */
 export function ensureSoul(): void {
   if (existsSync(SOUL_PATH)) return;
   const dir = bundledPromptsDir();
@@ -138,7 +141,17 @@ export function ensureSoul(): void {
     join(dir, "fragments", "soul.default.md"),
     "utf8",
   );
-  writeFileSync(SOUL_PATH, defaultSoul);
+  const personalized = defaultSoul.replaceAll(
+    "{{YOUR_NAME}}",
+    deriveUserName(),
+  );
+  writeFileSync(SOUL_PATH, personalized);
+}
+
+function deriveUserName(): string {
+  const raw = process.env.USER || process.env.USERNAME || "";
+  if (!raw) return "the user";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
 function readSoul(): string {
