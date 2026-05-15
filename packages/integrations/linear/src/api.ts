@@ -218,6 +218,89 @@ export async function createIssue(opts: {
   return data.issueCreate.issue;
 }
 
+export interface UpdateIssueInput {
+  title?: string;
+  description?: string;
+  stateId?: string;
+}
+
+export interface UpdatedIssue {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+}
+
+/**
+ * Update an existing Linear issue. Narrow surface — `title`, `description`,
+ * `stateId` only. Caller is responsible for resolving the issue UUID (see
+ * `resolveIssueIdByIdentifier`) and any state UUID (see `getStateIdByType`).
+ */
+export async function updateIssue(opts: {
+  apiKey: string;
+  id: string;
+  input: UpdateIssueInput;
+}): Promise<UpdatedIssue> {
+  interface UpdateResult {
+    issueUpdate: {
+      success: boolean;
+      issue: UpdatedIssue | null;
+    };
+  }
+  const data = await linearQuery<UpdateResult>(
+    opts.apiKey,
+    `mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+       issueUpdate(id: $id, input: $input) {
+         success
+         issue { id identifier title url }
+       }
+     }`,
+    { id: opts.id, input: opts.input },
+  );
+  if (!data.issueUpdate.success || !data.issueUpdate.issue) {
+    throw new LinearApiError(
+      `Linear issueUpdate returned success=false for id "${opts.id}"`,
+    );
+  }
+  return data.issueUpdate.issue;
+}
+
+/**
+ * Resolve a Linear `TEAM-N` identifier to the underlying issue UUID required
+ * by mutations like `issueUpdate`. Returns `null` when no issue matches.
+ * Throws `LinearApiError` on malformed identifiers.
+ */
+export async function resolveIssueIdByIdentifier(opts: {
+  apiKey: string;
+  identifier: string;
+}): Promise<string | null> {
+  const m = opts.identifier.match(/^([A-Z][A-Z0-9_]*)-(\d+)$/);
+  if (!m) {
+    throw new LinearApiError(`Invalid Linear identifier: ${opts.identifier}`);
+  }
+  const [, teamKey, numStr] = m;
+  const number = Number.parseInt(numStr, 10);
+
+  interface IssueLookupResult {
+    issues: { nodes: Array<{ id: string }> };
+  }
+  const data = await linearQuery<IssueLookupResult>(
+    opts.apiKey,
+    `query IssueId($filter: IssueFilter) {
+       issues(filter: $filter, first: 1) {
+         nodes { id }
+       }
+     }`,
+    {
+      filter: {
+        number: { eq: number },
+        team: { key: { eq: teamKey } },
+      },
+    },
+  );
+  return data.issues.nodes[0]?.id ?? null;
+}
+
 /**
  * Look up a single issue by Linear's `TEAM-N` identifier. Linear's GraphQL
  * doesn't expose this directly, so we filter on team key + number.

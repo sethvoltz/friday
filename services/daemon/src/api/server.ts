@@ -72,9 +72,14 @@ import {
 } from "@friday/evolve";
 import {
   createIssueWithConfiguredTeam as linearCreateIssue,
+  getStateIdByType as linearGetStateIdByType,
   importIssue as linearImportIssue,
   LinearApiError,
   reconcile as linearReconcile,
+  resolveIssueIdByIdentifier as linearResolveIssueIdByIdentifier,
+  updateIssue as linearUpdateIssue,
+  type LinearStateType,
+  type UpdateIssueInput,
 } from "@friday/integrations-linear";
 import {
   deleteSchedule,
@@ -1149,6 +1154,79 @@ async function handle(
       });
     } finally {
       restore();
+    }
+  }
+  if (method === "POST" && path === "/api/integrations/linear/update-issue") {
+    const body = await readJson<{
+      identifier?: string;
+      title?: string;
+      body?: string;
+      state?: LinearStateType;
+    }>(req);
+    if (!body.identifier) {
+      return json(res, 400, { error: "identifier required" });
+    }
+    const apiKey = process.env.LINEAR_API_KEY;
+    if (!apiKey) {
+      return json(res, 400, { error: "LINEAR_API_KEY not set" });
+    }
+    if (
+      body.title === undefined &&
+      body.body === undefined &&
+      body.state === undefined
+    ) {
+      return json(res, 400, {
+        error: "at least one of title, body, state must be provided",
+      });
+    }
+    const teamKeyMatch = body.identifier.match(/^([A-Z][A-Z0-9_]*)-(\d+)$/);
+    if (!teamKeyMatch) {
+      return json(res, 400, {
+        error: `invalid Linear identifier: ${body.identifier}`,
+      });
+    }
+    const teamKey = teamKeyMatch[1];
+    try {
+      const issueId = await linearResolveIssueIdByIdentifier({
+        apiKey,
+        identifier: body.identifier,
+      });
+      if (!issueId) {
+        return json(res, 404, {
+          error: `Linear issue not found: ${body.identifier}`,
+        });
+      }
+      const input: UpdateIssueInput = {};
+      if (body.title !== undefined) input.title = body.title;
+      if (body.body !== undefined) input.description = body.body;
+      if (body.state !== undefined) {
+        const stateId = await linearGetStateIdByType({
+          apiKey,
+          teamKey,
+          stateType: body.state,
+        });
+        if (!stateId) {
+          return json(res, 400, {
+            error: `No Linear workflow state of type "${body.state}" on team "${teamKey}"`,
+          });
+        }
+        input.stateId = stateId;
+      }
+      const updated = await linearUpdateIssue({
+        apiKey,
+        id: issueId,
+        input,
+      });
+      return json(res, 200, {
+        identifier: updated.identifier,
+        title: updated.title,
+        url: updated.url,
+      });
+    } catch (err) {
+      const status = err instanceof LinearApiError ? 502 : 500;
+      return json(res, status, {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
   if (method === "POST" && path === "/api/integrations/linear/reconcile") {

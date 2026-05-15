@@ -80,6 +80,53 @@ export function buildIntegrationsServer(
         },
       ),
       tool(
+        "linear_update_issue",
+        "WRITES to Linear: update an existing Linear issue identified by `identifier` (e.g. `FRI-75`). Requires LINEAR_API_KEY. Any of `title`, `body`, `state` may be supplied; omitted fields are left unchanged. `state` is a Linear state type (`triage`, `backlog`, `unstarted`, `started`, `completed`, `canceled`) and resolves to the first workflow state of that type on the issue's team.",
+        {
+          identifier: z
+            .string()
+            .describe(
+              "Linear issue identifier, e.g. `FRI-75` (required).",
+            ),
+          title: z.string().optional().describe("New issue title."),
+          body: z
+            .string()
+            .optional()
+            .describe(
+              "New issue description, markdown supported. Maps to Linear's `description` field.",
+            ),
+          state: z
+            .enum([
+              "triage",
+              "backlog",
+              "unstarted",
+              "started",
+              "completed",
+              "canceled",
+            ])
+            .optional()
+            .describe(
+              "Linear state type to move the issue into. Resolves to the first workflow state of that type on the issue's team.",
+            ),
+        },
+        async (args) => {
+          const result = await daemonFetch({
+            ...ctx,
+            path: "/api/integrations/linear/update-issue",
+            method: "POST",
+            body: {
+              identifier: args.identifier,
+              title: args.title,
+              body: args.body,
+              state: args.state,
+            },
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        },
+      ),
+      tool(
         "linear_reconcile",
         "Run a Linear reconcile pass on demand: list active Linear issues, cross-reference against existing Friday tickets, and report orphans and stale links. Read-only — does not import.",
         {},

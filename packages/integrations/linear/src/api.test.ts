@@ -5,7 +5,9 @@ import {
   getStateIdByType,
   LinearApiError,
   listTeams,
+  resolveIssueIdByIdentifier,
   setIssueStateByType,
+  updateIssue,
 } from "./api.js";
 
 interface MockCall {
@@ -288,6 +290,106 @@ describe("createIssue", () => {
         input: { teamId: "bad", title: "X" },
       }),
     ).rejects.toThrow(/team not found/);
+  });
+});
+
+describe("resolveIssueIdByIdentifier", () => {
+  it("returns the issue UUID for a matching identifier", async () => {
+    const { calls } = installFetchMock([
+      { data: { issues: { nodes: [{ id: "issue-uuid-7" }] } } },
+    ]);
+    const id = await resolveIssueIdByIdentifier({
+      apiKey: "k",
+      identifier: "FRI-75",
+    });
+    expect(id).toBe("issue-uuid-7");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].variables).toMatchObject({
+      filter: {
+        number: { eq: 75 },
+        team: { key: { eq: "FRI" } },
+      },
+    });
+  });
+
+  it("returns null when no issue matches", async () => {
+    installFetchMock([{ data: { issues: { nodes: [] } } }]);
+    const id = await resolveIssueIdByIdentifier({
+      apiKey: "k",
+      identifier: "FRI-999",
+    });
+    expect(id).toBeNull();
+  });
+
+  it("throws LinearApiError on malformed identifier", async () => {
+    await expect(
+      resolveIssueIdByIdentifier({ apiKey: "k", identifier: "not-an-id" }),
+    ).rejects.toBeInstanceOf(LinearApiError);
+  });
+});
+
+describe("updateIssue", () => {
+  it("posts the issueUpdate mutation with the given input and returns the updated issue", async () => {
+    const { calls } = installFetchMock([
+      {
+        data: {
+          issueUpdate: {
+            success: true,
+            issue: {
+              id: "issue-uuid",
+              identifier: "FRI-75",
+              title: "New title",
+              url: "https://linear.app/team/issue/FRI-75",
+            },
+          },
+        },
+      },
+    ]);
+
+    const result = await updateIssue({
+      apiKey: "k",
+      id: "issue-uuid",
+      input: { title: "New title", description: "## body" },
+    });
+
+    expect(result).toEqual({
+      id: "issue-uuid",
+      identifier: "FRI-75",
+      title: "New title",
+      url: "https://linear.app/team/issue/FRI-75",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].query).toContain("mutation IssueUpdate");
+    expect(calls[0].variables).toEqual({
+      id: "issue-uuid",
+      input: { title: "New title", description: "## body" },
+    });
+  });
+
+  it("throws LinearApiError when issueUpdate returns success=false", async () => {
+    installFetchMock([
+      { data: { issueUpdate: { success: false, issue: null } } },
+    ]);
+    await expect(
+      updateIssue({
+        apiKey: "k",
+        id: "issue-uuid",
+        input: { title: "x" },
+      }),
+    ).rejects.toBeInstanceOf(LinearApiError);
+  });
+
+  it("throws LinearApiError when GraphQL returns errors", async () => {
+    installFetchMock([
+      { data: undefined, errors: [{ message: "issue not found" }] },
+    ]);
+    await expect(
+      updateIssue({
+        apiKey: "k",
+        id: "bad",
+        input: { title: "x" },
+      }),
+    ).rejects.toThrow(/issue not found/);
   });
 });
 
