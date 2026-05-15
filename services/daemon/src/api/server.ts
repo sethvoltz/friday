@@ -70,7 +70,9 @@ import {
   type UpdateProposalInput,
 } from "@friday/evolve";
 import {
+  createIssueWithConfiguredTeam as linearCreateIssue,
   importIssue as linearImportIssue,
+  LinearApiError,
   reconcile as linearReconcile,
 } from "@friday/integrations-linear";
 import {
@@ -997,6 +999,48 @@ async function handle(
       return json(res, 500, {
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+  if (method === "POST" && path === "/api/integrations/linear/create-issue") {
+    const body = await readJson<{
+      title?: string;
+      body?: string;
+      team?: string;
+    }>(req);
+    if (!body.title) {
+      return json(res, 400, { error: "title required" });
+    }
+    if (!process.env.LINEAR_API_KEY) {
+      return json(res, 400, { error: "LINEAR_API_KEY not set" });
+    }
+    const teamOverride = body.team;
+    const restore = teamOverride
+      ? (() => {
+          const prev = process.env.FRIDAY_LINEAR_TEAM;
+          process.env.FRIDAY_LINEAR_TEAM = teamOverride;
+          return () => {
+            if (prev === undefined) delete process.env.FRIDAY_LINEAR_TEAM;
+            else process.env.FRIDAY_LINEAR_TEAM = prev;
+          };
+        })()
+      : () => {};
+    try {
+      const { issue } = await linearCreateIssue({
+        title: body.title,
+        description: body.body,
+      });
+      return json(res, 200, {
+        identifier: issue.identifier,
+        url: issue.url,
+        id: issue.id,
+      });
+    } catch (err) {
+      const status = err instanceof LinearApiError ? 502 : 500;
+      return json(res, status, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      restore();
     }
   }
   if (method === "POST" && path === "/api/integrations/linear/reconcile") {
