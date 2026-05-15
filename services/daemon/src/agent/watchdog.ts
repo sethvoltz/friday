@@ -28,6 +28,7 @@ import {
   archiveAgent,
   liveAgentNames,
   peekLiveWorker,
+  recordUserBlock,
 } from "./lifecycle.js";
 
 const TICK_INTERVAL_MS = 30_000;
@@ -184,7 +185,25 @@ async function refork(agentName: string): Promise<void> {
   // original turn_id so the user-text block already in DB (recorded by
   // `recordUserBlock` at POST time) binds back to its assistant
   // response.
-  dispatch(noticePrompt, `t_${randomUUID()}`);
+  const noticeTurnId = `t_${randomUUID()}`;
+  // FRI-71: persist the notice as a user block so the refork's first
+  // assistant reply renders against an originating bubble instead of
+  // dangling orphan.
+  try {
+    recordUserBlock({
+      turnId: noticeTurnId,
+      agentName,
+      sessionId: a.sessionId ?? undefined,
+      text: noticePrompt,
+      source: "refork_notice",
+    });
+  } catch (err) {
+    logger.log("warn", "watchdog.refork.user-block.error", {
+      agent: agentName,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+  dispatch(noticePrompt, noticeTurnId);
   if (drained.length > 0) {
     logger.log("info", "watchdog.refork.redeliver", {
       agent: agentName,

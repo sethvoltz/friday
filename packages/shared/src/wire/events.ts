@@ -157,7 +157,7 @@ export interface BlockStartEvent extends BaseEvent {
   /** 'user' | 'assistant' | 'system'. */
   role: string;
   kind: BlockKind;
-  /** 'user_chat' | 'mail' | 'queue_inject' | 'sdk' | null. */
+  /** 'user_chat' | 'mail' | 'queue_inject' | 'sdk' | 'scratch' | 'agent_spawn' | 'schedule' | 'refork_notice' | null. */
   source: string | null;
   /** Tool metadata captured at start, when kind === 'tool_use'. */
   tool?: { id: string; name: string };

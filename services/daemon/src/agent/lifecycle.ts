@@ -1600,7 +1600,14 @@ export interface RecordUserBlockInput {
   /** Falls back to '__pending__' if the agent doesn't yet have a session. */
   sessionId?: string;
   text: string;
-  source: "user_chat" | "mail" | "queue_inject";
+  source:
+    | "user_chat"
+    | "mail"
+    | "queue_inject"
+    | "scratch"
+    | "agent_spawn"
+    | "schedule"
+    | "refork_notice";
   /** `complete` for the common path (block is final the moment it's
    *  written). `queued` for user_chat POSTs that arrived while the agent
    *  was mid-turn — the row is parked until the worker drains it from

@@ -180,6 +180,53 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(JSON.parse(row!.contentJson)).toEqual({ text: "no attachments" });
   });
 
+  // FRI-71: spawn-time prompt paths (scratch, agent_spawn, schedule,
+  // refork_notice) must persist a user block so the first turn renders
+  // with the originating user bubble rather than an orphan assistant
+  // reply. Each source takes the SSE-emitting code path (no upstream
+  // optimistic bubble to race) and lands the prompt text verbatim.
+  it.each([
+    ["scratch", "seed topic from /scratch"],
+    ["agent_spawn", "build the thing"],
+    ["schedule", "daily standup digest"],
+    ["refork_notice", "(Your previous turn timed out and was reforked. …)"],
+  ] as const)(
+    "%s source persists the row and emits SSE with the prompt text",
+    async (source, text) => {
+      const { recordUserBlock } = await import("./lifecycle.js");
+      const { eventBus } = await import("../events/bus.js");
+      const { getBlockById } = await import("@friday/shared/services");
+
+      const captured: Array<{ type?: string; block_id?: string }> = [];
+      const unsub = eventBus.subscribe((e) =>
+        captured.push(e as { type?: string; block_id?: string }),
+      );
+
+      const { blockId, seq } = recordUserBlock({
+        turnId: `turn-fri71-${source}`,
+        agentName: "alpha",
+        text,
+        source,
+      });
+      unsub();
+
+      const row = getBlockById(blockId);
+      expect(row).not.toBeNull();
+      expect(row!.role).toBe("user");
+      expect(row!.kind).toBe("text");
+      expect(row!.source).toBe(source);
+      expect(row!.status).toBe("complete");
+      expect(JSON.parse(row!.contentJson)).toEqual({ text });
+      // SSE block_complete must have fired (the dashboard has no
+      // optimistic bubble for these system-originated prompts) and the
+      // row's last_event_seq must match the returned seq.
+      expect(seq).toBeGreaterThan(0);
+      expect(row!.lastEventSeq).toBe(seq);
+      const evt = captured.find((e) => e.block_id === blockId);
+      expect(evt?.type).toBe("block_complete");
+    },
+  );
+
   it("two back-to-back mail recordUserBlock calls produce strictly monotonic seqs", async () => {
     const { recordUserBlock } = await import("./lifecycle.js");
     const { getBlockById } = await import("@friday/shared/services");
