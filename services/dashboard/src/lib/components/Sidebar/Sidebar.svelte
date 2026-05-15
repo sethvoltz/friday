@@ -9,7 +9,28 @@
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import { loadJSON, saveJSON } from "$lib/stores/persistent";
   import { onMount } from "svelte";
-  import { DraftingCompass } from "lucide-svelte";
+  import {
+    DraftingCompass,
+    LifeBuoy,
+    Hammer,
+    CalendarClock,
+    PawPrint,
+  } from "lucide-svelte";
+
+  // Lucide glyph + color-var per agent type. Bare maps to PawPrint because
+  // Lucide has no literal bear; PawPrint is the closest animal glyph and
+  // reads as the "experimental / wild" agent kind. Tooltip retains the
+  // raw type string so screen-reader users still get the typed label.
+  const AGENT_ICON: Record<string, typeof DraftingCompass> = {
+    orchestrator: DraftingCompass,
+    helper: LifeBuoy,
+    builder: Hammer,
+    scheduled: CalendarClock,
+    bare: PawPrint,
+  };
+  function iconFor(type: string): typeof DraftingCompass {
+    return AGENT_ICON[type] ?? PawPrint;
+  }
 
   // The route is the authoritative source for which sidebar row is
   // active and how deep the menu should be expanded. `/` → orchestrator
@@ -284,12 +305,15 @@
         style:background={statusDot(a.status)}
       ></span>
       {#if isPinned}
-        <span class="friday-icon" aria-hidden="true">
+        <span class="agent-icon agent-orchestrator" aria-hidden="true">
           <DraftingCompass size={16} strokeWidth={2} />
         </span>
         <span class="name">Friday</span>
       {:else}
-        <span class="type">{a.type}</span>
+        {@const Icon = iconFor(a.type)}
+        <span class="agent-icon agent-{a.type}" aria-hidden="true">
+          <Icon size={16} strokeWidth={2} />
+        </span>
         <span class="name">{a.name}</span>
       {/if}
       {#if (chat.unreadByAgent[a.name] ?? 0) > 0}
@@ -379,12 +403,15 @@
         style:background={statusDot(focused.status)}
       ></span>
       {#if focused.type === "orchestrator"}
-        <span class="friday-icon" aria-hidden="true">
+        <span class="agent-icon agent-orchestrator" aria-hidden="true">
           <DraftingCompass size={16} strokeWidth={2} />
         </span>
         <span class="name">Friday</span>
       {:else}
-        <span class="type">{focused.type}</span>
+        {@const Icon = iconFor(focused.type)}
+        <span class="agent-icon agent-{focused.type}" aria-hidden="true">
+          <Icon size={16} strokeWidth={2} />
+        </span>
         <span class="name">{focused.name}</span>
       {/if}
       <span class="chev" aria-hidden="true">{open ? "▴" : "▾"}</span>
@@ -577,25 +604,23 @@
   @media (prefers-reduced-motion: reduce) {
     .dot.pulse { animation: none; }
   }
-  .friday-icon {
+  /* Typed agent glyph. Lucide icon centred in a fixed-size box so rows align
+     even when an agent's type rolls over (the glyph swaps; the column stays
+     put). Color comes from per-type CSS vars in app.css; both light and dark
+     palettes are defined there. */
+  .agent-icon {
     display: inline-flex;
     align-items: center;
-    color: #b45309;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
   }
-  :global([data-theme="dark"]) .friday-icon {
-    color: #fcd34d;
-  }
-  .type {
-    font-size: 0.62rem;
-    color: var(--text-tertiary);
-    padding: 0.1rem 0.4rem;
-    border-radius: 99px;
-    background: var(--bg-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: 600;
-    font-family: var(--font-mono);
-  }
+  .agent-icon.agent-orchestrator { color: var(--agent-orchestrator); }
+  .agent-icon.agent-helper { color: var(--agent-helper); }
+  .agent-icon.agent-builder { color: var(--agent-builder); }
+  .agent-icon.agent-scheduled { color: var(--agent-scheduled); }
+  .agent-icon.agent-bare { color: var(--agent-bare); }
   .name {
     flex: 1;
     overflow: hidden;

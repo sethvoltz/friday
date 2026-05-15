@@ -40,6 +40,15 @@
   --friday-purple: #9d6bd6;
   --friday-pink: #d96b9d;
 
+  /* Per-agent-type tint. Drives the sidebar's Lucide glyph color so each
+     agent type reads as a distinct family at a glance. Orchestrator reuses
+     the warm amber that the original DraftingCompass landed on. */
+  --agent-orchestrator: #b45309;
+  --agent-helper: #0d9488;
+  --agent-builder: #2563eb;
+  --agent-scheduled: #7c3aed;
+  --agent-bare: #be185d;
+
   --chart-1: #c4956a;
   --chart-2: #8b6e4e;
   --chart-3: #d4a87a;
@@ -108,6 +117,14 @@
   --friday-blue: #7eb0ff;
   --friday-purple: #b890ff;
   --friday-pink: #ff8eb4;
+
+  /* Dark-mode agent-type tints — brighter so glyphs read against the deep
+     blue background. Same hue families as light mode. */
+  --agent-orchestrator: #fcd34d;
+  --agent-helper: #5eead4;
+  --agent-builder: #93c5fd;
+  --agent-scheduled: #c4b5fd;
+  --agent-bare: #f9a8d4;
 
   --chart-1: #5b8edd;
   --chart-2: #7ba4e8;
