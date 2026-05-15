@@ -9,7 +9,28 @@
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import { loadJSON, saveJSON } from "$lib/stores/persistent";
   import { onMount } from "svelte";
-  import { DraftingCompass } from "lucide-svelte";
+  import {
+    DraftingCompass,
+    LifeBuoy,
+    Hammer,
+    CalendarClock,
+    PawPrint,
+  } from "lucide-svelte";
+
+  // Lucide glyph + color-var per agent type. Bare maps to PawPrint because
+  // Lucide has no literal bear; PawPrint is the closest animal glyph and
+  // reads as the "experimental / wild" agent kind. Tooltip retains the
+  // raw type string so screen-reader users still get the typed label.
+  const AGENT_ICON: Record<string, typeof DraftingCompass> = {
+    orchestrator: DraftingCompass,
+    helper: LifeBuoy,
+    builder: Hammer,
+    scheduled: CalendarClock,
+    bare: PawPrint,
+  };
+  function iconFor(type: string): typeof DraftingCompass {
+    return AGENT_ICON[type] ?? PawPrint;
+  }
 
   // The route is the authoritative source for which sidebar row is
   // active and how deep the menu should be expanded. `/` → orchestrator
@@ -120,8 +141,128 @@
         if (!isActive(a.status)) return showInactive;
         return true;
       })
-      .sort((a, b) => a.name.localeCompare(b.name)),
+      // Recency-first within each age bucket below. Falls back to name when
+      // neither agent has a timestamp yet (SSE-synthesized rows that haven't
+      // been touched by an /api/agents poll).
+      .sort((a, b) => ageMsOf(b) - ageMsOf(a) || a.name.localeCompare(b.name)),
   );
+
+  // Age-bucketed separators. Buckets are derived from local-time calendar
+  // boundaries against `now`, computed once per render — re-derived through
+  // Svelte 5 reactivity whenever `chat.agents` (and therefore `others`)
+  // changes, which is the same cadence the agent rows themselves refresh
+  // at. We don't try to live-rebucket while the tab sits open: an agent
+  // crossing midnight from "Today" into "Yesterday" without a state change
+  // is not worth a setInterval — the next SSE event or 30s poll re-runs
+  // this derivation.
+  type BucketKey =
+    | "today"
+    | "yesterday"
+    | "earlierWeek"
+    | "lastWeek"
+    | "earlierMonth"
+    | "lastMonth"
+    | "earlierYear"
+    | "older";
+  const BUCKET_ORDER: BucketKey[] = [
+    "today",
+    "yesterday",
+    "earlierWeek",
+    "lastWeek",
+    "earlierMonth",
+    "lastMonth",
+    "earlierYear",
+    "older",
+  ];
+  const BUCKET_LABEL: Record<BucketKey, string> = {
+    today: "Today",
+    yesterday: "Yesterday",
+    earlierWeek: "Earlier this Week",
+    lastWeek: "Last Week",
+    earlierMonth: "Earlier this Month",
+    lastMonth: "Last Month",
+    earlierYear: "Earlier this Year",
+    older: "Older",
+  };
+
+  function ageMsOf(a: AgentInfo): number {
+    // updatedAt wins; createdAt is the fallback. Missing both → 0, which
+    // parks the row in "Older". That's the right cliff: an entry the
+    // daemon hasn't acknowledged yet shouldn't claim "Today".
+    const src = a.updatedAt ?? a.createdAt;
+    if (!src) return 0;
+    const t = Date.parse(src);
+    return Number.isFinite(t) ? t : 0;
+  }
+
+  function bucketBoundaries(now: Date) {
+    // Start-of-day helpers in *local* time — same calendar the user
+    // perceives. Sunday-start weeks; the labels read fine either way and
+    // we don't want to import a locale lib for this.
+    const startOfToday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    ).getTime();
+    const startOfYesterday = startOfToday - 24 * 60 * 60 * 1000;
+    const startOfThisWeek =
+      startOfToday - now.getDay() * 24 * 60 * 60 * 1000;
+    const startOfLastWeek = startOfThisWeek - 7 * 24 * 60 * 60 * 1000;
+    const startOfThisMonth = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      1,
+    ).getTime();
+    const startOfLastMonth = new Date(
+      now.getFullYear(),
+      now.getMonth() - 1,
+      1,
+    ).getTime();
+    const startOfThisYear = new Date(now.getFullYear(), 0, 1).getTime();
+    return {
+      startOfToday,
+      startOfYesterday,
+      startOfThisWeek,
+      startOfLastWeek,
+      startOfThisMonth,
+      startOfLastMonth,
+      startOfThisYear,
+    };
+  }
+
+  function bucketOf(ts: number, b: ReturnType<typeof bucketBoundaries>): BucketKey {
+    if (ts >= b.startOfToday) return "today";
+    if (ts >= b.startOfYesterday) return "yesterday";
+    if (ts >= b.startOfThisWeek) return "earlierWeek";
+    if (ts >= b.startOfLastWeek) return "lastWeek";
+    if (ts >= b.startOfThisMonth) return "earlierMonth";
+    if (ts >= b.startOfLastMonth) return "lastMonth";
+    if (ts >= b.startOfThisYear) return "earlierYear";
+    return "older";
+  }
+
+  let bucketedOthers = $derived.by(() => {
+    const b = bucketBoundaries(new Date());
+    const groups: Array<{ key: BucketKey; label: string; items: AgentInfo[] }> = [];
+    const index: Partial<Record<BucketKey, number>> = {};
+    for (const a of others) {
+      const key = bucketOf(ageMsOf(a), b);
+      let idx = index[key];
+      if (idx === undefined) {
+        idx = groups.length;
+        index[key] = idx;
+        groups.push({ key, label: BUCKET_LABEL[key], items: [] });
+      }
+      groups[idx]!.items.push(a);
+    }
+    // Stable canonical ordering — buckets render in BUCKET_ORDER regardless
+    // of which arrived first in the input list.
+    groups.sort(
+      (a, b) =>
+        BUCKET_ORDER.indexOf(a.key) - BUCKET_ORDER.indexOf(b.key),
+    );
+    return groups;
+  });
   // Counts of agents hidden by each filter switch. Excludes the
   // orchestrator and the route-active row (both always show). When the
   // toggle is on, nothing is being hidden by that toggle → count is 0
@@ -284,12 +425,15 @@
         style:background={statusDot(a.status)}
       ></span>
       {#if isPinned}
-        <span class="friday-icon" aria-hidden="true">
+        <span class="agent-icon agent-orchestrator" aria-hidden="true">
           <DraftingCompass size={16} strokeWidth={2} />
         </span>
         <span class="name">Friday</span>
       {:else}
-        <span class="type">{a.type}</span>
+        {@const Icon = iconFor(a.type)}
+        <span class="agent-icon agent-{a.type}" aria-hidden="true">
+          <Icon size={16} strokeWidth={2} />
+        </span>
         <span class="name">{a.name}</span>
       {/if}
       {#if (chat.unreadByAgent[a.name] ?? 0) > 0}
@@ -338,12 +482,12 @@
 {#snippet panelContents()}
   <div class="scrollable">
     {@render agentRow(pinned, true)}
-    {#if others.length > 0}
-      <div class="divider">Active agents</div>
-      {#each others as a (a.name)}
+    {#each bucketedOthers as group (group.key)}
+      <div class="divider">{group.label}</div>
+      {#each group.items as a (a.name)}
         {@render agentRow(a, false)}
       {/each}
-    {/if}
+    {/each}
   </div>
   <div class="filters">
     <Toggle
@@ -379,15 +523,18 @@
         style:background={statusDot(focused.status)}
       ></span>
       {#if focused.type === "orchestrator"}
-        <span class="friday-icon" aria-hidden="true">
+        <span class="agent-icon agent-orchestrator" aria-hidden="true">
           <DraftingCompass size={16} strokeWidth={2} />
         </span>
         <span class="name">Friday</span>
       {:else}
-        <span class="type">{focused.type}</span>
+        {@const Icon = iconFor(focused.type)}
+        <span class="agent-icon agent-{focused.type}" aria-hidden="true">
+          <Icon size={16} strokeWidth={2} />
+        </span>
         <span class="name">{focused.name}</span>
       {/if}
-      <span class="chev" aria-hidden="true">{open ? "▴" : "▾"}</span>
+      <span class="chev" aria-hidden="true">{open ? "−" : "+"}</span>
     </button>
     {#if open}
       <div class="dropdown">
@@ -577,25 +724,23 @@
   @media (prefers-reduced-motion: reduce) {
     .dot.pulse { animation: none; }
   }
-  .friday-icon {
+  /* Typed agent glyph. Lucide icon centred in a fixed-size box so rows align
+     even when an agent's type rolls over (the glyph swaps; the column stays
+     put). Color comes from per-type CSS vars in app.css; both light and dark
+     palettes are defined there. */
+  .agent-icon {
     display: inline-flex;
     align-items: center;
-    color: #b45309;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
   }
-  :global([data-theme="dark"]) .friday-icon {
-    color: #fcd34d;
-  }
-  .type {
-    font-size: 0.62rem;
-    color: var(--text-tertiary);
-    padding: 0.1rem 0.4rem;
-    border-radius: 99px;
-    background: var(--bg-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: 600;
-    font-family: var(--font-mono);
-  }
+  .agent-icon.agent-orchestrator { color: var(--agent-orchestrator); }
+  .agent-icon.agent-helper { color: var(--agent-helper); }
+  .agent-icon.agent-builder { color: var(--agent-builder); }
+  .agent-icon.agent-scheduled { color: var(--agent-scheduled); }
+  .agent-icon.agent-bare { color: var(--agent-bare); }
   .name {
     flex: 1;
     overflow: hidden;

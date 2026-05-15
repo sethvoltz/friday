@@ -13,6 +13,7 @@ A local-first, headless agent daemon with a SvelteKit dashboard exposed via Clou
 - `docs/roadmap.md` — Open work, sequenced for execution.
 - `docs/setup.md` — Setup guide including CFT walkthrough.
 - `docs/running.md` — How to run the daemon and dashboard.
+- `docs/ui-conventions.md` — Cross-cutting UI patterns: `+`/`−` disclosure glyphs, agent-type icon map.
 
 ## Design Principles
 
