@@ -5,7 +5,7 @@
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
   import { onDestroy, onMount, tick } from "svelte";
-  import { Paperclip } from "lucide-svelte";
+  import { Paperclip, Send, CircleStop } from "lucide-svelte";
 
   interface CommandsResponse {
     system: Array<{ name: string; description: string; destructive?: boolean }>;
@@ -15,6 +15,17 @@
   let text = $state("");
   let textarea: HTMLTextAreaElement | undefined = $state();
   let busy = $derived(chat.inflightTurnId !== null);
+  // True between the user clicking Stop and the daemon emitting turn_done
+  // for the stopping turn. Drives the Stop button's disabled/dimmed look
+  // so a second click doesn't fire a redundant abort POST.
+  let isStopping = $derived.by(() => {
+    const id = chat.inflightTurnId;
+    if (!id) return false;
+    const m = chat.messages.find(
+      (x) => x.role === "assistant" && (x.id === id || x.turnId === id),
+    );
+    return m?.status === "stopping";
+  });
   // Touch keyboards (phones, tablets without a hardware keyboard) treat
   // Enter as "newline" — sending happens via the on-screen send button. We
   // detect that via the `(pointer: coarse)` media query. The flag is kept
@@ -424,8 +435,20 @@
   }
 
   async function stop() {
-    if (!chat.inflightTurnId) return;
-    await fetch(`/api/chat/turn/${chat.inflightTurnId}/abort`, { method: "POST" });
+    const id = chat.inflightTurnId;
+    if (!id) return;
+    // Mark the bubble as stopping immediately so the UI flips out of
+    // streaming-grow mode and the Stop button dims. The daemon's eventual
+    // turn_done will overwrite stopping → its terminal status (typically
+    // 'aborted'). Fire-and-forget the POST: the abort endpoint returns
+    // synchronously but the actual SDK unwind happens asynchronously, so
+    // there's nothing useful to await here.
+    chat.requestStop(id);
+    void fetch(`/api/chat/turn/${id}/abort`, { method: "POST" }).catch(() => {
+      /* network errors are tolerable — the next turn_done will reconcile.
+         If it never lands, the user can refresh; we don't want a thrown
+         promise spamming the console. */
+    });
   }
 
   function onKeydown(e: KeyboardEvent) {
@@ -637,11 +660,25 @@
 <div
   class="input-wrap"
   class:dragging={isDragging}
+  class:busy
   ondragenter={onDragEnter}
   ondragover={onDragOver}
   ondragleave={onDragLeave}
   ondrop={onDrop}
   role="presentation">
+  <!--
+    Aurora: nested so the blur owns the parent and the gradient + crop
+    live on a child. Filter on the parent applies AFTER the child's mask
+    paints, so the inner crop edge gets blurred soft (the outer edge of
+    the gradient has no mask, so the outside stays as the wide soft
+    glow). Both layers are always in the DOM; opacity fades 0 ↔ 1 when
+    .busy toggles. Pointer-events: none so input clicks pass through.
+  -->
+  <div class="aurora" aria-hidden="true">
+    <div class="aurora-mask">
+      <div class="aurora-shape"></div>
+    </div>
+  </div>
   {#if pendingAttachments.length > 0}
     <div class="chips" aria-label="Attachments">
       {#each pendingAttachments as a (a.key)}
@@ -698,7 +735,7 @@
       onchange={onFilePick} />
     <button
       type="button"
-      class="attach"
+      class="icon-btn attach"
       onclick={() => fileInput?.click()}
       aria-label="Attach file"
       title="Attach file">
@@ -714,15 +751,28 @@
       placeholder="Message Friday… or /command"
       rows="1"
       autocomplete="off"
-      autocapitalize="off"
+      autocapitalize="sentences"
     ></textarea>
     {#if busy}
-      <button type="button" class="stop" onclick={stop}>Stop</button>
+      <button
+        type="button"
+        class="icon-btn stop"
+        class:stopping={isStopping}
+        onclick={stop}
+        disabled={isStopping}
+        aria-label={isStopping ? "Stopping" : "Stop"}
+        title={isStopping ? "Stopping…" : "Stop"}>
+        <CircleStop size={18} aria-hidden="true" />
+      </button>
     {:else}
       <button
         type="submit"
-        class="send"
-        disabled={(!text.trim() && pendingAttachments.filter((a) => a.status === "done").length === 0) || pendingAttachments.some((a) => a.status === "uploading")}>Send</button>
+        class="icon-btn send"
+        aria-label="Send"
+        title="Send"
+        disabled={(!text.trim() && pendingAttachments.filter((a) => a.status === "done").length === 0) || pendingAttachments.some((a) => a.status === "uploading")}>
+        <Send size={18} aria-hidden="true" />
+      </button>
     {/if}
   </form>
 </div>
@@ -755,11 +805,149 @@
   .input-wrap {
     position: relative;
     width: 100%;
+    /* Background lives on ::before so that the same element can carry
+       backdrop-filter — needed to blur the aurora that paints behind
+       the input bar AND the chat content scrolling below it (mirroring
+       the header's translucent treatment). The wrap itself stays
+       transparent so its border + focus glow remain crisp. */
+    background: transparent;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-md);
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  }
+  .input-wrap::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: var(--header-float-bg);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    /* Sits between the aurora (z-index: 0) and the form/chips (z-index:
+       2) so its backdrop-filter samples the aurora and the chat content
+       behind, but never the textarea text we put on top. */
+    z-index: 1;
+    pointer-events: none;
+  }
+  /* Single bordered box — focus on any child (textarea, attach, send/stop)
+     lights the whole wrap. Same accent glow the textarea used to wear. */
+  .input-wrap:focus-within {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--accent-glow);
   }
   .input-wrap.dragging {
     outline: 2px dashed var(--accent-primary);
     outline-offset: -2px;
-    border-radius: var(--radius-md);
+  }
+
+  /* === Aurora ("Friday is thinking") =====================================
+     Two conic-gradient layers that flow around the input bar while a turn
+     is in flight. Outer extends past the wrap and is heavily blurred so
+     it bleeds into the chrome; inner is clipped to the wrap's rounded
+     rect via clip-path so the soft tint inside stays inside the box.
+     Both layers always exist; opacity fades in/out via .busy on the wrap.
+     The two @property declarations let the conic gradient's `from` angle
+     animate smoothly — a plain custom property would step, not tween. */
+  @property --friday-rotate-outer {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+  }
+  /* Three-layer aurora:
+       .aurora — owns blur, opacity, and the size container. container-
+                 type:size lets the inner shape read this box's dimensions
+                 via cqw/cqh so the scaleX compensation is dynamic.
+       .aurora-mask — owns the frame mask + padding so only the outer
+                 ring + small inner bleed shows. The mask cuts before
+                 .aurora's blur fires (filter on the parent fires AFTER
+                 children render), so the inner cutoff blurs softly.
+       .aurora-shape — renders the conic in a SQUARE coordinate system
+                 (height:100%, aspect-ratio:1/1 → square at the box's
+                 height) then scales horizontally by the box's
+                 width/height ratio. The conic's angle math is computed
+                 in the square's own coords, so a wide rect's top edge
+                 spans only ~90° of the gradient instead of ~180°,
+                 making each color band visually wider on top/bottom. */
+  .aurora {
+    position: absolute;
+    inset: -10px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 500ms ease;
+    z-index: 0;
+    /* Reduced from 14px → 8px so the conic arcs read as defined bands
+       outside the wrap; the wrap's translucent ::before adds a second
+       backdrop-blur pass on the slice that sits inside the wrap, so
+       the inside still reads as soft. */
+    filter: blur(8px);
+    container-type: size;
+  }
+  .input-wrap.busy .aurora { opacity: 1; }
+  .aurora-mask {
+    position: absolute;
+    inset: 0;
+    padding: 14px;
+    box-sizing: border-box;
+    border-radius: calc(var(--radius-md) + 10px);
+    -webkit-mask:
+      linear-gradient(#000 0 0) padding-box,
+      linear-gradient(#000 0 0) content-box;
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) padding-box,
+      linear-gradient(#000 0 0) content-box;
+    mask-composite: exclude;
+    overflow: visible;
+  }
+  .aurora-shape {
+    position: absolute;
+    /* Square at the parent's height — width auto-derived to equal
+       height via aspect-ratio. Centered horizontally with translateX
+       then stretched horizontally by the parent's aspect ratio so the
+       rendered square fills the wide rect. The conic gradient inside
+       computes angles in the square's own coord space, then those
+       angles get visually stretched horizontally — virtually turning
+       the conic's apex into a horizontal line. */
+    height: 100%;
+    aspect-ratio: 1 / 1;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%) scaleX(calc(100cqw / 100cqh));
+    transform-origin: center;
+    /* Force the shape to stay on its own dynamic compositing layer for
+       the entire animation lifetime. Without this, Chromium and Safari
+       were observed to cache the post-mask rasterization mid-animation
+       and then only invalidate the inner region per frame — freezing
+       the outer ring while the inner band kept moving. Hinting that
+       transform changes is enough to keep the layer dirty-tracked even
+       though our actual animation is on a custom property. */
+    will-change: transform;
+    background: conic-gradient(
+      from var(--friday-rotate-outer),
+      var(--friday-blue) 0deg,
+      transparent 80deg,
+      var(--friday-purple) 130deg,
+      transparent 220deg,
+      var(--friday-pink) 260deg,
+      transparent 330deg,
+      var(--friday-blue) 360deg
+    );
+    animation: friday-rotate-outer 9s linear infinite;
+  }
+  @keyframes friday-rotate-outer {
+    to { --friday-rotate-outer: 360deg; }
+  }
+  /* Reduced motion: a slow opacity pulse on the wrap border replaces the
+     rotating gradients. Same "Friday is working" signal, no parallax. */
+  @media (prefers-reduced-motion: reduce) {
+    .aurora { display: none; }
+    .input-wrap.busy {
+      animation: friday-pulse 2.4s ease-in-out infinite;
+    }
+    @keyframes friday-pulse {
+      0%, 100% { box-shadow: 0 0 0 1px var(--friday-blue); }
+      50% { box-shadow: 0 0 0 2px var(--friday-purple); }
+    }
   }
   .drop-overlay {
     position: absolute;
@@ -775,35 +963,75 @@
     z-index: 5;
   }
   .hidden-file { display: none; }
-  .attach {
+  /* Icon buttons share one base style (paperclip / send / stop). The
+     border-radius is the wrap radius minus the row padding so the corners
+     stay concentric with the outer box. */
+  .icon-btn {
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
     background: transparent;
-    border: 1px solid var(--border-primary);
-    border-radius: var(--radius-sm);
-    /* Match .send/.stop and the single-line textarea: same vertical
-       padding (0.55rem), same line-height/font-size resolved height
-       (0.9rem × 1.4 ≈ 1.26rem line-box), and a 1px border. Horizontal
-       padding stays tighter than .send because the content is an icon,
-       not a word — the button reads as a compact icon affordance. */
-    padding: 0.55rem 0.7rem;
-    line-height: 1.4;
-    font-size: 0.9rem;
-    cursor: pointer;
+    border: none;
+    border-radius: calc(var(--radius-md) - 5px);
     color: var(--text-secondary);
-    transition: background var(--transition-fast), color var(--transition-fast);
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast),
+      opacity var(--transition-fast);
   }
-  .attach:hover {
+  .icon-btn:hover:not(:disabled) {
     background: var(--bg-tertiary);
+  }
+  .icon-btn:focus-visible {
+    outline: none;
+    background: var(--bg-tertiary);
+  }
+  .icon-btn.attach { color: var(--text-secondary); }
+  .icon-btn.attach:hover:not(:disabled) { color: var(--text-primary); }
+  .icon-btn.send { color: var(--text-primary); }
+  .icon-btn.send:disabled {
     color: var(--text-primary);
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .icon-btn.stop { color: var(--status-error); }
+  .icon-btn.stop:hover:not(:disabled) {
+    color: var(--status-error);
+  }
+  /* Stopping: the user already clicked Stop; we're waiting for the daemon
+     to confirm. The button stays in place (no jump back to Send) but
+     dims so a second click is visibly inert. The aurora animation on
+     the wrap keeps running until turn_done lands. */
+  .icon-btn.stop.stopping {
+    color: var(--status-error);
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   .chips {
+    position: relative;
+    /* Sits above the aurora (z-index: 0) and the translucent
+       backdrop-blur pseudo (z-index: 1) so attachment chips remain
+       crisp while the gradient flows behind. */
+    z-index: 2;
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem;
-    padding: 0.5rem 1rem 0;
+    padding: 0.45rem 0.5rem;
+  }
+  /* Inset the divider to match the row's horizontal padding so it doesn't
+     touch the wrap's rounded edges. A pseudo-element keeps the rule
+     declarative — no border-image gymnastics. */
+  .chips::after {
+    content: "";
+    position: absolute;
+    left: 0.5rem;
+    right: 0.5rem;
+    bottom: 0;
+    height: 1px;
+    background: var(--border-subtle);
   }
   .chip {
     display: inline-flex;
@@ -848,57 +1076,36 @@
     color: var(--text-primary);
   }
   .input {
+    /* Lift the textarea + buttons above the aurora (z-index: 0) and
+       the translucent backdrop-blur pseudo (z-index: 1). */
+    position: relative;
+    z-index: 2;
     display: flex;
-    gap: 0.5rem;
+    gap: 0.25rem;
     align-items: flex-end;
-    padding: 0.75rem 1rem;
+    /* Padding sets the visual inset of the children inside the bordered
+       wrap. Concentric icon-button radius (above) is computed from this. */
+    padding: 0.5rem;
     background: transparent;
   }
   textarea {
     flex: 1;
     resize: none;
-    padding: 0.55rem 0.85rem;
+    /* No border, no background — the wrap owns the chrome. Vertical
+       padding sized so a single-row textarea matches the 2rem icon button
+       height (with align-items: flex-end keeping them aligned when the
+       textarea grows). */
+    padding: 0.35rem 0.5rem;
     line-height: 1.4;
     overflow-y: auto;
     max-height: 50vh;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border-primary);
-    background: var(--bg-input);
+    border: none;
+    background: transparent;
     color: var(--text-primary);
     font-family: var(--font-sans);
     font-size: 0.9rem;
-    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
   }
-  textarea:focus {
-    outline: none;
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px var(--accent-glow);
-  }
-  .send,
-  .stop {
-    /* Match textarea's 1-line height: same line-height + vertical padding +
-       border thickness so the button equals one row of the textarea. */
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    padding: 0.55rem 1.1rem;
-    font-weight: 600;
-    font-size: 0.9rem;
-    line-height: 1.4;
-    min-width: 80px;
-    flex-shrink: 0;
-    cursor: pointer;
-    transition: background var(--transition-fast), opacity var(--transition-fast);
-  }
-  .send {
-    background: var(--accent-primary);
-    color: var(--text-inverse);
-  }
-  .send:hover { background: var(--accent-secondary); }
-  .send:disabled { opacity: 0.5; cursor: not-allowed; }
-  .stop {
-    background: var(--status-error);
-    color: var(--text-inverse);
-  }
+  textarea:focus { outline: none; }
   .autocomplete {
     position: absolute;
     bottom: calc(100% + 0.5rem);
@@ -1017,10 +1224,10 @@
   @media (max-width: 768px) {
     /* iOS Safari zooms the page when you focus an input whose font-size is
        below 16px. Bump the textarea to 16px on mobile to suppress that.
-       Buttons match so their computed height stays one textarea row. */
+       Icon buttons don't host text, so they don't need the matching bump
+       — width/height are the same; the textarea row just gets taller and
+       align-items: flex-end keeps the icons pinned to the bottom row. */
     textarea { font-size: 16px; }
-    .send,
-    .stop { font-size: 16px; }
     .modal {
       max-width: 100%;
       height: 100vh;

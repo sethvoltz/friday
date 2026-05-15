@@ -32,6 +32,14 @@
   --status-error: #b54a4a;
   --status-error-bg: #fbe9e9;
 
+  /* Friday "thinking" palette — drives the aurora animation around the
+     chat input while a turn is in flight. Light/dark are the same hues,
+     re-saturated so each mode reads against its own background without
+     overwhelming the surrounding chrome. */
+  --friday-blue: #6b8ee3;
+  --friday-purple: #9d6bd6;
+  --friday-pink: #d96b9d;
+
   --chart-1: #c4956a;
   --chart-2: #8b6e4e;
   --chart-3: #d4a87a;
@@ -94,6 +102,12 @@
   --status-warn-bg: #2e2610;
   --status-error: #e05555;
   --status-error-bg: #2e1515;
+
+  /* Brighter Friday hues for dark mode so the aurora is visible against
+     the deep blue background — same conceptual palette as light. */
+  --friday-blue: #7eb0ff;
+  --friday-purple: #b890ff;
+  --friday-pink: #ff8eb4;
 
   --chart-1: #5b8edd;
   --chart-2: #7ba4e8;

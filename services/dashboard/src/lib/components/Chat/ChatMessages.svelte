@@ -459,6 +459,8 @@
             <Markdown source={msg.text} streaming={msg.status === "streaming"} />
             {#if msg.status === "aborted"}
               <div class="footer-tag">Stopped</div>
+            {:else if msg.status === "stopping"}
+              <div class="footer-tag stopping">Stopping…</div>
             {:else if msg.status === "error"}
               <div class="footer-tag err">Error</div>
             {:else if msg.status === "streaming"}
@@ -548,6 +550,9 @@
   }
   .footer-tag.streaming {
     color: var(--accent-primary);
+  }
+  .footer-tag.stopping {
+    color: var(--status-warn);
   }
   .footer-tag.queued {
     color: var(--text-inverse);

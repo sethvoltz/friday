@@ -118,6 +118,25 @@
     });
   }
 
+  // Absolute URLs (scheme: or protocol-relative //) open in a new tab so the
+  // dashboard isn't replaced when the user clicks an external reference.
+  // Relative paths (`/foo`, `./foo`, `#hash`) stay in the same tab so internal
+  // SvelteKit navigation keeps working.
+  const ABSOLUTE_HREF = /^([a-z][a-z0-9+.\-]*:|\/\/)/i;
+  function processLinks() {
+    if (!container) return;
+    const anchors = container.querySelectorAll<HTMLAnchorElement>("a[href]");
+    for (const a of anchors) {
+      if (a.dataset.linkProcessed) continue;
+      const href = a.getAttribute("href") ?? "";
+      if (ABSOLUTE_HREF.test(href)) {
+        a.setAttribute("target", "_blank");
+        a.setAttribute("rel", "noopener noreferrer");
+      }
+      a.dataset.linkProcessed = "1";
+    }
+  }
+
   async function renderMermaid() {
     if (!container) return;
     // Cheap pre-check: nothing to do if there are no unmounted mermaid
@@ -175,6 +194,7 @@
       if (themeChanged && container) invalidateRenderedMermaid(container);
       void renderMermaid();
       void highlightCode();
+      processLinks();
     });
   });
 
@@ -182,6 +202,7 @@
     void mermaidLoaded;
     renderMermaid();
     void highlightCode();
+    processLinks();
     // Delegated copy-button handler — one listener for every code block in
     // this Markdown instance. The button is emitted by codeChromeExtension
     // (packages/shared/src/markdown/plugins.ts) with `data-copy-action`.

@@ -12,6 +12,7 @@ export interface ChatMessage {
   text: string;
   status:
     | "streaming" // assistant turn still receiving deltas
+    | "stopping" // user clicked Stop; daemon hasn't confirmed yet
     | "complete"
     | "aborted"
     | "error"
@@ -630,7 +631,13 @@ export class ChatState {
         if (
           m.status === "complete" ||
           m.status === "aborted" ||
-          m.status === "error"
+          m.status === "error" ||
+          // Stopping bubbles freeze rendering — the user has explicitly
+          // asked the turn to halt and shouldn't see new text grow while
+          // we wait for the daemon's terminal turn_done. The bubble's
+          // existing text stays; the daemon's eventual turn_done flips
+          // the row to its real terminal state.
+          m.status === "stopping"
         ) {
           return;
         }
@@ -679,6 +686,54 @@ export class ChatState {
       }
     }
     if (this.inflightTurnId === turnId) this.inflightTurnId = null;
+  }
+
+  /**
+   * Mark the assistant bubble for `turnId` as `stopping`. Used by the
+   * Stop button before firing the abort POST so the UI immediately
+   * reflects that the user has requested a halt — without lying about
+   * whether the daemon has actually stopped yet.
+   *
+   * The bubble's status flips streaming → stopping; appendDelta then
+   * freezes further text growth on it. When the daemon's `turn_done`
+   * eventually lands, finishTurn overwrites status with the truthful
+   * terminal state (typically `aborted`, occasionally `complete` if the
+   * model's last token already shipped before the abort took effect).
+   *
+   * Idempotent: re-stopping a turn that's already stopping is a no-op.
+   * Returns true when the bubble was found and marked, false when the
+   * turn has already finalized or was never registered (the caller can
+   * still fire the POST defensively but shouldn't expect UI feedback).
+   *
+   * Race coverage:
+   *   - Mail starts T2 mid-stop of T1: T1 stays stopping, T2 starts as
+   *     streaming with its own bubble. Each finishTurn handles its own
+   *     turn id; finishTurn(T1) clears inflightTurnId only if it still
+   *     equals T1 (it doesn't — T2 overwrote it on turn_started), so
+   *     T2's busy state survives.
+   *   - Daemon's turn_done arrives before requestStop wins the lookup
+   *     (already finalized): returns false; the abort POST will return
+   *     `aborted: false` from the server's findAgentByTurnId.
+   */
+  requestStop(turnId: string): boolean {
+    for (const m of this.messages) {
+      if (m.role !== "assistant") continue;
+      if (m.id !== turnId && m.turnId !== turnId) continue;
+      if (
+        m.status === "complete" ||
+        m.status === "aborted" ||
+        m.status === "error"
+      ) {
+        return false;
+      }
+      // Already stopping: caller can still fire the POST again but the
+      // UI is already in the right place. Return true so the caller's
+      // "I requested stop" branch keeps running.
+      if (m.status === "stopping") return true;
+      m.status = "stopping";
+      return true;
+    }
+    return false;
   }
 
   pushTool(toolId: string, toolName: string, input: unknown): void {
