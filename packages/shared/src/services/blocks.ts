@@ -3,7 +3,15 @@ import { getDb, getRawDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
 
 export type BlockKind = "text" | "thinking" | "tool_use" | "tool_result";
-export type BlockStatus = "streaming" | "complete" | "aborted" | "error";
+export type BlockStatus =
+  | "streaming"
+  | "complete"
+  | "aborted"
+  | "error"
+  /** User block accepted by the daemon but still sitting in the worker's
+   *  `nextPrompts` FIFO behind an in-flight turn. Re-stamped to `complete`
+   *  with a fresh `ts` when the worker dispatches it (block_meta_update). */
+  | "queued";
 export type BlockSource =
   | "user_chat"
   | "mail"
@@ -115,6 +123,52 @@ export function getBlockById(blockId: string): BlockRow | null {
     .select()
     .from(schema.blocks)
     .where(eq(schema.blocks.blockId, blockId))
+    .get();
+  return (r ?? null) as BlockRow | null;
+}
+
+/** DELETE a block row. Used by the queued-message cancel endpoint — the
+ *  user's draft was never seen by the LLM, so we discard the row entirely
+ *  rather than leaving an `aborted` ghost in the transcript. Returns true
+ *  if a row was deleted. */
+export function deleteBlockById(blockId: string): boolean {
+  const db = getDb();
+  const res = db
+    .delete(schema.blocks)
+    .where(eq(schema.blocks.blockId, blockId))
+    .run();
+  return (res.changes ?? 0) > 0;
+}
+
+/** Return all blocks currently in `status='queued'`, oldest first. Used by
+ *  the daemon's boot-time rehydration pass to re-seed each worker's
+ *  `nextPrompts` FIFO so a daemon restart doesn't silently drop user
+ *  drafts that the dashboard already acknowledged. */
+export function listQueuedUserBlocks(): BlockRow[] {
+  const db = getDb();
+  return db
+    .select()
+    .from(schema.blocks)
+    .where(eq(schema.blocks.status, "queued"))
+    .orderBy(asc(schema.blocks.ts))
+    .all() as BlockRow[];
+}
+
+/** Look up a user block (role='user', source='user_chat') by its turn id.
+ *  Returns null when the turn doesn't have a user-chat block — covers
+ *  mail-injected turns and turns whose user block was already cancelled. */
+export function getUserChatBlockByTurnId(turnId: string): BlockRow | null {
+  const db = getDb();
+  const r = db
+    .select()
+    .from(schema.blocks)
+    .where(
+      and(
+        eq(schema.blocks.turnId, turnId),
+        eq(schema.blocks.role, "user"),
+        eq(schema.blocks.source, "user_chat"),
+      ),
+    )
     .get();
   return (r ?? null) as BlockRow | null;
 }

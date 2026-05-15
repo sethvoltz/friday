@@ -36,7 +36,11 @@ import {
   composeSystemPrompt,
   readPromptStack,
 } from "@friday/shared";
-import { inbox as mailInbox } from "@friday/shared/services";
+import {
+  deleteBlockById,
+  inbox as mailInbox,
+  listQueuedUserBlocks,
+} from "@friday/shared/services";
 import { buildMailPrompt } from "./comms/mail-prompt.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -66,6 +70,7 @@ async function main(): Promise<void> {
   replayPending();
   seedMetaAgents();
   recoverAgents(cfg);
+  recoverQueuedTurns(cfg);
   const schedTick = startScheduler();
   const watchdog = startWatchdog();
   startTurnStallWatchdog();
@@ -272,6 +277,102 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
       recoverFromJsonl(jsonlAgents);
     } catch (err) {
       logger.log("warn", "agent.recovery.jsonl-error", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+/**
+ * Rehydrate user blocks left at `status='queued'` by a previous daemon
+ * lifetime (the dashboard's send queue persisted them; the worker never
+ * got to dispatch them before the process died). Each block dispatches
+ * via `dispatchTurn` with its original turn_id and the row's blockId —
+ * the first one for an agent spawns the worker, subsequent ones for the
+ * same agent land in `nextPrompts` FIFO. On dispatch the row flips to
+ * `complete` with a fresh `ts` via `block_meta_update`, so the dashboard
+ * unpins each queued bubble as it runs.
+ *
+ * Archived agents are skipped and their queued rows deleted — there's no
+ * worker to send the prompt to, and leaving them in the table would
+ * surface as ghost pinned bubbles on the dashboard forever.
+ */
+function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): void {
+  const queued = listQueuedUserBlocks();
+  if (queued.length === 0) return;
+  const modelCfg = normalizeModelConfig(cfg.model);
+  for (const block of queued) {
+    const a = registry.getAgent(block.agentName);
+    if (!a || a.status === "archived") {
+      logger.log("info", "queued-turn.recovery.skip", {
+        agent: block.agentName,
+        turnId: block.turnId,
+        reason: a ? "archived" : "agent_missing",
+      });
+      deleteBlockById(block.blockId);
+      continue;
+    }
+    let text = "";
+    let attachments:
+      | Array<{ sha256: string; filename: string; mime: string }>
+      | undefined;
+    try {
+      const parsed = JSON.parse(block.contentJson) as {
+        text?: unknown;
+        attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+      };
+      if (typeof parsed.text === "string") text = parsed.text;
+      if (Array.isArray(parsed.attachments) && parsed.attachments.length > 0) {
+        attachments = parsed.attachments;
+      }
+    } catch {
+      logger.log("warn", "queued-turn.recovery.parse-error", {
+        agent: block.agentName,
+        turnId: block.turnId,
+      });
+      deleteBlockById(block.blockId);
+      continue;
+    }
+    if (!text.trim() && !attachments) {
+      deleteBlockById(block.blockId);
+      continue;
+    }
+    const stack = readPromptStack(a.type, []);
+    const systemPrompt = composeSystemPrompt(stack, {
+      agentName: a.name,
+      agentType: a.type,
+      parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
+    });
+    const wrappedPrompt = wrapWithRecall(text, text, "user_chat");
+    try {
+      dispatchTurn({
+        agentName: a.name,
+        options: {
+          agentName: a.name,
+          agentType: a.type,
+          workingDirectory: registry.workingDirectoryFor(a),
+          systemPrompt,
+          prompt: wrappedPrompt,
+          attachments,
+          turnId: block.turnId,
+          model: modelCfg.name,
+          thinking: modelCfg.thinking,
+          effort: modelCfg.effort,
+          resumeSessionId: a.sessionId ?? undefined,
+          daemonPort: cfg.daemonPort,
+          parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
+          mode: a.type === "scheduled" ? "one-shot" : "long-lived",
+        },
+        userBlockId: block.blockId,
+      });
+      logger.log("info", "queued-turn.recovery.dispatch", {
+        agent: a.name,
+        turnId: block.turnId,
+      });
+    } catch (err) {
+      logger.log("warn", "queued-turn.recovery.error", {
+        agent: a.name,
+        turnId: block.turnId,
         message: err instanceof Error ? err.message : String(err),
       });
     }

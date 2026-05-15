@@ -96,7 +96,12 @@ import {
   findAgentByTurnId,
   peekLiveWorker,
   recordUserBlock,
+  removeQueuedPrompt,
 } from "../agent/lifecycle.js";
+import {
+  deleteBlockById,
+  getUserChatBlockByTurnId,
+} from "@friday/shared/services";
 import { generateScratchName } from "../agent/scratch-names.js";
 import {
   archiveWorkspace,
@@ -209,15 +214,26 @@ async function handle(
       (a) => typeof a.sha256 === "string" && /^[a-f0-9]{64}$/.test(a.sha256),
     );
 
+    // Peek the live worker to decide whether this prompt will dispatch
+    // immediately or sit in `nextPrompts` behind an in-flight turn. When
+    // queued, we record the user block as `status='queued'` and pass the
+    // resulting blockId through dispatchTurn → WorkerPromptCommand →
+    // sendPrompt; the drain path re-stamps the row on actual dispatch
+    // (`block_meta_update`) so the queued bubble unpins and sorts inline.
+    const liveBefore = peekLiveWorker(agentName);
+    const willQueue = liveBefore?.status === "working";
+    let userBlockId: string | undefined;
     try {
-      recordUserBlock({
+      const recorded = recordUserBlock({
         turnId,
         agentName,
         sessionId: resumeSessionId,
         text: body.text,
         source: "user_chat",
+        status: willQueue ? "queued" : "complete",
         attachments: attachments.length > 0 ? attachments : undefined,
       });
+      if (willQueue) userBlockId = recorded.blockId;
     } catch (err) {
       logger.log("warn", "chat.turn.user-block.error", {
         agent: agentName,
@@ -248,8 +264,60 @@ async function handle(
         mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
         allowedToolsOverride,
       },
+      userBlockId,
     });
-    return json(res, 200, { turn_id: turnId });
+    return json(res, 200, { turn_id: turnId, queued: willQueue });
+  }
+
+  // Cancel a queued user-chat turn before the worker dispatches it. The
+  // block row is deleted (the message never reached the LLM) and the
+  // entry is yanked from the worker's `nextPrompts`. Returns the prompt
+  // text so the dashboard can stuff it back into the input bar.
+  if (
+    method === "DELETE" &&
+    path.startsWith("/api/chat/turn/") &&
+    path.endsWith("/queued")
+  ) {
+    const turnId = path.split("/")[4];
+    const block = getUserChatBlockByTurnId(turnId);
+    if (!block) {
+      return json(res, 404, { error: "turn_not_found", turn_id: turnId });
+    }
+    if (block.status !== "queued") {
+      return json(res, 409, {
+        error: "not_queued",
+        turn_id: turnId,
+        status: block.status,
+        message: "Turn has already dispatched; use abort instead",
+      });
+    }
+    removeQueuedPrompt(block.agentName, turnId);
+    let recoveredText = "";
+    try {
+      const parsed = JSON.parse(block.contentJson) as { text?: unknown };
+      if (typeof parsed.text === "string") recoveredText = parsed.text;
+    } catch {
+      // Malformed content_json — return empty text; the user gets to retype.
+    }
+    // Notify any other open dashboard tab on this agent that the queued
+    // bubble is gone. We publish the meta-update *before* the row vanishes
+    // so a late reconnect that compares its cursor sees the aborted state.
+    // No writeAndPublish coordination: the row is being deleted, so there's
+    // no `last_event_seq` to align with.
+    eventBus.publish({
+      v: 1,
+      type: "block_meta_update",
+      turn_id: turnId,
+      agent: block.agentName,
+      block_id: block.blockId,
+      status: "aborted",
+    });
+    deleteBlockById(block.blockId);
+    return json(res, 200, {
+      ok: true,
+      turn_id: turnId,
+      text: recoveredText,
+    });
   }
 
   if (method === "POST" && path.startsWith("/api/chat/turn/") && path.endsWith("/abort")) {

@@ -47,6 +47,18 @@ pnpm --filter @friday/daemon exec vitest run src/path/to/file.test.ts
 - All state lives in `~/.friday/` (override with `FRIDAY_DATA_DIR`). Never hardcode paths; use constants from `@friday/shared`.
 - `@friday/shared` is consumed via its built `dist/`. When you edit shared source, run `pnpm --filter @friday/shared build` before exercising the change in the daemon or dashboard.
 
+## Debugging
+
+- **Trust the user; verify the system.** Seth is a developer who speaks precisely — "I didn't click X" means he didn't click X. Investigate the system, not the user. Never offer "you probably did Y by accident" as an explanation when you can't find a code path; that's the shape of giving up dressed as a hypothesis. You may *ask* a clarifying question when you genuinely need one ("did you have another tab open?", "what did the network panel show?"), but the burden of proof sits on the code, not on his behavior.
+
+- **Don't assume — research.** When two thorough passes through the code don't explain a symptom, stop reading the same files harder and switch tools. The answer is in the logs, the DB, the SSE stream, or temporary instrumentation — not in another round of speculation. A proposed cause without a backing log line, DB row, or network event is a *hypothesis*, not a diagnosis; flag it as such when reporting and say what evidence would confirm or kill it. Two unproductive code-reading rounds is the signal to gather evidence, not the signal to write a longer write-up.
+
+- **Logs and canonical state live under `~/.friday/`** (override with `FRIDAY_DATA_DIR`). Path resolution is `getLogPath(service)` in `packages/shared/src/config.ts`.
+  - `logs/daemon.jsonl` — every daemon event in JSONL. Useful event names to grep for: `worker.fork`, `worker.prompt.queued`, `worker.exit`, `worker.turn.stalled`, `worker.abort.force-kill`, `block.seq-skew`, `blocks.update.error`, `chat.turn.user-block.error`, `queued-block.meta-update.error`, `jsonl-recovery.post-turn.error`, `daemon.shutdown`, `daemon.ready`. `tail -F` works fine; entries are one JSON per line.
+  - `logs/dashboard-<ts>-<id>.jsonl[.gz]` — per-session rotating dashboard logs.
+  - `logs/tunnel.log` — cloudflared plain text (only file in this dir that isn't JSONL).
+  - `db.sqlite` — canonical state for blocks, turns, agents, usage, mail, tickets. `sqlite3 ~/.friday/db.sqlite "SELECT block_id, turn_id, role, kind, status, ts, last_event_seq FROM blocks WHERE turn_id = '…' ORDER BY ts;"` settles arguments about what the daemon actually persisted vs. what the dashboard rendered — when a bubble's visual state disagrees with reality, the DB row is the source of truth and the next question is "which write path produced that status?"
+
 ## Versioning
 
 Single system version in the root `package.json`. All packages ship together.

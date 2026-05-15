@@ -369,6 +369,26 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
     blocks.clear();
   };
 
+  // Mid-message break (prompts-pending / critical-mail). Each block decides
+  // its own terminal status based on whether content actually accumulated.
+  // See the FRI-22 comment at the `m.type === "assistant"` boundary for why.
+  const blockHasContent = (b: BlockState): boolean => {
+    if (b.kind === "text" || b.kind === "thinking") return b.text.length > 0;
+    if (b.kind === "tool_use") return (b.inputJson?.length ?? 0) > 0;
+    return false;
+  };
+  const flushBoundaryBlocks = (): void => {
+    for (const block of blocks.values()) {
+      emit({
+        type: "block-stop",
+        clientBlockId: block.clientBlockId,
+        contentJson: finalizeBlockContent(block),
+        status: blockHasContent(block) ? "complete" : "aborted",
+      });
+    }
+    blocks.clear();
+  };
+
   const DEFAULT_THINKING_BUDGET = 8192;
   const thinking =
     opts.thinking?.type === "enabled"
@@ -644,18 +664,22 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         // gracefully. The parent's turn-complete handler will drain the
         // next prompt; `mainLoop` drains the inbox for critical mail.
         if (promptsPending || pendingCriticalMail) {
-          // FRI-4 #2: if the SDK abandoned an in-flight content block
-          // without emitting `content_block_stop` (observed live —
-          // empty content_json, no deltas, no stop), the `blocks` map
-          // still has its entry. Without this flush, the daemon's
-          // `dropTurn` (on the incoming `turn-complete`) wipes the
-          // liveTurns entry, `handleBlockStop` early-returns on any
-          // late-arriving stop, and the DB row stays at
-          // `status='streaming'` forever (the dashboard's
-          // `thinking`/`tool` bubble pulses indefinitely). Close
-          // anything still in flight as `aborted` so the daemon
-          // transitions the row off `streaming`.
-          flushInflightBlocks("aborted");
+          // FRI-4 #2 + FRI-22: at the assistant-message yield the model's
+          // reply is conceptually finished. The SDK *usually* emits
+          // `content_block_stop` for every block before yielding the
+          // assembled message, but in practice we've seen two cases land
+          // here with the `blocks` map non-empty:
+          //   - the SDK abandoned a partial block (no deltas, no stop) —
+          //     content_json comes out empty; this is the original FRI-4 #2.
+          //   - the SDK yielded the assistant message before emitting
+          //     `content_block_stop` for the last block — content is fully
+          //     populated; the stop was just dropped on the floor.
+          // Marking everything `aborted` collapses both cases and leaves
+          // visually-complete blocks rendering with the "Stopped" footer.
+          // Discriminate on whether content actually accumulated: present
+          // content ⇒ `complete` (the model's intent is whole); empty ⇒
+          // `aborted` (the SDK truly cut it short).
+          flushBoundaryBlocks();
           promptsPending = false;
           pendingCriticalMail = false;
           break;

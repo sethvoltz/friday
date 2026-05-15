@@ -34,7 +34,11 @@
       void sendQueue.flush().then((result) => {
         for (const s of result.sent) {
           chat.confirmPending(s.queueId, s.turnId);
-          chat.inflightTurnId = s.turnId;
+          // Queued turns (worker was busy when this POST hit the daemon)
+          // must not claim the inflight slot — the still-streaming turn
+          // owns it. SSE `turn_started` will set the slot when this turn
+          // actually dispatches.
+          if (!s.queued) chat.inflightTurnId = s.turnId;
         }
         for (const qid of result.failed) chat.markPendingFailed(qid);
         for (const qid of result.retrying) chat.markPendingRetrying(qid);
@@ -86,7 +90,11 @@
       void sendQueue.flush().then((result) => {
         for (const s of result.sent) {
           chat.confirmPending(s.queueId, s.turnId);
-          chat.inflightTurnId = s.turnId;
+          // Queued turns (worker was busy when this POST hit the daemon)
+          // must not claim the inflight slot — the still-streaming turn
+          // owns it. SSE `turn_started` will set the slot when this turn
+          // actually dispatches.
+          if (!s.queued) chat.inflightTurnId = s.turnId;
         }
         for (const qid of result.failed) chat.markPendingFailed(qid);
         for (const qid of result.retrying) chat.markPendingRetrying(qid);

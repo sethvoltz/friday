@@ -1,5 +1,6 @@
 <script lang="ts">
   import { chat } from "$lib/stores/chat.svelte";
+  import { chatInputBridge } from "$lib/stores/chat-input-bridge.svelte";
   import { goto } from "$app/navigation";
   import { portal } from "$lib/actions/portal";
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
@@ -49,7 +50,27 @@
     isCoarsePointer = mq.matches;
     const onChange = (e: MediaQueryListEvent) => (isCoarsePointer = e.matches);
     mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
+    // Register the textarea as the active sink for the queued-bubble
+    // cancel-X affordance: when the user yanks a queued message back, the
+    // recovered text is prepended here. The caret parks at the end of the
+    // recovered text (before the `\n\n` separator when a draft is in
+    // progress) so the user can keep editing it without losing whatever
+    // they were typing below.
+    const unregister = chatInputBridge.register((recovered) => {
+      const existing = text;
+      text = existing ? `${recovered}\n\n${existing}` : recovered;
+      const caretAt = recovered.length;
+      void tick().then(() => {
+        if (!textarea) return;
+        textarea.focus();
+        textarea.setSelectionRange(caretAt, caretAt);
+        autoresize();
+      });
+    });
+    return () => {
+      mq.removeEventListener("change", onChange);
+      unregister();
+    };
   });
 
   // Slack/Messages parity: claim keystrokes for the composer when nothing
@@ -339,7 +360,13 @@
     // Allow attachment-only sends (text empty but at least one ready
     // attachment) once we have anything ready.
     const ready = pendingAttachments.filter((a) => a.status === "done" && a.sha256);
-    if ((!t && ready.length === 0) || busy) return;
+    // Send is no longer gated on `busy`: the daemon's per-agent FIFO
+    // (`nextPrompts`) serializes concurrent prompts server-side, so a
+    // second send while a turn is mid-flight is queued, not rejected.
+    // The send button stays clickable; Stop appears alongside it. System
+    // slash commands like `/restart` are handled by a separate endpoint
+    // that doesn't go through the queue at all.
+    if (!t && ready.length === 0) return;
     // Block while any attachment is still uploading; otherwise the message
     // would land without the file the user clearly meant to include.
     if (pendingAttachments.some((a) => a.status === "uploading")) return;
@@ -404,10 +431,14 @@
       // turn-derived id so the daemon's `block_complete` for the user-role
       // block overwrites this exact row instead of creating a duplicate.
       chat.confirmPending(s.queueId, s.turnId);
-      // Set the inflight turn for the most recently-sent message so the UI
-      // shows the Stop button. Multi-message flushes only need the last one
-      // tracked — earlier messages have already produced their own turns.
-      chat.inflightTurnId = s.turnId;
+      // Only claim the per-agent inflight slot when this dispatch is the
+      // one that's actually running. A `queued` turn sits in the worker's
+      // `nextPrompts` FIFO behind a still-streaming turn — overwriting the
+      // slot with its id displaces the real in-flight turn (the eventual
+      // `turn_done` for the streaming turn no longer clears the slot, and
+      // a click on Stop targets the wrong turn id). The SSE `turn_started`
+      // event will set the slot when this turn actually dispatches.
+      if (!s.queued) chat.inflightTurnId = s.turnId;
     }
     for (const qid of result.failed) chat.markPendingFailed(qid);
     for (const qid of result.retrying) chat.markPendingRetrying(qid);
@@ -781,6 +812,14 @@
       autocomplete="off"
       autocapitalize="sentences"
     ></textarea>
+    <button
+      type="submit"
+      class="icon-btn send"
+      aria-label="Send"
+      title="Send"
+      disabled={(!text.trim() && pendingAttachments.filter((a) => a.status === "done").length === 0) || pendingAttachments.some((a) => a.status === "uploading")}>
+      <Send size={18} aria-hidden="true" />
+    </button>
     {#if busy}
       <button
         type="button"
@@ -791,15 +830,6 @@
         aria-label={isStopping ? "Stopping" : "Stop"}
         title={isStopping ? "Stopping…" : "Stop"}>
         <CircleStop size={18} aria-hidden="true" />
-      </button>
-    {:else}
-      <button
-        type="submit"
-        class="icon-btn send"
-        aria-label="Send"
-        title="Send"
-        disabled={(!text.trim() && pendingAttachments.filter((a) => a.status === "done").length === 0) || pendingAttachments.some((a) => a.status === "uploading")}>
-        <Send size={18} aria-hidden="true" />
       </button>
     {/if}
   </form>

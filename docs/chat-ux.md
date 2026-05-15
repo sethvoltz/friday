@@ -82,11 +82,13 @@ auto_invoke: true                # default true; built-ins set false
 - Manual invocation: typing `/<skill> args` at the start of a chat message injects the skill body as a `<skill-context>` block in the system prompt for that turn only. The remaining text becomes the user message.
 - When a skill declares `allowed_tools`, the daemon assembles the SDK call with the **intersection** of the agent's normal tool set and the skill's declared tools. Per-turn, restriction-only — never expansion.
 
-## Stop button
+## Send + Stop buttons
 
-- Replaces Send during in-flight turns (same physical slot).
+- Send is **always visible**; it does not get replaced by Stop during in-flight turns. The daemon serializes prompts per agent (`nextPrompts` FIFO in `services/daemon/src/agent/lifecycle.ts`), so the user can type and queue a follow-up without waiting for the current turn to finish. Slash commands like `/restart` and `/scratch` ride a separate endpoint (`/api/commands`) and are never gated by an in-flight turn.
+- Stop appears **alongside Send, to the right of it**, only while a turn is in flight. Sequence: paperclip · textarea · Send · Stop.
 - `POST /api/chat/turn/<id>/abort` → daemon `AbortController.abort()`.
 - Aborts at next SDK iteration. Tool calls already in flight finish; no next step. Honest UI copy: *Stop prevents future steps. It can't undo a step already started.*
+- Stop only cancels the running turn — anything sitting in `nextPrompts` after it stays queued and dispatches on the next idle window.
 
 ## Chat input
 
@@ -99,14 +101,21 @@ auto_invoke: true                # default true; built-ins set false
 
 ## Pending message lifecycle
 
-User messages render optimistically the moment Send fires. Each in-flight message carries a small status badge:
+User messages render optimistically the moment Send fires. There are two distinct queueing concerns here — the **client send-queue** (network resilience, persisted in localStorage) and the **daemon nextPrompts FIFO** (server-side serialization behind an in-flight turn). Both surface in the same bubble; the status pill tells them apart.
 
-- `pending` — POSTed to `/api/chat/turn`, not yet acked.
-- `failed` — POST failed; a retry affordance appears next to the bubble.
-- `retrying` — user clicked retry; we resubmit and re-enter `pending`.
-- (acknowledged) — daemon returned a `turn_id`; the optimistic bubble is replaced by the real `user`-kind block row when SSE delivers it.
+States:
 
-Queued messages (received during a still-running turn) get synthesized bubbles on page load so a refresh doesn't lose them visually before the daemon drains the queue.
+- `pending` — POSTed to `/api/chat/turn`, not yet acked. Optimistic bubble, sub-second window. Pinned to the bottom regardless of natural ts sort.
+- `failed` — POST returned 4xx; a retry / discard affordance appears next to the bubble (per-bubble retry, "discard one", "discard all").
+- `retrying` — POST returned 5xx / network failure and the send-queue is scheduling a backoff retry (up to 5 attempts).
+- `queued` — POST acked, daemon recorded the user block at `status='queued'` because the worker was mid-turn at the time. The bubble stays pinned to the bottom and shows an **X cancel affordance**: clicking X yanks the prompt out of `nextPrompts` (DELETE `/api/chat/turn/<id>/queued`), deletes the row, and prepends the recovered text back into the input bar with the caret parked at the end of the recovered text (separated from any in-progress draft by `\n\n`).
+- (dispatched) — the worker finally drains this prompt from `nextPrompts`. The daemon `UPDATE`s the block to `status='complete'` with a fresh `ts` (dispatch time) and emits a `block_meta_update` SSE event. The dashboard unpins the bubble and re-sorts it inline.
+
+The re-stamp is what makes the "natural timestamp" sort work: the POST-time `ts` would otherwise place the queued bubble above the still-streaming assistant blocks of the in-flight turn, which looks wrong.
+
+**Durability across daemon restart.** On boot, the daemon scans `blocks WHERE status='queued' ORDER BY ts` and dispatches each row via the normal `dispatchTurn` path (oldest first — the first one spawns the worker, the rest queue behind it). Archived agents are skipped and their queued rows deleted. See `recoverQueuedTurns` in `services/daemon/src/index.ts`.
+
+**Send-queue synthesized bubbles** still render on page load for entries that haven't even reached the daemon yet (offline / 5xx in flight before a successful POST). These carry a `queueId` rather than a daemon-issued `turnId`.
 
 ## Attachments
 

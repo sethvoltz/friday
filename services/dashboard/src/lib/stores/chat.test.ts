@@ -1875,3 +1875,183 @@ describe("FRI-12: per-agent inflight quarantine", () => {
     expect(chat.inflightTurnId).toBe(null);
   });
 });
+
+describe("queued user blocks (pending-message feature)", () => {
+  it("block_complete with status='queued' lands the bubble as status='queued'", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "turn-q1",
+      agent: "friday",
+      block_id: "blk-q1",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: '{"text":"queued msg"}',
+      status: "queued",
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    const bubble = chat.messages.find((m) => m.id === "user_turn-q1");
+    expect(bubble, "queued user bubble should be created").toBeDefined();
+    expect(bubble!.status).toBe("queued");
+    expect(bubble!.text).toBe("queued msg");
+    expect(bubble!.blockId).toBe("blk-q1");
+  });
+
+  it("block_meta_update flips queued → complete and bumps ts", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // First land the queued bubble.
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "turn-q2",
+      agent: "friday",
+      block_id: "blk-q2",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: '{"text":"waiting"}',
+      status: "queued",
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    // Then the worker drains it: ts re-stamped, status flipped.
+    chat.applyEvent({
+      v: 1,
+      type: "block_meta_update",
+      turn_id: "turn-q2",
+      agent: "friday",
+      block_id: "blk-q2",
+      status: "complete",
+      ts: 5000,
+      seq: 2,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    const bubble = chat.messages.find((m) => m.id === "user_turn-q2");
+    expect(bubble).toBeDefined();
+    expect(bubble!.status).toBe("complete");
+    expect(bubble!.ts).toBe(5000);
+  });
+
+  it("block_meta_update status='aborted' drops the queued bubble (cancel from another tab)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "turn-q3",
+      agent: "friday",
+      block_id: "blk-q3",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: '{"text":"to be cancelled"}',
+      status: "queued",
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages.find((m) => m.id === "user_turn-q3")).toBeDefined();
+
+    chat.applyEvent({
+      v: 1,
+      type: "block_meta_update",
+      turn_id: "turn-q3",
+      agent: "friday",
+      block_id: "blk-q3",
+      status: "aborted",
+      seq: 2,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(chat.messages.find((m) => m.id === "user_turn-q3")).toBeUndefined();
+  });
+
+  it("cancelQueued POSTs DELETE and stuffs recovered text back via the chat-input bridge", async () => {
+    mockFetchWithTimeout.mockResolvedValueOnce(
+      makeResponse({ ok: true, turn_id: "turn-q4", text: "the draft" }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // Seed a queued bubble locally.
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "turn-q4",
+      agent: "friday",
+      block_id: "blk-q4",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: '{"text":"the draft"}',
+      status: "queued",
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    const recovered = await chat.cancelQueued("turn-q4");
+    expect(recovered).toBe("the draft");
+    // Bubble is removed locally on success.
+    expect(chat.messages.find((m) => m.id === "user_turn-q4")).toBeUndefined();
+    // Endpoint shape: DELETE /api/chat/turn/<id>/queued
+    const call = mockFetchWithTimeout.mock.calls.find((c) =>
+      c[0].includes("/api/chat/turn/turn-q4/queued"),
+    );
+    expect(call).toBeDefined();
+  });
+
+  it("reload-mid-queue: blocks with status='queued' from /blocks come back as status='queued' bubbles", async () => {
+    mockFetchWithTimeout.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [
+          {
+            id: 1,
+            blockId: "blk-r1",
+            turnId: "turn-r1",
+            role: "user",
+            kind: "text",
+            contentJson: '{"text":"survived reload"}',
+            status: "queued",
+            ts: 1000,
+            agentName: "friday",
+            sessionId: "s",
+            messageId: null,
+            blockIndex: 0,
+            source: "user_chat",
+            lastEventSeq: 1,
+          },
+        ],
+        lastEventSeq: 1,
+      }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+
+    const bubble = chat.messages.find((m) => m.id === "user_turn-r1");
+    expect(bubble).toBeDefined();
+    expect(bubble!.status).toBe("queued");
+    expect(bubble!.text).toBe("survived reload");
+  });
+});

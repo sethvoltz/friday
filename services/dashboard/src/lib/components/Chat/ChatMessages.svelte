@@ -1,12 +1,14 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import { chat, type ChatMessage } from "$lib/stores/chat.svelte";
+  import { chatInputBridge } from "$lib/stores/chat-input-bridge.svelte";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import ToolBlock from "$lib/components/Chat/ToolBlock.svelte";
   import ThinkingBlock from "$lib/components/Chat/ThinkingBlock.svelte";
   import MailBlock from "$lib/components/Chat/MailBlock.svelte";
   import ErrorBlock from "$lib/components/Chat/ErrorBlock.svelte";
+  import { X } from "lucide-svelte";
 
   function queueEntry(queueId: string | undefined) {
     if (!queueId) return undefined;
@@ -17,7 +19,9 @@
     const result = await sendQueue.retry(queueId);
     for (const s of result.sent) {
       chat.confirmPending(s.queueId, s.turnId);
-      chat.inflightTurnId = s.turnId;
+      // See ChatInput's submit() for the gate rationale: a queued turn
+      // must not displace the actively-streaming turn's inflight slot.
+      if (!s.queued) chat.inflightTurnId = s.turnId;
     }
     for (const qid of result.failed) chat.markPendingFailed(qid);
     for (const qid of result.retrying) chat.markPendingRetrying(qid);
@@ -34,6 +38,25 @@
     // Defensive: any pending bubble that lost its queue entry mid-flight
     // should also be cleared.
     chat.discardAllPending();
+  }
+
+  /**
+   * Yank a daemon-side queued turn (one parked in the worker's
+   * `nextPrompts` FIFO, distinct from the client-side send-queue) and
+   * stuff the recovered text back into the input bar. The cancel endpoint
+   * returns the original prompt verbatim; ChatInput's bridge sink prepends
+   * it and parks the caret at the end of the recovered text.
+   *
+   * If the daemon returns null (network failure or 409 — worker drained
+   * the queue between render and click), leave the bubble in place. The
+   * subsequent turn_started + block_meta_update events will flip it to
+   * streaming on their own.
+   */
+  async function cancelDaemonQueued(turnId: string | undefined) {
+    if (!turnId) return;
+    const recovered = await chat.cancelQueued(turnId);
+    if (recovered === null) return;
+    if (recovered) chatInputBridge.prepend(recovered);
   }
 
   interface Props {
@@ -71,15 +94,20 @@
   let readonly = $derived(messages !== undefined);
 
   // FIX_FORWARD 2.6: pin pending bubbles to the bottom regardless of natural
-  // sort. A pending user bubble might otherwise drift above a server-sent
-  // message if the server message lands later in the array — pinning makes
-  // the "you just typed this" affordance always render below the
-  // conversation. Read-only views skip this since they have no pending state.
+  // sort. Extended to also pin user blocks the daemon recorded with
+  // `status='queued'` — these are sitting in the worker's `nextPrompts`
+  // FIFO behind an in-flight turn, and their stored `ts` is the POST time
+  // (which would naturally sort them above the still-streaming assistant
+  // blocks of the running turn). They unpin when the worker actually
+  // dispatches them and the `block_meta_update` event flips status to
+  // `complete` with a fresh `ts`.
   let allMessages = $derived.by(() => {
     if (readonly) return rawMessages;
-    const nonPending = rawMessages.filter((m) => !m.pending);
-    const pending = rawMessages.filter((m) => m.pending);
-    return pending.length === 0 ? rawMessages : [...nonPending, ...pending];
+    const isQueued = (m: (typeof rawMessages)[number]) =>
+      m.pending || m.status === "queued";
+    const nonQueued = rawMessages.filter((m) => !isQueued(m));
+    const queued = rawMessages.filter(isQueued);
+    return queued.length === 0 ? rawMessages : [...nonQueued, ...queued];
   });
 
   // DOM windowing. When the user is bottom-pinned (scrolled to or near the
@@ -479,6 +507,22 @@
                    turn_id — sendQueue.remove already ran, confirmPending
                    never did) and a pill claiming "queued" while the
                    queue is empty is worse than no pill. FRI-6. -->
+            {:else if msg.status === "queued"}
+              <!-- Daemon-side queue: this message is sitting in the
+                   worker's `nextPrompts` FIFO behind an in-flight turn.
+                   The X yanks it back and stuffs the text into the input
+                   bar (chatInputBridge → ChatInput sink). -->
+              <div class="footer-tag queued queued-row">
+                <span>Queued — waiting for current turn</span>
+                <button
+                  type="button"
+                  class="queue-cancel"
+                  aria-label="Cancel queued message"
+                  title="Cancel and edit"
+                  onclick={() => cancelDaemonQueued(msg.turnId)}>
+                  <X size={14} aria-hidden="true" />
+                </button>
+              </div>
             {/if}
           {:else}
             <Markdown source={msg.text} streaming={msg.status === "streaming"} />
@@ -582,6 +626,28 @@
   .footer-tag.queued {
     color: var(--text-inverse);
     opacity: 0.85;
+  }
+  .footer-tag.queued-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .queue-cancel {
+    background: rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    color: var(--text-inverse);
+    width: 1.4rem;
+    height: 1.4rem;
+    padding: 0;
+    border-radius: 999px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+  }
+  .queue-cancel:hover {
+    background: rgba(255, 255, 255, 0.32);
   }
   .footer-tag.failed-row {
     color: var(--text-inverse);

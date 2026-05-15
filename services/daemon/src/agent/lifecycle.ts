@@ -152,6 +152,12 @@ export interface SpawnTurnInput {
   options: WorkerSpawnOptions;
   /** Called when the worker process exits. Used by scheduled to write last-run.md. */
   onExit?: (info: ExitInfo) => void;
+  /** Present only when the caller recorded the user block as `status='queued'`
+   *  (the worker was already busy at POST time). Propagates to the queued
+   *  `WorkerPromptCommand` so `sendPrompt` knows to re-stamp the row on
+   *  dispatch. Omitted for immediate dispatch (`recordUserBlock` already
+   *  wrote `status='complete'`). */
+  userBlockId?: string;
 }
 
 /**
@@ -366,6 +372,16 @@ export function spawnTurn(input: SpawnTurnInput): void {
     });
   });
 
+  // Mirror sendPrompt's queued-block bookkeeping for the fork-fresh path:
+  // when a queued user block triggers a worker spawn (rehydration or POST
+  // against an offline worker), the block is sitting at status='queued'
+  // with the POST-time ts. Re-stamp it now so the dashboard's pinned
+  // bubble unpins as the worker comes up.
+  restampQueuedUserBlock(
+    input.agentName,
+    input.options.turnId,
+    input.userBlockId,
+  );
   eventBus.publish({
     v: 1,
     type: "agent_lifecycle",
@@ -401,6 +417,7 @@ export function dispatchTurn(input: SpawnTurnInput): void {
     resumeSessionId:
       input.options.resumeSessionId ?? existing.sessionId ?? undefined,
     allowedToolsOverride: input.options.allowedToolsOverride,
+    userBlockId: input.userBlockId,
   };
   if (existing.status === "idle") {
     sendPrompt(existing, promptCmd);
@@ -419,7 +436,54 @@ export function dispatchTurn(input: SpawnTurnInput): void {
   }
 }
 
+/**
+ * Flip a queued user block to `status='complete'` with a fresh `ts` and
+ * announce it on SSE so the dashboard unpins the bubble and re-sorts it
+ * inline. ADR-004 ordering: writeAndPublish stamps the row's
+ * last_event_seq with the same value the SSE event will carry.
+ *
+ * Called from both `sendPrompt` (queue-drain → existing live worker) and
+ * `spawnTurn` (rehydrated queue or POST against an offline worker forces
+ * a fresh fork). Safe to call with `undefined` blockId — no-op.
+ */
+function restampQueuedUserBlock(
+  agentName: string,
+  turnId: string,
+  userBlockId: string | undefined,
+): void {
+  if (!userBlockId) return;
+  const dispatchTs = Date.now();
+  try {
+    writeAndPublish(
+      {
+        v: 1,
+        type: "block_meta_update",
+        turn_id: turnId,
+        agent: agentName,
+        block_id: userBlockId,
+        status: "complete",
+        ts: dispatchTs,
+      },
+      (assignedSeq) => {
+        updateBlock(userBlockId, {
+          status: "complete",
+          ts: dispatchTs,
+          lastEventSeq: assignedSeq,
+        });
+      },
+    );
+  } catch (err) {
+    logger.log("warn", "queued-block.meta-update.error", {
+      agent: agentName,
+      turnId,
+      blockId: userBlockId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
+  restampQueuedUserBlock(w.agentName, p.turnId, p.userBlockId);
   w.turnId = p.turnId;
   w.turnStart = Date.now();
   w.abortRequested = false;
@@ -790,6 +854,26 @@ export function peekLiveWorker(agentName: string): {
     agentType: w.agentType,
     turnId: w.turnId,
   };
+}
+
+/**
+ * Remove a queued prompt (one that hasn't yet been dispatched to the worker)
+ * matching `turnId` from the live worker's `nextPrompts`. Returns the
+ * removed `WorkerPromptCommand` so callers can inspect the prompt text
+ * (used by the DELETE cancel endpoint to return the recovered text to the
+ * dashboard). Returns null when no live worker for this agent, or when no
+ * queued entry matches.
+ */
+export function removeQueuedPrompt(
+  agentName: string,
+  turnId: string,
+): WorkerPromptCommand | null {
+  const w = live.get(agentName);
+  if (!w) return null;
+  const idx = w.nextPrompts.findIndex((p) => p.turnId === turnId);
+  if (idx < 0) return null;
+  const [removed] = w.nextPrompts.splice(idx, 1);
+  return removed;
 }
 
 export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
@@ -1517,6 +1601,12 @@ export interface RecordUserBlockInput {
   sessionId?: string;
   text: string;
   source: "user_chat" | "mail" | "queue_inject";
+  /** `complete` for the common path (block is final the moment it's
+   *  written). `queued` for user_chat POSTs that arrived while the agent
+   *  was mid-turn — the row is parked until the worker drains it from
+   *  `nextPrompts`, at which point `dispatchQueuedPrompt` flips it to
+   *  `complete` + new `ts` via `block_meta_update`. Defaults to `complete`. */
+  status?: "complete" | "queued";
   /** Mail-derived blocks carry sender metadata inside content_json. */
   fromAgent?: string;
   /** Mail-derived blocks: extra MailRow metadata serialized into
@@ -1549,6 +1639,7 @@ export function recordUserBlock(input: RecordUserBlockInput): {
 } {
   const blockId = randomUUID();
   const ts = Date.now();
+  const status = input.status ?? "complete";
   const attachments =
     input.attachments && input.attachments.length > 0
       ? { attachments: input.attachments }
@@ -1572,17 +1663,23 @@ export function recordUserBlock(input: RecordUserBlockInput): {
         }
       : { text: input.text, ...attachments };
   const contentJson = JSON.stringify(content);
-  // The `user_chat` path has the dashboard's optimistic bubble already
-  // rendered before POST /api/chat/turn returns. Emitting the canonical
-  // `block_complete` SSE frame here races the POST response, and when the
-  // SSE wins, the dashboard ends up with two user-role bubbles for the
-  // same turn (one re-keyed by `confirmPending`, one freshly-pushed by
-  // `handleBlockComplete`). Skip the SSE publish for `user_chat`; the
-  // block row is still persisted so reloads via `/api/agents/:name/blocks`
-  // return the message. Mail / scheduled / queue-injected user blocks
-  // have no upstream optimistic bubble, so their SSE frames still emit.
+  // For `user_chat` + `status='complete'`, the dashboard's optimistic
+  // bubble is already on screen before POST /api/chat/turn returns.
+  // Emitting the canonical `block_complete` SSE frame here races the
+  // POST response and (when SSE wins) doubles the bubble — keep the
+  // historical "skip SSE for that exact case" behavior.
+  //
+  // For `status='queued'` we MUST emit on SSE: the worker may not drain
+  // this prompt for minutes, and the dashboard needs the signal to flip
+  // the optimistic bubble into the queued (pinned) visual state. The
+  // existing `confirmPending` race-protection in chat.svelte.ts handles
+  // either ordering of POST-ack vs. SSE.
+  //
+  // Mail / scheduled / queue-injected blocks have no upstream optimistic
+  // bubble and always emit.
+  const skipSse = input.source === "user_chat" && status === "complete";
   let seq: number;
-  if (input.source === "user_chat") {
+  if (skipSse) {
     seq = 0; // not in the event bus; not consumed by callers either
     insertBlock({
       blockId,
@@ -1595,7 +1692,7 @@ export function recordUserBlock(input: RecordUserBlockInput): {
       kind: "text",
       source: input.source,
       contentJson,
-      status: "complete",
+      status,
       ts,
       lastEventSeq: seq,
     });
@@ -1613,7 +1710,7 @@ export function recordUserBlock(input: RecordUserBlockInput): {
         kind: "text",
         source: input.source,
         content_json: contentJson,
-        status: "complete",
+        status,
         ts,
       },
       (assignedSeq) => {
@@ -1628,7 +1725,7 @@ export function recordUserBlock(input: RecordUserBlockInput): {
           kind: "text",
           source: input.source,
           contentJson,
-          status: "complete",
+          status,
           ts,
           lastEventSeq: assignedSeq,
         });
@@ -1646,7 +1743,7 @@ export function recordUserBlock(input: RecordUserBlockInput): {
     role: "user",
     kind: "text",
     source: input.source,
-    status: "complete",
+    status,
     contentJson,
   });
   return { blockId, seq };

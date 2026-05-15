@@ -140,7 +140,7 @@ export const blocks = sqliteTable(
     kind: text("kind").notNull(), // text|thinking|tool_use|tool_result|error
     source: text("source"), // user_chat|mail|queue_inject|sdk (null for assistant)
     contentJson: text("content_json").notNull(),
-    status: text("status").notNull(), // streaming|complete|aborted|error
+    status: text("status").notNull(), // streaming|complete|aborted|error|queued (user blocks awaiting worker dispatch)
     ts: integer("ts").notNull(),
     lastEventSeq: integer("last_event_seq").notNull(),
   },

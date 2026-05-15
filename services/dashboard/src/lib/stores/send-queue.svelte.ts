@@ -29,6 +29,19 @@ export interface QueuedMessage {
  *  problem. */
 const MAX_ATTEMPTS = 5;
 
+/** One row of the `sent` list returned by `flush`/`retry`. `queued` reflects
+ *  the daemon's response: `true` when the prompt landed in the worker's
+ *  `nextPrompts` FIFO behind an in-flight turn, `false` when it dispatched
+ *  immediately. Callers use this to decide whether to overwrite
+ *  `chat.inflightTurnId` — only dispatching turns should claim that slot;
+ *  a queued turn must not displace the actively-streaming turn. */
+export interface FlushSentItem {
+  queueId: string;
+  turnId: string;
+  agent: string;
+  queued: boolean;
+}
+
 class SendQueue {
   items = $state<QueuedMessage[]>(loadJSON<QueuedMessage[]>(KEYS.sendQueue, []));
   flushing = $state(false);
@@ -76,7 +89,7 @@ class SendQueue {
    *  then immediately flush so the retry feels instant. Wired to the
    *  per-bubble "retry" affordance in the UI. */
   async retry(id: string): Promise<{
-    sent: Array<{ queueId: string; turnId: string; agent: string }>;
+    sent: Array<FlushSentItem>;
     failed: string[];
     retrying: string[];
   }> {
@@ -103,15 +116,15 @@ class SendQueue {
    * UI affordances (FIX_FORWARD 2.6).
    */
   async flush(): Promise<{
-    sent: Array<{ queueId: string; turnId: string; agent: string }>;
+    sent: FlushSentItem[];
     failed: string[];
     retrying: string[];
   }> {
-    const empty = { sent: [] as Array<{ queueId: string; turnId: string; agent: string }>, failed: [] as string[], retrying: [] as string[] };
+    const empty = { sent: [] as FlushSentItem[], failed: [] as string[], retrying: [] as string[] };
     if (this.flushing) return empty;
     if (this.items.length === 0) return empty;
     this.flushing = true;
-    const sent: Array<{ queueId: string; turnId: string; agent: string }> = [];
+    const sent: FlushSentItem[] = [];
     const failed: string[] = [];
     const retrying: string[] = [];
     try {
@@ -149,10 +162,18 @@ class SendQueue {
             this.persist();
             return { sent, failed, retrying }; // 5xx: stop the run, try again on next reconnect.
           }
-          const data = (await r.json().catch(() => ({}))) as { turn_id?: string };
+          const data = (await r.json().catch(() => ({}))) as {
+            turn_id?: string;
+            queued?: boolean;
+          };
           this.remove(id);
           if (data.turn_id) {
-            sent.push({ queueId: m.id, turnId: data.turn_id, agent: m.agent });
+            sent.push({
+              queueId: m.id,
+              turnId: data.turn_id,
+              agent: m.agent,
+              queued: data.queued === true,
+            });
           }
         } catch (err) {
           // Network-layer failure (offline, abort, DNS). Always retryable

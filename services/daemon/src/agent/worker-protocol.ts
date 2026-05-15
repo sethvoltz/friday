@@ -66,6 +66,13 @@ export interface WorkerPromptCommand {
   turnId: string;
   resumeSessionId?: string;
   allowedToolsOverride?: string[];
+  /** The DB `blocks.block_id` of the user-chat block that backs this prompt,
+   *  when the daemon recorded the user block before dispatch. Populated for
+   *  `user_chat` POSTs (initial or queued); omitted for mail/scheduled
+   *  injection where no user block is written.  Used by the dispatch path
+   *  to flip a queued block to `complete` with a fresh `ts` via
+   *  `block_meta_update`. */
+  userBlockId?: string;
 }
 
 /** Metadata for an attachment referenced by a turn. Resolved to bytes on

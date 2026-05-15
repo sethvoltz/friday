@@ -17,7 +17,14 @@ export interface ChatMessage {
     | "aborted"
     | "error"
     | "running" // tool/thinking still in progress
-    | "done";
+    | "done"
+    // User block recorded by the daemon at status='queued' — sitting in the
+    // worker's `nextPrompts` FIFO behind an in-flight turn. Pinned to the
+    // bottom of the chat (alongside `pending`) until a `block_meta_update`
+    // event flips it to 'complete' with a fresh ts. Carries an X cancel
+    // affordance that yanks it from the daemon's queue and stuffs the
+    // text back into the input bar.
+    | "queued";
   agent?: string;
   ts: number;
 
@@ -1276,6 +1283,10 @@ export class ChatState {
         if (event.agent !== this.focusedAgent) break;
         this.handleBlockComplete(event);
         break;
+      case "block_meta_update":
+        if (event.agent !== this.focusedAgent) break;
+        this.handleBlockMetaUpdate(event);
+        break;
       case "block_reload":
         if (event.agent !== this.focusedAgent) break;
         // Daemon's JSONL recovery scan inserted/updated rows for this agent
@@ -1448,7 +1459,7 @@ export class ChatState {
     block_id: string;
     kind: "text" | "thinking" | "tool_use" | "tool_result" | "error";
     content_json: string;
-    status: "complete" | "aborted" | "error";
+    status: "complete" | "aborted" | "error" | "queued";
     turn_id: string;
     role: string;
     source: string | null;
@@ -1493,15 +1504,18 @@ export class ChatState {
         event.role === "user"
           ? userBlockIdForTurn(event.turn_id)
           : `b_${event.block_id}`;
+      const mappedStatus: ChatMessage["status"] =
+        event.status === "complete"
+          ? "complete"
+          : event.status === "aborted"
+            ? "aborted"
+            : event.status === "queued"
+              ? "queued"
+              : "error";
       for (const m of this.messages) {
         if (m.id !== id) continue;
         if (typeof parsed.text === "string") m.text = parsed.text;
-        m.status =
-          event.status === "complete"
-            ? "complete"
-            : event.status === "aborted"
-              ? "aborted"
-              : "error";
+        m.status = mappedStatus;
         // Backfill source/fromAgent if a prior block_start mounted the row
         // without them. recordUserBlock for mail emits only block_complete
         // (no block_start), so today this path is not hit for mail; the
@@ -1515,6 +1529,12 @@ export class ChatState {
         if (m.attachments === undefined && parsed.attachments) {
           m.attachments = parsed.attachments;
         }
+        // Hand off the turn id and block id so cancelQueued and the
+        // cancel-X affordance can target this bubble even after
+        // `confirmPending` has cleared the optimistic queueId. block_id
+        // also lets handleBlockMetaUpdate locate the bubble directly.
+        if (!m.turnId && event.turn_id) m.turnId = event.turn_id;
+        if (!m.blockId && event.block_id) m.blockId = event.block_id;
         return;
       }
       // Late mount: block_start was evicted from the ring (or — for mail
@@ -1524,14 +1544,10 @@ export class ChatState {
         id,
         role,
         text: parsed.text ?? "",
-        status:
-          event.status === "complete"
-            ? "complete"
-            : event.status === "aborted"
-              ? "aborted"
-              : "error",
+        status: mappedStatus,
         agent: this.focusedAgent,
         turnId: event.turn_id,
+        blockId: event.block_id,
         ts: event.ts,
         source: (event.source as ChatMessage["source"]) ?? undefined,
         fromAgent: parsed.from_agent,
@@ -1624,6 +1640,81 @@ export class ChatState {
         output: parsed.text ?? "",
         ts: event.ts,
       });
+    }
+  }
+
+  /**
+   * Late-binding update to a previously-emitted block. The daemon uses this
+   * to flip a queued user block to `complete` with a fresh `ts` once the
+   * worker actually dispatches the prompt (or to `aborted` when the cancel
+   * endpoint deletes the row out from under any other tab still watching).
+   *
+   * Aborted status drops the bubble entirely — the row is gone DB-side, so
+   * keeping it around as an "aborted user message" would surface a ghost.
+   */
+  private handleBlockMetaUpdate(event: {
+    block_id: string;
+    turn_id: string;
+    status?: "streaming" | "complete" | "aborted" | "error" | "queued";
+    ts?: number;
+  }): void {
+    if (event.status === "aborted") {
+      this.messages = this.messages.filter(
+        (m) =>
+          m.blockId !== event.block_id &&
+          // userBlockIdForTurn keys also serve as a fallback when the row
+          // was synthesized late (no block_id captured on the bubble).
+          m.id !== userBlockIdForTurn(event.turn_id),
+      );
+      return;
+    }
+    for (const m of this.messages) {
+      const matches =
+        m.blockId === event.block_id ||
+        m.id === userBlockIdForTurn(event.turn_id);
+      if (!matches) continue;
+      if (event.status) {
+        m.status =
+          event.status === "complete"
+            ? "complete"
+            : event.status === "queued"
+              ? "queued"
+              : event.status === "error"
+                ? "error"
+                : event.status === "streaming"
+                  ? "streaming"
+                  : m.status;
+      }
+      if (typeof event.ts === "number") m.ts = event.ts;
+      return;
+    }
+  }
+
+  /**
+   * Yank a queued user-chat turn out of the daemon's `nextPrompts` FIFO
+   * before the worker dispatches it. Returns the recovered prompt text so
+   * the caller (ChatInput's cancel-X handler) can stuff it back into the
+   * textarea. Removes the bubble locally on success; on failure leaves it
+   * in place so the user can try again or wait for the dispatch.
+   *
+   * 409 means the worker drained the queue between bubble render and
+   * click — treat that as "too late" and leave the bubble; the next
+   * turn_started event will flip it to streaming anyway.
+   */
+  async cancelQueued(turnId: string): Promise<string | null> {
+    try {
+      const r = await fetchWithTimeout(`/api/chat/turn/${turnId}/queued`, {
+        method: "DELETE",
+        timeoutMs: 5_000,
+      });
+      if (!r.ok) return null;
+      const data = (await r.json().catch(() => ({}))) as { text?: string };
+      this.messages = this.messages.filter(
+        (m) => m.turnId !== turnId || m.role !== "user",
+      );
+      return typeof data.text === "string" ? data.text : "";
+    } catch {
+      return null;
     }
   }
 }
@@ -1761,7 +1852,9 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
       // so they map cleanly to `complete`.
       const status: ChatMessage["status"] =
         role === "user"
-          ? "complete"
+          ? b.status === "queued"
+            ? "queued"
+            : "complete"
           : b.status === "streaming"
             ? "streaming"
             : b.status === "complete"
@@ -1776,6 +1869,7 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         status,
         agent,
         turnId: b.turnId,
+        blockId: b.blockId,
         ts: b.ts,
         source: (b.source as ChatMessage["source"]) ?? undefined,
         fromAgent: parsed.from_agent,

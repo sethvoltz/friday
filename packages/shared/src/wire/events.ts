@@ -31,6 +31,7 @@ export type WireEvent =
   | BlockStartEvent
   | BlockDeltaEvent
   | BlockCompleteEvent
+  | BlockMetaUpdateEvent
   | BlockReloadEvent
   | ConnectionEstablishedEvent;
 
@@ -186,8 +187,32 @@ export interface BlockCompleteEvent extends BaseEvent {
   /** Final serialized content payload for the block; same shape as the
    * `content_json` column in the blocks table. */
   content_json: string;
-  status: "complete" | "aborted" | "error";
+  /** `queued` is a transient terminal state for user blocks that have been
+   *  recorded in the DB but are still sitting in the worker's `nextPrompts`
+   *  FIFO (in-flight turn ahead of them). When the worker drains the queue
+   *  and actually dispatches the prompt, the daemon emits
+   *  `block_meta_update` with `status='complete'` and a fresh `ts` so the
+   *  block sorts inline with the surrounding stream rather than pinned to
+   *  the bottom. */
+  status: "complete" | "aborted" | "error" | "queued";
   ts: number;
+}
+
+/**
+ * Late-binding update to an already-emitted block's metadata. Today the only
+ * producer is the queued-prompt drain path: a user block was inserted with
+ * `status='queued'` on POST, and now (when the worker is finally ready to
+ * dispatch it) the daemon stamps the real dispatch time on it and flips the
+ * status to `complete`. Clients should patch their in-memory row by
+ * `block_id` and re-sort if the new `ts` changes ordering.
+ */
+export interface BlockMetaUpdateEvent extends BaseEvent {
+  type: "block_meta_update";
+  turn_id: string;
+  agent: string;
+  block_id: string;
+  status?: "streaming" | "complete" | "aborted" | "error" | "queued";
+  ts?: number;
 }
 
 /**
