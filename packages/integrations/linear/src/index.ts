@@ -16,10 +16,16 @@ import {
   linkExternal,
   type Ticket,
 } from "@friday/shared/services";
+import { loadConfig } from "@friday/shared";
 import {
+  createIssue,
+  findTeamByKey,
   getIssueByIdentifier,
   listActiveIssues,
+  listTeams,
+  type CreatedIssue,
   type LinearIssue,
+  type LinearTeam,
 } from "./api.js";
 
 export {
@@ -43,12 +49,84 @@ export const LINEAR_SYSTEM_NAME = "linear";
 
 export interface LinearConfig {
   apiKey: string;
+  /**
+   * Team identifier for issue creation. Either a Linear team UUID or a
+   * team key like `"FRI"`. Sourced from `FRIDAY_LINEAR_TEAM` env var,
+   * falling back to `linear.team` in `~/.friday/config.json`. May be
+   * undefined; the createIssue path falls back to "first team" with a
+   * warning when missing.
+   */
+  team?: string;
 }
 
 export function getLinearConfig(): LinearConfig | null {
   const key = process.env.LINEAR_API_KEY;
   if (!key) return null;
-  return { apiKey: key };
+  const team = process.env.FRIDAY_LINEAR_TEAM ?? loadConfig().linear?.team;
+  return { apiKey: key, team };
+}
+
+/**
+ * Resolve the configured `team` value (UUID or key) to a concrete team UUID
+ * suitable for `createIssue`. If no team is configured, falls back to the
+ * first team Linear returns and logs a warning.
+ *
+ * Pure helper — accepts the raw team string so tests can drive it directly.
+ */
+export async function resolveTeamId(opts: {
+  apiKey: string;
+  team?: string;
+  warn?: (msg: string) => void;
+}): Promise<LinearTeam> {
+  const warn = opts.warn ?? ((m) => console.warn(m));
+
+  if (opts.team && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.team)) {
+    // Already a UUID. Return a stub team — name/key not needed downstream.
+    return { id: opts.team, key: "", name: "" };
+  }
+
+  if (opts.team) {
+    const found = await findTeamByKey({ apiKey: opts.apiKey, key: opts.team });
+    if (!found) {
+      throw new Error(
+        `Linear team "${opts.team}" not found (configured via FRIDAY_LINEAR_TEAM or linear.team).`,
+      );
+    }
+    return found;
+  }
+
+  const teams = await listTeams({ apiKey: opts.apiKey });
+  if (teams.length === 0) {
+    throw new Error("Linear API key has access to no teams.");
+  }
+  warn(
+    `linear.team not configured — falling back to first team "${teams[0].key}". Set linear.team in ~/.friday/config.json or FRIDAY_LINEAR_TEAM to pin this.`,
+  );
+  return teams[0];
+}
+
+/**
+ * Convenience wrapper: resolve the configured team, then create an issue.
+ * Returns the created issue plus the team that was used.
+ */
+export async function createIssueWithConfiguredTeam(opts: {
+  title: string;
+  description?: string;
+}): Promise<{ issue: CreatedIssue; team: LinearTeam }> {
+  const cfg = getLinearConfig();
+  if (!cfg) {
+    throw new Error("LINEAR_API_KEY not set");
+  }
+  const team = await resolveTeamId({ apiKey: cfg.apiKey, team: cfg.team });
+  const issue = await createIssue({
+    apiKey: cfg.apiKey,
+    input: {
+      teamId: team.id,
+      title: opts.title,
+      description: opts.description,
+    },
+  });
+  return { issue, team };
 }
 
 export interface ReconcileResult {
