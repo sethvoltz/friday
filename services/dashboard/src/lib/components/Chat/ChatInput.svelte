@@ -751,7 +751,7 @@
       placeholder="Message Friday… or /command"
       rows="1"
       autocomplete="off"
-      autocapitalize="off"
+      autocapitalize="sentences"
     ></textarea>
     {#if busy}
       <button
