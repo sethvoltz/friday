@@ -7,6 +7,7 @@ import {
   mkdirSync,
   openSync,
   renameSync,
+  unlink,
   writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
@@ -53,6 +54,11 @@ export function createLogger(opts: CreateLoggerOptions): Logger {
     const gzPath = `${rotated}.gz`;
     const src = createReadStream(rotated);
     const dest = createWriteStream(gzPath);
+    dest.on("finish", () => {
+      unlink(rotated, () => {
+        // best-effort; leave the file if unlink fails
+      });
+    });
     src.pipe(createGzip()).pipe(dest);
     fd = openSync(path, "a");
   }
