@@ -364,7 +364,7 @@
                 onclick={() => toggleExpand(p.id)}
                 aria-expanded={expanded.has(p.id)}>
                 <span class="caret" aria-hidden="true"
-                  >{expanded.has(p.id) ? "▾" : "▸"}</span>
+                  >{expanded.has(p.id) ? "−" : "+"}</span>
                 {p.title}
               </button>
               <div class="row-meta">

@@ -534,7 +534,7 @@
         </span>
         <span class="name">{focused.name}</span>
       {/if}
-      <span class="chev" aria-hidden="true">{open ? "▴" : "▾"}</span>
+      <span class="chev" aria-hidden="true">{open ? "−" : "+"}</span>
     </button>
     {#if open}
       <div class="dropdown">
