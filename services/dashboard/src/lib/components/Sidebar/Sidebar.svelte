@@ -445,15 +445,16 @@
       {/if}
     </button>
     {#if (a.sessionCount ?? 0) > 1 || (a.sessionCount === 1 && !a.sessionId)}
-      <button
-        type="button"
-        class="expand-btn"
-        class:open={isExpanded(a.name)}
-        aria-label={isExpanded(a.name) ? "Hide history" : "Show history"}
-        aria-expanded={isExpanded(a.name) ? true : false}
-        onclick={() => toggleHistory(a.name)}>
-        {isExpanded(a.name) ? "−" : "+"}
-      </button>
+      <div class="expand-slot" class:open={isExpanded(a.name)} aria-hidden="true">
+        <button
+          type="button"
+          class="expand-btn"
+          aria-label={isExpanded(a.name) ? "Hide history" : "Show history"}
+          aria-expanded={isExpanded(a.name) ? true : false}
+          onclick={() => toggleHistory(a.name)}>
+          {isExpanded(a.name) ? "−" : "+"}
+        </button>
+      </div>
     {/if}
   </div>
   {#if isExpanded(a.name)}
@@ -584,24 +585,42 @@
   }
 
   /* Whole row is the visual unit — its background tracks hover/active so
-     both .row-main and .expand-btn sit inside the same highlight. The two
-     children are transparent. */
+     both .row-main and .expand-btn sit inside the same highlight. The
+     expand-btn is positioned absolutely on top of the row so the label
+     can use the full row width and ellide naturally; the button reveals
+     itself on hover/focus/expanded/touch as a right-edge overlay with a
+     gradient fade that matches whichever state the row is currently in.
+     --row-bg is the single source of truth for that match. */
   .row {
+    position: relative;
     display: flex;
     align-items: stretch;
     margin-bottom: 0.2rem;
-    padding-right: 0.35rem;
     border-radius: var(--radius-sm);
     color: var(--text-secondary);
+    --row-bg: var(--bg-card);
     transition: background var(--transition-fast), color var(--transition-fast);
   }
-  .row:hover {
+  .row:hover,
+  .row:focus-within {
     background: var(--bg-tertiary);
     color: var(--text-primary);
+    --row-bg: var(--bg-tertiary);
   }
-  .row.active {
+  .row.active,
+  .row.active:hover,
+  .row.active:focus-within {
     background: var(--accent-glow);
     color: var(--accent-primary);
+    /* --accent-glow is semi-transparent (~0.12 dark / 0.15 light) so it
+       reads as a tint OF the panel underneath. The slot can't reuse
+       --accent-glow directly — painting it again on top of the row's
+       accent-glow doubles the alpha and produces a darker patch where
+       the +/- overlay sits. Use a pre-flattened opaque equivalent
+       (panel bg + ~13% accent-primary) that visually matches the row's
+       rendered colour without stacking. */
+    --row-bg:
+      color-mix(in srgb, var(--bg-card), var(--accent-primary) 13%);
   }
   .row-main {
     flex: 1;
@@ -622,9 +641,52 @@
   .row.pinned .row-main { font-weight: 600; }
   .row.pinned .name { font-family: var(--font-sans); }
 
+  /* Slot owns the gradient fade and the reveal opacity; pointer-events
+     are off so clicks in the empty fade zone fall through to .row-main
+     (i.e. clicking near the glyph still navigates to the agent). The
+     glyph button inside re-enables pointer events and is the only
+     tabbable / clickable target — its focus ring hugs just the glyph,
+     not the whole 3rem fade area. */
+  .expand-slot {
+    position: absolute;
+    top: 50%;
+    right: 0;
+    transform: translateY(-50%);
+    /* Wider than the button itself so there's a meaningful opaque plate
+       around the glyph (the +/- never sits over translucent label text),
+       with the gradient fade strictly to the left of that plate. ~40%
+       fade + ~60% solid row-bg gives the button a substantial backing
+       even when the underlying label runs long. */
+    width: 4rem;
+    height: 1.85rem;
+    padding-right: 0.35rem;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    pointer-events: none;
+    background:
+      linear-gradient(
+        to right,
+        transparent 0%,
+        var(--row-bg) 40%,
+        var(--row-bg) 100%
+      );
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+  }
+  .row:hover .expand-slot,
+  .row:focus-within .expand-slot,
+  .expand-slot.open {
+    opacity: 1;
+  }
+  /* Always-visible on touch devices — slot reveals; button is the click
+     target as usual. */
+  @media (hover: none) {
+    .expand-slot { opacity: 1; }
+  }
+
   .expand-btn {
-    flex-shrink: 0;
-    align-self: center;
+    pointer-events: auto;
     width: 1.85rem;
     height: 1.85rem;
     background: transparent;
@@ -635,19 +697,18 @@
     font-family: var(--font-mono);
     font-size: 1.2rem;
     line-height: 1;
-    opacity: 0;
-    transition: opacity var(--transition-fast), background var(--transition-fast);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--transition-fast);
   }
-  .row:hover .expand-btn,
-  .expand-btn.open {
-    opacity: 1;
-  }
-  .expand-btn:hover {
-    background: var(--bg-card);
-  }
-  /* Always-visible expand button on touch devices. */
-  @media (hover: none) {
-    .expand-btn { opacity: 1; }
+  /* Button-itself affordance: a small solid plate over the slot bg so
+     the glyph reads as its own click target. Same plate fires on mouse
+     hover and keyboard focus so tabbed-in state visually matches the
+     pointer hover state. */
+  .expand-btn:hover,
+  .expand-btn:focus-visible {
+    background: color-mix(in srgb, var(--row-bg) 60%, var(--text-primary) 16%);
   }
 
   .history {
