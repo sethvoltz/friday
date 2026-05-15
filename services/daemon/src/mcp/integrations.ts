@@ -1,7 +1,7 @@
 /**
- * Friday-integrations MCP server. Cross-system imports (Linear today;
- * future GitHub Issues, Jira, etc.). Orchestrator only — sub-agents
- * shouldn't be reaching out to external services on their own.
+ * Friday-integrations MCP server. Cross-system imports and writes (Linear
+ * today; future GitHub Issues, Jira, etc.). Exposed to every non-archived
+ * agent type so sub-agents can file follow-ups directly.
  */
 
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";

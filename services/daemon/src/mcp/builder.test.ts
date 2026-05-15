@@ -34,17 +34,29 @@ describe("buildMcpServers: built-in surface", () => {
     }
   });
 
-  it("orchestrator alone gets agents/schedule/evolve/integrations", () => {
+  it("orchestrator alone gets agents/schedule/evolve", () => {
     const orch = buildMcpServers(baseOpts("orchestrator"));
     const helper = buildMcpServers(baseOpts("helper"));
     for (const name of [
       "friday-agents",
       "friday-schedule",
       "friday-evolve",
-      "friday-integrations",
     ]) {
       expect(orch[name]).toBeDefined();
       expect(helper[name]).toBeUndefined();
+    }
+  });
+
+  it("friday-integrations is wired for every agent type", () => {
+    for (const t of [
+      "orchestrator",
+      "builder",
+      "helper",
+      "scheduled",
+      "bare",
+    ] as const) {
+      const servers = buildMcpServers(baseOpts(t));
+      expect(servers["friday-integrations"]).toBeDefined();
     }
   });
 });
