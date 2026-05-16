@@ -427,6 +427,49 @@ When a new drift mode is discovered:
 - `/tickets` page renders list + detail with comments + external links.
 - External-system linking is system-agnostic (ADR-006): `ticket_external_links (ticket_id, system, external_id, url, meta)` carries Linear, GitHub, anything else as sibling rows. The `tickets` table itself doesn't know any external system exists.
 
+## Apps
+
+Friday Apps (ADR-021, FRI-78) are folders under `~/.friday/apps/<id>/` that are first-class registered, agent-owning, MCP-extending units. An app is **a folder + a manifest + a DB row**; the manifest on disk is the source of truth, the `apps` SQLite table is derived state.
+
+### Memory vs. files: the hard split
+
+- **Memory = facts.** Cross-cutting, durable, recall-able. Apps that need to remember something visible to the orchestrator save memory entries normally.
+- **Files = operational state.** Libraries, generated artifacts, structured config, plans. Apps that need this put it under their own folder (`~/.friday/apps/<id>/state/`).
+
+Earlier directions explored per-app memory namespacing or a recall ranker; the directory-per-app structure removes the namespacing problem at the source.
+
+### Per-app MCP scoping
+
+Each app's manifest declares zero or more stdio MCP servers (`command: "node"`, args resolved relative to the app folder, env values substituted from the app's own `.env`). When the daemon forks a worker for an agent that has `app_id` set, `spawnTurn` auto-populates `appContext` on the worker's options. The worker's `buildMcpServers` then appends those servers — only to the app's own agents. The orchestrator has no `app_id`, so it has no `appContext`, so it never sees per-app MCP servers. That's the structural containment that makes the model work.
+
+### Install / uninstall / reload lifecycle
+
+`services/daemon/src/apps/installer.ts` is the transactional heart. All collision checks + writes happen in one SQLite transaction; post-commit side effects (drop default `.gitignore`, SSE publish, folder rename) are best-effort and log a warning on failure rather than unwind.
+
+- **Install**: read manifest, run §6.2 collision matrix, upsert app row + agents + schedules, publish `app_lifecycle: installed`.
+- **Uninstall**: archive owned agents (preserve `app_id` as tombstone), drop schedules, delete app row, optionally archive / keep / delete the folder.
+- **Reload**: re-read manifest, reconcile. New agents added; removed agents NOT auto-archived (destructive — explicit uninstall required).
+- **Boot reconcile**: missing folder → flip status to `orphaned` (never auto-delete). Discovered folders without DB rows are logged but never auto-installed.
+
+### CWD rule
+
+Agents owned by an app run with `cwd = <app folder>` (resolved in `workingDirectoryFor`). Builders override this — workspace containment is the stronger Constitution rule. The orchestrator always runs with the daemon's cwd.
+
+### On-disk layout
+
+```
+~/.friday/apps/<id>/
+  manifest.json          # required
+  prompt.md              # optional; referenced by agents[].promptOverlay
+  .env                   # optional; loaded only for this app's MCP servers
+  .gitignore             # written on fresh install (.env + state/*.cache.json)
+  mcp/                   # optional; conventional location for app-shipped MCP server source
+  state/                 # optional; app's working files
+  README.md              # optional; ignored by daemon
+```
+
+See `docs/schema.md` for the `apps` table; ADR-021 for the load-bearing decisions; the synthetic fixture at `services/daemon/src/apps/fixtures/example-app/` for a canonical shape.
+
 ## State
 
 | Storage | Lives at | Owns |

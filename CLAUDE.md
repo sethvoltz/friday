@@ -48,9 +48,12 @@ packages/memory              — File-based memory store + DB-backed FTS5 index
 packages/evolve              — Self-improvement pipeline
 packages/integrations/linear — Linear API integration (optional)
 services/daemon              — Headless API tier; owns Claude SDK + agent registry
+  src/apps/                  — Friday Apps installer + boot reconcile (ADR-021)
 services/dashboard           — SvelteKit + Svelte 5; auth-gated public surface
 docs/                        — Documentation
 ```
+
+Installed Friday Apps live under `~/.friday/apps/<id>/` (override with `FRIDAY_DATA_DIR`). See ADR-021 and `docs/architecture.md` for the platform.
 
 ## Development
 
@@ -83,4 +86,4 @@ Single system version in the root `package.json`. All packages ship together.
 
 ## Commits
 
-Conventional Commits. Scopes: `daemon`, `dashboard`, `shared`, `cli`, `memory`, `evolve`, `integrations`, `docs`, `ci`. Use `system` for cross-cutting changes.
+Conventional Commits. Scopes: `daemon`, `dashboard`, `shared`, `cli`, `memory`, `evolve`, `integrations`, `apps`, `docs`, `ci`. Use `system` for cross-cutting changes.

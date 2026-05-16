@@ -94,10 +94,11 @@ The agent registry — replaces the old `agents.json` (ADR-013).
 | `session_id` | current SDK session, nullable |
 | `parent_name` | nullable; orchestrator name for builder/helper/bare |
 | `worktree_path`, `branch`, `ticket_id` | builder-specific |
+| `app_id` | nullable; owning Friday App id (ADR-021). Set by the apps installer; preserved as a tombstone on uninstall so reinstall can un-archive. |
 | `meta_json` | reserved for future per-type fields |
 | `created_at`, `updated_at` | |
 
-INDEX on `type`, INDEX on `(status, updated_at)`.
+INDEX on `type`, INDEX on `(status, updated_at)`, INDEX on `app_id`.
 
 ### `schedules`
 
@@ -108,9 +109,24 @@ INDEX on `type`, INDEX on `(status, updated_at)`.
 | `task_prompt` | the first-turn prompt for the spawned scheduled agent |
 | `paused` | bool, default false |
 | `next_run_at`, `last_run_at`, `last_run_id` | unix ms / synthetic run id |
+| `app_id` | nullable; owning Friday App id (ADR-021). Dropped on uninstall. |
 | `meta_json`, `created_at`, `updated_at` | |
 
-INDEX on `next_run_at`.
+INDEX on `next_run_at`, INDEX on `app_id`.
+
+### `apps`
+
+Registered Friday Apps (ADR-021). One row per installed app, mirrored from the on-disk manifest under the apps data directory. The manifest is the source of truth; this row is derived state reconciled at boot and on every install / uninstall / reload.
+
+| Column | Notes |
+|---|---|
+| `id` | TEXT primary key — matches the manifest's `id` and the folder name (`[a-z][a-z0-9-]{1,63}`) |
+| `name`, `version`, `manifest_version` | from the manifest |
+| `folder_path` | absolute path to the app folder |
+| `manifest_json` | last-known snapshot of the parsed manifest, JSON-serialized |
+| `status` | `installed` / `orphaned` / `error`. Orphaned means the folder disappeared; rows are never auto-deleted (Constitution §1). |
+| `installed_at`, `upgraded_at` | unix ms |
+| `meta_json` | reserved |
 
 ### `memory_entries`
 
