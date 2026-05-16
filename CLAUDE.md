@@ -68,6 +68,19 @@ pnpm --filter @friday/daemon exec vitest run src/path/to/file.test.ts
 - All state lives in `~/.friday/` (override with `FRIDAY_DATA_DIR`). Never hardcode paths; use constants from `@friday/shared`.
 - `@friday/shared` is consumed via its built `dist/`. When you edit shared source, run `pnpm --filter @friday/shared build` before exercising the change in the daemon or dashboard.
 
+## Database migrations
+
+Drizzle's SQLite migrator filters journal entries by their `when` field against `__drizzle_migrations.created_at` — **not by `idx` or filename order**. A migration whose `when` is less than the current max `created_at` in the DB is silently skipped (no error, no log). One bad `when` poisons every later migration on every machine that has already applied the bad row.
+
+**Rules — non-negotiable:**
+
+1. **The `when` field in `packages/shared/drizzle/meta/_journal.json` MUST be a real `Date.now()` captured at the moment the migration was generated. NEVER fabricate, round, hand-type, or copy-paste a "looks plausible" value. NEVER pick a future date.** Round numbers ending in `00000` and future-dated values are immediate red flags — both have appeared in this repo via agent-authored migrations and silently broke the chain.
+2. **Prefer `drizzle-kit generate`** — it writes `Date.now()` for you and keeps the snapshot chain consistent. Run `pnpm --filter @friday/shared exec drizzle-kit generate` whenever the schema in `packages/shared/src/db/schema.ts` changes.
+3. **Hand-authored migrations are allowed only for data fixes and release-boundary markers** (cases where `drizzle-kit` has no diff to emit, e.g. `UPDATE …` data backfills or `SELECT 1;` markers that pin a value to a release). When you must add a journal entry by hand: use the actual current `Date.now()` (e.g. paste the output of `node -e "console.log(Date.now())"` *at the moment you author the entry*) — never a rounded approximation, never a future value, and always strictly greater than the previous entry's `when`.
+4. **`runMigrations()` asserts that journal entry count equals `__drizzle_migrations` row count** after every run and throws if they diverge. If you ever see `drizzle journal/db mismatch` at boot, do not "fix" it by deleting rows — diagnose which `when` is wrong and correct both the journal *and* the DB's `created_at`.
+
+These rules apply to Builders and any other agent working in a worktree of this repo. If you find yourself reaching for `1779…00000`-shaped timestamps, stop.
+
 ## Debugging
 
 - **Trust the user; verify the system.** Seth is a developer who speaks precisely — "I didn't click X" means he didn't click X. Investigate the system, not the user. Never offer "you probably did Y by accident" as an explanation when you can't find a code path; that's the shape of giving up dressed as a hypothesis. You may *ask* a clarifying question when you genuinely need one ("did you have another tab open?", "what did the network panel show?"), but the burden of proof sits on the code, not on his behavior.

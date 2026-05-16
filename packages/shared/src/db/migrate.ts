@@ -1,5 +1,5 @@
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getDb, getRawDb } from "./client.js";
@@ -23,7 +23,42 @@ export function runMigrations(): void {
     return;
   }
   migrate(getDb(), { migrationsFolder: folder });
+  assertJournalApplied(folder);
   ensureFtsTables();
+}
+
+/**
+ * Drizzle's SQLite migrator filters journal entries with
+ * `lastDbMigration.created_at < migration.folderMillis` — so if any prior
+ * migration recorded a `created_at` greater than a newer migration's `when`,
+ * the newer one is silently skipped (no error, no log). This happens when a
+ * journal entry's `when` was hand-authored with a future or fabricated value
+ * instead of a real `Date.now()` from `drizzle-kit generate`.
+ *
+ * Compare the journal entry count to `__drizzle_migrations` row count after
+ * each run. They must match. If they don't, fail loudly with the offenders
+ * so the next boot doesn't quietly run on a half-migrated schema.
+ */
+function assertJournalApplied(folder: string): void {
+  const journalPath = join(folder, "meta", "_journal.json");
+  if (!existsSync(journalPath)) return;
+  const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+    entries: { idx: number; tag: string; when: number }[];
+  };
+  const raw = getRawDb();
+  const rows = raw
+    .prepare("SELECT created_at FROM __drizzle_migrations ORDER BY id")
+    .all() as { created_at: number }[];
+  if (rows.length === journal.entries.length) return;
+  const applied = new Set(rows.map((r) => r.created_at));
+  const missing = journal.entries.filter((e) => !applied.has(e.when));
+  const tags = missing.map((m) => `${m.tag} (when=${m.when})`).join(", ");
+  throw new Error(
+    `drizzle journal/db mismatch: ${journal.entries.length} entries in _journal.json, ` +
+      `${rows.length} rows in __drizzle_migrations. Likely cause: a journal entry's ` +
+      `\`when\` is older than the current max \`created_at\` in __drizzle_migrations, ` +
+      `so drizzle's migrator silently skipped it. Unapplied: ${tags}`,
+  );
 }
 
 function ensureFtsTables(): void {
