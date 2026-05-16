@@ -16,12 +16,19 @@ No servers to deploy beyond your laptop. No third-party identity. Single user, m
 
 **Topology:**
 
-```
-Cloudflare Tunnel ──► SvelteKit Dashboard ──► Friday Daemon ──► Claude Agent SDK ──► Your Machine
-    (public)         (BetterAuth gate)         (127.0.0.1)        (Pro / Max auth)
-                                                    │
-                                                    ▼
-                                           SQLite (WAL, source of truth)
+```mermaid
+flowchart LR
+    cft["Cloudflare Tunnel<br/>public"]
+    subgraph local["Your Machine"]
+        direction LR
+        dash["SvelteKit Dashboard<br/>BetterAuth gate"]
+        daemon["Friday Daemon<br/>127.0.0.1"]
+        sdk["Claude Agent SDK<br/>Pro / Max auth"]
+        db[("SQLite WAL<br/>source of truth")]
+    end
+
+    cft --> dash --> daemon --> sdk
+    daemon --> db
 ```
 
 The daemon binds to `127.0.0.1`. The dashboard is the only thing the public internet ever sees, and it gates every request through BetterAuth before forwarding to the daemon.
