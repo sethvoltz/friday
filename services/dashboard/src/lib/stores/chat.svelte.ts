@@ -38,6 +38,15 @@ export interface ChatMessage {
   toolName?: string;
   input?: unknown;
   output?: string;
+  /** Mid-stream accumulator for `input_json_delta` chunks (FRI-84). The
+   *  SDK emits the tool's input as incremental JSON fragments via the
+   *  `block_delta` wire event's `partial_json` field; we concatenate them
+   *  here so the ToolBlock can render the live input under the headline
+   *  during the streaming phase. Cleared on `block_complete` once `input`
+   *  is populated from the canonical content_json. Best-effort:
+   *  intermediate values may be invalid JSON and the renderer falls back
+   *  to raw display. */
+  inputPartialJson?: string;
 
   // Thinking-specific
   blockId?: string;
@@ -100,8 +109,25 @@ export interface ChatMessage {
    *  network) or the stop force-kill safety net fires. The bubble's
    *  `role` stays `"assistant"` so it slots into the assistant lane;
    *  ChatMessages discriminates on `kind` to render the ErrorBlock with
-   *  Resend / Resume / Details affordances. */
-  kind?: "error";
+   *  Resend / Resume / Details affordances.
+   *
+   *  When set to `"no-response"`, this bubble is a synthetic
+   *  "agent didn't reply" affordance (FRI-85). Emitted either because
+   *  the model produced its trained "No response requested." end-of-
+   *  turn sentinel (deliberate no-reply) or because the turn finished
+   *  with zero assistant-side content blocks (worker died early,
+   *  Task-only response, etc.). Replaces FRI-9's silent suppression
+   *  so the user is never left staring at their own message wondering
+   *  whether the system swallowed the turn. Single bubble per turn
+   *  (id `nr_<turnId>`) regardless of which producer wins. */
+  kind?: "error" | "no-response";
+
+  /** True when the synthetic no-response bubble was produced by the
+   *  SDK sentinel specifically — distinguishes "agent deliberately
+   *  decided no reply was needed" (verbose: "Agent acknowledged — no
+   *  reply needed") from "turn ended with zero assistant content"
+   *  (verbose: "Agent didn't respond"). FRI-85. */
+  noResponseSentinel?: boolean;
   errorCode?: string;
   errorHeadline?: string;
   httpStatus?: number;
@@ -162,6 +188,17 @@ function isNoResponseSentinel(role: string, text: string | undefined): boolean {
  */
 export function userBlockIdForTurn(turnId: string): string {
   return `user_${turnId}`;
+}
+
+/**
+ * Stable bubble id for the synthetic "agent didn't respond" affordance
+ * keyed by turn_id (FRI-85). One per turn — both the sentinel-text path
+ * and the zero-assistant-content safety-net path converge on the same id
+ * so live SSE replacing the streaming bubble and reload reconstructing
+ * from blocks produce identical message rows.
+ */
+export function noResponseIdForTurn(turnId: string): string {
+  return `nr_${turnId}`;
 }
 
 export class ChatState {
@@ -1477,6 +1514,9 @@ export class ChatState {
         status: "running",
         toolId,
         toolName: event.tool?.name ?? "",
+        // FRI-84: record blockId so handleBlockDelta can route
+        // input_json_delta fragments onto this bubble.
+        blockId: event.block_id,
         turnId: event.turn_id,
         ts: event.ts,
       });
@@ -1506,9 +1546,20 @@ export class ChatState {
         }
         return;
       }
+      // FRI-84: accumulate input_json_delta fragments on the tool bubble
+      // so the ToolBlock can render the live input under the headline
+      // during streaming. block_start for tool_use keys the bubble by
+      // `t_<toolId>` rather than block_id, so we match on role+blockId.
+      if (
+        m.role === "tool" &&
+        m.blockId === event.block_id &&
+        m.status === "running" &&
+        typeof event.delta.partial_json === "string"
+      ) {
+        m.inputPartialJson = (m.inputPartialJson ?? "") + event.delta.partial_json;
+        return;
+      }
     }
-    // tool_use input deltas don't render incrementally — the canonical input
-    // arrives via block_complete's content_json.
   }
 
   private handleBlockComplete(event: {
@@ -1555,7 +1606,31 @@ export class ChatState {
     }
     const parsed = parseBlockContent(event.content_json);
     if (event.kind === "text") {
-      if (isNoResponseSentinel(event.role, parsed.text)) return;
+      if (isNoResponseSentinel(event.role, parsed.text)) {
+        // FRI-85: sentinel reached its terminal state. The block_start that
+        // mounted this bubble pushed an empty streaming row at `b_<id>`;
+        // block_delta filled it with the sentinel literal. Both are now
+        // obsolete — swap them for the synthetic no-response affordance
+        // (id `nr_<turnId>`) so live and reload converge on the same shape.
+        const streamingId = `b_${event.block_id}`;
+        const idx = this.messages.findIndex((m) => m.id === streamingId);
+        if (idx !== -1) this.messages.splice(idx, 1);
+        const nrId = noResponseIdForTurn(event.turn_id);
+        if (!this.messages.some((m) => m.id === nrId)) {
+          this.messages.push({
+            id: nrId,
+            role: "assistant",
+            kind: "no-response",
+            noResponseSentinel: true,
+            text: "",
+            status: "complete",
+            agent: this.focusedAgent,
+            turnId: event.turn_id,
+            ts: event.ts,
+          });
+        }
+        return;
+      }
       const id =
         event.role === "user"
           ? userBlockIdForTurn(event.turn_id)
@@ -1648,6 +1723,10 @@ export class ChatState {
       for (const m of this.messages) {
         if (m.id !== id) continue;
         m.input = parsed.input;
+        // FRI-84: canonical input is now in `m.input`; drop the
+        // streaming accumulator so the renderer switches to the
+        // pretty-printed final form.
+        m.inputPartialJson = undefined;
         if (parsed.name && !m.toolName) m.toolName = parsed.name;
         // A tool_use that completes with aborted/error never gets a
         // tool_result follow-up to flip the bubble off "running" — honor
@@ -1902,6 +1981,15 @@ export interface BlockRow {
 export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
   const out: ChatMessage[] = [];
   const toolByToolId = new Map<string, ChatMessage>();
+  // FRI-85: track which turns produced any assistant-side content, and
+  // which turns we've already synthesized a no-response affordance for
+  // (sentinel-driven). After the main pass we scan user-only turns and
+  // backfill a "Agent didn't respond" affordance for any that ended with
+  // no assistant content at all (covers worker-died-before-block_start,
+  // Task-only responses filtered at the worker, etc.).
+  const userTurns = new Map<string, { ts: number; index: number }>();
+  const assistantTurns = new Set<string>();
+  const noResponseTurns = new Set<string>();
   // Newest-first arrives from the API; chronological for rendering. Sort by
   // `ts` first so boot-time jsonl-recovery rows — which receive a fresh
   // autoincrement `id` strictly greater than the live retry blocks that came
@@ -1914,7 +2002,40 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
     const parsed = parseBlockContent(b.contentJson);
     if (b.kind === "text") {
       const role = b.role === "user" ? "user" : "assistant";
-      if (isNoResponseSentinel(b.role, parsed.text)) continue;
+      if (isNoResponseSentinel(b.role, parsed.text)) {
+        // FRI-85: the SDK's trained end-of-turn marker. Instead of FRI-9's
+        // silent suppression (which left the user staring at their own
+        // message), render a faint "Agent acknowledged — no reply needed"
+        // affordance. Single bubble per turn; idempotent on duplicate
+        // sentinels (a refork can produce two).
+        if (b.turnId && !noResponseTurns.has(b.turnId)) {
+          noResponseTurns.add(b.turnId);
+          assistantTurns.add(b.turnId);
+          out.push({
+            id: noResponseIdForTurn(b.turnId),
+            role: "assistant",
+            kind: "no-response",
+            noResponseSentinel: true,
+            text: "",
+            status: "complete",
+            agent,
+            turnId: b.turnId,
+            ts: b.ts,
+          });
+        }
+        continue;
+      }
+      if (role === "assistant" && b.turnId) assistantTurns.add(b.turnId);
+      if (role === "user" && b.turnId) {
+        // user_chat is the only source that carries the "I sent something
+        // and expected a reply" semantics — mail / queue_inject / scratch
+        // / agent_spawn / schedule are agent-driven traffic where a silent
+        // turn is fine. The safety-net synth below only fires for
+        // user_chat-sourced user blocks.
+        if (b.source === "user_chat") {
+          userTurns.set(b.turnId, { ts: b.ts, index: out.length });
+        }
+      }
       const id =
         role === "user" ? userBlockIdForTurn(b.turnId) : `b_${b.blockId}`;
       // Preserve the row's `streaming` state. On reload during a turn,
@@ -1951,6 +2072,7 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         attachments: parsed.attachments,
       });
     } else if (b.kind === "thinking") {
+      if (b.turnId) assistantTurns.add(b.turnId);
       // Same shape for thinking blocks. `handleBlockDelta` gates on
       // `m.status === "running"` for thinking; preserve "running"
       // for streaming rows so reload-mid-turn deltas append.
@@ -1972,6 +2094,7 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         ts: b.ts,
       });
     } else if (b.kind === "tool_use") {
+      if (b.turnId) assistantTurns.add(b.turnId);
       const toolId = parsed.tool_use_id ?? b.blockId;
       // Dedup duplicate tool_use rows for the same id — JSONL replay
       // artifacts and refork retries can both produce them.
@@ -1990,12 +2113,16 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         toolId,
         toolName: parsed.name ?? "",
         input: parsed.input,
+        // FRI-84: blockId on reload mirrors the live handleBlockStart
+        // setter so any reload-mid-stream delta routing finds this row.
+        blockId: b.blockId,
         turnId: b.turnId,
         ts: b.ts,
       };
       out.push(msg);
       toolByToolId.set(toolId, msg);
     } else if (b.kind === "error") {
+      if (b.turnId) assistantTurns.add(b.turnId);
       // FRI-12: synthetic error bubble persisted by the daemon when the
       // SDK throws or the stop force-kill safety net fires. Mirror the
       // SSE `block_complete` materialization shape so reload-mid-error
@@ -2018,6 +2145,7 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         rawErrorMessage: errPayload.rawMessage,
       });
     } else if (b.kind === "tool_result") {
+      if (b.turnId) assistantTurns.add(b.turnId);
       const toolId = parsed.tool_use_id ?? "";
       const status = parsed.is_error ? "error" : "done";
       const existing = toolByToolId.get(toolId);
@@ -2039,6 +2167,39 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         toolByToolId.set(toolId, synth);
       }
     }
+  }
+  // FRI-85 safety net: for any user_chat-sourced user message whose turn
+  // produced zero assistant-side blocks (text/thinking/tool/error), synth
+  // an "Agent didn't respond" affordance so the user is never left staring
+  // at an unanswered message. Covers H3 (worker died before block_start),
+  // H5 (entire response was Task sub-agent traffic filtered at the worker),
+  // and any other "turn completed silently" path that doesn't already
+  // leave a visible artifact. Inserted just after the user block by ts so
+  // the natural chronological sort keeps it adjacent.
+  let synthesized = false;
+  for (const [turnId, info] of userTurns) {
+    if (assistantTurns.has(turnId)) continue;
+    synthesized = true;
+    out.push({
+      id: noResponseIdForTurn(turnId),
+      role: "assistant",
+      kind: "no-response",
+      noResponseSentinel: false,
+      text: "",
+      status: "complete",
+      agent,
+      turnId,
+      // +1ms keeps it strictly after its user message even when ts
+      // collisions occur (a fast turn can land sub-millisecond).
+      ts: info.ts + 1,
+    });
+  }
+  // Final ts-sort so the safety-net synth lands chronologically adjacent
+  // to its user message rather than at the trailing edge. Stable on
+  // existing entries (their ts ordering already matches the input-block
+  // sort one level up); only nr_<turnId> rows actually move.
+  if (synthesized) {
+    out.sort((a, b) => a.ts - b.ts);
   }
   return out;
 }

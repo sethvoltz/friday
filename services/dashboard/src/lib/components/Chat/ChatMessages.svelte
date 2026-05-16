@@ -395,7 +395,30 @@
     {/if}
   {/if}
   {#each list as msg (msg.id)}
-    {#if msg.kind === "error"}
+    {#if msg.kind === "no-response"}
+      <!-- FRI-85: the model emitted its trained "No response requested."
+           end-of-turn marker (noResponseSentinel=true), or the turn
+           finished with no assistant content at all (noResponseSentinel=
+           false). Render a faint inline note so the user is never left
+           staring at their own message wondering whether the system
+           swallowed the turn. -->
+      <div
+        class="message inline"
+        class:jump-highlight={!readonly && chat.highlightedMessageId === msg.id}
+        onanimationend={(e: AnimationEvent) => {
+          if (e.animationName === "jump-pulse" && chat.highlightedMessageId === msg.id) {
+            chat.highlightedMessageId = null;
+          }
+        }}
+        data-msg-id={msg.id}
+        data-kind="no-response">
+        <div class="no-response">
+          {msg.noResponseSentinel
+            ? "Agent acknowledged — no reply needed"
+            : "Agent didn't respond"}
+        </div>
+      </div>
+    {:else if msg.kind === "error"}
       <div
         class="message inline"
         class:jump-highlight={!readonly && chat.highlightedMessageId === msg.id}
@@ -425,6 +448,7 @@
           toolName={msg.toolName ?? ""}
           status={(msg.status === "done" || msg.status === "error" || msg.status === "aborted" ? msg.status : "running") as "running" | "done" | "error" | "aborted"}
           input={msg.input}
+          inputPartialJson={msg.inputPartialJson}
           output={msg.output} />
       </div>
     {:else if msg.role === "thinking"}
@@ -795,5 +819,12 @@
   }
   .hint.dim {
     opacity: 0.6;
+  }
+  .no-response {
+    font-size: 0.78rem;
+    color: var(--text-tertiary);
+    font-style: italic;
+    padding: 0.35rem 0.5rem;
+    opacity: 0.85;
   }
 </style>
