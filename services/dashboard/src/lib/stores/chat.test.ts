@@ -1218,11 +1218,11 @@ describe("mail block rendering", () => {
       // aborted thinking comes first (ts 1000)
       { role: "thinking", blockId: "blk-think-aborted", toolId: undefined, status: "aborted" },
       // recovered failed tool slots in BEFORE the successful retry (ts 1001/1002 < 3000)
-      { role: "tool", blockId: undefined, toolId: "toolu_RECOVER", status: "error" },
+      { role: "tool", blockId: "blk-tool-recover", toolId: "toolu_RECOVER", status: "error" },
       // retry thinking (ts 3000)
       { role: "thinking", blockId: "blk-think-complete", toolId: undefined, status: "done" },
       // successful retry tool (ts 3001/3002)
-      { role: "tool", blockId: undefined, toolId: "toolu_LIVE", status: "done" },
+      { role: "tool", blockId: "blk-tool-live", toolId: "toolu_LIVE", status: "done" },
     ]);
   });
 });
@@ -2511,5 +2511,282 @@ describe("queued user blocks (pending-message feature)", () => {
     expect(bubble).toBeDefined();
     expect(bubble!.status).toBe("queued");
     expect(bubble!.text).toBe("survived reload");
+  });
+});
+
+describe("FRI-84: tool-call input/output rendering", () => {
+  it("live: input_json_delta fragments accumulate into inputPartialJson on the tool bubble", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // block_start mounts the tool bubble with toolId/blockId.
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      turn_id: "t-84",
+      agent: "friday",
+      block_id: "blk-tool-84",
+      message_id: "m-84",
+      block_index: 0,
+      kind: "tool_use",
+      role: "assistant",
+      tool: { id: "tu-abc", name: "Read" },
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    // First fragment.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      turn_id: "t-84",
+      agent: "friday",
+      block_id: "blk-tool-84",
+      delta: { partial_json: '{"file":' },
+      seq: 2,
+      ts: 1001,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    // Second fragment.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      turn_id: "t-84",
+      agent: "friday",
+      block_id: "blk-tool-84",
+      delta: { partial_json: '"/etc/hosts"}' },
+      seq: 3,
+      ts: 1002,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const m = chat.messages.find((x) => x.id === "t_tu-abc");
+    expect(m).toBeDefined();
+    expect(m?.status).toBe("running");
+    expect(m?.inputPartialJson).toBe('{"file":"/etc/hosts"}');
+  });
+
+  it("live: block_complete on tool_use clears inputPartialJson and populates canonical input", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      turn_id: "t-84b",
+      agent: "friday",
+      block_id: "blk-tool-84b",
+      message_id: "m",
+      block_index: 0,
+      kind: "tool_use",
+      role: "assistant",
+      tool: { id: "tu-xyz", name: "Read" },
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      turn_id: "t-84b",
+      agent: "friday",
+      block_id: "blk-tool-84b",
+      delta: { partial_json: '{"file":"/etc/hosts"}' },
+      seq: 2,
+      ts: 1001,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "t-84b",
+      agent: "friday",
+      block_id: "blk-tool-84b",
+      message_id: "m",
+      block_index: 0,
+      kind: "tool_use",
+      role: "assistant",
+      source: "sdk",
+      content_json: JSON.stringify({
+        tool_use_id: "tu-xyz",
+        name: "Read",
+        input: { file: "/etc/hosts" },
+      }),
+      status: "complete",
+      ts: 1002,
+      seq: 3,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const m = chat.messages.find((x) => x.id === "t_tu-xyz");
+    expect(m).toBeDefined();
+    expect(m?.inputPartialJson).toBeUndefined();
+    expect(m?.input).toEqual({ file: "/etc/hosts" });
+  });
+
+  it("live↔reload symmetry: completed tool produces identical bubble shape across paths", async () => {
+    const { ChatState, parseBlocks } = await import("./chat.svelte");
+    const contentJson = JSON.stringify({
+      tool_use_id: "tu-sym",
+      name: "Read",
+      input: { file: "/etc/hosts" },
+    });
+    const resultJson = JSON.stringify({
+      tool_use_id: "tu-sym",
+      text: "127.0.0.1\tlocalhost\n",
+      is_error: false,
+    });
+    // Live path: full block_start → block_complete → tool_result flow.
+    const live = new ChatState();
+    live.focusedAgent = "friday";
+    live.applyEvent({
+      v: 1,
+      type: "block_start",
+      turn_id: "t-sym84",
+      agent: "friday",
+      block_id: "blk-sym84",
+      message_id: "m",
+      block_index: 0,
+      kind: "tool_use",
+      role: "assistant",
+      tool: { id: "tu-sym", name: "Read" },
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof live.applyEvent>[0]);
+    live.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "t-sym84",
+      agent: "friday",
+      block_id: "blk-sym84",
+      message_id: "m",
+      block_index: 0,
+      kind: "tool_use",
+      role: "assistant",
+      source: "sdk",
+      content_json: contentJson,
+      status: "complete",
+      ts: 1001,
+      seq: 2,
+    } as Parameters<typeof live.applyEvent>[0]);
+    live.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "t-sym84",
+      agent: "friday",
+      block_id: "blk-sym84-result",
+      message_id: "m2",
+      block_index: 1,
+      kind: "tool_result",
+      role: "user",
+      source: "sdk",
+      content_json: resultJson,
+      status: "complete",
+      ts: 1002,
+      seq: 3,
+    } as Parameters<typeof live.applyEvent>[0]);
+
+    // Reload path: parseBlocks on the same persisted rows.
+    const reloaded = parseBlocks(
+      [
+        {
+          id: 1,
+          blockId: "blk-sym84",
+          turnId: "t-sym84",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: "m",
+          blockIndex: 0,
+          role: "assistant",
+          kind: "tool_use",
+          source: "sdk",
+          contentJson,
+          status: "complete",
+          ts: 1001,
+          lastEventSeq: 2,
+        } as Parameters<typeof parseBlocks>[0][number],
+        {
+          id: 2,
+          blockId: "blk-sym84-result",
+          turnId: "t-sym84",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: "m2",
+          blockIndex: 1,
+          role: "user",
+          kind: "tool_result",
+          source: "sdk",
+          contentJson: resultJson,
+          status: "complete",
+          ts: 1002,
+          lastEventSeq: 3,
+        } as Parameters<typeof parseBlocks>[0][number],
+      ],
+      "friday",
+    );
+
+    expect(live.messages.length).toBe(1);
+    expect(reloaded.length).toBe(1);
+    const liveTool = live.messages[0]!;
+    const reloadTool = reloaded[0]!;
+    expect(liveTool.id).toBe("t_tu-sym");
+    expect(reloadTool.id).toBe("t_tu-sym");
+    expect(liveTool.role).toBe(reloadTool.role);
+    expect(liveTool.toolName).toBe(reloadTool.toolName);
+    expect(liveTool.input).toEqual(reloadTool.input);
+    expect(liveTool.output).toBe(reloadTool.output);
+    expect(liveTool.status).toBe(reloadTool.status);
+    expect(liveTool.status).toBe("done");
+  });
+
+  it("live↔reload symmetry: still-running tool (streaming row on reload) renders as running on both paths", async () => {
+    // Reload-mid-stream: the DB has a tool_use row at status='streaming'
+    // with possibly empty content_json (canonical input not yet finalized).
+    // Live: block_start fired but no block_complete yet. Both must
+    // produce a 'running' bubble (potentially with no input yet) that
+    // gracefully renders Preparing…/partial.
+    const { ChatState, parseBlocks } = await import("./chat.svelte");
+    const live = new ChatState();
+    live.focusedAgent = "friday";
+    live.applyEvent({
+      v: 1,
+      type: "block_start",
+      turn_id: "t-run84",
+      agent: "friday",
+      block_id: "blk-run84",
+      message_id: "m",
+      block_index: 0,
+      kind: "tool_use",
+      role: "assistant",
+      tool: { id: "tu-run", name: "Bash" },
+      ts: 500,
+      seq: 1,
+    } as Parameters<typeof live.applyEvent>[0]);
+
+    const reloaded = parseBlocks(
+      [
+        {
+          id: 1,
+          blockId: "blk-run84",
+          turnId: "t-run84",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: "m",
+          blockIndex: 0,
+          role: "assistant",
+          kind: "tool_use",
+          source: "sdk",
+          // On reload mid-stream, contentJson is the best-effort
+          // payload the daemon writes when persisting the streaming
+          // row — name + (possibly empty) input.
+          contentJson: JSON.stringify({
+            tool_use_id: "tu-run",
+            name: "Bash",
+            input: {},
+          }),
+          status: "streaming",
+          ts: 500,
+          lastEventSeq: 1,
+        } as Parameters<typeof parseBlocks>[0][number],
+      ],
+      "friday",
+    );
+
+    expect(live.messages[0]!.status).toBe("running");
+    expect(reloaded[0]!.status).toBe("running");
+    expect(live.messages[0]!.toolName).toBe("Bash");
+    expect(reloaded[0]!.toolName).toBe("Bash");
   });
 });

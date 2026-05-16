@@ -38,6 +38,15 @@ export interface ChatMessage {
   toolName?: string;
   input?: unknown;
   output?: string;
+  /** Mid-stream accumulator for `input_json_delta` chunks (FRI-84). The
+   *  SDK emits the tool's input as incremental JSON fragments via the
+   *  `block_delta` wire event's `partial_json` field; we concatenate them
+   *  here so the ToolBlock can render the live input under the headline
+   *  during the streaming phase. Cleared on `block_complete` once `input`
+   *  is populated from the canonical content_json. Best-effort:
+   *  intermediate values may be invalid JSON and the renderer falls back
+   *  to raw display. */
+  inputPartialJson?: string;
 
   // Thinking-specific
   blockId?: string;
@@ -1505,6 +1514,9 @@ export class ChatState {
         status: "running",
         toolId,
         toolName: event.tool?.name ?? "",
+        // FRI-84: record blockId so handleBlockDelta can route
+        // input_json_delta fragments onto this bubble.
+        blockId: event.block_id,
         turnId: event.turn_id,
         ts: event.ts,
       });
@@ -1534,9 +1546,20 @@ export class ChatState {
         }
         return;
       }
+      // FRI-84: accumulate input_json_delta fragments on the tool bubble
+      // so the ToolBlock can render the live input under the headline
+      // during streaming. block_start for tool_use keys the bubble by
+      // `t_<toolId>` rather than block_id, so we match on role+blockId.
+      if (
+        m.role === "tool" &&
+        m.blockId === event.block_id &&
+        m.status === "running" &&
+        typeof event.delta.partial_json === "string"
+      ) {
+        m.inputPartialJson = (m.inputPartialJson ?? "") + event.delta.partial_json;
+        return;
+      }
     }
-    // tool_use input deltas don't render incrementally — the canonical input
-    // arrives via block_complete's content_json.
   }
 
   private handleBlockComplete(event: {
@@ -1700,6 +1723,10 @@ export class ChatState {
       for (const m of this.messages) {
         if (m.id !== id) continue;
         m.input = parsed.input;
+        // FRI-84: canonical input is now in `m.input`; drop the
+        // streaming accumulator so the renderer switches to the
+        // pretty-printed final form.
+        m.inputPartialJson = undefined;
         if (parsed.name && !m.toolName) m.toolName = parsed.name;
         // A tool_use that completes with aborted/error never gets a
         // tool_result follow-up to flip the bubble off "running" — honor
@@ -2086,6 +2113,9 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         toolId,
         toolName: parsed.name ?? "",
         input: parsed.input,
+        // FRI-84: blockId on reload mirrors the live handleBlockStart
+        // setter so any reload-mid-stream delta routing finds this row.
+        blockId: b.blockId,
         turnId: b.turnId,
         ts: b.ts,
       };

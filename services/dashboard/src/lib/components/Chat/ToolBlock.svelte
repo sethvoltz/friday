@@ -8,10 +8,12 @@
     status: "running" | "done" | "error" | "aborted";
     input?: unknown;
     output?: string;
+    /** FRI-84: mid-stream `input_json_delta` accumulator. Rendered as a
+     *  best-effort preview during streaming when `input` is not yet
+     *  parsed. Pretty-print if parseable; fall back to raw otherwise. */
+    inputPartialJson?: string;
   }
-  let { toolName, status, input, output }: Props = $props();
-
-  let open = $state(false);
+  let { toolName, status, input, output, inputPartialJson }: Props = $props();
 
   function fmtInput(v: unknown): string {
     if (v === undefined || v === null) return "";
@@ -33,10 +35,35 @@
     if (typeof synth === "string" && synth.length > 0) return synth;
     return "";
   });
-  let inputText = $derived(fmtInput(input));
+
+  // FRI-84: input rendering uses parsed `input` whenever available
+  // (canonical, pretty-printable); during streaming `input` may be
+  // undefined and only `inputPartialJson` is populated. Best-effort
+  // parse so the user sees something structured if the partial happens
+  // to be valid mid-stream (rare but common at object boundaries),
+  // otherwise raw.
+  let inputText = $derived.by(() => {
+    if (input !== undefined && input !== null) return fmtInput(input);
+    const partial = inputPartialJson ?? "";
+    if (partial.length === 0) return "";
+    try {
+      return JSON.stringify(JSON.parse(partial), null, 2);
+    } catch {
+      return partial;
+    }
+  });
   let hasInput = $derived(inputText.length > 0 && inputText !== "{}");
   let hasOutput = $derived(typeof output === "string" && output.length > 0);
-  let canExpand = $derived(hasInput || hasOutput);
+  let isTerminal = $derived(
+    status === "done" || status === "error" || status === "aborted",
+  );
+  // FRI-84: while running, input is the prominent affordance — visible
+  // inline so the user sees what the tool is about to do. After the
+  // tool completes (done/error/aborted), the OUTPUT becomes the
+  // prominent section and the input collapses behind `+` for verification.
+  // `open` only controls the input section in the terminal state; output
+  // is always visible when present and terminal.
+  let open = $state(false);
 
   function badgeClass(s: string): string {
     if (s === "done") return "ok";
@@ -56,9 +83,9 @@
   <button
     type="button"
     class="tool-head"
-    onclick={() => canExpand && (open = !open)}
-    aria-expanded={canExpand ? open : undefined}
-    disabled={!canExpand}>
+    onclick={() => isTerminal && hasInput && (open = !open)}
+    aria-expanded={isTerminal && hasInput ? open : undefined}
+    disabled={!(isTerminal && hasInput)}>
     <span class="tool-icon" aria-hidden="true"><Wrench size={16} /></span>
     {#if description}
       <span class="tool-description">{description}</span>
@@ -67,21 +94,40 @@
       <code class="tool-name">{toolName}</code>
     {/if}
     <span class="badge {badgeClass(status)}">{statusLabel(status)}</span>
-    {#if canExpand}
+    {#if isTerminal && hasInput}
       <span class="expand-toggle" aria-hidden="true">{open ? "−" : "+"}</span>
     {/if}
   </button>
-  {#if open && hasInput}
-    <div class="block-section">
-      <div class="block-label">Input</div>
-      <pre class="block-pre"><code>{inputText}</code></pre>
-    </div>
-  {/if}
-  {#if open && hasOutput}
-    <div class="block-section">
-      <div class="block-label">Output</div>
-      <pre class="block-pre"><code>{output}</code></pre>
-    </div>
+
+  {#if !isTerminal}
+    <!-- Streaming phase: show the input prominently so the user can see
+         what the tool is about to do. If the SDK hasn't emitted any
+         input_json_delta yet (block_start fired, no deltas), render a
+         "Preparing…" placeholder rather than an empty section. -->
+    {#if hasInput}
+      <div class="block-section streaming">
+        <div class="block-label">Input</div>
+        <pre class="block-pre"><code>{inputText}</code></pre>
+      </div>
+    {:else}
+      <div class="block-section streaming preparing">Preparing…</div>
+    {/if}
+  {:else}
+    <!-- Terminal phase: output is the prominent section; input collapses
+         behind `+`. Per FRI-67's ui-conventions, the `+`/`−` glyph is in
+         the head. -->
+    {#if hasOutput}
+      <div class="block-section">
+        <div class="block-label">Output</div>
+        <pre class="block-pre"><code>{output}</code></pre>
+      </div>
+    {/if}
+    {#if open && hasInput}
+      <div class="block-section input-collapsed">
+        <div class="block-label">Input</div>
+        <pre class="block-pre"><code>{inputText}</code></pre>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -160,6 +206,16 @@
     padding: 0.5rem 0.75rem;
     background: var(--bg-tertiary);
     border-radius: var(--radius-sm);
+  }
+  /* FRI-84: subtler styling for the streaming-phase input — present
+     but not loud. The completed output is the prominent section. */
+  .block-section.streaming {
+    opacity: 0.85;
+  }
+  .block-section.preparing {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+    font-style: italic;
   }
   .block-label {
     font-size: 0.65rem;
