@@ -50,11 +50,14 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
 
   const queryOptions: Record<string, unknown> = {
     allowedTools: [],
-    // Lock the call down to one assistant turn. Belt-and-suspenders alongside
-    // `allowedTools: []`: a model that can't call tools also can't loop, but
-    // pinning `maxTurns: 1` prevents the SDK from spending budget on followups
-    // if a future model decides to "think aloud" mid-stream.
-    maxTurns: 1,
+    // Allow a small budget of assistant turns. `maxTurns: 1` (FRI-69) was
+    // tight enough that long enrichment replies got truncated mid-JSON when
+    // the SDK split output across turns, and that surfaced as "max turns"
+    // errors on the daemon-fatal / linear-reconcile / memory-recall proposals
+    // (FRI-79). 5 is plenty: each turn costs a subprocess round-trip but no
+    // tool calls (`allowedTools: []` still prevents loops). The retry-once-on-
+    // timeout path from FRI-69 is unchanged.
+    maxTurns: 5,
     // Don't autoload the user's MCP servers from settings.json. Enrichment is
     // a pure text-gen pass — MCP boot adds seconds (sometimes >>seconds) of
     // dead-weight startup that ate into our 90s budget and caused timeouts on
