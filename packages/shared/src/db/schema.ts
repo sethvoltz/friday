@@ -78,12 +78,18 @@ export const agents = sqliteTable(
     branch: text("branch"),
     ticketId: text("ticket_id"),
     metaJson: text("meta_json"),
+    // Owning app id; null for unaffiliated agents (orchestrator, ad-hoc bare,
+    // builders, helpers). Set by the apps installer when an agent is
+    // declared in a manifest; tombstoned on uninstall so reinstall can
+    // un-archive the same row.
+    appId: text("app_id"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
   (t) => ({
     typeIdx: index("agents_type").on(t.type),
     statusIdx: index("agents_status").on(t.status, t.updatedAt),
+    appIdx: index("agents_app").on(t.appId),
   }),
 );
 
@@ -272,13 +278,37 @@ export const schedules = sqliteTable(
     lastRunAt: integer("last_run_at"),
     lastRunId: text("last_run_id"),
     metaJson: text("meta_json"),
+    /** Owning app id; null for unaffiliated schedules. */
+    appId: text("app_id"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
   (t) => ({
     nextRunIdx: index("schedules_next_run").on(t.nextRunAt),
+    appIdx: index("schedules_app").on(t.appId),
   }),
 );
+
+/* ---------------- Apps registry ---------------- */
+// One row per installed app. `manifest.json` on disk is the source of truth;
+// this table is derived state, reconciled at boot and on every install/
+// reload. Folder rename ↔ orphaned row is the safe interim state — never
+// auto-delete a row when its folder disappears.
+
+export const apps = sqliteTable("apps", {
+  id: text("id").primaryKey(), // [a-z][a-z0-9-]{1,63}; matches folder name
+  name: text("name").notNull(),
+  version: text("version").notNull(),
+  manifestVersion: integer("manifest_version").notNull(),
+  folderPath: text("folder_path").notNull(),
+  /** Last-known snapshot of the parsed manifest, JSON-serialized. */
+  manifestJson: text("manifest_json").notNull(),
+  /** installed | orphaned | error */
+  status: text("status").notNull(),
+  installedAt: integer("installed_at", { mode: "timestamp_ms" }).notNull(),
+  upgradedAt: integer("upgraded_at", { mode: "timestamp_ms" }),
+  metaJson: text("meta_json"),
+});
 
 /* ---------------- Memory + Evolve indexes ---------------- */
 // Memory entries themselves live as markdown files in ~/.friday/memory/entries/.

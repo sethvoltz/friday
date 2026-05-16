@@ -9,6 +9,7 @@ export * from "./atomic-write.js";
 export * from "./cron.js";
 export * from "./skills.js";
 export * from "./prompts/loader.js";
+export * from "./apps/manifest.js";
 export * from "./db/client.js";
 export * from "./db/migrate.js";
 export * as schema from "./db/schema.js";
