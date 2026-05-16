@@ -1335,6 +1335,10 @@ export class ChatState {
         if (event.agent !== this.focusedAgent) break;
         this.handleBlockComplete(event);
         break;
+      case "block_canceled":
+        if (event.agent !== this.focusedAgent) break;
+        this.handleBlockCanceled(event);
+        break;
       case "block_meta_update":
         if (event.agent !== this.focusedAgent) break;
         this.handleBlockMetaUpdate(event);
@@ -1704,6 +1708,18 @@ export class ChatState {
    * Aborted status drops the bubble entirely — the row is gone DB-side, so
    * keeping it around as an "aborted user message" would surface a ghost.
    */
+  /**
+   * FRI-78 follow-up: the daemon DELETEd a block that started but never
+   * accumulated content (typically an SDK-opened `thinking` block that
+   * the worker's `flushBoundaryBlocks` cancelled at a pending-injection
+   * break). Drop any bubble currently mounted against that block id so
+   * the UI doesn't show a "Stopped" footer for a block that had nothing
+   * to disclose.
+   */
+  private handleBlockCanceled(event: { block_id: string }): void {
+    this.messages = this.messages.filter((m) => m.blockId !== event.block_id);
+  }
+
   private handleBlockMetaUpdate(event: {
     block_id: string;
     turn_id: string;

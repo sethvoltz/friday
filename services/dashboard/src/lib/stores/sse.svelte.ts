@@ -47,6 +47,7 @@ const HANDLED_TYPES = new Set([
   "block_start",
   "block_delta",
   "block_complete",
+  "block_canceled",
   "block_meta_update",
   "block_reload",
   "connection_established",

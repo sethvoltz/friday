@@ -31,6 +31,7 @@ export type WireEvent =
   | BlockStartEvent
   | BlockDeltaEvent
   | BlockCompleteEvent
+  | BlockCanceledEvent
   | BlockMetaUpdateEvent
   | BlockReloadEvent
   | ConnectionEstablishedEvent;
@@ -196,6 +197,22 @@ export interface BlockCompleteEvent extends BaseEvent {
    *  the bottom. */
   status: "complete" | "aborted" | "error" | "queued";
   ts: number;
+}
+
+/**
+ * A previously-started block was cancelled before any content accumulated —
+ * the SDK opened a `thinking` (or other) content block and the worker exited
+ * the for-await loop (FRI-78 mid-turn-injection break) before any deltas
+ * landed. The daemon deletes the row from `blocks` table and emits this so
+ * live clients can drop the bubble. Without it, the dashboard would render
+ * an empty "Thinking STOPPED" footer for a block that had no content to
+ * disclose.
+ */
+export interface BlockCanceledEvent extends BaseEvent {
+  type: "block_canceled";
+  turn_id: string;
+  agent: string;
+  block_id: string;
 }
 
 /**

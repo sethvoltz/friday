@@ -138,14 +138,20 @@ describe("lifecycle: queued user-block dispatch", () => {
     expect(event!.status).toBe("queued");
   });
 
-  it("recordUserBlock(status='complete') for user_chat does NOT emit SSE (legacy race-protection)", async () => {
+  it("recordUserBlock(status='complete') for user_chat DOES emit SSE (cross-client echo)", async () => {
+    // FRI-78 follow-up: the daemon now always publishes the canonical
+    // `block_complete` SSE for user_chat completes. Previously suppressed
+    // to defend the sending browser's optimistic-bubble dedup, but that
+    // suppression denied the message to other connected clients (browser
+    // B, mobile, etc.). The sending browser dedupes via
+    // `chat.svelte.ts:confirmPending` instead.
     const { recordUserBlock } = await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
 
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    recordUserBlock({
+    const { blockId, seq } = recordUserBlock({
       turnId: "t_immediate",
       agentName: "queued-agent",
       sessionId: "sess-1",
@@ -155,11 +161,16 @@ describe("lifecycle: queued user-block dispatch", () => {
     });
     unsub();
 
+    expect(seq).toBeGreaterThan(0);
     const blockCompletes = captured.filter(
-      (e) => e.type === "block_complete" && e.turn_id === "t_immediate",
+      (e) =>
+        e.type === "block_complete" &&
+        e.turn_id === "t_immediate" &&
+        e.block_id === blockId &&
+        e.status === "complete" &&
+        e.role === "user",
     );
-    // Optimistic-bubble race protection: user_chat at 'complete' skips SSE.
-    expect(blockCompletes).toHaveLength(0);
+    expect(blockCompletes).toHaveLength(1);
   });
 
   it("dispatchTurn queues a second prompt for a working worker and signals prompts-pending", async () => {

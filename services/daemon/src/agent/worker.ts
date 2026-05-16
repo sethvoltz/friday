@@ -208,6 +208,21 @@ function nextClientBlockId(): string {
   return `b_${randomUUID()}`;
 }
 
+/**
+ * Whether an SDK `assistant`-typed message carries any `tool_use` content
+ * blocks. Used by the for-await loop to decide whether a pending-injection
+ * break should fire immediately at the assistant boundary (pure-text reply,
+ * no follow-up `user` tool_results message coming) or defer to the next
+ * `user` boundary (model invoked tools; breaking now would leave the SDK
+ * session JSONL with a dangling `assistant→tool_use` and trigger
+ * "Stream closed" on the subsequent resume). Exported for testability.
+ */
+export function assistantMessageHasToolUses(assistantMsg: unknown): boolean {
+  const content = (assistantMsg as { content?: unknown })?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((b) => (b as { type?: string })?.type === "tool_use");
+}
+
 /** MIME types Anthropic's vision API will accept as `image` content
  *  blocks. `image/jpg` is folded into `image/jpeg`. Anything outside this
  *  set (and outside `application/pdf`, handled as a document block) is
@@ -377,13 +392,23 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
     if (b.kind === "tool_use") return (b.inputJson?.length ?? 0) > 0;
     return false;
   };
+  // FRI-78 follow-up: a block that started but accumulated zero content
+  // (e.g. SDK opened a `thinking` block, emitted no deltas, and the worker
+  // exited the for-await before content landed) shouldn't leak into the DB
+  // or paint a misleading "Thinking STOPPED" footer in the dashboard. Emit
+  // a `block-cancel` instead of `block-stop`; the daemon DELETEs the row
+  // and publishes `block_canceled` SSE so live clients drop the bubble.
   const flushBoundaryBlocks = (): void => {
     for (const block of blocks.values()) {
+      if (!blockHasContent(block)) {
+        emit({ type: "block-cancel", clientBlockId: block.clientBlockId });
+        continue;
+      }
       emit({
         type: "block-stop",
         clientBlockId: block.clientBlockId,
         contentJson: finalizeBlockContent(block),
-        status: blockHasContent(block) ? "complete" : "aborted",
+        status: "complete",
       });
     }
     blocks.clear();
@@ -459,6 +484,13 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       ? buildAttachmentPromptStream(p.prompt, p.attachments)
       : p.prompt;
 
+  // FRI-78: when a pending-injection break would land on an assistant
+  // message that carried tool_use blocks, defer it to the next
+  // user(tool_results) message so the SDK's session transcript stays
+  // consistent for the subsequent resume. See the assistant-boundary
+  // comment block below for the failure mode this avoids.
+  let breakAtNextUser = false;
+
   try {
     for await (const msg of query({
       prompt: promptInput,
@@ -474,6 +506,12 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         // `autoMemoryEnabled` lives on Settings, passed through the
         // top-level `settings` Options field.
         settings: { autoMemoryEnabled: false },
+        // FRI-78: thread the worker's abortController through the SDK so
+        // `stop`/`abort` IPCs propagate cleanly to the CLI subprocess
+        // (tool-execution streams shut down deterministically instead of
+        // closing on iterator return). Without this, the SDK only learns
+        // the consumer is gone when the for-await iterator returns.
+        ...(abortController ? { abortController } : {}),
         ...(builderGuardHooks ? { hooks: builderGuardHooks } : {}),
         ...(allowedTools ? { allowedTools } : {}),
         ...(thinking ? { thinking } : {}),
@@ -664,6 +702,24 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         // gracefully. The parent's turn-complete handler will drain the
         // next prompt; `mainLoop` drains the inbox for critical mail.
         if (promptsPending || pendingCriticalMail) {
+          // FRI-78: break timing matters for SDK-session integrity.
+          // Breaking immediately after an assistant message with tool_use
+          // blocks leaves the SDK's session JSONL with a dangling
+          // assistant→tool_use that never gets its matching user→
+          // tool_result. The next `runQuery` resumes that broken
+          // transcript and the CLI subprocess returns "Stream closed" /
+          // "Tool permission stream closed before response received" on
+          // the first tool dispatch (model retries with the same payload
+          // and the second call succeeds — the dashboard pattern Seth saw
+          // with fri-75-design-review). Defer the break to the next
+          // user(tool_results) boundary so the SDK can complete its tool
+          // dispatch first. If the assistant emitted no tool_use blocks
+          // (pure text), there's no follow-up user message and breaking
+          // immediately is safe.
+          if (assistantMessageHasToolUses(m.message)) {
+            breakAtNextUser = true;
+            continue;
+          }
           // FRI-4 #2 + FRI-22: at the assistant-message yield the model's
           // reply is conceptually finished. The SDK *usually* emits
           // `content_block_stop` for every block before yielding the
@@ -726,6 +782,18 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
               });
             }
           });
+        }
+        // FRI-78: if the prior assistant message had tool_uses and we
+        // deferred a pending-injection break, fire it now. The SDK has
+        // delivered the tool_results, so the session transcript is
+        // complete and the next resume won't trip the "Stream closed"
+        // race.
+        if (breakAtNextUser) {
+          flushBoundaryBlocks();
+          promptsPending = false;
+          pendingCriticalMail = false;
+          breakAtNextUser = false;
+          break;
         }
         continue;
       }

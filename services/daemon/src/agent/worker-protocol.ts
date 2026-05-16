@@ -91,17 +91,25 @@ export type WorkerCommand =
   | { type: "mail-wakeup" }
   /**
    * Critical-priority mail just landed for this worker (FIX_FORWARD 2.4).
-   * The worker breaks the current SDK iterator at the next assistant-
-   * message boundary and lets `mainLoop` drain the inbox normally — the
-   * critical mail will be the (at minimum) first row.
+   * The worker breaks the current SDK iterator at the next safe iteration
+   * boundary and lets `mainLoop` drain the inbox normally — the critical
+   * mail will be the (at minimum) first row.
+   *
+   * FRI-78: "next safe boundary" means the next `user`(tool_results)
+   * message if the just-yielded assistant message carried tool_uses,
+   * otherwise the assistant boundary itself. Breaking before the matching
+   * tool_results land would leave the SDK session JSONL with a dangling
+   * `assistant→tool_use` and the next `runQuery`'s resume fails with
+   * "Stream closed" on the model's first tool dispatch.
    */
   | { type: "mail-wakeup-critical" }
   /**
    * The parent has queued one or more user prompts for this worker via
    * `nextPrompts`. The worker breaks the current SDK iterator at the next
-   * assistant-message boundary, emits `turn-complete`, and lets the
-   * parent's turn-complete handler shift the queue and send a fresh
-   * `prompt` IPC. FIX_FORWARD 2.4.
+   * safe iteration boundary (see `mail-wakeup-critical` for the FRI-78
+   * detail on tool_use/tool_results ordering), emits `turn-complete`, and
+   * lets the parent's turn-complete handler shift the queue and send a
+   * fresh `prompt` IPC. FIX_FORWARD 2.4.
    */
   | { type: "prompts-pending" };
 
@@ -141,12 +149,28 @@ export interface WorkerBlockStop {
   status: "complete" | "aborted" | "error";
 }
 
+/**
+ * FRI-78 follow-up: a block that was started (block-start fired) but is being
+ * cancelled because it never accumulated any content. The canonical case is
+ * `flushBoundaryBlocks` at a pending-injection break: the SDK opened a
+ * `thinking` block but produced no deltas before the worker exited the
+ * for-await loop. Without this, an empty `aborted` row leaks into the DB and
+ * the dashboard paints a "Thinking STOPPED" footer for a block that had no
+ * content. The daemon's handler DELETEs the row and publishes
+ * `block_canceled` SSE so live clients drop the bubble.
+ */
+export interface WorkerBlockCancel {
+  type: "block-cancel";
+  clientBlockId: string;
+}
+
 export type WorkerEvent =
   | { type: "ready" }
   | { type: "session-update"; sessionId: string }
   | WorkerBlockStart
   | WorkerBlockDelta
   | WorkerBlockStop
+  | WorkerBlockCancel
   | {
       type: "turn-complete";
       sessionId: string;

@@ -28,11 +28,15 @@ beforeEach(async () => {
 });
 
 describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
-  it("user_chat source persists the row but does NOT publish SSE", async () => {
-    // The `user_chat` path collides with the dashboard's optimistic bubble
-    // (the POST /api/chat/turn response would race the SSE frame). The
-    // row still has to land in the blocks table — reload hydrates the
-    // chat from /api/agents/:name/blocks — but no SSE event must fire.
+  it("user_chat source persists the row and publishes block_complete SSE (cross-client echo)", async () => {
+    // FRI-78 follow-up: every recordUserBlock — including `user_chat` at
+    // status='complete' — must publish the canonical `block_complete`
+    // SSE. The sending browser dedupes against its optimistic bubble in
+    // `chat.svelte.ts:confirmPending` (race protection pinned in
+    // chat.test.ts "drops the optimistic bubble when the SSE
+    // block_complete arrived first"). Suppressing the publish here
+    // would deny the message to every *other* connected client (browser
+    // B, mobile, etc.).
     const { recordUserBlock } = await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
     const { getBlockById } = await import("@friday/shared/services");
@@ -41,9 +45,21 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
       type?: string;
       block_id?: string;
       seq?: number;
+      role?: string;
+      status?: string;
+      source?: string | null;
     }> = [];
     const unsub = eventBus.subscribe((e) =>
-      captured.push(e as { type?: string; block_id?: string; seq?: number }),
+      captured.push(
+        e as {
+          type?: string;
+          block_id?: string;
+          seq?: number;
+          role?: string;
+          status?: string;
+          source?: string | null;
+        },
+      ),
     );
 
     const before = eventBus.currentSeq();
@@ -60,11 +76,20 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(row).not.toBeNull();
     expect(row!.source).toBe("user_chat");
     expect(JSON.parse(row!.contentJson)).toEqual({ text: "hello adr" });
-    // No SSE event was published.
-    expect(captured.find((e) => e.block_id === blockId)).toBeUndefined();
-    expect(eventBus.currentSeq()).toBe(before);
-    // The returned seq is the sentinel 0 (no event → no seq).
-    expect(seq).toBe(0);
+    // SSE event was published with matching seq + the load-bearing fields
+    // a connected client needs to mount the bubble.
+    expect(eventBus.currentSeq()).toBeGreaterThan(before);
+    expect(seq).toBe(before + 1);
+    const evt = captured.find(
+      (e) => e.type === "block_complete" && e.block_id === blockId,
+    );
+    expect(evt).toBeDefined();
+    expect(evt!.seq).toBe(seq);
+    expect(evt!.role).toBe("user");
+    expect(evt!.status).toBe("complete");
+    expect(evt!.source).toBe("user_chat");
+    // ADR-004: the DB row's last_event_seq must match the event seq.
+    expect(row!.lastEventSeq).toBe(seq);
   });
 
   it("mail source publishes SSE and the row's seq matches the event seq", async () => {

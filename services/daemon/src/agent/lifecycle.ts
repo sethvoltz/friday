@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import type { AgentType, BlockKind } from "@friday/shared";
 import { loadConfig } from "@friday/shared";
 import {
+  deleteBlockById,
   insertBlock,
   insertUsage,
   updateBlock,
@@ -964,6 +965,14 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       handleBlockStop(w, e);
       break;
     }
+    case "block-cancel": {
+      // FRI-78 follow-up: the SDK started a content block (block-start
+      // already fired and the row exists at status='streaming') and the
+      // worker exited the for-await before any deltas accumulated. Drop
+      // the row and tell live clients to remove the bubble.
+      handleBlockCancel(w, e);
+      break;
+    }
     case "error": {
       // FRI-12: a worker response — even an error — means the abort was
       // honored; cancel the force-kill deadline so we don't redundantly
@@ -1382,6 +1391,37 @@ function handleBlockDelta(
   });
 }
 
+function handleBlockCancel(
+  w: LiveWorker,
+  e: { clientBlockId: string },
+): void {
+  // Peek the upcoming seq so the live-turns finish call and the SSE event
+  // stamp the same number — mirrors the handleBlockStop pattern.
+  const peekSeq = eventBus.currentSeq() + 1;
+  const live = liveTurns.finishBlock(w.turnId, e.clientBlockId, peekSeq);
+  if (!live) return;
+  writeAndPublish(
+    {
+      v: 1,
+      type: "block_canceled",
+      turn_id: w.turnId,
+      agent: w.agentName,
+      block_id: live.blockId,
+    },
+    () => {
+      try {
+        deleteBlockById(live.blockId);
+      } catch (err) {
+        logger.log("warn", "blocks.delete.error", {
+          agent: w.agentName,
+          blockId: live.blockId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+}
+
 function handleBlockStop(
   w: LiveWorker,
   e: {
@@ -1730,75 +1770,56 @@ export function recordUserBlock(input: RecordUserBlockInput): {
         }
       : { text: input.text, ...attachments };
   const contentJson = JSON.stringify(content);
-  // For `user_chat` + `status='complete'`, the dashboard's optimistic
-  // bubble is already on screen before POST /api/chat/turn returns.
-  // Emitting the canonical `block_complete` SSE frame here races the
-  // POST response and (when SSE wins) doubles the bubble — keep the
-  // historical "skip SSE for that exact case" behavior.
+  // FRI-78 follow-up: always publish the canonical `block_complete` SSE
+  // frame, including for `user_chat` + `status='complete'`. Prior to this
+  // the publish was skipped to avoid racing the POST /api/chat/turn
+  // response and double-mounting the optimistic bubble on the sending
+  // browser — but that suppression also denied the message to every
+  // *other* connected client (browser B, mobile, etc.), so they had to
+  // refresh to see the user's own message.
   //
-  // For `status='queued'` we MUST emit on SSE: the worker may not drain
-  // this prompt for minutes, and the dashboard needs the signal to flip
-  // the optimistic bubble into the queued (pinned) visual state. The
-  // existing `confirmPending` race-protection in chat.svelte.ts handles
-  // either ordering of POST-ack vs. SSE.
-  //
-  // Mail / scheduled / queue-injected blocks have no upstream optimistic
-  // bubble and always emit.
-  const skipSse = input.source === "user_chat" && status === "complete";
-  let seq: number;
-  if (skipSse) {
-    seq = 0; // not in the event bus; not consumed by callers either
-    insertBlock({
-      blockId,
-      turnId: input.turnId,
-      agentName: input.agentName,
-      sessionId: input.sessionId ?? "__pending__",
-      messageId: null,
-      blockIndex: 0,
+  // The dashboard already has the dedup for the SSE-first ordering:
+  // `confirmPending` in chat.svelte.ts collapses a duplicate user
+  // bubble when the SSE arrived before the POST response. Pinned by
+  // chat.test.ts "drops the optimistic bubble when the SSE
+  // block_complete arrived first". The POST-first ordering converges
+  // via the natural `handleBlockComplete` id-match: the optimistic was
+  // re-keyed to `user_<turnId>` in `confirmPending`, and the
+  // subsequent SSE finds the same id and updates in place.
+  const seq = writeAndPublish(
+    {
+      v: 1,
+      type: "block_complete",
+      turn_id: input.turnId,
+      agent: input.agentName,
+      block_id: blockId,
+      message_id: null,
+      block_index: 0,
       role: "user",
       kind: "text",
       source: input.source,
-      contentJson,
+      content_json: contentJson,
       status,
       ts,
-      lastEventSeq: seq,
-    });
-  } else {
-    seq = writeAndPublish(
-      {
-        v: 1,
-        type: "block_complete",
-        turn_id: input.turnId,
-        agent: input.agentName,
-        block_id: blockId,
-        message_id: null,
-        block_index: 0,
+    },
+    (assignedSeq) => {
+      insertBlock({
+        blockId,
+        turnId: input.turnId,
+        agentName: input.agentName,
+        sessionId: input.sessionId ?? "__pending__",
+        messageId: null,
+        blockIndex: 0,
         role: "user",
         kind: "text",
         source: input.source,
-        content_json: contentJson,
+        contentJson,
         status,
         ts,
-      },
-      (assignedSeq) => {
-        insertBlock({
-          blockId,
-          turnId: input.turnId,
-          agentName: input.agentName,
-          sessionId: input.sessionId ?? "__pending__",
-          messageId: null,
-          blockIndex: 0,
-          role: "user",
-          kind: "text",
-          source: input.source,
-          contentJson,
-          status,
-          ts,
-          lastEventSeq: assignedSeq,
-        });
-      },
-    ).seq;
-  }
+        lastEventSeq: assignedSeq,
+      });
+    },
+  ).seq;
   // FIX_FORWARD 2.8: mail-derived user blocks badge the recipient agent
   // (a piece of user-visible content just landed in their chat).
   // user_chat / queue_inject blocks are typed by the user themselves and
