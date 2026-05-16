@@ -276,6 +276,53 @@
   </div>
 
   <div class="card">
+    <div class="card-header"><h2>Apps</h2></div>
+    <p class="row-value">
+      Installed Friday Apps from <code>~/.friday/apps/</code>. Install,
+      uninstall, and reload are CLI/MCP-only in v1 — this card is
+      read-only.
+    </p>
+    {#if data.apps.length === 0}
+      <p class="row-value muted">No apps installed.</p>
+    {:else}
+      <ul class="apps-list">
+        {#each data.apps as app (app.id)}
+          <li class="app-row">
+            <div class="app-head">
+              <span class="app-id">{app.id}</span>
+              <span class="app-version">v{app.version}</span>
+              <span class="app-status app-status-{app.status}">
+                {app.status}
+              </span>
+            </div>
+            <div class="app-name">{app.name}</div>
+            {#if app.agents.length > 0}
+              <div class="app-detail">
+                <span class="muted">agents:</span>
+                {app.agents.map((a) => a.name).join(", ")}
+              </div>
+            {/if}
+            {#if app.schedules.length > 0}
+              <div class="app-detail">
+                <span class="muted">schedules:</span>
+                {app.schedules
+                  .map((s) => `${s.name} (${s.cron ?? "—"})`)
+                  .join(", ")}
+              </div>
+            {/if}
+            {#if app.mcpServers.length > 0}
+              <div class="app-detail">
+                <span class="muted">mcp:</span>
+                {app.mcpServers.map((m) => m.name).join(", ")}
+              </div>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </div>
+
+  <div class="card">
     <div class="card-header"><h2>Watchdog</h2></div>
     <p class="row-value">
       When an agent's worker process crashes mid-turn the watchdog can re-fork
@@ -532,4 +579,60 @@
     border-color: var(--status-error);
     color: var(--status-error);
   }
+
+  .apps-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .app-row {
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface, var(--bg-card));
+  }
+  .app-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .app-id {
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+  .app-version {
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+  }
+  .app-status {
+    font-size: 0.7rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 99px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    text-transform: lowercase;
+  }
+  .app-status-installed { color: var(--status-success); }
+  .app-status-orphaned { color: var(--text-tertiary); }
+  .app-status-error { color: var(--status-error); }
+  .app-name {
+    margin-top: 0.2rem;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+  }
+  .app-detail {
+    margin-top: 0.2rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+  .app-detail .muted {
+    color: var(--text-tertiary);
+    margin-right: 0.3rem;
+  }
+  .row-value.muted { color: var(--text-tertiary); }
 </style>

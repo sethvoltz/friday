@@ -115,6 +115,14 @@ import {
   workspacePath,
 } from "../agent/workspace.js";
 import { commandsApi } from "./commands.js";
+import {
+  AppInstallError,
+  installApp,
+  inspectApp,
+  listApps,
+  reloadApp,
+  uninstallApp,
+} from "../apps/installer.js";
 import { randomUUID } from "node:crypto";
 import { isValidAgentName } from "@friday/shared";
 import type { AgentType } from "@friday/shared";
@@ -508,6 +516,13 @@ async function handle(
       }
     }
 
+    // §9: propagate the spawning agent's `appId` to its child. Builders are
+    // exempt — workspace containment (worktree cwd) is the stronger rule,
+    // and builders can't be declared in a manifest in v1 anyway.
+    const inheritedAppId =
+      body.type !== "builder" && body.parentName
+        ? registry.getAppId(body.parentName)
+        : null;
     registry.registerAgent({
       name: body.name,
       type: body.type,
@@ -515,6 +530,7 @@ async function handle(
       ticketId: body.ticketId,
       worktreePath,
       branch,
+      appId: inheritedAppId ?? undefined,
     });
 
     const turnId = `t_${randomUUID()}`;
@@ -1405,6 +1421,99 @@ async function handle(
     res.writeHead(200, headers);
     res.end(bytes);
     return;
+  }
+
+  // --- Apps (FRI-78) ---
+  if (method === "GET" && path === "/api/apps") {
+    if (!authorizeSameHost(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+    const rows = listApps().map((r) => {
+      const detail = inspectApp(r.id);
+      return {
+        ...r,
+        agents: detail?.agents ?? [],
+        schedules: detail?.schedules ?? [],
+        mcpServers: detail?.mcpServers ?? [],
+      };
+    });
+    return json(res, 200, rows);
+  }
+  if (method === "POST" && path === "/api/apps") {
+    if (!authorizeSameHost(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+    const body = await readJson<{ folderPath: string; adopt?: boolean }>(req);
+    if (!body.folderPath) {
+      return json(res, 400, { error: "folderPath required" });
+    }
+    try {
+      const result = installApp(body.folderPath, { adopt: !!body.adopt });
+      return json(res, 201, result);
+    } catch (err) {
+      if (err instanceof AppInstallError) {
+        const status =
+          err.code === "already_installed"
+            ? 409
+            : err.code === "agent_name_collision" ||
+                err.code === "schedule_name_collision" ||
+                err.code === "mcp_name_collision"
+              ? 409
+              : 400;
+        return json(res, status, { error: err.message, code: err.code });
+      }
+      return json(res, 400, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (method === "GET" && /^\/api\/apps\/[^/]+$/.test(path)) {
+    if (!authorizeSameHost(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+    const id = decodeURIComponent(path.split("/")[3]);
+    const row = inspectApp(id);
+    if (!row) return json(res, 404, { error: "not found" });
+    return json(res, 200, row);
+  }
+  if (method === "DELETE" && /^\/api\/apps\/[^/]+$/.test(path)) {
+    if (!authorizeSameHost(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+    const id = decodeURIComponent(path.split("/")[3]);
+    const body = await readJson<{
+      folderDisposition?: "archive" | "keep" | "delete";
+    }>(req).catch(() => ({}) as { folderDisposition?: "archive" | "keep" | "delete" });
+    try {
+      const result = uninstallApp(id, {
+        folderDisposition: body.folderDisposition,
+      });
+      return json(res, 200, result);
+    } catch (err) {
+      if (err instanceof AppInstallError) {
+        return json(res, 404, { error: err.message, code: err.code });
+      }
+      return json(res, 400, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (method === "POST" && /^\/api\/apps\/[^/]+\/reload$/.test(path)) {
+    if (!authorizeSameHost(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+    const id = decodeURIComponent(path.split("/")[3]);
+    try {
+      const result = reloadApp(id);
+      return json(res, 200, result);
+    } catch (err) {
+      if (err instanceof AppInstallError) {
+        return json(res, 404, { error: err.message, code: err.code });
+      }
+      return json(res, 400, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   return json(res, 404, { error: "not found", path });

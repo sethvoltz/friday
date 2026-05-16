@@ -56,10 +56,14 @@ export class DaemonClient {
     return (await r.json()) as T;
   }
 
-  async del<T>(path: string): Promise<T> {
+  async del<T>(path: string, body?: unknown): Promise<T> {
     const r = await fetch(`${this.base}${path}`, {
       method: "DELETE",
-      headers: this.authHeaders(),
+      headers:
+        body !== undefined
+          ? { "content-type": "application/json", ...this.authHeaders() }
+          : this.authHeaders(),
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     if (!r.ok) throw new Error(`DELETE ${path} → ${r.status}`);
     return (await r.json()) as T;

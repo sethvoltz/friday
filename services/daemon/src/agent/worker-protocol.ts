@@ -7,6 +7,7 @@
 
 import type {
   AgentType,
+  ManifestMcpServer,
   McpServerConfig,
   ThinkingConfig,
   ThinkingEffort,
@@ -52,6 +53,19 @@ export interface WorkerSpawnOptions {
    * to set it themselves.
    */
   userMcpServers?: McpServerConfig[];
+  /**
+   * FRI-78: per-app context. Populated by the daemon spawn site when the
+   * agent has an `appId`. Carries the app's stdio MCP servers plus the
+   * parsed `.env`. The worker reconstructs `buildMcpServers` after fork
+   * so the IPC-friendly serialized form has to be here, not on the
+   * builder's option bag directly.
+   */
+  appContext?: {
+    appId: string;
+    folderPath: string;
+    mcpServers: ManifestMcpServer[];
+    envFile?: Record<string, string>;
+  };
 }
 
 /**

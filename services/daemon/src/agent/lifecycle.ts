@@ -40,6 +40,7 @@ import {
 } from "../services/ticket-close.js";
 import * as registry from "./registry.js";
 import * as liveTurns from "./live-turns.js";
+import { appContextForAgent } from "../apps/installer.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
 import {
   profileInputsFor,
@@ -171,6 +172,17 @@ export function spawnTurn(input: SpawnTurnInput): void {
     throw new Error(`agent "${input.agentName}" already has a live worker`);
   }
   registry.setStatus(input.agentName, "working");
+
+  // FRI-78: auto-populate per-app context for agents owned by an
+  // installed app. Centralized here so every dispatch path (api, mail,
+  // schedule, watchdog refork) inherits the wiring; callers don't need
+  // to remember to set it.
+  if (!input.options.appContext) {
+    const ctx = appContextForAgent(input.agentName);
+    if (ctx) {
+      input.options = { ...input.options, appContext: ctx };
+    }
+  }
 
   // M2: builders run under `sandbox-exec` so the kernel denies writes to
   // credentials, dotfiles, LaunchAgents, Keychains, and Friday's own state

@@ -1,0 +1,33 @@
+{
+  "manifestVersion": 1,
+  "id": "example-app",
+  "name": "Example App",
+  "version": "0.1.0",
+  "summary": "Synthetic fixture exercising every claim type for FRI-78 tests.",
+  "agents": [
+    {
+      "name": "example-owner",
+      "type": "bare",
+      "promptOverlay": "prompt.md"
+    },
+    {
+      "name": "example-weekly",
+      "type": "scheduled"
+    }
+  ],
+  "schedules": [
+    {
+      "name": "example-weekly-run",
+      "cron": "0 4 * * 1",
+      "agent": "example-weekly",
+      "taskPrompt": "Run the example app's weekly check. cwd="
+    }
+  ],
+  "mcpServers": [
+    {
+      "name": "example-echo",
+      "command": "node",
+      "args": ["mcp/echo.js"]
+    }
+  ]
+}

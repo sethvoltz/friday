@@ -33,6 +33,7 @@ export type {
   BlockCompleteEvent,
   BlockReloadEvent,
   ConnectionEstablishedEvent,
+  AppLifecycleEvent,
 } from "./wire/events.js";
 
 export { stringifyToolResult } from "./wire/tool-result.js";

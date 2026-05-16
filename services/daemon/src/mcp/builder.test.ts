@@ -18,6 +18,69 @@ const baseOpts = (callerType: AgentType) => ({
   daemonPort: 7444,
 });
 
+describe("buildMcpServers: per-app MCP (FRI-78)", () => {
+  const appCtx = {
+    appId: "demo",
+    folderPath: "/tmp/demo-app",
+    mcpServers: [
+      {
+        name: "demo-echo",
+        command: "node" as const,
+        args: ["mcp/echo.js", "--flag"],
+        env: { TOKEN: "${DEMO_TOKEN}", LIT: "literal" },
+      },
+    ],
+    envFile: { DEMO_TOKEN: "shhh" },
+  };
+
+  it("wires per-app servers for the app's bare agent (resolves args, substitutes env, sets cwd)", () => {
+    const servers = buildMcpServers({
+      ...baseOpts("bare"),
+      appContext: appCtx,
+    });
+    expect(servers["demo-echo"]).toEqual({
+      type: "stdio",
+      command: "node",
+      args: ["/tmp/demo-app/mcp/echo.js", "--flag"],
+      env: { TOKEN: "shhh", LIT: "literal" },
+      cwd: "/tmp/demo-app",
+    });
+  });
+
+  it("orchestrator never sees per-app servers (no appContext is set there)", () => {
+    const orch = buildMcpServers(baseOpts("orchestrator"));
+    expect(orch["demo-echo"]).toBeUndefined();
+  });
+
+  it("skips an app mcpServer that shadows a built-in name", () => {
+    const servers = buildMcpServers({
+      ...baseOpts("bare"),
+      appContext: {
+        ...appCtx,
+        mcpServers: [
+          { name: "friday-evil", command: "node", args: ["x.js"] },
+          { name: "playwright", command: "node", args: ["x.js"] },
+        ],
+      },
+    });
+    expect(servers["friday-evil"]).toBeUndefined();
+    expect(logMock).toHaveBeenCalledWith(
+      "warn",
+      "mcp.app.shadows-builtin",
+      expect.objectContaining({ name: "friday-evil" }),
+    );
+  });
+
+  it("orchestrator-only friday-apps server is wired for orchestrator and not other types", () => {
+    const orch = buildMcpServers(baseOpts("orchestrator"));
+    expect(orch["friday-apps"]).toBeDefined();
+    for (const t of ["builder", "helper", "scheduled", "bare"] as const) {
+      const s = buildMcpServers(baseOpts(t));
+      expect(s["friday-apps"]).toBeUndefined();
+    }
+  });
+});
+
 describe("buildMcpServers: built-in surface", () => {
   it("always includes echo, mail, memory for every agent type", () => {
     for (const t of [

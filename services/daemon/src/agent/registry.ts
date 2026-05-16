@@ -3,6 +3,7 @@ import {
   type AgentEntry,
   type AgentStatus,
   type AgentType,
+  appDir,
   getDb,
   schema,
 } from "@friday/shared";
@@ -29,6 +30,7 @@ export interface RegisterInput {
   worktreePath?: string;
   branch?: string;
   ticketId?: string;
+  appId?: string;
 }
 
 export function registerAgent(input: RegisterInput): AgentEntry {
@@ -43,6 +45,7 @@ export function registerAgent(input: RegisterInput): AgentEntry {
       worktreePath: input.worktreePath ?? null,
       branch: input.branch ?? null,
       ticketId: input.ticketId ?? null,
+      appId: input.appId ?? null,
       createdAt: now,
       updatedAt: now,
     })
@@ -52,6 +55,33 @@ export function registerAgent(input: RegisterInput): AgentEntry {
     })
     .run();
   return getAgent(input.name)!;
+}
+
+/**
+ * Set the owning app id for an existing agent row. Used by the apps
+ * installer when rebinding a previously-unaffiliated or other-app agent
+ * to a new owner. Pass `null` to clear.
+ */
+export function setAppId(name: string, appId: string | null): void {
+  const db = getDb();
+  db.update(schema.agents)
+    .set({ appId, updatedAt: new Date() })
+    .where(eq(schema.agents.name, name))
+    .run();
+}
+
+/**
+ * Read the raw `app_id` for an agent. Returns null when the agent
+ * doesn't exist or isn't owned by an app.
+ */
+export function getAppId(name: string): string | null {
+  const db = getDb();
+  const r = db
+    .select({ appId: schema.agents.appId })
+    .from(schema.agents)
+    .where(eq(schema.agents.name, name))
+    .get();
+  return r?.appId ?? null;
 }
 
 export function setStatus(name: string, status: AgentStatus): void {
@@ -80,6 +110,27 @@ export function clearSession(name: string): void {
 
 export function archiveAgent(name: string): void {
   setStatus(name, "archived");
+}
+
+/**
+ * Reverse of `archiveAgent`. Flips an `archived` row back to `idle`,
+ * preserving `sessionId` so previously-recorded chat history continues
+ * into the un-archived agent. Used by the apps installer on reinstall.
+ *
+ * Throws if the row is missing or in any non-archived status — the
+ * lifecycle path keeps its own guard against a worker-exit handler
+ * stomping an archived terminal state, so callers shouldn't be using
+ * this to clobber other transitions.
+ */
+export function unarchiveAgent(name: string): void {
+  const row = getAgent(name);
+  if (!row) throw new Error(`unarchiveAgent: no agent named "${name}"`);
+  if (row.status !== "archived") {
+    throw new Error(
+      `unarchiveAgent: "${name}" is not archived (status=${row.status})`,
+    );
+  }
+  setStatus(name, "idle");
 }
 
 /**
@@ -145,6 +196,13 @@ function rowToEntry(r: typeof schema.agents.$inferSelect): AgentEntry {
  * directory than the mirror is watching, which silently drops history.
  */
 export function workingDirectoryFor(a: AgentEntry): string {
+  // Workspace containment is the stronger Constitution rule: builders run
+  // inside their worktree even if a future ticket ever surfaces builders
+  // under an app. AgentEntry doesn't carry `appId` (it's not part of the
+  // user-facing wire shape), so we re-read the row when only the
+  // base-typed entry is in hand.
   if ("worktreePath" in a && a.worktreePath) return a.worktreePath;
+  const appId = getAppId(a.name);
+  if (appId) return appDir(appId);
   return process.cwd();
 }
