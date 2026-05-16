@@ -4,6 +4,7 @@ A local-first, headless agent daemon with a SvelteKit dashboard exposed via Clou
 
 ## Documentation
 
+- `README.md` — Top-of-repo overview: tagline, features, quick start, CLI reference, project layout, docs index. **Public-facing.** First thing visitors read.
 - `docs/architecture.md` — System overview, components, topology, wire protocol, prompt stack, agent lifecycle.
 - `docs/chat-ux.md` — Single-chat UX, sidebar, focus model, slash commands, attachments, markdown rendering.
 - `docs/mobile-ux.md` — Priority+ navigation, virtualization, PWA, mobile autocomplete.
@@ -14,6 +15,22 @@ A local-first, headless agent daemon with a SvelteKit dashboard exposed via Clou
 - `docs/setup.md` — Setup guide including CFT walkthrough.
 - `docs/running.md` — How to run the daemon and dashboard.
 - `docs/ui-conventions.md` — Cross-cutting UI patterns: `+`/`−` disclosure glyphs, agent-type icon map.
+
+### Keeping docs and README in sync
+
+Treat `README.md` as part of the documentation surface, not an afterthought. When work changes anything a newcomer would learn from the README — features, CLI commands, prerequisites, setup steps, project layout, `~/.friday/` contents, topology, supported integrations — update the README in the same change that updates `docs/`. Do not wait for "a docs pass later."
+
+Specifically, before considering a task done, check whether your change touches:
+
+- **A user-visible feature** described in the README's "Key features" section → update the matching bullet.
+- **A CLI command** (added, renamed, removed, or changed flags) → update the "CLI" section *and* `docs/running.md`.
+- **Setup prerequisites** (Brewfile entries, Node version, required env vars) → update "Quick start" *and* `docs/setup.md`.
+- **Project structure** (new package, moved service, renamed directory) → update the "Project structure" tree *and* the structure block at the top of this CLAUDE.md.
+- **`~/.friday/` layout** (new file, renamed directory) → update the `~/.friday/` block in the README *and* `docs/running.md`.
+- **Topology / wire protocol** (new public process, new auth boundary) → update the topology diagram *and* `docs/architecture.md`.
+- **Docs themselves** (new doc page, renamed, removed) → update the README's "Documentation" table *and* the list above in this CLAUDE.md.
+
+A docs-only change still warrants a commit with scope `docs`. A code change that lands without its README/docs counterpart is incomplete work, not "fast iteration."
 
 ## Design Principles
 
