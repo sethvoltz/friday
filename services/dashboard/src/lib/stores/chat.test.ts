@@ -1081,7 +1081,7 @@ describe("mail block rendering", () => {
       role: "assistant",
       kind: "thinking",
       source: null,
-      contentJson: JSON.stringify({ text: "" }),
+      contentJson: JSON.stringify({ text: "reasoning before abort" }),
       status: "aborted",
       ts: 1000,
       lastEventSeq: 100,
@@ -1097,7 +1097,7 @@ describe("mail block rendering", () => {
       role: "assistant",
       kind: "thinking",
       source: null,
-      contentJson: JSON.stringify({ text: "" }),
+      contentJson: JSON.stringify({ text: "reasoning after retry" }),
       status: "complete",
       ts: 3000,
       lastEventSeq: 101,
@@ -2287,5 +2287,555 @@ describe("queued user blocks (pending-message feature)", () => {
     expect(bubble).toBeDefined();
     expect(bubble!.status).toBe("queued");
     expect(bubble!.text).toBe("survived reload");
+  });
+});
+
+/* ============================================================
+ * FRI-81 — Reload vs. live convergence (drift audit regressions)
+ *
+ * Each test exercises a SINGLE drift case where the reload path
+ * (parseBlocks + healOrphanStreamingBubbles) used to disagree with
+ * the live path (applyEvent). Tests pin the convergence invariant
+ * so future patches that touch one path can't silently regress the
+ * other.
+ * ============================================================ */
+describe("FRI-81 D1: tool_use sorted after tool_result still resolves its name", () => {
+  it("reload path: tool_use whose ts is bumped past its tool_result no longer renders as '(unknown)'", async () => {
+    // Triggered by `finalizeStreamingBlocks` bumping the tool_use row's
+    // `ts` to Date.now() at block_complete. If the tool_result row was
+    // inserted at an earlier `ts`, the sort tiebreak put it BEFORE the
+    // tool_use; parseBlocks's old `if (toolByToolId.has(...)) continue`
+    // then dropped the tool_use entirely and the bubble stayed at
+    // toolName="(unknown)".
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            // tool_result sorted earlier than tool_use
+            {
+              id: 11,
+              blockId: "blk-result",
+              turnId: "t-1",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 1,
+              role: "assistant",
+              kind: "tool_result",
+              source: null,
+              contentJson: JSON.stringify({
+                tool_use_id: "toolu_X",
+                text: "result body",
+                is_error: false,
+              }),
+              status: "complete",
+              ts: 100,
+              lastEventSeq: 11,
+            },
+            {
+              id: 12,
+              blockId: "blk-tooluse",
+              turnId: "t-1",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-1",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "tool_use",
+              source: null,
+              contentJson: JSON.stringify({
+                tool_use_id: "toolu_X",
+                name: "mcp__friday-mail__mail_close",
+                input: { id: 42 },
+              }),
+              status: "complete",
+              ts: 200, // bumped past tool_result by finalizeStreamingBlocks
+              lastEventSeq: 12,
+            },
+          ],
+          lastEventSeq: 12,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    const tool = chat.messages.find((m) => m.role === "tool");
+    expect(tool, "tool bubble materialized").toBeDefined();
+    expect(tool!.toolName).toBe("mcp__friday-mail__mail_close");
+    expect(tool!.input).toEqual({ id: 42 });
+    expect(tool!.status).toBe("done");
+    expect(tool!.output).toBe("result body");
+  });
+
+  it("live ↔ reload symmetry: identical sequence through applyEvent vs. parseBlocks produces identical bubbles", async () => {
+    const { ChatState, parseBlocks } = await import("./chat.svelte");
+    const live = new ChatState();
+    live.focusedAgent = "friday";
+    // Live: block_start tool_use, block_complete tool_use, block_complete tool_result
+    live.applyEvent({
+      v: 1,
+      type: "block_start",
+      agent: "friday",
+      turn_id: "t-1",
+      block_id: "blk-tooluse",
+      block_index: 0,
+      role: "assistant",
+      kind: "tool_use",
+      tool: { id: "toolu_X", name: "mcp__friday-mail__mail_close" },
+      ts: 100,
+      seq: 1,
+    } as Parameters<typeof live.applyEvent>[0]);
+    live.applyEvent({
+      v: 1,
+      type: "block_complete",
+      agent: "friday",
+      turn_id: "t-1",
+      block_id: "blk-tooluse",
+      message_id: "msg-1",
+      block_index: 0,
+      role: "assistant",
+      kind: "tool_use",
+      source: null,
+      content_json: JSON.stringify({
+        tool_use_id: "toolu_X",
+        name: "mcp__friday-mail__mail_close",
+        input: { id: 42 },
+      }),
+      status: "complete",
+      ts: 200,
+      seq: 2,
+    } as Parameters<typeof live.applyEvent>[0]);
+    live.applyEvent({
+      v: 1,
+      type: "block_complete",
+      agent: "friday",
+      turn_id: "t-1",
+      block_id: "blk-result",
+      message_id: null,
+      block_index: 1,
+      role: "assistant",
+      kind: "tool_result",
+      source: null,
+      content_json: JSON.stringify({
+        tool_use_id: "toolu_X",
+        text: "result body",
+        is_error: false,
+      }),
+      status: "complete",
+      ts: 201,
+      seq: 3,
+    } as Parameters<typeof live.applyEvent>[0]);
+    const liveTool = live.messages.find((m) => m.role === "tool")!;
+
+    // Reload: same logical state from DB rows (reproducing the worst-case
+    // sort order: tool_result before tool_use).
+    const reloadMessages = parseBlocks(
+      [
+        {
+          id: 11,
+          blockId: "blk-result",
+          turnId: "t-1",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: null,
+          blockIndex: 1,
+          role: "assistant",
+          kind: "tool_result",
+          source: null,
+          contentJson: JSON.stringify({
+            tool_use_id: "toolu_X",
+            text: "result body",
+            is_error: false,
+          }),
+          status: "complete",
+          ts: 100,
+          lastEventSeq: 11,
+        },
+        {
+          id: 12,
+          blockId: "blk-tooluse",
+          turnId: "t-1",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: "msg-1",
+          blockIndex: 0,
+          role: "assistant",
+          kind: "tool_use",
+          source: null,
+          contentJson: JSON.stringify({
+            tool_use_id: "toolu_X",
+            name: "mcp__friday-mail__mail_close",
+            input: { id: 42 },
+          }),
+          status: "complete",
+          ts: 200,
+          lastEventSeq: 12,
+        },
+      ],
+      "friday",
+    );
+    const reloadTool = reloadMessages.find((m) => m.role === "tool")!;
+    // The two paths must agree on the load-bearing fields. (Don't compare
+    // `ts` — live records first-seen-ts, reload records DB ts; both are
+    // acceptable since the bubble already exists in chronology.)
+    expect(reloadTool.toolName).toBe(liveTool.toolName);
+    expect(reloadTool.input).toEqual(liveTool.input);
+    expect(reloadTool.output).toBe(liveTool.output);
+    expect(reloadTool.status).toBe(liveTool.status);
+    expect(reloadTool.toolId).toBe(liveTool.toolId);
+  });
+});
+
+describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
+  it("reload: streaming thinking from a previous turn is flipped to aborted when a later turn exists", async () => {
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            {
+              id: 1,
+              blockId: "blk-think-stuck",
+              turnId: "turn-stuck",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-stuck",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "thinking",
+              source: null,
+              contentJson: JSON.stringify({ text: "partial reasoning" }),
+              status: "streaming",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+            {
+              id: 2,
+              blockId: "blk-text-next",
+              turnId: "turn-next",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-next",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "text",
+              source: null,
+              contentJson: JSON.stringify({ text: "all done" }),
+              status: "complete",
+              ts: 200,
+              lastEventSeq: 2,
+            },
+          ],
+          lastEventSeq: 2,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    const stuck = chat.messages.find((m) => m.id === "th_blk-think-stuck");
+    expect(stuck, "stuck thinking is rendered").toBeDefined();
+    // Load-bearing: must NOT be "running" — that's the pulsing-dots state.
+    expect(stuck!.status).toBe("aborted");
+  });
+
+  it("reload: streaming tool_use with a later terminal sibling in the same turn is flipped to aborted", async () => {
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            {
+              id: 1,
+              blockId: "blk-tool-stuck",
+              turnId: "t-1",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-1",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "tool_use",
+              source: null,
+              contentJson: JSON.stringify({
+                tool_use_id: "toolu_S",
+                name: "Bash",
+                input: { command: "x" },
+              }),
+              status: "streaming",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+            {
+              id: 2,
+              blockId: "blk-text-later",
+              turnId: "t-1",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-2",
+              blockIndex: 1,
+              role: "assistant",
+              kind: "text",
+              source: null,
+              contentJson: JSON.stringify({ text: "moved on" }),
+              status: "complete",
+              ts: 200,
+              lastEventSeq: 2,
+            },
+          ],
+          lastEventSeq: 2,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    const tool = chat.messages.find((m) => m.id === "t_toolu_S");
+    expect(tool).toBeDefined();
+    expect(tool!.status).toBe("aborted");
+  });
+
+  it("reload: single-turn history with one streaming block + idle agent is healed via post-probe sweep", async () => {
+    // parseBlocks can't tell on its own — no later turn, no terminal
+    // sibling. The /api/agents/:name probe returning status='idle' is
+    // what authoritatively says "this is an orphan" — verify the
+    // post-probe sweep covers this case.
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            {
+              id: 1,
+              blockId: "blk-think-only",
+              turnId: "t-only",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-only",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "thinking",
+              source: null,
+              contentJson: JSON.stringify({ text: "stuck reasoning" }),
+              status: "streaming",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+          ],
+          lastEventSeq: 1,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    const stuck = chat.messages.find((m) => m.id === "th_blk-think-only");
+    expect(stuck!.status).toBe("aborted");
+  });
+
+  it("reload: streaming block in the ACTIVE turn is preserved when agent is working (D2 must not regress reload-mid-turn)", async () => {
+    // Inverse of the heal: if the agent is working and the streaming
+    // block belongs to its inflight turn, status must stay "running"
+    // so the SSE block_delta keeps appending. This regression check is
+    // why the post-probe sweep takes an `activeTurnId` argument.
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            {
+              id: 1,
+              blockId: "blk-think-live",
+              turnId: "turn-live",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-live",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "thinking",
+              source: null,
+              contentJson: JSON.stringify({ text: "thinking " }),
+              status: "streaming",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+          ],
+          lastEventSeq: 1,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "working" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    const live = chat.messages.find((m) => m.id === "th_blk-think-live");
+    expect(live!.status).toBe("running");
+  });
+});
+
+describe("FRI-81 D4: empty-content thinking ghost is filtered on both paths", () => {
+  it("reload: a thinking row with empty text + status='complete' is not rendered", async () => {
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            {
+              id: 1,
+              blockId: "blk-ghost",
+              turnId: "t-1",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-1",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "thinking",
+              source: null,
+              contentJson: JSON.stringify({ text: "" }),
+              status: "complete",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+            {
+              id: 2,
+              blockId: "blk-text",
+              turnId: "t-1",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-1",
+              blockIndex: 1,
+              role: "assistant",
+              kind: "text",
+              source: null,
+              contentJson: JSON.stringify({ text: "hi" }),
+              status: "complete",
+              ts: 101,
+              lastEventSeq: 2,
+            },
+          ],
+          lastEventSeq: 2,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    expect(chat.messages.find((m) => m.id === "th_blk-ghost")).toBeUndefined();
+    expect(chat.messages.find((m) => m.id === "b_blk-text")).toBeDefined();
+  });
+
+  it("reload: an empty-text thinking row at status='aborted' IS rendered (carries the 'stopped' affordance)", async () => {
+    // The worker tearing down a partial thinking block writes status=aborted
+    // — that conveys real information ("the model was thinking but we cut
+    // it"). Don't collapse that into the empty-ghost bucket.
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            {
+              id: 1,
+              blockId: "blk-aborted",
+              turnId: "t-1",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-1",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "thinking",
+              source: null,
+              contentJson: JSON.stringify({ text: "" }),
+              status: "aborted",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+          ],
+          lastEventSeq: 1,
+        }),
+      )
+      .mockResolvedValueOnce(makeResponse({ status: "idle" }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    expect(chat.messages.find((m) => m.id === "th_blk-aborted")).toBeDefined();
+  });
+
+  it("live: handleBlockComplete for an empty thinking block removes the placeholder pushed by block_start", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      agent: "friday",
+      turn_id: "t-1",
+      block_id: "blk-empty",
+      block_index: 0,
+      role: "assistant",
+      kind: "thinking",
+      ts: 100,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages.find((m) => m.id === "th_blk-empty")).toBeDefined();
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      agent: "friday",
+      turn_id: "t-1",
+      block_id: "blk-empty",
+      message_id: "msg-1",
+      block_index: 0,
+      role: "assistant",
+      kind: "thinking",
+      source: null,
+      content_json: JSON.stringify({ text: "" }),
+      status: "complete",
+      ts: 110,
+      seq: 2,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    // Convergence with reload: parseBlocks would `continue`; live must
+    // drop the placeholder rather than leave it as an empty "Thinking" pill.
+    expect(chat.messages.find((m) => m.id === "th_blk-empty")).toBeUndefined();
+  });
+});
+
+describe("FRI-81 D5: SDK 'No response requested.' sentinel cleans up its placeholder on the live path", () => {
+  it("block_start then block_complete-sentinel: live no longer leaks a ghost empty assistant bubble", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      agent: "friday",
+      turn_id: "t-empty",
+      block_id: "blk-sentinel",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      ts: 100,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    // The block_start created an empty assistant placeholder.
+    expect(chat.messages.find((m) => m.id === "b_blk-sentinel")).toBeDefined();
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      agent: "friday",
+      turn_id: "t-empty",
+      block_id: "blk-sentinel",
+      message_id: "m-empty",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      source: "sdk",
+      content_json: JSON.stringify({ text: "No response requested." }),
+      status: "complete",
+      ts: 110,
+      seq: 2,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    // Convergence: reload-path parseBlocks `continue`s past this row;
+    // live must remove the bubble it speculatively pushed at block_start.
+    expect(chat.messages.find((m) => m.id === "b_blk-sentinel")).toBeUndefined();
   });
 });

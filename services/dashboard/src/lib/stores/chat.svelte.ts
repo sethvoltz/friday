@@ -1187,7 +1187,17 @@ export class ChatState {
       if (!ar.ok) return;
       if (this.focusedAgent !== agent) return;
       const entry = (await ar.json()) as { status?: string };
-      if (entry.status !== "working") return;
+      if (entry.status !== "working") {
+        // FRI-81 D2/D3: agent is idle, so any streaming/running bubble
+        // we just rendered from the DB is, by definition, an orphan that
+        // parseBlocks's heuristic couldn't catch (single-turn history
+        // where no later turn exists to demote the streaming row).
+        // Convergence sweep — flip them to aborted so the user doesn't
+        // see a pulsing "Thinking…" or "running" tool for a turn the
+        // worker has already given up on.
+        healOrphanStreamingBubbles(this.messages, null);
+        return;
+      }
       // Find the most recent bubble carrying a turnId from the *response*
       // turn — that's the in-flight turn the daemon will emit `turn_done`
       // for. Skip user bubbles whose `source` produces a non-response
@@ -1211,6 +1221,11 @@ export class ChatState {
       // bubbles in view), leave the slot null and let SSE replay's
       // `turn_started` populate it — that's the authoritative signal.
       if (latestTurnId) this.markInflight(agent, latestTurnId);
+      // FRI-81 D2/D3: even when the agent is mid-turn, every streaming
+      // bubble outside the active turn is an orphan. Heal them now —
+      // the active turn's bubbles stay streaming so SSE deltas continue
+      // to attach.
+      healOrphanStreamingBubbles(this.messages, latestTurnId ?? null);
     } catch {
       // ignore — fallback path is the next turn_started SSE frame.
     }
@@ -1260,6 +1275,11 @@ export class ChatState {
         return;
       }
       const older = parseBlocks(blocks, agent);
+      // FRI-81 D2/D3: older history is, by definition, from past turns —
+      // no streaming/running bubble in this page is the active turn. Heal
+      // them eagerly (the parseBlocks heuristic doesn't see the current
+      // chat's blocks so it can't tell on its own).
+      healOrphanStreamingBubbles(older, this.inflightTurnIdByAgent[agent] ?? null);
       // Prepend, dedup-by-id (SSE may have surfaced something we now also
       // see in DB).
       const seen = new Set(this.messages.map((m) => m.id));
@@ -1555,7 +1575,20 @@ export class ChatState {
     }
     const parsed = parseBlockContent(event.content_json);
     if (event.kind === "text") {
-      if (isNoResponseSentinel(event.role, parsed.text)) return;
+      if (isNoResponseSentinel(event.role, parsed.text)) {
+        // FRI-81 D5: a prior `block_start` for this row already pushed an
+        // empty assistant placeholder. Without cleanup it lingers as a
+        // ghost "Thinking..." (the text bubble has no spinner but still
+        // takes vertical space). Reload-path `parseBlocks` filters the
+        // row out entirely via `continue`; converge by dropping any
+        // bubble live mounted under this id.
+        const id =
+          event.role === "user"
+            ? userBlockIdForTurn(event.turn_id)
+            : `b_${event.block_id}`;
+        this.messages = this.messages.filter((m) => m.id !== id);
+        return;
+      }
       const id =
         event.role === "user"
           ? userBlockIdForTurn(event.turn_id)
@@ -1614,6 +1647,17 @@ export class ChatState {
     }
     if (event.kind === "thinking") {
       const id = `th_${event.block_id}`;
+      // FRI-81 D4: converge with parseBlocks's ghost-filter. An empty
+      // thinking block that completes (rather than being cancelled via
+      // block_canceled IPC) is a ghost; drop the placeholder that
+      // block_start created. Aborted/error preserve their bubble so the
+      // user sees a "stopped" affordance.
+      const hasText =
+        typeof parsed.text === "string" && parsed.text.length > 0;
+      if (!hasText && event.status === "complete") {
+        this.messages = this.messages.filter((m) => m.id !== id);
+        return;
+      }
       // For thinking blocks, 'complete' (and the un-aborted retry path)
       // both surface as the user-visible "done" state. Terminal abort/error
       // — emitted by the worker's tear-down on iterator failure or
@@ -1899,7 +1943,80 @@ export interface BlockRow {
  * canonical block row + a live block_complete SSE event converge on the
  * same bubble id (FIX_FORWARD 3.7 + 2.6).
  */
+/**
+ * FRI-81 D2/D3: a thinking or tool_use row left at status='streaming' in
+ * the DB is an orphan when the worker died or the daemon restarted before
+ * any teardown could finalize it. Heuristic to decide which streaming rows
+ * are orphans without an authoritative "is this turn active" signal:
+ *
+ *   - Compute the max ts across all rows ("global high-water"). The active
+ *     turn, if one exists, is by definition the turn that produced the
+ *     newest block.
+ *   - For each turn, compute the turn's max ts.
+ *   - A streaming row is an orphan if EITHER:
+ *       (a) Its turn's max ts is strictly less than the global high-water —
+ *           i.e. a later turn has produced blocks since, so this turn
+ *           cannot still be live.
+ *       (b) Its own ts is strictly less than its turn's max ts — i.e. a
+ *           sibling block in the same turn landed later (possibly already
+ *           terminal), so the worker moved past this block.
+ *
+ * The streaming-mid-current-turn case (this block IS the latest activity
+ * we know about) is preserved so reload-during-stream resumes cleanly —
+ * `handleBlockDelta` gates on `m.status === "streaming"` / "running" and
+ * would otherwise reject the next SSE delta.
+ *
+ * `loadAgentTurns`'s post-render `/api/agents/:name` probe handles the
+ * remaining case (this is the only/latest turn AND the agent is idle)
+ * via `healOrphanStreamingBubbles` on the live message array.
+ */
+function classifyOrphanRows(blocks: BlockRow[]): Set<string> {
+  const orphans = new Set<string>();
+  if (blocks.length === 0) return orphans;
+  const maxTsByTurn = new Map<string, number>();
+  let globalMax = -Infinity;
+  for (const b of blocks) {
+    const prev = maxTsByTurn.get(b.turnId);
+    if (prev === undefined || b.ts > prev) maxTsByTurn.set(b.turnId, b.ts);
+    if (b.ts > globalMax) globalMax = b.ts;
+  }
+  for (const b of blocks) {
+    if (b.status !== "streaming") continue;
+    const turnMax = maxTsByTurn.get(b.turnId) ?? b.ts;
+    if (turnMax < globalMax || b.ts < turnMax) orphans.add(b.blockId);
+  }
+  return orphans;
+}
+
+/**
+ * FRI-81 D2/D3 (companion to `classifyOrphanRows`): heal any
+ * `streaming`/`running` bubble whose turnId is NOT the focused agent's
+ * current inflight turn. Called from `loadAgentTurns` after the
+ * `/api/agents/:name` probe resolves — by that point we know
+ * authoritatively whether the agent is mid-turn. An agent reporting
+ * `status !== 'working'` (or 'working' but with no inflight turn id)
+ * means every streaming bubble is, by definition, stale.
+ */
+function healOrphanStreamingBubbles(
+  messages: ChatMessage[],
+  activeTurnId: string | null,
+): void {
+  for (const m of messages) {
+    if (m.role === "assistant" && m.status === "streaming") {
+      if (activeTurnId && m.turnId === activeTurnId) continue;
+      m.status = "aborted";
+    } else if (
+      (m.role === "thinking" || m.role === "tool") &&
+      m.status === "running"
+    ) {
+      if (activeTurnId && m.turnId === activeTurnId) continue;
+      m.status = "aborted";
+    }
+  }
+}
+
 export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
+  const orphans = classifyOrphanRows(blocks);
   const out: ChatMessage[] = [];
   const toolByToolId = new Map<string, ChatMessage>();
   // Newest-first arrives from the API; chronological for rendering. Sort by
@@ -1924,13 +2041,16 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
       // and the user would see a frozen replay instead of a live
       // resumption. User blocks are always finalized at insert time
       // so they map cleanly to `complete`.
+      const isOrphan = orphans.has(b.blockId);
       const status: ChatMessage["status"] =
         role === "user"
           ? b.status === "queued"
             ? "queued"
             : "complete"
           : b.status === "streaming"
-            ? "streaming"
+            ? isOrphan
+              ? "aborted"
+              : "streaming"
             : b.status === "complete"
               ? "complete"
               : b.status === "aborted"
@@ -1951,12 +2071,26 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
         attachments: parsed.attachments,
       });
     } else if (b.kind === "thinking") {
+      // FRI-81 D4: an empty thinking row at status='complete' is a ghost
+      // — typically an SDK-opened block the worker abandoned before the
+      // FRI-78 block-cancel IPC existed. The dashboard's ThinkingBlock
+      // renders empty text as "redacted by Anthropic", which is not what
+      // these rows are. Drop them on reload. Aborted / error empties are
+      // preserved because they carry the user-visible "stopped" affordance
+      // (the worker explicitly tore the block down). Streaming rows are
+      // preserved so reload-mid-turn deltas still attach.
+      const hasText =
+        typeof parsed.text === "string" && parsed.text.length > 0;
+      if (!hasText && b.status === "complete") continue;
       // Same shape for thinking blocks. `handleBlockDelta` gates on
       // `m.status === "running"` for thinking; preserve "running"
       // for streaming rows so reload-mid-turn deltas append.
+      const isOrphan = orphans.has(b.blockId);
       const status: ChatMessage["status"] =
         b.status === "streaming"
-          ? "running"
+          ? isOrphan
+            ? "aborted"
+            : "running"
           : b.status === "aborted"
             ? "aborted"
             : b.status === "error"
@@ -1973,15 +2107,32 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
       });
     } else if (b.kind === "tool_use") {
       const toolId = parsed.tool_use_id ?? b.blockId;
-      // Dedup duplicate tool_use rows for the same id — JSONL replay
-      // artifacts and refork retries can both produce them.
-      if (toolByToolId.has(toolId)) continue;
+      const isOrphan = orphans.has(b.blockId);
       const status: ChatMessage["status"] =
         b.status === "aborted"
           ? "aborted"
           : b.status === "error"
             ? "error"
-            : "running";
+            : b.status === "streaming" && isOrphan
+              ? "aborted"
+              : "running";
+      // FRI-81 D1: a tool_result row may have been sorted (and processed)
+      // before its tool_use sibling when `finalizeStreamingBlocks` updates
+      // the tool_use's `ts` past the tool_result's original insert `ts`.
+      // The earlier code path skipped the tool_use entirely, leaving the
+      // tool-card with toolName="(unknown)" and no input. Instead, fold
+      // the tool_use's authoritative name/input into the existing synth.
+      const existing = toolByToolId.get(toolId);
+      if (existing) {
+        if (parsed.name) existing.toolName = parsed.name;
+        if (parsed.input !== undefined) existing.input = parsed.input;
+        if (!existing.turnId) existing.turnId = b.turnId;
+        // Don't downgrade a terminal tool_result status with a tool_use
+        // "running" — but DO honor a tool_use-side aborted/error since
+        // those won't have a tool_result follow-up.
+        if (status === "aborted" || status === "error") existing.status = status;
+        continue;
+      }
       const msg: ChatMessage = {
         id: `t_${toolId}`,
         role: "tool",
