@@ -1483,12 +1483,14 @@ describe("unread badge gating (PR C)", () => {
     expect(chat.inflightTurnId).toBeNull();
   });
 
-  it("FRI-9 reload path: assistant text block whose only content is the SDK 'No response requested.' sentinel is not rendered", async () => {
+  it("FRI-85 reload path: SDK 'No response requested.' sentinel renders as a no-response affordance (not silently filtered)", async () => {
     // The Claude Agent SDK writes the literal string 'No response requested.'
-    // into the session JSONL as a tombstone for turns that produce no
-    // assistant output. jsonl-mirror persists it as a normal text block;
-    // the dashboard must filter it out so the user does not see a ghost
-    // assistant bubble.
+    // into the session JSONL as the model's trained end-of-turn marker for
+    // turns it deems don't need a reply. jsonl-mirror persists it as a
+    // normal text block. FRI-9 originally suppressed it silently, but that
+    // left users staring at unanswered messages (FRI-85). The dashboard
+    // now replaces it with a faint "Agent acknowledged — no reply needed"
+    // affordance keyed by turn_id.
     mockFetchWithTimeout
       .mockResolvedValueOnce(
         makeResponse({
@@ -1535,14 +1537,47 @@ describe("unread badge gating (PR C)", () => {
     chat.focusedAgent = "friday";
     await chat.loadAgentTurns("friday");
     const ids = chat.messages.map((m) => m.id);
-    expect(ids).toEqual(["b_blk-real"]);
+    expect(ids).toEqual(["b_blk-real", "nr_t-empty"]);
     expect(chat.messages[0]!.text).toBe("hello");
+    const nr = chat.messages[1]!;
+    expect(nr.kind).toBe("no-response");
+    expect(nr.noResponseSentinel).toBe(true);
+    expect(nr.turnId).toBe("t-empty");
+    expect(nr.role).toBe("assistant");
   });
 
-  it("FRI-9 live SSE: block_complete carrying the SDK sentinel does not mount a bubble", async () => {
+  it("FRI-85 live SSE: block_complete carrying the SDK sentinel swaps the streaming bubble for a no-response affordance", async () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    // Simulate the full live sequence: block_start mounts the streaming
+    // bubble; block_delta accumulates the sentinel text; block_complete
+    // discovers it's a sentinel and replaces the bubble with nr_<turnId>.
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      turn_id: "t-empty",
+      agent: "friday",
+      block_id: "blk-sentinel-sse",
+      message_id: "m-empty",
+      block_index: 0,
+      kind: "text",
+      role: "assistant",
+      ts: 1000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      turn_id: "t-empty",
+      agent: "friday",
+      block_id: "blk-sentinel-sse",
+      delta: { text: "No response requested." },
+      seq: 2,
+      ts: 1001,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    // Streaming bubble exists at this point.
+    expect(chat.messages.find((m) => m.id === "b_blk-sentinel-sse")).toBeDefined();
     chat.applyEvent({
       v: 1,
       type: "block_complete",
@@ -1556,10 +1591,199 @@ describe("unread badge gating (PR C)", () => {
       source: "sdk",
       content_json: '{"text":"No response requested."}',
       status: "complete",
-      ts: 1000,
-      seq: 1,
+      ts: 1002,
+      seq: 3,
     } as Parameters<typeof chat.applyEvent>[0]);
-    expect(chat.messages).toEqual([]);
+    // Streaming bubble gone; nr_<turnId> in its place.
+    expect(chat.messages.find((m) => m.id === "b_blk-sentinel-sse")).toBeUndefined();
+    const nr = chat.messages.find((m) => m.id === "nr_t-empty");
+    expect(nr).toBeDefined();
+    expect(nr?.kind).toBe("no-response");
+    expect(nr?.noResponseSentinel).toBe(true);
+  });
+
+  it("FRI-85 live↔reload symmetry: sentinel turn produces the same nr_<turnId> shape in both paths", async () => {
+    // The reviewer of FRI-81 PR #22 specifically called out that the
+    // convergence claim was anchored on D1 only. Pin sentinel-render
+    // symmetry here.
+    const sentinelJson = '{"text":"No response requested."}';
+    // Live path
+    const { ChatState, parseBlocks } = await import("./chat.svelte");
+    const live = new ChatState();
+    live.focusedAgent = "friday";
+    live.applyEvent({
+      v: 1,
+      type: "block_start",
+      turn_id: "t-sym",
+      agent: "friday",
+      block_id: "blk-sym",
+      message_id: "m-sym",
+      block_index: 0,
+      kind: "text",
+      role: "assistant",
+      ts: 500,
+      seq: 1,
+    } as Parameters<typeof live.applyEvent>[0]);
+    live.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: "t-sym",
+      agent: "friday",
+      block_id: "blk-sym",
+      message_id: "m-sym",
+      block_index: 0,
+      kind: "text",
+      role: "assistant",
+      source: "sdk",
+      content_json: sentinelJson,
+      status: "complete",
+      ts: 600,
+      seq: 2,
+    } as Parameters<typeof live.applyEvent>[0]);
+    // Reload path
+    const reloaded = parseBlocks(
+      [
+        {
+          id: 1,
+          blockId: "blk-sym",
+          turnId: "t-sym",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: "m-sym",
+          blockIndex: 0,
+          role: "assistant",
+          kind: "text",
+          source: "sdk",
+          contentJson: sentinelJson,
+          status: "complete",
+          ts: 600,
+          lastEventSeq: 2,
+        } as Parameters<typeof parseBlocks>[0][number],
+      ],
+      "friday",
+    );
+    // Both paths produce a single nr_<turnId> shaped identically.
+    expect(live.messages.length).toBe(1);
+    expect(reloaded.length).toBe(1);
+    const liveNr = live.messages[0]!;
+    const reloadNr = reloaded[0]!;
+    expect(liveNr.id).toBe("nr_t-sym");
+    expect(reloadNr.id).toBe("nr_t-sym");
+    expect(liveNr.kind).toBe(reloadNr.kind);
+    expect(liveNr.role).toBe(reloadNr.role);
+    expect(liveNr.noResponseSentinel).toBe(reloadNr.noResponseSentinel);
+    expect(liveNr.turnId).toBe(reloadNr.turnId);
+    expect(liveNr.status).toBe(reloadNr.status);
+  });
+
+  it("FRI-85 safety net: user_chat turn with zero assistant blocks synthesizes 'Agent didn't respond' affordance on reload", async () => {
+    // Covers H3 (worker died before block_start) and H5 (entire response
+    // was Task sub-agent traffic filtered at the worker). The user_chat
+    // user block survives; nothing assistant-side does. parseBlocks
+    // synthesizes an nr_<turnId> with noResponseSentinel=false.
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks(
+      [
+        {
+          id: 1,
+          blockId: "blk-u",
+          turnId: "t-dead",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: null,
+          blockIndex: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          contentJson: '{"text":"hey"}',
+          status: "complete",
+          ts: 100,
+          lastEventSeq: 1,
+        } as Parameters<typeof parseBlocks>[0][number],
+      ],
+      "friday",
+    );
+    expect(out.length).toBe(2);
+    const nr = out.find((m) => m.id === "nr_t-dead");
+    expect(nr).toBeDefined();
+    expect(nr?.kind).toBe("no-response");
+    expect(nr?.noResponseSentinel).toBe(false);
+    // Chronological order: user message first, no-response synth after.
+    expect(out[0]!.role).toBe("user");
+    expect(out[1]!.id).toBe("nr_t-dead");
+  });
+
+  it("FRI-85 safety net: non-user_chat sources (mail, scratch, etc.) do NOT trigger the synth", async () => {
+    // Mail-delivered user blocks represent agent-to-agent traffic; a
+    // silent acknowledgment is normal. Same for queue_inject / scratch /
+    // agent_spawn / schedule.
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks(
+      [
+        {
+          id: 1,
+          blockId: "blk-mail",
+          turnId: "t-mail",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: null,
+          blockIndex: 0,
+          role: "user",
+          kind: "text",
+          source: "mail",
+          contentJson: '{"text":"fyi","from_agent":"helper"}',
+          status: "complete",
+          ts: 100,
+          lastEventSeq: 1,
+        } as Parameters<typeof parseBlocks>[0][number],
+      ],
+      "friday",
+    );
+    // Only the mail-rendered user block, no synthetic affordance.
+    expect(out.length).toBe(1);
+    expect(out.find((m) => m.kind === "no-response")).toBeUndefined();
+  });
+
+  it("FRI-85 safety net: turn with any assistant content (text/thinking/tool/error) does NOT synthesize", async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks(
+      [
+        {
+          id: 1,
+          blockId: "u",
+          turnId: "t-ok",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: null,
+          blockIndex: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          contentJson: '{"text":"hi"}',
+          status: "complete",
+          ts: 100,
+          lastEventSeq: 1,
+        } as Parameters<typeof parseBlocks>[0][number],
+        {
+          id: 2,
+          blockId: "th",
+          turnId: "t-ok",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: "m",
+          blockIndex: 0,
+          role: "assistant",
+          kind: "thinking",
+          source: "sdk",
+          contentJson: '{"text":"hm"}',
+          status: "complete",
+          ts: 110,
+          lastEventSeq: 2,
+        } as Parameters<typeof parseBlocks>[0][number],
+      ],
+      "friday",
+    );
+    expect(out.find((m) => m.kind === "no-response")).toBeUndefined();
   });
 
   it("FRI-9: a user message containing the same literal text is NOT filtered", async () => {
