@@ -18,6 +18,7 @@ import { eventBus } from "./events/bus.js";
 import * as registry from "./agent/registry.js";
 import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js";
 import { startMailBridge } from "./comms/mail-bridge.js";
+import { reconcileAppsOnBoot } from "./apps/reconcile.js";
 import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
 import {
   dispatchTurn,
@@ -69,6 +70,7 @@ async function main(): Promise<void> {
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
   replayPending();
   seedMetaAgents();
+  reconcileAppsOnBoot();
   recoverAgents(cfg);
   recoverQueuedTurns(cfg);
   const schedTick = startScheduler();

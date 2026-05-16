@@ -48,6 +48,11 @@ The daemon binds to `127.0.0.1`. The dashboard is the only thing the public inte
 - **Mail as the universal delivery primitive.** Every user-visible reply, every cross-agent message, every scheduled-agent escalation flows through the same `mail` table. Priority field on each row; `priority='critical'` mid-turn-injects into a live worker so an interruption actually interrupts.
 - **Scheduled agents with state continuity.** Cron and one-shot runs persist `state.md` between fires (auto-injected on the next prompt) and `last-run.md` written by the daemon. Missed runs catch up on restart; cooperative abort on shutdown.
 
+### Friday Apps
+
+- **Folder-as-app**, one tool call to install. An app at `~/.friday/apps/<id>/` is a manifest plus optional prompt overlays, optional stdio MCP servers, and an optional `.env` for app-scoped secrets. Friday's installer registers the app's agents and schedules, scopes the MCP servers to those agents only, and runs each app's workers with the app folder as `cwd`.
+- **Symmetric install / uninstall / reload.** `friday app install <path>`, `friday app uninstall <id>`, `friday app reload <id>`. Default uninstall renames the folder so reinstall un-archives everything; the `--folder=delete` flag is irreversible and prompts unless `--yes`. The orchestrator can do the same through the `friday-apps` MCP server.
+
 ### Memory, skills, and self-improvement
 
 - **File-based memory + auto-recall.** Markdown entries with FTS5 search, recall-frequency boosting, and an audit log. The daemon prepends a `<memory-context>` block at the major dispatch sites (user prompts, mail-driven turns, scheduled fires, scratch, agent spawn) — no `memory_search` tool call required for those paths. A `memory_search` MCP tool is still available for cases that build their own prompts.
@@ -162,6 +167,11 @@ friday schedules <create|pause|resume|trigger|delete> ...
 # Memory / Evolve
 friday memory <ls|show|add|edit|delete>
 friday evolve <list|show|scan|enrich|cluster|apply|dismiss>
+
+# Friday Apps (ADR-021)
+friday app install <path> [--adopt]
+friday app uninstall <id> [--folder=archive|keep|delete] [--yes]
+friday app list | inspect <id> | reload <id>
 ```
 
 ## Project structure
@@ -196,6 +206,7 @@ All app state lives at `~/.friday/`:
 ├── skills/*.md             User-additive slash skills
 ├── memory/entries/*.md     Memory entries (mirrored to memory_entries FTS5)
 ├── evolve/proposals/*.md   Evolve proposals
+├── apps/<id>/              Installed Friday Apps (manifest, prompt, state/, .env)
 ├── schedules/<name>/       state.md + last-run.md continuity
 ├── workspaces/<name>/      Builder git worktrees
 ├── uploads/<sha-bucket>/   Content-addressed attachments

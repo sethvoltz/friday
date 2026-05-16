@@ -31,6 +31,10 @@
 | `friday tickets update <id> --status ...` | Update status. |
 | `friday tickets comment <id> --author --body` | Add a comment. |
 | `friday mail send --from --to --type --body` | Send mail. |
+| `friday app install <path> [--adopt]` | Install a Friday App from a folder (FRI-78, ADR-021). |
+| `friday app uninstall <id> [--folder=archive\|keep\|delete] [--yes]` | Uninstall. `--folder=delete` is irreversible and prompts unless `--yes`. |
+| `friday app list` / `friday app inspect <id>` | Read-only inspection. |
+| `friday app reload <id>` | Re-read the manifest from disk and reconcile. |
 
 ## Modes
 
@@ -51,6 +55,7 @@ Everything lives at `~/.friday/`:
 ├── uploads/<bucket>/      Content-addressed attachments
 ├── memory/entries/*.md    Memory entries (mirrored to memory_entries table)
 ├── evolve/proposals/*.md  Evolve proposals
+├── apps/<id>/             Installed Friday Apps (ADR-021)
 ├── workspaces/<name>/     Builder git worktrees
 ├── logs/{daemon,dashboard}.jsonl   Structured logs (rotated at 1 MiB)
 ├── usage.jsonl            Per-turn usage records

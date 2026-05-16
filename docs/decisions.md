@@ -238,6 +238,74 @@ If/when we harden further:
 
 Adding a new invariant: see the "Adding a new invariant" section in `docs/architecture.md`.
 
+## ADR-021 — Friday Apps: folder-as-app, manifest-driven, hard memory/files split
+
+**Status:** accepted (FRI-78, 2026-05-16)
+
+A Friday App is a named, installable, agent-owning, MCP-extending
+folder under the apps data directory. The manifest on disk
+(`manifest.json`) is the source of truth; the SQLite `apps` table is
+derived state we reconcile against it at boot and on every install,
+uninstall, or reload. App ownership flows down to agents and
+schedules through nullable `app_id` columns.
+
+**Load-bearing decisions locked in by FRI-75's grilling:**
+
+1. **Hard split: memory = facts, files = operational data.** The
+   memory store is untouched by the apps platform. No per-app claim
+   tables, no recall ranker, no `family` tag override. Apps that
+   need operational state (libraries, routines, generated artifacts,
+   structured config) put it in files under their own folder. Apps
+   that need cross-cutting facts save memory entries normally.
+   Earlier directions explored per-app memory namespacing; profiling
+   real meal-app entries showed two distinct data shapes (facts vs.
+   operational state) that wanted different homes. Giving apps a
+   directory eliminated the namespacing problem at the source
+   rather than papering over it with a ranker.
+
+2. **Trust by discipline, not enforcement.** Apps run with daemon
+   privileges. No sandboxing, no capability enforcement, no
+   `commandAllowlist` in v1. Protection is: collision detection at
+   install time, symmetric uninstall, audit-visible state.
+   Capability enforcement arrives if/when family-visibility lands.
+
+3. **Manifest on disk is source of truth.** A daemon boot, or any
+   tool call that mutates state, reconciles. A folder that
+   disappears flips its row to `status='orphaned'` — never
+   auto-deleted (Constitution §1: preserve over delete).
+
+4. **Default-safe destructive flags.** Every destructive tool defaults
+   to the non-destructive behavior. Opting into folder-delete or any
+   other irreversible move requires an explicit flag, with a
+   description leading with the irreversibility.
+
+5. **Stdio-only, node-only, hard-coded.** App-shipped MCP servers run
+   as stdio child processes, `command: "node"`, no in-process
+   loading. Python and bun expansion is post-v1.
+
+6. **Symmetric vocab.** `install` / `uninstall`. Not `register` /
+   `deregister`. Not `add` / `remove`. Tool surface, CLI surface, and
+   SSE events all use install / uninstall.
+
+7. **No HTTP route mounting (yet).** No route surface under
+   `/apps/<id>/*` in v1. The dashboard surface is a single read-only
+   Settings card. Mounting per-app routes is a v2 problem once we
+   have an app that demands it.
+
+**What this unlocks:** an app folder Friday or the user can author
+once, install via one tool call, and Friday self-manages thereafter
+— including per-app stdio MCP servers (e.g. a Mealie integration)
+scoped only to that app's agents, with secrets in the app's own
+`.env`.
+
+**Deferred (not dropped):** HTTP route mounting, dedicated
+dashboard routes with per-app drill-down, capability declarations,
+sandbox enforcement, declarative migration system, lifecycle hooks,
+cross-app explicit sharing, Python/bun MCP commands, in-process
+MCP servers. Per-app memory namespacing, soft-quarantine recall
+rankers, and `family`-tag overrides are removed from the design
+entirely, not deferred — replaced by the hard split.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.

@@ -24,6 +24,15 @@ export const USAGE_LOG_PATH = join(DATA_DIR, "usage.jsonl");
 export const DAEMON_LOG_PATH = join(LOGS_DIR, "daemon.jsonl");
 export const SCHEDULES_DIR = join(DATA_DIR, "schedules");
 export const STATE_DIR = join(DATA_DIR, "state");
+export const APPS_DIR = join(DATA_DIR, "apps");
+
+export function appsDir(): string {
+  return APPS_DIR;
+}
+
+export function appDir(id: string): string {
+  return join(APPS_DIR, id);
+}
 
 export type ServiceName = "daemon" | "dashboard" | "tunnel";
 export const SERVICES: ServiceName[] = ["daemon", "dashboard", "tunnel"];
@@ -196,6 +205,7 @@ export function ensureDirs(): void {
     EVOLVE_DIR,
     EVOLVE_PROPOSALS_DIR,
     EVOLVE_CLUSTERS_DIR,
+    APPS_DIR,
   ]) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }

@@ -131,6 +131,16 @@ Edit `~/.friday/config.json` to:
 
 Edit `~/.friday/SOUL.md` to customize Friday's voice and identity. Source upgrades never overwrite this file.
 
+### Installing apps
+
+Friday Apps (ADR-021, FRI-78) are folders that bundle agents, schedules, and stdio MCP servers. Install with one command:
+
+```
+friday app install ~/path/to/my-app
+```
+
+The folder must contain a `manifest.json`. Friday's apps live under `~/.friday/apps/<id>/`. See `docs/architecture.md` §Apps for the layout, and `services/daemon/src/apps/fixtures/example-app/` for a canonical minimal example.
+
 ## 8. Troubleshooting
 
 | Symptom | Try |

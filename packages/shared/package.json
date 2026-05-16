@@ -13,7 +13,8 @@
     "./markdown": "./dist/markdown/plugins.js",
     "./markdown/streaming-mermaid": "./dist/markdown/streaming-mermaid.js",
     "./markdown/code-highlight": "./dist/markdown/code-highlight.js",
-    "./cron": "./dist/cron.js"
+    "./cron": "./dist/cron.js",
+    "./apps": "./dist/apps/manifest.js"
   },
   "scripts": {
     "build": "tsc && node ./scripts/copy-prompts.mjs",
@@ -30,7 +31,8 @@
     "katex": "^0.16.0",
     "marked": "^18.0.2",
     "marked-katex-extension": "^5.1.0",
-    "sharp": "^0.33.0"
+    "sharp": "^0.33.0",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

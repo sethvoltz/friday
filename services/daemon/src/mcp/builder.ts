@@ -8,12 +8,14 @@
  * tools as `mcp__<server-name>__<tool-name>`.
  */
 
-import type { AgentType, McpServerConfig } from "@friday/shared";
+import type { AgentType, ManifestMcpServer, McpServerConfig } from "@friday/shared";
 import type {
   McpSdkServerConfigWithInstance,
   McpStdioServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
+import { isAbsolute, join } from "node:path";
 import { logger } from "../log.js";
+import { buildAppsServer, APPS_SERVER_NAME } from "./apps.js";
 import { buildEchoServer, ECHO_SERVER_NAME } from "./echo.js";
 import { buildMailServer, MAIL_SERVER_NAME } from "./mail.js";
 import { buildAgentsServer, AGENTS_SERVER_NAME } from "./agents.js";
@@ -37,6 +39,21 @@ export interface BuildMcpServersOptions {
    * built-in (`friday-*`) are rejected.
    */
   userMcpServers?: McpServerConfig[];
+  /**
+   * FRI-78: per-app context. Set by the spawn site when the caller agent
+   * belongs to an installed app. The wiring loop appends each declared
+   * stdio MCP server with `cwd = appContext.folderPath` and substitutes
+   * `${VAR}` references in `env` from the app's `.env`. Per-app servers
+   * are visible only to the app's own agents; the orchestrator (which has
+   * no `appId`, so no `appContext`) never sees them.
+   */
+  appContext?: {
+    appId: string;
+    folderPath: string;
+    mcpServers: ManifestMcpServer[];
+    /** Parsed `.env` contents, when the app folder has one. */
+    envFile?: Record<string, string>;
+  };
 }
 
 export type AssembledMcpServers = Record<
@@ -98,6 +115,12 @@ export function buildMcpServers(
     servers[EVOLVE_SERVER_NAME] = buildEvolveServer(ctx);
   }
 
+  // friday-apps: orchestrator only. App install/uninstall/reload + listing.
+  // Sub-agents under an app can't pull the rug out from under themselves.
+  if (opts.callerType === "orchestrator") {
+    servers[APPS_SERVER_NAME] = buildAppsServer(ctx);
+  }
+
   // friday-integrations: every non-archived agent type. Cross-system imports
   // and writes (Linear today; future GH Issues, Jira). Sub-agents need this
   // so a builder can file a Linear follow-up directly instead of routing
@@ -152,7 +175,67 @@ export function buildMcpServers(
     };
   }
 
+  // FRI-78: per-app stdio MCP servers. Only visible to the declaring
+  // app's agents; the orchestrator never has `appContext` set. Resolved
+  // relative to `appContext.folderPath`, with `${VAR}` substitution from
+  // the app's own `.env`.
+  if (opts.appContext) {
+    const { appId, folderPath, mcpServers, envFile } = opts.appContext;
+    for (const srv of mcpServers) {
+      if (srv.name.startsWith("friday-") || RESERVED_NAMES.has(srv.name)) {
+        logger.log("warn", "mcp.app.shadows-builtin", {
+          name: srv.name,
+          appId,
+          callerName: opts.callerName,
+        });
+        continue;
+      }
+      if (servers[srv.name]) {
+        logger.log("warn", "mcp.app.name-collision", {
+          name: srv.name,
+          appId,
+          callerName: opts.callerName,
+        });
+        continue;
+      }
+      const resolvedArgs = srv.args.map((a) =>
+        isLikelyAppPath(a) && !isAbsolute(a) ? join(folderPath, a) : a,
+      );
+      servers[srv.name] = {
+        type: "stdio",
+        command: srv.command,
+        args: resolvedArgs,
+        env: substituteEnv(srv.env ?? {}, envFile ?? {}),
+        cwd: folderPath,
+      } as McpStdioServerConfig;
+    }
+  }
+
   return servers;
+}
+
+function isLikelyAppPath(arg: string): boolean {
+  if (arg.startsWith("-")) return false;
+  return arg.includes("/") || /\.(m?js|cjs|ts)$/i.test(arg);
+}
+
+/**
+ * Substitute `${VAR}` references in env values from the app's `.env` (with
+ * `process.env` as a fallback). Unmatched references collapse to empty
+ * string — a missing-secret bug surfaces as "tool can't authenticate"
+ * rather than a crash at spawn time.
+ */
+function substituteEnv(
+  env: Record<string, string>,
+  envFile: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    out[k] = v.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_, name) => {
+      return envFile[name] ?? process.env[name] ?? "";
+    });
+  }
+  return out;
 }
 
 export const BROWSER_SERVER_NAME = "playwright";

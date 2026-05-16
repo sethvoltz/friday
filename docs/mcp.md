@@ -21,6 +21,7 @@ The Claude `claude_code` preset provides Read, Write, Edit, Bash, Glob, Grep. Fr
 | `friday-schedule` | `schedule_upsert`, `schedule_list`, `schedule_show`, `schedule_pause`, `schedule_resume`, `schedule_delete`, `schedule_trigger` | ✓ | — | — | — | — |
 | `friday-evolve` | `evolve_list`, `evolve_get`, `evolve_save`, `evolve_update`, `evolve_apply`, `evolve_dismiss`, `evolve_scan`, `evolve_enrich`, `evolve_cluster` | ✓ | — | — | — | — |
 | `friday-integrations` | `linear_import`, `linear_create_issue`, `linear_update_issue`, `linear_reconcile` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `friday-apps` | `app_install`, `app_uninstall`, `app_list`, `app_inspect`, `app_reload` | ✓ | — | — | — | — |
 | `friday-echo` | `echo` (sanity check) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `playwright` | `browser_navigate`, `browser_click`, `browser_type`, `browser_snapshot`, `browser_take_screenshot`, `browser_evaluate`, `browser_console_messages`, `browser_network_requests`, … (full `@playwright/mcp` surface) | — | ✓ | ✓ | ✓ | ✓ |
 
@@ -31,7 +32,9 @@ The Claude `claude_code` preset provides Read, Write, Edit, Bash, Glob, Grep. Fr
 - **`agent_archive`** is the merged form of the prior `agent_kill` + `agent_delete_workspace`: for builders it stops the worker, removes the worktree under `~/.friday/workspaces/<name>/`, and force-deletes the `friday/<name>` branch. The tool description is contractual — the model MUST present the proposed archive to the user and wait for an explicit "yes" before invoking. **Required argument:** `reason: "completed" | "abandoned" | "failed"`. The reason drives the linked-ticket close behavior (`completed`→`done`+Linear `completed`; `abandoned`/`failed`→`closed`+Linear `canceled`). The orchestrator should ask the user which outcome applies before calling. See `docs/architecture.md` § "Archive reason and linked-ticket close".
 - Builder gets `memory_search` / `memory_get` only — builders consult memory but mail the orchestrator with anything worth saving as canonical memory.
 - Bare and scheduled don't touch tickets directly. Scheduled meta-agents push proposals through evolve, which the orchestrator turns into tickets.
-- Schedule and evolve mutation are orchestrator-only — sub-agents shouldn't be modifying their own schedules or applying proposals.
+- Schedule, evolve, and apps mutation are orchestrator-only — sub-agents shouldn't be modifying their own schedules, applying proposals, or installing/uninstalling apps.
+- **`friday-apps`** (ADR-021, FRI-78). The `app_uninstall` tool's `folderDisposition: "delete"` is irreversible and the tool description leads with that. Default is `archive` (folder renamed to `<id>.uninstalled-<ts>/`); `keep` leaves the folder in place. Agent rows, schedules, and the registry row are always preserved on uninstall per the preserve-over-delete rule; only the folder contents can be destroyed.
+- **Per-app stdio MCP servers** are appended to the worker's MCP set when the calling agent has an `app_id` set. Names starting with `friday-` are rejected; the orchestrator never has an `app_id`, so it never sees per-app servers. Args resolve relative to the app folder; env values dollar-substitute from the app's `.env`. See `docs/architecture.md` §Apps.
 - **`playwright`** is the only stdio (out-of-process) built-in. It launches Microsoft's `@playwright/mcp` via `npx -y @playwright/mcp@latest --headless --isolated` per worker — one fresh Chromium per agent, no shared profile (`SingletonLock` prevents that anyway). Orchestrator is excluded so long-running browser calls never block user responsiveness; browser work belongs in a spawned sub-agent. Shared logins across agents are deferred to a future `friday-secrets` MCP.
 
 ## Tool handlers — HTTP loopback

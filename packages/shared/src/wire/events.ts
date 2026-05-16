@@ -28,6 +28,7 @@ export type WireEvent =
   | ScheduleFiredEvent
   | EvolveCriticalEvent
   | SystemBannerEvent
+  | AppLifecycleEvent
   | BlockStartEvent
   | BlockDeltaEvent
   | BlockCompleteEvent
@@ -137,6 +138,18 @@ export interface SystemBannerEvent extends BaseEvent {
   type: "system_banner";
   level: "info" | "warn" | "error";
   text: string;
+}
+
+/**
+ * Apps platform lifecycle event (FRI-78). Fires when an app is
+ * installed, uninstalled, reloaded, or its on-disk folder disappeared
+ * out from under us during boot reconciliation.
+ */
+export interface AppLifecycleEvent extends BaseEvent {
+  type: "app_lifecycle";
+  event: "installed" | "uninstalled" | "reloaded" | "orphaned";
+  app: string;
+  version?: string;
 }
 
 /* ---------------- Block-level streaming events (FIX_FORWARD WS-1) ---------------- */
