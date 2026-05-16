@@ -1,27 +1,19 @@
 <script lang="ts">
   import type { PageData } from "./$types";
   import { invalidateAll } from "$app/navigation";
-  import { KEYS, saveString, loadString } from "$lib/stores/persistent";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
-  import { Sun, Moon } from "lucide-svelte";
+  import { Sun, Moon, MonitorCog } from "lucide-svelte";
+  import { setMode, userPrefersMode } from "mode-watcher";
+
+  type Mode = "light" | "dark" | "system";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
-  import { onMount } from "svelte";
   let { data }: { data: PageData } = $props();
 
-  // FIX_FORWARD 6.3: explicit theme selector. The header still has the
-  // quick toggle; this widget surfaces and persists the choice.
-  let theme = $state<"light" | "dark">("dark");
-  onMount(() => {
-    const stored = loadString(KEYS.theme);
-    if (stored === "light" || stored === "dark") theme = stored;
-    else if (document.documentElement.dataset.theme === "light")
-      theme = "light";
-  });
-  function applyTheme(next: "light" | "dark") {
-    theme = next;
-    document.documentElement.dataset.theme = next;
-    saveString(KEYS.theme, next);
-  }
+  // Theme selection is owned by mode-watcher (localStorage
+  // `mode-watcher-mode`). The header `⌘K` palette exposes the same three
+  // modes; this card is the discoverable surface for users who haven't
+  // learned the palette yet.
+  const selectedMode = $derived<Mode>(userPrefersMode.current ?? "system");
 
   // FIX_FORWARD 6.3: configurable Friday settings (model + watchdog).
   // PATCH writes back to ~/.friday/config.json via the dashboard's
@@ -223,17 +215,17 @@
   <div class="card">
     <div class="card-header"><h2>Theme</h2></div>
     <p class="row-value">
-      Friday ships a warm sunrise palette and a cool moody night palette. The
-      header has a quick toggle; pick one here and we'll remember it across
-      sessions.
+      Friday ships a warm sunrise palette and a cool moody night palette.
+      Pick one, or follow your operating system. The choice is remembered
+      across sessions and reachable from <kbd>⌘K</kbd> → Settings.
     </p>
     <div class="theme-picker" role="radiogroup" aria-label="Theme">
       <button
         type="button"
         class="theme-option"
-        class:selected={theme === "light"}
-        aria-pressed={theme === "light"}
-        onclick={() => applyTheme("light")}>
+        class:selected={selectedMode === "light"}
+        aria-pressed={selectedMode === "light"}
+        onclick={() => setMode("light")}>
         <span class="theme-icon" aria-hidden="true">
           <Sun size={16} strokeWidth={2} />
         </span>
@@ -242,13 +234,24 @@
       <button
         type="button"
         class="theme-option"
-        class:selected={theme === "dark"}
-        aria-pressed={theme === "dark"}
-        onclick={() => applyTheme("dark")}>
+        class:selected={selectedMode === "dark"}
+        aria-pressed={selectedMode === "dark"}
+        onclick={() => setMode("dark")}>
         <span class="theme-icon" aria-hidden="true">
           <Moon size={16} strokeWidth={2} />
         </span>
         Dark
+      </button>
+      <button
+        type="button"
+        class="theme-option"
+        class:selected={selectedMode === "system"}
+        aria-pressed={selectedMode === "system"}
+        onclick={() => setMode("system")}>
+        <span class="theme-icon" aria-hidden="true">
+          <MonitorCog size={16} strokeWidth={2} />
+        </span>
+        System
       </button>
     </div>
   </div>

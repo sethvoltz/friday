@@ -8,8 +8,9 @@
   import { startConnectivity } from "$lib/stores/connectivity.svelte";
   import ConnectivityWidget from "$lib/components/Connectivity/ConnectivityWidget.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
-  import { Sun, Moon } from "lucide-svelte";
-  import { KEYS, loadString, saveString } from "$lib/stores/persistent";
+  import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
+  import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
+  import { ModeWatcher, setMode } from "mode-watcher";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
   import { chat } from "$lib/stores/chat.svelte";
   import type { LayoutData } from "./$types";
@@ -17,12 +18,11 @@
 
   let { data, children }: { data: LayoutData; children: Snippet } = $props();
 
-  let theme = $state<"light" | "dark">("dark");
-  let themeHydrated = $state(false);
-  $effect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    if (themeHydrated) saveString(KEYS.theme, theme);
-  });
+  // mode-watcher owns the authoritative theme state. Its pre-paint head
+  // script (injected via <ModeWatcher />) adds the `dark` class to <html>
+  // synchronously before first paint, so app.css's `.dark { ... }` block
+  // and Markdown.svelte's `:global(.dark …)` rules light up immediately
+  // without a flash of the light palette.
 
   // Flush the optimistic-send queue every time SSE reconnects. The queue
   // itself is idempotent (in-flight POST is guarded by `flushing`), so
@@ -46,10 +46,6 @@
     }
     lastConnected = c;
   });
-  function toggleTheme() {
-    theme = theme === "dark" ? "light" : "dark";
-  }
-
   let menuOpen = $state(false);
   function closeMenu() {
     menuOpen = false;
@@ -65,13 +61,31 @@
   // Live uptime ticker + global SSE connection (one EventSource for all pages)
   let uptimeMs = $state(0);
   onMount(() => {
-    // Hydrate persisted theme on the client. Doing this in onMount (rather
-    // than at module init) keeps the initial render identical between SSR
-    // and CSR — no hydration mismatch warning, no flash if the persisted
-    // value differs from the default.
-    const storedTheme = loadString(KEYS.theme);
-    if (storedTheme === "light" || storedTheme === "dark") theme = storedTheme;
-    themeHydrated = true;
+    // One-time migration: the dashboard used to persist its theme under
+    // `friday:theme`. mode-watcher uses `mode-watcher-mode`. If the user
+    // has a stored preference from before, seed mode-watcher with it and
+    // drop the legacy key so future toggles round-trip through one place.
+    try {
+      const legacy = localStorage.getItem("friday:theme");
+      const newKey = localStorage.getItem("mode-watcher-mode");
+      if (legacy && !newKey && (legacy === "light" || legacy === "dark")) {
+        setMode(legacy);
+      }
+      if (legacy) localStorage.removeItem("friday:theme");
+    } catch {
+      // localStorage unavailable / SecurityError — ignore.
+    }
+
+    // Global Cmd/Ctrl-K to toggle the command palette. Fires even when
+    // an input is focused (Spotlight-style), but yields to IME composition.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "k" && e.key !== "K") return;
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.isComposing) return;
+      e.preventDefault();
+      commandPalette.toggle();
+    };
+    window.addEventListener("keydown", onKey);
 
     if (data.health?.uptimeSec !== undefined) {
       uptimeMs = data.health.uptimeSec * 1000;
@@ -123,6 +137,7 @@
     return () => {
       clearInterval(i);
       stopSSE();
+      window.removeEventListener("keydown", onKey);
       if (vv && vvUpdate) {
         vv.removeEventListener("resize", vvUpdate);
         vv.removeEventListener("scroll", vvUpdate);
@@ -164,7 +179,8 @@
     rel="stylesheet" />
 </svelte:head>
 
-<div data-theme={theme} class="app-shell">
+<ModeWatcher />
+<div class="app-shell">
   {#if signedIn && !isLogin && showOfflineBanner}
     <div class="offline-banner" role="status" aria-live="polite">
       Daemon unreachable — retrying. Sent messages are queued and will flush on reconnect.
@@ -199,12 +215,14 @@
           <a href="/logs" class:active={$page.url.pathname.startsWith("/logs")} onclick={closeMenu}>Logs</a>
           <a href="/settings" class:active={$page.url.pathname.startsWith("/settings")} onclick={closeMenu}>Settings</a>
         </nav>
-        <button class="theme-toggle" onclick={toggleTheme} title="Toggle theme" aria-label="Toggle theme">
-          {#if theme === "dark"}
-            <Sun size={16} strokeWidth={2} />
-          {:else}
-            <Moon size={16} strokeWidth={2} />
-          {/if}
+        <button
+          type="button"
+          class="cmd-k-chip"
+          onclick={() => commandPalette.openPalette()}
+          title="Open command palette (⌘K)"
+          aria-label="Open command palette"
+          aria-keyshortcuts="Meta+K Control+K">
+          ⌘K
         </button>
         <button class="hamburger-btn" onclick={() => (menuOpen = !menuOpen)} aria-label="Toggle navigation">
           <span></span><span></span><span></span>
@@ -219,6 +237,7 @@
 </div>
 
 <ConfirmDialog />
+<CommandPalette />
 
 <style>
   .app-shell {
@@ -295,6 +314,30 @@
   .app-main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; padding-top: 5.5rem; }
   .app-main.no-header { padding-top: 1.5rem; max-width: none; padding: 0; }
   .app-main.chat-route { max-width: none; margin: 0; padding: 0; }
+
+  .cmd-k-chip {
+    display: inline-flex;
+    align-items: center;
+    background: none;
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-sm);
+    padding: 0.2rem 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all var(--transition-fast);
+  }
+  .cmd-k-chip:hover {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+    background: var(--accent-glow);
+  }
+  @media (max-width: 640px) {
+    .cmd-k-chip { display: none; }
+  }
 
   .hamburger-btn {
     display: none; flex-direction: column; justify-content: center; gap: 4px;

@@ -402,7 +402,8 @@
       <span
         class="dot"
         class:pulse={a.status === "working"}
-        style:background={statusDot(a.status)}
+        class:archived={a.status === "archived"}
+        style:background={a.status === "archived" ? undefined : statusDot(a.status)}
       ></span>
       {#if isPinned}
         <span class="agent-icon agent-orchestrator" aria-hidden="true">
@@ -501,7 +502,8 @@
       <span
         class="dot"
         class:pulse={focused.status === "working"}
-        style:background={statusDot(focused.status)}
+        class:archived={focused.status === "archived"}
+        style:background={focused.status === "archived" ? undefined : statusDot(focused.status)}
       ></span>
       {#if focused.type === "orchestrator"}
         <span class="agent-icon agent-orchestrator" aria-hidden="true">
@@ -757,6 +759,15 @@
     height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
+    box-sizing: border-box;
+  }
+  /* Universal "this agent is archived" affordance — hollow circle,
+     identical to the palette's treatment. The override here trumps the
+     `style:background={...}` binding for archived rows (which now
+     passes `undefined`) and clears any pulse ring leftover. */
+  .dot.archived {
+    background: transparent !important;
+    border: 1px solid var(--text-tertiary);
   }
   /* Working agents pulse a soft outer ring so the live state reads at a
      glance — a static colored dot is too easy to miss against the row

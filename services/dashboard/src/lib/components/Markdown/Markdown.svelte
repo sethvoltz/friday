@@ -376,7 +376,7 @@
   :global(.markdown .code-block pre > code span) {
     color: var(--shiki-light);
   }
-  :global([data-theme="dark"] .markdown .code-block pre > code span) {
+  :global(.dark .markdown .code-block pre > code span) {
     color: var(--shiki-dark);
   }
 

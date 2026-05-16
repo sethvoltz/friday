@@ -80,7 +80,7 @@
   --transition-normal: 250ms ease;
 }
 
-[data-theme="dark"] {
+.dark {
   /* Dark mode — cool moody night */
   --bg-primary: #0f1219;
   --bg-secondary: #161b24;
