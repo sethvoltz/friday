@@ -52,11 +52,21 @@ export function proposeFromSignals(
         { score, signals: mergedSignals },
         opts.rule,
       );
+      // Severity-decay guard (FRI-79): a proposal that previously reached
+      // `critical` but has never been enriched must not silently fall back
+      // to `open`. Otherwise a failing enrichment pass masks severity — the
+      // proposal looks routine on the dashboard while its root signal still
+      // fires. Only ones that already touched critical are protected; we
+      // don't auto-promote new proposals here.
+      const protectCritical =
+        existing.status === "critical" && existing.enrichedAt === null;
       const status: ProposalStatus = nowCritical
         ? "critical"
-        : existing.status === "critical"
-          ? "open"
-          : existing.status;
+        : protectCritical
+          ? "critical"
+          : existing.status === "critical"
+            ? "open"
+            : existing.status;
 
       const updated = updateProposal(existing.id, {
         signals: mergedSignals,
@@ -163,7 +173,11 @@ export function rerankAll(rule: CriticalityRule): {
     const score = scoreProposal(p);
     const wasCritical = p.status === "critical";
     const nowCritical = isCritical({ score, signals: p.signals }, rule);
-    const status: ProposalStatus = nowCritical ? "critical" : "open";
+    // See severity-decay guard in proposeFromSignals: an un-enriched critical
+    // sticks at critical until enrichment lands.
+    const protectCritical = wasCritical && p.enrichedAt === null;
+    const status: ProposalStatus =
+      nowCritical || protectCritical ? "critical" : "open";
     if (score === p.score && status === p.status) continue;
 
     const updated = updateProposal(p.id, { score, status });
