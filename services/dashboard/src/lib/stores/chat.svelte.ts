@@ -1184,7 +1184,23 @@ export class ChatState {
         `/api/agents/${encodeURIComponent(agent)}`,
         { timeoutMs: 5_000 },
       );
-      if (!ar.ok) return;
+      if (!ar.ok) {
+        // FRI-81 PR #22 review B1: probe failed with a non-2xx. We don't
+        // have authoritative idle/working, but if a prior turn_started SSE
+        // already populated an inflight slot, we can still preserve THAT
+        // turn's bubbles and heal the rest. With no recoverable inflight,
+        // bail — `classifyOrphanRows` already handled the heuristic
+        // cases in parseBlocks and SSE `turn_started` will catch up.
+        const cachedInflight = this.inflightTurnIdByAgent[agent] ?? null;
+        if (cachedInflight) {
+          healOrphanStreamingBubbles(
+            this.messages,
+            "preserve-active",
+            cachedInflight,
+          );
+        }
+        return;
+      }
       if (this.focusedAgent !== agent) return;
       const entry = (await ar.json()) as { status?: string };
       if (entry.status !== "working") {
@@ -1195,7 +1211,7 @@ export class ChatState {
         // Convergence sweep — flip them to aborted so the user doesn't
         // see a pulsing "Thinking…" or "running" tool for a turn the
         // worker has already given up on.
-        healOrphanStreamingBubbles(this.messages, null);
+        healOrphanStreamingBubbles(this.messages, "all-stale", null);
         return;
       }
       // Find the most recent bubble carrying a turnId from the *response*
@@ -1220,14 +1236,35 @@ export class ChatState {
       // If no usable turnId is recoverable (only mail/scratch/etc. user
       // bubbles in view), leave the slot null and let SSE replay's
       // `turn_started` populate it — that's the authoritative signal.
-      if (latestTurnId) this.markInflight(agent, latestTurnId);
-      // FRI-81 D2/D3: even when the agent is mid-turn, every streaming
-      // bubble outside the active turn is an orphan. Heal them now —
-      // the active turn's bubbles stay streaming so SSE deltas continue
-      // to attach.
-      healOrphanStreamingBubbles(this.messages, latestTurnId ?? null);
+      // FRI-81 PR #22 review B2: must also skip the heal sweep here —
+      // calling it with a null active turn would flip every streaming
+      // bubble to aborted, including the genuinely-live one the daemon
+      // is about to emit deltas for. Bail and trust SSE.
+      if (latestTurnId) {
+        this.markInflight(agent, latestTurnId);
+        // FRI-81 D2/D3: even when the agent is mid-turn, every streaming
+        // bubble outside the active turn is an orphan. Heal them now —
+        // the active turn's bubbles stay streaming so SSE deltas continue
+        // to attach.
+        healOrphanStreamingBubbles(
+          this.messages,
+          "preserve-active",
+          latestTurnId,
+        );
+      }
     } catch {
-      // ignore — fallback path is the next turn_started SSE frame.
+      // FRI-81 PR #22 review B1: probe threw (network/timeout). Same as
+      // the !ar.ok branch above — if we already have an inflight slot
+      // from a prior SSE turn_started, preserve it and heal the rest.
+      // No inflight known → conservative bail.
+      const cachedInflight = this.inflightTurnIdByAgent[agent] ?? null;
+      if (cachedInflight) {
+        healOrphanStreamingBubbles(
+          this.messages,
+          "preserve-active",
+          cachedInflight,
+        );
+      }
     }
   }
 
@@ -1278,8 +1315,14 @@ export class ChatState {
       // FRI-81 D2/D3: older history is, by definition, from past turns —
       // no streaming/running bubble in this page is the active turn. Heal
       // them eagerly (the parseBlocks heuristic doesn't see the current
-      // chat's blocks so it can't tell on its own).
-      healOrphanStreamingBubbles(older, this.inflightTurnIdByAgent[agent] ?? null);
+      // chat's blocks so it can't tell on its own). If we have a known
+      // inflight, preserve that turn's bubbles; otherwise flip all.
+      const cachedInflight = this.inflightTurnIdByAgent[agent] ?? null;
+      healOrphanStreamingBubbles(
+        older,
+        cachedInflight ? "preserve-active" : "all-stale",
+        cachedInflight,
+      );
       // Prepend, dedup-by-id (SSE may have surfaced something we now also
       // see in DB).
       const seen = new Set(this.messages.map((m) => m.id));
@@ -1969,6 +2012,19 @@ export interface BlockRow {
  * `loadAgentTurns`'s post-render `/api/agents/:name` probe handles the
  * remaining case (this is the only/latest turn AND the agent is idle)
  * via `healOrphanStreamingBubbles` on the live message array.
+ *
+ * Known race (PR #22 review N1): rule (b) compares `ts` values. The
+ * daemon's `block_complete` write bumps the row's `ts` to `Date.now()`
+ * via `writeAndPublish`'s atomic helper; if a sibling block in the same
+ * turn has already completed AND its ts is later than this still-
+ * streaming block's `ts`, this block is classified as orphan even
+ * though it might still be receiving deltas. The window is bounded —
+ * the next SSE `block_complete` event flips the bubble to a real
+ * terminal status and overrides the misclassification — but the user
+ * sees a brief "Stopped" affordance on a block that wasn't stopped.
+ * Acceptable for now; a full fix would require tracking the daemon's
+ * live-turn map on the dashboard side, which is more state than the
+ * symptom warrants.
  */
 function classifyOrphanRows(blocks: BlockRow[]): Set<string> {
   const orphans = new Set<string>();
@@ -1993,23 +2049,46 @@ function classifyOrphanRows(blocks: BlockRow[]): Set<string> {
  * `streaming`/`running` bubble whose turnId is NOT the focused agent's
  * current inflight turn. Called from `loadAgentTurns` after the
  * `/api/agents/:name` probe resolves — by that point we know
- * authoritatively whether the agent is mid-turn. An agent reporting
- * `status !== 'working'` (or 'working' but with no inflight turn id)
- * means every streaming bubble is, by definition, stale.
+ * authoritatively whether the agent is mid-turn.
+ *
+ * Two modes — caller must be explicit, because passing the wrong one
+ * silently kills live bubbles (see FRI-81 PR #22 review B2):
+ *
+ *   - `"all-stale"`: agent is idle (or we have authoritative "no turn
+ *     is active" signal). Every streaming/running bubble is, by
+ *     definition, stale; flip all to aborted.
+ *
+ *   - `"preserve-active"`: agent is working on `activeTurnId`. Flip
+ *     every streaming/running bubble EXCEPT those carrying that turnId
+ *     so SSE deltas keep attaching to the live ones.
+ *
+ * On probe failure or any path where the caller doesn't have a
+ * definitive answer ("working but I can't recover the turnId"), DO NOT
+ * call this function — let SSE `turn_started` catch up. The
+ * conservative default is "don't touch live bubbles." parseBlocks's
+ * `classifyOrphanRows` heuristic already healed the unambiguous cases
+ * before this point.
  */
-function healOrphanStreamingBubbles(
+export function healOrphanStreamingBubbles(
   messages: ChatMessage[],
+  mode: "all-stale" | "preserve-active",
   activeTurnId: string | null,
 ): void {
+  if (mode === "preserve-active" && !activeTurnId) {
+    // Caller bug — defensive bail. The signature lets the caller
+    // forget to wrap in `if (latestTurnId)`; refusing to flip
+    // anything is the safer failure mode.
+    return;
+  }
   for (const m of messages) {
     if (m.role === "assistant" && m.status === "streaming") {
-      if (activeTurnId && m.turnId === activeTurnId) continue;
+      if (mode === "preserve-active" && m.turnId === activeTurnId) continue;
       m.status = "aborted";
     } else if (
       (m.role === "thinking" || m.role === "tool") &&
       m.status === "running"
     ) {
-      if (activeTurnId && m.turnId === activeTurnId) continue;
+      if (mode === "preserve-active" && m.turnId === activeTurnId) continue;
       m.status = "aborted";
     }
   }
@@ -2184,6 +2263,11 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
           toolId,
           toolName: "(unknown)",
           output: parsed.text ?? "",
+          // FRI-81 N3: stamp turnId at synth time so the D1 fold doesn't
+          // depend on it being unset (`if (!existing.turnId) existing.turnId = b.turnId`).
+          // tool_result rows always carry the turnId; no reason to wait for
+          // tool_use to fill it.
+          turnId: b.turnId,
           ts: b.ts,
         };
         out.push(synth);

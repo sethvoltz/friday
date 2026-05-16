@@ -2637,8 +2637,8 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
   it("reload: streaming block in the ACTIVE turn is preserved when agent is working (D2 must not regress reload-mid-turn)", async () => {
     // Inverse of the heal: if the agent is working and the streaming
     // block belongs to its inflight turn, status must stay "running"
-    // so the SSE block_delta keeps appending. This regression check is
-    // why the post-probe sweep takes an `activeTurnId` argument.
+    // AND the next block_delta must still accumulate. This regression
+    // check is why the post-probe sweep takes an `activeTurnId` argument.
     mockFetchWithTimeout
       .mockResolvedValueOnce(
         makeResponse({
@@ -2670,6 +2670,172 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
     await chat.loadAgentTurns("friday");
     const live = chat.messages.find((m) => m.id === "th_blk-think-live");
     expect(live!.status).toBe("running");
+    // Load-bearing (per PR #22 review T1): the gate the heal must NOT
+    // close is `handleBlockDelta`'s `m.status === "running"` check. Fire
+    // a delta and verify the text accumulated — that's the actual
+    // assertion the regression name promises.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      block_id: "blk-think-live",
+      turn_id: "turn-live",
+      agent: "friday",
+      delta: { text: "more" },
+      seq: 2,
+      ts: 110,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    const after = chat.messages.find((m) => m.id === "th_blk-think-live");
+    expect(after!.text).toBe("thinking more");
+  });
+
+  it("PR #22 B1: probe returns 404 — streaming bubble with no recoverable inflight is NOT flipped (live SSE recovers)", async () => {
+    // If the post-probe sweep ran with `null` activeTurnId on a probe
+    // failure, it would flip every streaming bubble to aborted —
+    // including any genuinely-live one whose turn_started hasn't yet
+    // populated the inflight slot. Treat probe-failure-with-no-cached-
+    // inflight as "defer to SSE."
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            {
+              id: 1,
+              blockId: "blk-think-live",
+              turnId: "turn-live",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-live",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "thinking",
+              source: null,
+              contentJson: JSON.stringify({ text: "thinking " }),
+              status: "streaming",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+          ],
+          lastEventSeq: 1,
+        }),
+      )
+      // Probe responds with 404 (archived agent or routing miss).
+      .mockResolvedValueOnce(new Response("nope", { status: 404 }));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    await chat.loadAgentTurns("friday");
+    const live = chat.messages.find((m) => m.id === "th_blk-think-live");
+    expect(live!.status).toBe("running");
+  });
+
+  it("PR #22 B1: probe throws (network) — streaming bubble outside cached inflight IS healed, inflight's stays", async () => {
+    // With a cached inflight slot (a prior turn_started already arrived
+    // via SSE), the catch path SHOULD heal everything except that turn.
+    mockFetchWithTimeout
+      .mockResolvedValueOnce(
+        makeResponse({
+          blocks: [
+            // Live block belonging to the cached-inflight turn — must stay.
+            {
+              id: 1,
+              blockId: "blk-live",
+              turnId: "turn-active",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-live",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "thinking",
+              source: null,
+              contentJson: JSON.stringify({ text: "live " }),
+              status: "streaming",
+              ts: 200,
+              lastEventSeq: 2,
+            },
+            // Orphan from a prior dead turn — must be healed.
+            {
+              id: 2,
+              blockId: "blk-orphan",
+              turnId: "turn-dead",
+              agentName: "friday",
+              sessionId: "s",
+              messageId: "msg-dead",
+              blockIndex: 0,
+              role: "assistant",
+              kind: "thinking",
+              source: null,
+              contentJson: JSON.stringify({ text: "stuck " }),
+              status: "streaming",
+              ts: 100,
+              lastEventSeq: 1,
+            },
+          ],
+          lastEventSeq: 2,
+        }),
+      )
+      .mockRejectedValueOnce(new Error("network down"));
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.markInflight("friday", "turn-active");
+    await chat.loadAgentTurns("friday");
+    const live = chat.messages.find((m) => m.id === "th_blk-live");
+    const orphan = chat.messages.find((m) => m.id === "th_blk-orphan");
+    expect(live!.status, "active-turn bubble survives probe-throw").toBe("running");
+    expect(orphan!.status, "non-active-turn bubble healed via cached inflight").toBe(
+      "aborted",
+    );
+  });
+
+  it("PR #22 B2 (helper-level): healOrphanStreamingBubbles refuses to flip when mode='preserve-active' and activeTurnId is null", async () => {
+    // Defense in depth against a future call-site forgetting the
+    // `if (latestTurnId)` guard. The helper signature `preserve-active +
+    // null` is meaningless — there's no active turn to preserve so the
+    // function would flip every streaming bubble, killing live state.
+    // Refuse the call.
+    const { healOrphanStreamingBubbles } = await import("./chat.svelte");
+    const messages: import("./chat.svelte").ChatMessage[] = [
+      {
+        id: "th_blk-live",
+        role: "thinking",
+        text: "live ",
+        status: "running",
+        blockId: "blk-live",
+        turnId: "turn-live",
+        ts: 100,
+      },
+      {
+        id: "assistant_msg-live",
+        role: "assistant",
+        text: "live ",
+        status: "streaming",
+        turnId: "turn-live",
+        ts: 110,
+      },
+    ];
+    healOrphanStreamingBubbles(messages, "preserve-active", null);
+    expect(messages[0].status, "thinking still running").toBe("running");
+    expect(messages[1].status, "assistant still streaming").toBe("streaming");
+  });
+
+  it("PR #22 B2 (helper-level): 'all-stale' mode with null is the explicit idle path — flips everything", async () => {
+    // The intent contract: passing the wrong mode silently kills live
+    // bubbles. Pin the right one — `all-stale` is the explicit idle
+    // signal and DOES flip everything regardless of turn.
+    const { healOrphanStreamingBubbles } = await import("./chat.svelte");
+    const messages: import("./chat.svelte").ChatMessage[] = [
+      {
+        id: "th_blk-stuck",
+        role: "thinking",
+        text: "stuck ",
+        status: "running",
+        blockId: "blk-stuck",
+        turnId: "turn-stuck",
+        ts: 100,
+      },
+    ];
+    healOrphanStreamingBubbles(messages, "all-stale", null);
+    expect(messages[0].status).toBe("aborted");
   });
 });
 
