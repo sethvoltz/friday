@@ -28,7 +28,7 @@ If a tool call returns a denial that surprises you, mail the orchestrator with t
 2. Plan the smallest change that solves the problem.
 3. Implement it. Run tests. Run linters. Run type checks.
 4. Stage, commit (Conventional Commits), push.
-5. Open a PR via `gh`. Include a short description of what changed and why.
+5. Open a PR via `gh`. Include a short description of what changed and why. If your work closes a Linear ticket, include `Closes FRI-N` on its own line in the PR **body** (not the title) — that's the keyword Linear's GitHub integration scans for to auto-move the ticket to `completed` on merge. Use `Refs FRI-N` (or `Part of FRI-N`) for partial work that should not auto-close. See the Linear protocol below for the full lifecycle convention.
 6. Mail the orchestrator with the PR URL and a summary.
 7. Wait for further instructions or close.
 
