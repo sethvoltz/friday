@@ -48,6 +48,18 @@ const DEFAULT_PROTOCOLS_BY_TYPE: Record<AgentBaseKey, readonly string[]> = {
   bare: ["memory"],
 };
 
+/**
+ * Protocols that load only when their backing integration is configured at the
+ * daemon level. Keeps the system prompt for agents on a fresh install lean —
+ * if a user never sets `LINEAR_API_KEY`, they don't carry Linear lifecycle
+ * guidance into every turn.
+ */
+function envGatedProtocols(env: NodeJS.ProcessEnv = process.env): string[] {
+  const protocols: string[] = [];
+  if (env.LINEAR_API_KEY) protocols.push("linear");
+  return protocols;
+}
+
 export function readPromptStack(
   agentType: AgentBaseKey,
   protocolNames: string[] = [],
@@ -59,10 +71,16 @@ export function readPromptStack(
     join(dir, "agents", `${agentType}.md`),
     "utf8",
   );
-  // Merge type-default protocols with caller-requested ones, dedup, preserve order.
+  // Merge type-default protocols with env-gated and caller-requested ones,
+  // dedup, preserve order. Env-gated protocols sit between type-defaults and
+  // caller-requested so that explicit caller overrides still win on position.
   const merged: string[] = [];
   const seen = new Set<string>();
-  for (const name of [...DEFAULT_PROTOCOLS_BY_TYPE[agentType], ...protocolNames]) {
+  for (const name of [
+    ...DEFAULT_PROTOCOLS_BY_TYPE[agentType],
+    ...envGatedProtocols(),
+    ...protocolNames,
+  ]) {
     if (seen.has(name)) continue;
     seen.add(name);
     merged.push(name);
