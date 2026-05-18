@@ -1,0 +1,10 @@
+{
+  "name": "@friday-apps/kitchen",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Kitchen Friday App — recipe library, weekly menus, history.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

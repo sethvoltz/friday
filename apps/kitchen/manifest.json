@@ -1,0 +1,34 @@
+{
+  "manifestVersion": 1,
+  "id": "kitchen",
+  "name": "Kitchen",
+  "version": "0.1.0",
+  "summary": "Meal-planning partner: recipe library, recurring routines, weekly menus, and what-we-actually-ate history.",
+  "agents": [
+    {
+      "name": "kitchen",
+      "type": "bare",
+      "promptOverlay": "prompt.md"
+    },
+    {
+      "name": "scheduled-kitchen-weekly",
+      "type": "scheduled",
+      "promptOverlay": "prompt-weekly.md"
+    }
+  ],
+  "schedules": [
+    {
+      "name": "scheduled-kitchen-weekly",
+      "cron": "17 3 * * 0",
+      "agent": "scheduled-kitchen-weekly",
+      "taskPrompt": "Draft next week's menu. Read the recipe library, routines, and recent history via your kitchen_* MCP tools. Recall family + dietary context via memory_search({ tags: [\"family\"] }). Save the resulting menu with kitchen_menu_save, then mail `friday` (subject: \"Weekly menu draft\") and `kitchen` (subject: \"Weekly menu draft — yours to refine\") with the rationale and a per-night summary."
+    }
+  ],
+  "mcpServers": [
+    {
+      "name": "kitchen-app",
+      "command": "node",
+      "args": ["mcp/kitchen.js"]
+    }
+  ]
+}

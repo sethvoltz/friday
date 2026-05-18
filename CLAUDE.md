@@ -50,6 +50,7 @@ packages/integrations/linear — Linear API integration (optional)
 services/daemon              — Headless API tier; owns Claude SDK + agent registry
   src/apps/                  — Friday Apps installer + boot reconcile (ADR-021)
 services/dashboard           — SvelteKit + Svelte 5; auth-gated public surface
+apps/                        — Checked-in Friday Apps (e.g. `apps/kitchen/`); copied to `~/.friday/apps/<id>/` at install
 docs/                        — Documentation
 ```
 

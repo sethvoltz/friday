@@ -468,7 +468,7 @@ Agents owned by an app run with `cwd = <app folder>` (resolved in `workingDirect
   README.md              # optional; ignored by daemon
 ```
 
-See `docs/schema.md` for the `apps` table; ADR-021 for the load-bearing decisions; the synthetic fixture at `services/daemon/src/apps/fixtures/example-app/` for a canonical shape.
+See `docs/schema.md` for the `apps` table; ADR-021 for the load-bearing decisions; the synthetic fixture at `services/daemon/src/apps/fixtures/example-app/` for a canonical shape. The first checked-in real app lives at `apps/kitchen/` — a meal-planning app declaring two agents (a conversational `kitchen` and a scheduled `scheduled-kitchen-weekly`), one cron, one MCP server, and JSON-file state (`recipes.json`, `routines.json`, `history.json`, `menus/<weekId>.json` one-file-per-ISO-week).
 
 ## State
 

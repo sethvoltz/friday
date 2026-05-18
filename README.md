@@ -191,6 +191,9 @@ agent-friday/
 │   │                       MCP servers, EventBus, SSE, scheduler, watchdog
 │   └── dashboard/          @friday/dashboard — SvelteKit + Svelte 5 (runes),
 │                           BetterAuth, adapter-node, PWA
+├── apps/
+│   └── kitchen/            Kitchen Friday App — meal planning, copied to
+│                           `~/.friday/apps/kitchen/` at install
 ├── bin/                    Dev shim — invokes packages/cli/dist/index.js
 └── docs/                   Architecture, setup, ADRs, schema, UX, roadmap
 ```
