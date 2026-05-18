@@ -3,6 +3,13 @@
   import { chat, type ChatMessage } from "$lib/stores/chat.svelte";
   import { chatInputBridge } from "$lib/stores/chat-input-bridge.svelte";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
+  import { clock } from "$lib/stores/clock.svelte";
+  import { computeGroupingMeta } from "$lib/util/chat-grouping";
+  import {
+    formatAbsoluteTooltip,
+    formatDaySeparator,
+    formatRelativeTime,
+  } from "$lib/util/time-format";
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import ToolBlock from "$lib/components/Chat/ToolBlock.svelte";
   import ThinkingBlock from "$lib/components/Chat/ThinkingBlock.svelte";
@@ -131,6 +138,29 @@
     if (allMessages.length <= WINDOW_SIZE) return allMessages;
     return allMessages.slice(allMessages.length - WINDOW_SIZE);
   });
+
+  // Slack-style grouping + separators (FRI-37). Computed off the same `list`
+  // we render so windowing changes recompute it. Reading clock.now in the
+  // template is enough for relative-time labels to update per-minute — the
+  // grouping structure itself is purely a function of message ts/role/etc.
+  // and never needs re-running on tick.
+  //
+  // `moreOlderHistoryPossible` suppresses the leading day separator while
+  // pagination can still reveal older messages — otherwise the top of a
+  // partially-loaded chat shows "Today" / "Yesterday" above a message that
+  // is NOT actually the first of that day, just the first one we've
+  // fetched. Once we reach the oldest block the leading separator pops in.
+  let moreOlderHistoryPossible = $derived(
+    readonly ? !pastReachedOldest : !chat.reachedOldest,
+  );
+  let groupingMeta = $derived(
+    computeGroupingMeta(list, { moreOlderHistoryPossible }),
+  );
+
+  function timestampableMessage(msg: ChatMessage): boolean {
+    // tool/thinking are continuations; they never carry their own timestamp.
+    return msg.role !== "tool" && msg.role !== "thinking";
+  }
 
   // Top-sentinel pagination. When the user scrolls up to the top of the
   // chat, the sentinel comes into view and we fetch the next 50 older
@@ -394,7 +424,26 @@
       </div>
     {/if}
   {/if}
-  {#each list as msg (msg.id)}
+  {#each list as msg, i (msg.id)}
+    {@const meta = groupingMeta[i]}
+    {#if meta?.showDaySeparator}
+      <div class="day-separator" role="separator" aria-label={formatDaySeparator(msg.ts, clock.now)}>
+        <span class="day-separator-label">{formatDaySeparator(msg.ts, clock.now)}</span>
+      </div>
+    {:else if meta?.showInactivitySeparator}
+      <div class="inactivity-separator" role="separator"></div>
+    {/if}
+    {#if meta?.isFirstInGroup && timestampableMessage(msg)}
+      <div
+        class="msg-timestamp {msg.role === 'user' && msg.source !== 'mail' ? 'right' : 'left'}"
+        title={formatAbsoluteTooltip(msg.ts)}>
+        <time
+          datetime={new Date(msg.ts).toISOString()}
+          aria-label={formatAbsoluteTooltip(msg.ts)}>
+          {formatRelativeTime(msg.ts, clock.now)}
+        </time>
+      </div>
+    {/if}
     {#if msg.kind === "no-response"}
       <!-- FRI-85: the model emitted its trained "No response requested."
            end-of-turn marker (noResponseSentinel=true), or the turn
@@ -819,6 +868,53 @@
   }
   .hint.dim {
     opacity: 0.6;
+  }
+  .day-separator {
+    display: flex;
+    align-items: center;
+    margin: 1.25rem 0 0.5rem;
+    position: relative;
+  }
+  .day-separator::before,
+  .day-separator::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border-subtle);
+  }
+  .day-separator-label {
+    padding: 0.15rem 0.75rem;
+    margin: 0 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: none;
+    letter-spacing: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    background: var(--bg-card);
+    white-space: nowrap;
+  }
+  .inactivity-separator {
+    height: 1px;
+    background: var(--border-subtle);
+    margin: 0.75rem 0 0.25rem;
+    opacity: 0.5;
+  }
+  .msg-timestamp {
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+    margin-top: 0.15rem;
+    line-height: 1;
+  }
+  .msg-timestamp.right {
+    text-align: right;
+  }
+  .msg-timestamp.left {
+    text-align: left;
+  }
+  .msg-timestamp time {
+    cursor: default;
   }
   .no-response {
     font-size: 0.78rem;

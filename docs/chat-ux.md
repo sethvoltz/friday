@@ -40,6 +40,18 @@ The dashboard's home `/` is a single persistent chat with Friday. This doc captu
 
 **WebKit / Safari / Orion paint-deferral.** Setting `scrollTop` while WebKit's scroll thread is still hot (fast-scroll just stopped, momentum still resolving) makes WebKit defer both the scroll-position commit and the paint of the newly-revealed region until the next user-originated scroll event. The DOM and layout are correct; the GPU paint is stale. Symptom: blank chat below a thin top band, fixed by any 1px scroll. We wrap the `scrollTop` write in a synchronous `overflow-y: hidden` → write → `setTimeout(0)` restore. Setting `overflow-y: hidden` detaches the element from the scroll thread, forcing WebKit to commit + paint synchronously; the async restore reattaches it once paint has happened. Synchronous restore reproduces the bug — the `setTimeout` tick is load-bearing. Pattern lifted from `inokawa/virtua` (PR #862, originally `prud/ios-overflow-scroll-to-top`). See ADR-019.
 
+## Timestamps and grouping
+
+Slack-canonical: relative wall-clock labels everywhere; same-author messages within 5 minutes collapse into a single group; only the first bubble of a group shows an inline timestamp.
+
+- **Relative formatter** (`src/lib/util/time-format.ts`): same local day → `2:14 PM`; one day ago → `Yesterday at 2:14 PM`; within 6 days → `Tuesday at 2:14 PM`; older same year → `Mar 15`; older → `Mar 15, 2024`. All buckets are local-day deltas via `dayDelta()`, not "hours since" — so a message from 11:55 PM yesterday flips from "11:55 PM" to "Yesterday at 11:55 PM" at local midnight, not 24h after it was sent.
+- **Day separator** on the local-day boundary: `Today` / `Yesterday` / `Saturday, May 17` / `Saturday, May 17, 2024` (year appended only when not the current local year).
+- **Inactivity separator** (thin rule, no label) on any same-day gap >1h. Day wins over inactivity — both never render on the same boundary.
+- **Grouping anchor** is the previous non-tool, non-thinking message. Streamed sub-blocks (`role === "tool"` / `"thinking"`) are continuations — they don't break grouping, don't emit separators, and don't carry their own inline timestamps. A tool block landing mid-gap doesn't suppress an inactivity separator on the next assistant bubble because the anchor's `ts` stayed at the previous text bubble.
+- **Author identity** for grouping: `user` (chat), `mail:<fromAgent>` (mail-bridge user blocks group per sending agent), `agent:<name>` (assistant + no-response), `system:error` (error blocks). Different identities break the group even within 5 minutes.
+- **Hover tooltip** (`title` attribute) carries the absolute datetime, `Sunday, May 17, 2026 at 2:14 PM`. Touch devices don't get hover affordances, which is the intended mobile behavior — no separate mobile path needed.
+- **Per-minute tick.** `src/lib/stores/clock.svelte.ts` exposes a single shared `clock.now` `$state` updated once per local-minute boundary via `setTimeout` (aligned to `60_000 - (Date.now() % 60_000)`). Components read `clock.now` inside `$derived` / template expressions; one timer drives all relative-time updates across the whole dashboard. The grouping structure itself is a pure function of message `ts`/role/author and doesn't recompute on tick — only labels do.
+
 ## Slash commands and skills
 
 Two flavors, one input:
