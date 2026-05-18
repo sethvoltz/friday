@@ -13,6 +13,14 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { flushSync, tick } from "svelte";
+
+async function flushReactive() {
+  flushSync();
+  await tick();
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
 const mockLoadJSON = vi.fn();
 const mockSaveJSON = vi.fn();
@@ -219,6 +227,125 @@ describe("wake-lock store (FRI-87)", () => {
     expect(sentinels[0].release).toHaveBeenCalledTimes(1);
     expect(wl.wakeLockState.held).toBe(false);
     expect(mockSaveJSON).toHaveBeenCalledWith("settings:wakeLock", false);
+  });
+
+  describe("reactive bridge (no manual reconcile)", () => {
+    it("acquires when chat.agents is replaced with a working agent — driven only by $effect", async () => {
+      const { request } = installFakeWakeLock();
+      const { wl, chat } = await load();
+      wl.startWakeLock();
+      await flushReactive();
+
+      chat.agents = [
+        { name: "friday", type: "orchestrator", status: "working" },
+      ];
+      await flushReactive();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(wl.wakeLockState.held).toBe(true);
+    });
+
+    it("acquires when an agent's status field flips via index-element replacement", async () => {
+      const { request } = installFakeWakeLock();
+      const { wl, chat } = await load();
+      wl.startWakeLock();
+
+      chat.agents = [
+        { name: "friday", type: "orchestrator", status: "idle" },
+      ];
+      await flushReactive();
+      expect(request).not.toHaveBeenCalled();
+
+      // Replace the element in place — the production code path. If the
+      // $effect subscribes only to the array identity and not to element
+      // status changes, this is where it would silently fail.
+      chat.agents[0] = {
+        ...chat.agents[0],
+        status: "working",
+      };
+      await flushReactive();
+
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(wl.wakeLockState.held).toBe(true);
+    });
+
+    it("releases when the last working agent's status field flips to idle in place", async () => {
+      const { sentinels } = installFakeWakeLock();
+      const { wl, chat } = await load();
+      wl.startWakeLock();
+      await flushReactive();
+
+      chat.agents = [
+        { name: "friday", type: "orchestrator", status: "working" },
+      ];
+      await flushReactive();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(wl.wakeLockState.held).toBe(true);
+
+      chat.agents[0] = { ...chat.agents[0], status: "idle" };
+      await flushReactive();
+
+      expect(sentinels[0].release).toHaveBeenCalledTimes(1);
+      expect(wl.wakeLockState.held).toBe(false);
+    });
+  });
+
+  it("releases the sentinel if all agents go idle while the request is in flight (race)", async () => {
+    // Drive a deferred request resolution so we can mutate state between
+    // request() and its resolution — the exact window where blocker #1
+    // could leak a sentinel.
+    let resolveRequest: ((s: FakeSentinel) => void) | null = null;
+    const sentinels: FakeSentinel[] = [];
+    const request = vi.fn(
+      () =>
+        new Promise<FakeSentinel>((res) => {
+          resolveRequest = (s) => {
+            sentinels.push(s);
+            res(s);
+          };
+        }),
+    );
+    Object.defineProperty(navigator, "wakeLock", {
+      value: { request },
+      configurable: true,
+    });
+    Object.defineProperty(document, "visibilityState", {
+      value: "visible",
+      configurable: true,
+    });
+    const { wl, chat } = await load();
+    wl.startWakeLock();
+
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "working" },
+    ];
+    wl.__reconcileForTest();
+    // request() has been called and is pending.
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(resolveRequest).not.toBeNull();
+
+    // All agents go idle BEFORE the sentinel resolves. shouldHold() now
+    // returns false; if the in-flight acquire blindly assigns sentinel
+    // we'd leak the lock.
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "idle" },
+    ];
+
+    // Now resolve the request — sentinel arrives.
+    const s = makeFakeSentinel();
+    resolveRequest!(s);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The post-await intent re-check must release it and leave us empty-
+    // handed.
+    expect(sentinels).toHaveLength(1);
+    expect(s.release).toHaveBeenCalledTimes(1);
+    expect(wl.wakeLockState.held).toBe(false);
   });
 
   it("marks itself unsupported when navigator.wakeLock is missing", async () => {

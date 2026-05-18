@@ -76,8 +76,15 @@ export const wakeLockSettings = new WakeLockSettings();
 class WakeLockState {
   /** True while we currently hold a live sentinel. Drives the UI indicator. */
   held = $state(false);
-  /** True if the browser exposes the API at all. */
-  supported = $state(false);
+  /**
+   * True if the browser exposes the API at all. Detected at module load
+   * — `getWakeLockApi()` is SSR-safe via its `typeof navigator` guard,
+   * and reading on the server gives `false`, which is fine because the
+   * settings card only matters once hydration runs in the browser.
+   * Doing this eagerly avoids the disabled-toggle + unsupported-message
+   * flash on supported browsers before layout's `onMount` fires.
+   */
+  supported = $state(getWakeLockApi() !== null);
 }
 
 export const wakeLockState = new WakeLockState();
@@ -108,6 +115,18 @@ async function acquire(): Promise<void> {
   acquiring = true;
   try {
     const s = await api.request("screen");
+    // Re-check intent after the await — the user may have toggled the
+    // setting off, or every agent may have returned to idle, while the
+    // request was in flight. Without this, we'd silently hold a lock we
+    // had explicitly decided to drop.
+    if (!shouldHold()) {
+      try {
+        await s.release();
+      } catch {
+        // ignore — best-effort
+      }
+      return;
+    }
     sentinel = s;
     wakeLockState.held = true;
     const onRelease = () => {
@@ -168,22 +187,15 @@ export function startWakeLock(): void {
   if (!wakeLockState.supported) return;
 
   stopEffect = $effect.root(() => {
-    $effect(() => {
-      // Touch reactive deps so this re-runs on changes.
-      // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-      wakeLockSettings.enabled;
-      // Reading .length + iterating agents in anyAgentWorking() establishes
-      // a subscription on the $state array contents.
-      anyAgentWorking();
-      reconcile();
-    });
+    // `reconcile()` calls `shouldHold()` which reads `wakeLockSettings.enabled`
+    // and iterates `chat.agents` — establishing subscriptions on both. The
+    // effect re-runs whenever either changes.
+    $effect(reconcile);
   });
 
   if (typeof document !== "undefined") {
     visListener = () => {
-      if (document.visibilityState === "visible" && shouldHold()) {
-        void acquire();
-      }
+      if (document.visibilityState === "visible") reconcile();
     };
     document.addEventListener("visibilitychange", visListener);
   }
@@ -222,5 +234,7 @@ export function __resetForTest(): void {
   acquiring = false;
   started = false;
   wakeLockState.held = false;
-  wakeLockState.supported = false;
+  // Re-derive supported from whatever the test installed on navigator
+  // since module load.
+  wakeLockState.supported = getWakeLockApi() !== null;
 }
