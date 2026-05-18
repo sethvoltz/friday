@@ -64,6 +64,16 @@ Everything lives at `~/.friday/`:
 
 Override the location with `FRIDAY_DATA_DIR=$HOME/.friday-v2 friday start`.
 
+## Runtime env vars
+
+Knobs that don't live in `config.toml`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FRIDAY_DATA_DIR` | `~/.friday` | Override the data directory root. |
+| `FRIDAY_TURN_STALL_MS` | `1800000` (30 min) | Stall watchdog threshold — a working worker with no `block-stop` for longer than this gets pgrp-SIGTERMed. |
+| `FRIDAY_TURN_STALE_CEILING_MS` | `14400000` (4 h) | Hard ceiling on a single turn (FRI-33). Any inbound IPC from a worker whose `turnStart` is older than this triggers a force-kill via `forceKillStuckWorker(reason: "stale")`. Defense against turns that stay alive past any plausible runtime (12.5h has been observed). |
+
 ## Cutover from old Friday
 
 If you're running the old Slack-based Friday alongside this:

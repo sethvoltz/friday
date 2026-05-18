@@ -306,7 +306,7 @@ export function spawnTurn(input: SpawnTurnInput): void {
   live.set(input.agentName, w);
 
   child.on("message", (raw: unknown) => {
-    handleEvent(w, raw as WorkerEvent);
+    safeHandleEvent(w, raw);
   });
   child.on("exit", (code, signal) => {
     logger.log("info", "worker.exit", {
@@ -612,7 +612,7 @@ function forceKillStuckWorker(
 
   if (reason === "stale") {
     logger.log("warn", "worker.turn.stale-killed", {
-      agentId: w.agentName,
+      agent: w.agentName,
       turnId: w.turnId,
       msSinceTurnStart: opts.msSinceTurnStart ?? null,
     });
@@ -974,6 +974,32 @@ export function removeQueuedPrompt(
   return removed;
 }
 
+/**
+ * FRI-33 outer IPC boundary. `handleEvent` calls `eventBus.publish` from
+ * every branch and external subscribers run synchronously on that thread;
+ * any sync throw from a subscriber, a malformed payload, or a bug in a
+ * downstream handler used to escape into Node's default `uncaughtException`
+ * handler (no top-level handler is installed in `services/daemon/src/`)
+ * and end the daemon — taking every other live worker with it. Trap once
+ * at the IPC boundary so the crash class is closed regardless of which
+ * branch threw; per-event `type` is captured for attribution.
+ *
+ * Exported so the unit test can exercise the boundary directly without
+ * spawning a real child process.
+ */
+export function safeHandleEvent(w: LiveWorker, raw: unknown): void {
+  const ev = raw as WorkerEvent;
+  try {
+    handleEvent(w, ev);
+  } catch (err) {
+    logger.log("error", "worker.ipc.error", {
+      agent: w.agentName,
+      type: (ev as { type?: string })?.type ?? "unknown",
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
   // FRI-33: stale-turn ceiling. Any inbound IPC — heartbeat or otherwise —
   // gives us a chance to notice that the worker has been on the same turn
@@ -981,6 +1007,12 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
   // arithmetic on `w.turnStart` and before another hour of bills accrues.
   // Idempotent via `forceKilled`; safe if multiple events land in the same
   // tick.
+  //
+  // Invariant: the worker only emits `heartbeat` from inside `runQuery`'s
+  // setInterval, cleared in the finally — so no IPC fires between turns,
+  // and `w.turnStart` reflects the *current* turn. If a future change adds
+  // a between-turns heartbeat, this check would spuriously fire on the
+  // first heartbeat after a 4h idle; update both sides together.
   if (!w.forceKilled && w.turnStart) {
     const msSinceTurnStart = Date.now() - w.turnStart;
     if (msSinceTurnStart > staleTurnCeilingMs()) {
@@ -1118,27 +1150,14 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       break;
     }
     case "status-change":
-      // FRI-33: error boundary. A malformed `status-change` payload (missing
-      // `status`, unexpected enum value, IPC tampering) previously bubbled
-      // out of the `child.on("message")` listener as an uncaughtException —
-      // which, with no top-level handler installed, crashes the daemon and
-      // every other live worker with it. Trap, log, do not rethrow.
-      try {
-        setWorkerStatus(w, e.status, "handleEvent.status-change");
-        eventBus.publish({
-          v: 1,
-          type: "agent_status",
-          agent: w.agentName,
-          status: e.status === "working" ? "working" : "idle",
-          since: Date.now(),
-        });
-      } catch (err) {
-        logger.log("error", "worker.ipc.error", {
-          agentId: w.agentName,
-          type: e.type,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
+      setWorkerStatus(w, e.status, "handleEvent.status-change");
+      eventBus.publish({
+        v: 1,
+        type: "agent_status",
+        agent: w.agentName,
+        status: e.status === "working" ? "working" : "idle",
+        since: Date.now(),
+      });
       break;
     case "turn-complete": {
       // FRI-12: same cancellation as the error path. If the worker raced

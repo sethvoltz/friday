@@ -112,15 +112,15 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     handleEvent(worker as never, { type: "heartbeat" });
     unsub();
 
-    // Structured log emitted with exact event name + agentId + msSinceTurnStart.
+    // Structured log emitted with exact event name + agent + msSinceTurnStart.
     const staleLog = logSpy.mock.calls.find(
       ([, event]) => event === "worker.turn.stale-killed",
     );
     expect(staleLog).toBeDefined();
     const [level, , payload] = staleLog!;
     expect(level).toBe("warn");
-    const p = payload as { agentId: string; msSinceTurnStart: number; turnId: string };
-    expect(p.agentId).toBe("stale-agent");
+    const p = payload as { agent: string; msSinceTurnStart: number; turnId: string };
+    expect(p.agent).toBe("stale-agent");
     expect(p.turnId).toBe("turn-stale-old");
     expect(p.msSinceTurnStart).toBeGreaterThanOrEqual(FIVE_HOURS);
 
@@ -145,14 +145,20 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     __deleteLiveWorkerForTest("stale-agent");
   });
 
-  it("does NOT force-kill when msSinceTurnStart is well under the ceiling", async () => {
+  it("does NOT force-kill when msSinceTurnStart is well under the ceiling, and the event is still processed", async () => {
     const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
     const { logger } = await import("../log.js");
 
+    // Pin lastHeartbeat to a stale-but-known value so we can prove the
+    // handler ran (the heartbeat branch updates `w.lastHeartbeat = Date.now()`
+    // — adversarial review N3: bare "no log emitted" assertions would also
+    // pass against a no-op `handleEvent`, so anchor on a positive side-effect).
+    const ANCIENT = Date.now() - 30 * 60 * 1000;
     const { worker } = makeFakeWorker({
       turnId: "turn-fresh",
       turnStart: Date.now() - 60_000, // 1 minute in
+      lastHeartbeat: ANCIENT,
     });
     __putLiveWorkerForTest("stale-agent", worker as never);
 
@@ -163,20 +169,29 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
       logSpy.mock.calls.find(([, event]) => event === "worker.turn.stale-killed"),
     ).toBeUndefined();
     expect((worker as { forceKilled?: boolean }).forceKilled).toBeFalsy();
+    // Proves handleEvent actually executed past the ceiling check.
+    expect((worker as { lastHeartbeat: number }).lastHeartbeat).toBeGreaterThan(
+      ANCIENT,
+    );
 
     __deleteLiveWorkerForTest("stale-agent");
   });
 
-  it("ceiling check is idempotent: a second IPC after force-kill does not re-fire", async () => {
+  it("ceiling check is idempotent: no duplicate error block, no duplicate turn_done on repeat IPC", async () => {
     const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
+    const { eventBus } = await import("../events/bus.js");
     const { logger } = await import("../log.js");
+    const { getRawDb } = await import("@friday/shared");
 
     const { worker } = makeFakeWorker({
       turnId: "turn-stale-idem",
       turnStart: Date.now() - 10 * 60 * 60 * 1000, // 10h
     });
     __putLiveWorkerForTest("stale-agent", worker as never);
+
+    const captured: CapturedEvent[] = [];
+    const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
     const logSpy = vi.spyOn(logger, "log");
     handleEvent(worker as never, { type: "heartbeat" });
@@ -185,61 +200,100 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
       type: "status-change",
       status: "idle",
     });
+    unsub();
 
     const staleLogs = logSpy.mock.calls.filter(
       ([, event]) => event === "worker.turn.stale-killed",
     );
     expect(staleLogs.length).toBe(1);
 
+    // Load-bearing: exactly one error block in the DB for this turn.
+    const errorRows = getRawDb()
+      .prepare("SELECT id FROM blocks WHERE turn_id = ? AND kind = 'error'")
+      .all("turn-stale-idem") as Array<{ id: string }>;
+    expect(errorRows.length).toBe(1);
+
+    // Load-bearing: exactly one turn_done emitted for this turn.
+    const turnDoneCount = captured.filter(
+      (e) => e.type === "turn_done" && e.turn_id === "turn-stale-idem",
+    ).length;
+    expect(turnDoneCount).toBe(1);
+
     __deleteLiveWorkerForTest("stale-agent");
   });
 });
 
 describe("lifecycle: IPC handler error boundary (FRI-33)", () => {
-  it("logs worker.ipc.error and does not rethrow when status-change handling throws", async () => {
-    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+  // Adversarial review B1: the boundary lives at the outer IPC handler
+  // (`safeHandleEvent`), not inside any single switch branch — every branch
+  // calls `eventBus.publish` and any branch could blow up the daemon. Test
+  // the boundary itself by driving `safeHandleEvent` directly (same call
+  // shape that `child.on("message")` uses in production).
+
+  for (const [branch, event] of [
+    ["status-change", { type: "status-change", status: "working" } as const],
+    [
+      "turn-complete",
+      { type: "turn-complete", sessionId: "sess-x" } as const,
+    ],
+  ] as const) {
+    it(`logs worker.ipc.error and does not rethrow when ${branch} branch throws`, async () => {
+      const { safeHandleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+        await import("./lifecycle.js");
+      const { eventBus } = await import("../events/bus.js");
+      const { logger } = await import("../log.js");
+
+      const { worker } = makeFakeWorker({ turnId: `turn-ipc-${branch}` });
+      __putLiveWorkerForTest("stale-agent", worker as never);
+
+      // Make every publish throw — simulates a downstream subscriber
+      // blowing up (the real-world crash shape: any sync exception in
+      // publish() used to bubble out of child.on("message") into Node's
+      // default uncaughtException handler).
+      const publishSpy = vi
+        .spyOn(eventBus, "publish")
+        .mockImplementation((() => {
+          throw new Error(`synthetic publish failure (${branch})`);
+        }) as never);
+
+      const logSpy = vi.spyOn(logger, "log");
+
+      expect(() => safeHandleEvent(worker as never, event)).not.toThrow();
+
+      const ipcErr = logSpy.mock.calls.find(
+        ([, ev]) => ev === "worker.ipc.error",
+      );
+      expect(ipcErr).toBeDefined();
+      const [level, , payload] = ipcErr!;
+      expect(level).toBe("error");
+      const p = payload as { agent: string; type: string; err: string };
+      expect(p.agent).toBe("stale-agent");
+      expect(p.type).toBe(branch);
+      expect(p.err).toContain(`synthetic publish failure (${branch})`);
+
+      publishSpy.mockRestore();
+      __deleteLiveWorkerForTest("stale-agent");
+    });
+  }
+
+  it("safeHandleEvent passes through normally when nothing throws", async () => {
+    const { safeHandleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
-    const { eventBus } = await import("../events/bus.js");
     const { logger } = await import("../log.js");
 
-    const { worker } = makeFakeWorker({ turnId: "turn-ipc-err" });
+    const { worker } = makeFakeWorker({ turnId: "turn-ipc-passthrough" });
     __putLiveWorkerForTest("stale-agent", worker as never);
 
-    // Force the inner `eventBus.publish` to throw on the agent_status emit.
-    // This simulates a downstream subscriber blowing up (the real-world
-    // crash shape: any sync exception in publish() bubbles out of
-    // child.on("message") into Node's default uncaughtException handler).
-    const publishSpy = vi.spyOn(eventBus, "publish").mockImplementation(((e: unknown) => {
-      const ev = e as { type?: string };
-      if (ev.type === "agent_status") {
-        throw new Error("synthetic publish failure");
-      }
-    }) as never);
-
     const logSpy = vi.spyOn(logger, "log");
-
-    // Must NOT throw.
     expect(() =>
-      handleEvent(worker as never, {
-        type: "status-change",
-        // Cast through unknown so we can feed a deliberately-malformed payload
-        // shape past TS without disabling type checking globally.
-        status: "working",
-      }),
+      safeHandleEvent(worker as never, { type: "heartbeat" }),
     ).not.toThrow();
 
-    const ipcErr = logSpy.mock.calls.find(
-      ([, event]) => event === "worker.ipc.error",
-    );
-    expect(ipcErr).toBeDefined();
-    const [level, , payload] = ipcErr!;
-    expect(level).toBe("error");
-    const p = payload as { agentId: string; type: string; err: string };
-    expect(p.agentId).toBe("stale-agent");
-    expect(p.type).toBe("status-change");
-    expect(p.err).toContain("synthetic publish failure");
+    // No error log on the happy path.
+    expect(
+      logSpy.mock.calls.find(([, ev]) => ev === "worker.ipc.error"),
+    ).toBeUndefined();
 
-    publishSpy.mockRestore();
     __deleteLiveWorkerForTest("stale-agent");
   });
 });
