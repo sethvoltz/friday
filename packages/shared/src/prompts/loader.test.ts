@@ -103,3 +103,20 @@ describe("default protocols by agent type", () => {
     expect(occurrences).toBe(1);
   });
 });
+
+describe("voice discipline section (FRI-39)", () => {
+  const agentTypes = ["builder", "helper", "bare", "scheduled", "orchestrator"] as const;
+
+  for (const agentType of agentTypes) {
+    it(`${agentType} base prompt includes the "Language to cut" discipline section`, () => {
+      const stack = readPromptStack(agentType, []);
+      expect(stack.agentBase).toContain("Communication discipline");
+      expect(stack.agentBase).toContain("Language to cut");
+      // Concrete bans the section must carry.
+      expect(stack.agentBase).toMatch(/Performative honesty/);
+      expect(stack.agentBase).toMatch(/Performative effort/);
+      expect(stack.agentBase).toMatch(/Throat-clearing/);
+      expect(stack.agentBase).toMatch(/Trailing offers/);
+    });
+  }
+});
