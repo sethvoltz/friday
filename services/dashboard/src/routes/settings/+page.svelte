@@ -7,7 +7,22 @@
 
   type Mode = "light" | "dark" | "system";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
+  import {
+    wakeLockSettings,
+    wakeLockState,
+  } from "$lib/stores/wake-lock.svelte";
   let { data }: { data: PageData } = $props();
+
+  // Hydrate the wake-lock setting on first paint (SSR-safe: hydrate() reads
+  // localStorage behind a typeof guard).
+  wakeLockSettings.hydrate();
+
+  let wakeLockEnabled = $state(wakeLockSettings.enabled);
+  $effect(() => {
+    if (wakeLockEnabled !== wakeLockSettings.enabled) {
+      wakeLockSettings.set(wakeLockEnabled);
+    }
+  });
 
   // Theme selection is owned by mode-watcher (localStorage
   // `mode-watcher-mode`). The header `⌘K` palette exposes the same three
@@ -335,6 +350,29 @@
         label="Auto-refork crashed workers"
         disabled={savingSettings} />
     </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Keep screen awake</h2></div>
+    <p class="row-value">
+      Hold a screen wake lock while any agent is working so your phone won't
+      sleep mid-turn. Default on for mobile, off for desktop. iOS Safari only
+      honours this while the tab is foreground — it can't wake a locked
+      phone.
+    </p>
+    <div class="toggle-row">
+      <Toggle
+        bind:checked={wakeLockEnabled}
+        label="Keep screen awake while agents work"
+        disabled={!wakeLockState.supported} />
+    </div>
+    {#if !wakeLockState.supported}
+      <p class="row-value muted">
+        This browser doesn't support the Screen Wake Lock API.
+      </p>
+    {:else if wakeLockState.held}
+      <p class="row-value muted">Wake lock is active right now.</p>
+    {/if}
   </div>
 
   <div class="card">

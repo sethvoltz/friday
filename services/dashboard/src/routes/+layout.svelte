@@ -6,7 +6,13 @@
   import { onMount } from "svelte";
   import { sseConnected, startSSE, stopSSE } from "$lib/stores/sse.svelte";
   import { startConnectivity } from "$lib/stores/connectivity.svelte";
+  import {
+    startWakeLock,
+    stopWakeLock,
+    wakeLockState,
+  } from "$lib/stores/wake-lock.svelte";
   import ConnectivityWidget from "$lib/components/Connectivity/ConnectivityWidget.svelte";
+  import { Zap } from "lucide-svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
   import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
@@ -96,6 +102,7 @@
     if (signedIn && !isLogin) {
       startSSE();
       startConnectivity();
+      startWakeLock();
     }
 
     // Best-effort flush on initial mount — drains anything left in
@@ -137,6 +144,7 @@
     return () => {
       clearInterval(i);
       stopSSE();
+      stopWakeLock();
       window.removeEventListener("keydown", onKey);
       if (vv && vvUpdate) {
         vv.removeEventListener("resize", vvUpdate);
@@ -198,6 +206,14 @@
              previous Bot/Live dots. Three stages: Internet / SSE /
              Daemon with cascade-grey and a daemon-uptime tail. -->
         <ConnectivityWidget />
+        {#if wakeLockState.held}
+          <span
+            class="wake-lock-indicator"
+            title="Screen wake lock is active — phone won't sleep while an agent is working"
+            aria-label="Screen wake lock active">
+            <Zap size={14} strokeWidth={2} aria-hidden="true" />
+          </span>
+        {/if}
       </div>
       <div class="header-right">
         <nav class="header-nav" class:open={menuOpen}>
@@ -292,6 +308,14 @@
   .header-right { display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; position: relative; }
 
   .header-sep { width: 1px; height: 1.2rem; background: var(--border-primary); flex-shrink: 0; }
+  .wake-lock-indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent-primary);
+    opacity: 0.9;
+    flex-shrink: 0;
+  }
 
   .logo {
     display: flex; align-items: center; gap: 0.5rem;
