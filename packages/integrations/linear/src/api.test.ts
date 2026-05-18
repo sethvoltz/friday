@@ -266,6 +266,51 @@ describe("createIssue", () => {
     });
   });
 
+  it("maps named priority to Linear's int encoding and includes it on the wire", async () => {
+    const { calls } = installFetchMock([
+      {
+        data: {
+          issueCreate: {
+            success: true,
+            issue: {
+              id: "u",
+              identifier: "FRI-100",
+              url: "https://linear.app/x/issue/FRI-100",
+            },
+          },
+        },
+      },
+    ]);
+    await createIssue({
+      apiKey: "k",
+      input: { teamId: "team-uuid", title: "P", priority: "high" },
+    });
+    expect(calls[0].variables).toEqual({
+      input: { teamId: "team-uuid", title: "P", priority: 2 },
+    });
+  });
+
+  it("omits priority from the wire input when unset", async () => {
+    const { calls } = installFetchMock([
+      {
+        data: {
+          issueCreate: {
+            success: true,
+            issue: { id: "u", identifier: "FRI-101", url: "https://x/y" },
+          },
+        },
+      },
+    ]);
+    await createIssue({
+      apiKey: "k",
+      input: { teamId: "team-uuid", title: "P" },
+    });
+    const input = (calls[0].variables as { input: Record<string, unknown> })
+      .input;
+    expect(input).not.toHaveProperty("priority");
+    expect(input).toEqual({ teamId: "team-uuid", title: "P" });
+  });
+
   it("throws LinearApiError when issueCreate returns success=false", async () => {
     installFetchMock([
       { data: { issueCreate: { success: false, issue: null } } },
@@ -364,6 +409,99 @@ describe("updateIssue", () => {
       id: "issue-uuid",
       input: { title: "New title", description: "## body" },
     });
+  });
+
+  it("maps named priority to Linear's int encoding and includes it on the wire", async () => {
+    const { calls } = installFetchMock([
+      {
+        data: {
+          issueUpdate: {
+            success: true,
+            issue: {
+              id: "issue-uuid",
+              identifier: "FRI-75",
+              title: "t",
+              url: "https://x/y",
+            },
+          },
+        },
+      },
+    ]);
+    await updateIssue({
+      apiKey: "k",
+      id: "issue-uuid",
+      input: { priority: "urgent" },
+    });
+    expect(calls[0].variables).toEqual({
+      id: "issue-uuid",
+      input: { priority: 1 },
+    });
+  });
+
+  it("omits priority from the wire input when unset", async () => {
+    const { calls } = installFetchMock([
+      {
+        data: {
+          issueUpdate: {
+            success: true,
+            issue: {
+              id: "issue-uuid",
+              identifier: "FRI-75",
+              title: "t",
+              url: "https://x/y",
+            },
+          },
+        },
+      },
+    ]);
+    await updateIssue({
+      apiKey: "k",
+      id: "issue-uuid",
+      input: { title: "t" },
+    });
+    const input = (calls[0].variables as { input: Record<string, unknown> })
+      .input;
+    expect(input).not.toHaveProperty("priority");
+    expect(input).toEqual({ title: "t" });
+  });
+
+  it("maps every named priority level to its Linear int", async () => {
+    const cases: Array<[
+      "none" | "urgent" | "high" | "medium" | "low",
+      number,
+    ]> = [
+      ["none", 0],
+      ["urgent", 1],
+      ["high", 2],
+      ["medium", 3],
+      ["low", 4],
+    ];
+    for (const [name, expected] of cases) {
+      const { calls, restore } = installFetchMock([
+        {
+          data: {
+            issueUpdate: {
+              success: true,
+              issue: {
+                id: "issue-uuid",
+                identifier: "FRI-75",
+                title: "t",
+                url: "https://x/y",
+              },
+            },
+          },
+        },
+      ]);
+      await updateIssue({
+        apiKey: "k",
+        id: "issue-uuid",
+        input: { priority: name },
+      });
+      const input = (calls[0].variables as { input: { priority: number } })
+        .input;
+      expect(input.priority).toBe(expected);
+      restore();
+    }
   });
 
   it("throws LinearApiError when issueUpdate returns success=false", async () => {

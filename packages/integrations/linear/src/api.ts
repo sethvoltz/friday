@@ -169,12 +169,29 @@ export async function listTeams(opts: {
   return data.teams.nodes;
 }
 
+/**
+ * Linear's `priority` is wire-encoded as an integer 0–4. We accept the named
+ * form at this boundary and convert to int before issuing the mutation, so
+ * callers (MCP tool, daemon) can pass `"high"` rather than memorising that
+ * `2 === high`.
+ */
+export type LinearPriority = "none" | "urgent" | "high" | "medium" | "low";
+
+const PRIORITY_TO_INT: Record<LinearPriority, number> = {
+  none: 0,
+  urgent: 1,
+  high: 2,
+  medium: 3,
+  low: 4,
+};
+
 export interface CreateIssueInput {
   /** Linear team UUID (not the key). Use `findTeamByKey` to resolve. */
   teamId: string;
   title: string;
   /** Markdown supported. */
   description?: string;
+  priority?: LinearPriority;
 }
 
 export interface CreatedIssue {
@@ -200,6 +217,9 @@ export async function createIssue(opts: {
       issue: CreatedIssue | null;
     };
   }
+  const { priority, ...rest } = opts.input;
+  const wireInput: Record<string, unknown> = { ...rest };
+  if (priority !== undefined) wireInput.priority = PRIORITY_TO_INT[priority];
   const data = await linearQuery<CreateResult>(
     opts.apiKey,
     `mutation IssueCreate($input: IssueCreateInput!) {
@@ -208,7 +228,7 @@ export async function createIssue(opts: {
          issue { id identifier url }
        }
      }`,
-    { input: opts.input },
+    { input: wireInput },
   );
   if (!data.issueCreate.success || !data.issueCreate.issue) {
     throw new LinearApiError(
@@ -222,6 +242,7 @@ export interface UpdateIssueInput {
   title?: string;
   description?: string;
   stateId?: string;
+  priority?: LinearPriority;
 }
 
 export interface UpdatedIssue {
@@ -247,6 +268,9 @@ export async function updateIssue(opts: {
       issue: UpdatedIssue | null;
     };
   }
+  const { priority, ...rest } = opts.input;
+  const wireInput: Record<string, unknown> = { ...rest };
+  if (priority !== undefined) wireInput.priority = PRIORITY_TO_INT[priority];
   const data = await linearQuery<UpdateResult>(
     opts.apiKey,
     `mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
@@ -255,7 +279,7 @@ export async function updateIssue(opts: {
          issue { id identifier title url }
        }
      }`,
-    { id: opts.id, input: opts.input },
+    { id: opts.id, input: wireInput },
   );
   if (!data.issueUpdate.success || !data.issueUpdate.issue) {
     throw new LinearApiError(

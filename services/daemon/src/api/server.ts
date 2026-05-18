@@ -78,6 +78,7 @@ import {
   reconcile as linearReconcile,
   resolveIssueIdByIdentifier as linearResolveIssueIdByIdentifier,
   updateIssue as linearUpdateIssue,
+  type LinearPriority,
   type LinearStateType,
   type UpdateIssueInput,
 } from "@friday/integrations-linear";
@@ -1135,6 +1136,7 @@ async function handle(
       title?: string;
       body?: string;
       team?: string;
+      priority?: LinearPriority;
     }>(req);
     if (!body.title) {
       return json(res, 400, { error: "title required" });
@@ -1157,6 +1159,7 @@ async function handle(
       const { issue } = await linearCreateIssue({
         title: body.title,
         description: body.body,
+        priority: body.priority,
       });
       return json(res, 200, {
         identifier: issue.identifier,
@@ -1178,6 +1181,7 @@ async function handle(
       title?: string;
       body?: string;
       state?: LinearStateType;
+      priority?: LinearPriority;
     }>(req);
     if (!body.identifier) {
       return json(res, 400, { error: "identifier required" });
@@ -1189,10 +1193,11 @@ async function handle(
     if (
       body.title === undefined &&
       body.body === undefined &&
-      body.state === undefined
+      body.state === undefined &&
+      body.priority === undefined
     ) {
       return json(res, 400, {
-        error: "at least one of title, body, state must be provided",
+        error: "at least one of title, body, state, priority must be provided",
       });
     }
     const teamKeyMatch = body.identifier.match(/^([A-Z][A-Z0-9_]*)-(\d+)$/);
@@ -1215,6 +1220,7 @@ async function handle(
       const input: UpdateIssueInput = {};
       if (body.title !== undefined) input.title = body.title;
       if (body.body !== undefined) input.description = body.body;
+      if (body.priority !== undefined) input.priority = body.priority;
       if (body.state !== undefined) {
         const stateId = await linearGetStateIdByType({
           apiKey,

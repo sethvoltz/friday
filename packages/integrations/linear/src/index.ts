@@ -25,6 +25,7 @@ import {
   listTeams,
   type CreatedIssue,
   type LinearIssue,
+  type LinearPriority,
   type LinearTeam,
 } from "./api.js";
 
@@ -43,6 +44,7 @@ export {
   type CreateIssueInput,
   type CreatedIssue,
   type LinearIssue,
+  type LinearPriority,
   type LinearStateType,
   type LinearTeam,
   type UpdateIssueInput,
@@ -116,6 +118,7 @@ export async function resolveTeamId(opts: {
 export async function createIssueWithConfiguredTeam(opts: {
   title: string;
   description?: string;
+  priority?: LinearPriority;
 }): Promise<{ issue: CreatedIssue; team: LinearTeam }> {
   const cfg = getLinearConfig();
   if (!cfg) {
@@ -128,6 +131,7 @@ export async function createIssueWithConfiguredTeam(opts: {
       teamId: team.id,
       title: opts.title,
       description: opts.description,
+      priority: opts.priority,
     },
   });
   return { issue, team };
