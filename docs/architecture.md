@@ -186,7 +186,7 @@ agent-friday/
 
 ### Postgres as canonical store (ADR-023)
 
-- Host-installed Postgres (`brew install postgresql@17`, `brew services start postgresql@17`). Friday provisions a dedicated `friday` database + role; no custom PGDATA, no Friday-managed Postgres lifecycle.
+- Host-installed Postgres (`brew install postgresql@18`, `brew services start postgresql@18`). Friday provisions a dedicated `friday` database + role; no custom PGDATA, no Friday-managed Postgres lifecycle.
 - **Peer writers.** Daemon writes runtime state (block rows on close, agent status, mail-bridge rows, scheduler firings, app-lifecycle reconcile). Dashboard mutators write mutator-driven changes (user messages, abort intents, archive intents, ticket/memory/schedule edits, client telemetry). Neither "owns" the DB; both write directly.
 - **Row-as-intent.** Mutators encode side-effect intent as a status field on the data row itself (`pending`, `abort_requested`, `archive_requested`, etc.). The daemon LISTENs on Postgres NOTIFY channels per status transition and dispatches side effects (fork worker, fire AbortController, archive agent). Boot recovery scans the same WHERE clauses, so the live path and recovery path are the same code.
 - **Fast-path + durable-path.** For latency-sensitive ops (abort, critical-mail-wakeup, cancel-queued), the dashboard mutator additionally sidebands a `POST 127.0.0.1:<daemonPort>/api/internal/<op>` (localhost-only, fire-and-forget). The daemon handler is idempotent: whichever path fires first wins. See ADR-023.

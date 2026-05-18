@@ -76,7 +76,7 @@ The daemon binds to `127.0.0.1`. zero-cache binds to `127.0.0.1`. The dashboard 
 
 ### Built for the long haul
 
-- **Postgres as canonical store.** Host-installed via Homebrew (`brew install postgresql@17`), Friday provisions a dedicated `friday` database. Daemon and dashboard both write directly — daemon for runtime state (block closes, agent status, mail), dashboard for user-driven mutations via Zero mutators. Each survives the other's reboot. See ADR-023.
+- **Postgres as canonical store.** Host-installed via Homebrew (`brew install postgresql@18`), Friday provisions a dedicated `friday` database. Daemon and dashboard both write directly — daemon for runtime state (block closes, agent status, mail), dashboard for user-driven mutations via Zero mutators. Each survives the other's reboot. See ADR-023.
 - **Row-as-intent dispatch.** Every mutation writes the row it cares about with a status field encoding "side effect needed." The daemon LISTENs on Postgres NOTIFY, dispatches, and transitions the row. Boot recovery scans the same WHERE clauses, so live path and recovery path are the same code. Latency-critical ops (abort, mail-wakeup, cancel-queued) get an additional localhost fast-path; both paths converge on the same idempotent handler.
 - **Two-phase bootstrap, generous client cache.** First-time device load fetches the orchestrator's recent chat and active-state metadata in ~2s; background Phase 2 fills the full history for active agents, tickets, memory, and recent mail. Blocks for agents archived >30 days expunge from the client cache; the server keeps everything.
 - **Boot recovery.** `~/.claude/projects/.../sessionId.jsonl` is walked once on startup to back-fill any blocks lost between worker `block-complete` and the Postgres write. Idempotent on `(session_id, message_id, kind)` for text/thinking and `(session_id, tool_use_id)` for tool blocks.
@@ -92,7 +92,7 @@ brew bundle --file=Brewfile
 
 Installs:
 
-- **`postgresql@17`** — Friday's canonical store. Managed by `brew services`, lifecycle-independent of `friday start/stop`.
+- **`postgresql@18`** — Friday's canonical store. Managed by `brew services`, lifecycle-independent of `friday start/stop`.
 - **`claude-code`** — Claude Code CLI; runs the Agent SDK against the Pro/Max subscription tied to your interactive `claude` login (no `ANTHROPIC_API_KEY` needed once signed in)
 - **`gh`** — GitHub CLI for Builders to clone and open PRs
 - **`tmux`** — daemon + dashboard + zero-cache supervision
@@ -101,7 +101,7 @@ Installs:
 Built and tested against Node 22 and pnpm 10. Start Postgres if it isn't already running:
 
 ```bash
-brew services start postgresql@17
+brew services start postgresql@18
 ```
 
 > Sign in to Claude Code once before running Friday: `claude` (the CLI walks you through the OAuth flow). Friday's workers spawn the SDK as a child process and inherit that login.
