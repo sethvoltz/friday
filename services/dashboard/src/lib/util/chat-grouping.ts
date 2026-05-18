@@ -46,8 +46,19 @@ function authorOf(msg: ChatMessage): string {
  *     fired (day wins).
  *   - first-in-group fires when a separator fires, the author changes, or
  *     the gap exceeds 5 minutes.
+ *
+ * `options.moreOlderHistoryPossible`: when true, the topmost loaded message
+ * may not be the actual first message of its local day — older history is
+ * still paginated above. Suppress the leading day separator so we don't
+ * mark a mid-day cut as "Today" / "Yesterday" / etc. (the inline timestamp
+ * on the message itself still shows, which is accurate regardless).
+ * Inter-message day separators inside the loaded window remain — they sit
+ * between two loaded messages, so the boundary is real.
  */
-export function computeGroupingMeta(messages: ChatMessage[]): MessageGroupingMeta[] {
+export function computeGroupingMeta(
+  messages: ChatMessage[],
+  options: { moreOlderHistoryPossible?: boolean } = {},
+): MessageGroupingMeta[] {
   const out: MessageGroupingMeta[] = new Array(messages.length);
   let prevTs: number | null = null;
   let prevAuthor: string | null = null;
@@ -76,7 +87,8 @@ export function computeGroupingMeta(messages: ChatMessage[]): MessageGroupingMet
       isFirstEver || dayChanged || inactivity || authorChanged || gap > FIVE_MINUTES;
 
     out[i] = {
-      showDaySeparator: isFirstEver || dayChanged,
+      showDaySeparator:
+        (isFirstEver && !options.moreOlderHistoryPossible) || dayChanged,
       showInactivitySeparator: inactivity,
       isFirstInGroup,
       isContinuation: false,

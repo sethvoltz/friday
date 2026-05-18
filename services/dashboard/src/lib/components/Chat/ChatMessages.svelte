@@ -144,7 +144,18 @@
   // template is enough for relative-time labels to update per-minute — the
   // grouping structure itself is purely a function of message ts/role/etc.
   // and never needs re-running on tick.
-  let groupingMeta = $derived(computeGroupingMeta(list));
+  //
+  // `moreOlderHistoryPossible` suppresses the leading day separator while
+  // pagination can still reveal older messages — otherwise the top of a
+  // partially-loaded chat shows "Today" / "Yesterday" above a message that
+  // is NOT actually the first of that day, just the first one we've
+  // fetched. Once we reach the oldest block the leading separator pops in.
+  let moreOlderHistoryPossible = $derived(
+    readonly ? !pastReachedOldest : !chat.reachedOldest,
+  );
+  let groupingMeta = $derived(
+    computeGroupingMeta(list, { moreOlderHistoryPossible }),
+  );
 
   function timestampableMessage(msg: ChatMessage): boolean {
     // tool/thinking are continuations; they never carry their own timestamp.

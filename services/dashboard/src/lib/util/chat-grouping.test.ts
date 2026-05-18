@@ -130,6 +130,50 @@ describe("computeGroupingMeta", () => {
     expect(meta[2].isFirstInGroup).toBe(true);
   });
 
+  it("suppresses leading day separator while older history can still load", () => {
+    // Two same-day messages. With moreOlderHistoryPossible=true the first
+    // should NOT render a day separator — it isn't necessarily the first
+    // message of its local day, just the first one we've fetched. The
+    // inline timestamp (isFirstInGroup) still fires.
+    const meta = computeGroupingMeta(
+      [
+        mk({ id: "u1", role: "user", ts: T0 }),
+        mk({ id: "u2", role: "user", ts: T0 + 30 * MIN }),
+      ],
+      { moreOlderHistoryPossible: true },
+    );
+    expect(meta[0].showDaySeparator).toBe(false);
+    expect(meta[0].isFirstInGroup).toBe(true);
+    expect(meta[1].showDaySeparator).toBe(false);
+  });
+
+  it("still emits inter-message day separators while older history can load", () => {
+    // Even with moreOlderHistoryPossible=true, a day boundary BETWEEN two
+    // loaded messages is real and must still render. The cross-midnight
+    // case is what proves it.
+    const next = new Date(2026, 4, 18, 9, 0, 0, 0).getTime();
+    const meta = computeGroupingMeta(
+      [
+        mk({ id: "u1", role: "user", ts: T0 }),
+        mk({ id: "u2", role: "user", ts: next }),
+      ],
+      { moreOlderHistoryPossible: true },
+    );
+    expect(meta[0].showDaySeparator).toBe(false);
+    expect(meta[1].showDaySeparator).toBe(true);
+  });
+
+  it("emits leading day separator once oldest is reached", () => {
+    // moreOlderHistoryPossible=false (the default + the reached-oldest
+    // case): the first loaded message IS the first message ever, so the
+    // day separator above it is accurate.
+    const meta = computeGroupingMeta(
+      [mk({ id: "u1", role: "user", ts: T0 })],
+      { moreOlderHistoryPossible: false },
+    );
+    expect(meta[0].showDaySeparator).toBe(true);
+  });
+
   it("treats mail user blocks as a distinct author per fromAgent", () => {
     const meta = computeGroupingMeta([
       mk({ id: "m1", role: "user", source: "mail", fromAgent: "builder-a", ts: T0 }),
