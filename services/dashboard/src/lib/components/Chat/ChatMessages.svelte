@@ -420,13 +420,15 @@
         <span class="day-separator-label">{formatDaySeparator(msg.ts, clock.now)}</span>
       </div>
     {:else if meta?.showInactivitySeparator}
-      <div class="inactivity-separator" aria-hidden="true"></div>
+      <div class="inactivity-separator" role="separator"></div>
     {/if}
     {#if meta?.isFirstInGroup && timestampableMessage(msg)}
       <div
         class="msg-timestamp {msg.role === 'user' && msg.source !== 'mail' ? 'right' : 'left'}"
         title={formatAbsoluteTooltip(msg.ts)}>
-        <time datetime={new Date(msg.ts).toISOString()}>
+        <time
+          datetime={new Date(msg.ts).toISOString()}
+          aria-label={formatAbsoluteTooltip(msg.ts)}>
           {formatRelativeTime(msg.ts, clock.now)}
         </time>
       </div>

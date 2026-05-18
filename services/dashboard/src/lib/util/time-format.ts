@@ -35,7 +35,7 @@ function dayDelta(a: number, b: number): number {
  * Slack-style relative time:
  *   - same local day → "2:14 PM"
  *   - yesterday      → "Yesterday at 2:14 PM"
- *   - within 6 days  → "Tuesday at 2:14 PM"
+ *   - delta in 2..6  → "Tuesday at 2:14 PM"
  *   - older same yr  → "Mar 15"
  *   - older          → "Mar 15, 2024"
  */

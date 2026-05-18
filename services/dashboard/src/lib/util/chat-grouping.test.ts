@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "$lib/stores/chat.svelte";
-import { computeGroupingMeta } from "./chat-grouping";
+import { computeGroupingMeta } from "./chat-grouping.js";
 
 type Partial<T> = { [P in keyof T]?: T[P] };
 
