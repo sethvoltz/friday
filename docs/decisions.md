@@ -306,6 +306,58 @@ MCP servers. Per-app memory namespacing, soft-quarantine recall
 rankers, and `family`-tag overrides are removed from the design
 entirely, not deferred — replaced by the hard split.
 
+## ADR-022 — Builders may spawn Helpers (not other Builders)
+
+**Status:** proposed (FRI-38, 2026-05-18)
+
+Today the Builder prompt reads "Do not create new builders. Do not spawn helpers" (`packages/shared/src/prompts/agents/builder.md:8`) and the `friday-agents` MCP server is hard-gated to `callerType === "orchestrator"` (`services/daemon/src/mcp/builder.ts:84`). A Builder mid-task that needs scoped research — "what does this third-party API actually return?", "summarize this 30-file directory before I edit", "fetch and digest an upstream RFC" — has to package the question, mail the orchestrator, wait for a turn, and resume. The orchestrator then spawns the Helper anyway. The middleman adds latency, drains the orchestrator's context with sub-agent bookkeeping, and discourages Builders from asking for help they should be asking for.
+
+In Seth's framing: *"research aids to the agents making shit is super helpful."* That's the value frame. The follow-up rules below exist to keep that value without re-opening containment.
+
+**Decision.** Builders may call `agent_create` to spawn **Helpers only**. Helpers remain leaves: they cannot spawn anything. Builders still cannot spawn Builders. The orchestrator remains the only agent that can spawn Builders or Bares.
+
+**Why Helpers are the only allowed child type:**
+
+1. **Containment holds.** Helpers don't have worktrees — `services/daemon/src/api/server.ts:501` only branches on `body.type === "builder"` for `createWorkspace`; every other type starts with `workingDirectory = process.cwd()`. A Builder-spawned Helper therefore lands in the daemon's cwd, **not** in the Builder's worktree. The constitutional rule "Workspace containment for builders" is preserved by construction: the Helper has no path into the worktree, and the Builder's prompt-level "do not read, write, or modify files outside it" rule still binds the *Builder*. (Helpers have looser file access in general; if a Builder hands its worktree path to a Helper as data, the Helper could read it. That's a prompt-discipline issue, not a containment break — and it's no different from a Helper today receiving the same path from the orchestrator. We accept that surface.)
+2. **Helpers stay leaves to prevent cycles and depth runaway.** If Helpers could spawn Helpers, a buggy or hostile prompt could fan out indefinitely. A flat two-level tree under any Builder (Builder → N Helpers) is bounded by N. The orchestrator → Builder → Helper chain is fixed at depth 3.
+3. **Builders can't spawn Builders because each Builder is a worktree + branch + push-rights surface.** Letting one Builder cut another worktree turns the blast radius of a single rogue task into N rogue tasks with N branches and N PRs. The orchestrator's "user approval gate before creating Builders" (Constitution §3) exists precisely because Builders are the irreversible surface; delegating that gate to another Builder defeats it.
+
+**Cost runaway.** Each Helper consumes its own context + API spend. A Builder fanning out 20 simultaneous Helpers is a real failure mode (think: a Builder reading a large codebase and dispatching one Helper per directory). We propose:
+
+- **Default cap: 3 concurrent non-archived Helpers per Builder.** Enforced at the API handler (`POST /api/agents`) by counting `helper`-type rows whose `parentName === body.parentName` and `status !== 'archived'`. Reject with 429 + structured error code when exceeded.
+- **No depth cap needed** — Helpers can't spawn, so depth from a Builder is always exactly 1.
+- **No lifetime/total-spawned cap in v1.** A Builder spawning 50 Helpers serially over a long task is fine; what hurts is 50 *concurrent*.
+
+These caps are proposals — final values land with the implementation ticket. The mechanism (count-cap at the API handler, structured error code) is locked in.
+
+**Observability.** The dashboard sidebar (`services/dashboard/src/lib/components/Sidebar/Sidebar.svelte:102`) renders a flat list with the orchestrator pinned at top; it does **not** today render explicit `parent → child` tree edges. A Builder-spawned Helper will appear as a peer of orchestrator-spawned Helpers — distinguishable only by clicking through to its `parentName`. This is acceptable for v1 (it's the same fidelity orchestrator-spawned Helpers get today), but is called out as a follow-up: a small "parent: builder-foo" affordance on Helper rows would make Builder→Helper sub-trees scannable. Tracked as a docs/UX note, not a blocker.
+
+**Mail loop risk.** A Builder spawns a Helper; the Helper mails the Builder; the Builder mails back; etc. Mail is the existing primitive and already has the usual safety guarantees (turns are queued, the worker model rate-limits, archive halts delivery). We rely on those — no new mail-cycle guard. If we see real loops in practice, the lever is the helper-count cap (a looping Helper can't spawn another Helper to amplify the loop) plus standard archive on the offending agent.
+
+**Implementation plan (for the follow-up builder, not this PR):**
+
+1. **`builder.md` prompt.** Rewrite the line at `packages/shared/src/prompts/agents/builder.md:8` from `Do not create new builders. Do not spawn helpers.` to: `Do not create new builders. You **may** spawn Helpers via agent_create for scoped research / lookups / cross-file digests that would otherwise burn your own context. Helpers are leaves: they cannot spawn anything. Default cap: 3 concurrent helpers per builder. Pass them a worktree-relative question; do not hand them write access to your worktree.` Also revise the "Communicate via mail. Do not use the built-in `Task` tool…" paragraph at line 40 to clarify that `agent_create` (Friday MCP) is the spawn path, and update the Tools list to add `agent_create` / `agent_list` / `agent_status` / `agent_inspect`.
+
+2. **`helper.md` prompt.** Reaffirm leaf status. After the existing line 11 ("You don't open PRs and don't manage worktrees…"), add: `You also do not spawn other agents. You are a leaf in the agent tree. If your task requires sub-work, mail your parent and propose escalation.` Also update the line 19 `Do not use the built-in Task tool. If you need help, mail the orchestrator…` to read `mail your parent` (since the parent may now be a Builder).
+
+3. **MCP allowlist.** In `services/daemon/src/mcp/builder.ts`, change the `if (opts.callerType === "orchestrator")` guard around `buildAgentsServer` (line 84) to `if (opts.callerType === "orchestrator" || opts.callerType === "builder")`. The Builder gets the full `agent_*` surface — `agent_create`, `agent_list`, `agent_status`, `agent_inspect`, `agent_archive`. Yes including archive: a Builder must be able to clean up the Helpers it spawned.
+
+4. **Daemon-side guard.** In `services/daemon/src/api/server.ts` at the `POST /api/agents` handler (currently lines 488–496), add after the type-validity check: look up `body.parentName` via `registry.getAgent(...)`. If the parent's `type === "builder"`, require `body.type === "helper"` — reject with HTTP 403 and structured `{ error: "builder may only spawn helpers", code: "PARENT_TYPE_FORBIDS_CHILD" }`. Also enforce the concurrent-helpers cap: count non-archived helpers with `parentName === body.parentName`; if `>= 3`, reject with HTTP 429 + `code: "HELPER_BUDGET_EXCEEDED"`. The MCP gating is defense-in-depth; the API handler is the source of truth.
+
+5. **Tests.** Add to `services/daemon/src/agent/` (sibling to `invariants.test.ts`):
+   - Builder → Helper spawn returns 200 and registers a row with `parentName` = builder, `type` = helper, `worktreePath` = null.
+   - Builder → Builder spawn returns 403 with code `PARENT_TYPE_FORBIDS_CHILD`.
+   - Builder → Bare spawn returns 403 (same code).
+   - Helper → anything spawn: Helper has no `agent_create` tool in its MCP surface (verify by inspecting `buildMcpServers({ callerType: "helper" })` and asserting `AGENTS_SERVER_NAME` is absent). Additionally, a direct API call from a helper context (simulated by a `parentName` whose registry row has `type === "helper"`) returns 403.
+   - Concurrent-cap: after 3 non-archived helpers under one builder, the 4th returns 429 with code `HELPER_BUDGET_EXCEEDED`. Archiving one drops the count.
+   - The existing MCP-gating assertion ("builder doesn't see `agent_*`") in current tests, if present, is **updated** to "builder sees `agent_*` but only with `agent_create({type: 'helper'})` accepted" — don't silently delete the old assertion.
+
+**Open questions** (deliberately not decided here):
+
+- **Helper budget defaults.** Is `3 concurrent` the right number? Should there be a *lifetime* cap per Builder (e.g. no more than 20 helpers ever, even serially) to bound runaway long-running Builders? Should the cap be configurable per-Builder in the spawn payload (orchestrator says "this builder gets up to 5")?
+- **Auto-archival.** When a Builder archives, do its outstanding Helpers archive too (cascade), or persist? Cascade matches the worktree-cleanup model; persistence matches Constitution §1 ("preserve over delete"). Leaning cascade with the Helpers' transcripts preserved as session history.
+- **Mail injection.** The orchestrator can already *read* Builder ↔ Helper mail via the dashboard. Should it be able to *inject* into that mailbox (e.g. interrupt a runaway Builder→Helper exchange)? Today no agent can inject into another's mailbox out-of-band; the orchestrator's only lever is `agent_archive`. Leaving this open until we see whether read-only visibility is sufficient in practice.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.
