@@ -30,6 +30,15 @@ export function ensureFridayEnv(): void {
     appendFileSync(ENV_PATH, `BETTER_AUTH_SECRET=${secret}\n`);
     process.env.BETTER_AUTH_SECRET = secret;
   }
+
+  // ADR-023: dashboard mints short-lived JWTs from this secret to authenticate
+  // to zero-cache. Generated once; rotated only on explicit action by setup
+  // (not auto). 32 bytes hex matches Zero's documented format.
+  if (!process.env.ZERO_AUTH_SECRET) {
+    const secret = randomBytes(32).toString("hex");
+    appendFileSync(ENV_PATH, `ZERO_AUTH_SECRET=${secret}\n`);
+    process.env.ZERO_AUTH_SECRET = secret;
+  }
 }
 
 /**

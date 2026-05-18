@@ -13,6 +13,15 @@ export * from "./apps/manifest.js";
 export * from "./db/client.js";
 export * from "./db/migrate.js";
 export * as schema from "./db/schema.js";
+export * as schemaPg from "./db/schema.pg.js";
+export {
+  provisionPostgres,
+  probePostgresHealth,
+  dropFridayDatabaseForTest,
+  FRIDAY_PG_CONSTANTS,
+  type PgHealth,
+  type ProvisionResult,
+} from "./db/pg-provision.js";
 
 export type {
   WireEvent,

@@ -11,6 +11,7 @@ import {
   ensureFridayEnv,
   ensureSoul,
   loadConfig,
+  provisionPostgres,
   upsertEnvVar,
   writeConfig,
   getDb,
@@ -50,6 +51,42 @@ export const setupCommand = defineCommand({
     ensureFridayEnv(); // load + generate BETTER_AUTH_SECRET if needed
     runMigrations();
     ensureSoul();
+
+    // Phase 0 (ADR-023): provision the Postgres canonical store side-by-side
+    // with the still-active SQLite chain. The daemon code path keeps using
+    // SQLite until Phase 1 cuts it over; this step gets the new home ready.
+    try {
+      console.log(pc.dim("  provisioning Postgres (ADR-023)…"));
+      const result = await provisionPostgres({
+        log: (msg) => console.log(pc.dim(msg)),
+      });
+      if (result.freshInstall) {
+        console.log(
+          pc.green(
+            `  Postgres ready (fresh): ${result.appliedMigrations.length} migration(s) applied`,
+          ),
+        );
+      } else if (result.appliedMigrations.length > 0) {
+        console.log(
+          pc.green(
+            `  Postgres up to date after applying ${result.appliedMigrations.length} migration(s)`,
+          ),
+        );
+      } else {
+        console.log(pc.green("  Postgres at head"));
+      }
+    } catch (err) {
+      console.error(
+        pc.red(
+          `  Postgres provisioning failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+      console.error(
+        pc.dim(
+          "  Setup will continue with the legacy SQLite store. Re-run `friday setup` once Postgres is available.",
+        ),
+      );
+    }
 
     if (!existsSync(CONFIG_PATH)) {
       writeConfig(DEFAULT_CONFIG);

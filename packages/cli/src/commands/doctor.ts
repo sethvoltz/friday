@@ -7,10 +7,12 @@ import {
   DATA_DIR,
   DB_PATH,
   ENV_PATH,
+  FRIDAY_PG_CONSTANTS,
   LOGS_DIR,
   SOUL_PATH,
   ensureFridayEnv,
   getDb,
+  probePostgresHealth,
   schema,
 } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
@@ -91,6 +93,70 @@ export const doctorCommand = defineCommand({
       } else {
         checks.push(check("cloudflared binary", true));
       }
+    }
+
+    // Postgres (ADR-023). All sub-checks roll into one health probe.
+    try {
+      const pg = await probePostgresHealth();
+      const { FRIDAY_DB, FRIDAY_ROLE, FRIDAY_PUBLICATION } = FRIDAY_PG_CONSTANTS;
+      if (!pg.reachable) {
+        checks.push(
+          check(
+            "Postgres reachable",
+            false,
+            pg.reachableReason ?? "pg_isready failed — `brew services start postgresql@18`",
+          ),
+        );
+      } else {
+        checks.push(check("Postgres reachable", true));
+        checks.push(
+          check(
+            `Postgres role ${FRIDAY_ROLE}`,
+            pg.roleExists,
+            pg.roleExists ? undefined : "run `friday setup`",
+          ),
+        );
+        checks.push(
+          check(
+            `Postgres database ${FRIDAY_DB}`,
+            pg.databaseExists,
+            pg.databaseExists ? undefined : "run `friday setup`",
+          ),
+        );
+        checks.push(
+          check(
+            `Postgres migrations at head (${pg.migrationsApplied}/${pg.migrationsExpected})`,
+            pg.migrationsAtHead,
+            pg.migrationsAtHead
+              ? undefined
+              : "run `friday setup` to apply pending migrations",
+          ),
+        );
+        checks.push(
+          check(
+            `Postgres publication ${FRIDAY_PUBLICATION}`,
+            pg.publicationExists,
+            pg.publicationExists ? undefined : "run `friday setup`",
+          ),
+        );
+        checks.push(
+          check(
+            "ZERO_AUTH_SECRET present",
+            pg.zeroAuthSecretPresent,
+            pg.zeroAuthSecretPresent
+              ? undefined
+              : "run `friday setup` to generate the secret",
+          ),
+        );
+      }
+    } catch (err) {
+      checks.push(
+        check(
+          "Postgres health probe",
+          false,
+          err instanceof Error ? err.message : String(err),
+        ),
+      );
     }
 
     // daemon reachable

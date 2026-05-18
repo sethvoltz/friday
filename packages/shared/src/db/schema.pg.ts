@@ -515,7 +515,13 @@ export const dbMeta = pgTable("db_meta", {
 // the base tables. The generated `*_tsv` columns are populated by trigger;
 // queries do `SELECT … WHERE *_tsv @@ plainto_tsquery(?)`.
 
-export const FTS_SETUP_SQL = sql`
+/**
+ * Static SQL string applied via raw `client.query()` after the Drizzle
+ * migration creates the base tables. Drizzle's `sql` template literal would
+ * need parameterization rebuilding for multi-statement raw application; we
+ * keep this as a plain string for clarity and to avoid the round-trip.
+ */
+export const FTS_SETUP_SQL = `
   -- blocks: search across the text payload portion of content_json.
   -- content_json is jsonb; we extract a 'text' field if present, else
   -- the whole thing serialized as text.
