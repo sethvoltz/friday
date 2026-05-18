@@ -306,7 +306,7 @@ export function spawnTurn(input: SpawnTurnInput): void {
   live.set(input.agentName, w);
 
   child.on("message", (raw: unknown) => {
-    handleEvent(w, raw as WorkerEvent);
+    safeHandleEvent(w, raw);
   });
   child.on("exit", (code, signal) => {
     logger.log("info", "worker.exit", {
@@ -600,26 +600,49 @@ function clearAbortDeadline(w: LiveWorker): void {
  * still emit a final IPC message before the kernel reaps it; the error
  * and turn-complete handlers honor `forceKilled` and bail.
  */
-function forceKillStuckWorker(w: LiveWorker): void {
+function forceKillStuckWorker(
+  w: LiveWorker,
+  opts: { reason?: "abort" | "stale"; msSinceTurnStart?: number } = {},
+): void {
   if (w.forceKilled) return;
   if (!live.has(w.agentName)) return;
   w.forceKilled = true;
   w.abortDeadline = undefined;
+  const reason = opts.reason ?? "abort";
 
-  logger.log("warn", "worker.abort.force-kill", {
-    agent: w.agentName,
-    turnId: w.turnId,
-  });
+  if (reason === "stale") {
+    logger.log("warn", "worker.turn.stale-killed", {
+      agent: w.agentName,
+      turnId: w.turnId,
+      msSinceTurnStart: opts.msSinceTurnStart ?? null,
+    });
+  } else {
+    logger.log("warn", "worker.abort.force-kill", {
+      agent: w.agentName,
+      turnId: w.turnId,
+    });
+  }
 
-  insertErrorBlock(w, {
-    code: "stopped_forced",
-    headline: "Stopped — worker did not respond to abort, restarted",
-    rawMessage:
-      "Stop deadline exceeded: the worker process ignored the abort signal " +
-      "for 2s. The agent has been killed; the next message will spawn a " +
-      "fresh worker.",
-  });
-  finalizeStreamingBlocks(w, "aborted");
+  const errorPayload =
+    reason === "stale"
+      ? {
+          code: "turn_timed_out",
+          headline: "Turn timed out — exceeded 4h ceiling, worker restarted",
+          rawMessage:
+            "Stale-turn ceiling exceeded: this worker stayed on the same turn " +
+            "for more than 4 hours. The agent has been killed; the next " +
+            "message will spawn a fresh worker.",
+        }
+      : {
+          code: "stopped_forced",
+          headline: "Stopped — worker did not respond to abort, restarted",
+          rawMessage:
+            "Stop deadline exceeded: the worker process ignored the abort signal " +
+            "for 2s. The agent has been killed; the next message will spawn a " +
+            "fresh worker.",
+        };
+  insertErrorBlock(w, errorPayload);
+  finalizeStreamingBlocks(w, reason === "stale" ? "error" : "aborted");
   // Emit the in-band TurnErrorEvent so any consumers still listening for
   // it know a force-kill happened (vs. a clean abort).
   eventBus.publish({
@@ -627,8 +650,11 @@ function forceKillStuckWorker(w: LiveWorker): void {
     type: "error",
     turn_id: w.turnId,
     agent: w.agentName,
-    code: "stopped_forced",
-    message: "Stop forced — worker unresponsive",
+    code: errorPayload.code,
+    message:
+      reason === "stale"
+        ? "Turn timed out — stale-turn ceiling exceeded"
+        : "Stop forced — worker unresponsive",
     recoverable: true,
   });
   eventBus.publish({
@@ -636,13 +662,13 @@ function forceKillStuckWorker(w: LiveWorker): void {
     type: "turn_done",
     turn_id: w.turnId,
     agent: w.agentName,
-    status: "aborted",
+    status: reason === "stale" ? "error" : "aborted",
   });
   // Drop the live-turn entry now so the upcoming child.exit handler's
   // safety-net `finalizeStreamingBlocks` is a no-op (would otherwise
   // double-publish block_complete for the same blocks).
   liveTurns.dropTurn(w.turnId);
-  w.lastExitStatus = "aborted";
+  w.lastExitStatus = reason === "stale" ? "error" : "aborted";
   setWorkerStatus(w, "idle", "forceKillStuckWorker");
   registry.setStatus(w.agentName, "idle");
 
@@ -781,6 +807,26 @@ export function reapAllLiveWorkers(): void {
 
 const DEFAULT_TURN_STALL_MS = 30 * 60 * 1000; // 30 minutes
 const TURN_STALL_CHECK_MS = 60 * 1000; // 1 minute
+
+/**
+ * FRI-33: hard ceiling on how long a single turn may stay live before the
+ * daemon force-reaps the worker. The stall watchdog (`worker.turn.stalled`)
+ * already catches workers with no block-stop progress, but it can be defeated
+ * by long-running tool loops that emit block-stops periodically while the
+ * turn itself never completes. The ~12.5h `msSinceTurnStart` observed on the
+ * `path-to-prod-design` worker prior to recurring `daemon.fatal` crashes is
+ * exactly that shape: stalled forward progress, healthy IPC.
+ *
+ * Overridable via `FRIDAY_TURN_STALE_CEILING_MS` (milliseconds).
+ */
+const DEFAULT_STALE_TURN_CEILING_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+function staleTurnCeilingMs(): number {
+  const raw = process.env.FRIDAY_TURN_STALE_CEILING_MS;
+  if (!raw) return DEFAULT_STALE_TURN_CEILING_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_STALE_TURN_CEILING_MS;
+}
 
 let stallInterval: NodeJS.Timeout | undefined;
 
@@ -928,7 +974,53 @@ export function removeQueuedPrompt(
   return removed;
 }
 
+/**
+ * FRI-33 outer IPC boundary. `handleEvent` calls `eventBus.publish` from
+ * every branch and external subscribers run synchronously on that thread;
+ * any sync throw from a subscriber, a malformed payload, or a bug in a
+ * downstream handler used to escape into Node's default `uncaughtException`
+ * handler (no top-level handler is installed in `services/daemon/src/`)
+ * and end the daemon — taking every other live worker with it. Trap once
+ * at the IPC boundary so the crash class is closed regardless of which
+ * branch threw; per-event `type` is captured for attribution.
+ *
+ * Exported so the unit test can exercise the boundary directly without
+ * spawning a real child process.
+ */
+export function safeHandleEvent(w: LiveWorker, raw: unknown): void {
+  const ev = raw as WorkerEvent;
+  try {
+    handleEvent(w, ev);
+  } catch (err) {
+    logger.log("error", "worker.ipc.error", {
+      agent: w.agentName,
+      type: (ev as { type?: string })?.type ?? "unknown",
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
+  // FRI-33: stale-turn ceiling. Any inbound IPC — heartbeat or otherwise —
+  // gives us a chance to notice that the worker has been on the same turn
+  // longer than is plausible. Reap before downstream handlers run their own
+  // arithmetic on `w.turnStart` and before another hour of bills accrues.
+  // Idempotent via `forceKilled`; safe if multiple events land in the same
+  // tick.
+  //
+  // Invariant: the worker only emits `heartbeat` from inside `runQuery`'s
+  // setInterval, cleared in the finally — so no IPC fires between turns,
+  // and `w.turnStart` reflects the *current* turn. If a future change adds
+  // a between-turns heartbeat, this check would spuriously fire on the
+  // first heartbeat after a 4h idle; update both sides together.
+  if (!w.forceKilled && w.turnStart) {
+    const msSinceTurnStart = Date.now() - w.turnStart;
+    if (msSinceTurnStart > staleTurnCeilingMs()) {
+      forceKillStuckWorker(w, { reason: "stale", msSinceTurnStart });
+      return;
+    }
+  }
+
   // FRI-72 instrumentation: log lifecycle-significant IPC arrivals.
   // Heartbeats and per-block frames are skipped — too chatty and the
   // canonical block table already records that pipeline. The interesting
