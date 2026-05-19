@@ -1149,31 +1149,24 @@ function zeroServerUrl(): string {
 }
 
 /**
- * Universal Zero opt-in. Phase 3 collapses what was originally
- * `useZeroSidebar()` (Phase 2) into a single switch — all slices that
- * have landed activate together.
+ * Whether to bring up the Zero client in the current execution context.
+ *
+ * Always `true` in a browser: Phase 5 retired the SSE/REST fallback
+ * paths for every slice Zero replaces (agents, tickets, schedules,
+ * memory, mail, blocks, apps, read-cursors, client-devices, settings),
+ * so there is no longer a coherent "Zero off" mode — the rest of the
+ * dashboard expects the Zero materializations to be live. The
+ * `PUBLIC_FRIDAY_USE_ZERO` / `friday:flag:use-zero` opt-ins from
+ * Phase 2's gradual rollout are gone with the fallback paths they
+ * gated.
+ *
+ * Always `false` during SSR: Zero owns a WS connection and an in-memory
+ * cache that only make sense on the client. Server-side renders use
+ * REST data from `+page.server.ts` load functions and hydrate into
+ * Zero on the client.
  */
 export function useZero(): boolean {
-  if (!browser) return false;
-  const env = (
-    import.meta as unknown as { env?: Record<string, string | undefined> }
-  ).env;
-  if (env?.PUBLIC_FRIDAY_USE_ZERO === "1" || env?.PUBLIC_FRIDAY_USE_ZERO === "true")
-    return true;
-  // Phase 2 alias kept for backward compat with the original smoke flag.
-  if (
-    env?.PUBLIC_FRIDAY_USE_ZERO_SIDEBAR === "1" ||
-    env?.PUBLIC_FRIDAY_USE_ZERO_SIDEBAR === "true"
-  )
-    return true;
-  // localStorage override for dev — either of the two keys works.
-  try {
-    if (localStorage.getItem("friday:flag:use-zero") === "1") return true;
-    if (localStorage.getItem("friday:flag:use-zero-sidebar") === "1") return true;
-  } catch {
-    // ignore
-  }
-  return false;
+  return browser;
 }
 
 /**

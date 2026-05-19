@@ -1,11 +1,13 @@
 /**
  * @vitest-environment jsdom
  *
- * Phase 2 unit tests for the Zero sync store boundary. The real
- * `@rocicorp/zero` client opens a live WS connection and only resolves
- * in a browser context — we mock it here to pin our store's contract:
+ * Unit tests for the Zero sync store boundary. The real `@rocicorp/zero`
+ * client opens a live WS connection and only resolves in a browser
+ * context — we mock it here to pin our store's contract:
  *
- *   1. Feature flag gating: store stays dormant when the flag is off.
+ *   1. Browser/SSR gating: `useZero()` is true under `browser`, false
+ *      otherwise. Post-Phase 5 there's no flag — Zero is the only data
+ *      path the dashboard knows how to drive.
  *   2. JWT refresh path: store fetches `/api/sync/refresh` on init and
  *      passes the returned token via Zero's `auth` callback.
  *   3. Row-to-AgentInfo mapping: ZeroAgentRow snake_case → AgentInfo
@@ -252,49 +254,30 @@ async function importStore(): Promise<typeof import("./zero.svelte.js")> {
   return await import("./zero.svelte.js");
 }
 
-describe("useZero feature flag", () => {
-  it("returns false by default (no flag set)", async () => {
-    const { useZero } = await importStore();
-    expect(useZero()).toBe(false);
-  });
-
-  it("returns true when the universal localStorage opt-in is set", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
-    const { useZero } = await importStore();
-    expect(useZero()).toBe(true);
-  });
-
-  it("returns true via the legacy `friday:flag:use-zero-sidebar` alias", async () => {
-    // Phase 2 shipped under the per-slice key; Phase 3 collapses the
-    // flags but keeps the old key working so existing browser
-    // profiles continue to opt in without manual migration.
-    localStorage.setItem("friday:flag:use-zero-sidebar", "1");
+describe("useZero", () => {
+  it("returns true in a browser context (Zero is the only data path post-Phase 5)", async () => {
     const { useZero, useZeroSidebar } = await importStore();
     expect(useZero()).toBe(true);
-    // Alias still exported for backward compat.
+    // Phase 2 alias retained for callers still typing the old name.
     expect(useZeroSidebar()).toBe(true);
   });
 
-  it("rejects a non-'1' localStorage value", async () => {
-    localStorage.setItem("friday:flag:use-zero", "true");
-    const { useZero } = await importStore();
-    // The store's strict check is === "1"; "true" doesn't qualify so
-    // the feature stays off — pinning this so a future loosening of
-    // the check is deliberate.
-    expect(useZero()).toBe(false);
+  it("returns false outside a browser context (SSR has no WS / IDB)", async () => {
+    // The default test setup mocks `$app/environment` to `{ browser:
+    // true }`; flip it for this one test to assert the SSR branch.
+    vi.doMock("$app/environment", () => ({ browser: false }));
+    vi.resetModules();
+    const store = await import("./zero.svelte.js");
+    expect(store.useZero()).toBe(false);
+    // Restore the module-level mock so subsequent tests in this file
+    // continue to see `browser: true`.
+    vi.doMock("$app/environment", () => ({ browser: true }));
+    vi.resetModules();
   });
 });
 
 describe("ZeroSyncStore initialization", () => {
-  it("does NOT construct a Zero client when the flag is off", async () => {
-    await importStore();
-    // Let any microtasks settle.
-    await new Promise((r) => setTimeout(r, 10));
-    expect(instances).toHaveLength(0);
-  });
-
-  it("fetches /api/sync/refresh and constructs Zero with the device id when flag is on", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
+  it("fetches /api/sync/refresh and constructs Zero with the device id", async () => {
     await importStore();
     // Give the async init time to fetch + construct.
     await new Promise((r) => setTimeout(r, 20));
@@ -319,7 +302,6 @@ describe("ZeroSyncStore initialization", () => {
 
 describe("toAgentInfo mapping (via materialize update)", () => {
   it("converts snake_case ZeroAgentRow → camelCase AgentInfo with ISO timestamps", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     // Capture the listener so we can drive an update with a known payload.
     const listeners: Array<(data: unknown) => void> = [];
     const mockedZero = await import("@rocicorp/zero");
@@ -412,7 +394,6 @@ describe("toAgentInfo mapping (via materialize update)", () => {
 
 describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
   it("bindBlocksFor materializes a per-agent query with status filter + ordering + limit", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     expect(instances).toHaveLength(1);
@@ -445,7 +426,6 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
   });
 
   it("rebinding to a new agent tears down the previous view", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
 
@@ -470,7 +450,6 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
   });
 
   it("rebinding to the same agent is a no-op", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
 
@@ -491,7 +470,6 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
   });
 
   it("unbindBlocks clears state + tears down the view", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
 
@@ -539,7 +517,6 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
     // fires the moment SvelteKit hands over, but `#init`'s
     // `/api/sync/refresh` round-trip hasn't resolved yet. Without the
     // pending-agent recovery, the binding is silently dropped.
-    localStorage.setItem("friday:flag:use-zero", "1");
 
     // Stall the refresh fetch so init can't resolve before we call
     // bindBlocksFor — that's the race we're modeling.
@@ -575,7 +552,6 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
   });
 
   it("unbindBlocks before init clears the pending agent", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     let releaseFetch: () => void = () => {};
     const fetchPromise = new Promise<Response>((resolve) => {
       releaseFetch = () =>
@@ -605,7 +581,6 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
   });
 
   it("onBlocksUpdate fires synchronously with current snapshot on registration", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
 
@@ -622,7 +597,6 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
 
 describe("tickets binding (Phase 3.1)", () => {
   it("seeds zeroSync.tickets from the second materialize call's snapshot", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const mockedZero = await import("@rocicorp/zero");
     const origCtor = mockedZero.Zero as unknown as new (
       opts: Record<string, unknown>,
@@ -691,7 +665,6 @@ describe("tickets binding (Phase 3.1)", () => {
 
 describe("Phase 4.1: markRead mutator dispatch", () => {
   it("markRead forwards (deviceId, agentName, blockId) to zero.mutate.markRead", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     expect(instances).toHaveLength(1);
@@ -711,16 +684,20 @@ describe("Phase 4.1: markRead mutator dispatch", () => {
     expect(typeof args.ts).toBe("number");
   });
 
-  it("markRead is silently dropped if Zero hasn't initialized", async () => {
-    // No flag → no init → no mutator framework. The call MUST NOT
-    // throw — chat shells call markRead unconditionally on focus.
+  it("markRead is silently dropped before Zero has finished initializing", async () => {
+    // Block the JWT fetch so #init() never reaches the `new Zero(...)`
+    // line — chat shells call markRead unconditionally on focus and
+    // MUST NOT throw if Zero isn't ready yet.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     expect(() => zeroSync.markRead("alpha", "blk-1")).not.toThrow();
     expect(instances).toHaveLength(0);
   });
 
   it("the Zero constructor receives `mutators` from createMutators", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     await importStore();
     await new Promise((r) => setTimeout(r, 30));
     expect(instances).toHaveLength(1);
@@ -734,7 +711,6 @@ describe("Phase 4.1: markRead mutator dispatch", () => {
 
 describe("Phase 4.2: reportClientStats + forgetDevice", () => {
   it("fires reportClientStats on connect with the navigator.storage.estimate() reading", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     vi.stubGlobal("navigator", {
       ...globalThis.navigator,
       storage: {
@@ -765,7 +741,6 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
   it("fires reportClientStats even when navigator.storage.estimate is unavailable", async () => {
     // Older Safari etc. — the mutator should still fire so
     // last_seen_at advances; storage fields stay undefined.
-    localStorage.setItem("friday:flag:use-zero", "1");
     vi.stubGlobal("navigator", {
       ...globalThis.navigator,
       // No `storage` field at all.
@@ -785,7 +760,6 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
   });
 
   it("handles storage.estimate throwing (SecurityError in cross-origin iframes) without crashing", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     vi.stubGlobal("navigator", {
       ...globalThis.navigator,
       storage: {
@@ -805,7 +779,6 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
   });
 
   it("forgetDevice forwards the deviceId to zero.mutate.forgetDevice", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 40));
     expect(instances).toHaveLength(1);
@@ -818,14 +791,17 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
     expect(args.deviceId).toBe("dev-to-evict");
   });
 
-  it("forgetDevice is silent when Zero hasn't initialized", async () => {
+  it("forgetDevice is silent before Zero has finished initializing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     expect(() => zeroSync.forgetDevice("dev-x")).not.toThrow();
     expect(instances).toHaveLength(0);
   });
 
   it("updateSettings forwards the partial patch to zero.mutate.updateSettings", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     expect(instances).toHaveLength(1);
@@ -842,7 +818,11 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
     expect(typeof args.ts).toBe("number");
   });
 
-  it("updateSettings is silent when Zero hasn't initialized", async () => {
+  it("updateSettings is silent before Zero has finished initializing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     expect(() =>
       zeroSync.updateSettings({ model: "claude-opus-4-7" }),
@@ -851,7 +831,6 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
   });
 
   it("destroy() clears the reportClientStats interval", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
     vi.useFakeTimers();
     try {
       const { zeroSync } = await importStore();
@@ -874,7 +853,6 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
 
 describe("Phase 4.4: ticket mutator dispatch", () => {
   async function bootedZero() {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     return { zeroSync, z: instances[0]! };
@@ -984,7 +962,11 @@ describe("Phase 4.4: ticket mutator dispatch", () => {
     expect(typeof args.ts).toBe("number");
   });
 
-  it("all ticket mutators are silent when Zero hasn't initialized", async () => {
+  it("all ticket mutators are silent before Zero has finished initializing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     expect(() =>
       zeroSync.createTicket({ id: "FRI-1", title: "x" }),
@@ -1017,7 +999,6 @@ describe("Phase 4.4: ticket mutator dispatch", () => {
 
 describe("Phase 4.5: memory mutator dispatch", () => {
   async function bootedZero() {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     return { zeroSync, z: instances[0]! };
@@ -1075,7 +1056,11 @@ describe("Phase 4.5: memory mutator dispatch", () => {
     expect(typeof args.ts).toBe("number");
   });
 
-  it("all memory mutators are silent when Zero hasn't initialized", async () => {
+  it("all memory mutators are silent before Zero has finished initializing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     expect(() =>
       zeroSync.createMemoryEntry({
@@ -1093,7 +1078,6 @@ describe("Phase 4.5: memory mutator dispatch", () => {
 
 describe("Phase 4.6: schedule mutator dispatch", () => {
   async function bootedZero() {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     return { zeroSync, z: instances[0]! };
@@ -1152,7 +1136,11 @@ describe("Phase 4.6: schedule mutator dispatch", () => {
     expect(typeof args.ts).toBe("number");
   });
 
-  it("all schedule mutators are silent when Zero hasn't initialized", async () => {
+  it("all schedule mutators are silent before Zero has finished initializing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     expect(() =>
       zeroSync.createSchedule({ name: "x", taskPrompt: "X" }),
@@ -1164,7 +1152,6 @@ describe("Phase 4.6: schedule mutator dispatch", () => {
 
 describe("Phase 4.7: app mutator dispatch", () => {
   async function bootedZero() {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     return { zeroSync, z: instances[0]! };
@@ -1209,7 +1196,11 @@ describe("Phase 4.7: app mutator dispatch", () => {
     expect(typeof args.ts).toBe("number");
   });
 
-  it("all app mutators are silent when Zero hasn't initialized", async () => {
+  it("all app mutators are silent before Zero has finished initializing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     expect(() =>
       zeroSync.installApp({ id: "x", folderPath: "/x" }),
@@ -1221,7 +1212,6 @@ describe("Phase 4.7: app mutator dispatch", () => {
 
 describe("Phase 4.8: archiveAgent mutator dispatch", () => {
   async function bootedZero() {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     return { zeroSync, z: instances[0]! };
@@ -1250,7 +1240,11 @@ describe("Phase 4.8: archiveAgent mutator dispatch", () => {
     expect(args.reason).toBe("abandoned");
   });
 
-  it("is silent when Zero hasn't initialized", async () => {
+  it("is silent before Zero has finished initializing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     expect(() => zeroSync.archiveAgent({ name: "x" })).not.toThrow();
   });
@@ -1258,7 +1252,6 @@ describe("Phase 4.8: archiveAgent mutator dispatch", () => {
 
 describe("Phase 4.9: cancelQueued wrapper (fast-path + mutator)", () => {
   async function bootedZero() {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     return { zeroSync, z: instances[0]! };
@@ -1346,7 +1339,11 @@ describe("Phase 4.9: cancelQueued wrapper (fast-path + mutator)", () => {
     expect(z.mutate.cancelQueued).toHaveBeenCalledTimes(1);
   });
 
-  it("is silent when Zero hasn't initialized", async () => {
+  it("is silent before Zero has finished initializing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     await expect(zeroSync.cancelQueued("turn-x")).resolves.toBeNull();
   });
@@ -1354,7 +1351,6 @@ describe("Phase 4.9: cancelQueued wrapper (fast-path + mutator)", () => {
 
 describe("Phase 4.10: abortTurn wrapper (fast-path + mutator)", () => {
   async function bootedZero() {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     return { zeroSync, z: instances[0]! };
@@ -1440,7 +1436,11 @@ describe("Phase 4.10: abortTurn wrapper (fast-path + mutator)", () => {
     expect(z.mutate.abortTurn).toHaveBeenCalledTimes(1);
   });
 
-  it("is silent when Zero hasn't initialized", async () => {
+  it("is silent before Zero has finished initializing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     await expect(zeroSync.abortTurn("turn-x")).resolves.toBe(false);
   });
@@ -1448,7 +1448,6 @@ describe("Phase 4.10: abortTurn wrapper (fast-path + mutator)", () => {
 
 describe("Phase 4.11b: sendUserMessage wrapper", () => {
   async function bootedZero() {
-    localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     return { zeroSync, z: instances[0]! };
@@ -1513,7 +1512,11 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
     expect(out).toBeNull();
   });
 
-  it("returns null when Zero hasn't initialized", async () => {
+  it("returns null before Zero has finished initializing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
     const { zeroSync } = await importStore();
     await expect(
       zeroSync.sendUserMessage({ agent: "friday", text: "x" }),

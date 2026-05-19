@@ -28,8 +28,6 @@ import { loadString, saveJSON, saveString } from "./persistent";
 
 const DASHBOARD_BUMP_TYPES = new Set([
   "turn_done",
-  "agent_lifecycle",
-  "agent_status",
 ]);
 
 const HANDLED_TYPES = new Set([

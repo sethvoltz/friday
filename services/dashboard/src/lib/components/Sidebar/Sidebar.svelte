@@ -1,14 +1,13 @@
 <script lang="ts">
   import {
     chat,
-    type AgentInfo,
     type SidebarSessionSummary,
   } from "$lib/stores/chat.svelte";
   // Importing `zeroSidebar` triggers its singleton constructor — which
-  // opens the Zero WS subscription when the feature flag is on and
-  // writes `chat.agents` live. The Sidebar reads `chat.agents` as
-  // before; the data source switches behind the flag.
-  import { useZeroSidebar, zeroSidebar } from "$lib/stores/zero.svelte";
+  // opens the Zero WS subscription and writes `chat.agents` live. The
+  // Sidebar reads `chat.agents`; the import side-effect is the only
+  // reason this symbol appears in scope.
+  import { zeroSidebar } from "$lib/stores/zero.svelte";
   void zeroSidebar;
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
@@ -35,40 +34,9 @@
   // "friday" is the orchestrator's pinned name and the default for `/`.
   let activeAgent = $derived(routeAgent || "friday");
 
-  async function loadAgents() {
-    try {
-      const r = await fetch("/api/agents");
-      if (!r.ok) return;
-      chat.agents = (await r.json()) as AgentInfo[];
-    } catch {
-      // ignore
-    }
-  }
-
-  // F2-A: SSE drives the sidebar (lifecycle / status / message events
-  // update chat.agents inline), but a periodic /api/agents poll
-  // self-heals any missed event (cross-tab divergence, reconnect gap,
-  // tab hidden during a flurry). 30s default; overridable via
-  // FRIDAY_AGENTS_POLL_MS for power users with a custom build.
-  const POLL_MS = (() => {
-    const env = (
-      import.meta as unknown as { env?: Record<string, string | undefined> }
-    ).env;
-    const raw = env?.PUBLIC_FRIDAY_AGENTS_POLL_MS;
-    const n = raw ? Number(raw) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : 30_000;
-  })();
-  // Phase 2 (ADR-024): when the Zero-sidebar feature flag is on, the
-  // Zero client writes `chat.agents` live and the REST poll becomes
-  // redundant. Skip it so the two sources don't fight (Zero updates
-  // arrive within a second; REST every 30s would briefly overwrite
-  // with stale data on each tick).
-  onMount(() => {
-    if (useZeroSidebar()) return;
-    void loadAgents();
-    const id = setInterval(() => void loadAgents(), POLL_MS);
-    return () => clearInterval(id);
-  });
+  // Zero writes `chat.agents` live (ADR-024); the REST poll path that
+  // used to back this in the SSE+REST era is retired. No onMount-driven
+  // poll here.
 
   function hrefFor(name: string, type: string): string {
     return type === "orchestrator" ? "/" : `/sessions/${name}`;
