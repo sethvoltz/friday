@@ -507,6 +507,33 @@ function flushDb(): void {
   });
 }
 
+// Node 15+ defaults to terminating the process on an unhandled promise
+// rejection. The daemon owns long-lived listeners and async worker IPC
+// pipes that don't always propagate failures back through awaited
+// boundaries — a stray rejection from a child callback or LISTEN handler
+// would otherwise kill the daemon with no log at all (tmux session
+// vanishes, last log line is whatever happened before the rejection).
+//
+// Log with the rejection's stack so the underlying bug is fixable, but
+// don't exit: a single misbehaved subsystem shouldn't take the daemon
+// down. `uncaughtException` is a different beast — the runtime state is
+// unsafe to continue in, so log and exit 1.
+process.on("unhandledRejection", (reason, promise) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  logger.log("error", "daemon.unhandled-rejection", {
+    message: err.message,
+    stack: err.stack,
+    promise: String(promise),
+  });
+});
+process.on("uncaughtException", (err) => {
+  logger.log("error", "daemon.uncaught-exception", {
+    message: err.message,
+    stack: err.stack,
+  });
+  process.exit(1);
+});
+
 main().catch((err: unknown) => {
   logger.log("error", "daemon.fatal", {
     message: err instanceof Error ? err.message : String(err),

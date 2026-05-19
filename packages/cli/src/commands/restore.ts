@@ -472,8 +472,60 @@ async function restoreLegacySqliteBundle(
         pc.dim(`  ${table.padEnd(24)} ${String(rows.length).padStart(6)} rows`),
       );
     }
+    // Legacy bundles INSERT raw row values, which never touches the
+    // bigserial sequences — they stay at 1 even after restoring rows
+    // with `id=150`. The very next post-restore INSERT then hits a
+    // duplicate-key violation. (pg_dump bundles emit explicit `setval`
+    // calls, so they don't have this problem.) Catch up every sequence
+    // attached to an `id` column in the public schema to MAX(id).
+    await syncBigserialSequences(client);
   } finally {
     client.release();
+  }
+}
+
+/**
+ * Advance every `<table>_id_seq` sequence in the public schema to the
+ * current MAX(id) of its owning table. Called after the legacy_sqlite
+ * INSERT loop so post-restore inserts don't collide with restored IDs.
+ *
+ * Discovers sequences via the catalog (rather than a hard-coded list)
+ * so adding a new bigserial column to the schema doesn't silently
+ * leave that sequence un-synced after a restore.
+ */
+export async function syncBigserialSequences(client: DbClient): Promise<void> {
+  const seqRows = await client.query(
+    `SELECT s.relname AS seq_name,
+            t.relname AS table_name,
+            a.attname AS column_name
+       FROM pg_class s
+       JOIN pg_depend d ON d.objid = s.oid AND d.classid = 'pg_class'::regclass
+       JOIN pg_class t ON t.oid = d.refobjid
+       JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
+       JOIN pg_namespace n ON n.oid = s.relnamespace
+      WHERE s.relkind = 'S'
+        AND n.nspname = 'public'`,
+  );
+  // node-pg returns `{ rows: ... }` on SELECT; the structural DbClient
+  // type only declared `rowCount`. Re-narrow locally.
+  const rows = (seqRows as unknown as { rows: Array<{ seq_name: string; table_name: string; column_name: string }> }).rows;
+  let synced = 0;
+  for (const r of rows) {
+    // pg_get_serial_sequence's argument quoting is fiddly; use setval
+    // directly with computed MAX. is_called=true when MAX>0 (next call
+    // returns MAX+1); is_called=false when the table is empty (next
+    // call returns 1, leaves sequence at 1).
+    await client.query(
+      `SELECT setval(
+        '"${r.seq_name}"'::regclass,
+        COALESCE((SELECT MAX("${r.column_name}") FROM "${r.table_name}"), 0) + 1,
+        false
+      )`,
+    );
+    synced += 1;
+  }
+  if (synced > 0) {
+    console.log(pc.dim(`  synced ${synced} bigserial sequence(s)`));
   }
 }
 

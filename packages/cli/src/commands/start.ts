@@ -48,7 +48,11 @@ function tmuxSpecs(
     },
     dashboard: {
       cwd: join(repoRoot, "services", "dashboard"),
-      prodCmd: "node build/index.js",
+      // adapter-node's HTTP server reads PORT from env at startup; without
+      // it the server falls back to 3000 and the rest of the stack (vite
+      // proxies, friday status, the SvelteKit dev URL) all assume the
+      // configured `dashboardPort` (default 5173).
+      prodCmd: `PORT=${dashboardPort} node build/index.js`,
       devCmd: `exec pnpm exec vite dev --port ${dashboardPort}`,
     },
     // zero-cache is a stateless sidecar; no dev/prod distinction. It
