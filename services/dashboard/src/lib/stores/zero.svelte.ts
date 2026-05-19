@@ -21,6 +21,11 @@
 
 import { browser } from "$app/environment";
 import { Zero } from "@rocicorp/zero";
+// `MutatorResult` was renamed in Zero 1.5 — the shape is identical
+// (`{client, server}` Promise pair) but the export now lives under
+// `PromiseWithServerResult`. Alias on import to keep the existing
+// mutator-method return-type readable.
+import type { PromiseWithServerResult as MutatorResult } from "@rocicorp/zero";
 import {
   createMutators,
   schema,
@@ -30,12 +35,15 @@ import {
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
 
 /** Row shape mirrors the `agents` Zero table definition. Kept narrow:
- *  Phase 2 only reads the columns the sidebar needs. */
+ *  Phase 2 only reads the columns the sidebar needs. Phase 6's
+ *  Settings → Apps panel groups agents by `app_id`, so that column
+ *  is exposed too. */
 export interface ZeroAgentRow {
   name: string;
   type: string;
   status: string;
   session_id: string | null;
+  app_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -292,7 +300,7 @@ class ZeroSyncStore {
       // refresh endpoint puts BetterAuth's user id in both.
       //
       // `mutators` is the Phase 4.1+ write path: every entry from
-      // `createMutators()` becomes callable on `this.#zero.mutate`.
+      // `createMutators()` becomes callable on `this.#zero!.mutate`.
       // The mutator runs once optimistically on the client + once
       // canonically on the server (dashboard's `/api/mutators` push
       // handler routes the server-side execution).
@@ -373,9 +381,9 @@ class ZeroSyncStore {
     // the connection-bound `z.query.<table>` field; the alternative
     // `createBuilder(schema)` path returns unbound builders that
     // register 0 desired queries with zero-cache.
-    const query = this.#zero.query.agents.where("status", "!=", "archived");
-    const preload = this.#zero.preload(query);
-    const view = this.#zero.materialize(query);
+    const query = this.#zero!.query.agents.where("status", "!=", "archived");
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroAgentRow[];
       this.agents = rows as ZeroAgentRow[];
@@ -395,9 +403,9 @@ class ZeroSyncStore {
 
   #bindTickets(): void {
     if (!this.#zero) return;
-    const query = this.#zero.query.tickets;
-    const preload = this.#zero.preload(query);
-    const view = this.#zero.materialize(query);
+    const query = this.#zero!.query.tickets;
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroTicketRow[];
       this.tickets = rows as ZeroTicketRow[];
@@ -415,13 +423,13 @@ class ZeroSyncStore {
     // Phase 4.6: filter `deleted` tombstones server-side.
     // dashboards see the schedule disappear immediately on user
     // delete (the mutator sets status='deleted' as a soft-delete).
-    const query = this.#zero.query.schedules.where(
+    const query = this.#zero!.query.schedules.where(
       "status",
       "!=",
       "deleted",
     );
-    const preload = this.#zero.preload(query);
-    const view = this.#zero.materialize(query);
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroScheduleRow[];
       this.schedules = rows as ZeroScheduleRow[];
@@ -441,11 +449,11 @@ class ZeroSyncStore {
     // the file to trash). The dashboard list disappears the entry
     // immediately after the delete mutator fires — the daemon's
     // subsequent flip to `deleted` is invisible to the read path.
-    const query = this.#zero.query.memory_entries
+    const query = this.#zero!.query.memory_entries
       .where("status", "!=", "deleted")
       .where("status", "!=", "pending_delete");
-    const preload = this.#zero.preload(query);
-    const view = this.#zero.materialize(query);
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroMemoryEntryRow[];
       this.memory = rows as ZeroMemoryEntryRow[];
@@ -466,13 +474,13 @@ class ZeroSyncStore {
     // milliseconds. Filtering keeps the placeholder out of the
     // settings page's apps list until the daemon flips status
     // to 'installed'.
-    const query = this.#zero.query.apps.where(
+    const query = this.#zero!.query.apps.where(
       "status",
       "!=",
       "pending_install",
     );
-    const preload = this.#zero.preload(query);
-    const view = this.#zero.materialize(query);
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroAppRow[];
       this.apps = rows as ZeroAppRow[];
@@ -491,9 +499,9 @@ class ZeroSyncStore {
     // is bounded by `(device_count * agent_count)`. Per-device
     // filtering for the unread badge derivation happens client-side
     // off `this.#deviceId`.
-    const query = this.#zero.query.read_cursors;
-    const preload = this.#zero.preload(query);
-    const view = this.#zero.materialize(query);
+    const query = this.#zero!.query.read_cursors;
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroReadCursorRow[];
       this.readCursors = rows as ZeroReadCursorRow[];
@@ -511,9 +519,9 @@ class ZeroSyncStore {
     // Global query — Friday is single-user, the row set is at most
     // a handful of devices. The Settings → Devices panel reads from
     // this directly.
-    const query = this.#zero.query.client_devices;
-    const preload = this.#zero.preload(query);
-    const view = this.#zero.materialize(query);
+    const query = this.#zero!.query.client_devices;
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroClientDeviceRow[];
       this.clientDevices = rows as ZeroClientDeviceRow[];
@@ -530,9 +538,9 @@ class ZeroSyncStore {
     if (!this.#zero) return;
     // Singleton query. The migration's seed insert + `id = 'singleton'`
     // PK means the row set is guaranteed length 1.
-    const query = this.#zero.query.settings;
-    const preload = this.#zero.preload(query);
-    const view = this.#zero.materialize(query);
+    const query = this.#zero!.query.settings;
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroSettingsRow[];
       this.settings = rows as ZeroSettingsRow[];
@@ -574,7 +582,7 @@ class ZeroSyncStore {
     // Bail again — the estimate await may have racey-resolved after
     // a destroy().
     if (!this.#zero || !this.#deviceId) return;
-    void this.#zero.mutate.reportClientStats({
+    void this.#zero!.mutate.reportClientStats({
       deviceId: this.#deviceId,
       storageUsedBytes: used,
       storageQuotaBytes: quota,
@@ -630,14 +638,14 @@ class ZeroSyncStore {
     // `ts` first with `id` only as a same-ms tiebreak, so the render
     // order is unchanged — this only affects which 50 rows the
     // materialized view holds.
-    const query = this.#zero.query.blocks
+    const query = this.#zero!.query.blocks
       .where("agent_name", "=", agentName)
       .where("status", "!=", "streaming")
       .where("status", "!=", "cancel_requested")
       .orderBy("ts", "desc")
       .limit(50);
-    const preload = this.#zero.preload(query);
-    const view = this.#zero.materialize(query);
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroBlocksRow[];
       this.blocks = rows as ZeroBlocksRow[];
@@ -701,7 +709,7 @@ class ZeroSyncStore {
    */
   markRead(agentName: string, blockId: string): void {
     if (!this.#zero || !this.#deviceId) return;
-    void this.#zero.mutate.markRead({
+    void this.#zero!.mutate.markRead({
       deviceId: this.#deviceId,
       agentName,
       lastSeenBlockId: blockId,
@@ -719,7 +727,7 @@ class ZeroSyncStore {
    */
   forgetDevice(deviceId: string): void {
     if (!this.#zero) return;
-    void this.#zero.mutate.forgetDevice({ deviceId });
+    void this.#zero!.mutate.forgetDevice({ deviceId });
   }
 
   /**
@@ -737,7 +745,7 @@ class ZeroSyncStore {
     watchdogRefork?: boolean;
   }): void {
     if (!this.#zero) return;
-    void this.#zero.mutate.updateSettings({
+    void this.#zero!.mutate.updateSettings({
       ...args,
       ts: Date.now(),
     });
@@ -763,9 +771,9 @@ class ZeroSyncStore {
     kind?: "task" | "epic" | "bug" | "chore";
     assignee?: string;
     meta?: Record<string, unknown>;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.createTicket({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.createTicket({ ...args, ts: Date.now() });
   }
   updateTicket(args: {
     id: string;
@@ -775,26 +783,26 @@ class ZeroSyncStore {
     kind?: "task" | "epic" | "bug" | "chore";
     assignee?: string | null;
     meta?: Record<string, unknown> | null;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.updateTicket({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.updateTicket({ ...args, ts: Date.now() });
   }
   addTicketComment(args: {
     id: string;
     ticketId: string;
     author: string;
     body: string;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.addTicketComment({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.addTicketComment({ ...args, ts: Date.now() });
   }
   addTicketRelation(args: {
     parentId: string;
     childId: string;
     kind: "depends_on" | "child_of" | "blocks" | "relates_to";
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.addTicketRelation(args);
+    return this.#zero!.mutate.addTicketRelation(args);
   }
   linkTicketExternal(args: {
     ticketId: string;
@@ -802,9 +810,9 @@ class ZeroSyncStore {
     externalId: string;
     url?: string;
     meta?: Record<string, unknown>;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.linkTicketExternal({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.linkTicketExternal({ ...args, ts: Date.now() });
   }
 
   /**
@@ -823,24 +831,24 @@ class ZeroSyncStore {
     content: string;
     tags: string[];
     createdBy: string;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.createMemoryEntry({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.createMemoryEntry({ ...args, ts: Date.now() });
   }
   updateMemoryEntry(args: {
     id: string;
     title?: string;
     content?: string;
     tags?: string[];
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.updateMemoryEntry({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.updateMemoryEntry({ ...args, ts: Date.now() });
   }
   deleteMemoryEntry(args: {
     id: string;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.deleteMemoryEntry({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.deleteMemoryEntry({ ...args, ts: Date.now() });
   }
 
   /**
@@ -854,9 +862,9 @@ class ZeroSyncStore {
     runAt?: string;
     taskPrompt: string;
     paused?: boolean;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.createSchedule({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.createSchedule({ ...args, ts: Date.now() });
   }
   updateSchedule(args: {
     name: string;
@@ -864,15 +872,15 @@ class ZeroSyncStore {
     runAt?: string | null;
     taskPrompt?: string;
     paused?: boolean;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.updateSchedule({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.updateSchedule({ ...args, ts: Date.now() });
   }
   deleteSchedule(args: {
     name: string;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.deleteSchedule({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.deleteSchedule({ ...args, ts: Date.now() });
   }
 
   /**
@@ -890,21 +898,21 @@ class ZeroSyncStore {
   installApp(args: {
     id: string;
     folderPath: string;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.installApp({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.installApp({ ...args, ts: Date.now() });
   }
   uninstallApp(args: {
     id: string;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.uninstallApp({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.uninstallApp({ ...args, ts: Date.now() });
   }
   reloadApp(args: {
     id: string;
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.reloadApp({ ...args, ts: Date.now() });
+    return this.#zero!.mutate.reloadApp({ ...args, ts: Date.now() });
   }
 
   /**
@@ -921,9 +929,9 @@ class ZeroSyncStore {
   archiveAgent(args: {
     name: string;
     reason?: "completed" | "abandoned" | "failed" | "refork";
-  }): import("@rocicorp/zero").MutatorResult | undefined {
+  }): MutatorResult | undefined {
     if (!this.#zero) return;
-    return this.#zero.mutate.archiveAgent({
+    return this.#zero!.mutate.archiveAgent({
       name: args.name,
       reason: args.reason ?? "abandoned",
       ts: Date.now(),
@@ -987,7 +995,7 @@ class ZeroSyncStore {
         : `blk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const turnId = `t_${blockId}`;
     try {
-      await this.#zero.mutate.sendUserMessage({
+      await this.#zero!.mutate.sendUserMessage({
         id: blockId,
         turnId,
         agentName: args.agent,
@@ -1053,7 +1061,7 @@ class ZeroSyncStore {
     }
 
     try {
-      await this.#zero.mutate.abortTurn({ id: row.id, ts: Date.now() })
+      await this.#zero!.mutate.abortTurn({ id: row.id, ts: Date.now() })
         .server;
     } catch {
       // Server-side mutator failure (e.g. row has moved on to
@@ -1102,7 +1110,7 @@ class ZeroSyncStore {
     }
 
     try {
-      await this.#zero.mutate.cancelQueued({ id: row.id, ts: Date.now() })
+      await this.#zero!.mutate.cancelQueued({ id: row.id, ts: Date.now() })
         .server;
     } catch {
       // Server-side mutator failure (e.g. row already DELETEd by the

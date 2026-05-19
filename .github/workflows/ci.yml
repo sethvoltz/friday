@@ -15,6 +15,30 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
 
+    # Phase 1+ moved Friday's canonical persistence from SQLite to
+    # Postgres (ADR-023). Tests in @friday/daemon, @friday/cli, and
+    # @friday/shared use `createTestDb()` from `@friday/shared`'s
+    # `test-pg.ts` to spin up a scratch DB per file. That helper calls
+    # `pg_isready` and refuses to start without a reachable Postgres.
+    # Service container exposes `postgres:18` on the standard port; the
+    # helper builds its admin URL as `postgresql://${USER}@localhost:5432/postgres`
+    # so we set POSTGRES_USER to `runner` (GHA's default user) and use
+    # trust auth (no password) to match the local peer-auth setup.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: runner
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     strategy:
       matrix:
         node-version: [22]
@@ -28,6 +52,13 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
+
+      # The Postgres service container is reachable on TCP but the
+      # `pg_isready` binary that `test-pg.ts:assertPgReady()` shells
+      # out to lives on the runner host, not the container. Install
+      # the lightweight client-only package so the assertion finds it.
+      - name: Install postgres client (for pg_isready)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

@@ -20,7 +20,6 @@ import http from "node:http";
 import net from "node:net";
 // vitest evaluates .test.ts under vite, which can import the sibling
 // `.mjs` server-entry from the package root via a relative path.
-// @ts-expect-error: .mjs has no .d.ts; this module exports plain JS.
 import { createZeroUpgradeHandler, PROXY_PREFIX } from "../../../server-entry-proxy.mjs";
 
 interface Harness {
@@ -48,7 +47,12 @@ async function buildHarness(): Promise<Harness> {
   const upstreamServer = net.createServer((socket) => {
     upstreamSockets.push(socket);
     let receivedFirst = false;
-    socket.on("data", (chunk) => {
+    socket.on("data", (raw) => {
+      // socket.on("data") declares `Buffer | string`; the socket
+      // never has setEncoding called so it's always a Buffer in
+      // practice, but narrow explicitly so the `subarray` and
+      // `Buffer[]` push below typecheck.
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
       if (!receivedFirst) {
         upstreamFirstChunks.push(chunk);
         receivedFirst = true;

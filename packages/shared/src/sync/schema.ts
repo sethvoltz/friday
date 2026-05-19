@@ -366,10 +366,16 @@ const mail = table("mail")
 
 // Explicit annotation: `createSchema`'s inferred return type references a
 // private path inside @rocicorp/zero's `out/zero-types/src/schema`, which
-// TS rejects with TS2742 ("not portable"). Annotating with the exported
-// `Schema` (renamed to `ZeroSchema` at import) keeps consumers' .d.ts
-// emit clean.
-export const schema: ZeroSchema = createSchema({
+// TS rejects with TS2742 ("not portable"). Annotating keeps consumers'
+// .d.ts emit clean. The intersection with `{ enableLegacyQueries: true }`
+// preserves that flag as a LITERAL — without it, `ZeroSchema`'s widening
+// to `boolean` makes `ConditionalSchemaQuery<S>` resolve to `undefined`,
+// and every `this.#zero.query.<table>` site downstream fails with
+// "Object is possibly 'undefined'" at type-check time. The flag is
+// load-bearing at runtime (Phase 3 entrance gate); pinning it in the
+// type matches the runtime contract.
+export const schema: ZeroSchema & { readonly enableLegacyQueries: true } =
+  createSchema({
   tables: [
     agents,
     tickets,

@@ -1291,11 +1291,16 @@ describe("Phase 4.9: cancelQueued wrapper (fast-path + mutator)", () => {
   }
 
   function stubFastPath(text: string, ok = true) {
-    const spy = vi.fn(async () =>
-      new Response(JSON.stringify({ ok, text }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
+    // Type the inner fn with fetch's signature so vitest's mock-call
+    // tuple narrows to `[RequestInfo | URL, RequestInit?]` — without
+    // it `.mock.calls[0]` is `[]` and tests indexing `[0]`/`[1]` to
+    // assert the URL + body fail to typecheck.
+    const spy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify({ ok, text }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
     );
     vi.stubGlobal("fetch", spy);
     return spy;
@@ -1397,11 +1402,15 @@ describe("Phase 4.10: abortTurn wrapper (fast-path + mutator)", () => {
   it("POSTs the daemon fast-path with the turn_id AND dispatches the mutator with the bigserial id", async () => {
     const { zeroSync, z } = await bootedZero();
     seedUserBlock(zeroSync as never);
-    const fetchSpy = vi.fn(async () =>
-      new Response(JSON.stringify({ ok: true, aborted: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
+    // Annotate args so the mock-call tuple narrows to `[input, init?]`
+    // — bare `vi.fn(async () => ...)` makes `mock.calls[0]` an empty
+    // tuple and the `c[0]` / `[1]` accesses below fail to typecheck.
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify({ ok: true, aborted: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
     );
     vi.stubGlobal("fetch", fetchSpy);
 

@@ -533,7 +533,10 @@ describe("jumpTo (/jump <date|term>)", () => {
   });
 
   function makeBlock(overrides: Partial<{
-    id: number;
+    // Phase 4.11 flipped `blocks.id` from bigserial to text(UUID).
+    // Tests still pass numeric-shaped strings ("10", "11", …) so the
+    // legacy fixtures keep working; accept either and coerce.
+    id: string | number;
     blockId: string;
     turnId: string;
     role: "user" | "assistant";
@@ -542,7 +545,9 @@ describe("jumpTo (/jump <date|term>)", () => {
     ts: number;
     status: string;
   }> = {}) {
-    const id = overrides.id ?? 1;
+    const rawId = overrides.id ?? 1;
+    const id = String(rawId);
+    const idNum = typeof rawId === "number" ? rawId : Number(rawId);
     return {
       id,
       blockId: overrides.blockId ?? `blk-${id}`,
@@ -556,8 +561,8 @@ describe("jumpTo (/jump <date|term>)", () => {
       source: null,
       contentJson: JSON.stringify({ text: overrides.text ?? `body-${id}` }),
       status: overrides.status ?? "complete",
-      ts: overrides.ts ?? id * 100,
-      lastEventSeq: id,
+      ts: overrides.ts ?? idNum * 100,
+      lastEventSeq: idNum,
     };
   }
 
@@ -1318,6 +1323,9 @@ describe("unread badge gating (PR C)", () => {
     chat.agents = [
       { name: "ghost-builder", type: "builder", status: "archived" },
     ];
+    // Phase 5b retired `agent_status` from WireEvent; cast through
+    // `unknown` to feed the retired shape into applyEvent. The whole
+    // point of this test is to assert that applyEvent ignores it.
     chat.applyEvent({
       v: 1,
       type: "agent_status",
@@ -1325,7 +1333,7 @@ describe("unread badge gating (PR C)", () => {
       status: "working",
       since: 1,
       seq: 1,
-    } as Parameters<typeof chat.applyEvent>[0]);
+    } as unknown as Parameters<typeof chat.applyEvent>[0]);
     expect(
       chat.agents.find((a) => a.name === "ghost-builder")?.status,
     ).toBe("archived");
@@ -1337,6 +1345,8 @@ describe("unread badge gating (PR C)", () => {
     chat.agents = [
       { name: "ghost-builder", type: "builder", status: "archived" },
     ];
+    // Phase 5b retired `agent_lifecycle` from WireEvent; cast through
+    // `unknown` to feed the retired shape into applyEvent.
     chat.applyEvent({
       v: 1,
       type: "agent_lifecycle",
@@ -1344,7 +1354,7 @@ describe("unread badge gating (PR C)", () => {
       agentType: "builder",
       event: "complete",
       seq: 2,
-    } as Parameters<typeof chat.applyEvent>[0]);
+    } as unknown as Parameters<typeof chat.applyEvent>[0]);
     expect(
       chat.agents.find((a) => a.name === "ghost-builder")?.status,
     ).toBe("archived");
@@ -3451,7 +3461,9 @@ describe("FRI-84: tool-call input/output rendering", () => {
 describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
   function makeZeroBlocksRow(
     overrides: Partial<{
-      id: number;
+      // Phase 4.11: `blocks.id` is text (UUID) in PG and Zero; fixtures
+      // use numeric-shaped strings ("1", "2", …) for readability.
+      id: string;
       block_id: string;
       turn_id: string;
       agent_name: string;
@@ -4019,7 +4031,9 @@ describe("Phase 3.7: zeroBlockRowToBlockRow / dropSupersededNoResponseSafetyNet"
 describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
   function makeZeroRow(
     overrides: Partial<{
-      id: number;
+      // Phase 4.11: `blocks.id` is text(UUID) in PG/Zero; fixtures
+      // use short numeric-shaped strings ("1", "2", …) for readability.
+      id: string;
       block_id: string;
       turn_id: string;
       agent_name: string;

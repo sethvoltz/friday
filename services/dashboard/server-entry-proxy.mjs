@@ -34,11 +34,17 @@ export const PROXY_PREFIX = "/zero";
  * `${PROXY_PREFIX}/*` upgrades to the given upstream and refuses the
  * rest with a clean 400.
  *
- * @param {{upstreamHost: string, upstreamPort: number, debug?: boolean}} opts
+ * @param {{
+ *   upstreamHost: string,
+ *   upstreamPort: number,
+ *   debug?: boolean,
+ *   log?: (event: string, payload: Record<string, unknown>) => void,
+ * }} opts
  * @returns {(req: import("node:http").IncomingMessage, socket: import("node:net").Socket, head: Buffer) => void}
  */
 export function createZeroUpgradeHandler(opts) {
   const { upstreamHost, upstreamPort, debug = false, log } = opts;
+  /** @type {(event: string, payload: Record<string, unknown>) => void} */
   const logEvent = log ?? (() => {});
   return function onUpgrade(req, clientSocket, head) {
     const url = req.url ?? "";
@@ -78,6 +84,7 @@ export function createZeroUpgradeHandler(opts) {
     const upstream = net.connect(upstreamPort, upstreamHost);
 
     let torndown = false;
+    /** @type {(where: string, err?: Error) => void} */
     const teardown = (where, err) => {
       if (torndown) return;
       torndown = true;
@@ -131,7 +138,13 @@ export function createZeroUpgradeHandler(opts) {
       logEvent("zero-proxy.upstream.error", {
         url,
         message: err.message,
-        code: err.code ?? null,
+        // `Error` doesn't carry `code` in the standard type, but
+        // node's `net` errors are augmented with one
+        // (`ECONNREFUSED`, `ETIMEDOUT`, …). Read through `unknown`
+        // to satisfy strict mode without losing the value.
+        code: /** @type {{code?: string}} */ (
+          /** @type {unknown} */ (err)
+        ).code ?? null,
       });
       teardown("upstream", err);
     });
