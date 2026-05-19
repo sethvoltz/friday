@@ -1180,23 +1180,36 @@ export const zeroSync = new ZeroSyncStore();
 // Phase 3.7: wire the chat store's per-agent blocks integration. Chat
 // can't import this module directly (zero.svelte.ts already imports
 // chat.svelte.ts), so we register the binding + listener here at module
-// init. Skipped when Zero is disabled — the chat store's REST path then
-// owns the read flow as it did pre-Phase-3.
-if (browser && useZero()) {
-  chat.setBlocksBinder((agent: string | null) => {
-    if (agent) zeroSync.bindBlocksFor(agent);
-    else zeroSync.unbindBlocks();
+// init.
+//
+// The wiring is deferred via `queueMicrotask` because Rollup may chunk
+// the two stores so that this module-top-level block runs BEFORE
+// `chat.svelte.ts`'s `export const chat = new ChatState()` assignment
+// has executed (the `var c_ = new class …` declaration ends up after
+// the use site in the merged chunk, leaving `chat` hoisted as
+// `undefined`). Under the previous Phase 2 feature-flag default of
+// `useZero() === false` the IF never fired and this latent ordering
+// bug stayed hidden; collapsing the flag to "always on in browser"
+// exposed it as a `TypeError: Cannot read properties of undefined
+// (reading 'setBlocksBinder')` on every cold page load. A microtask
+// boundary lets module evaluation finish first.
+if (browser) {
+  queueMicrotask(() => {
+    chat.setBlocksBinder((agent: string | null) => {
+      if (agent) zeroSync.bindBlocksFor(agent);
+      else zeroSync.unbindBlocks();
+    });
+    zeroSync.onBlocksUpdate((rows) => {
+      const agent = zeroSync.blocksAgent;
+      if (!agent) return;
+      chat.applyZeroBlocks(rows, agent);
+    });
+    // Phase 4.1: register the markRead callback. Chat calls this from
+    // `applyZeroBlocks` after each per-agent snapshot to advance the
+    // read cursor to the newest block. Same circular-dep avoidance
+    // pattern as the binder: chat doesn't import zero.
+    chat.setMarkReadFn((agent, blockId) => zeroSync.markRead(agent, blockId));
   });
-  zeroSync.onBlocksUpdate((rows) => {
-    const agent = zeroSync.blocksAgent;
-    if (!agent) return;
-    chat.applyZeroBlocks(rows, agent);
-  });
-  // Phase 4.1: register the markRead callback. Chat calls this from
-  // `applyZeroBlocks` after each per-agent snapshot to advance the
-  // read cursor to the newest block. Same circular-dep avoidance
-  // pattern as the binder: chat doesn't import zero.
-  chat.setMarkReadFn((agent, blockId) => zeroSync.markRead(agent, blockId));
 }
 
 // Dev probe: expose the singleton on `window` so devtools and Playwright

@@ -119,6 +119,17 @@ export const handle: Handle = async ({ event, resolve }) => {
     [...LOOPBACK_ONLY_PATHS].some((p) => event.url.pathname.startsWith(p)) &&
     isLoopbackOrigin(event);
   if (!event.locals.user && !isPublic && !isLoopbackOnly) {
+    // API paths return 401 JSON; HTML routes 302 → /login. Fetch
+    // follows 302s by default, so a 302 on /api/* would land the
+    // browser-side caller on the /login HTML page and the next
+    // `await response.json()` throws `Unexpected token '<'`. Return
+    // a structured 401 instead so the caller can branch on `r.ok`.
+    if (event.url.pathname.startsWith("/api/")) {
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    }
     throw redirect(302, "/login");
   }
 
