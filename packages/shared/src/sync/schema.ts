@@ -164,13 +164,40 @@ const apps = table("apps")
   })
   .primaryKey("id");
 
+/* ---------------- mail (Phase 3.6) ---------------- */
+// Mail items don't have a dedicated dashboard surface — they render
+// inline in the chat scroller as user-role blocks with
+// `source = "mail"` (Phase 3.7 covers blocks). Phase 3.6 lands the
+// table in the Zero schema so the Phase 5 SSE-event retirement
+// (`mail_delivered` → reactive unread badge derived from `delivery`)
+// + the Phase 6 multi-device inbox surface have something to bind to
+// without a follow-on schema change.
+
+const mail = table("mail")
+  .columns({
+    id: number(),
+    from_agent: string(),
+    to_agent: string(),
+    type: string<"message" | "notification" | "task">(),
+    delivery: string<"pending" | "delivered" | "read" | "closed">(),
+    subject: string().optional(),
+    thread_id: string().optional(),
+    body: string(),
+    meta_json: json().optional(),
+    ts: number(),
+    read_at: number().optional(),
+    closed_at: number().optional(),
+    priority: string<"normal" | "critical">(),
+  })
+  .primaryKey("id");
+
 // Explicit annotation: `createSchema`'s inferred return type references a
 // private path inside @rocicorp/zero's `out/zero-types/src/schema`, which
 // TS rejects with TS2742 ("not portable"). Annotating with the exported
 // `Schema` (renamed to `ZeroSchema` at import) keeps consumers' .d.ts
 // emit clean.
 export const schema: ZeroSchema = createSchema({
-  tables: [agents, tickets, schedules, memoryEntries, apps],
+  tables: [agents, tickets, schedules, memoryEntries, apps, mail],
   // Phase 3: enable the deprecated `z.query.<table>` field. The
   // createBuilder() path returns query objects that aren't bound to a
   // Zero connection, so `zero.materialize(builder.agents)` registers
@@ -200,4 +227,5 @@ export const permissions = definePermissions(schema, () => ({
   schedules: { row: { select: ANYONE_CAN } },
   memory_entries: { row: { select: ANYONE_CAN } },
   apps: { row: { select: ANYONE_CAN } },
+  mail: { row: { select: ANYONE_CAN } },
 }));
