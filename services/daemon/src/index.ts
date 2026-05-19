@@ -58,6 +58,10 @@ import {
   startAbortListener,
 } from "./agent/abort-listener.js";
 import {
+  runDispatchBootScan,
+  startDispatchListener,
+} from "./agent/dispatch-listener.js";
+import {
   composeSystemPrompt,
   readPromptStack,
 } from "@friday/shared";
@@ -152,6 +156,15 @@ async function main(): Promise<void> {
   // isn't accidentally re-dispatched on restart.
   await runAbortBootScan();
   const abortListener = await startAbortListener();
+
+  // Phase 4.11b: open the long-lived LISTEN connection for
+  // `friday_new_pending_block`. Boot-recovery scan dispatches any
+  // user-chat blocks that landed at status='pending' while the
+  // daemon was down (the mutator commits durably even when the
+  // daemon is offline). Must run BEFORE `recoverQueuedTurns()` so
+  // the dispatch path isn't doubled up.
+  await runDispatchBootScan();
+  const dispatchListener = await startDispatchListener();
 
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
@@ -251,6 +264,9 @@ async function main(): Promise<void> {
       /* shutdown best-effort; the process is about to exit */
     });
     void abortListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void dispatchListener.stop().catch(() => {
       /* shutdown best-effort; the process is about to exit */
     });
     clearHealth();

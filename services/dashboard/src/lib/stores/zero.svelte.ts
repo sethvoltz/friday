@@ -925,6 +925,49 @@ class ZeroSyncStore {
    * `null` if no matching queued bubble was found.
    */
   /**
+   * Phase 4.11b: dispatch a new user-chat turn through the
+   * `sendUserMessage` mutator. The dashboard pre-generates a UUID
+   * (used for both the row PK and the application-level block_id)
+   * and a turn id (`t_<UUID>`); the optimistic client write lands
+   * the bubble immediately; the canonical server write fires the
+   * Postgres trigger; the daemon's LISTEN handler resolves the
+   * agent, composes prompt, detects skills, wraps with recall, and
+   * dispatches the turn.
+   *
+   * Returns `{ blockId, turnId }` on success, or `null` if Zero
+   * hasn't initialized yet (caller should retry on next flush).
+   */
+  async sendUserMessage(args: {
+    agent: string;
+    text: string;
+    attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+  }): Promise<{ blockId: string; turnId: string } | null> {
+    if (!this.#zero) return null;
+    const blockId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `blk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const turnId = `t_${blockId}`;
+    try {
+      await this.#zero.mutate.sendUserMessage({
+        id: blockId,
+        turnId,
+        agentName: args.agent,
+        text: args.text,
+        attachments: args.attachments,
+        ts: Date.now(),
+      }).server;
+    } catch (err) {
+      // Server-side error (most often a PK collision on retry —
+      // shouldn't happen with fresh UUIDs but defense-in-depth).
+      // Bubble up as null so the send-queue retry path can fire.
+      void err;
+      return null;
+    }
+    return { blockId, turnId };
+  }
+
+  /**
    * Phase 4.10: abort an in-flight turn. Three-step flow:
    *
    *   1. Look up the user block for this turn in the local Zero

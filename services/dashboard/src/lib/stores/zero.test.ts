@@ -155,6 +155,10 @@ vi.mock("@rocicorp/zero", () => {
         client: Promise.resolve({ type: "success" }),
         server: Promise.resolve({ type: "success" }),
       })),
+      sendUserMessage: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
     };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
@@ -1439,5 +1443,80 @@ describe("Phase 4.10: abortTurn wrapper (fast-path + mutator)", () => {
   it("is silent when Zero hasn't initialized", async () => {
     const { zeroSync } = await importStore();
     await expect(zeroSync.abortTurn("turn-x")).resolves.toBe(false);
+  });
+});
+
+describe("Phase 4.11b: sendUserMessage wrapper", () => {
+  async function bootedZero() {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  it("generates a UUID + t_-prefixed turn_id and dispatches the mutator with the full args", async () => {
+    const { zeroSync, z } = await bootedZero();
+    const out = await zeroSync.sendUserMessage({
+      agent: "friday",
+      text: "hello agent",
+    });
+    expect(out).not.toBeNull();
+    expect(out!.blockId.length).toBeGreaterThan(0);
+    expect(out!.turnId).toBe(`t_${out!.blockId}`);
+
+    expect(z.mutate.sendUserMessage).toHaveBeenCalledTimes(1);
+    const args = z.mutate.sendUserMessage.mock.calls[0][0] as {
+      id: string;
+      turnId: string;
+      agentName: string;
+      text: string;
+      attachments?: unknown;
+      ts: number;
+    };
+    expect(args.id).toBe(out!.blockId);
+    expect(args.turnId).toBe(out!.turnId);
+    expect(args.agentName).toBe("friday");
+    expect(args.text).toBe("hello agent");
+    expect(typeof args.ts).toBe("number");
+    expect(args.attachments).toBeUndefined();
+  });
+
+  it("forwards attachments verbatim to the mutator", async () => {
+    const { zeroSync, z } = await bootedZero();
+    const attachments = [
+      { sha256: "a".repeat(64), filename: "shot.png", mime: "image/png" },
+    ];
+    await zeroSync.sendUserMessage({
+      agent: "friday",
+      text: "see this",
+      attachments,
+    });
+    const args = z.mutate.sendUserMessage.mock.calls[0][0] as {
+      attachments?: Array<{ sha256: string }>;
+    };
+    expect(args.attachments).toEqual(attachments);
+  });
+
+  it("returns null when the server-side mutator throws (PK collision / Zero error)", async () => {
+    // Server-side mutator failure must surface as null so the
+    // send-queue retries on the next flush rather than treating
+    // the dispatch as successful.
+    const { zeroSync, z } = await bootedZero();
+    z.mutate.sendUserMessage = vi.fn(() => ({
+      client: Promise.resolve({ type: "success" }),
+      server: Promise.reject(new Error("pk_collision")),
+    }));
+    const out = await zeroSync.sendUserMessage({
+      agent: "friday",
+      text: "boom",
+    });
+    expect(out).toBeNull();
+  });
+
+  it("returns null when Zero hasn't initialized", async () => {
+    const { zeroSync } = await importStore();
+    await expect(
+      zeroSync.sendUserMessage({ agent: "friday", text: "x" }),
+    ).resolves.toBeNull();
   });
 });

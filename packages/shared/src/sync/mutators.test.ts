@@ -33,6 +33,7 @@ import {
   type MarkReadArgs,
   type ReloadAppArgs,
   type ReportClientStatsArgs,
+  type SendUserMessageArgs,
   type UninstallAppArgs,
   type UpdateMemoryEntryArgs,
   type UpdateScheduleArgs,
@@ -187,8 +188,27 @@ interface MockAgentUpdateCall {
 }
 
 interface MockBlocksUpdateCall {
-  id: number;
+  id: string;
   status: string;
+}
+
+interface MockBlocksInsertCall {
+  id: string;
+  block_id: string;
+  turn_id: string;
+  agent_name: string;
+  session_id: string;
+  message_id?: string;
+  block_index: number;
+  role: string;
+  kind: string;
+  source: string | null;
+  content_json: Record<string, unknown>;
+  status: string;
+  streaming: boolean;
+  origin_mutation_id?: string;
+  ts: number;
+  last_event_seq: number;
 }
 
 function makeMockTx(): {
@@ -210,6 +230,7 @@ function makeMockTx(): {
   appUpdates: MockAppUpdateCall[];
   agentUpdates: MockAgentUpdateCall[];
   blocksUpdates: MockBlocksUpdateCall[];
+  blocksInserts: MockBlocksInsertCall[];
 } {
   const upsertCalls: MockUpsertCall[] = [];
   const clientDeviceUpdates: MockClientDeviceUpdateCall[] = [];
@@ -285,6 +306,10 @@ function makeMockTx(): {
   const blocksUpdate = vi.fn(async (row: MockBlocksUpdateCall) => {
     blocksUpdates.push(row);
   });
+  const blocksInserts: MockBlocksInsertCall[] = [];
+  const blocksInsert = vi.fn(async (row: MockBlocksInsertCall) => {
+    blocksInserts.push(row);
+  });
   // The mutators touch `tx.mutate.<table>.<op>`. Rest of Transaction
   // surface left undefined — we cast to the parameter type only to
   // satisfy TypeScript.
@@ -301,7 +326,7 @@ function makeMockTx(): {
       schedules: { insert: scheduleInsert, update: scheduleUpdate },
       apps: { insert: appInsert, update: appUpdate },
       agents: { update: agentUpdate },
-      blocks: { update: blocksUpdate },
+      blocks: { update: blocksUpdate, insert: blocksInsert },
     },
   } as unknown as Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   return {
@@ -323,6 +348,7 @@ function makeMockTx(): {
     appUpdates,
     agentUpdates,
     blocksUpdates,
+    blocksInserts,
   };
 }
 
@@ -1322,11 +1348,11 @@ describe("cancelQueued", () => {
     const mutators = createMutators();
     const { tx, blocksUpdates } = makeMockTx();
     const args: CancelQueuedArgs = {
-      id: 4242,
+      id: "blk-cancel-4242",
       ts: 1_700_000_000_000,
     };
     await mutators.cancelQueued(tx, args);
-    expect(blocksUpdates).toEqual([{ id: 4242, status: "cancel_requested" }]);
+    expect(blocksUpdates).toEqual([{ id: "blk-cancel-4242", status: "cancel_requested" }]);
   });
 
   it("is idempotent — re-running with same args produces identical writes", async () => {
@@ -1373,9 +1399,9 @@ describe("abortTurn", () => {
   it("UPDATEs blocks.status to 'abort_requested' keyed by bigserial id", async () => {
     const mutators = createMutators();
     const { tx, blocksUpdates } = makeMockTx();
-    const args: AbortTurnArgs = { id: 7777, ts: 1_700_000_000_000 };
+    const args: AbortTurnArgs = { id: "blk-abort-7777", ts: 1_700_000_000_000 };
     await mutators.abortTurn(tx, args);
-    expect(blocksUpdates).toEqual([{ id: 7777, status: "abort_requested" }]);
+    expect(blocksUpdates).toEqual([{ id: "blk-abort-7777", status: "abort_requested" }]);
   });
 
   it("is idempotent — re-running with same args produces identical writes", async () => {
@@ -1403,8 +1429,136 @@ describe("abortTurn", () => {
   it("does not write args.ts — the user block's ts is daemon-owned", async () => {
     const mutators = createMutators();
     const { tx, blocksUpdates } = makeMockTx();
-    await mutators.abortTurn(tx, { id: 1, ts: 9_999_999_999_999 });
+    await mutators.abortTurn(tx, { id: "blk-abort-keep", ts: 9_999_999_999_999 });
     const u = blocksUpdates[0] as Record<string, unknown>;
     expect(u.ts).toBeUndefined();
+  });
+});
+
+describe("sendUserMessage", () => {
+  it("INSERTs a user-chat blocks row at status='pending' with client-supplied id + turn_id", async () => {
+    const mutators = createMutators();
+    const { tx, blocksInserts } = makeMockTx();
+    const args: SendUserMessageArgs = {
+      id: "blk-uuid-1",
+      turnId: "t_blk-uuid-1",
+      agentName: "friday",
+      text: "hello daemon",
+      ts: 1_700_000_000_000,
+    };
+    await mutators.sendUserMessage(tx, args);
+    expect(blocksInserts).toHaveLength(1);
+    const row = blocksInserts[0]!;
+    expect(row.id).toBe("blk-uuid-1");
+    expect(row.block_id).toBe("blk-uuid-1");
+    expect(row.turn_id).toBe("t_blk-uuid-1");
+    expect(row.agent_name).toBe("friday");
+    expect(row.role).toBe("user");
+    expect(row.kind).toBe("text");
+    expect(row.source).toBe("user_chat");
+    expect(row.status).toBe("pending");
+    expect(row.streaming).toBe(false);
+    expect(row.session_id).toBe("__pending__");
+    expect(row.block_index).toBe(0);
+    expect(row.last_event_seq).toBe(0);
+    expect(row.ts).toBe(1_700_000_000_000);
+    expect(row.content_json).toEqual({ text: "hello daemon" });
+  });
+
+  it("preserves attachments in content_json when supplied", async () => {
+    // Attachments go into content_json so the daemon's LISTEN handler
+    // can serialize them into the worker IPC. The mutator MUST keep
+    // the array shape — daemon parses content_json.attachments for
+    // sha256 validation.
+    const mutators = createMutators();
+    const { tx, blocksInserts } = makeMockTx();
+    await mutators.sendUserMessage(tx, {
+      id: "blk-attach",
+      turnId: "t_blk-attach",
+      agentName: "friday",
+      text: "see this",
+      attachments: [
+        {
+          sha256: "a".repeat(64),
+          filename: "shot.png",
+          mime: "image/png",
+        },
+      ],
+      ts: 1,
+    });
+    expect(blocksInserts[0]!.content_json).toEqual({
+      text: "see this",
+      attachments: [
+        { sha256: "a".repeat(64), filename: "shot.png", mime: "image/png" },
+      ],
+    });
+  });
+
+  it("omits attachments key from content_json when not supplied (legacy shape)", async () => {
+    // Existing daemon-side `parseBlockContent` treats an absent
+    // attachments key differently from `attachments: []`. Match the
+    // legacy `recordUserBlock` shape: omit the key when there are
+    // no attachments.
+    const mutators = createMutators();
+    const { tx, blocksInserts } = makeMockTx();
+    await mutators.sendUserMessage(tx, {
+      id: "blk-noattach",
+      turnId: "t_blk-noattach",
+      agentName: "friday",
+      text: "plain",
+      ts: 1,
+    });
+    expect(blocksInserts[0]!.content_json).toEqual({ text: "plain" });
+    expect("attachments" in (blocksInserts[0]!.content_json as object)).toBe(
+      false,
+    );
+  });
+
+  it("omits the attachments key when supplied as an empty array", async () => {
+    const mutators = createMutators();
+    const { tx, blocksInserts } = makeMockTx();
+    await mutators.sendUserMessage(tx, {
+      id: "blk-empty-att",
+      turnId: "t_blk-empty-att",
+      agentName: "friday",
+      text: "plain",
+      attachments: [],
+      ts: 1,
+    });
+    expect("attachments" in (blocksInserts[0]!.content_json as object)).toBe(
+      false,
+    );
+  });
+
+  it("status is always 'pending' on insert — the daemon owns the flip-out to 'complete' / 'queued'", async () => {
+    // Critical contract: if the mutator wrote 'complete' or 'queued'
+    // directly, the trigger predicate (NEW.status='pending') would
+    // never fire and the daemon would never dispatch the turn.
+    const mutators = createMutators();
+    const { tx, blocksInserts } = makeMockTx();
+    await mutators.sendUserMessage(tx, {
+      id: "blk-status",
+      turnId: "t_blk-status",
+      agentName: "friday",
+      text: "x",
+      ts: 1,
+    });
+    expect(blocksInserts[0]!.status).toBe("pending");
+  });
+
+  it("session_id is the '__pending__' sentinel — the daemon resolves the agent's session on dispatch", async () => {
+    // The session id is daemon-owned (tied to the SDK session
+    // boundary). The mutator can't synthesize it client-side without
+    // a round-trip, so it writes a sentinel the daemon overwrites.
+    const mutators = createMutators();
+    const { tx, blocksInserts } = makeMockTx();
+    await mutators.sendUserMessage(tx, {
+      id: "blk-session",
+      turnId: "t_blk-session",
+      agentName: "any",
+      text: "x",
+      ts: 1,
+    });
+    expect(blocksInserts[0]!.session_id).toBe("__pending__");
   });
 });

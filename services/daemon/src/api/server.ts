@@ -1856,7 +1856,7 @@ async function handleSystemCommand(
  * Returns the matched Skill plus the remaining args (the user message minus
  * the slash command), or null if no match. Filters by agent type.
  */
-function matchSkillInvocation(
+export function matchSkillInvocation(
   text: string,
   agentType: AgentEntry["type"],
 ): { skill: ReturnType<typeof loadSkills>[number]; userText: string } | null {

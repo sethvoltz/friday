@@ -1,4 +1,5 @@
 import { KEYS, loadJSON, saveJSON } from "./persistent";
+import { useZero, zeroSync } from "./zero.svelte";
 
 export interface QueuedAttachment {
   sha256: string;
@@ -134,6 +135,48 @@ class SendQueue {
         if (!m) continue;
         if (m.status === "failed") continue;
         try {
+          // Phase 4.11b: Zero-path dispatches the sendUserMessage
+          // mutator. The dashboard generates the UUIDs (id +
+          // turn_id) so the optimistic local write lands the
+          // bubble immediately; the daemon's LISTEN handler picks
+          // up the row, runs the full dispatch (agent resolution,
+          // system prompt, skill, recall, queue-vs-dispatch), and
+          // forks/queues the worker. `queued=false` here is the
+          // optimistic default — the daemon may flip the block to
+          // 'queued' if a worker is mid-turn; the SSE turn_started
+          // event reconciles inflightTurnId in that case.
+          if (useZero()) {
+            const result = await zeroSync.sendUserMessage({
+              agent: m.agent,
+              text: m.text,
+              attachments: m.attachments,
+            });
+            if (!result) {
+              // useZero true but the wrapper bailed (Zero not yet
+              // initialized). Treat as transient — retry on next
+              // flush.
+              m.attempts += 1;
+              m.lastError = "zero_not_ready";
+              if (m.attempts >= MAX_ATTEMPTS) {
+                m.status = "failed";
+                failed.push(m.id);
+                this.persist();
+                continue;
+              }
+              m.status = "retrying";
+              retrying.push(m.id);
+              this.persist();
+              return { sent, failed, retrying };
+            }
+            this.remove(id);
+            sent.push({
+              queueId: m.id,
+              turnId: result.turnId,
+              agent: m.agent,
+              queued: false,
+            });
+            continue;
+          }
           const r = await fetch("/api/chat/turn", {
             method: "POST",
             headers: { "content-type": "application/json" },

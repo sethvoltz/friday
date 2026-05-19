@@ -78,6 +78,13 @@
       "when": 1779202442798,
       "tag": "0010_blocks_id_to_text",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1779203520465,
+      "tag": "0011_block_dispatch_notify_trigger",
+      "breakpoints": true
     }
   ]
 }

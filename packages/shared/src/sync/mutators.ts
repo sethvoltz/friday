@@ -488,6 +488,66 @@ export interface AbortTurnArgs {
   ts: number;
 }
 
+/* ---------------- Phase 4.11: sendUserMessage ---------------- */
+// The largest mutator. INSERTs a new user-chat block at
+// status='pending'; the Postgres trigger fires NOTIFY
+// `friday_new_pending_block` (channel reserved since Phase 0); the
+// daemon's LISTEN handler reads the row, resolves the agent
+// (registers as orchestrator if missing), composes system prompt,
+// detects skill invocation, wraps with memory recall, peeks the
+// live worker to decide queued-vs-immediate, UPDATEs the row's
+// status to 'queued' or 'complete', and calls `dispatchTurn` to
+// fork or queue the prompt.
+//
+// Row-state pre/post (plan §5):
+//   - Pre: no row.
+//   - Post (mutator INSERT): one row at status='pending'.
+//   - Post (daemon handler): status='queued' (worker mid-turn) or
+//     'complete' (clean dispatch). Block stays visible in the chat
+//     scroller throughout; the dashboard's blocks Zero query does
+//     NOT filter 'pending' (the user sees their typed message
+//     before the daemon picks it up).
+//
+// Idempotency contract (plan §5):
+//   - Mutator: PK conflict on `id` (client-generated UUID) collapses
+//     to a server-side error the caller surfaces. The framework's
+//     mutation_id idempotency ensures retries don't double-INSERT.
+//   - Daemon handler: re-running on a row already past 'pending' is
+//     a no-op (status mismatch short-circuits).
+//
+// Client-supplied fields:
+//   - `id` (UUID — same value lands in `block_id` too).
+//   - `turnId` (UUID prefixed `t_` — matches the legacy REST path
+//     pattern; the daemon uses this as the dispatchTurn key).
+//   - `agentName` (target agent; daemon registers if missing).
+//   - `text` (the user's typed message; goes into content_json.text).
+//   - `attachments` (optional sha256-keyed uploads).
+//
+// Daemon-owned fields (handler overwrites or leaves at their
+// defaults):
+//   - `session_id` starts as the sentinel `__pending__`; daemon
+//     fills in the agent's resumed session id during dispatch.
+//   - `last_event_seq` starts at 0; daemon publishes a block_complete
+//     SSE event and may update this to the assigned seq.
+//   - `streaming` always false (user blocks never stream).
+
+export interface SendUserMessageArgs {
+  /** Pre-generated UUID — same value is used for both the row PK
+   *  (`id`) and the application-level `block_id`. */
+  id: string;
+  /** Pre-generated turn id of the form `t_<UUID>`. */
+  turnId: string;
+  /** Target agent (daemon registers as orchestrator if missing). */
+  agentName: string;
+  /** The user's typed message. */
+  text: string;
+  /** Optional content attachments (sha256-keyed uploads from
+   *  `POST /api/uploads`). */
+  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+  /** Client-side wall clock; daemon owns the canonical row.ts. */
+  ts: number;
+}
+
 export const createMutators = () => ({
   markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
     // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -876,6 +936,45 @@ export const createMutators = () => ({
     await tx.mutate.blocks.update({
       id: args.id,
       status: "cancel_requested",
+    });
+  },
+  sendUserMessage: async (
+    tx: FridayTx,
+    args: SendUserMessageArgs,
+  ): Promise<void> => {
+    // INSERT a user-chat block at status='pending'. The Postgres
+    // trigger fires NOTIFY `friday_new_pending_block` (channel
+    // reserved at the schema level). The daemon's LISTEN handler
+    // does the rest: agent resolution, prompt composition, skill
+    // detection, memory recall, queue-vs-dispatch decision,
+    // status flip-back to 'queued' / 'complete', and worker fork.
+    //
+    // `id` and `block_id` carry the same UUID — Phase 4.11 unified
+    // the PK and the application-level identifier. `session_id` is
+    // a sentinel; the daemon overwrites with the agent's resumed
+    // session id. `last_event_seq=0` is a placeholder the daemon
+    // updates when it publishes the block_complete SSE event.
+    const content: Record<string, unknown> = { text: args.text };
+    if (args.attachments && args.attachments.length > 0) {
+      content.attachments = args.attachments;
+    }
+    await tx.mutate.blocks.insert({
+      id: args.id,
+      block_id: args.id,
+      turn_id: args.turnId,
+      agent_name: args.agentName,
+      session_id: "__pending__",
+      message_id: undefined,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: content,
+      status: "pending",
+      streaming: false,
+      origin_mutation_id: undefined,
+      ts: args.ts,
+      last_event_seq: 0,
     });
   },
   abortTurn: async (
