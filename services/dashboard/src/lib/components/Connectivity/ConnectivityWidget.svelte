@@ -132,12 +132,23 @@
     border-radius: 50%;
     flex-shrink: 0;
     background: var(--stage-color);
-    /* The animation is ALWAYS running on every dot — that's how we keep
-       the three pulses in sync. State transitions mutate `--stage-color`
-       only; the timeline never restarts. `color-mix` re-resolves each
-       frame so the halo follows the dot's current color. */
+    /* The animation runs on `.stage-live` and `.stage-reconnecting`
+       dots — pulsing means "active" (green) or "trying to reconnect"
+       (yellow). `.stage-down` (red) and `.stage-unknown` (grey) stay
+       static because there's nothing happening to communicate. The
+       animation timeline lives on the dot itself rather than on a
+       per-state rule so the green↔yellow transition (e.g. brief
+       reconnect blip during a Zero auth refresh) keeps a single
+       continuous timeline instead of restarting the keyframe at 0%.
+       `color-mix` re-resolves each frame so the halo follows the
+       dot's current color. */
     animation: stage-pulse 1.6s ease-out infinite;
     transition: background-color 200ms ease;
+  }
+  .stage-down .dot,
+  .stage-unknown .dot {
+    animation: none;
+    box-shadow: none;
   }
   @keyframes stage-pulse {
     0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--stage-color) 65%, transparent); }
