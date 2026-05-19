@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 export const DATA_DIR =
   process.env.FRIDAY_DATA_DIR ?? join(homedir(), ".friday");
 
-export const DB_PATH = join(DATA_DIR, "db.sqlite");
 export const CONFIG_PATH = join(DATA_DIR, "config.json");
 export const ENV_PATH = join(DATA_DIR, ".env");
 export const SOUL_PATH = join(DATA_DIR, "SOUL.md");

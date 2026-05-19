@@ -5,7 +5,6 @@ import { spawnSync } from "node:child_process";
 import {
   CONFIG_PATH,
   DATA_DIR,
-  DB_PATH,
   ENV_PATH,
   FRIDAY_PG_CONSTANTS,
   LOGS_DIR,
@@ -33,7 +32,6 @@ export const doctorCommand = defineCommand({
     checks.push(check(`data dir ${DATA_DIR}`, existsSync(DATA_DIR)));
     checks.push(check(`config ${CONFIG_PATH}`, existsSync(CONFIG_PATH)));
     checks.push(check(`env ${ENV_PATH}`, existsSync(ENV_PATH)));
-    checks.push(check(`db ${DB_PATH}`, existsSync(DB_PATH)));
     checks.push(check(`SOUL.md ${SOUL_PATH}`, existsSync(SOUL_PATH)));
     checks.push(check(`logs dir ${LOGS_DIR}`, existsSync(LOGS_DIR)));
 
