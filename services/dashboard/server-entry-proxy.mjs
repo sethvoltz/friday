@@ -30,12 +30,24 @@ export const PROXY_PREFIX = "/api/sync";
  * @returns {(req: import("node:http").IncomingMessage, socket: import("node:net").Socket, head: Buffer) => void}
  */
 export function createZeroUpgradeHandler(opts) {
-  const { upstreamHost, upstreamPort, debug = false } = opts;
+  const { upstreamHost, upstreamPort, debug = false, log } = opts;
+  const logEvent = log ?? (() => {});
   return function onUpgrade(req, clientSocket, head) {
     const url = req.url ?? "";
+    const remoteAddr =
+      req.socket?.remoteAddress ??
+      clientSocket.remoteAddress ??
+      "unknown";
+    const fwd = req.headers["cf-connecting-ip"] ?? req.headers["x-forwarded-for"];
     if (!url.startsWith(PROXY_PREFIX + "/") && url !== PROXY_PREFIX) {
       // Some other route's WS upgrade; we don't know how to serve it.
       // Return a clean 400 so the client sees a refusal, not a hang.
+      logEvent("zero-proxy.upgrade.rejected", {
+        url,
+        reason: "path_outside_mount",
+        remote: remoteAddr,
+        forwardedFor: typeof fwd === "string" ? fwd : null,
+      });
       clientSocket.write(
         "HTTP/1.1 400 Bad Request\r\n" +
           "Connection: close\r\n" +
@@ -45,6 +57,12 @@ export function createZeroUpgradeHandler(opts) {
       clientSocket.destroy();
       return;
     }
+    logEvent("zero-proxy.upgrade.accepted", {
+      url,
+      remote: remoteAddr,
+      forwardedFor: typeof fwd === "string" ? fwd : null,
+      userAgent: req.headers["user-agent"] ?? null,
+    });
 
     // Strip the mount path. zero-cache expects `/sync/v50/...` at its root.
     const targetPath = url.slice(PROXY_PREFIX.length) || "/";
@@ -101,9 +119,18 @@ export function createZeroUpgradeHandler(opts) {
       clientSocket.pipe(upstream);
     });
 
-    upstream.on("error", (err) => teardown("upstream", err));
+    upstream.on("error", (err) => {
+      logEvent("zero-proxy.upstream.error", {
+        url,
+        message: err.message,
+        code: err.code ?? null,
+      });
+      teardown("upstream", err);
+    });
     clientSocket.on("error", (err) => teardown("client", err));
-    upstream.on("close", () => teardown("upstream-close"));
+    upstream.on("close", () =>
+      teardown("upstream-close"),
+    );
     clientSocket.on("close", () => teardown("client-close"));
   };
 }

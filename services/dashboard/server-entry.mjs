@@ -31,6 +31,25 @@ const HOST = process.env.HOST ?? "0.0.0.0";
 const ZERO_CACHE_HOST = process.env.ZERO_CACHE_HOST ?? "127.0.0.1";
 const ZERO_CACHE_PORT = Number(process.env.ZERO_CACHE_PORT ?? 4848);
 
+// Tag each WS-proxy event with the dashboard service so it shows up
+// next to the request log lines under the same JSONL stream the user
+// already greps for in `~/.friday/logs/dashboard.jsonl`. Stdout in the
+// tmux session works as the destination — the friday CLI's `logs`
+// command tails the JSONL file the polka request hook already writes
+// to, and prepending these to that surface kept-the-debug-loop-tight
+// concerns simple.
+function emitProxyLog(event, payload) {
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    level: "info",
+    service: "dashboard",
+    event,
+    ...payload,
+  });
+  // eslint-disable-next-line no-console
+  console.log(line);
+}
+
 const server = http.createServer(handler);
 server.on(
   "upgrade",
@@ -38,6 +57,7 @@ server.on(
     upstreamHost: ZERO_CACHE_HOST,
     upstreamPort: ZERO_CACHE_PORT,
     debug: !!process.env.DEBUG_ZERO_PROXY,
+    log: emitProxyLog,
   }),
 );
 

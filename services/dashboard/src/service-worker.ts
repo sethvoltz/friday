@@ -23,7 +23,13 @@ declare const self: ServiceWorkerGlobalScope;
  * - /api/*: bypass. SSE, agent lists, transcripts — serving cached
  *   versions of those would actively mislead the UI.
  *
- * No skipWaiting/clients.claim — the user gets the new worker on next reload.
+ * The SW calls `skipWaiting()` on install and `clients.claim()` on
+ * activate so a newer worker takes over immediately — without this,
+ * the old worker stays in control until every controlled tab closes
+ * and reopens, which on mobile PWAs is "next time the user kills the
+ * app from the task switcher." We've shipped at least one cohort of
+ * crashing bundles ahead of this rule; the safer default is "fresh
+ * SW wins on next reload."
  */
 
 const CACHE = `friday-shell-${version}`;
@@ -34,6 +40,8 @@ self.addEventListener("install", (event) => {
     (async () => {
       const cache = await caches.open(CACHE);
       await cache.addAll(ASSETS);
+      // Don't wait for the previous worker's tabs to close.
+      await self.skipWaiting();
     })(),
   );
 });
@@ -45,6 +53,11 @@ self.addEventListener("activate", (event) => {
       for (const key of await caches.keys()) {
         if (key !== CACHE) await caches.delete(key);
       }
+      // Take over any open tabs immediately so the next request from
+      // them hits this version's fetch handler (and gets the
+      // already-installed `version` precache, not the previous
+      // version's stale chunks).
+      await self.clients.claim();
     })(),
   );
 });
