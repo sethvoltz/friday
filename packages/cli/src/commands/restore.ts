@@ -34,7 +34,13 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { confirm } from "@clack/prompts";
 import pc from "picocolors";
-import { DATA_DIR, ENV_PATH, HEALTH_PATH, runMigrations } from "@friday/shared";
+import {
+  DATA_DIR,
+  ENV_PATH,
+  HEALTH_PATH,
+  getPool,
+  runMigrations,
+} from "@friday/shared";
 
 const BACKUP_PATHS = [
   ".env",
@@ -52,10 +58,102 @@ interface BackupManifest {
   createdAt: string;
   bundleId: string;
   schemaVersion: number;
-  postgresDumpSha256: string;
-  fridayVersion: string;
+  /** `pg_dump` for tarballs from `friday backup`; `legacy_sqlite` for
+   *  tarballs from `friday export-legacy-sqlite`. Older bundles
+   *  (pre-Phase-7c) don't carry this field — default to `pg_dump`. */
+  bundleType?: "pg_dump" | "legacy_sqlite";
+  postgresDumpSha256?: string;
+  fridayVersion?: string;
+  /** Present on legacy_sqlite bundles only. */
+  tables?: Array<{ name: string; rowCount: number; sha256: string }>;
   files: Array<{ path: string; exists: boolean }>;
 }
+
+/** Columns whose runtime value must be re-stringified as JSON before
+ *  the parameterized INSERT — `pg` would otherwise pass the JS object
+ *  through node-postgres's text encoder which produces `[object Object]`
+ *  for jsonb columns. Keyed by `<table>.<column>`. Subset of the export
+ *  side's JSON_COLUMNS that survives into the new Postgres schema. */
+const JSONB_COLUMNS_AT_IMPORT = new Set<string>([
+  "blocks.content_json",
+  "mail.meta_json",
+  "memory_entries.tags_json",
+  "tickets.meta_json",
+  "ticket_external_links.meta_json",
+  "schedules.meta_json",
+  "agents.meta_json",
+  "apps.manifest_json",
+  "apps.meta_json",
+]);
+
+/** Timestamptz columns in the new Postgres schema. The legacy SQLite
+ *  source sometimes wrote these as integer milliseconds and sometimes
+ *  as ISO strings (BetterAuth tables especially are inconsistent),
+ *  so at import we normalize any number to `new Date(n).toISOString()`.
+ *  Keyed by `<table>.<column>` to cover both BetterAuth's camelCase
+ *  schema and Drizzle's snake_case. */
+const TIMESTAMP_COLUMNS_AT_IMPORT = new Set<string>([
+  // BetterAuth tables (camelCase per `auth-schema.ts`).
+  "user.createdAt",
+  "user.updatedAt",
+  // user.emailVerified is a boolean in the new Postgres schema —
+  // NOT a timestamp. SQLite stored it as integer 0/1; the values
+  // pass through unchanged (Postgres treats `0`/`1` as boolean OK).
+  "session.expiresAt",
+  "session.createdAt",
+  "session.updatedAt",
+  "account.accessTokenExpiresAt",
+  "account.refreshTokenExpiresAt",
+  "account.createdAt",
+  "account.updatedAt",
+  "verification.expiresAt",
+  "verification.createdAt",
+  "verification.updatedAt",
+  // Friday tables (snake_case per Drizzle).
+  "agents.created_at",
+  "agents.updated_at",
+  "tickets.created_at",
+  "tickets.updated_at",
+  "ticket_comments.ts",
+  "ticket_external_links.linked_at",
+  "blocks.ts",
+  "mail.ts",
+  "mail.read_at",
+  "mail.closed_at",
+  "memory_entries.created_at",
+  "memory_entries.updated_at",
+  "memory_entries.file_mtime",
+  "memory_entries.last_recalled_at",
+  "schedules.next_run_at",
+  "schedules.last_run_at",
+  "schedules.created_at",
+  "schedules.updated_at",
+  "apps.installed_at",
+  "apps.upgraded_at",
+  "attachments.uploaded_at",
+]);
+
+/** Tables we INSERT into during a legacy_sqlite import, in FK-aware
+ *  order (parents before children). Matches the export side. */
+const LEGACY_TABLES_IN_ORDER = [
+  "user",
+  "account",
+  "session",
+  "verification",
+  "agents",
+  "tickets",
+  "ticket_comments",
+  "ticket_relations",
+  "ticket_external_links",
+  "blocks",
+  "mail",
+  "memory_entries",
+  "schedules",
+  "apps",
+  "attachments",
+  "usage",
+  "db_meta",
+] as const;
 
 export const restoreCommand = defineCommand({
   meta: {
@@ -114,8 +212,10 @@ export const restoreCommand = defineCommand({
         throw new Error(`tar extraction failed with status ${tar.status}.`);
       }
 
-      // 2. Validate the bundle. Manifest must exist + dump checksum
-      //    must match. Schema version >1 means a newer Friday — refuse.
+      // 2. Validate the bundle. Manifest must exist; schema version >1
+      //    means a newer Friday — refuse. Bundle-type-specific
+      //    validation (postgres.dump checksum / NDJSON SHA-256) runs
+      //    in the dispatched handler below.
       const manifestPath = join(stageDir, "manifest.json");
       if (!existsSync(manifestPath)) {
         throw new Error(
@@ -130,19 +230,10 @@ export const restoreCommand = defineCommand({
           `Bundle schema version ${manifest.schemaVersion} is not supported by this CLI (expected 1).`,
         );
       }
-      const dumpPath = join(stageDir, "postgres.dump");
-      if (!existsSync(dumpPath)) {
-        throw new Error("Bundle is missing postgres.dump.");
-      }
-      const dumpSha = sha256File(dumpPath);
-      if (dumpSha !== manifest.postgresDumpSha256) {
-        throw new Error(
-          `postgres.dump checksum mismatch: bundle has ${manifest.postgresDumpSha256}, computed ${dumpSha}. Bundle is corrupt.`,
-        );
-      }
+      const bundleType = manifest.bundleType ?? "pg_dump";
       console.log(
         pc.dim(
-          `  bundle ${manifest.bundleId} · ${manifest.fridayVersion} · created ${manifest.createdAt}`,
+          `  bundle ${manifest.bundleId} · type=${bundleType} · created ${manifest.createdAt}`,
         ),
       );
 
@@ -160,18 +251,12 @@ export const restoreCommand = defineCommand({
         }
       }
 
-      // 4. Drop + recreate the friday database. `pg_dump` was taken
-      //    with --no-owner --no-privileges so we don't need to recreate
-      //    the role here; `friday setup` provisions that on first run.
-      //    Zero-cache holds a logical-replication slot on `friday`; we
-      //    drop those slots first so DROP DATABASE doesn't fail. They
-      //    get recreated automatically the next time zero-cache starts.
+      // 4. Drop + recreate the friday database. Zero-cache holds a
+      //    logical-replication slot; drop it first (terminating any
+      //    still-active backend) so DROP DATABASE doesn't fail.
       console.log(
         pc.dim("  dropping zero-cache replication slots (if any)…"),
       );
-      // Terminate any backend still holding the slot (zero-cache may
-      // have died without releasing) so pg_drop_replication_slot
-      // doesn't error with "slot active for PID …".
       runPsqlAdmin([
         "-c",
         `SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE database = 'friday' AND active_pid IS NOT NULL;`,
@@ -186,35 +271,18 @@ export const restoreCommand = defineCommand({
         'CREATE DATABASE friday OWNER friday;',
       ]);
 
-      // 5. Restore the pg_dump custom-format archive. Connect as the
-      //    `friday` role via DATABASE_URL so all restored objects end
-      //    up owned by it — otherwise the dump's `--no-owner` flag
-      //    leaves them owned by whoever ran pg_restore (typically
-      //    `seth` under macOS peer auth), and runMigrations later
-      //    fails with `permission denied for schema drizzle`. Sourcing
-      //    .env now also gives runMigrations the URL it needs.
       sourceEnvFromFile(ENV_PATH);
       const dbUrl = process.env.DATABASE_URL;
       if (!dbUrl) {
         throw new Error(
-          "DATABASE_URL is missing from ~/.friday/.env after restore. Re-run `friday setup` first.",
-        );
-      }
-      console.log(pc.dim("  pg_restore…"));
-      const pgRestore = spawnSync(
-        "pg_restore",
-        ["--no-owner", "--no-privileges", "-d", dbUrl, dumpPath],
-        { stdio: ["ignore", "inherit", "inherit"] },
-      );
-      if (pgRestore.status !== 0) {
-        throw new Error(
-          `pg_restore exited with status ${pgRestore.status}.`,
+          "DATABASE_URL is missing from ~/.friday/.env. Run `friday setup` first to provision Postgres.",
         );
       }
 
-      // 6. Restore filesystem. Each path that existed at backup time is
-      //    copied back into DATA_DIR. Existing target is removed first
-      //    so we don't end up with merged-state surprises.
+      // 5. Restore filesystem first so `.env` is in place + migrations
+      //    can find configuration. Each path that existed at backup
+      //    time is copied back into DATA_DIR; existing target is
+      //    removed first to avoid merged-state surprises.
       console.log(pc.dim("  restoring filesystem…"));
       mkdirSync(DATA_DIR, { recursive: true });
       for (const rel of BACKUP_PATHS) {
@@ -228,11 +296,25 @@ export const restoreCommand = defineCommand({
         await cp(src, dest, { recursive: true, preserveTimestamps: true });
       }
 
-      // 7. Re-apply pending migrations. A bundle from an older Friday
-      //    may not have the latest schema; runMigrations is idempotent
-      //    against already-applied migrations and brings the DB to head.
-      console.log(pc.dim("  re-running drizzle migrations…"));
-      await runMigrations();
+      // 6. Bundle-type-specific data restore.
+      if (bundleType === "pg_dump") {
+        await restorePgDumpBundle(stageDir, manifest, dbUrl);
+      } else if (bundleType === "legacy_sqlite") {
+        await restoreLegacySqliteBundle(stageDir, manifest);
+      } else {
+        throw new Error(
+          `Unsupported bundle type: ${String(bundleType)}. Expected pg_dump or legacy_sqlite.`,
+        );
+      }
+
+      // 7. Re-apply pending migrations on the pg_dump path (schema is
+      //    captured in the dump but newer migrations may need to land).
+      //    Legacy SQLite import already ran migrations to create the
+      //    schema before INSERTing rows, so skip here.
+      if (bundleType === "pg_dump") {
+        console.log(pc.dim("  re-running drizzle migrations…"));
+        await runMigrations();
+      }
 
       // 8. Final readiness check. Spawn `friday doctor` so the user
       //    sees the same exit status they'd get on a fresh install.
@@ -281,6 +363,188 @@ function daemonAppearsRunning(): boolean {
     { encoding: "utf8" },
   );
   return probe.status === 0 && probe.stdout.trim().length > 0;
+}
+
+/**
+ * Pg_dump bundle handler: validates the dump SHA-256 against the
+ * manifest, then pg_restore as the `friday` role so all restored
+ * objects end up with the right owner.
+ */
+async function restorePgDumpBundle(
+  stageDir: string,
+  manifest: BackupManifest,
+  dbUrl: string,
+): Promise<void> {
+  const dumpPath = join(stageDir, "postgres.dump");
+  if (!existsSync(dumpPath)) {
+    throw new Error("pg_dump bundle is missing postgres.dump.");
+  }
+  if (!manifest.postgresDumpSha256) {
+    throw new Error("pg_dump bundle manifest is missing postgresDumpSha256.");
+  }
+  const dumpSha = sha256File(dumpPath);
+  if (dumpSha !== manifest.postgresDumpSha256) {
+    throw new Error(
+      `postgres.dump checksum mismatch: bundle has ${manifest.postgresDumpSha256}, computed ${dumpSha}. Bundle is corrupt.`,
+    );
+  }
+  console.log(pc.dim("  pg_restore…"));
+  const pgRestore = spawnSync(
+    "pg_restore",
+    ["--no-owner", "--no-privileges", "-d", dbUrl, dumpPath],
+    { stdio: ["ignore", "inherit", "inherit"] },
+  );
+  if (pgRestore.status !== 0) {
+    throw new Error(`pg_restore exited with status ${pgRestore.status}.`);
+  }
+}
+
+/**
+ * Legacy SQLite bundle handler (Phase 7d). Sequence:
+ *   1. runMigrations() creates the schema in the empty database.
+ *   2. For each NDJSON file in dependency order:
+ *        - Verify SHA-256 against the manifest.
+ *        - Parse rows, re-stringify JSONB columns, build parameterized
+ *          INSERTs, send them in batches over a single pg connection.
+ *   3. Skip schedule_runs / read_cursors / client_devices / settings —
+ *      none of these exist in the legacy SQLite schema; they're
+ *      populated organically by the running daemon and dashboard.
+ *
+ * Idempotency: this handler runs after DROP+CREATE database, so the
+ * table is empty when we start; INSERTs can't collide. If a row has
+ * a column the new schema doesn't recognize, the INSERT fails loudly
+ * (preferred over silently dropping data).
+ */
+async function restoreLegacySqliteBundle(
+  stageDir: string,
+  manifest: BackupManifest,
+): Promise<void> {
+  // First create the schema in the empty `friday` database. The
+  // legacy bundle has no DDL — just data — so we need migrations to
+  // run before any INSERTs.
+  console.log(pc.dim("  running drizzle migrations to create schema…"));
+  await runMigrations();
+
+  const rowsDir = join(stageDir, "rows");
+  if (!existsSync(rowsDir)) {
+    throw new Error("legacy_sqlite bundle is missing rows/ directory.");
+  }
+  const tableMeta = new Map<
+    string,
+    { rowCount: number; sha256: string }
+  >();
+  for (const t of manifest.tables ?? []) {
+    tableMeta.set(t.name, { rowCount: t.rowCount, sha256: t.sha256 });
+  }
+
+  const pool = getPool();
+  const client = (await pool.connect()) as unknown as DbClient;
+  try {
+    for (const table of LEGACY_TABLES_IN_ORDER) {
+      const filePath = join(rowsDir, `${table}.ndjson`);
+      if (!existsSync(filePath)) {
+        // Bundles from older Friday versions may not have every table
+        // we care about. Skip silently.
+        continue;
+      }
+      const buf = readFileSync(filePath, "utf8");
+      const meta = tableMeta.get(table);
+      if (meta) {
+        const sha = createHash("sha256")
+          .update(buf.replace(/\n$/, ""))
+          .digest("hex");
+        if (sha !== meta.sha256) {
+          throw new Error(
+            `legacy NDJSON SHA-256 mismatch for ${table}: bundle ${meta.sha256}, computed ${sha}. Bundle is corrupt.`,
+          );
+        }
+      }
+      const rows = buf
+        .split("\n")
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      if (rows.length === 0) {
+        console.log(pc.dim(`  ${table.padEnd(24)} empty`));
+        continue;
+      }
+      await importTable(client, table, rows);
+      console.log(
+        pc.dim(`  ${table.padEnd(24)} ${String(rows.length).padStart(6)} rows`),
+      );
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Generic per-table importer. Uses the first row's keys as the column
+ * list (NDJSON rows from `friday export-legacy-sqlite` all share the
+ * same shape per table), builds a parameterized INSERT, and batches
+ * via multi-row VALUES for throughput. JSONB columns get re-stringified
+ * because node-postgres's text encoder produces `[object Object]` for
+ * object values destined for `jsonb`.
+ */
+/** Structural type for `pg.PoolClient` — only the `query` and `release`
+ *  methods we use. Sidesteps the missing `pg` types in @friday/cli's
+ *  dep graph (the runtime client object is `pg.PoolClient` from
+ *  @friday/shared's pool). */
+interface DbClient {
+  query(text: string, values?: unknown[]): Promise<{ rowCount: number | null }>;
+  release(): void;
+}
+
+async function importTable(
+  client: DbClient,
+  table: string,
+  rows: Array<Record<string, unknown>>,
+): Promise<void> {
+  if (rows.length === 0) return;
+  const cols = Object.keys(rows[0]!);
+  if (cols.length === 0) return;
+  // Quote every column name to handle reserved words ("user" → "user").
+  const colList = cols.map((c) => `"${c}"`).join(", ");
+  // Batch rows so we don't hit the 65k-parameter Postgres limit.
+  const PARAMS_PER_ROW = cols.length;
+  const MAX_PARAMS = 60_000;
+  const BATCH = Math.max(1, Math.floor(MAX_PARAMS / PARAMS_PER_ROW));
+  for (let i = 0; i < rows.length; i += BATCH) {
+    const chunk = rows.slice(i, i + BATCH);
+    const values: unknown[] = [];
+    const placeholders: string[] = [];
+    for (const row of chunk) {
+      const rowPlaceholders: string[] = [];
+      for (const col of cols) {
+        const key = `${table}.${col}`;
+        let v = row[col];
+        if (JSONB_COLUMNS_AT_IMPORT.has(key) && v !== null && v !== undefined) {
+          v = JSON.stringify(v);
+        }
+        if (
+          TIMESTAMP_COLUMNS_AT_IMPORT.has(key) &&
+          typeof v === "number" &&
+          Number.isFinite(v)
+        ) {
+          v = new Date(v).toISOString();
+        }
+        values.push(v);
+        rowPlaceholders.push(`$${values.length}`);
+      }
+      placeholders.push(`(${rowPlaceholders.join(", ")})`);
+    }
+    // Quote table name so reserved words like "user" work. The legacy
+    // schema may not have every column the new Postgres schema does
+    // (NEW columns get NULL/default from the table definition); we
+    // INSERT only the columns the bundle has.
+    const sql = `INSERT INTO "${table}" (${colList}) VALUES ${placeholders.join(", ")} ON CONFLICT DO NOTHING`;
+    try {
+      await client.query(sql, values);
+    } catch (err) {
+      throw new Error(
+        `INSERT into ${table} failed at batch starting row ${i}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 }
 
 function zeroCacheAppearsRunning(): boolean {
