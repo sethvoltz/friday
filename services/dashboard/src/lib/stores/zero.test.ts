@@ -424,6 +424,76 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
     expect(destroyed).toBe(true);
   });
 
+  it("bindBlocksFor called before #init defers and applies once init resolves", async () => {
+    // Reproduces the cold-load race: ChatShell mounts and the binder
+    // fires the moment SvelteKit hands over, but `#init`'s
+    // `/api/sync/refresh` round-trip hasn't resolved yet. Without the
+    // pending-agent recovery, the binding is silently dropped.
+    localStorage.setItem("friday:flag:use-zero", "1");
+
+    // Stall the refresh fetch so init can't resolve before we call
+    // bindBlocksFor — that's the race we're modeling.
+    let releaseFetch: () => void = () => {};
+    const fetchPromise = new Promise<Response>((resolve) => {
+      releaseFetch = () =>
+        resolve(
+          new Response(
+            JSON.stringify({
+              token: "test-token-123",
+              deviceId: "test-device-id",
+              userId: "test-user-id",
+              expiresAt: Date.now() + 900_000,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => fetchPromise),
+    );
+
+    const { zeroSync } = await importStore();
+    // Before init: blocksAgent stays null but the call is queued.
+    zeroSync.bindBlocksFor("friday");
+    expect(zeroSync.blocksAgent).toBeNull();
+
+    // Release init; the deferred binding should apply.
+    releaseFetch();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(zeroSync.blocksAgent).toBe("friday");
+  });
+
+  it("unbindBlocks before init clears the pending agent", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    let releaseFetch: () => void = () => {};
+    const fetchPromise = new Promise<Response>((resolve) => {
+      releaseFetch = () =>
+        resolve(
+          new Response(
+            JSON.stringify({
+              token: "x",
+              deviceId: "d",
+              userId: "u",
+              expiresAt: Date.now() + 900_000,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => fetchPromise),
+    );
+
+    const { zeroSync } = await importStore();
+    zeroSync.bindBlocksFor("alpha"); // queued
+    zeroSync.unbindBlocks(); // cancels queue
+    releaseFetch();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(zeroSync.blocksAgent).toBeNull();
+  });
+
   it("onBlocksUpdate fires synchronously with current snapshot on registration", async () => {
     localStorage.setItem("friday:flag:use-zero", "1");
     const { zeroSync } = await importStore();

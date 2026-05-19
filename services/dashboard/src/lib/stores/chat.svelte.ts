@@ -372,6 +372,17 @@ export class ChatState {
     this.blocksBinder = fn;
   }
 
+  /**
+   * Track every `block_id` that has appeared in a Zero snapshot for the
+   * currently-focused agent. Used by {@linkcode applyZeroBlocks} to
+   * distinguish "row was deleted upstream" (drop) from "bubble pre-dates
+   * the Zero window" (preserve as scroll-back). Reset on focus switch
+   * so a different agent's history doesn't trip the delete heuristic.
+   * Bounded by the count of distinct blocks ever surfaced for the
+   * focused agent in this page session — single-digit MB at worst.
+   */
+  private zeroSeenBlockIds = new Set<string>();
+
   constructor() {
     // F3-C (PR C): hydrate the per-agent SSE dedup cursor from
     // localStorage. Without this, every page reload reset the cursor to
@@ -1129,6 +1140,10 @@ export class ChatState {
     this.reachedOldest = false;
     this.historyError = null;
     this.zeroBlocksActive = false;
+    // Phase 3.7: reset the per-agent seen-blockIds tracker so a stale
+    // entry from the previous agent doesn't trip the delete heuristic
+    // here.
+    this.zeroSeenBlockIds = new Set();
     // Clear any stale loading-older flag from the previous agent. Without
     // this, if the user scrolled up in agent A and clicked away before
     // the load finished, A's `loadingOlder=true` would persist into B's
@@ -1161,7 +1176,20 @@ export class ChatState {
     const cached = loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
     if (cached.length > 0) {
       this.messages = [...parseBlocks(cached, agent), ...queueSynth];
-      this.oldestBlockId = oldestBlockCursor(cached);
+      // Only seed the scroll-back cursor from cached blocks when Zero
+      // is OFF. With Zero on, the cached cursor is stale — new rows
+      // may have landed in Postgres since the cache was last saved —
+      // and a premature `loadOlderTurns` triggered by a fast scroll
+      // would call `?before=<cached-oldest>` and silently mark
+      // `reachedOldest=true` if that cursor points to the literal
+      // oldest row, hiding any rows between the cached cursor and the
+      // Zero window from REST scroll-back forever. `applyZeroBlocks`
+      // sets `oldestBlockId` from the Zero snapshot as soon as it
+      // arrives; the IntersectionObserver short-circuits while
+      // `oldestBlockId === null`.
+      if (!this.blocksBinder) {
+        this.oldestBlockId = oldestBlockCursor(cached);
+      }
     } else if (queueSynth.length > 0) {
       this.messages = [...queueSynth];
     }
@@ -1401,6 +1429,18 @@ export class ChatState {
     const parsedById = new Map<string, ChatMessage>();
     for (const m of parsed) parsedById.set(m.id, m);
 
+    // Track which block_ids the current snapshot contains so we can
+    // detect deletes: a `blockId` previously delivered by Zero but
+    // absent now is a real upstream removal (cancel-queued mutator,
+    // daemon `block_canceled`). Without this, deleted rows would
+    // linger as ghost bubbles on receivers' devices until they
+    // reload. The `zeroSeenBlockIds` tracker grows as new block_ids
+    // appear (bounded by distinct blocks ever surfaced for this
+    // agent in this session); it resets on focus switch in
+    // `loadAgentTurns`.
+    const snapshotBlockIds = new Set<string>();
+    for (const r of rows) snapshotBlockIds.add(r.block_id);
+
     const merged: ChatMessage[] = [];
     const seen = new Set<string>();
     for (const m of this.messages) {
@@ -1408,21 +1448,49 @@ export class ChatState {
       if (parsedMatch) {
         merged.push(parsedMatch);
         seen.add(m.id);
-      } else {
-        // No parsed counterpart — preserve. Covers in-flight SSE streams
-        // (status=streaming/running with no canonical row yet), queue-
-        // synth, optimistic-pending user bubbles, and scroll-back rows
-        // older than the 50-row Zero window.
-        merged.push(m);
+        continue;
       }
+      // No parsed counterpart. Decide whether to keep or drop.
+      if (
+        m.blockId !== undefined &&
+        this.zeroSeenBlockIds.has(m.blockId) &&
+        !snapshotBlockIds.has(m.blockId)
+      ) {
+        // The bubble's `blockId` was in a prior Zero snapshot but is
+        // missing now — the upstream row was deleted. Drop the
+        // bubble so cancel-queued / block_canceled propagate.
+        continue;
+      }
+      // Otherwise preserve. Covers in-flight SSE streams (no
+      // blockId yet, or blockId-having streaming row that Zero will
+      // deliver as `complete` on the next snapshot), queue-synth
+      // (no blockId), optimistic-pending user bubbles, and
+      // scroll-back rows older than the 50-row Zero window
+      // (blockId-having but not previously seen via Zero — they
+      // came from the REST `?before=…` fallback).
+      merged.push(m);
     }
     for (const m of parsed) {
       if (!seen.has(m.id)) merged.push(m);
     }
     merged.sort((a, b) => a.ts - b.ts);
 
+    // Update the seen tracker AFTER the merge so this snapshot's
+    // block_ids are recognized as "seen via Zero" on the next call.
+    for (const bid of snapshotBlockIds) this.zeroSeenBlockIds.add(bid);
+
     this.messages = dropSupersededNoResponseSafetyNet(merged);
-    this.oldestBlockId = oldestBlockCursor(blockRows);
+    const newOldest = oldestBlockCursor(blockRows);
+    if (newOldest !== this.oldestBlockId) {
+      // The Zero snapshot shifted the scroll-back cursor. Re-arm
+      // pagination: if a prior stale-cursor `loadOlderTurns` set
+      // `reachedOldest=true` (cursor pointed at an actually-oldest row,
+      // server returned empty), the user would otherwise be stuck —
+      // any rows that landed between the stale cursor and the new
+      // Zero window would be permanently unreachable via scroll-back.
+      this.reachedOldest = false;
+    }
+    this.oldestBlockId = newOldest;
 
     let maxSeq = 0;
     for (const r of rows) {
@@ -2230,24 +2298,36 @@ export function zeroBlockRowToBlockRow(r: ZeroBlocksRow): BlockRow {
   };
 }
 
-/** Strip safety-net "Agent didn't respond" bubbles whose turn has since
- *  produced real assistant content. parseBlocks emits `nr_<turnId>` with
- *  `noResponseSentinel=false` for any user_chat turn that lacks
- *  assistant blocks at parse time — a fundamentally stateful inference
- *  that's wrong during the brief race where the user message lands in
- *  Zero before the first assistant block does. Sentinel-driven nr_
- *  bubbles (`noResponseSentinel=true`) come from the SDK's trained
- *  marker block and are authoritative; we never drop those. */
+/** Strip safety-net "Agent didn't respond" bubbles that are no longer
+ *  load-bearing. Two cases:
+ *
+ *   1. **Superseded**: the turn has since produced real assistant
+ *      content. parseBlocks emits `nr_<turnId>` with
+ *      `noResponseSentinel=false` for any user_chat turn that lacks
+ *      assistant blocks at parse time — a fundamentally stateful
+ *      inference that's wrong during the brief race where the user
+ *      message lands in Zero before the first assistant block does.
+ *   2. **Orphaned**: the user_chat user bubble that anchored the
+ *      affordance is gone. Happens when the upstream blocks row was
+ *      deleted (cancel-queued mutator, daemon block_canceled) but the
+ *      nr_ synth from a prior parse run is still in `messages`.
+ *
+ *  Sentinel-driven nr_ bubbles (`noResponseSentinel=true`) come from
+ *  the SDK's trained marker block and are authoritative; we never
+ *  drop those. */
 export function dropSupersededNoResponseSafetyNet(
   messages: ChatMessage[],
 ): ChatMessage[] {
   const respondedTurns = new Set<string>();
+  const userChatTurns = new Set<string>();
   for (const m of messages) {
     if (!m.turnId) continue;
     if (m.role === "assistant" && m.kind !== "no-response") {
       respondedTurns.add(m.turnId);
     } else if (m.role === "thinking" || m.role === "tool") {
       respondedTurns.add(m.turnId);
+    } else if (m.role === "user" && (m.source ?? "user_chat") === "user_chat") {
+      userChatTurns.add(m.turnId);
     }
   }
   return messages.filter((m) => {
@@ -2257,7 +2337,8 @@ export function dropSupersededNoResponseSafetyNet(
       m.noResponseSentinel === false &&
       m.turnId
     ) {
-      return !respondedTurns.has(m.turnId);
+      if (respondedTurns.has(m.turnId)) return false;
+      if (!userChatTurns.has(m.turnId)) return false;
     }
     return true;
   });

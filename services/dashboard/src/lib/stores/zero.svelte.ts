@@ -163,6 +163,18 @@ class ZeroSyncStore {
    *  merge Zero rows into `chat.messages` without re-subscribing on
    *  every reactive read. */
   #blocksListeners = new Set<(rows: ZeroBlocksRow[]) => void>();
+  /**
+   * When `bindBlocksFor` is called before `#init` resolves (the typical
+   * cold-load race — the chat shell mounts the moment SvelteKit hands
+   * control over, but `#init` has to await `/api/sync/refresh` before
+   * `#zero` is constructed), we remember the requested agent here and
+   * apply the binding once init completes. Without this, the cold-load
+   * call lands when `#zero` is still null, the early-return fires
+   * silently, and Phase 3.7's chat-history path stays unbound for the
+   * lifetime of the page (the binder won't fire again until the user
+   * navigates between agents).
+   */
+  #pendingBlocksAgent: string | null = null;
 
   constructor() {
     if (!browser) return;
@@ -202,6 +214,22 @@ class ZeroSyncStore {
       this.#bindMemory();
       this.#bindApps();
       this.status = "live";
+      // Apply any blocks-binding the chat shell asked for while
+      // `#init` was still running. Cold-load order is:
+      //   1. ChatShell mounts, $effect fires, calls
+      //      `chat.loadAgentTurns(agent)`.
+      //   2. `loadAgentTurns` calls `chat.blocksBinder(agent)`.
+      //   3. The binder calls `zeroSync.bindBlocksFor(agent)`.
+      //   4. `bindBlocksFor` early-returns because `#zero` is still
+      //      null (init hasn't resolved the JWT fetch + Zero ctor).
+      // Without the pending-agent recovery here, step 4 silently
+      // discards the binding and the user sees the local-cache
+      // first-paint forever (no live updates from Zero).
+      if (this.#pendingBlocksAgent) {
+        const agent = this.#pendingBlocksAgent;
+        this.#pendingBlocksAgent = null;
+        this.bindBlocksFor(agent);
+      }
     } catch (err) {
       this.status = "error";
       this.errorMessage = err instanceof Error ? err.message : String(err);
@@ -327,7 +355,13 @@ class ZeroSyncStore {
    * dashboard's chat state by the existing `loadOlderTurns` path.
    */
   bindBlocksFor(agentName: string): void {
-    if (!this.#zero) return;
+    if (!this.#zero) {
+      // Defer: `#init` is still in flight. The last write wins so a
+      // rapid focus-switch (A → B → C before init resolves) ends up
+      // bound to C, which matches what the user would expect.
+      this.#pendingBlocksAgent = agentName;
+      return;
+    }
     if (this.blocksAgent === agentName && this.#blocksTeardown) return;
     this.unbindBlocks();
     this.blocksAgent = agentName;
@@ -357,8 +391,11 @@ class ZeroSyncStore {
   }
 
   /** Release the per-agent blocks subscription. Idempotent on a
-   *  no-op when nothing is currently bound. */
+   *  no-op when nothing is currently bound. Also drops any deferred
+   *  pre-init binding request — otherwise an `unbindBlocks` before
+   *  init resolves would be silently overridden by the queued bind. */
   unbindBlocks(): void {
+    this.#pendingBlocksAgent = null;
     if (this.#blocksTeardown) {
       this.#blocksTeardown();
       this.#blocksTeardown = null;

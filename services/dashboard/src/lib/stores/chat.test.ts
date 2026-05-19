@@ -3896,7 +3896,80 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     expect(chat.messages.some((m) => m.text === "recent")).toBe(true);
   });
 
-  it("(9) empty Zero snapshot preserves queue-synth + sets reachedOldest", async () => {
+  it("(9) delete propagation: a previously-Zero bubble disappears when its row vanishes", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Initial snapshot: two assistant bubbles in the window.
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({
+          id: 1,
+          block_id: "b1",
+          turn_id: "t1",
+          role: "assistant",
+          content_json: { text: "kept" },
+          ts: 1_000,
+        }),
+        makeZeroBlocksRow({
+          id: 2,
+          block_id: "b2",
+          turn_id: "t1",
+          role: "assistant",
+          content_json: { text: "to-be-deleted" },
+          ts: 1_100,
+        }),
+      ],
+      "friday",
+    );
+    expect(chat.messages.some((m) => m.text === "to-be-deleted")).toBe(true);
+    // Second snapshot drops b2 (upstream delete: cancel-queued mutator
+    // or daemon block_canceled).
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({
+          id: 1,
+          block_id: "b1",
+          turn_id: "t1",
+          role: "assistant",
+          content_json: { text: "kept" },
+          ts: 1_000,
+        }),
+      ],
+      "friday",
+    );
+    expect(chat.messages.some((m) => m.text === "to-be-deleted")).toBe(false);
+    expect(chat.messages.some((m) => m.text === "kept")).toBe(true);
+  });
+
+  it("(10) applyZeroBlocks re-arms pagination when oldestBlockId shifts", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Simulate the stale-cursor race: a prior REST `loadOlderTurns`
+    // call hit the literal oldest row, got an empty response, and set
+    // `reachedOldest = true`. Then Zero converges and brings rows in
+    // that the stale cursor would never have reached.
+    chat.oldestBlockId = "stale-cursor";
+    chat.reachedOldest = true;
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({
+          id: 100,
+          block_id: "newer-window-oldest",
+          turn_id: "t1",
+          role: "user",
+          content_json: { text: "x" },
+          ts: 5_000,
+        }),
+      ],
+      "friday",
+    );
+    expect(chat.oldestBlockId).toBe("newer-window-oldest");
+    expect(chat.reachedOldest).toBe(false);
+  });
+
+  it("(11) empty Zero snapshot preserves queue-synth + sets reachedOldest", async () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
