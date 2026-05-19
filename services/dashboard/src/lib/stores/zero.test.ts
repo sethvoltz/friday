@@ -147,6 +147,10 @@ vi.mock("@rocicorp/zero", () => {
         client: Promise.resolve({ type: "success" }),
         server: Promise.resolve({ type: "success" }),
       })),
+      cancelQueued: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
     };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
@@ -418,6 +422,11 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
     expect(blocksQuery.__calls).toEqual([
       { method: "where", args: ["agent_name", "=", "friday"] },
       { method: "where", args: ["status", "!=", "streaming"] },
+      // Phase 4.9: rows the dashboard's cancelQueued mutator just
+      // flipped to 'cancel_requested' (mid-flight, before the daemon
+      // LISTEN handler DELETEs the row) are excluded so the bubble
+      // vanishes optimistically.
+      { method: "where", args: ["status", "!=", "cancel_requested"] },
       { method: "orderBy", args: ["id", "desc"] },
       { method: "limit", args: [50] },
     ]);
@@ -1236,5 +1245,101 @@ describe("Phase 4.8: archiveAgent mutator dispatch", () => {
   it("is silent when Zero hasn't initialized", async () => {
     const { zeroSync } = await importStore();
     expect(() => zeroSync.archiveAgent({ name: "x" })).not.toThrow();
+  });
+});
+
+describe("Phase 4.9: cancelQueued wrapper (fast-path + mutator)", () => {
+  async function bootedZero() {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  function seedQueuedBlock(zeroSync: {
+    blocks: Array<{
+      id: number;
+      block_id: string;
+      turn_id: string;
+      agent_name: string;
+      role: string;
+      source: string | null;
+      status: string;
+      content_json: unknown;
+    }>;
+  }) {
+    zeroSync.blocks = [
+      {
+        id: 4242,
+        block_id: "blk-queued-1",
+        turn_id: "turn-q1",
+        agent_name: "agent-a",
+        role: "user",
+        source: "user_chat",
+        status: "queued",
+        content_json: { text: "hello world" },
+      },
+    ];
+  }
+
+  function stubFastPath(text: string, ok = true) {
+    const spy = vi.fn(async () =>
+      new Response(JSON.stringify({ ok, text }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", spy);
+    return spy;
+  }
+
+  it("returns null when no queued block matches the turn id (already dispatched / cleared)", async () => {
+    const { zeroSync } = await bootedZero();
+    // No blocks seeded — the wrapper bails before even calling the
+    // fast-path or the mutator.
+    const out = await zeroSync.cancelQueued("turn-missing");
+    expect(out).toBeNull();
+  });
+
+  it("POSTs the daemon fast-path with the block_id and returns recovered text", async () => {
+    const { zeroSync, z } = await bootedZero();
+    seedQueuedBlock(zeroSync as never);
+    const fetchSpy = stubFastPath("hello world");
+    const out = await zeroSync.cancelQueued("turn-q1");
+    expect(out).toBe("hello world");
+    // First fetch call: the fast-path endpoint with the right body.
+    const first = fetchSpy.mock.calls[0];
+    expect(first?.[0]).toBe("/api/internal/cancel-queued");
+    const init = first?.[1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ block_id: "blk-queued-1" });
+    // Mutator dispatched with the bigserial id (not the block_id).
+    expect(z.mutate.cancelQueued).toHaveBeenCalledTimes(1);
+    const args = z.mutate.cancelQueued.mock.calls[0][0] as {
+      id: number;
+      ts: number;
+    };
+    expect(args.id).toBe(4242);
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("falls back to content_json from the local Zero snapshot when fast-path fails", async () => {
+    // Daemon-down resilience: the mutator must still fire (durable
+    // cross-device propagation), and the recovered text comes from
+    // the local Zero row's content_json.
+    const { zeroSync, z } = await bootedZero();
+    seedQueuedBlock(zeroSync as never);
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const out = await zeroSync.cancelQueued("turn-q1");
+    expect(out).toBe("hello world");
+    expect(z.mutate.cancelQueued).toHaveBeenCalledTimes(1);
+  });
+
+  it("is silent when Zero hasn't initialized", async () => {
+    const { zeroSync } = await importStore();
+    await expect(zeroSync.cancelQueued("turn-x")).resolves.toBeNull();
   });
 });

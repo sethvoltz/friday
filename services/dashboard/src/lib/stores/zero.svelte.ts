@@ -586,9 +586,16 @@ class ZeroSyncStore {
     // below trip the same "possibly undefined" lint as the other
     // `#bind*` methods (this is a pre-existing pattern, not new
     // sloppiness — the early-return at top guarantees non-null).
+    // Filter out:
+    //   - 'streaming' rows (in-flight blocks; written via SSE only).
+    //   - 'cancel_requested' rows (Phase 4.9): the mutator UPDATEs to
+    //     this terminal-pending status BEFORE the daemon's LISTEN
+    //     handler deletes the row. Excluding it here is what makes
+    //     the optimistic-UX bubble-vanish happen on click.
     const query = this.#zero.query.blocks
       .where("agent_name", "=", agentName)
       .where("status", "!=", "streaming")
+      .where("status", "!=", "cancel_requested")
       .orderBy("id", "desc")
       .limit(50);
     const preload = this.#zero.preload(query);
@@ -883,6 +890,88 @@ class ZeroSyncStore {
       reason: args.reason ?? "abandoned",
       ts: Date.now(),
     });
+  }
+
+  /**
+   * Phase 4.9: cancel a queued user-chat prompt before the worker
+   * dispatches it. Three-step flow:
+   *
+   *   1. Look up the queued block in the local Zero snapshot by
+   *      turn_id (the dashboard knows the turn the user wants to
+   *      cancel, not the bigserial PK). Bail if we can't find one —
+   *      the user clicked Cancel on a bubble that's already
+   *      dispatched or already removed.
+   *   2. POST the daemon fast-path (`/api/internal/cancel-queued`)
+   *      to synchronously splice the worker's in-memory
+   *      `nextPrompts` deque. The HTTP response carries back the
+   *      recovered prompt text so the caller can stuff it into the
+   *      input bar.
+   *   3. Dispatch the Zero mutator (UPDATE blocks.status =
+   *      'cancel_requested'). This is the durable, cross-device
+   *      signal: the Postgres trigger fires NOTIFY, the daemon
+   *      LISTEN handler picks it up, calls `removeQueuedPrompt`
+   *      (idempotent — already done by step 2), publishes the
+   *      `block_meta_update` SSE for legacy tabs, and DELETEs the
+   *      row.
+   *
+   * Both the fast-path and the LISTEN-path are idempotent against
+   * each other (plan §5). If step 2 fails (daemon down), we still
+   * dispatch the mutator — the row will commit to Postgres via
+   * zero-cache's queue, and the LISTEN-path will splice + delete
+   * once the daemon returns.
+   *
+   * Returns the recovered prompt text on success (possibly empty
+   * string if the block's content_json couldn't be parsed), or
+   * `null` if no matching queued bubble was found.
+   */
+  async cancelQueued(turnId: string): Promise<string | null> {
+    if (!this.#zero) return null;
+    const row = this.blocks.find(
+      (b) =>
+        b.turn_id === turnId &&
+        b.role === "user" &&
+        b.source === "user_chat" &&
+        b.status === "queued",
+    );
+    if (!row) return null;
+
+    let recoveredText = "";
+    try {
+      const r = await fetch("/api/internal/cancel-queued", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ block_id: row.block_id }),
+      });
+      if (r.ok) {
+        const data = (await r.json().catch(() => ({}))) as { text?: unknown };
+        if (typeof data.text === "string") recoveredText = data.text;
+      }
+    } catch {
+      // Daemon unreachable — fall through to the mutator dispatch.
+      // The mutator's row UPDATE replicates durably; the daemon's
+      // LISTEN-path picks it up once it returns. Recovered text
+      // falls back to the local Zero snapshot's content_json below.
+    }
+
+    // Fallback recovery from the local snapshot if the fast-path
+    // failed or returned an empty text. The Zero row's content_json
+    // is the same JSON the daemon serialized into the DB.
+    if (!recoveredText) {
+      const parsed = row.content_json as { text?: unknown } | null;
+      if (parsed && typeof parsed.text === "string") recoveredText = parsed.text;
+    }
+
+    try {
+      await this.#zero.mutate.cancelQueued({ id: row.id, ts: Date.now() })
+        .server;
+    } catch {
+      // Server-side mutator failure (e.g. row already DELETEd by the
+      // LISTEN-path winning the race). The user-visible state is
+      // already correct — the bubble is gone, the prompt text is
+      // recovered. Swallow.
+    }
+
+    return recoveredText;
   }
 
   destroy(): void {

@@ -20,6 +20,7 @@ import {
   type AddTicketCommentArgs,
   type AddTicketRelationArgs,
   type ArchiveAgentArgs,
+  type CancelQueuedArgs,
   type CreateMemoryEntryArgs,
   type CreateScheduleArgs,
   type CreateTicketArgs,
@@ -184,6 +185,11 @@ interface MockAgentUpdateCall {
   updated_at: number;
 }
 
+interface MockBlocksUpdateCall {
+  id: number;
+  status: string;
+}
+
 function makeMockTx(): {
   tx: Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   upsertCalls: MockUpsertCall[];
@@ -202,6 +208,7 @@ function makeMockTx(): {
   appInserts: MockAppInsertCall[];
   appUpdates: MockAppUpdateCall[];
   agentUpdates: MockAgentUpdateCall[];
+  blocksUpdates: MockBlocksUpdateCall[];
 } {
   const upsertCalls: MockUpsertCall[] = [];
   const clientDeviceUpdates: MockClientDeviceUpdateCall[] = [];
@@ -273,6 +280,10 @@ function makeMockTx(): {
   const agentUpdate = vi.fn(async (row: MockAgentUpdateCall) => {
     agentUpdates.push(row);
   });
+  const blocksUpdates: MockBlocksUpdateCall[] = [];
+  const blocksUpdate = vi.fn(async (row: MockBlocksUpdateCall) => {
+    blocksUpdates.push(row);
+  });
   // The mutators touch `tx.mutate.<table>.<op>`. Rest of Transaction
   // surface left undefined — we cast to the parameter type only to
   // satisfy TypeScript.
@@ -289,6 +300,7 @@ function makeMockTx(): {
       schedules: { insert: scheduleInsert, update: scheduleUpdate },
       apps: { insert: appInsert, update: appUpdate },
       agents: { update: agentUpdate },
+      blocks: { update: blocksUpdate },
     },
   } as unknown as Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   return {
@@ -309,6 +321,7 @@ function makeMockTx(): {
     appInserts,
     appUpdates,
     agentUpdates,
+    blocksUpdates,
   };
 }
 
@@ -1300,5 +1313,57 @@ describe("archiveAgent", () => {
     expect(Object.keys(u).sort()).toEqual(
       ["archive_reason", "name", "status", "updated_at"].sort(),
     );
+  });
+});
+
+describe("cancelQueued", () => {
+  it("UPDATEs blocks.status to 'cancel_requested' keyed by bigserial id", async () => {
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    const args: CancelQueuedArgs = {
+      id: 4242,
+      ts: 1_700_000_000_000,
+    };
+    await mutators.cancelQueued(tx, args);
+    expect(blocksUpdates).toEqual([{ id: 4242, status: "cancel_requested" }]);
+  });
+
+  it("is idempotent — re-running with same args produces identical writes", async () => {
+    // Plan §5: every mutator idempotent on row PK. A second invocation
+    // with the same args reflects the LISTEN-path winning the race
+    // (row already DELETEd at the server) — the mutator's write set
+    // stays identical.
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    const args: CancelQueuedArgs = { id: 1, ts: 1 };
+    await mutators.cancelQueued(tx, args);
+    await mutators.cancelQueued(tx, args);
+    expect(blocksUpdates).toHaveLength(2);
+    expect(blocksUpdates[0]).toEqual(blocksUpdates[1]);
+  });
+
+  it("touches only id + status — daemon owns content_json / turn_id / agent_name", async () => {
+    // Pre/post-condition contract: the daemon's LISTEN handler reads
+    // agent_name, turn_id, content_json from the row BEFORE the
+    // DELETE. The mutator MUST NOT clobber them. Verify the write
+    // patch contains exactly two keys.
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    await mutators.cancelQueued(tx, { id: 99, ts: 1 });
+    const u = blocksUpdates[0] as Record<string, unknown>;
+    expect(Object.keys(u).sort()).toEqual(["id", "status"].sort());
+  });
+
+  it("does not write the args.ts field — the row's ts is daemon-owned (block timestamp)", async () => {
+    // The mutator interface includes `ts` for symmetry with other
+    // mutators (and for diagnostic logging at the Zero server-side
+    // PushProcessor layer), but the row's `ts` is the block's
+    // arrival timestamp set by `recordUserBlock` and must not be
+    // clobbered to a cancel timestamp.
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    await mutators.cancelQueued(tx, { id: 1, ts: 9_999_999_999_999 });
+    const u = blocksUpdates[0] as Record<string, unknown>;
+    expect(u.ts).toBeUndefined();
   });
 });

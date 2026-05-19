@@ -156,7 +156,7 @@ export const blocks = pgTable(
     kind: text("kind").notNull(), // text|thinking|tool_use|tool_result|error
     source: text("source"), // user_chat|mail|queue_inject|sdk|scratch|agent_spawn|schedule|refork_notice|dashboard-mutator
     contentJson: jsonb("content_json").notNull(),
-    status: text("status").notNull(), // pending|streaming|complete|aborted|error|queued|abort_requested
+    status: text("status").notNull(), // pending|streaming|complete|aborted|error|queued|abort_requested|dispatched|cancel_requested
     streaming: boolean("streaming").notNull().default(false),
     // ADR-023 mutator origin (for Zero idempotency cross-check + diagnostics).
     originMutationId: text("origin_mutation_id"),
@@ -186,7 +186,7 @@ export const blocks = pgTable(
     ),
     statusCheck: check(
       "blocks_status_check",
-      sql`${t.status} IN ('pending','streaming','complete','aborted','error','queued','abort_requested','dispatched')`,
+      sql`${t.status} IN ('pending','streaming','complete','aborted','error','queued','abort_requested','dispatched','cancel_requested')`,
     ),
   }),
 );
@@ -609,6 +609,13 @@ export const LISTEN_CHANNELS = {
   memoryFileChanged: "friday_memory_file_changed",
   /** Settings table UPDATE — daemon re-syncs `~/.friday/config.json`. */
   settingsChanged: "friday_settings_changed",
+  /** Blocks row UPDATEd to status='cancel_requested' — the dashboard
+   *  cancelQueued mutator's signal that a queued user-chat prompt
+   *  should be yanked from the worker's `nextPrompts` and the row
+   *  deleted. Fast-path (`POST /api/internal/cancel-queued`) splices
+   *  nextPrompts synchronously; LISTEN-path performs the canonical
+   *  row delete. */
+  blockCancelRequested: "friday_block_canceled",
 } as const;
 
 export type ListenChannel =

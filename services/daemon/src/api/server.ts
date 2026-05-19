@@ -107,6 +107,7 @@ import {
 } from "../agent/lifecycle.js";
 import {
   deleteBlockById,
+  getBlockById,
   getUserChatBlockByTurnId,
 } from "@friday/shared/services";
 import { generateScratchName } from "../agent/scratch-names.js";
@@ -333,6 +334,60 @@ async function handle(
       ok: true,
       turn_id: turnId,
       text: recoveredText,
+    });
+  }
+
+  // Phase 4.9 fast-path: synchronous in-memory splice of the worker's
+  // `nextPrompts` deque. Called by the dashboard's `cancelQueued`
+  // wrapper before / alongside dispatching the Zero mutator. The
+  // mutator UPDATEs the row to status='cancel_requested' which fires
+  // the Postgres trigger; the daemon's LISTEN handler then performs
+  // the canonical row DELETE. This endpoint deliberately does NOT
+  // delete the row — leaving the DELETE to the LISTEN-path keeps the
+  // cancel-row-delete pathway single-sourced and avoids racing the
+  // trigger.
+  //
+  // Idempotent on the in-memory state: re-running after the splice
+  // has already happened returns `{ ok: true, already_canceled: true,
+  // text: "" }`. The dashboard treats both responses the same way.
+  if (
+    method === "POST" &&
+    path === "/api/internal/cancel-queued"
+  ) {
+    const body = await readJson<{ block_id?: string }>(req);
+    const blockId = body.block_id;
+    if (typeof blockId !== "string" || blockId.length === 0) {
+      return json(res, 400, { error: "missing_block_id" });
+    }
+    const block = await getBlockById(blockId);
+    if (!block) {
+      // Row already deleted (LISTEN-path won the race, or legacy DELETE
+      // path already handled it). Idempotent return: nothing to splice,
+      // no text to recover.
+      return json(res, 200, { ok: true, already_canceled: true, text: "" });
+    }
+    if (block.status !== "queued" && block.status !== "cancel_requested") {
+      return json(res, 409, {
+        error: "not_queued",
+        block_id: blockId,
+        status: block.status,
+        message: "Block has already dispatched; use abort instead",
+      });
+    }
+    const removed = removeQueuedPrompt(block.agentName, block.turnId);
+    let recoveredText = "";
+    try {
+      const parsed = JSON.parse(block.contentJson) as { text?: unknown };
+      if (typeof parsed.text === "string") recoveredText = parsed.text;
+    } catch {
+      // Malformed content_json — return empty text; the user retypes.
+    }
+    return json(res, 200, {
+      ok: true,
+      already_canceled: removed === null,
+      text: recoveredText,
+      turn_id: block.turnId,
+      agent: block.agentName,
     });
   }
 

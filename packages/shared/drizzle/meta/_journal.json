@@ -57,6 +57,13 @@
       "when": 1779178883910,
       "tag": "0007_agent_archive_notify_trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1779181299466,
+      "tag": "0008_block_cancel_notify_trigger",
+      "breakpoints": true
     }
   ]
 }

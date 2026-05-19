@@ -396,6 +396,48 @@ export interface ArchiveAgentArgs {
   ts: number;
 }
 
+/* ---------------- Phase 4.9: cancelQueued ---------------- */
+// First mutator with a *required* fast-path (plan §4.9). The daemon's
+// `nextPrompts` deque is in-memory state — a Postgres NOTIFY round-trip
+// is too slow to reliably outrun the worker dispatcher. Two paths run
+// in parallel:
+//
+//   1. Fast-path (sync): `POST /api/internal/cancel-queued` calls
+//      `removeQueuedPrompt(agent, turn)` on the daemon, returns the
+//      recovered prompt text so the dashboard can stuff it back into
+//      the input bar.
+//   2. Mutator (durable + cross-device): UPDATEs the block row's
+//      status from 'queued' to 'cancel_requested'. A Postgres trigger
+//      fires `NOTIFY friday_block_canceled`; the daemon's LISTEN
+//      handler:
+//        - Calls `removeQueuedPrompt` (idempotent — no-op if the
+//          fast-path already spliced the entry).
+//        - Publishes a `block_meta_update` SSE event for legacy tabs.
+//        - DELETEs the row (canonical delete path).
+//
+// Row-state pre/post (plan §5):
+//   - Pre: blocks WHERE id = args.id AND status='queued'.
+//   - Post (mutator): status='cancel_requested'.
+//   - Post (daemon flip): row DELETEd.
+//
+// Idempotency contract (plan §5):
+//   - Mutator: re-running on a row already at 'cancel_requested' is a
+//     no-op (UPDATE with same value); re-running on a DELETEd row
+//     surfaces a missing-PK error (the dashboard wrapper traps it).
+//   - Fast-path: idempotent against the LISTEN-path — if the LISTEN
+//     handler already ran (row DELETEd, prompt already spliced),
+//     `removeQueuedPrompt` returns null and the fast-path returns
+//     `text=""` with `already_canceled=true`.
+//
+// The Zero blocks PK is `id` (Postgres bigserial). The dashboard
+// reads it from the local Zero snapshot before invoking the mutator.
+
+export interface CancelQueuedArgs {
+  /** Bigserial PK of the blocks row (read from local Zero snapshot). */
+  id: number;
+  ts: number;
+}
+
 export const createMutators = () => ({
   markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
     // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -764,6 +806,26 @@ export const createMutators = () => ({
       url: args.url,
       meta_json: args.meta,
       linked_at: args.ts,
+    });
+  },
+  cancelQueued: async (
+    tx: FridayTx,
+    args: CancelQueuedArgs,
+  ): Promise<void> => {
+    // UPDATE blocks.status='cancel_requested'. The dashboard's blocks
+    // query filters this status out so the bubble disappears
+    // optimistically. The Postgres trigger fires NOTIFY
+    // `friday_block_canceled` and the daemon LISTEN handler then
+    // performs the canonical row DELETE + nextPrompts splice.
+    //
+    // Touches only `status` (+ `last_event_seq` advance for the
+    // existing SSE-block-cursor invariant). All other fields are
+    // preserved so the daemon's LISTEN handler can read the original
+    // agent_name / turn_id / content_json from the row before it
+    // performs the delete.
+    await tx.mutate.blocks.update({
+      id: args.id,
+      status: "cancel_requested",
     });
   },
   updateSettings: async (

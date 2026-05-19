@@ -323,6 +323,7 @@ const blocks = table("blocks")
       | "queued"
       | "abort_requested"
       | "dispatched"
+      | "cancel_requested"
     >(),
     streaming: boolean(),
     origin_mutation_id: string().optional(),

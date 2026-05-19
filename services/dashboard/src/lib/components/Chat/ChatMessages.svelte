@@ -4,6 +4,7 @@
   import { chatInputBridge } from "$lib/stores/chat-input-bridge.svelte";
   import { sendQueue } from "$lib/stores/send-queue.svelte";
   import { clock } from "$lib/stores/clock.svelte";
+  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
   import { computeGroupingMeta } from "$lib/util/chat-grouping";
   import {
     formatAbsoluteTooltip,
@@ -61,7 +62,14 @@
    */
   async function cancelDaemonQueued(turnId: string | undefined) {
     if (!turnId) return;
-    const recovered = await chat.cancelQueued(turnId);
+    // Phase 4.9: Zero-path dispatches the cancelQueued mutator alongside
+    // the daemon fast-path so the cancel propagates across devices. The
+    // wrapper handles fallback to the local Zero snapshot for the
+    // recovered text when the daemon is unreachable. Legacy REST path
+    // stays in place for sessions where useZero() is false.
+    const recovered = useZero()
+      ? await zeroSync.cancelQueued(turnId)
+      : await chat.cancelQueued(turnId);
     if (recovered === null) return;
     if (recovered) chatInputBridge.prepend(recovered);
   }

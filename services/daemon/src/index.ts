@@ -50,6 +50,10 @@ import {
   startArchiveListener,
 } from "./agent/archive-listener.js";
 import {
+  runCancelBootScan,
+  startCancelListener,
+} from "./agent/cancel-listener.js";
+import {
   composeSystemPrompt,
   readPromptStack,
 } from "@friday/shared";
@@ -123,6 +127,17 @@ async function main(): Promise<void> {
   // archive requests that landed during daemon downtime.
   await runArchiveBootScan();
   const archiveListener = await startArchiveListener();
+
+  // Phase 4.9: open the long-lived LISTEN connection for
+  // `friday_block_canceled`. Boot-recovery scan applies any
+  // `status='cancel_requested'` rows that landed during daemon
+  // downtime (the mutator commits durably even when the daemon is
+  // down; the LISTEN handler picks them up on next boot). Must run
+  // BEFORE `recoverQueuedTurns()` so a row marked `cancel_requested`
+  // pre-shutdown is yanked from the queue before any worker re-spawn
+  // could re-dispatch it.
+  await runCancelBootScan();
+  const cancelListener = await startCancelListener();
 
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
@@ -216,6 +231,9 @@ async function main(): Promise<void> {
       /* shutdown best-effort; the process is about to exit */
     });
     void archiveListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void cancelListener.stop().catch(() => {
       /* shutdown best-effort; the process is about to exit */
     });
     clearHealth();
