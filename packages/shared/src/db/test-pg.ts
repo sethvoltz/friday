@@ -49,7 +49,21 @@ function adminUrl(): string {
 }
 
 function assertPgReady(): void {
-  const result = spawnSync("pg_isready", { encoding: "utf8" });
+  // Pass `-h localhost -p 5432` explicitly. Without args libpq falls
+  // back to a Unix socket at `/var/run/postgresql/.s.PGSQL.5432`,
+  // which doesn't exist on bare CI runners (the GitHub Actions
+  // `services:` container exposes only TCP). On a developer's mac
+  // running `brew services start postgresql@18` the socket DOES
+  // exist, but TCP on 5432 is also available — the explicit args
+  // make both environments take the TCP path. `PGHOST` env override
+  // is still honored by libpq if the operator wants to point at a
+  // non-default host (FRIDAY_PGHOST-style runtime config can be
+  // added later if needed).
+  const result = spawnSync(
+    "pg_isready",
+    ["-h", "localhost", "-p", "5432"],
+    { encoding: "utf8" },
+  );
   if (result.status !== 0) {
     throw new Error(
       `pg_isready failed (exit=${result.status}). Tests require a reachable Postgres. ` +
