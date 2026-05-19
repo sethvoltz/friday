@@ -48,8 +48,9 @@ const HANDLED_TYPES = new Set([
   "block_delta",
   "block_complete",
   "block_canceled",
-  "block_meta_update",
-  "block_reload",
+  // Phase 5: `block_meta_update` retired — Zero replicates the
+  // row UPDATEs (queued → complete, aborted-then-delete) reactively.
+  // Phase 5: `block_reload` retired — same rationale.
   "connection_established",
 ]);
 

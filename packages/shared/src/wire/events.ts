@@ -9,7 +9,7 @@
  *
  * FIX_FORWARD 1.5 collapsed token-level streaming events (`text_delta`,
  * `thinking_*`, `tool_use_*`, `compaction_*`) into the block-level lifecycle
- * (`block_start`, `block_delta`, `block_complete`, `block_reload`). The
+ * (`block_start`, `block_delta`, `block_complete`). The
  * `connection_established` event is sent first on every new SSE connection
  * to carry the daemon's `boot_id` (FIX_FORWARD 1.6) — clients reset their
  * per-agent cursors on `boot_id` mismatch.
@@ -33,8 +33,6 @@ export type WireEvent =
   | BlockDeltaEvent
   | BlockCompleteEvent
   | BlockCanceledEvent
-  | BlockMetaUpdateEvent
-  | BlockReloadEvent
   | ConnectionEstablishedEvent;
 
 export interface BaseEvent {
@@ -228,41 +226,12 @@ export interface BlockCanceledEvent extends BaseEvent {
   block_id: string;
 }
 
-/**
- * Late-binding update to an already-emitted block's metadata. Today the only
- * producer is the queued-prompt drain path: a user block was inserted with
- * `status='queued'` on POST, and now (when the worker is finally ready to
- * dispatch it) the daemon stamps the real dispatch time on it and flips the
- * status to `complete`. Clients should patch their in-memory row by
- * `block_id` and re-sort if the new `ts` changes ordering.
- */
-export interface BlockMetaUpdateEvent extends BaseEvent {
-  type: "block_meta_update";
-  turn_id: string;
-  agent: string;
-  block_id: string;
-  status?: "streaming" | "complete" | "aborted" | "error" | "queued";
-  ts?: number;
-}
-
-/**
- * Emitted by the daemon when boot-time JSONL recovery (FIX_FORWARD 1.3) has
- * INSERTed or UPDATEd canonical blocks that an SSE client should refetch.
- * Carries the affected block ids so clients can decide whether to refetch
- * the focused agent's history.
- */
-export interface BlockReloadEvent extends BaseEvent {
-  type: "block_reload";
-  agent: string;
-  /** Sessions touched by the recovery scan. */
-  session_id: string;
-  block_ids: string[];
-  /** Number of net-new blocks inserted by recovery. */
-  inserted: number;
-  /** Number of existing blocks whose content was refreshed. */
-  updated: number;
-  ts: number;
-}
+// Phase 5: `block_meta_update` retired — Zero replicates the
+// underlying queued → complete UPDATEs (and aborted DELETEs) on
+// the blocks slice; the dashboard's reactive query re-sorts on
+// the new ts automatically. Same removal applies to `block_reload`,
+// which signaled JSONL-recovery INSERTs/UPDATEs that Zero now
+// replicates without an SSE-triggered REST refetch.
 
 /**
  * First SSE event the daemon emits on every new connection (FIX_FORWARD 1.6).

@@ -48,7 +48,6 @@ export type {
   BlockStartEvent,
   BlockDeltaEvent,
   BlockCompleteEvent,
-  BlockReloadEvent,
   ConnectionEstablishedEvent,
   AppLifecycleEvent,
 } from "./wire/events.js";

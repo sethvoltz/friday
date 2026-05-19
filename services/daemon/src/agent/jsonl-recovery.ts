@@ -41,7 +41,9 @@
  *    use ↔ result.
  *  - User-role text content is ignored: those blocks are written by the
  *    daemon at chat/turn / mail-bridge time, never derived from JSONL.
- *  - A `block_reload` SSE event fires per session with any net changes so
+ *  - Phase 5: net changes are picked up by Zero replication (the
+ *    blocks reactive query); the legacy `block_reload` SSE event
+ *    is retired. Diagnostic logging via `jsonl-recovery.session.applied` so
  *    connected dashboards can refetch.
  *
  * Invocation sites:
@@ -109,16 +111,18 @@ export async function recoverFromJsonl(
       stats.inserted += inserted;
       stats.updated += updated;
       stats.skipped += skipped;
+      // Phase 5 (SSE narrowing): the `block_reload` event was the
+      // signal for the dashboard to re-fetch blocks via REST after
+      // JSONL recovery touched rows. Zero's blocks reactive query
+      // now auto-replicates those INSERTs/UPDATEs, so the event is
+      // retired; we still log the recovery for diagnostics.
       if (blockIds.length > 0) {
-        eventBus.publish({
-          v: 1,
-          type: "block_reload",
+        logger.log("info", "jsonl-recovery.session.applied", {
           agent: a.agentName,
-          session_id: a.sessionId,
-          block_ids: blockIds,
+          session: a.sessionId,
           inserted,
           updated,
-          ts: Date.now(),
+          block_count: blockIds.length,
         });
       }
     } catch (err) {

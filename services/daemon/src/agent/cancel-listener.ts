@@ -34,7 +34,6 @@ import {
 } from "@friday/shared";
 import { deleteBlockById, getBlockById } from "@friday/shared/services";
 import { removeQueuedPrompt } from "./lifecycle.js";
-import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 
 const { Client } = pgPkg;
@@ -66,19 +65,9 @@ async function processCancelRequestedRow(blockId: string): Promise<void> {
   // gone).
   const removed = removeQueuedPrompt(row.agentName, row.turnId);
 
-  // Legacy SSE compatibility — non-Zero dashboard tabs receive
-  // `block_meta_update` and flip the queued bubble out of the chat
-  // accumulator. Publish BEFORE the DELETE so a late reconnecting
-  // client sees the aborted state alongside the row vanish.
-  eventBus.publish({
-    v: 1,
-    type: "block_meta_update",
-    turn_id: row.turnId,
-    agent: row.agentName,
-    block_id: row.blockId,
-    status: "aborted",
-  });
-
+  // Phase 5: `block_meta_update` SSE retired — Zero replicates the
+  // DELETE on the blocks slice; the dashboard's reactive query
+  // drops the bubble across every open tab.
   await deleteBlockById(row.blockId);
 
   logger.log("info", "block.cancel.applied", {

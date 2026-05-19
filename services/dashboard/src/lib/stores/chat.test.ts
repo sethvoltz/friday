@@ -2364,82 +2364,13 @@ describe("queued user blocks (pending-message feature)", () => {
     expect(bubble!.blockId).toBe("blk-q1");
   });
 
-  it("block_meta_update flips queued → complete and bumps ts", async () => {
-    const { ChatState } = await import("./chat.svelte");
-    const chat = new ChatState();
-    chat.focusedAgent = "friday";
-
-    // First land the queued bubble.
-    chat.applyEvent({
-      v: 1,
-      type: "block_complete",
-      turn_id: "turn-q2",
-      agent: "friday",
-      block_id: "blk-q2",
-      message_id: null,
-      block_index: 0,
-      role: "user",
-      kind: "text",
-      source: "user_chat",
-      content_json: '{"text":"waiting"}',
-      status: "queued",
-      ts: 1000,
-      seq: 1,
-    } as Parameters<typeof chat.applyEvent>[0]);
-
-    // Then the worker drains it: ts re-stamped, status flipped.
-    chat.applyEvent({
-      v: 1,
-      type: "block_meta_update",
-      turn_id: "turn-q2",
-      agent: "friday",
-      block_id: "blk-q2",
-      status: "complete",
-      ts: 5000,
-      seq: 2,
-    } as Parameters<typeof chat.applyEvent>[0]);
-
-    const bubble = chat.messages.find((m) => m.id === "user_turn-q2");
-    expect(bubble).toBeDefined();
-    expect(bubble!.status).toBe("complete");
-    expect(bubble!.ts).toBe(5000);
-  });
-
-  it("block_meta_update status='aborted' drops the queued bubble (cancel from another tab)", async () => {
-    const { ChatState } = await import("./chat.svelte");
-    const chat = new ChatState();
-    chat.focusedAgent = "friday";
-
-    chat.applyEvent({
-      v: 1,
-      type: "block_complete",
-      turn_id: "turn-q3",
-      agent: "friday",
-      block_id: "blk-q3",
-      message_id: null,
-      block_index: 0,
-      role: "user",
-      kind: "text",
-      source: "user_chat",
-      content_json: '{"text":"to be cancelled"}',
-      status: "queued",
-      ts: 1000,
-      seq: 1,
-    } as Parameters<typeof chat.applyEvent>[0]);
-    expect(chat.messages.find((m) => m.id === "user_turn-q3")).toBeDefined();
-
-    chat.applyEvent({
-      v: 1,
-      type: "block_meta_update",
-      turn_id: "turn-q3",
-      agent: "friday",
-      block_id: "blk-q3",
-      status: "aborted",
-      seq: 2,
-    } as Parameters<typeof chat.applyEvent>[0]);
-
-    expect(chat.messages.find((m) => m.id === "user_turn-q3")).toBeUndefined();
-  });
+  // Phase 5: `block_meta_update` SSE retired. The queued → complete
+  // flip and the aborted-vanish behavior is now driven by Zero's
+  // blocks reactive query (the daemon UPDATEs / DELETEs the row;
+  // Zero replicates; `applyZeroBlocks` re-derives the message list).
+  // See `dispatch-listener.test.ts` and `cancel-listener.test.ts`
+  // for the daemon-side coverage; the dashboard rendering path is
+  // covered by the existing Zero blocks tests in `zero.test.ts`.
 
   it("cancelQueued POSTs DELETE and stuffs recovered text back via the chat-input bridge", async () => {
     mockFetchWithTimeout.mockResolvedValueOnce(

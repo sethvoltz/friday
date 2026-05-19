@@ -1689,17 +1689,11 @@ export class ChatState {
         if (event.agent !== this.focusedAgent) break;
         this.handleBlockCanceled(event);
         break;
-      case "block_meta_update":
-        if (event.agent !== this.focusedAgent) break;
-        this.handleBlockMetaUpdate(event);
-        break;
-      case "block_reload":
-        if (event.agent !== this.focusedAgent) break;
-        // Daemon's JSONL recovery scan inserted/updated rows for this agent
-        // (FIX_FORWARD 1.3). Re-seed history so the dashboard mirrors the
-        // canonical blocks table.
-        void this.loadAgentTurns(event.agent);
-        break;
+      // Phase 5: `block_meta_update` + `block_reload` retired.
+      // Zero replicates the underlying blocks-table UPDATEs/INSERTs
+      // (queued → complete, aborted-then-deleted, JSONL-recovery
+      // inserts) reactively into the dashboard's `applyZeroBlocks`
+      // path — no SSE consumer or REST refetch needed.
       case "turn_done":
         // FRI-12: always clear the per-agent inflight slot for this
         // turn — quarantine of inflight state is global state and must
@@ -2125,43 +2119,10 @@ export class ChatState {
     this.messages = this.messages.filter((m) => m.blockId !== event.block_id);
   }
 
-  private handleBlockMetaUpdate(event: {
-    block_id: string;
-    turn_id: string;
-    status?: "streaming" | "complete" | "aborted" | "error" | "queued";
-    ts?: number;
-  }): void {
-    if (event.status === "aborted") {
-      this.messages = this.messages.filter(
-        (m) =>
-          m.blockId !== event.block_id &&
-          // userBlockIdForTurn keys also serve as a fallback when the row
-          // was synthesized late (no block_id captured on the bubble).
-          m.id !== userBlockIdForTurn(event.turn_id),
-      );
-      return;
-    }
-    for (const m of this.messages) {
-      const matches =
-        m.blockId === event.block_id ||
-        m.id === userBlockIdForTurn(event.turn_id);
-      if (!matches) continue;
-      if (event.status) {
-        m.status =
-          event.status === "complete"
-            ? "complete"
-            : event.status === "queued"
-              ? "queued"
-              : event.status === "error"
-                ? "error"
-                : event.status === "streaming"
-                  ? "streaming"
-                  : m.status;
-      }
-      if (typeof event.ts === "number") m.ts = event.ts;
-      return;
-    }
-  }
+  // Phase 5: `handleBlockMetaUpdate` removed — Zero replicates the
+  // queued → complete UPDATEs (and aborted DELETEs) on the blocks
+  // table; `applyZeroBlocks` re-derives the message list via
+  // `parseBlocks` which re-sorts by ts.
 
   /**
    * Yank a queued user-chat turn out of the daemon's `nextPrompts` FIFO

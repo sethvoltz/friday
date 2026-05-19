@@ -316,19 +316,9 @@ async function handle(
     } catch {
       // Malformed content_json — return empty text; the user gets to retype.
     }
-    // Notify any other open dashboard tab on this agent that the queued
-    // bubble is gone. We publish the meta-update *before* the row vanishes
-    // so a late reconnect that compares its cursor sees the aborted state.
-    // No writeAndPublish coordination: the row is being deleted, so there's
-    // no `last_event_seq` to align with.
-    eventBus.publish({
-      v: 1,
-      type: "block_meta_update",
-      turn_id: turnId,
-      agent: block.agentName,
-      block_id: block.blockId,
-      status: "aborted",
-    });
+    // Phase 5: `block_meta_update` SSE retired — Zero replicates
+    // the DELETE on the blocks slice; other dashboard tabs see the
+    // bubble vanish via the reactive query without an SSE event.
     await deleteBlockById(block.blockId);
     return json(res, 200, {
       ok: true,

@@ -500,26 +500,15 @@ function restampQueuedUserBlock(
 ): void {
   if (!userBlockId) return;
   const dispatchTs = Date.now();
-  // writeAndPublish is async (ADR-023). Fire-and-forget from this sync
-  // caller path (sendPrompt / spawnTurn), with the same logger surface
-  // the previous try/catch used.
-  void writeAndPublish(
-    {
-      v: 1,
-      type: "block_meta_update",
-      turn_id: turnId,
-      agent: agentName,
-      block_id: userBlockId,
-      status: "complete",
-      ts: dispatchTs,
-    },
-    (assignedSeq) =>
-      updateBlock(userBlockId, {
-        status: "complete",
-        ts: dispatchTs,
-        lastEventSeq: assignedSeq,
-      }),
-  ).catch((err: unknown) => {
+  // Phase 5: the legacy `block_meta_update` SSE event is retired —
+  // Zero replicates the row UPDATE to the dashboard's blocks slice
+  // reactively. We still bump `last_event_seq` to keep the column's
+  // monotonic invariant intact for any legacy reader.
+  void updateBlock(userBlockId, {
+    status: "complete",
+    ts: dispatchTs,
+    lastEventSeq: eventBus.currentSeq() + 1,
+  }).catch((err: unknown) => {
     logger.log("warn", "queued-block.meta-update.error", {
       agent: agentName,
       turnId,

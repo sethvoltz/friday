@@ -130,10 +130,10 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
       { mid: "msg-B", idx: 0, kind: "tool_result" },
     ]);
 
-    const reload = captured.find((e) => e.type === "block_reload");
-    expect(reload).toBeDefined();
-    expect(reload!.inserted).toBe(4);
-    expect((reload!.block_ids ?? []).length).toBe(4);
+    // Phase 5: `block_reload` SSE event is retired; Zero replicates
+    // JSONL-recovery INSERTs/UPDATEs reactively to the dashboard's
+    // blocks slice. The recovery emits no SSE event.
+    expect(captured.find((e) => e.type === "block_reload")).toBeUndefined();
   });
 
   it("is idempotent: re-running inserts nothing and emits no reload event", async () => {

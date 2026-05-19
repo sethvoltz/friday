@@ -237,18 +237,18 @@ describe("lifecycle: queued user-block dispatch", () => {
     __deleteLiveWorkerForTest("queued-agent");
   });
 
-  it("queued → drained: block_meta_update flips status + bumps ts, the DB row tracks", async () => {
-    // Stand up a real queued user block, then drive the queue-drain path
-    // (turn-complete) and assert: SSE meta-update fires with complete +
-    // new ts, the row in `blocks` matches, and the new ts strictly
-    // beats the original POST ts. Test seam writes a fake LiveWorker
-    // with a single queued WorkerPromptCommand carrying its userBlockId.
+  it("queued → drained: the DB row's status + ts track the drain timestamp; no SSE meta event (Phase 5)", async () => {
+    // Phase 5: the legacy `block_meta_update` SSE event is retired —
+    // Zero replicates the row UPDATE to the dashboard's blocks slice.
+    // The test asserts the canonical DB state (status='complete' + a
+    // fresh ts strictly greater than the original POST ts) AND that
+    // no SSE event of that type fires.
     const { recordUserBlock, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
     const { getBlockById } = await import("@friday/shared/services");
 
-    const { blockId, seq: originalSeq } = await recordUserBlock({
+    const { blockId } = await recordUserBlock({
       turnId: "t_drain",
       agentName: "queued-agent",
       sessionId: "sess-1",
@@ -256,7 +256,6 @@ describe("lifecycle: queued user-block dispatch", () => {
       source: "user_chat",
       status: "queued",
     });
-    expect(originalSeq).toBeGreaterThan(0); // queued emits SSE
     const beforeRow = await getBlockById(blockId);
     expect(beforeRow!.status).toBe("queued");
     const beforeTs = beforeRow!.ts;
@@ -287,25 +286,21 @@ describe("lifecycle: queued user-block dispatch", () => {
       sessionId: "sess-1",
       usage: undefined,
     } as never);
-    // restampQueuedUserBlock is fire-and-forget — let the meta-update land.
+    // restampQueuedUserBlock is fire-and-forget — let the DB write
+    // land.
     await settle();
 
     unsub();
     __deleteLiveWorkerForTest("queued-agent");
 
-    const meta = captured.find(
-      (e) =>
-        e.type === "block_meta_update" &&
-        e.block_id === blockId &&
-        e.status === "complete",
-    );
-    expect(meta).toBeDefined();
-    expect(typeof meta!.ts).toBe("number");
-    expect(meta!.ts!).toBeGreaterThan(beforeTs);
+    // No block_meta_update SSE event — Phase 5 retired it.
+    expect(
+      captured.find((e) => e.type === "block_meta_update"),
+    ).toBeUndefined();
 
     const afterRow = await getBlockById(blockId);
     expect(afterRow!.status).toBe("complete");
-    expect(afterRow!.ts).toBe(meta!.ts);
+    expect(afterRow!.ts).toBeGreaterThan(beforeTs);
     // The queued IPC ran too: the worker received `prompt` after the drain.
     expect(child.send).toHaveBeenCalledWith(
       expect.objectContaining({ type: "prompt" }),
