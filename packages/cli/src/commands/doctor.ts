@@ -146,6 +146,15 @@ export const doctorCommand = defineCommand({
               : "run `friday setup` to generate the secret",
           ),
         );
+        checks.push(
+          check(
+            `Postgres wal_level=logical (Zero replication)`,
+            pg.walLevelLogical,
+            pg.walLevelLogical
+              ? undefined
+              : `actual: ${pg.walLevelActual ?? "unknown"} — run \`friday setup\` then \`brew services restart postgresql@18\``,
+          ),
+        );
       }
     } catch (err) {
       checks.push(
