@@ -79,13 +79,10 @@ function tick(): void {
         sinceHeartbeatMs: sinceHb,
         thresholdMs,
       });
-      eventBus.publish({
-        v: 1,
-        type: "agent_status",
-        agent: name,
-        status: "stalled",
-        since: now,
-      });
+      // Phase 5: `agent_status` SSE retired. The stall is reflected
+      // by the daemon-side `watchdog.stall.detected` log entry +
+      // (when refork=true) the eventual agents.status UPDATE Zero
+      // replicates.
 
       if (cfg.watchdog?.refork) {
         // Fire-and-forget: refork awaits archiveAgent so the new fork can't

@@ -233,8 +233,11 @@ describe("lifecycle: IPC handler error boundary (FRI-33)", () => {
   // the boundary itself by driving `safeHandleEvent` directly (same call
   // shape that `child.on("message")` uses in production).
 
+  // Phase 5: the `status-change` branch no longer publishes (the
+  // legacy `agent_status` SSE was retired); only branches that still
+  // hit eventBus.publish are exercised here. `turn-complete` still
+  // publishes turn_done.
   for (const [branch, event] of [
-    ["status-change", { type: "status-change", status: "working" } as const],
     [
       "turn-complete",
       { type: "turn-complete", sessionId: "sess-x" } as const,

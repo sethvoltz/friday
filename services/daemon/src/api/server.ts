@@ -1740,14 +1740,8 @@ async function handleSystemCommand(
       // the agent is being reset, not closed.
       void archiveAgent(name, { reason: "refork" });
       await registry.clearSession(name);
-      eventBus.publish({
-        v: 1,
-        type: "agent_lifecycle",
-        agent: name,
-        agentType: a.type,
-        event: "refork",
-        reason: "reset-context",
-      });
+      // Phase 5: `agent_lifecycle:refork` SSE retired — Zero replicates
+      // the session-clear (agents.session_id=null) reactively.
       return json(res, 200, {
         ok: true,
         message: `reset-context: ${name} session cleared; next turn starts fresh`,
@@ -1769,13 +1763,8 @@ async function handleSystemCommand(
         type: "bare",
         parentName: undefined,
       });
-      eventBus.publish({
-        v: 1,
-        type: "agent_lifecycle",
-        agent: name,
-        agentType: "bare",
-        event: "spawn",
-      });
+      // Phase 5: `agent_lifecycle:spawn` SSE retired — Zero replicates
+      // the agents INSERT to the dashboard sidebar reactively.
 
       // Seed the agent with the topic as its first user turn. Re-uses the
       // same dispatch path as /api/chat/turn so persistence + SSE work

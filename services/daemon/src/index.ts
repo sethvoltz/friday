@@ -317,14 +317,9 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
       // registry row is flipped but reads from this captured value.
       const ticketId = a.ticketId ?? null;
       await registry.archiveAgent(a.name);
-      eventBus.publish({
-        v: 1,
-        type: "agent_lifecycle",
-        agent: a.name,
-        agentType: a.type,
-        event: "archive",
-        reason: "orphan-worktree",
-      });
+      // Phase 5: `agent_lifecycle` SSE retired — Zero's `agents`
+      // slice replicates the status transition reactively to the
+      // dashboard sidebar.
       // Newly-discovered orphan whose worktree is gone — work definitely
       // did not complete. Mark the linked ticket abandoned. Not a backfill
       // sweep of pre-existing in_progress rows; only orphans we observe

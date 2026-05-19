@@ -30,7 +30,6 @@ const DASHBOARD_BUMP_TYPES = new Set([
   "turn_done",
   "agent_lifecycle",
   "agent_status",
-  "schedule_fired",
 ]);
 
 const HANDLED_TYPES = new Set([
@@ -40,17 +39,15 @@ const HANDLED_TYPES = new Set([
   "agent_message",
   "agent_lifecycle",
   "agent_status",
-  "mail_delivered",
-  "schedule_fired",
   "evolve_critical",
   "system_banner",
   "block_start",
   "block_delta",
   "block_complete",
   "block_canceled",
-  // Phase 5: `block_meta_update` retired — Zero replicates the
-  // row UPDATEs (queued → complete, aborted-then-delete) reactively.
-  // Phase 5: `block_reload` retired — same rationale.
+  // Phase 5 retirements (Zero reactive queries replace the SSE
+  // role): `block_meta_update`, `block_reload`, `mail_delivered`,
+  // `schedule_fired`.
   "connection_established",
 ]);
 

@@ -15,17 +15,15 @@
  * per-agent cursors on `boot_id` mismatch.
  */
 
-import type { AgentStatus, AgentType } from "../agents.js";
+// Phase 5: AgentType/AgentStatus imports removed — the
+// AgentLifecycleEvent/AgentStatusEvent shapes that referenced them
+// are retired.
 
 export type WireEvent =
   | TurnStartedEvent
   | TurnErrorEvent
   | TurnDoneEvent
   | AgentMessageEvent
-  | AgentLifecycleEvent
-  | AgentStatusEvent
-  | MailDeliveredEvent
-  | ScheduleFiredEvent
   | EvolveCriticalEvent
   | SystemBannerEvent
   | AppLifecycleEvent
@@ -93,38 +91,16 @@ export interface AgentMessageEvent extends BaseEvent {
   preview?: string;
 }
 
-export interface AgentLifecycleEvent extends BaseEvent {
-  type: "agent_lifecycle";
-  agent: string;
-  agentType: AgentType;
-  /** Name of the agent that spawned this one, when known. The dashboard uses
-   * this to attach the spawn message to the spawner's chat (not the focused
-   * agent's, which may be unrelated). Undefined for top-level agents like the
-   * orchestrator and bare scratch agents created from a system command. */
-  parentName?: string;
-  event: "spawn" | "archive" | "crash" | "refork" | "complete";
-  reason?: string;
-}
+// Phase 5: `agent_lifecycle` + `agent_status` retired — Zero
+// replicates the `agents` slice (Phase 2) so the dashboard sidebar
+// reads spawn / archive / idle / working / stalled status directly
+// from the row.
 
-export interface AgentStatusEvent extends BaseEvent {
-  type: "agent_status";
-  agent: string;
-  status: AgentStatus;
-  since: number;
-}
-
-export interface MailDeliveredEvent extends BaseEvent {
-  type: "mail_delivered";
-  mail_id: number;
-  from: string;
-  to: string;
-}
-
-export interface ScheduleFiredEvent extends BaseEvent {
-  type: "schedule_fired";
-  schedule: string;
-  run_id: string;
-}
+// Phase 5: `mail_delivered` retired — Zero replicates the `mail`
+// slice (Phase 3.6); the dashboard's reactive query picks up new
+// rows. `schedule_fired` retired — Zero replicates the `schedules`
+// slice (and the `schedule_runs` history table) so the dashboard
+// sees the row's last_run_at / last_run_id update directly.
 
 export interface EvolveCriticalEvent extends BaseEvent {
   type: "evolve_critical";

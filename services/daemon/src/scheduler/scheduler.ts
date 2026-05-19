@@ -1,6 +1,5 @@
 import { eq } from "drizzle-orm";
 import { getDb, isValidCron, nextRun, schema } from "@friday/shared";
-import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import { isAgentLive } from "../agent/lifecycle.js";
 import * as registry from "../agent/registry.js";
@@ -211,12 +210,10 @@ export async function fireSchedule(
 ): Promise<string> {
   const runId = `r_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   logger.log("info", "schedule.fire", { name: r.name, runId });
-  eventBus.publish({
-    v: 1,
-    type: "schedule_fired",
-    schedule: r.name,
-    run_id: runId,
-  });
+  // Phase 5: `schedule_fired` SSE retired — Zero replicates the
+  // `schedules` slice (and the `schedule_runs` history table) so
+  // the dashboard sees the row's last_run_at / last_run_id update
+  // through its reactive query.
 
   try {
     await spawnScheduledRun(r, runId);

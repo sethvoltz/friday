@@ -73,7 +73,8 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    handleEvent(makeFakeWorker() as never, {
+    const worker = makeFakeWorker() as { status: string };
+    handleEvent(worker as never, {
       type: "error",
       message: "Anthropic temporarily overloaded — usually clears in a moment",
       recoverable: false,
@@ -140,12 +141,12 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     expect(completeIdx).toBeGreaterThan(-1);
     expect(doneIdx).toBeGreaterThan(completeIdx);
 
-    // (c) agent flipped to idle.
-    const statusEvent = [...captured]
-      .reverse()
-      .find((e) => e.type === "agent_status");
-    expect(statusEvent).toBeDefined();
-    expect(statusEvent!.status).toBe("idle");
+    // (c) Phase 5: `agent_status` SSE retired. The status flip is
+    // observable via setWorkerStatus mutating the live worker's
+    // `status` field (and via the registry UPDATE Zero replicates
+    // when the agent has a registry row — this fake worker doesn't
+    // pre-register so we assert the in-memory worker state here).
+    expect(worker.status).toBe("idle");
   });
 
   it("aborted branch emits turn_done(aborted) but does NOT insert an error block", async () => {

@@ -2,8 +2,9 @@
  * Mail bridge. Subscribes to the in-process `mailBus` EventEmitter (fired by
  * `sendMail` in shared/services) and:
  *
- *  - Always publishes a `mail_delivered` SSE event so the dashboard sees the
- *    delivery in real time.
+ *  - Phase 5: the legacy `mail_delivered` SSE event is retired; the dashboard
+ *    reads the `mail` slice reactively via Zero, so delivery is visible
+ *    without an SSE-triggered nudge.
  *  - If the recipient currently has a live worker, sends a `mail-wakeup` IPC
  *    so the worker drains its inbox without polling.
  *  - If the recipient is registered but not live and is a long-lived type,
@@ -21,7 +22,6 @@ import {
   readPromptStack,
 } from "@friday/shared";
 import { inbox, mailBus, type MailRow } from "@friday/shared/services";
-import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import {
   dispatchTurn,
@@ -47,14 +47,9 @@ export function startMailBridge(): void {
     // any rejection lands on the bus's `error` channel rather than as an
     // unhandled promise.
     void (async () => {
-      eventBus.publish({
-        v: 1,
-        type: "mail_delivered",
-        mail_id: row.id,
-        from: row.fromAgent,
-        to: row.toAgent,
-      });
-
+      // Phase 5: `mail_delivered` SSE retired — Zero replicates the
+      // `mail` slice (Phase 3.6) so the dashboard sees the new row
+      // through its reactive query.
       try {
         const recipient = await registry.getAgent(row.toAgent);
         await recordUserBlock({

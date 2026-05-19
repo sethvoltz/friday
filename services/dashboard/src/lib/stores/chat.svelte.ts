@@ -1712,35 +1712,11 @@ export class ChatState {
         if (event.agent !== this.focusedAgent) break;
         if (event.turn_id) this.finishTurn(event.turn_id, "error");
         break;
-      case "agent_lifecycle":
-        if (event.event === "spawn") {
-          this.upsertAgent(event.agent, {
-            type: event.agentType,
-            status: "working",
-          });
-        } else if (event.event === "archive") {
-          // Mark as archived; row stays in chat.agents so "Show archived"
-          // can surface it. Sessions persist as history forever.
-          this.upsertAgent(event.agent, { status: "archived" });
-        } else if (event.event === "complete") {
-          // F2-A: worker exited cleanly. The daemon already flipped
-          // status to idle (F1-A); reflect it locally so tabs that
-          // missed the prior agent_status: idle don't drift. upsertAgent
-          // refuses to create with type="unknown" (F2-B), so a stray
-          // complete for an unknown agent is a safe no-op — the next
-          // /api/agents poll will surface it.
-          //
-          // Archived is terminal — see applyAgentStatus comment. A
-          // ring-buffer replay's `complete` for an already-archived
-          // agent must not flip status back to idle.
-          const existing = this.agents.find((a) => a.name === event.agent);
-          if (existing?.status === "archived") break;
-          this.upsertAgent(event.agent, { status: "idle" });
-        }
-        break;
-      case "agent_status":
-        this.applyAgentStatus(event.agent, event.status);
-        break;
+      // Phase 5: `agent_lifecycle` + `agent_status` SSE retired.
+      // Zero's `agents` slice (Phase 2) mirrors into `chat.agents`
+      // via the `#bindAgents` listener in zero.svelte.ts; the
+      // dashboard sidebar gets spawn / archive / idle / working
+      // status reactively without these SSE handlers.
       case "agent_message":
         // FIX_FORWARD 3.6: badge unfocused agents on new user-visible
         // block_complete. The focused agent never accumulates a badge —
@@ -1749,14 +1725,10 @@ export class ChatState {
           this.bumpUnread(event.agent);
         }
         break;
-      case "mail_delivered":
-        // F3-B (PR C): we used to bump unread here as a faster nudge
-        // before the recipient's assistant reply landed. That produced
-        // double-counts (mail_delivered + later assistant agent_message
-        // → two badges per logical event). The assistant reply is the
-        // signal that warrants a badge; until then the chat shows
-        // nothing the user can act on. Intentional no-op here.
-        break;
+      // Phase 5: `mail_delivered` SSE retired. Zero replicates the
+      // `mail` slice (Phase 3.6); the recipient's badge is bumped
+      // by the eventual assistant `agent_message` SSE — same
+      // F3-B PR C behavior, just with the redundant nudge gone.
       default:
         break;
     }

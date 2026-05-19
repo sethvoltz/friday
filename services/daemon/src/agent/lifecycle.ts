@@ -360,14 +360,9 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
         });
       }
     })();
-    eventBus.publish({
-      v: 1,
-      type: "agent_lifecycle",
-      agent: input.agentName,
-      agentType: input.options.agentType,
-      parentName: input.options.parentName,
-      event: "complete",
-    });
+    // Phase 5: `agent_lifecycle` SSE retired — Zero replicates the
+    // agents row UPDATE so the dashboard sees the status drop on
+    // worker exit.
     if (w.onExit) {
       const status: ExitInfo["status"] = w.completedAtLeastOnce
         ? w.lastExitStatus
@@ -413,14 +408,9 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     input.options.turnId,
     input.userBlockId,
   );
-  eventBus.publish({
-    v: 1,
-    type: "agent_lifecycle",
-    agent: input.agentName,
-    agentType: input.options.agentType,
-    parentName: input.options.parentName,
-    event: "spawn",
-  });
+  // Phase 5: `agent_lifecycle:spawn` SSE retired — Zero replicates
+  // the agents row's new status (idle → working) reactively to the
+  // dashboard sidebar.
   eventBus.publish({
     v: 1,
     type: "turn_started",
@@ -782,13 +772,9 @@ export async function archiveAgent(
   // before the child has fully exited.
   if (w) live.delete(agentName);
   await registry.archiveAgent(agentName);
-  eventBus.publish({
-    v: 1,
-    type: "agent_lifecycle",
-    agent: agentName,
-    agentType: w?.agentType ?? "orchestrator",
-    event: "archive",
-  });
+  // Phase 5: `agent_lifecycle:archive` SSE retired — Zero replicates
+  // the agents.status='archived' UPDATE; the dashboard sidebar drops
+  // the row via the reactive query.
   // Fire-and-forget: the closer owns its error handling and must never
   // bubble back into the worker-teardown path.
   void closeTicketForArchive({
@@ -1188,26 +1174,17 @@ export async function handleEvent(
       setWorkerStatus(w, "idle", "handleEvent.error");
       w.completedAtLeastOnce = true;
       await registry.setStatus(w.agentName, "idle");
-      eventBus.publish({
-        v: 1,
-        type: "agent_status",
-        agent: w.agentName,
-        status: "idle",
-        since: Date.now(),
-      });
+      // Phase 5: `agent_status` SSE retired — Zero replicates the
+      // agents.status UPDATE reactively.
       const next = w.nextPrompts.shift();
       if (next) sendPrompt(w, next);
       break;
     }
     case "status-change":
       setWorkerStatus(w, e.status, "handleEvent.status-change");
-      eventBus.publish({
-        v: 1,
-        type: "agent_status",
-        agent: w.agentName,
-        status: e.status === "working" ? "working" : "idle",
-        since: Date.now(),
-      });
+      // Phase 5: `agent_status` SSE retired — Zero replicates the
+      // setWorkerStatus → registry UPDATE reactively. The internal
+      // `setWorkerStatus` log line preserves diagnostic visibility.
       break;
     case "turn-complete": {
       // FRI-12: same cancellation as the error path. If the worker raced

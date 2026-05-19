@@ -97,14 +97,8 @@ export async function audit(): Promise<{ archived: string[]; demoted: string[] }
         previousStatus: a.status,
       });
       await registry.archiveAgent(a.name);
-      eventBus.publish({
-        v: 1,
-        type: "agent_lifecycle",
-        agent: a.name,
-        agentType: a.type,
-        event: "archive",
-        reason: "orphan-worktree",
-      });
+      // Phase 5: SSE retirement — Zero replicates the agent row's
+      // status transition; no `agent_lifecycle` event needed.
       archived.push(a.name);
       continue;
     }
@@ -118,13 +112,8 @@ export async function audit(): Promise<{ archived: string[]; demoted: string[] }
         agent: a.name,
       });
       await registry.setStatus(a.name, "idle");
-      eventBus.publish({
-        v: 1,
-        type: "agent_status",
-        agent: a.name,
-        status: "idle",
-        since: Date.now(),
-      });
+      // Phase 5: `agent_status` SSE retired — Zero replicates the
+      // setStatus UPDATE reactively.
       demoted.push(a.name);
     }
   }
