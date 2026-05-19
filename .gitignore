@@ -10,3 +10,4 @@ build/
 .friday-workspace.json
 .commit-msg.tmp
 .playwright-mcp/
+.claude/
