@@ -2070,17 +2070,13 @@ export class ChatState {
         if (typeof parsed.text === "string") m.output = parsed.text;
         return;
       }
-      // No preceding tool_use bubble — likely a ring eviction. Synthesize one.
-      this.messages.push({
-        id,
-        role: "tool",
-        text: "",
-        status: parsed.is_error ? "error" : "done",
-        toolId,
-        toolName: "(unknown)",
-        output: parsed.text ?? "",
-        ts: event.ts,
-      });
+      // No preceding tool_use bubble — likely a ring eviction OR the
+      // first 50-row Zero window cut mid-turn. A "(unknown)" tool card
+      // with just the result text ("mail 154 closed", a bare exit code,
+      // …) is more noise than signal; the user already lost the tool
+      // call's input, name, and motivation. Drop the orphan; if its
+      // tool_use later arrives via scroll-back, parseBlocks's
+      // tool_result branch will produce a paired bubble at that point.
     }
   }
 
@@ -2466,6 +2462,25 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
   const orphans = classifyOrphanRows(blocks);
   const out: ChatMessage[] = [];
   const toolByToolId = new Map<string, ChatMessage>();
+  // Pre-scan: which tool_use_ids actually have a tool_use row in this
+  // batch. The 50-row Zero window — and the `?before=` scroll-back
+  // batches that share the same shape — often slice between a tool_use
+  // and its tool_result; we want to drop the orphan tool_result rather
+  // than render a `toolName="(unknown)"` card with just the result text
+  // ("mail 154 closed", a bare exit code, …) which is noise without the
+  // tool name + input. FRI-81 D1 still has to work: when both rows ARE
+  // in the batch but `finalizeStreamingBlocks` bumped the tool_use past
+  // the tool_result's ts, the sort processes tool_result first and the
+  // fold-in-existing path needs to materialize a placeholder. So:
+  // window-cut orphan ⇒ drop, ts-reorder orphan ⇒ synth-then-fold.
+  const toolUseIdsInBatch = new Set<string>();
+  for (const b of blocks) {
+    if (b.kind === "tool_use") {
+      const p = parseBlockContent(b.contentJson);
+      const tid = p.tool_use_id ?? b.blockId;
+      toolUseIdsInBatch.add(tid);
+    }
+  }
   // FRI-85: track which turns produced any assistant-side content, and
   // which turns we've already synthesized a no-response affordance for
   // (sentinel-driven). After the main pass we scan user-only turns and
@@ -2680,7 +2695,11 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
       if (existing) {
         existing.status = status;
         existing.output = parsed.text ?? "";
-      } else {
+      } else if (toolUseIdsInBatch.has(toolId)) {
+        // FRI-81 D1: the tool_use IS in this batch but hasn't been
+        // processed yet because `finalizeStreamingBlocks` bumped its
+        // ts past the tool_result's. Materialize a placeholder so the
+        // upcoming tool_use can fold its name + input in.
         const synth: ChatMessage = {
           id: `t_${toolId}`,
           role: "tool",
@@ -2689,16 +2708,14 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
           toolId,
           toolName: "(unknown)",
           output: parsed.text ?? "",
-          // FRI-81 N3: stamp turnId at synth time so the D1 fold doesn't
-          // depend on it being unset (`if (!existing.turnId) existing.turnId = b.turnId`).
-          // tool_result rows always carry the turnId; no reason to wait for
-          // tool_use to fill it.
           turnId: b.turnId,
           ts: b.ts,
         };
         out.push(synth);
         toolByToolId.set(toolId, synth);
       }
+      // Else: window-cut orphan — drop. See `toolUseIdsInBatch`
+      // pre-scan comment at the top of parseBlocks.
     }
   }
   // FRI-85 safety net: for any user_chat-sourced user message whose turn

@@ -2532,6 +2532,96 @@ describe("FRI-81 D1: tool_use sorted after tool_result still resolves its name",
   });
 });
 
+describe("window-cut orphan tool_result is dropped, not rendered as (unknown)", () => {
+  it("reload: tool_result whose tool_use isn't in the batch produces no bubble", async () => {
+    // Reproduces the 50-row Zero window slicing between a tool_use and
+    // its tool_result. Before this fix, the orphan synth path produced
+    // a `toolName="(unknown)"` card with just the result text — visible
+    // as a stream of "mail 154 closed" / "mail 153 closed" bubbles on
+    // the orchestrator transcript because the orchestrator closes mail
+    // in tight back-to-back loops at turn boundaries.
+    const { parseBlocks } = await import("./chat.svelte");
+    const messages = parseBlocks(
+      [
+        {
+          id: "20",
+          blockId: "blk-orphan-result",
+          turnId: "t-1",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: null,
+          blockIndex: 1,
+          role: "assistant",
+          kind: "tool_result",
+          source: null,
+          contentJson: JSON.stringify({
+            tool_use_id: "toolu_evicted",
+            text: "mail 154 closed",
+            is_error: false,
+          }),
+          status: "complete",
+          ts: 500,
+          lastEventSeq: 20,
+        },
+        // A regular text block in the same batch so the function isn't
+        // returning early on empty input.
+        {
+          id: "21",
+          blockId: "blk-text",
+          turnId: "t-1",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: "msg-1",
+          blockIndex: 0,
+          role: "assistant",
+          kind: "text",
+          source: null,
+          contentJson: JSON.stringify({ text: "OK, mail handled." }),
+          status: "complete",
+          ts: 600,
+          lastEventSeq: 21,
+        },
+      ],
+      "friday",
+    );
+    expect(messages.find((m) => m.role === "tool")).toBeUndefined();
+    // The legitimate text bubble in the same batch still renders.
+    expect(messages.find((m) => m.role === "assistant")?.text).toBe(
+      "OK, mail handled.",
+    );
+  });
+
+  it("live: tool_result SSE event with no preceding tool_use bubble produces no orphan", async () => {
+    // Live path mirror of the reload test — applyEvent("tool_result")
+    // with no matching `t_<toolId>` already in `messages` must not
+    // synthesize a `toolName="(unknown)"` card. (Pre-fix it did.)
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      agent: "friday",
+      turn_id: "t-1",
+      block_id: "blk-orphan-result",
+      message_id: null,
+      block_index: 1,
+      role: "assistant",
+      kind: "tool_result",
+      source: null,
+      content_json: JSON.stringify({
+        tool_use_id: "toolu_evicted",
+        text: "mail 154 closed",
+        is_error: false,
+      }),
+      status: "complete",
+      ts: 100,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages.find((m) => m.role === "tool")).toBeUndefined();
+  });
+});
+
 describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
   it("reload: streaming thinking from a previous turn is flipped to aborted when a later turn exists", async () => {
     mockFetchWithTimeout
