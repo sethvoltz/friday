@@ -184,18 +184,10 @@ async function main(): Promise<void> {
         return;
       }
       if (result.orphans.length > 0) {
-        const sample = result.orphans
-          .slice(0, 3)
-          .map((o) => o.identifier)
-          .join(", ");
-        eventBus.publish({
-          v: 1,
-          type: "system_banner",
-          level: "info",
-          text: `Linear: ${result.orphans.length} active ticket${
-            result.orphans.length === 1 ? "" : "s"
-          } not linked to Friday — first few: ${sample}`,
-        });
+        // Phase 5: `system_banner` SSE retired. The dashboard's
+        // sidebar will pick up the orphan-count signal from the
+        // `system_banners` table (ADR-024) in Phase 6; for now the
+        // info-level surface is the daemon log entry below.
         logger.log("info", "linear.reconcile.orphans", {
           count: result.orphans.length,
           stale: result.staleLinks.length,

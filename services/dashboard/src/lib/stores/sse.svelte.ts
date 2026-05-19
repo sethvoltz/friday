@@ -37,17 +37,14 @@ const HANDLED_TYPES = new Set([
   "error",
   "turn_done",
   "agent_message",
-  "agent_lifecycle",
-  "agent_status",
-  "evolve_critical",
-  "system_banner",
   "block_start",
   "block_delta",
   "block_complete",
   "block_canceled",
-  // Phase 5 retirements (Zero reactive queries replace the SSE
-  // role): `block_meta_update`, `block_reload`, `mail_delivered`,
-  // `schedule_fired`.
+  // Phase 5 retirements (Zero reactive queries / Postgres tables
+  // replace the SSE role): `block_meta_update`, `block_reload`,
+  // `mail_delivered`, `schedule_fired`, `agent_lifecycle`,
+  // `agent_status`, `evolve_critical`, `system_banner`.
   "connection_established",
 ]);
 

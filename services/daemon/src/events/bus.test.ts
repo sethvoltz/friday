@@ -22,9 +22,10 @@ describe("event bus boot_id (FIX_FORWARD 1.6)", () => {
     const before = eventBus.currentSeq();
     eventBus.publish({
       v: 1,
-      type: "system_banner",
-      level: "info",
-      text: "boot test",
+      type: "block_canceled",
+      turn_id: "t-bus-1",
+      agent: "a-bus",
+      block_id: "blk-bus-1",
     });
     expect(eventBus.currentSeq()).toBe(before + 1);
   });
@@ -33,9 +34,10 @@ describe("event bus boot_id (FIX_FORWARD 1.6)", () => {
     for (let i = 0; i < 700; i++) {
       eventBus.publish({
         v: 1,
-        type: "system_banner",
-        level: "info",
-        text: `walk-${i}`,
+        type: "block_canceled",
+        turn_id: `t-walk-${i}`,
+        agent: "a-bus",
+        block_id: `blk-walk-${i}`,
       });
     }
     const after = eventBus.currentSeq();
@@ -52,9 +54,10 @@ describe("event bus boot_id (FIX_FORWARD 1.6)", () => {
     for (let i = 0; i < 6000; i++) {
       eventBus.publish({
         v: 1,
-        type: "system_banner",
-        level: "info",
-        text: `flood-${i}`,
+        type: "block_canceled",
+        turn_id: `t-flood-${i}`,
+        agent: "a-bus",
+        block_id: `blk-flood-${i}`,
       });
     }
     const head = eventBus.currentSeq();

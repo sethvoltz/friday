@@ -24,8 +24,6 @@ export type WireEvent =
   | TurnErrorEvent
   | TurnDoneEvent
   | AgentMessageEvent
-  | EvolveCriticalEvent
-  | SystemBannerEvent
   | AppLifecycleEvent
   | BlockStartEvent
   | BlockDeltaEvent
@@ -102,17 +100,10 @@ export interface AgentMessageEvent extends BaseEvent {
 // slice (and the `schedule_runs` history table) so the dashboard
 // sees the row's last_run_at / last_run_id update directly.
 
-export interface EvolveCriticalEvent extends BaseEvent {
-  type: "evolve_critical";
-  proposal_id: string;
-  count: number;
-}
-
-export interface SystemBannerEvent extends BaseEvent {
-  type: "system_banner";
-  level: "info" | "warn" | "error";
-  text: string;
-}
+// Phase 5: `evolve_critical` + `system_banner` retired. Both move
+// to canonical Postgres tables (`evolve_proposals` count derives
+// via Zero; `system_banners` per ADR-024 carries level + text).
+// The dashboard sidebar surfaces will be wired up in Phase 6.
 
 /**
  * Apps platform lifecycle event (FRI-78). Fires when an app is

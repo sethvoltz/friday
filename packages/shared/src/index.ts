@@ -37,8 +37,6 @@ export type {
   TurnErrorEvent,
   TurnDoneEvent,
   AgentMessageEvent,
-  EvolveCriticalEvent,
-  SystemBannerEvent,
   TurnUsage,
   BlockKind,
   BlockStartEvent,
