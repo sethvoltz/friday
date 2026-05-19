@@ -98,7 +98,10 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
     expect(startEvt).toBeDefined();
     const blockId = startEvt!.block_id!;
     expect(blockId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(await getBlockById(blockId)).not.toBeNull();
+    // Phase 5 (plan §212): the blocks row is only INSERTed at
+    // block_complete now — block_start doesn't write the DB. No row
+    // should exist between start and cancel.
+    expect(await getBlockById(blockId)).toBeNull();
 
     handleEvent(w as never, {
       type: "block-cancel",
@@ -108,6 +111,8 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
 
     unsub();
 
+    // After cancel the row still doesn't exist (handleBlockCancel has
+    // nothing to delete — the row was never inserted).
     expect(await getBlockById(blockId)).toBeNull();
     const cancelEvt = captured.find(
       (e) => e.type === "block_canceled" && e.block_id === blockId,

@@ -1412,51 +1412,27 @@ async function handleBlockStart(
   const role = "assistant";
   const source: BlockSource = null;
 
-  let insertOk = true;
-  let assignedSeq = 0;
-  try {
-    const result = await writeAndPublish(
-      {
-        v: 1,
-        type: "block_start",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        block_id: blockId,
-        message_id: e.messageId ?? null,
-        block_index: e.blockIndex,
-        role,
-        kind: e.kind,
-        source,
-        tool: e.tool,
-        ts,
-      },
-      (seq) =>
-        insertBlock({
-          blockId,
-          turnId: w.turnId,
-          agentName: w.agentName,
-          sessionId,
-          messageId: e.messageId ?? null,
-          blockIndex: e.blockIndex,
-          role,
-          kind: e.kind,
-          source,
-          contentJson: "",
-          status: "streaming",
-          ts,
-          lastEventSeq: seq,
-        }),
-    );
-    assignedSeq = result.seq;
-  } catch (err) {
-    insertOk = false;
-    logger.log("warn", "blocks.insert.error", {
-      agent: w.agentName,
-      blockId,
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
-  if (!insertOk) return;
+  // Phase 5 (plan §212): the blocks row is NOT INSERTed at block_start
+  // anymore. Live streaming bytes accumulate in `liveTurns` only; the
+  // canonical row INSERTs at block_complete with `streaming=false`.
+  // Mid-stream reload reconstructs the in-flight bubble from the
+  // per-turn SSE replay buffer (the daemon replays from turn start on
+  // every per-agent connect), not from the DB row.
+  const assignedSeq = eventBus.currentSeq() + 1;
+  eventBus.publish({
+    v: 1,
+    type: "block_start",
+    turn_id: w.turnId,
+    agent: w.agentName,
+    block_id: blockId,
+    message_id: e.messageId ?? null,
+    block_index: e.blockIndex,
+    role,
+    kind: e.kind,
+    source,
+    tool: e.tool,
+    ts,
+  });
 
   liveTurns.startBlock({
     turnId: w.turnId,
@@ -1487,36 +1463,11 @@ async function handleBlockDelta(
     nextSeq,
   );
   if (!live) return;
-  // Persist the accumulated text + bump `last_event_seq` so a mid-turn
-  // reload picks up the partial content from /api/agents/:name/blocks
-  // and skips the replayed deltas via the per-agent SSE cursor. Without
-  // this the row stays at `content_json=""` until block_complete, the
-  // dashboard's parseBlocks renders an empty bubble, the resumed SSE
-  // deltas append from "" — and if the ring buffer evicted the early
-  // deltas, the user sees only the late half. We only write text
-  // accumulation here; tool_use blocks accumulate `partial_json` and
-  // don't render incrementally on the client, so their canonical
-  // content arrives via block_complete as before.
-  if (
-    typeof e.delta.text === "string" &&
-    (live.kind === "text" || live.kind === "thinking")
-  ) {
-    try {
-      await updateBlock(live.blockId, {
-        contentJson: JSON.stringify({ text: live.text }),
-        lastEventSeq: nextSeq,
-      });
-    } catch (err) {
-      // A DB write failure here doesn't break the live stream — the
-      // SSE event still publishes below. Mid-stream reload would
-      // fall back to empty content (the prior failure mode).
-      logger.log("warn", "blocks.delta.update.fail", {
-        agent: w.agentName,
-        blockId: live.blockId,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  // Phase 5 (plan §212): no per-delta row write. The accumulated text
+  // lives in `liveTurns` until block_complete; the canonical row is
+  // INSERTed once at that terminal point with `streaming=false`. Mid-
+  // stream reloads rebuild the in-flight accumulator from the per-turn
+  // SSE replay buffer instead of reading the row.
   eventBus.publish({
     v: 1,
     type: "block_delta",
@@ -1536,26 +1487,18 @@ async function handleBlockCancel(
   const peekSeq = eventBus.currentSeq() + 1;
   const live = liveTurns.finishBlock(w.turnId, e.clientBlockId, peekSeq);
   if (!live) return;
-  await writeAndPublish(
-    {
-      v: 1,
-      type: "block_canceled",
-      turn_id: w.turnId,
-      agent: w.agentName,
-      block_id: live.blockId,
-    },
-    async () => {
-      try {
-        await deleteBlockById(live.blockId);
-      } catch (err) {
-        logger.log("warn", "blocks.delete.error", {
-          agent: w.agentName,
-          blockId: live.blockId,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    },
-  );
+  // Phase 5 (plan §212): block_start no longer INSERTs the row, so a
+  // cancel has no row to DELETE — just emit the SSE so any live
+  // dashboard drops the in-flight bubble it built from the streaming
+  // delta replay. liveTurns.finishBlock above already cleared the
+  // accumulator.
+  eventBus.publish({
+    v: 1,
+    type: "block_canceled",
+    turn_id: w.turnId,
+    agent: w.agentName,
+    block_id: live.blockId,
+  });
 }
 
 async function handleBlockStop(
@@ -1573,6 +1516,12 @@ async function handleBlockStop(
   const peekSeq = eventBus.currentSeq() + 1;
   const live = liveTurns.finishBlock(w.turnId, e.clientBlockId, peekSeq);
   if (!live) return;
+  // Phase 5 (plan §212): the canonical blocks row is INSERTed here at
+  // block_complete with the final content_json + status + streaming=false
+  // (the schema default). Prior phases INSERTed at block_start; the new
+  // contract is "rows only exist for closed blocks." Mid-stream reload
+  // sees no row for an in-flight block; the dashboard reconstructs the
+  // bubble from the per-turn SSE replay buffer instead.
   await writeAndPublish(
     {
       v: 1,
@@ -1591,14 +1540,23 @@ async function handleBlockStop(
     },
     async (seq) => {
       try {
-        await updateBlock(live.blockId, {
+        await insertBlock({
+          blockId: live.blockId,
+          turnId: w.turnId,
+          agentName: w.agentName,
+          sessionId: live.sessionId,
+          messageId: live.messageId,
+          blockIndex: live.blockIndex,
+          role: live.role,
+          kind: live.kind,
+          source: live.source,
           contentJson: e.contentJson,
           status: e.status,
           ts,
           lastEventSeq: seq,
         });
       } catch (err) {
-        logger.log("warn", "blocks.update.error", {
+        logger.log("warn", "blocks.insert.error", {
           agent: w.agentName,
           blockId: live.blockId,
           message: err instanceof Error ? err.message : String(err),
