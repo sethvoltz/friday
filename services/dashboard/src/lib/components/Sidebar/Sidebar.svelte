@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     chat,
+    type AgentInfo,
     type SidebarSessionSummary,
   } from "$lib/stores/chat.svelte";
   // Importing `zeroSidebar` triggers its singleton constructor — which
