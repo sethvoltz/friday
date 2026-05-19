@@ -66,8 +66,14 @@ function tmuxSpecs(
     // visible in `friday attach zero-cache` so the operator can see it.
     "zero-cache": {
       cwd: join(repoRoot, "services", "dashboard"),
+      // Source ~/.friday/.env before exec — zero-cache reads its
+      // upstream + replica config from env vars (ZERO_UPSTREAM_DB,
+      // ZERO_REPLICA_FILE, ZERO_AUTH_SECRET, ZERO_APP_PUBLICATIONS,
+      // ZERO_MUTATE_URL), and the tmux session's parent shell may
+      // not have those exported. `set -a` auto-exports every var
+      // assigned by the source.
       prodCmd:
-        "while true; do pnpm exec zero-cache; ec=$?; echo \"zero-cache exited code $ec — restarting in 1s\"; sleep 1; done",
+        'set -a && source ~/.friday/.env && set +a && while true; do pnpm exec zero-cache; ec=$?; echo "zero-cache exited code $ec — restarting in 1s"; sleep 1; done',
     },
   };
 }
