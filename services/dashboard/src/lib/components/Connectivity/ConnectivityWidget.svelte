@@ -44,10 +44,14 @@
     aria-label={view.sync.tooltip}>
     <span class="dot"></span>
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M21 12a9 9 0 0 1-15.5 6.4" />
-      <path d="M3 12a9 9 0 0 1 15.5-6.4" />
-      <polyline points="20,2 20,8 14,8" />
-      <polyline points="4,22 4,16 10,16" />
+      <!-- Satellite-dish glyph. Phase 6a rewired the middle stage from
+           SSE → Sync semantics but the dish icon reads more clearly as
+           "signal" than the refresh arrows did; keep the dish, the
+           binding still resolves Zero WS health via `view.sync`. -->
+      <path d="M4 10a7.31 7.31 0 0 0 10 10Z" />
+      <path d="m9 15 3-3" />
+      <path d="M17 13a6 6 0 0 0-6-6" />
+      <path d="M21 13A10 10 0 0 0 11 3" />
     </svg>
   </span>
   <svg class="sep" viewBox="0 0 20 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
