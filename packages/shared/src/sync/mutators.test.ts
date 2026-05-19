@@ -19,6 +19,7 @@ import {
   slugifyMemoryId,
   type AddTicketCommentArgs,
   type AddTicketRelationArgs,
+  type ArchiveAgentArgs,
   type CreateMemoryEntryArgs,
   type CreateScheduleArgs,
   type CreateTicketArgs,
@@ -176,6 +177,13 @@ interface MockAppUpdateCall {
   status: string;
 }
 
+interface MockAgentUpdateCall {
+  name: string;
+  status: string;
+  archive_reason?: string;
+  updated_at: number;
+}
+
 function makeMockTx(): {
   tx: Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   upsertCalls: MockUpsertCall[];
@@ -193,6 +201,7 @@ function makeMockTx(): {
   scheduleUpdates: MockScheduleUpdateCall[];
   appInserts: MockAppInsertCall[];
   appUpdates: MockAppUpdateCall[];
+  agentUpdates: MockAgentUpdateCall[];
 } {
   const upsertCalls: MockUpsertCall[] = [];
   const clientDeviceUpdates: MockClientDeviceUpdateCall[] = [];
@@ -260,6 +269,10 @@ function makeMockTx(): {
   const appUpdate = vi.fn(async (row: MockAppUpdateCall) => {
     appUpdates.push(row);
   });
+  const agentUpdates: MockAgentUpdateCall[] = [];
+  const agentUpdate = vi.fn(async (row: MockAgentUpdateCall) => {
+    agentUpdates.push(row);
+  });
   // The mutators touch `tx.mutate.<table>.<op>`. Rest of Transaction
   // surface left undefined — we cast to the parameter type only to
   // satisfy TypeScript.
@@ -275,6 +288,7 @@ function makeMockTx(): {
       memory_entries: { insert: memoryInsert, update: memoryUpdate },
       schedules: { insert: scheduleInsert, update: scheduleUpdate },
       apps: { insert: appInsert, update: appUpdate },
+      agents: { update: agentUpdate },
     },
   } as unknown as Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   return {
@@ -294,6 +308,7 @@ function makeMockTx(): {
     scheduleUpdates,
     appInserts,
     appUpdates,
+    agentUpdates,
   };
 }
 
@@ -1216,5 +1231,74 @@ describe("reloadApp", () => {
     await mutators.reloadApp(tx, args);
     expect(appUpdates).toHaveLength(2);
     expect(appUpdates[0]).toEqual(appUpdates[1]);
+  });
+});
+
+describe("archiveAgent", () => {
+  it("UPDATEs status='archive_requested' + records archive_reason", async () => {
+    const mutators = createMutators();
+    const { tx, agentUpdates } = makeMockTx();
+    const args: ArchiveAgentArgs = {
+      name: "builder-xyz",
+      reason: "completed",
+      ts: 1_700_000_000_000,
+    };
+    await mutators.archiveAgent(tx, args);
+    expect(agentUpdates).toEqual([
+      {
+        name: "builder-xyz",
+        status: "archive_requested",
+        archive_reason: "completed",
+        updated_at: 1_700_000_000_000,
+      },
+    ]);
+  });
+
+  it("supports all four reason values", async () => {
+    const mutators = createMutators();
+    const { tx, agentUpdates } = makeMockTx();
+    for (const reason of [
+      "completed",
+      "abandoned",
+      "failed",
+      "refork",
+    ] as const) {
+      await mutators.archiveAgent(tx, {
+        name: `agent-${reason}`,
+        reason,
+        ts: 1,
+      });
+    }
+    expect(agentUpdates.map((u) => u.archive_reason).sort()).toEqual(
+      ["abandoned", "completed", "failed", "refork"].sort(),
+    );
+  });
+
+  it("is idempotent — re-archiving with same args produces identical writes", async () => {
+    const mutators = createMutators();
+    const { tx, agentUpdates } = makeMockTx();
+    const args: ArchiveAgentArgs = {
+      name: "x",
+      reason: "abandoned",
+      ts: 1,
+    };
+    await mutators.archiveAgent(tx, args);
+    await mutators.archiveAgent(tx, args);
+    expect(agentUpdates).toHaveLength(2);
+    expect(agentUpdates[0]).toEqual(agentUpdates[1]);
+  });
+
+  it("touches only name + status + archive_reason + updated_at — daemon owns everything else", async () => {
+    const mutators = createMutators();
+    const { tx, agentUpdates } = makeMockTx();
+    await mutators.archiveAgent(tx, {
+      name: "x",
+      reason: "abandoned",
+      ts: 1,
+    });
+    const u = agentUpdates[0] as Record<string, unknown>;
+    expect(Object.keys(u).sort()).toEqual(
+      ["archive_reason", "name", "status", "updated_at"].sort(),
+    );
   });
 });

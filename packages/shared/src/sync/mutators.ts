@@ -365,6 +365,37 @@ export interface ReloadAppArgs {
   ts: number;
 }
 
+/* ---------------- Phase 4.8: archiveAgent ---------------- */
+// Mutator UPDATEs the agent row's status to 'archive_requested' and
+// records the reason. A Postgres trigger fires
+// `NOTIFY friday_archive_requested`; the daemon's LISTEN handler
+// calls the existing `archiveAgent(name, {reason})` lifecycle
+// function which:
+//   1. Stops the live worker (graceful → SIGTERM pgrp → SIGKILL pgrp).
+//   2. Archives the worktree to disk (builders only).
+//   3. Closes any linked Linear ticket via `closeTicketForArchive`.
+//   4. Sets status='archived' as its final write.
+//
+// The legacy `/api/commands` archive path remains untouched — it
+// bypasses the mutator and calls `archiveAgent` directly. The
+// trigger predicate (NEW.status = 'archive_requested') ensures
+// only mutator-initiated archives fire the LISTEN handler.
+//
+// `reason` is required because the linked-ticket closer behaves
+// differently per reason (e.g., 'completed' marks the ticket done;
+// 'abandoned' marks it abandoned; 'refork' is a no-op for tickets).
+// The dashboard's `/archive <name>` slash command surfaces a
+// dropdown to pick the reason; the default is 'abandoned' to match
+// the legacy slash-command default.
+
+export type ArchiveReason = "completed" | "abandoned" | "failed" | "refork";
+
+export interface ArchiveAgentArgs {
+  name: string;
+  reason: ArchiveReason;
+  ts: number;
+}
+
 export const createMutators = () => ({
   markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
     // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -692,6 +723,28 @@ export const createMutators = () => ({
     await tx.mutate.apps.update({
       id: args.id,
       status: "reload_requested",
+    });
+  },
+  archiveAgent: async (
+    tx: FridayTx,
+    args: ArchiveAgentArgs,
+  ): Promise<void> => {
+    // UPDATE agents.status='archive_requested' + archive_reason.
+    // The Postgres trigger fires NOTIFY; the daemon's LISTEN
+    // handler calls the existing `archiveAgent(name, {reason})`
+    // lifecycle function which kills the worker, archives the
+    // worktree, closes linked tickets, and flips status='archived'.
+    //
+    // Idempotent: re-archiving an already-archived agent is a
+    // no-op at the lifecycle level (the worker is gone, the
+    // worktree is archived, the ticket is closed). The mutator
+    // UPDATE itself produces another archive_request write — the
+    // daemon's handler is structured to tolerate this.
+    await tx.mutate.agents.update({
+      name: args.name,
+      status: "archive_requested",
+      archive_reason: args.reason,
+      updated_at: args.ts,
     });
   },
   linkTicketExternal: async (

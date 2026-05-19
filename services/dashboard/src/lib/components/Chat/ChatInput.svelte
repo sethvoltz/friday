@@ -1,6 +1,9 @@
 <script lang="ts">
   import { chat } from "$lib/stores/chat.svelte";
   import { chatInputBridge } from "$lib/stores/chat-input-bridge.svelte";
+  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
+
+  const zeroOn = useZero();
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { portal } from "$lib/actions/portal";
@@ -512,6 +515,33 @@
     text = "";
     await tick();
     autoresize();
+    // Phase 4.8: route the `archive` destructive command through
+    // the Zero mutator when the feature flag is on. Other
+    // destructive commands (reset-context, restart) stay on the
+    // legacy `/api/commands` REST path — they're not in Phase 4
+    // scope.
+    if (zeroOn && name === "archive" && args) {
+      const result = zeroSync.archiveAgent({ name: args });
+      const sr = await result?.server;
+      if (sr && sr.type === "error") {
+        chat.messages.push({
+          id: `sys_${Date.now()}`,
+          role: "assistant",
+          text: `**/archive** — error: ${sr.error.message}`,
+          status: "error",
+          ts: Date.now(),
+        });
+        return;
+      }
+      chat.messages.push({
+        id: `sys_${Date.now()}`,
+        role: "assistant",
+        text: `**/archive** — requested archive of ${args}`,
+        status: "complete",
+        ts: Date.now(),
+      });
+      return;
+    }
     await dispatchSystem(name, args);
   }
 

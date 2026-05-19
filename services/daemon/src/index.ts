@@ -46,6 +46,10 @@ import {
 } from "./scheduler/listener.js";
 import { runAppBootScan, startAppListener } from "./apps/listener.js";
 import {
+  runArchiveBootScan,
+  startArchiveListener,
+} from "./agent/archive-listener.js";
+import {
   composeSystemPrompt,
   readPromptStack,
 } from "@friday/shared";
@@ -113,6 +117,12 @@ async function main(): Promise<void> {
   // get processed before the daemon went down.
   await runAppBootScan();
   const appListener = await startAppListener();
+
+  // Phase 4.8: open the long-lived LISTEN connection for
+  // `friday_archive_requested`. Boot-recovery scan picks up
+  // archive requests that landed during daemon downtime.
+  await runArchiveBootScan();
+  const archiveListener = await startArchiveListener();
 
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
@@ -203,6 +213,9 @@ async function main(): Promise<void> {
       /* shutdown best-effort; the process is about to exit */
     });
     void appListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void archiveListener.stop().catch(() => {
       /* shutdown best-effort; the process is about to exit */
     });
     clearHealth();

@@ -862,6 +862,29 @@ class ZeroSyncStore {
     return this.#zero.mutate.reloadApp({ ...args, ts: Date.now() });
   }
 
+  /**
+   * Phase 4.8: trigger the archiveAgent flow. Mutator UPDATEs
+   * agent row to status='archive_requested' + archive_reason;
+   * daemon's LISTEN handler calls the existing lifecycle
+   * `archiveAgent(name, {reason})` which kills the worker, archives
+   * the worktree, closes linked tickets, and flips status='archived'.
+   *
+   * `reason` defaults to 'abandoned' to match the legacy `/archive`
+   * slash-command default. The reason drives the linked-ticket-
+   * close behavior — see `services/daemon/src/services/ticket-close.ts`.
+   */
+  archiveAgent(args: {
+    name: string;
+    reason?: "completed" | "abandoned" | "failed" | "refork";
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.archiveAgent({
+      name: args.name,
+      reason: args.reason ?? "abandoned",
+      ts: Date.now(),
+    });
+  }
+
   destroy(): void {
     if (this.#statsInterval) {
       clearInterval(this.#statsInterval);

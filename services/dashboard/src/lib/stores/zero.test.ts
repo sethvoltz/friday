@@ -143,6 +143,10 @@ vi.mock("@rocicorp/zero", () => {
         client: Promise.resolve({ type: "success" }),
         server: Promise.resolve({ type: "success" }),
       })),
+      archiveAgent: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
     };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
@@ -1195,5 +1199,42 @@ describe("Phase 4.7: app mutator dispatch", () => {
     ).not.toThrow();
     expect(() => zeroSync.uninstallApp({ id: "x" })).not.toThrow();
     expect(() => zeroSync.reloadApp({ id: "x" })).not.toThrow();
+  });
+});
+
+describe("Phase 4.8: archiveAgent mutator dispatch", () => {
+  async function bootedZero() {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  it("forwards name + reason + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.archiveAgent({ name: "builder-xyz", reason: "completed" });
+    expect(z.mutate.archiveAgent).toHaveBeenCalledTimes(1);
+    const args = z.mutate.archiveAgent.mock.calls[0][0] as {
+      name: string;
+      reason: string;
+      ts: number;
+    };
+    expect(args.name).toBe("builder-xyz");
+    expect(args.reason).toBe("completed");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("defaults reason to 'abandoned' when omitted (matches /archive slash-command default)", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.archiveAgent({ name: "ghost" });
+    const args = z.mutate.archiveAgent.mock.calls[0][0] as {
+      reason: string;
+    };
+    expect(args.reason).toBe("abandoned");
+  });
+
+  it("is silent when Zero hasn't initialized", async () => {
+    const { zeroSync } = await importStore();
+    expect(() => zeroSync.archiveAgent({ name: "x" })).not.toThrow();
   });
 });
