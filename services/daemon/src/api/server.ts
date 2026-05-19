@@ -1657,16 +1657,28 @@ function handleEvents(
   //     client missed is delivered. The chat-side per-agent dedup
   //     (FIX_FORWARD 1.7) handles duplicates against the canonical-blocks
   //     fetch that the client also issues on mount.
-  const lastEventIdHeader = req.headers["last-event-id"];
-  const parsedLast = lastEventIdHeader ? Number(lastEventIdHeader) : NaN;
-  const BACKWALK = 500;
-  const replayFrom =
-    Number.isFinite(parsedLast) && parsedLast >= 0
-      ? (parsedLast as number)
-      : Math.max(0, eventBus.currentSeq() - BACKWALK);
-  for (const e of eventBus.replaySince(replayFrom)) {
-    if (!passesAgentFilter(e, agentFilter)) continue;
-    writeEvent(res, e);
+  //
+  // Phase 5: when `?agent=<name>` is set, the daemon switches from
+  // the legacy seq-cursor replay to a "replay the current turn's
+  // buffer" model (plan §211). The per-agent buffer is bounded
+  // (2000 events) and evicted on `turn_done`, so the replay is
+  // always scoped to the in-flight turn — no Last-Event-ID needed.
+  if (agentFilter) {
+    for (const e of eventBus.replayForAgent(agentFilter)) {
+      if (!passesAgentFilter(e, agentFilter)) continue;
+      writeEvent(res, e);
+    }
+  } else {
+    const lastEventIdHeader = req.headers["last-event-id"];
+    const parsedLast = lastEventIdHeader ? Number(lastEventIdHeader) : NaN;
+    const BACKWALK = 500;
+    const replayFrom =
+      Number.isFinite(parsedLast) && parsedLast >= 0
+        ? (parsedLast as number)
+        : Math.max(0, eventBus.currentSeq() - BACKWALK);
+    for (const e of eventBus.replaySince(replayFrom)) {
+      writeEvent(res, e);
+    }
   }
 
   const unsub = eventBus.subscribe((e) => {

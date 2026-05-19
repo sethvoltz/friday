@@ -99,29 +99,49 @@ async function captureEvents(
   return events;
 }
 
+/**
+ * Phase 5: events without a preceding `turn_started` for the same
+ * agent aren't stored in the per-turn buffer — they're broadcast
+ * live only. Tests must open the turn first so the buffer holds
+ * the events the SSE handler replays on connect.
+ */
+function startTurn(agent: string, turnId: string): void {
+  eventBus.publish({
+    v: 1,
+    type: "turn_started",
+    turn_id: turnId,
+    agent,
+    ts: Date.now(),
+  });
+}
+
 describe("GET /api/events — Phase 5 per-agent filter", () => {
   it("with no `?agent=` query string, every event flows through (legacy global stream)", async () => {
-    // Publish three events for different agents before opening.
+    // Open a turn per agent so the per-turn buffer holds the
+    // block_canceled events the SSE replay walks.
+    startTurn("alpha", "t-a-legacy");
+    startTurn("beta", "t-b-legacy");
+    startTurn("gamma", "t-c-legacy");
     eventBus.publish({
       v: 1,
       type: "block_canceled",
-      turn_id: "t-a",
+      turn_id: "t-a-legacy",
       agent: "alpha",
-      block_id: "blk-a",
+      block_id: "blk-a-legacy",
     });
     eventBus.publish({
       v: 1,
       type: "block_canceled",
-      turn_id: "t-b",
+      turn_id: "t-b-legacy",
       agent: "beta",
-      block_id: "blk-b",
+      block_id: "blk-b-legacy",
     });
     eventBus.publish({
       v: 1,
       type: "block_canceled",
-      turn_id: "t-c",
+      turn_id: "t-c-legacy",
       agent: "gamma",
-      block_id: "blk-c",
+      block_id: "blk-c-legacy",
     });
     const events = await captureEvents(
       `http://127.0.0.1:${port}/api/events`,
@@ -138,26 +158,29 @@ describe("GET /api/events — Phase 5 per-agent filter", () => {
   });
 
   it("with `?agent=beta`, only events whose `agent` field equals beta land", async () => {
+    startTurn("alpha", "t-alpha-filter");
+    startTurn("beta", "t-beta-filter");
+    startTurn("gamma", "t-gamma-filter");
     eventBus.publish({
       v: 1,
       type: "block_canceled",
-      turn_id: "t-alpha-2",
+      turn_id: "t-alpha-filter",
       agent: "alpha",
-      block_id: "blk-alpha-2",
+      block_id: "blk-alpha-filter",
     });
     eventBus.publish({
       v: 1,
       type: "block_canceled",
-      turn_id: "t-beta-2",
+      turn_id: "t-beta-filter",
       agent: "beta",
-      block_id: "blk-beta-2",
+      block_id: "blk-beta-filter",
     });
     eventBus.publish({
       v: 1,
       type: "block_canceled",
-      turn_id: "t-gamma-2",
+      turn_id: "t-gamma-filter",
       agent: "gamma",
-      block_id: "blk-gamma-2",
+      block_id: "blk-gamma-filter",
     });
     const events = await captureEvents(
       `http://127.0.0.1:${port}/api/events?agent=beta`,
