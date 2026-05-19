@@ -449,7 +449,7 @@ The auditor is a **safety net**, not the primary enforcement. Most invariant vio
 
 - The user `rm -rf`s a worktree from a terminal.
 - A worker crashes hard enough that `child.on("exit")` doesn't fire (kernel panic, SIGKILL by an external process, OOM).
-- An external process or future code path mutates `~/.friday/db.sqlite` directly.
+- An external process or future code path mutates the `friday` Postgres database directly (e.g. an operator running `psql friday`).
 
 For these, there's no event to hook into — `fs.watch` on macOS is unreliable for delete events on certain filesystems, and process death without an exit signal can't be detected synchronously. A periodic scan is the right tool: cheap (it's a `listAgents()` + `existsSync()` per builder), idempotent, and bounded in latency to one interval.
 
@@ -469,7 +469,7 @@ When a new drift mode is discovered:
 
 ### Mail
 
-- All-SQLite. The `mail` table is the persistence layer. The in-process `mailBus` EventEmitter is the wakeup signal.
+- All-Postgres. The `mail` table is the persistence layer; Zero replicates it to the dashboard. The in-process `mailBus` EventEmitter is the daemon-side wakeup signal for `recordUserBlock`/`dispatchTurn` (no SSE event — Phase 5 retired `mail_delivered`).
 - Push delivery: `sendMail()` writes row → emits `mail:to:<agent>` + `mail:any` (ADR-014) → daemon's `mail-bridge` republishes as `mail_delivered` SSE and sends `mail-wakeup` IPC to the live worker, or spawns a fresh turn for an idle long-lived agent.
 - **Universal delivery primitive** (ADR-017, FIX_FORWARD 8.5): mail is the only way to deliver anything user-visible. The old `chat_reply` MCP tool and `/api/chat/reply` endpoint were removed; user-facing replies are `mail_send` to recipient `friday` (the orchestrator's box), which the mail-bridge surfaces as `mail` block rows in the chat. Builders and helpers address the user the same way.
 - **Priority field** (ADR-014 amendment): `priority='critical'` triggers mid-turn injection on a live worker via `mail-wakeup-critical` IPC. `priority='normal'` (default) waits for the next turn boundary.
@@ -483,7 +483,7 @@ When a new drift mode is discovered:
 
 ## Apps
 
-Friday Apps (ADR-021, FRI-78) are folders under `~/.friday/apps/<id>/` that are first-class registered, agent-owning, MCP-extending units. An app is **a folder + a manifest + a DB row**; the manifest on disk is the source of truth, the `apps` SQLite table is derived state.
+Friday Apps (ADR-021, FRI-78) are folders under `~/.friday/apps/<id>/` that are first-class registered, agent-owning, MCP-extending units. An app is **a folder + a manifest + a DB row**; the manifest on disk is the source of truth, the `apps` Postgres table is derived state.
 
 ### Memory vs. files: the hard split
 
@@ -498,7 +498,7 @@ Each app's manifest declares zero or more stdio MCP servers (`command: "node"`, 
 
 ### Install / uninstall / reload lifecycle
 
-`services/daemon/src/apps/installer.ts` is the transactional heart. All collision checks + writes happen in one SQLite transaction; post-commit side effects (drop default `.gitignore`, SSE publish, folder rename) are best-effort and log a warning on failure rather than unwind.
+`services/daemon/src/apps/installer.ts` is the transactional heart. All collision checks + writes happen in one Postgres transaction; post-commit side effects (drop default `.gitignore`, SSE publish, folder rename) are best-effort and log a warning on failure rather than unwind.
 
 - **Install**: read manifest, run §6.2 collision matrix, upsert app row + agents + schedules, publish `app_lifecycle: installed`.
 - **Uninstall**: archive owned agents (preserve `app_id` as tombstone), drop schedules, delete app row, optionally archive / keep / delete the folder.
@@ -553,8 +553,9 @@ Lifted nearly verbatim:
 Replaced:
 
 - Slack interface — gone entirely. Mail is the universal delivery primitive (ADR-017); `slack_reply` and its short-lived successor `chat_reply` are both retired.
-- Beads — replaced with the SQLite mail + tickets schema (ADR-006, ADR-014).
-- `agents.json` and per-channel session files — replaced by the `agents` SQLite table (ADR-013).
+- Beads — replaced with the mail + tickets schema (ADR-006, ADR-014).
+- `agents.json` and per-channel session files — replaced by the `agents` table (ADR-013).
+- SQLite — replaced by host-installed Postgres + zero-cache logical replication (ADR-023, ADR-024).
 - `turns` table as the live store — replaced by `blocks` (ADR-016); old `turns` rows are retained read-side until the migration window closes.
 
 Pending lift (`docs/roadmap.md`):
