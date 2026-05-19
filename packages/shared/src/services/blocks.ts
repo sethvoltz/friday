@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, lt, or, sql } from "drizzle-orm";
 import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
 
@@ -28,7 +28,13 @@ export type BlockSource =
   | null;
 
 export interface BlockRow {
-  id: number;
+  /** Phase 4.11: now a text UUID (was bigserial number). Same
+   *  value as `blockId` for mutator-INSERTed rows; for legacy
+   *  daemon-INSERTed rows under the previous bigserial scheme,
+   *  the column was flipped to the text representation of the
+   *  integer (e.g. "123") so existing rows remain readable but
+   *  don't sort chronologically by id alone — see `listBlocks`. */
+  id: string;
   blockId: string;
   turnId: string;
   agentName: string;
@@ -296,10 +302,17 @@ export async function getToolResultByToolUseId(
 export interface ListBlocksOpts {
   agentName?: string;
   sessionId?: string;
-  beforeId?: number;
-  afterId?: number;
+  /** Anchor for `older-than` cursor pagination. Phase 4.11: the
+   *  cursor is now a (ts, id) tuple — bigserial id is gone, and a
+   *  bare lexical compare on text UUIDs has no chronological
+   *  meaning. The anchor's `ts` is the primary sort, `id` only
+   *  tiebreaks rows that share a millisecond. */
+  beforeAnchor?: { ts: number; id: string };
+  /** Anchor for `newer-than` cursor pagination. */
+  afterAnchor?: { ts: number; id: string };
   limit?: number;
-  /** When set, ordering is ascending by id (forward fill). Default desc. */
+  /** When set, ordering is ascending by (ts, id) (forward fill).
+   *  Default desc (newest first). */
   ascending?: boolean;
 }
 
@@ -310,13 +323,29 @@ export async function listBlocks(
   const conds = [];
   if (opts.agentName) conds.push(eq(schema.blocks.agentName, opts.agentName));
   if (opts.sessionId) conds.push(eq(schema.blocks.sessionId, opts.sessionId));
-  if (opts.beforeId !== undefined)
-    conds.push(lt(schema.blocks.id, opts.beforeId));
-  if (opts.afterId !== undefined)
-    conds.push(gt(schema.blocks.id, opts.afterId));
+  if (opts.beforeAnchor !== undefined) {
+    // (ts, id) < (anchorTs, anchorId) lexicographic. Drizzle has no
+    // tuple-compare primitive — open-code the OR.
+    const a = opts.beforeAnchor;
+    conds.push(
+      or(
+        lt(schema.blocks.ts, new Date(a.ts)),
+        and(eq(schema.blocks.ts, new Date(a.ts)), lt(schema.blocks.id, a.id)),
+      )!,
+    );
+  }
+  if (opts.afterAnchor !== undefined) {
+    const a = opts.afterAnchor;
+    conds.push(
+      or(
+        gt(schema.blocks.ts, new Date(a.ts)),
+        and(eq(schema.blocks.ts, new Date(a.ts)), gt(schema.blocks.id, a.id)),
+      )!,
+    );
+  }
   const order = opts.ascending
-    ? asc(schema.blocks.id)
-    : desc(schema.blocks.id);
+    ? [asc(schema.blocks.ts), asc(schema.blocks.id)]
+    : [desc(schema.blocks.ts), desc(schema.blocks.id)];
   const limit = opts.limit ?? 50;
   const rows =
     conds.length > 0
@@ -324,24 +353,24 @@ export async function listBlocks(
           .select()
           .from(schema.blocks)
           .where(and(...conds))
-          .orderBy(order)
+          .orderBy(...order)
           .limit(limit)
       : await db
           .select()
           .from(schema.blocks)
-          .orderBy(order)
+          .orderBy(...order)
           .limit(limit);
   return rows.map(rowFromDb);
 }
 
-/** All blocks belonging to a given turn, ordered by insert id. */
+/** All blocks belonging to a given turn, chronologically (ts, id). */
 export async function listBlocksByTurn(turnId: string): Promise<BlockRow[]> {
   const db = getDb();
   const rows = await db
     .select()
     .from(schema.blocks)
     .where(eq(schema.blocks.turnId, turnId))
-    .orderBy(asc(schema.blocks.id));
+    .orderBy(asc(schema.blocks.ts), asc(schema.blocks.id));
   return rows.map(rowFromDb);
 }
 
@@ -421,7 +450,7 @@ export async function fetchBlocksByAgent(
     const rows = await listBlocks({
       agentName: opts.agentName,
       sessionId: opts.sessionId,
-      beforeId: anchor.id,
+      beforeAnchor: { ts: anchor.ts, id: anchor.id },
       limit: clampLimit(opts.limit),
     });
     return { blocks: rows, lastEventSeq: maxSeq(rows) };
@@ -432,7 +461,7 @@ export async function fetchBlocksByAgent(
     const rows = await listBlocks({
       agentName: opts.agentName,
       sessionId: opts.sessionId,
-      afterId: anchor.id,
+      afterAnchor: { ts: anchor.ts, id: anchor.id },
       limit: clampLimit(opts.limit),
       ascending: true,
     });

@@ -301,7 +301,12 @@ const readCursors = table("read_cursors")
 
 const blocks = table("blocks")
   .columns({
-    id: number(),
+    // Phase 4.11: flipped from `number()` → `string()` alongside
+    // the Drizzle bigserial→text(uuid) migration. The mutator
+    // INSERT path (sendUserMessage) requires the client to
+    // pre-generate the PK; existing daemon writes use
+    // `gen_random_uuid()::text` as the column default.
+    id: string(),
     block_id: string(),
     turn_id: string(),
     agent_name: string(),

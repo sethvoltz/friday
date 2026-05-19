@@ -15,6 +15,7 @@
 import type { EvidencePointer, Signal, SignalSeverity } from "./types.js";
 import {
   collectOrchestratorTurns,
+  dbTurnIdToLine,
   type OrchestratorTurn,
 } from "./scan-friction.js";
 import { signalHash } from "./scan.js";
@@ -121,7 +122,7 @@ export function bucketByCategory(
     const pointer: EvidencePointer = {
       kind: "transcript",
       path: t.filePath,
-      line: t.dbTurnId,
+      line: dbTurnIdToLine(t.dbTurnId),
       sessionId: t.sessionId,
     };
 

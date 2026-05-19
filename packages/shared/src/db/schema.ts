@@ -145,7 +145,17 @@ export const agents = pgTable(
 export const blocks = pgTable(
   "blocks",
   {
-    id: bigserial("id", { mode: "number" }).primaryKey(),
+    // Phase 4.11: flipped from bigserial → text (UUID). Zero
+    // mutators require the row's PK in the INSERT args so the
+    // optimistic client write and the canonical server write land
+    // on the same row. `gen_random_uuid()::text` default keeps the
+    // existing daemon-side `recordUserBlock` callsites working
+    // without supplying an id. `blockId` (text UUID) is retained
+    // as a separate column for the daemon-side write path; new
+    // mutator-driven writes set both columns to the same UUID.
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()::text`),
     blockId: text("block_id").notNull().unique(),
     turnId: text("turn_id").notNull(),
     agentName: text("agent_name").notNull(),

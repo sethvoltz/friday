@@ -19,7 +19,7 @@ function turn(
     ts: overrides.ts ?? `2026-05-01T00:0${i}:00.000Z`,
     userText: `user text ${i}`,
     prevAssistantText: "",
-    dbTurnId: 100 + i,
+    dbTurnId: `${100 + i}`,
     turn_id: `t-${i}`,
     category,
     signal_score,

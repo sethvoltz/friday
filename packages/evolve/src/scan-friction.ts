@@ -80,8 +80,17 @@ export interface OrchestratorTurn {
   ts: string;
   userText: string;
   prevAssistantText: string;
-  /** DB row id; used as the evidence pointer line number. */
-  dbTurnId: number;
+  /** DB row id. Phase 4.11 flipped `blocks.id` to text (UUID), so
+   *  this can be a UUID for newer rows or a bigserial-shaped
+   *  numeric string for legacy rows. We parse it as a number for
+   *  the EvidencePointer's `line` field (falls through to omitted
+   *  when NaN). */
+  dbTurnId: string;
+}
+
+export function dbTurnIdToLine(id: string): number | undefined {
+  const n = Number(id);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 export async function scanFriction(
@@ -146,7 +155,7 @@ function bucketByCategory(
     const pointer: EvidencePointer = {
       kind: "transcript",
       path: t.filePath,
-      line: t.dbTurnId,
+      line: dbTurnIdToLine(t.dbTurnId),
       sessionId: t.sessionId,
     };
 

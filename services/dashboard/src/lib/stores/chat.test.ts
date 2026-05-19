@@ -112,9 +112,9 @@ describe("loadAgentTurns", () => {
     mockFetchWithTimeout.mockResolvedValue(
       makeResponse({
         blocks: [
-          { id: 3, blockId: "blk-c", turnId: "t-c", role: "assistant", kind: "text", contentJson: '{"text":"c"}', status: "complete", ts: 300, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 3 },
-          { id: 1, blockId: "blk-a", turnId: "t-a", role: "user", kind: "text", contentJson: '{"text":"a"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
-          { id: 2, blockId: "blk-b", turnId: "t-b", role: "assistant", kind: "text", contentJson: '{"text":"b"}', status: "complete", ts: 200, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 2 },
+          { id: "3", blockId: "blk-c", turnId: "t-c", role: "assistant", kind: "text", contentJson: '{"text":"c"}', status: "complete", ts: 300, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 3 },
+          { id: "1", blockId: "blk-a", turnId: "t-a", role: "user", kind: "text", contentJson: '{"text":"a"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+          { id: "2", blockId: "blk-b", turnId: "t-b", role: "assistant", kind: "text", contentJson: '{"text":"b"}', status: "complete", ts: 200, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 2 },
         ],
         lastEventSeq: 3,
       }),
@@ -147,7 +147,7 @@ describe("loadAgentTurns", () => {
     mockFetchWithTimeout.mockResolvedValue(
       makeResponse({
         blocks: [
-          { id: 1, blockId: "blk-1", turnId: "t-1", role: "user", kind: "text", contentJson: '{"text":"old"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+          { id: "1", blockId: "blk-1", turnId: "t-1", role: "user", kind: "text", contentJson: '{"text":"old"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
         ],
         lastEventSeq: 1,
       }),
@@ -172,7 +172,7 @@ describe("loadOlderTurns", () => {
         // Initial load
         makeResponse({
           blocks: [
-            { id: 5, blockId: "blk-5", turnId: "t-5", role: "user", kind: "text", contentJson: '{"text":"recent"}', status: "complete", ts: 500, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 5 },
+            { id: "5", blockId: "blk-5", turnId: "t-5", role: "user", kind: "text", contentJson: '{"text":"recent"}', status: "complete", ts: 500, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 5 },
           ],
           lastEventSeq: 5,
         }),
@@ -203,7 +203,7 @@ describe("loadOlderTurns", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: 1, blockId: "blk-1", turnId: "t-1", role: "user", kind: "text", contentJson: '{"text":"a"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+            { id: "1", blockId: "blk-1", turnId: "t-1", role: "user", kind: "text", contentJson: '{"text":"a"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
           ],
           lastEventSeq: 1,
         }),
@@ -287,7 +287,7 @@ describe("reload-mid-turn replay → SSE resumption", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: 1, blockId: "blk-asst-live", turnId: "turn-live", role: "assistant", kind: "text", contentJson: '{"text":"partial "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+            { id: "1", blockId: "blk-asst-live", turnId: "turn-live", role: "assistant", kind: "text", contentJson: '{"text":"partial "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
           ],
           lastEventSeq: 1,
         }),
@@ -333,7 +333,7 @@ describe("reload-mid-turn replay → SSE resumption", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: 1, blockId: "blk-1", turnId: "t-1", role: "assistant", kind: "text", contentJson: '{"text":"partial "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 42 },
+            { id: "1", blockId: "blk-1", turnId: "t-1", role: "assistant", kind: "text", contentJson: '{"text":"partial "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 42 },
           ],
           lastEventSeq: 42,
         }),
@@ -381,7 +381,7 @@ describe("reload-mid-turn replay → SSE resumption", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: 1, blockId: "blk-think-live", turnId: "turn-think", role: "assistant", kind: "thinking", contentJson: '{"text":"thought so far "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+            { id: "1", blockId: "blk-think-live", turnId: "turn-think", role: "assistant", kind: "thinking", contentJson: '{"text":"thought so far "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
           ],
           lastEventSeq: 1,
         }),
@@ -416,8 +416,8 @@ describe("inflight-state probe on reload", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: 1, blockId: "blk-user", turnId: "turn-flying", role: "user", kind: "text", contentJson: '{"text":"go"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
-            { id: 2, blockId: "blk-asst", turnId: "turn-flying", role: "assistant", kind: "text", contentJson: '{"text":"work"}', status: "streaming", ts: 110, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 1, source: null, lastEventSeq: 2 },
+            { id: "1", blockId: "blk-user", turnId: "turn-flying", role: "user", kind: "text", contentJson: '{"text":"go"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+            { id: "2", blockId: "blk-asst", turnId: "turn-flying", role: "assistant", kind: "text", contentJson: '{"text":"work"}', status: "streaming", ts: 110, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 1, source: null, lastEventSeq: 2 },
           ],
           lastEventSeq: 2,
         }),
@@ -435,7 +435,7 @@ describe("inflight-state probe on reload", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: 1, blockId: "blk-done", turnId: "turn-old", role: "assistant", kind: "text", contentJson: '{"text":"prev"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+            { id: "1", blockId: "blk-done", turnId: "turn-old", role: "assistant", kind: "text", contentJson: '{"text":"prev"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
           ],
           lastEventSeq: 1,
         }),
@@ -459,7 +459,7 @@ describe("inflight-state probe on reload", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: 1, blockId: "blk-mail", turnId: "mail_77", role: "user", kind: "text", contentJson: '{"text":"hi from another agent"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "mail", lastEventSeq: 1 },
+            { id: "1", blockId: "blk-mail", turnId: "mail_77", role: "user", kind: "text", contentJson: '{"text":"hi from another agent"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "mail", lastEventSeq: 1 },
           ],
           lastEventSeq: 1,
         }),
@@ -481,8 +481,8 @@ describe("inflight-state probe on reload", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: 1, blockId: "blk-mail", turnId: "mail_77", role: "user", kind: "text", contentJson: '{"text":"hi"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "mail", lastEventSeq: 1 },
-            { id: 2, blockId: "blk-asst", turnId: "t_response_77", role: "assistant", kind: "text", contentJson: '{"text":"thinking..."}', status: "streaming", ts: 110, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 1, source: null, lastEventSeq: 2 },
+            { id: "1", blockId: "blk-mail", turnId: "mail_77", role: "user", kind: "text", contentJson: '{"text":"hi"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "mail", lastEventSeq: 1 },
+            { id: "2", blockId: "blk-asst", turnId: "t_response_77", role: "assistant", kind: "text", contentJson: '{"text":"thinking..."}', status: "streaming", ts: 110, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 1, source: null, lastEventSeq: 2 },
           ],
           lastEventSeq: 2,
         }),
@@ -505,7 +505,7 @@ describe("inflight-state probe on reload", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: 1, blockId: "blk-user", turnId: "t_chat_88", role: "user", kind: "text", contentJson: '{"text":"go"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "user_chat", lastEventSeq: 1 },
+            { id: "1", blockId: "blk-user", turnId: "t_chat_88", role: "user", kind: "text", contentJson: '{"text":"go"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "user_chat", lastEventSeq: 1 },
           ],
           lastEventSeq: 1,
         }),
@@ -569,7 +569,7 @@ describe("jumpTo (/jump <date|term>)", () => {
     mockFetch.mockResolvedValueOnce(
       makeResponse({
         blocks: [
-          makeBlock({ id: 10, blockId: "blk-jump", turnId: "t-jump", role: "user", text: "found me", ts: 5000 }),
+          makeBlock({ id: "10", blockId: "blk-jump", turnId: "t-jump", role: "user", text: "found me", ts: 5000 }),
         ],
       }),
     );
@@ -603,11 +603,11 @@ describe("jumpTo (/jump <date|term>)", () => {
       makeResponse({
         blocks: [
           // Two yesterday blocks (before midnight).
-          makeBlock({ id: 1, blockId: "blk-y1", turnId: "t-y1", role: "user", ts: todayMidnight - 7_200_000 }),
-          makeBlock({ id: 2, blockId: "blk-y2", turnId: "t-y1", role: "assistant", ts: todayMidnight - 7_100_000 }),
+          makeBlock({ id: "1", blockId: "blk-y1", turnId: "t-y1", role: "user", ts: todayMidnight - 7_200_000 }),
+          makeBlock({ id: "2", blockId: "blk-y2", turnId: "t-y1", role: "assistant", ts: todayMidnight - 7_100_000 }),
           // Today's earliest block — the scroll target.
-          makeBlock({ id: 3, blockId: "blk-t1", turnId: "t-t1", role: "user", ts: todayMidnight + 1_000 }),
-          makeBlock({ id: 4, blockId: "blk-t2", turnId: "t-t1", role: "assistant", ts: todayMidnight + 2_000 }),
+          makeBlock({ id: "3", blockId: "blk-t1", turnId: "t-t1", role: "user", ts: todayMidnight + 1_000 }),
+          makeBlock({ id: "4", blockId: "blk-t2", turnId: "t-t1", role: "assistant", ts: todayMidnight + 2_000 }),
         ],
       }),
     );
@@ -623,7 +623,7 @@ describe("jumpTo (/jump <date|term>)", () => {
   it("date jump: uses around_ts query, not match", async () => {
     mockFetch.mockResolvedValueOnce(
       makeResponse({
-        blocks: [makeBlock({ id: 1, role: "user", ts: 1000 })],
+        blocks: [makeBlock({ id: "1", role: "user", ts: 1000 })],
       }),
     );
     const { ChatState } = await import("./chat.svelte");
@@ -644,9 +644,9 @@ describe("jumpTo (/jump <date|term>)", () => {
       makeResponse({
         blocks: [
           // Top-ranked: id=42 (later by id, but ranked first by FTS).
-          makeBlock({ id: 42, blockId: "blk-best", turnId: "t-best", role: "assistant", text: "the unique token here", ts: 500 }),
+          makeBlock({ id: "42", blockId: "blk-best", turnId: "t-best", role: "assistant", text: "the unique token here", ts: 500 }),
           // Lower-ranked: id=10 (earlier by id).
-          makeBlock({ id: 10, blockId: "blk-meh", turnId: "t-meh", role: "user", text: "vaguely the token", ts: 100 }),
+          makeBlock({ id: "10", blockId: "blk-meh", turnId: "t-meh", role: "user", text: "vaguely the token", ts: 100 }),
         ],
       }),
     );
@@ -662,9 +662,9 @@ describe("jumpTo (/jump <date|term>)", () => {
     mockFetch.mockResolvedValueOnce(
       makeResponse({
         blocks: [
-          makeBlock({ id: 1, role: "user", text: "hit one" }),
-          makeBlock({ id: 2, role: "assistant", text: "hit two" }),
-          makeBlock({ id: 3, role: "user", text: "hit three" }),
+          makeBlock({ id: "1", role: "user", text: "hit one" }),
+          makeBlock({ id: "2", role: "assistant", text: "hit two" }),
+          makeBlock({ id: "3", role: "user", text: "hit three" }),
         ],
       }),
     );
@@ -679,7 +679,7 @@ describe("jumpTo (/jump <date|term>)", () => {
   it("term jump: singular toast for exactly one match", async () => {
     mockFetch.mockResolvedValueOnce(
       makeResponse({
-        blocks: [makeBlock({ id: 1, role: "user", text: "only one" })],
+        blocks: [makeBlock({ id: "1", role: "user", text: "only one" })],
       }),
     );
     const { ChatState } = await import("./chat.svelte");
@@ -712,8 +712,8 @@ describe("jumpTo (/jump <date|term>)", () => {
     mockFetch.mockResolvedValueOnce(
       makeResponse({
         blocks: [
-          makeBlock({ id: 1, role: "user", ts: 1_000_000 }),
-          makeBlock({ id: 2, role: "assistant", ts: 1_000_100 }),
+          makeBlock({ id: "1", role: "user", ts: 1_000_000 }),
+          makeBlock({ id: "2", role: "assistant", ts: 1_000_100 }),
         ],
       }),
     );
@@ -735,7 +735,7 @@ describe("jumpTo (/jump <date|term>)", () => {
     // mutating messages.
     mockFetch.mockResolvedValueOnce(
       makeResponse({
-        blocks: [makeBlock({ id: 1, role: "user", text: "hit", ts: 500 })],
+        blocks: [makeBlock({ id: "1", role: "user", text: "hit", ts: 500 })],
       }),
     );
     const { ChatState } = await import("./chat.svelte");
@@ -778,12 +778,12 @@ describe("jumpTo (/jump <date|term>)", () => {
     mockFetch
       .mockResolvedValueOnce(
         makeResponse({
-          blocks: [makeBlock({ id: 1, blockId: "blk-x", turnId: "t-x", role: "user", text: "same", ts: 100 })],
+          blocks: [makeBlock({ id: "1", blockId: "blk-x", turnId: "t-x", role: "user", text: "same", ts: 100 })],
         }),
       )
       .mockResolvedValueOnce(
         makeResponse({
-          blocks: [makeBlock({ id: 1, blockId: "blk-x", turnId: "t-x", role: "user", text: "same", ts: 100 })],
+          blocks: [makeBlock({ id: "1", blockId: "blk-x", turnId: "t-x", role: "user", text: "same", ts: 100 })],
         }),
       );
     const { ChatState } = await import("./chat.svelte");
@@ -880,7 +880,7 @@ describe("mail block rendering", () => {
         makeResponse({
           blocks: [
             {
-              id: 1,
+              id: "1",
               blockId: "blk-mail-reload",
               turnId: "mail_99",
               agentName: "friday",
@@ -927,7 +927,7 @@ describe("mail block rendering", () => {
         makeResponse({
           blocks: [
             {
-              id: 1,
+              id: "1",
               blockId: "blk-att-reload",
               turnId: "turn_paste_1",
               agentName: "friday",
@@ -1071,7 +1071,7 @@ describe("mail block rendering", () => {
     // behaviour) puts the ERROR tool card after the DONE one. Sort by ts
     // first so the retry trail renders in the order it actually happened.
     const aborted = {
-      id: 100, // live aborted thinking
+      id: "100", // live aborted thinking
       blockId: "blk-think-aborted",
       turnId: "t-orchestrator",
       agentName: "friday",
@@ -1087,7 +1087,7 @@ describe("mail block rendering", () => {
       lastEventSeq: 100,
     };
     const completeThink = {
-      id: 101, // live retry thinking
+      id: "101", // live retry thinking
       blockId: "blk-think-complete",
       turnId: "t-orchestrator",
       agentName: "friday",
@@ -1103,7 +1103,7 @@ describe("mail block rendering", () => {
       lastEventSeq: 101,
     };
     const liveToolUse = {
-      id: 102, // live retry tool_use
+      id: "102", // live retry tool_use
       blockId: "blk-tool-live",
       turnId: "t-orchestrator",
       agentName: "friday",
@@ -1123,7 +1123,7 @@ describe("mail block rendering", () => {
       lastEventSeq: 102,
     };
     const liveToolResult = {
-      id: 103, // live retry tool_result
+      id: "103", // live retry tool_result
       blockId: "blk-result-live",
       turnId: "t-orchestrator",
       agentName: "friday",
@@ -1146,7 +1146,7 @@ describe("mail block rendering", () => {
     // live retry — they came from the same session's JSONL after a
     // SIGTERM/restart picked them up.
     const recoverToolUse = {
-      id: 200,
+      id: "200",
       blockId: "blk-tool-recover",
       turnId: "recover_s",
       agentName: "friday",
@@ -1166,7 +1166,7 @@ describe("mail block rendering", () => {
       lastEventSeq: 200,
     };
     const recoverToolResult = {
-      id: 201,
+      id: "201",
       blockId: "blk-result-recover",
       turnId: "recover_s",
       agentName: "friday",
@@ -1496,7 +1496,7 @@ describe("unread badge gating (PR C)", () => {
         makeResponse({
           blocks: [
             {
-              id: 1,
+              id: "1",
               blockId: "blk-real",
               turnId: "t-real",
               agentName: "friday",
@@ -1512,7 +1512,7 @@ describe("unread badge gating (PR C)", () => {
               lastEventSeq: 1,
             },
             {
-              id: 2,
+              id: "2",
               blockId: "blk-sentinel",
               turnId: "t-empty",
               agentName: "friday",
@@ -1644,7 +1644,7 @@ describe("unread badge gating (PR C)", () => {
     const reloaded = parseBlocks(
       [
         {
-          id: 1,
+          id: "1",
           blockId: "blk-sym",
           turnId: "t-sym",
           agentName: "friday",
@@ -1685,7 +1685,7 @@ describe("unread badge gating (PR C)", () => {
     const out = parseBlocks(
       [
         {
-          id: 1,
+          id: "1",
           blockId: "blk-u",
           turnId: "t-dead",
           agentName: "friday",
@@ -1721,7 +1721,7 @@ describe("unread badge gating (PR C)", () => {
     const out = parseBlocks(
       [
         {
-          id: 1,
+          id: "1",
           blockId: "blk-mail",
           turnId: "t-mail",
           agentName: "friday",
@@ -1749,7 +1749,7 @@ describe("unread badge gating (PR C)", () => {
     const out = parseBlocks(
       [
         {
-          id: 1,
+          id: "1",
           blockId: "u",
           turnId: "t-ok",
           agentName: "friday",
@@ -1765,7 +1765,7 @@ describe("unread badge gating (PR C)", () => {
           lastEventSeq: 1,
         } as Parameters<typeof parseBlocks>[0][number],
         {
-          id: 2,
+          id: "2",
           blockId: "th",
           turnId: "t-ok",
           agentName: "friday",
@@ -2162,7 +2162,7 @@ describe("FRI-12: error block materialization", () => {
     // the persisted row and must produce the same bubble id that SSE
     // would have. Replay arrives over the SSE channel; idempotent.
     const errBlock = {
-      id: 1,
+      id: "1",
       blockId: "blk-err-3",
       turnId: "turn-err-3",
       agentName: "friday",
@@ -2483,7 +2483,7 @@ describe("queued user blocks (pending-message feature)", () => {
       makeResponse({
         blocks: [
           {
-            id: 1,
+            id: "1",
             blockId: "blk-r1",
             turnId: "turn-r1",
             role: "user",
@@ -2537,7 +2537,7 @@ describe("FRI-81 D1: tool_use sorted after tool_result still resolves its name",
           blocks: [
             // tool_result sorted earlier than tool_use
             {
-              id: 11,
+              id: "11",
               blockId: "blk-result",
               turnId: "t-1",
               agentName: "friday",
@@ -2557,7 +2557,7 @@ describe("FRI-81 D1: tool_use sorted after tool_result still resolves its name",
               lastEventSeq: 11,
             },
             {
-              id: 12,
+              id: "12",
               blockId: "blk-tooluse",
               turnId: "t-1",
               agentName: "friday",
@@ -2658,7 +2658,7 @@ describe("FRI-81 D1: tool_use sorted after tool_result still resolves its name",
     const reloadMessages = parseBlocks(
       [
         {
-          id: 11,
+          id: "11",
           blockId: "blk-result",
           turnId: "t-1",
           agentName: "friday",
@@ -2678,7 +2678,7 @@ describe("FRI-81 D1: tool_use sorted after tool_result still resolves its name",
           lastEventSeq: 11,
         },
         {
-          id: 12,
+          id: "12",
           blockId: "blk-tooluse",
           turnId: "t-1",
           agentName: "friday",
@@ -2719,7 +2719,7 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
         makeResponse({
           blocks: [
             {
-              id: 1,
+              id: "1",
               blockId: "blk-think-stuck",
               turnId: "turn-stuck",
               agentName: "friday",
@@ -2735,7 +2735,7 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               lastEventSeq: 1,
             },
             {
-              id: 2,
+              id: "2",
               blockId: "blk-text-next",
               turnId: "turn-next",
               agentName: "friday",
@@ -2771,7 +2771,7 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
         makeResponse({
           blocks: [
             {
-              id: 1,
+              id: "1",
               blockId: "blk-tool-stuck",
               turnId: "t-1",
               agentName: "friday",
@@ -2791,7 +2791,7 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               lastEventSeq: 1,
             },
             {
-              id: 2,
+              id: "2",
               blockId: "blk-text-later",
               turnId: "t-1",
               agentName: "friday",
@@ -2830,7 +2830,7 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
         makeResponse({
           blocks: [
             {
-              id: 1,
+              id: "1",
               blockId: "blk-think-only",
               turnId: "t-only",
               agentName: "friday",
@@ -2868,7 +2868,7 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
         makeResponse({
           blocks: [
             {
-              id: 1,
+              id: "1",
               blockId: "blk-think-live",
               turnId: "turn-live",
               agentName: "friday",
@@ -2923,7 +2923,7 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
         makeResponse({
           blocks: [
             {
-              id: 1,
+              id: "1",
               blockId: "blk-think-live",
               turnId: "turn-live",
               agentName: "friday",
@@ -2961,7 +2961,7 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
           blocks: [
             // Live block belonging to the cached-inflight turn — must stay.
             {
-              id: 1,
+              id: "1",
               blockId: "blk-live",
               turnId: "turn-active",
               agentName: "friday",
@@ -2978,7 +2978,7 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
             },
             // Orphan from a prior dead turn — must be healed.
             {
-              id: 2,
+              id: "2",
               blockId: "blk-orphan",
               turnId: "turn-dead",
               agentName: "friday",
@@ -3070,7 +3070,7 @@ describe("FRI-81 D4: empty-content thinking ghost is filtered on both paths", ()
         makeResponse({
           blocks: [
             {
-              id: 1,
+              id: "1",
               blockId: "blk-ghost",
               turnId: "t-1",
               agentName: "friday",
@@ -3086,7 +3086,7 @@ describe("FRI-81 D4: empty-content thinking ghost is filtered on both paths", ()
               lastEventSeq: 1,
             },
             {
-              id: 2,
+              id: "2",
               blockId: "blk-text",
               turnId: "t-1",
               agentName: "friday",
@@ -3123,7 +3123,7 @@ describe("FRI-81 D4: empty-content thinking ghost is filtered on both paths", ()
         makeResponse({
           blocks: [
             {
-              id: 1,
+              id: "1",
               blockId: "blk-aborted",
               turnId: "t-1",
               agentName: "friday",
@@ -3400,7 +3400,7 @@ describe("FRI-84: tool-call input/output rendering", () => {
     const reloaded = parseBlocks(
       [
         {
-          id: 1,
+          id: "1",
           blockId: "blk-sym84",
           turnId: "t-sym84",
           agentName: "friday",
@@ -3416,7 +3416,7 @@ describe("FRI-84: tool-call input/output rendering", () => {
           lastEventSeq: 2,
         } as Parameters<typeof parseBlocks>[0][number],
         {
-          id: 2,
+          id: "2",
           blockId: "blk-sym84-result",
           turnId: "t-sym84",
           agentName: "friday",
@@ -3476,7 +3476,7 @@ describe("FRI-84: tool-call input/output rendering", () => {
     const reloaded = parseBlocks(
       [
         {
-          id: 1,
+          id: "1",
           blockId: "blk-run84",
           turnId: "t-run84",
           agentName: "friday",
@@ -3560,7 +3560,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     }>,
   ): import("./chat.svelte").ZeroBlocksRow {
     return {
-      id: 1,
+      id: "1",
       block_id: "b1",
       turn_id: "t1",
       agent_name: "friday",
@@ -3586,7 +3586,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.focusedAgent = "friday";
     const rows = [
       makeZeroBlocksRow({
-        id: 1,
+        id: "1",
         block_id: "b1",
         turn_id: "t1",
         role: "user",
@@ -3596,7 +3596,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
         last_event_seq: 3,
       }),
       makeZeroBlocksRow({
-        id: 2,
+        id: "2",
         block_id: "b2",
         turn_id: "t1",
         role: "assistant",
@@ -3626,7 +3626,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
-          id: 1,
+          id: "1",
           block_id: "b1",
           turn_id: "t1",
           role: "user",
@@ -3642,7 +3642,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
-          id: 1,
+          id: "1",
           block_id: "b1",
           turn_id: "t1",
           role: "user",
@@ -3650,7 +3650,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
           ts: 1_000,
         }),
         makeZeroBlocksRow({
-          id: 2,
+          id: "2",
           block_id: "b2",
           turn_id: "t1",
           role: "assistant",
@@ -3693,7 +3693,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
-          id: 2,
+          id: "2",
           block_id: "b2",
           turn_id: "t1",
           role: "assistant",
@@ -3729,7 +3729,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
-          id: 1,
+          id: "1",
           block_id: "b1",
           turn_id: "t-old",
           role: "user",
@@ -3765,7 +3765,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
-          id: 1,
+          id: "1",
           block_id: "b1",
           turn_id: "t1",
           role: "user",
@@ -3785,9 +3785,9 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.lastSeqByAgent.friday = 100; // pre-existing higher cursor
     chat.applyZeroBlocks(
       [
-        makeZeroBlocksRow({ id: 1, block_id: "b1", last_event_seq: 7 }),
+        makeZeroBlocksRow({ id: "1", block_id: "b1", last_event_seq: 7 }),
         makeZeroBlocksRow({
-          id: 2,
+          id: "2",
           block_id: "b2",
           last_event_seq: 12,
           ts: 1_100,
@@ -3832,7 +3832,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
-          id: 1,
+          id: "1",
           block_id: "u_t1",
           turn_id: "t1",
           role: "user",
@@ -3840,7 +3840,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
           ts: 1_000,
         }),
         makeZeroBlocksRow({
-          id: 2,
+          id: "2",
           block_id: "b2",
           turn_id: "t1",
           role: "assistant",
@@ -3882,7 +3882,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
-          id: 999,
+          id: "999",
           block_id: "recent-1",
           turn_id: "t-new",
           role: "user",
@@ -3904,7 +3904,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
-          id: 1,
+          id: "1",
           block_id: "b1",
           turn_id: "t1",
           role: "assistant",
@@ -3912,7 +3912,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
           ts: 1_000,
         }),
         makeZeroBlocksRow({
-          id: 2,
+          id: "2",
           block_id: "b2",
           turn_id: "t1",
           role: "assistant",
@@ -3928,7 +3928,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
-          id: 1,
+          id: "1",
           block_id: "b1",
           turn_id: "t1",
           role: "assistant",
@@ -3955,7 +3955,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
-          id: 100,
+          id: "100",
           block_id: "newer-window-oldest",
           turn_id: "t1",
           role: "user",
@@ -3994,7 +3994,7 @@ describe("Phase 3.7: zeroBlockRowToBlockRow / dropSupersededNoResponseSafetyNet"
   it("converts snake_case Zero row to camelCase BlockRow with stringified content_json", async () => {
     const { zeroBlockRowToBlockRow } = await import("./chat.svelte");
     const out = zeroBlockRowToBlockRow({
-      id: 7,
+      id: "7",
       block_id: "bx",
       turn_id: "tx",
       agent_name: "friday",
@@ -4011,7 +4011,7 @@ describe("Phase 3.7: zeroBlockRowToBlockRow / dropSupersededNoResponseSafetyNet"
       ts: 12_345,
       last_event_seq: 9,
     });
-    expect(out.id).toBe(7);
+    expect(out.id).toBe("7");
     expect(out.blockId).toBe("bx");
     expect(out.turnId).toBe("tx");
     expect(out.agentName).toBe("friday");
@@ -4128,7 +4128,7 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     }>,
   ): import("./chat.svelte").ZeroBlocksRow {
     return {
-      id: 1,
+      id: "1",
       block_id: "b1",
       turn_id: "t1",
       agent_name: "friday",
@@ -4156,9 +4156,9 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     chat.setMarkReadFn((agent, blockId) => calls.push({ agent, blockId }));
     chat.applyZeroBlocks(
       [
-        makeZeroRow({ id: 1, block_id: "b1", ts: 1_000 }),
-        makeZeroRow({ id: 2, block_id: "b2", ts: 1_100 }),
-        makeZeroRow({ id: 3, block_id: "b3", ts: 900 }),
+        makeZeroRow({ id: "1", block_id: "b1", ts: 1_000 }),
+        makeZeroRow({ id: "2", block_id: "b2", ts: 1_100 }),
+        makeZeroRow({ id: "3", block_id: "b3", ts: 900 }),
       ],
       "friday",
     );
@@ -4175,9 +4175,9 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     chat.focusedAgent = "friday";
     const calls: Array<{ agent: string; blockId: string }> = [];
     chat.setMarkReadFn((agent, blockId) => calls.push({ agent, blockId }));
-    chat.applyZeroBlocks([makeZeroRow({ id: 1, block_id: "b1" })], "friday");
-    chat.applyZeroBlocks([makeZeroRow({ id: 1, block_id: "b1" })], "friday");
-    chat.applyZeroBlocks([makeZeroRow({ id: 1, block_id: "b1" })], "friday");
+    chat.applyZeroBlocks([makeZeroRow({ id: "1", block_id: "b1" })], "friday");
+    chat.applyZeroBlocks([makeZeroRow({ id: "1", block_id: "b1" })], "friday");
+    chat.applyZeroBlocks([makeZeroRow({ id: "1", block_id: "b1" })], "friday");
     expect(calls).toHaveLength(1);
   });
 
@@ -4187,11 +4187,11 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     chat.focusedAgent = "friday";
     const calls: Array<{ agent: string; blockId: string }> = [];
     chat.setMarkReadFn((agent, blockId) => calls.push({ agent, blockId }));
-    chat.applyZeroBlocks([makeZeroRow({ id: 1, block_id: "b1" })], "friday");
+    chat.applyZeroBlocks([makeZeroRow({ id: "1", block_id: "b1" })], "friday");
     chat.applyZeroBlocks(
       [
-        makeZeroRow({ id: 1, block_id: "b1" }),
-        makeZeroRow({ id: 2, block_id: "b2", ts: 1_100 }),
+        makeZeroRow({ id: "1", block_id: "b1" }),
+        makeZeroRow({ id: "2", block_id: "b2", ts: 1_100 }),
       ],
       "friday",
     );
@@ -4207,7 +4207,7 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
 
     // Initial focus + snapshot.
     chat.focusedAgent = "friday";
-    chat.applyZeroBlocks([makeZeroRow({ id: 1, block_id: "b1" })], "friday");
+    chat.applyZeroBlocks([makeZeroRow({ id: "1", block_id: "b1" })], "friday");
     expect(calls).toHaveLength(1);
 
     // Focus switches the agent — `loadAgentTurns` resets the memo
@@ -4220,7 +4220,7 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     chat.focusedAgent = "other";
     chat.applyZeroBlocks([], "other"); // empty snapshot, no markRead
     chat.focusedAgent = "friday";
-    chat.applyZeroBlocks([makeZeroRow({ id: 1, block_id: "b1" })], "friday");
+    chat.applyZeroBlocks([makeZeroRow({ id: "1", block_id: "b1" })], "friday");
     // Without a memo reset, the second call would have been suppressed
     // (same blockId as before). The reset happens inside
     // `loadAgentTurns` — but tests can't easily drive that. The
@@ -4237,7 +4237,7 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     const calls: Array<{ agent: string; blockId: string }> = [];
     chat.setMarkReadFn((agent, blockId) => calls.push({ agent, blockId }));
     chat.applyZeroBlocks(
-      [makeZeroRow({ id: 1, block_id: "b1" })],
+      [makeZeroRow({ id: "1", block_id: "b1" })],
       "friday", // stale snapshot for non-focused agent
     );
     expect(calls).toHaveLength(0);

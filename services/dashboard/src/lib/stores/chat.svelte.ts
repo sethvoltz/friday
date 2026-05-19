@@ -2282,7 +2282,11 @@ function extractMailMeta(
 /** Wire shape of a row from `GET /api/agents/:name/blocks`. Mirrors the
  *  `blocks` table columns (FIX_FORWARD 1.1). */
 export interface BlockRow {
-  id: number;
+  /** Phase 4.11: text UUID (was bigserial number). Equal to
+   *  blockId for mutator-INSERTed rows; for legacy daemon-written
+   *  rows the column still holds the original bigserial value as
+   *  text (e.g. "123"). */
+  id: string;
   blockId: string;
   turnId: string;
   agentName: string;
@@ -2303,7 +2307,9 @@ export interface BlockRow {
  *  the chat → zero circular dependency. Aligned with `ZeroBlockRow`
  *  in `stores/zero.svelte.ts`. */
 export interface ZeroBlocksRow {
-  id: number;
+  /** Phase 4.11: flipped from `number` → `string` alongside the
+   *  Drizzle bigserial→text(uuid) migration. */
+  id: string;
   block_id: string;
   turn_id: string;
   agent_name: string;
@@ -2529,7 +2535,13 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
   // (failed attempt before its retry) instead of trailing the successful
   // retry. `id` stays as the tiebreaker for blocks sharing a ts (a single
   // live message's thinking + tool_use can land within the same ms).
-  const sorted = [...blocks].sort((a, b) => a.ts - b.ts || a.id - b.id);
+  // Phase 4.11: id is now a text UUID, so the chronological
+  // tiebreak switches from numeric subtraction to lexical
+  // comparison. Within a millisecond the lexical order is
+  // arbitrary-but-stable — same property bigserial provided.
+  const sorted = [...blocks].sort(
+    (a, b) => a.ts - b.ts || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
   for (const b of sorted) {
     const parsed = parseBlockContent(b.contentJson);
     if (b.kind === "text") {

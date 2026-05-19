@@ -433,8 +433,9 @@ export interface ArchiveAgentArgs {
 // reads it from the local Zero snapshot before invoking the mutator.
 
 export interface CancelQueuedArgs {
-  /** Bigserial PK of the blocks row (read from local Zero snapshot). */
-  id: number;
+  /** Text-UUID PK of the blocks row (read from local Zero snapshot).
+   *  Phase 4.11 flipped this from bigserial → text. */
+  id: string;
   ts: number;
 }
 
@@ -481,8 +482,9 @@ export interface CancelQueuedArgs {
 // 'abort_requested' status is purely the LISTEN signal.
 
 export interface AbortTurnArgs {
-  /** Bigserial PK of the user block whose turn is being aborted. */
-  id: number;
+  /** Text-UUID PK of the user block whose turn is being aborted.
+   *  Phase 4.11 flipped this from bigserial → text. */
+  id: string;
   ts: number;
 }
 

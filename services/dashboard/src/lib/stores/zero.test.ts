@@ -1262,7 +1262,7 @@ describe("Phase 4.9: cancelQueued wrapper (fast-path + mutator)", () => {
 
   function seedQueuedBlock(zeroSync: {
     blocks: Array<{
-      id: number;
+      id: string;
       block_id: string;
       turn_id: string;
       agent_name: string;
@@ -1274,7 +1274,7 @@ describe("Phase 4.9: cancelQueued wrapper (fast-path + mutator)", () => {
   }) {
     zeroSync.blocks = [
       {
-        id: 4242,
+        id: "blk-cancel-fixture",
         block_id: "blk-queued-1",
         turn_id: "turn-q1",
         agent_name: "agent-a",
@@ -1320,10 +1320,10 @@ describe("Phase 4.9: cancelQueued wrapper (fast-path + mutator)", () => {
     // Mutator dispatched with the bigserial id (not the block_id).
     expect(z.mutate.cancelQueued).toHaveBeenCalledTimes(1);
     const args = z.mutate.cancelQueued.mock.calls[0][0] as {
-      id: number;
+      id: string;
       ts: number;
     };
-    expect(args.id).toBe(4242);
+    expect(args.id).toBe("blk-cancel-fixture");
     expect(typeof args.ts).toBe("number");
   });
 
@@ -1358,7 +1358,7 @@ describe("Phase 4.10: abortTurn wrapper (fast-path + mutator)", () => {
 
   function seedUserBlock(zeroSync: {
     blocks: Array<{
-      id: number;
+      id: string;
       block_id: string;
       turn_id: string;
       agent_name: string;
@@ -1370,7 +1370,7 @@ describe("Phase 4.10: abortTurn wrapper (fast-path + mutator)", () => {
   }) {
     zeroSync.blocks = [
       {
-        id: 8888,
+        id: "blk-abort-fixture",
         block_id: "blk-inflight",
         turn_id: "turn-stop",
         agent_name: "friday",
@@ -1414,10 +1414,10 @@ describe("Phase 4.10: abortTurn wrapper (fast-path + mutator)", () => {
     // Mutator dispatched with the bigserial id.
     expect(z.mutate.abortTurn).toHaveBeenCalledTimes(1);
     const args = z.mutate.abortTurn.mock.calls[0][0] as {
-      id: number;
+      id: string;
       ts: number;
     };
-    expect(args.id).toBe(8888);
+    expect(args.id).toBe("blk-abort-fixture");
     expect(typeof args.ts).toBe("number");
   });
 
