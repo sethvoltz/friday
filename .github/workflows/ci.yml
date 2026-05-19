@@ -39,17 +39,6 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
-    # `pg_isready` (and libpq generally) defaults to a Unix socket at
-    # `/var/run/postgresql/.s.PGSQL.5432` when PGHOST is unset, and
-    # the socket doesn't exist on the runner — only the service
-    # container's TCP listener does. Force TCP via PGHOST so the
-    # assertion in `test-pg.ts:assertPgReady()` actually probes the
-    # service. `test-pg.ts` itself builds connection strings directly
-    # from `process.env.USER`, so this env var only affects `pg_isready`.
-    env:
-      PGHOST: localhost
-      PGPORT: "5432"
-
     strategy:
       matrix:
         node-version: [22]
