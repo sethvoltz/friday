@@ -78,8 +78,18 @@ function tmuxSpecs(
       // ZERO_MUTATE_URL), and the tmux session's parent shell may
       // not have those exported. `set -a` auto-exports every var
       // assigned by the source.
+      //
+      // Deploy Zero permissions before the cache boots. The schema's
+      // `definePermissions(...)` block only takes effect once it's
+      // written into upstream Postgres via `zero-deploy-permissions`;
+      // without this step zero-cache logs "No permission rules found
+      // for table 'X'. No rows will be returned." on every subscribe
+      // and the client sees empty materializations. Idempotent — the
+      // tool no-ops when the deployed hash already matches.
       prodCmd:
-        'set -a && source ~/.friday/.env && set +a && while true; do pnpm exec zero-cache; ec=$?; echo "zero-cache exited code $ec — restarting in 1s"; sleep 1; done',
+        'set -a && source ~/.friday/.env && set +a && ' +
+        'pnpm exec zero-deploy-permissions --schema-path ../../packages/shared/dist/sync/schema.js && ' +
+        'while true; do pnpm exec zero-cache; ec=$?; echo "zero-cache exited code $ec — restarting in 1s"; sleep 1; done',
     },
   };
 }

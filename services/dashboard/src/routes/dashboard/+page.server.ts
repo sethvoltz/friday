@@ -34,20 +34,30 @@ export const load: PageServerLoad = async () => {
     return d.toISOString();
   })();
 
+  // ADR-023: these helpers all became async when persistence moved
+  // from better-sqlite3 (sync) to node-postgres (async). Without the
+  // awaits below, `stats.today` etc. are Promises that serialize as
+  // `{}` and `dailyByModel` is a Promise — `buildDailyCost(rows)`
+  // then throws `rows is not iterable`. Parallel via Promise.all so
+  // the page still loads at the cost of one round-trip, not four.
+  const [today, week, all, dailyByModel, agentCostsRaw] = await Promise.all([
+    getUsageStats(todayStartIso),
+    getUsageStats(weekStartIso),
+    getUsageStats(),
+    getDailyByModel(),
+    getCostByAgent(),
+  ]);
   const stats: { today: UsageStats; week: UsageStats; all: UsageStats } = {
-    today: getUsageStats(todayStartIso),
-    week: getUsageStats(weekStartIso),
-    all: getUsageStats(),
+    today,
+    week,
+    all,
   };
 
-  const dailyByModel = getDailyByModel();
   const { dailyCost, models } = buildDailyCost(dailyByModel);
   const { views: tokenViews, costSummary } = buildTokenViews(dailyByModel);
 
   const oneYearAgo = Date.now() - 365 * 24 * 60 * 60 * 1000;
   const activityByDate = buildActivityByDate(dailyByModel, oneYearAgo);
-
-  const agentCostsRaw = getCostByAgent();
   const agentCosts: Record<string, { cost: number; estimated: boolean }> = {};
   for (const [name, cost] of Object.entries(agentCostsRaw)) {
     agentCosts[name] = { cost, estimated: false };
