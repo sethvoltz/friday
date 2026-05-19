@@ -924,6 +924,65 @@ class ZeroSyncStore {
    * string if the block's content_json couldn't be parsed), or
    * `null` if no matching queued bubble was found.
    */
+  /**
+   * Phase 4.10: abort an in-flight turn. Three-step flow:
+   *
+   *   1. Look up the user block for this turn in the local Zero
+   *      snapshot (need the bigserial id for the mutator). Bail if
+   *      no matching block — the turn already finished or never
+   *      committed.
+   *   2. POST the daemon fast-path (`/api/internal/abort-turn`) to
+   *      synchronously fire the worker's AbortController. The
+   *      response carries `{aborted: bool}` mirroring the legacy
+   *      REST endpoint's shape.
+   *   3. Dispatch the Zero mutator (UPDATE blocks.status =
+   *      'abort_requested') so the durable + cross-device signal
+   *      reaches the daemon's LISTEN handler. The handler calls the
+   *      same lifecycle `abortTurn` (idempotent against step 2)
+   *      and flips the row back to 'complete'.
+   *
+   * Both paths are idempotent against each other. If step 2 fails
+   * (daemon down), the mutator still commits durably — when the
+   * daemon comes back up, the boot-recovery scan picks up the
+   * `abort_requested` row and dispatches the lifecycle abort then.
+   *
+   * Returns `true` if the abort was dispatched, `false` if no
+   * matching block was found.
+   */
+  async abortTurn(turnId: string): Promise<boolean> {
+    if (!this.#zero) return false;
+    const row = this.blocks.find(
+      (b) =>
+        b.turn_id === turnId &&
+        b.role === "user" &&
+        b.source === "user_chat",
+    );
+    if (!row) return false;
+
+    try {
+      await fetch("/api/internal/abort-turn", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ turn_id: turnId }),
+      });
+    } catch {
+      // Daemon unreachable — fall through to the mutator. The
+      // LISTEN-path's boot-recovery scan will dispatch the abort
+      // once the daemon returns.
+    }
+
+    try {
+      await this.#zero.mutate.abortTurn({ id: row.id, ts: Date.now() })
+        .server;
+    } catch {
+      // Server-side mutator failure (e.g. row has moved on to
+      // 'aborted' already from a fast worker). User-visible state
+      // is still correct — the turn is gone. Swallow.
+    }
+
+    return true;
+  }
+
   async cancelQueued(turnId: string): Promise<string | null> {
     if (!this.#zero) return null;
     const row = this.blocks.find(

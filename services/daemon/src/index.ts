@@ -54,6 +54,10 @@ import {
   startCancelListener,
 } from "./agent/cancel-listener.js";
 import {
+  runAbortBootScan,
+  startAbortListener,
+} from "./agent/abort-listener.js";
+import {
   composeSystemPrompt,
   readPromptStack,
 } from "@friday/shared";
@@ -138,6 +142,16 @@ async function main(): Promise<void> {
   // could re-dispatch it.
   await runCancelBootScan();
   const cancelListener = await startCancelListener();
+
+  // Phase 4.10: open the long-lived LISTEN connection for
+  // `friday_abort_requested`. Boot-recovery scan applies any
+  // `status='abort_requested'` rows that landed during daemon
+  // downtime, calls the lifecycle abort (no-op if no live worker)
+  // and flips the row back to 'complete'. Must run BEFORE
+  // `recoverQueuedTurns()` so a turn marked aborted pre-shutdown
+  // isn't accidentally re-dispatched on restart.
+  await runAbortBootScan();
+  const abortListener = await startAbortListener();
 
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
@@ -234,6 +248,9 @@ async function main(): Promise<void> {
       /* shutdown best-effort; the process is about to exit */
     });
     void cancelListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void abortListener.stop().catch(() => {
       /* shutdown best-effort; the process is about to exit */
     });
     clearHealth();

@@ -151,6 +151,10 @@ vi.mock("@rocicorp/zero", () => {
         client: Promise.resolve({ type: "success" }),
         server: Promise.resolve({ type: "success" }),
       })),
+      abortTurn: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
     };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
@@ -1341,5 +1345,99 @@ describe("Phase 4.9: cancelQueued wrapper (fast-path + mutator)", () => {
   it("is silent when Zero hasn't initialized", async () => {
     const { zeroSync } = await importStore();
     await expect(zeroSync.cancelQueued("turn-x")).resolves.toBeNull();
+  });
+});
+
+describe("Phase 4.10: abortTurn wrapper (fast-path + mutator)", () => {
+  async function bootedZero() {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  function seedUserBlock(zeroSync: {
+    blocks: Array<{
+      id: number;
+      block_id: string;
+      turn_id: string;
+      agent_name: string;
+      role: string;
+      source: string | null;
+      status: string;
+      content_json: unknown;
+    }>;
+  }) {
+    zeroSync.blocks = [
+      {
+        id: 8888,
+        block_id: "blk-inflight",
+        turn_id: "turn-stop",
+        agent_name: "friday",
+        role: "user",
+        source: "user_chat",
+        status: "complete",
+        content_json: { text: "stop me" },
+      },
+    ];
+  }
+
+  it("returns false when no matching user block exists for the turn (already finished)", async () => {
+    const { zeroSync } = await bootedZero();
+    await expect(zeroSync.abortTurn("turn-nope")).resolves.toBe(false);
+  });
+
+  it("POSTs the daemon fast-path with the turn_id AND dispatches the mutator with the bigserial id", async () => {
+    const { zeroSync, z } = await bootedZero();
+    seedUserBlock(zeroSync as never);
+    const fetchSpy = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true, aborted: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const out = await zeroSync.abortTurn("turn-stop");
+    expect(out).toBe(true);
+
+    // Fast-path POSTed with turn_id (not block_id — the daemon's
+    // findAgentByTurnId looks up the agent via live-worker map).
+    const fastPathCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/api/internal/abort-turn"),
+    );
+    expect(fastPathCall).toBeDefined();
+    const init = fastPathCall![1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ turn_id: "turn-stop" });
+
+    // Mutator dispatched with the bigserial id.
+    expect(z.mutate.abortTurn).toHaveBeenCalledTimes(1);
+    const args = z.mutate.abortTurn.mock.calls[0][0] as {
+      id: number;
+      ts: number;
+    };
+    expect(args.id).toBe(8888);
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("still dispatches the mutator even when the fast-path fails (daemon-down resilience)", async () => {
+    // Plan §5: mutator commits durably to Postgres; the LISTEN-path's
+    // boot-recovery scan picks up the abort_requested row once the
+    // daemon returns.
+    const { zeroSync, z } = await bootedZero();
+    seedUserBlock(zeroSync as never);
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const out = await zeroSync.abortTurn("turn-stop");
+    expect(out).toBe(true);
+    expect(z.mutate.abortTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("is silent when Zero hasn't initialized", async () => {
+    const { zeroSync } = await importStore();
+    await expect(zeroSync.abortTurn("turn-x")).resolves.toBe(false);
   });
 });

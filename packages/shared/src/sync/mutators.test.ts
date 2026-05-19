@@ -17,6 +17,7 @@ import {
   createMutators,
   nextTicketIdFrom,
   slugifyMemoryId,
+  type AbortTurnArgs,
   type AddTicketCommentArgs,
   type AddTicketRelationArgs,
   type ArchiveAgentArgs,
@@ -1363,6 +1364,46 @@ describe("cancelQueued", () => {
     const mutators = createMutators();
     const { tx, blocksUpdates } = makeMockTx();
     await mutators.cancelQueued(tx, { id: 1, ts: 9_999_999_999_999 });
+    const u = blocksUpdates[0] as Record<string, unknown>;
+    expect(u.ts).toBeUndefined();
+  });
+});
+
+describe("abortTurn", () => {
+  it("UPDATEs blocks.status to 'abort_requested' keyed by bigserial id", async () => {
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    const args: AbortTurnArgs = { id: 7777, ts: 1_700_000_000_000 };
+    await mutators.abortTurn(tx, args);
+    expect(blocksUpdates).toEqual([{ id: 7777, status: "abort_requested" }]);
+  });
+
+  it("is idempotent — re-running with same args produces identical writes", async () => {
+    // The fast-path may have already aborted the worker AND the
+    // daemon's LISTEN handler may have flipped the row back to
+    // 'complete' — a retry of the mutator (from a Zero reconnect
+    // queue) re-fires the trigger but produces the same row state.
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    const args: AbortTurnArgs = { id: 1, ts: 1 };
+    await mutators.abortTurn(tx, args);
+    await mutators.abortTurn(tx, args);
+    expect(blocksUpdates).toHaveLength(2);
+    expect(blocksUpdates[0]).toEqual(blocksUpdates[1]);
+  });
+
+  it("touches only id + status — content_json / turn_id / agent_name preserved for the daemon to read", async () => {
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    await mutators.abortTurn(tx, { id: 99, ts: 1 });
+    const u = blocksUpdates[0] as Record<string, unknown>;
+    expect(Object.keys(u).sort()).toEqual(["id", "status"].sort());
+  });
+
+  it("does not write args.ts — the user block's ts is daemon-owned", async () => {
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    await mutators.abortTurn(tx, { id: 1, ts: 9_999_999_999_999 });
     const u = blocksUpdates[0] as Record<string, unknown>;
     expect(u.ts).toBeUndefined();
   });

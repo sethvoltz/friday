@@ -402,6 +402,33 @@ async function handle(
     return json(res, 200, { aborted, turn_id: turnId, agent });
   }
 
+  // Phase 4.10 fast-path: synchronously dispatch the lifecycle
+  // `abortTurn(agent)` so the worker's `AbortController` fires before
+  // the next SDK step lands. Called by the dashboard's `abortTurn`
+  // wrapper before / alongside dispatching the Zero mutator. Idempotent
+  // against the LISTEN-path (both call the same lifecycle function).
+  //
+  // Authenticated callers only (loopback + shared secret enforced at
+  // the dashboard's proxy layer).
+  if (
+    method === "POST" &&
+    path === "/api/internal/abort-turn"
+  ) {
+    const body = await readJson<{ turn_id?: string }>(req);
+    const turnId = body.turn_id;
+    if (typeof turnId !== "string" || turnId.length === 0) {
+      return json(res, 400, { error: "missing_turn_id" });
+    }
+    const agent = findAgentByTurnId(turnId);
+    const aborted = agent ? abortTurn(agent) : false;
+    // `aborted=false` means no live worker matched the turn (either
+    // it already finished or the legacy abort path already tore it
+    // down). The dashboard treats both as success; the response shape
+    // matches the legacy `/api/chat/turn/<id>/abort` endpoint so
+    // callers can share the same JSON parser.
+    return json(res, 200, { ok: true, aborted, turn_id: turnId, agent });
+  }
+
   if (method === "POST" && path.startsWith("/api/chat/turn/") && path.endsWith("/resume")) {
     // FRI-12: "Resume" CTA on an error bubble. Re-dispatch the original
     // user prompt under the SAME turn_id so the retry's content blocks

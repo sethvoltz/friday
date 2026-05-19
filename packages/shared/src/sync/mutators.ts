@@ -438,6 +438,54 @@ export interface CancelQueuedArgs {
   ts: number;
 }
 
+/* ---------------- Phase 4.10: abortTurn ---------------- */
+// Second mutator with a *required* fast-path (plan §4.10). The
+// daemon's worker `AbortController` is in-memory state; a Postgres
+// NOTIFY round-trip is too slow to reliably outrun the next SDK
+// step. Two paths run in parallel:
+//
+//   1. Fast-path (sync): `POST /api/internal/abort-turn { turn_id }`
+//      calls the existing `abortTurn(agentName)` lifecycle function
+//      which sets `w.abortRequested=true`, sends `{type:'abort'}` IPC
+//      to the worker, and arms the 2s force-kill safety net.
+//   2. Mutator (durable + cross-device): UPDATEs the user block's
+//      status from 'complete' to 'abort_requested'. A Postgres
+//      trigger fires `NOTIFY friday_abort_requested`; the daemon's
+//      LISTEN handler:
+//        - Calls `abortTurn(agentName)` (idempotent: re-running
+//          re-sends the IPC, which the worker tolerates; if the
+//          worker is already gone, `abortTurn` returns false).
+//        - UPDATEs the row back to status='complete' (the natural
+//          terminal state for a user block) so the trigger doesn't
+//          re-fire on subsequent lifecycle UPDATEs.
+//
+// Row-state pre/post (plan §5):
+//   - Pre: blocks WHERE id = args.id AND status='complete' (user
+//     block, written by `recordUserBlock` at status='complete').
+//   - Post (mutator): status='abort_requested'.
+//   - Post (daemon flip-back): status='complete'.
+//
+// Idempotency contract (plan §5):
+//   - Mutator: re-running on a row already at 'abort_requested' is
+//     a no-op (UPDATE with same value); re-running on a row at
+//     'complete' (handler-flipped-back) is a fresh signal that
+//     fires the trigger again — but the lifecycle `abortTurn` is
+//     itself idempotent, so the eventual side effect is identical.
+//   - Fast-path: idempotent against the LISTEN-path — both call the
+//     same lifecycle function. Either path firing first is safe.
+//
+// The block row UI status doesn't gate the user message bubble's
+// visibility — the dashboard's blocks Zero query does NOT filter
+// 'abort_requested' (unlike Phase 4.9's 'cancel_requested'), so the
+// user's typed message stays visible throughout. The transient
+// 'abort_requested' status is purely the LISTEN signal.
+
+export interface AbortTurnArgs {
+  /** Bigserial PK of the user block whose turn is being aborted. */
+  id: number;
+  ts: number;
+}
+
 export const createMutators = () => ({
   markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
     // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -826,6 +874,23 @@ export const createMutators = () => ({
     await tx.mutate.blocks.update({
       id: args.id,
       status: "cancel_requested",
+    });
+  },
+  abortTurn: async (
+    tx: FridayTx,
+    args: AbortTurnArgs,
+  ): Promise<void> => {
+    // UPDATE blocks.status='abort_requested'. The Postgres trigger
+    // fires NOTIFY `friday_abort_requested`; the daemon's LISTEN
+    // handler dispatches the existing `abortTurn(agentName)`
+    // lifecycle function and then flips the row back to 'complete'.
+    //
+    // Touches only `status` — agent_name / turn_id / content_json
+    // must be preserved so the daemon's LISTEN handler can read them
+    // before performing the abort + flip-back.
+    await tx.mutate.blocks.update({
+      id: args.id,
+      status: "abort_requested",
     });
   },
   updateSettings: async (
