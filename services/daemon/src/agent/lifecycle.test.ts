@@ -1,30 +1,23 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 // FIX_FORWARD 1.10: DB-before-SSE invariant. Every block-tied SSE event must
 // be preceded by a `blocks` row write at the same `last_event_seq` it
 // carries. We drive `recordUserBlock` end-to-end against a real DB and
 // confirm the row matches the published event.
 
-const dataDir = mkdtempSync(join(tmpdir(), "friday-lifecycle-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
+let handle: TestDbHandle;
 
 beforeAll(async () => {
-  const { runMigrations } = await import("@friday/shared");
-  runMigrations();
+  handle = await createTestDb({ label: "lifecycle_adr004" });
 });
 
 afterAll(async () => {
-  const { closeDb } = await import("@friday/shared");
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+  await handle.drop();
 });
 
 beforeEach(async () => {
-  const { getRawDb } = await import("@friday/shared");
-  getRawDb().prepare("DELETE FROM blocks").run();
+  await handle.truncate();
 });
 
 describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
@@ -63,7 +56,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     );
 
     const before = eventBus.currentSeq();
-    const { blockId, seq } = recordUserBlock({
+    const { blockId, seq } = await recordUserBlock({
       turnId: "turn-adr-1",
       agentName: "alpha",
       text: "hello adr",
@@ -72,7 +65,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     unsub();
 
     // Row landed.
-    const row = getBlockById(blockId);
+    const row = await getBlockById(blockId);
     expect(row).not.toBeNull();
     expect(row!.source).toBe("user_chat");
     expect(JSON.parse(row!.contentJson)).toEqual({ text: "hello adr" });
@@ -110,7 +103,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     );
 
     const before = eventBus.currentSeq();
-    const { blockId, seq } = recordUserBlock({
+    const { blockId, seq } = await recordUserBlock({
       turnId: "turn-adr-2",
       agentName: "alpha",
       text: "mail body",
@@ -131,7 +124,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(evt).toBeDefined();
     expect(evt!.seq).toBe(seq);
 
-    const row = getBlockById(blockId);
+    const row = await getBlockById(blockId);
     expect(row!.lastEventSeq).toBe(seq);
   });
 
@@ -139,14 +132,14 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     const { recordUserBlock } = await import("./lifecycle.js");
     const { getBlockById } = await import("@friday/shared/services");
 
-    const { blockId } = recordUserBlock({
+    const { blockId } = await recordUserBlock({
       turnId: "turn-adr-3",
       agentName: "alpha",
       text: "ping",
       source: "mail",
       fromAgent: "beta",
     });
-    const row = getBlockById(blockId);
+    const row = await getBlockById(blockId);
     const parsed = JSON.parse(row!.contentJson) as {
       text: string;
       from_agent?: string;
@@ -172,14 +165,14 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
         mime: "application/pdf",
       },
     ];
-    const { blockId } = recordUserBlock({
+    const { blockId } = await recordUserBlock({
       turnId: "turn-att-1",
       agentName: "alpha",
       text: "look at these",
       source: "user_chat",
       attachments: atts,
     });
-    const row = getBlockById(blockId);
+    const row = await getBlockById(blockId);
     expect(JSON.parse(row!.contentJson)).toEqual({
       text: "look at these",
       attachments: atts,
@@ -195,13 +188,13 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     const { recordUserBlock } = await import("./lifecycle.js");
     const { getBlockById } = await import("@friday/shared/services");
 
-    const { blockId } = recordUserBlock({
+    const { blockId } = await recordUserBlock({
       turnId: "turn-att-2",
       agentName: "alpha",
       text: "no attachments",
       source: "user_chat",
     });
-    const row = getBlockById(blockId);
+    const row = await getBlockById(blockId);
     expect(JSON.parse(row!.contentJson)).toEqual({ text: "no attachments" });
   });
 
@@ -227,7 +220,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
         captured.push(e as { type?: string; block_id?: string }),
       );
 
-      const { blockId, seq } = recordUserBlock({
+      const { blockId, seq } = await recordUserBlock({
         turnId: `turn-fri71-${source}`,
         agentName: "alpha",
         text,
@@ -235,7 +228,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
       });
       unsub();
 
-      const row = getBlockById(blockId);
+      const row = await getBlockById(blockId);
       expect(row).not.toBeNull();
       expect(row!.role).toBe("user");
       expect(row!.kind).toBe("text");
@@ -256,14 +249,14 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     const { recordUserBlock } = await import("./lifecycle.js");
     const { getBlockById } = await import("@friday/shared/services");
 
-    const r1 = recordUserBlock({
+    const r1 = await recordUserBlock({
       turnId: "t1",
       agentName: "alpha",
       text: "first",
       source: "mail",
       fromAgent: "beta",
     });
-    const r2 = recordUserBlock({
+    const r2 = await recordUserBlock({
       turnId: "t2",
       agentName: "alpha",
       text: "second",
@@ -275,7 +268,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     // event between the two block_completes for mail-derived blocks, so the
     // gap isn't necessarily exactly 1.
     expect(r2.seq).toBeGreaterThan(r1.seq);
-    expect(getBlockById(r1.blockId)!.lastEventSeq).toBe(r1.seq);
-    expect(getBlockById(r2.blockId)!.lastEventSeq).toBe(r2.seq);
+    expect((await getBlockById(r1.blockId))!.lastEventSeq).toBe(r1.seq);
+    expect((await getBlockById(r2.blockId))!.lastEventSeq).toBe(r2.seq);
   });
 });

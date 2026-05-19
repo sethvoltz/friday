@@ -69,7 +69,7 @@ export async function applyProposal(
     };
   }
 
-  const ticket = createTicket({
+  const ticket = await createTicket({
     title: proposal.title,
     body: buildTicketBody(proposal),
     kind:

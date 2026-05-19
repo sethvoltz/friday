@@ -42,70 +42,69 @@ export function startMailBridge(): void {
   started = true;
 
   mailBus.on("mail:any", (row: MailRow) => {
-    eventBus.publish({
-      v: 1,
-      type: "mail_delivered",
-      mail_id: row.id,
-      from: row.fromAgent,
-      to: row.toAgent,
-    });
-
-    // Materialize the mail body as a user-role block in the recipient's chat
-    // (FIX_FORWARD 1.2). The block carries `source='mail'` and the sender
-    // name inside content_json so the dashboard can render attribution.
-    try {
-      const recipient = registry.getAgent(row.toAgent);
-      recordUserBlock({
-        turnId: `mail_${row.id}`,
-        agentName: row.toAgent,
-        sessionId: recipient?.sessionId ?? undefined,
-        text: row.body,
-        source: "mail",
-        fromAgent: row.fromAgent,
-        mailMeta: {
-          id: row.id,
-          subject: row.subject,
-          type: row.type,
-          priority: row.priority,
-          threadId: row.threadId,
-          ts: row.ts,
-        },
-      });
-    } catch (err) {
-      logger.log("warn", "mail.bridge.user-block.error", {
+    // The handler is fire-and-forget — mailBus is a sync EventEmitter, and
+    // shared/services moves to async under ADR-023. We spawn an IIFE so
+    // any rejection lands on the bus's `error` channel rather than as an
+    // unhandled promise.
+    void (async () => {
+      eventBus.publish({
+        v: 1,
+        type: "mail_delivered",
+        mail_id: row.id,
+        from: row.fromAgent,
         to: row.toAgent,
-        mailId: row.id,
-        message: err instanceof Error ? err.message : String(err),
       });
-    }
 
-    try {
-      if (isAgentLive(row.toAgent)) {
-        // FIX_FORWARD 2.4: critical mail triggers mid-turn injection (the
-        // worker breaks at the next SDK iteration boundary). Normal mail
-        // just wakes the worker so it drains at the outer query boundary
-        // when idle.
-        if (row.priority === "critical") {
-          wakeAgentCritical(row.toAgent);
-        } else {
-          wakeAgent(row.toAgent);
-        }
-        return;
+      try {
+        const recipient = await registry.getAgent(row.toAgent);
+        await recordUserBlock({
+          turnId: `mail_${row.id}`,
+          agentName: row.toAgent,
+          sessionId: recipient?.sessionId ?? undefined,
+          text: row.body,
+          source: "mail",
+          fromAgent: row.fromAgent,
+          mailMeta: {
+            id: row.id,
+            subject: row.subject,
+            type: row.type,
+            priority: row.priority,
+            threadId: row.threadId,
+            ts: row.ts,
+          },
+        });
+      } catch (err) {
+        logger.log("warn", "mail.bridge.user-block.error", {
+          to: row.toAgent,
+          mailId: row.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
       }
-      maybeSpawnFromMail(row.toAgent);
-    } catch (err) {
-      logger.log("warn", "mail.bridge.dispatch-error", {
-        to: row.toAgent,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
+
+      try {
+        if (isAgentLive(row.toAgent)) {
+          if (row.priority === "critical") {
+            wakeAgentCritical(row.toAgent);
+          } else {
+            wakeAgent(row.toAgent);
+          }
+          return;
+        }
+        await maybeSpawnFromMail(row.toAgent);
+      } catch (err) {
+        logger.log("warn", "mail.bridge.dispatch-error", {
+          to: row.toAgent,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
   });
 
   logger.log("info", "mail.bridge.started");
 }
 
-function maybeSpawnFromMail(agentName: string): void {
-  const agentRow = registry.getAgent(agentName);
+async function maybeSpawnFromMail(agentName: string): Promise<void> {
+  const agentRow = await registry.getAgent(agentName);
   if (!agentRow) {
     logger.log("debug", "mail.bridge.unknown-recipient", { agent: agentName });
     return;
@@ -117,7 +116,7 @@ function maybeSpawnFromMail(agentName: string): void {
     return;
   }
 
-  const pending = inbox(agentName);
+  const pending = await inbox(agentName);
   if (pending.length === 0) return;
 
   const cfg = loadConfig();
@@ -136,14 +135,16 @@ function maybeSpawnFromMail(agentName: string): void {
   // asked to act on, not the surrounding mail-listing prose.
   const intent = pending.map((m) => m.body).join("\n\n");
   const mailPrompt = buildMailPrompt(agentName, pending);
+  const wrappedPrompt = await wrapWithRecall(intent, mailPrompt, "mail");
+  const workingDirectory = await registry.workingDirectoryFor(agentRow);
   dispatchTurn({
     agentName,
     options: {
       agentName,
       agentType: agentRow.type,
-      workingDirectory: registry.workingDirectoryFor(agentRow),
+      workingDirectory,
       systemPrompt,
-      prompt: wrapWithRecall(intent, mailPrompt, "mail"),
+      prompt: wrappedPrompt,
       turnId,
       model: modelCfg.name,
       thinking: modelCfg.thinking,

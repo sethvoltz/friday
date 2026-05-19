@@ -251,16 +251,16 @@ function normalizeMediaType(mime: string): string {
  * `[image unavailable: <filename>]` text fragment so the model has some
  * signal that the user intended an attachment.
  */
-function buildAttachmentPromptStream(
+async function buildAttachmentPromptStream(
   text: string,
   attachments: WorkerAttachment[],
-): AsyncIterable<SDKUserMessage> {
+): Promise<AsyncIterable<SDKUserMessage>> {
   const content: Array<Record<string, unknown>> = [];
   if (text.length > 0) {
     content.push({ type: "text", text });
   }
   for (const a of attachments) {
-    const bytes = readAttachmentBytes(a.sha256);
+    const bytes = await readAttachmentBytes(a.sha256);
     if (!bytes) {
       content.push({
         type: "text",
@@ -482,7 +482,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   // unchanged.
   const promptInput =
     p.attachments && p.attachments.length > 0
-      ? buildAttachmentPromptStream(p.prompt, p.attachments)
+      ? await buildAttachmentPromptStream(p.prompt, p.attachments)
       : p.prompt;
 
   // FRI-78: when a pending-injection break would land on an assistant

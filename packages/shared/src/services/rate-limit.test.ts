@@ -1,35 +1,25 @@
-import Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createTestDb, type TestDbHandle } from "../db/test-pg.js";
 
-let raw: Database.Database;
+let handle: TestDbHandle;
 
-vi.mock("../db/client.js", async () => {
-  const drizzleMod = await import("drizzle-orm/better-sqlite3");
-  const schema = await import("../db/schema.js");
-  return {
-    getRawDb: () => raw,
-    getDb: () => drizzleMod.drizzle(raw, { schema }),
-    closeDb: () => raw.close(),
-  };
+beforeAll(async () => {
+  handle = await createTestDb({ label: "rate_limit" });
+});
+
+afterAll(async () => {
+  await handle.drop();
 });
 
 beforeEach(async () => {
-  raw = new Database(":memory:");
-  raw.pragma("journal_mode = MEMORY");
-  raw.pragma("foreign_keys = ON");
-  const { runMigrations } = await import("../db/migrate.js");
-  runMigrations();
-});
-
-afterEach(() => {
-  raw.close();
+  await handle.truncate();
 });
 
 describe("rate-limit (FIX_FORWARD 5.7)", () => {
   it("allows up to `max` consumes within the window", async () => {
     const { consumeRateLimit } = await import("./rate-limit.js");
     for (let i = 0; i < 5; i++) {
-      const r = consumeRateLimit({
+      const r = await consumeRateLimit({
         key: "auth:1.2.3.4",
         windowMs: 60_000,
         max: 5,
@@ -42,14 +32,14 @@ describe("rate-limit (FIX_FORWARD 5.7)", () => {
   it("triggers a lockout on the 6th attempt with lockoutMs", async () => {
     const { consumeRateLimit } = await import("./rate-limit.js");
     for (let i = 0; i < 5; i++) {
-      consumeRateLimit({
+      await consumeRateLimit({
         key: "auth:1.2.3.4",
         windowMs: 15 * 60_000,
         max: 5,
         lockoutMs: 30 * 60_000,
       });
     }
-    const blocked = consumeRateLimit({
+    const blocked = await consumeRateLimit({
       key: "auth:1.2.3.4",
       windowMs: 15 * 60_000,
       max: 5,
@@ -62,9 +52,13 @@ describe("rate-limit (FIX_FORWARD 5.7)", () => {
   it("isolates buckets by key", async () => {
     const { consumeRateLimit } = await import("./rate-limit.js");
     for (let i = 0; i < 5; i++) {
-      consumeRateLimit({ key: "auth:1.2.3.4", windowMs: 60_000, max: 5 });
+      await consumeRateLimit({
+        key: "auth:1.2.3.4",
+        windowMs: 60_000,
+        max: 5,
+      });
     }
-    const other = consumeRateLimit({
+    const other = await consumeRateLimit({
       key: "auth:5.6.7.8",
       windowMs: 60_000,
       max: 5,
@@ -73,12 +67,18 @@ describe("rate-limit (FIX_FORWARD 5.7)", () => {
   });
 
   it("resetRateLimit clears one key", async () => {
-    const { consumeRateLimit, resetRateLimit } = await import("./rate-limit.js");
+    const { consumeRateLimit, resetRateLimit } = await import(
+      "./rate-limit.js"
+    );
     for (let i = 0; i < 5; i++) {
-      consumeRateLimit({ key: "auth:1.2.3.4", windowMs: 60_000, max: 5 });
+      await consumeRateLimit({
+        key: "auth:1.2.3.4",
+        windowMs: 60_000,
+        max: 5,
+      });
     }
-    resetRateLimit("auth:1.2.3.4");
-    const r = consumeRateLimit({
+    await resetRateLimit("auth:1.2.3.4");
+    const r = await consumeRateLimit({
       key: "auth:1.2.3.4",
       windowMs: 60_000,
       max: 5,
@@ -91,31 +91,31 @@ describe("rate-limit (FIX_FORWARD 5.7)", () => {
       "./rate-limit.js"
     );
     for (let i = 0; i < 5; i++) {
-      consumeRateLimit({
+      await consumeRateLimit({
         key: "auth:1.2.3.4",
         windowMs: 60_000,
         max: 5,
         lockoutMs: 1_000_000,
       });
     }
-    consumeRateLimit({
+    await consumeRateLimit({
       key: "auth:1.2.3.4",
       windowMs: 60_000,
       max: 5,
       lockoutMs: 1_000_000,
     });
-    consumeRateLimit({ key: "mail:alpha", windowMs: 60_000, max: 5 });
+    await consumeRateLimit({ key: "mail:alpha", windowMs: 60_000, max: 5 });
 
-    const cleared = resetRateLimitPrefix("auth:");
+    const cleared = await resetRateLimitPrefix("auth:");
     expect(cleared).toBeGreaterThanOrEqual(1);
-    const reopened = consumeRateLimit({
+    const reopened = await consumeRateLimit({
       key: "auth:1.2.3.4",
       windowMs: 60_000,
       max: 5,
     });
     expect(reopened.allowed).toBe(true);
     // mail bucket survived.
-    const mailStill = consumeRateLimit({
+    const mailStill = await consumeRateLimit({
       key: "mail:alpha",
       windowMs: 60_000,
       max: 5,
@@ -126,16 +126,16 @@ describe("rate-limit (FIX_FORWARD 5.7)", () => {
 
   it("state persists across the helper boundary (db-backed)", async () => {
     const { consumeRateLimit } = await import("./rate-limit.js");
-    consumeRateLimit({ key: "mail:alpha", windowMs: 60_000, max: 3 });
-    consumeRateLimit({ key: "mail:alpha", windowMs: 60_000, max: 3 });
-    const third = consumeRateLimit({
+    await consumeRateLimit({ key: "mail:alpha", windowMs: 60_000, max: 3 });
+    await consumeRateLimit({ key: "mail:alpha", windowMs: 60_000, max: 3 });
+    const third = await consumeRateLimit({
       key: "mail:alpha",
       windowMs: 60_000,
       max: 3,
     });
     expect(third.allowed).toBe(true);
     expect(third.remaining).toBe(0);
-    const fourth = consumeRateLimit({
+    const fourth = await consumeRateLimit({
       key: "mail:alpha",
       windowMs: 60_000,
       max: 3,

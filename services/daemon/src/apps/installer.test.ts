@@ -8,8 +8,7 @@
  * observe.
  */
 
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -21,26 +20,23 @@ import {
   it,
   vi,
 } from "vitest";
-
-const dataDir = mkdtempSync(join(tmpdir(), "friday-apps-installer-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
+import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 vi.mock("../agent/lifecycle.js", () => ({
   archiveAgent: vi.fn(async () => []),
 }));
 
-const { runMigrations, closeDb, getRawDb, getDb, schema, appDir } = await import(
-  "@friday/shared"
-);
-const registry = await import("../agent/registry.js");
-const {
-  AppInstallError,
-  installApp,
-  inspectApp,
-  listApps,
-  reloadApp,
-  uninstallApp,
-} = await import("./installer.js");
+let handle: TestDbHandle;
+let getDb: typeof import("@friday/shared")["getDb"];
+let schema: typeof import("@friday/shared")["schema"];
+let appDir: typeof import("@friday/shared")["appDir"];
+let registry: typeof import("../agent/registry.js");
+let AppInstallError: typeof import("./installer.js")["AppInstallError"];
+let installApp: typeof import("./installer.js")["installApp"];
+let inspectApp: typeof import("./installer.js")["inspectApp"];
+let listApps: typeof import("./installer.js")["listApps"];
+let reloadApp: typeof import("./installer.js")["reloadApp"];
+let uninstallApp: typeof import("./installer.js")["uninstallApp"];
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_SRC = resolve(__dirname, "fixtures/example-app");
@@ -59,30 +55,39 @@ function freshFixture(id = "example-app"): string {
   return target;
 }
 
-beforeAll(() => {
-  runMigrations();
+beforeAll(async () => {
+  handle = await createTestDb({ label: "apps_installer" });
+  ({ getDb, schema, appDir } = await import("@friday/shared"));
+  registry = await import("../agent/registry.js");
+  ({
+    AppInstallError,
+    installApp,
+    inspectApp,
+    listApps,
+    reloadApp,
+    uninstallApp,
+  } = await import("./installer.js"));
 });
 
-afterAll(() => {
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+afterAll(async () => {
+  await handle.drop();
+  // FRIDAY_DATA_DIR was set by createTestDb; clean the apps folder so
+  // future test runs (different label, different DB) don't see leftovers.
+  const appsRoot = appDir("");
+  if (existsSync(appsRoot)) rmSync(appsRoot, { recursive: true, force: true });
 });
 
-beforeEach(() => {
-  const raw = getRawDb();
-  raw.prepare("DELETE FROM blocks").run();
-  raw.prepare("DELETE FROM schedules").run();
-  raw.prepare("DELETE FROM agents").run();
-  raw.prepare("DELETE FROM apps").run();
+beforeEach(async () => {
+  await handle.truncate();
   // Clean up any pre-existing app folders from prior tests
   const appsRoot = appDir("");
   if (existsSync(appsRoot)) rmSync(appsRoot, { recursive: true, force: true });
 });
 
 describe("installApp", () => {
-  it("registers agents + schedules + app row from the fixture", () => {
+  it("registers agents + schedules + app row from the fixture", async () => {
     const folder = freshFixture();
-    const result = installApp(folder);
+    const result = await installApp(folder);
     expect(result.id).toBe("example-app");
     expect(result.status).toBe("installed");
     expect(result.agents).toEqual([
@@ -94,102 +99,103 @@ describe("installApp", () => {
     ]);
     expect(result.mcpServers).toEqual([{ name: "example-echo" }]);
 
-    const owner = registry.getAgent("example-owner");
+    const owner = await registry.getAgent("example-owner");
     expect(owner).not.toBeNull();
     expect(owner!.type).toBe("bare");
     expect(owner!.status).toBe("idle");
-    expect(registry.getAppId("example-owner")).toBe("example-app");
+    expect(await registry.getAppId("example-owner")).toBe("example-app");
 
-    const weekly = registry.getAgent("example-weekly");
+    const weekly = await registry.getAgent("example-weekly");
     expect(weekly!.type).toBe("scheduled");
-    expect(registry.getAppId("example-weekly")).toBe("example-app");
+    expect(await registry.getAppId("example-weekly")).toBe("example-app");
 
     const db = getDb();
-    const sched = db.select().from(schema.schedules).all();
+    const sched = await db.select().from(schema.schedules);
     expect(sched).toHaveLength(1);
     expect(sched[0].name).toBe("example-weekly-run");
     expect(sched[0].appId).toBe("example-app");
   });
 
-  it("drops a default .gitignore on fresh install", () => {
+  it("drops a default .gitignore on fresh install", async () => {
     const folder = freshFixture();
-    installApp(folder);
+    await installApp(folder);
     const gi = readFileSync(join(folder, ".gitignore"), "utf8");
     expect(gi).toContain(".env");
     expect(gi).toContain("state/*.cache.json");
   });
 
-  it("rejects double-install without going through reload", () => {
+  it("rejects double-install without going through reload", async () => {
     const folder = freshFixture();
-    installApp(folder);
-    expect(() => installApp(folder)).toThrowError(/already installed/);
+    await installApp(folder);
+    await expect(installApp(folder)).rejects.toThrow(/already installed/);
   });
 
-  it("acceptance §16.6: name collision fails with no DB writes when adopt=false", () => {
+  it("acceptance §16.6: name collision fails with no DB writes when adopt=false", async () => {
     // Pre-create an unaffiliated agent with the same name
-    registry.registerAgent({ name: "example-owner", type: "bare" });
+    await registry.registerAgent({ name: "example-owner", type: "bare" });
     const folder = freshFixture();
 
     const db = getDb();
-    const beforeApps = db.select().from(schema.apps).all().length;
-    const beforeAgents = db.select().from(schema.agents).all().length;
-    const beforeSchedules = db.select().from(schema.schedules).all().length;
+    const beforeApps = (await db.select().from(schema.apps)).length;
+    const beforeAgents = (await db.select().from(schema.agents)).length;
+    const beforeSchedules = (await db.select().from(schema.schedules)).length;
 
-    expect(() => installApp(folder)).toThrow(AppInstallError);
+    await expect(installApp(folder)).rejects.toBeInstanceOf(AppInstallError);
 
-    const afterApps = db.select().from(schema.apps).all().length;
-    const afterAgents = db.select().from(schema.agents).all().length;
-    const afterSchedules = db.select().from(schema.schedules).all().length;
+    const afterApps = (await db.select().from(schema.apps)).length;
+    const afterAgents = (await db.select().from(schema.agents)).length;
+    const afterSchedules = (await db.select().from(schema.schedules)).length;
 
     expect(afterApps).toBe(beforeApps);
     expect(afterAgents).toBe(beforeAgents);
     expect(afterSchedules).toBe(beforeSchedules);
     // appId still null on the pre-existing row
-    expect(registry.getAppId("example-owner")).toBeNull();
+    expect(await registry.getAppId("example-owner")).toBeNull();
   });
 
-  it("acceptance §16.6: adopt=true rebinds an existing agent", () => {
-    registry.registerAgent({ name: "example-owner", type: "bare" });
+  it("acceptance §16.6: adopt=true rebinds an existing agent", async () => {
+    await registry.registerAgent({ name: "example-owner", type: "bare" });
     const folder = freshFixture();
-    installApp(folder, { adopt: true });
-    expect(registry.getAppId("example-owner")).toBe("example-app");
+    await installApp(folder, { adopt: true });
+    expect(await registry.getAppId("example-owner")).toBe("example-app");
   });
 
-  it("acceptance §16.6: archived existing row, adopt=false → un-archive + clearSession (history preserved as old session)", () => {
+  it("acceptance §16.6: archived existing row, adopt=false → un-archive + clearSession (history preserved as old session)", async () => {
     // Simulate the prior incarnation: the agent existed and ran, then was archived.
-    registry.registerAgent({ name: "example-owner", type: "bare" });
-    registry.setSession("example-owner", "sess-old-12345");
-    registry.archiveAgent("example-owner");
+    await registry.registerAgent({ name: "example-owner", type: "bare" });
+    await registry.setSession("example-owner", "sess-old-12345");
+    await registry.archiveAgent("example-owner");
 
     const folder = freshFixture();
-    installApp(folder);
+    await installApp(folder);
 
-    const row = registry.getAgent("example-owner");
+    const row = await registry.getAgent("example-owner");
     expect(row!.status).toBe("idle");
-    expect(registry.getAppId("example-owner")).toBe("example-app");
+    expect(await registry.getAppId("example-owner")).toBe("example-app");
     // clearSession on no-adopt reinstall
     expect(row!.sessionId).toBeUndefined();
   });
 
-  it("same-app reinstall (archived rows) un-archives and keeps sessionId", () => {
+  it("same-app reinstall (archived rows) un-archives and keeps sessionId", async () => {
     const folder = freshFixture();
-    installApp(folder);
-    registry.setSession("example-owner", "sess-keep-me");
+    await installApp(folder);
+    await registry.setSession("example-owner", "sess-keep-me");
     // Simulate uninstall: archive the agent (tombstone keeps appId)
-    registry.archiveAgent("example-owner");
+    await registry.archiveAgent("example-owner");
     // Reinstall: must un-archive and preserve sessionId
     // But first we need to drop the apps row that already exists from the
     // first install (uninstallApp would normally do this; we shortcut).
-    getRawDb().prepare("DELETE FROM apps WHERE id = ?").run("example-app");
-    installApp(folder);
-    const row = registry.getAgent("example-owner");
+    const { eq } = await import("drizzle-orm");
+    await getDb().delete(schema.apps).where(eq(schema.apps.id, "example-app"));
+    await installApp(folder);
+    const row = await registry.getAgent("example-owner");
     expect(row!.status).toBe("idle");
     expect(row!.sessionId).toBe("sess-keep-me");
   });
 
-  it("rejects manifests whose mcpServer name collides across apps", () => {
+  it("rejects manifests whose mcpServer name collides across apps", async () => {
     const folderA = freshFixture("app-a");
-    installApp(folderA);
+    await installApp(folderA);
     // Build a second fixture with a clashing mcpServer name
     const folderB = freshFixture("app-b");
     const manifestPath = join(folderB, "manifest.json");
@@ -198,15 +204,15 @@ describe("installApp", () => {
     m.agents = [{ name: "app-b-owner", type: "bare" }];
     m.schedules = [];
     writeFileSync(manifestPath, JSON.stringify(m));
-    expect(() => installApp(folderB)).toThrowError(/already declared/);
+    await expect(installApp(folderB)).rejects.toThrow(/already declared/);
   });
 });
 
 describe("uninstallApp", () => {
-  it("archives owned agents, drops schedules, and renames the folder", () => {
+  it("archives owned agents, drops schedules, and renames the folder", async () => {
     const folder = freshFixture();
-    installApp(folder);
-    const result = uninstallApp("example-app");
+    await installApp(folder);
+    const result = await uninstallApp("example-app");
     expect(result.folderDisposition).toBe("archive");
     expect(result.archivedFolderPath).toBeDefined();
     expect(existsSync(folder)).toBe(false);
@@ -214,69 +220,69 @@ describe("uninstallApp", () => {
 
     // App row gone
     const db = getDb();
-    expect(db.select().from(schema.apps).all()).toHaveLength(0);
+    expect(await db.select().from(schema.apps)).toHaveLength(0);
     // Schedules dropped
-    expect(db.select().from(schema.schedules).all()).toHaveLength(0);
+    expect(await db.select().from(schema.schedules)).toHaveLength(0);
     // Agents kept (preserve-over-delete); status will be archived
     // once lifecycle.archiveAgent runs — our mock no-ops, so we just
     // verify the tombstoned appId is intact.
-    expect(registry.getAppId("example-owner")).toBe("example-app");
+    expect(await registry.getAppId("example-owner")).toBe("example-app");
   });
 
-  it("folderDisposition=keep leaves the folder in place", () => {
+  it("folderDisposition=keep leaves the folder in place", async () => {
     const folder = freshFixture();
-    installApp(folder);
-    uninstallApp("example-app", { folderDisposition: "keep" });
+    await installApp(folder);
+    await uninstallApp("example-app", { folderDisposition: "keep" });
     expect(existsSync(folder)).toBe(true);
   });
 
-  it("folderDisposition=delete removes the folder", () => {
+  it("folderDisposition=delete removes the folder", async () => {
     const folder = freshFixture();
-    installApp(folder);
-    uninstallApp("example-app", { folderDisposition: "delete" });
+    await installApp(folder);
+    await uninstallApp("example-app", { folderDisposition: "delete" });
     expect(existsSync(folder)).toBe(false);
   });
 
-  it("throws on missing app", () => {
-    expect(() => uninstallApp("does-not-exist")).toThrowError(/not installed/);
+  it("throws on missing app", async () => {
+    await expect(uninstallApp("does-not-exist")).rejects.toThrow(/not installed/);
   });
 });
 
 describe("reloadApp", () => {
-  it("no-ops when manifest unchanged", () => {
+  it("no-ops when manifest unchanged", async () => {
     const folder = freshFixture();
-    installApp(folder);
-    const r = reloadApp("example-app");
+    await installApp(folder);
+    const r = await reloadApp("example-app");
     expect(r.changed).toBe(false);
   });
 
-  it("flips status to orphaned when folder disappears", () => {
+  it("flips status to orphaned when folder disappears", async () => {
     const folder = freshFixture();
-    installApp(folder);
+    await installApp(folder);
     rmSync(folder, { recursive: true, force: true });
-    const r = reloadApp("example-app");
+    const r = await reloadApp("example-app");
     expect(r.changed).toBe(true);
-    const detail = inspectApp("example-app");
+    const detail = await inspectApp("example-app");
     expect(detail!.status).toBe("orphaned");
   });
 
-  it("picks up new agents added to the manifest", () => {
+  it("picks up new agents added to the manifest", async () => {
     const folder = freshFixture();
-    installApp(folder);
+    await installApp(folder);
     const manifestPath = join(folder, "manifest.json");
     const m = JSON.parse(readFileSync(manifestPath, "utf8"));
     m.agents.push({ name: "example-extra", type: "bare" });
     m.version = "0.2.0";
     writeFileSync(manifestPath, JSON.stringify(m));
-    const r = reloadApp("example-app");
+    const r = await reloadApp("example-app");
     expect(r.changed).toBe(true);
-    expect(registry.getAgent("example-extra")).not.toBeNull();
-    expect(registry.getAppId("example-extra")).toBe("example-app");
+    expect(await registry.getAgent("example-extra")).not.toBeNull();
+    expect(await registry.getAppId("example-extra")).toBe("example-app");
   });
 
-  it("does NOT auto-archive agents removed from the manifest", () => {
+  it("does NOT auto-archive agents removed from the manifest", async () => {
     const folder = freshFixture();
-    installApp(folder);
+    await installApp(folder);
     const manifestPath = join(folder, "manifest.json");
     const m = JSON.parse(readFileSync(manifestPath, "utf8"));
     m.agents = m.agents.filter(
@@ -284,22 +290,22 @@ describe("reloadApp", () => {
     );
     m.schedules = [];
     writeFileSync(manifestPath, JSON.stringify(m));
-    reloadApp("example-app");
+    await reloadApp("example-app");
     // Weekly agent still present, still owned (preserve-over-delete)
-    expect(registry.getAgent("example-weekly")).not.toBeNull();
+    expect(await registry.getAgent("example-weekly")).not.toBeNull();
   });
 });
 
 describe("listApps / inspectApp", () => {
-  it("lists installed apps; inspect returns full detail or null", () => {
-    expect(listApps()).toHaveLength(0);
+  it("lists installed apps; inspect returns full detail or null", async () => {
+    expect(await listApps()).toHaveLength(0);
     const folder = freshFixture();
-    installApp(folder);
-    const all = listApps();
+    await installApp(folder);
+    const all = await listApps();
     expect(all).toHaveLength(1);
     expect(all[0].id).toBe("example-app");
 
-    const detail = inspectApp("example-app");
+    const detail = await inspectApp("example-app");
     expect(detail).not.toBeNull();
     expect(detail!.manifest.id).toBe("example-app");
     expect(detail!.agents.map((a) => a.name).sort()).toEqual([
@@ -309,6 +315,6 @@ describe("listApps / inspectApp", () => {
     expect(detail!.schedules.map((s) => s.name)).toEqual(["example-weekly-run"]);
     expect(detail!.mcpServers.map((m) => m.name)).toEqual(["example-echo"]);
 
-    expect(inspectApp("ghost")).toBeNull();
+    expect(await inspectApp("ghost")).toBeNull();
   });
 });

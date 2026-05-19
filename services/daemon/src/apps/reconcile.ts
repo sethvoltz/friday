@@ -20,18 +20,18 @@ import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import { reloadApp } from "./installer.js";
 
-export function reconcileAppsOnBoot(): void {
+export async function reconcileAppsOnBoot(): Promise<void> {
   const db = getDb();
-  const rows = db.select().from(schema.apps).all();
+  const rows = await db.select().from(schema.apps);
   const seenFolders = new Set<string>();
   for (const row of rows) {
     seenFolders.add(row.folderPath);
     if (!existsSync(row.folderPath)) {
       if (row.status !== "orphaned") {
-        db.update(schema.apps)
+        await db
+          .update(schema.apps)
           .set({ status: "orphaned" })
-          .where(eq(schema.apps.id, row.id))
-          .run();
+          .where(eq(schema.apps.id, row.id));
         eventBus.publish({
           v: 1,
           type: "app_lifecycle",
@@ -46,7 +46,7 @@ export function reconcileAppsOnBoot(): void {
       continue;
     }
     try {
-      reloadApp(row.id);
+      await reloadApp(row.id);
     } catch (err) {
       logger.log("warn", "apps.reconcile.error", {
         id: row.id,

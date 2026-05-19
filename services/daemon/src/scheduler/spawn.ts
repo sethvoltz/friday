@@ -30,16 +30,16 @@ import {
   writeLastRun,
 } from "./state.js";
 
-export function spawnScheduledRun(
+export async function spawnScheduledRun(
   scheduleRow: typeof schema.schedules.$inferSelect,
   runId: string,
-): void {
+): Promise<void> {
   const cfg = loadConfig();
   const stateDir = ensureScheduleStateDir(scheduleRow.name);
 
   // Ensure the registry has a row for this scheduled agent.
-  if (!registry.getAgent(scheduleRow.name)) {
-    registry.registerAgent({
+  if (!(await registry.getAgent(scheduleRow.name))) {
+    await registry.registerAgent({
       name: scheduleRow.name,
       type: "scheduled",
     });
@@ -59,7 +59,7 @@ export function spawnScheduledRun(
     scheduleName: scheduleRow.name,
     taskPrompt: scheduleRow.taskPrompt,
   });
-  const prompt = wrapWithRecall(
+  const prompt = await wrapWithRecall(
     scheduleRow.taskPrompt,
     promptBody,
     "scheduled",
@@ -79,7 +79,7 @@ export function spawnScheduledRun(
   // ids are fresh — recordUserBlock falls back to '__pending__' until
   // post-turn JSONL recovery rewrites with the SDK-assigned id.
   try {
-    recordUserBlock({
+    await recordUserBlock({
       turnId,
       agentName: scheduleRow.name,
       text: scheduleRow.taskPrompt,

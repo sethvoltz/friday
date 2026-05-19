@@ -1,7 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 // FIX_FORWARD 2.5: safeRecall is best-effort. wrapWithRecall returns the
 // body unchanged when recall is empty; prepends `<memory-context>` when
@@ -10,18 +8,14 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 // fresh daemon) and verify that a thrown buildAutoRecallBlock is caught
 // and the body still flows through.
 
-const dataDir = mkdtempSync(join(tmpdir(), "friday-recall-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
+let handle: TestDbHandle;
 
 beforeAll(async () => {
-  const { runMigrations } = await import("@friday/shared");
-  runMigrations();
+  handle = await createTestDb({ label: "recall" });
 });
 
 afterAll(async () => {
-  const { closeDb } = await import("@friday/shared");
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+  await handle.drop();
 });
 
 describe("recall helpers (FIX_FORWARD 2.5)", () => {
@@ -30,7 +24,11 @@ describe("recall helpers (FIX_FORWARD 2.5)", () => {
     // Distinct intentText vs body so a regression that accidentally
     // emitted the intent into the output (instead of the body) would
     // surface — the previous version passed body for both.
-    const out = wrapWithRecall("recall query", "response body", "user_chat");
+    const out = await wrapWithRecall(
+      "recall query",
+      "response body",
+      "user_chat",
+    );
     expect(out).toBe("response body");
   });
 
@@ -43,7 +41,7 @@ describe("recall helpers (FIX_FORWARD 2.5)", () => {
     }));
     const { wrapWithRecall } = await import("./recall.js");
     const body = "fallback path body";
-    expect(wrapWithRecall("intent", body, "mail")).toBe(body);
+    expect(await wrapWithRecall("intent", body, "mail")).toBe(body);
     vi.unmock("@friday/memory");
     vi.resetModules();
   });
@@ -51,12 +49,12 @@ describe("recall helpers (FIX_FORWARD 2.5)", () => {
   it("wrapWithRecall prepends the block when buildAutoRecallBlock returns content", async () => {
     vi.resetModules();
     vi.doMock("@friday/memory", () => ({
-      buildAutoRecallBlock: (_t: string) =>
+      buildAutoRecallBlock: async (_t: string) =>
         "<memory-context>\nrelevant fact\n</memory-context>",
     }));
     const { wrapWithRecall } = await import("./recall.js");
     const body = "actual prompt body";
-    const out = wrapWithRecall("intent", body, "scheduled");
+    const out = await wrapWithRecall("intent", body, "scheduled");
     // Pin the exact join — `\n\n` between the block and the body is the
     // documented contract. `startsWith` + `endsWith` would let a regression
     // that fused the two (`...</memory-context>actual prompt body`) pass.

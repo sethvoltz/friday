@@ -3,7 +3,6 @@ import {
   ensureDirs,
   ensureFridayEnv,
   ensureSoul,
-  getRawDb,
   loadConfig,
   normalizeModelConfig,
   runMigrations,
@@ -49,10 +48,10 @@ import { existsSync } from "node:fs";
 async function main(): Promise<void> {
   ensureDirs();
   ensureFridayEnv();
-  runMigrations();
+  await runMigrations();
   ensureSoul();
 
-  const backfill = backfillUsageFromLegacyJsonl();
+  const backfill = await backfillUsageFromLegacyJsonl();
   if ("skipped" in backfill && backfill.skipped) {
     logger.log("info", "usage.backfill.skip", { reason: backfill.reason });
   } else {
@@ -68,11 +67,11 @@ async function main(): Promise<void> {
 
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
-  replayPending();
-  seedMetaAgents();
-  reconcileAppsOnBoot();
-  recoverAgents(cfg);
-  recoverQueuedTurns(cfg);
+  await replayPending();
+  await seedMetaAgents();
+  await reconcileAppsOnBoot();
+  await recoverAgents(cfg);
+  await recoverQueuedTurns(cfg);
   const schedTick = startScheduler();
   const watchdog = startWatchdog();
   startTurnStallWatchdog();
@@ -167,9 +166,9 @@ async function main(): Promise<void> {
  *  - For long-lived agents (orchestrator/builder/helper/bare) with non-empty
  *    inboxes, dispatch a fresh turn so the pending mail isn't stranded.
  */
-function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
+async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> {
   const jsonlAgents: RecoveryAgent[] = [];
-  for (const a of registry.listAgents()) {
+  for (const a of await registry.listAgents()) {
     // Heal-on-boot: a builder whose worktree was already removed cannot
     // run another turn. If we don't archive it here, the eligibility
     // check below would happily re-dispatch (sending it into the
@@ -192,7 +191,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
       // Capture ticketId before archive — the closer fires after the
       // registry row is flipped but reads from this captured value.
       const ticketId = a.ticketId ?? null;
-      registry.archiveAgent(a.name);
+      await registry.archiveAgent(a.name);
       eventBus.publish({
         v: 1,
         type: "agent_lifecycle",
@@ -214,9 +213,9 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
     }
     if (a.status === "working") {
       logger.log("info", "agent.recovery.reset-working", { agent: a.name });
-      registry.setStatus(a.name, "idle");
+      await registry.setStatus(a.name, "idle");
     }
-    const cwd = registry.workingDirectoryFor(a);
+    const cwd = await registry.workingDirectoryFor(a);
     if (a.sessionId) {
       jsonlAgents.push({
         agentName: a.name,
@@ -226,7 +225,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
     }
 
     if (a.type !== "scheduled" && a.status !== "archived") {
-      const pending = mailInbox(a.name);
+      const pending = await mailInbox(a.name);
       if (pending.length > 0) {
         const stack = readPromptStack(a.type, []);
         const systemPrompt = composeSystemPrompt(stack, {
@@ -245,6 +244,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
           // FIX_FORWARD 2.5: wrap with recall on the joined mail bodies.
           const intent = pending.map((m) => m.body).join("\n\n");
           const mailPrompt = buildMailPrompt(a.name, pending);
+          const wrappedMailPrompt = await wrapWithRecall(intent, mailPrompt, "mail");
           dispatchTurn({
             agentName: a.name,
             options: {
@@ -252,7 +252,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
               agentType: a.type,
               workingDirectory: cwd,
               systemPrompt,
-              prompt: wrapWithRecall(intent, mailPrompt, "mail"),
+              prompt: wrappedMailPrompt,
               turnId,
               model: modelCfg.name,
               thinking: modelCfg.thinking,
@@ -276,7 +276,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
 
   if (jsonlAgents.length > 0) {
     try {
-      recoverFromJsonl(jsonlAgents);
+      await recoverFromJsonl(jsonlAgents);
     } catch (err) {
       logger.log("warn", "agent.recovery.jsonl-error", {
         message: err instanceof Error ? err.message : String(err),
@@ -299,19 +299,19 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
  * worker to send the prompt to, and leaving them in the table would
  * surface as ghost pinned bubbles on the dashboard forever.
  */
-function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): void {
-  const queued = listQueuedUserBlocks();
+async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<void> {
+  const queued = await listQueuedUserBlocks();
   if (queued.length === 0) return;
   const modelCfg = normalizeModelConfig(cfg.model);
   for (const block of queued) {
-    const a = registry.getAgent(block.agentName);
+    const a = await registry.getAgent(block.agentName);
     if (!a || a.status === "archived") {
       logger.log("info", "queued-turn.recovery.skip", {
         agent: block.agentName,
         turnId: block.turnId,
         reason: a ? "archived" : "agent_missing",
       });
-      deleteBlockById(block.blockId);
+      await deleteBlockById(block.blockId);
       continue;
     }
     let text = "";
@@ -332,11 +332,11 @@ function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): void {
         agent: block.agentName,
         turnId: block.turnId,
       });
-      deleteBlockById(block.blockId);
+      await deleteBlockById(block.blockId);
       continue;
     }
     if (!text.trim() && !attachments) {
-      deleteBlockById(block.blockId);
+      await deleteBlockById(block.blockId);
       continue;
     }
     const stack = readPromptStack(a.type, []);
@@ -345,14 +345,15 @@ function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): void {
       agentType: a.type,
       parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
     });
-    const wrappedPrompt = wrapWithRecall(text, text, "user_chat");
+    const wrappedPrompt = await wrapWithRecall(text, text, "user_chat");
+    const queuedCwd = await registry.workingDirectoryFor(a);
     try {
       dispatchTurn({
         agentName: a.name,
         options: {
           agentName: a.name,
           agentType: a.type,
-          workingDirectory: registry.workingDirectoryFor(a),
+          workingDirectory: queuedCwd,
           systemPrompt,
           prompt: wrappedPrompt,
           attachments,
@@ -382,26 +383,16 @@ function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): void {
 }
 
 /**
- * Run a WAL checkpoint (TRUNCATE) and close the DB handle on shutdown.
- * Without this the WAL file grows unbounded across restarts and the main
- * `.sqlite` file stays cold. Data is durable either way (NORMAL sync), but
- * this keeps the on-disk shape sane and reads fast after restart.
+ * Close the Postgres pool on shutdown. Postgres manages its own WAL —
+ * no explicit checkpoint needed (Postgres autovacuum + bgwriter handle
+ * it). This is fire-and-forget; the shutdown timer below caps wait time.
  */
 function flushDb(): void {
-  try {
-    getRawDb().pragma("wal_checkpoint(TRUNCATE)");
-  } catch (err) {
-    logger.log("warn", "db.checkpoint.error", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
-  try {
-    closeDb();
-  } catch (err) {
+  void closeDb().catch((err: unknown) => {
     logger.log("warn", "db.close.error", {
       message: err instanceof Error ? err.message : String(err),
     });
-  }
+  });
 }
 
 main().catch((err: unknown) => {

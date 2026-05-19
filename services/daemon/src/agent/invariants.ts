@@ -48,11 +48,21 @@ let interval: NodeJS.Timeout | undefined;
  */
 export function startInvariantAuditor(): NodeJS.Timeout | undefined {
   if (interval) return interval;
-  interval = setInterval(audit, AUDIT_INTERVAL_MS);
+  interval = setInterval(() => {
+    void audit().catch((err: unknown) => {
+      logger.log("warn", "invariant.audit.error", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, AUDIT_INTERVAL_MS);
   interval.unref();
-  // Run one pass synchronously at start so we don't have to wait the
-  // full interval after a restart to catch boot-recovery's blind spots.
-  audit();
+  // Run one pass at start so we don't have to wait the full interval
+  // after a restart to catch boot-recovery's blind spots.
+  void audit().catch((err: unknown) => {
+    logger.log("warn", "invariant.audit.error", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  });
   return interval;
 }
 
@@ -67,10 +77,10 @@ export function stopInvariantAuditor(): void {
  * One audit pass. Exported for testability — tests drive `audit()`
  * directly instead of waiting on the interval.
  */
-export function audit(): { archived: string[]; demoted: string[] } {
+export async function audit(): Promise<{ archived: string[]; demoted: string[] }> {
   const archived: string[] = [];
   const demoted: string[] = [];
-  for (const a of registry.listAgents()) {
+  for (const a of await registry.listAgents()) {
     // Rule 1: builder worktree presence. Filesystem is the source of
     // truth — if the dir is gone, the agent can't function and the
     // registry row was lying.
@@ -86,7 +96,7 @@ export function audit(): { archived: string[]; demoted: string[] } {
         worktreePath: a.worktreePath,
         previousStatus: a.status,
       });
-      registry.archiveAgent(a.name);
+      await registry.archiveAgent(a.name);
       eventBus.publish({
         v: 1,
         type: "agent_lifecycle",
@@ -107,7 +117,7 @@ export function audit(): { archived: string[]; demoted: string[] } {
       logger.log("warn", "invariant.demote-zombie-working", {
         agent: a.name,
       });
-      registry.setStatus(a.name, "idle");
+      await registry.setStatus(a.name, "idle");
       eventBus.publish({
         v: 1,
         type: "agent_status",

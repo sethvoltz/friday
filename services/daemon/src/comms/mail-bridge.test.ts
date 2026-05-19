@@ -1,37 +1,40 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
 // FIX_FORWARD 2.2: mail-as-block invariant. On every mail:any event, the
 // bridge materializes a `role='user'`, `kind='text'`, `source='mail'` block
 // in the recipient's session and surfaces the sender via content_json.
+//
+// The mail-bridge handler is fire-and-forget async (ADR-023), so each
+// test awaits a small settling tick after emit before reading rows.
 
-const dataDir = mkdtempSync(join(tmpdir(), "friday-mail-bridge-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
+let handle: TestDbHandle;
 
 beforeAll(async () => {
-  const { runMigrations } = await import("@friday/shared");
-  runMigrations();
+  handle = await createTestDb({ label: "mail_bridge" });
   const { startMailBridge } = await import("./mail-bridge.js");
   startMailBridge();
 });
 
 afterAll(async () => {
-  const { closeDb } = await import("@friday/shared");
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+  await handle.drop();
 });
 
 beforeEach(async () => {
-  const { getRawDb } = await import("@friday/shared");
-  getRawDb().prepare("DELETE FROM blocks").run();
+  await handle.truncate();
 });
+
+/** Drain the microtask + macrotask queue so the mail-bridge's
+ *  fire-and-forget IIFE finishes its DB write before the test reads. */
+async function settle(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 50));
+}
 
 describe("mail-bridge → mail-as-block (FIX_FORWARD 2.2)", () => {
   it("a fresh mailBus event lands a user-role source='mail' block", async () => {
     const { mailBus } = await import("@friday/shared/services");
-    const { getRawDb } = await import("@friday/shared");
+    const db = getDb();
 
     mailBus.emit("mail:any", {
       id: 101,
@@ -42,29 +45,25 @@ describe("mail-bridge → mail-as-block (FIX_FORWARD 2.2)", () => {
       subject: null,
       threadId: null,
       body: "hello via mail",
-      metaJson: null,
+      meta: null,
       ts: Date.now(),
       readAt: null,
       closedAt: null,
+      priority: "normal",
     });
 
-    const rows = getRawDb()
-      .prepare(
-        "SELECT role, kind, source, agent_name, content_json FROM blocks WHERE agent_name = ?",
-      )
-      .all("unknown-recipient-1") as Array<{
-        role: string;
-        kind: string;
-        source: string | null;
-        agent_name: string;
-        content_json: string;
-      }>;
+    await settle();
+    const rows = await db
+      .select()
+      .from(schema.blocks)
+      .where(eq(schema.blocks.agentName, "unknown-recipient-1"));
     expect(rows.length).toBe(1);
     expect(rows[0].role).toBe("user");
     expect(rows[0].kind).toBe("text");
     expect(rows[0].source).toBe("mail");
 
-    const parsed = JSON.parse(rows[0].content_json) as {
+    // contentJson is jsonb; Drizzle returns the parsed object.
+    const parsed = rows[0].contentJson as {
       text: string;
       from_agent?: string;
     };
@@ -74,7 +73,7 @@ describe("mail-bridge → mail-as-block (FIX_FORWARD 2.2)", () => {
 
   it("multiple mail deliveries each get their own block keyed by mail id", async () => {
     const { mailBus } = await import("@friday/shared/services");
-    const { getRawDb } = await import("@friday/shared");
+    const db = getDb();
 
     for (let i = 0; i < 3; i++) {
       mailBus.emit("mail:any", {
@@ -86,19 +85,21 @@ describe("mail-bridge → mail-as-block (FIX_FORWARD 2.2)", () => {
         subject: null,
         threadId: null,
         body: `body-${i}`,
-        metaJson: null,
+        meta: null,
         ts: Date.now() + i,
         readAt: null,
         closedAt: null,
+        priority: "normal",
       });
     }
 
-    const rows = getRawDb()
-      .prepare(
-        "SELECT turn_id FROM blocks WHERE agent_name = ? ORDER BY turn_id",
-      )
-      .all("unknown-recipient-2") as Array<{ turn_id: string }>;
-    expect(rows.map((r) => r.turn_id)).toEqual([
+    await settle();
+    const rows = await db
+      .select({ turnId: schema.blocks.turnId })
+      .from(schema.blocks)
+      .where(eq(schema.blocks.agentName, "unknown-recipient-2"))
+      .orderBy(schema.blocks.turnId);
+    expect(rows.map((r) => r.turnId)).toEqual([
       "mail_200",
       "mail_201",
       "mail_202",

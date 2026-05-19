@@ -163,7 +163,7 @@ export async function reconcile(): Promise<ReconcileResult> {
   }
 
   const issues = await listActiveIssues({ apiKey: cfg.apiKey });
-  const links = externalLinksBySystem(LINEAR_SYSTEM_NAME);
+  const links = await externalLinksBySystem(LINEAR_SYSTEM_NAME);
 
   const linkedIds = new Set(links.map((l) => l.externalId));
   const activeById = new Map(issues.map((i) => [i.identifier, i]));
@@ -210,11 +210,12 @@ export async function importIssue(opts: {
   }
 
   // Check existing link.
-  const existing = externalLinksBySystem(LINEAR_SYSTEM_NAME).find(
+  const existingLinks = await externalLinksBySystem(LINEAR_SYSTEM_NAME);
+  const existing = existingLinks.find(
     (l) => l.externalId === issue.identifier,
   );
   if (existing) {
-    const t = getTicket(existing.ticketId);
+    const t = await getTicket(existing.ticketId);
     if (t) {
       return { ticket: t, alreadyLinked: true, issue };
     }
@@ -222,14 +223,14 @@ export async function importIssue(opts: {
   }
 
   const status = mapState(issue.state.type);
-  const ticket = createTicket({
+  const ticket = await createTicket({
     title: issue.title,
     body: issue.description ?? undefined,
     status,
     kind: "task",
     meta: { linearUrl: issue.url, linearState: issue.state.name },
   });
-  linkExternal({
+  await linkExternal({
     ticketId: ticket.id,
     system: LINEAR_SYSTEM_NAME,
     externalId: issue.identifier,

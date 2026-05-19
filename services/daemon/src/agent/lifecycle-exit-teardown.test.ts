@@ -1,7 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 // F4-A regression: when the worker process exits without going through
 // `runQuery`'s try/catch (SIGTERM from the stall watchdog, SIGKILL, OOM,
@@ -10,23 +8,18 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 // rendered tool/thinking bubbles as `running` forever. The exit handler
 // now finalizes them via `finalizeStreamingBlocks`.
 
-const dataDir = mkdtempSync(join(tmpdir(), "friday-lifecycle-exit-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
+let handle: TestDbHandle;
 
 beforeAll(async () => {
-  const { runMigrations } = await import("@friday/shared");
-  runMigrations();
+  handle = await createTestDb({ label: "lifecycle_exit" });
 });
 
 afterAll(async () => {
-  const { closeDb } = await import("@friday/shared");
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+  await handle.drop();
 });
 
 beforeEach(async () => {
-  const { getRawDb } = await import("@friday/shared");
-  getRawDb().prepare("DELETE FROM blocks").run();
+  await handle.truncate();
   const liveTurns = await import("./live-turns.js");
   liveTurns.__resetForTest();
 });
@@ -63,7 +56,7 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
     // Mirror what handleBlockStart would have done: insert a streaming
     // DB row AND register the block with liveTurns so the exit handler
     // has the live state to finalize from.
-    insertBlock({
+    await insertBlock({
       blockId: "th-blk",
       turnId: "turn-exit-1",
       agentName: "exit-agent",
@@ -93,7 +86,7 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
     });
     liveTurns.appendDelta("turn-exit-1", "c-th", { text: "partial thought" }, 2);
 
-    insertBlock({
+    await insertBlock({
       blockId: "tu-blk",
       turnId: "turn-exit-1",
       agentName: "exit-agent",
@@ -129,36 +122,36 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
       3,
     );
 
-    finalizeStreamingBlocks(makeFakeWorker() as never, "error");
+    await finalizeStreamingBlocks(makeFakeWorker() as never, "error");
 
-    const thinking = getBlockById("th-blk");
+    const thinking = await getBlockById("th-blk");
     expect(thinking?.status).toBe("error");
     // Accumulated delta carries through so the finalized bubble shows
     // whatever made it onto the wire instead of an empty placeholder.
-    expect(thinking?.contentJson).toBe(
-      JSON.stringify({ text: "partial thought" }),
-    );
+    // contentJson is normalized to a JSON string by getBlockById, but jsonb
+    // storage doesn't preserve key order — parse before structural compare.
+    expect(JSON.parse(thinking!.contentJson)).toEqual({
+      text: "partial thought",
+    });
 
-    const tu = getBlockById("tu-blk");
+    const tu = await getBlockById("tu-blk");
     expect(tu?.status).toBe("error");
     // Malformed partial_json falls back to `_raw` so the bubble still
     // renders something diagnostic.
-    expect(tu?.contentJson).toBe(
-      JSON.stringify({
-        tool_use_id: "toolu_FOO",
-        name: "Bash",
-        input: { _raw: '{"command":"echo' },
-      }),
-    );
+    expect(JSON.parse(tu!.contentJson)).toEqual({
+      tool_use_id: "toolu_FOO",
+      name: "Bash",
+      input: { _raw: '{"command":"echo' },
+    });
   });
 
   it("is a no-op when the worker exited cleanly (no live turn)", async () => {
     const { finalizeStreamingBlocks } = await import("./lifecycle.js");
     // No liveTurns entry for `turn-exit-1`. Must not throw, must not
     // touch the DB.
-    expect(() => {
-      finalizeStreamingBlocks(makeFakeWorker() as never, "error");
-    }).not.toThrow();
+    await expect(
+      finalizeStreamingBlocks(makeFakeWorker() as never, "error"),
+    ).resolves.toBeUndefined();
   });
 
   it("FRI-4 #2 (Layer B): marks orphan blocks 'aborted' on turn-rotation", async () => {
@@ -174,7 +167,7 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
     );
     const liveTurns = await import("./live-turns.js");
 
-    insertBlock({
+    await insertBlock({
       blockId: "th-orphan",
       turnId: "turn-exit-1",
       agentName: "exit-agent",
@@ -203,9 +196,9 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
       seq: 1,
     });
 
-    finalizeStreamingBlocks(makeFakeWorker() as never, "aborted");
+    await finalizeStreamingBlocks(makeFakeWorker() as never, "aborted");
 
-    const row = getBlockById("th-orphan");
+    const row = await getBlockById("th-orphan");
     expect(row?.status).toBe("aborted");
   });
 });

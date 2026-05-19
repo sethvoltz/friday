@@ -167,18 +167,18 @@ export interface SpawnTurnInput {
  * if the agent already has a live worker — the caller should use
  * `dispatchTurn` instead, which handles both fork and reuse.
  */
-export function spawnTurn(input: SpawnTurnInput): void {
+export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   if (live.has(input.agentName)) {
     throw new Error(`agent "${input.agentName}" already has a live worker`);
   }
-  registry.setStatus(input.agentName, "working");
+  await registry.setStatus(input.agentName, "working");
 
   // FRI-78: auto-populate per-app context for agents owned by an
   // installed app. Centralized here so every dispatch path (api, mail,
   // schedule, watchdog refork) inherits the wiring; callers don't need
   // to remember to set it.
   if (!input.options.appContext) {
-    const ctx = appContextForAgent(input.agentName);
+    const ctx = await appContextForAgent(input.agentName);
     if (ctx) {
       input.options = { ...input.options, appContext: ctx };
     }
@@ -305,8 +305,13 @@ export function spawnTurn(input: SpawnTurnInput): void {
   };
   live.set(input.agentName, w);
 
+  // Per-worker async chain: serialize IPC events so block start→delta→stop
+  // writes land in order even though each writeAndPublish is async. Node's
+  // `on("message")` callback is sync; we chain promises so the next event
+  // doesn't dispatch until the previous one's DB writes commit.
+  let ipcChain: Promise<void> = Promise.resolve();
   child.on("message", (raw: unknown) => {
-    safeHandleEvent(w, raw);
+    ipcChain = ipcChain.then(() => safeHandleEvent(w, raw));
   });
   child.on("exit", (code, signal) => {
     logger.log("info", "worker.exit", {
@@ -327,7 +332,10 @@ export function spawnTurn(input: SpawnTurnInput): void {
     // `status='error'`. The normal IPC-driven `handleBlockStop` path
     // would have already emptied the map for clean exits; this is
     // strictly the SIGTERM / SIGKILL / OOM / crash safety net.
-    finalizeStreamingBlocks(w, "error");
+    // Fire-and-forget — the exit handler is sync, but finalizeStreamingBlocks
+    // is async (ADR-023). Errors are logged via the lifecycle.streaming-
+    // finalize.error channel.
+    void finalizeStreamingBlocks(w, "error").catch(() => {});
     // If the worker died mid-turn the in-flight registry entry would leak —
     // drop it here so the daemon doesn't hold accumulator state for a turn
     // that can no longer make progress.
@@ -337,11 +345,21 @@ export function spawnTurn(input: SpawnTurnInput): void {
     // `archiveAgent` asked it to stop, the row is already "archived" — we
     // must not overwrite it back to "idle" or the workspace-cleanup half
     // of an archive call would race the wrong status. Same for "error":
-    // a crash-marked row stays crashed.
-    const cur = registry.getAgent(input.agentName);
-    if (cur && cur.status !== "archived" && cur.status !== "error") {
-      registry.setStatus(input.agentName, "idle");
-    }
+    // a crash-marked row stays crashed. The lookup is async now (ADR-023);
+    // do it inside a fire-and-forget so the exit handler stays sync.
+    void (async () => {
+      try {
+        const cur = await registry.getAgent(input.agentName);
+        if (cur && cur.status !== "archived" && cur.status !== "error") {
+          await registry.setStatus(input.agentName, "idle");
+        }
+      } catch (err) {
+        logger.log("warn", "lifecycle.exit.status-reset.error", {
+          agent: input.agentName,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
     eventBus.publish({
       v: 1,
       type: "agent_lifecycle",
@@ -420,7 +438,17 @@ export function spawnTurn(input: SpawnTurnInput): void {
 export function dispatchTurn(input: SpawnTurnInput): void {
   const existing = live.get(input.agentName);
   if (!existing) {
-    spawnTurn(input);
+    // Fire-and-forget the async spawn — the worker fork is itself
+    // asynchronous; the registry write + appContext lookup that newly
+    // need awaiting (ADR-023) don't change the contract that callers
+    // see "the turn has been accepted" the moment dispatchTurn returns.
+    // Errors during the async setup are logged inside spawnTurn.
+    void spawnTurn(input).catch((err: unknown) => {
+      logger.log("warn", "spawn.async-setup-error", {
+        agent: input.agentName,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
     return;
   }
   const promptCmd: WorkerPromptCommand = {
@@ -472,33 +500,33 @@ function restampQueuedUserBlock(
 ): void {
   if (!userBlockId) return;
   const dispatchTs = Date.now();
-  try {
-    writeAndPublish(
-      {
-        v: 1,
-        type: "block_meta_update",
-        turn_id: turnId,
-        agent: agentName,
-        block_id: userBlockId,
+  // writeAndPublish is async (ADR-023). Fire-and-forget from this sync
+  // caller path (sendPrompt / spawnTurn), with the same logger surface
+  // the previous try/catch used.
+  void writeAndPublish(
+    {
+      v: 1,
+      type: "block_meta_update",
+      turn_id: turnId,
+      agent: agentName,
+      block_id: userBlockId,
+      status: "complete",
+      ts: dispatchTs,
+    },
+    (assignedSeq) =>
+      updateBlock(userBlockId, {
         status: "complete",
         ts: dispatchTs,
-      },
-      (assignedSeq) => {
-        updateBlock(userBlockId, {
-          status: "complete",
-          ts: dispatchTs,
-          lastEventSeq: assignedSeq,
-        });
-      },
-    );
-  } catch (err) {
+        lastEventSeq: assignedSeq,
+      }),
+  ).catch((err: unknown) => {
     logger.log("warn", "queued-block.meta-update.error", {
       agent: agentName,
       turnId,
       blockId: userBlockId,
       message: err instanceof Error ? err.message : String(err),
     });
-  }
+  });
 }
 
 /**
@@ -531,7 +559,17 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   w.turnStart = Date.now();
   w.abortRequested = false;
   setWorkerStatus(w, "working", "sendPrompt");
-  registry.setStatus(w.agentName, "working");
+  // Fire-and-forget: registry.setStatus is async under Postgres (ADR-023);
+  // sendPrompt is sync because it's called from the IPC dispatcher and the
+  // setTimeout-driven abortDeadline. Errors are surfaced via the existing
+  // log channel rather than blocking the prompt dispatch.
+  void registry.setStatus(w.agentName, "working").catch((err: unknown) => {
+    logger.log("warn", "registry.set-status.error", {
+      agent: w.agentName,
+      status: "working",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  });
   eventBus.publish({
     v: 1,
     type: "turn_started",
@@ -579,7 +617,18 @@ export function abortTurn(agentName: string): boolean {
   // honest abort lands in tens of milliseconds) and short enough that
   // the user's Stop click feels responsive.
   if (w.abortDeadline) clearTimeout(w.abortDeadline);
-  w.abortDeadline = setTimeout(() => forceKillStuckWorker(w), 2_000);
+  // forceKillStuckWorker is async under ADR-023; setTimeout callback is sync,
+  // so fire-and-forget with logging. We still set/clear the timer through
+  // `w.abortDeadline` so a fast worker response can cancel the kill.
+  w.abortDeadline = setTimeout(() => {
+    void forceKillStuckWorker(w).catch((err: unknown) => {
+      logger.log("warn", "worker.force-kill.error", {
+        agent: w.agentName,
+        turnId: w.turnId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 2_000);
   w.abortDeadline.unref();
   return true;
 }
@@ -600,10 +649,10 @@ function clearAbortDeadline(w: LiveWorker): void {
  * still emit a final IPC message before the kernel reaps it; the error
  * and turn-complete handlers honor `forceKilled` and bail.
  */
-function forceKillStuckWorker(
+async function forceKillStuckWorker(
   w: LiveWorker,
   opts: { reason?: "abort" | "stale"; msSinceTurnStart?: number } = {},
-): void {
+): Promise<void> {
   if (w.forceKilled) return;
   if (!live.has(w.agentName)) return;
   w.forceKilled = true;
@@ -641,8 +690,8 @@ function forceKillStuckWorker(
             "for 2s. The agent has been killed; the next message will spawn a " +
             "fresh worker.",
         };
-  insertErrorBlock(w, errorPayload);
-  finalizeStreamingBlocks(w, reason === "stale" ? "error" : "aborted");
+  await insertErrorBlock(w, errorPayload);
+  await finalizeStreamingBlocks(w, reason === "stale" ? "error" : "aborted");
   // Emit the in-band TurnErrorEvent so any consumers still listening for
   // it know a force-kill happened (vs. a clean abort).
   eventBus.publish({
@@ -670,7 +719,13 @@ function forceKillStuckWorker(
   liveTurns.dropTurn(w.turnId);
   w.lastExitStatus = reason === "stale" ? "error" : "aborted";
   setWorkerStatus(w, "idle", "forceKillStuckWorker");
-  registry.setStatus(w.agentName, "idle");
+  await registry.setStatus(w.agentName, "idle").catch((err: unknown) => {
+    logger.log("warn", "registry.set-status.error", {
+      agent: w.agentName,
+      status: "idle",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  });
 
   // Tear down the process group. We've already waited 2s for the worker
   // to honor the abort IPC, so skip the graceful 'stop' command and go
@@ -718,7 +773,7 @@ export function findAgentByTurnId(turnId: string): string | null {
  * mapping. Watchdog refork must pass `"refork"` or the closer will move the
  * ticket to a terminal status on every transient stall.
  */
-export function archiveAgent(
+export async function archiveAgent(
   agentName: string,
   opts: { reason: ArchiveReason },
 ): Promise<WorkerPromptCommand[]> {
@@ -730,14 +785,14 @@ export function archiveAgent(
   // Capture ticketId BEFORE registry.archiveAgent — defensive against a
   // future refactor that nulls the row's fields on archive. The closer
   // reads from this captured value, not from the registry.
-  const agentRow = registry.getAgent(agentName);
+  const agentRow = await registry.getAgent(agentName);
   const ticketId =
     agentRow && "ticketId" in agentRow ? agentRow.ticketId ?? null : null;
   // Synchronous side-effects: drop from the live map so subsequent
   // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
   // before the child has fully exited.
   if (w) live.delete(agentName);
-  registry.archiveAgent(agentName);
+  await registry.archiveAgent(agentName);
   eventBus.publish({
     v: 1,
     type: "agent_lifecycle",
@@ -752,7 +807,7 @@ export function archiveAgent(
     reason: opts.reason,
     agentName,
   });
-  if (!w) return Promise.resolve(drainedPrompts);
+  if (!w) return drainedPrompts;
 
   // Ask the worker to stop gracefully, then wait for the actual exit
   // event. SIGTERM-on-pgrp backstop at 5s catches descendants the worker
@@ -987,10 +1042,13 @@ export function removeQueuedPrompt(
  * Exported so the unit test can exercise the boundary directly without
  * spawning a real child process.
  */
-export function safeHandleEvent(w: LiveWorker, raw: unknown): void {
+export async function safeHandleEvent(
+  w: LiveWorker,
+  raw: unknown,
+): Promise<void> {
   const ev = raw as WorkerEvent;
   try {
-    handleEvent(w, ev);
+    await handleEvent(w, ev);
   } catch (err) {
     logger.log("error", "worker.ipc.error", {
       agent: w.agentName,
@@ -1000,7 +1058,10 @@ export function safeHandleEvent(w: LiveWorker, raw: unknown): void {
   }
 }
 
-export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
+export async function handleEvent(
+  w: LiveWorker,
+  e: WorkerEvent,
+): Promise<void> {
   // FRI-33: stale-turn ceiling. Any inbound IPC — heartbeat or otherwise —
   // gives us a chance to notice that the worker has been on the same turn
   // longer than is plausible. Reap before downstream handlers run their own
@@ -1016,7 +1077,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
   if (!w.forceKilled && w.turnStart) {
     const msSinceTurnStart = Date.now() - w.turnStart;
     if (msSinceTurnStart > staleTurnCeilingMs()) {
-      forceKillStuckWorker(w, { reason: "stale", msSinceTurnStart });
+      await forceKillStuckWorker(w, { reason: "stale", msSinceTurnStart });
       return;
     }
   }
@@ -1046,7 +1107,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
   switch (e.type) {
     case "session-update":
       w.sessionId = e.sessionId;
-      registry.setSession(w.agentName, e.sessionId);
+      await registry.setSession(w.agentName, e.sessionId);
       // No live JSONL tail-watcher: blocks are persisted directly via the
       // worker → daemon IPC pipeline (FIX_FORWARD 1.2). JSONL is reconciled
       // at boot (FIX_FORWARD 1.3) and after every turn-complete on this
@@ -1054,11 +1115,11 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       // turn-complete handler below).
       break;
     case "block-start": {
-      handleBlockStart(w, e);
+      await handleBlockStart(w, e);
       break;
     }
     case "block-delta": {
-      handleBlockDelta(w, e);
+      await handleBlockDelta(w, e);
       break;
     }
     case "block-stop": {
@@ -1066,7 +1127,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       // the turn-stall watchdog. Heartbeats don't count — a hung SDK still
       // emits them, but no block ever lands.
       w.lastBlockStop = Date.now();
-      handleBlockStop(w, e);
+      await handleBlockStop(w, e);
       break;
     }
     case "block-cancel": {
@@ -1074,7 +1135,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       // already fired and the row exists at status='streaming') and the
       // worker exited the for-await before any deltas accumulated. Drop
       // the row and tell live clients to remove the bubble.
-      handleBlockCancel(w, e);
+      await handleBlockCancel(w, e);
       break;
     }
     case "error": {
@@ -1095,7 +1156,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       // the bubble is already visible via the user's Stop click and the
       // assistant text bubble flips to "aborted" via finishTurn below.
       if (!wasAbort) {
-        insertErrorBlock(w, {
+        await insertErrorBlock(w, {
           code: e.code ?? "worker_error",
           headline: e.headline ?? e.message,
           httpStatus: e.httpStatus,
@@ -1107,7 +1168,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       // Close any blocks left at status='streaming' so their dashboard
       // bubbles transition off "running". finalizeStreamingBlocks is
       // idempotent — safe to call even when the inflight set is empty.
-      finalizeStreamingBlocks(w, wasAbort ? "aborted" : "error");
+      await finalizeStreamingBlocks(w, wasAbort ? "aborted" : "error");
       // Publish the canonical TurnErrorEvent (kept for any consumer that
       // listens for it) BEFORE the synthesized turn_done — clients route
       // both, but ordering means the error metadata is in hand by the time
@@ -1137,7 +1198,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       liveTurns.dropTurn(w.turnId);
       setWorkerStatus(w, "idle", "handleEvent.error");
       w.completedAtLeastOnce = true;
-      registry.setStatus(w.agentName, "idle");
+      await registry.setStatus(w.agentName, "idle");
       eventBus.publish({
         v: 1,
         type: "agent_status",
@@ -1184,26 +1245,27 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
           : undefined,
       });
       if (e.usage && (w.sessionId || e.sessionId)) {
-        try {
-          insertUsage({
-            timestamp: new Date().toISOString(),
-            sessionId: w.sessionId ?? e.sessionId,
-            agentName: w.agentName,
-            agentType: w.agentType,
-            model: w.model,
-            costUsd: e.usage.cost_usd,
-            inputTokens: e.usage.input_tokens,
-            outputTokens: e.usage.output_tokens,
-            cacheCreationTokens: e.usage.cache_creation_tokens,
-            cacheReadTokens: e.usage.cache_read_tokens,
-            durationMs,
-          });
-        } catch (err) {
+        // insertUsage is async (ADR-023); fire-and-forget from this sync
+        // handler. We surface errors via the existing log channel rather
+        // than ignoring them.
+        void insertUsage({
+          timestamp: new Date().toISOString(),
+          sessionId: w.sessionId ?? e.sessionId,
+          agentName: w.agentName,
+          agentType: w.agentType,
+          model: w.model,
+          costUsd: e.usage.cost_usd,
+          inputTokens: e.usage.input_tokens,
+          outputTokens: e.usage.output_tokens,
+          cacheCreationTokens: e.usage.cache_creation_tokens,
+          cacheReadTokens: e.usage.cache_read_tokens,
+          durationMs,
+        }).catch((err: unknown) => {
           logger.log("warn", "usage.insert.error", {
             agent: w.agentName,
             message: err instanceof Error ? err.message : String(err),
           });
-        }
+        });
       }
       // FRI-4 #2 (Layer B): if the SDK abandoned a content block
       // mid-stream and the worker's pre-break flush missed it, the
@@ -1213,7 +1275,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       // `status='streaming'`. Finalize as `aborted` first so the row
       // transitions cleanly off `streaming` and the dashboard's bubble
       // moves off `running`.
-      finalizeStreamingBlocks(w, "aborted");
+      await finalizeStreamingBlocks(w, "aborted");
       // The in-flight registry holds per-turn block accumulators (FIX_FORWARD
       // 1.4). Drop the entry once the turn completes; canonical block content
       // already lives in the `blocks` table.
@@ -1223,7 +1285,7 @@ export function handleEvent(w: LiveWorker, e: WorkerEvent): void {
       setWorkerStatus(w, "idle", "handleEvent.turn-complete");
       w.completedAtLeastOnce = true;
       w.lastExitStatus = w.abortRequested ? "aborted" : "complete";
-      registry.setStatus(w.agentName, "idle");
+      await registry.setStatus(w.agentName, "idle");
       // Per-turn recovery sweep: catches any block the live IPC pipeline
       // dropped this turn — most notably tool_result blocks from a mid-
       // turn iterator break (FIX_FORWARD 2.4), where the worker exits the
@@ -1323,24 +1385,29 @@ function maybeEmitAgentMessage(opts: {
   });
 }
 
-/* ---------------- DB-before-SSE atomic helper (FIX_FORWARD 1.10) ---------------- */
+/* ---------------- DB-before-SSE atomic helper (FIX_FORWARD 1.10 / ADR-023) ---------------- */
 // Pins ADR-004 at block granularity: every SSE event tied to a `blocks` row
-// is preceded by a synchronous DB write that stamps the row's
-// `last_event_seq` with the same value the SSE event will carry. Because
-// Node is single-threaded and `dbWrite` is synchronous (better-sqlite3) and
-// no other eventBus.publish() calls run between `currentSeq() + 1` and our
-// `eventBus.publish(...)`, the captured `seq` is exactly what publish()
-// assigns. If a future refactor were to violate that, the assertion below
-// flags the skew so it's caught before reaching SSE consumers.
+// is preceded by a DB write that stamps the row's `last_event_seq` with the
+// same value the SSE event will carry. Under Postgres + Drizzle the dbWrite
+// is async, so we capture `currentSeq() + 1` synchronously, await dbWrite,
+// then publish — the per-worker IPC chain in `spawnWorker` serializes events
+// so the captured seq matches what `publish()` assigns. Cross-worker
+// interleaving can still skew; the warning below flags such skew without
+// blocking the publish.
 
 type PublishableEvent = Parameters<typeof eventBus.publish>[0];
 
-function writeAndPublish<E extends PublishableEvent>(
+async function writeAndPublish<E extends PublishableEvent>(
   event: E,
-  dbWrite: (seq: number) => void,
-): { seq: number } {
+  dbWrite: (seq: number) => unknown,
+): Promise<{ seq: number }> {
   const seq = eventBus.currentSeq() + 1;
-  dbWrite(seq);
+  // ADR-004 invariant: the row write must complete before the SSE event
+  // emits. Under the Postgres + Drizzle async model (ADR-023) the dbWrite
+  // callback typically returns a Promise; await it before publishing so
+  // clients that fetch the canonical block on `block_start` see a row
+  // whose `last_event_seq` already matches the event seq.
+  await dbWrite(seq);
   const full = eventBus.publish(event);
   if (full.seq !== seq) {
     logger.log("warn", "block.seq-skew", {
@@ -1360,7 +1427,7 @@ function writeAndPublish<E extends PublishableEvent>(
  * canonical block on `block_start` sees a row whose `last_event_seq` already
  * matches the event seq.
  */
-function handleBlockStart(
+async function handleBlockStart(
   w: LiveWorker,
   e: {
     clientBlockId: string;
@@ -1369,7 +1436,7 @@ function handleBlockStart(
     messageId?: string;
     tool?: { id: string; name: string };
   },
-): void {
+): Promise<void> {
   const sessionId = w.sessionId ?? "__pending__";
   const blockId = randomUUID();
   const ts = Date.now();
@@ -1382,7 +1449,7 @@ function handleBlockStart(
   let insertOk = true;
   let assignedSeq = 0;
   try {
-    const result = writeAndPublish(
+    const result = await writeAndPublish(
       {
         v: 1,
         type: "block_start",
@@ -1397,7 +1464,7 @@ function handleBlockStart(
         tool: e.tool,
         ts,
       },
-      (seq) => {
+      (seq) =>
         insertBlock({
           blockId,
           turnId: w.turnId,
@@ -1412,8 +1479,7 @@ function handleBlockStart(
           status: "streaming",
           ts,
           lastEventSeq: seq,
-        });
-      },
+        }),
     );
     assignedSeq = result.seq;
   } catch (err) {
@@ -1443,10 +1509,10 @@ function handleBlockStart(
   });
 }
 
-function handleBlockDelta(
+async function handleBlockDelta(
   w: LiveWorker,
   e: { clientBlockId: string; delta: { text?: string; partial_json?: string } },
-): void {
+): Promise<void> {
   const nextSeq = eventBus.currentSeq() + 1;
   const live = liveTurns.appendDelta(
     w.turnId,
@@ -1470,7 +1536,7 @@ function handleBlockDelta(
     (live.kind === "text" || live.kind === "thinking")
   ) {
     try {
-      updateBlock(live.blockId, {
+      await updateBlock(live.blockId, {
         contentJson: JSON.stringify({ text: live.text }),
         lastEventSeq: nextSeq,
       });
@@ -1495,16 +1561,16 @@ function handleBlockDelta(
   });
 }
 
-function handleBlockCancel(
+async function handleBlockCancel(
   w: LiveWorker,
   e: { clientBlockId: string },
-): void {
+): Promise<void> {
   // Peek the upcoming seq so the live-turns finish call and the SSE event
   // stamp the same number — mirrors the handleBlockStop pattern.
   const peekSeq = eventBus.currentSeq() + 1;
   const live = liveTurns.finishBlock(w.turnId, e.clientBlockId, peekSeq);
   if (!live) return;
-  writeAndPublish(
+  await writeAndPublish(
     {
       v: 1,
       type: "block_canceled",
@@ -1512,9 +1578,9 @@ function handleBlockCancel(
       agent: w.agentName,
       block_id: live.blockId,
     },
-    () => {
+    async () => {
       try {
-        deleteBlockById(live.blockId);
+        await deleteBlockById(live.blockId);
       } catch (err) {
         logger.log("warn", "blocks.delete.error", {
           agent: w.agentName,
@@ -1526,14 +1592,14 @@ function handleBlockCancel(
   );
 }
 
-function handleBlockStop(
+async function handleBlockStop(
   w: LiveWorker,
   e: {
     clientBlockId: string;
     contentJson: string;
     status: "complete" | "aborted" | "error";
   },
-): void {
+): Promise<void> {
   const ts = Date.now();
   // Peek at the upcoming seq so live-turns sees the same value we'll stamp
   // onto the row + SSE event. `writeAndPublish` validates this binding
@@ -1541,7 +1607,7 @@ function handleBlockStop(
   const peekSeq = eventBus.currentSeq() + 1;
   const live = liveTurns.finishBlock(w.turnId, e.clientBlockId, peekSeq);
   if (!live) return;
-  writeAndPublish(
+  await writeAndPublish(
     {
       v: 1,
       type: "block_complete",
@@ -1557,9 +1623,9 @@ function handleBlockStop(
       status: e.status,
       ts,
     },
-    (seq) => {
+    async (seq) => {
       try {
-        updateBlock(live.blockId, {
+        await updateBlock(live.blockId, {
           contentJson: e.contentJson,
           status: e.status,
           ts,
@@ -1612,10 +1678,10 @@ export interface ErrorBlockPayload {
  * The exact value doesn't matter for ordering — the dashboard sorts by
  * `ts` / `block_id` — but we keep it monotonic so DB scans look sane.
  */
-export function insertErrorBlock(
+export async function insertErrorBlock(
   w: LiveWorker,
   payload: ErrorBlockPayload,
-): { blockId: string } | null {
+): Promise<{ blockId: string } | null> {
   const sessionId = w.sessionId ?? "__pending__";
   const blockId = randomUUID();
   const ts = Date.now();
@@ -1630,7 +1696,7 @@ export function insertErrorBlock(
   }
   const contentJson = JSON.stringify(payload);
   try {
-    writeAndPublish(
+    await writeAndPublish(
       {
         v: 1,
         type: "block_start",
@@ -1644,7 +1710,7 @@ export function insertErrorBlock(
         source: null,
         ts,
       },
-      (seq) => {
+      (seq) =>
         insertBlock({
           blockId,
           turnId: w.turnId,
@@ -1659,10 +1725,9 @@ export function insertErrorBlock(
           status: "complete",
           ts,
           lastEventSeq: seq,
-        });
-      },
+        }),
     );
-    writeAndPublish(
+    await writeAndPublish(
       {
         v: 1,
         type: "block_complete",
@@ -1678,9 +1743,7 @@ export function insertErrorBlock(
         status: "complete",
         ts,
       },
-      (seq) => {
-        updateBlock(blockId, { lastEventSeq: seq });
-      },
+      (seq) => updateBlock(blockId, { lastEventSeq: seq }),
     );
     return { blockId };
   } catch (err) {
@@ -1719,17 +1782,17 @@ export function insertErrorBlock(
  *     `dropTurn` wipes the liveTurns entry and `handleBlockStop` would
  *     no-op on any late stop, leaving the row at `status='streaming'`.
  */
-export function finalizeStreamingBlocks(
+export async function finalizeStreamingBlocks(
   w: LiveWorker,
   status: "error" | "aborted",
-): void {
+): Promise<void> {
   const lt = liveTurns.getLiveTurn(w.turnId);
   if (!lt) return;
   for (const live of lt.blocks.values()) {
     const ts = Date.now();
     const contentJson = finalizeLiveBlockContent(live);
     try {
-      writeAndPublish(
+      await writeAndPublish(
         {
           v: 1,
           type: "block_complete",
@@ -1745,14 +1808,13 @@ export function finalizeStreamingBlocks(
           status,
           ts,
         },
-        (seq) => {
+        (seq) =>
           updateBlock(live.blockId, {
             contentJson,
             status,
             ts,
             lastEventSeq: seq,
-          });
-        },
+          }),
       );
     } catch (err) {
       logger.log("warn", "lifecycle.streaming-finalize.error", {
@@ -1844,10 +1906,10 @@ export interface RecordUserBlockInput {
  * row lands with `status='complete'` immediately — there's no streaming
  * lifecycle for user-typed or mail-derived content.
  */
-export function recordUserBlock(input: RecordUserBlockInput): {
+export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
   blockId: string;
   seq: number;
-} {
+}> {
   const blockId = randomUUID();
   const ts = Date.now();
   const status = input.status ?? "complete";
@@ -1890,7 +1952,7 @@ export function recordUserBlock(input: RecordUserBlockInput): {
   // via the natural `handleBlockComplete` id-match: the optimistic was
   // re-keyed to `user_<turnId>` in `confirmPending`, and the
   // subsequent SSE finds the same id and updates in place.
-  const seq = writeAndPublish(
+  const { seq } = await writeAndPublish(
     {
       v: 1,
       type: "block_complete",
@@ -1906,7 +1968,7 @@ export function recordUserBlock(input: RecordUserBlockInput): {
       status,
       ts,
     },
-    (assignedSeq) => {
+    (assignedSeq) =>
       insertBlock({
         blockId,
         turnId: input.turnId,
@@ -1921,9 +1983,8 @@ export function recordUserBlock(input: RecordUserBlockInput): {
         status,
         ts,
         lastEventSeq: assignedSeq,
-      });
-    },
-  ).seq;
+      }),
+  );
   // FIX_FORWARD 2.8: mail-derived user blocks badge the recipient agent
   // (a piece of user-visible content just landed in their chat).
   // user_chat / queue_inject blocks are typed by the user themselves and

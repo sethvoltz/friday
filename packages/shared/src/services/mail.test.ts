@@ -1,36 +1,24 @@
-import Database from "better-sqlite3";
-import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createTestDb, type TestDbHandle } from "../db/test-pg.js";
 
-let raw: Database.Database;
+let handle: TestDbHandle;
 
-vi.mock("../db/client.js", async () => {
-  const drizzleMod = await import("drizzle-orm/better-sqlite3");
-  const schema = await import("../db/schema.js");
-  return {
-    getRawDb: () => raw,
-    getDb: () => drizzleMod.drizzle(raw, { schema }),
-    closeDb: () => {
-      raw.close();
-    },
-  };
+beforeAll(async () => {
+  handle = await createTestDb({ label: "mail" });
+});
+
+afterAll(async () => {
+  await handle.drop();
 });
 
 beforeEach(async () => {
-  raw = new Database(":memory:");
-  raw.pragma("journal_mode = MEMORY");
-  raw.pragma("foreign_keys = ON");
-  const { runMigrations } = await import("../db/migrate.js");
-  runMigrations();
-});
-
-afterEach(() => {
-  raw.close();
+  await handle.truncate();
 });
 
 describe("mail priority (FIX_FORWARD 2.3)", () => {
   it("sendMail defaults priority to 'normal'", async () => {
     const { sendMail } = await import("./mail.js");
-    const row = sendMail({
+    const row = await sendMail({
       fromAgent: "alpha",
       toAgent: "beta",
       type: "message",
@@ -41,14 +29,14 @@ describe("mail priority (FIX_FORWARD 2.3)", () => {
 
   it("sendMail persists priority='critical' when set", async () => {
     const { sendMail, inbox } = await import("./mail.js");
-    sendMail({
+    await sendMail({
       fromAgent: "alpha",
       toAgent: "beta",
       type: "message",
       body: "urgent reply",
       priority: "critical",
     });
-    const rows = inbox("beta");
+    const rows = await inbox("beta");
     expect(rows.length).toBe(1);
     expect(rows[0].priority).toBe("critical");
   });
@@ -63,13 +51,13 @@ describe("mail priority (FIX_FORWARD 2.3)", () => {
       seen.push(`normal-${row.id}`);
     });
 
-    sendMail({
+    await sendMail({
       fromAgent: "alpha",
       toAgent: "beta",
       type: "message",
       body: "normal",
     });
-    sendMail({
+    await sendMail({
       fromAgent: "alpha",
       toAgent: "beta",
       type: "message",

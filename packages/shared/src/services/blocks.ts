@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gt, lt, sql } from "drizzle-orm";
-import { getDb, getRawDb } from "../db/client.js";
+import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
 
 export type BlockKind = "text" | "thinking" | "tool_use" | "tool_result";
@@ -38,8 +38,12 @@ export interface BlockRow {
   role: string;
   kind: string;
   source: string | null;
+  /** Serialized as JSON text for stable API shape. Underlying column is
+   *  jsonb in Postgres; we stringify on read so callers continue parsing
+   *  with JSON.parse. Phase 1+ may revisit and pass the parsed object. */
   contentJson: string;
   status: string;
+  /** Milliseconds since epoch. */
   ts: number;
   lastEventSeq: number;
 }
@@ -54,18 +58,50 @@ export interface InsertBlockInput {
   role: string;
   kind: BlockKind | string;
   source?: BlockSource;
+  /** JSON-encoded string of the block payload. */
   contentJson: string;
   status: BlockStatus;
+  /** Milliseconds since epoch. */
   ts: number;
   lastEventSeq: number;
+}
+
+function rowFromDb(r: typeof schema.blocks.$inferSelect): BlockRow {
+  return {
+    id: r.id,
+    blockId: r.blockId,
+    turnId: r.turnId,
+    agentName: r.agentName,
+    sessionId: r.sessionId,
+    messageId: r.messageId,
+    blockIndex: r.blockIndex,
+    role: r.role,
+    kind: r.kind,
+    source: r.source,
+    contentJson:
+      typeof r.contentJson === "string"
+        ? r.contentJson
+        : JSON.stringify(r.contentJson ?? null),
+    status: r.status,
+    ts: r.ts.getTime(),
+    lastEventSeq: r.lastEventSeq,
+  };
 }
 
 /**
  * INSERT a new block row. Throws on duplicate `blockId` (UNIQUE constraint).
  */
-export function insertBlock(input: InsertBlockInput): BlockRow {
+export async function insertBlock(input: InsertBlockInput): Promise<BlockRow> {
   const db = getDb();
-  const row = db
+  // contentJson is delivered as a string by callers; parse before inserting
+  // so it lands as jsonb in Postgres rather than a stringified scalar.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input.contentJson);
+  } catch {
+    parsed = input.contentJson;
+  }
+  const insertedRows = await db
     .insert(schema.blocks)
     .values({
       blockId: input.blockId,
@@ -77,20 +113,20 @@ export function insertBlock(input: InsertBlockInput): BlockRow {
       role: input.role,
       kind: input.kind,
       source: input.source ?? null,
-      contentJson: input.contentJson,
+      contentJson: parsed,
       status: input.status,
-      ts: input.ts,
+      ts: new Date(input.ts),
       lastEventSeq: input.lastEventSeq,
     })
-    .returning()
-    .get();
-  return row as BlockRow;
+    .returning();
+  return rowFromDb(insertedRows[0]);
 }
 
 export interface UpdateBlockPatch {
   contentJson?: string;
   status?: BlockStatus;
   lastEventSeq?: number;
+  /** Milliseconds since epoch. */
   ts?: number;
   /** Optional new index — defaults to leaving it unchanged. */
   blockIndex?: number;
@@ -100,74 +136,83 @@ export interface UpdateBlockPatch {
  * UPDATE a block by its stable `blockId`. Returns the new row, or `null` if
  * the block_id wasn't found.
  */
-export function updateBlock(
+export async function updateBlock(
   blockId: string,
   patch: UpdateBlockPatch,
-): BlockRow | null {
+): Promise<BlockRow | null> {
   const db = getDb();
-  const existing = db
+  const existingRows = await db
     .select()
     .from(schema.blocks)
     .where(eq(schema.blocks.blockId, blockId))
-    .get();
+    .limit(1);
+  const existing = existingRows[0];
   if (!existing) return null;
-  const next = {
-    contentJson: patch.contentJson ?? existing.contentJson,
-    status: patch.status ?? existing.status,
-    lastEventSeq: patch.lastEventSeq ?? existing.lastEventSeq,
-    ts: patch.ts ?? existing.ts,
-    blockIndex: patch.blockIndex ?? existing.blockIndex,
-  };
-  db.update(schema.blocks)
-    .set(next)
+  const updates: Record<string, unknown> = {};
+  if (patch.contentJson !== undefined) {
+    try {
+      updates.contentJson = JSON.parse(patch.contentJson);
+    } catch {
+      updates.contentJson = patch.contentJson;
+    }
+  }
+  if (patch.status !== undefined) updates.status = patch.status;
+  if (patch.lastEventSeq !== undefined)
+    updates.lastEventSeq = patch.lastEventSeq;
+  if (patch.ts !== undefined) updates.ts = new Date(patch.ts);
+  if (patch.blockIndex !== undefined) updates.blockIndex = patch.blockIndex;
+  if (Object.keys(updates).length === 0) return rowFromDb(existing);
+  await db
+    .update(schema.blocks)
+    .set(updates)
+    .where(eq(schema.blocks.blockId, blockId));
+  const refetched = await db
+    .select()
+    .from(schema.blocks)
     .where(eq(schema.blocks.blockId, blockId))
-    .run();
-  return { ...(existing as BlockRow), ...next };
+    .limit(1);
+  return refetched[0] ? rowFromDb(refetched[0]) : null;
 }
 
-export function getBlockById(blockId: string): BlockRow | null {
+export async function getBlockById(blockId: string): Promise<BlockRow | null> {
   const db = getDb();
-  const r = db
+  const rows = await db
     .select()
     .from(schema.blocks)
     .where(eq(schema.blocks.blockId, blockId))
-    .get();
-  return (r ?? null) as BlockRow | null;
+    .limit(1);
+  return rows[0] ? rowFromDb(rows[0]) : null;
 }
 
 /** DELETE a block row. Used by the queued-message cancel endpoint — the
  *  user's draft was never seen by the LLM, so we discard the row entirely
  *  rather than leaving an `aborted` ghost in the transcript. Returns true
  *  if a row was deleted. */
-export function deleteBlockById(blockId: string): boolean {
+export async function deleteBlockById(blockId: string): Promise<boolean> {
   const db = getDb();
-  const res = db
+  const res = await db
     .delete(schema.blocks)
-    .where(eq(schema.blocks.blockId, blockId))
-    .run();
-  return (res.changes ?? 0) > 0;
+    .where(eq(schema.blocks.blockId, blockId));
+  return (res.rowCount ?? 0) > 0;
 }
 
-/** Return all blocks currently in `status='queued'`, oldest first. Used by
- *  the daemon's boot-time rehydration pass to re-seed each worker's
- *  `nextPrompts` FIFO so a daemon restart doesn't silently drop user
- *  drafts that the dashboard already acknowledged. */
-export function listQueuedUserBlocks(): BlockRow[] {
+/** Return all blocks currently in `status='queued'`, oldest first. */
+export async function listQueuedUserBlocks(): Promise<BlockRow[]> {
   const db = getDb();
-  return db
+  const rows = await db
     .select()
     .from(schema.blocks)
     .where(eq(schema.blocks.status, "queued"))
-    .orderBy(asc(schema.blocks.ts))
-    .all() as BlockRow[];
+    .orderBy(asc(schema.blocks.ts));
+  return rows.map(rowFromDb);
 }
 
-/** Look up a user block (role='user', source='user_chat') by its turn id.
- *  Returns null when the turn doesn't have a user-chat block — covers
- *  mail-injected turns and turns whose user block was already cancelled. */
-export function getUserChatBlockByTurnId(turnId: string): BlockRow | null {
+/** Look up a user block (role='user', source='user_chat') by its turn id. */
+export async function getUserChatBlockByTurnId(
+  turnId: string,
+): Promise<BlockRow | null> {
   const db = getDb();
-  const r = db
+  const rows = await db
     .select()
     .from(schema.blocks)
     .where(
@@ -177,46 +222,23 @@ export function getUserChatBlockByTurnId(turnId: string): BlockRow | null {
         eq(schema.blocks.source, "user_chat"),
       ),
     )
-    .get();
-  return (r ?? null) as BlockRow | null;
+    .limit(1);
+  return rows[0] ? rowFromDb(rows[0]) : null;
 }
 
 /**
  * Look up a text or thinking block by its natural key
- * `(session_id, message_id, kind)`. Used by JSONL recovery
- * (FIX_FORWARD 1.3) to dedup against blocks already written by the live
- * worker.
- *
- * `block_index` is intentionally NOT part of the key. The live worker
- * stamps the SDK stream's `e.index` (position within the assembled
- * assistant message — so thinking=0, text=1 in a thinking+text reply),
- * but the SDK persists JSONL as one entry per content block, each
- * entry's `content` array starting fresh at `index: 0`. The recovery
- * walker reads its position from `msg.content.forEach((_, idx))`, which
- * is always 0 within a split entry. The two indices therefore disagree
- * for any message with more than one block, and including `block_index`
- * in the dedup key caused recovery to insert a parallel row for the
- * same logical content (FRI-4).
- *
- * `kind` stays in the key because thinking and text legitimately
- * coexist in a single message and need separate rows. Multiple
- * same-kind blocks in one assistant message are not produced by the
- * Anthropic API in practice; if that ever changes, this dedup would
- * collapse them — accept that trade vs. the simpler alternative of
- * carrying an order-tracking counter across JSONL entries.
- *
- * Tool_use and tool_result blocks have a stronger natural key
- * (`tool_use_id`) — see `getToolUseByToolUseId` and
- * `getToolResultByToolUseId`. Use those instead of this function for
- * those kinds.
+ * `(session_id, message_id, kind)`. See the long comment on the previous
+ * SQLite version (ADR-016 / FRI-4) — semantics unchanged. Tool_use and
+ * tool_result use a stronger key (`tool_use_id`); see those helpers.
  */
-export function getBlockByNaturalKey(
+export async function getBlockByNaturalKey(
   sessionId: string,
   messageId: string,
   kind: string,
-): BlockRow | null {
+): Promise<BlockRow | null> {
   const db = getDb();
-  const r = db
+  const rows = await db
     .select()
     .from(schema.blocks)
     .where(
@@ -226,73 +248,49 @@ export function getBlockByNaturalKey(
         eq(schema.blocks.kind, kind),
       ),
     )
-    .get();
-  return (r ?? null) as BlockRow | null;
+    .limit(1);
+  return rows[0] ? rowFromDb(rows[0]) : null;
 }
 
-/**
- * Look up a `tool_use` block by (session_id, tool_use_id). The Claude SDK
- * splits a multi-block assistant message into one JSONL entry per content
- * block, each starting fresh at `index: 0`. The live IPC path, in
- * contrast, writes tool_use at the SDK-stream's global `e.index` (e.g.,
- * `1` if a thinking block precedes it). So the `(message_id, block_index)`
- * coordinates of a tool_use block in JSONL and the same block in DB don't
- * line up. The Anthropic API's `tool_use_id` is the stable cross-reference
- * (it appears identically in JSONL `id` and in DB `content_json.tool_use_id`).
- *
- * Used by jsonl-recovery's tool_use reconcile path so recovery dedup against
- * live-IPC rows works regardless of streaming-chunk boundaries.
- */
-export function getToolUseByToolUseId(
+/** Look up a `tool_use` block by (session_id, tool_use_id). See the long
+ *  comment on the previous SQLite version — semantics unchanged. */
+export async function getToolUseByToolUseId(
   sessionId: string,
   toolUseId: string,
-): BlockRow | null {
+): Promise<BlockRow | null> {
   const db = getDb();
-  const r = db
+  const rows = await db
     .select()
     .from(schema.blocks)
     .where(
       and(
         eq(schema.blocks.sessionId, sessionId),
         eq(schema.blocks.kind, "tool_use"),
-        sql`json_extract(${schema.blocks.contentJson}, '$.tool_use_id') = ${toolUseId}`,
+        sql`${schema.blocks.contentJson}->>'tool_use_id' = ${toolUseId}`,
       ),
     )
-    .get();
-  return (r ?? null) as BlockRow | null;
+    .limit(1);
+  return rows[0] ? rowFromDb(rows[0]) : null;
 }
 
-/**
- * Look up a `tool_result` block by (session_id, tool_use_id). Tool_result
- * entries in the Claude SDK's JSONL never carry a `message.id` (they're
- * appended to user-role messages whose ids are generated only at flush
- * time), so the (sessionId, messageId, blockIndex) natural key used by
- * `getBlockByNaturalKey` doesn't match. The `tool_use_id` inside
- * `content_json` is the stable cross-reference here: the Anthropic API
- * mints one per tool call and uses it to pair use ↔ result.
- *
- * Used by jsonl-recovery's tool_result reconcile path so the recovery
- * pass is idempotent even when message_id is null in both JSONL and DB.
- */
-export function getToolResultByToolUseId(
+/** Look up a `tool_result` block by (session_id, tool_use_id). */
+export async function getToolResultByToolUseId(
   sessionId: string,
   toolUseId: string,
-): BlockRow | null {
+): Promise<BlockRow | null> {
   const db = getDb();
-  // json_extract reads the tool_use_id out of the content_json blob. SQLite
-  // built-in JSON1 is available everywhere we run (better-sqlite3 ships it).
-  const r = db
+  const rows = await db
     .select()
     .from(schema.blocks)
     .where(
       and(
         eq(schema.blocks.sessionId, sessionId),
         eq(schema.blocks.kind, "tool_result"),
-        sql`json_extract(${schema.blocks.contentJson}, '$.tool_use_id') = ${toolUseId}`,
+        sql`${schema.blocks.contentJson}->>'tool_use_id' = ${toolUseId}`,
       ),
     )
-    .get();
-  return (r ?? null) as BlockRow | null;
+    .limit(1);
+  return rows[0] ? rowFromDb(rows[0]) : null;
 }
 
 export interface ListBlocksOpts {
@@ -305,55 +303,67 @@ export interface ListBlocksOpts {
   ascending?: boolean;
 }
 
-export function listBlocks(opts: ListBlocksOpts = {}): BlockRow[] {
+export async function listBlocks(
+  opts: ListBlocksOpts = {},
+): Promise<BlockRow[]> {
   const db = getDb();
-  const conds = [] as ReturnType<typeof eq>[];
+  const conds = [];
   if (opts.agentName) conds.push(eq(schema.blocks.agentName, opts.agentName));
   if (opts.sessionId) conds.push(eq(schema.blocks.sessionId, opts.sessionId));
   if (opts.beforeId !== undefined)
     conds.push(lt(schema.blocks.id, opts.beforeId));
-  if (opts.afterId !== undefined) conds.push(gt(schema.blocks.id, opts.afterId));
-  const base = db.select().from(schema.blocks);
-  const filtered = conds.length > 0 ? base.where(and(...conds)) : base;
-  return filtered
-    .orderBy(opts.ascending ? asc(schema.blocks.id) : desc(schema.blocks.id))
-    .limit(opts.limit ?? 50)
-    .all() as BlockRow[];
+  if (opts.afterId !== undefined)
+    conds.push(gt(schema.blocks.id, opts.afterId));
+  const order = opts.ascending
+    ? asc(schema.blocks.id)
+    : desc(schema.blocks.id);
+  const limit = opts.limit ?? 50;
+  const rows =
+    conds.length > 0
+      ? await db
+          .select()
+          .from(schema.blocks)
+          .where(and(...conds))
+          .orderBy(order)
+          .limit(limit)
+      : await db
+          .select()
+          .from(schema.blocks)
+          .orderBy(order)
+          .limit(limit);
+  return rows.map(rowFromDb);
 }
 
-/** All blocks belonging to a given turn, ordered by insert id. Used by
- *  the Resume endpoint (FRI-12) to recover the original user prompt
- *  from a turn that errored, so the user's "Resume" CTA can re-dispatch
- *  the same prompt under the same turn_id. */
-export function listBlocksByTurn(turnId: string): BlockRow[] {
+/** All blocks belonging to a given turn, ordered by insert id. */
+export async function listBlocksByTurn(turnId: string): Promise<BlockRow[]> {
   const db = getDb();
-  return db
+  const rows = await db
     .select()
     .from(schema.blocks)
     .where(eq(schema.blocks.turnId, turnId))
-    .orderBy(asc(schema.blocks.id))
-    .all() as BlockRow[];
+    .orderBy(asc(schema.blocks.id));
+  return rows.map(rowFromDb);
 }
 
 /** Most-recent block per agent — used by the per-agent cursor (FIX_FORWARD 1.7). */
-export function maxSeqByAgent(agentName: string): number {
+export async function maxSeqByAgent(agentName: string): Promise<number> {
   const db = getDb();
-  const row = db
+  const rows = await db
     .select({
-      maxSeq: sql<number>`COALESCE(MAX(${schema.blocks.lastEventSeq}), 0)`,
+      maxSeq: sql<number>`COALESCE(MAX(${schema.blocks.lastEventSeq}), 0)`.as(
+        "maxSeq",
+      ),
     })
     .from(schema.blocks)
-    .where(eq(schema.blocks.agentName, agentName))
-    .get();
-  return row?.maxSeq ?? 0;
+    .where(eq(schema.blocks.agentName, agentName));
+  return rows[0]?.maxSeq ?? 0;
 }
 
 /* ---------------- Block-fetch API helpers (FIX_FORWARD 1.8) ---------------- */
 
 export interface FetchBlocksOpts {
   agentName: string;
-  /** When set, restrict the result to a single SDK session (FIX_FORWARD 3.7
-   *  — past-session view). */
+  /** When set, restrict the result to a single SDK session. */
   sessionId?: string;
   limit?: number;
   /** Return blocks strictly older than this block_id. */
@@ -364,14 +374,13 @@ export interface FetchBlocksOpts {
   aroundTs?: number;
   beforeLimit?: number;
   afterLimit?: number;
-  /** FTS5 MATCH expression against blocks_fts. */
+  /** Postgres `plainto_tsquery` expression against the `content_tsv`
+   *  generated column on blocks. */
   match?: string;
 }
 
 export interface FetchBlocksResult {
   blocks: BlockRow[];
-  /** The largest `last_event_seq` in the result set, or 0 if empty. Clients
-   *  use this to seed their per-agent SSE cursor (FIX_FORWARD 1.7). */
   lastEventSeq: number;
 }
 
@@ -389,22 +398,15 @@ function maxSeq(rows: BlockRow[]): number {
   return m;
 }
 
-/**
- * Dispatch a /api/agents/:name/blocks query. Modes are mutually exclusive:
- *  - `match`: FTS lookup, returned in score order, capped by `limit`.
- *  - `aroundTs`: blocks before + after a target timestamp (chronological).
- *  - `beforeBlockId` / `afterBlockId`: cursor pagination.
- *  - default (none of the above): most recent `limit` blocks.
- */
-export function fetchBlocksByAgent(opts: FetchBlocksOpts): FetchBlocksResult {
+export async function fetchBlocksByAgent(
+  opts: FetchBlocksOpts,
+): Promise<FetchBlocksResult> {
   if (opts.match) {
-    const rows = matchBlocks({
+    const rows = await matchBlocks({
       agentName: opts.agentName,
       match: opts.match,
       limit: clampLimit(opts.limit, 20),
     });
-    // matchBlocks doesn't filter by session today — apply post-hoc so the
-    // /jump <term> search in a past-session view stays scoped.
     const filtered = opts.sessionId
       ? rows.filter((r) => r.sessionId === opts.sessionId)
       : rows;
@@ -414,9 +416,9 @@ export function fetchBlocksByAgent(opts: FetchBlocksOpts): FetchBlocksResult {
     return fetchAroundTs(opts);
   }
   if (opts.beforeBlockId) {
-    const anchor = getBlockById(opts.beforeBlockId);
+    const anchor = await getBlockById(opts.beforeBlockId);
     if (!anchor) return { blocks: [], lastEventSeq: 0 };
-    const rows = listBlocks({
+    const rows = await listBlocks({
       agentName: opts.agentName,
       sessionId: opts.sessionId,
       beforeId: anchor.id,
@@ -425,9 +427,9 @@ export function fetchBlocksByAgent(opts: FetchBlocksOpts): FetchBlocksResult {
     return { blocks: rows, lastEventSeq: maxSeq(rows) };
   }
   if (opts.afterBlockId) {
-    const anchor = getBlockById(opts.afterBlockId);
+    const anchor = await getBlockById(opts.afterBlockId);
     if (!anchor) return { blocks: [], lastEventSeq: 0 };
-    const rows = listBlocks({
+    const rows = await listBlocks({
       agentName: opts.agentName,
       sessionId: opts.sessionId,
       afterId: anchor.id,
@@ -436,7 +438,7 @@ export function fetchBlocksByAgent(opts: FetchBlocksOpts): FetchBlocksResult {
     });
     return { blocks: rows, lastEventSeq: maxSeq(rows) };
   }
-  const rows = listBlocks({
+  const rows = await listBlocks({
     agentName: opts.agentName,
     sessionId: opts.sessionId,
     limit: clampLimit(opts.limit),
@@ -444,161 +446,134 @@ export function fetchBlocksByAgent(opts: FetchBlocksOpts): FetchBlocksResult {
   return { blocks: rows, lastEventSeq: maxSeq(rows) };
 }
 
-function fetchAroundTs(opts: FetchBlocksOpts): FetchBlocksResult {
+async function fetchAroundTs(
+  opts: FetchBlocksOpts,
+): Promise<FetchBlocksResult> {
   const aroundTs = opts.aroundTs as number;
   const db = getDb();
   const beforeLimit = clampLimit(opts.beforeLimit, 10);
   const afterLimit = clampLimit(opts.afterLimit, 40);
+  const aroundTsDate = new Date(aroundTs);
   const beforeConds = [
     eq(schema.blocks.agentName, opts.agentName),
-    lt(schema.blocks.ts, aroundTs),
+    lt(schema.blocks.ts, aroundTsDate),
   ];
   const afterConds = [
     eq(schema.blocks.agentName, opts.agentName),
-    gt(schema.blocks.ts, aroundTs - 1),
+    gt(schema.blocks.ts, new Date(aroundTs - 1)),
   ];
   if (opts.sessionId) {
     beforeConds.push(eq(schema.blocks.sessionId, opts.sessionId));
     afterConds.push(eq(schema.blocks.sessionId, opts.sessionId));
   }
-  const beforeRows = db
+  const beforeRows = await db
     .select()
     .from(schema.blocks)
     .where(and(...beforeConds))
     .orderBy(desc(schema.blocks.ts))
-    .limit(beforeLimit)
-    .all() as BlockRow[];
-  const afterRows = db
+    .limit(beforeLimit);
+  const afterRows = await db
     .select()
     .from(schema.blocks)
     .where(and(...afterConds))
     .orderBy(asc(schema.blocks.ts))
-    .limit(afterLimit)
-    .all() as BlockRow[];
+    .limit(afterLimit);
   // Merge in chronological order; before-rows came back DESC.
-  const merged = [...beforeRows.reverse(), ...afterRows];
+  const merged = [
+    ...beforeRows.reverse().map(rowFromDb),
+    ...afterRows.map(rowFromDb),
+  ];
   return { blocks: merged, lastEventSeq: maxSeq(merged) };
 }
 
-/** Search blocks_fts. Returns the matching block rows in score order. */
 export interface MatchBlocksOpts {
   agentName?: string;
   match: string;
   limit?: number;
 }
 
-interface RawBlockRow {
-  id: number;
-  block_id: string;
-  turn_id: string;
-  agent_name: string;
-  session_id: string;
-  message_id: string | null;
-  block_index: number;
-  role: string;
-  kind: string;
-  source: string | null;
-  content_json: string;
-  status: string;
-  ts: number;
-  last_event_seq: number;
-}
-
-function rowFromRaw(r: RawBlockRow): BlockRow {
-  return {
-    id: r.id,
-    blockId: r.block_id,
-    turnId: r.turn_id,
-    agentName: r.agent_name,
-    sessionId: r.session_id,
-    messageId: r.message_id,
-    blockIndex: r.block_index,
-    role: r.role,
-    kind: r.kind,
-    source: r.source,
-    contentJson: r.content_json,
-    status: r.status,
-    ts: r.ts,
-    lastEventSeq: r.last_event_seq,
-  };
-}
-
-export function matchBlocks(opts: MatchBlocksOpts): BlockRow[] {
-  const raw = getRawDb();
+/**
+ * Postgres full-text search against the generated `content_tsv` column on
+ * blocks (see schema.ts FTS_SETUP_SQL). The query string is parsed via
+ * `plainto_tsquery` for tolerant, prefix-friendly user input.
+ */
+export async function matchBlocks(
+  opts: MatchBlocksOpts,
+): Promise<BlockRow[]> {
+  const db = getDb();
   const limit = Math.min(opts.limit ?? 20, 200);
-  const rows = opts.agentName
-    ? (raw
-        .prepare(
-          `SELECT b.* FROM blocks b
-           JOIN blocks_fts f ON f.rowid = b.id
-           WHERE blocks_fts MATCH ? AND b.agent_name = ?
-           ORDER BY rank LIMIT ?`,
-        )
-        .all(opts.match, opts.agentName, limit) as RawBlockRow[])
-    : (raw
-        .prepare(
-          `SELECT b.* FROM blocks b
-           JOIN blocks_fts f ON f.rowid = b.id
-           WHERE blocks_fts MATCH ?
-           ORDER BY rank LIMIT ?`,
-        )
-        .all(opts.match, limit) as RawBlockRow[]);
-  return rows.map(rowFromRaw);
+  const conds = [
+    sql`content_tsv @@ plainto_tsquery('english', ${opts.match})`,
+  ];
+  if (opts.agentName) {
+    conds.push(eq(schema.blocks.agentName, opts.agentName));
+  }
+  const rows = await db
+    .select()
+    .from(schema.blocks)
+    .where(and(...conds))
+    .orderBy(
+      sql`ts_rank(content_tsv, plainto_tsquery('english', ${opts.match})) DESC`,
+    )
+    .limit(limit);
+  return rows.map(rowFromDb);
 }
 
 /* ---------------- Agent-session summaries (FIX_FORWARD G) ---------------- */
 
 export interface AgentSessionSummary {
   sessionId: string;
+  /** Milliseconds since epoch. */
   firstTs: number;
   lastTs: number;
-  /** Number of distinct turns observed in this session. Each turn may
-   *  contain many blocks; the count here is the number of unique turn
-   *  ids, which corresponds to "rounds of interaction". */
+  /** Number of distinct turns observed in this session. */
   turnCount: number;
 }
 
-/**
- * Distinct sessions for an agent, sorted most-recent first. Used by the
- * sidebar to expand an agent row into its prior sessions list. Ported
- * to the `blocks` table at FIX_FORWARD G — the legacy `turns`-table
- * implementation stopped growing post-WS-1.
- */
-export function listAgentSessions(agentName: string): AgentSessionSummary[] {
+export async function listAgentSessions(
+  agentName: string,
+): Promise<AgentSessionSummary[]> {
   const db = getDb();
-  const rows = db
+  const rows = await db
     .select({
       sessionId: schema.blocks.sessionId,
-      firstTs: sql<number>`MIN(${schema.blocks.ts})`,
-      lastTs: sql<number>`MAX(${schema.blocks.ts})`,
-      turnCount: sql<number>`COUNT(DISTINCT ${schema.blocks.turnId})`,
+      firstTs: sql<Date>`MIN(${schema.blocks.ts})`.as("firstTs"),
+      lastTs: sql<Date>`MAX(${schema.blocks.ts})`.as("lastTs"),
+      turnCount: sql<number>`COUNT(DISTINCT ${schema.blocks.turnId})::int`.as(
+        "turnCount",
+      ),
     })
     .from(schema.blocks)
     .where(eq(schema.blocks.agentName, agentName))
     .groupBy(schema.blocks.sessionId)
-    .orderBy(desc(sql<number>`MAX(${schema.blocks.ts})`))
-    .all();
-  return rows as AgentSessionSummary[];
+    .orderBy(desc(sql`MAX(${schema.blocks.ts})`));
+  return rows.map((r) => ({
+    sessionId: r.sessionId,
+    firstTs:
+      r.firstTs instanceof Date ? r.firstTs.getTime() : Number(r.firstTs),
+    lastTs: r.lastTs instanceof Date ? r.lastTs.getTime() : Number(r.lastTs),
+    turnCount: Number(r.turnCount),
+  }));
 }
 
 /**
  * Distinct session counts keyed by agent name. One query supplying
- * counts for the entire registry, so `/api/agents` can decide which
- * rows show an expand-history button without N+1 follow-up calls.
+ * counts for the entire registry.
  */
-export function sessionCountsByAgent(): Record<string, number> {
+export async function sessionCountsByAgent(): Promise<Record<string, number>> {
   const db = getDb();
-  const rows = db
+  const rows = await db
     .select({
       agentName: schema.blocks.agentName,
-      count: sql<number>`COUNT(DISTINCT ${schema.blocks.sessionId})`,
+      count: sql<number>`COUNT(DISTINCT ${schema.blocks.sessionId})::int`.as(
+        "count",
+      ),
     })
     .from(schema.blocks)
-    .groupBy(schema.blocks.agentName)
-    .all();
+    .groupBy(schema.blocks.agentName);
   const out: Record<string, number> = {};
-  for (const r of rows as Array<{ agentName: string | null; count: number }>) {
-    if (r.agentName) out[r.agentName] = r.count;
+  for (const r of rows) {
+    if (r.agentName) out[r.agentName] = Number(r.count);
   }
   return out;
 }

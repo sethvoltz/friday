@@ -29,9 +29,12 @@ export type RecallIntent =
  * The intent argument is unused today (recall is uniform) — it's
  * forward-compat instrumentation for intent-tagged filtering.
  */
-export function safeRecall(text: string, intent: RecallIntent = "user_chat"): string {
+export async function safeRecall(
+  text: string,
+  intent: RecallIntent = "user_chat",
+): Promise<string> {
   try {
-    return buildAutoRecallBlock(text);
+    return await buildAutoRecallBlock(text);
   } catch (err) {
     logger.log("warn", "memory.recall.error", {
       intent,
@@ -47,11 +50,11 @@ export function safeRecall(text: string, intent: RecallIntent = "user_chat"): st
  * `intentText`, not the fully-decorated prompt — recall on formatting noise
  * (skill scaffolds, mail-listing prose) pulls in irrelevant memories.
  */
-export function wrapWithRecall(
+export async function wrapWithRecall(
   intentText: string,
   body: string,
   intent: RecallIntent = "user_chat",
-): string {
-  const block = safeRecall(intentText, intent);
+): Promise<string> {
+  const block = await safeRecall(intentText, intent);
   return block ? `${block}\n\n${body}` : body;
 }

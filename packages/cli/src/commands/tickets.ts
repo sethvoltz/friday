@@ -23,15 +23,15 @@ export const ticketsCommand = defineCommand({
   subCommands: {
     ls: defineCommand({
       meta: { name: "ls" },
-      run() {
-        console.log(JSON.stringify(listTickets(), null, 2));
+      async run() {
+        console.log(JSON.stringify(await listTickets(), null, 2));
       },
     }),
     show: defineCommand({
       meta: { name: "show" },
       args: { id: { type: "positional", required: true } },
-      run({ args }) {
-        const t = getTicket(args.id as string);
+      async run({ args }) {
+        const t = await getTicket(args.id as string);
         console.log(JSON.stringify(t, null, 2));
       },
     }),
@@ -61,7 +61,7 @@ export const ticketsCommand = defineCommand({
           );
           process.exit(1);
         }
-        const t = createTicket({
+        const t = await createTicket({
           title: args.title as string,
           body: args.body as string | undefined,
           kind: kind as TicketKind,
@@ -76,11 +76,11 @@ export const ticketsCommand = defineCommand({
         status: { type: "string" },
         assignee: { type: "string" },
       },
-      run({ args }) {
+      async run({ args }) {
         const patch: Record<string, unknown> = {};
         if (args.status) patch.status = args.status;
         if (args.assignee) patch.assignee = args.assignee;
-        const t = updateTicket(args.id as string, patch as never);
+        const t = await updateTicket(args.id as string, patch as never);
         console.log(JSON.stringify(t, null, 2));
       },
     }),
@@ -91,8 +91,12 @@ export const ticketsCommand = defineCommand({
         author: { type: "string", required: true },
         body: { type: "string", required: true },
       },
-      run({ args }) {
-        addComment(args.id as string, args.author as string, args.body as string);
+      async run({ args }) {
+        await addComment(
+          args.id as string,
+          args.author as string,
+          args.body as string,
+        );
       },
     }),
   },
@@ -137,7 +141,7 @@ async function interactiveCreate() {
     return null;
   }
 
-  const t = createTicket({
+  const t = await createTicket({
     title: (title as string).trim(),
     body: body ? (body as string) : undefined,
     kind: kind as TicketKind,

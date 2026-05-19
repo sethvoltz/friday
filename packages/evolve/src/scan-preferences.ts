@@ -70,7 +70,7 @@ export async function scanPreferences(
   const model = opts.model ?? "claude-haiku-4-5-20251001";
   const score = opts.scoreFn ?? defaultScoreFn;
 
-  const turns = collectOrchestratorTurns(sinceMs, maxTurns);
+  const turns = await collectOrchestratorTurns(sinceMs, maxTurns);
   if (turns.length === 0) return [];
 
   const scored: Array<OrchestratorTurn & PreferenceScoredTurn> = [];

@@ -21,7 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pgPkg from "pg";
 import { upsertEnvVar } from "../env.js";
-import { FTS_SETUP_SQL } from "./schema.pg.js";
+import { FTS_SETUP_SQL } from "./schema.js";
 
 const { Client } = pgPkg;
 
@@ -95,18 +95,14 @@ export async function provisionPostgres(opts: {
 /* -------------------- helpers -------------------- */
 
 function defaultMigrationsDir(): string {
-  // Resolve relative to this file's location (post-build, dist/db/ →
-  // sibling drizzle-pg/ at the package root). Build-time copy-prompts.mjs
-  // does not currently copy drizzle-pg/; we read directly from the source
-  // tree by walking up from dist or from src.
-  // The package layout puts drizzle-pg/ at packages/shared/drizzle-pg/.
-  // When this file is dist/db/pg-provision.js, drizzle-pg/ is ../../drizzle-pg.
-  // When this file is src/db/pg-provision.ts (during tests), drizzle-pg/ is
-  // ../../drizzle-pg as well. Either way, the relative path is stable.
+  // Resolve relative to this file's location. Post-build path is
+  // `dist/db/pg-provision.js`; source-tree path is `src/db/pg-provision.ts`.
+  // In both cases, going up two levels reaches the package root where
+  // `drizzle/` lives (the canonical Postgres migration dir after the
+  // Phase 1 swap).
   const here = new URL("..", import.meta.url).pathname;
-  // 'here' ends with `/dist/` or `/src/`. Go up one more level.
   const pkgRoot = join(here, "..");
-  return join(pkgRoot, "drizzle-pg");
+  return join(pkgRoot, "drizzle");
 }
 
 function assertPgReady(): void {

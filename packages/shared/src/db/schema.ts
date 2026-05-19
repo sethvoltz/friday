@@ -1,43 +1,65 @@
+// Friday — Postgres schema (ADR-023).
+//
+// This file replaces `schema.ts` once Phase 1 of the Postgres+Zero cutover
+// completes. During Phase 0 it lives side-by-side so migrations can be
+// generated and inspected without breaking the live SQLite code path.
+//
+// Conventions:
+//   * Snake_case column names (existing convention).
+//   * Timestamps are `timestamptz` (microsecond precision). Old ms-since-epoch
+//     ints are converted on import via the legacy-sqlite migrator.
+//   * JSON columns are `jsonb`. The Drizzle types reflect that — callers stop
+//     hand-rolling JSON.stringify/parse in Phase 1.
+//   * Booleans are real `boolean` (no more integer-as-bool).
+//   * Status columns are `text` with CHECK constraints (ADR-023: prefer
+//     CHECK over Postgres enums for ergonomic adding-values later).
+//   * Full-text search uses generated `tsvector` columns + GIN indexes; the
+//     migration adds the column + index via a raw SQL step (Drizzle doesn't
+//     model generated columns as a first-class primitive yet).
+
 import { sql } from "drizzle-orm";
 import {
+  bigserial,
+  boolean,
+  check,
+  doublePrecision,
   index,
   integer,
+  jsonb,
+  pgTable,
   primaryKey,
-  real,
-  sqliteTable,
   text,
+  timestamp,
   uniqueIndex,
-} from "drizzle-orm/sqlite-core";
+} from "drizzle-orm/pg-core";
 
 /* ---------------- BetterAuth tables ---------------- */
-// Match BetterAuth's expected schema exactly: singular table names, camelCase
-// columns. We declare them in our Drizzle schema for typed app access, but the
-// authoritative shape is what BetterAuth's adapter writes/reads.
+// BetterAuth's Postgres adapter expects these exact shapes (singular table
+// names, camelCase columns). The authoritative shape is whatever BetterAuth's
+// runtime writes; this typed declaration is for app-side use.
 
-export const users = sqliteTable("user", {
+export const users = pgTable("user", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   email: text("email").notNull().unique(),
-  emailVerified: integer("emailVerified", { mode: "boolean" })
-    .notNull()
-    .default(false),
+  emailVerified: boolean("emailVerified").notNull().default(false),
   image: text("image"),
-  createdAt: integer("createdAt", { mode: "timestamp_ms" }).notNull(),
-  updatedAt: integer("updatedAt", { mode: "timestamp_ms" }).notNull(),
+  createdAt: timestamp("createdAt", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true }).notNull(),
 });
 
-export const sessions = sqliteTable("session", {
+export const sessions = pgTable("session", {
   id: text("id").primaryKey(),
-  expiresAt: integer("expiresAt", { mode: "timestamp_ms" }).notNull(),
+  expiresAt: timestamp("expiresAt", { withTimezone: true }).notNull(),
   token: text("token").notNull().unique(),
-  createdAt: integer("createdAt", { mode: "timestamp_ms" }).notNull(),
-  updatedAt: integer("updatedAt", { mode: "timestamp_ms" }).notNull(),
+  createdAt: timestamp("createdAt", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true }).notNull(),
   ipAddress: text("ipAddress"),
   userAgent: text("userAgent"),
   userId: text("userId").notNull(),
 });
 
-export const accounts = sqliteTable("account", {
+export const accounts = pgTable("account", {
   id: text("id").primaryKey(),
   accountId: text("accountId").notNull(),
   providerId: text("providerId").notNull(),
@@ -45,97 +67,84 @@ export const accounts = sqliteTable("account", {
   accessToken: text("accessToken"),
   refreshToken: text("refreshToken"),
   idToken: text("idToken"),
-  accessTokenExpiresAt: integer("accessTokenExpiresAt", { mode: "timestamp_ms" }),
-  refreshTokenExpiresAt: integer("refreshTokenExpiresAt", {
-    mode: "timestamp_ms",
+  accessTokenExpiresAt: timestamp("accessTokenExpiresAt", { withTimezone: true }),
+  refreshTokenExpiresAt: timestamp("refreshTokenExpiresAt", {
+    withTimezone: true,
   }),
   scope: text("scope"),
   password: text("password"),
-  createdAt: integer("createdAt", { mode: "timestamp_ms" }).notNull(),
-  updatedAt: integer("updatedAt", { mode: "timestamp_ms" }).notNull(),
+  createdAt: timestamp("createdAt", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true }).notNull(),
 });
 
-export const verifications = sqliteTable("verification", {
+export const verifications = pgTable("verification", {
   id: text("id").primaryKey(),
   identifier: text("identifier").notNull(),
   value: text("value").notNull(),
-  expiresAt: integer("expiresAt", { mode: "timestamp_ms" }).notNull(),
-  createdAt: integer("createdAt", { mode: "timestamp_ms" }),
-  updatedAt: integer("updatedAt", { mode: "timestamp_ms" }),
+  expiresAt: timestamp("expiresAt", { withTimezone: true }).notNull(),
+  createdAt: timestamp("createdAt", { withTimezone: true }),
+  updatedAt: timestamp("updatedAt", { withTimezone: true }),
 });
 
-/* ---------------- Agents registry ---------------- */
+/* ---------------- Agents registry (ADR-013, ADR-022) ---------------- */
 
-export const agents = sqliteTable(
+export const agents = pgTable(
   "agents",
   {
     name: text("name").primaryKey(),
     type: text("type").notNull(), // orchestrator|builder|helper|scheduled|bare
-    status: text("status").notNull(), // idle|working|stalled|error|archived
+    status: text("status").notNull(), // idle|working|stalled|error|archived|archive_requested
     sessionId: text("session_id"),
     parentName: text("parent_name"), // for builder/helper/bare
     worktreePath: text("worktree_path"), // for builder
     branch: text("branch"),
     ticketId: text("ticket_id"),
-    metaJson: text("meta_json"),
-    // Owning app id; null for unaffiliated agents (orchestrator, ad-hoc bare,
-    // builders, helpers). Set by the apps installer when an agent is
-    // declared in a manifest; tombstoned on uninstall so reinstall can
-    // un-archive the same row.
+    metaJson: jsonb("meta_json"),
+    // ADR-022: rationale recorded when a non-orchestrator spawned this agent.
+    spawnReason: text("spawn_reason"),
+    // ADR-021: owning app id; null for unaffiliated agents (orchestrator,
+    // ad-hoc bare, builders, helpers). Tombstoned on app uninstall so a
+    // reinstall can un-archive the same row.
     appId: text("app_id"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+    // ADR-023: when archive was requested by a mutator (before the daemon
+    // picked it up). Used to drive the daemon's archive side-effect handler.
+    archiveReason: text("archive_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
   (t) => ({
     typeIdx: index("agents_type").on(t.type),
     statusIdx: index("agents_status").on(t.status, t.updatedAt),
     appIdx: index("agents_app").on(t.appId),
-  }),
-);
-
-/* ---------------- Turns (legacy; superseded by blocks) ---------------- */
-// The turns table is kept here until WS-1 items 1.2–1.10 migrate every caller
-// onto the new blocks model. After the one-time user data migration runs
-// (scripts/migrate-turns-to-blocks.ts), the physical table is dropped; this
-// schema export becomes dead code at that point and a follow-up removal will
-// land alongside the last caller cleanup.
-
-export const turns = sqliteTable(
-  "turns",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    sessionId: text("session_id").notNull(),
-    agentName: text("agent_name"),
-    turnIndex: integer("turn_index").notNull(),
-    ts: integer("ts").notNull(),
-    role: text("role").notNull(), // user|assistant|system|tool_use|tool_result
-    kind: text("kind").notNull(), // text|tool_call|tool_result|stream
-    contentJson: text("content_json").notNull(),
-    sourceFile: text("source_file").notNull(),
-    sourceByteOff: integer("source_byte_off").notNull(),
-    /** Cursor for race-free SSE resume — the last seq applied to this row. */
-    lastEventSeq: integer("last_event_seq").notNull().default(0),
-  },
-  (t) => ({
-    sessionTurnUniq: uniqueIndex("turns_session_turn").on(
-      t.sessionId,
-      t.turnIndex,
+    typeCheck: check(
+      "agents_type_check",
+      sql`${t.type} IN ('orchestrator','builder','helper','scheduled','bare')`,
     ),
-    agentTsIdx: index("turns_agent_ts").on(t.agentName, t.ts),
+    statusCheck: check(
+      "agents_status_check",
+      sql`${t.status} IN ('idle','working','stalled','error','archived','archive_requested')`,
+    ),
   }),
 );
 
 /* ---------------- Blocks (per-content-block chat persistence) ---------------- */
 // One row per content block (text / thinking / tool_use / tool_result, plus
-// user-typed and mail-delivered user-role blocks). `block_id` is a
-// daemon-minted UUID and the stable client-facing identity. `turn_id` groups
-// blocks belonging to one user-prompt cycle. `last_event_seq` enforces the
-// ADR-004 ordering invariant at block granularity (see FIX_FORWARD 1.10).
+// user-typed and mail-delivered user-role blocks). `block_id` is a daemon-
+// or dashboard-mutator-minted UUID and the stable client-facing identity.
+// `turn_id` groups blocks belonging to one user-prompt cycle.
+//
+// ADR-024 change from the SQLite era: rows are written *only on
+// block_complete* with `streaming=false`. Zero replicates rows scoped to
+// `WHERE streaming=false`. In-flight bytes live in the daemon's `liveTurns`
+// in-memory accumulator and ride per-agent SSE.
+//
+// `last_event_seq` is retained narrowly for the live-turn-delta SSE path
+// (ADR-024 amendment to ADR-004) — it's no longer the cross-restart cursor.
 
-export const blocks = sqliteTable(
+export const blocks = pgTable(
   "blocks",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: bigserial("id", { mode: "number" }).primaryKey(),
     blockId: text("block_id").notNull().unique(),
     turnId: text("turn_id").notNull(),
     agentName: text("agent_name").notNull(),
@@ -144,11 +153,14 @@ export const blocks = sqliteTable(
     blockIndex: integer("block_index").notNull(),
     role: text("role").notNull(), // user|assistant|system
     kind: text("kind").notNull(), // text|thinking|tool_use|tool_result|error
-    source: text("source"), // user_chat|mail|queue_inject|sdk|scratch|agent_spawn|schedule|refork_notice (null for assistant)
-    contentJson: text("content_json").notNull(),
-    status: text("status").notNull(), // streaming|complete|aborted|error|queued (user blocks awaiting worker dispatch)
-    ts: integer("ts").notNull(),
-    lastEventSeq: integer("last_event_seq").notNull(),
+    source: text("source"), // user_chat|mail|queue_inject|sdk|scratch|agent_spawn|schedule|refork_notice|dashboard-mutator
+    contentJson: jsonb("content_json").notNull(),
+    status: text("status").notNull(), // pending|streaming|complete|aborted|error|queued|abort_requested
+    streaming: boolean("streaming").notNull().default(false),
+    // ADR-023 mutator origin (for Zero idempotency cross-check + diagnostics).
+    originMutationId: text("origin_mutation_id"),
+    ts: timestamp("ts", { withTimezone: true }).notNull(),
+    lastEventSeq: integer("last_event_seq").notNull().default(0),
   },
   (t) => ({
     agentTsIdx: index("blocks_agent_ts").on(t.agentName, t.ts),
@@ -158,41 +170,64 @@ export const blocks = sqliteTable(
       t.blockIndex,
     ),
     turnIdx: index("blocks_turn").on(t.turnId),
+    // ADR-023: daemon LISTENs on (source='dashboard-mutator', status='pending')
+    // and similar — speed those scans up.
+    pendingIdx: index("blocks_pending")
+      .on(t.status, t.ts)
+      .where(sql`${t.status} IN ('pending','abort_requested')`),
+    roleCheck: check(
+      "blocks_role_check",
+      sql`${t.role} IN ('user','assistant','system')`,
+    ),
+    kindCheck: check(
+      "blocks_kind_check",
+      sql`${t.kind} IN ('text','thinking','tool_use','tool_result','error','mail')`,
+    ),
+    statusCheck: check(
+      "blocks_status_check",
+      sql`${t.status} IN ('pending','streaming','complete','aborted','error','queued','abort_requested','dispatched')`,
+    ),
   }),
 );
 
 /* ---------------- Mail (inter-agent messaging) ---------------- */
 
-export const mail = sqliteTable(
+export const mail = pgTable(
   "mail",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: bigserial("id", { mode: "number" }).primaryKey(),
     fromAgent: text("from_agent").notNull(),
     toAgent: text("to_agent").notNull(),
     type: text("type").notNull(), // message|notification|task
     delivery: text("delivery").notNull(), // pending|delivered|read|closed
-    /** Optional short subject. Senders include it for inbox-scanning UX. */
     subject: text("subject"),
-    /** Optional thread id; messages with the same id render grouped. */
     threadId: text("thread_id"),
     body: text("body").notNull(),
-    metaJson: text("meta_json"),
-    ts: integer("ts").notNull(),
-    readAt: integer("read_at"),
-    closedAt: integer("closed_at"),
-    /** 'normal' drains at the next turn boundary; 'critical' drains at the
-     *  next SDK iteration boundary inside the worker (FIX_FORWARD 2.3/2.4). */
+    metaJson: jsonb("meta_json"),
+    ts: timestamp("ts", { withTimezone: true }).notNull(),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    // ADR-014: 'normal' drains at next turn boundary; 'critical' mid-turn.
     priority: text("priority").notNull().default("normal"),
+    originMutationId: text("origin_mutation_id"),
   },
   (t) => ({
     inboxIdx: index("mail_inbox").on(t.toAgent, t.delivery, t.ts),
     threadIdx: index("mail_thread").on(t.threadId, t.ts),
+    priorityCheck: check(
+      "mail_priority_check",
+      sql`${t.priority} IN ('normal','critical')`,
+    ),
+    deliveryCheck: check(
+      "mail_delivery_check",
+      sql`${t.delivery} IN ('pending','delivered','read','closed')`,
+    ),
   }),
 );
 
 /* ---------------- Tickets ---------------- */
 
-export const tickets = sqliteTable(
+export const tickets = pgTable(
   "tickets",
   {
     id: text("id").primaryKey(), // FRI-1234
@@ -201,17 +236,21 @@ export const tickets = sqliteTable(
     status: text("status").notNull(), // open|in_progress|done|blocked|closed
     kind: text("kind").notNull(), // task|epic|bug|chore
     assignee: text("assignee"),
-    metaJson: text("meta_json"),
-    createdAt: integer("created_at").notNull(),
-    updatedAt: integer("updated_at").notNull(),
+    metaJson: jsonb("meta_json"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
   (t) => ({
     statusIdx: index("tickets_status").on(t.status, t.updatedAt),
     assigneeIdx: index("tickets_assignee").on(t.assignee),
+    statusCheck: check(
+      "tickets_status_check",
+      sql`${t.status} IN ('open','in_progress','done','blocked','closed')`,
+    ),
   }),
 );
 
-export const ticketRelations = sqliteTable(
+export const ticketRelations = pgTable(
   "ticket_relations",
   {
     parentId: text("parent_id").notNull(),
@@ -223,29 +262,29 @@ export const ticketRelations = sqliteTable(
   }),
 );
 
-export const ticketComments = sqliteTable(
+export const ticketComments = pgTable(
   "ticket_comments",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: bigserial("id", { mode: "number" }).primaryKey(),
     ticketId: text("ticket_id").notNull(),
     author: text("author").notNull(),
     body: text("body").notNull(),
-    ts: integer("ts").notNull(),
+    ts: timestamp("ts", { withTimezone: true }).notNull(),
   },
   (t) => ({
     ticketIdx: index("ticket_comments_ticket").on(t.ticketId, t.ts),
   }),
 );
 
-export const ticketExternalLinks = sqliteTable(
+export const ticketExternalLinks = pgTable(
   "ticket_external_links",
   {
     ticketId: text("ticket_id").notNull(),
     system: text("system").notNull(), // linear|github|...
     externalId: text("external_id").notNull(),
     url: text("url"),
-    metaJson: text("meta_json"),
-    linkedAt: integer("linked_at").notNull(),
+    metaJson: jsonb("meta_json"),
+    linkedAt: timestamp("linked_at", { withTimezone: true }).notNull(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.ticketId, t.system, t.externalId] }),
@@ -254,94 +293,140 @@ export const ticketExternalLinks = sqliteTable(
 );
 
 /* ---------------- Attachments ---------------- */
+// Metadata only — content-addressed bytes live on the daemon's filesystem
+// at ~/.friday/uploads/<sha-bucket>/<sha>.<ext> (ADR-007). Clients fetch
+// bytes via an authed URL when they need them.
 
-export const attachments = sqliteTable("attachments", {
+export const attachments = pgTable("attachments", {
   sha256: text("sha256").primaryKey(),
   filename: text("filename").notNull(),
   mime: text("mime").notNull(),
   sizeBytes: integer("size_bytes").notNull(),
-  uploadedAt: integer("uploaded_at").notNull(),
-  firstTurnId: integer("first_turn_id"),
+  uploadedAt: timestamp("uploaded_at", { withTimezone: true }).notNull(),
+  firstTurnId: text("first_turn_id"),
 });
 
 /* ---------------- Schedules ---------------- */
 
-export const schedules = sqliteTable(
+export const schedules = pgTable(
   "schedules",
   {
     name: text("name").primaryKey(),
     cron: text("cron"),
     runAt: text("run_at"),
     taskPrompt: text("task_prompt").notNull(),
-    paused: integer("paused", { mode: "boolean" }).notNull().default(false),
-    nextRunAt: integer("next_run_at"),
-    lastRunAt: integer("last_run_at"),
+    paused: boolean("paused").notNull().default(false),
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
     lastRunId: text("last_run_id"),
-    metaJson: text("meta_json"),
-    /** Owning app id; null for unaffiliated schedules. */
+    metaJson: jsonb("meta_json"),
     appId: text("app_id"),
-    createdAt: integer("created_at").notNull(),
-    updatedAt: integer("updated_at").notNull(),
+    // ADR-023: mutator-driven status transitions for register/unregister/pause.
+    status: text("status").notNull().default("active"), // active|pending_register|reload_requested|deleted
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
   (t) => ({
     nextRunIdx: index("schedules_next_run").on(t.nextRunAt),
     appIdx: index("schedules_app").on(t.appId),
+    statusCheck: check(
+      "schedules_status_check",
+      sql`${t.status} IN ('active','pending_register','reload_requested','deleted','paused')`,
+    ),
   }),
 );
 
-/* ---------------- Apps registry ---------------- */
-// One row per installed app. `manifest.json` on disk is the source of truth;
-// this table is derived state, reconciled at boot and on every install/
-// reload. Folder rename ↔ orphaned row is the safe interim state — never
-// auto-delete a row when its folder disappears.
+/* ---------------- ADR-024: schedule_runs (replaces SSE schedule_fired event) ---------------- */
 
-export const apps = sqliteTable("apps", {
-  id: text("id").primaryKey(), // [a-z][a-z0-9-]{1,63}; matches folder name
-  name: text("name").notNull(),
-  version: text("version").notNull(),
-  manifestVersion: integer("manifest_version").notNull(),
-  folderPath: text("folder_path").notNull(),
-  /** Last-known snapshot of the parsed manifest, JSON-serialized. */
-  manifestJson: text("manifest_json").notNull(),
-  /** installed | orphaned | error */
-  status: text("status").notNull(),
-  installedAt: integer("installed_at", { mode: "timestamp_ms" }).notNull(),
-  upgradedAt: integer("upgraded_at", { mode: "timestamp_ms" }),
-  metaJson: text("meta_json"),
-});
+export const scheduleRuns = pgTable(
+  "schedule_runs",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    scheduleName: text("schedule_name").notNull(),
+    firedAt: timestamp("fired_at", { withTimezone: true }).notNull(),
+    status: text("status").notNull(), // running|complete|error
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    error: text("error"),
+  },
+  (t) => ({
+    scheduleTsIdx: index("schedule_runs_schedule_ts").on(
+      t.scheduleName,
+      t.firedAt,
+    ),
+    statusCheck: check(
+      "schedule_runs_status_check",
+      sql`${t.status} IN ('running','complete','error')`,
+    ),
+  }),
+);
 
-/* ---------------- Memory + Evolve indexes ---------------- */
-// Memory entries themselves live as markdown files in ~/.friday/memory/entries/.
-// We mirror them into this table for the FTS5 index + recall counters.
+/* ---------------- Apps registry (ADR-021) ---------------- */
 
-export const memoryEntries = sqliteTable("memory_entries", {
-  id: text("id").primaryKey(),
-  title: text("title").notNull(),
-  content: text("content").notNull(),
-  tagsJson: text("tags_json").notNull().default("[]"),
-  createdBy: text("created_by").notNull(),
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
-  fileMtime: integer("file_mtime").notNull(),
-  recallCount: integer("recall_count").notNull().default(0),
-  lastRecalledAt: text("last_recalled_at"),
-});
+export const apps = pgTable(
+  "apps",
+  {
+    id: text("id").primaryKey(), // [a-z][a-z0-9-]{1,63}; matches folder name
+    name: text("name").notNull(),
+    version: text("version").notNull(),
+    manifestVersion: integer("manifest_version").notNull(),
+    folderPath: text("folder_path").notNull(),
+    manifestJson: jsonb("manifest_json").notNull(),
+    status: text("status").notNull(), // installed | orphaned | error | pending_install | uninstall_requested | reload_requested
+    installedAt: timestamp("installed_at", { withTimezone: true }).notNull(),
+    upgradedAt: timestamp("upgraded_at", { withTimezone: true }),
+    metaJson: jsonb("meta_json"),
+  },
+  (t) => ({
+    statusCheck: check(
+      "apps_status_check",
+      sql`${t.status} IN ('installed','orphaned','error','pending_install','uninstall_requested','reload_requested')`,
+    ),
+  }),
+);
+
+/* ---------------- Memory entries ---------------- */
+// Bodies live as markdown files in ~/.friday/memory/entries/. We mirror them
+// here for fast lookup, FTS, and recall counters. The tsvector column is
+// added via raw SQL post-migration (Drizzle doesn't model generated columns
+// natively today).
+
+export const memoryEntries = pgTable(
+  "memory_entries",
+  {
+    id: text("id").primaryKey(),
+    title: text("title").notNull(),
+    content: text("content").notNull(),
+    tagsJson: jsonb("tags_json").notNull().default(sql`'[]'::jsonb`),
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+    fileMtime: timestamp("file_mtime", { withTimezone: true }).notNull(),
+    recallCount: integer("recall_count").notNull().default(0),
+    lastRecalledAt: timestamp("last_recalled_at", { withTimezone: true }),
+    // ADR-023: pending_file → ready; daemon-side mutator writes the markdown
+    // file on filesystem and flips status.
+    status: text("status").notNull().default("ready"),
+  },
+  (t) => ({
+    statusCheck: check(
+      "memory_entries_status_check",
+      sql`${t.status} IN ('ready','pending_file','pending_delete','deleted')`,
+    ),
+  }),
+);
 
 /* ---------------- Usage (Claude API call accounting) ---------------- */
-// One row per turn / model invocation. Populated from `turn_done` events in
-// the daemon and via a one-time backfill from any legacy ~/.friday/usage.jsonl
-// the user carried over from old Friday.
 
-export const usage = sqliteTable(
+export const usage = pgTable(
   "usage",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    timestamp: text("timestamp").notNull(), // ISO 8601
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
     sessionId: text("session_id").notNull(),
     agentName: text("agent_name"),
     agentType: text("agent_type"), // orchestrator|builder|helper|scheduled|bare
     model: text("model"),
-    costUsd: real("cost_usd"),
+    costUsd: doublePrecision("cost_usd"),
     inputTokens: integer("input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
     cacheCreationTokens: integer("cache_creation_tokens").notNull().default(0),
@@ -356,26 +441,138 @@ export const usage = sqliteTable(
   }),
 );
 
+/* ---------------- ADR-023: client_devices ---------------- */
+// First-class device tracking. Created on first bootstrap. Storage telemetry
+// reported via the reportClientStats mutator; `Forget this device` mutator
+// deletes the row + invalidates future JWT minting.
+
+export const clientDevices = pgTable(
+  "client_devices",
+  {
+    deviceId: text("device_id").primaryKey(),
+    userId: text("user_id").notNull(),
+    userAgent: text("user_agent"),
+    label: text("label"), // user-editable
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    storageUsedBytes: integer("storage_used_bytes"),
+    storageQuotaBytes: integer("storage_quota_bytes"),
+    lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+  },
+  (t) => ({
+    userIdx: index("client_devices_user").on(t.userId, t.lastSeenAt),
+  }),
+);
+
+/* ---------------- ADR-023: read_cursors (per-device, per-agent) ---------------- */
+// Replaces today's per-device localStorage badge state. Synced via Zero so
+// reads on one device update unread badges on all others.
+
+export const readCursors = pgTable(
+  "read_cursors",
+  {
+    deviceId: text("device_id").notNull(),
+    agentName: text("agent_name").notNull(),
+    lastSeenBlockId: text("last_seen_block_id").notNull(),
+    ts: timestamp("ts", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.deviceId, t.agentName] }),
+  }),
+);
+
+/* ---------------- ADR-024: system_banners (replaces SSE system_banner event) ---------------- */
+
+export const systemBanners = pgTable(
+  "system_banners",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    level: text("level").notNull(), // info|warn|error
+    text: text("text").notNull(),
+    ts: timestamp("ts", { withTimezone: true }).notNull(),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+  },
+  (t) => ({
+    activeIdx: index("system_banners_active")
+      .on(t.ts)
+      .where(sql`${t.dismissedAt} IS NULL`),
+    levelCheck: check(
+      "system_banners_level_check",
+      sql`${t.level} IN ('info','warn','error')`,
+    ),
+  }),
+);
+
 /* ---------------- Generic key/value store ---------------- */
 
-export const dbMeta = sqliteTable("db_meta", {
+export const dbMeta = pgTable("db_meta", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
 
-/* ---------------- FTS5 trigger SQL ---------------- */
-// Drizzle doesn't natively model FTS5 virtual tables; we issue these as raw
-// SQL after migrations in `migrate.ts`.
+/* ---------------- FTS setup SQL ---------------- */
+// Postgres tsvector + GIN indexes. Run after the Drizzle migration creates
+// the base tables. The generated `*_tsv` columns are populated by trigger;
+// queries do `SELECT … WHERE *_tsv @@ plainto_tsquery(?)`.
 
-export const FTS_SETUP_SQL = sql`
-  CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
-    content_json, content='turns', content_rowid='id'
-  );
-  CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
-    content_json, content='blocks', content_rowid='id'
-  );
-  CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    title, content, tags_json,
-    content='memory_entries', content_rowid='rowid'
-  );
+/**
+ * Static SQL string applied via raw `client.query()` after the Drizzle
+ * migration creates the base tables. Drizzle's `sql` template literal would
+ * need parameterization rebuilding for multi-statement raw application; we
+ * keep this as a plain string for clarity and to avoid the round-trip.
+ */
+export const FTS_SETUP_SQL = `
+  -- blocks: search across the text payload portion of content_json.
+  -- content_json is jsonb; we extract a 'text' field if present, else
+  -- the whole thing serialized as text.
+  ALTER TABLE blocks
+    ADD COLUMN IF NOT EXISTS content_tsv tsvector
+    GENERATED ALWAYS AS (
+      to_tsvector('english', coalesce(content_json->>'text', content_json::text))
+    ) STORED;
+  CREATE INDEX IF NOT EXISTS blocks_content_tsv_idx ON blocks USING GIN (content_tsv);
+
+  -- memory_entries: search across title + content + tags.
+  ALTER TABLE memory_entries
+    ADD COLUMN IF NOT EXISTS content_tsv tsvector
+    GENERATED ALWAYS AS (
+      to_tsvector(
+        'english',
+        coalesce(title, '') || ' ' ||
+        coalesce(content, '') || ' ' ||
+        coalesce(tags_json::text, '')
+      )
+    ) STORED;
+  CREATE INDEX IF NOT EXISTS memory_entries_content_tsv_idx
+    ON memory_entries USING GIN (content_tsv);
 `;
+
+/* ---------------- LISTEN/NOTIFY channels (ADR-023) ---------------- */
+// Channel names the daemon listens on. The dashboard mutator (or daemon-
+// internal writers) does NOTIFY <channel> after a relevant INSERT/UPDATE.
+// Boot recovery scans the same WHERE clauses.
+
+export const LISTEN_CHANNELS = {
+  /** New user-block written with status='pending' by a dashboard mutator. */
+  newPendingBlock: "friday_new_pending_block",
+  /** Block UPDATE status='abort_requested' — fast-path-supplemented. */
+  abortRequested: "friday_abort_requested",
+  /** New mail row inserted (daemon-internal OR dashboard mutator). */
+  newMail: "friday_new_mail",
+  /** Agent status='archive_requested' — daemon archives + closes tickets. */
+  archiveRequested: "friday_archive_requested",
+  /** Schedule status changes (pending_register, reload_requested). */
+  scheduleChanged: "friday_schedule_changed",
+  /** Apps status changes (pending_install, uninstall_requested, reload_requested). */
+  appChanged: "friday_app_changed",
+  /** Memory entry status='pending_file' or 'pending_delete'. */
+  memoryFileChanged: "friday_memory_file_changed",
+} as const;
+
+export type ListenChannel =
+  (typeof LISTEN_CHANNELS)[keyof typeof LISTEN_CHANNELS];
+
+/* ---------------- Re-exports for callsites ---------------- */
+// uniqueIndex is intentionally imported above for future use; suppress
+// unused-import noise during Phase 0 when the call site is empty.
+export type _Reserved = typeof uniqueIndex;

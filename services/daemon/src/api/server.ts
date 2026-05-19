@@ -174,7 +174,7 @@ async function handle(
   // --- System command dispatch ---
   if (method === "POST" && path === "/api/commands/dispatch") {
     const body = await readJson<{ command: string; args?: string }>(req);
-    return handleSystemCommand(res, body, cfg);
+    return await handleSystemCommand(res, body, cfg);
   }
 
   // --- SSE events ---
@@ -189,11 +189,11 @@ async function handle(
     const turnId = `t_${randomUUID()}`;
 
     // Ensure orchestrator exists.
-    if (!registry.getAgent(agentName)) {
-      registry.registerAgent({ name: agentName, type: "orchestrator" });
+    if (!(await registry.getAgent(agentName))) {
+      await registry.registerAgent({ name: agentName, type: "orchestrator" });
     }
 
-    const agentRow = registry.getAgent(agentName)!;
+    const agentRow = (await registry.getAgent(agentName))!;
     const resumeSessionId = agentRow.sessionId ?? undefined;
 
     const stack = readPromptStack(agentRow.type, []);
@@ -215,7 +215,7 @@ async function handle(
       : baseSystemPrompt;
     const allowedToolsOverride = skillMatch?.skill.allowedTools ?? undefined;
 
-    const wrappedPrompt = wrapWithRecall(userText, userText, "user_chat");
+    const wrappedPrompt = await wrapWithRecall(userText, userText, "user_chat");
 
     // Persist the user's typed prompt as a `role='user'`, `source='user_chat'`
     // block before dispatching. Stays scoped to the user's literal input —
@@ -239,7 +239,7 @@ async function handle(
     const willQueue = liveBefore?.status === "working";
     let userBlockId: string | undefined;
     try {
-      const recorded = recordUserBlock({
+      const recorded = await recordUserBlock({
         turnId,
         agentName,
         sessionId: resumeSessionId,
@@ -257,12 +257,13 @@ async function handle(
     }
 
     const modelCfg = normalizeModelConfig(cfg.model);
+    const turnCwd = await registry.workingDirectoryFor(agentRow);
     dispatchTurn({
       agentName,
       options: {
         agentName,
         agentType: agentRow.type,
-        workingDirectory: registry.workingDirectoryFor(agentRow),
+        workingDirectory: turnCwd,
         systemPrompt,
         prompt: wrappedPrompt,
         attachments: attachments.length > 0 ? attachments : undefined,
@@ -294,7 +295,7 @@ async function handle(
     path.endsWith("/queued")
   ) {
     const turnId = path.split("/")[4];
-    const block = getUserChatBlockByTurnId(turnId);
+    const block = await getUserChatBlockByTurnId(turnId);
     if (!block) {
       return json(res, 404, { error: "turn_not_found", turn_id: turnId });
     }
@@ -327,7 +328,7 @@ async function handle(
       block_id: block.blockId,
       status: "aborted",
     });
-    deleteBlockById(block.blockId);
+    await deleteBlockById(block.blockId);
     return json(res, 200, {
       ok: true,
       turn_id: turnId,
@@ -353,7 +354,7 @@ async function handle(
     // is already past that point — this is a fresh prompt; it just
     // shares the turn label.
     const turnId = path.split("/")[4];
-    const blocks = listBlocksByTurn(turnId);
+    const blocks = await listBlocksByTurn(turnId);
     if (blocks.length === 0) {
       return json(res, 404, { error: "turn_not_found", turn_id: turnId });
     }
@@ -375,7 +376,7 @@ async function handle(
         message: "A turn is already in flight for this agent",
       });
     }
-    const agentRow = registry.getAgent(agentName);
+    const agentRow = await registry.getAgent(agentName);
     if (!agentRow) {
       return json(res, 404, { error: "agent_not_found", agent: agentName });
     }
@@ -409,14 +410,15 @@ async function handle(
       parentName:
         "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
     });
-    const wrappedPrompt = wrapWithRecall(parsedText, parsedText, "user_chat");
+    const wrappedPrompt = await wrapWithRecall(parsedText, parsedText, "user_chat");
     const modelCfg = normalizeModelConfig(cfg.model);
+    const resumeCwd = await registry.workingDirectoryFor(agentRow);
     dispatchTurn({
       agentName,
       options: {
         agentName,
         agentType: agentRow.type,
-        workingDirectory: registry.workingDirectoryFor(agentRow),
+        workingDirectory: resumeCwd,
         systemPrompt: baseSystemPrompt,
         prompt: wrappedPrompt,
         turnId, // <-- reuse the failed turn's id
@@ -437,7 +439,7 @@ async function handle(
 
   // --- Agents ---
   if (method === "GET" && path === "/api/agents") {
-    const all: AgentEntry[] = registry.listAgents();
+    const all: AgentEntry[] = await registry.listAgents();
     // Prefer the in-memory live worker's status over the DB column whenever
     // an agent has a forked worker — the DB lags by however long it takes
     // for setStatus() to land between the worker's status-change and the
@@ -456,7 +458,7 @@ async function handle(
     );
     // Augment with past-session count so the dashboard sidebar can decide
     // whether an agent has expandable history without N+1 follow-up calls.
-    const counts = sessionCountsByAgent();
+    const counts = await sessionCountsByAgent();
     const augmented = filtered.map((a) => ({
       ...a,
       sessionCount: counts[a.name] ?? 0,
@@ -465,7 +467,7 @@ async function handle(
   }
   if (method === "GET" && /^\/api\/agents\/[^/]+\/sessions$/.test(path)) {
     const agentName = path.split("/")[3];
-    return json(res, 200, listAgentSessions(agentName));
+    return json(res, 200, await listAgentSessions(agentName));
   }
   if (method === "POST" && path === "/api/agents") {
     const body = await readJson<{
@@ -483,7 +485,7 @@ async function handle(
           "invalid name (must be lowercase alphanumeric + dashes, up to 64 chars)",
       });
     }
-    if (registry.getAgent(body.name)) {
+    if (await registry.getAgent(body.name)) {
       return json(res, 409, { error: `agent "${body.name}" already exists` });
     }
     if (
@@ -522,9 +524,9 @@ async function handle(
     // and builders can't be declared in a manifest in v1 anyway.
     const inheritedAppId =
       body.type !== "builder" && body.parentName
-        ? registry.getAppId(body.parentName)
+        ? await registry.getAppId(body.parentName)
         : null;
-    registry.registerAgent({
+    await registry.registerAgent({
       name: body.name,
       type: body.type,
       parentName: body.parentName,
@@ -546,7 +548,7 @@ async function handle(
         ? `${baseSystemPrompt}\n\n---\n\nYou are running in a git worktree at \`${worktreePath}\` on branch \`${branch}\`. **Do not read, write, or modify files outside this directory.** All Bash commands run with this directory as cwd by default; do not \`cd\` outside it.`
         : baseSystemPrompt;
     const modelCfg = normalizeModelConfig(cfg.model);
-    const wrappedSpawnPrompt = wrapWithRecall(
+    const wrappedSpawnPrompt = await wrapWithRecall(
       body.prompt,
       body.prompt,
       "agent_spawn",
@@ -557,7 +559,7 @@ async function handle(
     // falls back to '__pending__' and the post-turn JSONL recovery rewrites
     // it once the SDK assigns a real id.
     try {
-      recordUserBlock({
+      await recordUserBlock({
         turnId,
         agentName: body.name,
         text: body.prompt,
@@ -591,7 +593,7 @@ async function handle(
   }
   if (method === "GET" && /^\/api\/agents\/[^/]+$/.test(path)) {
     const name = path.split("/")[3];
-    const a = registry.getAgent(name);
+    const a = await registry.getAgent(name);
     if (!a) return json(res, 404, { error: "not found" });
     return json(res, 200, a);
   }
@@ -601,7 +603,7 @@ async function handle(
     // Sessions persist in perpetuity — this just frees the disk and stops
     // future work. Merged form of the old POST /kill + DELETE /workspace.
     const name = path.split("/")[3];
-    const a = registry.getAgent(name);
+    const a = await registry.getAgent(name);
     if (!a) return json(res, 404, { error: "not found" });
     // `reason` is required and drives the linked-ticket close behavior
     // (completed→done, abandoned/failed→closed). Refork is daemon-internal
@@ -661,7 +663,7 @@ async function handle(
     const match = url.searchParams.get("match") ?? undefined;
     const sessionId = url.searchParams.get("session_id") ?? undefined;
     try {
-      const result = fetchBlocksByAgent({
+      const result = await fetchBlocksByAgent({
         agentName,
         sessionId,
         limit,
@@ -861,7 +863,7 @@ async function handle(
       req.headers["x-friday-caller-name"] ?? "user",
     );
     const now = new Date().toISOString();
-    const existing = getEntry(id);
+    const existing = await getEntry(id);
     const entry: MemoryEntry = {
       id,
       title: body.title,
@@ -873,12 +875,12 @@ async function handle(
       recallCount: existing?.recallCount ?? 0,
       lastRecalledAt: existing?.lastRecalledAt ?? null,
     };
-    saveEntry(entry);
+    await saveEntry(entry);
     return json(res, existing ? 200 : 201, entry);
   }
   if (method === "GET" && /^\/api\/memory\/[^/]+$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[3]);
-    const e = getEntry(id);
+    const e = await getEntry(id);
     if (!e) return json(res, 404, { error: "not found" });
     // FIX_FORWARD 6.8 follow-up: bumping `recallCount` on every dashboard
     // page view (load, edit, delete, invalidateAll) pollutes the metric
@@ -886,25 +888,25 @@ async function handle(
     // explicit `?recall=1` from callers that want the bump (the
     // auto-recall block uses `searchMemories`, which touches on its own).
     if (url.searchParams.get("recall") === "1") {
-      touchRecall(id);
+      await touchRecall(id);
     }
     return json(res, 200, e);
   }
   if (method === "PATCH" && /^\/api\/memory\/[^/]+$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[3]);
-    if (!getEntry(id)) return json(res, 404, { error: "not found" });
+    if (!(await getEntry(id))) return json(res, 404, { error: "not found" });
     const patch = await readJson<{
       title?: string;
       content?: string;
       tags?: string[];
     }>(req);
-    updateEntry(id, patch);
-    return json(res, 200, getEntry(id));
+    await updateEntry(id, patch);
+    return json(res, 200, await getEntry(id));
   }
   if (method === "DELETE" && /^\/api\/memory\/[^/]+$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[3]);
-    if (!getEntry(id)) return json(res, 404, { error: "not found" });
-    forgetEntry(id);
+    if (!(await getEntry(id))) return json(res, 404, { error: "not found" });
+    await forgetEntry(id);
     return json(res, 200, { ok: true });
   }
 
@@ -977,7 +979,7 @@ async function handle(
       assignee?: string;
     }>(req);
     const callerName = String(req.headers["x-friday-caller-name"] ?? "user");
-    const ticket = createTicket({
+    const ticket = await createTicket({
       title: p.title,
       body: renderProposalForTicket(p),
       kind: body.ticketKind ?? "task",
@@ -1023,7 +1025,7 @@ async function handle(
     const since = sinceHoursAgo(windowHours);
     const windowEnd = new Date().toISOString();
     try {
-      const syncSignals = scanAll({ since });
+      const syncSignals = await scanAll({ since });
       const frictionSignals = includeFriction
         ? await scanFriction({ since }).catch((err) => {
             logger.log("warn", "evolve.scan.friction-error", {
@@ -1265,14 +1267,14 @@ async function handle(
   // --- Mail ---
   if (method === "GET" && /^\/api\/mail\/inbox\/[^/]+$/.test(path)) {
     const agent = path.split("/")[4];
-    return json(res, 200, inbox(agent));
+    return json(res, 200, await inbox(agent));
   }
   if (method === "POST" && path === "/api/mail/send") {
     const body = await readJson<Parameters<typeof sendMail>[0]>(req);
     // FIX_FORWARD 5.7: per-agent mail rate limit — 50 mails / 5min / from.
     // A runaway tool that spams the orchestrator can't drown the mail bus.
     const fromAgent = body.fromAgent || "__unknown__";
-    const r = consumeRateLimit({
+    const r = await consumeRateLimit({
       key: `mail:${fromAgent}`,
       windowMs: 5 * 60 * 1000,
       max: 50,
@@ -1286,7 +1288,7 @@ async function handle(
     }
     // FRI-11 F3: resolve symbolic recipients ("parent" / "self") against the
     // caller's registry row before validation. Literal names pass through.
-    const resolved = resolveRecipient(fromAgent, body.toAgent);
+    const resolved = await resolveRecipient(fromAgent, body.toAgent);
     if (!resolved.ok) {
       return json(res, 400, { error: resolved.error });
     }
@@ -1294,20 +1296,20 @@ async function handle(
     // The MCP tool surfaces this 400 to the caller as a daemonFetch error —
     // the agent sees the suggestion immediately instead of silently writing
     // an undeliverable mail row.
-    const check = validateRecipient(resolved.agent);
+    const check = await validateRecipient(resolved.agent);
     if (!check.ok) {
       return json(res, 400, {
         error: check.error,
         suggestion: check.suggestion,
       });
     }
-    return json(res, 200, sendMail({ ...body, toAgent: check.agent }));
+    return json(res, 200, await sendMail({ ...body, toAgent: check.agent }));
   }
   if (method === "POST" && /^\/api\/mail\/\d+\/read$/.test(path)) {
     const id = Number(path.split("/")[3]);
-    const row = getMail(id);
+    const row = await getMail(id);
     if (!row) return json(res, 404, { error: "mail not found" });
-    markRead(id);
+    await markRead(id);
     return json(res, 200, { ...row, delivery: "read", readAt: Date.now() });
   }
   if (method === "POST" && /^\/api\/mail\/\d+\/close$/.test(path)) {
@@ -1403,9 +1405,9 @@ async function handle(
       return json(res, 401, { error: "unauthorized" });
     }
     const sha = path.split("/")[3];
-    const bytes = readAttachmentBytes(sha);
+    const bytes = await readAttachmentBytes(sha);
     if (!bytes) return json(res, 404, { error: "not found" });
-    const meta = getAttachment(sha);
+    const meta = await getAttachment(sha);
     const rawMime = (meta?.mime ?? "application/octet-stream").toLowerCase();
     // Only allow inline rendering for a small, well-understood set of
     // MIME types. Anything else is forced to `application/octet-stream`
@@ -1434,15 +1436,18 @@ async function handle(
     if (!authorizeSameHost(req)) {
       return json(res, 401, { error: "unauthorized" });
     }
-    const rows = listApps().map((r) => {
-      const detail = inspectApp(r.id);
-      return {
-        ...r,
-        agents: detail?.agents ?? [],
-        schedules: detail?.schedules ?? [],
-        mcpServers: detail?.mcpServers ?? [],
-      };
-    });
+    const list = await listApps();
+    const rows = await Promise.all(
+      list.map(async (r) => {
+        const detail = await inspectApp(r.id);
+        return {
+          ...r,
+          agents: detail?.agents ?? [],
+          schedules: detail?.schedules ?? [],
+          mcpServers: detail?.mcpServers ?? [],
+        };
+      }),
+    );
     return json(res, 200, rows);
   }
   if (method === "POST" && path === "/api/apps") {
@@ -1620,11 +1625,11 @@ function writeRawEvent(
   }
 }
 
-function handleSystemCommand(
+async function handleSystemCommand(
   res: ServerResponse,
   body: { command: string; args?: string },
   cfg: ReturnType<typeof loadConfig>,
-): void {
+): Promise<void> {
   const args = (body.args ?? "").trim();
   switch (body.command) {
     case "archive": {
@@ -1637,20 +1642,20 @@ function handleSystemCommand(
     }
     case "status": {
       return json(res, 200, {
-        agents: registry.listAgents(),
+        agents: await registry.listAgents(),
         ts: Date.now(),
       });
     }
     case "inspect": {
       if (!args) return json(res, 400, { error: "agent name required" });
-      const a = registry.getAgent(args);
+      const a = await registry.getAgent(args);
       if (!a) return json(res, 404, { error: "agent not found" });
       return json(res, 200, a);
     }
     case "reset-context": {
       const cfg = loadConfig();
       const name = args || cfg.orchestratorName;
-      const a = registry.getAgent(name);
+      const a = await registry.getAgent(name);
       if (!a) return json(res, 404, { error: `agent not found: ${name}` });
       // If a worker is currently running, archive it so the next turn forks
       // a fresh process with no `resume` arg. setStatus + clearSession alone
@@ -1658,7 +1663,7 @@ function handleSystemCommand(
       // so the linked ticket (if any) isn't moved to a terminal status —
       // the agent is being reset, not closed.
       void archiveAgent(name, { reason: "refork" });
-      registry.clearSession(name);
+      await registry.clearSession(name);
       eventBus.publish({
         v: 1,
         type: "agent_lifecycle",
@@ -1677,8 +1682,13 @@ function handleSystemCommand(
       // auto-generated as scratch-<adj>-<noun>, kebab-case + unique against
       // the live registry.
       const topic = args.trim();
-      const name = generateScratchName((n) => registry.getAgent(n) !== null);
-      registry.registerAgent({
+      // Pre-fetch all existing agent names once so the name generator's
+      // collision predicate stays sync (the loop tries random pairs).
+      const existingNames = new Set(
+        (await registry.listAgents()).map((a) => a.name),
+      );
+      const name = generateScratchName((n) => existingNames.has(n));
+      await registry.registerAgent({
         name,
         type: "bare",
         parentName: undefined,
@@ -1703,11 +1713,11 @@ function handleSystemCommand(
           agentType: "bare",
         });
         const modelCfg = normalizeModelConfig(cfg.model);
-        const wrappedTopic = wrapWithRecall(topic, topic, "scratch");
+        const wrappedTopic = await wrapWithRecall(topic, topic, "scratch");
         // FRI-71: persist the seed topic as a user block so the bare agent's
         // first turn renders with the originating user bubble.
         try {
-          recordUserBlock({
+          await recordUserBlock({
             turnId: seedTurnId,
             agentName: name,
             text: topic,

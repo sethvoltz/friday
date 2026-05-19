@@ -40,10 +40,12 @@ function rowToAuthSession(
 }
 
 /** Active (non-expired) sessions for a user, newest first. */
-export function listActiveSessionsForUser(userId: string): AuthSession[] {
+export async function listActiveSessionsForUser(
+  userId: string,
+): Promise<AuthSession[]> {
   const db = getDb();
   const now = new Date();
-  const rows = db
+  const rows = await db
     .select()
     .from(schema.sessions)
     .where(
@@ -52,27 +54,29 @@ export function listActiveSessionsForUser(userId: string): AuthSession[] {
         gt(schema.sessions.expiresAt, now),
       ),
     )
-    .orderBy(desc(schema.sessions.createdAt))
-    .all();
+    .orderBy(desc(schema.sessions.createdAt));
   return rows.map(rowToAuthSession);
 }
 
 /** Revoke one session by id. Returns the number of rows deleted (0 or 1). */
-export function revokeSessionById(userId: string, id: string): number {
+export async function revokeSessionById(
+  userId: string,
+  id: string,
+): Promise<number> {
   const db = getDb();
-  const result = db
+  const result = await db
     .delete(schema.sessions)
-    .where(and(eq(schema.sessions.id, id), eq(schema.sessions.userId, userId)))
-    .run();
-  return result.changes ?? 0;
+    .where(and(eq(schema.sessions.id, id), eq(schema.sessions.userId, userId)));
+  return result.rowCount ?? 0;
 }
 
 /** Revoke every session for a user (including the caller's current one). */
-export function revokeAllSessionsForUser(userId: string): number {
+export async function revokeAllSessionsForUser(
+  userId: string,
+): Promise<number> {
   const db = getDb();
-  const result = db
+  const result = await db
     .delete(schema.sessions)
-    .where(eq(schema.sessions.userId, userId))
-    .run();
-  return result.changes ?? 0;
+    .where(eq(schema.sessions.userId, userId));
+  return result.rowCount ?? 0;
 }

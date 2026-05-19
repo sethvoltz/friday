@@ -8,19 +8,20 @@ import {
   schema,
 } from "@friday/shared";
 
-export function listAgents(): AgentEntry[] {
+export async function listAgents(): Promise<AgentEntry[]> {
   const db = getDb();
-  return db.select().from(schema.agents).all().map(rowToEntry);
+  const rows = await db.select().from(schema.agents);
+  return rows.map(rowToEntry);
 }
 
-export function getAgent(name: string): AgentEntry | null {
+export async function getAgent(name: string): Promise<AgentEntry | null> {
   const db = getDb();
-  const r = db
+  const rows = await db
     .select()
     .from(schema.agents)
     .where(eq(schema.agents.name, name))
-    .get();
-  return r ? rowToEntry(r) : null;
+    .limit(1);
+  return rows[0] ? rowToEntry(rows[0]) : null;
 }
 
 export interface RegisterInput {
@@ -33,10 +34,11 @@ export interface RegisterInput {
   appId?: string;
 }
 
-export function registerAgent(input: RegisterInput): AgentEntry {
+export async function registerAgent(input: RegisterInput): Promise<AgentEntry> {
   const db = getDb();
   const now = new Date();
-  db.insert(schema.agents)
+  await db
+    .insert(schema.agents)
     .values({
       name: input.name,
       type: input.type,
@@ -52,9 +54,10 @@ export function registerAgent(input: RegisterInput): AgentEntry {
     .onConflictDoUpdate({
       target: schema.agents.name,
       set: { status: "idle", updatedAt: now },
-    })
-    .run();
-  return getAgent(input.name)!;
+    });
+  const got = await getAgent(input.name);
+  if (!got) throw new Error(`registerAgent: row vanished after insert: ${input.name}`);
+  return got;
 }
 
 /**
@@ -62,54 +65,63 @@ export function registerAgent(input: RegisterInput): AgentEntry {
  * installer when rebinding a previously-unaffiliated or other-app agent
  * to a new owner. Pass `null` to clear.
  */
-export function setAppId(name: string, appId: string | null): void {
+export async function setAppId(
+  name: string,
+  appId: string | null,
+): Promise<void> {
   const db = getDb();
-  db.update(schema.agents)
+  await db
+    .update(schema.agents)
     .set({ appId, updatedAt: new Date() })
-    .where(eq(schema.agents.name, name))
-    .run();
+    .where(eq(schema.agents.name, name));
 }
 
 /**
  * Read the raw `app_id` for an agent. Returns null when the agent
  * doesn't exist or isn't owned by an app.
  */
-export function getAppId(name: string): string | null {
+export async function getAppId(name: string): Promise<string | null> {
   const db = getDb();
-  const r = db
+  const rows = await db
     .select({ appId: schema.agents.appId })
     .from(schema.agents)
     .where(eq(schema.agents.name, name))
-    .get();
-  return r?.appId ?? null;
+    .limit(1);
+  return rows[0]?.appId ?? null;
 }
 
-export function setStatus(name: string, status: AgentStatus): void {
+export async function setStatus(
+  name: string,
+  status: AgentStatus,
+): Promise<void> {
   const db = getDb();
-  db.update(schema.agents)
+  await db
+    .update(schema.agents)
     .set({ status, updatedAt: new Date() })
-    .where(eq(schema.agents.name, name))
-    .run();
+    .where(eq(schema.agents.name, name));
 }
 
-export function setSession(name: string, sessionId: string): void {
+export async function setSession(
+  name: string,
+  sessionId: string,
+): Promise<void> {
   const db = getDb();
-  db.update(schema.agents)
+  await db
+    .update(schema.agents)
     .set({ sessionId, updatedAt: new Date() })
-    .where(eq(schema.agents.name, name))
-    .run();
+    .where(eq(schema.agents.name, name));
 }
 
-export function clearSession(name: string): void {
+export async function clearSession(name: string): Promise<void> {
   const db = getDb();
-  db.update(schema.agents)
+  await db
+    .update(schema.agents)
     .set({ sessionId: null, updatedAt: new Date() })
-    .where(eq(schema.agents.name, name))
-    .run();
+    .where(eq(schema.agents.name, name));
 }
 
-export function archiveAgent(name: string): void {
-  setStatus(name, "archived");
+export async function archiveAgent(name: string): Promise<void> {
+  await setStatus(name, "archived");
 }
 
 /**
@@ -122,15 +134,15 @@ export function archiveAgent(name: string): void {
  * stomping an archived terminal state, so callers shouldn't be using
  * this to clobber other transitions.
  */
-export function unarchiveAgent(name: string): void {
-  const row = getAgent(name);
+export async function unarchiveAgent(name: string): Promise<void> {
+  const row = await getAgent(name);
   if (!row) throw new Error(`unarchiveAgent: no agent named "${name}"`);
   if (row.status !== "archived") {
     throw new Error(
       `unarchiveAgent: "${name}" is not archived (status=${row.status})`,
     );
   }
-  setStatus(name, "idle");
+  await setStatus(name, "idle");
 }
 
 /**
@@ -139,9 +151,9 @@ export function unarchiveAgent(name: string): void {
  * was deleted before the first fire). The general policy is preserve-over-
  * delete; callers must verify the row has no session and no blocks first.
  */
-export function deleteAgent(name: string): void {
+export async function deleteAgent(name: string): Promise<void> {
   const db = getDb();
-  db.delete(schema.agents).where(eq(schema.agents.name, name)).run();
+  await db.delete(schema.agents).where(eq(schema.agents.name, name));
 }
 
 function rowToEntry(r: typeof schema.agents.$inferSelect): AgentEntry {
@@ -150,8 +162,8 @@ function rowToEntry(r: typeof schema.agents.$inferSelect): AgentEntry {
     type: r.type as AgentType,
     status: r.status as AgentStatus,
     sessionId: r.sessionId ?? undefined,
-    createdAt: new Date(r.createdAt).toISOString(),
-    updatedAt: new Date(r.updatedAt).toISOString(),
+    createdAt: r.createdAt.toISOString(),
+    updatedAt: r.updatedAt.toISOString(),
   };
   switch (base.type) {
     case "orchestrator":
@@ -195,14 +207,14 @@ function rowToEntry(r: typeof schema.agents.$inferSelect): AgentEntry {
  * transcript ends up in a different `~/.claude/projects/<encoded-cwd>/`
  * directory than the mirror is watching, which silently drops history.
  */
-export function workingDirectoryFor(a: AgentEntry): string {
+export async function workingDirectoryFor(a: AgentEntry): Promise<string> {
   // Workspace containment is the stronger Constitution rule: builders run
   // inside their worktree even if a future ticket ever surfaces builders
   // under an app. AgentEntry doesn't carry `appId` (it's not part of the
   // user-facing wire shape), so we re-read the row when only the
   // base-typed entry is in hand.
   if ("worktreePath" in a && a.worktreePath) return a.worktreePath;
-  const appId = getAppId(a.name);
+  const appId = await getAppId(a.name);
   if (appId) return appDir(appId);
   return process.cwd();
 }

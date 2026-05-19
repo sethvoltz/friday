@@ -1,7 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 // FRI-78 follow-up: the worker emits `block-cancel` (instead of `block-stop`)
 // for blocks that started but accumulated zero content — the canonical case
@@ -11,26 +9,25 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 // handler DELETEs the row and publishes a `block_canceled` SSE so live
 // clients drop the bubble.
 
-const dataDir = mkdtempSync(join(tmpdir(), "friday-block-cancel-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
+let handle: TestDbHandle;
 
 beforeAll(async () => {
-  const { runMigrations } = await import("@friday/shared");
-  runMigrations();
+  handle = await createTestDb({ label: "block_cancel" });
 });
 
 afterAll(async () => {
-  const { closeDb } = await import("@friday/shared");
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+  await handle.drop();
 });
 
 beforeEach(async () => {
-  const { getRawDb } = await import("@friday/shared");
-  getRawDb().prepare("DELETE FROM blocks").run();
+  await handle.truncate();
   const liveTurns = await import("./live-turns.js");
   liveTurns.__resetForTest();
 });
+
+async function settle(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 30));
+}
 
 function makeFakeWorker(): unknown {
   return {
@@ -82,10 +79,6 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
 
     const w = makeFakeWorker();
 
-    // Mirror the SDK opening a `thinking` content block: block-start IPC
-    // fires, daemon inserts a streaming row + registers the block in
-    // liveTurns. clientBlockId is the worker's local handle; blockId is
-    // the daemon-minted UUID we expect on the cancel SSE.
     handleEvent(w as never, {
       type: "block-start",
       clientBlockId: "c-thinking-empty",
@@ -93,10 +86,9 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
       blockIndex: 0,
       messageId: "msg-cancel-1",
     } as never);
+    // handleBlockStart writes via fire-and-forget; let the row land.
+    await settle();
 
-    // The daemon's handleBlockStart picked a UUID for blockId. Grab it
-    // off the published block_start event so we can assert the row was
-    // really written and then deleted.
     const startEvt = captured.find(
       (e) =>
         e.type === "block_start" &&
@@ -106,19 +98,17 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
     expect(startEvt).toBeDefined();
     const blockId = startEvt!.block_id!;
     expect(blockId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(getBlockById(blockId)).not.toBeNull();
+    expect(await getBlockById(blockId)).not.toBeNull();
 
-    // No deltas accumulated. Now the worker exited the for-await loop
-    // (pending-injection break) and emitted block-cancel for this empty
-    // block. The daemon should DELETE the row and publish block_canceled.
     handleEvent(w as never, {
       type: "block-cancel",
       clientBlockId: "c-thinking-empty",
     } as never);
+    await settle();
 
     unsub();
 
-    expect(getBlockById(blockId)).toBeNull();
+    expect(await getBlockById(blockId)).toBeNull();
     const cancelEvt = captured.find(
       (e) => e.type === "block_canceled" && e.block_id === blockId,
     );
@@ -140,15 +130,13 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
 
     const w = makeFakeWorker();
 
-    // No prior block-start for this clientBlockId — mirrors a stale
-    // IPC arriving after liveTurns.dropTurn already ran (e.g. the worker
-    // raced a force-kill). handleBlockCancel must bail cleanly.
     expect(() => {
       handleEvent(w as never, {
         type: "block-cancel",
         clientBlockId: "c-unknown",
       } as never);
     }).not.toThrow();
+    await settle();
 
     unsub();
 

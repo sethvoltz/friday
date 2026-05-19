@@ -1,119 +1,168 @@
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+// Postgres migration runner for the daemon's boot path (ADR-023).
+//
+// Mirrors the SQLite-era `runMigrations()` contract:
+//   1. Apply any pending Drizzle migrations idempotently.
+//   2. Apply the FTS_SETUP_SQL (generated tsvector columns + GIN indexes).
+//   3. Assert journal count equals the row count in
+//      drizzle.__drizzle_migrations. A mismatch indicates a fabricated
+//      `when` timestamp poisoning the chain; fail loudly.
+//
+// Concurrency-safe: holds `pg_advisory_lock(0x4652494441590001)` during
+// the apply step so concurrent boots (e.g., daemon + setup) don't race.
+//
+// Phase 1 note: this replaces the SQLite migrator that was called sync
+// during boot. The signature returns Promise<void>; the daemon's
+// startup code awaits it.
+
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getDb, getRawDb } from "./client.js";
+import { getPool } from "./client.js";
+import { FTS_SETUP_SQL } from "./schema.js";
+
+const ADVISORY_LOCK_KEY = BigInt("0x4652494441590001");
+
+interface JournalEntry {
+  idx: number;
+  version: string;
+  when: number;
+  tag: string;
+  breakpoints: boolean;
+}
+
+interface Journal {
+  version: string;
+  dialect: string;
+  entries: JournalEntry[];
+}
 
 /**
- * Apply pending migrations and ensure the FTS5 virtual tables + triggers
- * exist. Idempotent. Called by the daemon at startup; no-op when called
- * twice.
+ * Apply pending migrations + ensure FTS columns exist. Idempotent.
+ * Throws on journal/db mismatch (see assertJournalApplied).
  */
-export function runMigrations(): void {
+export async function runMigrations(): Promise<void> {
+  const folder = locateMigrationsFolder();
+  if (!folder) {
+    // No migrations folder (e.g., bundled consumer); skip silently.
+    return;
+  }
+
+  const journalPath = join(folder, "meta", "_journal.json");
+  if (!existsSync(journalPath)) {
+    throw new Error(`Drizzle journal missing at ${journalPath}`);
+  }
+  const journal = JSON.parse(readFileSync(journalPath, "utf8")) as Journal;
+
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query(`CREATE SCHEMA IF NOT EXISTS drizzle`);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (
+        id SERIAL PRIMARY KEY,
+        hash TEXT NOT NULL,
+        created_at BIGINT
+      )
+    `);
+
+    await client.query(`SELECT pg_advisory_lock($1)`, [
+      ADVISORY_LOCK_KEY.toString(),
+    ]);
+    try {
+      const appliedRows = await client.query<{ created_at: string }>(
+        `SELECT created_at FROM drizzle.__drizzle_migrations`,
+      );
+      const appliedWhens = new Set(
+        appliedRows.rows.map((r) => Number(r.created_at)),
+      );
+
+      const sortedEntries = [...journal.entries].sort(
+        (a, b) => a.when - b.when,
+      );
+      for (const entry of sortedEntries) {
+        if (appliedWhens.has(entry.when)) continue;
+        const sqlPath = join(folder, `${entry.tag}.sql`);
+        if (!existsSync(sqlPath)) {
+          throw new Error(
+            `Migration file missing: ${sqlPath} (referenced by journal)`,
+          );
+        }
+        const rawSql = readFileSync(sqlPath, "utf8");
+        const statements = rawSql
+          .split(/-->\s*statement-breakpoint/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        await client.query("BEGIN");
+        try {
+          for (const stmt of statements) {
+            await client.query(stmt);
+          }
+          await client.query(
+            `INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ($1, $2)`,
+            [entry.tag, entry.when],
+          );
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
+      }
+
+      // FTS setup is idempotent (IF NOT EXISTS on the generated column +
+      // GIN indexes). Run after every migration pass so schema changes
+      // that add new tsvector targets flow through.
+      await client.query(FTS_SETUP_SQL);
+    } finally {
+      await client.query(`SELECT pg_advisory_unlock($1)`, [
+        ADVISORY_LOCK_KEY.toString(),
+      ]);
+    }
+
+    await assertJournalApplied(client, journal);
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Drizzle's Postgres migrator (and our hand-rolled version above) tracks
+ * applied migrations by `created_at` matching the journal `when`. If a
+ * future migration's `when` is less than the current max (which happens
+ * when someone hand-edits the journal with a fabricated value), it will
+ * be silently skipped. Catch this by counting and fail loudly.
+ */
+async function assertJournalApplied(
+  client: { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> },
+  journal: Journal,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = (await client.query(
+    `SELECT COUNT(*)::int AS c FROM drizzle.__drizzle_migrations`,
+  )) as { rows: { c: number }[] };
+  const dbCount = result.rows[0]?.c ?? 0;
+  if (dbCount === journal.entries.length) return;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const applied = (await client.query(
+    `SELECT created_at FROM drizzle.__drizzle_migrations`,
+  )) as { rows: { created_at: string }[] };
+  const appliedSet = new Set(applied.rows.map((r) => Number(r.created_at)));
+  const missing = journal.entries.filter((e) => !appliedSet.has(e.when));
+  const tags = missing.map((m) => `${m.tag} (when=${m.when})`).join(", ");
+  throw new Error(
+    `drizzle journal/db mismatch: ${journal.entries.length} entries in _journal.json, ` +
+      `${dbCount} rows in drizzle.__drizzle_migrations. Likely cause: a journal entry's ` +
+      `\`when\` is older than the current max \`created_at\` in __drizzle_migrations, ` +
+      `so the migrator silently skipped it. Unapplied: ${tags}`,
+  );
+}
+
+function locateMigrationsFolder(): string | null {
   const here = dirname(fileURLToPath(import.meta.url));
   // From dist/db/migrate.js → ../../drizzle (next to package.json)
   const candidates = [
     join(here, "..", "..", "drizzle"),
     join(here, "..", "..", "..", "drizzle"),
   ];
-  const folder = candidates.find((p) => existsSync(p));
-  if (!folder) {
-    // No migrations folder (e.g., bundled consumer); skip silently.
-    ensureFtsTables();
-    return;
-  }
-  migrate(getDb(), { migrationsFolder: folder });
-  assertJournalApplied(folder);
-  ensureFtsTables();
-}
-
-/**
- * Drizzle's SQLite migrator filters journal entries with
- * `lastDbMigration.created_at < migration.folderMillis` — so if any prior
- * migration recorded a `created_at` greater than a newer migration's `when`,
- * the newer one is silently skipped (no error, no log). This happens when a
- * journal entry's `when` was hand-authored with a future or fabricated value
- * instead of a real `Date.now()` from `drizzle-kit generate`.
- *
- * Compare the journal entry count to `__drizzle_migrations` row count after
- * each run. They must match. If they don't, fail loudly with the offenders
- * so the next boot doesn't quietly run on a half-migrated schema.
- */
-function assertJournalApplied(folder: string): void {
-  const journalPath = join(folder, "meta", "_journal.json");
-  if (!existsSync(journalPath)) return;
-  const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
-    entries: { idx: number; tag: string; when: number }[];
-  };
-  const raw = getRawDb();
-  const rows = raw
-    .prepare("SELECT created_at FROM __drizzle_migrations ORDER BY id")
-    .all() as { created_at: number }[];
-  if (rows.length === journal.entries.length) return;
-  const applied = new Set(rows.map((r) => r.created_at));
-  const missing = journal.entries.filter((e) => !applied.has(e.when));
-  const tags = missing.map((m) => `${m.tag} (when=${m.when})`).join(", ");
-  throw new Error(
-    `drizzle journal/db mismatch: ${journal.entries.length} entries in _journal.json, ` +
-      `${rows.length} rows in __drizzle_migrations. Likely cause: a journal entry's ` +
-      `\`when\` is older than the current max \`created_at\` in __drizzle_migrations, ` +
-      `so drizzle's migrator silently skipped it. Unapplied: ${tags}`,
-  );
-}
-
-function ensureFtsTables(): void {
-  const raw = getRawDb();
-  raw.exec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
-      content_json, content='turns', content_rowid='id'
-    );
-    CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
-      content_json, content='blocks', content_rowid='id'
-    );
-    CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-      title, content, tags_json,
-      content='memory_entries', content_rowid='rowid'
-    );
-
-    CREATE TRIGGER IF NOT EXISTS turns_ai AFTER INSERT ON turns BEGIN
-      INSERT INTO turns_fts(rowid, content_json) VALUES (new.id, new.content_json);
-    END;
-    CREATE TRIGGER IF NOT EXISTS turns_ad AFTER DELETE ON turns BEGIN
-      INSERT INTO turns_fts(turns_fts, rowid, content_json)
-        VALUES ('delete', old.id, old.content_json);
-    END;
-    CREATE TRIGGER IF NOT EXISTS turns_au AFTER UPDATE ON turns BEGIN
-      INSERT INTO turns_fts(turns_fts, rowid, content_json)
-        VALUES ('delete', old.id, old.content_json);
-      INSERT INTO turns_fts(rowid, content_json) VALUES (new.id, new.content_json);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS blocks_ai AFTER INSERT ON blocks BEGIN
-      INSERT INTO blocks_fts(rowid, content_json) VALUES (new.id, new.content_json);
-    END;
-    CREATE TRIGGER IF NOT EXISTS blocks_ad AFTER DELETE ON blocks BEGIN
-      INSERT INTO blocks_fts(blocks_fts, rowid, content_json)
-        VALUES ('delete', old.id, old.content_json);
-    END;
-    CREATE TRIGGER IF NOT EXISTS blocks_au AFTER UPDATE ON blocks BEGIN
-      INSERT INTO blocks_fts(blocks_fts, rowid, content_json)
-        VALUES ('delete', old.id, old.content_json);
-      INSERT INTO blocks_fts(rowid, content_json) VALUES (new.id, new.content_json);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory_entries BEGIN
-      INSERT INTO memory_fts(rowid, title, content, tags_json)
-        VALUES (new.rowid, new.title, new.content, new.tags_json);
-    END;
-    CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory_entries BEGIN
-      INSERT INTO memory_fts(memory_fts, rowid, title, content, tags_json)
-        VALUES ('delete', old.rowid, old.title, old.content, old.tags_json);
-    END;
-    CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory_entries BEGIN
-      INSERT INTO memory_fts(memory_fts, rowid, title, content, tags_json)
-        VALUES ('delete', old.rowid, old.title, old.content, old.tags_json);
-      INSERT INTO memory_fts(rowid, title, content, tags_json)
-        VALUES (new.rowid, new.title, new.content, new.tags_json);
-    END;
-  `);
+  return candidates.find((p) => existsSync(p)) ?? null;
 }

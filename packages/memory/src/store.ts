@@ -21,6 +21,7 @@ export interface MemoryEntry {
   content: string;
   tags: string[];
   createdBy: string;
+  /** ISO-8601 string. */
   createdAt: string;
   updatedAt: string;
   recallCount: number;
@@ -62,8 +63,14 @@ export function parseEntry(id: string, raw: string): MemoryEntry {
     content: m[2],
     tags: Array.isArray(fm.tags) ? (fm.tags as string[]) : [],
     createdBy: typeof fm.createdBy === "string" ? fm.createdBy : "unknown",
-    createdAt: typeof fm.createdAt === "string" ? fm.createdAt : new Date().toISOString(),
-    updatedAt: typeof fm.updatedAt === "string" ? fm.updatedAt : new Date().toISOString(),
+    createdAt:
+      typeof fm.createdAt === "string"
+        ? fm.createdAt
+        : new Date().toISOString(),
+    updatedAt:
+      typeof fm.updatedAt === "string"
+        ? fm.updatedAt
+        : new Date().toISOString(),
     recallCount: 0,
     lastRecalledAt: null,
   };
@@ -80,66 +87,67 @@ export function serializeEntry(entry: MemoryEntry): string {
   return `---\n${fm}\n---\n${entry.content}`;
 }
 
-export function saveEntry(entry: MemoryEntry): void {
+export async function saveEntry(entry: MemoryEntry): Promise<void> {
   ensureMemoryDirs();
   const path = entryPath(entry.id);
   writeFileSync(path, serializeEntry(entry));
   const db = getDb();
-  const fileMtime = statSync(path).mtimeMs;
-  const existing = db
+  const fileMtime = new Date(statSync(path).mtimeMs);
+  const existingRows = await db
     .select()
     .from(schema.memoryEntries)
     .where(eq(schema.memoryEntries.id, entry.id))
-    .get();
-  if (existing) {
-    db.update(schema.memoryEntries)
+    .limit(1);
+  if (existingRows[0]) {
+    await db
+      .update(schema.memoryEntries)
       .set({
         title: entry.title,
         content: entry.content,
-        tagsJson: JSON.stringify(entry.tags),
+        tagsJson: entry.tags,
         createdBy: entry.createdBy,
-        createdAt: entry.createdAt,
-        updatedAt: entry.updatedAt,
+        createdAt: new Date(entry.createdAt),
+        updatedAt: new Date(entry.updatedAt),
         fileMtime,
       })
-      .where(eq(schema.memoryEntries.id, entry.id))
-      .run();
+      .where(eq(schema.memoryEntries.id, entry.id));
   } else {
-    db.insert(schema.memoryEntries)
-      .values({
-        id: entry.id,
-        title: entry.title,
-        content: entry.content,
-        tagsJson: JSON.stringify(entry.tags),
-        createdBy: entry.createdBy,
-        createdAt: entry.createdAt,
-        updatedAt: entry.updatedAt,
-        fileMtime,
-        recallCount: 0,
-        lastRecalledAt: null,
-      })
-      .run();
+    await db.insert(schema.memoryEntries).values({
+      id: entry.id,
+      title: entry.title,
+      content: entry.content,
+      tagsJson: entry.tags,
+      createdBy: entry.createdBy,
+      createdAt: new Date(entry.createdAt),
+      updatedAt: new Date(entry.updatedAt),
+      fileMtime,
+      recallCount: 0,
+      lastRecalledAt: null,
+    });
   }
 }
 
-export function getEntry(id: string): MemoryEntry | null {
+export async function getEntry(id: string): Promise<MemoryEntry | null> {
   const db = getDb();
-  const row = db
+  const rows = await db
     .select()
     .from(schema.memoryEntries)
     .where(eq(schema.memoryEntries.id, id))
-    .get();
-  if (!row) {
+    .limit(1);
+  if (!rows[0]) {
     const path = entryPath(id);
     if (!existsSync(path)) return null;
     const raw = readFileSync(path, "utf8");
     return parseEntry(id, raw);
   }
-  return rowToEntry(row);
+  return rowToEntry(rows[0]);
 }
 
-export function updateEntry(id: string, patch: Partial<MemoryEntry>): void {
-  const cur = getEntry(id);
+export async function updateEntry(
+  id: string,
+  patch: Partial<MemoryEntry>,
+): Promise<void> {
+  const cur = await getEntry(id);
   if (!cur) return;
   const next: MemoryEntry = {
     ...cur,
@@ -147,52 +155,63 @@ export function updateEntry(id: string, patch: Partial<MemoryEntry>): void {
     id,
     updatedAt: new Date().toISOString(),
   };
-  saveEntry(next);
+  await saveEntry(next);
 }
 
-export function forgetEntry(id: string): void {
+export async function forgetEntry(id: string): Promise<void> {
   const path = entryPath(id);
   if (existsSync(path)) rmSync(path);
   const db = getDb();
-  db.delete(schema.memoryEntries)
-    .where(eq(schema.memoryEntries.id, id))
-    .run();
+  await db
+    .delete(schema.memoryEntries)
+    .where(eq(schema.memoryEntries.id, id));
 }
 
-export function listEntries(): MemoryEntry[] {
+export async function listEntries(): Promise<MemoryEntry[]> {
   const db = getDb();
-  const rows = db.select().from(schema.memoryEntries).all();
+  const rows = await db.select().from(schema.memoryEntries);
   return rows.map(rowToEntry);
 }
 
-export function touchRecall(id: string): void {
+export async function touchRecall(id: string): Promise<void> {
   const db = getDb();
-  const row = db
+  const rows = await db
     .select()
     .from(schema.memoryEntries)
     .where(eq(schema.memoryEntries.id, id))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return;
-  db.update(schema.memoryEntries)
+  await db
+    .update(schema.memoryEntries)
     .set({
       recallCount: row.recallCount + 1,
-      lastRecalledAt: new Date().toISOString(),
+      lastRecalledAt: new Date(),
     })
-    .where(eq(schema.memoryEntries.id, id))
-    .run();
+    .where(eq(schema.memoryEntries.id, id));
 }
 
 function rowToEntry(r: typeof schema.memoryEntries.$inferSelect): MemoryEntry {
+  // tags_json is jsonb in Postgres; Drizzle returns it as a parsed value.
+  // Defend against historical rows that may have been stored as strings.
+  const tagsRaw = r.tagsJson;
+  const tags = Array.isArray(tagsRaw)
+    ? (tagsRaw as string[])
+    : typeof tagsRaw === "string"
+      ? (JSON.parse(tagsRaw) as string[])
+      : [];
   return {
     id: r.id,
     title: r.title,
     content: r.content,
-    tags: JSON.parse(r.tagsJson) as string[],
+    tags,
     createdBy: r.createdBy,
-    createdAt: r.createdAt,
-    updatedAt: r.updatedAt,
+    createdAt: r.createdAt.toISOString(),
+    updatedAt: r.updatedAt.toISOString(),
     recallCount: r.recallCount,
-    lastRecalledAt: r.lastRecalledAt,
+    lastRecalledAt: r.lastRecalledAt
+      ? r.lastRecalledAt.toISOString()
+      : null,
   };
 }
 

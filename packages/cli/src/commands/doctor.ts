@@ -41,7 +41,7 @@ export const doctorCommand = defineCommand({
     let accountOk = false;
     try {
       const db = getDb();
-      const users = db.select().from(schema.users).limit(1).all();
+      const users = await db.select().from(schema.users).limit(1);
       accountOk = users.length > 0;
     } catch {
       // db not migrated yet

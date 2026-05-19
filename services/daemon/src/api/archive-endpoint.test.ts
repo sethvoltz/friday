@@ -11,36 +11,35 @@
  * authorization needed — the archive endpoint isn't behind same-host auth.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
 import type { Server } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   afterAll,
-  afterEach,
   beforeAll,
   beforeEach,
   describe,
   expect,
   it,
 } from "vitest";
+import { createTestDb, type TestDbHandle } from "@friday/shared";
 
-const dataRoot = mkdtempSync(join(tmpdir(), "friday-archive-rest-"));
-process.env.FRIDAY_DATA_DIR = dataRoot;
 delete process.env.LINEAR_API_KEY;
 
-const { runMigrations, closeDb } = await import("@friday/shared");
-const { createTicket, getTicket } = await import("@friday/shared/services");
-const registry = await import("../agent/registry.js");
-const { startServer } = await import("./server.js");
-
+let handle: TestDbHandle;
 let server: Server;
 let port: number;
+let createTicket: typeof import("@friday/shared/services")["createTicket"];
+let getTicket: typeof import("@friday/shared/services")["getTicket"];
+let registry: typeof import("../agent/registry.js");
 
 beforeAll(async () => {
-  runMigrations();
+  handle = await createTestDb({ label: "archive_rest" });
+  ({ createTicket, getTicket } = await import("@friday/shared/services"));
+  registry = await import("../agent/registry.js");
+  const { startServer } = await import("./server.js");
   server = startServer({ port: 0 });
-  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  await new Promise<void>((resolve) =>
+    server.once("listening", () => resolve()),
+  );
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("no port assigned");
   port = addr.port;
@@ -48,16 +47,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  closeDb();
-  rmSync(dataRoot, { recursive: true, force: true });
+  await handle.drop();
 });
 
-beforeEach(() => {
-  // Each test uses a unique agent name so registry rows don't collide.
-});
-
-afterEach(() => {
-  // No global side effects to clean up between tests.
+beforeEach(async () => {
+  await handle.truncate();
 });
 
 function archiveUrl(name: string): string {
@@ -66,7 +60,7 @@ function archiveUrl(name: string): string {
 
 describe("POST /api/agents/:name/archive — contract", () => {
   it("returns 400 when reason is missing from the request body", async () => {
-    registry.registerAgent({
+    await registry.registerAgent({
       name: "rest-missing-reason",
       type: "builder",
       parentName: "orchestrator",
@@ -84,13 +78,13 @@ describe("POST /api/agents/:name/archive — contract", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("reason");
     // Agent must not have been archived on a 400.
-    expect(registry.getAgent("rest-missing-reason")?.status).not.toBe(
+    expect((await registry.getAgent("rest-missing-reason"))?.status).not.toBe(
       "archived",
     );
   });
 
   it("returns 400 when reason is not one of the allowed values", async () => {
-    registry.registerAgent({
+    await registry.registerAgent({
       name: "rest-bad-reason",
       type: "builder",
       parentName: "orchestrator",
@@ -108,8 +102,8 @@ describe("POST /api/agents/:name/archive — contract", () => {
   });
 
   it("with reason='completed' moves the linked ticket to 'done' end-to-end", async () => {
-    const t = createTicket({ title: "rest-happy", status: "in_progress" });
-    registry.registerAgent({
+    const t = await createTicket({ title: "rest-happy", status: "in_progress" });
+    await registry.registerAgent({
       name: "rest-completed",
       type: "builder",
       parentName: "orchestrator",
@@ -125,13 +119,20 @@ describe("POST /api/agents/:name/archive — contract", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(getTicket(t.id)?.status).toBe("done");
-    expect(registry.getAgent("rest-completed")?.status).toBe("archived");
+    // ticket-close is fire-and-forget; let it land.
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await getTicket(t.id))?.status).toBe("done");
+    expect((await registry.getAgent("rest-completed"))?.status).toBe(
+      "archived",
+    );
   });
 
   it("with reason='abandoned' moves the linked ticket to 'closed'", async () => {
-    const t = createTicket({ title: "rest-abandoned", status: "in_progress" });
-    registry.registerAgent({
+    const t = await createTicket({
+      title: "rest-abandoned",
+      status: "in_progress",
+    });
+    await registry.registerAgent({
       name: "rest-abandoned",
       type: "builder",
       parentName: "orchestrator",
@@ -147,7 +148,8 @@ describe("POST /api/agents/:name/archive — contract", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(getTicket(t.id)?.status).toBe("closed");
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await getTicket(t.id))?.status).toBe("closed");
   });
 
   it("returns 404 when the agent doesn't exist (before reason validation)", async () => {

@@ -93,7 +93,7 @@ export async function scanFriction(
   const model = opts.model ?? "claude-haiku-4-5-20251001";
   const score = opts.scoreFn ?? defaultScoreFn;
 
-  const turns = collectOrchestratorTurns(sinceMs, maxTurns);
+  const turns = await collectOrchestratorTurns(sinceMs, maxTurns);
   if (turns.length === 0) return [];
 
   const scored: Array<OrchestratorTurn & ScoredTurn> = [];
@@ -195,31 +195,29 @@ function severityRank(s: SignalSeverity): number {
  *   3. Every distinct sessionId in the `turns` table that's tagged with one
  *      of those agent names (catches historical sessions across resumes).
  */
-function collectOrchestratorSessions(): Set<string> {
+async function collectOrchestratorSessions(): Promise<Set<string>> {
   const out = new Set<string>();
   const db = getDb();
 
-  const orchAgents = db
+  const orchAgents = await db
     .select()
     .from(schema.agents)
-    .where(eq(schema.agents.type, "orchestrator"))
-    .all();
+    .where(eq(schema.agents.type, "orchestrator"));
   if (orchAgents.length === 0) return out;
 
   for (const a of orchAgents) {
     if (a.sessionId) out.add(a.sessionId);
   }
 
+  // Historic session enumeration via the `blocks` table — the legacy
+  // `turns` table is retired per ADR-016. Distinct session_id values
+  // for any orchestrator-named agent's blocks.
   const orchNames = orchAgents.map((a) => a.name);
-  const historicTurns = db
-    .select({
-      sessionId: schema.turns.sessionId,
-      agentName: schema.turns.agentName,
-    })
-    .from(schema.turns)
-    .where(inArray(schema.turns.agentName, orchNames))
-    .all();
-  for (const t of historicTurns) {
+  const historicSessions = await db
+    .selectDistinct({ sessionId: schema.blocks.sessionId })
+    .from(schema.blocks)
+    .where(inArray(schema.blocks.agentName, orchNames));
+  for (const t of historicSessions) {
     if (t.sessionId) out.add(t.sessionId);
   }
 
@@ -233,62 +231,65 @@ function collectOrchestratorSessions(): Set<string> {
  *
  * Capped at `maxTurns`. Older sessions go first if we hit the cap.
  */
-export function collectOrchestratorTurns(
+export async function collectOrchestratorTurns(
   sinceMs: number,
   maxTurns: number,
-): OrchestratorTurn[] {
-  const sessionIds = collectOrchestratorSessions();
+): Promise<OrchestratorTurn[]> {
+  const sessionIds = await collectOrchestratorSessions();
   if (sessionIds.size === 0) return [];
 
+  // Ported to the `blocks` table per ADR-016 + ADR-023. Each block row is
+  // already a single semantic unit (text / thinking / tool_use / tool_result
+  // / user / mail); we no longer parse a JSONL-style `content_json` envelope
+  // with `type=user|assistant`. The friction scorer wants pairs of
+  // (user-typed text, immediately-preceding assistant text), so we walk
+  // blocks in ts order, accumulate the latest assistant text per session,
+  // and emit a turn whenever we see a user-role text/user block.
   const db = getDb();
-  const rows = db
+  const rows = await db
     .select()
-    .from(schema.turns)
-    .where(inArray(schema.turns.sessionId, [...sessionIds]))
-    .all();
+    .from(schema.blocks)
+    .where(inArray(schema.blocks.sessionId, [...sessionIds]));
   // Sort ts ascending so older sessions get scored first when capped.
-  rows.sort((a, b) => a.ts - b.ts);
+  rows.sort((a, b) => a.ts.getTime() - b.ts.getTime());
 
   const out: OrchestratorTurn[] = [];
-  // Track previous assistant text per-session so a multi-session sweep
-  // doesn't bleed context across orchestrator-resume boundaries.
   const prevAssistantBySession = new Map<string, string>();
 
   for (const r of rows) {
-    if (sinceMs && r.ts < sinceMs) continue;
+    const rTsMs = r.ts.getTime();
+    if (sinceMs && rTsMs < sinceMs) continue;
     if (out.length >= maxTurns) break;
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(r.contentJson);
-    } catch {
-      continue;
-    }
-    const j = parsed as {
-      type?: string;
-      uuid?: string;
-      message?: { content?: unknown };
-    };
+    // contentJson is jsonb; Drizzle returns it as the parsed object. Block
+    // payloads are shaped per-kind; we only need the `text` field for the
+    // text + user kinds.
+    const content = r.contentJson as { text?: string };
 
-    if (j.type === "assistant") {
-      const txt = extractText(j.message?.content);
+    if (r.role === "assistant" && r.kind === "text") {
+      const txt =
+        typeof content?.text === "string" ? content.text : "";
       if (txt) prevAssistantBySession.set(r.sessionId, txt);
       continue;
     }
 
-    if (j.type !== "user") continue;
-    if (isToolResultOnly(j.message?.content)) continue;
+    // User-typed blocks (chat input, scratch seed, agent_spawn, schedule
+    // task prompt). Skip mail-delivered user blocks — those aren't the
+    // user's free-text friction signal.
+    if (r.role !== "user" || r.kind !== "text") continue;
+    if (r.source === "mail") continue;
 
-    const userText = extractText(j.message?.content);
+    const userText =
+      typeof content?.text === "string" ? content.text : "";
     if (!userText.trim()) continue;
     const cleaned = stripMemoryContext(userText).trim();
     if (!cleaned) continue;
 
     out.push({
       sessionId: r.sessionId,
-      filePath: r.sourceFile,
-      turnId: j.uuid ?? `${r.sessionId}:${r.turnIndex}`,
-      ts: new Date(r.ts).toISOString(),
+      filePath: "",
+      turnId: r.turnId,
+      ts: r.ts.toISOString(),
       userText: cleaned,
       prevAssistantText: prevAssistantBySession.get(r.sessionId) ?? "",
       dbTurnId: r.id,

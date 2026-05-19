@@ -106,7 +106,7 @@ function tick(): void {
 }
 
 async function refork(agentName: string): Promise<void> {
-  const a = registry.getAgent(agentName);
+  const a = await registry.getAgent(agentName);
   if (!a) return;
   // Scheduled agents are one-shot — let them die naturally.
   if (a.type === "scheduled") return;
@@ -133,7 +133,7 @@ async function refork(agentName: string): Promise<void> {
 
   // The registry row was archived by archiveAgent. Re-register so the new
   // turn has a row to bind onto.
-  registry.registerAgent({
+  await registry.registerAgent({
     name: agentName,
     type: a.type,
     parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
@@ -158,13 +158,14 @@ async function refork(agentName: string): Promise<void> {
   const noticePrompt =
     "(Your previous turn timed out and was reforked. Check your mail inbox via mail_inbox if you were mid-task; otherwise wait for the next instruction.)";
 
+  const workingDirectory = await registry.workingDirectoryFor(a);
   const dispatch = (prompt: string, turnId: string): void => {
     dispatchTurn({
       agentName,
       options: {
         agentName,
         agentType: a.type,
-        workingDirectory: registry.workingDirectoryFor(a),
+        workingDirectory,
         systemPrompt,
         prompt,
         turnId,
@@ -190,7 +191,7 @@ async function refork(agentName: string): Promise<void> {
   // assistant reply renders against an originating bubble instead of
   // dangling orphan.
   try {
-    recordUserBlock({
+    await recordUserBlock({
       turnId: noticeTurnId,
       agentName,
       sessionId: a.sessionId ?? undefined,

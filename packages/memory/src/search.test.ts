@@ -3,17 +3,19 @@ import type { MemoryEntry } from "./store.js";
 
 let entries: MemoryEntry[] = [];
 
+// Force the FTS path to throw so the scoring logic falls back to the
+// full-scan branch. ADR-023 update: production code uses `getPool()`
+// (returns pg.Pool whose `query` is awaitable); here we return a stub
+// whose `query` rejects.
 vi.mock("@friday/shared", () => ({
-  getRawDb: () => ({
-    prepare: () => {
-      throw new Error("force fallback to full scan");
-    },
+  getPool: () => ({
+    query: () => Promise.reject(new Error("force fallback to full scan")),
   }),
 }));
 
 vi.mock("./store.js", () => ({
-  listEntries: () => entries,
-  touchRecall: () => {},
+  listEntries: () => Promise.resolve(entries),
+  touchRecall: () => Promise.resolve(),
 }));
 
 function mkEntry(partial: Partial<MemoryEntry> & { id: string }): MemoryEntry {
@@ -50,7 +52,7 @@ describe("searchMemories scoring", () => {
       }),
     ];
 
-    const results = searchMemories({ query: "friday memory" });
+    const results = await searchMemories({ query: "friday memory" });
     expect(results.map((r) => r.entry.id)).toEqual(["a"]);
     expect(results[0].matchedOn).toContain("title");
   });
@@ -70,7 +72,7 @@ describe("searchMemories scoring", () => {
       }),
     ];
 
-    const results = searchMemories({ query: "daemon orchestrator" });
+    const results = await searchMemories({ query: "daemon orchestrator" });
     expect(results.map((r) => r.entry.id)).toEqual(["split"]);
     const r = results[0];
     expect(r.matchedOn).toEqual(
@@ -99,7 +101,7 @@ describe("searchMemories scoring", () => {
       }),
     ];
 
-    const results = searchMemories({ query: "alpha" });
+    const results = await searchMemories({ query: "alpha" });
     // Tag exact-match (5) > title contains (3) > content contains (1).
     expect(results.map((r) => r.entry.id)).toEqual([
       "tag-hit",
@@ -126,7 +128,7 @@ describe("searchMemories scoring", () => {
       }),
     ];
 
-    const results = searchMemories({ query: "matches", tags: ["needed"] });
+    const results = await searchMemories({ query: "matches", tags: ["needed"] });
     expect(results.map((r) => r.entry.id)).toEqual(["tagged"]);
   });
 
@@ -140,7 +142,7 @@ describe("searchMemories scoring", () => {
       }),
     ];
 
-    const results = searchMemories({ query: "friday memory" });
+    const results = await searchMemories({ query: "friday memory" });
     expect(results).toEqual([]);
   });
 });

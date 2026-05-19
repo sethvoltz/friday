@@ -24,8 +24,10 @@ export interface BackfillSkip {
  * The legacy JSONL came from old Friday and used `sessionType` instead of
  * `agentType` and carried a Slack `channelId` that the new project drops.
  */
-export function backfillUsageFromLegacyJsonl(): BackfillResult | BackfillSkip {
-  if (!isUsageEmpty()) {
+export async function backfillUsageFromLegacyJsonl(): Promise<
+  BackfillResult | BackfillSkip
+> {
+  if (!(await isUsageEmpty())) {
     return {
       inserted: 0,
       source: null,
@@ -71,7 +73,7 @@ export function backfillUsageFromLegacyJsonl(): BackfillResult | BackfillSkip {
       // skip malformed JSON lines
     }
   }
-  const inserted = bulkInsertUsage(rows);
+  const inserted = await bulkInsertUsage(rows);
   return { inserted, source };
 }
 
