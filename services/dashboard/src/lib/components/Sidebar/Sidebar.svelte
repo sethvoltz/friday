@@ -4,6 +4,12 @@
     type AgentInfo,
     type SidebarSessionSummary,
   } from "$lib/stores/chat.svelte";
+  // Importing `zeroSidebar` triggers its singleton constructor — which
+  // opens the Zero WS subscription when the feature flag is on and
+  // writes `chat.agents` live. The Sidebar reads `chat.agents` as
+  // before; the data source switches behind the flag.
+  import { useZeroSidebar, zeroSidebar } from "$lib/stores/zero.svelte";
+  void zeroSidebar;
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
@@ -52,7 +58,13 @@
     const n = raw ? Number(raw) : NaN;
     return Number.isFinite(n) && n > 0 ? n : 30_000;
   })();
+  // Phase 2 (ADR-024): when the Zero-sidebar feature flag is on, the
+  // Zero client writes `chat.agents` live and the REST poll becomes
+  // redundant. Skip it so the two sources don't fight (Zero updates
+  // arrive within a second; REST every 30s would briefly overwrite
+  // with stale data on each tick).
   onMount(() => {
+    if (useZeroSidebar()) return;
     void loadAgents();
     const id = setInterval(() => void loadAgents(), POLL_MS);
     return () => clearInterval(id);
