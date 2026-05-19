@@ -416,7 +416,14 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
       // LISTEN handler DELETEs the row) are excluded so the bubble
       // vanishes optimistically.
       { method: "where", args: ["status", "!=", "cancel_requested"] },
-      { method: "orderBy", args: ["id", "desc"] },
+      // Order by `ts DESC`, not `id DESC`. Phase 4.11 flipped
+      // `blocks.id` from bigserial to text(UUID); pre-migration rows
+      // kept their old numeric ids as strings, so the mixed alphabet
+      // makes lex-DESC on id pick a "top 50" that's chronologically
+      // arbitrary — a brand-new post-cutover UUID starting with a low
+      // digit sinks to rank ~2300 and the chat scroller never sees
+      // it. ts-DESC is the chronological intent.
+      { method: "orderBy", args: ["ts", "desc"] },
       { method: "limit", args: [50] },
     ]);
     // Materialize was called once for blocks (in addition to the

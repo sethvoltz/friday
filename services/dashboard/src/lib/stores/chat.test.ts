@@ -4058,7 +4058,7 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     };
   }
 
-  it("fires markRead with the newest block id on the first Zero snapshot", async () => {
+  it("fires markRead with the chronologically-newest block id on the first Zero snapshot", async () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
@@ -4072,11 +4072,13 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
       ],
       "friday",
     );
-    // Newest by id, not by ts (id is the bigserial). b3 has older ts
-    // but the newest id wins: b3 is id=3 with ts=900 (a deliberate
-    // out-of-order insert simulating jsonl-recovery).
+    // Newest is picked by (ts, id) tuple — Phase 4.11 made `id` a text
+    // UUID, and pre-migration rows kept their old bigserial ids as
+    // strings, so bare lexical `id` comparison is meaningless across
+    // the mixed alphabet. b2 has ts=1100 (highest), so b2 wins despite
+    // b3 having the highest `id` value.
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toEqual({ agent: "friday", blockId: "b3" });
+    expect(calls[0]).toEqual({ agent: "friday", blockId: "b2" });
   });
 
   it("dedupes — the same newest blockId across snapshots produces one call", async () => {

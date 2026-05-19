@@ -617,11 +617,24 @@ class ZeroSyncStore {
     //     this terminal-pending status BEFORE the daemon's LISTEN
     //     handler deletes the row. Excluding it here is what makes
     //     the optimistic-UX bubble-vanish happen on click.
+    // Order by `ts DESC`, not `id DESC`. Phase 4.11 flipped
+    // `blocks.id` from bigserial to text(UUID) — pre-migration rows
+    // kept their old numeric ids as strings ("9943", "9942", …),
+    // post-migration rows are UUIDs. Lex-DESC on that mixed alphabet
+    // pins UUIDs starting with high hex chars at the top forever
+    // (every numeric "9XXX" sorts below "a…"); a brand-new UUID
+    // beginning with a low digit (`2241585c-…`) lands ~2300 rows
+    // below the top-50 cut and never reaches the chat scroller. The
+    // `(agent_name, ts)` index in the schema makes the ts-DESC range
+    // scan efficient. parseBlocks's client-side sort already uses
+    // `ts` first with `id` only as a same-ms tiebreak, so the render
+    // order is unchanged — this only affects which 50 rows the
+    // materialized view holds.
     const query = this.#zero.query.blocks
       .where("agent_name", "=", agentName)
       .where("status", "!=", "streaming")
       .where("status", "!=", "cancel_requested")
-      .orderBy("id", "desc")
+      .orderBy("ts", "desc")
       .limit(50);
     const preload = this.#zero.preload(query);
     const view = this.#zero.materialize(query);

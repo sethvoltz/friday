@@ -1552,12 +1552,19 @@ export class ChatState {
     // switch always sends a fresh write because `loadAgentTurns`
     // clears the memo for the new agent.
     if (this.markReadFn) {
-      // `rows` is ordered DESC by id (Phase 3.7 binder); the first
-      // entry is the newest. But the parsed merge re-sorted by ts,
-      // so consult the raw `rows` array for the highest id.
+      // Find the chronologically newest row. Bare `r.id > newest.id`
+      // would be a lex-string comparison and Phase 4.11's mixed
+      // numeric-string + UUID alphabet makes that meaningless (see
+      // `oldestBlockCursor` for the full writeup). Use `(ts, id)`
+      // tuple, same as the materialized-view query now orders by.
       let newest: ZeroBlocksRow | null = null;
       for (const r of rows) {
-        if (!newest || r.id > newest.id) newest = r;
+        if (
+          !newest ||
+          r.ts > newest.ts ||
+          (r.ts === newest.ts && r.id > newest.id)
+        )
+          newest = r;
       }
       if (newest) {
         const prev = this.lastMarkedBlockIdByAgent.get(forAgent);
@@ -2757,9 +2764,22 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
 /** Lowest block_id across an array. Used as the next `before` cursor for
  *  scroll-up pagination (FIX_FORWARD 3.7). */
 export function oldestBlockCursor(blocks: BlockRow[]): string | null {
+  // Compare by `(ts, id)` tuple, NOT by bare `id`. Phase 4.11 made
+  // `blocks.id` a text UUID; the pre-migration rows that came in via
+  // legacy_sqlite restore kept their old bigserial ids as strings
+  // ("9943", "9942", …). A bare lexical `b.id < oldest.id` is meaningless
+  // across that mixed alphabet — e.g. `"2241..." < "9943" < "ebec..."` —
+  // and chooses an "oldest" that has nothing to do with chronology, then
+  // hands that anchor to the daemon's `?before=` pagination which
+  // dutifully fetches rows older than the wrong row.
   let oldest: BlockRow | null = null;
   for (const b of blocks) {
-    if (oldest === null || b.id < oldest.id) oldest = b;
+    if (
+      oldest === null ||
+      b.ts < oldest.ts ||
+      (b.ts === oldest.ts && b.id < oldest.id)
+    )
+      oldest = b;
   }
   return oldest?.blockId ?? null;
 }
