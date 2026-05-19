@@ -131,6 +131,18 @@ vi.mock("@rocicorp/zero", () => {
         client: Promise.resolve({ type: "success" }),
         server: Promise.resolve({ type: "success" }),
       })),
+      installApp: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      uninstallApp: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      reloadApp: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
     };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
@@ -1126,5 +1138,62 @@ describe("Phase 4.6: schedule mutator dispatch", () => {
     ).not.toThrow();
     expect(() => zeroSync.updateSchedule({ name: "x" })).not.toThrow();
     expect(() => zeroSync.deleteSchedule({ name: "x" })).not.toThrow();
+  });
+});
+
+describe("Phase 4.7: app mutator dispatch", () => {
+  async function bootedZero() {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  it("installApp forwards id + folderPath + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.installApp({
+      id: "my-app",
+      folderPath: "/Users/x/.friday/apps/my-app",
+    });
+    expect(z.mutate.installApp).toHaveBeenCalledTimes(1);
+    const args = z.mutate.installApp.mock.calls[0][0] as {
+      id: string;
+      folderPath: string;
+      ts: number;
+    };
+    expect(args.id).toBe("my-app");
+    expect(args.folderPath).toBe("/Users/x/.friday/apps/my-app");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("uninstallApp forwards id + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.uninstallApp({ id: "to-uninstall" });
+    const args = z.mutate.uninstallApp.mock.calls[0][0] as {
+      id: string;
+      ts: number;
+    };
+    expect(args.id).toBe("to-uninstall");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("reloadApp forwards id + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.reloadApp({ id: "to-reload" });
+    const args = z.mutate.reloadApp.mock.calls[0][0] as {
+      id: string;
+      ts: number;
+    };
+    expect(args.id).toBe("to-reload");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("all app mutators are silent when Zero hasn't initialized", async () => {
+    const { zeroSync } = await importStore();
+    expect(() =>
+      zeroSync.installApp({ id: "x", folderPath: "/x" }),
+    ).not.toThrow();
+    expect(() => zeroSync.uninstallApp({ id: "x" })).not.toThrow();
+    expect(() => zeroSync.reloadApp({ id: "x" })).not.toThrow();
   });
 });

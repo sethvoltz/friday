@@ -435,7 +435,17 @@ class ZeroSyncStore {
 
   #bindApps(): void {
     if (!this.#zero) return;
-    const query = this.#zero.query.apps;
+    // Phase 4.7: filter `pending_install` server-side. The
+    // `installApp` mutator INSERTs a stub row with placeholder
+    // name/version/manifest that the daemon overwrites within
+    // milliseconds. Filtering keeps the placeholder out of the
+    // settings page's apps list until the daemon flips status
+    // to 'installed'.
+    const query = this.#zero.query.apps.where(
+      "status",
+      "!=",
+      "pending_install",
+    );
     const preload = this.#zero.preload(query);
     const view = this.#zero.materialize(query);
     const update = (data: readonly unknown[]): void => {
@@ -818,6 +828,38 @@ class ZeroSyncStore {
   }): import("@rocicorp/zero").MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero.mutate.deleteSchedule({ ...args, ts: Date.now() });
+  }
+
+  /**
+   * Phase 4.7: app mutators. Dashboard inserts pending-install
+   * stub / sets pending status; daemon's LISTEN handler dispatches
+   * to the existing `installApp` / `uninstallApp` / `reloadApp`
+   * functions in `services/daemon/src/apps/installer.ts`.
+   *
+   * `installApp` is asymmetric — the daemon owns the manifest (it
+   * lives on the daemon's filesystem). The mutator INSERTs a stub
+   * row that the daemon overwrites within milliseconds. The
+   * dashboard's apps reactive query filters status='pending_install'
+   * so the placeholder is never user-visible.
+   */
+  installApp(args: {
+    id: string;
+    folderPath: string;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.installApp({ ...args, ts: Date.now() });
+  }
+  uninstallApp(args: {
+    id: string;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.uninstallApp({ ...args, ts: Date.now() });
+  }
+  reloadApp(args: {
+    id: string;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.reloadApp({ ...args, ts: Date.now() });
   }
 
   destroy(): void {

@@ -43,6 +43,13 @@
       "when": 1779174193349,
       "tag": "0005_schedule_notify_trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1779176556005,
+      "tag": "0006_app_notify_trigger",
+      "breakpoints": true
     }
   ]
 }

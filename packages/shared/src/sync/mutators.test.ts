@@ -25,9 +25,12 @@ import {
   type DeleteMemoryEntryArgs,
   type DeleteScheduleArgs,
   type ForgetDeviceArgs,
+  type InstallAppArgs,
   type LinkTicketExternalArgs,
   type MarkReadArgs,
+  type ReloadAppArgs,
   type ReportClientStatsArgs,
+  type UninstallAppArgs,
   type UpdateMemoryEntryArgs,
   type UpdateScheduleArgs,
   type UpdateSettingsArgs,
@@ -155,6 +158,24 @@ interface MockScheduleUpdateCall {
   status: string;
 }
 
+interface MockAppInsertCall {
+  id: string;
+  name: string;
+  version: string;
+  manifest_version: number;
+  folder_path: string;
+  manifest_json: Record<string, unknown>;
+  status: string;
+  installed_at: number;
+  upgraded_at: number | null;
+  meta_json: Record<string, unknown> | null;
+}
+
+interface MockAppUpdateCall {
+  id: string;
+  status: string;
+}
+
 function makeMockTx(): {
   tx: Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   upsertCalls: MockUpsertCall[];
@@ -170,6 +191,8 @@ function makeMockTx(): {
   memoryUpdates: MockMemoryUpdateCall[];
   scheduleInserts: MockScheduleInsertCall[];
   scheduleUpdates: MockScheduleUpdateCall[];
+  appInserts: MockAppInsertCall[];
+  appUpdates: MockAppUpdateCall[];
 } {
   const upsertCalls: MockUpsertCall[] = [];
   const clientDeviceUpdates: MockClientDeviceUpdateCall[] = [];
@@ -229,6 +252,14 @@ function makeMockTx(): {
   const scheduleUpdate = vi.fn(async (row: MockScheduleUpdateCall) => {
     scheduleUpdates.push(row);
   });
+  const appInserts: MockAppInsertCall[] = [];
+  const appUpdates: MockAppUpdateCall[] = [];
+  const appInsert = vi.fn(async (row: MockAppInsertCall) => {
+    appInserts.push(row);
+  });
+  const appUpdate = vi.fn(async (row: MockAppUpdateCall) => {
+    appUpdates.push(row);
+  });
   // The mutators touch `tx.mutate.<table>.<op>`. Rest of Transaction
   // surface left undefined — we cast to the parameter type only to
   // satisfy TypeScript.
@@ -243,6 +274,7 @@ function makeMockTx(): {
       ticket_external_links: { insert: ticketExternalLinkInsert },
       memory_entries: { insert: memoryInsert, update: memoryUpdate },
       schedules: { insert: scheduleInsert, update: scheduleUpdate },
+      apps: { insert: appInsert, update: appUpdate },
     },
   } as unknown as Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   return {
@@ -260,6 +292,8 @@ function makeMockTx(): {
     memoryUpdates,
     scheduleInserts,
     scheduleUpdates,
+    appInserts,
+    appUpdates,
   };
 }
 
@@ -1073,5 +1107,114 @@ describe("deleteSchedule", () => {
     expect("run_at" in u).toBe(false);
     expect("task_prompt" in u).toBe(false);
     expect("paused" in u).toBe(false);
+  });
+});
+
+describe("installApp", () => {
+  it("INSERTs apps stub at status='pending_install' with placeholder name/version/manifest", async () => {
+    const mutators = createMutators();
+    const { tx, appInserts } = makeMockTx();
+    const args: InstallAppArgs = {
+      id: "my-app",
+      folderPath: "/Users/x/.friday/apps/my-app",
+      ts: 1_700_000_000_000,
+    };
+    await mutators.installApp(tx, args);
+    expect(appInserts).toEqual([
+      {
+        id: "my-app",
+        name: "",
+        version: "0.0.0",
+        manifest_version: 0,
+        folder_path: "/Users/x/.friday/apps/my-app",
+        manifest_json: {},
+        status: "pending_install",
+        installed_at: 1_700_000_000_000,
+        upgraded_at: null,
+        meta_json: null,
+      },
+    ]);
+  });
+
+  it("status is always 'pending_install' on insert (daemon flips to 'installed' after manifest read)", async () => {
+    const mutators = createMutators();
+    const { tx, appInserts } = makeMockTx();
+    await mutators.installApp(tx, {
+      id: "x",
+      folderPath: "/x",
+      ts: 1,
+    });
+    expect(appInserts[0]!.status).toBe("pending_install");
+  });
+
+  it("stub name/version/manifest never user-visible — dashboard query filters pending_install", async () => {
+    // The placeholder values are present in the row briefly. The
+    // dashboard's `#bindApps` query filters status='pending_install'
+    // so they're never rendered. This test pins the placeholder
+    // shape so a future refactor doesn't accidentally show
+    // garbage data through.
+    const mutators = createMutators();
+    const { tx, appInserts } = makeMockTx();
+    await mutators.installApp(tx, { id: "x", folderPath: "/x", ts: 1 });
+    expect(appInserts[0]!.name).toBe("");
+    expect(appInserts[0]!.version).toBe("0.0.0");
+    expect(appInserts[0]!.manifest_version).toBe(0);
+    expect(appInserts[0]!.manifest_json).toEqual({});
+  });
+});
+
+describe("uninstallApp", () => {
+  it("UPDATEs to status='uninstall_requested' — daemon does the actual uninstall", async () => {
+    const mutators = createMutators();
+    const { tx, appUpdates } = makeMockTx();
+    await mutators.uninstallApp(tx, {
+      id: "my-app",
+      ts: 5,
+    } as UninstallAppArgs);
+    expect(appUpdates).toEqual([
+      { id: "my-app", status: "uninstall_requested" },
+    ]);
+  });
+
+  it("is idempotent — re-running with same args produces identical writes", async () => {
+    const mutators = createMutators();
+    const { tx, appUpdates } = makeMockTx();
+    const args: UninstallAppArgs = { id: "x", ts: 1 };
+    await mutators.uninstallApp(tx, args);
+    await mutators.uninstallApp(tx, args);
+    expect(appUpdates).toHaveLength(2);
+    expect(appUpdates[0]).toEqual(appUpdates[1]);
+  });
+
+  it("touches only id + status — daemon owns all other field writes", async () => {
+    const mutators = createMutators();
+    const { tx, appUpdates } = makeMockTx();
+    await mutators.uninstallApp(tx, { id: "x", ts: 1 });
+    const u = appUpdates[0] as Record<string, unknown>;
+    expect(Object.keys(u).sort()).toEqual(["id", "status"]);
+  });
+});
+
+describe("reloadApp", () => {
+  it("UPDATEs to status='reload_requested'", async () => {
+    const mutators = createMutators();
+    const { tx, appUpdates } = makeMockTx();
+    await mutators.reloadApp(tx, {
+      id: "my-app",
+      ts: 5,
+    } as ReloadAppArgs);
+    expect(appUpdates).toEqual([
+      { id: "my-app", status: "reload_requested" },
+    ]);
+  });
+
+  it("is idempotent", async () => {
+    const mutators = createMutators();
+    const { tx, appUpdates } = makeMockTx();
+    const args: ReloadAppArgs = { id: "x", ts: 1 };
+    await mutators.reloadApp(tx, args);
+    await mutators.reloadApp(tx, args);
+    expect(appUpdates).toHaveLength(2);
+    expect(appUpdates[0]).toEqual(appUpdates[1]);
   });
 });

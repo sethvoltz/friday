@@ -44,6 +44,7 @@ import {
   runScheduleBootScan,
   startScheduleListener,
 } from "./scheduler/listener.js";
+import { runAppBootScan, startAppListener } from "./apps/listener.js";
 import {
   composeSystemPrompt,
   readPromptStack,
@@ -103,6 +104,15 @@ async function main(): Promise<void> {
   // window opens.
   await runScheduleBootScan();
   const scheduleListener = await startScheduleListener();
+
+  // Phase 4.7: open the long-lived LISTEN connection for
+  // `friday_app_changed`. Boot-recovery scan runs AFTER
+  // `reconcileAppsOnBoot()` (already invoked earlier) — that one
+  // handles disk-vs-DB drift; this one handles the narrower case
+  // of dashboard-mutator-initiated pending requests that didn't
+  // get processed before the daemon went down.
+  await runAppBootScan();
+  const appListener = await startAppListener();
 
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
@@ -190,6 +200,9 @@ async function main(): Promise<void> {
       /* shutdown best-effort; the process is about to exit */
     });
     void scheduleListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void appListener.stop().catch(() => {
       /* shutdown best-effort; the process is about to exit */
     });
     clearHealth();

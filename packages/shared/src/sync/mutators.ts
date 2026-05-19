@@ -323,6 +323,48 @@ export interface DeleteScheduleArgs {
   ts: number;
 }
 
+/* ---------------- Phase 4.7: app mutators ---------------- */
+// Three mutators that drive the daemon's transaction-wrapped
+// installer (see `services/daemon/src/apps/installer.ts`).
+//
+// The dashboard mutator writes only Postgres state with a pending
+// status. A Postgres trigger fires `NOTIFY friday_app_changed`; the
+// daemon's LISTEN handler dispatches to the existing
+// `installApp` / `uninstallApp` / `reloadApp` functions — the
+// installer logic itself is unchanged from the pre-Phase-4 era.
+//
+// `installApp` is the asymmetric one: the daemon owns the manifest
+// (it lives on the daemon's filesystem at
+// `<folder_path>/manifest.json`). The mutator can't synthesize the
+// canonical `name`/`version`/`manifest_json` fields client-side; it
+// INSERTs a stub row at status='pending_install' with placeholder
+// values that the daemon overwrites within milliseconds. The
+// dashboard's reactive apps query filters status='pending_install'
+// out so the placeholder is never user-visible (see
+// `#bindApps` in zero.svelte.ts).
+//
+// `uninstallApp` and `reloadApp` are conventional status flips —
+// the row already exists with canonical fields.
+
+export interface InstallAppArgs {
+  /** Folder name under `~/.friday/apps/` (also the PK). */
+  id: string;
+  /** Absolute or `~/.friday/apps/<id>/` path. The daemon reads the
+   *  manifest from `<folderPath>/manifest.json`. */
+  folderPath: string;
+  ts: number;
+}
+
+export interface UninstallAppArgs {
+  id: string;
+  ts: number;
+}
+
+export interface ReloadAppArgs {
+  id: string;
+  ts: number;
+}
+
 export const createMutators = () => ({
   markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
     // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -593,6 +635,63 @@ export const createMutators = () => ({
       name: args.name,
       updated_at: args.ts,
       status: "deleted",
+    });
+  },
+  installApp: async (
+    tx: FridayTx,
+    args: InstallAppArgs,
+  ): Promise<void> => {
+    // INSERT a stub row at status='pending_install'. NOT NULL
+    // columns (`name`, `version`, `manifest_version`,
+    // `manifest_json`) get placeholders that the daemon overwrites
+    // when it reads the manifest from disk. The dashboard's apps
+    // query filters status='pending_install' so the placeholder is
+    // never user-visible — the row appears in the list only after
+    // the daemon flips status='installed'.
+    //
+    // PK collision (re-install of the same id) → caller surfaces
+    // the error. The daemon's installer already handles
+    // "previously archived agents under this app id" via the
+    // re-attach path; users wanting to re-install should
+    // uninstallApp first.
+    await tx.mutate.apps.insert({
+      id: args.id,
+      name: "",
+      version: "0.0.0",
+      manifest_version: 0,
+      folder_path: args.folderPath,
+      manifest_json: {},
+      status: "pending_install",
+      installed_at: args.ts,
+      upgraded_at: null,
+      meta_json: null,
+    });
+  },
+  uninstallApp: async (
+    tx: FridayTx,
+    args: UninstallAppArgs,
+  ): Promise<void> => {
+    // UPDATE status='uninstall_requested'. Daemon LISTEN handler
+    // archives owned agents, drops schedules, optionally moves the
+    // folder, then DELETEs the row. The row vanishing is the
+    // user's "uninstall complete" signal across devices.
+    await tx.mutate.apps.update({
+      id: args.id,
+      status: "uninstall_requested",
+    });
+  },
+  reloadApp: async (
+    tx: FridayTx,
+    args: ReloadAppArgs,
+  ): Promise<void> => {
+    // UPDATE status='reload_requested'. Daemon LISTEN handler
+    // re-reads the manifest from disk, reconciles agent/schedule
+    // rows, and flips status='installed'. No-op when the manifest
+    // hasn't changed (the daemon's reloadApp returns
+    // {changed: false}).
+    await tx.mutate.apps.update({
+      id: args.id,
+      status: "reload_requested",
     });
   },
   linkTicketExternal: async (
