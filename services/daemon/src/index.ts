@@ -37,6 +37,10 @@ import {
   startSettingsListener,
 } from "./settings/listener.js";
 import {
+  runMemoryBootScan,
+  startMemoryListener,
+} from "./memory/listener.js";
+import {
   composeSystemPrompt,
   readPromptStack,
 } from "@friday/shared";
@@ -80,6 +84,12 @@ async function main(): Promise<void> {
   // dashboard mutator rewrite config.json without a daemon restart,
   // so the next worker spawn picks up the new value.
   const settingsListener = await startSettingsListener();
+
+  // Phase 4.5: open the long-lived LISTEN connection for
+  // `friday_memory_file_changed`. Boot-recovery scan first to apply
+  // any pending rows that landed while the daemon was down.
+  await runMemoryBootScan();
+  const memoryListener = await startMemoryListener();
 
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
@@ -161,6 +171,9 @@ async function main(): Promise<void> {
     stopTurnStallWatchdog();
     stopInvariantAuditor();
     void settingsListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void memoryListener.stop().catch(() => {
       /* shutdown best-effort; the process is about to exit */
     });
     clearHealth();

@@ -177,7 +177,9 @@ const memoryEntries = table("memory_entries")
     file_mtime: number(),
     recall_count: number(),
     last_recalled_at: number().optional(),
-    status: string<"ready" | "pending_file" | "deleted">(),
+    status: string<
+      "ready" | "pending_file" | "pending_delete" | "deleted"
+    >(),
   })
   .primaryKey("id");
 

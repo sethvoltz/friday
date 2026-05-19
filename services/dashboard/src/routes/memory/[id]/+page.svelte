@@ -66,6 +66,30 @@
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean);
+      if (zeroOn) {
+        // Phase 4.5: optimistic UPDATE via mutator; daemon
+        // re-writes the markdown file in response to the
+        // status='pending_file' notification.
+        const result = zeroSync.updateMemoryEntry({
+          id: entry.id,
+          title: title.trim(),
+          content,
+          tags,
+        });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`save failed: ${sr.error.message}`, "err");
+          return;
+        }
+        // Local optimistic update so the rendered entry doesn't
+        // briefly flash back to the SSR baseline before the Zero
+        // snapshot lands (the reactive $effect above will reconcile
+        // when the row updates).
+        entry = { ...entry, title: title.trim(), content, tags };
+        editing = false;
+        showToast("saved");
+        return;
+      }
       const r = await fetch(`/api/memory/${encodeURIComponent(entry.id)}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -93,6 +117,19 @@
       danger: true,
     });
     if (!ok) return;
+    if (zeroOn) {
+      // Phase 4.5: soft-delete via mutator (status='pending_delete').
+      // Dashboard list filters this status out so the row vanishes
+      // optimistically; daemon moves the file to trash.
+      const result = zeroSync.deleteMemoryEntry({ id: entry.id });
+      const sr = await result?.server;
+      if (sr && sr.type === "error") {
+        showToast(`delete failed: ${sr.error.message}`, "err");
+        return;
+      }
+      void goto("/memory");
+      return;
+    }
     const r = await fetch(`/api/memory/${encodeURIComponent(entry.id)}`, {
       method: "DELETE",
     });

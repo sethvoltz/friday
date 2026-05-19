@@ -222,6 +222,64 @@ export function nextTicketIdFrom(
   return `FRI-${max + 1}`;
 }
 
+/* ---------------- Phase 4.5: memory mutators ---------------- */
+// Three side-effect-bearing mutators. The dashboard's mutator writes
+// only the Postgres row (status='pending_file' or 'pending_delete');
+// the daemon's LISTEN handler (services/daemon/src/memory/listener.ts)
+// picks up the row, writes or moves the markdown file under
+// `~/.friday/memory/entries/`, and flips status to 'ready' or
+// 'deleted'. Boot-recovery scan applies the same predicate to any
+// pending rows that landed while the daemon was down (plan §5).
+//
+// MCP `memory_save` keeps the legacy synchronous path (writes file +
+// inserts row with status='ready' in one step). Both paths must
+// coexist because workers can't wait for a Postgres notification
+// round-trip to complete their save.
+//
+// `createMemoryEntry` requires a pre-computed `id`: derive it from
+// the title via `slugifyMemoryId(title)`. Same client/server
+// determinism contract as `nextTicketIdFrom`: a multi-device race
+// surfaces as a PK conflict the framework reports.
+
+export interface CreateMemoryEntryArgs {
+  /** Pre-computed by `slugifyMemoryId(title)`. */
+  id: string;
+  title: string;
+  content: string;
+  tags: string[];
+  createdBy: string;
+  ts: number;
+}
+
+export interface UpdateMemoryEntryArgs {
+  id: string;
+  title?: string;
+  content?: string;
+  tags?: string[];
+  ts: number;
+}
+
+export interface DeleteMemoryEntryArgs {
+  id: string;
+  ts: number;
+}
+
+/**
+ * Derive a memory-entry id from a title. Mirrors the daemon-side
+ * `slugifyMemoryId` (which used to live in services/daemon/src/api/
+ * server.ts) so the dashboard can compute the id locally without a
+ * round-trip. Truncated to 64 chars (the column constraint).
+ */
+export function slugifyMemoryId(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
 export const createMutators = () => ({
   markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
     // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -350,6 +408,74 @@ export const createMutators = () => ({
       parent_id: args.parentId,
       child_id: args.childId,
       kind: args.kind,
+    });
+  },
+  createMemoryEntry: async (
+    tx: FridayTx,
+    args: CreateMemoryEntryArgs,
+  ): Promise<void> => {
+    // INSERT with status='pending_file' — the daemon's LISTEN
+    // handler picks up the NOTIFY (fired by the trigger from
+    // migration 0004) and writes the markdown file, then flips
+    // status to 'ready'. PK conflict (e.g. two devices using the
+    // same slug) is surfaced to the caller.
+    //
+    // `file_mtime` is mandatory in the schema but we don't know it
+    // yet — the daemon writes the file and stamps mtime then.
+    // Provide `ts` as a placeholder so the column has SOMETHING
+    // until the daemon flips it.
+    await tx.mutate.memory_entries.insert({
+      id: args.id,
+      title: args.title,
+      content: args.content,
+      tags_json: args.tags,
+      created_by: args.createdBy,
+      created_at: args.ts,
+      updated_at: args.ts,
+      file_mtime: args.ts,
+      recall_count: 0,
+      last_recalled_at: null,
+      status: "pending_file",
+    });
+  },
+  updateMemoryEntry: async (
+    tx: FridayTx,
+    args: UpdateMemoryEntryArgs,
+  ): Promise<void> => {
+    // UPDATE with status='pending_file' + advanced updated_at.
+    // Omitted fields preserved (Zero's `update`). Daemon LISTEN
+    // handler rewrites the file and flips back to 'ready'.
+    const patch: {
+      id: string;
+      title?: string;
+      content?: string;
+      tags_json?: string[];
+      updated_at: number;
+      status: "pending_file";
+    } = {
+      id: args.id,
+      updated_at: args.ts,
+      status: "pending_file",
+    };
+    if (args.title !== undefined) patch.title = args.title;
+    if (args.content !== undefined) patch.content = args.content;
+    if (args.tags !== undefined) patch.tags_json = args.tags;
+    await tx.mutate.memory_entries.update(patch);
+  },
+  deleteMemoryEntry: async (
+    tx: FridayTx,
+    args: DeleteMemoryEntryArgs,
+  ): Promise<void> => {
+    // Soft-delete: set status='pending_delete' + advance
+    // updated_at. The dashboard's reactive query filters status
+    // NOT IN ('pending_delete','deleted') so the row disappears
+    // from the list immediately (optimistic). Daemon LISTEN
+    // handler moves the file to ~/.friday/memory/trash/ and flips
+    // status to 'deleted' (tombstone).
+    await tx.mutate.memory_entries.update({
+      id: args.id,
+      updated_at: args.ts,
+      status: "pending_delete",
     });
   },
   linkTicketExternal: async (

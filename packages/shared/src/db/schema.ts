@@ -600,7 +600,10 @@ export const LISTEN_CHANNELS = {
   scheduleChanged: "friday_schedule_changed",
   /** Apps status changes (pending_install, uninstall_requested, reload_requested). */
   appChanged: "friday_app_changed",
-  /** Memory entry status='pending_file' or 'pending_delete'. */
+  /** Memory entry status='pending_file' or 'pending_delete'. Daemon
+   *  writes or moves the markdown file under
+   *  `~/.friday/memory/entries/`, then flips the row to 'ready' or
+   *  'deleted' respectively. */
   memoryFileChanged: "friday_memory_file_changed",
   /** Settings table UPDATE — daemon re-syncs `~/.friday/config.json`. */
   settingsChanged: "friday_settings_changed",

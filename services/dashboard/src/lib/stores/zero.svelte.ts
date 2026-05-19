@@ -87,7 +87,7 @@ export interface ZeroMemoryEntryRow {
   file_mtime: number;
   recall_count: number;
   last_recalled_at: number | null;
-  status: "ready" | "pending_file" | "deleted";
+  status: "ready" | "pending_file" | "pending_delete" | "deleted";
 }
 
 /** Row shape mirrors the `read_cursors` Zero table definition (Phase 4.1).
@@ -404,14 +404,14 @@ class ZeroSyncStore {
 
   #bindMemory(): void {
     if (!this.#zero) return;
-    // Filter out tombstoned `deleted` rows server-side so the
-    // dashboard list isn't pre-filled with hidden entries the user
-    // already forgot. Recovery / undelete is Phase 4 work.
-    const query = this.#zero.query.memory_entries.where(
-      "status",
-      "!=",
-      "deleted",
-    );
+    // Phase 4.5: filter both `deleted` (tombstoned) and
+    // `pending_delete` (soft-delete just landed; daemon is moving
+    // the file to trash). The dashboard list disappears the entry
+    // immediately after the delete mutator fires — the daemon's
+    // subsequent flip to `deleted` is invisible to the read path.
+    const query = this.#zero.query.memory_entries
+      .where("status", "!=", "deleted")
+      .where("status", "!=", "pending_delete");
     const preload = this.#zero.preload(query);
     const view = this.#zero.materialize(query);
     const update = (data: readonly unknown[]): void => {
@@ -743,6 +743,42 @@ class ZeroSyncStore {
   }): import("@rocicorp/zero").MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero.mutate.linkTicketExternal({ ...args, ts: Date.now() });
+  }
+
+  /**
+   * Phase 4.5: memory mutators. Dashboard writes only the Postgres
+   * row (status='pending_file' or 'pending_delete'); the daemon's
+   * LISTEN handler picks it up, writes/moves the markdown file
+   * under `~/.friday/memory/entries/`, and flips status to
+   * 'ready' or 'deleted'.
+   *
+   * `createMemoryEntry` requires a pre-computed `id` from
+   * `slugifyMemoryId(title)` (exported from `@friday/shared/sync`).
+   */
+  createMemoryEntry(args: {
+    id: string;
+    title: string;
+    content: string;
+    tags: string[];
+    createdBy: string;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.createMemoryEntry({ ...args, ts: Date.now() });
+  }
+  updateMemoryEntry(args: {
+    id: string;
+    title?: string;
+    content?: string;
+    tags?: string[];
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.updateMemoryEntry({ ...args, ts: Date.now() });
+  }
+  deleteMemoryEntry(args: {
+    id: string;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.deleteMemoryEntry({ ...args, ts: Date.now() });
   }
 
   destroy(): void {

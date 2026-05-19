@@ -16,13 +16,17 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createMutators,
   nextTicketIdFrom,
+  slugifyMemoryId,
   type AddTicketCommentArgs,
   type AddTicketRelationArgs,
+  type CreateMemoryEntryArgs,
   type CreateTicketArgs,
+  type DeleteMemoryEntryArgs,
   type ForgetDeviceArgs,
   type LinkTicketExternalArgs,
   type MarkReadArgs,
   type ReportClientStatsArgs,
+  type UpdateMemoryEntryArgs,
   type UpdateSettingsArgs,
   type UpdateTicketArgs,
 } from "./mutators.js";
@@ -99,6 +103,29 @@ interface MockTicketExternalLinkInsertCall {
   linked_at: number;
 }
 
+interface MockMemoryInsertCall {
+  id: string;
+  title: string;
+  content: string;
+  tags_json: string[];
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  file_mtime: number;
+  recall_count: number;
+  last_recalled_at: number | null;
+  status: string;
+}
+
+interface MockMemoryUpdateCall {
+  id: string;
+  title?: string;
+  content?: string;
+  tags_json?: string[];
+  updated_at: number;
+  status: string;
+}
+
 function makeMockTx(): {
   tx: Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   upsertCalls: MockUpsertCall[];
@@ -110,6 +137,8 @@ function makeMockTx(): {
   ticketCommentInserts: MockTicketCommentInsertCall[];
   ticketRelationInserts: MockTicketRelationInsertCall[];
   ticketExternalLinkInserts: MockTicketExternalLinkInsertCall[];
+  memoryInserts: MockMemoryInsertCall[];
+  memoryUpdates: MockMemoryUpdateCall[];
 } {
   const upsertCalls: MockUpsertCall[] = [];
   const clientDeviceUpdates: MockClientDeviceUpdateCall[] = [];
@@ -153,6 +182,14 @@ function makeMockTx(): {
       ticketExternalLinkInserts.push(row);
     },
   );
+  const memoryInserts: MockMemoryInsertCall[] = [];
+  const memoryUpdates: MockMemoryUpdateCall[] = [];
+  const memoryInsert = vi.fn(async (row: MockMemoryInsertCall) => {
+    memoryInserts.push(row);
+  });
+  const memoryUpdate = vi.fn(async (row: MockMemoryUpdateCall) => {
+    memoryUpdates.push(row);
+  });
   // The mutators touch `tx.mutate.<table>.<op>`. Rest of Transaction
   // surface left undefined — we cast to the parameter type only to
   // satisfy TypeScript.
@@ -165,6 +202,7 @@ function makeMockTx(): {
       ticket_comments: { insert: ticketCommentInsert },
       ticket_relations: { insert: ticketRelationInsert },
       ticket_external_links: { insert: ticketExternalLinkInsert },
+      memory_entries: { insert: memoryInsert, update: memoryUpdate },
     },
   } as unknown as Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   return {
@@ -178,6 +216,8 @@ function makeMockTx(): {
     ticketCommentInserts,
     ticketRelationInserts,
     ticketExternalLinkInserts,
+    memoryInserts,
+    memoryUpdates,
   };
 }
 
@@ -686,5 +726,162 @@ describe("linkTicketExternal", () => {
     expect(ticketExternalLinkInserts[0]!.meta_json).toEqual({
       repo: "anthropic/friday",
     });
+  });
+});
+
+describe("slugifyMemoryId", () => {
+  it("converts a title to lowercase-dashed slug", () => {
+    expect(slugifyMemoryId("My Important Note")).toBe("my-important-note");
+  });
+
+  it("strips non-word characters", () => {
+    expect(slugifyMemoryId("Hello, World! (2024)")).toBe("hello-world-2024");
+  });
+
+  it("collapses repeated dashes and trims edge dashes", () => {
+    expect(slugifyMemoryId("  --hello---world--  ")).toBe("hello-world");
+  });
+
+  it("truncates to 64 chars", () => {
+    const longTitle = "a".repeat(200);
+    expect(slugifyMemoryId(longTitle).length).toBe(64);
+  });
+});
+
+describe("createMemoryEntry", () => {
+  it("INSERTs memory_entries at status='pending_file'", async () => {
+    const mutators = createMutators();
+    const { tx, memoryInserts } = makeMockTx();
+    const args: CreateMemoryEntryArgs = {
+      id: "my-note",
+      title: "My Note",
+      content: "Body text.",
+      tags: ["alpha", "beta"],
+      createdBy: "user",
+      ts: 1_700_000_000_000,
+    };
+    await mutators.createMemoryEntry(tx, args);
+    expect(memoryInserts).toEqual([
+      {
+        id: "my-note",
+        title: "My Note",
+        content: "Body text.",
+        tags_json: ["alpha", "beta"],
+        created_by: "user",
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_000_000_000,
+        file_mtime: 1_700_000_000_000,
+        recall_count: 0,
+        last_recalled_at: null,
+        status: "pending_file",
+      },
+    ]);
+  });
+
+  it("created_at = updated_at = file_mtime = ts on initial INSERT", async () => {
+    const mutators = createMutators();
+    const { tx, memoryInserts } = makeMockTx();
+    await mutators.createMemoryEntry(tx, {
+      id: "x",
+      title: "X",
+      content: "",
+      tags: [],
+      createdBy: "user",
+      ts: 999,
+    });
+    expect(memoryInserts[0]!.created_at).toBe(999);
+    expect(memoryInserts[0]!.updated_at).toBe(999);
+    expect(memoryInserts[0]!.file_mtime).toBe(999);
+  });
+
+  it("status is always 'pending_file' on insert (never 'ready' — that's the daemon's job)", async () => {
+    const mutators = createMutators();
+    const { tx, memoryInserts } = makeMockTx();
+    await mutators.createMemoryEntry(tx, {
+      id: "y",
+      title: "Y",
+      content: "",
+      tags: [],
+      createdBy: "u",
+      ts: 1,
+    });
+    expect(memoryInserts[0]!.status).toBe("pending_file");
+  });
+});
+
+describe("updateMemoryEntry", () => {
+  it("UPDATEs only the fields that were provided, sets status='pending_file'", async () => {
+    const mutators = createMutators();
+    const { tx, memoryUpdates } = makeMockTx();
+    await mutators.updateMemoryEntry(tx, {
+      id: "my-note",
+      title: "New Title",
+      ts: 5,
+    } as UpdateMemoryEntryArgs);
+    expect(memoryUpdates).toHaveLength(1);
+    const u = memoryUpdates[0]!;
+    expect(u).toMatchObject({
+      id: "my-note",
+      title: "New Title",
+      updated_at: 5,
+      status: "pending_file",
+    });
+    expect("content" in u).toBe(false);
+    expect("tags_json" in u).toBe(false);
+  });
+
+  it("always advances updated_at AND sets status='pending_file'", async () => {
+    const mutators = createMutators();
+    const { tx, memoryUpdates } = makeMockTx();
+    await mutators.updateMemoryEntry(tx, { id: "x", ts: 42 });
+    expect(memoryUpdates[0]!.updated_at).toBe(42);
+    expect(memoryUpdates[0]!.status).toBe("pending_file");
+  });
+
+  it("supports updating content + tags together", async () => {
+    const mutators = createMutators();
+    const { tx, memoryUpdates } = makeMockTx();
+    await mutators.updateMemoryEntry(tx, {
+      id: "x",
+      content: "new body",
+      tags: ["a", "b"],
+      ts: 1,
+    });
+    expect(memoryUpdates[0]!.content).toBe("new body");
+    expect(memoryUpdates[0]!.tags_json).toEqual(["a", "b"]);
+  });
+});
+
+describe("deleteMemoryEntry", () => {
+  it("UPDATEs to status='pending_delete' (soft-delete; daemon trashes the file)", async () => {
+    const mutators = createMutators();
+    const { tx, memoryUpdates } = makeMockTx();
+    await mutators.deleteMemoryEntry(tx, {
+      id: "to-delete",
+      ts: 7,
+    } as DeleteMemoryEntryArgs);
+    expect(memoryUpdates).toEqual([
+      { id: "to-delete", updated_at: 7, status: "pending_delete" },
+    ]);
+  });
+
+  it("is idempotent — re-running with same args produces identical writes", async () => {
+    const mutators = createMutators();
+    const { tx, memoryUpdates } = makeMockTx();
+    const args: DeleteMemoryEntryArgs = { id: "x", ts: 1 };
+    await mutators.deleteMemoryEntry(tx, args);
+    await mutators.deleteMemoryEntry(tx, args);
+    expect(memoryUpdates).toHaveLength(2);
+    expect(memoryUpdates[0]).toEqual(memoryUpdates[1]);
+  });
+
+  it("does NOT touch tags / content / title (only status + updated_at)", async () => {
+    const mutators = createMutators();
+    const { tx, memoryUpdates } = makeMockTx();
+    await mutators.deleteMemoryEntry(tx, { id: "x", ts: 1 });
+    const u = memoryUpdates[0] as Record<string, unknown>;
+    expect("content" in u).toBe(false);
+    expect("title" in u).toBe(false);
+    expect("tags_json" in u).toBe(false);
   });
 });

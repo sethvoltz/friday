@@ -7,6 +7,7 @@
     zeroSync,
     type ZeroMemoryEntryRow,
   } from "$lib/stores/zero.svelte";
+  import { slugifyMemoryId } from "@friday/shared/sync";
 
   let { data }: { data: PageData } = $props();
 
@@ -164,6 +165,33 @@
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean);
+      if (zeroOn) {
+        // Phase 4.5: client computes the slug locally, mutator
+        // INSERTs the row at status='pending_file'; the daemon
+        // writes the markdown file and flips to 'ready'. Race-loss
+        // (two devices with the same slug) → PK conflict reported
+        // via result.server.
+        const id = slugifyMemoryId(newTitle.trim());
+        const result = zeroSync.createMemoryEntry({
+          id,
+          title: newTitle.trim(),
+          content: newContent,
+          tags,
+          createdBy: "user",
+        });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`create failed: ${sr.error.message}`, "err");
+          return;
+        }
+        newTitle = "";
+        newContent = "";
+        newTags = "";
+        newOpen = false;
+        showToast(`created ${id}`);
+        void goto(`/memory/${encodeURIComponent(id)}`);
+        return;
+      }
       const r = await fetch("/api/memory", {
         method: "POST",
         headers: { "content-type": "application/json" },

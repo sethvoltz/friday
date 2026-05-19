@@ -29,6 +29,13 @@
       "when": 1779169297031,
       "tag": "0003_overrated_arclight",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1779171847099,
+      "tag": "0004_memory_notify_trigger",
+      "breakpoints": true
     }
   ]
 }

@@ -107,6 +107,18 @@ vi.mock("@rocicorp/zero", () => {
         client: Promise.resolve({ type: "success" }),
         server: Promise.resolve({ type: "success" }),
       })),
+      createMemoryEntry: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      updateMemoryEntry: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      deleteMemoryEntry: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
     };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
@@ -955,5 +967,81 @@ describe("Phase 4.4: ticket mutator dispatch", () => {
         externalId: "LIN-1",
       }),
     ).not.toThrow();
+  });
+});
+
+describe("Phase 4.5: memory mutator dispatch", () => {
+  async function bootedZero() {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  it("createMemoryEntry forwards args + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.createMemoryEntry({
+      id: "my-note",
+      title: "My Note",
+      content: "Body",
+      tags: ["a", "b"],
+      createdBy: "user",
+    });
+    expect(z.mutate.createMemoryEntry).toHaveBeenCalledTimes(1);
+    const args = z.mutate.createMemoryEntry.mock.calls[0][0] as {
+      id: string;
+      title: string;
+      content: string;
+      tags: string[];
+      createdBy: string;
+      ts: number;
+    };
+    expect(args).toMatchObject({
+      id: "my-note",
+      title: "My Note",
+      content: "Body",
+      tags: ["a", "b"],
+      createdBy: "user",
+    });
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("updateMemoryEntry forwards partial patch + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.updateMemoryEntry({ id: "x", title: "new" });
+    const args = z.mutate.updateMemoryEntry.mock.calls[0][0] as {
+      id: string;
+      title?: string;
+      ts: number;
+    };
+    expect(args.id).toBe("x");
+    expect(args.title).toBe("new");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("deleteMemoryEntry forwards id + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.deleteMemoryEntry({ id: "to-delete" });
+    const args = z.mutate.deleteMemoryEntry.mock.calls[0][0] as {
+      id: string;
+      ts: number;
+    };
+    expect(args.id).toBe("to-delete");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("all memory mutators are silent when Zero hasn't initialized", async () => {
+    const { zeroSync } = await importStore();
+    expect(() =>
+      zeroSync.createMemoryEntry({
+        id: "x",
+        title: "X",
+        content: "",
+        tags: [],
+        createdBy: "u",
+      }),
+    ).not.toThrow();
+    expect(() => zeroSync.updateMemoryEntry({ id: "x" })).not.toThrow();
+    expect(() => zeroSync.deleteMemoryEntry({ id: "x" })).not.toThrow();
   });
 });
