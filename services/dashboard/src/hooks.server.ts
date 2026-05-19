@@ -40,7 +40,7 @@ export const handle: Handle = async ({ event, resolve }) => {
       event.request.method === "POST";
     const ip = isSignIn ? clientIp(event) : null;
     if (isSignIn && ip) {
-      const r = consumeRateLimit({
+      const r = await consumeRateLimit({
         key: `auth:${ip}`,
         windowMs: SIGN_IN_WINDOW_MS,
         max: SIGN_IN_MAX,
@@ -68,7 +68,7 @@ export const handle: Handle = async ({ event, resolve }) => {
     // legitimate login. The pre-consume above still throttles bursts of
     // bad attempts even before they reach BetterAuth.
     if (isSignIn && ip && response.status >= 200 && response.status < 300) {
-      resetRateLimit(`auth:${ip}`);
+      await resetRateLimit(`auth:${ip}`);
     }
     return response;
   }

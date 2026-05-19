@@ -1,6 +1,6 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { ensureFridayEnv, getDb, loadConfig } from "@friday/shared";
+import { ensureFridayEnv, getDb, loadConfig, schema } from "@friday/shared";
 
 ensureFridayEnv();
 const cfg = loadConfig();
@@ -47,7 +47,11 @@ for (const [source, url] of PUBLIC_BASE_URL_SOURCES) {
 const baseURL = process.env.BETTER_AUTH_URL ?? cfg.publicUrl ?? localUrl;
 
 export const auth = betterAuth({
-  database: drizzleAdapter(db, { provider: "pg" }),
+  // Our schema exports keys with plural names (`users`, `sessions`,
+  // `accounts`, `verifications`) while the physical pg tables use
+  // BetterAuth's expected singular names. `usePlural: true` aligns the
+  // adapter's lookups with our schema's exported symbol names.
+  database: drizzleAdapter(db, { provider: "pg", schema, usePlural: true }),
   baseURL,
   trustedOrigins,
   emailAndPassword: {

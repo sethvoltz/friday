@@ -106,7 +106,11 @@ export const setupCommand = defineCommand({
     const cfg = loadConfig();
     const db = getDb();
     const auth = betterAuth({
-      database: drizzleAdapter(db, { provider: "pg" }),
+      // Our schema exports keys with plural names (`users`, `sessions`,
+      // `accounts`, `verifications`) while the physical pg tables use
+      // BetterAuth's expected singular names (`user`, `session`, etc.).
+      // `usePlural: true` tells the adapter to look up the plural symbol.
+      database: drizzleAdapter(db, { provider: "pg", schema, usePlural: true }),
       baseURL:
         process.env.BETTER_AUTH_URL ??
         `http://localhost:${cfg.dashboardPort}`,
