@@ -91,9 +91,13 @@ let onlineListener: (() => void) | null = null;
  *  closure of each fetch's reader loop so a stale chunk arriving on an
  *  abandoned connection can't apply events to the current one. */
 let connectionId = 0;
-/** Last `id:` field we saw on the wire. Sent as `Last-Event-ID` on the
- *  next reconnect so the daemon resumes from `replaySince(lastEventId)`. */
-let lastEventId: string | null = null;
+// Phase 5: the legacy `Last-Event-ID` cursor send is retired (plan
+// §211). The per-agent SSE channel (`?agent=<name>`) hits the
+// daemon's per-turn replay buffer, which scopes the replay to the
+// in-flight turn automatically — the cursor is no longer
+// informative on that path. The chat-store's `lastSeqByAgent`
+// continues to dedupe events at apply-time across replay/live
+// boundaries, so re-applying a replayed delta is a no-op.
 /** localStorage key for the last daemon boot_id we connected to. Hydrated
  *  at module load so a fresh page load can detect a daemon restart on the
  *  very first `connection_established` event — without this, the
@@ -121,7 +125,10 @@ async function connect(): Promise<void> {
     const headers: HeadersInit = {
       accept: "text/event-stream",
     };
-    if (lastEventId !== null) headers["last-event-id"] = lastEventId;
+    // Phase 5: no `last-event-id` header — daemon's per-agent path
+    // ignores it (replays the current turn buffer instead), and the
+    // legacy path's 500-event back-walk is a fine default for the
+    // no-`?agent=` callers.
     // Phase 5: per-agent SSE channel. When a focused agent is set,
     // pass `?agent=<name>` so the daemon filters to that agent's
     // turn-lifecycle events. The connection re-opens whenever
@@ -274,11 +281,9 @@ export function acceptConnectionEstablished(
 
 function handleEvent(evt: ParsedEvent, myId: number): void {
   if (myId !== connectionId) return;
-  // Update Last-Event-ID cursor (used on the next reconnect's headers).
-  // `connection_established` deliberately skips `id:` so the cursor only
-  // ever advances to real bus seqs.
-  if (evt.id !== undefined && evt.id !== "") lastEventId = evt.id;
-
+  // Phase 5: `last-event-id` cursor tracking retired (see comment
+  // at the top of this module). The chat store's per-agent seq
+  // dedup handles re-applied events on reconnect.
   const type = evt.event ?? "";
   if (!HANDLED_TYPES.has(type)) return;
   let parsed: WireEvent;
@@ -367,8 +372,9 @@ export function reopenForAgent(): void {
   if (stopped) return;
   // Abort the current connection; the existing reconnect ladder will
   // open a new one immediately via scheduleReconnect, picking up the
-  // new `chat.focusedAgent`.
-  lastEventId = null;
+  // new `chat.focusedAgent`. Phase 5: no cursor to clear here — the
+  // daemon's per-agent path replays the current-turn buffer from
+  // scratch on every connect.
   abortController?.abort();
 }
 
