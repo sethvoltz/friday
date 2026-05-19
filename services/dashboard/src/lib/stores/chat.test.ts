@@ -3508,3 +3508,527 @@ describe("FRI-84: tool-call input/output rendering", () => {
     expect(reloaded[0]!.toolName).toBe("Bash");
   });
 });
+
+/* ====================================================================
+ * Phase 3.7: blocks slice via Zero
+ *
+ * The chat store's `applyZeroBlocks(rows, agent)` is the merge boundary
+ * between the per-agent Zero reactive query (canonical history) and the
+ * SSE-driven in-flight overlay. These tests pin the merge invariants
+ * that the multi-device convergence smoke depends on:
+ *
+ *   (1) Initial snapshot: empty messages → parsed bubbles + queue-synth
+ *       preserved.
+ *   (2) Reactive update: a new Zero row arriving on the receiver side
+ *       (no SSE on that device) produces a new bubble.
+ *   (3) Convergence: the same blockId arriving via SSE first and Zero
+ *       second does NOT duplicate the bubble.
+ *   (4) In-flight preservation: an SSE-only streaming bubble (no Zero
+ *       row yet, status=streaming) survives a Zero snapshot that
+ *       doesn't include that block.
+ *   (5) Streaming-row exclusion: `applyZeroBlocks` never receives
+ *       `status='streaming'` rows because the binder filters them
+ *       server-side. We assert the filter shape via `bindBlocksFor`.
+ *   (6) Focus-switch race: a snapshot for agent A landing after the
+ *       user switched to agent B is a no-op.
+ *   (7) Superseded no-response: a `nr_<turnId>` safety-net bubble is
+ *       dropped when a real assistant bubble for the same turn lands
+ *       in a later Zero update.
+ *   (8) Scroll-back continuity: older REST-loaded bubbles outside the
+ *       Zero window are preserved when a Zero snapshot lands.
+ * ==================================================================== */
+
+describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
+  function makeZeroBlocksRow(
+    overrides: Partial<{
+      id: number;
+      block_id: string;
+      turn_id: string;
+      agent_name: string;
+      session_id: string;
+      message_id: string | null;
+      block_index: number;
+      role: string;
+      kind: string;
+      source: string | null;
+      content_json: unknown;
+      status: string;
+      streaming: boolean;
+      origin_mutation_id: string | null;
+      ts: number;
+      last_event_seq: number;
+    }>,
+  ): import("./chat.svelte").ZeroBlocksRow {
+    return {
+      id: 1,
+      block_id: "b1",
+      turn_id: "t1",
+      agent_name: "friday",
+      session_id: "s1",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: { text: "hi" },
+      status: "complete",
+      streaming: false,
+      origin_mutation_id: null,
+      ts: 1_000,
+      last_event_seq: 5,
+      ...overrides,
+    };
+  }
+
+  it("(1) initial snapshot replaces messages with parsed bubbles", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    const rows = [
+      makeZeroBlocksRow({
+        id: 1,
+        block_id: "b1",
+        turn_id: "t1",
+        role: "user",
+        kind: "text",
+        content_json: { text: "hello" },
+        ts: 1_000,
+        last_event_seq: 3,
+      }),
+      makeZeroBlocksRow({
+        id: 2,
+        block_id: "b2",
+        turn_id: "t1",
+        role: "assistant",
+        kind: "text",
+        content_json: { text: "hi there" },
+        ts: 1_100,
+        last_event_seq: 5,
+      }),
+    ];
+    chat.applyZeroBlocks(rows, "friday");
+    expect(chat.messages).toHaveLength(2);
+    expect(chat.messages[0]!.role).toBe("user");
+    expect(chat.messages[0]!.text).toBe("hello");
+    expect(chat.messages[1]!.role).toBe("assistant");
+    expect(chat.messages[1]!.text).toBe("hi there");
+    expect(chat.zeroBlocksActive).toBe(true);
+    expect(chat.loadingInitial).toBe(false);
+    expect(chat.oldestBlockId).toBe("b1");
+    expect(chat.lastSeqByAgent.friday).toBe(5);
+  });
+
+  it("(2) reactive update appends a new Zero row as a bubble", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // First snapshot: a single user block.
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({
+          id: 1,
+          block_id: "b1",
+          turn_id: "t1",
+          role: "user",
+          content_json: { text: "first" },
+          ts: 1_000,
+        }),
+      ],
+      "friday",
+    );
+    expect(chat.messages).toHaveLength(2); // user bubble + nr_ safety net
+    // Second snapshot: assistant block landed (receiver-device path,
+    // no SSE on this device).
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({
+          id: 1,
+          block_id: "b1",
+          turn_id: "t1",
+          role: "user",
+          content_json: { text: "first" },
+          ts: 1_000,
+        }),
+        makeZeroBlocksRow({
+          id: 2,
+          block_id: "b2",
+          turn_id: "t1",
+          role: "assistant",
+          content_json: { text: "second" },
+          ts: 1_100,
+        }),
+      ],
+      "friday",
+    );
+    expect(chat.messages.some((m) => m.text === "second")).toBe(true);
+    // The nr_ safety-net bubble should be gone now (real assistant
+    // content landed for the same turn).
+    expect(
+      chat.messages.some(
+        (m) => m.role === "assistant" && m.kind === "no-response",
+      ),
+    ).toBe(false);
+  });
+
+  it("(3) SSE-first then Zero-second does not duplicate the bubble", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Simulate SSE having already produced an assistant bubble with
+    // canonical id `b_<blockId>` (handleBlockComplete writes this form).
+    chat.messages = [
+      {
+        id: "b_b2",
+        role: "assistant",
+        text: "live content",
+        status: "complete",
+        agent: "friday",
+        turnId: "t1",
+        blockId: "b2",
+        ts: 1_100,
+      },
+    ];
+    // Now Zero delivers the canonical row for the same blockId. Same
+    // parsed id (`b_b2`) — merge replaces in place, no duplicate.
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({
+          id: 2,
+          block_id: "b2",
+          turn_id: "t1",
+          role: "assistant",
+          content_json: { text: "live content" },
+          ts: 1_100,
+        }),
+      ],
+      "friday",
+    );
+    const matching = chat.messages.filter((m) => m.id === "b_b2");
+    expect(matching).toHaveLength(1);
+  });
+
+  it("(4) in-flight SSE bubble survives a Zero snapshot that omits it", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Mid-stream SSE state: an in-flight assistant bubble keyed by
+    // turnId (no blockId yet) at status=streaming.
+    chat.messages = [
+      {
+        id: "live-stream-1",
+        role: "assistant",
+        text: "partial...",
+        status: "streaming",
+        agent: "friday",
+        turnId: "t-live",
+        ts: 2_000,
+      },
+    ];
+    // Zero snapshot delivers older history but NOT the streaming bubble
+    // (no row exists yet — the daemon won't write until block_complete).
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({
+          id: 1,
+          block_id: "b1",
+          turn_id: "t-old",
+          role: "user",
+          content_json: { text: "earlier" },
+          ts: 1_000,
+        }),
+      ],
+      "friday",
+    );
+    expect(
+      chat.messages.some(
+        (m) => m.id === "live-stream-1" && m.status === "streaming",
+      ),
+    ).toBe(true);
+  });
+
+  it("(5) focus-switch race: snapshot for stale agent is a no-op", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "builder-xyz";
+    // Pre-existing messages from the new focused agent.
+    chat.messages = [
+      {
+        id: "u_keep",
+        role: "user",
+        text: "for builder-xyz",
+        status: "complete",
+        ts: 5_000,
+      },
+    ];
+    const before = chat.messages.slice();
+    // A late-arriving snapshot for the prior agent.
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({
+          id: 1,
+          block_id: "b1",
+          turn_id: "t1",
+          role: "user",
+          content_json: { text: "for friday (stale)" },
+          ts: 1_000,
+        }),
+      ],
+      "friday",
+    );
+    expect(chat.messages).toEqual(before);
+  });
+
+  it("(6) lastEventSeq seeds the dedup cursor with the snapshot's max", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.lastSeqByAgent.friday = 100; // pre-existing higher cursor
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({ id: 1, block_id: "b1", last_event_seq: 7 }),
+        makeZeroBlocksRow({
+          id: 2,
+          block_id: "b2",
+          last_event_seq: 12,
+          ts: 1_100,
+        }),
+      ],
+      "friday",
+    );
+    // Max(snapshot) = 12, but existing cursor = 100; cursor must NOT
+    // regress (replay dedup invariant).
+    expect(chat.lastSeqByAgent.friday).toBe(100);
+  });
+
+  it("(7) superseded no-response safety-net is dropped", async () => {
+    const { ChatState, noResponseIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Simulate parseBlocks having already synthesized an nr_ bubble
+    // for turn t1 (because at parse time t1 had no assistant content).
+    chat.messages = [
+      {
+        id: "u_t1",
+        role: "user",
+        text: "hi",
+        status: "complete",
+        turnId: "t1",
+        source: "user_chat",
+        ts: 1_000,
+      },
+      {
+        id: noResponseIdForTurn("t1"),
+        role: "assistant",
+        kind: "no-response",
+        noResponseSentinel: false,
+        text: "",
+        status: "complete",
+        agent: "friday",
+        turnId: "t1",
+        ts: 1_001,
+      },
+    ];
+    // Real assistant content finally lands via a fresh Zero snapshot.
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({
+          id: 1,
+          block_id: "u_t1",
+          turn_id: "t1",
+          role: "user",
+          content_json: { text: "hi" },
+          ts: 1_000,
+        }),
+        makeZeroBlocksRow({
+          id: 2,
+          block_id: "b2",
+          turn_id: "t1",
+          role: "assistant",
+          content_json: { text: "real reply" },
+          ts: 1_100,
+        }),
+      ],
+      "friday",
+    );
+    expect(
+      chat.messages.some(
+        (m) => m.kind === "no-response" && m.noResponseSentinel === false,
+      ),
+    ).toBe(false);
+    expect(chat.messages.some((m) => m.text === "real reply")).toBe(true);
+  });
+
+  it("(8) scroll-back bubbles outside the Zero window are preserved", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Pre-existing scroll-back state: an assistant bubble that's older
+    // than what the Zero window will return (the user scrolled up,
+    // loaded REST history). Bubble id is `b_<blockId>` so it matches
+    // parseBlocks's id scheme.
+    chat.messages = [
+      {
+        id: "b_old-1",
+        role: "assistant",
+        text: "ancient history",
+        status: "complete",
+        agent: "friday",
+        turnId: "t-old",
+        blockId: "old-1",
+        ts: 100,
+      },
+    ];
+    // Zero snapshot brings in the recent 50-block window.
+    chat.applyZeroBlocks(
+      [
+        makeZeroBlocksRow({
+          id: 999,
+          block_id: "recent-1",
+          turn_id: "t-new",
+          role: "user",
+          content_json: { text: "recent" },
+          ts: 5_000,
+        }),
+      ],
+      "friday",
+    );
+    expect(chat.messages.some((m) => m.id === "b_old-1")).toBe(true);
+    expect(chat.messages.some((m) => m.text === "recent")).toBe(true);
+  });
+
+  it("(9) empty Zero snapshot preserves queue-synth + sets reachedOldest", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.messages = [
+      {
+        id: "u_queue_q1",
+        role: "user",
+        text: "queued draft",
+        status: "complete",
+        queueId: "q1",
+        ts: 5_000,
+      },
+    ];
+    chat.applyZeroBlocks([], "friday");
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0]!.queueId).toBe("q1");
+    expect(chat.reachedOldest).toBe(true);
+  });
+});
+
+describe("Phase 3.7: zeroBlockRowToBlockRow / dropSupersededNoResponseSafetyNet", () => {
+  it("converts snake_case Zero row to camelCase BlockRow with stringified content_json", async () => {
+    const { zeroBlockRowToBlockRow } = await import("./chat.svelte");
+    const out = zeroBlockRowToBlockRow({
+      id: 7,
+      block_id: "bx",
+      turn_id: "tx",
+      agent_name: "friday",
+      session_id: "sx",
+      message_id: "mx",
+      block_index: 3,
+      role: "assistant",
+      kind: "text",
+      source: "sdk",
+      content_json: { text: "round-trip me" },
+      status: "complete",
+      streaming: false,
+      origin_mutation_id: null,
+      ts: 12_345,
+      last_event_seq: 9,
+    });
+    expect(out.id).toBe(7);
+    expect(out.blockId).toBe("bx");
+    expect(out.turnId).toBe("tx");
+    expect(out.agentName).toBe("friday");
+    expect(out.sessionId).toBe("sx");
+    expect(out.messageId).toBe("mx");
+    expect(out.blockIndex).toBe(3);
+    expect(out.lastEventSeq).toBe(9);
+    expect(typeof out.contentJson).toBe("string");
+    expect(JSON.parse(out.contentJson)).toEqual({ text: "round-trip me" });
+  });
+
+  it("preserves sentinel-driven no-response bubbles (noResponseSentinel=true)", async () => {
+    const { dropSupersededNoResponseSafetyNet } = await import("./chat.svelte");
+    const messages = [
+      {
+        id: "nr_t1",
+        role: "assistant" as const,
+        kind: "no-response" as const,
+        noResponseSentinel: true,
+        text: "",
+        status: "complete" as const,
+        turnId: "t1",
+        ts: 1_000,
+      },
+      // Real assistant bubble for the same turn — but the sentinel
+      // version is authoritative and should NOT be dropped.
+      {
+        id: "b_b2",
+        role: "assistant" as const,
+        text: "actual content",
+        status: "complete" as const,
+        turnId: "t1",
+        ts: 1_100,
+      },
+    ];
+    const out = dropSupersededNoResponseSafetyNet(messages);
+    expect(out.find((m) => m.id === "nr_t1")).toBeDefined();
+    expect(out.find((m) => m.id === "b_b2")).toBeDefined();
+  });
+
+  it("drops safety-net no-response (noResponseSentinel=false) when assistant content lands", async () => {
+    const { dropSupersededNoResponseSafetyNet } = await import("./chat.svelte");
+    const messages = [
+      {
+        id: "nr_t1",
+        role: "assistant" as const,
+        kind: "no-response" as const,
+        noResponseSentinel: false,
+        text: "",
+        status: "complete" as const,
+        turnId: "t1",
+        ts: 1_000,
+      },
+      {
+        id: "th_b1",
+        role: "thinking" as const,
+        text: "thinking content counts",
+        status: "done" as const,
+        turnId: "t1",
+        ts: 1_100,
+      },
+    ];
+    const out = dropSupersededNoResponseSafetyNet(messages);
+    expect(out.find((m) => m.id === "nr_t1")).toBeUndefined();
+    expect(out.find((m) => m.id === "th_b1")).toBeDefined();
+  });
+
+  it("retains safety-net no-response when the turn truly has no assistant content", async () => {
+    const { dropSupersededNoResponseSafetyNet } = await import("./chat.svelte");
+    const messages = [
+      {
+        id: "u_t1",
+        role: "user" as const,
+        text: "hi",
+        status: "complete" as const,
+        turnId: "t1",
+        ts: 1_000,
+      },
+      {
+        id: "nr_t1",
+        role: "assistant" as const,
+        kind: "no-response" as const,
+        noResponseSentinel: false,
+        text: "",
+        status: "complete" as const,
+        turnId: "t1",
+        ts: 1_001,
+      },
+    ];
+    const out = dropSupersededNoResponseSafetyNet(messages);
+    expect(out.find((m) => m.id === "nr_t1")).toBeDefined();
+  });
+});

@@ -22,7 +22,7 @@
 import { browser } from "$app/environment";
 import { Zero } from "@rocicorp/zero";
 import { schema, type Schema } from "@friday/shared/sync";
-import { chat, type AgentInfo } from "./chat.svelte";
+import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
 
 /** Row shape mirrors the `agents` Zero table definition. Kept narrow:
  *  Phase 2 only reads the columns the sidebar needs. */
@@ -132,6 +132,16 @@ class ZeroSyncStore {
   /** Live apps rows from Zero (Phase 3.4). */
   apps = $state<ZeroAppRow[]>([]);
 
+  /** Live blocks rows for the currently-focused agent (Phase 3.7).
+   *  Bound dynamically by {@linkcode bindBlocksFor}; empty when no agent
+   *  is focused or when {@linkcode unbindBlocks} has been called. */
+  blocks = $state<ZeroBlocksRow[]>([]);
+
+  /** Which agent's blocks the current {@linkcode blocks} view is bound to,
+   *  or `null` when no binding is active. The chat store inspects this
+   *  to decide whether a focus-switch needs to rebind. */
+  blocksAgent = $state<string | null>(null);
+
   /** Connection status of the underlying Zero client. `pending` until
    *  the first materialization, `live` once a snapshot has been
    *  delivered, `error` when the WS bridge is unhealthy. */
@@ -144,6 +154,15 @@ class ZeroSyncStore {
 
   #zero: Zero<Schema> | null = null;
   #unsubscribers: Array<() => void> = [];
+  /** Tear-down handle for the per-agent {@linkcode blocks} view. Held
+   *  separately from `#unsubscribers` because focus-switch destroys
+   *  this binding without tearing down the global slices. */
+  #blocksTeardown: (() => void) | null = null;
+  /** Listeners notified on every blocks-view update (initial snapshot
+   *  + every subsequent reactive frame). Used by the chat store to
+   *  merge Zero rows into `chat.messages` without re-subscribing on
+   *  every reactive read. */
+  #blocksListeners = new Set<(rows: ZeroBlocksRow[]) => void>();
 
   constructor() {
     if (!browser) return;
@@ -294,9 +313,77 @@ class ZeroSyncStore {
     });
   }
 
+  /**
+   * Bind (or rebind) the per-agent blocks reactive query. Tears down
+   * the prior binding first so a focus switch from agent A → B doesn't
+   * leak A's view-syncer subscription. Filters out `status='streaming'`
+   * placeholder rows (ADR-024: those are the in-flight markers the
+   * daemon writes on `block_start` and finalizes at `block_complete`;
+   * the chat should only render canonical rows).
+   *
+   * The reactive view materializes the last 50 blocks for the focused
+   * agent. Scroll-back beyond that window is served by the REST endpoint
+   * (`GET /api/agents/:name/blocks?before=…`) and merged into the
+   * dashboard's chat state by the existing `loadOlderTurns` path.
+   */
+  bindBlocksFor(agentName: string): void {
+    if (!this.#zero) return;
+    if (this.blocksAgent === agentName && this.#blocksTeardown) return;
+    this.unbindBlocks();
+    this.blocksAgent = agentName;
+    // `this.unbindBlocks()` above invalidates TS's narrowing of
+    // `this.#zero` because it touches `this`, so the per-line reads
+    // below trip the same "possibly undefined" lint as the other
+    // `#bind*` methods (this is a pre-existing pattern, not new
+    // sloppiness — the early-return at top guarantees non-null).
+    const query = this.#zero.query.blocks
+      .where("agent_name", "=", agentName)
+      .where("status", "!=", "streaming")
+      .orderBy("id", "desc")
+      .limit(50);
+    const preload = this.#zero.preload(query);
+    const view = this.#zero.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      const rows = data as readonly ZeroBlocksRow[];
+      this.blocks = rows as ZeroBlocksRow[];
+      for (const listener of this.#blocksListeners) listener(this.blocks);
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#blocksTeardown = (): void => {
+      preload.cleanup();
+      view.destroy();
+    };
+  }
+
+  /** Release the per-agent blocks subscription. Idempotent on a
+   *  no-op when nothing is currently bound. */
+  unbindBlocks(): void {
+    if (this.#blocksTeardown) {
+      this.#blocksTeardown();
+      this.#blocksTeardown = null;
+    }
+    this.blocksAgent = null;
+    this.blocks = [];
+  }
+
+  /** Register a listener that fires on every blocks-view update. Returns
+   *  an unsubscribe function. Listeners are notified synchronously on
+   *  registration with the current snapshot so callers don't miss the
+   *  initial frame. */
+  onBlocksUpdate(listener: (rows: ZeroBlocksRow[]) => void): () => void {
+    this.#blocksListeners.add(listener);
+    listener(this.blocks);
+    return () => {
+      this.#blocksListeners.delete(listener);
+    };
+  }
+
   destroy(): void {
     for (const unsub of this.#unsubscribers) unsub();
     this.#unsubscribers = [];
+    this.unbindBlocks();
+    this.#blocksListeners.clear();
     this.#zero?.close();
     this.#zero = null;
   }
@@ -370,6 +457,23 @@ export function useZero(): boolean {
 export const useZeroSidebar = useZero;
 
 export const zeroSync = new ZeroSyncStore();
+
+// Phase 3.7: wire the chat store's per-agent blocks integration. Chat
+// can't import this module directly (zero.svelte.ts already imports
+// chat.svelte.ts), so we register the binding + listener here at module
+// init. Skipped when Zero is disabled — the chat store's REST path then
+// owns the read flow as it did pre-Phase-3.
+if (browser && useZero()) {
+  chat.setBlocksBinder((agent: string | null) => {
+    if (agent) zeroSync.bindBlocksFor(agent);
+    else zeroSync.unbindBlocks();
+  });
+  zeroSync.onBlocksUpdate((rows) => {
+    const agent = zeroSync.blocksAgent;
+    if (!agent) return;
+    chat.applyZeroBlocks(rows, agent);
+  });
+}
 
 // Dev probe: expose the singleton on `window` so devtools and Playwright
 // probes can read its state without having to re-import the module

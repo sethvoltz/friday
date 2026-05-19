@@ -28,11 +28,7 @@ vi.mock("$app/environment", () => ({ browser: true }));
 // capture each instance + its `auth` callback so we can assert against
 // them post-construction.
 type MockedZero = {
-  query: {
-    agents: {
-      where: () => MockedZero["query"]["agents"];
-    };
-  };
+  query: Record<string, unknown>;
   preload: ReturnType<typeof vi.fn>;
   materialize: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
@@ -42,12 +38,24 @@ type MockedZero = {
 const instances: MockedZero[] = [];
 
 vi.mock("@rocicorp/zero", () => {
+  // Chainable query builder. Every method returns the same proxy so a
+  // chain like `.where(...).where(...).orderBy(...).limit(...)` resolves
+  // without errors and so tests can inspect the recorded call sequence
+  // via __calls.
+  function makeQueryProxy(): Record<string, unknown> {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const proxy: Record<string, unknown> = { __calls: calls };
+    const methods = ["where", "orderBy", "limit", "start", "related", "one"];
+    for (const m of methods) {
+      proxy[m] = (...args: unknown[]) => {
+        calls.push({ method: m, args });
+        return proxy;
+      };
+    }
+    return proxy;
+  }
   class Zero {
-    query = {
-      agents: {
-        where: () => this.query.agents,
-      },
-    };
+    query: Record<string, unknown>;
     preload = vi.fn(() => ({ cleanup: vi.fn(), complete: Promise.resolve() }));
     materialize = vi.fn(() => ({
       data: [] as unknown[],
@@ -58,6 +66,16 @@ vi.mock("@rocicorp/zero", () => {
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
       this.__ctorOpts = opts;
+      // Phase 3+ tables: each table is its own chain-able query proxy.
+      this.query = {
+        agents: makeQueryProxy(),
+        tickets: makeQueryProxy(),
+        schedules: makeQueryProxy(),
+        memory_entries: makeQueryProxy(),
+        apps: makeQueryProxy(),
+        mail: makeQueryProxy(),
+        blocks: makeQueryProxy(),
+      };
       instances.push(this as unknown as MockedZero);
     }
   }
@@ -65,12 +83,9 @@ vi.mock("@rocicorp/zero", () => {
   // used by our store post-1.5. The shape mirrors the live Zero client's
   // `z.query` field, just decoupled from a connection.
   const createBuilder = () => ({
-    agents: {
-      where: () => createBuilder().agents,
-    },
-    tickets: {
-      where: () => createBuilder().tickets,
-    },
+    agents: makeQueryProxy(),
+    tickets: makeQueryProxy(),
+    blocks: makeQueryProxy(),
   });
   return { Zero, createBuilder };
 });
@@ -287,6 +302,141 @@ describe("toAgentInfo mapping (via materialize update)", () => {
 
     // Restore for other tests.
     (mockedZero as unknown as { Zero: unknown }).Zero = origCtor;
+  });
+});
+
+describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
+  it("bindBlocksFor materializes a per-agent query with status filter + ordering + limit", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+
+    zeroSync.bindBlocksFor("friday");
+    expect(zeroSync.blocksAgent).toBe("friday");
+
+    // Inspect the recorded call sequence on the blocks-query proxy to
+    // verify the filter shape. `streaming` rows MUST be excluded —
+    // otherwise the chat would render in-flight placeholders.
+    const blocksQuery = z.query.blocks as {
+      __calls: Array<{ method: string; args: unknown[] }>;
+    };
+    expect(blocksQuery.__calls).toEqual([
+      { method: "where", args: ["agent_name", "=", "friday"] },
+      { method: "where", args: ["status", "!=", "streaming"] },
+      { method: "orderBy", args: ["id", "desc"] },
+      { method: "limit", args: [50] },
+    ]);
+    // Materialize was called once for blocks (in addition to the
+    // global slice bindings during init).
+    const materializeCallCount = z.materialize.mock.calls.length;
+    expect(materializeCallCount).toBeGreaterThan(0);
+  });
+
+  it("rebinding to a new agent tears down the previous view", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Track destroy calls on the materialized views.
+    const destroyCalls: string[] = [];
+    const z = instances[0];
+    let blocksMaterializeNth = 0;
+    z.materialize = vi.fn(() => {
+      const n = blocksMaterializeNth++;
+      return {
+        data: [],
+        addListener: vi.fn(() => () => {}),
+        destroy: vi.fn(() => destroyCalls.push(`destroy-${n}`)),
+      };
+    });
+
+    zeroSync.bindBlocksFor("alpha");
+    zeroSync.bindBlocksFor("beta");
+    expect(zeroSync.blocksAgent).toBe("beta");
+    // First view (alpha) must be torn down on rebind.
+    expect(destroyCalls).toContain("destroy-0");
+  });
+
+  it("rebinding to the same agent is a no-op", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const z = instances[0];
+    let count = 0;
+    z.materialize = vi.fn(() => {
+      count++;
+      return {
+        data: [],
+        addListener: vi.fn(() => () => {}),
+        destroy: vi.fn(),
+      };
+    });
+    zeroSync.bindBlocksFor("friday");
+    const after = count;
+    zeroSync.bindBlocksFor("friday");
+    expect(count).toBe(after);
+  });
+
+  it("unbindBlocks clears state + tears down the view", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const z = instances[0];
+    let destroyed = false;
+    z.materialize = vi.fn(() => ({
+      data: [
+        {
+          id: 1,
+          block_id: "b1",
+          turn_id: "t1",
+          agent_name: "friday",
+          session_id: "s1",
+          message_id: null,
+          block_index: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          content_json: { text: "x" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1_000,
+          last_event_seq: 1,
+        },
+      ],
+      addListener: vi.fn(() => () => {}),
+      destroy: vi.fn(() => {
+        destroyed = true;
+      }),
+    }));
+
+    zeroSync.bindBlocksFor("friday");
+    expect(zeroSync.blocks.length).toBe(1);
+    expect(zeroSync.blocksAgent).toBe("friday");
+
+    zeroSync.unbindBlocks();
+    expect(zeroSync.blocksAgent).toBeNull();
+    expect(zeroSync.blocks).toEqual([]);
+    expect(destroyed).toBe(true);
+  });
+
+  it("onBlocksUpdate fires synchronously with current snapshot on registration", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const seen: unknown[][] = [];
+    const unsub = zeroSync.onBlocksUpdate((rows) => {
+      seen.push(rows.slice());
+    });
+    // Sync notification on registration with empty array (no binding yet).
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual([]);
+    unsub();
   });
 });
 

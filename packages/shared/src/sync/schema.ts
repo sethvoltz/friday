@@ -164,6 +164,61 @@ const apps = table("apps")
   })
   .primaryKey("id");
 
+/* ---------------- blocks (Phase 3.7) ---------------- */
+// Mirrors `db/schema.ts:blocks`. The chat scroller is the largest read
+// surface in the dashboard — the Zero subscription is *per focused agent
+// + last 50 rows* (bound dynamically by `zeroSync.bindBlocksFor`), not
+// global, because the global blocks history grows unbounded and Zero's
+// client-side cache would otherwise hold every agent's transcript in
+// every browser session. Scroll-back beyond the synced window stays on
+// the REST endpoint (`GET /api/agents/:name/blocks?before=…`); the
+// dashboard merges those rows into the chat alongside the Zero rows.
+//
+// In-flight in-flight blocks (`status='streaming'`, ADR-024 phrasing
+// `streaming=1`) are filtered out at the client query layer — they
+// should be invisible until the daemon flips them to `complete` or
+// `aborted`. Phase 5 narrows this further once the daemon stops writing
+// the streaming row entirely (ADR-024: row written only on
+// `block_complete`); the Phase 3.7 contract is "what the daemon writes
+// today, minus the streaming placeholder."
+//
+// Columns mirror Drizzle's `blocks` table; `content_json` is jsonb
+// (replicated as a parsed object) and `ts` is epoch-ms. `id` is the
+// Postgres bigserial primary key — used by parseBlocks's chronological
+// tiebreak for blocks sharing a millisecond.
+
+const blocks = table("blocks")
+  .columns({
+    id: number(),
+    block_id: string(),
+    turn_id: string(),
+    agent_name: string(),
+    session_id: string(),
+    message_id: string().optional(),
+    block_index: number(),
+    role: string<"user" | "assistant" | "system">(),
+    kind: string<
+      "text" | "thinking" | "tool_use" | "tool_result" | "error" | "mail"
+    >(),
+    source: string().optional(),
+    content_json: json(),
+    status: string<
+      | "pending"
+      | "streaming"
+      | "complete"
+      | "aborted"
+      | "error"
+      | "queued"
+      | "abort_requested"
+      | "dispatched"
+    >(),
+    streaming: boolean(),
+    origin_mutation_id: string().optional(),
+    ts: number(),
+    last_event_seq: number(),
+  })
+  .primaryKey("id");
+
 /* ---------------- mail (Phase 3.6) ---------------- */
 // Mail items don't have a dedicated dashboard surface — they render
 // inline in the chat scroller as user-role blocks with
@@ -197,7 +252,7 @@ const mail = table("mail")
 // `Schema` (renamed to `ZeroSchema` at import) keeps consumers' .d.ts
 // emit clean.
 export const schema: ZeroSchema = createSchema({
-  tables: [agents, tickets, schedules, memoryEntries, apps, mail],
+  tables: [agents, tickets, schedules, memoryEntries, apps, mail, blocks],
   // Phase 3: enable the deprecated `z.query.<table>` field. The
   // createBuilder() path returns query objects that aren't bound to a
   // Zero connection, so `zero.materialize(builder.agents)` registers
@@ -228,4 +283,5 @@ export const permissions = definePermissions(schema, () => ({
   memory_entries: { row: { select: ANYONE_CAN } },
   apps: { row: { select: ANYONE_CAN } },
   mail: { row: { select: ANYONE_CAN } },
+  blocks: { row: { select: ANYONE_CAN } },
 }));
