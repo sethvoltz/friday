@@ -70,6 +70,21 @@ export interface ZeroScheduleRow {
   updated_at: number;
 }
 
+/** Row shape mirrors the `memory_entries` Zero table definition. */
+export interface ZeroMemoryEntryRow {
+  id: string;
+  title: string;
+  content: string;
+  tags_json: string[];
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  file_mtime: number;
+  recall_count: number;
+  last_recalled_at: number | null;
+  status: "ready" | "pending_file" | "deleted";
+}
+
 interface RefreshResponse {
   token: string;
   deviceId: string;
@@ -86,6 +101,9 @@ class ZeroSyncStore {
 
   /** Live schedule rows from Zero (Phase 3.2). */
   schedules = $state<ZeroScheduleRow[]>([]);
+
+  /** Live memory_entries rows from Zero (Phase 3.3). */
+  memory = $state<ZeroMemoryEntryRow[]>([]);
 
   /** Connection status of the underlying Zero client. `pending` until
    *  the first materialization, `live` once a snapshot has been
@@ -135,6 +153,7 @@ class ZeroSyncStore {
       this.#bindAgents();
       this.#bindTickets();
       this.#bindSchedules();
+      this.#bindMemory();
       this.status = "live";
     } catch (err) {
       this.status = "error";
@@ -197,6 +216,30 @@ class ZeroSyncStore {
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroScheduleRow[];
       this.schedules = rows as ZeroScheduleRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  #bindMemory(): void {
+    if (!this.#zero) return;
+    // Filter out tombstoned `deleted` rows server-side so the
+    // dashboard list isn't pre-filled with hidden entries the user
+    // already forgot. Recovery / undelete is Phase 4 work.
+    const query = this.#zero.query.memory_entries.where(
+      "status",
+      "!=",
+      "deleted",
+    );
+    const preload = this.#zero.preload(query);
+    const view = this.#zero.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      const rows = data as readonly ZeroMemoryEntryRow[];
+      this.memory = rows as ZeroMemoryEntryRow[];
     };
     update(view.data as readonly unknown[]);
     view.addListener((data) => update(data as readonly unknown[]));

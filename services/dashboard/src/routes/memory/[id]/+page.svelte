@@ -3,11 +3,33 @@
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import { goto, invalidateAll } from "$app/navigation";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
+  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
 
   let { data }: { data: PageData } = $props();
 
+  // Phase 3.3: when Zero is on, overlay the row from `zeroSync.memory`
+  // so edits in another tab propagate <1s without `invalidateAll`.
+  // The SSR-loaded `data.entry` is the warm baseline.
+  const zeroOn = useZero();
   // svelte-ignore state_referenced_locally
   let entry = $state(data.entry);
+  $effect(() => {
+    if (!zeroOn) return;
+    const row = zeroSync.memory.find((r) => r.id === data.entry.id);
+    if (row) {
+      entry = {
+        ...entry,
+        title: row.title,
+        content: row.content,
+        tags: Array.isArray(row.tags_json) ? row.tags_json : [],
+        updatedAt: new Date(row.updated_at).toISOString(),
+        recallCount: row.recall_count,
+        lastRecalledAt: row.last_recalled_at
+          ? new Date(row.last_recalled_at).toISOString()
+          : null,
+      };
+    }
+  });
   let editing = $state(false);
   let saving = $state(false);
   let title = $state("");

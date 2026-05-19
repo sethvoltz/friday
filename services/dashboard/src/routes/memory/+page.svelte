@@ -2,11 +2,43 @@
   import type { PageData } from "./$types";
   import type { MemoryEntry, SearchResult } from "@friday/memory";
   import { goto } from "$app/navigation";
+  import {
+    useZero,
+    zeroSync,
+    type ZeroMemoryEntryRow,
+  } from "$lib/stores/zero.svelte";
 
   let { data }: { data: PageData } = $props();
 
+  // Phase 3.3 (ADR-024): same pattern as tickets/schedules slices —
+  // keep `entries` as a mutable $state so the rest of the page reads
+  // a plain array; under the Zero flag, an effect pushes the reactive
+  // `zeroSync.memory` rows in. FTS search still flows through the
+  // REST endpoint (`/api/memory/search`) — the generated tsvector
+  // column isn't replicated by Zero.
+  const zeroOn = useZero();
   // svelte-ignore state_referenced_locally
   let entries = $state<MemoryEntry[]>(data.entries);
+  $effect(() => {
+    if (zeroOn) {
+      entries = zeroSync.memory.map(toMemoryEntry);
+    }
+  });
+  function toMemoryEntry(r: ZeroMemoryEntryRow): MemoryEntry {
+    return {
+      id: r.id,
+      title: r.title,
+      content: r.content,
+      tags: Array.isArray(r.tags_json) ? r.tags_json : [],
+      createdBy: r.created_by,
+      createdAt: new Date(r.created_at).toISOString(),
+      updatedAt: new Date(r.updated_at).toISOString(),
+      recallCount: r.recall_count,
+      lastRecalledAt: r.last_recalled_at
+        ? new Date(r.last_recalled_at).toISOString()
+        : null,
+    };
+  }
   let query = $state("");
   let activeTags = $state<Set<string>>(new Set());
   let searchResults = $state<SearchResult[] | null>(null);
@@ -111,6 +143,9 @@
   }
 
   async function refreshList() {
+    // Under the Zero flag the reactive query keeps `entries` in sync;
+    // a manual REST refresh is redundant.
+    if (zeroOn) return;
     try {
       const r = await fetch("/api/memory");
       if (!r.ok) return;

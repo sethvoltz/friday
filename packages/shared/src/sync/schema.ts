@@ -114,13 +114,36 @@ const schedules = table("schedules")
   })
   .primaryKey("name");
 
+/* ---------------- memory_entries (Phase 3.3) ---------------- */
+// Mirrors `db/schema.ts:memoryEntries`. `tagsJson` is a `jsonb` array
+// of strings in Postgres; Zero exposes it as `json` and the dashboard
+// reshapes to MemoryEntry.tags. Search (FTS) still flows through the
+// REST endpoint at `/api/memory/search` — Zero doesn't replicate
+// the generated tsvector column.
+
+const memoryEntries = table("memory_entries")
+  .columns({
+    id: string(),
+    title: string(),
+    content: string(),
+    tags_json: json(),
+    created_by: string(),
+    created_at: number(),
+    updated_at: number(),
+    file_mtime: number(),
+    recall_count: number(),
+    last_recalled_at: number().optional(),
+    status: string<"ready" | "pending_file" | "deleted">(),
+  })
+  .primaryKey("id");
+
 // Explicit annotation: `createSchema`'s inferred return type references a
 // private path inside @rocicorp/zero's `out/zero-types/src/schema`, which
 // TS rejects with TS2742 ("not portable"). Annotating with the exported
 // `Schema` (renamed to `ZeroSchema` at import) keeps consumers' .d.ts
 // emit clean.
 export const schema: ZeroSchema = createSchema({
-  tables: [agents, tickets, schedules],
+  tables: [agents, tickets, schedules, memoryEntries],
   // Phase 3: enable the deprecated `z.query.<table>` field. The
   // createBuilder() path returns query objects that aren't bound to a
   // Zero connection, so `zero.materialize(builder.agents)` registers
@@ -148,4 +171,5 @@ export const permissions = definePermissions(schema, () => ({
   agents: { row: { select: ANYONE_CAN } },
   tickets: { row: { select: ANYONE_CAN } },
   schedules: { row: { select: ANYONE_CAN } },
+  memory_entries: { row: { select: ANYONE_CAN } },
 }));
