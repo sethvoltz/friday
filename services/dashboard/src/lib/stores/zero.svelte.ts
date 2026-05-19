@@ -1120,14 +1120,32 @@ async function refreshToken(): Promise<string> {
 }
 
 function zeroServerUrl(): string {
-  // Read at module load — Vite inlines PUBLIC_* env vars at build time.
   // Zero 1.5 expects an http(s) URL (the protocol upgrades to WS during
   // handshake); passing `ws://` throws `must use the "http" or "https"
-  // scheme.`
+  // scheme.` Zero's createConnectionURL then appends `/sync/v50/connect`
+  // to whatever we return here.
   const env = (
-    import.meta as unknown as { env?: Record<string, string | undefined> }
+    import.meta as unknown as {
+      env?: Record<string, string | undefined> & { DEV?: boolean; PROD?: boolean };
+    }
   ).env;
-  return env?.PUBLIC_FRIDAY_ZERO_URL ?? "http://localhost:4848";
+  // Explicit override always wins (CI, integration tests, future
+  // deploy topologies).
+  if (env?.PUBLIC_FRIDAY_ZERO_URL) return env.PUBLIC_FRIDAY_ZERO_URL;
+  // Prod build: route through the dashboard's own origin via the
+  // server-entry WS reverse-proxy at `/api/sync` (server-entry.mjs).
+  // This is what lets a phone over Cloudflare Tunnel reach zero-cache
+  // — the local 4848 listener is unreachable from outside the host.
+  // Use `window.location.origin` so the same bundle works against any
+  // hostname (localhost, friday.voltzmakes.com, an alt CF tunnel,
+  // etc.) without rebuilding.
+  if (env?.PROD && typeof window !== "undefined") {
+    return `${window.location.origin}/api/sync`;
+  }
+  // Dev (`vite dev`): connect directly to the local zero-cache.
+  // vite dev doesn't run the server-entry proxy, and dev only ever
+  // serves clients on the same host anyway.
+  return "http://localhost:4848";
 }
 
 /**

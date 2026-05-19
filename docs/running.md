@@ -38,7 +38,7 @@
 
 ## Modes
 
-- **Production** (no flag): runs the built artifacts (`node dist/index.js` for the daemon, `node build/index.js` for the dashboard). Run `pnpm build` first.
+- **Production** (no flag): runs the built artifacts (`node dist/index.js` for the daemon, `node server-entry.mjs` for the dashboard — a custom adapter-node wrapper that adds the `/api/sync` WS reverse-proxy to zero-cache). Run `pnpm build` first.
 - **Dev** (`--dev`): runs `tsx watch` for the daemon and `vite dev` for the dashboard. Hot reload, slower startup, expects source on disk.
 
 ## Data location
