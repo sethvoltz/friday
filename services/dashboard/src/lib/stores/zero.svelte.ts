@@ -99,6 +99,19 @@ export interface ZeroReadCursorRow {
   ts: number;
 }
 
+/** Row shape mirrors the `client_devices` Zero table definition (Phase 4.2). */
+export interface ZeroClientDeviceRow {
+  device_id: string;
+  user_id: string;
+  user_agent: string | null;
+  label: string | null;
+  first_seen_at: number;
+  last_seen_at: number;
+  storage_used_bytes: number | null;
+  storage_quota_bytes: number | null;
+  last_sync_at: number | null;
+}
+
 /** Row shape mirrors the `apps` Zero table definition. */
 export interface ZeroAppRow {
   id: string;
@@ -130,6 +143,21 @@ interface RefreshResponse {
   expiresAt: number;
 }
 
+/** Phase 4.2: how often to fire `reportClientStats` while the tab is
+ *  active. The plan's cadence is 5 min; that matches Anthropic's
+ *  prompt-cache TTL and is a reasonable interval to land a fresh
+ *  storage estimate (the value changes slowly — kvStore growth from
+ *  the Zero replica is on the order of bytes-per-minute under
+ *  normal usage). Override via env for tests / soak runs. */
+const STATS_REPORT_INTERVAL_MS = (() => {
+  const env = (
+    import.meta as unknown as { env?: Record<string, string | undefined> }
+  ).env;
+  const raw = env?.PUBLIC_FRIDAY_STATS_REPORT_MS;
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 5 * 60 * 1000;
+})();
+
 class ZeroSyncStore {
   /** Live agent rows from Zero, filtered server-side to non-archived. */
   agents = $state<ZeroAgentRow[]>([]);
@@ -150,6 +178,12 @@ class ZeroSyncStore {
    *  the current user — the per-device unread derivation filters
    *  client-side by `device_id === this.#deviceId`. */
   readCursors = $state<ZeroReadCursorRow[]>([]);
+
+  /** Live client_devices rows from Zero (Phase 4.2). Powers the
+   *  Settings → Devices panel (Phase 6) — the "Forget this device"
+   *  button calls the `forgetDevice` mutator with the row's
+   *  device_id. */
+  clientDevices = $state<ZeroClientDeviceRow[]>([]);
 
   /** Live blocks rows for the currently-focused agent (Phase 3.7).
    *  Bound dynamically by {@linkcode bindBlocksFor}; empty when no agent
@@ -187,6 +221,15 @@ class ZeroSyncStore {
    *  merge Zero rows into `chat.messages` without re-subscribing on
    *  every reactive read. */
   #blocksListeners = new Set<(rows: ZeroBlocksRow[]) => void>();
+  /**
+   * Phase 4.2: telemetry-loop handle. `setInterval` token returned by
+   * `#init` after `#zero` is constructed; cleared in `destroy()`.
+   * Holds the 5-min `reportClientStats` cadence — kept on the
+   * instance (not module-level) so `destroy()` can stop it without
+   * leaking timers across page navigations.
+   */
+  #statsInterval: ReturnType<typeof setInterval> | null = null;
+
   /**
    * When `bindBlocksFor` is called before `#init` resolves (the typical
    * cold-load race — the chat shell mounts the moment SvelteKit hands
@@ -246,7 +289,17 @@ class ZeroSyncStore {
       this.#bindMemory();
       this.#bindApps();
       this.#bindReadCursors();
+      this.#bindClientDevices();
       this.status = "live";
+      // Phase 4.2: report storage stats immediately on connect +
+      // every 5 minutes thereafter. The `client_devices` row already
+      // exists (created by `/api/sync/refresh` before this point);
+      // the mutator only touches the storage + last-seen fields.
+      void this.#reportClientStats();
+      this.#statsInterval = setInterval(
+        () => void this.#reportClientStats(),
+        STATS_REPORT_INTERVAL_MS,
+      );
       // Apply any blocks-binding the chat shell asked for while
       // `#init` was still running. Cold-load order is:
       //   1. ChatShell mounts, $effect fires, calls
@@ -395,6 +448,63 @@ class ZeroSyncStore {
     });
   }
 
+  #bindClientDevices(): void {
+    if (!this.#zero) return;
+    // Global query — Friday is single-user, the row set is at most
+    // a handful of devices. The Settings → Devices panel reads from
+    // this directly.
+    const query = this.#zero.query.client_devices;
+    const preload = this.#zero.preload(query);
+    const view = this.#zero.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      const rows = data as readonly ZeroClientDeviceRow[];
+      this.clientDevices = rows as ZeroClientDeviceRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  /**
+   * Phase 4.2: read `navigator.storage.estimate()` and fire the
+   * `reportClientStats` mutator. Silently no-ops when:
+   *   - The browser doesn't expose `navigator.storage.estimate()`
+   *     (older Safari, some embedded WebViews) — there's nothing to
+   *     report; the row's last_seen_at still advances on every JWT
+   *     refresh, which is the more important signal.
+   *   - Zero or the deviceId aren't initialized yet (the interval
+   *     timer can outlive `destroy()` by one tick on page navigate).
+   */
+  async #reportClientStats(): Promise<void> {
+    if (!this.#zero || !this.#deviceId) return;
+    let used: number | undefined;
+    let quota: number | undefined;
+    const storage = (navigator as Navigator & { storage?: StorageManager })
+      .storage;
+    if (storage?.estimate) {
+      try {
+        const est = await storage.estimate();
+        used = est.usage;
+        quota = est.quota;
+      } catch {
+        // Cross-origin iframes can fail this with SecurityError;
+        // treat as "no data" rather than throwing.
+      }
+    }
+    // Bail again — the estimate await may have racey-resolved after
+    // a destroy().
+    if (!this.#zero || !this.#deviceId) return;
+    void this.#zero.mutate.reportClientStats({
+      deviceId: this.#deviceId,
+      storageUsedBytes: used,
+      storageQuotaBytes: quota,
+      ts: Date.now(),
+    });
+  }
+
   /**
    * Bind (or rebind) the per-agent blocks reactive query. Tears down
    * the prior binding first so a focus switch from agent A → B doesn't
@@ -502,7 +612,24 @@ class ZeroSyncStore {
     });
   }
 
+  /**
+   * Phase 4.2: trigger the `forgetDevice` mutator. Hard-deletes the
+   * `client_devices` row by device_id. Used by the Settings → Devices
+   * "Forget this device" button (Phase 6 UI). Safe to call with
+   * `this.#deviceId` (the current tab) — production usage couples
+   * that with a sign-out so the deleted row doesn't immediately
+   * re-upsert on the next /api/sync/refresh.
+   */
+  forgetDevice(deviceId: string): void {
+    if (!this.#zero) return;
+    void this.#zero.mutate.forgetDevice({ deviceId });
+  }
+
   destroy(): void {
+    if (this.#statsInterval) {
+      clearInterval(this.#statsInterval);
+      this.#statsInterval = null;
+    }
     for (const unsub of this.#unsubscribers) unsub();
     this.#unsubscribers = [];
     this.unbindBlocks();

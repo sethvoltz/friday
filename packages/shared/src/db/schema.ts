@@ -19,6 +19,7 @@
 
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   bigserial,
   boolean,
   check,
@@ -455,8 +456,13 @@ export const clientDevices = pgTable(
     label: text("label"), // user-editable
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
-    storageUsedBytes: integer("storage_used_bytes"),
-    storageQuotaBytes: integer("storage_quota_bytes"),
+    // bigint: browser storage quotas routinely exceed Postgres
+    // `integer`'s 2 GB ceiling (10–50 GB is normal on desktop). Mode
+    // `number` lets JS handle them as numbers as long as the value
+    // stays ≤ Number.MAX_SAFE_INTEGER (9 PB), which storage estimates
+    // always will.
+    storageUsedBytes: bigint("storage_used_bytes", { mode: "number" }),
+    storageQuotaBytes: bigint("storage_quota_bytes", { mode: "number" }),
     lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
   },
   (t) => ({

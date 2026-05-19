@@ -75,6 +75,14 @@ vi.mock("@rocicorp/zero", () => {
         client: Promise.resolve({ type: "success" }),
         server: Promise.resolve({ type: "success" }),
       })),
+      reportClientStats: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      forgetDevice: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
     };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
@@ -87,6 +95,7 @@ vi.mock("@rocicorp/zero", () => {
         memory_entries: makeQueryProxy(),
         apps: makeQueryProxy(),
         mail: makeQueryProxy(),
+        client_devices: makeQueryProxy(),
         blocks: makeQueryProxy(),
       };
       instances.push(this as unknown as MockedZero);
@@ -635,5 +644,119 @@ describe("Phase 4.1: markRead mutator dispatch", () => {
     // Confirm the createMutators() shape made it in (the test mock
     // returns an empty object; this asserts the property exists).
     expect(typeof opts.mutators).toBe("object");
+  });
+});
+
+describe("Phase 4.2: reportClientStats + forgetDevice", () => {
+  it("fires reportClientStats on connect with the navigator.storage.estimate() reading", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    vi.stubGlobal("navigator", {
+      ...globalThis.navigator,
+      storage: {
+        estimate: vi.fn(async () => ({
+          usage: 12_345,
+          quota: 1_000_000,
+        })),
+      } as unknown as StorageManager,
+    });
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 40));
+    void zeroSync; // suppress unused
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+    expect(z.mutate.reportClientStats).toHaveBeenCalledTimes(1);
+    const args = z.mutate.reportClientStats.mock.calls[0][0] as {
+      deviceId: string;
+      storageUsedBytes: number;
+      storageQuotaBytes: number;
+      ts: number;
+    };
+    expect(args.deviceId).toBe("test-device-id");
+    expect(args.storageUsedBytes).toBe(12_345);
+    expect(args.storageQuotaBytes).toBe(1_000_000);
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("fires reportClientStats even when navigator.storage.estimate is unavailable", async () => {
+    // Older Safari etc. — the mutator should still fire so
+    // last_seen_at advances; storage fields stay undefined.
+    localStorage.setItem("friday:flag:use-zero", "1");
+    vi.stubGlobal("navigator", {
+      ...globalThis.navigator,
+      // No `storage` field at all.
+    });
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 40));
+    void zeroSync;
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+    expect(z.mutate.reportClientStats).toHaveBeenCalled();
+    const args = z.mutate.reportClientStats.mock.calls[0][0] as {
+      storageUsedBytes?: number;
+      storageQuotaBytes?: number;
+    };
+    expect(args.storageUsedBytes).toBeUndefined();
+    expect(args.storageQuotaBytes).toBeUndefined();
+  });
+
+  it("handles storage.estimate throwing (SecurityError in cross-origin iframes) without crashing", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    vi.stubGlobal("navigator", {
+      ...globalThis.navigator,
+      storage: {
+        estimate: vi.fn(async () => {
+          throw new DOMException("SecurityError", "SecurityError");
+        }),
+      } as unknown as StorageManager,
+    });
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 40));
+    void zeroSync;
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+    // The mutator STILL fires with undefined storage — the throw is
+    // swallowed, the row's last_seen_at still advances.
+    expect(z.mutate.reportClientStats).toHaveBeenCalled();
+  });
+
+  it("forgetDevice forwards the deviceId to zero.mutate.forgetDevice", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+    zeroSync.forgetDevice("dev-to-evict");
+    expect(z.mutate.forgetDevice).toHaveBeenCalledTimes(1);
+    const args = z.mutate.forgetDevice.mock.calls[0][0] as {
+      deviceId: string;
+    };
+    expect(args.deviceId).toBe("dev-to-evict");
+  });
+
+  it("forgetDevice is silent when Zero hasn't initialized", async () => {
+    const { zeroSync } = await importStore();
+    expect(() => zeroSync.forgetDevice("dev-x")).not.toThrow();
+    expect(instances).toHaveLength(0);
+  });
+
+  it("destroy() clears the reportClientStats interval", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    vi.useFakeTimers();
+    try {
+      const { zeroSync } = await importStore();
+      // Drain init's microtask queue.
+      await vi.runAllTimersAsync().catch(() => {});
+      expect(instances).toHaveLength(1);
+      const z = instances[0];
+      const callsBeforeDestroy = z.mutate.reportClientStats.mock.calls.length;
+      zeroSync.destroy();
+      // Advance 6 minutes; the cleared interval should not fire.
+      vi.advanceTimersByTime(6 * 60 * 1000);
+      expect(z.mutate.reportClientStats.mock.calls.length).toBe(
+        callsBeforeDestroy,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

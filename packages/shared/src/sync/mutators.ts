@@ -61,6 +61,56 @@ export interface MarkReadArgs {
 
 type FridayTx = Transaction<Schema>;
 
+/* ---------------- Phase 4.2: reportClientStats ---------------- */
+// Per-device storage telemetry. UPSERTs `client_devices` with the
+// device's current `navigator.storage.estimate()` reading. PK is
+// `device_id` — re-running with same args = no row-shape change;
+// re-running with newer storage numbers advances the row. The
+// client fires this every 5 minutes while active + on each Zero
+// (re)connect.
+//
+// `first_seen_at` and `user_id` are pinned by the server-side
+// `/api/sync/refresh` upsert path (the only place they originate);
+// the client mutator only touches the fields it owns
+// (storage_used_bytes, storage_quota_bytes, last_seen_at,
+// last_sync_at). Postgres ON CONFLICT semantics preserve untouched
+// columns so user_id / first_seen_at can't be clobbered by a stale
+// client.
+//
+// No daemon side effect. Telemetry only.
+
+export interface ReportClientStatsArgs {
+  deviceId: string;
+  /** From `navigator.storage.estimate().usage`. Optional — some
+   *  browsers (older Safari) don't return it. */
+  storageUsedBytes?: number;
+  /** From `navigator.storage.estimate().quota`. */
+  storageQuotaBytes?: number;
+  ts: number;
+}
+
+/* ---------------- Phase 4.2: forgetDevice ---------------- */
+// Remove a `client_devices` row by `device_id`. The Settings → Devices
+// surface invokes this from the "Forget this device" button (Phase 6
+// UI lands later; the mutator is in place now).
+//
+// Idempotency: re-running with the same deviceId is a no-op
+// (the row is already gone — Drizzle DELETE WHERE NOT EXISTS is
+// a 0-row outcome, not an error).
+//
+// Per ADR-023 line 564 + the comment in `forgetClientDevice`:
+// "the next time that client tries to refresh its JWT, the mint
+// endpoint will re-upsert and the user will need to manually
+// forget again — so production usage couples this with a sign-out
+// on the affected device." For Phase 4.2 the mutator is the entire
+// operation; daemon-side credential revocation lives at the daemon
+// LISTEN handler tier and is reserved for a future hardening pass
+// (the row absence + sign-out is functionally sufficient for v1).
+
+export interface ForgetDeviceArgs {
+  deviceId: string;
+}
+
 export const createMutators = () => ({
   markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
     // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -78,6 +128,39 @@ export const createMutators = () => ({
       agent_name: args.agentName,
       last_seen_block_id: args.lastSeenBlockId,
       ts: args.ts,
+    });
+  },
+  reportClientStats: async (
+    tx: FridayTx,
+    args: ReportClientStatsArgs,
+  ): Promise<void> => {
+    // Upsert. Touches only the columns the client owns —
+    // `last_seen_at`, `last_sync_at`, `storage_used_bytes`,
+    // `storage_quota_bytes`. The PK is `device_id`; user_id /
+    // first_seen_at are populated by `/api/sync/refresh` on first
+    // mint and stay pinned afterward. Zero's `update` (vs `upsert`)
+    // would refuse if the row didn't exist; we use `update` here
+    // because the row is guaranteed to exist by the time the client
+    // calls this (refresh creates it before the WS handshake even
+    // completes).
+    await tx.mutate.client_devices.update({
+      device_id: args.deviceId,
+      last_seen_at: args.ts,
+      last_sync_at: args.ts,
+      storage_used_bytes: args.storageUsedBytes,
+      storage_quota_bytes: args.storageQuotaBytes,
+    });
+  },
+  forgetDevice: async (
+    tx: FridayTx,
+    args: ForgetDeviceArgs,
+  ): Promise<void> => {
+    // Hard-delete. Re-running with the same args is a no-op on the
+    // server (Postgres DELETE WHERE no row matches doesn't error).
+    // Optimistic deletes on the client emit a sync notification so
+    // multi-tab Settings views update in real time.
+    await tx.mutate.client_devices.delete({
+      device_id: args.deviceId,
     });
   },
 }) satisfies CustomMutatorDefs;

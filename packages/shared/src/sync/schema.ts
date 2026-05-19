@@ -164,6 +164,36 @@ const apps = table("apps")
   })
   .primaryKey("id");
 
+/* ---------------- client_devices (Phase 4.2) ---------------- */
+// Per-browser-install device registry. ADR-023's "device-scoped read
+// cursors + per-device storage telemetry + 'Forget this device'
+// button" model — Phase 4.2 brings it under Zero so the Settings
+// page (Phase 6) can render a live list of every device that has
+// touched this account, including itself.
+//
+// Two mutators write here (Phase 4.2):
+//   - `reportClientStats` — UPSERT storage stats from
+//     `navigator.storage.estimate()` every 5 minutes when the tab is
+//     active.
+//   - `forgetDevice` — DELETE by device_id. The next
+//     `/api/sync/refresh` from that browser re-creates the row;
+//     production usage couples this with a sign-out on the affected
+//     device to actually evict it.
+
+const clientDevices = table("client_devices")
+  .columns({
+    device_id: string(),
+    user_id: string(),
+    user_agent: string().optional(),
+    label: string().optional(),
+    first_seen_at: number(),
+    last_seen_at: number(),
+    storage_used_bytes: number().optional(),
+    storage_quota_bytes: number().optional(),
+    last_sync_at: number().optional(),
+  })
+  .primaryKey("device_id");
+
 /* ---------------- read_cursors (Phase 4.1) ---------------- */
 // Per-device, per-agent last-seen marker. Drives the unread badge:
 // `unread(agent) = count(blocks where agent_name=agent AND id > last_seen)`.
@@ -278,6 +308,7 @@ export const schema: ZeroSchema = createSchema({
     mail,
     blocks,
     readCursors,
+    clientDevices,
   ],
   // Phase 3: enable the deprecated `z.query.<table>` field. The
   // createBuilder() path returns query objects that aren't bound to a
@@ -316,4 +347,8 @@ export const permissions = definePermissions(schema, () => ({
   // configured here so the client's reactive unread-derivation query
   // can read the row.
   read_cursors: { row: { select: ANYONE_CAN } },
+  // Writes flow through `reportClientStats` + `forgetDevice` mutators
+  // (Phase 4.2). Only `select` is configured for the Settings-page
+  // device-list reactive query.
+  client_devices: { row: { select: ANYONE_CAN } },
 }));
