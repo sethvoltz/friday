@@ -34,10 +34,12 @@ interface ServiceSpec {
   devCmd?: string;
 }
 
+type TmuxService = "daemon" | "dashboard" | "zero-cache";
+
 function tmuxSpecs(
   repoRoot: string,
   dashboardPort: number,
-): Record<"daemon" | "dashboard", ServiceSpec> {
+): Record<TmuxService, ServiceSpec> {
   return {
     daemon: {
       cwd: join(repoRoot, "services", "daemon"),
@@ -49,11 +51,21 @@ function tmuxSpecs(
       prodCmd: "node build/index.js",
       devCmd: `exec pnpm exec vite dev --port ${dashboardPort}`,
     },
+    // zero-cache is a stateless sidecar; no dev/prod distinction. It
+    // replicates from Postgres (ZERO_UPSTREAM_DB) into its own internal
+    // sqlite (ZERO_REPLICA_FILE) and serves WS clients on port 4848.
+    // ADR-024. Zero lives in the dashboard's deps (it's also the Zero
+    // client host), so we spawn the binary from that package — its
+    // node_modules/.bin/zero-cache is the canonical path.
+    "zero-cache": {
+      cwd: join(repoRoot, "services", "dashboard"),
+      prodCmd: "pnpm exec zero-cache",
+    },
   };
 }
 
 function startTmuxService(
-  service: "daemon" | "dashboard",
+  service: TmuxService,
   spec: ServiceSpec,
   mode: ServiceMode,
 ): { started: boolean; detail: string } {
@@ -247,10 +259,13 @@ export const startCommand = defineCommand({
     console.log();
     console.log(pc.dim(`  daemon API     http://localhost:${cfg.daemonPort}`));
     console.log(pc.dim(`  dashboard      http://localhost:${cfg.dashboardPort}`));
+    console.log(pc.dim(`  zero-cache     ws://localhost:4848`));
     if (services.includes("tunnel") && cfg.publicUrl) {
       console.log(pc.dim(`  public URL     ${cfg.publicUrl}`));
     }
-    console.log(pc.dim(`  attach with:   friday attach <daemon|dashboard>`));
+    console.log(
+      pc.dim(`  attach with:   friday attach <daemon|dashboard|zero-cache>`),
+    );
     console.log(pc.dim(`  tunnel logs:   friday logs tunnel -f`));
   },
 });

@@ -162,6 +162,19 @@ export const doctorCommand = defineCommand({
     const reachable = await client.ping();
     checks.push(check("daemon reachable (localhost)", reachable, reachable ? undefined : "not running — `friday start`"));
 
+    // zero-cache reachable (Phase 2 / ADR-024). zero-cache binds
+    // ws://127.0.0.1:4848 by default; treat a TCP-open as "alive". A more
+    // thorough health probe (replication slot caught up, etc.) lives in
+    // the zero-cache process logs.
+    const zeroReachable = await tcpReachable("127.0.0.1", 4848, 500);
+    checks.push(
+      check(
+        "zero-cache reachable (localhost:4848)",
+        zeroReachable,
+        zeroReachable ? undefined : "not running — `friday start zero-cache`",
+      ),
+    );
+
     // disk
     try {
       const st = statSync(DATA_DIR);
@@ -198,4 +211,30 @@ function check(name: string, ok: boolean, detail?: string) {
 
 function warn(name: string, detail?: string) {
   return { name, ok: false, warn: true, detail };
+}
+
+/** TCP-connect with timeout. Used as a cheap liveness probe for
+ *  zero-cache; a full WS handshake would be more accurate but the open
+ *  port is sufficient signal for the doctor's purposes. */
+async function tcpReachable(
+  host: string,
+  port: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const { Socket } = await import("node:net");
+  return new Promise<boolean>((resolve) => {
+    const sock = new Socket();
+    let done = false;
+    const finish = (ok: boolean): void => {
+      if (done) return;
+      done = true;
+      sock.destroy();
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.once("connect", () => finish(true));
+    sock.once("timeout", () => finish(false));
+    sock.once("error", () => finish(false));
+    sock.connect(port, host);
+  });
 }
