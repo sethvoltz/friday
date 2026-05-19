@@ -1,22 +1,28 @@
 /**
  * Connectivity-chain widget store (FIX_FORWARD 3.10).
  *
- * Three stages — Internet, SSE, Daemon — each with a status:
+ * Three stages — Internet, Sync, Daemon — each with a status:
  *   - "live":         green, pulsing
  *   - "reconnecting": orange, pulsing
  *   - "down":         red, static
  *   - "unknown":      grey, static (a strictly earlier stage is not "live")
  *
+ * Phase 6 (plan §224): the middle stage is now **Sync** — Zero's
+ * WebSocket-to-zero-cache health is the primary signal, because most
+ * dashboard reads ride Zero (agents, blocks, tickets, schedules, mail,
+ * memory, apps, settings, client_devices, read_cursors). The SSE
+ * stream is now narrow (live-turn-only deltas) and surfaces as a
+ * sub-component in the Sync tooltip.
+ *
  * The Internet stage is derived primarily from `navigator.onLine` and
- * `online` / `offline` events, with a "recent same-origin success"
- * timestamp the SSE handler bumps whenever it parses an event chunk
- * (every successful daemon-proxy round-trip is implicit proof that the
- * client → daemon path is reachable). Stages 2 and 3 derive from the SSE
- * manager and `chat.bootId` / `chat.bootTs`.
+ * `online` / `offline` events. Stages 2 and 3 derive from the Zero
+ * client's status, SSE connection state, and `chat.bootId` /
+ * `chat.bootTs`.
  */
 
 import { chat } from "./chat.svelte";
 import { sseConnected } from "./sse.svelte";
+import { zeroSync } from "./zero.svelte";
 
 export type StageStatus = "live" | "reconnecting" | "down" | "unknown";
 
@@ -97,7 +103,7 @@ export interface StageView {
 
 export interface WidgetView {
   internet: StageView;
-  sse: StageView;
+  sync: StageView;
   daemon: StageView;
   uptimeMs: number | null;
 }
@@ -130,26 +136,40 @@ export function resolveWidget(): WidgetView {
   // to stage 2.
   const internet: StageStatus = connectivity.online ? "live" : "down";
 
-  // Stage 2 — SSE. Cascades grey if internet isn't live. Otherwise:
-  // connected + recent chunk = live; connected but stale = reconnecting;
-  // not connected = reconnecting (the manager loops with backoff).
-  let sse: StageStatus;
+  // Stage 2 — Sync. Phase 6: Zero WS health is the primary signal.
+  // The Zero client's `status` field reports "pending" (still
+  // connecting / no JWT yet), "live" (WS open + handshake done), or
+  // "error" (terminal — auth failure or schema mismatch). SSE
+  // sub-health surfaces in the tooltip; SSE-down with Zero-live is
+  // an acceptable degraded state (most reads still work).
+  const zeroStatus = zeroSync.status;
+  let sync: StageStatus;
   if (internet !== "live") {
-    sse = "unknown";
-  } else if (!sseConnected.value) {
-    sse = "reconnecting";
-  } else if (sseStale) {
-    sse = "reconnecting";
-  } else if (sseFresh || !haveSuccess) {
-    // `!haveSuccess` covers the brief window between TCP-connected and
-    // first chunk — render live so we don't blink orange on every load.
-    sse = "live";
+    sync = "unknown";
+  } else if (zeroStatus === "live") {
+    sync = "live";
+  } else if (zeroStatus === "pending") {
+    sync = "reconnecting";
   } else {
-    sse = "reconnecting";
+    sync = "down";
+  }
+
+  // SSE sub-health (folded into the Sync tooltip, not its own stage).
+  let sseHealth: StageStatus;
+  if (internet !== "live") {
+    sseHealth = "unknown";
+  } else if (!sseConnected.value) {
+    sseHealth = "reconnecting";
+  } else if (sseStale) {
+    sseHealth = "reconnecting";
+  } else if (sseFresh || !haveSuccess) {
+    sseHealth = "live";
+  } else {
+    sseHealth = "reconnecting";
   }
 
   let daemon: StageStatus;
-  if (sse !== "live") {
+  if (sync !== "live") {
     daemon = "unknown";
   } else if (chat.bootId !== null) {
     daemon = "live";
@@ -165,10 +185,10 @@ export function resolveWidget(): WidgetView {
       label: "Internet",
       tooltip: internetTooltip(internet),
     },
-    sse: {
-      status: sse,
-      label: "SSE",
-      tooltip: sseTooltip(sse, sseFresh, sseStale, haveSuccess),
+    sync: {
+      status: sync,
+      label: "Sync",
+      tooltip: syncTooltip(sync, sseHealth, sseFresh, sseStale, haveSuccess),
     },
     daemon: {
       status: daemon,
@@ -184,27 +204,34 @@ function internetTooltip(s: StageStatus): string {
   return "Internet — browser is online";
 }
 
-function sseTooltip(
-  s: StageStatus,
+function syncTooltip(
+  zero: StageStatus,
+  sse: StageStatus,
   fresh: boolean,
   stale: boolean,
   haveSuccess: boolean,
 ): string {
-  if (s === "unknown") return "SSE — waiting on internet";
-  if (s === "live") {
-    return fresh
-      ? "SSE — connected; last frame under 30s ago"
-      : "SSE — connected";
-  }
-  if (s === "down") return "SSE — disconnected";
-  // reconnecting
-  if (stale) return "SSE — no frame in 60+ seconds; reconnecting";
-  if (!haveSuccess) return "SSE — connecting";
-  return "SSE — reconnecting";
+  // Phase 6: Sync == Zero WS health; SSE sub-health folded in.
+  if (zero === "unknown") return "Sync — waiting on internet";
+  const zeroText =
+    zero === "live"
+      ? "Sync — Zero WS live"
+      : zero === "down"
+        ? "Sync — Zero WS down (auth or schema error)"
+        : "Sync — Zero WS reconnecting";
+  let sseText: string;
+  if (sse === "unknown") sseText = "SSE waiting";
+  else if (sse === "live")
+    sseText = fresh ? "SSE live (< 30s)" : "SSE live";
+  else if (sse === "down") sseText = "SSE down";
+  else if (stale) sseText = "SSE stale (no frame 60s+)";
+  else if (!haveSuccess) sseText = "SSE connecting";
+  else sseText = "SSE reconnecting";
+  return `${zeroText} · ${sseText}`;
 }
 
 function daemonTooltip(s: StageStatus, uptimeMs: number | null): string {
-  if (s === "unknown") return "Daemon — waiting on SSE";
+  if (s === "unknown") return "Daemon — waiting on Sync";
   if (s !== "live") return "Daemon — reconnecting";
   if (uptimeMs === null) return "Daemon — live";
   return `Daemon — live · up ${formatUptime(uptimeMs)}`;
