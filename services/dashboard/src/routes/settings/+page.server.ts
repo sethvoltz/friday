@@ -34,25 +34,30 @@ export interface AppSummary {
   mcpServers: { name: string }[];
 }
 
-function loadApps(): AppSummary[] {
+async function loadApps(): Promise<AppSummary[]> {
   const db = getDb();
-  const rows = db.select().from(schema.apps).all();
+  // Phase 1 regression fix: under ADR-023 Drizzle Postgres these
+  // queries return Promises; the original SQLite `.all()` shape was
+  // synchronous. The page rendered an empty Apps panel because the
+  // `rows.length === 0` check ran on a Promise (which is truthy and
+  // doesn't have a `length`). `manifestJson` is jsonb now — Drizzle
+  // returns the parsed value directly, so the inner `JSON.parse` was
+  // double-parsing and the catch ate the error.
+  const rows = await db.select().from(schema.apps);
   if (rows.length === 0) return [];
-  const allAgents = db.select().from(schema.agents).all();
-  const allSchedules = db.select().from(schema.schedules).all();
+  const allAgents = await db.select().from(schema.agents);
+  const allSchedules = await db.select().from(schema.schedules);
   return rows.map((r) => {
-    let manifest: Manifest | null = null;
-    try {
-      manifest = JSON.parse(r.manifestJson) as Manifest;
-    } catch {
-      // Corrupted manifest snapshot — render the bare row.
-    }
+    const manifest: Manifest | null =
+      r.manifestJson && typeof r.manifestJson === "object"
+        ? (r.manifestJson as Manifest)
+        : null;
     return {
       id: r.id,
       name: r.name,
       version: r.version,
       status: r.status,
-      installedAt: new Date(r.installedAt).getTime(),
+      installedAt: r.installedAt.getTime(),
       folderPath: r.folderPath,
       agents: allAgents
         .filter((a) => a.appId === r.id)
@@ -72,7 +77,7 @@ export const load: ServerLoad = async ({ locals }) => {
   // session table (via the shared helper). The current session is
   // flagged so the UI can render "this device" affordances and the
   // post-revoke redirect.
-  const rows = listActiveSessionsForUser(locals.user.id);
+  const rows = await listActiveSessionsForUser(locals.user.id);
   const sessions: SessionSummary[] = rows.map((r) => ({
     id: r.id,
     createdAt: r.createdAt,
@@ -89,7 +94,7 @@ export const load: ServerLoad = async ({ locals }) => {
     watchdogRefork: cfg.watchdog?.refork ?? false,
   };
 
-  const apps = loadApps();
+  const apps = await loadApps();
 
   return { user: locals.user, sessions, settings, apps };
 };

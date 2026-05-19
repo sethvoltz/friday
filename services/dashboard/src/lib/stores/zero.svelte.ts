@@ -85,6 +85,30 @@ export interface ZeroMemoryEntryRow {
   status: "ready" | "pending_file" | "deleted";
 }
 
+/** Row shape mirrors the `apps` Zero table definition. */
+export interface ZeroAppRow {
+  id: string;
+  name: string;
+  version: string;
+  manifest_version: number;
+  folder_path: string;
+  manifest_json: {
+    name?: string;
+    version?: string;
+    mcpServers?: Array<{ name: string }>;
+  } | null;
+  status:
+    | "installed"
+    | "orphaned"
+    | "error"
+    | "pending_install"
+    | "uninstall_requested"
+    | "reload_requested";
+  installed_at: number;
+  upgraded_at: number | null;
+  meta_json: Record<string, unknown> | null;
+}
+
 interface RefreshResponse {
   token: string;
   deviceId: string;
@@ -104,6 +128,9 @@ class ZeroSyncStore {
 
   /** Live memory_entries rows from Zero (Phase 3.3). */
   memory = $state<ZeroMemoryEntryRow[]>([]);
+
+  /** Live apps rows from Zero (Phase 3.4). */
+  apps = $state<ZeroAppRow[]>([]);
 
   /** Connection status of the underlying Zero client. `pending` until
    *  the first materialization, `live` once a snapshot has been
@@ -154,6 +181,7 @@ class ZeroSyncStore {
       this.#bindTickets();
       this.#bindSchedules();
       this.#bindMemory();
+      this.#bindApps();
       this.status = "live";
     } catch (err) {
       this.status = "error";
@@ -240,6 +268,23 @@ class ZeroSyncStore {
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroMemoryEntryRow[];
       this.memory = rows as ZeroMemoryEntryRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  #bindApps(): void {
+    if (!this.#zero) return;
+    const query = this.#zero.query.apps;
+    const preload = this.#zero.preload(query);
+    const view = this.#zero.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      const rows = data as readonly ZeroAppRow[];
+      this.apps = rows as ZeroAppRow[];
     };
     update(view.data as readonly unknown[]);
     view.addListener((data) => update(data as readonly unknown[]));

@@ -137,13 +137,40 @@ const memoryEntries = table("memory_entries")
   })
   .primaryKey("id");
 
+/* ---------------- apps (Phase 3.4) ---------------- */
+// Mirrors `db/schema.ts:apps`. The Settings page's installed-apps
+// panel reads from this slice; mutators that install / uninstall /
+// reload an app live on the daemon side (Phase 4).
+
+const apps = table("apps")
+  .columns({
+    id: string(),
+    name: string(),
+    version: string(),
+    manifest_version: number(),
+    folder_path: string(),
+    manifest_json: json(),
+    status: string<
+      | "installed"
+      | "orphaned"
+      | "error"
+      | "pending_install"
+      | "uninstall_requested"
+      | "reload_requested"
+    >(),
+    installed_at: number(),
+    upgraded_at: number().optional(),
+    meta_json: json().optional(),
+  })
+  .primaryKey("id");
+
 // Explicit annotation: `createSchema`'s inferred return type references a
 // private path inside @rocicorp/zero's `out/zero-types/src/schema`, which
 // TS rejects with TS2742 ("not portable"). Annotating with the exported
 // `Schema` (renamed to `ZeroSchema` at import) keeps consumers' .d.ts
 // emit clean.
 export const schema: ZeroSchema = createSchema({
-  tables: [agents, tickets, schedules, memoryEntries],
+  tables: [agents, tickets, schedules, memoryEntries, apps],
   // Phase 3: enable the deprecated `z.query.<table>` field. The
   // createBuilder() path returns query objects that aren't bound to a
   // Zero connection, so `zero.materialize(builder.agents)` registers
@@ -172,4 +199,5 @@ export const permissions = definePermissions(schema, () => ({
   tickets: { row: { select: ANYONE_CAN } },
   schedules: { row: { select: ANYONE_CAN } },
   memory_entries: { row: { select: ANYONE_CAN } },
+  apps: { row: { select: ANYONE_CAN } },
 }));

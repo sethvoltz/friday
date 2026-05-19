@@ -4,6 +4,7 @@
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
   import { Sun, Moon, MonitorCog } from "lucide-svelte";
   import { setMode, userPrefersMode } from "mode-watcher";
+  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
 
   type Mode = "light" | "dark" | "system";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
@@ -11,7 +12,39 @@
     wakeLockSettings,
     wakeLockState,
   } from "$lib/stores/wake-lock.svelte";
+  import type { AppSummary } from "./+page.server";
   let { data }: { data: PageData } = $props();
+
+  // Phase 3.4 (ADR-024): when the Zero flag is on, derive the
+  // installed-apps panel from `zeroSync.apps` joined against
+  // `zeroSync.agents` + `zeroSync.schedules` (already reactive).
+  // Falls back to the SSR-loaded `data.apps` when the flag is off.
+  const zeroOn = useZero();
+  const apps = $derived.by<AppSummary[]>(() => {
+    if (!zeroOn) return data.apps;
+    const allAgents = zeroSync.agents;
+    const allSchedules = zeroSync.schedules;
+    return zeroSync.apps.map((r) => {
+      const manifest = r.manifest_json ?? null;
+      return {
+        id: r.id,
+        name: r.name,
+        version: r.version,
+        status: r.status,
+        installedAt: r.installed_at,
+        folderPath: r.folder_path,
+        agents: allAgents
+          .filter((a) => a.app_id === r.id)
+          .map((a) => ({ name: a.name, type: a.type, status: a.status })),
+        schedules: allSchedules
+          .filter((s) => s.app_id === r.id)
+          .map((s) => ({ name: s.name, cron: s.cron })),
+        mcpServers: (manifest?.mcpServers ?? []).map((m) => ({
+          name: m.name,
+        })),
+      };
+    });
+  });
 
   // Hydrate the wake-lock setting on first paint (SSR-safe: hydrate() reads
   // localStorage behind a typeof guard).
@@ -297,11 +330,11 @@
       uninstall, and reload are CLI/MCP-only in v1 — this card is
       read-only.
     </p>
-    {#if data.apps.length === 0}
+    {#if apps.length === 0}
       <p class="row-value muted">No apps installed.</p>
     {:else}
       <ul class="apps-list">
-        {#each data.apps as app (app.id)}
+        {#each apps as app (app.id)}
           <li class="app-row">
             <div class="app-head">
               <span class="app-id">{app.id}</span>
