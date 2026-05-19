@@ -15,7 +15,11 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 export interface ZeroJwtClaims {
-  /** BetterAuth user id from the session. */
+  /** Standard JWT `sub` claim — Zero requires it for the auth gate.
+   *  We mirror `userId` here for backward compat with existing
+   *  consumers; new code should read `sub`. */
+  sub: string;
+  /** BetterAuth user id from the session (same value as `sub`). */
   userId: string;
   /** Stable per-browser-install device id; client_devices.device_id. */
   deviceId: string;
@@ -42,6 +46,10 @@ export function mintZeroJwt(opts: MintOptions): string {
   const ttl = opts.ttlSec ?? 900;
   const header = { alg: "HS256", typ: "JWT" };
   const payload: ZeroJwtClaims = {
+    // `sub` is required by Zero's JWT validator (and is the standard
+    // JWT claim for the subject anyway). We use the userId here so
+    // Zero's `userID` parameter and the token agree.
+    sub: opts.userId,
     userId: opts.userId,
     deviceId: opts.deviceId,
     iat: now,
@@ -96,6 +104,7 @@ function isClaims(v: unknown): v is ZeroJwtClaims {
   if (!v || typeof v !== "object") return false;
   const o = v as Record<string, unknown>;
   return (
+    typeof o.sub === "string" &&
     typeof o.userId === "string" &&
     typeof o.deviceId === "string" &&
     typeof o.iat === "number" &&

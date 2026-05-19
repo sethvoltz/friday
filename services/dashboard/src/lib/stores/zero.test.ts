@@ -114,6 +114,7 @@ beforeEach(() => {
       JSON.stringify({
         token: "test-token-123",
         deviceId: "test-device-id",
+        userId: "test-user-id",
         expiresAt: Date.now() + 900_000,
       }),
       { status: 200, headers: { "content-type": "application/json" } },
@@ -185,27 +186,14 @@ describe("ZeroSyncStore initialization", () => {
     expect(url).toBe("/api/sync/refresh");
     expect((init as RequestInit).method).toBe("POST");
 
-    // Zero was constructed with the deviceId as userID and an auth
-    // callback that re-fetches the token.
+    // Zero was constructed with the BetterAuth user id as userID
+    // (Zero's JWT validator requires `sub === userID`) and the JWT
+    // string as `auth`.
     expect(instances).toHaveLength(1);
     const opts = instances[0].__ctorOpts;
-    expect(opts.userID).toBe("test-device-id");
-    expect(typeof opts.auth).toBe("function");
+    expect(opts.userID).toBe("test-user-id");
+    expect(opts.auth).toBe("test-token-123");
     expect(opts.kvStore).toBe("mem");
-  });
-
-  it("Zero's auth callback re-fetches a fresh token on each invocation", async () => {
-    localStorage.setItem("friday:flag:use-zero", "1");
-    await importStore();
-    await new Promise((r) => setTimeout(r, 20));
-
-    const fetchSpy = global.fetch as unknown as ReturnType<typeof vi.fn>;
-    const callsBefore = fetchSpy.mock.calls.length;
-    const auth = instances[0].__ctorOpts.auth as () => Promise<string>;
-    const token = await auth();
-    expect(token).toBe("test-token-123");
-    // One additional POST /api/sync/refresh fired.
-    expect(fetchSpy.mock.calls.length).toBe(callsBefore + 1);
   });
 });
 

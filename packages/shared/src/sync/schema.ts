@@ -21,7 +21,10 @@
 // gates that via short-lived JWTs, not by Zero permissions).
 
 import {
+  ANYONE_CAN,
+  boolean,
   createSchema,
+  definePermissions,
   json,
   number,
   type Schema as ZeroSchema,
@@ -85,13 +88,64 @@ const tickets = table("tickets")
   })
   .primaryKey("id");
 
+/* ---------------- schedules (Phase 3.2) ---------------- */
+// Mirrors `db/schema.ts:schedules`. The `paused` column ships as a
+// boolean (Drizzle column is `boolean`, jsonb wouldn't apply). Other
+// nullable fields stay `.optional()` so the Zero row shape matches
+// what Postgres returns under logical replication.
+
+const schedules = table("schedules")
+  .columns({
+    name: string(),
+    cron: string().optional(),
+    run_at: string().optional(),
+    task_prompt: string(),
+    paused: boolean(),
+    next_run_at: number().optional(),
+    last_run_at: number().optional(),
+    last_run_id: string().optional(),
+    meta_json: json().optional(),
+    app_id: string().optional(),
+    status: string<
+      "active" | "pending_register" | "reload_requested" | "deleted" | "paused"
+    >(),
+    created_at: number(),
+    updated_at: number(),
+  })
+  .primaryKey("name");
+
 // Explicit annotation: `createSchema`'s inferred return type references a
 // private path inside @rocicorp/zero's `out/zero-types/src/schema`, which
 // TS rejects with TS2742 ("not portable"). Annotating with the exported
 // `Schema` (renamed to `ZeroSchema` at import) keeps consumers' .d.ts
 // emit clean.
 export const schema: ZeroSchema = createSchema({
-  tables: [agents, tickets],
+  tables: [agents, tickets, schedules],
+  // Phase 3: enable the deprecated `z.query.<table>` field. The
+  // createBuilder() path returns query objects that aren't bound to a
+  // Zero connection, so `zero.materialize(builder.agents)` registers
+  // 0 desired queries with zero-cache (the dashboard's symptoms in
+  // Phase 3.2: client gets "Loaded 0 row records" even when the
+  // replica contains rows). With `enableLegacyQueries: true`,
+  // `zero.query.<table>` returns connection-bound builders that
+  // actually wire the query up to the WS.
+  enableLegacyQueries: true,
 });
 
 export type Schema = typeof schema;
+
+/* ---------------- permissions ---------------- */
+// Zero 1.5+ defaults to "deny all" for tables without an explicit
+// permissions rule — queries against an undeployed schema return zero
+// rows with the server-side log line "No upstream permissions deployed."
+// Friday is single-user (the dashboard's BetterAuth session gates
+// access at the WS handshake), so every authenticated client reads
+// every row. `ANYONE_CAN` translates to "select allowed for any
+// authenticated principal." Phase 4 layers in cell-level or
+// row-conditional rules if the auth model grows.
+
+export const permissions = definePermissions(schema, () => ({
+  agents: { row: { select: ANYONE_CAN } },
+  tickets: { row: { select: ANYONE_CAN } },
+  schedules: { row: { select: ANYONE_CAN } },
+}));

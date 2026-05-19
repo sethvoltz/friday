@@ -20,11 +20,9 @@
  */
 
 import { browser } from "$app/environment";
-import { Zero, createBuilder } from "@rocicorp/zero";
+import { Zero } from "@rocicorp/zero";
 import { schema, type Schema } from "@friday/shared/sync";
 import { chat, type AgentInfo } from "./chat.svelte";
-
-const queries = createBuilder(schema);
 
 /** Row shape mirrors the `agents` Zero table definition. Kept narrow:
  *  Phase 2 only reads the columns the sidebar needs. */
@@ -50,9 +48,32 @@ export interface ZeroTicketRow {
   updated_at: number;
 }
 
+/** Row shape mirrors the `schedules` Zero table definition. */
+export interface ZeroScheduleRow {
+  name: string;
+  cron: string | null;
+  run_at: string | null;
+  task_prompt: string;
+  paused: boolean;
+  next_run_at: number | null;
+  last_run_at: number | null;
+  last_run_id: string | null;
+  meta_json: Record<string, unknown> | null;
+  app_id: string | null;
+  status:
+    | "active"
+    | "pending_register"
+    | "reload_requested"
+    | "deleted"
+    | "paused";
+  created_at: number;
+  updated_at: number;
+}
+
 interface RefreshResponse {
   token: string;
   deviceId: string;
+  userId: string;
   expiresAt: number;
 }
 
@@ -62,6 +83,9 @@ class ZeroSyncStore {
 
   /** Live ticket rows from Zero (Phase 3.1). */
   tickets = $state<ZeroTicketRow[]>([]);
+
+  /** Live schedule rows from Zero (Phase 3.2). */
+  schedules = $state<ZeroScheduleRow[]>([]);
 
   /** Connection status of the underlying Zero client. `pending` until
    *  the first materialization, `live` once a snapshot has been
@@ -93,17 +117,24 @@ class ZeroSyncStore {
         this.status = "error";
         return;
       }
-      const { deviceId } = (await r.json()) as RefreshResponse;
+      const { token, userId } = (await r.json()) as RefreshResponse;
+      // Zero 1.5: `auth` is a JWT string, not a callback. Token
+      // rotation happens via `zero.connection.connect({auth})` when
+      // zero-cache returns 401/403. Phase 6 wires that listener; the
+      // 15-min TTL gives Phase 3 plenty of soak time before rotation
+      // matters. `userID` MUST match the JWT's `sub` claim; the
+      // refresh endpoint puts BetterAuth's user id in both.
       this.#zero = new Zero<Schema>({
         schema,
         server: zeroServerUrl(),
-        auth: refreshToken,
-        userID: deviceId,
+        auth: token,
+        userID: userId,
         kvStore: "mem", // Phase 6 promotes to IDB for offline cache.
       });
 
       this.#bindAgents();
       this.#bindTickets();
+      this.#bindSchedules();
       this.status = "live";
     } catch (err) {
       this.status = "error";
@@ -117,7 +148,11 @@ class ZeroSyncStore {
 
   #bindAgents(): void {
     if (!this.#zero) return;
-    const query = queries.agents.where("status", "!=", "archived");
+    // `enableLegacyQueries: true` in the shared sync schema gives us
+    // the connection-bound `z.query.<table>` field; the alternative
+    // `createBuilder(schema)` path returns unbound builders that
+    // register 0 desired queries with zero-cache.
+    const query = this.#zero.query.agents.where("status", "!=", "archived");
     const preload = this.#zero.preload(query);
     const view = this.#zero.materialize(query);
     const update = (data: readonly unknown[]): void => {
@@ -139,12 +174,29 @@ class ZeroSyncStore {
 
   #bindTickets(): void {
     if (!this.#zero) return;
-    const query = queries.tickets;
+    const query = this.#zero.query.tickets;
     const preload = this.#zero.preload(query);
     const view = this.#zero.materialize(query);
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroTicketRow[];
       this.tickets = rows as ZeroTicketRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  #bindSchedules(): void {
+    if (!this.#zero) return;
+    const query = this.#zero.query.schedules;
+    const preload = this.#zero.preload(query);
+    const view = this.#zero.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      const rows = data as readonly ZeroScheduleRow[];
+      this.schedules = rows as ZeroScheduleRow[];
     };
     update(view.data as readonly unknown[]);
     view.addListener((data) => update(data as readonly unknown[]));

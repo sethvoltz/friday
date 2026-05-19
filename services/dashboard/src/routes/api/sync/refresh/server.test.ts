@@ -123,16 +123,22 @@ describe("POST /api/sync/refresh", () => {
     const body = (await response.json()) as {
       token: string;
       deviceId: string;
+      userId: string;
       expiresAt: number;
     };
 
     // Cookie was set on the response with the same deviceId.
     expect(cookies.get("friday-device-id")).toBe(body.deviceId);
+    // The endpoint surfaces the BetterAuth user id in the response so
+    // the Zero client can pass it as `userID` (Zero's JWT validator
+    // requires `sub === userID`).
+    expect(body.userId).toBe("user-happy");
 
     // JWT verifies with the same secret and carries the claims we
     // expect; exp is roughly now+15min.
     const claims = verifyZeroJwt(body.token, process.env.ZERO_AUTH_SECRET!);
     expect(claims).not.toBeNull();
+    expect(claims!.sub).toBe("user-happy");
     expect(claims!.userId).toBe("user-happy");
     expect(claims!.deviceId).toBe(body.deviceId);
     expect(claims!.exp - claims!.iat).toBe(15 * 60);

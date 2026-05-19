@@ -3,11 +3,41 @@
   import type { ScheduleRow } from "./+page.server";
   import { nextRuns } from "@friday/shared/cron";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
+  import {
+    useZero,
+    zeroSync,
+    type ZeroScheduleRow,
+  } from "$lib/stores/zero.svelte";
 
   let { data }: { data: PageData } = $props();
 
+  // Phase 3.2 (ADR-024): when the Zero flag is on the schedules list
+  // is sourced from `zeroSync.schedules`. Same pattern as the tickets
+  // slice — keep `schedules` as a mutable $state so downstream call
+  // sites (refresh, mutation handlers) stay untouched, and push Zero
+  // rows in via an $effect when the flag is on.
+  const zeroOn = useZero();
   // svelte-ignore state_referenced_locally
   let schedules = $state<ScheduleRow[]>(data.schedules);
+  $effect(() => {
+    if (zeroOn) {
+      schedules = zeroSync.schedules.map(toScheduleRow);
+    }
+  });
+  function toScheduleRow(r: ZeroScheduleRow): ScheduleRow {
+    return {
+      name: r.name,
+      cron: r.cron,
+      runAt: r.run_at,
+      taskPrompt: r.task_prompt,
+      paused: r.paused,
+      nextRunAt: r.next_run_at,
+      lastRunAt: r.last_run_at,
+      lastRunId: r.last_run_id,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
+  }
   let busy = $state<string | null>(null);
   let toast = $state<{ msg: string; kind: "ok" | "err" | "info" } | null>(null);
 
@@ -43,6 +73,9 @@
   }
 
   async function refresh() {
+    // Phase 3.2: under the Zero flag the reactive query keeps schedules
+    // in sync without a manual REST hit.
+    if (zeroOn) return;
     try {
       const r = await fetch("/api/schedules");
       if (!r.ok) return;

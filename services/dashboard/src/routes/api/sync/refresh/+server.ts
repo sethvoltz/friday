@@ -75,6 +75,11 @@ export const POST: RequestHandler = async ({ cookies, locals, request }) => {
   return json({
     token,
     deviceId,
+    // The Zero client passes `userID` at construction; Zero's JWT
+    // validator requires `sub === userID`. Mint the JWT with
+    // `sub = locals.user.id` and surface the same value here so the
+    // client constructs Zero with the matching userID.
+    userId: locals.user.id,
     expiresAt: (nowSec + TOKEN_TTL_SEC) * 1000,
   });
 };

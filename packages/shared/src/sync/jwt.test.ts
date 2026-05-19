@@ -14,6 +14,9 @@ describe("mintZeroJwt + verifyZeroJwt", () => {
     });
     const claims = verifyZeroJwt(token, SECRET, 1_000_100);
     expect(claims).toEqual({
+      // `sub` mirrors userId so Zero's JWT validator (which requires
+      // the standard `sub` claim) recognizes the same identity.
+      sub: "user-123",
       userId: "user-123",
       deviceId: "device-abc",
       iat: 1_000_000,
