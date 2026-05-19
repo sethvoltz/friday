@@ -1,5 +1,5 @@
 /**
- * Cross-boundary test for the `/api/sync` WebSocket reverse-proxy that
+ * Cross-boundary test for the `/zero` WebSocket reverse-proxy that
  * fronts zero-cache (see `services/dashboard/server-entry-proxy.mjs`).
  *
  * The proxy is the only thing between a phone over Cloudflare Tunnel
@@ -11,7 +11,7 @@
  * rewritten HTTP upgrade request); a fake client opens a raw socket
  * to an HTTP server wired with the proxy's upgrade handler and
  * exchanges WS-handshake-style bytes. Assertions pin specific bytes
- * (the rewritten request line, the strip of `/api/sync` from the
+ * (the rewritten request line, the strip of `/zero` from the
  * path, byte-level echo in both directions), not types.
  */
 
@@ -150,11 +150,11 @@ describe("createZeroUpgradeHandler", () => {
   });
 
   test(
-    "upgrade on /api/sync/sync/v50/connect arrives at upstream with /api/sync stripped from request line",
+    "upgrade on /zero/sync/v50/connect arrives at upstream with /zero stripped from request line",
     async () => {
       const client = await rawConnect("127.0.0.1", h.proxyPort);
       const upgradeReq =
-        "GET /api/sync/sync/v50/connect?clientID=abc HTTP/1.1\r\n" +
+        "GET /zero/sync/v50/connect?clientID=abc HTTP/1.1\r\n" +
         "Host: dashboard.local\r\n" +
         "Connection: Upgrade\r\n" +
         "Upgrade: websocket\r\n" +
@@ -192,7 +192,7 @@ describe("createZeroUpgradeHandler", () => {
     async () => {
       const client = await rawConnect("127.0.0.1", h.proxyPort);
       client.write(
-        "GET /api/sync/sync/v50/connect HTTP/1.1\r\n" +
+        "GET /zero/sync/v50/connect HTTP/1.1\r\n" +
           "Host: dashboard.local\r\n" +
           "Connection: Upgrade\r\n" +
           "Upgrade: websocket\r\n" +
@@ -229,7 +229,7 @@ describe("createZeroUpgradeHandler", () => {
     },
   );
 
-  test("upgrade on path outside /api/sync is refused with HTTP 400 and no upstream connection", async () => {
+  test("upgrade on path outside /zero is refused with HTTP 400 and no upstream connection", async () => {
     const client = await rawConnect("127.0.0.1", h.proxyPort);
     client.write(
       "GET /api/some-other-route HTTP/1.1\r\n" +
@@ -256,6 +256,6 @@ describe("createZeroUpgradeHandler", () => {
   });
 
   test("PROXY_PREFIX is the documented mount path Zero clients can target", () => {
-    expect(PROXY_PREFIX).toBe("/api/sync");
+    expect(PROXY_PREFIX).toBe("/zero");
   });
 });

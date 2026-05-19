@@ -1151,14 +1151,16 @@ function zeroServerUrl(): string {
   // deploy topologies).
   if (env?.PUBLIC_FRIDAY_ZERO_URL) return env.PUBLIC_FRIDAY_ZERO_URL;
   // Prod build: route through the dashboard's own origin via the
-  // server-entry WS reverse-proxy at `/api/sync` (server-entry.mjs).
+  // server-entry WS reverse-proxy at `/zero` (server-entry.mjs).
   // This is what lets a phone over Cloudflare Tunnel reach zero-cache
   // — the local 4848 listener is unreachable from outside the host.
-  // Use `window.location.origin` so the same bundle works against any
-  // hostname (localhost, friday.voltzmakes.com, an alt CF tunnel,
-  // etc.) without rebuilding.
+  // The mount path is single-segment because `ZeroOptions.server` is
+  // validated by Zero to have at most one path component; `/api/sync`
+  // is rejected at construction time. Use `window.location.origin` so
+  // the same bundle works against any hostname (localhost,
+  // friday.voltzmakes.com, an alt CF tunnel, etc.) without rebuilding.
   if (env?.PROD && typeof window !== "undefined") {
-    return `${window.location.origin}/api/sync`;
+    return `${window.location.origin}/zero`;
   }
   // Dev (`vite dev`): connect directly to the local zero-cache.
   // vite dev doesn't run the server-entry proxy, and dev only ever

@@ -12,14 +12,22 @@
 import net from "node:net";
 
 /**
- * The proxy mount path. Zero's client computes its WS URL as
- * `<server>/sync/v50/connect` (see `@rocicorp/zero`'s
- * createConnectionURL). When `server` is
- * `https://friday.voltzmakes.com/api/sync`, the resulting upgrade hits
- * `/api/sync/sync/v50/connect` — the doubled `sync` is Zero's
- * protocol root layered under our proxy prefix, not a typo.
+ * The proxy mount path. Zero's `ZeroOptions.server` constraint:
+ * "at most one path component" — `https://friday.voltzmakes.com/api/sync`
+ * is rejected at construction time with
+ *
+ *   Error: ZeroOptions.server may have at most one path component.
+ *   For example: "https://myapp-myteam.zero.ms/zero".
+ *
+ * so the mount has to be a single segment. With `server` set to
+ * `${origin}/zero` the client opens `/zero/sync/v50/connect`; we strip
+ * `/zero` and forward `/sync/v50/connect` to zero-cache. (The
+ * unauthenticated HTTP endpoints around it — `/api/sync/refresh` for
+ * JWT mint, `/api/_diag/client-error` for client-side error
+ * reporting — keep their two-component paths; they're plain SvelteKit
+ * routes, not Zero's server URL.)
  */
-export const PROXY_PREFIX = "/api/sync";
+export const PROXY_PREFIX = "/zero";
 
 /**
  * Build an upgrade-event listener for an HTTP server that proxies

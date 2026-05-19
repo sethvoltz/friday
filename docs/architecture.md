@@ -32,8 +32,9 @@ Local-first, headless agent daemon with a SvelteKit dashboard exposed via Cloudf
                     ┌────────────────────────┐
                     │  SvelteKit Dashboard   │ ◄── BetterAuth (in-process)
                     │   (adapter-node)       │
-                    │  /api/sync   ─ WS proxy → zero-cache
-                    │  /api/events ─ SSE proxy → daemon
+                    │  /zero         ─ WS proxy → zero-cache
+                    │  /api/sync/refresh ─ Zero JWT mint
+                    │  /api/events   ─ SSE proxy → daemon
                     │  /api/mutators ─ Zero push-url
                     └────┬──────────────┬────┘
                          │              │
@@ -198,7 +199,7 @@ Full schema reference: see `docs/schema.md`.
 ### Sync engine (Zero) — settled state to clients
 
 - `zero-cache` runs as a sidecar on `127.0.0.1:4848`, tailing Postgres logical replication. Apache-2 licensed (no licensing wrinkles for self-hosted).
-- Dashboard reverse-proxies `/api/sync` (WS) → zero-cache; auth via short-lived JWT minted from the BetterAuth session.
+- Dashboard reverse-proxies `/zero` (WS) → zero-cache; auth via short-lived JWT minted from the BetterAuth session.
 - Client subscribes to reactive queries against the synced schema. Phase 1 bootstrap is the orchestrator's last 50 blocks + non-archived agents/tickets/schedules/apps/settings (target <2s broadband). Phase 2 fills full history for active agents and the last 24h of archives. Phase 3 is lazy on demand for very old data.
 - **Streaming rows excluded from sync.** Block rows for the in-flight turn live only in the daemon's in-memory `liveTurns` accumulator; they're written to Postgres only on `block_complete` with `streaming=0`. Clients' reactive queries are scoped to `WHERE streaming=0`. See ADR-024.
 - **Read cursors are synced** (`read_cursors` table, per `device_id`). Unread badges become cross-device-correct by construction; today's localStorage-only badge state retires.
@@ -267,7 +268,7 @@ See ADR-016 for the original block-model rationale; ADR-024 for the in-memory-ac
 - Public surface, gated by BetterAuth. Every API route checks the session before forwarding.
 - `hooks.server.ts` logs all requests + unhandled errors via `@friday/shared` logger.
 - **Three proxy surfaces under one public port:**
-  - `/api/sync` — WS upgrade, auth-gated, reverse-proxied to `127.0.0.1:zero-cache`. Short-lived JWT minted from BetterAuth session and passed as Authorization header on the upstream WS.
+  - `/zero` — WS upgrade, auth-gated, reverse-proxied to `127.0.0.1:zero-cache`. Short-lived JWT minted from BetterAuth session and passed as Authorization header on the upstream WS.
   - `/api/events?agent=<name>` — per-agent SSE proxy to daemon. Live-turn deltas only (ADR-024).
   - `/api/mutators` — Zero's `push-url`. Dashboard executes the mutator (writes Postgres + optional sideband to daemon fast-path endpoint). Returns Zero's mutation acknowledgement.
 - **Connectivity widget** in the header (ADR-018, amended by ADR-024): three sequential dots — Internet / Sync / Daemon. Sync stage's tooltip surfaces both Zero WS health and live-turn SSE health (the latter is a sub-indicator, since sync is the dominant signal). Grey-cascade when an upstream stage is down. Tooltips informational only.
@@ -282,7 +283,7 @@ Two channels: **Zero WS** for settled state, **per-agent SSE** for live-turn del
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `WS /api/sync` | WS | Zero WebSocket, auth-gated by dashboard, reverse-proxied to `zero-cache`. Carries reactive query subscriptions, mutator submissions, and the bidirectional sync protocol. |
+| `WS /zero` | WS | Zero WebSocket, auth-gated by dashboard, reverse-proxied to `zero-cache`. Carries reactive query subscriptions, mutator submissions, and the bidirectional sync protocol. |
 | `POST /api/mutators` | POST | Zero `push-url`. Dashboard executes the named mutator (writes Postgres + optional sideband to daemon fast-path). Idempotent on Zero's `mutation_id`. |
 | `GET /api/events?agent=<name>` | SSE | Per-agent live-turn delta stream. Daemon replays the current in-flight turn from `turn_started` on (re)connect. |
 | `POST /api/internal/abort` | POST | Localhost-only fast-path for abort. Daemon sideband; dashboard mutator additionally writes `abort_requested` row. |
