@@ -13,6 +13,10 @@ export * from "./apps/manifest.js";
 export * from "./db/client.js";
 export * from "./db/migrate.js";
 export * as schema from "./db/schema.js";
+// Phase 4.3: NOTIFY channel names are referenced from both client
+// and daemon — re-export the constant + type so daemon-side LISTEN
+// handlers don't have to drill through the schema namespace.
+export { LISTEN_CHANNELS, type ListenChannel } from "./db/schema.js";
 export {
   provisionPostgres,
   probePostgresHealth,

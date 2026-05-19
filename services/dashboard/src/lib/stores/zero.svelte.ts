@@ -99,6 +99,15 @@ export interface ZeroReadCursorRow {
   ts: number;
 }
 
+/** Row shape mirrors the `settings` Zero table definition (Phase 4.3).
+ *  Single-row table — `id` is always `"singleton"`. */
+export interface ZeroSettingsRow {
+  id: string;
+  model: string | null;
+  watchdog_refork: boolean | null;
+  updated_at: number;
+}
+
 /** Row shape mirrors the `client_devices` Zero table definition (Phase 4.2). */
 export interface ZeroClientDeviceRow {
   device_id: string;
@@ -184,6 +193,12 @@ class ZeroSyncStore {
    *  button calls the `forgetDevice` mutator with the row's
    *  device_id. */
   clientDevices = $state<ZeroClientDeviceRow[]>([]);
+
+  /** Live settings singleton row from Zero (Phase 4.3). Always
+   *  length 0 or 1 — the singleton-keyed table guarantees that. The
+   *  Settings page derives current model + watchdog values from
+   *  here so cross-tab updates land in <1s. */
+  settings = $state<ZeroSettingsRow[]>([]);
 
   /** Live blocks rows for the currently-focused agent (Phase 3.7).
    *  Bound dynamically by {@linkcode bindBlocksFor}; empty when no agent
@@ -290,6 +305,7 @@ class ZeroSyncStore {
       this.#bindApps();
       this.#bindReadCursors();
       this.#bindClientDevices();
+      this.#bindSettings();
       this.status = "live";
       // Phase 4.2: report storage stats immediately on connect +
       // every 5 minutes thereafter. The `client_devices` row already
@@ -468,6 +484,25 @@ class ZeroSyncStore {
     });
   }
 
+  #bindSettings(): void {
+    if (!this.#zero) return;
+    // Singleton query. The migration's seed insert + `id = 'singleton'`
+    // PK means the row set is guaranteed length 1.
+    const query = this.#zero.query.settings;
+    const preload = this.#zero.preload(query);
+    const view = this.#zero.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      const rows = data as readonly ZeroSettingsRow[];
+      this.settings = rows as ZeroSettingsRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
   /**
    * Phase 4.2: read `navigator.storage.estimate()` and fire the
    * `reportClientStats` mutator. Silently no-ops when:
@@ -623,6 +658,27 @@ class ZeroSyncStore {
   forgetDevice(deviceId: string): void {
     if (!this.#zero) return;
     void this.#zero.mutate.forgetDevice({ deviceId });
+  }
+
+  /**
+   * Phase 4.3: dispatch the `updateSettings` mutator. Partial — omit
+   * fields you don't want to touch. The daemon's LISTEN handler
+   * re-syncs `~/.friday/config.json` from the new row contents so
+   * the next worker spawn picks up the change without a daemon
+   * restart.
+   *
+   * No-op when Zero hasn't finished init (the Settings page can call
+   * this from the input handler without gating on `status === 'live'`).
+   */
+  updateSettings(args: {
+    model?: string;
+    watchdogRefork?: boolean;
+  }): void {
+    if (!this.#zero) return;
+    void this.#zero.mutate.updateSettings({
+      ...args,
+      ts: Date.now(),
+    });
   }
 
   destroy(): void {

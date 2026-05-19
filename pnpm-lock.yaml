@@ -184,6 +184,9 @@ importers:
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.1)(@types/better-sqlite3@7.6.13)(@types/pg@8.20.0)(better-sqlite3@12.10.0)(gel@2.2.0)(kysely@0.28.17)(pg@8.21.0)(postgres@3.4.7)
+      pg:
+        specifier: ^8.13.0
+        version: 8.21.0
       shell-quote:
         specifier: ^1.8.3
         version: 1.8.3
@@ -191,6 +194,9 @@ importers:
         specifier: ^4.0.0
         version: 4.4.3
     devDependencies:
+      '@types/pg':
+        specifier: ^8.11.0
+        version: 8.20.0
       '@types/shell-quote':
         specifier: ^1.7.5
         version: 1.7.5

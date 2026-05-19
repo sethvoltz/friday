@@ -18,6 +18,7 @@ import {
   type ForgetDeviceArgs,
   type MarkReadArgs,
   type ReportClientStatsArgs,
+  type UpdateSettingsArgs,
 } from "./mutators.js";
 
 interface MockUpsertCall {
@@ -39,15 +40,24 @@ interface MockClientDeviceDeleteCall {
   device_id: string;
 }
 
+interface MockSettingsUpdateCall {
+  id: string;
+  model?: string;
+  watchdog_refork?: boolean;
+  updated_at: number;
+}
+
 function makeMockTx(): {
   tx: Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   upsertCalls: MockUpsertCall[];
   clientDeviceUpdates: MockClientDeviceUpdateCall[];
   clientDeviceDeletes: MockClientDeviceDeleteCall[];
+  settingsUpdates: MockSettingsUpdateCall[];
 } {
   const upsertCalls: MockUpsertCall[] = [];
   const clientDeviceUpdates: MockClientDeviceUpdateCall[] = [];
   const clientDeviceDeletes: MockClientDeviceDeleteCall[] = [];
+  const settingsUpdates: MockSettingsUpdateCall[] = [];
   const upsert = vi.fn(async (row: MockUpsertCall) => {
     upsertCalls.push(row);
   });
@@ -57,6 +67,9 @@ function makeMockTx(): {
   const clientDelete = vi.fn(async (row: MockClientDeviceDeleteCall) => {
     clientDeviceDeletes.push(row);
   });
+  const settingsUpdate = vi.fn(async (row: MockSettingsUpdateCall) => {
+    settingsUpdates.push(row);
+  });
   // The mutators touch `tx.mutate.<table>.<op>`. Rest of Transaction
   // surface left undefined — we cast to the parameter type only to
   // satisfy TypeScript.
@@ -64,9 +77,16 @@ function makeMockTx(): {
     mutate: {
       read_cursors: { upsert },
       client_devices: { update: clientUpdate, delete: clientDelete },
+      settings: { update: settingsUpdate },
     },
   } as unknown as Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
-  return { tx, upsertCalls, clientDeviceUpdates, clientDeviceDeletes };
+  return {
+    tx,
+    upsertCalls,
+    clientDeviceUpdates,
+    clientDeviceDeletes,
+    settingsUpdates,
+  };
 }
 
 describe("markRead", () => {
@@ -220,6 +240,92 @@ describe("reportClientStats", () => {
     expect("first_seen_at" in row).toBe(false);
     expect("label" in row).toBe(false);
     expect("user_agent" in row).toBe(false);
+  });
+});
+
+describe("updateSettings", () => {
+  it("UPDATEs settings singleton with model when provided", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    const args: UpdateSettingsArgs = {
+      model: "claude-opus-4-7",
+      ts: 1_700_000_000_000,
+    };
+    await mutators.updateSettings(tx, args);
+    expect(settingsUpdates).toEqual([
+      {
+        id: "singleton",
+        model: "claude-opus-4-7",
+        updated_at: 1_700_000_000_000,
+      },
+    ]);
+  });
+
+  it("UPDATEs settings singleton with watchdogRefork when provided", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, {
+      watchdogRefork: false,
+      ts: 1,
+    });
+    expect(settingsUpdates).toEqual([
+      {
+        id: "singleton",
+        watchdog_refork: false,
+        updated_at: 1,
+      },
+    ]);
+  });
+
+  it("UPDATEs both fields when both are provided", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, {
+      model: "claude-sonnet-4-6",
+      watchdogRefork: true,
+      ts: 999,
+    });
+    expect(settingsUpdates[0]).toEqual({
+      id: "singleton",
+      model: "claude-sonnet-4-6",
+      watchdog_refork: true,
+      updated_at: 999,
+    });
+  });
+
+  it("omits fields that weren't provided (preserves existing values via Zero's update semantic)", async () => {
+    // Critical contract — `update` (not `upsert`) means absent keys
+    // preserve their current Postgres values. A naive UPSERT with
+    // undefined would clobber the omitted column to NULL.
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { model: "x", ts: 5 });
+    expect("watchdog_refork" in (settingsUpdates[0] ?? {})).toBe(false);
+  });
+
+  it("is idempotent on PK — re-running with same args produces identical writes", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    const args: UpdateSettingsArgs = {
+      model: "claude-opus-4-7",
+      watchdogRefork: true,
+      ts: 1,
+    };
+    await mutators.updateSettings(tx, args);
+    await mutators.updateSettings(tx, args);
+    expect(settingsUpdates).toHaveLength(2);
+    expect(settingsUpdates[0]).toEqual(settingsUpdates[1]);
+  });
+
+  it("always targets the literal 'singleton' PK", async () => {
+    // Defensive: the table is single-row by design; any other id
+    // would silently create a parallel row. The mutator hardcodes
+    // "singleton" — verify no path slips a different value through.
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { model: "x", ts: 1 });
+    await mutators.updateSettings(tx, { watchdogRefork: false, ts: 2 });
+    expect(settingsUpdates.map((c) => c.id)).toEqual(["singleton", "singleton"]);
   });
 });
 

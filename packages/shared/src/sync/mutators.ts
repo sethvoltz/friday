@@ -111,6 +111,31 @@ export interface ForgetDeviceArgs {
   deviceId: string;
 }
 
+/* ---------------- Phase 4.3: updateSettings ---------------- */
+// UPSERTs the single-row `settings` table by the literal PK
+// "singleton". Only fields the user explicitly provides are
+// touched; omitted fields preserve their existing values (Zero's
+// `upsert` semantic).
+//
+// Side effect (daemon): the daemon LISTENs for settings changes and
+// re-syncs `~/.friday/config.json` so existing `loadConfig()` reads
+// (worker spawns, mail-bridge, scheduler) pick up the new value. The
+// LISTEN handler has a matching boot-recovery scan (plan §5): on
+// daemon boot, scan the settings table and reconcile config.json.
+//
+// Idempotency: re-running with same args is a no-op at the table
+// level (UPSERT to the same values produces the same row) AND at
+// the side-effect layer (config.json rewrite is deterministic on
+// the row contents — same row, same file output).
+
+export interface UpdateSettingsArgs {
+  /** Partial — omitted fields preserve their existing values. */
+  model?: string;
+  watchdogRefork?: boolean;
+  /** Client-side wall clock for diagnostics; server overwrites. */
+  ts: number;
+}
+
 export const createMutators = () => ({
   markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
     // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -162,6 +187,31 @@ export const createMutators = () => ({
     await tx.mutate.client_devices.delete({
       device_id: args.deviceId,
     });
+  },
+  updateSettings: async (
+    tx: FridayTx,
+    args: UpdateSettingsArgs,
+  ): Promise<void> => {
+    // UPSERT the singleton row. Only fields the user provided are
+    // included in the patch — Zero's `update` semantics preserve
+    // omitted columns. The 0002 migration ensures the row already
+    // exists, so `update` rather than `upsert` is safe; using
+    // `update` makes the omitted-fields-preserved invariant
+    // explicit in the type signature.
+    const patch: {
+      id: string;
+      model?: string;
+      watchdog_refork?: boolean;
+      updated_at: number;
+    } = {
+      id: "singleton",
+      updated_at: args.ts,
+    };
+    if (args.model !== undefined) patch.model = args.model;
+    if (args.watchdogRefork !== undefined) {
+      patch.watchdog_refork = args.watchdogRefork;
+    }
+    await tx.mutate.settings.update(patch);
   },
 }) satisfies CustomMutatorDefs;
 

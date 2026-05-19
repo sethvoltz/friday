@@ -63,15 +63,43 @@
   // learned the palette yet.
   const selectedMode = $derived<Mode>(userPrefersMode.current ?? "system");
 
-  // FIX_FORWARD 6.3: configurable Friday settings (model + watchdog).
-  // PATCH writes back to ~/.friday/config.json via the dashboard's
-  // /api/settings endpoint. The server snapshot seeds these once; user
-  // edits are reflected locally from the PATCH response.
+  // FIX_FORWARD 6.3 + Phase 4.3: configurable Friday settings (model +
+  // watchdog). Under Zero (`useZero()`), the live values come from the
+  // reactive `zeroSync.settings` singleton row and writes go through
+  // the `updateSettings` mutator; the daemon's LISTEN handler re-syncs
+  // ~/.friday/config.json so worker spawns see the new value on the
+  // next read (no restart required). The SSR `data.settings` seed
+  // covers first paint before Zero's WS handshake completes.
+  const liveSettings = $derived.by<{ model: string; watchdogRefork: boolean }>(
+    () => {
+      if (!zeroOn) {
+        return {
+          model: data.settings.model,
+          watchdogRefork: data.settings.watchdogRefork,
+        };
+      }
+      const row = zeroSync.settings[0];
+      return {
+        model: row?.model ?? data.settings.model,
+        watchdogRefork: row?.watchdog_refork ?? data.settings.watchdogRefork,
+      };
+    },
+  );
+  // Two-way bindings for the form inputs. `$effect` mirrors the
+  // derived live values into the writable state so cross-tab updates
+  // converge the inputs without trampling an in-progress edit.
   // svelte-ignore state_referenced_locally
   let model = $state(data.settings.model);
   // svelte-ignore state_referenced_locally
   let watchdogRefork = $state(data.settings.watchdogRefork);
   let savingSettings = $state(false);
+
+  $effect(() => {
+    if (!zeroOn) return;
+    if (savingSettings) return; // don't trample an in-flight save
+    model = liveSettings.model;
+    watchdogRefork = liveSettings.watchdogRefork;
+  });
 
   const MODEL_OPTIONS: Array<{ id: string; label: string }> = [
     { id: "claude-opus-4-7", label: "Claude Opus 4.7 — best for reasoning" },
@@ -92,9 +120,26 @@
     }, 4500);
   }
 
-  async function patchSettings(body: Record<string, unknown>) {
+  async function patchSettings(body: {
+    model?: string;
+    watchdogRefork?: boolean;
+  }) {
     savingSettings = true;
     try {
+      if (zeroOn) {
+        // Phase 4.3: write via the Zero mutator. Optimistic client
+        // write lands immediately; the canonical Postgres UPSERT and
+        // daemon's LISTEN-driven config.json resync follow within a
+        // second. The reactive `$effect` above will mirror the new
+        // values back into the inputs once they arrive — until then
+        // the inputs reflect the user's keystrokes.
+        zeroSync.updateSettings(body);
+        priorModel = body.model ?? priorModel;
+        priorWatchdog = body.watchdogRefork ?? priorWatchdog;
+        showSettingsToast("saved", "ok");
+        return;
+      }
+      // Legacy REST path — only reachable with Zero disabled.
       let r: Response;
       try {
         r = await fetch("/api/settings", {
@@ -103,8 +148,6 @@
           body: JSON.stringify(body),
         });
       } catch (err) {
-        // Network failed entirely — revert and surface so the user
-        // doesn't see a control sitting on the failed value.
         model = priorModel;
         watchdogRefork = priorWatchdog;
         showSettingsToast(
@@ -134,9 +177,6 @@
       watchdogRefork = fresh.watchdogRefork;
       priorModel = fresh.model;
       priorWatchdog = fresh.watchdogRefork;
-      // Config is written to disk, but the running daemon caches its
-      // config at boot — these changes take effect for the next daemon
-      // start, not the next turn.
       showSettingsToast("saved · restart daemon for changes to take effect", "ok");
     } finally {
       savingSettings = false;

@@ -83,6 +83,10 @@ vi.mock("@rocicorp/zero", () => {
         client: Promise.resolve({ type: "success" }),
         server: Promise.resolve({ type: "success" }),
       })),
+      updateSettings: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
     };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
@@ -96,6 +100,7 @@ vi.mock("@rocicorp/zero", () => {
         apps: makeQueryProxy(),
         mail: makeQueryProxy(),
         client_devices: makeQueryProxy(),
+        settings: makeQueryProxy(),
         blocks: makeQueryProxy(),
       };
       instances.push(this as unknown as MockedZero);
@@ -736,6 +741,32 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
   it("forgetDevice is silent when Zero hasn't initialized", async () => {
     const { zeroSync } = await importStore();
     expect(() => zeroSync.forgetDevice("dev-x")).not.toThrow();
+    expect(instances).toHaveLength(0);
+  });
+
+  it("updateSettings forwards the partial patch to zero.mutate.updateSettings", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+    zeroSync.updateSettings({ model: "claude-opus-4-7" });
+    expect(z.mutate.updateSettings).toHaveBeenCalledTimes(1);
+    const args = z.mutate.updateSettings.mock.calls[0][0] as {
+      model?: string;
+      watchdogRefork?: boolean;
+      ts: number;
+    };
+    expect(args.model).toBe("claude-opus-4-7");
+    expect("watchdogRefork" in args).toBe(false);
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("updateSettings is silent when Zero hasn't initialized", async () => {
+    const { zeroSync } = await importStore();
+    expect(() =>
+      zeroSync.updateSettings({ model: "claude-opus-4-7" }),
+    ).not.toThrow();
     expect(instances).toHaveLength(0);
   });
 

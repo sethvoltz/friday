@@ -73,6 +73,8 @@ export const SYNC_TABLES: readonly string[] = [
   "client_devices",
   "read_cursors",
   "system_banners",
+  // Phase 4.3
+  "settings",
 ];
 
 export interface ProvisionResult {

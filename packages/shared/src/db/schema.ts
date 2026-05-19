@@ -509,6 +509,28 @@ export const systemBanners = pgTable(
   }),
 );
 
+/* ---------------- ADR-023: settings (user-toggleable config) ---------------- */
+// Per ADR-023 line 565: `updateSettings` mutator writes here. Daemon
+// LISTENs and re-syncs `~/.friday/config.json` so worker spawns see
+// the new values via the existing `loadConfig()` reads. The set of
+// columns here is exactly the user-toggleable subset of FridayConfig;
+// structural fields (ports, mcpServers, etc.) stay in config.json
+// and aren't user-edited from the dashboard.
+//
+// Single-row table — primary key is the literal string "singleton".
+// Postgres ON CONFLICT (id) on UPSERT collapses a duplicate insert
+// to a no-op; the mutator's race-condition contract holds.
+//
+// `updated_at` is server-stamped (the mutator's clock-of-record) so
+// the daemon's LISTEN handler can dedup duplicate notifications.
+
+export const settings = pgTable("settings", {
+  id: text("id").primaryKey(),
+  model: text("model"),
+  watchdogRefork: boolean("watchdog_refork"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+});
+
 /* ---------------- Generic key/value store ---------------- */
 
 export const dbMeta = pgTable("db_meta", {
@@ -573,6 +595,8 @@ export const LISTEN_CHANNELS = {
   appChanged: "friday_app_changed",
   /** Memory entry status='pending_file' or 'pending_delete'. */
   memoryFileChanged: "friday_memory_file_changed",
+  /** Settings table UPDATE — daemon re-syncs `~/.friday/config.json`. */
+  settingsChanged: "friday_settings_changed",
 } as const;
 
 export type ListenChannel =

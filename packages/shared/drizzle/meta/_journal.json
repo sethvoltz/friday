@@ -15,6 +15,13 @@
       "when": 1779166936717,
       "tag": "0001_elite_scourge",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1779167913514,
+      "tag": "0002_aberrant_johnny_blaze",
+      "breakpoints": true
     }
   ]
 }

@@ -33,6 +33,10 @@ import {
 import { wrapWithRecall } from "./agent/recall.js";
 import { closeTicketForArchive } from "./services/ticket-close.js";
 import {
+  runSettingsBootScan,
+  startSettingsListener,
+} from "./settings/listener.js";
+import {
   composeSystemPrompt,
   readPromptStack,
 } from "@friday/shared";
@@ -61,9 +65,21 @@ async function main(): Promise<void> {
     });
   }
 
+  // Phase 4.3: settings boot-recovery scan. Must run BEFORE the
+  // first `loadConfig()` below — settings changes that landed while
+  // the daemon was down need to be applied to ~/.friday/config.json
+  // so the daemon sees the user's intent on the very first read.
+  await runSettingsBootScan();
+
   const cfg = loadConfig();
   const server = startServer({ port: cfg.daemonPort });
   const heartbeat = startHealthHeartbeat();
+
+  // Phase 4.3: open the long-lived LISTEN connection for
+  // `friday_settings_changed`. Subsequent settings updates from the
+  // dashboard mutator rewrite config.json without a daemon restart,
+  // so the next worker spawn picks up the new value.
+  const settingsListener = await startSettingsListener();
 
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
@@ -144,6 +160,9 @@ async function main(): Promise<void> {
     stopWatchdog();
     stopTurnStallWatchdog();
     stopInvariantAuditor();
+    void settingsListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
     clearHealth();
     flushDb();
     server.close(() => process.exit(0));

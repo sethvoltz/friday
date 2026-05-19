@@ -164,6 +164,25 @@ const apps = table("apps")
   })
   .primaryKey("id");
 
+/* ---------------- settings (Phase 4.3) ---------------- */
+// Single-row table — primary key is the literal string "singleton".
+// Daemon's `loadConfig()` reads `~/.friday/config.json`; the
+// `updateSettings` mutator writes to this Postgres table AND the
+// daemon's LISTEN handler keeps `~/.friday/config.json` in sync so
+// worker spawns pick up the new model/watchdog values via the
+// existing read path. The dashboard's Settings page (Phase 4.3+)
+// reads from this table via Zero so multiple browser tabs converge
+// within a second of any mutation.
+
+const settings = table("settings")
+  .columns({
+    id: string(),
+    model: string().optional(),
+    watchdog_refork: boolean().optional(),
+    updated_at: number(),
+  })
+  .primaryKey("id");
+
 /* ---------------- client_devices (Phase 4.2) ---------------- */
 // Per-browser-install device registry. ADR-023's "device-scoped read
 // cursors + per-device storage telemetry + 'Forget this device'
@@ -309,6 +328,7 @@ export const schema: ZeroSchema = createSchema({
     blocks,
     readCursors,
     clientDevices,
+    settings,
   ],
   // Phase 3: enable the deprecated `z.query.<table>` field. The
   // createBuilder() path returns query objects that aren't bound to a
@@ -351,4 +371,8 @@ export const permissions = definePermissions(schema, () => ({
   // (Phase 4.2). Only `select` is configured for the Settings-page
   // device-list reactive query.
   client_devices: { row: { select: ANYONE_CAN } },
+  // Writes via the `updateSettings` mutator (Phase 4.3). Select-only
+  // here; the daemon's LISTEN handler runs `~/.friday/config.json`
+  // resync on every UPDATE.
+  settings: { row: { select: ANYONE_CAN } },
 }));
