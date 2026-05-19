@@ -1,6 +1,6 @@
 import { json, type RequestHandler } from "@sveltejs/kit";
 import { randomUUID } from "node:crypto";
-import { mintZeroJwt } from "@friday/shared/sync";
+import { mintZeroJwt } from "@friday/shared/sync/jwt";
 import { upsertClientDevice } from "@friday/shared/services";
 
 /**

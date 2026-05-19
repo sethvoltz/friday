@@ -21,7 +21,7 @@ import {
   it,
 } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
-import { verifyZeroJwt } from "@friday/shared/sync";
+import { verifyZeroJwt } from "@friday/shared/sync/jwt";
 
 let handle: TestDbHandle;
 let endpoint: typeof import("./+server.js");

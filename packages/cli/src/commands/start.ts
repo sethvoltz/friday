@@ -57,9 +57,17 @@ function tmuxSpecs(
     // ADR-024. Zero lives in the dashboard's deps (it's also the Zero
     // client host), so we spawn the binary from that package — its
     // node_modules/.bin/zero-cache is the canonical path.
+    //
+    // Restart loop: zero-cache exits with code 14 on AutoResetSignal
+    // (replica out-of-sync; needs a fresh sync from upstream). The
+    // parent runner expects us to restart it; tmux on its own doesn't,
+    // so we wrap in a `while true` loop with a short backoff. A
+    // pathological crash loop will still spin every second — that's
+    // visible in `friday attach zero-cache` so the operator can see it.
     "zero-cache": {
       cwd: join(repoRoot, "services", "dashboard"),
-      prodCmd: "pnpm exec zero-cache",
+      prodCmd:
+        "while true; do pnpm exec zero-cache; ec=$?; echo \"zero-cache exited code $ec — restarting in 1s\"; sleep 1; done",
     },
   };
 }

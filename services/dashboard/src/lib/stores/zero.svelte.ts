@@ -75,27 +75,32 @@ class ZeroSidebarStore {
         kvStore: "mem", // Phase 6 promotes to IDB for offline cache.
       });
 
-      const view = this.#zero.query.agents
-        .where("status", "!=", "archived")
-        .materialize();
-
-      // Zero's materialized view exposes `.data` (the current rows)
-      // and `.addListener` for updates. Phase 2 mirrors the rows into
-      // BOTH this store's `agents` (for inspection / tests) AND the
-      // existing `chat.agents` Svelte state (so the existing Sidebar
-      // component renders Zero data without code changes — the
-      // sidebar's REST poll is gated behind the same feature flag and
-      // is skipped when Zero is active).
-      const update = (): void => {
-        const rows = view.data as ZeroAgentRow[];
-        this.agents = rows;
+      const query = this.#zero.query.agents.where(
+        "status",
+        "!=",
+        "archived",
+      );
+      // Preload so the query is registered with zero-cache and rows
+      // arrive even when no UI is currently observing the materialized
+      // view (the listener below subscribes after this point).
+      const preload = this.#zero.preload(query);
+      // `zero.materialize(query)` is the post-1.5 API; the older
+      // `query.materialize()` form is deprecated. Pass the listener
+      // arg-style so the callback receives `data` directly (no closure
+      // re-read of `.data`).
+      const view = this.#zero.materialize(query);
+      const update = (data: readonly unknown[]): void => {
+        const rows = data as readonly ZeroAgentRow[];
+        this.agents = rows as ZeroAgentRow[];
         chat.agents = rows.map(toAgentInfo);
         this.status = "live";
       };
-      update();
-      view.addListener(update);
+      // Seed from current snapshot then subscribe to deltas.
+      update(view.data as readonly unknown[]);
+      view.addListener((data) => update(data as readonly unknown[]));
 
       this.#unsubscribe = () => {
+        preload.cleanup();
         view.destroy();
       };
     } catch {
@@ -135,10 +140,13 @@ async function refreshToken(): Promise<string> {
 
 function zeroServerUrl(): string {
   // Read at module load — Vite inlines PUBLIC_* env vars at build time.
+  // Zero 1.5 expects an http(s) URL (the protocol upgrades to WS during
+  // handshake); passing `ws://` throws `must use the "http" or "https"
+  // scheme.`
   const env = (
     import.meta as unknown as { env?: Record<string, string | undefined> }
   ).env;
-  return env?.PUBLIC_FRIDAY_ZERO_URL ?? "ws://localhost:4848";
+  return env?.PUBLIC_FRIDAY_ZERO_URL ?? "http://localhost:4848";
 }
 
 /** Feature flag: opt in to the Zero-driven sidebar. Stays false by
