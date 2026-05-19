@@ -18,6 +18,7 @@ import { schedulesCommand } from "./commands/schedules.js";
 import { appsCommand } from "./commands/apps.js";
 import { backupCommand } from "./commands/backup.js";
 import { restoreCommand } from "./commands/restore.js";
+import { exportLegacySqliteCommand } from "./commands/export-legacy-sqlite.js";
 
 const main = defineCommand({
   meta: {
@@ -44,6 +45,7 @@ const main = defineCommand({
     app: appsCommand,
     backup: backupCommand,
     restore: restoreCommand,
+    "export-legacy-sqlite": exportLegacySqliteCommand,
   },
 });
 
