@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import {
   LOGS_DIR,
   ensureFridayEnv,
+  getLogPath,
   loadConfig,
   type ServiceName,
   SERVICES,
@@ -86,10 +87,23 @@ function tmuxSpecs(
       // for table 'X'. No rows will be returned." on every subscribe
       // and the client sees empty materializations. Idempotent — the
       // tool no-ops when the deployed hash already matches.
+      //
+      // ZERO_LOG_FORMAT=json makes every log line a structured JSON
+      // record so the dashboard's `/api/logs/zero-cache` endpoint can
+      // parse and color-code by `level` the same way it does for
+      // daemon + dashboard. The `tee -a` after `2>&1` mirrors the
+      // stream to `~/.friday/logs/zero-cache.jsonl` AND keeps it
+      // visible in the tmux pane (`friday attach zero-cache`). The
+      // file is the only durable artifact across daemon restarts —
+      // tmux scrollback is bounded and resets when the session is
+      // killed.
       prodCmd:
         'set -a && source ~/.friday/.env && set +a && ' +
         'pnpm exec zero-deploy-permissions --schema-path ../../packages/shared/dist/sync/schema.js && ' +
-        'while true; do pnpm exec zero-cache; ec=$?; echo "zero-cache exited code $ec — restarting in 1s"; sleep 1; done',
+        `while true; do ` +
+        `ZERO_LOG_FORMAT=json pnpm exec zero-cache 2>&1 | tee -a "${getLogPath("zero-cache")}"; ` +
+        `ec=\${PIPESTATUS[0]}; echo "zero-cache exited code $ec — restarting in 1s"; sleep 1; ` +
+        `done`,
     },
   };
 }
