@@ -7,3 +7,4 @@
 // blow up Vite's browser bundle if pulled in transitively.
 
 export * from "./schema.js";
+export * from "./mutators.js";

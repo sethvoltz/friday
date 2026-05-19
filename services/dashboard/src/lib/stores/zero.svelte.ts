@@ -21,7 +21,12 @@
 
 import { browser } from "$app/environment";
 import { Zero } from "@rocicorp/zero";
-import { schema, type Schema } from "@friday/shared/sync";
+import {
+  createMutators,
+  schema,
+  type Mutators,
+  type Schema,
+} from "@friday/shared/sync";
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
 
 /** Row shape mirrors the `agents` Zero table definition. Kept narrow:
@@ -85,6 +90,15 @@ export interface ZeroMemoryEntryRow {
   status: "ready" | "pending_file" | "deleted";
 }
 
+/** Row shape mirrors the `read_cursors` Zero table definition (Phase 4.1).
+ *  Per-device, per-agent — primary key is (device_id, agent_name). */
+export interface ZeroReadCursorRow {
+  device_id: string;
+  agent_name: string;
+  last_seen_block_id: string;
+  ts: number;
+}
+
 /** Row shape mirrors the `apps` Zero table definition. */
 export interface ZeroAppRow {
   id: string;
@@ -132,6 +146,11 @@ class ZeroSyncStore {
   /** Live apps rows from Zero (Phase 3.4). */
   apps = $state<ZeroAppRow[]>([]);
 
+  /** Live read_cursors rows from Zero (Phase 4.1). All devices for
+   *  the current user — the per-device unread derivation filters
+   *  client-side by `device_id === this.#deviceId`. */
+  readCursors = $state<ZeroReadCursorRow[]>([]);
+
   /** Live blocks rows for the currently-focused agent (Phase 3.7).
    *  Bound dynamically by {@linkcode bindBlocksFor}; empty when no agent
    *  is focused or when {@linkcode unbindBlocks} has been called. */
@@ -152,7 +171,12 @@ class ZeroSyncStore {
    *  + a future Settings → Sync health surface. */
   errorMessage = $state<string | null>(null);
 
-  #zero: Zero<Schema> | null = null;
+  #zero: Zero<Schema, Mutators> | null = null;
+  /** Per-tab device id (from `/api/sync/refresh`). Used by mutators
+   *  that scope writes to "this device" — markRead, reportClientStats,
+   *  forgetDevice. Set in `#init` once `/api/sync/refresh` resolves;
+   *  null before that. */
+  #deviceId: string | null = null;
   #unsubscribers: Array<() => void> = [];
   /** Tear-down handle for the per-agent {@linkcode blocks} view. Held
    *  separately from `#unsubscribers` because focus-switch destroys
@@ -193,15 +217,23 @@ class ZeroSyncStore {
         this.status = "error";
         return;
       }
-      const { token, userId } = (await r.json()) as RefreshResponse;
+      const { token, userId, deviceId } = (await r.json()) as RefreshResponse;
+      this.#deviceId = deviceId;
       // Zero 1.5: `auth` is a JWT string, not a callback. Token
       // rotation happens via `zero.connection.connect({auth})` when
       // zero-cache returns 401/403. Phase 6 wires that listener; the
       // 15-min TTL gives Phase 3 plenty of soak time before rotation
       // matters. `userID` MUST match the JWT's `sub` claim; the
       // refresh endpoint puts BetterAuth's user id in both.
-      this.#zero = new Zero<Schema>({
+      //
+      // `mutators` is the Phase 4.1+ write path: every entry from
+      // `createMutators()` becomes callable on `this.#zero.mutate`.
+      // The mutator runs once optimistically on the client + once
+      // canonically on the server (dashboard's `/api/mutators` push
+      // handler routes the server-side execution).
+      this.#zero = new Zero<Schema, Mutators>({
         schema,
+        mutators: createMutators(),
         server: zeroServerUrl(),
         auth: token,
         userID: userId,
@@ -213,6 +245,7 @@ class ZeroSyncStore {
       this.#bindSchedules();
       this.#bindMemory();
       this.#bindApps();
+      this.#bindReadCursors();
       this.status = "live";
       // Apply any blocks-binding the chat shell asked for while
       // `#init` was still running. Cold-load order is:
@@ -341,6 +374,27 @@ class ZeroSyncStore {
     });
   }
 
+  #bindReadCursors(): void {
+    if (!this.#zero) return;
+    // Global query (no `where`) — Friday is single-user, the row set
+    // is bounded by `(device_count * agent_count)`. Per-device
+    // filtering for the unread badge derivation happens client-side
+    // off `this.#deviceId`.
+    const query = this.#zero.query.read_cursors;
+    const preload = this.#zero.preload(query);
+    const view = this.#zero.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      const rows = data as readonly ZeroReadCursorRow[];
+      this.readCursors = rows as ZeroReadCursorRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
   /**
    * Bind (or rebind) the per-agent blocks reactive query. Tears down
    * the prior binding first so a focus switch from agent A → B doesn't
@@ -414,6 +468,38 @@ class ZeroSyncStore {
     return () => {
       this.#blocksListeners.delete(listener);
     };
+  }
+
+  /**
+   * Phase 4.1: mark blocks up to (and including) `blockId` as read for
+   * the current device on the focused agent. UPSERTs the
+   * `read_cursors` row keyed by (device_id, agent_name); the unread
+   * badge derivation `blocks.count where id > read_cursor.last_seen`
+   * zeroes on the next reactive frame.
+   *
+   * Per ADR-023 open-question default, this is per-device: marking
+   * read on phone does NOT clear the badge on laptop. Multi-device
+   * users see the cursor row land on both — which device "wins" the
+   * highest-block-id depends on which one viewed last.
+   *
+   * No-op (silently dropped) if:
+   *   - Zero hasn't finished init (no `#zero`, no `#deviceId`).
+   *   - `useZero()` is false (Zero disabled — legacy unread bookkeeping
+   *     in `chat.unreadByAgent` still owns the state).
+   *
+   * The "Phase 4.1 doesn't fire until Zero is live" miss is acceptable
+   * because the unread state itself is server-derived only when Zero
+   * is on; without Zero, `chat.clearUnread(name)` (called by the
+   * sidebar's focus handler) still owns the path.
+   */
+  markRead(agentName: string, blockId: string): void {
+    if (!this.#zero || !this.#deviceId) return;
+    void this.#zero.mutate.markRead({
+      deviceId: this.#deviceId,
+      agentName,
+      lastSeenBlockId: blockId,
+      ts: Date.now(),
+    });
   }
 
   destroy(): void {
@@ -510,6 +596,11 @@ if (browser && useZero()) {
     if (!agent) return;
     chat.applyZeroBlocks(rows, agent);
   });
+  // Phase 4.1: register the markRead callback. Chat calls this from
+  // `applyZeroBlocks` after each per-agent snapshot to advance the
+  // read cursor to the newest block. Same circular-dep avoidance
+  // pattern as the binder: chat doesn't import zero.
+  chat.setMarkReadFn((agent, blockId) => zeroSync.markRead(agent, blockId));
 }
 
 // Dev probe: expose the singleton on `window` so devtools and Playwright

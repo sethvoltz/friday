@@ -164,6 +164,23 @@ const apps = table("apps")
   })
   .primaryKey("id");
 
+/* ---------------- read_cursors (Phase 4.1) ---------------- */
+// Per-device, per-agent last-seen marker. Drives the unread badge:
+// `unread(agent) = count(blocks where agent_name=agent AND id > last_seen)`.
+// The `markRead` mutator UPSERTs a row keyed by (device_id, agent_name).
+// Per-device by default (ADR-023 open question; mark-read on phone does
+// NOT clear the badge on laptop). `ts` is purely diagnostic — the
+// authoritative "what have I seen" cursor is `last_seen_block_id`.
+
+const readCursors = table("read_cursors")
+  .columns({
+    device_id: string(),
+    agent_name: string(),
+    last_seen_block_id: string(),
+    ts: number(),
+  })
+  .primaryKey("device_id", "agent_name");
+
 /* ---------------- blocks (Phase 3.7) ---------------- */
 // Mirrors `db/schema.ts:blocks`. The chat scroller is the largest read
 // surface in the dashboard — the Zero subscription is *per focused agent
@@ -252,7 +269,16 @@ const mail = table("mail")
 // `Schema` (renamed to `ZeroSchema` at import) keeps consumers' .d.ts
 // emit clean.
 export const schema: ZeroSchema = createSchema({
-  tables: [agents, tickets, schedules, memoryEntries, apps, mail, blocks],
+  tables: [
+    agents,
+    tickets,
+    schedules,
+    memoryEntries,
+    apps,
+    mail,
+    blocks,
+    readCursors,
+  ],
   // Phase 3: enable the deprecated `z.query.<table>` field. The
   // createBuilder() path returns query objects that aren't bound to a
   // Zero connection, so `zero.materialize(builder.agents)` registers
@@ -284,4 +310,10 @@ export const permissions = definePermissions(schema, () => ({
   apps: { row: { select: ANYONE_CAN } },
   mail: { row: { select: ANYONE_CAN } },
   blocks: { row: { select: ANYONE_CAN } },
+  // Writes to `read_cursors` flow through the `markRead` mutator
+  // (Phase 4.1) — Zero 1.5+ deprecates insert/update/delete row
+  // permissions in favor of mutator-defined authz. Only `select` is
+  // configured here so the client's reactive unread-derivation query
+  // can read the row.
+  read_cursors: { row: { select: ANYONE_CAN } },
 }));

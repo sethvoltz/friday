@@ -373,6 +373,25 @@ export class ChatState {
   }
 
   /**
+   * Phase 4.1: callback that fires the `markRead` mutator with the
+   * newest block id for the focused agent. Registered by
+   * `zero.svelte.ts` at module init alongside the binder, kept as a
+   * function reference for the same chat → zero circular-dep reasons.
+   * `null` when Zero is off.
+   */
+  private markReadFn: ((agent: string, blockId: string) => void) | null = null;
+  setMarkReadFn(fn: (agent: string, blockId: string) => void): void {
+    this.markReadFn = fn;
+  }
+  /**
+   * Per-agent memo of the latest block_id we've already passed to
+   * `markRead`. Suppresses the redundant write that would otherwise
+   * fire on every Zero snapshot frame (the cursor is already there).
+   * Reset on focus switch so a re-focus re-establishes the cursor.
+   */
+  private lastMarkedBlockIdByAgent = new Map<string, string>();
+
+  /**
    * Track every `block_id` that has appeared in a Zero snapshot for the
    * currently-focused agent. Used by {@linkcode applyZeroBlocks} to
    * distinguish "row was deleted upstream" (drop) from "bubble pre-dates
@@ -1144,6 +1163,11 @@ export class ChatState {
     // entry from the previous agent doesn't trip the delete heuristic
     // here.
     this.zeroSeenBlockIds = new Set();
+    // Phase 4.1: focus switch invalidates the markRead memo so the
+    // first Zero snapshot for the new agent will fire a fresh cursor
+    // write (even if we'd previously marked the same blockId for the
+    // PREVIOUS agent, the (device, agent) tuple is different).
+    this.lastMarkedBlockIdByAgent.delete(agent);
     // Clear any stale loading-older flag from the previous agent. Without
     // this, if the user scrolled up in agent A and clicked away before
     // the load finished, A's `loadingOlder=true` would persist into B's
@@ -1501,6 +1525,33 @@ export class ChatState {
         this.lastSeqByAgent[forAgent] ?? 0,
         maxSeq,
       );
+    }
+
+    // Phase 4.1: advance the per-device read cursor for this agent to
+    // the newest block in the snapshot. While the user is focused on
+    // this agent's chat, every new block delivery advances the cursor
+    // — the semantic is "if you're looking at it, you've seen it."
+    // The mutator is idempotent on the (device, agent, block) PK so a
+    // re-fire with the same args is a server-side no-op; the
+    // `lastMarkedBlockIdByAgent` memo dedups at the client to avoid
+    // even sending the redundant push. The first frame after a focus
+    // switch always sends a fresh write because `loadAgentTurns`
+    // clears the memo for the new agent.
+    if (this.markReadFn) {
+      // `rows` is ordered DESC by id (Phase 3.7 binder); the first
+      // entry is the newest. But the parsed merge re-sorted by ts,
+      // so consult the raw `rows` array for the highest id.
+      let newest: ZeroBlocksRow | null = null;
+      for (const r of rows) {
+        if (!newest || r.id > newest.id) newest = r;
+      }
+      if (newest) {
+        const prev = this.lastMarkedBlockIdByAgent.get(forAgent);
+        if (prev !== newest.block_id) {
+          this.lastMarkedBlockIdByAgent.set(forAgent, newest.block_id);
+          this.markReadFn(forAgent, newest.block_id);
+        }
+      }
     }
   }
 

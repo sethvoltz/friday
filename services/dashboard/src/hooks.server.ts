@@ -5,6 +5,25 @@ import { consumeRateLimit, resetRateLimit } from "@friday/shared/services";
 
 const PUBLIC_PATHS = new Set(["/login", "/api/auth"]);
 
+/**
+ * Localhost-only loopback paths exempt from the session-redirect gate.
+ * Phase 4 (ADR-023): `/api/mutators` is the dashboard's endpoint for
+ * zero-cache's server-side mutator dispatch. zero-cache lives on
+ * `127.0.0.1:4848`, forwards a JWT it has already verified, and only
+ * reachable from the same host — sending it through the session
+ * cookie redirect would 302 it to `/login` and break every mutator
+ * call. Per-mutator authz lives in the mutator body via the JWT
+ * claims zero-cache forwards.
+ */
+const LOOPBACK_ONLY_PATHS = new Set(["/api/mutators"]);
+function isLoopbackOrigin(event: Parameters<Handle>[0]["event"]): boolean {
+  const addr = event.getClientAddress();
+  // SvelteKit normalizes IPv4-mapped IPv6 (::ffff:127.0.0.1) to 127.0.0.1
+  // under adapter-node; under the dev server the address is "::1" or
+  // "127.0.0.1". Accept either.
+  return addr === "127.0.0.1" || addr === "::1";
+}
+
 /** FIX_FORWARD 5.7: sign-in rate limit — 5 attempts per 15-minute window
  *  per client IP, with a 30-minute lockout once the 6th attempt arrives.
  *  Bypassed for non-sign-in auth routes (sign-out, session, etc). */
@@ -96,7 +115,10 @@ export const handle: Handle = async ({ event, resolve }) => {
 
   // Auth gate
   const isPublic = [...PUBLIC_PATHS].some((p) => event.url.pathname.startsWith(p));
-  if (!event.locals.user && !isPublic) {
+  const isLoopbackOnly =
+    [...LOOPBACK_ONLY_PATHS].some((p) => event.url.pathname.startsWith(p)) &&
+    isLoopbackOrigin(event);
+  if (!event.locals.user && !isPublic && !isLoopbackOnly) {
     throw redirect(302, "/login");
   }
 

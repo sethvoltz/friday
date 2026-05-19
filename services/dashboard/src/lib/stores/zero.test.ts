@@ -32,6 +32,7 @@ type MockedZero = {
   preload: ReturnType<typeof vi.fn>;
   materialize: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
+  mutate: Record<string, ReturnType<typeof vi.fn>>;
   // Capture the constructor args so tests can inspect them.
   __ctorOpts: Record<string, unknown>;
 };
@@ -63,6 +64,18 @@ vi.mock("@rocicorp/zero", () => {
       destroy: vi.fn(),
     }));
     close = vi.fn();
+    // Phase 4.1: custom mutators surface. The store calls
+    // `this.#zero.mutate.<name>(args)`. The test mock returns a
+    // chained mutator-shape object whose call returns a no-op
+    // MutatorResult shape so the code path doesn't throw. Specific
+    // tests that exercise mutator invocation override this on the
+    // instance.
+    mutate = {
+      markRead: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+    };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
       this.__ctorOpts = opts;
@@ -91,9 +104,12 @@ vi.mock("@rocicorp/zero", () => {
 });
 
 // Schema mock — the store imports `schema` + `Schema`; the values don't
-// matter to the test since we mock Zero entirely.
+// matter to the test since we mock Zero entirely. `createMutators` is
+// added in Phase 4.1 — the mock returns an empty mutator map since the
+// tests don't drive mutator calls.
 vi.mock("@friday/shared/sync", () => ({
   schema: { tables: [] },
+  createMutators: () => ({}),
 }));
 
 // Install a minimal in-memory localStorage stub: the vitest-bundled
@@ -576,5 +592,48 @@ describe("tickets binding (Phase 3.1)", () => {
     });
 
     (mockedZero as unknown as { Zero: unknown }).Zero = origCtor;
+  });
+});
+
+describe("Phase 4.1: markRead mutator dispatch", () => {
+  it("markRead forwards (deviceId, agentName, blockId) to zero.mutate.markRead", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+
+    zeroSync.markRead("alpha", "blk-42");
+    expect(z.mutate.markRead).toHaveBeenCalledTimes(1);
+    const args = z.mutate.markRead.mock.calls[0][0] as {
+      deviceId: string;
+      agentName: string;
+      lastSeenBlockId: string;
+      ts: number;
+    };
+    expect(args.deviceId).toBe("test-device-id");
+    expect(args.agentName).toBe("alpha");
+    expect(args.lastSeenBlockId).toBe("blk-42");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("markRead is silently dropped if Zero hasn't initialized", async () => {
+    // No flag → no init → no mutator framework. The call MUST NOT
+    // throw — chat shells call markRead unconditionally on focus.
+    const { zeroSync } = await importStore();
+    expect(() => zeroSync.markRead("alpha", "blk-1")).not.toThrow();
+    expect(instances).toHaveLength(0);
+  });
+
+  it("the Zero constructor receives `mutators` from createMutators", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(instances).toHaveLength(1);
+    const opts = instances[0].__ctorOpts;
+    expect(opts.mutators).toBeDefined();
+    // Confirm the createMutators() shape made it in (the test mock
+    // returns an empty object; this asserts the property exists).
+    expect(typeof opts.mutators).toBe("object");
   });
 });
