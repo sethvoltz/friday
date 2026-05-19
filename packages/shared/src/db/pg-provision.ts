@@ -30,6 +30,51 @@ const FRIDAY_DB = "friday";
 const FRIDAY_ROLE = "friday";
 const FRIDAY_PUBLICATION = "friday_pub";
 
+/**
+ * Tables `friday_pub` includes in logical replication for Zero.
+ *
+ * Narrow on purpose — zero-cache replicates this publication into its
+ * own sqlite replica and would otherwise stream every write to every
+ * table. With FOR ALL TABLES (the original Phase 2 setup),
+ * high-frequency daemon writes against `usage` / `db_meta` and
+ * schema-version churn from Drizzle migrations both feed Zero data it
+ * doesn't serve, and either trigger `AutoResetSignal` restarts when
+ * upstream/replica versions diverge.
+ *
+ * Inclusion criteria: a table is in `SYNC_TABLES` iff it's declared in
+ * the Zero sync schema at `packages/shared/src/sync/schema.ts` OR is
+ * planned for a Phase 3 slice. Phase 3 slices add their tables to this
+ * list when they land.
+ *
+ * Exclusions:
+ *   - BetterAuth tables (`user`, `session`, `account`, `verification`)
+ *     — server-only, gated by the dashboard session middleware.
+ *   - `usage` — high-volume append-only telemetry; surfaced via REST.
+ *   - `db_meta` — internal kv (rate-limit buckets, schema version).
+ */
+export const SYNC_TABLES: readonly string[] = [
+  // Phase 2 (live)
+  "agents",
+  // Phase 3 slices (declared up front to avoid touching the
+  // publication when each slice lands; tables exist already in the
+  // Drizzle schema)
+  "tickets",
+  "ticket_comments",
+  "ticket_relations",
+  "ticket_external_links",
+  "schedules",
+  "schedule_runs",
+  "memory_entries",
+  "apps",
+  "mail",
+  "blocks",
+  "attachments",
+  // Phase 6 surfaces
+  "client_devices",
+  "read_cursors",
+  "system_banners",
+];
+
 export interface ProvisionResult {
   /** True when this run created a brand-new role/database/migration chain. */
   freshInstall: boolean;
@@ -347,24 +392,91 @@ async function ensurePublication(
   databaseUrl: string,
   log: (msg: string) => void,
 ): Promise<boolean> {
-  // CREATE PUBLICATION ... FOR ALL TABLES requires superuser. Connect as
-  // admin (the OS-level Postgres owner on Homebrew) into the friday DB and
-  // create it there. The publication is per-database; querying it from the
-  // friday role at runtime is fine — only creation is privileged.
+  // Connect as admin (the OS-level Postgres owner on Homebrew) into the
+  // friday DB. CREATE PUBLICATION FOR TABLE requires ownership of the
+  // tables (which `friday` has) but the publication itself is owned by
+  // the connecting role — we keep ownership with the admin user so a
+  // future `friday setup` can reconcile it without dropping the
+  // long-running replication slot.
   const adminInFriday = `postgresql://${process.env.USER ?? "postgres"}@localhost:5432/${FRIDAY_DB}`;
   const client = new Client({ connectionString: adminInFriday });
   await client.connect();
   try {
-    const exists = await client.query(
-      `SELECT 1 FROM pg_publication WHERE pubname = $1`,
-      [FRIDAY_PUBLICATION],
+    // Find which of SYNC_TABLES actually exist in the DB right now.
+    // First-time setup runs after migrations, so all should exist; this
+    // guard keeps the call safe if a future schema change drops a table
+    // before SYNC_TABLES is updated.
+    const existingTables = await client.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
+      [Array.from(SYNC_TABLES)],
     );
-    if (exists.rows.length > 0) {
-      log(`  publication ${FRIDAY_PUBLICATION} already exists`);
+    const wanted = new Set(existingTables.rows.map((r) => r.tablename));
+    if (wanted.size === 0) {
+      log(`  publication ${FRIDAY_PUBLICATION} skipped (no sync tables exist yet)`);
       return false;
     }
-    await client.query(`CREATE PUBLICATION ${FRIDAY_PUBLICATION} FOR ALL TABLES`);
-    log(`  created publication ${FRIDAY_PUBLICATION} (as admin)`);
+
+    const exists = await client.query<{ puballtables: boolean }>(
+      `SELECT puballtables FROM pg_publication WHERE pubname = $1`,
+      [FRIDAY_PUBLICATION],
+    );
+    if (exists.rows.length === 0) {
+      const tableList = Array.from(wanted)
+        .map((t) => `"${t}"`)
+        .join(", ");
+      await client.query(
+        `CREATE PUBLICATION ${FRIDAY_PUBLICATION} FOR TABLE ${tableList}`,
+      );
+      log(
+        `  created publication ${FRIDAY_PUBLICATION} for ${wanted.size} table(s) (as admin)`,
+      );
+      return true;
+    }
+
+    // Reconcile an existing publication to match SYNC_TABLES exactly.
+    // If the existing one is FOR ALL TABLES, we drop + recreate (the
+    // narrow form is incompatible). Otherwise we ALTER to ADD/DROP
+    // specific tables so the replication slot survives.
+    const wasAllTables = exists.rows[0]?.puballtables === true;
+    if (wasAllTables) {
+      await client.query(`DROP PUBLICATION ${FRIDAY_PUBLICATION}`);
+      const tableList = Array.from(wanted)
+        .map((t) => `"${t}"`)
+        .join(", ");
+      await client.query(
+        `CREATE PUBLICATION ${FRIDAY_PUBLICATION} FOR TABLE ${tableList}`,
+      );
+      log(
+        `  rebuilt publication ${FRIDAY_PUBLICATION} (was FOR ALL TABLES → FOR TABLE list of ${wanted.size}; admin)`,
+      );
+      return true;
+    }
+
+    const have = await client.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_publication_tables WHERE pubname = $1`,
+      [FRIDAY_PUBLICATION],
+    );
+    const present = new Set(have.rows.map((r) => r.tablename));
+    const toAdd = [...wanted].filter((t) => !present.has(t));
+    const toDrop = [...present].filter((t) => !wanted.has(t));
+
+    for (const t of toAdd) {
+      await client.query(
+        `ALTER PUBLICATION ${FRIDAY_PUBLICATION} ADD TABLE "${t}"`,
+      );
+    }
+    for (const t of toDrop) {
+      await client.query(
+        `ALTER PUBLICATION ${FRIDAY_PUBLICATION} DROP TABLE "${t}"`,
+      );
+    }
+    if (toAdd.length === 0 && toDrop.length === 0) {
+      log(`  publication ${FRIDAY_PUBLICATION} already aligned (${wanted.size} table(s))`);
+      return false;
+    }
+    log(
+      `  reconciled publication ${FRIDAY_PUBLICATION}: +${toAdd.length} -${toDrop.length}`,
+    );
     return true;
   } finally {
     await client.end();
