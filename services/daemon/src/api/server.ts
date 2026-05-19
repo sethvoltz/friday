@@ -705,34 +705,35 @@ async function handle(
       ? (rawStatus as (typeof TICKET_STATUSES)[number])
       : undefined;
     const assignee = url.searchParams.get("assignee") ?? undefined;
-    return json(res, 200, listTickets({ status, assignee }));
+    return json(res, 200, await listTickets({ status, assignee }));
   }
   if (method === "POST" && path === "/api/tickets") {
     const body = await readJson<Parameters<typeof createTicket>[0]>(req);
-    return json(res, 200, createTicket(body));
+    return json(res, 200, await createTicket(body));
   }
   if (method === "GET" && /^\/api\/tickets\/[^/]+$/.test(path)) {
     const id = path.split("/")[3];
-    const t = getTicket(id);
+    const t = await getTicket(id);
     if (!t) return json(res, 404, { error: "not found" });
-    const ext = externalLinks(id);
-    const comments = listComments(id);
+    const ext = await externalLinks(id);
+    const comments = await listComments(id);
     return json(res, 200, { ...t, externalLinks: ext, comments });
   }
   if (method === "PATCH" && /^\/api\/tickets\/[^/]+$/.test(path)) {
     const id = path.split("/")[3];
     const body = await readJson<Parameters<typeof updateTicket>[1]>(req);
-    return json(res, 200, updateTicket(id, body));
+    return json(res, 200, await updateTicket(id, body));
   }
   if (method === "POST" && /^\/api\/tickets\/[^/]+\/comments$/.test(path)) {
     const id = path.split("/")[3];
     const body = await readJson<{ author: string; body: string }>(req);
-    addComment(id, body.author, body.body);
+    await addComment(id, body.author, body.body);
     return json(res, 200, { ok: true });
   }
   if (method === "POST" && /^\/api\/tickets\/[^/]+\/links$/.test(path)) {
     const id = path.split("/")[3];
-    if (!getTicket(id)) return json(res, 404, { error: "ticket not found" });
+    if (!(await getTicket(id)))
+      return json(res, 404, { error: "ticket not found" });
     const body = await readJson<{
       system: string;
       externalId: string;
@@ -742,7 +743,7 @@ async function handle(
     if (!body.system || !body.externalId) {
       return json(res, 400, { error: "system and externalId required" });
     }
-    linkExternal({
+    await linkExternal({
       ticketId: id,
       system: body.system,
       externalId: body.externalId,
@@ -753,7 +754,8 @@ async function handle(
   }
   if (method === "DELETE" && /^\/api\/tickets\/[^/]+\/links$/.test(path)) {
     const id = path.split("/")[3];
-    if (!getTicket(id)) return json(res, 404, { error: "ticket not found" });
+    if (!(await getTicket(id)))
+      return json(res, 404, { error: "ticket not found" });
     const system = url.searchParams.get("system");
     const externalId = url.searchParams.get("externalId");
     if (!system || !externalId) {
@@ -761,19 +763,19 @@ async function handle(
         error: "system and externalId query params required",
       });
     }
-    const removed = unlinkExternal({ ticketId: id, system, externalId });
+    const removed = await unlinkExternal({ ticketId: id, system, externalId });
     if (!removed) return json(res, 404, { error: "link not found" });
     return json(res, 200, { ok: true });
   }
 
   // --- Schedules ---
   if (method === "GET" && path === "/api/schedules") {
-    return json(res, 200, listSchedules());
+    return json(res, 200, await listSchedules());
   }
   if (method === "POST" && path === "/api/schedules") {
     const body = await readJson<Parameters<typeof upsertSchedule>[0]>(req);
     try {
-      upsertSchedule(body);
+      await upsertSchedule(body);
     } catch (err) {
       if (err instanceof ScheduleNameCollisionError) {
         return json(res, 409, { error: err.message });
@@ -789,7 +791,7 @@ async function handle(
     /^\/api\/schedules\/[^/]+\/trigger$/.test(path)
   ) {
     const name = decodeURIComponent(path.split("/")[3]);
-    const runId = triggerSchedule(name);
+    const runId = await triggerSchedule(name);
     if (!runId)
       return json(res, 409, {
         error: "schedule not found or already running",
@@ -803,32 +805,34 @@ async function handle(
     const name = decodeURIComponent(path.split("/")[3]);
     const action = path.split("/")[4];
     const ok =
-      action === "pause" ? pauseSchedule(name) : resumeSchedule(name);
+      action === "pause"
+        ? await pauseSchedule(name)
+        : await resumeSchedule(name);
     if (!ok) return json(res, 404, { error: "schedule not found" });
     return json(res, 200, { ok: true });
   }
   if (method === "GET" && /^\/api\/schedules\/[^/]+$/.test(path)) {
     const name = decodeURIComponent(path.split("/")[3]);
-    const r = getSchedule(name);
+    const r = await getSchedule(name);
     if (!r) return json(res, 404, { error: "schedule not found" });
     return json(res, 200, r);
   }
   if (method === "GET" && /^\/api\/schedules\/[^/]+\/state$/.test(path)) {
     const name = decodeURIComponent(path.split("/")[3]);
-    if (!getSchedule(name))
+    if (!(await getSchedule(name)))
       return json(res, 404, { error: "schedule not found" });
     return json(res, 200, readScheduleArtifacts(name));
   }
   if (method === "DELETE" && /^\/api\/schedules\/[^/]+$/.test(path)) {
     const name = decodeURIComponent(path.split("/")[3]);
-    const ok = deleteSchedule(name);
+    const ok = await deleteSchedule(name);
     if (!ok) return json(res, 404, { error: "schedule not found" });
     return json(res, 200, { ok: true });
   }
 
   // --- Memory ---
   if (method === "GET" && path === "/api/memory") {
-    return json(res, 200, listEntries());
+    return json(res, 200, await listEntries());
   }
   if (method === "GET" && path === "/api/memory/search") {
     const q = url.searchParams.get("q") ?? "";
@@ -839,7 +843,7 @@ async function handle(
       : undefined;
     const limit = limitParam ? Math.max(1, Number(limitParam) || 10) : undefined;
     if (!q.trim()) return json(res, 400, { error: "q parameter required" });
-    const results = searchMemories({
+    const results = await searchMemories({
       query: q,
       tags,
       limit,

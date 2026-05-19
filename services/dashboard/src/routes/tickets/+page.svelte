@@ -1,11 +1,45 @@
 <script lang="ts">
   import type { PageData } from "./$types";
   import type { Ticket, TicketKind, TicketStatus } from "@friday/shared/services";
+  import {
+    useZero,
+    zeroSync,
+    type ZeroTicketRow,
+  } from "$lib/stores/zero.svelte";
 
   let { data }: { data: PageData } = $props();
 
+  // Phase 3.1 (ADR-024): when the Zero flag is on, the tickets list is
+  // sourced from the reactive Zero query (`zeroSync.tickets`).
+  // Otherwise the existing SSR-then-manual-refresh REST path is used,
+  // unchanged. The flag is single-switch via `useZero()`.
+  // Phase 3.1 (ADR-024): keep `tickets` as a mutable $state so the
+  // existing call sites (statusCount, filtered, etc.) continue to read
+  // a plain array. When the Zero flag is on, an effect pushes the
+  // Zero-streamed rows in; when off, the original REST path
+  // (refresh()) updates the same state. Either way, downstream code
+  // sees one source-of-truth array.
+  const zeroOn = useZero();
   // svelte-ignore state_referenced_locally
   let tickets = $state<Ticket[]>(data.tickets);
+  $effect(() => {
+    if (zeroOn) {
+      tickets = zeroSync.tickets.map(toTicket);
+    }
+  });
+  function toTicket(r: ZeroTicketRow): Ticket {
+    return {
+      id: r.id,
+      title: r.title,
+      body: r.body,
+      status: r.status,
+      kind: r.kind,
+      assignee: r.assignee,
+      meta: r.meta_json,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
+  }
   let statusFilter = $state<"all" | TicketStatus>("all");
   let assigneeFilter = $state<string>("all");
   let sortKey = $state<"updated" | "created" | "id" | "title" | "status">(
@@ -88,6 +122,9 @@
   }
 
   async function refresh() {
+    // When Zero is the source of truth the reactive query handles
+    // updates automatically; no manual refresh needed.
+    if (zeroOn) return;
     try {
       const r = await fetch("/api/tickets");
       if (!r.ok) return;

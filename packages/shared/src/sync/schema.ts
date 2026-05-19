@@ -61,13 +61,37 @@ const agents = table("agents")
   })
   .primaryKey("name");
 
+/* ---------------- tickets (Phase 3.1) ---------------- */
+// Mirrors `db/schema.ts:tickets`. First Phase 3 read-path slice.
+// `ticket_comments` / `ticket_relations` / `ticket_external_links`
+// ride on the same friday_pub publication but aren't yet exposed as
+// reactive queries — future Phase 3 slices add them as relationships
+// when the dashboard surfaces (e.g., the detail-page comment thread)
+// switch over from REST.
+
+const tickets = table("tickets")
+  .columns({
+    id: string(), // "FRI-1234"
+    title: string(),
+    body: string().optional(),
+    status: string<
+      "open" | "in_progress" | "done" | "blocked" | "closed"
+    >(),
+    kind: string<"task" | "epic" | "bug" | "chore">(),
+    assignee: string().optional(),
+    meta_json: json().optional(),
+    created_at: number(),
+    updated_at: number(),
+  })
+  .primaryKey("id");
+
 // Explicit annotation: `createSchema`'s inferred return type references a
 // private path inside @rocicorp/zero's `out/zero-types/src/schema`, which
 // TS rejects with TS2742 ("not portable"). Annotating with the exported
 // `Schema` (renamed to `ZeroSchema` at import) keeps consumers' .d.ts
 // emit clean.
 export const schema: ZeroSchema = createSchema({
-  tables: [agents],
+  tables: [agents, tickets],
 });
 
 export type Schema = typeof schema;

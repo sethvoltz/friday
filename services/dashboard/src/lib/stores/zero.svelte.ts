@@ -1,24 +1,30 @@
 /**
- * Phase 2 (ADR-024): Zero sync client bound to a Svelte 5 `$state`
- * store. Opens a single WS connection to `zero-cache` (via the JWT
- * minted by `/api/sync/refresh`) and exposes the live `agents` row set
- * as a reactive array.
+ * Zero sync client bound to Svelte 5 `$state`. Single WS connection to
+ * zero-cache (authenticated via the JWT minted by `/api/sync/refresh`)
+ * underlying multiple reactive collections exposed as `$state`
+ * properties on the `zeroSync` singleton.
  *
- * Phase 2 ships only the `agents` slice; Phase 3 layers in additional
- * tables (tickets, schedules, memory, apps, evolve, mail, blocks) by
- * adding queries on this same `Zero` instance and surfacing them via
- * additional reactive properties on the store.
+ * Slices currently active:
+ *   - Phase 2: `agents` (sidebar; mirrors into `chat.agents` for the
+ *     existing Sidebar component).
+ *   - Phase 3.1: `tickets` (the /tickets list page; detail page
+ *     follows once row-level queries land).
  *
- * Feature flag: `PUBLIC_FRIDAY_USE_ZERO_SIDEBAR=1` (or `true`) flips
- * the sidebar component over to the Zero-driven agent list. Default is
- * still the SSE + REST-poll path so Phase 2 lands behind-the-flag
- * without changing any user-visible behavior.
+ * Feature flag (one switch for all slices):
+ *   - `PUBLIC_FRIDAY_USE_ZERO=1` env var, OR
+ *   - `localStorage["friday:flag:use-zero"]=1` (dev override; survives
+ *     reload).
+ *
+ * The legacy `useZeroSidebar()` and `friday:flag:use-zero-sidebar` key
+ * stay as fallback aliases so the Phase 2 smoke flag still works.
  */
 
 import { browser } from "$app/environment";
-import { Zero } from "@rocicorp/zero";
+import { Zero, createBuilder } from "@rocicorp/zero";
 import { schema, type Schema } from "@friday/shared/sync";
 import { chat, type AgentInfo } from "./chat.svelte";
+
+const queries = createBuilder(schema);
 
 /** Row shape mirrors the `agents` Zero table definition. Kept narrow:
  *  Phase 2 only reads the columns the sidebar needs. */
@@ -31,27 +37,48 @@ export interface ZeroAgentRow {
   updated_at: number;
 }
 
+/** Row shape mirrors the `tickets` Zero table definition. */
+export interface ZeroTicketRow {
+  id: string;
+  title: string;
+  body: string | null;
+  status: "open" | "in_progress" | "done" | "blocked" | "closed";
+  kind: "task" | "epic" | "bug" | "chore";
+  assignee: string | null;
+  meta_json: Record<string, unknown> | null;
+  created_at: number;
+  updated_at: number;
+}
+
 interface RefreshResponse {
   token: string;
   deviceId: string;
   expiresAt: number;
 }
 
-class ZeroSidebarStore {
+class ZeroSyncStore {
   /** Live agent rows from Zero, filtered server-side to non-archived. */
   agents = $state<ZeroAgentRow[]>([]);
+
+  /** Live ticket rows from Zero (Phase 3.1). */
+  tickets = $state<ZeroTicketRow[]>([]);
 
   /** Connection status of the underlying Zero client. `pending` until
    *  the first materialization, `live` once a snapshot has been
    *  delivered, `error` when the WS bridge is unhealthy. */
   status = $state<"pending" | "live" | "error">("pending");
 
+  /** When `status === "error"`, the message captured from the
+   *  exception that put us there. Exposed for the dev devtools probe
+   *  + a future Settings → Sync health surface. */
+  errorMessage = $state<string | null>(null);
+
   #zero: Zero<Schema> | null = null;
-  #unsubscribe: (() => void) | null = null;
+  #unsubscribers: Array<() => void> = [];
 
   constructor() {
     if (!browser) return;
-    if (!useZeroSidebar()) return;
+    if (!useZero()) return;
     void this.#init();
   }
 
@@ -75,42 +102,61 @@ class ZeroSidebarStore {
         kvStore: "mem", // Phase 6 promotes to IDB for offline cache.
       });
 
-      const query = this.#zero.query.agents.where(
-        "status",
-        "!=",
-        "archived",
-      );
-      // Preload so the query is registered with zero-cache and rows
-      // arrive even when no UI is currently observing the materialized
-      // view (the listener below subscribes after this point).
-      const preload = this.#zero.preload(query);
-      // `zero.materialize(query)` is the post-1.5 API; the older
-      // `query.materialize()` form is deprecated. Pass the listener
-      // arg-style so the callback receives `data` directly (no closure
-      // re-read of `.data`).
-      const view = this.#zero.materialize(query);
-      const update = (data: readonly unknown[]): void => {
-        const rows = data as readonly ZeroAgentRow[];
-        this.agents = rows as ZeroAgentRow[];
-        chat.agents = rows.map(toAgentInfo);
-        this.status = "live";
-      };
-      // Seed from current snapshot then subscribe to deltas.
-      update(view.data as readonly unknown[]);
-      view.addListener((data) => update(data as readonly unknown[]));
-
-      this.#unsubscribe = () => {
-        preload.cleanup();
-        view.destroy();
-      };
-    } catch {
+      this.#bindAgents();
+      this.#bindTickets();
+      this.status = "live";
+    } catch (err) {
       this.status = "error";
+      this.errorMessage = err instanceof Error ? err.message : String(err);
+      // Surface unexpected init failures in dev — Phase 6 will route
+      // these through the connectivity widget.
+      // eslint-disable-next-line no-console
+      console.error("[zeroSync] init failed:", err);
     }
   }
 
+  #bindAgents(): void {
+    if (!this.#zero) return;
+    const query = queries.agents.where("status", "!=", "archived");
+    const preload = this.#zero.preload(query);
+    const view = this.#zero.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      const rows = data as readonly ZeroAgentRow[];
+      this.agents = rows as ZeroAgentRow[];
+      // Mirror into chat.agents (existing AgentInfo shape) so the
+      // existing Sidebar component renders Zero data without code
+      // changes — the sidebar's REST poll is gated behind the same
+      // feature flag and is skipped when Zero is active.
+      chat.agents = rows.map(toAgentInfo);
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  #bindTickets(): void {
+    if (!this.#zero) return;
+    const query = queries.tickets;
+    const preload = this.#zero.preload(query);
+    const view = this.#zero.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      const rows = data as readonly ZeroTicketRow[];
+      this.tickets = rows as ZeroTicketRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
   destroy(): void {
-    this.#unsubscribe?.();
-    this.#unsubscribe = null;
+    for (const unsub of this.#unsubscribers) unsub();
+    this.#unsubscribers = [];
     this.#zero?.close();
     this.#zero = null;
   }
@@ -149,23 +195,55 @@ function zeroServerUrl(): string {
   return env?.PUBLIC_FRIDAY_ZERO_URL ?? "http://localhost:4848";
 }
 
-/** Feature flag: opt in to the Zero-driven sidebar. Stays false by
- *  default until Phase 2 ships and we're confident parity is reached. */
-export function useZeroSidebar(): boolean {
+/**
+ * Universal Zero opt-in. Phase 3 collapses what was originally
+ * `useZeroSidebar()` (Phase 2) into a single switch — all slices that
+ * have landed activate together.
+ */
+export function useZero(): boolean {
   if (!browser) return false;
   const env = (
     import.meta as unknown as { env?: Record<string, string | undefined> }
   ).env;
-  const raw = env?.PUBLIC_FRIDAY_USE_ZERO_SIDEBAR;
-  if (raw === "1" || raw === "true") return true;
-  // localStorage override for dev — set
-  //   localStorage["friday:flag:use-zero-sidebar"] = "1"
-  // and reload to opt in without a rebuild.
+  if (env?.PUBLIC_FRIDAY_USE_ZERO === "1" || env?.PUBLIC_FRIDAY_USE_ZERO === "true")
+    return true;
+  // Phase 2 alias kept for backward compat with the original smoke flag.
+  if (
+    env?.PUBLIC_FRIDAY_USE_ZERO_SIDEBAR === "1" ||
+    env?.PUBLIC_FRIDAY_USE_ZERO_SIDEBAR === "true"
+  )
+    return true;
+  // localStorage override for dev — either of the two keys works.
   try {
-    return localStorage.getItem("friday:flag:use-zero-sidebar") === "1";
+    if (localStorage.getItem("friday:flag:use-zero") === "1") return true;
+    if (localStorage.getItem("friday:flag:use-zero-sidebar") === "1") return true;
   } catch {
-    return false;
+    // ignore
   }
+  return false;
 }
 
-export const zeroSidebar = new ZeroSidebarStore();
+/**
+ * @deprecated Use {@linkcode useZero}. Kept so existing Phase 2 call
+ * sites keep working without churn.
+ */
+export const useZeroSidebar = useZero;
+
+export const zeroSync = new ZeroSyncStore();
+
+// Dev probe: expose the singleton on `window` so devtools and Playwright
+// probes can read its state without having to re-import the module
+// (Vite gives each import path its own instance, defeating in-page
+// inspection). Removed in Phase 6 when the connectivity widget surfaces
+// the same signals natively.
+if (browser) {
+  (
+    globalThis as unknown as { __fridayZero?: ZeroSyncStore }
+  ).__fridayZero = zeroSync;
+}
+
+/**
+ * @deprecated Use {@linkcode zeroSync}. Same singleton; the Phase 2
+ * name is preserved for backward compat with the Sidebar component.
+ */
+export const zeroSidebar = zeroSync;

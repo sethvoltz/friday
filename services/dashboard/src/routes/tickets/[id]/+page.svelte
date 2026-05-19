@@ -4,6 +4,7 @@
   import { invalidateAll } from "$app/navigation";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
   import type { TicketStatus } from "@friday/shared/services";
+  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
 
   let { data }: { data: PageData } = $props();
 
@@ -13,7 +14,30 @@
   // ref follows. The previous version mirrored `data.ticket` into a
   // local $state and shallow-cloned on each mutation, which left stale
   // comment/external-link arrays whenever two mutations interleaved.
-  const t = $derived(data.ticket);
+  //
+  // Phase 3.1: when the Zero flag is on, the row itself comes from the
+  // reactive `zeroSync.tickets` query — so updates from another browser
+  // tab arrive in <1s instead of waiting for the next `invalidateAll`.
+  // Comments + external links still load via the SvelteKit page load
+  // (REST) until a Phase 3 follow-up adds those tables as Zero queries.
+  const zeroOn = useZero();
+  const zeroTicket = $derived(
+    zeroOn ? zeroSync.tickets.find((r) => r.id === data.ticket.id) : undefined,
+  );
+  const t = $derived(
+    zeroTicket
+      ? {
+          ...data.ticket,
+          title: zeroTicket.title,
+          body: zeroTicket.body,
+          status: zeroTicket.status,
+          kind: zeroTicket.kind,
+          assignee: zeroTicket.assignee,
+          meta: zeroTicket.meta_json,
+          updatedAt: zeroTicket.updated_at,
+        }
+      : data.ticket,
+  );
   let savingStatus = $state(false);
   let savingAssignee = $state(false);
   // svelte-ignore state_referenced_locally

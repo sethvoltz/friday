@@ -61,7 +61,18 @@ vi.mock("@rocicorp/zero", () => {
       instances.push(this as unknown as MockedZero);
     }
   }
-  return { Zero };
+  // `createBuilder(schema)` returns the standalone schema-query builder
+  // used by our store post-1.5. The shape mirrors the live Zero client's
+  // `z.query` field, just decoupled from a connection.
+  const createBuilder = () => ({
+    agents: {
+      where: () => createBuilder().agents,
+    },
+    tickets: {
+      where: () => createBuilder().tickets,
+    },
+  });
+  return { Zero, createBuilder };
 });
 
 // Schema mock — the store imports `schema` + `Schema`; the values don't
@@ -120,29 +131,40 @@ async function importStore(): Promise<typeof import("./zero.svelte.js")> {
   return await import("./zero.svelte.js");
 }
 
-describe("useZeroSidebar feature flag", () => {
+describe("useZero feature flag", () => {
   it("returns false by default (no flag set)", async () => {
-    const { useZeroSidebar } = await importStore();
-    expect(useZeroSidebar()).toBe(false);
+    const { useZero } = await importStore();
+    expect(useZero()).toBe(false);
   });
 
-  it("returns true when localStorage opt-in is set", async () => {
+  it("returns true when the universal localStorage opt-in is set", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { useZero } = await importStore();
+    expect(useZero()).toBe(true);
+  });
+
+  it("returns true via the legacy `friday:flag:use-zero-sidebar` alias", async () => {
+    // Phase 2 shipped under the per-slice key; Phase 3 collapses the
+    // flags but keeps the old key working so existing browser
+    // profiles continue to opt in without manual migration.
     localStorage.setItem("friday:flag:use-zero-sidebar", "1");
-    const { useZeroSidebar } = await importStore();
+    const { useZero, useZeroSidebar } = await importStore();
+    expect(useZero()).toBe(true);
+    // Alias still exported for backward compat.
     expect(useZeroSidebar()).toBe(true);
   });
 
   it("rejects a non-'1' localStorage value", async () => {
-    localStorage.setItem("friday:flag:use-zero-sidebar", "true");
-    const { useZeroSidebar } = await importStore();
+    localStorage.setItem("friday:flag:use-zero", "true");
+    const { useZero } = await importStore();
     // The store's strict check is === "1"; "true" doesn't qualify so
     // the feature stays off — pinning this so a future loosening of
     // the check is deliberate.
-    expect(useZeroSidebar()).toBe(false);
+    expect(useZero()).toBe(false);
   });
 });
 
-describe("ZeroSidebarStore initialization", () => {
+describe("ZeroSyncStore initialization", () => {
   it("does NOT construct a Zero client when the flag is off", async () => {
     await importStore();
     // Let any microtasks settle.
@@ -151,7 +173,7 @@ describe("ZeroSidebarStore initialization", () => {
   });
 
   it("fetches /api/sync/refresh and constructs Zero with the device id when flag is on", async () => {
-    localStorage.setItem("friday:flag:use-zero-sidebar", "1");
+    localStorage.setItem("friday:flag:use-zero", "1");
     await importStore();
     // Give the async init time to fetch + construct.
     await new Promise((r) => setTimeout(r, 20));
@@ -173,7 +195,7 @@ describe("ZeroSidebarStore initialization", () => {
   });
 
   it("Zero's auth callback re-fetches a fresh token on each invocation", async () => {
-    localStorage.setItem("friday:flag:use-zero-sidebar", "1");
+    localStorage.setItem("friday:flag:use-zero", "1");
     await importStore();
     await new Promise((r) => setTimeout(r, 20));
 
@@ -189,7 +211,7 @@ describe("ZeroSidebarStore initialization", () => {
 
 describe("toAgentInfo mapping (via materialize update)", () => {
   it("converts snake_case ZeroAgentRow → camelCase AgentInfo with ISO timestamps", async () => {
-    localStorage.setItem("friday:flag:use-zero-sidebar", "1");
+    localStorage.setItem("friday:flag:use-zero", "1");
     // Capture the listener so we can drive an update with a known payload.
     const listeners: Array<(data: unknown) => void> = [];
     const mockedZero = await import("@rocicorp/zero");
@@ -201,26 +223,34 @@ describe("toAgentInfo mapping (via materialize update)", () => {
     const origCtor = ZeroCtor;
     const patched = function (opts: Record<string, unknown>) {
       const inst = new origCtor(opts);
+      // The store calls `materialize` once per slice (agents + tickets
+      // in Phase 3.1). Return the populated agent snapshot for the
+      // first call and an empty snapshot for everything after.
+      let nth = 0;
       inst.materialize = vi.fn(() => {
+        const isFirst = nth === 0;
+        nth += 1;
         const view = {
-          data: [
-            {
-              name: "alpha",
-              type: "builder",
-              status: "working",
-              session_id: "sess-1",
-              created_at: 1_700_000_000_000,
-              updated_at: 1_700_000_001_000,
-            },
-            {
-              name: "beta",
-              type: "bare",
-              status: "idle",
-              session_id: null,
-              created_at: 1_700_000_000_000,
-              updated_at: 1_700_000_002_000,
-            },
-          ],
+          data: isFirst
+            ? [
+                {
+                  name: "alpha",
+                  type: "builder",
+                  status: "working",
+                  session_id: "sess-1",
+                  created_at: 1_700_000_000_000,
+                  updated_at: 1_700_000_001_000,
+                },
+                {
+                  name: "beta",
+                  type: "bare",
+                  status: "idle",
+                  session_id: null,
+                  created_at: 1_700_000_000_000,
+                  updated_at: 1_700_000_002_000,
+                },
+              ]
+            : [],
           addListener: vi.fn((listener: (data: unknown) => void) => {
             listeners.push(listener);
             return () => {};
@@ -233,17 +263,21 @@ describe("toAgentInfo mapping (via materialize update)", () => {
     };
     (mockedZero as unknown as { Zero: unknown }).Zero = patched;
 
-    const { zeroSidebar } = await importStore();
+    const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
 
     // The seeded snapshot should already be applied to the store.
-    expect(zeroSidebar.agents).toHaveLength(2);
-    expect(zeroSidebar.agents[0]).toMatchObject({
+    expect(zeroSync.agents).toHaveLength(2);
+    expect(zeroSync.agents[0]).toMatchObject({
       name: "alpha",
       type: "builder",
       status: "working",
       session_id: "sess-1",
     });
+    // Tickets slice (Phase 3.1) seeded with empty snapshot in this
+    // mock — confirms the second materialize call is wired but doesn't
+    // leak agent rows into `tickets`.
+    expect(zeroSync.tickets).toHaveLength(0);
 
     // chat.agents (the legacy shape) should mirror the same rows in
     // camelCase, with the null session_id collapsed to undefined.
@@ -264,6 +298,75 @@ describe("toAgentInfo mapping (via materialize update)", () => {
     );
 
     // Restore for other tests.
+    (mockedZero as unknown as { Zero: unknown }).Zero = origCtor;
+  });
+});
+
+describe("tickets binding (Phase 3.1)", () => {
+  it("seeds zeroSync.tickets from the second materialize call's snapshot", async () => {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const mockedZero = await import("@rocicorp/zero");
+    const origCtor = mockedZero.Zero as unknown as new (
+      opts: Record<string, unknown>,
+    ) => MockedZero;
+    const patched = function (opts: Record<string, unknown>) {
+      const inst = new origCtor(opts);
+      let nth = 0;
+      inst.materialize = vi.fn(() => {
+        const isAgents = nth === 0;
+        nth += 1;
+        return {
+          data: isAgents
+            ? []
+            : [
+                {
+                  id: "FRI-1",
+                  title: "first ticket",
+                  body: null,
+                  status: "open",
+                  kind: "task",
+                  assignee: null,
+                  meta_json: null,
+                  created_at: 1_700_000_000_000,
+                  updated_at: 1_700_000_001_000,
+                },
+                {
+                  id: "FRI-2",
+                  title: "second ticket",
+                  body: "with body",
+                  status: "in_progress",
+                  kind: "bug",
+                  assignee: "alice",
+                  meta_json: { foo: "bar" },
+                  created_at: 1_700_000_000_000,
+                  updated_at: 1_700_000_005_000,
+                },
+              ],
+          addListener: vi.fn(() => () => {}),
+          destroy: vi.fn(),
+        };
+      });
+      return inst;
+    };
+    (mockedZero as unknown as { Zero: unknown }).Zero = patched;
+
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(zeroSync.agents).toHaveLength(0);
+    expect(zeroSync.tickets).toHaveLength(2);
+    expect(zeroSync.tickets[0]).toMatchObject({
+      id: "FRI-1",
+      title: "first ticket",
+      status: "open",
+      kind: "task",
+    });
+    expect(zeroSync.tickets[1]).toMatchObject({
+      id: "FRI-2",
+      assignee: "alice",
+      status: "in_progress",
+    });
+
     (mockedZero as unknown as { Zero: unknown }).Zero = origCtor;
   });
 });
