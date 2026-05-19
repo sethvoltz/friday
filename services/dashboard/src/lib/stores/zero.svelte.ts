@@ -1040,36 +1040,51 @@ class ZeroSyncStore {
    */
   async abortTurn(turnId: string): Promise<boolean> {
     if (!this.#zero) return false;
+    // Fire the daemon fast-path FIRST, unconditionally. The endpoint
+    // only needs `turn_id` — it looks up the live worker via the
+    // in-memory `findAgentByTurnId` map, not via Zero's materialized
+    // blocks window. Prior to this fix we bailed early if no user_chat
+    // block was in `this.blocks`, which happens any time the user
+    // sends a message that pushes the original user_chat row out of
+    // the 50-row ts-desc window (long-running turns with many tool
+    // calls) — Stop became silently a no-op, the worker kept
+    // chewing, and the dashboard log showed zero `/api/internal/abort-turn`
+    // POSTs. The mutator dispatch below still needs the row's PK; if
+    // we can't find one we skip just that leg (the fast-path already
+    // aborted the worker — the durable signal is for cross-device
+    // reconciliation, which a single user with one tab doesn't need).
+    let fastPathOk = false;
+    try {
+      const r = await fetch("/api/internal/abort-turn", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ turn_id: turnId }),
+      });
+      fastPathOk = r.ok;
+    } catch {
+      // Daemon unreachable — the mutator (when it dispatches) is the
+      // durable backstop. The daemon's LISTEN handler picks up the
+      // `abort_requested` row on next boot and aborts then.
+    }
+
     const row = this.blocks.find(
       (b) =>
         b.turn_id === turnId &&
         b.role === "user" &&
         b.source === "user_chat",
     );
-    if (!row) return false;
-
-    try {
-      await fetch("/api/internal/abort-turn", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ turn_id: turnId }),
-      });
-    } catch {
-      // Daemon unreachable — fall through to the mutator. The
-      // LISTEN-path's boot-recovery scan will dispatch the abort
-      // once the daemon returns.
+    if (row) {
+      try {
+        await this.#zero!.mutate.abortTurn({ id: row.id, ts: Date.now() })
+          .server;
+      } catch {
+        // Server-side mutator failure (e.g. row has moved on to
+        // 'aborted' already from a fast worker). User-visible state
+        // is still correct — the turn is gone. Swallow.
+      }
     }
 
-    try {
-      await this.#zero!.mutate.abortTurn({ id: row.id, ts: Date.now() })
-        .server;
-    } catch {
-      // Server-side mutator failure (e.g. row has moved on to
-      // 'aborted' already from a fast worker). User-visible state
-      // is still correct — the turn is gone. Swallow.
-    }
-
-    return true;
+    return fastPathOk || row !== undefined;
   }
 
   async cancelQueued(turnId: string): Promise<string | null> {

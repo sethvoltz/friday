@@ -1394,9 +1394,29 @@ describe("Phase 4.10: abortTurn wrapper (fast-path + mutator)", () => {
     ];
   }
 
-  it("returns false when no matching user block exists for the turn (already finished)", async () => {
+  it("still fires the daemon fast-path even when no matching user block is in Zero's window", async () => {
+    // Regression — previously this path returned `false` early without
+    // hitting the daemon, which silently no-op'd the Stop button any
+    // time a long turn (lots of tool calls) had pushed the user_chat
+    // row out of the 50-row Zero materialization. The daemon endpoint
+    // only needs `turn_id`; it resolves the live worker server-side.
     const { zeroSync } = await bootedZero();
-    await expect(zeroSync.abortTurn("turn-nope")).resolves.toBe(false);
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify({ ok: true, aborted: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(zeroSync.abortTurn("turn-nope")).resolves.toBe(true);
+    const fastPath = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("/api/internal/abort-turn"),
+    );
+    expect(fastPath).toBeDefined();
+    expect(JSON.parse((fastPath![1] as RequestInit).body as string)).toEqual({
+      turn_id: "turn-nope",
+    });
   });
 
   it("POSTs the daemon fast-path with the turn_id AND dispatches the mutator with the bigserial id", async () => {
