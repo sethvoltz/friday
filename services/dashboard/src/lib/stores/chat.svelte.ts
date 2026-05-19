@@ -212,11 +212,19 @@ export class ChatState {
    * us; the wrapper preserves reactivity while adding the trace.
    */
   private _focusedAgent = $state("friday");
+  /** Phase 5: registered by sse.svelte.ts (via `bindFocusChange`)
+   *  so chat.svelte.ts can ping the SSE store on focus switch
+   *  without a static circular import. */
+  #onFocusChange: (() => void) | null = null;
+  bindFocusChange(cb: () => void): void {
+    this.#onFocusChange = cb;
+  }
   get focusedAgent(): string {
     return this._focusedAgent;
   }
   set focusedAgent(value: string) {
-    if (this._focusedAgent !== value) {
+    const changed = this._focusedAgent !== value;
+    if (changed) {
       try {
         const pathname =
           typeof window !== "undefined" ? window.location.pathname : "";
@@ -234,6 +242,12 @@ export class ChatState {
       }
     }
     this._focusedAgent = value;
+    // Phase 5: per-agent SSE channel. On focus switch, fire the
+    // registered SSE reopen hook (registered by sse.svelte.ts at
+    // startSSE time) so the next reconnect carries `?agent=<new>`
+    // and the daemon scopes its replay to the new turn lifecycle.
+    // The hook indirection avoids a chat→sse static import cycle.
+    if (changed && this.#onFocusChange) this.#onFocusChange();
   }
   /**
    * Per-agent cursor for race-free SSE catchup (FIX_FORWARD 1.7). Keyed by

@@ -1611,6 +1611,16 @@ function handleEvents(
   res: ServerResponse,
   cfg: ReturnType<typeof loadConfig>,
 ): void {
+  // Phase 5: per-agent SSE channel. `?agent=<name>` restricts the
+  // stream to live-turn events for that agent only. The dashboard
+  // re-opens the connection on agent focus switch; events without an
+  // `agent` field (e.g. connection_established, app_lifecycle) pass
+  // through regardless so global daemon-level signals still reach the
+  // client. Omitting the query string keeps the legacy global stream
+  // for non-Zero callers + tests.
+  const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+  const agentFilter = url.searchParams.get("agent");
+
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache, no-transform",
@@ -1655,10 +1665,14 @@ function handleEvents(
       ? (parsedLast as number)
       : Math.max(0, eventBus.currentSeq() - BACKWALK);
   for (const e of eventBus.replaySince(replayFrom)) {
+    if (!passesAgentFilter(e, agentFilter)) continue;
     writeEvent(res, e);
   }
 
-  const unsub = eventBus.subscribe((e) => writeEvent(res, e));
+  const unsub = eventBus.subscribe((e) => {
+    if (!passesAgentFilter(e, agentFilter)) return;
+    writeEvent(res, e);
+  });
   const ka = setInterval(() => {
     try {
       res.write(": keepalive\n\n");
@@ -1671,6 +1685,21 @@ function handleEvents(
     clearInterval(ka);
     unsub();
   });
+}
+
+/**
+ * Phase 5 per-agent SSE filter. When `?agent=` is set, drop events
+ * whose `agent` field doesn't match. Events without an `agent` field
+ * (connection_established, app_lifecycle) always pass through — they're
+ * daemon-level signals every connected client needs to see.
+ */
+function passesAgentFilter(
+  e: { type?: unknown; agent?: unknown },
+  agentFilter: string | null,
+): boolean {
+  if (!agentFilter) return true;
+  if (typeof e.agent !== "string") return true;
+  return e.agent === agentFilter;
 }
 
 function writeEvent(res: ServerResponse, e: { type: string; seq: number }): void {

@@ -122,7 +122,17 @@ async function connect(): Promise<void> {
       accept: "text/event-stream",
     };
     if (lastEventId !== null) headers["last-event-id"] = lastEventId;
-    const res = await fetch("/api/events", {
+    // Phase 5: per-agent SSE channel. When a focused agent is set,
+    // pass `?agent=<name>` so the daemon filters to that agent's
+    // turn-lifecycle events. The connection re-opens whenever
+    // `chat.focusedAgent` changes via `reopenForAgent`. With no
+    // focused agent (sidebar landing state), keep the legacy global
+    // stream so connection_established still lands.
+    const focused = chat.focusedAgent;
+    const url = focused
+      ? `/api/events?agent=${encodeURIComponent(focused)}`
+      : "/api/events";
+    const res = await fetch(url, {
       headers,
       signal: ctrl.signal,
       // Defensive: SSE responses must NOT be cached by intermediaries; the
@@ -323,6 +333,10 @@ export function startSSE(): void {
   stopped = false;
   freshLoad = true;
   attempt = 0;
+  // Phase 5: register the focus-change hook so chat.focusedAgent
+  // switches trigger an SSE reconnect with the new `?agent=` filter.
+  // Idempotent — `bindFocusChange` overwrites a single slot.
+  chat.bindFocusChange(reopenForAgent);
   void connect();
   if (typeof document !== "undefined" && !visListener) {
     visListener = () => {
@@ -336,6 +350,26 @@ export function startSSE(): void {
     onlineListener = () => reconnectNow();
     window.addEventListener("online", onlineListener);
   }
+}
+
+/**
+ * Phase 5: tear down the current SSE connection and open a fresh one,
+ * picking up whatever agent `chat.focusedAgent` now points at. Used by
+ * the chat store on focus switch — the new connection's `?agent=`
+ * query string scopes the stream to that agent, and the daemon's
+ * per-agent replay buffer (when wired) replays the current turn so
+ * the dashboard rebuilds the in-flight accumulator.
+ *
+ * No-op when SSE isn't running (stopSSE / startSSE bookkeeping
+ * stays the source of truth for lifecycle).
+ */
+export function reopenForAgent(): void {
+  if (stopped) return;
+  // Abort the current connection; the existing reconnect ladder will
+  // open a new one immediately via scheduleReconnect, picking up the
+  // new `chat.focusedAgent`.
+  lastEventId = null;
+  abortController?.abort();
 }
 
 export function stopSSE(): void {
