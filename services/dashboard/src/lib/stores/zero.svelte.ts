@@ -215,6 +215,13 @@ class ZeroSyncStore {
    *  delivered, `error` when the WS bridge is unhealthy. */
   status = $state<"pending" | "live" | "error">("pending");
 
+  /** Phase 6: device id this tab is connected as. Set once `/api/sync/refresh`
+   *  resolves; null before then. Read by the Settings → Devices panel to
+   *  decide which row is "this device" and by the dashboard card on `/`. */
+  get currentDeviceId(): string | null {
+    return this.#deviceId;
+  }
+
   /** When `status === "error"`, the message captured from the
    *  exception that put us there. Exposed for the dev devtools probe
    *  + a future Settings → Sync health surface. */

@@ -258,6 +258,51 @@
     return new Date(ms).toLocaleString();
   }
 
+  /** Phase 6: human-readable bytes (MB / GB) for storage indicators.
+   *  Browser storage quotas live in the GB range; usage typically sits
+   *  in MB. Both surfaces are coarse — no need for KB / B detail. */
+  function fmtBytes(bytes: number | null | undefined): string {
+    if (!Number.isFinite(bytes ?? NaN) || (bytes ?? 0) <= 0) return "—";
+    const b = bytes as number;
+    const gb = b / (1024 ** 3);
+    if (gb >= 0.5) return `${gb.toFixed(2)} GB`;
+    const mb = b / (1024 ** 2);
+    if (mb >= 1) return `${mb.toFixed(1)} MB`;
+    const kb = b / 1024;
+    return `${kb.toFixed(1)} KB`;
+  }
+
+  function fmtStorageUsage(
+    used: number | null | undefined,
+    quota: number | null | undefined,
+  ): string {
+    const usedText = fmtBytes(used);
+    if (!Number.isFinite(quota ?? NaN) || (quota ?? 0) <= 0) return usedText;
+    return `${usedText} / ${fmtBytes(quota)}`;
+  }
+
+  /** Phase 6: forget a device. Hard-deletes the client_devices row
+   *  via the `forgetDevice` mutator. When the user forgets the
+   *  current tab, ALSO sign them out so the row doesn't get
+   *  immediately re-created by the next `/api/sync/refresh` JWT
+   *  mint. */
+  async function forgetDevice(deviceId: string, isCurrent: boolean): Promise<void> {
+    const ok = await confirmDialog({
+      title: isCurrent ? "Forget this device?" : "Forget that device?",
+      description: isCurrent
+        ? "Removing this device's storage telemetry + per-device read cursors. You'll also be signed out — sign back in to re-register this device."
+        : "Removing that device's storage telemetry + per-device read cursors. The device will re-register on next sync-refresh until it's signed out.",
+      confirmLabel: "Forget device",
+      danger: true,
+    });
+    if (!ok) return;
+    zeroSync.forgetDevice(deviceId);
+    if (isCurrent) {
+      await fetch("/api/auth/sign-out", { method: "POST" });
+      window.location.href = "/login";
+    }
+  }
+
   function shortenUserAgent(ua: string | null): string {
     if (!ua) return "unknown client";
     // Pick out a recognizable browser/platform fragment. Full UA strings
@@ -462,6 +507,50 @@
     </div>
   </div>
 
+  {#if zeroOn}
+    <div class="card devices-card">
+      <div class="card-header"><h2>Devices</h2></div>
+      <p class="row-value">
+        Browser caches that have synced this account. Each row is a separate
+        device-id minted by <code>/api/sync/refresh</code>. Forget a device to
+        drop its read cursors + storage telemetry; the row is re-created the
+        next time that browser refreshes its sync token.
+      </p>
+      {#if zeroSync.clientDevices.length === 0}
+        <p class="row-value muted">No devices reported storage yet.</p>
+      {:else}
+        <ul class="device-list">
+          {#each zeroSync.clientDevices as d (d.device_id)}
+            {@const isCurrent = d.device_id === zeroSync.currentDeviceId}
+            <li class="device-row" class:current={isCurrent}>
+              <div class="device-meta">
+                <span class="device-client">
+                  {d.label ?? shortenUserAgent(d.user_agent ?? null)}
+                </span>
+                {#if isCurrent}
+                  <span class="device-current">this device</span>
+                {/if}
+              </div>
+              <div class="device-storage">
+                <span class="storage-usage">
+                  {fmtStorageUsage(d.storage_used_bytes, d.storage_quota_bytes)}
+                </span>
+                <span class="device-times">
+                  Last seen {fmtTimestamp(d.last_seen_at)}
+                </span>
+              </div>
+              <button
+                class="ghost device-forget"
+                onclick={() => forgetDevice(d.device_id, isCurrent)}>
+                Forget this device
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+  {/if}
+
   <div class="card sessions-card">
     <div class="card-header"><h2>Active sessions</h2></div>
     <p class="row-value">
@@ -554,6 +643,67 @@
   }
   .config-card { grid-column: 1 / -1; }
   .sessions-card { grid-column: 1 / -1; }
+  .devices-card { grid-column: 1 / -1; }
+  .device-list {
+    list-style: none;
+    padding: 0;
+    margin: 0.75rem 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .device-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+  }
+  .device-row.current {
+    border-color: var(--accent-primary);
+    background: var(--accent-glow);
+  }
+  .device-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .device-client {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+  }
+  .device-current {
+    font-size: 0.65rem;
+    color: var(--accent-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    background: var(--bg-card);
+    padding: 0.1rem 0.4rem;
+    border-radius: 99px;
+  }
+  .device-storage {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.15rem;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+  }
+  .storage-usage { color: var(--text-primary); }
+  .device-times { color: var(--text-tertiary); }
+  .device-forget { font-size: 0.75rem; padding: 0.25rem 0.6rem; }
+  @media (max-width: 640px) {
+    .device-row { grid-template-columns: 1fr; }
+    .device-storage { align-items: flex-start; }
+  }
 
   .theme-picker {
     display: flex;
