@@ -346,6 +346,24 @@ class ZeroSyncStore {
       // these through the connectivity widget.
       // eslint-disable-next-line no-console
       console.error("[zeroSync] init failed:", err);
+      // Report to the server-side diagnostic endpoint so a watcher on
+      // `friday logs dashboard -f` can see what crashed on a phone /
+      // PWA where the user can't open DevTools. Best-effort — a
+      // failure here is silent (we're already in the error path).
+      void fetch("/api/_diag/client-error", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event: "zero.init.failed",
+          message: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+          url: typeof window !== "undefined" ? window.location.href : null,
+          userAgent:
+            typeof navigator !== "undefined" ? navigator.userAgent : null,
+        }),
+      }).catch(() => {
+        /* best-effort — we're already in the error path */
+      });
     }
   }
 
@@ -1209,6 +1227,36 @@ if (browser) {
     // read cursor to the newest block. Same circular-dep avoidance
     // pattern as the binder: chat doesn't import zero.
     chat.setMarkReadFn((agent, blockId) => zeroSync.markRead(agent, blockId));
+  });
+
+  // Global error/rejection reporters — when a PWA on a phone can't
+  // open DevTools, the only surface that tells us what's blowing up
+  // is the server log. Forward every uncaught error + unhandled
+  // promise rejection to `/api/_diag/client-error` so a watcher on
+  // `friday logs dashboard -f` sees them.
+  const reportToServer = (event: string, message: string, stack?: string) => {
+    void fetch("/api/_diag/client-error", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        event,
+        message,
+        stack,
+        url: window.location.href,
+        userAgent: navigator.userAgent,
+      }),
+    }).catch(() => {
+      /* best-effort */
+    });
+  };
+  window.addEventListener("error", (e) => {
+    reportToServer("window.error", e.message, e.error?.stack);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const reason = e.reason;
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    const stack = reason instanceof Error ? reason.stack : undefined;
+    reportToServer("window.unhandledrejection", msg, stack);
   });
 }
 
