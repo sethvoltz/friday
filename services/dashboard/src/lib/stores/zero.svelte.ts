@@ -387,7 +387,14 @@ class ZeroSyncStore {
 
   #bindSchedules(): void {
     if (!this.#zero) return;
-    const query = this.#zero.query.schedules;
+    // Phase 4.6: filter `deleted` tombstones server-side.
+    // dashboards see the schedule disappear immediately on user
+    // delete (the mutator sets status='deleted' as a soft-delete).
+    const query = this.#zero.query.schedules.where(
+      "status",
+      "!=",
+      "deleted",
+    );
     const preload = this.#zero.preload(query);
     const view = this.#zero.materialize(query);
     const update = (data: readonly unknown[]): void => {
@@ -779,6 +786,38 @@ class ZeroSyncStore {
   }): import("@rocicorp/zero").MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero.mutate.deleteMemoryEntry({ ...args, ts: Date.now() });
+  }
+
+  /**
+   * Phase 4.6: schedule mutators. Dashboard writes pending status;
+   * daemon's LISTEN handler registers/recomputes/cleans up + flips
+   * to terminal status.
+   */
+  createSchedule(args: {
+    name: string;
+    cron?: string;
+    runAt?: string;
+    taskPrompt: string;
+    paused?: boolean;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.createSchedule({ ...args, ts: Date.now() });
+  }
+  updateSchedule(args: {
+    name: string;
+    cron?: string | null;
+    runAt?: string | null;
+    taskPrompt?: string;
+    paused?: boolean;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.updateSchedule({ ...args, ts: Date.now() });
+  }
+  deleteSchedule(args: {
+    name: string;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.deleteSchedule({ ...args, ts: Date.now() });
   }
 
   destroy(): void {

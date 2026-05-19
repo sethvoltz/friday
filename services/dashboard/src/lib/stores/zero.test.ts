@@ -119,6 +119,18 @@ vi.mock("@rocicorp/zero", () => {
         client: Promise.resolve({ type: "success" }),
         server: Promise.resolve({ type: "success" }),
       })),
+      createSchedule: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      updateSchedule: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      deleteSchedule: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
     };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
@@ -1043,5 +1055,76 @@ describe("Phase 4.5: memory mutator dispatch", () => {
     ).not.toThrow();
     expect(() => zeroSync.updateMemoryEntry({ id: "x" })).not.toThrow();
     expect(() => zeroSync.deleteMemoryEntry({ id: "x" })).not.toThrow();
+  });
+});
+
+describe("Phase 4.6: schedule mutator dispatch", () => {
+  async function bootedZero() {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  it("createSchedule forwards args + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.createSchedule({
+      name: "daily",
+      cron: "0 8 * * *",
+      taskPrompt: "Summarize",
+    });
+    expect(z.mutate.createSchedule).toHaveBeenCalledTimes(1);
+    const args = z.mutate.createSchedule.mock.calls[0][0] as {
+      name: string;
+      cron?: string;
+      taskPrompt: string;
+      ts: number;
+    };
+    expect(args.name).toBe("daily");
+    expect(args.cron).toBe("0 8 * * *");
+    expect(args.taskPrompt).toBe("Summarize");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("updateSchedule forwards partial patch + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.updateSchedule({ name: "daily", cron: "0 9 * * *" });
+    const args = z.mutate.updateSchedule.mock.calls[0][0] as {
+      name: string;
+      cron?: string | null;
+      ts: number;
+    };
+    expect(args.name).toBe("daily");
+    expect(args.cron).toBe("0 9 * * *");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("updateSchedule supports null to clear cron/runAt", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.updateSchedule({ name: "x", cron: null });
+    const args = z.mutate.updateSchedule.mock.calls[0][0] as {
+      cron?: string | null;
+    };
+    expect(args.cron).toBeNull();
+  });
+
+  it("deleteSchedule forwards name + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.deleteSchedule({ name: "to-delete" });
+    const args = z.mutate.deleteSchedule.mock.calls[0][0] as {
+      name: string;
+      ts: number;
+    };
+    expect(args.name).toBe("to-delete");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("all schedule mutators are silent when Zero hasn't initialized", async () => {
+    const { zeroSync } = await importStore();
+    expect(() =>
+      zeroSync.createSchedule({ name: "x", taskPrompt: "X" }),
+    ).not.toThrow();
+    expect(() => zeroSync.updateSchedule({ name: "x" })).not.toThrow();
+    expect(() => zeroSync.deleteSchedule({ name: "x" })).not.toThrow();
   });
 });

@@ -124,6 +124,19 @@
     if (!ok) return;
     busy = `delete ${name}`;
     try {
+      if (zeroOn) {
+        // Phase 4.6: soft-delete via Zero mutator. Reactive query
+        // filters status='deleted' so the row disappears
+        // immediately from the list (optimistic).
+        const result = zeroSync.deleteSchedule({ name });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`delete failed: ${sr.error.message}`, "err");
+          return;
+        }
+        showToast(`deleted ${name}`);
+        return;
+      }
       const r = await fetch(`/api/schedules/${encodeURIComponent(name)}`, {
         method: "DELETE",
       });

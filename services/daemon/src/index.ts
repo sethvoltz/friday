@@ -41,6 +41,10 @@ import {
   startMemoryListener,
 } from "./memory/listener.js";
 import {
+  runScheduleBootScan,
+  startScheduleListener,
+} from "./scheduler/listener.js";
+import {
   composeSystemPrompt,
   readPromptStack,
 } from "@friday/shared";
@@ -90,6 +94,15 @@ async function main(): Promise<void> {
   // any pending rows that landed while the daemon was down.
   await runMemoryBootScan();
   const memoryListener = await startMemoryListener();
+
+  // Phase 4.6: open the long-lived LISTEN connection for
+  // `friday_schedule_changed`. Boot-recovery scan first to apply
+  // pending registers/reloads/deletes that landed while the daemon
+  // was down. Runs BEFORE the scheduler's 30s tick starts so a
+  // dashboard-created schedule is registered before its first fire
+  // window opens.
+  await runScheduleBootScan();
+  const scheduleListener = await startScheduleListener();
 
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
@@ -174,6 +187,9 @@ async function main(): Promise<void> {
       /* shutdown best-effort; the process is about to exit */
     });
     void memoryListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void scheduleListener.stop().catch(() => {
       /* shutdown best-effort; the process is about to exit */
     });
     clearHealth();

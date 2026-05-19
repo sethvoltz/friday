@@ -20,13 +20,16 @@ import {
   type AddTicketCommentArgs,
   type AddTicketRelationArgs,
   type CreateMemoryEntryArgs,
+  type CreateScheduleArgs,
   type CreateTicketArgs,
   type DeleteMemoryEntryArgs,
+  type DeleteScheduleArgs,
   type ForgetDeviceArgs,
   type LinkTicketExternalArgs,
   type MarkReadArgs,
   type ReportClientStatsArgs,
   type UpdateMemoryEntryArgs,
+  type UpdateScheduleArgs,
   type UpdateSettingsArgs,
   type UpdateTicketArgs,
 } from "./mutators.js";
@@ -126,6 +129,32 @@ interface MockMemoryUpdateCall {
   status: string;
 }
 
+interface MockScheduleInsertCall {
+  name: string;
+  cron?: string;
+  run_at?: string;
+  task_prompt: string;
+  paused: boolean;
+  next_run_at: number | null;
+  last_run_at: number | null;
+  last_run_id: string | null;
+  meta_json: Record<string, unknown> | null;
+  app_id: string | null;
+  status: string;
+  created_at: number;
+  updated_at: number;
+}
+
+interface MockScheduleUpdateCall {
+  name: string;
+  cron?: string | null;
+  run_at?: string | null;
+  task_prompt?: string;
+  paused?: boolean;
+  updated_at: number;
+  status: string;
+}
+
 function makeMockTx(): {
   tx: Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   upsertCalls: MockUpsertCall[];
@@ -139,6 +168,8 @@ function makeMockTx(): {
   ticketExternalLinkInserts: MockTicketExternalLinkInsertCall[];
   memoryInserts: MockMemoryInsertCall[];
   memoryUpdates: MockMemoryUpdateCall[];
+  scheduleInserts: MockScheduleInsertCall[];
+  scheduleUpdates: MockScheduleUpdateCall[];
 } {
   const upsertCalls: MockUpsertCall[] = [];
   const clientDeviceUpdates: MockClientDeviceUpdateCall[] = [];
@@ -190,6 +221,14 @@ function makeMockTx(): {
   const memoryUpdate = vi.fn(async (row: MockMemoryUpdateCall) => {
     memoryUpdates.push(row);
   });
+  const scheduleInserts: MockScheduleInsertCall[] = [];
+  const scheduleUpdates: MockScheduleUpdateCall[] = [];
+  const scheduleInsert = vi.fn(async (row: MockScheduleInsertCall) => {
+    scheduleInserts.push(row);
+  });
+  const scheduleUpdate = vi.fn(async (row: MockScheduleUpdateCall) => {
+    scheduleUpdates.push(row);
+  });
   // The mutators touch `tx.mutate.<table>.<op>`. Rest of Transaction
   // surface left undefined — we cast to the parameter type only to
   // satisfy TypeScript.
@@ -203,6 +242,7 @@ function makeMockTx(): {
       ticket_relations: { insert: ticketRelationInsert },
       ticket_external_links: { insert: ticketExternalLinkInsert },
       memory_entries: { insert: memoryInsert, update: memoryUpdate },
+      schedules: { insert: scheduleInsert, update: scheduleUpdate },
     },
   } as unknown as Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   return {
@@ -218,6 +258,8 @@ function makeMockTx(): {
     ticketExternalLinkInserts,
     memoryInserts,
     memoryUpdates,
+    scheduleInserts,
+    scheduleUpdates,
   };
 }
 
@@ -883,5 +925,153 @@ describe("deleteMemoryEntry", () => {
     expect("content" in u).toBe(false);
     expect("title" in u).toBe(false);
     expect("tags_json" in u).toBe(false);
+  });
+});
+
+describe("createSchedule", () => {
+  it("INSERTs schedules at status='pending_register'", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleInserts } = makeMockTx();
+    const args: CreateScheduleArgs = {
+      name: "daily-summary",
+      cron: "0 8 * * *",
+      taskPrompt: "Summarize yesterday",
+      ts: 1_700_000_000_000,
+    };
+    await mutators.createSchedule(tx, args);
+    expect(scheduleInserts).toHaveLength(1);
+    expect(scheduleInserts[0]).toMatchObject({
+      name: "daily-summary",
+      cron: "0 8 * * *",
+      task_prompt: "Summarize yesterday",
+      paused: false,
+      status: "pending_register",
+      created_at: 1_700_000_000_000,
+      updated_at: 1_700_000_000_000,
+    });
+  });
+
+  it("leaves next_run_at NULL — the daemon LISTEN handler computes it", async () => {
+    // Critical contract: nextRunAt is computed server-side after
+    // the mutator UPDATE. If the client guessed it, multi-device
+    // clocks would disagree.
+    const mutators = createMutators();
+    const { tx, scheduleInserts } = makeMockTx();
+    await mutators.createSchedule(tx, {
+      name: "x",
+      cron: "*/5 * * * *",
+      taskPrompt: "X",
+      ts: 1,
+    });
+    expect(scheduleInserts[0]!.next_run_at).toBeNull();
+    expect(scheduleInserts[0]!.last_run_at).toBeNull();
+    expect(scheduleInserts[0]!.last_run_id).toBeNull();
+  });
+
+  it("status is always 'pending_register' on insert (never 'active')", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleInserts } = makeMockTx();
+    await mutators.createSchedule(tx, {
+      name: "y",
+      taskPrompt: "Y",
+      ts: 1,
+    });
+    expect(scheduleInserts[0]!.status).toBe("pending_register");
+  });
+
+  it("supports runAt (one-shot schedules) alongside cron", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleInserts } = makeMockTx();
+    await mutators.createSchedule(tx, {
+      name: "one-shot",
+      runAt: "2026-12-25T08:00:00Z",
+      taskPrompt: "merry christmas",
+      ts: 1,
+    });
+    expect(scheduleInserts[0]!.run_at).toBe("2026-12-25T08:00:00Z");
+  });
+});
+
+describe("updateSchedule", () => {
+  it("UPDATEs with status='reload_requested' + advanced updated_at", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    await mutators.updateSchedule(tx, {
+      name: "daily",
+      cron: "0 9 * * *",
+      ts: 42,
+    } as UpdateScheduleArgs);
+    expect(scheduleUpdates).toEqual([
+      {
+        name: "daily",
+        cron: "0 9 * * *",
+        updated_at: 42,
+        status: "reload_requested",
+      },
+    ]);
+  });
+
+  it("preserves omitted fields (only patches what was provided)", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    await mutators.updateSchedule(tx, {
+      name: "daily",
+      paused: true,
+      ts: 1,
+    });
+    const u = scheduleUpdates[0]!;
+    expect(u.name).toBe("daily");
+    expect(u.paused).toBe(true);
+    expect("cron" in u).toBe(false);
+    expect("run_at" in u).toBe(false);
+    expect("task_prompt" in u).toBe(false);
+  });
+
+  it("supports clearing cron / runAt to null (transition from cron to runAt or vice versa)", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    await mutators.updateSchedule(tx, {
+      name: "x",
+      cron: null,
+      runAt: "2026-12-25T08:00:00Z",
+      ts: 1,
+    });
+    expect(scheduleUpdates[0]!.cron).toBeNull();
+    expect(scheduleUpdates[0]!.run_at).toBe("2026-12-25T08:00:00Z");
+  });
+});
+
+describe("deleteSchedule", () => {
+  it("UPDATEs to status='deleted' (soft-delete; daemon cleans up registry stub)", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    await mutators.deleteSchedule(tx, {
+      name: "to-delete",
+      ts: 7,
+    } as DeleteScheduleArgs);
+    expect(scheduleUpdates).toEqual([
+      { name: "to-delete", updated_at: 7, status: "deleted" },
+    ]);
+  });
+
+  it("is idempotent — re-running produces identical writes", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    const args: DeleteScheduleArgs = { name: "x", ts: 1 };
+    await mutators.deleteSchedule(tx, args);
+    await mutators.deleteSchedule(tx, args);
+    expect(scheduleUpdates).toHaveLength(2);
+    expect(scheduleUpdates[0]).toEqual(scheduleUpdates[1]);
+  });
+
+  it("does NOT touch cron, runAt, taskPrompt, paused (only status + updated_at)", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    await mutators.deleteSchedule(tx, { name: "x", ts: 1 });
+    const u = scheduleUpdates[0] as Record<string, unknown>;
+    expect("cron" in u).toBe(false);
+    expect("run_at" in u).toBe(false);
+    expect("task_prompt" in u).toBe(false);
+    expect("paused" in u).toBe(false);
   });
 });

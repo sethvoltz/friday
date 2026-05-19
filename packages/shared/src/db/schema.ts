@@ -596,7 +596,9 @@ export const LISTEN_CHANNELS = {
   newMail: "friday_new_mail",
   /** Agent status='archive_requested' — daemon archives + closes tickets. */
   archiveRequested: "friday_archive_requested",
-  /** Schedule status changes (pending_register, reload_requested). */
+  /** Schedule status changes (pending_register, reload_requested,
+   *  deleted). Daemon registers/re-registers cron entries +
+   *  optional registry-stub cleanup. */
   scheduleChanged: "friday_schedule_changed",
   /** Apps status changes (pending_install, uninstall_requested, reload_requested). */
   appChanged: "friday_app_changed",

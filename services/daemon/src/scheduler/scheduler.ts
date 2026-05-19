@@ -164,8 +164,21 @@ async function tick(): Promise<void> {
   const db = getDb();
   const now = new Date();
   const all = await db.select().from(schema.schedules);
+  // Phase 4.6: skip 'deleted' (tombstone — dashboard mutator
+  // soft-deleted; row stays for cross-device convergence but the
+  // schedule is logically gone) AND 'pending_register' /
+  // 'reload_requested' (the LISTEN handler hasn't completed
+  // the register/recompute yet; `nextRunAt` may be null or
+  // stale). The 'active' and 'paused' statuses are the only ones
+  // the tick should fire from.
   const due = all.filter(
-    (r) => !r.paused && r.nextRunAt !== null && r.nextRunAt <= now,
+    (r) =>
+      !r.paused &&
+      r.status !== "deleted" &&
+      r.status !== "pending_register" &&
+      r.status !== "reload_requested" &&
+      r.nextRunAt !== null &&
+      r.nextRunAt <= now,
   );
   for (const r of due) {
     if (isAgentLive(r.name)) {

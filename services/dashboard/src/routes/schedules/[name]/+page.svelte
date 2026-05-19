@@ -3,6 +3,9 @@
   import { isValidCron, nextRuns } from "@friday/shared/cron";
   import { invalidateAll, goto } from "$app/navigation";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
+  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
+
+  const zeroOn = useZero();
 
   let { data }: { data: PageData } = $props();
 
@@ -45,6 +48,24 @@
     }
     saving = true;
     try {
+      if (zeroOn) {
+        // Phase 4.6: dispatch the updateSchedule mutator. Server
+        // sets status='reload_requested'; daemon's LISTEN handler
+        // recomputes nextRunAt + flips back to 'active'.
+        const result = zeroSync.updateSchedule({
+          name: data.schedule.name,
+          cron: cron.trim() || null,
+          runAt: runAt.trim() || null,
+          taskPrompt,
+        });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`save failed: ${sr.error.message}`, "err");
+          return;
+        }
+        showToast("saved");
+        return;
+      }
       const r = await fetch("/api/schedules", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -106,6 +127,16 @@
       danger: true,
     });
     if (!ok) return;
+    if (zeroOn) {
+      const result = zeroSync.deleteSchedule({ name: data.schedule.name });
+      const sr = await result?.server;
+      if (sr && sr.type === "error") {
+        showToast(`delete failed: ${sr.error.message}`, "err");
+        return;
+      }
+      await goto("/schedules");
+      return;
+    }
     const r = await fetch(
       `/api/schedules/${encodeURIComponent(data.schedule.name)}`,
       { method: "DELETE" },

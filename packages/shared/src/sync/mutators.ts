@@ -280,6 +280,49 @@ export function slugifyMemoryId(s: string): string {
     .slice(0, 64);
 }
 
+/* ---------------- Phase 4.6: schedule mutators ---------------- */
+// Three mutators with a daemon-side side effect: cron registration.
+//
+// The dashboard mutator writes Postgres state with a pending status
+// (`pending_register` for create, `reload_requested` for update,
+// `deleted` for soft-delete). A Postgres trigger fires `NOTIFY
+// friday_schedule_changed` on transition INTO any of those states;
+// the daemon's LISTEN handler picks up, computes nextRunAt from the
+// new cron expression, registers/unregisters the agent stub in
+// the registry, and flips status to 'active' (or leaves at
+// 'deleted' as a tombstone).
+//
+// Coexists with the legacy MCP/REST path (`upsertSchedule` in
+// `services/daemon/src/scheduler/scheduler.ts`) which writes
+// status='active' directly. The trigger predicate excludes 'active'
+// so the legacy path doesn't reentry the daemon's LISTEN handler.
+//
+// Schedule PK is `name` (text); the dashboard requires the user to
+// supply a name in the create form, so no slug helper is needed.
+
+export interface CreateScheduleArgs {
+  name: string;
+  cron?: string;
+  runAt?: string;
+  taskPrompt: string;
+  paused?: boolean;
+  ts: number;
+}
+
+export interface UpdateScheduleArgs {
+  name: string;
+  cron?: string | null;
+  runAt?: string | null;
+  taskPrompt?: string;
+  paused?: boolean;
+  ts: number;
+}
+
+export interface DeleteScheduleArgs {
+  name: string;
+  ts: number;
+}
+
 export const createMutators = () => ({
   markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
     // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -476,6 +519,80 @@ export const createMutators = () => ({
       id: args.id,
       updated_at: args.ts,
       status: "pending_delete",
+    });
+  },
+  createSchedule: async (
+    tx: FridayTx,
+    args: CreateScheduleArgs,
+  ): Promise<void> => {
+    // INSERT with status='pending_register'. Daemon's LISTEN
+    // handler reads the row, registers the agent stub in the
+    // `agents` registry (mail-routing target), computes nextRunAt
+    // from the cron expression, and flips status='active'.
+    //
+    // `next_run_at`, `last_run_at`, `last_run_id` left null on
+    // initial insert — the daemon's LISTEN handler computes them.
+    // PK is `name`; race-loss between devices → PK conflict.
+    await tx.mutate.schedules.insert({
+      name: args.name,
+      cron: args.cron,
+      run_at: args.runAt,
+      task_prompt: args.taskPrompt,
+      paused: args.paused ?? false,
+      next_run_at: null,
+      last_run_at: null,
+      last_run_id: null,
+      meta_json: null,
+      app_id: null,
+      status: "pending_register",
+      created_at: args.ts,
+      updated_at: args.ts,
+    });
+  },
+  updateSchedule: async (
+    tx: FridayTx,
+    args: UpdateScheduleArgs,
+  ): Promise<void> => {
+    // UPDATE with status='reload_requested' + advanced updated_at.
+    // Omitted fields preserved. Daemon LISTEN handler recomputes
+    // nextRunAt (cron may have changed → fresh window) and flips
+    // status='active'. `paused` updates flow through here too —
+    // the daemon's recompute handles the paused-during-due-window
+    // edge case (the existing `resumeSchedule` legacy path uses
+    // the same recompute semantic).
+    const patch: {
+      name: string;
+      cron?: string | null;
+      run_at?: string | null;
+      task_prompt?: string;
+      paused?: boolean;
+      updated_at: number;
+      status: "reload_requested";
+    } = {
+      name: args.name,
+      updated_at: args.ts,
+      status: "reload_requested",
+    };
+    if (args.cron !== undefined) patch.cron = args.cron;
+    if (args.runAt !== undefined) patch.run_at = args.runAt;
+    if (args.taskPrompt !== undefined) patch.task_prompt = args.taskPrompt;
+    if (args.paused !== undefined) patch.paused = args.paused;
+    await tx.mutate.schedules.update(patch);
+  },
+  deleteSchedule: async (
+    tx: FridayTx,
+    args: DeleteScheduleArgs,
+  ): Promise<void> => {
+    // Soft-delete: status='deleted' + advance updated_at. The
+    // dashboard's schedules query filters `status != 'deleted'` so
+    // the row vanishes immediately. Daemon LISTEN handler cleans
+    // up the registry agent stub if it's unused (no session, no
+    // blocks); idempotent — re-running is safe. Row stays at
+    // 'deleted' as a tombstone for cross-device convergence.
+    await tx.mutate.schedules.update({
+      name: args.name,
+      updated_at: args.ts,
+      status: "deleted",
     });
   },
   linkTicketExternal: async (
