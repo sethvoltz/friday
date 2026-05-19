@@ -88,6 +88,50 @@ const tickets = table("tickets")
   })
   .primaryKey("id");
 
+/* ---------------- ticket_comments (Phase 4.4) ---------------- */
+// Mirrors `db/schema.ts:ticketComments`. PK flipped from bigserial
+// to text-uuid in migration 0003 so the Zero mutator can pass the
+// id at INSERT time (Zero requires the PK in the args for the
+// optimistic client write).
+
+const ticketComments = table("ticket_comments")
+  .columns({
+    id: string(),
+    ticket_id: string(),
+    author: string(),
+    body: string(),
+    ts: number(),
+  })
+  .primaryKey("id");
+
+/* ---------------- ticket_relations (Phase 4.4) ---------------- */
+// Mirrors `db/schema.ts:ticketRelations`. Composite PK
+// (parent_id, child_id, kind) — multiple relation kinds per pair.
+
+const ticketRelations = table("ticket_relations")
+  .columns({
+    parent_id: string(),
+    child_id: string(),
+    kind: string<"depends_on" | "child_of" | "blocks" | "relates_to">(),
+  })
+  .primaryKey("parent_id", "child_id", "kind");
+
+/* ---------------- ticket_external_links (Phase 4.4) ---------------- */
+// Mirrors `db/schema.ts:ticketExternalLinks`. Composite PK
+// (ticket_id, system, external_id). One Friday ticket can link to
+// multiple external systems (Linear + GitHub + …).
+
+const ticketExternalLinks = table("ticket_external_links")
+  .columns({
+    ticket_id: string(),
+    system: string(),
+    external_id: string(),
+    url: string().optional(),
+    meta_json: json().optional(),
+    linked_at: number(),
+  })
+  .primaryKey("ticket_id", "system", "external_id");
+
 /* ---------------- schedules (Phase 3.2) ---------------- */
 // Mirrors `db/schema.ts:schedules`. The `paused` column ships as a
 // boolean (Drizzle column is `boolean`, jsonb wouldn't apply). Other
@@ -321,6 +365,9 @@ export const schema: ZeroSchema = createSchema({
   tables: [
     agents,
     tickets,
+    ticketComments,
+    ticketRelations,
+    ticketExternalLinks,
     schedules,
     memoryEntries,
     apps,
@@ -356,6 +403,10 @@ export type Schema = typeof schema;
 export const permissions = definePermissions(schema, () => ({
   agents: { row: { select: ANYONE_CAN } },
   tickets: { row: { select: ANYONE_CAN } },
+  // Ticket sub-tables — writes flow through Phase 4.4 mutators.
+  ticket_comments: { row: { select: ANYONE_CAN } },
+  ticket_relations: { row: { select: ANYONE_CAN } },
+  ticket_external_links: { row: { select: ANYONE_CAN } },
   schedules: { row: { select: ANYONE_CAN } },
   memory_entries: { row: { select: ANYONE_CAN } },
   apps: { row: { select: ANYONE_CAN } },

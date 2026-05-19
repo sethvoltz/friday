@@ -136,6 +136,92 @@ export interface UpdateSettingsArgs {
   ts: number;
 }
 
+/* ---------------- Phase 4.4: ticket mutators ---------------- */
+// Five pure-data mutators per ADR-023 §Mutators. None has a daemon
+// side effect — ticket writes are pure Postgres-state mutations
+// (Linear push happens only in the daemon's `ticket-close.ts`
+// path which is fired by archiveAgent, NOT by linkTicketExternal).
+//
+// `createTicket` requires the client to compute the id (FRI-N
+// pattern) by reading the local `zeroSync.tickets` snapshot and
+// finding max(numeric_suffix) + 1. Race: two simultaneous creates
+// from different devices can pick the same id → PK conflict → the
+// loser's mutator surfaces an error and the dashboard retries with
+// the next id. Single-user, low-rate creation → acceptable.
+
+export interface CreateTicketArgs {
+  /** Pre-computed by `nextTicketIdFrom(localTickets)` — see helper. */
+  id: string;
+  title: string;
+  body?: string;
+  status?: "open" | "in_progress" | "done" | "blocked" | "closed";
+  kind?: "task" | "epic" | "bug" | "chore";
+  assignee?: string;
+  meta?: Record<string, unknown>;
+  ts: number;
+}
+
+export interface UpdateTicketArgs {
+  id: string;
+  title?: string;
+  body?: string | null;
+  status?: "open" | "in_progress" | "done" | "blocked" | "closed";
+  kind?: "task" | "epic" | "bug" | "chore";
+  assignee?: string | null;
+  meta?: Record<string, unknown> | null;
+  ts: number;
+}
+
+export interface AddTicketCommentArgs {
+  /** Pre-computed UUID — see `clientCommentId()` helper. */
+  id: string;
+  ticketId: string;
+  author: string;
+  body: string;
+  ts: number;
+}
+
+export interface AddTicketRelationArgs {
+  parentId: string;
+  childId: string;
+  kind: "depends_on" | "child_of" | "blocks" | "relates_to";
+}
+
+export interface LinkTicketExternalArgs {
+  ticketId: string;
+  system: string;
+  externalId: string;
+  url?: string;
+  meta?: Record<string, unknown>;
+  ts: number;
+}
+
+/**
+ * Compute the next FRI-N ticket id from a local Zero snapshot.
+ * Multi-device race: if two clients call this simultaneously and
+ * neither has the other's write yet, they pick the same id; the
+ * loser gets a PK conflict from the server-side mutator and the
+ * dashboard must retry with the incremented id.
+ *
+ * Exported (not inlined into the mutator) so dashboard call sites
+ * can compute the id BEFORE invoking the mutator — Zero's
+ * MutatorResult surfaces a server-side error and the caller needs
+ * the id in scope to retry.
+ */
+export function nextTicketIdFrom(
+  existing: ReadonlyArray<{ id: string }>,
+): string {
+  let max = 0;
+  for (const t of existing) {
+    const m = /^FRI-(\d+)$/.exec(t.id);
+    if (m) {
+      const n = parseInt(m[1]!, 10);
+      if (n > max) max = n;
+    }
+  }
+  return `FRI-${max + 1}`;
+}
+
 export const createMutators = () => ({
   markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
     // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -186,6 +272,103 @@ export const createMutators = () => ({
     // multi-tab Settings views update in real time.
     await tx.mutate.client_devices.delete({
       device_id: args.deviceId,
+    });
+  },
+  createTicket: async (
+    tx: FridayTx,
+    args: CreateTicketArgs,
+  ): Promise<void> => {
+    // INSERT — collides on PK if the client raced another device
+    // picking the same FRI-N. The mutator framework surfaces that
+    // collision as an application error to the caller. The id is
+    // computed client-side via `nextTicketIdFrom(zeroSync.tickets)`.
+    await tx.mutate.tickets.insert({
+      id: args.id,
+      title: args.title,
+      body: args.body,
+      status: args.status ?? "open",
+      kind: args.kind ?? "task",
+      assignee: args.assignee,
+      meta_json: args.meta,
+      created_at: args.ts,
+      updated_at: args.ts,
+    });
+  },
+  updateTicket: async (
+    tx: FridayTx,
+    args: UpdateTicketArgs,
+  ): Promise<void> => {
+    // UPDATE — omitted fields preserved via Zero's `update`
+    // semantic (not `upsert`). `updated_at` always advances on
+    // every patch.
+    const patch: {
+      id: string;
+      title?: string;
+      body?: string | null;
+      status?: "open" | "in_progress" | "done" | "blocked" | "closed";
+      kind?: "task" | "epic" | "bug" | "chore";
+      assignee?: string | null;
+      meta_json?: Record<string, unknown> | null;
+      updated_at: number;
+    } = { id: args.id, updated_at: args.ts };
+    if (args.title !== undefined) patch.title = args.title;
+    if (args.body !== undefined) patch.body = args.body;
+    if (args.status !== undefined) patch.status = args.status;
+    if (args.kind !== undefined) patch.kind = args.kind;
+    if (args.assignee !== undefined) patch.assignee = args.assignee;
+    if (args.meta !== undefined) patch.meta_json = args.meta;
+    await tx.mutate.tickets.update(patch);
+  },
+  addTicketComment: async (
+    tx: FridayTx,
+    args: AddTicketCommentArgs,
+  ): Promise<void> => {
+    // INSERT comment AND bump the parent ticket's updated_at so
+    // the list page's "sort by updated" re-orders correctly. Mirrors
+    // the legacy `addComment` service (tickets.ts:130-144).
+    await tx.mutate.ticket_comments.insert({
+      id: args.id,
+      ticket_id: args.ticketId,
+      author: args.author,
+      body: args.body,
+      ts: args.ts,
+    });
+    await tx.mutate.tickets.update({
+      id: args.ticketId,
+      updated_at: args.ts,
+    });
+  },
+  addTicketRelation: async (
+    tx: FridayTx,
+    args: AddTicketRelationArgs,
+  ): Promise<void> => {
+    // INSERT — composite PK (parent_id, child_id, kind) means a
+    // duplicate relation is a PK conflict (acceptable: the UI
+    // surfaces the error so the user knows the link already
+    // exists).
+    await tx.mutate.ticket_relations.insert({
+      parent_id: args.parentId,
+      child_id: args.childId,
+      kind: args.kind,
+    });
+  },
+  linkTicketExternal: async (
+    tx: FridayTx,
+    args: LinkTicketExternalArgs,
+  ): Promise<void> => {
+    // INSERT — composite PK (ticket_id, system, external_id). The
+    // legacy REST path used `ON CONFLICT DO NOTHING`; the mutator's
+    // `insert` raises on conflict so the UI must check first. The
+    // ticket detail page already gates the form on
+    // `!existingLink(system, externalId)` so the conflict path is
+    // exercised only on a true race.
+    await tx.mutate.ticket_external_links.insert({
+      ticket_id: args.ticketId,
+      system: args.system,
+      external_id: args.externalId,
+      url: args.url,
+      meta_json: args.meta,
+      linked_at: args.ts,
     });
   },
   updateSettings: async (

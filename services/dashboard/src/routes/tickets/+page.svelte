@@ -6,6 +6,7 @@
     zeroSync,
     type ZeroTicketRow,
   } from "$lib/stores/zero.svelte";
+  import { nextTicketIdFrom } from "@friday/shared/sync";
 
   let { data }: { data: PageData } = $props();
 
@@ -139,6 +140,33 @@
     if (!newTitle.trim()) return;
     creating = true;
     try {
+      if (zeroOn) {
+        // Phase 4.4: optimistic create via Zero mutator. id is
+        // computed from the local reactive snapshot — races between
+        // tabs surface as a PK conflict the framework reports back.
+        const id = nextTicketIdFrom(zeroSync.tickets);
+        const result = zeroSync.createTicket({
+          id,
+          title: newTitle.trim(),
+          body: newBody.trim() || undefined,
+          kind: newKind,
+          assignee: newAssignee.trim() || undefined,
+        });
+        // Wait for the server-side run to either commit or report a
+        // PK collision (race-loss). Either way, clear the form so the
+        // optimistic row stays visible.
+        const serverResult = await result?.server;
+        if (serverResult && serverResult.type === "error") {
+          // PK race: leave the form populated so the user can retry.
+          return;
+        }
+        newTitle = "";
+        newBody = "";
+        newAssignee = "";
+        newKind = "task";
+        newOpen = false;
+        return;
+      }
       const r = await fetch("/api/tickets", {
         method: "POST",
         headers: { "content-type": "application/json" },

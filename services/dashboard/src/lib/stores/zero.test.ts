@@ -87,6 +87,26 @@ vi.mock("@rocicorp/zero", () => {
         client: Promise.resolve({ type: "success" }),
         server: Promise.resolve({ type: "success" }),
       })),
+      createTicket: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      updateTicket: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      addTicketComment: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      addTicketRelation: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
+      linkTicketExternal: vi.fn(() => ({
+        client: Promise.resolve({ type: "success" }),
+        server: Promise.resolve({ type: "success" }),
+      })),
     };
     __ctorOpts: Record<string, unknown>;
     constructor(opts: Record<string, unknown>) {
@@ -95,6 +115,9 @@ vi.mock("@rocicorp/zero", () => {
       this.query = {
         agents: makeQueryProxy(),
         tickets: makeQueryProxy(),
+        ticket_comments: makeQueryProxy(),
+        ticket_relations: makeQueryProxy(),
+        ticket_external_links: makeQueryProxy(),
         schedules: makeQueryProxy(),
         memory_entries: makeQueryProxy(),
         apps: makeQueryProxy(),
@@ -789,5 +812,148 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("Phase 4.4: ticket mutator dispatch", () => {
+  async function bootedZero() {
+    localStorage.setItem("friday:flag:use-zero", "1");
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  it("createTicket forwards args + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.createTicket({
+      id: "FRI-9",
+      title: "Hello",
+      kind: "bug",
+    });
+    expect(z.mutate.createTicket).toHaveBeenCalledTimes(1);
+    const args = z.mutate.createTicket.mock.calls[0][0] as {
+      id: string;
+      title: string;
+      kind: string;
+      ts: number;
+    };
+    expect(args.id).toBe("FRI-9");
+    expect(args.title).toBe("Hello");
+    expect(args.kind).toBe("bug");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("updateTicket forwards args + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.updateTicket({ id: "FRI-1", status: "done" });
+    expect(z.mutate.updateTicket).toHaveBeenCalledTimes(1);
+    const args = z.mutate.updateTicket.mock.calls[0][0] as {
+      id: string;
+      status?: string;
+      ts: number;
+    };
+    expect(args.id).toBe("FRI-1");
+    expect(args.status).toBe("done");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("addTicketComment forwards args + stamps ts", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.addTicketComment({
+      id: "uuid-1",
+      ticketId: "FRI-1",
+      author: "alice",
+      body: "looks good",
+    });
+    expect(z.mutate.addTicketComment).toHaveBeenCalledTimes(1);
+    const args = z.mutate.addTicketComment.mock.calls[0][0] as {
+      id: string;
+      ticketId: string;
+      author: string;
+      body: string;
+      ts: number;
+    };
+    expect(args).toMatchObject({
+      id: "uuid-1",
+      ticketId: "FRI-1",
+      author: "alice",
+      body: "looks good",
+    });
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("addTicketRelation forwards args (no ts — relations don't carry one)", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.addTicketRelation({
+      parentId: "FRI-1",
+      childId: "FRI-2",
+      kind: "blocks",
+    });
+    const args = z.mutate.addTicketRelation.mock.calls[0][0] as {
+      parentId: string;
+      childId: string;
+      kind: string;
+    };
+    expect(args).toEqual({
+      parentId: "FRI-1",
+      childId: "FRI-2",
+      kind: "blocks",
+    });
+    // No ts stamped — ticket_relations has no timestamp column.
+    expect("ts" in args).toBe(false);
+  });
+
+  it("linkTicketExternal forwards args + stamps ts (becomes linked_at server-side)", async () => {
+    const { zeroSync, z } = await bootedZero();
+    zeroSync.linkTicketExternal({
+      ticketId: "FRI-1",
+      system: "linear",
+      externalId: "LIN-7",
+      url: "https://linear.app/x/LIN-7",
+    });
+    const args = z.mutate.linkTicketExternal.mock.calls[0][0] as {
+      ticketId: string;
+      system: string;
+      externalId: string;
+      url?: string;
+      ts: number;
+    };
+    expect(args).toMatchObject({
+      ticketId: "FRI-1",
+      system: "linear",
+      externalId: "LIN-7",
+      url: "https://linear.app/x/LIN-7",
+    });
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("all ticket mutators are silent when Zero hasn't initialized", async () => {
+    const { zeroSync } = await importStore();
+    expect(() =>
+      zeroSync.createTicket({ id: "FRI-1", title: "x" }),
+    ).not.toThrow();
+    expect(() => zeroSync.updateTicket({ id: "FRI-1" })).not.toThrow();
+    expect(() =>
+      zeroSync.addTicketComment({
+        id: "u",
+        ticketId: "FRI-1",
+        author: "a",
+        body: "b",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      zeroSync.addTicketRelation({
+        parentId: "FRI-1",
+        childId: "FRI-2",
+        kind: "blocks",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      zeroSync.linkTicketExternal({
+        ticketId: "FRI-1",
+        system: "linear",
+        externalId: "LIN-1",
+      }),
+    ).not.toThrow();
   });
 });

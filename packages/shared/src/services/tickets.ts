@@ -145,7 +145,8 @@ export async function addComment(
 
 export async function listComments(ticketId: string): Promise<
   Array<{
-    id: number;
+    /** UUID — Phase 4.4 flipped from bigserial to text. */
+    id: string;
     author: string;
     body: string;
     /** Milliseconds since epoch. */

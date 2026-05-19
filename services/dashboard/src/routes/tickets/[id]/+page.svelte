@@ -95,6 +95,19 @@
     if (status === t.status || !canTransition(status)) return;
     savingStatus = true;
     try {
+      if (zeroOn) {
+        // Phase 4.4: optimistic via Zero mutator. The reactive
+        // query updates t (via zeroTicket) within ms; no need to
+        // invalidateAll.
+        const result = zeroSync.updateTicket({ id: t.id, status });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`status update failed: ${sr.error.message}`, "err");
+          return;
+        }
+        showToast(`status → ${status}`);
+        return;
+      }
       const r = await fetch(`/api/tickets/${t.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -116,6 +129,16 @@
     if (next === t.assignee) return;
     savingAssignee = true;
     try {
+      if (zeroOn) {
+        const result = zeroSync.updateTicket({ id: t.id, assignee: next });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`assignee update failed: ${sr.error.message}`, "err");
+          return;
+        }
+        showToast(next ? `assigned → ${next}` : "unassigned");
+        return;
+      }
       const r = await fetch(`/api/tickets/${t.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -137,6 +160,33 @@
     if (!commentBody.trim()) return;
     postingComment = true;
     try {
+      if (zeroOn) {
+        // Phase 4.4: comment id is a client-generated UUID. The
+        // mutator inserts the row + bumps the parent ticket's
+        // updated_at so list-sort reorders the ticket to the top.
+        const id =
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? (crypto as { randomUUID: () => string }).randomUUID()
+            : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const result = zeroSync.addTicketComment({
+          id,
+          ticketId: t.id,
+          author: data.defaultAuthor,
+          body: commentBody,
+        });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`comment failed: ${sr.error.message}`, "err");
+          return;
+        }
+        commentBody = "";
+        // Comments aren't sourced from Zero on the detail page yet
+        // (they ride the SSR `data.comments` from the load function).
+        // Invalidate so the next page render sees the new comment.
+        await invalidateAll();
+        showToast("comment posted");
+        return;
+      }
       const r = await fetch(`/api/tickets/${t.id}/comments`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -162,6 +212,25 @@
     if (!linkSystem.trim() || !linkExternalId.trim()) return;
     linking = true;
     try {
+      if (zeroOn) {
+        const result = zeroSync.linkTicketExternal({
+          ticketId: t.id,
+          system: linkSystem.trim(),
+          externalId: linkExternalId.trim(),
+          url: linkUrl.trim() || undefined,
+        });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`link failed: ${sr.error.message}`, "err");
+          return;
+        }
+        linkSystem = "";
+        linkExternalId = "";
+        linkUrl = "";
+        await invalidateAll();
+        showToast("link added");
+        return;
+      }
       const r = await fetch(`/api/tickets/${t.id}/links`, {
         method: "POST",
         headers: { "content-type": "application/json" },

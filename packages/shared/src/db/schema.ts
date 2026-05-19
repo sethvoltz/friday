@@ -266,7 +266,14 @@ export const ticketRelations = pgTable(
 export const ticketComments = pgTable(
   "ticket_comments",
   {
-    id: bigserial("id", { mode: "number" }).primaryKey(),
+    // Phase 4.4: id flipped from bigserial → text(uuid). The Zero
+    // mutator framework requires the row's PK in the args so the
+    // optimistic client write and the canonical server write target
+    // the same row; bigserial's server-assigned values broke that
+    // round-trip. Default is server-side `gen_random_uuid()::text`
+    // so the legacy `addComment` REST service path continues to
+    // work without changes.
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
     ticketId: text("ticket_id").notNull(),
     author: text("author").notNull(),
     body: text("body").notNull(),

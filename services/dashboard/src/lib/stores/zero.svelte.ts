@@ -681,6 +681,70 @@ class ZeroSyncStore {
     });
   }
 
+  /**
+   * Phase 4.4: ticket mutators. Each wraps the corresponding entry
+   * in `createMutators()` with `ts: Date.now()` stamping at the call
+   * boundary. All are no-ops if `#zero` isn't bound — callers can
+   * dispatch unconditionally.
+   *
+   * `createTicket` requires a pre-computed `id` (FRI-N) — callers
+   * compute it via `nextTicketIdFrom(zeroSync.tickets)` from
+   * `@friday/shared/sync`. The local reactive snapshot is the
+   * authoritative max; race-loss surfaces as a `MutatorResult` error
+   * the dashboard can retry.
+   */
+  createTicket(args: {
+    id: string;
+    title: string;
+    body?: string;
+    status?: "open" | "in_progress" | "done" | "blocked" | "closed";
+    kind?: "task" | "epic" | "bug" | "chore";
+    assignee?: string;
+    meta?: Record<string, unknown>;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.createTicket({ ...args, ts: Date.now() });
+  }
+  updateTicket(args: {
+    id: string;
+    title?: string;
+    body?: string | null;
+    status?: "open" | "in_progress" | "done" | "blocked" | "closed";
+    kind?: "task" | "epic" | "bug" | "chore";
+    assignee?: string | null;
+    meta?: Record<string, unknown> | null;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.updateTicket({ ...args, ts: Date.now() });
+  }
+  addTicketComment(args: {
+    id: string;
+    ticketId: string;
+    author: string;
+    body: string;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.addTicketComment({ ...args, ts: Date.now() });
+  }
+  addTicketRelation(args: {
+    parentId: string;
+    childId: string;
+    kind: "depends_on" | "child_of" | "blocks" | "relates_to";
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.addTicketRelation(args);
+  }
+  linkTicketExternal(args: {
+    ticketId: string;
+    system: string;
+    externalId: string;
+    url?: string;
+    meta?: Record<string, unknown>;
+  }): import("@rocicorp/zero").MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero.mutate.linkTicketExternal({ ...args, ts: Date.now() });
+  }
+
   destroy(): void {
     if (this.#statsInterval) {
       clearInterval(this.#statsInterval);

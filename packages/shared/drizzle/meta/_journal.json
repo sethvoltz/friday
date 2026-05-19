@@ -22,6 +22,13 @@
       "when": 1779167913514,
       "tag": "0002_aberrant_johnny_blaze",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1779169297031,
+      "tag": "0003_overrated_arclight",
+      "breakpoints": true
     }
   ]
 }

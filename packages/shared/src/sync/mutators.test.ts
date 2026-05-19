@@ -15,10 +15,16 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createMutators,
+  nextTicketIdFrom,
+  type AddTicketCommentArgs,
+  type AddTicketRelationArgs,
+  type CreateTicketArgs,
   type ForgetDeviceArgs,
+  type LinkTicketExternalArgs,
   type MarkReadArgs,
   type ReportClientStatsArgs,
   type UpdateSettingsArgs,
+  type UpdateTicketArgs,
 } from "./mutators.js";
 
 interface MockUpsertCall {
@@ -47,17 +53,73 @@ interface MockSettingsUpdateCall {
   updated_at: number;
 }
 
+interface MockTicketInsertCall {
+  id: string;
+  title: string;
+  body?: string;
+  status: string;
+  kind: string;
+  assignee?: string;
+  meta_json?: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+}
+
+interface MockTicketUpdateCall {
+  id: string;
+  title?: string;
+  body?: string | null;
+  status?: string;
+  kind?: string;
+  assignee?: string | null;
+  meta_json?: Record<string, unknown> | null;
+  updated_at: number;
+}
+
+interface MockTicketCommentInsertCall {
+  id: string;
+  ticket_id: string;
+  author: string;
+  body: string;
+  ts: number;
+}
+
+interface MockTicketRelationInsertCall {
+  parent_id: string;
+  child_id: string;
+  kind: string;
+}
+
+interface MockTicketExternalLinkInsertCall {
+  ticket_id: string;
+  system: string;
+  external_id: string;
+  url?: string;
+  meta_json?: Record<string, unknown>;
+  linked_at: number;
+}
+
 function makeMockTx(): {
   tx: Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   upsertCalls: MockUpsertCall[];
   clientDeviceUpdates: MockClientDeviceUpdateCall[];
   clientDeviceDeletes: MockClientDeviceDeleteCall[];
   settingsUpdates: MockSettingsUpdateCall[];
+  ticketInserts: MockTicketInsertCall[];
+  ticketUpdates: MockTicketUpdateCall[];
+  ticketCommentInserts: MockTicketCommentInsertCall[];
+  ticketRelationInserts: MockTicketRelationInsertCall[];
+  ticketExternalLinkInserts: MockTicketExternalLinkInsertCall[];
 } {
   const upsertCalls: MockUpsertCall[] = [];
   const clientDeviceUpdates: MockClientDeviceUpdateCall[] = [];
   const clientDeviceDeletes: MockClientDeviceDeleteCall[] = [];
   const settingsUpdates: MockSettingsUpdateCall[] = [];
+  const ticketInserts: MockTicketInsertCall[] = [];
+  const ticketUpdates: MockTicketUpdateCall[] = [];
+  const ticketCommentInserts: MockTicketCommentInsertCall[] = [];
+  const ticketRelationInserts: MockTicketRelationInsertCall[] = [];
+  const ticketExternalLinkInserts: MockTicketExternalLinkInsertCall[] = [];
   const upsert = vi.fn(async (row: MockUpsertCall) => {
     upsertCalls.push(row);
   });
@@ -70,6 +132,27 @@ function makeMockTx(): {
   const settingsUpdate = vi.fn(async (row: MockSettingsUpdateCall) => {
     settingsUpdates.push(row);
   });
+  const ticketInsert = vi.fn(async (row: MockTicketInsertCall) => {
+    ticketInserts.push(row);
+  });
+  const ticketUpdate = vi.fn(async (row: MockTicketUpdateCall) => {
+    ticketUpdates.push(row);
+  });
+  const ticketCommentInsert = vi.fn(
+    async (row: MockTicketCommentInsertCall) => {
+      ticketCommentInserts.push(row);
+    },
+  );
+  const ticketRelationInsert = vi.fn(
+    async (row: MockTicketRelationInsertCall) => {
+      ticketRelationInserts.push(row);
+    },
+  );
+  const ticketExternalLinkInsert = vi.fn(
+    async (row: MockTicketExternalLinkInsertCall) => {
+      ticketExternalLinkInserts.push(row);
+    },
+  );
   // The mutators touch `tx.mutate.<table>.<op>`. Rest of Transaction
   // surface left undefined — we cast to the parameter type only to
   // satisfy TypeScript.
@@ -78,6 +161,10 @@ function makeMockTx(): {
       read_cursors: { upsert },
       client_devices: { update: clientUpdate, delete: clientDelete },
       settings: { update: settingsUpdate },
+      tickets: { insert: ticketInsert, update: ticketUpdate },
+      ticket_comments: { insert: ticketCommentInsert },
+      ticket_relations: { insert: ticketRelationInsert },
+      ticket_external_links: { insert: ticketExternalLinkInsert },
     },
   } as unknown as Parameters<ReturnType<typeof createMutators>["markRead"]>[0];
   return {
@@ -86,6 +173,11 @@ function makeMockTx(): {
     clientDeviceUpdates,
     clientDeviceDeletes,
     settingsUpdates,
+    ticketInserts,
+    ticketUpdates,
+    ticketCommentInserts,
+    ticketRelationInserts,
+    ticketExternalLinkInserts,
   };
 }
 
@@ -346,5 +438,253 @@ describe("forgetDevice", () => {
     await mutators.forgetDevice(tx, args);
     expect(clientDeviceDeletes).toHaveLength(2);
     expect(clientDeviceDeletes[0]).toEqual(clientDeviceDeletes[1]);
+  });
+});
+
+describe("nextTicketIdFrom", () => {
+  it("returns FRI-1 from an empty snapshot", () => {
+    expect(nextTicketIdFrom([])).toBe("FRI-1");
+  });
+
+  it("returns max(numeric_suffix) + 1", () => {
+    expect(
+      nextTicketIdFrom([{ id: "FRI-3" }, { id: "FRI-1" }, { id: "FRI-7" }]),
+    ).toBe("FRI-8");
+  });
+
+  it("ignores non-FRI-pattern ids (defensive — shouldn't happen in practice)", () => {
+    expect(
+      nextTicketIdFrom([{ id: "FRI-5" }, { id: "other-id" }, { id: "FRI-10" }]),
+    ).toBe("FRI-11");
+  });
+
+  it("returns FRI-1 if no ids match the FRI-N pattern", () => {
+    expect(nextTicketIdFrom([{ id: "weird" }, { id: "uuid-shape" }])).toBe(
+      "FRI-1",
+    );
+  });
+});
+
+describe("createTicket", () => {
+  it("INSERTs tickets with the supplied id + default status/kind", async () => {
+    const mutators = createMutators();
+    const { tx, ticketInserts } = makeMockTx();
+    await mutators.createTicket(tx, {
+      id: "FRI-42",
+      title: "Hello",
+      ts: 1_000,
+    } as CreateTicketArgs);
+    expect(ticketInserts).toEqual([
+      {
+        id: "FRI-42",
+        title: "Hello",
+        body: undefined,
+        status: "open",
+        kind: "task",
+        assignee: undefined,
+        meta_json: undefined,
+        created_at: 1_000,
+        updated_at: 1_000,
+      },
+    ]);
+  });
+
+  it("honors explicit status, kind, body, assignee, meta", async () => {
+    const mutators = createMutators();
+    const { tx, ticketInserts } = makeMockTx();
+    await mutators.createTicket(tx, {
+      id: "FRI-9",
+      title: "Custom",
+      body: "details",
+      status: "in_progress",
+      kind: "bug",
+      assignee: "alice",
+      meta: { tags: ["urgent"] },
+      ts: 5,
+    });
+    expect(ticketInserts[0]).toMatchObject({
+      id: "FRI-9",
+      title: "Custom",
+      body: "details",
+      status: "in_progress",
+      kind: "bug",
+      assignee: "alice",
+      meta_json: { tags: ["urgent"] },
+    });
+  });
+
+  it("stamps created_at = updated_at on initial insert", async () => {
+    const mutators = createMutators();
+    const { tx, ticketInserts } = makeMockTx();
+    await mutators.createTicket(tx, {
+      id: "FRI-1",
+      title: "x",
+      ts: 99,
+    });
+    expect(ticketInserts[0]!.created_at).toBe(ticketInserts[0]!.updated_at);
+    expect(ticketInserts[0]!.created_at).toBe(99);
+  });
+});
+
+describe("updateTicket", () => {
+  it("UPDATEs only the fields that were provided", async () => {
+    const mutators = createMutators();
+    const { tx, ticketUpdates } = makeMockTx();
+    await mutators.updateTicket(tx, {
+      id: "FRI-1",
+      status: "done",
+      ts: 5,
+    } as UpdateTicketArgs);
+    expect(ticketUpdates).toHaveLength(1);
+    const u = ticketUpdates[0]!;
+    expect(u.id).toBe("FRI-1");
+    expect(u.status).toBe("done");
+    expect(u.updated_at).toBe(5);
+    expect("title" in u).toBe(false);
+    expect("body" in u).toBe(false);
+    expect("kind" in u).toBe(false);
+    expect("assignee" in u).toBe(false);
+    expect("meta_json" in u).toBe(false);
+  });
+
+  it("always advances updated_at", async () => {
+    const mutators = createMutators();
+    const { tx, ticketUpdates } = makeMockTx();
+    // Even with no field changes, updated_at advances. The dashboard
+    // never calls updateTicket without at least one field, but
+    // the contract guarantees the bump anyway.
+    await mutators.updateTicket(tx, { id: "FRI-1", ts: 42 });
+    expect(ticketUpdates[0]!.updated_at).toBe(42);
+  });
+
+  it("supports null body / assignee / meta (the unset operation)", async () => {
+    const mutators = createMutators();
+    const { tx, ticketUpdates } = makeMockTx();
+    await mutators.updateTicket(tx, {
+      id: "FRI-1",
+      body: null,
+      assignee: null,
+      meta: null,
+      ts: 1,
+    });
+    expect(ticketUpdates[0]!.body).toBeNull();
+    expect(ticketUpdates[0]!.assignee).toBeNull();
+    expect(ticketUpdates[0]!.meta_json).toBeNull();
+  });
+});
+
+describe("addTicketComment", () => {
+  it("INSERTs the comment AND bumps the parent ticket's updated_at", async () => {
+    const mutators = createMutators();
+    const { tx, ticketCommentInserts, ticketUpdates } = makeMockTx();
+    await mutators.addTicketComment(tx, {
+      id: "comment-uuid-1",
+      ticketId: "FRI-1",
+      author: "alice",
+      body: "looks good",
+      ts: 100,
+    } as AddTicketCommentArgs);
+    expect(ticketCommentInserts).toEqual([
+      {
+        id: "comment-uuid-1",
+        ticket_id: "FRI-1",
+        author: "alice",
+        body: "looks good",
+        ts: 100,
+      },
+    ]);
+    // Critical: the comment insert must bump tickets.updated_at so
+    // the list page's "sort by updated" reorders the parent ticket.
+    expect(ticketUpdates).toEqual([{ id: "FRI-1", updated_at: 100 }]);
+  });
+
+  it("uses the same ts for both the comment and the ticket bump", async () => {
+    const mutators = createMutators();
+    const { tx, ticketCommentInserts, ticketUpdates } = makeMockTx();
+    await mutators.addTicketComment(tx, {
+      id: "uuid-x",
+      ticketId: "FRI-2",
+      author: "bob",
+      body: "hello",
+      ts: 555,
+    });
+    expect(ticketCommentInserts[0]!.ts).toBe(555);
+    expect(ticketUpdates[0]!.updated_at).toBe(555);
+  });
+});
+
+describe("addTicketRelation", () => {
+  it("INSERTs the relation triple (parent_id, child_id, kind)", async () => {
+    const mutators = createMutators();
+    const { tx, ticketRelationInserts } = makeMockTx();
+    await mutators.addTicketRelation(tx, {
+      parentId: "FRI-1",
+      childId: "FRI-2",
+      kind: "blocks",
+    } as AddTicketRelationArgs);
+    expect(ticketRelationInserts).toEqual([
+      { parent_id: "FRI-1", child_id: "FRI-2", kind: "blocks" },
+    ]);
+  });
+
+  it("preserves the kind discriminator in the row (composite PK includes it)", async () => {
+    // Two different relation kinds between the same pair are distinct
+    // rows — the test verifies the kind passes through unchanged so
+    // the PK uniqueness lands correctly.
+    const mutators = createMutators();
+    const { tx, ticketRelationInserts } = makeMockTx();
+    await mutators.addTicketRelation(tx, {
+      parentId: "FRI-1",
+      childId: "FRI-2",
+      kind: "depends_on",
+    });
+    await mutators.addTicketRelation(tx, {
+      parentId: "FRI-1",
+      childId: "FRI-2",
+      kind: "blocks",
+    });
+    expect(ticketRelationInserts.map((r) => r.kind)).toEqual([
+      "depends_on",
+      "blocks",
+    ]);
+  });
+});
+
+describe("linkTicketExternal", () => {
+  it("INSERTs the external-link row with linked_at = ts", async () => {
+    const mutators = createMutators();
+    const { tx, ticketExternalLinkInserts } = makeMockTx();
+    await mutators.linkTicketExternal(tx, {
+      ticketId: "FRI-1",
+      system: "linear",
+      externalId: "LIN-42",
+      url: "https://linear.app/x/LIN-42",
+      ts: 1_700_000_000_000,
+    } as LinkTicketExternalArgs);
+    expect(ticketExternalLinkInserts).toEqual([
+      {
+        ticket_id: "FRI-1",
+        system: "linear",
+        external_id: "LIN-42",
+        url: "https://linear.app/x/LIN-42",
+        meta_json: undefined,
+        linked_at: 1_700_000_000_000,
+      },
+    ]);
+  });
+
+  it("supports meta_json", async () => {
+    const mutators = createMutators();
+    const { tx, ticketExternalLinkInserts } = makeMockTx();
+    await mutators.linkTicketExternal(tx, {
+      ticketId: "FRI-1",
+      system: "github",
+      externalId: "#123",
+      meta: { repo: "anthropic/friday" },
+      ts: 1,
+    });
+    expect(ticketExternalLinkInserts[0]!.meta_json).toEqual({
+      repo: "anthropic/friday",
+    });
   });
 });
