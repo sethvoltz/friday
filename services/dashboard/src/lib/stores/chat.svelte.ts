@@ -224,23 +224,6 @@ export class ChatState {
   }
   set focusedAgent(value: string) {
     const changed = this._focusedAgent !== value;
-    if (changed) {
-      try {
-        const pathname =
-          typeof window !== "undefined" ? window.location.pathname : "";
-        const stack = new Error().stack ?? "";
-        // Normal lifecycle traffic — every route navigation flips this.
-        // Debug level so log scrapers (evolve, etc.) don't read it as a
-        // problem signal. The submit-time *mismatch* check stays at
-        // error level — that one is actually a bug condition.
-        // eslint-disable-next-line no-console
-        console.debug(
-          `[chat.focusedAgent] ${this._focusedAgent} → ${value} @ ${pathname}\n${stack}`,
-        );
-      } catch {
-        /* trace failure must not block the write */
-      }
-    }
     this._focusedAgent = value;
     // Phase 5: per-agent SSE channel. On focus switch, fire the
     // registered SSE reopen hook (registered by sse.svelte.ts at
