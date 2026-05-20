@@ -749,6 +749,23 @@ Friday's CLI used to launch dev mode on demand (`friday start --dev`) and prod m
 - Dev contributors invoke `pnpm dev:daemon` / `pnpm dev:dashboard` from the repo root — two terminals, not one CLI command. Prod and dev can co-run without TCP collisions; the residual gotcha is the shared Postgres + zero-cache (document the `FRIDAY_DATA_DIR=~/.friday-dev` + parallel-zero-cache path for contributors who need true isolation).
 - The 9 daemon-side `cfg.daemonPort` reads (workers, scheduler, mail-bridge, dispatch listener, watchdog, api/server x4, recovery functions) all funnel through `resolveDaemonPort(cfg)` and the dashboard's daemon-fetch URL reads the same chain — there is one canonical port-resolution path now.
 
+### Post-mortem (2026-05-20 operator flip)
+
+Three issues surfaced during Seth's first prod flip onto `:7610` / `:7615`. All trace to the same shape of bug — port info baked into persisted runtime state files that the FRI-83 audit didn't include. Captured here so the FRI-88 brew packaging work doesn't re-encounter them and so future port migrations have a checklist.
+
+1. **`~/.friday/config.json` carrying stale `daemonPort: 7444` / `dashboardPort: 5173`.** Pre-flip these values matched DEFAULT_CONFIG; post-flip they overrode the new prod constants because the resolution chain is `cfg.<x>Port ?? PROD_<X>_PORT` and explicit-config-set wins. Fix during flip: removed the four stale fields (`daemonPort`, `dashboardPort`, plus two leftover `*BaseUrl` fields no longer referenced anywhere in the codebase) from `config.json`. The settings-sync listener doesn't write port fields, so the state stays clean.
+
+2. **`~/.friday/.env` carrying stale `ZERO_MUTATE_URL=http://localhost:5173/api/mutators`.** Zero's push URL is read from env at zero-cache startup; the value was written once at `friday setup` and never updated when ports moved. Fix landed in code (see #3 below); during flip I patched `.env` directly to unblock prod.
+
+3. **Two missed audit-list sites for `cfg.daemonPort`:** `services/dashboard/src/routes/api/events/+server.ts:26` (the SSE proxy — the cause of "Fetch API cannot load /api/events" in Safari) and `packages/cli/src/lib/api.ts:16` (DaemonClient fallback). The original FRI-83 audit pattern looked at `services/dashboard/src/lib/server/` but missed `routes/`. Both migrated to `resolveDaemonPort(cfg)`.
+
+**Resolution decisions:**
+
+- **`ZERO_MUTATE_URL` is now exported by `start.ts`'s zero-cache spawn** from `resolveDashboardPort(cfg)`, after the `.env` source. The dynamic value wins over any stale persisted value; future port changes take effect on the next `friday start zero-cache` with no operator action. `ZERO_MUTATE_URL` was removed from `~/.friday/.env` after the flip — having it static was misleading once the spawn-time override landed.
+- **`~/.friday/.env` and `~/.friday/config.json` are not part of the source audit anymore — they're runtime state that should never carry derivable values.** The brew-packaging work (FRI-88) should remove `daemonPort` / `dashboardPort` from the templates `friday setup` writes (they're already optional in the type), and consider not writing `ZERO_MUTATE_URL` at all (let the spawn-time export be the only source).
+- **`friday doctor` could grow a "stale runtime-state" check** that warns when `config.json` carries `daemonPort` / `dashboardPort` that match neither the prod constants nor a documented dev value, and when `.env` carries `ZERO_MUTATE_URL` (which is now spawn-time-only). Flagged for FRI-88's doctor surface.
+- **Process-supervision gap surfaced during the flip:** `friday stop` doesn't always propagate kill signals to zero-cache's grandchild workers (replicator/syncer). Multiple zombie workers held replica.db locks and ports 4848/4849 across restart cycles, causing `EADDRINUSE` and `SQLITE_BUSY` crash loops. Manual `kill -9` cleared each. This is a known cost of tmux supervision and is owned by FRI-88's launchd plist (process-group semantics handle this correctly).
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.
