@@ -821,7 +821,9 @@ export class ChatState {
       }
     }
 
-    const parsed = parseBlocks(rawBlocks, agent);
+    const parsed = parseBlocks(rawBlocks, agent, {
+      inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+    });
 
     // Find the scroll target BEFORE the merge so we can compute it
     // against the raw response (which preserves FTS rank order for term
@@ -1384,7 +1386,12 @@ export class ChatState {
     // so any in-flight SSE deltas attach cleanly.
     const cached = loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
     if (cached.length > 0) {
-      this.messages = [...parseBlocks(cached, agent), ...queueSynth];
+      this.messages = [
+        ...parseBlocks(cached, agent, {
+          inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+        }),
+        ...queueSynth,
+      ];
       // Only seed the scroll-back cursor from cached blocks when Zero
       // is OFF. With Zero on, the cached cursor is stale — new rows
       // may have landed in Postgres since the cache was last saved —
@@ -1452,7 +1459,12 @@ export class ChatState {
         // not-yet-sent user input that conceptually sits at the bottom
         // until the daemon assigns turn_ids and the SSE confirmation
         // arrives.
-        this.messages = [...parseBlocks(blocks, agent), ...queueSynth];
+        this.messages = [
+          ...parseBlocks(blocks, agent, {
+            inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+          }),
+          ...queueSynth,
+        ];
         this.oldestBlockId = oldestBlockCursor(blocks);
         // Seed the per-agent SSE cursor from the snapshot's high-water
         // mark. The daemon updates `last_event_seq` on every block_delta
@@ -1646,7 +1658,9 @@ export class ChatState {
     }
 
     const blockRows: BlockRow[] = rows.map(zeroBlockRowToBlockRow);
-    const parsed = parseBlocks(blockRows, forAgent);
+    const parsed = parseBlocks(blockRows, forAgent, {
+      inflightTurnId: this.inflightTurnIdByAgent[forAgent] ?? null,
+    });
     const parsedById = new Map<string, ChatMessage>();
     for (const m of parsed) parsedById.set(m.id, m);
 
@@ -1815,7 +1829,9 @@ export class ChatState {
         this.reachedOldest = true;
         return;
       }
-      const older = parseBlocks(blocks, agent);
+      const older = parseBlocks(blocks, agent, {
+        inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+      });
       // FRI-81 D2/D3: older history is, by definition, from past turns —
       // no streaming/running bubble in this page is the active turn. Heal
       // them eagerly (the parseBlocks heuristic doesn't see the current
@@ -2661,7 +2677,11 @@ export function healOrphanStreamingBubbles(
   }
 }
 
-export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
+export function parseBlocks(
+  blocks: BlockRow[],
+  agent: string,
+  opts: { inflightTurnId?: string | null } = {},
+): ChatMessage[] {
   const orphans = classifyOrphanRows(blocks);
   const out: ChatMessage[] = [];
   const toolByToolId = new Map<string, ChatMessage>();
@@ -2930,8 +2950,22 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
   // leave a visible artifact. Inserted just after the user block by ts so
   // the natural chronological sort keeps it adjacent.
   let synthesized = false;
+  // Suppress the synth for the agent's currently in-flight turn.
+  // The Claude SDK's first stream_event can land anywhere from
+  // hundreds of ms to many seconds after submit (model latency,
+  // queue depth, tool-call subprocess startup). A blanket time
+  // grace would either flash the "Agent didn't respond" affordance
+  // for slow turns or hide it for genuinely-failed-fast turns; the
+  // chat store's `inflightTurnIdByAgent` is the unambiguous signal.
+  // While a turn is the agent's in-flight turn, the safety-net
+  // never fires; once it stops being in-flight (turn_done from
+  // SSE or agents.status flip to idle), the next parseBlocks run
+  // will see no inflight match and the synth can fire if the turn
+  // genuinely produced no assistant content.
+  const inflight = opts.inflightTurnId;
   for (const [turnId, info] of userTurns) {
     if (assistantTurns.has(turnId)) continue;
+    if (inflight && turnId === inflight) continue;
     synthesized = true;
     out.push({
       id: noResponseIdForTurn(turnId),
