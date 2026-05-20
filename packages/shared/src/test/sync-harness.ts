@@ -696,7 +696,7 @@ export async function spawnTestSyncEnv(
     throw err;
   }
 
-  return {
+  const env: SyncEnv = {
     databaseUrl,
     db,
     // The Skip* opts produce nulls here; the interface keeps these
@@ -725,14 +725,16 @@ export async function spawnTestSyncEnv(
     cleanup: async () => {
       // SIGTERM in reverse spawn order: dashboard depends on daemon +
       // zero-cache; daemon depends on the database; zero-cache depends
-      // on the database. Tear down top-down.
+      // on the database. Tear down top-down. NB: read `env.daemon` at
+      // call time, not the closure's local — the resilience suite
+      // reassigns `env.daemon = fresh` after a restart and the cleanup
+      // needs to signal the *current* process, not the one that died.
+      const currentDaemon = env.daemon ?? daemon;
       if (dashboard) await sigtermThenSigkill(dashboard.child);
-      if (daemon) {
-        await sigtermThenSigkill(daemon.child);
-        // Clean the per-test data dir so a re-run doesn't accumulate
-        // tmp directories.
+      if (currentDaemon) {
+        await sigtermThenSigkill(currentDaemon.child);
         try {
-          rmSync(daemon.dataDir, { recursive: true, force: true });
+          rmSync(currentDaemon.dataDir, { recursive: true, force: true });
         } catch {
           /* ignore */
         }
@@ -746,8 +748,30 @@ export async function spawnTestSyncEnv(
         } catch {
           /* ignore */
         }
+        // zero-cache leaves a logical-replication slot on the upstream
+        // DB. Postgres refuses DROP DATABASE while a slot exists for
+        // that DB. Drop it explicitly so `db.drop()` succeeds; without
+        // this every e2e run leaks its scratch DB and `friday_test_*`
+        // accumulates in pg_database until manual cleanup. Best-effort:
+        // tolerate the slot being gone or the DB unreachable.
+        try {
+          const admin = new Client({ connectionString: databaseUrl });
+          await admin.connect();
+          try {
+            await admin.query(
+              `SELECT pg_drop_replication_slot(slot_name)
+                 FROM pg_replication_slots
+                 WHERE database = current_database()`,
+            );
+          } finally {
+            await admin.end();
+          }
+        } catch {
+          /* slot gone or DB unreachable — DROP DATABASE will tell us */
+        }
       }
       await db.drop();
     },
   };
+  return env;
 }

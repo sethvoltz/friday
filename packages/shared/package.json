@@ -16,7 +16,8 @@
     "./cron": "./dist/cron.js",
     "./apps": "./dist/apps/manifest.js",
     "./sync": "./dist/sync/index.js",
-    "./sync/jwt": "./dist/sync/jwt.js"
+    "./sync/jwt": "./dist/sync/jwt.js",
+    "./test/sync-harness": "./dist/test/sync-harness.js"
   },
   "scripts": {
     "build": "tsc && node ./scripts/copy-prompts.mjs",
