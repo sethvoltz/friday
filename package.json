@@ -8,6 +8,8 @@
     "test:e2e": "turbo run test:e2e --concurrency=1",
     "test:playwright": "pnpm --filter @friday/dashboard run test:playwright",
     "dev": "turbo run dev",
+    "dev:daemon": "FRIDAY_DAEMON_PORT=7444 pnpm --filter @friday/daemon dev",
+    "dev:dashboard": "FRIDAY_DAEMON_PORT=7444 pnpm --filter @friday/dashboard dev",
     "check": "turbo run check",
     "clean": "turbo run clean",
     "drizzle:generate": "pnpm --filter @friday/shared run drizzle:generate",
