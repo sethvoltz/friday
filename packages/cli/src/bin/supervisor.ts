@@ -432,10 +432,33 @@ async function main(): Promise<void> {
   // restart it via KeepAlive).
 }
 
-main().catch((err) => {
-  logSupervisor("supervisor.fatal", {
-    message: err instanceof Error ? err.message : String(err),
-    stack: err instanceof Error ? err.stack : undefined,
+// Only run when invoked as a script (not when imported by tests). The
+// `process.argv[1]` resolution handles both `node supervisor.js` and the
+// `bin/friday-supervisor` wrapper's `exec node …`.
+const invokedAsScript =
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.endsWith("/friday-supervisor") === true ||
+  process.argv[1]?.endsWith("/supervisor.js") === true;
+
+if (invokedAsScript) {
+  main().catch((err) => {
+    logSupervisor("supervisor.fatal", {
+      message: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    process.exit(1);
   });
-  process.exit(1);
-});
+}
+
+// Test-facing exports. Not part of the public CLI surface; the binary
+// itself is the only intended consumer. Marked here so `supervisor.test.ts`
+// can drive `killChildGroup` against subprocess fixtures.
+export {
+  killChildGroup,
+  CRASH_LOOP_WINDOW_MS,
+  CRASH_LOOP_MAX,
+  BACKOFF_INITIAL_MS,
+  BACKOFF_CAP_MS,
+  CASCADE_STOP_DEADLINE_MS,
+};
+export type { ChildState };
