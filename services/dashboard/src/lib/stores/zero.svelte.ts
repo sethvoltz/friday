@@ -840,7 +840,15 @@ class ZeroSyncStore {
       .where("status", "!=", "streaming")
       .where("status", "!=", "cancel_requested")
       .where("ts", ">", cutoff);
-    const handle = this.#zero!.preload(query, { ttl: "1d" });
+    // `ttl` here only matters AFTER `handle.cleanup()` fires — while
+    // the handle is alive (i.e. for the life of this dashboard tab),
+    // the preloaded rows stay in the replica. Zero 1.5 hard-caps the
+    // ttl at 10 minutes (`MAX_TTL_MS` in `@rocicorp/zero/out/zql/src/query/ttl.js`)
+    // and emits a `QueryManager: TTL (Xd) is too high, clamping to 10m`
+    // warning on every page load for any value higher. 10m matches
+    // the cap and silences the warning; the practical effect is
+    // identical because we hold the handle for the tab's lifetime.
+    const handle = this.#zero!.preload(query, { ttl: "10m" });
     this.#unsubscribers.push(() => handle.cleanup());
   }
 
