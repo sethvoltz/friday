@@ -13,6 +13,7 @@ import {
   ensureSoul,
   loadConfig,
   provisionPostgres,
+  resolveDashboardPort,
   upsertEnvVar,
   writeConfig,
   getDb,
@@ -113,7 +114,7 @@ export const setupCommand = defineCommand({
       database: drizzleAdapter(db, { provider: "pg", schema, usePlural: true }),
       baseURL:
         process.env.BETTER_AUTH_URL ??
-        `http://localhost:${cfg.dashboardPort}`,
+        `http://localhost:${resolveDashboardPort(cfg)}`,
       emailAndPassword: { enabled: true, disableSignUp: false },
       secret: process.env.BETTER_AUTH_SECRET!,
     });
