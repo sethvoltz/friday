@@ -331,6 +331,41 @@ export interface DeleteScheduleArgs {
   ts: number;
 }
 
+/* ---------------- Item #53: schedule pause / resume / trigger ---------------- */
+// Three mutators that complete the schedule-state-machine surface
+// — Phase 4.6 left these as REST because they "don't change cron
+// registration." That left a multi-write-path surface on /schedules
+// (some POSTs, some Zero); converting unifies on Zero.
+//
+// pauseSchedule: pure data write (paused=true). The scheduler's tick
+// already short-circuits on `paused`, so no daemon LISTEN is needed.
+//
+// resumeSchedule: paused=false + status='reload_requested'. Reuses
+// the existing Phase 4.6 listener which recomputes next_run_at from
+// the cron so a paused-during-due-time schedule doesn't fire
+// immediately on resume.
+//
+// triggerSchedule: status='trigger_requested'. New listener branch
+// (services/daemon/src/scheduler/listener.ts) calls fireSchedule then
+// flips status back to 'active'. Required the schema check constraint
+// extension (migration 0013) + the trigger-predicate extension
+// (migration 0014).
+
+export interface PauseScheduleArgs {
+  name: string;
+  ts: number;
+}
+
+export interface ResumeScheduleArgs {
+  name: string;
+  ts: number;
+}
+
+export interface TriggerScheduleArgs {
+  name: string;
+  ts: number;
+}
+
 /* ---------------- Phase 4.7: app mutators ---------------- */
 // Three mutators that drive the daemon's transaction-wrapped
 // installer (see `services/daemon/src/apps/installer.ts`).
@@ -833,6 +868,50 @@ export const createMutators = () => ({
       name: args.name,
       updated_at: args.ts,
       status: "deleted",
+    });
+  },
+  pauseSchedule: async (
+    tx: FridayTx,
+    args: PauseScheduleArgs,
+  ): Promise<void> => {
+    // Pure data write. The scheduler's tick() short-circuits on
+    // `paused`, so no daemon LISTEN handler is needed — the next
+    // tick reads the new value and skips the fire.
+    await tx.mutate.schedules.update({
+      name: args.name,
+      paused: true,
+      updated_at: args.ts,
+    });
+  },
+  resumeSchedule: async (
+    tx: FridayTx,
+    args: ResumeScheduleArgs,
+  ): Promise<void> => {
+    // Flip paused=false AND request a daemon-side reload. The
+    // existing Phase 4.6 listener for status='reload_requested'
+    // recomputes next_run_at from the cron — without that recompute
+    // a schedule paused mid-due-time would fire on the next tick
+    // (its stored next_run_at is in the past from before the pause).
+    await tx.mutate.schedules.update({
+      name: args.name,
+      paused: false,
+      status: "reload_requested",
+      updated_at: args.ts,
+    });
+  },
+  triggerSchedule: async (
+    tx: FridayTx,
+    args: TriggerScheduleArgs,
+  ): Promise<void> => {
+    // Status flip the daemon's listener picks up to call
+    // fireSchedule(name) immediately, then flips back to 'active'.
+    // Migration 0014 extended the existing schedule-notify trigger
+    // predicate to include this status; migration 0013 added it to
+    // the check constraint.
+    await tx.mutate.schedules.update({
+      name: args.name,
+      status: "trigger_requested",
+      updated_at: args.ts,
     });
   },
   installApp: async (

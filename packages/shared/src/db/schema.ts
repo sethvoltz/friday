@@ -340,7 +340,11 @@ export const schedules = pgTable(
     metaJson: jsonb("meta_json"),
     appId: text("app_id"),
     // ADR-023: mutator-driven status transitions for register/unregister/pause.
-    status: text("status").notNull().default("active"), // active|pending_register|reload_requested|deleted
+    // active|pending_register|reload_requested|deleted|trigger_requested
+    // (trigger_requested = dashboard wants the schedule to fire NOW;
+    // daemon's listener calls fireSchedule then flips status back to
+    // 'active'.)
+    status: text("status").notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
@@ -349,7 +353,7 @@ export const schedules = pgTable(
     appIdx: index("schedules_app").on(t.appId),
     statusCheck: check(
       "schedules_status_check",
-      sql`${t.status} IN ('active','pending_register','reload_requested','deleted','paused')`,
+      sql`${t.status} IN ('active','pending_register','reload_requested','deleted','paused','trigger_requested')`,
     ),
   }),
 );

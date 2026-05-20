@@ -31,9 +31,12 @@ import {
   type InstallAppArgs,
   type LinkTicketExternalArgs,
   type MarkReadArgs,
+  type PauseScheduleArgs,
   type ReloadAppArgs,
   type ReportClientStatsArgs,
+  type ResumeScheduleArgs,
   type SendUserMessageArgs,
+  type TriggerScheduleArgs,
   type UninstallAppArgs,
   type UpdateMemoryEntryArgs,
   type UpdateScheduleArgs,
@@ -1177,6 +1180,81 @@ describe("deleteSchedule", () => {
     expect("run_at" in u).toBe(false);
     expect("task_prompt" in u).toBe(false);
     expect("paused" in u).toBe(false);
+  });
+});
+
+describe("pauseSchedule (item #53)", () => {
+  it("UPDATEs paused=true with no other state change", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    await mutators.pauseSchedule(tx, { name: "s", ts: 11 } as PauseScheduleArgs);
+    expect(scheduleUpdates).toEqual([
+      { name: "s", paused: true, updated_at: 11 },
+    ]);
+  });
+
+  it("is idempotent — re-running produces identical writes", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    const args: PauseScheduleArgs = { name: "s", ts: 11 };
+    await mutators.pauseSchedule(tx, args);
+    await mutators.pauseSchedule(tx, args);
+    expect(scheduleUpdates).toHaveLength(2);
+    expect(scheduleUpdates[0]).toEqual(scheduleUpdates[1]);
+  });
+});
+
+describe("resumeSchedule (item #53)", () => {
+  it("UPDATEs paused=false + status='reload_requested' (daemon recomputes next_run_at)", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    await mutators.resumeSchedule(tx, {
+      name: "s",
+      ts: 22,
+    } as ResumeScheduleArgs);
+    expect(scheduleUpdates).toEqual([
+      {
+        name: "s",
+        paused: false,
+        status: "reload_requested",
+        updated_at: 22,
+      },
+    ]);
+  });
+
+  it("never touches cron / runAt / taskPrompt — daemon owns the next_run_at recompute", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    await mutators.resumeSchedule(tx, { name: "s", ts: 1 });
+    const u = scheduleUpdates[0] as Record<string, unknown>;
+    expect("cron" in u).toBe(false);
+    expect("run_at" in u).toBe(false);
+    expect("task_prompt" in u).toBe(false);
+    expect("next_run_at" in u).toBe(false);
+  });
+});
+
+describe("triggerSchedule (item #53)", () => {
+  it("UPDATEs status='trigger_requested' so the daemon listener fires the schedule", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    await mutators.triggerSchedule(tx, {
+      name: "s",
+      ts: 33,
+    } as TriggerScheduleArgs);
+    expect(scheduleUpdates).toEqual([
+      { name: "s", status: "trigger_requested", updated_at: 33 },
+    ]);
+  });
+
+  it("is idempotent — re-running queues identical mutations (the daemon's flip-back to 'active' is excluded from the trigger predicate)", async () => {
+    const mutators = createMutators();
+    const { tx, scheduleUpdates } = makeMockTx();
+    const args: TriggerScheduleArgs = { name: "s", ts: 33 };
+    await mutators.triggerSchedule(tx, args);
+    await mutators.triggerSchedule(tx, args);
+    expect(scheduleUpdates).toHaveLength(2);
+    expect(scheduleUpdates[0]).toEqual(scheduleUpdates[1]);
   });
 });
 

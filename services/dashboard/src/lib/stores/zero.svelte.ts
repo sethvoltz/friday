@@ -1032,6 +1032,18 @@ class ZeroSyncStore {
     if (!this.#zero) return;
     return this.#zero!.mutate.deleteSchedule({ ...args, ts: Date.now() });
   }
+  pauseSchedule(args: { name: string }): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.pauseSchedule({ ...args, ts: Date.now() });
+  }
+  resumeSchedule(args: { name: string }): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.resumeSchedule({ ...args, ts: Date.now() });
+  }
+  triggerSchedule(args: { name: string }): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.triggerSchedule({ ...args, ts: Date.now() });
+  }
 
   /**
    * Phase 4.7: app mutators. Dashboard inserts pending-install

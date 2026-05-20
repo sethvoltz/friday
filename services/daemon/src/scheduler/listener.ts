@@ -41,6 +41,7 @@ import {
 } from "@friday/shared";
 import * as registry from "../agent/registry.js";
 import { logger } from "../log.js";
+import { fireSchedule } from "./scheduler.js";
 
 const { Client } = pgPkg;
 
@@ -113,6 +114,34 @@ async function processPendingScheduleRow(name: string): Promise<void> {
     return;
   }
 
+  if (row.status === "trigger_requested") {
+    // Item #53: dashboard wants this schedule to fire NOW. Call the
+    // existing fireSchedule path (same code the in-process tick uses)
+    // then flip status back to 'active' so the trigger doesn't re-enter.
+    // The flip-back UPDATE is excluded from the notify predicate by
+    // the migration-0014 trigger definition.
+    let runId: string | null = null;
+    try {
+      runId = await fireSchedule(row);
+    } catch (err) {
+      logger.log("warn", "schedule.sync.trigger.error", {
+        name,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    const next = computeNext(row);
+    await db
+      .update(schema.schedules)
+      .set({ status: "active", nextRunAt: next })
+      .where(eq(schema.schedules.name, name));
+    logger.log("info", "schedule.sync.triggered", {
+      name,
+      runId,
+      nextRunAt: next?.toISOString() ?? null,
+    });
+    return;
+  }
+
   if (row.status === "deleted") {
     // Tombstone — clean up the registry stub if it's unused.
     // Mirrors the legacy `deleteSchedule` semantic: once the
@@ -152,6 +181,7 @@ export async function runScheduleBootScan(): Promise<void> {
           "pending_register",
           "reload_requested",
           "deleted",
+          "trigger_requested",
         ]),
       );
     for (const row of rows) {

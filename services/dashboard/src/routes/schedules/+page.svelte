@@ -87,13 +87,32 @@
 
   async function action(
     name: string,
-    label: string,
+    label: "pause" | "resume" | "trigger",
     past: string,
     path: string,
   ) {
     if (busy) return;
     busy = `${label} ${name}`;
     try {
+      if (zeroOn) {
+        // Item #53: pause/resume/trigger as mutators. The Zero path
+        // dispatches the matching mutator + the daemon LISTEN
+        // handler (or the scheduler's tick(), for pure-data pause)
+        // applies the side effect. Replaces the REST POSTs.
+        const result =
+          label === "pause"
+            ? zeroSync.pauseSchedule({ name })
+            : label === "resume"
+              ? zeroSync.resumeSchedule({ name })
+              : zeroSync.triggerSchedule({ name });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`${label} failed: ${sr.error.message}`, "err");
+          return;
+        }
+        showToast(`${past} ${name}`);
+        return;
+      }
       const r = await fetch(path, {
         method: "POST",
         headers: { "content-type": "application/json" },

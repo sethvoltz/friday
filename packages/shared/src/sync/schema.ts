@@ -151,7 +151,12 @@ const schedules = table("schedules")
     meta_json: json().optional(),
     app_id: string().optional(),
     status: string<
-      "active" | "pending_register" | "reload_requested" | "deleted" | "paused"
+      | "active"
+      | "pending_register"
+      | "reload_requested"
+      | "deleted"
+      | "paused"
+      | "trigger_requested"
     >(),
     created_at: number(),
     updated_at: number(),
