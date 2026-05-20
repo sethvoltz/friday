@@ -22,6 +22,9 @@ export interface ClientDeviceRow {
   storageUsedBytes: number | null;
   storageQuotaBytes: number | null;
   lastSyncAt: number | null;
+  /** Plan §41: non-null means the device has been forgotten. The
+   *  refresh handler denies JWT minting for revoked rows. */
+  revokedAt: number | null;
 }
 
 function rowToClientDevice(
@@ -37,6 +40,7 @@ function rowToClientDevice(
     storageUsedBytes: r.storageUsedBytes,
     storageQuotaBytes: r.storageQuotaBytes,
     lastSyncAt: r.lastSyncAt ? r.lastSyncAt.getTime() : null,
+    revokedAt: r.revokedAt ? r.revokedAt.getTime() : null,
   };
 }
 
@@ -133,5 +137,28 @@ export async function forgetClientDevice(
   // Drizzle pg returns the affected row count via the QueryResult's
   // rowCount property; coerce nullable to 0 for the boolean return.
   void userId; // reserved — Phase 6 adds ownership check
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Plan §41: soft-delete a device via the `revoked_at` tombstone. This
+ * is what the `forgetDevice` mutator's server-side body does too;
+ * exposed as a service helper so non-mutator callers (tests, daemon
+ * boot recovery) can drive the same state transition without the
+ * Zero push pipeline.
+ *
+ * Idempotent: setting `revoked_at` on an already-revoked row is a
+ * no-op write (the column value updates to the new `ts`, which is
+ * fine — the deny gate only checks `IS NOT NULL`).
+ */
+export async function revokeClientDevice(
+  deviceId: string,
+  revokedAt: Date = new Date(),
+): Promise<boolean> {
+  const db = getDb();
+  const result = await db
+    .update(schema.clientDevices)
+    .set({ revokedAt })
+    .where(eq(schema.clientDevices.deviceId, deviceId));
   return (result.rowCount ?? 0) > 0;
 }

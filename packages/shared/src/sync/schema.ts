@@ -256,6 +256,9 @@ const clientDevices = table("client_devices")
     storage_used_bytes: number().optional(),
     storage_quota_bytes: number().optional(),
     last_sync_at: number().optional(),
+    // Plan §41: non-null means the device has been forgotten;
+    // `/api/sync/refresh` denies JWT minting for revoked rows.
+    revoked_at: number().optional(),
   })
   .primaryKey("device_id");
 

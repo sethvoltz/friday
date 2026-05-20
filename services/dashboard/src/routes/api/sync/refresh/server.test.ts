@@ -52,6 +52,7 @@ interface CookieStore {
     opts?: Record<string, unknown>,
   ) => void;
   get: (name: string) => string | undefined;
+  delete: (name: string, opts?: Record<string, unknown>) => void;
 }
 
 function makeCookies(initial: Record<string, string> = {}): CookieStore {
@@ -62,6 +63,9 @@ function makeCookies(initial: Record<string, string> = {}): CookieStore {
       store.set(name, value);
     },
     get: (name) => store.get(name),
+    delete: (name) => {
+      store.delete(name);
+    },
   };
 }
 
@@ -191,5 +195,53 @@ describe("POST /api/sync/refresh", () => {
     const row = await getClientDevice(cookieValue);
     expect(row).not.toBeNull();
     expect(row!.userId).toBe("alice"); // original owner sticks
+  });
+
+  it("plan §41: rejects (401) when the device's revoked_at is set, AND clears the friday-device-id cookie", async () => {
+    // Mint once to seed the row.
+    const first = await callPost({
+      user: { id: "alice", email: "a@x", name: "Alice" },
+    });
+    expect(first.response.status).toBe(200);
+    const cookieValue = first.cookies.get("friday-device-id")!;
+
+    // Simulate the forgetDevice mutator landing: set revoked_at on the
+    // row via the shared service helper.
+    const { revokeClientDevice } = await import("@friday/shared/services");
+    await revokeClientDevice(cookieValue);
+
+    // Next mint attempt with the SAME cookie must be denied — this is
+    // the load-bearing contract that makes "Forget this device" mean
+    // something. Without it, the next refresh would just re-upsert and
+    // the user's revocation would be cosmetic.
+    const denied = await callPost({
+      user: { id: "alice", email: "a@x", name: "Alice" },
+      cookies: { "friday-device-id": cookieValue },
+    });
+    expect(denied.response.status).toBe(401);
+    // Cookie cleared so the client doesn't keep retrying against the
+    // same revoked id — next refresh mints a fresh device row under a
+    // brand-new UUID.
+    expect(denied.cookies.get("friday-device-id")).toBeUndefined();
+  });
+
+  it("plan §41: a brand-new cookie value still mints even when another (revoked) row exists for the same user", async () => {
+    // Seed + revoke a device for Alice.
+    const first = await callPost({
+      user: { id: "alice", email: "a@x", name: "Alice" },
+    });
+    const firstDeviceId = first.cookies.get("friday-device-id")!;
+    const { revokeClientDevice } = await import("@friday/shared/services");
+    await revokeClientDevice(firstDeviceId);
+
+    // Mint with NO cookie — endpoint generates a fresh deviceId and
+    // should succeed.
+    const fresh = await callPost({
+      user: { id: "alice", email: "a@x", name: "Alice" },
+    });
+    expect(fresh.response.status).toBe(200);
+    const freshDeviceId = fresh.cookies.get("friday-device-id");
+    expect(freshDeviceId).toBeDefined();
+    expect(freshDeviceId).not.toBe(firstDeviceId);
   });
 });

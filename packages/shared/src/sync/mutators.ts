@@ -89,26 +89,28 @@ export interface ReportClientStatsArgs {
   ts: number;
 }
 
-/* ---------------- Phase 4.2: forgetDevice ---------------- */
-// Remove a `client_devices` row by `device_id`. The Settings → Devices
-// surface invokes this from the "Forget this device" button (Phase 6
-// UI lands later; the mutator is in place now).
+/* ---------------- Phase 4.2 / Plan §41: forgetDevice ---------------- */
+// Mark a `client_devices` row as revoked. Sets `revoked_at = now()`;
+// `/api/sync/refresh` rejects (401) any subsequent mint attempt for
+// that device_id. The deny semantics is the meaningful version of
+// "Forget this device" the plan §41 promised — the prior delete-only
+// behavior was cosmetic because the next refresh just re-upserted
+// the row.
 //
-// Idempotency: re-running with the same deviceId is a no-op
-// (the row is already gone — Drizzle DELETE WHERE NOT EXISTS is
-// a 0-row outcome, not an error).
+// Idempotency: re-running with the same deviceId is a no-op (the row
+// is already revoked; `revoked_at` keeps its prior value since the
+// UPDATE only sets it when null).
 //
-// Per ADR-023 line 564 + the comment in `forgetClientDevice`:
-// "the next time that client tries to refresh its JWT, the mint
-// endpoint will re-upsert and the user will need to manually
-// forget again — so production usage couples this with a sign-out
-// on the affected device." For Phase 4.2 the mutator is the entire
-// operation; daemon-side credential revocation lives at the daemon
-// LISTEN handler tier and is reserved for a future hardening pass
-// (the row absence + sign-out is functionally sufficient for v1).
+// Recovery: the user clears the `friday-device-id` cookie (sign out +
+// back in does this; the dashboard couples sign-out with the current-
+// device forget) and the next refresh mints a fresh device row under
+// a brand-new UUID.
 
 export interface ForgetDeviceArgs {
   deviceId: string;
+  /** Timestamp the dashboard stamps at click time so all replicas
+   *  converge on the same revocation moment. */
+  ts: number;
 }
 
 /* ---------------- Phase 4.3: updateSettings ---------------- */
@@ -592,12 +594,19 @@ export const createMutators = () => ({
     tx: FridayTx,
     args: ForgetDeviceArgs,
   ): Promise<void> => {
-    // Hard-delete. Re-running with the same args is a no-op on the
-    // server (Postgres DELETE WHERE no row matches doesn't error).
-    // Optimistic deletes on the client emit a sync notification so
-    // multi-tab Settings views update in real time.
-    await tx.mutate.client_devices.delete({
+    // Plan §41: soft-delete via `revoked_at` so the daemon's
+    // `/api/sync/refresh` deny-list lookup can find the tombstone and
+    // refuse to mint another JWT for this device_id. Hard DELETE used
+    // to leave no trace, so the next refresh re-upserted the row and
+    // the user's "Forget" click was effectively cosmetic.
+    //
+    // Idempotent: re-running on an already-revoked row is a Zero
+    // UPDATE with the same shape — Zero's mutator framework treats
+    // it as a no-op write. The trigger predicate on `last_seen_at`
+    // also doesn't fire here because we don't touch that column.
+    await tx.mutate.client_devices.update({
       device_id: args.deviceId,
+      revoked_at: args.ts,
     });
   },
   createTicket: async (

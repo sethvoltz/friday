@@ -323,15 +323,16 @@
     userAgent: string | null;
     isCurrent: boolean;
   }): import("$lib/stores/zero.svelte").ZeroClientDeviceRow | null {
+    // Revoked devices are tombstones — they shouldn't surface storage
+    // info next to a session. Filter them out across both branches.
     if (session.isCurrent && zeroSync.currentDeviceId) {
-      return (
-        zeroSync.clientDevices.find(
-          (d) => d.device_id === zeroSync.currentDeviceId,
-        ) ?? null
+      const cur = zeroSync.clientDevices.find(
+        (d) => d.device_id === zeroSync.currentDeviceId,
       );
+      return cur && cur.revoked_at === null ? cur : null;
     }
     const candidates = zeroSync.clientDevices.filter(
-      (d) => d.user_agent === session.userAgent,
+      (d) => d.user_agent === session.userAgent && d.revoked_at === null,
     );
     if (candidates.length === 0) return null;
     return [...candidates].sort((a, b) => b.last_seen_at - a.last_seen_at)[0]!;

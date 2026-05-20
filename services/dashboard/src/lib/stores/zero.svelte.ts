@@ -128,6 +128,7 @@ export interface ZeroClientDeviceRow {
   storage_used_bytes: number | null;
   storage_quota_bytes: number | null;
   last_sync_at: number | null;
+  revoked_at: number | null;
 }
 
 /** Row shape mirrors the `apps` Zero table definition. */
@@ -785,16 +786,20 @@ class ZeroSyncStore {
   }
 
   /**
-   * Phase 4.2: trigger the `forgetDevice` mutator. Hard-deletes the
-   * `client_devices` row by device_id. Used by the Settings → Devices
-   * "Forget this device" button (Phase 6 UI). Safe to call with
-   * `this.#deviceId` (the current tab) — production usage couples
-   * that with a sign-out so the deleted row doesn't immediately
-   * re-upsert on the next /api/sync/refresh.
+   * Plan §41: trigger the `forgetDevice` mutator. Sets `revoked_at`
+   * on the matching `client_devices` row so the daemon's
+   * `/api/sync/refresh` deny-list lookup refuses to mint another JWT
+   * for that device_id. The prior hard-DELETE behavior was cosmetic
+   * — the next refresh just re-upserted the row.
+   *
+   * Recovery: the user clears the `friday-device-id` cookie (the
+   * dashboard does this implicitly when forgetting the CURRENT tab
+   * via the sign-out coupling in `settings/+page.svelte`); the next
+   * refresh mints a fresh device row under a brand-new UUID.
    */
   forgetDevice(deviceId: string): void {
     if (!this.#zero) return;
-    void this.#zero!.mutate.forgetDevice({ deviceId });
+    void this.#zero!.mutate.forgetDevice({ deviceId, ts: Date.now() });
   }
 
   /**

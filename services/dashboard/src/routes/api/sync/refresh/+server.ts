@@ -1,7 +1,7 @@
 import { json, type RequestHandler } from "@sveltejs/kit";
 import { randomUUID } from "node:crypto";
 import { mintZeroJwt } from "@friday/shared/sync/jwt";
-import { upsertClientDevice } from "@friday/shared/services";
+import { getClientDevice, upsertClientDevice } from "@friday/shared/services";
 
 /**
  * Phase 2 (ADR-024): mint a short-lived JWT that the dashboard's Zero
@@ -53,6 +53,19 @@ export const POST: RequestHandler = async ({ cookies, locals, request }) => {
       // Forget-device revokes the row, not the cookie.
       maxAge: 60 * 60 * 24 * 365 * 5, // 5 years
     });
+  } else {
+    // Plan §41: if the user previously clicked "Forget this device" on
+    // this device_id, the row's `revoked_at` tombstone is set. Deny
+    // any further JWT minting against that id and clear the local
+    // cookie so the next request mints a fresh device. This is the
+    // load-bearing line that made the prior delete-only mutator
+    // cosmetic — without this gate, the next refresh just re-upserted
+    // the row and the "forget" had no security effect.
+    const existing = await getClientDevice(deviceId);
+    if (existing && existing.revokedAt !== null) {
+      cookies.delete(DEVICE_COOKIE, { path: "/" });
+      return new Response("device-revoked", { status: 401 });
+    }
   }
 
   const userAgent = request.headers.get("user-agent");

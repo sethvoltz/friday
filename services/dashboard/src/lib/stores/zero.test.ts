@@ -841,17 +841,21 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
     expect(z.mutate.reportClientStats).toHaveBeenCalled();
   });
 
-  it("forgetDevice forwards the deviceId to zero.mutate.forgetDevice", async () => {
+  it("forgetDevice forwards the deviceId AND a fresh `ts` to zero.mutate.forgetDevice (plan §41 revoke-at semantics)", async () => {
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 40));
     expect(instances).toHaveLength(1);
     const z = instances[0];
+    const before = Date.now();
     zeroSync.forgetDevice("dev-to-evict");
     expect(z.mutate.forgetDevice).toHaveBeenCalledTimes(1);
     const args = z.mutate.forgetDevice.mock.calls[0][0] as {
       deviceId: string;
+      ts: number;
     };
     expect(args.deviceId).toBe("dev-to-evict");
+    expect(args.ts).toBeGreaterThanOrEqual(before);
+    expect(args.ts).toBeLessThanOrEqual(Date.now());
   });
 
   it("forgetDevice is silent before Zero has finished initializing", async () => {

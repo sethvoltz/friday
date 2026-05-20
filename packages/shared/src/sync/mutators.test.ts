@@ -592,23 +592,38 @@ describe("updateSettings", () => {
   });
 });
 
-describe("forgetDevice", () => {
-  it("DELETEs the client_devices row by device_id", async () => {
+describe("forgetDevice (plan §41 — JWT revocation tombstone)", () => {
+  it("UPDATEs the client_devices row with `revoked_at = args.ts` (no DELETE)", async () => {
     const mutators = createMutators();
-    const { tx, clientDeviceDeletes } = makeMockTx();
-    const args: ForgetDeviceArgs = { deviceId: "dev-evict" };
+    const { tx, clientDeviceUpdates, clientDeviceDeletes } = makeMockTx();
+    const args: ForgetDeviceArgs = { deviceId: "dev-evict", ts: 9_999 };
     await mutators.forgetDevice(tx, args);
-    expect(clientDeviceDeletes).toEqual([{ device_id: "dev-evict" }]);
+    expect(clientDeviceUpdates).toEqual([
+      { device_id: "dev-evict", revoked_at: 9_999 },
+    ]);
+    // Critical: no DELETE. The prior delete-only behavior was the bug
+    // §41 documented — `/api/sync/refresh` re-upserted the row on the
+    // next mint, so "forget" had no security effect.
+    expect(clientDeviceDeletes).toEqual([]);
   });
 
-  it("is idempotent — re-running with same args produces identical deletes (no-op server-side)", async () => {
+  it("touches only device_id and revoked_at — never clobbers last_seen_at, user_agent, or storage stats", async () => {
     const mutators = createMutators();
-    const { tx, clientDeviceDeletes } = makeMockTx();
-    const args: ForgetDeviceArgs = { deviceId: "dev-evict" };
+    const { tx, clientDeviceUpdates } = makeMockTx();
+    await mutators.forgetDevice(tx, { deviceId: "dev-x", ts: 1_000 });
+    expect(clientDeviceUpdates).toHaveLength(1);
+    const call = clientDeviceUpdates[0]!;
+    expect(Object.keys(call).sort()).toEqual(["device_id", "revoked_at"]);
+  });
+
+  it("is idempotent — re-running on an already-revoked device produces identical UPDATEs (no-op server-side under Zero's UPSERT semantics)", async () => {
+    const mutators = createMutators();
+    const { tx, clientDeviceUpdates } = makeMockTx();
+    const args: ForgetDeviceArgs = { deviceId: "dev-evict", ts: 5_000 };
     await mutators.forgetDevice(tx, args);
     await mutators.forgetDevice(tx, args);
-    expect(clientDeviceDeletes).toHaveLength(2);
-    expect(clientDeviceDeletes[0]).toEqual(clientDeviceDeletes[1]);
+    expect(clientDeviceUpdates).toHaveLength(2);
+    expect(clientDeviceUpdates[0]).toEqual(clientDeviceUpdates[1]);
   });
 });
 

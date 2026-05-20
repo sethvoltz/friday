@@ -481,9 +481,20 @@ export const clientDevices = pgTable(
     storageUsedBytes: bigint("storage_used_bytes", { mode: "number" }),
     storageQuotaBytes: bigint("storage_quota_bytes", { mode: "number" }),
     lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+    // Plan §41: meaningful "Forget this device" revokes JWT minting.
+    // Non-null means the device has been forgotten; `/api/sync/refresh`
+    // returns 401 on any further mint attempt for this deviceId. The
+    // user has to clear the local `friday-device-id` cookie (or sign
+    // out + back in, which the dashboard does automatically when
+    // forgetting the current tab) to mint under a fresh device row.
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
   },
   (t) => ({
     userIdx: index("client_devices_user").on(t.userId, t.lastSeenAt),
+    // Fast deny-list lookup keyed by (deviceId, revokedAt IS NOT NULL).
+    // The refresh handler queries by deviceId already; the partial
+    // index lets the planner read just revoked rows without a seq scan.
+    revokedIdx: index("client_devices_revoked").on(t.deviceId, t.revokedAt),
   }),
 );
 
