@@ -776,6 +776,136 @@ describe("jumpTo (/jump <date|term>)", () => {
     expect(chat.messages[0]!.id).toBe("b_blk-pre");
   });
 
+  it("local-first date jump within 90d retention: NO REST round-trip, scrollTarget set, window slid to include target", async () => {
+    // Plan §39 phase 3 (lazy-on-demand). The 90d Zero retention window
+    // means any date jump within ~3 months is already in chat.messages
+    // locally — there's no reason to make a REST call for it. The bug
+    // this pins: prior to the local-first branch, every /jump fired
+    // /api/agents/.../blocks?around_ts=… regardless of how close the
+    // target was, defeating the "all access looks local" architectural
+    // promise (plan §1).
+    const { ChatState, parseJumpDate } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Use "today" so parseJumpDate returns today's midnight and the
+    // target message just-after-midnight is unambiguously >= it.
+    // Today is well within 90 days.
+    const todayMidnight = parseJumpDate("today") as number;
+    expect(todayMidnight).toBeGreaterThan(0);
+    chat.messages = [
+      { id: "user_t-old", role: "user", text: "yesterday", status: "complete", ts: todayMidnight - 3_600_000, turnId: "t-old" },
+      { id: "user_t-target", role: "user", text: "today early", status: "complete", ts: todayMidnight + 1_000, turnId: "t-target" },
+      { id: "b_blk-after", role: "assistant", text: "reply", status: "complete", ts: todayMidnight + 5_000, turnId: "t-target", blockId: "blk-after" },
+    ];
+
+    await chat.jumpTo("friday", "today");
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(chat.scrollTarget?.id).toBe("user_t-target");
+    expect(chat.pinnedToBottom).toBe(false);
+    // Window slid to include the target. chatWindowEnd is tagged with the
+    // focused agent; the `end` cursor sits at most `+100` past the target's
+    // index so the rendered slice (last WINDOW_SIZE rows of allMessages
+    // ending at `end`) covers the target.
+    const targetIdx = chat.messages.findIndex((m) => m.id === "user_t-target");
+    expect(chat.chatWindowEnd).toEqual({
+      agent: "friday",
+      end: Math.min(chat.messages.length, targetIdx + 100),
+    });
+  });
+
+  it("local-first term jump with a matching local message: NO REST round-trip", async () => {
+    // Substring scan over the local Zero snapshot covers the common
+    // "did I just say X" case in single-digit milliseconds. Only when
+    // the substring isn't anywhere in the local replica do we fall
+    // through to Postgres FTS (which needs the daemon for tsvector
+    // ranking against blocks older than retention).
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.messages = [
+      { id: "user_t-1", role: "user", text: "hello world", status: "complete", ts: 1_000, turnId: "t-1" },
+      { id: "user_t-2", role: "user", text: "Find this UNIQUEPHRASE somewhere", status: "complete", ts: 2_000, turnId: "t-2" },
+      { id: "b_blk-3", role: "assistant", text: "no match here", status: "complete", ts: 3_000, turnId: "t-2", blockId: "blk-3" },
+    ];
+
+    await chat.jumpTo("friday", "uniquephrase");
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(chat.scrollTarget?.id).toBe("user_t-2");
+  });
+
+  it("local-first term jump picks the NEWEST local match (recency over rank)", async () => {
+    // FTS would return by rank; the local fallback prefers recency
+    // because that's the implicit "did I just say X" mental model
+    // when scrolling history.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.messages = [
+      { id: "user_t-old", role: "user", text: "needle in older turn", status: "complete", ts: 1_000, turnId: "t-old" },
+      { id: "user_t-new", role: "user", text: "needle in newer turn", status: "complete", ts: 5_000, turnId: "t-new" },
+    ];
+
+    await chat.jumpTo("friday", "needle");
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(chat.scrollTarget?.id).toBe("user_t-new");
+  });
+
+  it("date jump past 90d retention falls through to REST (Zero replica doesn't have those rows)", async () => {
+    // Blocks older than `BLOCKS_RETENTION_MS` aren't in the local Zero
+    // replica (the foreground query has `where('ts', '>', cutoff)`); the
+    // jump has to hit the daemon's REST `?around_ts=` endpoint to fetch
+    // them on demand. The user pays a network round-trip — but only
+    // because they explicitly asked for something past retention.
+    const { ChatState, parseJumpDate } = await import("./chat.svelte");
+    // 200 days ago — definitely past the 90d retention.
+    const longAgo = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000);
+    const dateArg = longAgo.toISOString().slice(0, 10);
+    const targetMidnight = parseJumpDate(dateArg) as number;
+    expect(targetMidnight).toBeGreaterThan(0);
+    // Mock the daemon's REST shape: blocks must include at least one
+    // row AT-OR-AFTER the target ts so the existing "out of range"
+    // toast doesn't fire and the test exercises the REST scroll-target
+    // path proper.
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [
+          makeBlock({ id: "1", blockId: "blk-old", turnId: "t-old", role: "user", text: "ancient before", ts: targetMidnight - 60_000 }),
+          makeBlock({ id: "2", blockId: "blk-old-after", turnId: "t-old-2", role: "user", text: "ancient after", ts: targetMidnight + 60_000 }),
+        ],
+      }),
+    );
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    await chat.jumpTo("friday", dateArg);
+
+    expect(mockFetch).toHaveBeenCalled();
+    expect(chat.scrollTarget).not.toBeNull();
+  });
+
+  it("term jump with no local match falls through to REST FTS", async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({
+        blocks: [
+          makeBlock({ id: "1", blockId: "blk-r", turnId: "t-r", role: "user", text: "found via fts", ts: 100 }),
+        ],
+      }),
+    );
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.messages = [
+      { id: "user_t-x", role: "user", text: "nothing relevant here", status: "complete", ts: 1, turnId: "t-x" },
+    ];
+
+    await chat.jumpTo("friday", "xyznotinlocal");
+
+    expect(mockFetch).toHaveBeenCalled();
+  });
+
   it("scrollTarget nonce advances on every jump so repeats re-trigger the effect", async () => {
     // The effect that runs scrollIntoView watches `chat.scrollTarget`
     // by reference; a fresh nonce per request lets two consecutive

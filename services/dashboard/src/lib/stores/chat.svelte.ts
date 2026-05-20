@@ -686,6 +686,29 @@ export class ChatState {
    * view after the jump, the IntersectionObserver will flip it back to
    * `true` on its own.
    */
+  /**
+   * Land a /jump on an already-local chat message. Slides the rendered
+   * window to include the target (sliding-window virtualization caps
+   * the DOM at ~WINDOW_SIZE messages; without this, jumps below the
+   * current window mount nothing into the DOM and scrollIntoView
+   * silently fails). Sets `scrollTarget` so the ChatMessages effect
+   * runs scrollIntoView after the next paint.
+   */
+  #scrollLocalJump(target: ChatMessage): void {
+    const idx = this.messages.indexOf(target);
+    if (idx !== -1) {
+      // Park the target ~100 from the bottom of the rendered window;
+      // ChatMessages's WINDOW_SIZE (500) covers ~400 messages above it,
+      // giving the user immediate context in both directions without
+      // mounting the entire transcript.
+      const end = Math.min(this.messages.length, idx + 100);
+      this.chatWindowEnd = { agent: this.focusedAgent, end };
+    }
+    this.pinnedToBottom = false;
+    this.scrollNonce += 1;
+    this.scrollTarget = { id: target.id, nonce: this.scrollNonce };
+  }
+
   async jumpTo(agent: string, arg: string): Promise<void> {
     const trimmed = arg.trim();
     if (!trimmed) {
@@ -694,6 +717,62 @@ export class ChatState {
     }
     const ts = parseJumpDate(trimmed);
     const isDateJump = ts !== null;
+
+    // Local-first path (plan §39 phase 3 "lazy on demand"): if the
+    // target is within the client retention horizon, every matching
+    // block is already in `this.messages` — there's no REST round-trip
+    // needed. Try to land the jump from the local Zero replica first;
+    // fall through to the REST endpoint only when local doesn't have
+    // a candidate (e.g., the date is older than the 90d retention or
+    // the FTS match needs Postgres tsvector ranking).
+    const RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+    const targetTsWithinRetention = isDateJump
+      ? (ts as number) > Date.now() - RETENTION_MS
+      : false;
+    if (isDateJump && targetTsWithinRetention) {
+      // Earliest block on or after the target ts that the user would
+      // recognize as "the start of that day's chat" — same selection
+      // rule the REST-driven branch uses.
+      const targetTs = ts as number;
+      let candidate: ChatMessage | undefined;
+      for (const m of this.messages) {
+        if (m.role !== "user" && m.role !== "assistant") continue;
+        // Skip error / no-response affordance bubbles — they carry no
+        // user-recognizable body text to land a jump on. (Regular
+        // assistant text + user_chat messages have `kind === undefined`.)
+        if (m.kind !== undefined) continue;
+        if (m.ts < targetTs) continue;
+        if (!candidate || m.ts < candidate.ts) candidate = m;
+      }
+      if (candidate) {
+        this.#scrollLocalJump(candidate);
+        return;
+      }
+      // Target ts is within retention but no local candidate at-or-after.
+      // Could be a date past the end of chat — let the REST path warn.
+    } else if (!isDateJump) {
+      // Term mode: try a case-insensitive substring scan on the local
+      // replica first. Pure-JS scan over the ~thousand-message Zero
+      // snapshot is sub-millisecond and avoids the daemon round-trip
+      // for the common case where the user is searching recent chat.
+      // Newest match wins (FTS would rank; the local fallback prefers
+      // recency since that's what a humans reasoning about "did I just
+      // say X" expects).
+      const needle = trimmed.toLowerCase();
+      let recentMatch: ChatMessage | undefined;
+      for (const m of this.messages) {
+        if (m.role !== "user" && m.role !== "assistant") continue;
+        if (typeof m.text !== "string" || m.text.length === 0) continue;
+        if (!m.text.toLowerCase().includes(needle)) continue;
+        if (!recentMatch || m.ts > recentMatch.ts) recentMatch = m;
+      }
+      if (recentMatch) {
+        this.#scrollLocalJump(recentMatch);
+        return;
+      }
+      // No local hit — fall through to the REST FTS endpoint.
+    }
+
     const url = isDateJump
       ? `/api/agents/${encodeURIComponent(agent)}/blocks?around_ts=${ts}&before_limit=10&after_limit=40`
       : `/api/agents/${encodeURIComponent(agent)}/blocks?match=${encodeURIComponent(trimmed)}&limit=20`;
