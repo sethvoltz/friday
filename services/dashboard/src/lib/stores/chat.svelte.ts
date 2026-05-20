@@ -1339,29 +1339,47 @@ export class ChatState {
   }
 
   async loadAgentTurns(agent: string): Promise<void> {
-    // Clear immediately so switching agents doesn't briefly show the prior
-    // agent's messages while turns are fetching.
-    this.messages = [];
-    this.oldestBlockId = null;
-    this.reachedOldest = false;
-    this.historyError = null;
-    this.zeroBlocksActive = false;
-    // Phase 3.7: reset the per-agent seen-blockIds tracker so a stale
-    // entry from the previous agent doesn't trip the delete heuristic
-    // here.
-    this.zeroSeenBlockIds = new Set();
-    // Phase 4.1: focus switch invalidates the markRead memo so the
-    // first Zero snapshot for the new agent will fire a fresh cursor
-    // write (even if we'd previously marked the same blockId for the
-    // PREVIOUS agent, the (device, agent) tuple is different).
-    this.lastMarkedBlockIdByAgent.delete(agent);
-    // Clear any stale loading-older flag from the previous agent. Without
-    // this, if the user scrolled up in agent A and clicked away before
-    // the load finished, A's `loadingOlder=true` would persist into B's
-    // chat and block B's first pagination request until A's stale finally
-    // fires (~350ms later). The new guards in `loadOlderTurns` ensure
-    // that stale call won't clobber B's state.
-    this.loadingOlder = false;
+    // User-reported bug: navigating to /tickets and back to chat shows
+    // an empty transcript until the user clicks another agent and
+    // returns. Root cause: this method always clears `messages`, even
+    // on re-entry to the same agent. The Zero binder short-circuits
+    // (`bindBlocksFor` is a no-op when already bound to the same
+    // agent), so no fresh `applyZeroBlocks` fires to re-populate the
+    // cleared array — until the next Zero update, which may not come
+    // for minutes.
+    //
+    // Guard: only clear/reset state when we're genuinely switching
+    // agents OR we have nothing to preserve. Re-entry to the same
+    // agent leaves `messages` and the cursors untouched; the binder
+    // call below is still safe (it's idempotent), the cached-load
+    // path below skips itself (messages already populated), and the
+    // post-load probe still runs.
+    const switchingAgents = this.focusedAgent !== agent;
+    const haveMessages = this.messages.length > 0;
+    const isReentry = !switchingAgents && haveMessages;
+    if (!isReentry) {
+      this.messages = [];
+      this.oldestBlockId = null;
+      this.reachedOldest = false;
+      this.historyError = null;
+      this.zeroBlocksActive = false;
+      // Phase 3.7: reset the per-agent seen-blockIds tracker so a stale
+      // entry from the previous agent doesn't trip the delete heuristic
+      // here.
+      this.zeroSeenBlockIds = new Set();
+      // Phase 4.1: focus switch invalidates the markRead memo so the
+      // first Zero snapshot for the new agent will fire a fresh cursor
+      // write (even if we'd previously marked the same blockId for the
+      // PREVIOUS agent, the (device, agent) tuple is different).
+      this.lastMarkedBlockIdByAgent.delete(agent);
+      // Clear any stale loading-older flag from the previous agent. Without
+      // this, if the user scrolled up in agent A and clicked away before
+      // the load finished, A's `loadingOlder=true` would persist into B's
+      // chat and block B's first pagination request until A's stale finally
+      // fires (~350ms later). The new guards in `loadOlderTurns` ensure
+      // that stale call won't clobber B's state.
+      this.loadingOlder = false;
+    }
 
     // Build the queue-synth bubbles once — we append them after both the
     // cached-render and the live-fetch overwrite so they're never wiped
@@ -1384,7 +1402,9 @@ export class ChatState {
     // bubble ids are stable across cache → fresh (parseBlocks uses
     // userBlockIdForTurn for user blocks and b_<blockId> for assistant),
     // so any in-flight SSE deltas attach cleanly.
-    const cached = loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
+    const cached = isReentry
+      ? []
+      : loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
     if (cached.length > 0) {
       this.messages = [
         ...parseBlocks(cached, agent, {
