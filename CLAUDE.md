@@ -59,12 +59,14 @@ Installed Friday Apps live under `~/.friday/apps/<id>/` (override with `FRIDAY_D
 
 ```bash
 pnpm install
-pnpm test
+pnpm test               # unit suite (fast — no subprocesses)
+pnpm test:e2e           # multi-subprocess e2e (daemon + dashboard + zero-cache against scratch PG); slow
+pnpm test:playwright    # browser-driven user-visible round-trip; slowest, needs chromium installed
 pnpm --filter @friday/daemon exec vitest run src/path/to/file.test.ts
 ```
 
 - TypeScript throughout, Vitest for tests, pnpm workspaces + Turborepo.
-- Tests are co-located with source as `*.test.ts`.
+- Tests are co-located with source as `*.test.ts`. Files named `*.e2e.test.ts` are heavy multi-subprocess suites — excluded from `pnpm test`, run via `pnpm test:e2e`. The Playwright browser suite lives in `services/dashboard/e2e/`.
 - All state lives in `~/.friday/` (override with `FRIDAY_DATA_DIR`). Never hardcode paths; use constants from `@friday/shared`.
 - `@friday/shared` is consumed via its built `dist/`. When you edit shared source, run `pnpm --filter @friday/shared build` before exercising the change in the daemon or dashboard.
 

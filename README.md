@@ -264,12 +264,14 @@ friday logs daemon --follow      # tail daemon logs without attaching
 ### Testing
 
 ```bash
-pnpm test                                                   # full suite
+pnpm test                                                   # unit suite (fast — no subprocesses)
+pnpm test:e2e                                               # multi-subprocess e2e (daemon + dashboard + zero-cache against a scratch PG)
+pnpm test:playwright                                        # browser-driven user-visible round-trip (slowest; chromium must be installed)
 pnpm --filter @friday/daemon run test                       # one package
 pnpm --filter @friday/daemon exec vitest run src/foo.test.ts  # one file
 ```
 
-Tests are co-located with source as `*.test.ts`, deterministic, no network. See [docs/architecture.md](docs/architecture.md) for testing conventions.
+Tests are co-located with source as `*.test.ts`, deterministic, no network. Files named `*.e2e.test.ts` are the heavy multi-subprocess suites — excluded from `pnpm test`, run via `pnpm test:e2e`. The Playwright browser suite lives in `services/dashboard/e2e/`. See [docs/architecture.md](docs/architecture.md) for testing conventions.
 
 ### Schema migrations
 
