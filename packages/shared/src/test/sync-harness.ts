@@ -1,22 +1,76 @@
 /**
- * Multi-subprocess e2e test harness for the Postgres + Zero sync surface
- * (item #50 in `~/.claude/plans/mellow-sparking-dusk.md`,
- * full plan at `~/.claude/plans/item-50-full-test-harness.md`).
+ * Multi-subprocess e2e test harness for the Postgres + Zero sync
+ * surface (item #50 in `~/.claude/plans/mellow-sparking-dusk.md`).
  *
- * `spawnTestSyncEnv` spins up a scratch Postgres database, a `zero-cache`
- * subprocess, a daemon subprocess, and a dashboard subprocess — each on
- * its own free port. Returns handles for every subprocess + a
- * `mintTestSessionCookie` helper that creates a BetterAuth session row
- * and returns a signed session-cookie pair so test clients can hit the
- * dashboard's auth-gated `/api/*` surface.
+ * # API
  *
- * Lifecycle: one env per test file via beforeAll / afterAll; tests inside
- * the file share the env and use `db.truncate()` (or write to isolated
- * agents / unique block ids) between tests to avoid cross-pollution.
+ * `spawnTestSyncEnv(opts)` → `SyncEnv` — composes a full Friday
+ * environment in 3-5s and tears it back down on `.cleanup()`. Each
+ * call gets:
  *
- * Subprocess spawning + readiness probing + orderly teardown is roughly
- * 2-4 seconds per test file. e2e suites are gated behind a separate
- * `pnpm test:e2e` script from the unit-test runner.
+ *   - A fresh `friday_test_<label>_<hex>` scratch Postgres database
+ *     (via `@friday/shared`'s `createTestDb`). All migrations applied.
+ *   - A zero-cache subprocess on a free port, with its own SQLite
+ *     replica in a per-env tmpdir. Bound to the scratch DB as its
+ *     upstream + the dashboard subprocess as its `ZERO_MUTATE_URL`.
+ *   - A daemon subprocess on a free port, with FRIDAY_DATA_DIR
+ *     pointing at a per-env tmpdir. Runs migrations + LISTEN
+ *     handlers normally.
+ *   - A dashboard subprocess on a free port, with BETTER_AUTH_URL
+ *     + ZERO_AUTH_SECRET wired to match. Serves real auth via
+ *     BetterAuth + real mutator dispatch via PushProcessor.
+ *   - `env.mintCookie({ email, name })` — seeds a user + credential
+ *     account in the scratch DB, then POSTs `/api/auth/sign-in/email`
+ *     against the live dashboard to receive a signed Set-Cookie. By
+ *     construction the cookie is one BetterAuth will accept on
+ *     subsequent `/api/*` calls.
+ *
+ * `SyncEnv.cleanup()` SIGTERMs every subprocess (process-group
+ * signaling — zero-cache forks 10+ workers we have to reap), drops
+ * the upstream replication slot zero-cache leaves behind, and
+ * drops the scratch DB.
+ *
+ * # Skip flags
+ *
+ * `skipDashboard / skipDaemon / skipZeroCache` opts let lighter-
+ * weight tests (pure PG trigger tests; daemon-only stress) skip the
+ * subprocess boot. The corresponding handle in the returned env is
+ * `null` cast to its type — don't dereference what you skipped.
+ *
+ * # Suites built on top
+ *
+ *   - `packages/shared/src/test/sync-harness.e2e.test.ts` — smoke.
+ *   - `packages/shared/src/sync/unread-count-trigger.test.ts` — pure
+ *     PG trigger test using `skipDashboard / skipDaemon / skipZeroCache`.
+ *   - `services/daemon/src/agent/daemon-down.e2e.test.ts` — restart
+ *     resilience + boot-recovery contract.
+ *   - `services/daemon/src/agent/dispatch-stress.e2e.test.ts` —
+ *     exactly-once dispatch under 100-row burst.
+ *   - `services/dashboard/src/lib/sync/dashboard-down.e2e.test.ts` —
+ *     dashboard restart contract.
+ *   - `services/dashboard/e2e/live-typing.spec.ts` — Playwright
+ *     browser-driven round-trip; uses this harness via
+ *     `e2e/global-setup.ts`.
+ *
+ * # Lifecycle pattern
+ *
+ *   beforeAll(() => { env = await spawnTestSyncEnv({ label: "..." }); })
+ *   afterAll(()  => { await env.cleanup(); })
+ *
+ * One env per test file. Tests inside the file share the env and
+ * either use unique block ids / agent names per-test or call
+ * `env.db.truncate()` between tests to avoid cross-pollution.
+ *
+ * # Note on the dropped convergence suite
+ *
+ * The original plan included a synthetic two-`@rocicorp/zero`-clients
+ * convergence test. That was dropped: Zero's Node client closes WS
+ * with code 1006 against the harness's zero-cache and the dashboard
+ * repo has no precedent for a real Node Zero client (every existing
+ * `zero.test.ts` mocks the module). The user-visible convergence
+ * contract is now covered end-to-end by the Playwright suite —
+ * which exercises a real browser Zero client through the same
+ * harness, which is what actually matters for Friday's reliability.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
