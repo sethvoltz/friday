@@ -13,6 +13,7 @@
   } from "$lib/util/time-format";
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import ToolBlock from "$lib/components/Chat/ToolBlock.svelte";
+  import { friendlyToolName } from "$lib/components/Chat/tool-headlines";
   import ThinkingBlock from "$lib/components/Chat/ThinkingBlock.svelte";
   import MailBlock from "$lib/components/Chat/MailBlock.svelte";
   import ErrorBlock from "$lib/components/Chat/ErrorBlock.svelte";
@@ -599,6 +600,7 @@
       <div class="message inline">
         <ToolBlock
           toolName={msg.toolName ?? ""}
+          friendlyName={friendlyToolName(msg.toolName ?? "")}
           status={(msg.status === "done" || msg.status === "error" || msg.status === "aborted" ? msg.status : "running") as "running" | "done" | "error" | "aborted"}
           input={msg.input}
           inputPartialJson={msg.inputPartialJson}

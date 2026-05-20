@@ -1,61 +1,58 @@
 import { describe, it, expect } from "vitest";
-import { compressPath, synthesizeHeadline } from "./tool-headlines";
+import { aliasPath, synthesizeHeadline } from "./tool-headlines";
 
 const HOME = "/Users/seth";
+const DATA = "/Users/seth/.friday";
 
-describe("compressPath", () => {
-  it("compresses an absolute path under home into ~/X/Y/file", () => {
+describe("aliasPath", () => {
+  it("aliases workspaces paths to @workspaces/<name>", () => {
     expect(
-      compressPath(
-        "/Users/seth/Development/Seth/Friday/agent-friday/services/daemon/src/api/server.ts",
-        HOME,
-      ),
-    ).toBe("~/D/S/F/a/s/d/s/a/server.ts");
+      aliasPath("/Users/seth/.friday/workspaces/my-agent/src/foo.ts", HOME, DATA),
+    ).toBe("@workspaces/my-agent/src/foo.ts");
   });
 
-  it("preserves leading dot on hidden directories", () => {
-    expect(compressPath("/Users/seth/.friday/memory/entries/x.md", HOME)).toBe(
-      "~/.f/m/e/x.md",
+  it("aliases apps paths to @apps/<name>", () => {
+    expect(
+      aliasPath("/Users/seth/.friday/apps/my-app/index.ts", HOME, DATA),
+    ).toBe("@apps/my-app/index.ts");
+  });
+
+  it("aliases home paths to ~/...", () => {
+    expect(
+      aliasPath("/Users/seth/Development/project/src/main.ts", HOME, DATA),
+    ).toBe("~/Development/project/src/main.ts");
+  });
+
+  it("passes through paths with no matching alias", () => {
+    expect(aliasPath("/etc/hosts", HOME, DATA)).toBe("/etc/hosts");
+    expect(aliasPath("/var/log/system.log", null, null)).toBe("/var/log/system.log");
+  });
+
+  it("workspace alias takes priority over home alias", () => {
+    expect(
+      aliasPath("/Users/seth/.friday/workspaces/foo", HOME, DATA),
+    ).toBe("@workspaces/foo");
+  });
+
+  it("passes through when dataDir is not provided", () => {
+    expect(aliasPath("/Users/seth/.friday/workspaces/foo", HOME, null)).toBe(
+      "~/.friday/workspaces/foo",
     );
-  });
-
-  it("renders the home dir itself as ~", () => {
-    expect(compressPath("/Users/seth", HOME)).toBe("~");
-  });
-
-  it("compresses absolute paths outside home with a leading /", () => {
-    expect(compressPath("/etc/hosts", HOME)).toBe("/e/hosts");
-    expect(compressPath("/var/log/system.log", HOME)).toBe("/v/l/system.log");
-  });
-
-  it("compresses relative paths", () => {
-    expect(compressPath("services/dashboard/src/app.css", null)).toBe(
-      "s/d/s/app.css",
-    );
-  });
-
-  it("returns single-segment paths untouched", () => {
-    expect(compressPath("server.ts", null)).toBe("server.ts");
-    expect(compressPath("/etc", null)).toBe("/etc");
-  });
-
-  it("skips home replacement when homeDir is not provided", () => {
-    expect(compressPath("/Users/seth/Code/x.ts", null)).toBe("/U/s/C/x.ts");
   });
 });
 
 describe("synthesizeHeadline — built-ins", () => {
-  it("Read uses file_path with compression", () => {
+  it("Read uses file_path with home alias", () => {
     expect(
       synthesizeHeadline(
         "Read",
         { file_path: "/Users/seth/Development/x.ts" },
         { homeDir: HOME },
       ),
-    ).toBe("Reading ~/D/x.ts");
+    ).toBe("Reading ~/Development/x.ts");
   });
 
-  it("Edit / Write use the same compression", () => {
+  it("Edit / Write use the same home alias", () => {
     expect(
       synthesizeHeadline(
         "Edit",

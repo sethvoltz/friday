@@ -61,7 +61,7 @@ async function spawnShellWithSleepChild(): Promise<{
   sleepPid: number;
   cleanup: () => void;
 }> {
-  const shell = spawn("sh", ["-c", "sleep 60 & wait"], {
+  const shell = spawn("sh", ["-c", "sleep 60 & while :; do sleep 30; done"], {
     detached: true,
     stdio: "ignore",
   });
@@ -162,16 +162,9 @@ describe("abortTurn kills in-flight tool subprocesses immediately", () => {
       expect(pidIsAlive(sleepPid)).toBe(false);
 
       // Worker stand-in (the shell) is still alive — descendant-kill is
-      // surgical. (The shell will exit on its own shortly afterward
-      // because its `wait` returned when `sleep` died; we don't assert
-      // that here because the cleanup path handles it. The contract this
-      // test pins is "shell wasn't killed by abortTurn itself.")
-      // Read shell aliveness within a couple of ms of the abort to avoid
-      // racing the shell's natural exit.
-      const elapsed = Date.now() - t0;
-      if (elapsed < 50) {
-        expect(pidIsAlive(shellPid)).toBe(true);
-      }
+      // surgical. The shell runs `while :; do sleep 30; done` so it stays
+      // alive indefinitely even after the sleep children are killed.
+      expect(pidIsAlive(shellPid)).toBe(true);
 
       __deleteLiveWorkerForTest("abort-tool-kill-agent");
     } finally {
