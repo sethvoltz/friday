@@ -559,7 +559,21 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       const captured = extractUsageFromResult(m);
       if (captured) {
         finalUsage = captured;
-        continue;
+        // The SDK protocol says `result` is the FINAL message of a
+        // turn. Continuing the for-await past it and waiting for the
+        // iterator to close on its own is a latent stall: if the CLI
+        // subprocess hangs or the underlying transport drops without
+        // emitting iterator-end, the worker sits in this loop forever
+        // — exactly what produced the 4h stale-turn ceiling kill on
+        // 2026-05-19 (turn t_92e2862e). Break immediately so
+        // turn-complete fires on the strong signal we already have,
+        // not on iterator closure that may never come. Any in-flight
+        // blocks that didn't receive their own content_block_stop
+        // before the result fired get the boundary-flush treatment
+        // (complete with content / cancel without) — mirroring the
+        // prompts-pending and critical-mail break paths.
+        flushBoundaryBlocks();
+        break;
       }
 
       if (m.type === "stream_event") {
