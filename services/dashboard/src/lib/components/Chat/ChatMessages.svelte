@@ -125,25 +125,25 @@
     return queued.length === 0 ? rawMessages : [...nonQueued, ...queued];
   });
 
-  // DOM windowing — bounded list slice with incremental expansion on
-  // scroll-up. Critical for long-running chats: rendering 3000+ bubbles
-  // at once on mobile blows past memory budgets and tanks scroll
-  // performance. The prior `pinnedToBottom`-gated implementation went
-  // from "last 200" to "all messages" the instant the user scrolled
-  // up — fine when "all" was Zero's 50-row window plus a few REST
-  // pages, but with the unbounded 90-day Zero query (plan §39 phase 2
-  // local-first) "all" is now thousands of rows; the bulk mount above
-  // the user's scrollTop snaps them to the actual top of the list.
+  // DOM windowing — bounded initial slice that goes unbounded on the
+  // first scroll-up. The window exists ONLY to keep mobile first-paint
+  // cheap on dense chats; once the user signals interest in older
+  // history (top sentinel intersects), we reveal everything in one
+  // shot with anchor-restore so they don't have to scroll up 15 times
+  // to see a year of conversation.
   //
-  // New shape: `renderTake` is the number of trailing messages we
-  // render, starting at WINDOW_SIZE and expanding by WINDOW_EXPAND on
-  // each top-sentinel hit (with anchor-restore so the user's viewport
-  // stays put). Read-only past-session views always render everything
-  // — that data set is bounded by the session length and the
-  // anchor-restore logic already lives in the past-session sentinel
-  // handler.
-  const WINDOW_SIZE = 200;
-  const WINDOW_EXPAND = 200;
+  // Sizing: `WINDOW_SIZE = 2000` covers the vast majority of active
+  // chats in one render — friday's 3300-message agent loads ~60% of
+  // it in the initial window, and chats under 2000 messages render
+  // entirely from the start. The previous WINDOW_SIZE of 200 produced
+  // the "a couple days" symptom: a dense chat showing only its last
+  // 33-ish hours despite having 12 days of history locally synced.
+  //
+  // Anchor-restore on the expand handler keeps the user's viewport
+  // pinned to their current bubble. Read-only past-session views are
+  // unaffected: their messages array is bounded by the session length
+  // and rendered in full.
+  const WINDOW_SIZE = 2000;
   let renderTake = $state(WINDOW_SIZE);
   // Reset the rendered window whenever the focused agent changes —
   // switching agents starts fresh from the bottom; without this,
@@ -281,14 +281,14 @@
               : 0;
           // Local-first window expansion. Plan §39: the Zero replica
           // already holds the full 90-day history in IndexedDB — there
-          // is no network round-trip. The top-sentinel hit means "reveal
-          // the next batch of older bubbles from the local store." The
-          // anchor-restore math is identical to the prior REST `?before=`
-          // path; only the source of the new rows changes.
-          renderTake = Math.min(
-            renderTake + WINDOW_EXPAND,
-            allMessages.length,
-          );
+          // is no network round-trip. The top-sentinel hit means "the
+          // user wants older messages"; reveal *all* of them in one
+          // shot rather than incrementing by a fixed step (a dense
+          // chat would otherwise need 15+ scroll-ups to surface a
+          // year of history, which feels broken). Anchor-restore
+          // below keeps the user's viewport pinned through the bulk
+          // mount.
+          renderTake = allMessages.length;
           void (async () => {
             if (!scroller || !anchorId) return;
             await tick();
