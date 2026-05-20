@@ -9,6 +9,8 @@ import {
   ensureFridayEnv,
   getLogPath,
   loadConfig,
+  resolveDaemonPort,
+  resolveDashboardPort,
   type ServiceName,
   SERVICES,
 } from "@friday/shared";
@@ -17,22 +19,21 @@ import {
   newSession,
   tmuxAvailable,
 } from "../lib/tmux.js";
-import {
-  readState,
-  tmuxSessionFor,
-  writeState,
-  type ServiceMode,
-} from "../lib/state.js";
+import { readState, tmuxSessionFor, writeState } from "../lib/state.js";
 import { isAlive, spawnDetached } from "../lib/proc.js";
+
+/**
+ * `--dev` was retired with FRI-83 — `friday start` always launches the
+ * prod-built artifacts now. Dev runs via root-package `pnpm dev:daemon`
+ * / `pnpm dev:dashboard` wrappers instead, so dev never touches the
+ * running prod fleet by default. If you're reaching for `--dev` here
+ * out of muscle memory, citty will reject the unknown flag — that's
+ * the new user-facing signpost.
+ */
 
 interface ServiceSpec {
   cwd: string;
   prodCmd: string;
-  /**
-   * Alternate command used when `friday start --dev`. Omit for services
-   * where dev/prod doesn't apply.
-   */
-  devCmd?: string;
 }
 
 type TmuxService = "daemon" | "dashboard" | "zero-cache";
@@ -45,25 +46,24 @@ function tmuxSpecs(
     daemon: {
       cwd: join(repoRoot, "services", "daemon"),
       prodCmd: "node dist/index.js",
-      devCmd: "exec pnpm exec tsx watch src/index.ts",
     },
     dashboard: {
       cwd: join(repoRoot, "services", "dashboard"),
       // Custom entrypoint that wraps adapter-node's handler with a
       // `/api/sync` WebSocket reverse-proxy to zero-cache (see
-      // server-entry.mjs). Falls back to adapter-node's PORT env knob
-      // for the HTTP listener so the rest of the stack (vite proxies,
-      // `friday status`, the SvelteKit dev URL, Cloudflare Tunnel
-      // ingress) all agree on the configured `dashboardPort`.
+      // server-entry.mjs). adapter-node's only port knob is `PORT`
+      // env, so we pass the resolved dashboard port (cfg.dashboardPort
+      // ?? PROD_DASHBOARD_PORT) through to it here. Dev mode uses
+      // vite dev's hardcoded 5173 from `vite.config.ts` — invoked
+      // separately via `pnpm dev:dashboard`, not from this CLI.
       prodCmd: `PORT=${dashboardPort} node server-entry.mjs`,
-      devCmd: `exec pnpm exec vite dev --port ${dashboardPort}`,
     },
-    // zero-cache is a stateless sidecar; no dev/prod distinction. It
-    // replicates from Postgres (ZERO_UPSTREAM_DB) into its own internal
-    // sqlite (ZERO_REPLICA_FILE) and serves WS clients on port 4848.
-    // ADR-024. Zero lives in the dashboard's deps (it's also the Zero
-    // client host), so we spawn the binary from that package — its
-    // node_modules/.bin/zero-cache is the canonical path.
+    // zero-cache is a stateless sidecar; it replicates from Postgres
+    // (ZERO_UPSTREAM_DB) into its own internal sqlite (ZERO_REPLICA_FILE)
+    // and serves WS clients on port 4848. ADR-024. Zero lives in the
+    // dashboard's deps (it's also the Zero client host), so we spawn
+    // the binary from that package — its node_modules/.bin/zero-cache
+    // is the canonical path.
     //
     // Restart loop: zero-cache exits with code 14 on AutoResetSignal
     // (replica out-of-sync; needs a fresh sync from upstream). The
@@ -111,19 +111,14 @@ function tmuxSpecs(
 function startTmuxService(
   service: TmuxService,
   spec: ServiceSpec,
-  mode: ServiceMode,
 ): { started: boolean; detail: string } {
   const sessionName = tmuxSessionFor(service);
-  const effectiveMode: ServiceMode =
-    mode === "dev" && spec.devCmd ? "dev" : "prod";
   if (hasSession(sessionName)) {
     return { started: false, detail: `already running (${sessionName})` };
   }
-  const cmd = effectiveMode === "dev" ? spec.devCmd! : spec.prodCmd;
-  newSession(sessionName, cmd, spec.cwd);
+  newSession(sessionName, spec.prodCmd, spec.cwd);
   writeState({
     service,
-    mode: effectiveMode,
     tmuxSession: sessionName,
     startedAt: new Date().toISOString(),
   });
@@ -132,10 +127,10 @@ function startTmuxService(
 
 /**
  * The Cloudflare Tunnel runs as a detached background process — not a
- * tmux session — because it's a stateless connector with no dev/prod
- * distinction and no need for an interactive shell. cloudflared writes
- * its own log via `--logfile`; the pid is tracked in
- * `~/.friday/state/tunnel.json` for `friday stop` / `friday status`.
+ * tmux session — because it's a stateless connector with no need for
+ * an interactive shell. cloudflared writes its own log via
+ * `--logfile`; the pid is tracked in `~/.friday/state/tunnel.json` for
+ * `friday stop` / `friday status`.
  */
 function startTunnel(repoRoot: string): { started: boolean; detail: string } {
   const existing = readState("tunnel");
@@ -165,7 +160,6 @@ function startTunnel(repoRoot: string): { started: boolean; detail: string } {
   );
   writeState({
     service: "tunnel",
-    mode: "prod",
     pid,
     startedAt: new Date().toISOString(),
   });
@@ -259,18 +253,13 @@ export const startCommand = defineCommand({
   meta: {
     name: "start",
     description:
-      "Start a service. `start` (no arg) starts daemon + dashboard (in tmux) plus the Cloudflare Tunnel (background daemon) when configured.",
+      "Start a service. `start` (no arg) starts daemon + dashboard + zero-cache (in tmux) plus the Cloudflare Tunnel (background daemon) when configured. Always prod mode; for dev see `pnpm dev:daemon` / `pnpm dev:dashboard`.",
   },
   args: {
     service: {
       type: "positional",
       required: false,
       description: `${SERVICES.join(" | ")} (default: all configured)`,
-    },
-    dev: {
-      type: "boolean",
-      description: "Dev mode for daemon + dashboard (tsx watch + vite dev). Ignored by tunnel.",
-      default: false,
     },
   },
   async run({ args }) {
@@ -282,8 +271,9 @@ export const startCommand = defineCommand({
     ensureFridayEnv();
     const cfg = loadConfig();
     const repoRoot = findRepoRoot();
-    const tmuxAll = tmuxSpecs(repoRoot, cfg.dashboardPort);
-    const mode: ServiceMode = args.dev ? "dev" : "prod";
+    const daemonPort = resolveDaemonPort(cfg);
+    const dashboardPort = resolveDashboardPort(cfg);
+    const tmuxAll = tmuxSpecs(repoRoot, dashboardPort);
 
     const target = (args.service as string | undefined)?.toLowerCase();
     let services: ServiceName[] = target
@@ -312,14 +302,13 @@ export const startCommand = defineCommand({
     // dist/. The tunnel doesn't need them, so skip when only tunnel is
     // queued (FIX_FORWARD 7.2).
     //
-    // In prod mode, also build the dashboard service itself — `node
-    // server-entry.mjs` runs whatever's already in `services/dashboard/build/`,
-    // and that artifact does not auto-update when the dashboard source
-    // changes. Until this gate landed, `friday restart dashboard` after a
-    // source edit silently kept serving the previous bundle, producing the
-    // worst possible feedback loop: "the fix doesn't work" reports against
-    // changes that simply hadn't shipped. Dev mode is exempt because
-    // `vite dev` rebuilds on demand.
+    // Also build the dashboard service itself — `node server-entry.mjs`
+    // runs whatever's already in `services/dashboard/build/`, and that
+    // artifact does not auto-update when the dashboard source changes.
+    // Until this gate landed, `friday restart dashboard` after a source
+    // edit silently kept serving the previous bundle, producing the
+    // worst possible feedback loop: "the fix doesn't work" reports
+    // against changes that simply hadn't shipped.
     const needsPackages = services.some(
       (s) => s === "daemon" || s === "dashboard",
     );
@@ -327,24 +316,24 @@ export const startCommand = defineCommand({
       console.log(pc.dim("  · building workspace packages…"));
       buildPackagesOrAbort(repoRoot);
     }
-    if (services.includes("dashboard") && mode === "prod") {
-      console.log(pc.dim("  · building dashboard (prod)…"));
+    if (services.includes("dashboard")) {
+      console.log(pc.dim("  · building dashboard…"));
       buildDashboardOrAbort(repoRoot);
     }
 
-    console.log(pc.green(`starting ${services.join(" + ")} in ${mode} mode`));
+    console.log(pc.green(`starting ${services.join(" + ")}`));
     for (const svc of services) {
       const r =
         svc === "tunnel"
           ? startTunnel(repoRoot)
-          : startTmuxService(svc, tmuxAll[svc], mode);
+          : startTmuxService(svc, tmuxAll[svc]);
       const icon = r.started ? pc.green("✓") : pc.yellow("·");
       console.log(`  ${icon} ${svc.padEnd(10)} ${r.detail}`);
     }
 
     console.log();
-    console.log(pc.dim(`  daemon API     http://localhost:${cfg.daemonPort}`));
-    console.log(pc.dim(`  dashboard      http://localhost:${cfg.dashboardPort}`));
+    console.log(pc.dim(`  daemon API     http://localhost:${daemonPort}`));
+    console.log(pc.dim(`  dashboard      http://localhost:${dashboardPort}`));
     console.log(pc.dim(`  zero-cache     ws://localhost:4848`));
     if (services.includes("tunnel") && cfg.publicUrl) {
       console.log(pc.dim(`  public URL     ${cfg.publicUrl}`));

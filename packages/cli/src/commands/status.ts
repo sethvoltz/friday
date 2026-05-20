@@ -124,11 +124,8 @@ export const statusCommand = defineCommand({
 
       const session = tmuxSessionFor(svc);
       const up = hasSession(session);
-      const mode = state?.mode ?? "—";
       const tag = up ? pc.green("up") : pc.dim("down");
-      console.log(
-        `  ${svc.padEnd(10)} ${tag}  mode=${mode}  session=${session}`,
-      );
+      console.log(`  ${svc.padEnd(10)} ${tag}  session=${session}`);
     }
 
     const client = new DaemonClient();

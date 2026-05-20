@@ -3,14 +3,12 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import pc from "picocolors";
 import { SERVICES, type ServiceName } from "@friday/shared";
-import { hasSession, paneCommand } from "../lib/tmux.js";
-import { readState, tmuxSessionFor, type ServiceMode } from "../lib/state.js";
 
 export const restartCommand = defineCommand({
   meta: {
     name: "restart",
     description:
-      "Restart one service (or `all`) in the same mode it was started in. A target is required — there's no default. Does not accept --dev/--prod.",
+      "Restart one service (or `all`). A target is required — there's no default.",
   },
   args: {
     service: {
@@ -19,19 +17,7 @@ export const restartCommand = defineCommand({
       description: `${SERVICES.join(" | ")} | all (required)`,
     },
   },
-  async run({ args, rawArgs }) {
-    for (const a of rawArgs) {
-      if (a === "--dev" || a === "--prod") {
-        console.error(
-          pc.red(`restart does not accept ${a} — it preserves the current mode.`),
-        );
-        console.error(
-          `To switch modes: friday stop <svc> && friday start <svc>${a === "--dev" ? " --dev" : ""}`,
-        );
-        process.exit(1);
-      }
-    }
-
+  async run({ args }) {
     const target = (args.service as string | undefined)?.toLowerCase();
     // No silent default. Bouncing every service was a footgun (vite HMR
     // reloads the browser tab); silently restarting just the daemon would
@@ -44,6 +30,7 @@ export const restartCommand = defineCommand({
       );
       console.error(`    daemon     — restart just the API daemon`);
       console.error(`    dashboard  — restart just the SvelteKit dashboard`);
+      console.error(`    zero-cache — restart just the Zero sync sidecar`);
       console.error(`    tunnel     — restart just the Cloudflare Tunnel`);
       console.error(`    all        — restart every running service`);
       process.exit(1);
@@ -67,40 +54,13 @@ export const restartCommand = defineCommand({
     );
 
     for (const svc of services) {
-      const mode = detectMode(svc);
-      if (!mode) {
-        console.error(
-          pc.red(`${svc}: cannot determine mode (not running, no state).`),
-        );
-        console.error(`  start it: ${pc.cyan(`friday start ${svc} [--dev]`)}`);
-        continue;
-      }
-      console.log(pc.dim(`restarting ${svc} in ${mode} mode`));
+      console.log(pc.dim(`restarting ${svc}`));
       spawnSync("node", [self, "stop", svc], { stdio: "inherit" });
-      spawnSync(
-        "node",
-        [self, "start", svc, ...(mode === "dev" ? ["--dev"] : [])],
-        { stdio: "inherit" },
-      );
+      spawnSync("node", [self, "start", svc], { stdio: "inherit" });
     }
   },
 });
 
 function validateService(s: string): s is ServiceName {
   return (SERVICES as readonly string[]).includes(s);
-}
-
-function detectMode(service: ServiceName): ServiceMode | null {
-  const state = readState(service);
-  if (state?.mode === "dev" || state?.mode === "prod") return state.mode;
-
-  const session = tmuxSessionFor(service);
-  if (hasSession(session)) {
-    const cmd = paneCommand(session).toLowerCase();
-    if (cmd.includes("tsx") || cmd.includes("vite") || cmd.includes("pnpm")) {
-      return "dev";
-    }
-    if (cmd.includes("node")) return "prod";
-  }
-  return null;
 }
