@@ -75,6 +75,16 @@ export const SYNC_TABLES: readonly string[] = [
   "system_banners",
   // Phase 4.3
   "settings",
+  // Item #54 — evolve proposals as a Zero-replicated table. Missed
+  // from this list on first ship; the browser's Zero schema declared
+  // it but the publication didn't, so zero-cache served clients a
+  // schema fingerprint the daemon's table set couldn't match and
+  // every page load fell into a SchemaVersionNotSupported reload
+  // loop. `ensurePublication` reconciles via ALTER PUBLICATION ADD
+  // TABLE on the next `friday setup` invocation, so existing
+  // installs recover by re-running setup (no replication-slot
+  // rebuild needed).
+  "evolve_proposals",
 ];
 
 export interface ProvisionResult {
