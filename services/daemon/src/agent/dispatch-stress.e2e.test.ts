@@ -164,26 +164,39 @@ describe("dispatch stress / exactly-once (item #50 — plan §4 step 4b)", () =>
       );
       expect(allSpecs.length).toBe(ROW_COUNT);
 
-      // Wait for the daemon's LISTEN handler to drain.
+      // Wait for the daemon's LISTEN handler to drain to the DB AND
+      // emit every log line. processPendingBlockRow flips the row off
+      // 'pending' (UPDATE blocks SET status='queued'|'complete') BEFORE
+      // it writes the "block.dispatch.applied" log line — see
+      // dispatch-listener.ts L149–L188. Polling only on pending=0 races
+      // the log writes for the last handful of rows and produced
+      // flakes around 88–99/100 on CI.
       const deadline = Date.now() + CONVERGE_DEADLINE_MS;
       let lastPending = ROW_COUNT;
+      let lastApplied = 0;
+      let logBuf = "";
       while (Date.now() < deadline) {
         lastPending = await countPending(env.databaseUrl);
-        if (lastPending === 0) break;
-        await new Promise((r) => setTimeout(r, 250));
+        logBuf = await readDaemonLog(env.daemon.dataDir);
+        lastApplied = countLogEvents(logBuf, "block.dispatch.applied");
+        if (lastPending === 0 && lastApplied === ROW_COUNT) break;
+        await new Promise((r) => setTimeout(r, 100));
       }
       expect(lastPending).toBe(0);
+      expect(lastApplied).toBe(ROW_COUNT);
 
-      // Exactly-once dispatch: count `block.dispatch.applied` log
-      // events. Equal to ROW_COUNT means each row was processed once.
-      const log = await readDaemonLog(env.daemon.dataDir);
-      const applied = countLogEvents(log, "block.dispatch.applied");
-      expect(applied).toBe(ROW_COUNT);
+      // Brief settle so any duplicate-dispatch bug (applied > ROW_COUNT)
+      // has a chance to surface. By the time pending=0 has converged
+      // the LISTEN handler is idle, so 500ms is enough to catch a
+      // stray re-entry without meaningfully extending wall time.
+      await new Promise((r) => setTimeout(r, 500));
+      logBuf = await readDaemonLog(env.daemon.dataDir);
+      expect(countLogEvents(logBuf, "block.dispatch.applied")).toBe(ROW_COUNT);
 
       // Negative-space assertions: no shape-mismatch (our INSERTs were
       // legal), no process errors (LISTEN handler ran clean).
-      expect(countLogEvents(log, "block.dispatch.skip.shape-mismatch")).toBe(0);
-      expect(countLogEvents(log, "block.dispatch-listen.process.error")).toBe(0);
+      expect(countLogEvents(logBuf, "block.dispatch.skip.shape-mismatch")).toBe(0);
+      expect(countLogEvents(logBuf, "block.dispatch-listen.process.error")).toBe(0);
     },
     TEST_TIMEOUT_MS,
   );
