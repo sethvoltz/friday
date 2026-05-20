@@ -49,6 +49,7 @@ interface MockUpsertCall {
   agent_name: string;
   last_seen_block_id: string;
   ts: number;
+  unread_count?: number;
 }
 
 interface MockClientDeviceUpdateCall {
@@ -372,6 +373,9 @@ describe("markRead", () => {
         agent_name: "friday",
         last_seen_block_id: "blk-7",
         ts: 1_700_000_000_000,
+        // Item #52: markRead resets the server-computed unread badge
+        // counter atomically with the cursor advance.
+        unread_count: 0,
       },
     ]);
   });

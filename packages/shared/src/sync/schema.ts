@@ -281,6 +281,10 @@ const readCursors = table("read_cursors")
     agent_name: string(),
     last_seen_block_id: string(),
     ts: number(),
+    // Item #52: server-computed unread badge counter. Increments via
+    // a Postgres trigger on `blocks` INSERT; the `markRead` mutator
+    // resets to 0 alongside the last_seen_block_id update.
+    unread_count: number(),
   })
   .primaryKey("device_id", "agent_name");
 

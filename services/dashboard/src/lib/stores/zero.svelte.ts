@@ -125,6 +125,7 @@ export interface ZeroReadCursorRow {
   agent_name: string;
   last_seen_block_id: string;
   ts: number;
+  unread_count: number;
 }
 
 /** Row shape mirrors the `settings` Zero table definition (Phase 4.3).

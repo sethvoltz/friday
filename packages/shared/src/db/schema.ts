@@ -513,6 +513,14 @@ export const readCursors = pgTable(
     agentName: text("agent_name").notNull(),
     lastSeenBlockId: text("last_seen_block_id").notNull(),
     ts: timestamp("ts", { withTimezone: true }).notNull(),
+    // Item #52: server-computed unread badge counter. A Postgres
+    // trigger on `blocks` INSERT increments this for every row whose
+    // (deviceId, agentName) matches the new block's agent. The
+    // `markRead` mutator resets it to 0 atomically with the
+    // last_seen_block_id update. Drives the sidebar badge reactively
+    // via Zero — replaces the prior SSE-`agent_message`-driven
+    // `chat.unreadByAgent` derivation.
+    unreadCount: integer("unread_count").notNull().default(0),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.deviceId, t.agentName] }),

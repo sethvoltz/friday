@@ -608,6 +608,11 @@ export const createMutators = () => ({
       agent_name: args.agentName,
       last_seen_block_id: args.lastSeenBlockId,
       ts: args.ts,
+      // Item #52: reset the server-computed unread counter atomically
+      // with the cursor advance. The trigger on `blocks` INSERT
+      // increments this row; markRead resets it back to 0 the moment
+      // the user catches up.
+      unread_count: 0,
     });
   },
   reportClientStats: async (
