@@ -125,26 +125,57 @@
     return queued.length === 0 ? rawMessages : [...nonQueued, ...queued];
   });
 
-  // DOM windowing. When the user is bottom-pinned (scrolled to or near the
-  // latest), only render the last WINDOW_SIZE messages — keeps the DOM
-  // bounded for long-running chats. The moment the user scrolls up to read
-  // older history we render everything, including any pages already loaded
-  // via top-sentinel pagination, so they can browse freely. Read-only
-  // session views always render the full passed-in array.
+  // DOM windowing — bounded list slice with incremental expansion on
+  // scroll-up. Critical for long-running chats: rendering 3000+ bubbles
+  // at once on mobile blows past memory budgets and tanks scroll
+  // performance. The prior `pinnedToBottom`-gated implementation went
+  // from "last 200" to "all messages" the instant the user scrolled
+  // up — fine when "all" was Zero's 50-row window plus a few REST
+  // pages, but with the unbounded 90-day Zero query (plan §39 phase 2
+  // local-first) "all" is now thousands of rows; the bulk mount above
+  // the user's scrollTop snaps them to the actual top of the list.
+  //
+  // New shape: `renderTake` is the number of trailing messages we
+  // render, starting at WINDOW_SIZE and expanding by WINDOW_EXPAND on
+  // each top-sentinel hit (with anchor-restore so the user's viewport
+  // stays put). Read-only past-session views always render everything
+  // — that data set is bounded by the session length and the
+  // anchor-restore logic already lives in the past-session sentinel
+  // handler.
   const WINDOW_SIZE = 200;
+  const WINDOW_EXPAND = 200;
+  let renderTake = $state(WINDOW_SIZE);
+  // Reset the rendered window whenever the focused agent changes —
+  // switching agents starts fresh from the bottom; without this,
+  // hopping between a 3000-message chat and a 5-message chat would
+  // leave the new agent's view rendering its 5 messages plus 2995
+  // ghost-slots' worth of expansion budget the user hadn't actually
+  // scrolled into.
+  $effect(() => {
+    chat.focusedAgent;
+    untrack(() => {
+      renderTake = WINDOW_SIZE;
+    });
+  });
   let list = $derived.by(() => {
     if (readonly) return allMessages;
-    // Defensive: while a load-older is in flight, never apply the
-    // pinnedToBottom window slice. If the bottom IntersectionObserver
-    // ever fires mid-mutation and flips `pinnedToBottom` true (the
-    // observed WebKit paint bug had a different cause, but this guards
-    // against a related theoretical race), the rendered DOM would chop
-    // down to the last 200 items right as the user is reading older
-    // history. Cheap to gate; keep it.
-    if (chat.loadingOlder) return allMessages;
-    if (!chat.pinnedToBottom) return allMessages;
-    if (allMessages.length <= WINDOW_SIZE) return allMessages;
-    return allMessages.slice(allMessages.length - WINDOW_SIZE);
+    if (allMessages.length <= renderTake) return allMessages;
+    return allMessages.slice(allMessages.length - renderTake);
+  });
+  // Honest "no older messages" gate: once the rendered window contains
+  // every message in the agent's transcript AND Zero confirms the local
+  // replica matches the upstream filter, scroll-up should stop offering
+  // expansion. This flips `chat.reachedOldest` so the top-sentinel guard
+  // bails (and the day-separator at the top of history finally surfaces).
+  $effect(() => {
+    if (readonly) return;
+    const total = allMessages.length;
+    const complete = zeroSync.blocksResultType === "complete";
+    untrack(() => {
+      if (complete && renderTake >= total) {
+        if (!chat.reachedOldest) chat.reachedOldest = true;
+      }
+    });
   });
 
   // Slack-style grouping + separators (FRI-37). Computed off the same `list`
@@ -230,13 +261,15 @@
             });
             continue;
           }
-          if (chat.loadingOlder || chat.reachedOldest) continue;
+          if (chat.reachedOldest) continue;
+          if (renderTake >= allMessages.length) continue;
           // Anchor on a concrete rendered message rather than scrollHeight
           // math: capture the first currently-rendered bubble's id + its
-          // distance from the viewport top, then after prepend, scroll so
-          // that same bubble lands at the same offset. Works identically
-          // in Chromium and WebKit; `scrollHeight - beforeHeight` did not
-          // (WebKit's layout flush ordering left the read stale).
+          // distance from the viewport top, then after the window expands,
+          // scroll so that same bubble lands at the same offset. Works
+          // identically in Chromium and WebKit; `scrollHeight -
+          // beforeHeight` did not (WebKit's layout flush ordering left
+          // the read stale).
           const scroller = el.closest(".chat-scroll") as HTMLElement | null;
           const anchorEl =
             scroller?.querySelector<HTMLElement>("[data-msg-id]") ?? null;
@@ -246,50 +279,39 @@
               ? anchorEl.getBoundingClientRect().top -
                 scroller.getBoundingClientRect().top
               : 0;
-          void chat.loadOlderTurns({
-            onPrepended: async () => {
-              if (!scroller || !anchorId) return;
-              // `tick()` flushes Svelte's pending DOM updates so the
-              // freshly-prepended bubbles are in the document.
-              await tick();
-              if (!scroller) return;
-              const target = scroller.querySelector<HTMLElement>(
-                `[data-msg-id="${CSS.escape(anchorId)}"]`,
-              );
-              if (!target) return;
-              const newOffset =
-                target.getBoundingClientRect().top -
-                scroller.getBoundingClientRect().top;
-              const delta = newOffset - anchorOffset;
-              // WebKit/Safari/Orion paint-deferral fix (virtua PR #862 /
-              // inokawa#362, originally `prud/ios-overflow-scroll-to-top`).
-              // A programmatic `scrollTop` write that lands while WebKit's
-              // scroll thread is still hot (fast-scroll just stopped,
-              // momentum, recent input) defers both the scroll commit and
-              // the paint of the newly-revealed region until the next
-              // user scroll event. The DOM is correct; the GPU paint is
-              // stale. Toggling `overflow-y: hidden` synchronously detaches
-              // the element from the scroll thread, forcing WebKit to
-              // commit + flush a full paint. The async restore (setTimeout
-              // 0) reattaches it correctly painted — a synchronous restore
-              // reproduces the bug, so the tick is load-bearing.
-              //
-              // Re-entrancy: the restore targets "" (let .chat-scroll's
-              // CSS overflow-y: auto resume), not a snapshotted prev. The
-              // prepend's height change synchronously fires the ChatShell
-              // content ResizeObserver, which calls its own writeScrollTop
-              // mid-handler — before this setTimeout has run. With prev-
-              // capture, that nested call would snapshot prev = "hidden"
-              // and its trailing restore would re-apply "hidden", locking
-              // the scroller permanently until the element unmounted (the
-              // reported "have to switch session to recover" bug).
-              scroller.style.overflowY = "hidden";
-              scroller.scrollTop += delta;
-              setTimeout(() => {
-                if (scroller) scroller.style.overflowY = "";
-              }, 0);
-            },
-          });
+          // Local-first window expansion. Plan §39: the Zero replica
+          // already holds the full 90-day history in IndexedDB — there
+          // is no network round-trip. The top-sentinel hit means "reveal
+          // the next batch of older bubbles from the local store." The
+          // anchor-restore math is identical to the prior REST `?before=`
+          // path; only the source of the new rows changes.
+          renderTake = Math.min(
+            renderTake + WINDOW_EXPAND,
+            allMessages.length,
+          );
+          void (async () => {
+            if (!scroller || !anchorId) return;
+            await tick();
+            if (!scroller) return;
+            const target = scroller.querySelector<HTMLElement>(
+              `[data-msg-id="${CSS.escape(anchorId)}"]`,
+            );
+            if (!target) return;
+            const newOffset =
+              target.getBoundingClientRect().top -
+              scroller.getBoundingClientRect().top;
+            const delta = newOffset - anchorOffset;
+            // WebKit/Safari/Orion paint-deferral fix — same shape as the
+            // past-session block above. Detach the scroll thread, write,
+            // reattach next tick. Without it the freshly-rendered region
+            // above the user's viewport stays unpainted until the next
+            // scroll event.
+            scroller.style.overflowY = "hidden";
+            scroller.scrollTop += delta;
+            setTimeout(() => {
+              if (scroller) scroller.style.overflowY = "";
+            }, 0);
+          })();
         }
       },
       { rootMargin: "200px 0px 0px 0px" },
@@ -318,25 +340,24 @@
   // and the user's next scroll-up will trigger pagination normally.
   $effect(() => {
     if (readonly) return;
-    // Track the gates the callback checks. When any of these flips to a
-    // pagination-permitting value, re-emit. `chat.focusedAgent` covers
-    // agent-switch; `chat.oldestBlockId` transitions from null → string
-    // when an initial load completes; the other two cover the small-chat
-    // case where reachedOldest had been true on the previous agent.
+    // Track the gates the new local-first callback checks. The IO only
+    // emits on intersection CHANGES — without a forced re-emit, a small
+    // chat whose entire list fits in one viewport (so the top sentinel
+    // is already intersecting when render-take is at the WINDOW_SIZE
+    // floor) never triggers an expansion no matter how many older rows
+    // arrive into the local replica afterward.
     //
-    // We deliberately do NOT track `chat.messages.length` here. That used
-    // to be in the deps and produced a serious regression: every send
-    // (`addUser` increments the length) re-emitted the IO callback, which
-    // fired a spurious `loadOlderTurns` that — when it returned empty —
-    // set `reachedOldest = true` and broke subsequent pagination.
+    // We deliberately do NOT track `allMessages.length` directly to
+    // avoid the historical "every send re-emits the IO and trips a
+    // spurious expansion" regression — instead we track the agent
+    // identity (covers agent-switch) and reachedOldest (covers the
+    // window-just-caught-up-to-all-messages transition flipping the
+    // gate state).
     chat.focusedAgent;
-    const oldest = chat.oldestBlockId;
-    chat.loadingOlder;
     chat.reachedOldest;
 
     untrack(() => {
-      if (oldest === null) return;
-      if (chat.loadingOlder || chat.reachedOldest) return;
+      if (chat.reachedOldest) return;
       if (!topSentinelObserver || !topSentinel) return;
       topSentinelObserver.unobserve(topSentinel);
       topSentinelObserver.observe(topSentinel);
