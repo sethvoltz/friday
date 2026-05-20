@@ -227,8 +227,25 @@
   }
 
   /** FIX_FORWARD 5.11: revoke one session. If it's the current one, the
-   *  next request will fail auth and the browser redirects to /login. */
+   *  next request will fail auth and the browser redirects to /login.
+   *
+   *  Also forgets the matching client_devices row(s) so the storage
+   *  telemetry doesn't orphan — per Seth's spec, "tracking the usage
+   *  only makes sense for logged in sessions." Best-effort: matches
+   *  by exact userAgent (or by deviceId for the current tab); a
+   *  session with no matching device is a clean no-op on the forget
+   *  leg. */
   async function revokeSession(id: string, isCurrent: boolean) {
+    if (zeroOn) {
+      const session = data.sessions.find((s) => s.id === id);
+      if (session) {
+        const device = deviceForSession({
+          userAgent: session.userAgent,
+          isCurrent,
+        });
+        if (device) zeroSync.forgetDevice(device.device_id);
+      }
+    }
     await fetch("/api/sessions/revoke", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -281,26 +298,43 @@
     return `${usedText} / ${fmtBytes(quota)}`;
   }
 
-  /** Phase 6: forget a device. Hard-deletes the client_devices row
-   *  via the `forgetDevice` mutator. When the user forgets the
-   *  current tab, ALSO sign them out so the row doesn't get
-   *  immediately re-created by the next `/api/sync/refresh` JWT
-   *  mint. */
-  async function forgetDevice(deviceId: string, isCurrent: boolean): Promise<void> {
-    const ok = await confirmDialog({
-      title: isCurrent ? "Forget this device?" : "Forget that device?",
-      description: isCurrent
-        ? "Removing this device's storage telemetry + per-device read cursors. You'll also be signed out — sign back in to re-register this device."
-        : "Removing that device's storage telemetry + per-device read cursors. The device will re-register on next sync-refresh until it's signed out.",
-      confirmLabel: "Forget device",
-      danger: true,
-    });
-    if (!ok) return;
-    zeroSync.forgetDevice(deviceId);
-    if (isCurrent) {
-      await fetch("/api/auth/sign-out", { method: "POST" });
-      window.location.href = "/login";
+  /**
+   * Match a BetterAuth session to a Zero `client_devices` row so we
+   * can render storage telemetry inline with the session.
+   *
+   * Strategy:
+   *   - Current session: use the tab's known `currentDeviceId` (most
+   *     precise — no userAgent ambiguity).
+   *   - Other sessions: best-effort match by exact userAgent string.
+   *     If multiple devices share the same userAgent (same browser
+   *     install, separate sign-ins), pick the most-recently-seen one.
+   *   - No device row yet (a session whose tab hasn't reported storage
+   *     stats in this account's history): return null and the row
+   *     renders without the storage column.
+   *
+   * The "logged in sessions only" semantic from Seth's spec falls out
+   * naturally: we iterate `data.sessions` and only sessions with a
+   * device get the storage UI. Orphaned devices (no matching session)
+   * are not rendered — they'll get cleaned up when the user revokes
+   * the session or the `forgetDevice` mutator fires from a future
+   * Settings affordance.
+   */
+  function deviceForSession(session: {
+    userAgent: string | null;
+    isCurrent: boolean;
+  }): import("$lib/stores/zero.svelte").ZeroClientDeviceRow | null {
+    if (session.isCurrent && zeroSync.currentDeviceId) {
+      return (
+        zeroSync.clientDevices.find(
+          (d) => d.device_id === zeroSync.currentDeviceId,
+        ) ?? null
+      );
     }
+    const candidates = zeroSync.clientDevices.filter(
+      (d) => d.user_agent === session.userAgent,
+    );
+    if (candidates.length === 0) return null;
+    return [...candidates].sort((a, b) => b.last_seen_at - a.last_seen_at)[0]!;
   }
 
   function shortenUserAgent(ua: string | null): string {
@@ -507,61 +541,20 @@
     </div>
   </div>
 
-  {#if zeroOn}
-    <div class="card devices-card">
-      <div class="card-header"><h2>Devices</h2></div>
-      <p class="row-value">
-        Browser caches that have synced this account. Each row is a separate
-        device-id minted by <code>/api/sync/refresh</code>. Forget a device to
-        drop its read cursors + storage telemetry; the row is re-created the
-        next time that browser refreshes its sync token.
-      </p>
-      {#if zeroSync.clientDevices.length === 0}
-        <p class="row-value muted">No devices reported storage yet.</p>
-      {:else}
-        <ul class="device-list">
-          {#each zeroSync.clientDevices as d (d.device_id)}
-            {@const isCurrent = d.device_id === zeroSync.currentDeviceId}
-            <li class="device-row" class:current={isCurrent}>
-              <div class="device-meta">
-                <span class="device-client">
-                  {d.label ?? shortenUserAgent(d.user_agent ?? null)}
-                </span>
-                {#if isCurrent}
-                  <span class="device-current">this device</span>
-                {/if}
-              </div>
-              <div class="device-storage">
-                <span class="storage-usage">
-                  {fmtStorageUsage(d.storage_used_bytes, d.storage_quota_bytes)}
-                </span>
-                <span class="device-times">
-                  Last seen {fmtTimestamp(d.last_seen_at)}
-                </span>
-              </div>
-              <button
-                class="ghost device-forget"
-                onclick={() => forgetDevice(d.device_id, isCurrent)}>
-                Forget this device
-              </button>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </div>
-  {/if}
-
   <div class="card sessions-card">
     <div class="card-header"><h2>Active sessions</h2></div>
     <p class="row-value">
       Devices and browsers currently signed in to this account. Revoke one to force
-      that session to re-authenticate.
+      that session to re-authenticate. Storage usage is reported by the device
+      when it has a live sync connection — sessions without a recent sync show
+      no storage column.
     </p>
     {#if data.sessions.length === 0}
       <p class="row-value muted">No active sessions.</p>
     {:else}
       <ul class="session-list">
         {#each data.sessions as s (s.id)}
+          {@const device = zeroOn ? deviceForSession(s) : null}
           <li class="session-row" class:current={s.isCurrent}>
             <div class="session-meta">
               <span class="session-client">{shortenUserAgent(s.userAgent)}</span>
@@ -572,6 +565,23 @@
                 <span class="session-current">this device</span>
               {/if}
             </div>
+            {#if device}
+              <div class="session-storage" aria-label="Storage usage">
+                <span class="storage-usage">
+                  {fmtStorageUsage(
+                    device.storage_used_bytes,
+                    device.storage_quota_bytes,
+                  )}
+                </span>
+                <span class="session-last-seen">
+                  Last sync {fmtTimestamp(device.last_seen_at)}
+                </span>
+              </div>
+            {:else}
+              <div class="session-storage muted" aria-label="No storage data">
+                <span class="storage-usage muted">—</span>
+              </div>
+            {/if}
             <div class="session-times">
               <span>Signed in {fmtTimestamp(s.createdAt)}</span>
               <span class="session-expires">Expires {fmtTimestamp(s.expiresAt)}</span>
@@ -643,67 +653,7 @@
   }
   .config-card { grid-column: 1 / -1; }
   .sessions-card { grid-column: 1 / -1; }
-  .devices-card { grid-column: 1 / -1; }
-  .device-list {
-    list-style: none;
-    padding: 0;
-    margin: 0.75rem 0 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-  .device-row {
-    display: grid;
-    grid-template-columns: 1fr auto auto;
-    gap: 0.75rem;
-    align-items: center;
-    padding: 0.6rem 0.75rem;
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-sm);
-    background: var(--bg-secondary);
-  }
-  .device-row.current {
-    border-color: var(--accent-primary);
-    background: var(--accent-glow);
-  }
-  .device-meta {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-    min-width: 0;
-  }
-  .device-client {
-    font-weight: 600;
-    color: var(--text-primary);
-    font-size: 0.85rem;
-  }
-  .device-current {
-    font-size: 0.65rem;
-    color: var(--accent-primary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: 600;
-    background: var(--bg-card);
-    padding: 0.1rem 0.4rem;
-    border-radius: 99px;
-  }
-  .device-storage {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 0.15rem;
-    color: var(--text-secondary);
-    font-size: 0.75rem;
-    font-family: var(--font-mono);
-  }
   .storage-usage { color: var(--text-primary); }
-  .device-times { color: var(--text-tertiary); }
-  .device-forget { font-size: 0.75rem; padding: 0.25rem 0.6rem; }
-  @media (max-width: 640px) {
-    .device-row { grid-template-columns: 1fr; }
-    .device-storage { align-items: flex-start; }
-  }
 
   .theme-picker {
     display: flex;
@@ -764,13 +714,29 @@
   }
   .session-row {
     display: grid;
-    grid-template-columns: 1fr auto auto;
-    gap: 0.75rem;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    gap: 0.75rem 1rem;
     align-items: center;
     padding: 0.6rem 0.75rem;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     background: var(--bg-secondary);
+  }
+  .session-storage {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.15rem;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    min-width: 8rem;
+  }
+  .session-storage.muted .storage-usage {
+    color: var(--text-tertiary);
+  }
+  .session-last-seen {
+    color: var(--text-tertiary);
   }
   .session-row.current {
     border-color: var(--accent-primary);
@@ -819,7 +785,10 @@
     .session-row {
       grid-template-columns: 1fr;
     }
-    .session-times { align-items: flex-start; }
+    .session-times,
+    .session-storage {
+      align-items: flex-start;
+    }
   }
 
   .settings-toast {
