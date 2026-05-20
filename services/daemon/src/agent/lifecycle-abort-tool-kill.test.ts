@@ -1,0 +1,186 @@
+/**
+ * Stop must kill in-flight tool subprocesses immediately (item #1 in
+ * `~/.claude/plans/mellow-sparking-dusk.md`).
+ *
+ * The bug this test pins: prior to the descendant-kill landing, `abortTurn`
+ * sent the IPC and waited up to 2 seconds for the SDK's abortController to
+ * propagate through the CLI subprocess to in-flight tools (Bash, etc.). A
+ * destructive `rm -rf` or runaway `find /` kept executing for that window.
+ *
+ * New contract:
+ *   - `abortTurn` calls `killPgrpDescendants(pgid, workerPid, "SIGTERM")`
+ *     at T+0, alongside the IPC send.
+ *   - The worker process itself is left alive; its for-await loop sees the
+ *     SDK CLI subprocess close and runs the catch arm cleanly.
+ *   - Tool subprocesses in the worker's pgrp are reaped within milliseconds.
+ *
+ * The test spawns a real shell subprocess whose own child is a long `sleep`,
+ * sets up a synthetic `LiveWorker` whose pgrp matches that shell, then calls
+ * `abortTurn`. The descendant `sleep` must die within 100ms; the shell
+ * itself must stay alive (it's the worker stand-in).
+ */
+
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { spawn, spawnSync } from "node:child_process";
+import { createTestDb, type TestDbHandle } from "@friday/shared";
+
+let handle: TestDbHandle;
+
+beforeAll(async () => {
+  handle = await createTestDb({ label: "abort_tool_kill" });
+});
+
+beforeEach(async () => {
+  await handle.truncate();
+});
+
+afterEach(async () => {
+  vi.useRealTimers();
+});
+
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw err;
+  }
+}
+
+/**
+ * Spawn a detached shell that itself runs a long `sleep`. The shell is its
+ * own pgrp leader (detached:true). Returns once the `sleep` subprocess is
+ * confirmed to exist as a child of the shell — that gives the test a real
+ * descendant to assert on without racing the fork.
+ */
+async function spawnShellWithSleepChild(): Promise<{
+  shellPid: number;
+  sleepPid: number;
+  cleanup: () => void;
+}> {
+  const shell = spawn("sh", ["-c", "sleep 60 & wait"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  const shellPid = shell.pid;
+  if (!shellPid) throw new Error("shell did not spawn");
+
+  // Wait for the shell to fork `sleep`. Poll pgrep until we see the child.
+  let sleepPid = 0;
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const r = spawnSync("pgrep", ["-P", String(shellPid)], { encoding: "utf8" });
+    if (r.status === 0) {
+      const lines = (r.stdout ?? "").trim().split("\n").filter(Boolean);
+      if (lines.length > 0) {
+        sleepPid = Number.parseInt(lines[0], 10);
+        if (Number.isFinite(sleepPid) && sleepPid > 0) break;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!sleepPid) {
+    try {
+      process.kill(-shellPid, "SIGKILL");
+    } catch {
+      /* ignore */
+    }
+    throw new Error("sleep child never appeared under shell pgrp");
+  }
+
+  return {
+    shellPid,
+    sleepPid,
+    cleanup: () => {
+      try {
+        process.kill(-shellPid, "SIGKILL");
+      } catch {
+        /* already dead */
+      }
+    },
+  };
+}
+
+describe("abortTurn kills in-flight tool subprocesses immediately", () => {
+  it("SIGTERMs the worker's descendants at T+0 (no 2s grace) while leaving the worker process alive", async () => {
+    const { abortTurn, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+
+    const { shellPid, sleepPid, cleanup } = await spawnShellWithSleepChild();
+    try {
+      // Synthetic LiveWorker whose pgrp matches the real shell + sleep
+      // subprocess tree. `child.pid = shellPid` is critical so
+      // `killPgrpDescendants` excludes the shell (worker stand-in) and only
+      // signals the sleep child.
+      const worker = {
+        child: {
+          pid: shellPid,
+          send: vi.fn(),
+          exitCode: null,
+          killed: false,
+        },
+        pgid: shellPid,
+        agentName: "abort-tool-kill-agent",
+        agentType: "orchestrator",
+        model: "claude-opus-4-7",
+        turnId: "turn-att-1",
+        sessionId: "sess-att-1",
+        workingDirectory: "/tmp/fake",
+        abortRequested: false,
+        lastHeartbeat: Date.now(),
+        turnStart: Date.now() - 1000,
+        spawnedAt: Date.now() - 5000,
+        lastBlockStop: Date.now(),
+        status: "working",
+        nextPrompts: [],
+        mode: "long-lived",
+        lastExitStatus: "complete",
+        completedAtLeastOnce: false,
+      };
+      __putLiveWorkerForTest("abort-tool-kill-agent", worker as never);
+
+      // Sanity: sleep is alive before abort.
+      expect(pidIsAlive(sleepPid)).toBe(true);
+      expect(pidIsAlive(shellPid)).toBe(true);
+
+      // Fire.
+      const t0 = Date.now();
+      expect(abortTurn("abort-tool-kill-agent")).toBe(true);
+      expect(worker.child.send).toHaveBeenCalledWith({ type: "abort" });
+
+      // Poll until sleep is reaped. The test fails if it takes longer than
+      // 100ms — the whole point of the descendant-kill is that destructive
+      // tools die within a human-imperceptible window.
+      const deadline = t0 + 100;
+      while (Date.now() < deadline) {
+        if (!pidIsAlive(sleepPid)) break;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      expect(pidIsAlive(sleepPid)).toBe(false);
+
+      // Worker stand-in (the shell) is still alive — descendant-kill is
+      // surgical. (The shell will exit on its own shortly afterward
+      // because its `wait` returned when `sleep` died; we don't assert
+      // that here because the cleanup path handles it. The contract this
+      // test pins is "shell wasn't killed by abortTurn itself.")
+      // Read shell aliveness within a couple of ms of the abort to avoid
+      // racing the shell's natural exit.
+      const elapsed = Date.now() - t0;
+      if (elapsed < 50) {
+        expect(pidIsAlive(shellPid)).toBe(true);
+      }
+
+      __deleteLiveWorkerForTest("abort-tool-kill-agent");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("is a no-op on agents that aren't live", async () => {
+    const { abortTurn } = await import("./lifecycle.js");
+    expect(abortTurn("agent-that-does-not-exist")).toBe(false);
+  });
+});

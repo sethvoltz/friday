@@ -79,7 +79,7 @@ interface CapturedEvent {
 }
 
 describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
-  it("force-kills the worker when abort IPC is ignored for 2s", async () => {
+  it("force-kills the worker when abort IPC is ignored for 500ms", async () => {
     const { abortTurn, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
@@ -99,11 +99,11 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     expect(child.send).toHaveBeenCalledWith({ type: "abort" });
 
     // Before the deadline, no force-kill yet.
-    await vi.advanceTimersByTimeAsync(1500);
+    await vi.advanceTimersByTimeAsync(300);
     expect(captured.find((e) => e.type === "turn_done")).toBeUndefined();
 
-    // After the 2s deadline, force-kill fires.
-    await vi.advanceTimersByTimeAsync(600);
+    // After the 500ms deadline, force-kill fires.
+    await vi.advanceTimersByTimeAsync(300);
     // Drop back to real timers and let any pending DB writes flush.
     vi.useRealTimers();
     await new Promise((r) => setTimeout(r, 50));
@@ -146,14 +146,14 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
 
     abortTurn("fk-agent");
 
-    // Worker responds at 500ms with turn-complete (the SDK aborted cleanly).
-    await vi.advanceTimersByTimeAsync(500);
+    // Worker responds at 200ms with turn-complete (the SDK aborted cleanly).
+    await vi.advanceTimersByTimeAsync(200);
     await handleEvent(worker as never, {
       type: "turn-complete",
       sessionId: "sess-fk-1",
     });
 
-    // Advance well past the original 2s deadline.
+    // Advance well past the 500ms deadline to confirm the timer was cleared.
     await vi.advanceTimersByTimeAsync(3000);
     vi.useRealTimers();
     await new Promise((r) => setTimeout(r, 50));
@@ -190,7 +190,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
 
     abortTurn("fk-agent");
 
-    await vi.advanceTimersByTimeAsync(800);
+    await vi.advanceTimersByTimeAsync(200);
     // Worker emits error IPC because SDK threw an AbortError.
     await handleEvent(worker as never, {
       type: "error",
@@ -212,8 +212,8 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     __deleteLiveWorkerForTest("fk-agent");
   });
 
-  it("force-kill at 1.9s race: late turn-complete after force-kill is ignored", async () => {
-    // Pathological: worker responds RIGHT after the 2s timer fires. The
+  it("force-kill at 500ms race: late turn-complete after force-kill is ignored", async () => {
+    // Pathological: worker responds RIGHT after the 500ms timer fires. The
     // force-kill flow already ran; the late turn-complete must be a no-op
     // so we don't double-publish turn_done.
     const { abortTurn, handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
@@ -228,7 +228,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
     abortTurn("fk-agent");
-    await vi.advanceTimersByTimeAsync(2100);
+    await vi.advanceTimersByTimeAsync(700);
     // Now force-kill has run. The worker, dying, emits one final turn-complete.
     await handleEvent(worker as never, {
       type: "turn-complete",

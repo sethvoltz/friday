@@ -17,6 +17,7 @@
 
 import {
   spawn,
+  spawnSync,
   type ChildProcess,
   type SpawnOptions,
 } from "node:child_process";
@@ -147,6 +148,54 @@ export function killPgrp(pgid: number, signal: "SIGTERM" | "SIGKILL"): void {
       });
     }
   }
+}
+
+/**
+ * Send a signal to every process in `pgid` EXCEPT the worker itself.
+ * Used by `abortTurn` to kill in-flight tool subprocesses (the SDK CLI
+ * subprocess + Bash et al. that it spawned) the instant Stop is pressed,
+ * without taking down the worker — the worker stays alive long enough to
+ * see the SDK iterator close, run its catch block (flushInflightBlocks),
+ * and emit `turn-complete` cleanly. Returns the count of descendants
+ * signaled, for log instrumentation + test assertion.
+ *
+ * Uses `pgrep -g <pgid>` to enumerate group members. Available on macOS
+ * + Linux — matches Friday's deployment surface.
+ *
+ * Defensive: if pgrep is unavailable or returns nothing useful, return 0
+ * and let the IPC + safety-net path do the work. Production correctness
+ * does not depend on this helper succeeding; this is an aggressiveness
+ * boost for the destructive-tool case.
+ */
+export function killPgrpDescendants(
+  pgid: number,
+  workerPid: number,
+  signal: "SIGTERM" | "SIGKILL",
+): number {
+  if (!pgid || pgid <= 1 || !workerPid) return 0;
+  const out = spawnSync("pgrep", ["-g", String(pgid)], { encoding: "utf8" });
+  if (out.status !== 0 || typeof out.stdout !== "string") return 0;
+  const pids = out.stdout
+    .trim()
+    .split("\n")
+    .map((s) => Number.parseInt(s, 10))
+    .filter((n) => Number.isFinite(n) && n > 1 && n !== workerPid);
+  for (const pid of pids) {
+    try {
+      process.kill(pid, signal);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH" && code !== "EPERM") {
+        logger.log("warn", "worker.descendant.kill.fail", {
+          pgid,
+          pid,
+          signal,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+  return pids.length;
 }
 
 export interface SpawnTurnInput {
@@ -579,7 +628,7 @@ export function abortTurn(agentName: string): boolean {
   w.abortRequested = true;
   // FRI-72 instrumentation: pair this with `worker.ipc.recv` so the log
   // shows whether the worker acknowledged the abort (turn-complete /
-  // status-change / error) before forceKillStuckWorker's 2s deadline.
+  // status-change / error) before forceKillStuckWorker's safety net.
   logger.log("info", "worker.ipc.send", {
     agent: w.agentName,
     type: "abort",
@@ -587,14 +636,41 @@ export function abortTurn(agentName: string): boolean {
     workerStatus: w.status,
   });
   send(w.child, { type: "abort" });
+  // T+0 destructive-tool kill: SIGTERM every process in the worker's
+  // pgrp EXCEPT the worker itself. This kills the SDK CLI subprocess
+  // and any in-flight tool subprocesses (Bash, Read, WebFetch, …) the
+  // instant Stop is pressed — no waiting for the SDK's abortController
+  // to propagate, no waiting for the safety-net deadline. Critical
+  // for the destructive-Bash case: a runaway `find /` or `rm -rf`
+  // dies in milliseconds, not the 2 seconds the prior implementation
+  // allowed. The worker process stays alive: its for-await loop sees
+  // the SDK iterator close (the CLI subprocess died) and runs the
+  // catch arm's `flushInflightBlocks("aborted")` + emits
+  // `turn-complete` cleanly.
+  const workerPid = w.child.pid ?? 0;
+  const descendantsKilled = killPgrpDescendants(
+    w.pgid,
+    workerPid,
+    "SIGTERM",
+  );
+  logger.log("info", "worker.abort.descendants-killed", {
+    agent: w.agentName,
+    turnId: w.turnId,
+    pgid: w.pgid,
+    workerPid,
+    descendantsKilled,
+  });
   // FRI-12 safety net: if the worker is wedged inside an SDK call (the
-  // 529 lockup), the abort IPC is silently ignored — the AbortController's
-  // `abort()` only fires inside the worker process, and a stuck SDK loop
-  // never returns control. Without this deadline, the dashboard's bubble
-  // would freeze in 'stopping' forever waiting for a turn_done that's
-  // never coming. Two seconds is generous for a healthy worker (an
-  // honest abort lands in tens of milliseconds) and short enough that
-  // the user's Stop click feels responsive.
+  // 529 lockup) AND the descendant kill above didn't free the loop
+  // (e.g., the SDK subprocess was the wedged one and is now dead but
+  // the worker's for-await iterator is still suspended on a
+  // non-cancellable promise), the abort IPC is silently ignored. Without
+  // this deadline, the dashboard's bubble would freeze in 'stopping'
+  // forever. 500ms is generous for a healthy worker (an honest abort
+  // lands in tens of milliseconds once descendants are dead) and tight
+  // enough that the user's Stop click feels instant. Was 2000ms before
+  // the descendant-kill landed; the descendants-already-dead case
+  // doesn't need the longer grace.
   if (w.abortDeadline) clearTimeout(w.abortDeadline);
   // forceKillStuckWorker is async under ADR-023; setTimeout callback is sync,
   // so fire-and-forget with logging. We still set/clear the timer through
@@ -607,7 +683,7 @@ export function abortTurn(agentName: string): boolean {
         message: err instanceof Error ? err.message : String(err),
       });
     });
-  }, 2_000);
+  }, 500);
   w.abortDeadline.unref();
   return true;
 }
