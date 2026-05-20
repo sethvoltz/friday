@@ -49,6 +49,25 @@ export interface ZeroAgentRow {
   updated_at: number;
 }
 
+/** Row shape mirrors the `ticket_comments` Zero table definition (Phase 4.4). */
+export interface ZeroTicketCommentRow {
+  id: string;
+  ticket_id: string;
+  author: string;
+  body: string;
+  ts: number;
+}
+
+/** Row shape mirrors the `ticket_external_links` Zero table definition (Phase 4.4). */
+export interface ZeroTicketExternalLinkRow {
+  ticket_id: string;
+  system: string;
+  external_id: string;
+  url: string | null;
+  meta_json: Record<string, unknown> | null;
+  linked_at: number;
+}
+
 /** Row shape mirrors the `tickets` Zero table definition. */
 export interface ZeroTicketRow {
   id: string;
@@ -191,6 +210,15 @@ class ZeroSyncStore {
 
   /** Live ticket rows from Zero (Phase 3.1). */
   tickets = $state<ZeroTicketRow[]>([]);
+
+  /** Live ticket comments (Phase 3.1 follow-up — reactive read path
+   *  for the detail page's comment thread). Filter client-side by
+   *  `ticket_id` in the page component. */
+  ticketComments = $state<ZeroTicketCommentRow[]>([]);
+
+  /** Live ticket external links (Phase 3.1 follow-up — reactive read
+   *  path for the detail page's link list). */
+  ticketExternalLinks = $state<ZeroTicketExternalLinkRow[]>([]);
 
   /** Live schedule rows from Zero (Phase 3.2). */
   schedules = $state<ZeroScheduleRow[]>([]);
@@ -346,6 +374,8 @@ class ZeroSyncStore {
 
       this.#bindAgents();
       this.#bindTickets();
+      this.#bindTicketComments();
+      this.#bindTicketExternalLinks();
       this.#bindSchedules();
       this.#bindMemory();
       this.#bindApps();
@@ -459,6 +489,46 @@ class ZeroSyncStore {
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroTicketRow[];
       this.tickets = rows as ZeroTicketRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  /**
+   * Phase 3.1 follow-up: reactive ticket_comments + ticket_external_links
+   * reads. The Phase 4.4 mutator work added these tables to the Zero
+   * schema with `select: ANYONE_CAN` permissions but never wired the
+   * read path — the /tickets/[id] detail page still loaded comments
+   * via SSR REST + invalidateAll(). This bind makes mutations in
+   * another tab arrive in <1s reactively.
+   */
+  #bindTicketComments(): void {
+    if (!this.#zero) return;
+    const query = this.#zero!.query.ticket_comments;
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      this.ticketComments = data as ZeroTicketCommentRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  #bindTicketExternalLinks(): void {
+    if (!this.#zero) return;
+    const query = this.#zero!.query.ticket_external_links;
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      this.ticketExternalLinks = data as ZeroTicketExternalLinkRow[];
     };
     update(view.data as readonly unknown[]);
     view.addListener((data) => update(data as readonly unknown[]));
@@ -885,6 +955,14 @@ class ZeroSyncStore {
   }): MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero!.mutate.linkTicketExternal({ ...args, ts: Date.now() });
+  }
+  unlinkTicketExternal(args: {
+    ticketId: string;
+    system: string;
+    externalId: string;
+  }): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.unlinkTicketExternal(args);
   }
 
   /**

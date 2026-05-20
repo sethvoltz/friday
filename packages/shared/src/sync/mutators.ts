@@ -189,6 +189,12 @@ export interface AddTicketRelationArgs {
   kind: "depends_on" | "child_of" | "blocks" | "relates_to";
 }
 
+export interface UnlinkTicketExternalArgs {
+  ticketId: string;
+  system: string;
+  externalId: string;
+}
+
 export interface LinkTicketExternalArgs {
   ticketId: string;
   system: string;
@@ -925,6 +931,22 @@ export const createMutators = () => ({
       url: args.url,
       meta_json: args.meta,
       linked_at: args.ts,
+    });
+  },
+  unlinkTicketExternal: async (
+    tx: FridayTx,
+    args: UnlinkTicketExternalArgs,
+  ): Promise<void> => {
+    // DELETE on the composite PK. Idempotent — Postgres DELETE WHERE
+    // no-match doesn't error. Required for the /tickets/[id] detail
+    // page's "detach link" affordance once that page derives its
+    // external-link list from `zeroSync.ticketExternalLinks`; without
+    // this mutator the REST DELETE wouldn't sync to the Zero replica
+    // and the link would re-appear after the next render.
+    await tx.mutate.ticket_external_links.delete({
+      ticket_id: args.ticketId,
+      system: args.system,
+      external_id: args.externalId,
     });
   },
   cancelQueued: async (

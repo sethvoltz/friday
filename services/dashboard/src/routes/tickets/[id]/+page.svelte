@@ -24,6 +24,33 @@
   const zeroTicket = $derived(
     zeroOn ? zeroSync.tickets.find((r) => r.id === data.ticket.id) : undefined,
   );
+
+  // Phase 3.1 follow-up: comments + external_links derived from the
+  // reactive Zero queries once Zero is live. Mutations from other tabs
+  // land reactively (no more invalidateAll round-trip). SSR-loaded
+  // `data.ticket.comments` / `data.ticket.externalLinks` seed first
+  // paint and serve as the fallback when Zero isn't yet connected.
+  const zeroLive = $derived(zeroOn && zeroSync.status === "live");
+  const zeroComments = $derived(
+    zeroLive
+      ? zeroSync.ticketComments
+          .filter((c) => c.ticket_id === data.ticket.id)
+          .map((c) => ({ id: c.id, author: c.author, body: c.body, ts: c.ts }))
+          .sort((a, b) => a.ts - b.ts)
+      : null,
+  );
+  const zeroExternalLinks = $derived(
+    zeroLive
+      ? zeroSync.ticketExternalLinks
+          .filter((l) => l.ticket_id === data.ticket.id)
+          .map((l) => ({
+            system: l.system,
+            externalId: l.external_id,
+            url: l.url,
+            meta: l.meta_json,
+          }))
+      : null,
+  );
   const t = $derived(
     zeroTicket
       ? {
@@ -35,6 +62,14 @@
           assignee: zeroTicket.assignee,
           meta: zeroTicket.meta_json,
           updatedAt: zeroTicket.updated_at,
+          comments:
+            zeroComments !== null
+              ? (zeroComments as typeof data.ticket.comments)
+              : data.ticket.comments,
+          externalLinks:
+            zeroExternalLinks !== null
+              ? (zeroExternalLinks as typeof data.ticket.externalLinks)
+              : data.ticket.externalLinks,
         }
       : data.ticket,
   );
@@ -180,10 +215,9 @@
           return;
         }
         commentBody = "";
-        // Comments aren't sourced from Zero on the detail page yet
-        // (they ride the SSR `data.comments` from the load function).
-        // Invalidate so the next page render sees the new comment.
-        await invalidateAll();
+        // Comments now derive reactively from `zeroSync.ticketComments`
+        // — no invalidateAll round-trip needed; the new row lands in
+        // the reactive view via the mutator's optimistic write.
         showToast("comment posted");
         return;
       }
@@ -227,7 +261,9 @@
         linkSystem = "";
         linkExternalId = "";
         linkUrl = "";
-        await invalidateAll();
+        // External-links derive reactively from
+        // `zeroSync.ticketExternalLinks`; the optimistic Zero write
+        // makes the new link appear without an invalidateAll.
         showToast("link added");
         return;
       }
@@ -262,6 +298,20 @@
       danger: true,
     });
     if (!ok) return;
+    if (zeroOn) {
+      const result = zeroSync.unlinkTicketExternal({
+        ticketId: t.id,
+        system,
+        externalId,
+      });
+      const sr = await result?.server;
+      if (sr && sr.type === "error") {
+        showToast(`detach failed: ${sr.error.message}`, "err");
+        return;
+      }
+      showToast("link removed");
+      return;
+    }
     const qs = `?system=${encodeURIComponent(system)}&externalId=${encodeURIComponent(externalId)}`;
     const r = await fetch(`/api/tickets/${t.id}/links${qs}`, {
       method: "DELETE",
