@@ -17,6 +17,7 @@ import {
   loadConfig,
   normalizeModelConfig,
   readPromptStack,
+  resolveDaemonPort,
   watchdogThresholdMs,
 } from "@friday/shared";
 import { randomUUID } from "node:crypto";
@@ -170,7 +171,7 @@ async function refork(agentName: string): Promise<void> {
         thinking: modelCfg.thinking,
         effort: modelCfg.effort,
         resumeSessionId: a.sessionId ?? undefined,
-        daemonPort: cfg.daemonPort,
+        daemonPort: resolveDaemonPort(cfg),
         parentName:
           "parentName" in a ? a.parentName ?? undefined : undefined,
         mode: "long-lived",

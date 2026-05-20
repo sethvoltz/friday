@@ -12,6 +12,7 @@ import {
   loadSkills,
   normalizeModelConfig,
   readPromptStack,
+  resolveDaemonPort,
   skillsForAgent,
 } from "@friday/shared";
 import {
@@ -277,7 +278,7 @@ async function handle(
         thinking: modelCfg.thinking,
         effort: modelCfg.effort,
         resumeSessionId,
-        daemonPort: cfg.daemonPort,
+        daemonPort: resolveDaemonPort(cfg),
         parentName:
           "parentName" in agentRow
             ? agentRow.parentName ?? undefined
@@ -502,7 +503,7 @@ async function handle(
         thinking: modelCfg.thinking,
         effort: modelCfg.effort,
         resumeSessionId: agentRow.sessionId ?? undefined,
-        daemonPort: cfg.daemonPort,
+        daemonPort: resolveDaemonPort(cfg),
         parentName:
           "parentName" in agentRow
             ? agentRow.parentName ?? undefined
@@ -660,7 +661,7 @@ async function handle(
         model: body.model ?? modelCfg.name,
         thinking: modelCfg.thinking,
         effort: modelCfg.effort,
-        daemonPort: cfg.daemonPort,
+        daemonPort: resolveDaemonPort(cfg),
         parentName: body.parentName,
         mode: "long-lived",
       },
@@ -1861,7 +1862,7 @@ async function handleSystemCommand(
             thinking: modelCfg.thinking,
             effort: modelCfg.effort,
             resumeSessionId: undefined,
-            daemonPort: cfg.daemonPort,
+            daemonPort: resolveDaemonPort(cfg),
             parentName: undefined,
             mode: "long-lived",
           },

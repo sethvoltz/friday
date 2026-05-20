@@ -17,6 +17,7 @@ import {
   loadConfig,
   normalizeModelConfig,
   readPromptStack,
+  resolveDaemonPort,
   schema,
 } from "@friday/shared";
 import { logger } from "../log.js";
@@ -119,7 +120,7 @@ export async function spawnScheduledRun(
       model: modelCfg.name,
       thinking: modelCfg.thinking,
       effort: modelCfg.effort,
-      daemonPort: cfg.daemonPort,
+      daemonPort: resolveDaemonPort(cfg),
       stateDir: scheduleStateDir(scheduleRow.name),
       mode: "one-shot",
     },

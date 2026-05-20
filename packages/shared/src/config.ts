@@ -80,15 +80,22 @@ export interface FridayConfig {
    * - an object with `name` plus optional `thinking` and `effort`
    */
   model: string | ModelConfig;
-  /** Daemon HTTP port (localhost only). Defaults to `PROD_DAEMON_PORT`. */
-  daemonPort: number;
   /**
-   * Dashboard port. Defaults to `PROD_DASHBOARD_PORT`. `start.ts`
-   * resolves the value and passes it as `PORT=<resolved>` to the
-   * dashboard spawn (adapter-node's convention). `vite dev` ignores
-   * this entirely and binds 5173 from `vite.config.ts`.
+   * Daemon HTTP port (localhost only). Optional — `~/.friday/config.json`
+   * may omit it, in which case `resolveDaemonPort()` falls back to
+   * `process.env.FRIDAY_DAEMON_PORT` (used by dev wrappers) and finally
+   * to `PROD_DAEMON_PORT`.
    */
-  dashboardPort: number;
+  daemonPort?: number;
+  /**
+   * Dashboard port. Optional — `~/.friday/config.json` may omit it, in
+   * which case `resolveDashboardPort()` falls back to
+   * `PROD_DASHBOARD_PORT`. `start.ts` resolves and passes the value as
+   * `PORT=<resolved>` to the dashboard spawn (adapter-node's
+   * convention). `vite dev` ignores this entirely and binds 5173 from
+   * `vite.config.ts`.
+   */
+  dashboardPort?: number;
   /** SSE keepalive interval in seconds. */
   sseKeepaliveSec: number;
   /** Aggregate worker memory budget in MB; surfaces a banner over this. */

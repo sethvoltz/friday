@@ -218,7 +218,7 @@ async function main(): Promise<void> {
 
   const modelCfg = normalizeModelConfig(cfg.model);
   logger.log("info", "daemon.ready", {
-    port: cfg.daemonPort,
+    port: daemonPort,
     model: modelCfg.name,
     thinking: modelCfg.thinking?.type ?? "default",
     effort: modelCfg.effort ?? "default",
@@ -294,6 +294,7 @@ async function main(): Promise<void> {
  *    inboxes, dispatch a fresh turn so the pending mail isn't stranded.
  */
 async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> {
+  const daemonPort = resolveDaemonPort(cfg);
   const jsonlAgents: RecoveryAgent[] = [];
   for (const a of await registry.listAgents()) {
     // Heal-on-boot: a builder whose worktree was already removed cannot
@@ -380,7 +381,7 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
               thinking: modelCfg.thinking,
               effort: modelCfg.effort,
               resumeSessionId: a.sessionId ?? undefined,
-              daemonPort: cfg.daemonPort,
+              daemonPort,
               parentName:
                 "parentName" in a ? a.parentName ?? undefined : undefined,
               mode: "long-lived",
@@ -424,6 +425,7 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
 async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<void> {
   const queued = await listQueuedUserBlocks();
   if (queued.length === 0) return;
+  const daemonPort = resolveDaemonPort(cfg);
   const modelCfg = normalizeModelConfig(cfg.model);
   for (const block of queued) {
     const a = await registry.getAgent(block.agentName);
@@ -484,7 +486,7 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
           thinking: modelCfg.thinking,
           effort: modelCfg.effort,
           resumeSessionId: a.sessionId ?? undefined,
-          daemonPort: cfg.daemonPort,
+          daemonPort,
           parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
           mode: a.type === "scheduled" ? "one-shot" : "long-lived",
         },

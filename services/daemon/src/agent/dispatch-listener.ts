@@ -38,6 +38,7 @@ import {
   loadConfig,
   normalizeModelConfig,
   readPromptStack,
+  resolveDaemonPort,
   schema,
 } from "@friday/shared";
 import { getBlockById } from "@friday/shared/services";
@@ -175,7 +176,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
       thinking: modelCfg.thinking,
       effort: modelCfg.effort,
       resumeSessionId,
-      daemonPort: cfg.daemonPort,
+      daemonPort: resolveDaemonPort(cfg),
       parentName:
         "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
       mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
