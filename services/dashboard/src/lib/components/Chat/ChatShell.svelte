@@ -135,7 +135,7 @@
     // tail first, await a tick so ChatMessages re-slices and remounts
     // the latest bubbles, then scroll.
     if (!readonly) {
-      chat.resetChatWindowToLatest(chat.messages.length);
+      chat.resetChatWindowToLatest();
       await tick();
     }
     if (!scrollEl) return;

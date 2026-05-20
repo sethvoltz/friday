@@ -338,31 +338,34 @@ export class ChatState {
   pinnedToBottom = $state(true);
 
   /**
-   * Sliding-window DOM virtualization cursor (exclusive end into the
-   * full per-agent `allMessages` array). ChatMessages renders the
-   * slice `[max(0, windowEnd - WINDOW_SIZE), windowEnd)` so the DOM
-   * is always bounded. Lives on the store so the Latest button in
-   * ChatShell can reset it (`resetChatWindowToLatest()`) without
-   * needing a direct ref to the ChatMessages component.
+   * Sliding-window DOM virtualization cursor. `null` means "follow
+   * the live tail" (windowEnd derives to `allMessages.length`, which
+   * grows reactively as new messages arrive). A `{agent, end}` value
+   * means the user has explicitly slid the window mid-history on
+   * THAT agent.
    *
-   * `0` means "uninitialized" — ChatMessages snaps it to
-   * `allMessages.length` on first effect run for the focused agent.
-   * Switching agents re-anchors via the focused-agent effect.
+   * The agent-tag is load-bearing: switching agents must reset the
+   * view to the latest, per the chat-UX spec. With the tag, a stale
+   * `{agent: "friday", end: 50}` from a previous focus session has
+   * no effect when the focused agent is now "linear-import" — the
+   * agent-mismatch falls through to the "follow live tail" default
+   * automatically, no init effect needed.
+   *
+   * Slide operations write `{ agent: focusedAgent, end: newEnd }`.
+   * When a slide brings `end` to `allMessages.length` (back at the
+   * tail), the writer sets this back to `null` so the next live-
+   * append advances naturally without another mutator hop.
    */
-  chatWindowEnd = $state(0);
+  chatWindowEnd = $state<{ agent: string; end: number } | null>(null);
 
   /**
    * Reset the sliding window to the tail of all messages. Called by
-   * the "↓ Latest" button in ChatShell; ChatMessages reactively
-   * re-slices the rendered list to the new windowEnd value, and
-   * the caller follows up with a scroll-to-bottom.
-   *
-   * Takes the new value explicitly rather than reading from any
-   * messages array — keeps this method ignorant of the agent-vs-
-   * past-session split and the parseBlocks call site.
+   * the "↓ Latest" button in ChatShell — sets the cursor back to
+   * `null` (follow live tail) so subsequent new messages auto-extend.
+   * The caller follows up with `scrollTop = scrollHeight`.
    */
-  resetChatWindowToLatest(totalMessages: number): void {
-    this.chatWindowEnd = totalMessages;
+  resetChatWindowToLatest(): void {
+    this.chatWindowEnd = null;
   }
 
   /** Per-agent debounce timers for working→idle transitions. Long-lived

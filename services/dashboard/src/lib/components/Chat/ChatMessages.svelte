@@ -146,59 +146,29 @@
   // and render in full — no windowing.
   const WINDOW_SIZE = 500;
   const SLIDE_AMOUNT = 100;
-  // `windowEnd` lives on the chat store (chat.chatWindowEnd) so the
-  // "↓ Latest" button in ChatShell can reset it without a direct ref
-  // to this component. Derived `windowStart` clamps to a slice of at
-  // most WINDOW_SIZE rows.
-  let windowStart = $derived(Math.max(0, chat.chatWindowEnd - WINDOW_SIZE));
+  // `windowEnd` derives from chat.chatWindowEnd, which is either:
+  //   - `null` ("follow live tail") → windowEnd = allMessages.length
+  //   - `{agent, end}` matching the focused agent → windowEnd = end
+  //   - `{agent, end}` for a DIFFERENT agent → falls through to live
+  //     tail (handles agent-switch: a stale window from the previous
+  //     agent has no effect on the new one; the user lands at the
+  //     newly-focused agent's latest message).
+  //
+  // No init effect is needed: the derivation reactively follows
+  // allMessages.length whenever chat.chatWindowEnd is null or
+  // agent-mismatched, which is the cold-start + agent-switch +
+  // live-append case all at once. Slide handlers explicitly mutate
+  // chat.chatWindowEnd; slide-down to the tail sets it back to null
+  // so subsequent live appends auto-extend without another mutator.
+  let windowEnd = $derived(
+    chat.chatWindowEnd && chat.chatWindowEnd.agent === chat.focusedAgent
+      ? Math.min(chat.chatWindowEnd.end, allMessages.length)
+      : allMessages.length,
+  );
+  let windowStart = $derived(Math.max(0, windowEnd - WINDOW_SIZE));
   let list = $derived.by(() => {
     if (readonly) return allMessages;
-    // Clamp the upper bound defensively: a Zero update could shrink
-    // allMessages (e.g., cancel-queued mutator deletes a row) and
-    // leave chatWindowEnd pointing past the new tail.
-    const end = Math.min(chat.chatWindowEnd, allMessages.length);
-    return allMessages.slice(windowStart, end);
-  });
-  // Single effect that does three jobs against the same dependency
-  // set (focusedAgent, allMessages.length):
-  //
-  //   1. **Cold-start / agent-switch snap**: chat.chatWindowEnd is
-  //      `0` either at module init or right after a route change. If
-  //      we don't catch that here, the next render slices
-  //      allMessages[0..0] and the chat is empty — the regression
-  //      this commit is fixing.
-  //
-  //   2. **Defensive clamp**: a Zero update can shrink allMessages
-  //      (cancel-queued / block_canceled drops a row), and a stale
-  //      chatWindowEnd pointing past the new tail would slice past
-  //      the end. Snap back to total.
-  //
-  //   3. **Live tail follow**: when the user is already viewing the
-  //      latest message and a new block lands, advance windowEnd to
-  //      include it so the chat keeps streaming. Mid-history users
-  //      (chatWindowEnd well below total) stay parked.
-  //
-  // Tracks BOTH chat.focusedAgent (agent switch) AND
-  // allMessages.length (length growth or shrink). Without the length
-  // track, the cold-start path would not fire when Zero populates
-  // chat.messages asynchronously after this component mounts.
-  $effect(() => {
-    chat.focusedAgent;
-    const total = allMessages.length;
-    untrack(() => {
-      if (readonly) return;
-      // Cold start (sentinel 0) or defensive clamp past the new tail.
-      if (chat.chatWindowEnd === 0 || chat.chatWindowEnd > total) {
-        chat.chatWindowEnd = total;
-        return;
-      }
-      // Live tail follow: only when the user is already pinned to the
-      // bottom of all history AND the window's prior end was within 1
-      // of the prior total (i.e., we're following the live cursor).
-      if (chat.pinnedToBottom && chat.chatWindowEnd >= total - 1) {
-        if (chat.chatWindowEnd !== total) chat.chatWindowEnd = total;
-      }
-    });
+    return allMessages.slice(windowStart, windowEnd);
   });
   // Honest "no older messages" gate: when windowStart hits 0 AND the
   // local replica is the canonical full set (Zero `resultType ===
@@ -208,18 +178,14 @@
   $effect(() => {
     if (readonly) return;
     const ws = windowStart;
-    const we = chat.chatWindowEnd;
     const total = allMessages.length;
     const complete = zeroSync.blocksResultType === "complete";
     untrack(() => {
-      // "Beginning of history" affordance fires only when:
-      //   - the rendered window genuinely starts at index 0, AND
-      //   - the window has been initialized past the 0-sentinel (we == 0
-      //     is the cold-start state, not "at the top of a 3000-row
-      //     transcript"), AND
-      //   - Zero confirms the local replica matches the upstream filter
-      //     (no more rows the server has that the client hasn't seen).
-      const atTop = ws === 0 && we > 0 && total > 0;
+      // "Beginning of history" affordance fires only when the rendered
+      // window genuinely starts at index 0 AND there are actual rows
+      // AND Zero confirms the local replica matches the upstream filter
+      // (no more rows the server has that the client hasn't seen).
+      const atTop = ws === 0 && total > 0;
       if (complete && atTop) {
         if (!chat.reachedOldest) chat.reachedOldest = true;
       } else if (!atTop && chat.reachedOldest) {
@@ -284,16 +250,18 @@
           scroller.getBoundingClientRect().top
         : 0;
 
-    if (direction === "up") {
-      chat.chatWindowEnd = Math.max(
-        WINDOW_SIZE,
-        chat.chatWindowEnd - SLIDE_AMOUNT,
-      );
+    const current = windowEnd;
+    const newEnd =
+      direction === "up"
+        ? Math.max(WINDOW_SIZE, current - SLIDE_AMOUNT)
+        : Math.min(allMessages.length, current + SLIDE_AMOUNT);
+    // When a slide-down brings us back to the tail, drop the
+    // tagged state so subsequent live appends auto-extend (no
+    // need for another mutator hop on every new message).
+    if (newEnd === allMessages.length) {
+      chat.chatWindowEnd = null;
     } else {
-      chat.chatWindowEnd = Math.min(
-        allMessages.length,
-        chat.chatWindowEnd + SLIDE_AMOUNT,
-      );
+      chat.chatWindowEnd = { agent: chat.focusedAgent, end: newEnd };
     }
 
     void (async () => {
@@ -466,13 +434,13 @@
           // might just mean "at the bottom of the slice we currently
           // have mounted, with more newer messages waiting to slide in."
           chat.pinnedToBottom =
-            atBottomOfWindow && chat.chatWindowEnd >= allMessages.length;
+            atBottomOfWindow && windowEnd >= allMessages.length;
           // Symmetric slide-down: when the user reaches the bottom of
           // the rendered window AND there are newer messages beyond it
           // (e.g., they scrolled up earlier, were mid-history, now
           // scrolling back down), advance the window. Anchor restore
           // keeps their viewport pinned through the mount.
-          if (atBottomOfWindow && chat.chatWindowEnd < allMessages.length) {
+          if (atBottomOfWindow && windowEnd < allMessages.length) {
             const scroller =
               sentinel.closest(".chat-scroll") as HTMLElement | null;
             slideWindow(scroller, "down");
