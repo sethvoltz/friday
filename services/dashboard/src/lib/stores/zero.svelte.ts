@@ -33,6 +33,7 @@ import {
   type Schema,
 } from "@friday/shared/sync";
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
+import { reconcileWakeLock } from "./wake-lock.svelte";
 
 /** Row shape mirrors the `agents` Zero table definition. Kept narrow:
  *  Phase 2 only reads the columns the sidebar needs. Phase 6's
@@ -433,6 +434,13 @@ class ZeroSyncStore {
       // wedges from lost tool_result rows or evicted per-turn replay
       // buffers converge to terminal here.
       chat.reconcileAgentStatuses(rows);
+      // Explicit wake-lock reconcile. The wake-lock module's $effect
+      // tracks `chat.agents` reads in theory, but cross-context
+      // propagation from a Zero listener callback is unreliable in
+      // practice — the lock silently never acquires on a phone with
+      // the setting on. Firing reconcile directly removes the
+      // dependency on Svelte's auto-propagation through this seam.
+      reconcileWakeLock();
     };
     update(view.data as readonly unknown[]);
     view.addListener((data) => update(data as readonly unknown[]));

@@ -348,6 +348,67 @@ describe("wake-lock store (FRI-87)", () => {
     expect(wl.wakeLockState.held).toBe(false);
   });
 
+  it("reconcileWakeLock() is the deterministic wire from zero.svelte.ts and acquires without relying on $effect propagation", async () => {
+    // This is the contract that fixes the prod regression where the
+    // lock silently never acquired on mobile despite the setting being
+    // on. zero.svelte.ts's #bindAgents listener calls reconcileWakeLock()
+    // explicitly after every agents-view update — bypassing the
+    // $effect.root path that turned out to be flaky across the Zero
+    // listener callback / Svelte effect-scheduling seam in practice.
+    const { request, sentinels } = installFakeWakeLock();
+    const { wl, chat } = await load();
+    wl.startWakeLock();
+
+    // Mutate chat.agents the way zero.svelte.ts's listener does, but
+    // do NOT call __reconcileForTest. Only the explicit reconcile
+    // hook fires. If the deterministic wire is correct, the lock
+    // still acquires.
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "working" },
+    ];
+    wl.reconcileWakeLock();
+    await flushReactive();
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(sentinels).toHaveLength(1);
+    expect(wl.wakeLockState.held).toBe(true);
+  });
+
+  it("reconcileWakeLock() is a no-op before startWakeLock() (pre-mount callers must not crash or acquire)", async () => {
+    const { request } = installFakeWakeLock();
+    const { wl, chat } = await load();
+    // No startWakeLock() — simulating a pre-mount Zero update.
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "working" },
+    ];
+    expect(() => wl.reconcileWakeLock()).not.toThrow();
+    await flushReactive();
+    expect(request).not.toHaveBeenCalled();
+    expect(wl.wakeLockState.held).toBe(false);
+  });
+
+  it("reconcileWakeLock() releases when agents transition back to idle", async () => {
+    const { sentinels } = installFakeWakeLock();
+    const { wl, chat } = await load();
+    wl.startWakeLock();
+
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "working" },
+    ];
+    wl.reconcileWakeLock();
+    await flushReactive();
+    expect(sentinels).toHaveLength(1);
+    expect(wl.wakeLockState.held).toBe(true);
+
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "idle" },
+    ];
+    wl.reconcileWakeLock();
+    await flushReactive();
+    expect(sentinels[0].release).toHaveBeenCalledTimes(1);
+    expect(wl.wakeLockState.held).toBe(false);
+  });
+
   it("marks itself unsupported when navigator.wakeLock is missing", async () => {
     // Strip the API.
     Object.defineProperty(navigator, "wakeLock", {

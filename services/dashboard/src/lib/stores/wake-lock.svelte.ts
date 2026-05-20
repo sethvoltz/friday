@@ -220,6 +220,24 @@ export function __reconcileForTest(): void {
   reconcile();
 }
 
+/**
+ * Deterministic reconcile entry point for non-Svelte modules (Zero's
+ * agents listener calls this whenever the agents view updates). The
+ * $effect.root path inside startWakeLock SHOULD pick up chat.agents
+ * mutations reactively, but in practice the cross-context propagation
+ * from a Zero listener callback can be flaky depending on Svelte's
+ * scheduling under the current browser. Explicit-call is the safer
+ * wire; the $effect remains as a backup for any callers that mutate
+ * chat.agents without going through this hook.
+ *
+ * No-op when wake-lock hasn't been started yet (the layout's onMount
+ * is the gate; pre-mount callers are silently ignored).
+ */
+export function reconcileWakeLock(): void {
+  if (!started) return;
+  reconcile();
+}
+
 /** Test-only: reset module state between specs. */
 export function __resetForTest(): void {
   if (stopEffect) {
