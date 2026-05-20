@@ -3,7 +3,10 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "bin": { "friday": "dist/index.js" },
+  "bin": {
+    "friday": "dist/index.js",
+    "friday-supervisor": "dist/bin/supervisor.js"
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
