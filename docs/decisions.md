@@ -711,6 +711,44 @@ Bring this ADR back to the table if any of these fire:
 - The /memory page has two distinct data paths (Zero for list, REST for search). The dashboard treats them as orthogonal: search results don't update the Zero snapshot's order, and Zero updates don't re-trigger the active search query.
 - No code change from this ADR. Existing implementation is correct; this entry documents *why* the hybrid lives and *when* we'd change it, so future architectural audits don't keep re-discovering the gap as a TODO.
 
+## ADR-027 — Path to production: prod-mode-by-default, dev as pnpm wrappers, port surgery
+
+**Status:** accepted (FRI-83, 2026-05-20)
+
+Friday's CLI used to launch dev mode on demand (`friday start --dev`) and prod mode separately, with both pointing at the same `~/.friday/` and the same default ports (daemon 7444, dashboard 5173). The Cloudflare Tunnel terminated wherever adapter-node happened to land (port 3000 in practice, since `cfg.dashboardPort` was dead-weight for prod). This conflated three distinct concerns — supervising the running deployment, hot-reloading developer source, and exposing a stable public surface — into one flag that toggled both at once.
+
+### Decision
+
+1. **`friday start` always launches prod.** The `--dev` flag is gone (breaking change accepted). `friday restart`, `friday stop`, `friday status`, `friday logs` act on the prod install only.
+2. **Dev runs via `pnpm dev:daemon` / `pnpm dev:dashboard`** wrappers at the repo root. They set `FRIDAY_DAEMON_PORT=7444` inline so the dev dashboard's SvelteKit server-side fetches reach the dev daemon, not the prod daemon on 7610.
+3. **Prod ports are pinned to disjoint values from dev.** Daemon **7610**, dashboard **7615** ("TGIF"). Dev keeps its existing 7444 / 5173. Zero-cache stays at 4848 (Zero's convention; shared between prod and dev by default — full isolation needs a parallel zero-cache on a different `ZERO_PORT` + a separate Postgres database).
+4. **`FridayConfig.daemonPort` / `dashboardPort` become optional override fields.** Resolution is `resolveDaemonPort(cfg)` = `process.env.FRIDAY_DAEMON_PORT ?? cfg.daemonPort ?? PROD_DAEMON_PORT` and `resolveDashboardPort(cfg)` = `cfg.dashboardPort ?? PROD_DASHBOARD_PORT`. The daemon helper is symmetric — both the daemon's own bind and the dashboard's daemon-fetch URL read the same chain — so dev wrappers can redirect both sides with one env var.
+5. **Adapter-node's `PORT` env is an implementation detail, not a user surface.** `start.ts` resolves the dashboard port from the chain above and passes `PORT=<resolved>` to the dashboard spawn. The user's config field is what they edit; the env var is downstream.
+6. **`friday status` displays probed ports, not config-derived ones.** The daemon writes its bound port into `health.json`'s new `port` field on every heartbeat (mtime-based staleness check falls back to config with a "(config — not heartbeating)" indicator). The dashboard is validated by a 1s-timeout `fetch http://localhost:<resolved>/`.
+7. **BetterAuth `trustedOrigins` is a static list with both localhost ports.** `http://localhost:7615` and `http://localhost:5173` are always present (plus `cfg.publicUrl` and any `BETTER_AUTH_URL` env). Dev sign-ins (origin `:5173`) and prod sign-ins (origin `:7615` or the tunnel URL) both pass CSRF with no per-environment branching.
+8. **The Cloudflare Tunnel terminates at `:7615`.** Repoint is a one-time Cloudflare Zero Trust UI edit by the operator — not a Friday-side code change.
+
+### Why these specific shapes
+
+- **Why optional config fields, not deleted ones.** `~/.friday/config.json` is the user's override surface; deleting the fields would force every operator who'd customized them to discover the new shared constants and edit different code. Optional + `DEFAULT_CONFIG = PROD_*` means a fresh install gets prod defaults and an existing install with a custom port keeps it.
+- **Why an env var (`FRIDAY_DAEMON_PORT`) for dev when prod has none.** Prod reads only config and constants. Dev needs to redirect the daemon-fetch URL on a process-by-process basis (the prod dashboard reads the prod config; the dev dashboard reads the same prod config but needs to talk to a different daemon). An env var is the cheapest mechanism that doesn't require dev to carry its own config file.
+- **Why prod can't avoid `PORT` env.** `@sveltejs/adapter-node` always reads `process.env.PORT` and has no other knob. The custom `server-entry.mjs` consumes it too. We accept the asymmetry: daemon resolves its port from the chain directly; dashboard's chain is computed in `start.ts` and propagated via `PORT`.
+- **Why probing instead of trusting config.** The daemon's IPC consumers (workers, scheduler, mail-bridge) get the port from `workerOpts.daemonPort` already; surfacing the *actually-bound* port in `friday status` is a hedge against config drift between `cfg.daemonPort` and the running process. Probe-validated dashboard is the same idea — config says one thing, the live process is asked.
+- **Why retain breaking `--dev` removal.** A deprecation rejection-shim is ~5 lines of code that exists forever. Citty's unknown-flag error is the user-facing message; muscle-memory recovery happens once, then never again.
+
+### Cross-references
+
+- **Supersedes:** none — Friday's prior mode story was not ADR-codified.
+- **Coexists with:** ADR-023 (Postgres canonical store), ADR-024 (Zero sync, narrow SSE). Port surgery is orthogonal to the data layer; zero-cache's WS port (4848) is unaffected.
+- **Cross-reference:** ADR-009 (tmux-backed daemon supervision) still stands pending FRI-88 (Friday brew packaging + launchd supervision), which will supersede ADR-009 and make `friday start/stop/restart` thin aliases over `brew services`.
+- **Out of scope:** brew packaging + launchd supervision (FRI-88); full dev/prod isolation with a parallel Postgres database + parallel zero-cache (follow-up); a `friday update` combined pull/install/build/restart helper.
+
+### Consequences
+
+- Operators run on `:7610` / `:7615` after a one-time Cloudflare Zero Trust UI repoint. `friday backup` + `friday restore` cover the rollback path; the runbook is in FRI-83.
+- Dev contributors invoke `pnpm dev:daemon` / `pnpm dev:dashboard` from the repo root — two terminals, not one CLI command. Prod and dev can co-run without TCP collisions; the residual gotcha is the shared Postgres + zero-cache (document the `FRIDAY_DATA_DIR=~/.friday-dev` + parallel-zero-cache path for contributors who need true isolation).
+- The 9 daemon-side `cfg.daemonPort` reads (workers, scheduler, mail-bridge, dispatch listener, watchdog, api/server x4, recovery functions) all funnel through `resolveDaemonPort(cfg)` and the dashboard's daemon-fetch URL reads the same chain — there is one canonical port-resolution path now.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.

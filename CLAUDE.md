@@ -68,6 +68,7 @@ pnpm --filter @friday/daemon exec vitest run src/path/to/file.test.ts
 - TypeScript throughout, Vitest for tests, pnpm workspaces + Turborepo.
 - Tests are co-located with source as `*.test.ts`. Files named `*.e2e.test.ts` are heavy multi-subprocess suites — excluded from `pnpm test`, run via `pnpm test:e2e`. The Playwright browser suite lives in `services/dashboard/e2e/`.
 - All state lives in `~/.friday/` (override with `FRIDAY_DATA_DIR`). Never hardcode paths; use constants from `@friday/shared`.
+- Test files that touch `~/.friday/` state must set `process.env.FRIDAY_DATA_DIR = <tmpdir>` **before** importing any `@friday/shared` DB/data-dir machinery. The import is what binds the data-dir constants; setting the env after the import is too late and trashes the real prod data dir.
 - `@friday/shared` is consumed via its built `dist/`. When you edit shared source, run `pnpm --filter @friday/shared build` before exercising the change in the daemon or dashboard.
 
 ## Database migrations

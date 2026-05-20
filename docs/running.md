@@ -4,9 +4,9 @@
 
 | Command | What it does |
 |---|---|
-| `friday start [--dev]` | Launch daemon + dashboard via tmux. `--dev` enables hot reload. |
+| `friday start` | Launch daemon + dashboard + zero-cache via tmux (always prod). For dev hot-reload, use `pnpm dev:daemon` / `pnpm dev:dashboard` instead — see "Dev mode" below. |
 | `friday stop` | Kill the tmux session. |
-| `friday restart <daemon\|dashboard\|tunnel\|all>` | Restart a service (or `all`). Target is required — bare `friday restart` errors with usage. Restarting `dashboard` or `all` in dev bounces vite, which triggers a full browser reload on reconnect; prefer `friday restart daemon` when only daemon state needs refreshing. |
+| `friday restart <daemon\|dashboard\|zero-cache\|tunnel\|all>` | Restart a service (or `all`). Target is required — bare `friday restart` errors with usage. |
 | `friday status` | Show pids, ports, uptime. |
 | `friday doctor` | Health check. |
 | `friday logs [daemon\|dashboard] [--follow]` | Tail logs. |
@@ -36,10 +36,33 @@
 | `friday app list` / `friday app inspect <id>` | Read-only inspection. |
 | `friday app reload <id>` | Re-read the manifest from disk and reconcile. |
 
-## Modes
+## Production (the only thing `friday` launches)
 
-- **Production** (no flag): runs the built artifacts (`node dist/index.js` for the daemon, `node server-entry.mjs` for the dashboard — a custom adapter-node wrapper that adds the `/api/sync` WS reverse-proxy to zero-cache). Run `pnpm build` first.
-- **Dev** (`--dev`): runs `tsx watch` for the daemon and `vite dev` for the dashboard. Hot reload, slower startup, expects source on disk.
+`friday start` runs the built artifacts: `node dist/index.js` for the daemon (binds **127.0.0.1:7610**), `node server-entry.mjs` for the dashboard (binds **127.0.0.1:7615** — a custom adapter-node wrapper that adds the `/api/sync` WS reverse-proxy to zero-cache), and `pnpm exec zero-cache` for the Zero sidecar (**127.0.0.1:4848**, internal-only behind the dashboard's WS proxy). Run `pnpm build` first; `friday start` rebuilds `packages/**` and the dashboard automatically before launch but won't pre-build raw source for you.
+
+Ports default to the prod constants above. Override either via `~/.friday/config.json`'s `daemonPort` / `dashboardPort` (both optional). Zero-cache's port is fixed at 4848 (Zero's convention; if you need a parallel instance later, override via `ZERO_PORT` env at spawn time).
+
+## Dev mode for contributors
+
+Dev is launched directly from the repo with two pnpm scripts, **not** the `friday` CLI:
+
+```bash
+pnpm dev:daemon       # tsx watch src/index.ts — daemon on :7444
+pnpm dev:dashboard    # vite dev --port 5173 — dashboard on :5173
+```
+
+Both wrappers set `FRIDAY_DAEMON_PORT=7444` so the dev dashboard's SvelteKit server-side fetches reach the dev daemon (`:7444`) rather than the prod daemon (`:7610`) when both are running concurrently.
+
+By default, dev shares `~/.friday/` with prod — including the Postgres `friday` database and the running prod zero-cache. This is intentional: testing against live data is sometimes the point. **Co-running prod + dev daemons against the same Postgres DB will produce inconsistent writes** — either `friday stop` first, or use full isolation:
+
+```bash
+FRIDAY_DATA_DIR=$HOME/.friday-dev pnpm dev:daemon
+FRIDAY_DATA_DIR=$HOME/.friday-dev pnpm dev:dashboard
+```
+
+For full DB-level isolation (separate Postgres database and a parallel zero-cache), additionally `CREATE DATABASE friday_dev` and point a parallel `~/.friday-dev/.env`'s `DATABASE_URL` at it; spawn a second zero-cache on a different `ZERO_PORT`. Not currently scripted — flagged for a follow-up ticket.
+
+The `--dev` CLI flag was retired with FRI-83. `friday start --dev` now exits with citty's unknown-flag error.
 
 ## Data location
 
