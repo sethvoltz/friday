@@ -942,7 +942,6 @@
     border-radius: inherit;
     background: var(--header-float-bg);
     backdrop-filter: blur(20px) saturate(160%);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
     /* Sits between the aurora (z-index: 0) and the form/chips (z-index:
        2) so its backdrop-filter samples the aurora and the chat content
        behind, but never the textarea text we put on top. */

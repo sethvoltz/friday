@@ -300,7 +300,6 @@
        at the top-right can route to the sidebar's stacking context first. */
     z-index: 250;
     backdrop-filter: blur(20px) saturate(160%);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
     border-radius: 999px;
     box-shadow: var(--shadow-lg);
     gap: 1rem;

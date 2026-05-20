@@ -461,7 +461,6 @@
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-lg);
     backdrop-filter: blur(20px) saturate(160%);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
     z-index: 90;
   }
 
@@ -514,7 +513,6 @@
     border-radius: var(--radius-lg);
     background: var(--header-float-bg);
     backdrop-filter: blur(20px) saturate(160%);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
     color: var(--text-primary);
     font-size: 0.8rem;
     font-weight: 500;
