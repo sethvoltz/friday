@@ -127,18 +127,45 @@
     // drags `position: fixed` elements (the floating header, in
     // particular) out of view. Track visualViewport.offsetTop in a CSS
     // var so the header can stay anchored to the *visible* top edge.
+    //
+    // **Only update while an input or textarea is focused** — without
+    // this gate, iOS fires `visualViewport.scroll` events during chat
+    // scroll-to-bottom animations and the offset wanders to mid-screen,
+    // dragging the floating header down with it (the "snaps to center
+    // of the screen while running" symptom). When no input is focused,
+    // the keyboard isn't open and the offset is always 0 anyway; clearing
+    // it explicitly prevents a stale value from sticking past a blur.
+    //
+    // Clamp the value defensively too: a runaway vv.offsetTop (older
+    // Safari pinch-zoom edge case) would otherwise position the header
+    // at arbitrary screen coordinates. 200px caps it at "definitely
+    // still near the top of the visible area."
     const vv = window.visualViewport;
     let vvUpdate: (() => void) | undefined;
     if (vv) {
-      vvUpdate = () => {
+      const setOffset = (value: number) => {
+        const clamped = Math.max(0, Math.min(value, 200));
         document.documentElement.style.setProperty(
           "--vv-offset-top",
-          `${vv.offsetTop}px`,
+          `${clamped}px`,
         );
+      };
+      vvUpdate = () => {
+        const active = document.activeElement;
+        const tag = active?.tagName;
+        const isTextField =
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          (active instanceof HTMLElement && active.isContentEditable);
+        setOffset(isTextField ? vv.offsetTop : 0);
       };
       vvUpdate();
       vv.addEventListener("resize", vvUpdate);
       vv.addEventListener("scroll", vvUpdate);
+      // Re-evaluate when focus state changes — blur on the input must
+      // immediately reset the offset to 0 even if no vv event fires.
+      document.addEventListener("focusin", vvUpdate);
+      document.addEventListener("focusout", vvUpdate);
     }
 
     return () => {
@@ -149,6 +176,8 @@
       if (vv && vvUpdate) {
         vv.removeEventListener("resize", vvUpdate);
         vv.removeEventListener("scroll", vvUpdate);
+        document.removeEventListener("focusin", vvUpdate);
+        document.removeEventListener("focusout", vvUpdate);
       }
     };
   });
