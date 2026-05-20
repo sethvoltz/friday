@@ -12,6 +12,7 @@
     wakeLockState,
   } from "$lib/stores/wake-lock.svelte";
   import ConnectivityWidget from "$lib/components/Connectivity/ConnectivityWidget.svelte";
+  import SyncOverlay from "$lib/components/SyncOverlay/SyncOverlay.svelte";
   import { Zap } from "lucide-svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
@@ -209,6 +210,9 @@
 </svelte:head>
 
 <ModeWatcher />
+{#if signedIn && !isLogin}
+  <SyncOverlay />
+{/if}
 <div class="app-shell">
   {#if signedIn && !isLogin}
     <header class="app-header">
