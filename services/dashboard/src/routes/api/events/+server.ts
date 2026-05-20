@@ -1,5 +1,5 @@
 import type { RequestHandler } from "@sveltejs/kit";
-import { loadConfig } from "@friday/shared";
+import { loadConfig, resolveDaemonPort } from "@friday/shared";
 
 /**
  * Pipe the daemon's SSE stream to the browser using a fresh ReadableStream
@@ -23,7 +23,7 @@ export const GET: RequestHandler = async ({ request, locals }) => {
   }
 
   const upstream = await fetch(
-    `http://localhost:${cfg.daemonPort}/api/events`,
+    `http://localhost:${resolveDaemonPort(cfg)}/api/events`,
     { headers, signal: request.signal },
   );
 

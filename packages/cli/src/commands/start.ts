@@ -97,8 +97,15 @@ function tmuxSpecs(
       // file is the only durable artifact across daemon restarts —
       // tmux scrollback is bounded and resets when the session is
       // killed.
+      // `ZERO_MUTATE_URL` is exported AFTER sourcing `.env` so the
+      // dynamically-resolved dashboard port wins over whatever stale
+      // value the .env carries (this file is written once at
+      // `friday setup` time and isn't re-emitted when ports change).
+      // Same shape as `resolveDaemonPort` / `resolveDashboardPort` for
+      // every other port consumer — config drives the running value.
       prodCmd:
         'set -a && source ~/.friday/.env && set +a && ' +
+        `export ZERO_MUTATE_URL="http://localhost:${dashboardPort}/api/mutators" && ` +
         'pnpm exec zero-deploy-permissions --schema-path ../../packages/shared/dist/sync/schema.js && ' +
         `while true; do ` +
         `ZERO_LOG_FORMAT=json pnpm exec zero-cache 2>&1 | tee -a "${getLogPath("zero-cache")}"; ` +

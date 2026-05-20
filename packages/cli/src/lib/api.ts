@@ -2,6 +2,7 @@ import {
   DAEMON_SECRET_HEADER,
   getDaemonSecret,
   loadConfig,
+  resolveDaemonPort,
 } from "@friday/shared";
 
 /**
@@ -13,7 +14,7 @@ export class DaemonClient {
   private base: string;
   constructor(port?: number) {
     const cfg = loadConfig();
-    const p = port ?? cfg.daemonPort;
+    const p = port ?? resolveDaemonPort(cfg);
     this.base = `http://localhost:${p}`;
   }
 
