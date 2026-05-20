@@ -71,6 +71,10 @@ import {
   type UpdateProposalInput,
 } from "@friday/evolve";
 import {
+  deleteProposalFromPg,
+  syncProposalToPg,
+} from "../evolve/projector.js";
+import {
   createIssueWithConfiguredTeam as linearCreateIssue,
   getStateIdByType as linearGetStateIdByType,
   importIssue as linearImportIssue,
@@ -107,6 +111,7 @@ import {
 } from "../agent/lifecycle.js";
 import {
   deleteBlockById,
+  getBlockById,
   getUserChatBlockByTurnId,
 } from "@friday/shared/services";
 import { generateScratchName } from "../agent/scratch-names.js";
@@ -174,7 +179,7 @@ async function handle(
   // --- System command dispatch ---
   if (method === "POST" && path === "/api/commands/dispatch") {
     const body = await readJson<{ command: string; args?: string }>(req);
-    return handleSystemCommand(res, body, cfg);
+    return await handleSystemCommand(res, body, cfg);
   }
 
   // --- SSE events ---
@@ -189,11 +194,11 @@ async function handle(
     const turnId = `t_${randomUUID()}`;
 
     // Ensure orchestrator exists.
-    if (!registry.getAgent(agentName)) {
-      registry.registerAgent({ name: agentName, type: "orchestrator" });
+    if (!(await registry.getAgent(agentName))) {
+      await registry.registerAgent({ name: agentName, type: "orchestrator" });
     }
 
-    const agentRow = registry.getAgent(agentName)!;
+    const agentRow = (await registry.getAgent(agentName))!;
     const resumeSessionId = agentRow.sessionId ?? undefined;
 
     const stack = readPromptStack(agentRow.type, []);
@@ -215,7 +220,7 @@ async function handle(
       : baseSystemPrompt;
     const allowedToolsOverride = skillMatch?.skill.allowedTools ?? undefined;
 
-    const wrappedPrompt = wrapWithRecall(userText, userText, "user_chat");
+    const wrappedPrompt = await wrapWithRecall(userText, userText, "user_chat");
 
     // Persist the user's typed prompt as a `role='user'`, `source='user_chat'`
     // block before dispatching. Stays scoped to the user's literal input —
@@ -239,7 +244,7 @@ async function handle(
     const willQueue = liveBefore?.status === "working";
     let userBlockId: string | undefined;
     try {
-      const recorded = recordUserBlock({
+      const recorded = await recordUserBlock({
         turnId,
         agentName,
         sessionId: resumeSessionId,
@@ -257,12 +262,13 @@ async function handle(
     }
 
     const modelCfg = normalizeModelConfig(cfg.model);
+    const turnCwd = await registry.workingDirectoryFor(agentRow);
     dispatchTurn({
       agentName,
       options: {
         agentName,
         agentType: agentRow.type,
-        workingDirectory: registry.workingDirectoryFor(agentRow),
+        workingDirectory: turnCwd,
         systemPrompt,
         prompt: wrappedPrompt,
         attachments: attachments.length > 0 ? attachments : undefined,
@@ -294,7 +300,7 @@ async function handle(
     path.endsWith("/queued")
   ) {
     const turnId = path.split("/")[4];
-    const block = getUserChatBlockByTurnId(turnId);
+    const block = await getUserChatBlockByTurnId(turnId);
     if (!block) {
       return json(res, 404, { error: "turn_not_found", turn_id: turnId });
     }
@@ -314,24 +320,68 @@ async function handle(
     } catch {
       // Malformed content_json — return empty text; the user gets to retype.
     }
-    // Notify any other open dashboard tab on this agent that the queued
-    // bubble is gone. We publish the meta-update *before* the row vanishes
-    // so a late reconnect that compares its cursor sees the aborted state.
-    // No writeAndPublish coordination: the row is being deleted, so there's
-    // no `last_event_seq` to align with.
-    eventBus.publish({
-      v: 1,
-      type: "block_meta_update",
-      turn_id: turnId,
-      agent: block.agentName,
-      block_id: block.blockId,
-      status: "aborted",
-    });
-    deleteBlockById(block.blockId);
+    // Phase 5: `block_meta_update` SSE retired — Zero replicates
+    // the DELETE on the blocks slice; other dashboard tabs see the
+    // bubble vanish via the reactive query without an SSE event.
+    await deleteBlockById(block.blockId);
     return json(res, 200, {
       ok: true,
       turn_id: turnId,
       text: recoveredText,
+    });
+  }
+
+  // Phase 4.9 fast-path: synchronous in-memory splice of the worker's
+  // `nextPrompts` deque. Called by the dashboard's `cancelQueued`
+  // wrapper before / alongside dispatching the Zero mutator. The
+  // mutator UPDATEs the row to status='cancel_requested' which fires
+  // the Postgres trigger; the daemon's LISTEN handler then performs
+  // the canonical row DELETE. This endpoint deliberately does NOT
+  // delete the row — leaving the DELETE to the LISTEN-path keeps the
+  // cancel-row-delete pathway single-sourced and avoids racing the
+  // trigger.
+  //
+  // Idempotent on the in-memory state: re-running after the splice
+  // has already happened returns `{ ok: true, already_canceled: true,
+  // text: "" }`. The dashboard treats both responses the same way.
+  if (
+    method === "POST" &&
+    path === "/api/internal/cancel-queued"
+  ) {
+    const body = await readJson<{ block_id?: string }>(req);
+    const blockId = body.block_id;
+    if (typeof blockId !== "string" || blockId.length === 0) {
+      return json(res, 400, { error: "missing_block_id" });
+    }
+    const block = await getBlockById(blockId);
+    if (!block) {
+      // Row already deleted (LISTEN-path won the race, or legacy DELETE
+      // path already handled it). Idempotent return: nothing to splice,
+      // no text to recover.
+      return json(res, 200, { ok: true, already_canceled: true, text: "" });
+    }
+    if (block.status !== "queued" && block.status !== "cancel_requested") {
+      return json(res, 409, {
+        error: "not_queued",
+        block_id: blockId,
+        status: block.status,
+        message: "Block has already dispatched; use abort instead",
+      });
+    }
+    const removed = removeQueuedPrompt(block.agentName, block.turnId);
+    let recoveredText = "";
+    try {
+      const parsed = JSON.parse(block.contentJson) as { text?: unknown };
+      if (typeof parsed.text === "string") recoveredText = parsed.text;
+    } catch {
+      // Malformed content_json — return empty text; the user retypes.
+    }
+    return json(res, 200, {
+      ok: true,
+      already_canceled: removed === null,
+      text: recoveredText,
+      turn_id: block.turnId,
+      agent: block.agentName,
     });
   }
 
@@ -346,6 +396,33 @@ async function handle(
     return json(res, 200, { aborted, turn_id: turnId, agent });
   }
 
+  // Phase 4.10 fast-path: synchronously dispatch the lifecycle
+  // `abortTurn(agent)` so the worker's `AbortController` fires before
+  // the next SDK step lands. Called by the dashboard's `abortTurn`
+  // wrapper before / alongside dispatching the Zero mutator. Idempotent
+  // against the LISTEN-path (both call the same lifecycle function).
+  //
+  // Authenticated callers only (loopback + shared secret enforced at
+  // the dashboard's proxy layer).
+  if (
+    method === "POST" &&
+    path === "/api/internal/abort-turn"
+  ) {
+    const body = await readJson<{ turn_id?: string }>(req);
+    const turnId = body.turn_id;
+    if (typeof turnId !== "string" || turnId.length === 0) {
+      return json(res, 400, { error: "missing_turn_id" });
+    }
+    const agent = findAgentByTurnId(turnId);
+    const aborted = agent ? abortTurn(agent) : false;
+    // `aborted=false` means no live worker matched the turn (either
+    // it already finished or the legacy abort path already tore it
+    // down). The dashboard treats both as success; the response shape
+    // matches the legacy `/api/chat/turn/<id>/abort` endpoint so
+    // callers can share the same JSON parser.
+    return json(res, 200, { ok: true, aborted, turn_id: turnId, agent });
+  }
+
   if (method === "POST" && path.startsWith("/api/chat/turn/") && path.endsWith("/resume")) {
     // FRI-12: "Resume" CTA on an error bubble. Re-dispatch the original
     // user prompt under the SAME turn_id so the retry's content blocks
@@ -353,7 +430,7 @@ async function handle(
     // is already past that point — this is a fresh prompt; it just
     // shares the turn label.
     const turnId = path.split("/")[4];
-    const blocks = listBlocksByTurn(turnId);
+    const blocks = await listBlocksByTurn(turnId);
     if (blocks.length === 0) {
       return json(res, 404, { error: "turn_not_found", turn_id: turnId });
     }
@@ -375,7 +452,7 @@ async function handle(
         message: "A turn is already in flight for this agent",
       });
     }
-    const agentRow = registry.getAgent(agentName);
+    const agentRow = await registry.getAgent(agentName);
     if (!agentRow) {
       return json(res, 404, { error: "agent_not_found", agent: agentName });
     }
@@ -409,14 +486,15 @@ async function handle(
       parentName:
         "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
     });
-    const wrappedPrompt = wrapWithRecall(parsedText, parsedText, "user_chat");
+    const wrappedPrompt = await wrapWithRecall(parsedText, parsedText, "user_chat");
     const modelCfg = normalizeModelConfig(cfg.model);
+    const resumeCwd = await registry.workingDirectoryFor(agentRow);
     dispatchTurn({
       agentName,
       options: {
         agentName,
         agentType: agentRow.type,
-        workingDirectory: registry.workingDirectoryFor(agentRow),
+        workingDirectory: resumeCwd,
         systemPrompt: baseSystemPrompt,
         prompt: wrappedPrompt,
         turnId, // <-- reuse the failed turn's id
@@ -437,7 +515,7 @@ async function handle(
 
   // --- Agents ---
   if (method === "GET" && path === "/api/agents") {
-    const all: AgentEntry[] = registry.listAgents();
+    const all: AgentEntry[] = await registry.listAgents();
     // Prefer the in-memory live worker's status over the DB column whenever
     // an agent has a forked worker — the DB lags by however long it takes
     // for setStatus() to land between the worker's status-change and the
@@ -456,7 +534,7 @@ async function handle(
     );
     // Augment with past-session count so the dashboard sidebar can decide
     // whether an agent has expandable history without N+1 follow-up calls.
-    const counts = sessionCountsByAgent();
+    const counts = await sessionCountsByAgent();
     const augmented = filtered.map((a) => ({
       ...a,
       sessionCount: counts[a.name] ?? 0,
@@ -465,7 +543,7 @@ async function handle(
   }
   if (method === "GET" && /^\/api\/agents\/[^/]+\/sessions$/.test(path)) {
     const agentName = path.split("/")[3];
-    return json(res, 200, listAgentSessions(agentName));
+    return json(res, 200, await listAgentSessions(agentName));
   }
   if (method === "POST" && path === "/api/agents") {
     const body = await readJson<{
@@ -483,7 +561,7 @@ async function handle(
           "invalid name (must be lowercase alphanumeric + dashes, up to 64 chars)",
       });
     }
-    if (registry.getAgent(body.name)) {
+    if (await registry.getAgent(body.name)) {
       return json(res, 409, { error: `agent "${body.name}" already exists` });
     }
     if (
@@ -522,9 +600,9 @@ async function handle(
     // and builders can't be declared in a manifest in v1 anyway.
     const inheritedAppId =
       body.type !== "builder" && body.parentName
-        ? registry.getAppId(body.parentName)
+        ? await registry.getAppId(body.parentName)
         : null;
-    registry.registerAgent({
+    await registry.registerAgent({
       name: body.name,
       type: body.type,
       parentName: body.parentName,
@@ -546,7 +624,7 @@ async function handle(
         ? `${baseSystemPrompt}\n\n---\n\nYou are running in a git worktree at \`${worktreePath}\` on branch \`${branch}\`. **Do not read, write, or modify files outside this directory.** All Bash commands run with this directory as cwd by default; do not \`cd\` outside it.`
         : baseSystemPrompt;
     const modelCfg = normalizeModelConfig(cfg.model);
-    const wrappedSpawnPrompt = wrapWithRecall(
+    const wrappedSpawnPrompt = await wrapWithRecall(
       body.prompt,
       body.prompt,
       "agent_spawn",
@@ -557,7 +635,7 @@ async function handle(
     // falls back to '__pending__' and the post-turn JSONL recovery rewrites
     // it once the SDK assigns a real id.
     try {
-      recordUserBlock({
+      await recordUserBlock({
         turnId,
         agentName: body.name,
         text: body.prompt,
@@ -591,7 +669,7 @@ async function handle(
   }
   if (method === "GET" && /^\/api\/agents\/[^/]+$/.test(path)) {
     const name = path.split("/")[3];
-    const a = registry.getAgent(name);
+    const a = await registry.getAgent(name);
     if (!a) return json(res, 404, { error: "not found" });
     return json(res, 200, a);
   }
@@ -601,7 +679,7 @@ async function handle(
     // Sessions persist in perpetuity — this just frees the disk and stops
     // future work. Merged form of the old POST /kill + DELETE /workspace.
     const name = path.split("/")[3];
-    const a = registry.getAgent(name);
+    const a = await registry.getAgent(name);
     if (!a) return json(res, 404, { error: "not found" });
     // `reason` is required and drives the linked-ticket close behavior
     // (completed→done, abandoned/failed→closed). Refork is daemon-internal
@@ -661,7 +739,7 @@ async function handle(
     const match = url.searchParams.get("match") ?? undefined;
     const sessionId = url.searchParams.get("session_id") ?? undefined;
     try {
-      const result = fetchBlocksByAgent({
+      const result = await fetchBlocksByAgent({
         agentName,
         sessionId,
         limit,
@@ -703,34 +781,35 @@ async function handle(
       ? (rawStatus as (typeof TICKET_STATUSES)[number])
       : undefined;
     const assignee = url.searchParams.get("assignee") ?? undefined;
-    return json(res, 200, listTickets({ status, assignee }));
+    return json(res, 200, await listTickets({ status, assignee }));
   }
   if (method === "POST" && path === "/api/tickets") {
     const body = await readJson<Parameters<typeof createTicket>[0]>(req);
-    return json(res, 200, createTicket(body));
+    return json(res, 200, await createTicket(body));
   }
   if (method === "GET" && /^\/api\/tickets\/[^/]+$/.test(path)) {
     const id = path.split("/")[3];
-    const t = getTicket(id);
+    const t = await getTicket(id);
     if (!t) return json(res, 404, { error: "not found" });
-    const ext = externalLinks(id);
-    const comments = listComments(id);
+    const ext = await externalLinks(id);
+    const comments = await listComments(id);
     return json(res, 200, { ...t, externalLinks: ext, comments });
   }
   if (method === "PATCH" && /^\/api\/tickets\/[^/]+$/.test(path)) {
     const id = path.split("/")[3];
     const body = await readJson<Parameters<typeof updateTicket>[1]>(req);
-    return json(res, 200, updateTicket(id, body));
+    return json(res, 200, await updateTicket(id, body));
   }
   if (method === "POST" && /^\/api\/tickets\/[^/]+\/comments$/.test(path)) {
     const id = path.split("/")[3];
     const body = await readJson<{ author: string; body: string }>(req);
-    addComment(id, body.author, body.body);
+    await addComment(id, body.author, body.body);
     return json(res, 200, { ok: true });
   }
   if (method === "POST" && /^\/api\/tickets\/[^/]+\/links$/.test(path)) {
     const id = path.split("/")[3];
-    if (!getTicket(id)) return json(res, 404, { error: "ticket not found" });
+    if (!(await getTicket(id)))
+      return json(res, 404, { error: "ticket not found" });
     const body = await readJson<{
       system: string;
       externalId: string;
@@ -740,7 +819,7 @@ async function handle(
     if (!body.system || !body.externalId) {
       return json(res, 400, { error: "system and externalId required" });
     }
-    linkExternal({
+    await linkExternal({
       ticketId: id,
       system: body.system,
       externalId: body.externalId,
@@ -751,7 +830,8 @@ async function handle(
   }
   if (method === "DELETE" && /^\/api\/tickets\/[^/]+\/links$/.test(path)) {
     const id = path.split("/")[3];
-    if (!getTicket(id)) return json(res, 404, { error: "ticket not found" });
+    if (!(await getTicket(id)))
+      return json(res, 404, { error: "ticket not found" });
     const system = url.searchParams.get("system");
     const externalId = url.searchParams.get("externalId");
     if (!system || !externalId) {
@@ -759,19 +839,19 @@ async function handle(
         error: "system and externalId query params required",
       });
     }
-    const removed = unlinkExternal({ ticketId: id, system, externalId });
+    const removed = await unlinkExternal({ ticketId: id, system, externalId });
     if (!removed) return json(res, 404, { error: "link not found" });
     return json(res, 200, { ok: true });
   }
 
   // --- Schedules ---
   if (method === "GET" && path === "/api/schedules") {
-    return json(res, 200, listSchedules());
+    return json(res, 200, await listSchedules());
   }
   if (method === "POST" && path === "/api/schedules") {
     const body = await readJson<Parameters<typeof upsertSchedule>[0]>(req);
     try {
-      upsertSchedule(body);
+      await upsertSchedule(body);
     } catch (err) {
       if (err instanceof ScheduleNameCollisionError) {
         return json(res, 409, { error: err.message });
@@ -787,7 +867,7 @@ async function handle(
     /^\/api\/schedules\/[^/]+\/trigger$/.test(path)
   ) {
     const name = decodeURIComponent(path.split("/")[3]);
-    const runId = triggerSchedule(name);
+    const runId = await triggerSchedule(name);
     if (!runId)
       return json(res, 409, {
         error: "schedule not found or already running",
@@ -801,32 +881,34 @@ async function handle(
     const name = decodeURIComponent(path.split("/")[3]);
     const action = path.split("/")[4];
     const ok =
-      action === "pause" ? pauseSchedule(name) : resumeSchedule(name);
+      action === "pause"
+        ? await pauseSchedule(name)
+        : await resumeSchedule(name);
     if (!ok) return json(res, 404, { error: "schedule not found" });
     return json(res, 200, { ok: true });
   }
   if (method === "GET" && /^\/api\/schedules\/[^/]+$/.test(path)) {
     const name = decodeURIComponent(path.split("/")[3]);
-    const r = getSchedule(name);
+    const r = await getSchedule(name);
     if (!r) return json(res, 404, { error: "schedule not found" });
     return json(res, 200, r);
   }
   if (method === "GET" && /^\/api\/schedules\/[^/]+\/state$/.test(path)) {
     const name = decodeURIComponent(path.split("/")[3]);
-    if (!getSchedule(name))
+    if (!(await getSchedule(name)))
       return json(res, 404, { error: "schedule not found" });
     return json(res, 200, readScheduleArtifacts(name));
   }
   if (method === "DELETE" && /^\/api\/schedules\/[^/]+$/.test(path)) {
     const name = decodeURIComponent(path.split("/")[3]);
-    const ok = deleteSchedule(name);
+    const ok = await deleteSchedule(name);
     if (!ok) return json(res, 404, { error: "schedule not found" });
     return json(res, 200, { ok: true });
   }
 
   // --- Memory ---
   if (method === "GET" && path === "/api/memory") {
-    return json(res, 200, listEntries());
+    return json(res, 200, await listEntries());
   }
   if (method === "GET" && path === "/api/memory/search") {
     const q = url.searchParams.get("q") ?? "";
@@ -837,7 +919,7 @@ async function handle(
       : undefined;
     const limit = limitParam ? Math.max(1, Number(limitParam) || 10) : undefined;
     if (!q.trim()) return json(res, 400, { error: "q parameter required" });
-    const results = searchMemories({
+    const results = await searchMemories({
       query: q,
       tags,
       limit,
@@ -861,7 +943,7 @@ async function handle(
       req.headers["x-friday-caller-name"] ?? "user",
     );
     const now = new Date().toISOString();
-    const existing = getEntry(id);
+    const existing = await getEntry(id);
     const entry: MemoryEntry = {
       id,
       title: body.title,
@@ -873,12 +955,12 @@ async function handle(
       recallCount: existing?.recallCount ?? 0,
       lastRecalledAt: existing?.lastRecalledAt ?? null,
     };
-    saveEntry(entry);
+    await saveEntry(entry);
     return json(res, existing ? 200 : 201, entry);
   }
   if (method === "GET" && /^\/api\/memory\/[^/]+$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[3]);
-    const e = getEntry(id);
+    const e = await getEntry(id);
     if (!e) return json(res, 404, { error: "not found" });
     // FIX_FORWARD 6.8 follow-up: bumping `recallCount` on every dashboard
     // page view (load, edit, delete, invalidateAll) pollutes the metric
@@ -886,25 +968,25 @@ async function handle(
     // explicit `?recall=1` from callers that want the bump (the
     // auto-recall block uses `searchMemories`, which touches on its own).
     if (url.searchParams.get("recall") === "1") {
-      touchRecall(id);
+      await touchRecall(id);
     }
     return json(res, 200, e);
   }
   if (method === "PATCH" && /^\/api\/memory\/[^/]+$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[3]);
-    if (!getEntry(id)) return json(res, 404, { error: "not found" });
+    if (!(await getEntry(id))) return json(res, 404, { error: "not found" });
     const patch = await readJson<{
       title?: string;
       content?: string;
       tags?: string[];
     }>(req);
-    updateEntry(id, patch);
-    return json(res, 200, getEntry(id));
+    await updateEntry(id, patch);
+    return json(res, 200, await getEntry(id));
   }
   if (method === "DELETE" && /^\/api\/memory\/[^/]+$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[3]);
-    if (!getEntry(id)) return json(res, 404, { error: "not found" });
-    forgetEntry(id);
+    if (!(await getEntry(id))) return json(res, 404, { error: "not found" });
+    await forgetEntry(id);
     return json(res, 200, { ok: true });
   }
 
@@ -929,6 +1011,10 @@ async function handle(
     }
     const callerName = String(req.headers["x-friday-caller-name"] ?? "user");
     const p = saveProposal({ ...body, createdBy: callerName });
+    // Item #54: project the FS write to Postgres so /evolve's Zero
+    // reactive query sees the new row. Fire-and-forget — FS stays
+    // canonical; a PG sync failure logs but doesn't fail the HTTP 201.
+    void syncProposalToPg(p.id);
     return json(res, 201, p);
   }
   if (
@@ -949,6 +1035,7 @@ async function handle(
       return json(res, 404, { error: "proposal not found" });
     const patch = await readJson<UpdateProposalInput>(req);
     const next = updateProposal(id, patch);
+    void syncProposalToPg(id);
     return json(res, 200, next);
   }
   if (
@@ -958,6 +1045,7 @@ async function handle(
     const id = decodeURIComponent(path.split("/")[4]);
     if (!deleteProposal(id))
       return json(res, 404, { error: "proposal not found" });
+    void deleteProposalFromPg(id);
     return json(res, 200, { ok: true });
   }
   if (
@@ -977,7 +1065,7 @@ async function handle(
       assignee?: string;
     }>(req);
     const callerName = String(req.headers["x-friday-caller-name"] ?? "user");
-    const ticket = createTicket({
+    const ticket = await createTicket({
       title: p.title,
       body: renderProposalForTicket(p),
       kind: body.ticketKind ?? "task",
@@ -990,6 +1078,7 @@ async function handle(
       appliedBy: callerName,
       appliedTicketId: ticket.id,
     });
+    void syncProposalToPg(id);
     return json(res, 200, { proposal: updated, ticket });
   }
   if (
@@ -1007,6 +1096,7 @@ async function handle(
       status: "rejected",
       proposedChange: newBody,
     });
+    void syncProposalToPg(id);
     return json(res, 200, updated);
   }
 
@@ -1023,7 +1113,7 @@ async function handle(
     const since = sinceHoursAgo(windowHours);
     const windowEnd = new Date().toISOString();
     try {
-      const syncSignals = scanAll({ since });
+      const syncSignals = await scanAll({ since });
       const frictionSignals = includeFriction
         ? await scanFriction({ since }).catch((err) => {
             logger.log("warn", "evolve.scan.friction-error", {
@@ -1265,14 +1355,14 @@ async function handle(
   // --- Mail ---
   if (method === "GET" && /^\/api\/mail\/inbox\/[^/]+$/.test(path)) {
     const agent = path.split("/")[4];
-    return json(res, 200, inbox(agent));
+    return json(res, 200, await inbox(agent));
   }
   if (method === "POST" && path === "/api/mail/send") {
     const body = await readJson<Parameters<typeof sendMail>[0]>(req);
     // FIX_FORWARD 5.7: per-agent mail rate limit — 50 mails / 5min / from.
     // A runaway tool that spams the orchestrator can't drown the mail bus.
     const fromAgent = body.fromAgent || "__unknown__";
-    const r = consumeRateLimit({
+    const r = await consumeRateLimit({
       key: `mail:${fromAgent}`,
       windowMs: 5 * 60 * 1000,
       max: 50,
@@ -1286,7 +1376,7 @@ async function handle(
     }
     // FRI-11 F3: resolve symbolic recipients ("parent" / "self") against the
     // caller's registry row before validation. Literal names pass through.
-    const resolved = resolveRecipient(fromAgent, body.toAgent);
+    const resolved = await resolveRecipient(fromAgent, body.toAgent);
     if (!resolved.ok) {
       return json(res, 400, { error: resolved.error });
     }
@@ -1294,20 +1384,20 @@ async function handle(
     // The MCP tool surfaces this 400 to the caller as a daemonFetch error —
     // the agent sees the suggestion immediately instead of silently writing
     // an undeliverable mail row.
-    const check = validateRecipient(resolved.agent);
+    const check = await validateRecipient(resolved.agent);
     if (!check.ok) {
       return json(res, 400, {
         error: check.error,
         suggestion: check.suggestion,
       });
     }
-    return json(res, 200, sendMail({ ...body, toAgent: check.agent }));
+    return json(res, 200, await sendMail({ ...body, toAgent: check.agent }));
   }
   if (method === "POST" && /^\/api\/mail\/\d+\/read$/.test(path)) {
     const id = Number(path.split("/")[3]);
-    const row = getMail(id);
+    const row = await getMail(id);
     if (!row) return json(res, 404, { error: "mail not found" });
-    markRead(id);
+    await markRead(id);
     return json(res, 200, { ...row, delivery: "read", readAt: Date.now() });
   }
   if (method === "POST" && /^\/api\/mail\/\d+\/close$/.test(path)) {
@@ -1403,9 +1493,9 @@ async function handle(
       return json(res, 401, { error: "unauthorized" });
     }
     const sha = path.split("/")[3];
-    const bytes = readAttachmentBytes(sha);
+    const bytes = await readAttachmentBytes(sha);
     if (!bytes) return json(res, 404, { error: "not found" });
-    const meta = getAttachment(sha);
+    const meta = await getAttachment(sha);
     const rawMime = (meta?.mime ?? "application/octet-stream").toLowerCase();
     // Only allow inline rendering for a small, well-understood set of
     // MIME types. Anything else is forced to `application/octet-stream`
@@ -1434,15 +1524,18 @@ async function handle(
     if (!authorizeSameHost(req)) {
       return json(res, 401, { error: "unauthorized" });
     }
-    const rows = listApps().map((r) => {
-      const detail = inspectApp(r.id);
-      return {
-        ...r,
-        agents: detail?.agents ?? [],
-        schedules: detail?.schedules ?? [],
-        mcpServers: detail?.mcpServers ?? [],
-      };
-    });
+    const list = await listApps();
+    const rows = await Promise.all(
+      list.map(async (r) => {
+        const detail = await inspectApp(r.id);
+        return {
+          ...r,
+          agents: detail?.agents ?? [],
+          schedules: detail?.schedules ?? [],
+          mcpServers: detail?.mcpServers ?? [],
+        };
+      }),
+    );
     return json(res, 200, rows);
   }
   if (method === "POST" && path === "/api/apps") {
@@ -1530,6 +1623,16 @@ function handleEvents(
   res: ServerResponse,
   cfg: ReturnType<typeof loadConfig>,
 ): void {
+  // Phase 5: per-agent SSE channel. `?agent=<name>` restricts the
+  // stream to live-turn events for that agent only. The dashboard
+  // re-opens the connection on agent focus switch; events without an
+  // `agent` field (e.g. connection_established, app_lifecycle) pass
+  // through regardless so global daemon-level signals still reach the
+  // client. Omitting the query string keeps the legacy global stream
+  // for non-Zero callers + tests.
+  const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+  const agentFilter = url.searchParams.get("agent");
+
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache, no-transform",
@@ -1566,18 +1669,34 @@ function handleEvents(
   //     client missed is delivered. The chat-side per-agent dedup
   //     (FIX_FORWARD 1.7) handles duplicates against the canonical-blocks
   //     fetch that the client also issues on mount.
-  const lastEventIdHeader = req.headers["last-event-id"];
-  const parsedLast = lastEventIdHeader ? Number(lastEventIdHeader) : NaN;
-  const BACKWALK = 500;
-  const replayFrom =
-    Number.isFinite(parsedLast) && parsedLast >= 0
-      ? (parsedLast as number)
-      : Math.max(0, eventBus.currentSeq() - BACKWALK);
-  for (const e of eventBus.replaySince(replayFrom)) {
-    writeEvent(res, e);
+  //
+  // Phase 5: when `?agent=<name>` is set, the daemon switches from
+  // the legacy seq-cursor replay to a "replay the current turn's
+  // buffer" model (plan §211). The per-agent buffer is bounded
+  // (2000 events) and evicted on `turn_done`, so the replay is
+  // always scoped to the in-flight turn — no Last-Event-ID needed.
+  if (agentFilter) {
+    for (const e of eventBus.replayForAgent(agentFilter)) {
+      if (!passesAgentFilter(e, agentFilter)) continue;
+      writeEvent(res, e);
+    }
+  } else {
+    const lastEventIdHeader = req.headers["last-event-id"];
+    const parsedLast = lastEventIdHeader ? Number(lastEventIdHeader) : NaN;
+    const BACKWALK = 500;
+    const replayFrom =
+      Number.isFinite(parsedLast) && parsedLast >= 0
+        ? (parsedLast as number)
+        : Math.max(0, eventBus.currentSeq() - BACKWALK);
+    for (const e of eventBus.replaySince(replayFrom)) {
+      writeEvent(res, e);
+    }
   }
 
-  const unsub = eventBus.subscribe((e) => writeEvent(res, e));
+  const unsub = eventBus.subscribe((e) => {
+    if (!passesAgentFilter(e, agentFilter)) return;
+    writeEvent(res, e);
+  });
   const ka = setInterval(() => {
     try {
       res.write(": keepalive\n\n");
@@ -1590,6 +1709,21 @@ function handleEvents(
     clearInterval(ka);
     unsub();
   });
+}
+
+/**
+ * Phase 5 per-agent SSE filter. When `?agent=` is set, drop events
+ * whose `agent` field doesn't match. Events without an `agent` field
+ * (connection_established, app_lifecycle) always pass through — they're
+ * daemon-level signals every connected client needs to see.
+ */
+function passesAgentFilter(
+  e: { type?: unknown; agent?: unknown },
+  agentFilter: string | null,
+): boolean {
+  if (!agentFilter) return true;
+  if (typeof e.agent !== "string") return true;
+  return e.agent === agentFilter;
 }
 
 function writeEvent(res: ServerResponse, e: { type: string; seq: number }): void {
@@ -1620,11 +1754,11 @@ function writeRawEvent(
   }
 }
 
-function handleSystemCommand(
+async function handleSystemCommand(
   res: ServerResponse,
   body: { command: string; args?: string },
   cfg: ReturnType<typeof loadConfig>,
-): void {
+): Promise<void> {
   const args = (body.args ?? "").trim();
   switch (body.command) {
     case "archive": {
@@ -1637,20 +1771,20 @@ function handleSystemCommand(
     }
     case "status": {
       return json(res, 200, {
-        agents: registry.listAgents(),
+        agents: await registry.listAgents(),
         ts: Date.now(),
       });
     }
     case "inspect": {
       if (!args) return json(res, 400, { error: "agent name required" });
-      const a = registry.getAgent(args);
+      const a = await registry.getAgent(args);
       if (!a) return json(res, 404, { error: "agent not found" });
       return json(res, 200, a);
     }
     case "reset-context": {
       const cfg = loadConfig();
       const name = args || cfg.orchestratorName;
-      const a = registry.getAgent(name);
+      const a = await registry.getAgent(name);
       if (!a) return json(res, 404, { error: `agent not found: ${name}` });
       // If a worker is currently running, archive it so the next turn forks
       // a fresh process with no `resume` arg. setStatus + clearSession alone
@@ -1658,15 +1792,9 @@ function handleSystemCommand(
       // so the linked ticket (if any) isn't moved to a terminal status —
       // the agent is being reset, not closed.
       void archiveAgent(name, { reason: "refork" });
-      registry.clearSession(name);
-      eventBus.publish({
-        v: 1,
-        type: "agent_lifecycle",
-        agent: name,
-        agentType: a.type,
-        event: "refork",
-        reason: "reset-context",
-      });
+      await registry.clearSession(name);
+      // Phase 5: `agent_lifecycle:refork` SSE retired — Zero replicates
+      // the session-clear (agents.session_id=null) reactively.
       return json(res, 200, {
         ok: true,
         message: `reset-context: ${name} session cleared; next turn starts fresh`,
@@ -1677,19 +1805,19 @@ function handleSystemCommand(
       // auto-generated as scratch-<adj>-<noun>, kebab-case + unique against
       // the live registry.
       const topic = args.trim();
-      const name = generateScratchName((n) => registry.getAgent(n) !== null);
-      registry.registerAgent({
+      // Pre-fetch all existing agent names once so the name generator's
+      // collision predicate stays sync (the loop tries random pairs).
+      const existingNames = new Set(
+        (await registry.listAgents()).map((a) => a.name),
+      );
+      const name = generateScratchName((n) => existingNames.has(n));
+      await registry.registerAgent({
         name,
         type: "bare",
         parentName: undefined,
       });
-      eventBus.publish({
-        v: 1,
-        type: "agent_lifecycle",
-        agent: name,
-        agentType: "bare",
-        event: "spawn",
-      });
+      // Phase 5: `agent_lifecycle:spawn` SSE retired — Zero replicates
+      // the agents INSERT to the dashboard sidebar reactively.
 
       // Seed the agent with the topic as its first user turn. Re-uses the
       // same dispatch path as /api/chat/turn so persistence + SSE work
@@ -1703,11 +1831,11 @@ function handleSystemCommand(
           agentType: "bare",
         });
         const modelCfg = normalizeModelConfig(cfg.model);
-        const wrappedTopic = wrapWithRecall(topic, topic, "scratch");
+        const wrappedTopic = await wrapWithRecall(topic, topic, "scratch");
         // FRI-71: persist the seed topic as a user block so the bare agent's
         // first turn renders with the originating user bubble.
         try {
-          recordUserBlock({
+          await recordUserBlock({
             turnId: seedTurnId,
             agentName: name,
             text: topic,
@@ -1760,7 +1888,7 @@ function handleSystemCommand(
  * Returns the matched Skill plus the remaining args (the user message minus
  * the slash command), or null if no match. Filters by agent type.
  */
-function matchSkillInvocation(
+export function matchSkillInvocation(
   text: string,
   agentType: AgentEntry["type"],
 ): { skill: ReturnType<typeof loadSkills>[number]; userText: string } | null {

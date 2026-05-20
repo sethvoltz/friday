@@ -14,28 +14,33 @@
     "./markdown/streaming-mermaid": "./dist/markdown/streaming-mermaid.js",
     "./markdown/code-highlight": "./dist/markdown/code-highlight.js",
     "./cron": "./dist/cron.js",
-    "./apps": "./dist/apps/manifest.js"
+    "./apps": "./dist/apps/manifest.js",
+    "./sync": "./dist/sync/index.js",
+    "./sync/jwt": "./dist/sync/jwt.js",
+    "./test/sync-harness": "./dist/test/sync-harness.js"
   },
   "scripts": {
     "build": "tsc && node ./scripts/copy-prompts.mjs",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --passWithNoTests --exclude '**/*.e2e.test.ts'",
+    "test:e2e": "vitest run --passWithNoTests --config ./vitest.e2e.config.ts",
     "clean": "rm -rf dist",
     "drizzle:generate": "drizzle-kit generate",
     "drizzle:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
-    "better-sqlite3": "^12.0.0",
+    "@rocicorp/zero": "1.5.0",
     "cron-parser": "^5.5.0",
     "dotenv": "^16.4.0",
     "drizzle-orm": "^0.45.2",
     "katex": "^0.16.0",
     "marked": "^18.0.2",
     "marked-katex-extension": "^5.1.0",
+    "pg": "^8.13.0",
     "sharp": "^0.33.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
+    "@types/pg": "^8.11.10",
     "drizzle-kit": "^0.31.10",
     "jsdom": "^25.0.0",
     "typescript": "^5.7.0",

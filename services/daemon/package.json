@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --passWithNoTests --exclude '**/*.e2e.test.ts'",
+    "test:e2e": "vitest run --passWithNoTests --config ./vitest.e2e.config.ts",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "clean": "rm -rf dist"
@@ -17,10 +18,12 @@
     "@friday/memory": "workspace:*",
     "@friday/shared": "workspace:*",
     "drizzle-orm": "^0.45.2",
+    "pg": "^8.13.0",
     "shell-quote": "^1.8.3",
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/pg": "^8.11.0",
     "@types/shell-quote": "^1.7.5",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",

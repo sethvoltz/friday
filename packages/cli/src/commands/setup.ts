@@ -3,6 +3,7 @@ import { confirm, intro, outro, password, text } from "@clack/prompts";
 import pc from "picocolors";
 import { existsSync, writeFileSync } from "node:fs";
 import { betterAuth } from "better-auth";
+import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { eq } from "drizzle-orm";
 import {
   CONFIG_PATH,
@@ -11,10 +12,10 @@ import {
   ensureFridayEnv,
   ensureSoul,
   loadConfig,
+  provisionPostgres,
   upsertEnvVar,
   writeConfig,
   getDb,
-  getRawDb,
   runMigrations,
   schema,
 } from "@friday/shared";
@@ -48,8 +49,44 @@ export const setupCommand = defineCommand({
 
     ensureDirs();
     ensureFridayEnv(); // load + generate BETTER_AUTH_SECRET if needed
-    runMigrations();
+    await runMigrations();
     ensureSoul();
+
+    // Phase 0 (ADR-023): provision the Postgres canonical store side-by-side
+    // with the still-active SQLite chain. The daemon code path keeps using
+    // SQLite until Phase 1 cuts it over; this step gets the new home ready.
+    try {
+      console.log(pc.dim("  provisioning Postgres (ADR-023)…"));
+      const result = await provisionPostgres({
+        log: (msg) => console.log(pc.dim(msg)),
+      });
+      if (result.freshInstall) {
+        console.log(
+          pc.green(
+            `  Postgres ready (fresh): ${result.appliedMigrations.length} migration(s) applied`,
+          ),
+        );
+      } else if (result.appliedMigrations.length > 0) {
+        console.log(
+          pc.green(
+            `  Postgres up to date after applying ${result.appliedMigrations.length} migration(s)`,
+          ),
+        );
+      } else {
+        console.log(pc.green("  Postgres at head"));
+      }
+    } catch (err) {
+      console.error(
+        pc.red(
+          `  Postgres provisioning failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+      console.error(
+        pc.dim(
+          "  Setup will continue with the legacy SQLite store. Re-run `friday setup` once Postgres is available.",
+        ),
+      );
+    }
 
     if (!existsSync(CONFIG_PATH)) {
       writeConfig(DEFAULT_CONFIG);
@@ -67,8 +104,13 @@ export const setupCommand = defineCommand({
     // instance keeps `disableSignUp: true` so the public surface can never
     // create an account. Hashing format matches automatically.
     const cfg = loadConfig();
+    const db = getDb();
     const auth = betterAuth({
-      database: getRawDb(),
+      // Our schema exports keys with plural names (`users`, `sessions`,
+      // `accounts`, `verifications`) while the physical pg tables use
+      // BetterAuth's expected singular names (`user`, `session`, etc.).
+      // `usePlural: true` tells the adapter to look up the plural symbol.
+      database: drizzleAdapter(db, { provider: "pg", schema, usePlural: true }),
       baseURL:
         process.env.BETTER_AUTH_URL ??
         `http://localhost:${cfg.dashboardPort}`,
@@ -76,8 +118,7 @@ export const setupCommand = defineCommand({
       secret: process.env.BETTER_AUTH_SECRET!,
     });
 
-    const db = getDb();
-    const existing = db.select().from(schema.users).limit(1).all();
+    const existing = await db.select().from(schema.users).limit(1);
 
     if (existing.length === 0) {
       const email = (await text({
@@ -118,18 +159,18 @@ export const setupCommand = defineCommand({
       try {
         const ctx = await auth.$context;
         const hashed = await ctx.password.hash(pw);
-        db.update(schema.accounts)
+        await db
+          .update(schema.accounts)
           .set({ password: hashed, updatedAt: new Date() })
-          .where(eq(schema.accounts.userId, user.id))
-          .run();
+          .where(eq(schema.accounts.userId, user.id));
         // FIX_FORWARD 5.7: a legitimate password reset should clear any
         // pending sign-in lockouts left by the forgotten attempts that
         // led the user here.
-        const cleared = resetRateLimitPrefix("auth:");
+        const cleared = await resetRateLimitPrefix("auth:");
         // FIX_FORWARD 5.11: revoke every active session — a forgotten
         // password is a security-event class, and any old cookie an
         // attacker may have lifted should stop working immediately.
-        const revoked = revokeAllSessionsForUser(user.id);
+        const revoked = await revokeAllSessionsForUser(user.id);
         console.log(pc.green(`  password updated for ${user.email}`));
         if (revoked > 0) {
           console.log(
@@ -163,9 +204,8 @@ export const setupCommand = defineCommand({
           ),
         })) as boolean;
         if (ok) {
-          const raw = getRawDb();
-          raw.prepare(`DELETE FROM accounts`).run();
-          raw.prepare(`DELETE FROM users`).run();
+          await db.delete(schema.accounts);
+          await db.delete(schema.users);
           console.log(pc.yellow("  account deleted; re-run `friday setup`"));
         }
       }

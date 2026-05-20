@@ -212,11 +212,19 @@ export class ChatState {
    * us; the wrapper preserves reactivity while adding the trace.
    */
   private _focusedAgent = $state("friday");
+  /** Phase 5: registered by sse.svelte.ts (via `bindFocusChange`)
+   *  so chat.svelte.ts can ping the SSE store on focus switch
+   *  without a static circular import. */
+  #onFocusChange: (() => void) | null = null;
+  bindFocusChange(cb: () => void): void {
+    this.#onFocusChange = cb;
+  }
   get focusedAgent(): string {
     return this._focusedAgent;
   }
   set focusedAgent(value: string) {
-    if (this._focusedAgent !== value) {
+    const changed = this._focusedAgent !== value;
+    if (changed) {
       try {
         const pathname =
           typeof window !== "undefined" ? window.location.pathname : "";
@@ -234,6 +242,12 @@ export class ChatState {
       }
     }
     this._focusedAgent = value;
+    // Phase 5: per-agent SSE channel. On focus switch, fire the
+    // registered SSE reopen hook (registered by sse.svelte.ts at
+    // startSSE time) so the next reconnect carries `?agent=<new>`
+    // and the daemon scopes its replay to the new turn lifecycle.
+    // The hook indirection avoids a chat→sse static import cycle.
+    if (changed && this.#onFocusChange) this.#onFocusChange();
   }
   /**
    * Per-agent cursor for race-free SSE catchup (FIX_FORWARD 1.7). Keyed by
@@ -323,6 +337,37 @@ export class ChatState {
    * pinned) or render everything (when the user is reading older history). */
   pinnedToBottom = $state(true);
 
+  /**
+   * Sliding-window DOM virtualization cursor. `null` means "follow
+   * the live tail" (windowEnd derives to `allMessages.length`, which
+   * grows reactively as new messages arrive). A `{agent, end}` value
+   * means the user has explicitly slid the window mid-history on
+   * THAT agent.
+   *
+   * The agent-tag is load-bearing: switching agents must reset the
+   * view to the latest, per the chat-UX spec. With the tag, a stale
+   * `{agent: "friday", end: 50}` from a previous focus session has
+   * no effect when the focused agent is now "linear-import" — the
+   * agent-mismatch falls through to the "follow live tail" default
+   * automatically, no init effect needed.
+   *
+   * Slide operations write `{ agent: focusedAgent, end: newEnd }`.
+   * When a slide brings `end` to `allMessages.length` (back at the
+   * tail), the writer sets this back to `null` so the next live-
+   * append advances naturally without another mutator hop.
+   */
+  chatWindowEnd = $state<{ agent: string; end: number } | null>(null);
+
+  /**
+   * Reset the sliding window to the tail of all messages. Called by
+   * the "↓ Latest" button in ChatShell — sets the cursor back to
+   * `null` (follow live tail) so subsequent new messages auto-extend.
+   * The caller follows up with `scrollTop = scrollHeight`.
+   */
+  resetChatWindowToLatest(): void {
+    this.chatWindowEnd = null;
+  }
+
   /** Per-agent debounce timers for working→idle transitions. Long-lived
    * workers emit `status-change: idle` between back-to-back turns
    * (worker.ts waits for the next prompt in an idle loop), which would
@@ -346,6 +391,61 @@ export class ChatState {
   /** localStorage key for F3-C cursor persistence. Cleared when the
    *  daemon's boot_id changes (different process — old seqs are stale). */
   private static readonly LAST_SEQ_KEY = "chat:lastSeqByAgent";
+
+  /**
+   * Phase 3.7: Zero integration hook. `zero.svelte.ts` registers a
+   * binder via {@linkcode setBlocksBinder} during module init; chat
+   * calls it on focus change to bind / unbind the per-agent blocks
+   * reactive query. Kept as a function reference (not a direct import)
+   * to avoid the chat → zero → chat circular dependency. `null` when
+   * Zero is disabled, or before the zero module finishes initializing.
+   */
+  private blocksBinder: ((agent: string | null) => void) | null = null;
+
+  /**
+   * `true` when the Phase 3.7 Zero binding is active for the current
+   * focused agent. Set to true by {@linkcode applyZeroBlocks} when
+   * rows arrive for a matching agent; reset on focus switch. The
+   * chat scroller uses this to decide whether to suppress the
+   * REST-driven `loadingInitial` skeleton (the Zero binding has its
+   * own snapshot path that hits immediately when the WS is healthy).
+   */
+  zeroBlocksActive = $state(false);
+
+  /** Register the Zero blocks binder. Idempotent on the same fn. */
+  setBlocksBinder(fn: (agent: string | null) => void): void {
+    this.blocksBinder = fn;
+  }
+
+  /**
+   * Phase 4.1: callback that fires the `markRead` mutator with the
+   * newest block id for the focused agent. Registered by
+   * `zero.svelte.ts` at module init alongside the binder, kept as a
+   * function reference for the same chat → zero circular-dep reasons.
+   * `null` when Zero is off.
+   */
+  private markReadFn: ((agent: string, blockId: string) => void) | null = null;
+  setMarkReadFn(fn: (agent: string, blockId: string) => void): void {
+    this.markReadFn = fn;
+  }
+  /**
+   * Per-agent memo of the latest block_id we've already passed to
+   * `markRead`. Suppresses the redundant write that would otherwise
+   * fire on every Zero snapshot frame (the cursor is already there).
+   * Reset on focus switch so a re-focus re-establishes the cursor.
+   */
+  private lastMarkedBlockIdByAgent = new Map<string, string>();
+
+  /**
+   * Track every `block_id` that has appeared in a Zero snapshot for the
+   * currently-focused agent. Used by {@linkcode applyZeroBlocks} to
+   * distinguish "row was deleted upstream" (drop) from "bubble pre-dates
+   * the Zero window" (preserve as scroll-back). Reset on focus switch
+   * so a different agent's history doesn't trip the delete heuristic.
+   * Bounded by the count of distinct blocks ever surfaced for the
+   * focused agent in this page session — single-digit MB at worst.
+   */
+  private zeroSeenBlockIds = new Set<string>();
 
   constructor() {
     // F3-C (PR C): hydrate the per-agent SSE dedup cursor from
@@ -586,6 +686,29 @@ export class ChatState {
    * view after the jump, the IntersectionObserver will flip it back to
    * `true` on its own.
    */
+  /**
+   * Land a /jump on an already-local chat message. Slides the rendered
+   * window to include the target (sliding-window virtualization caps
+   * the DOM at ~WINDOW_SIZE messages; without this, jumps below the
+   * current window mount nothing into the DOM and scrollIntoView
+   * silently fails). Sets `scrollTarget` so the ChatMessages effect
+   * runs scrollIntoView after the next paint.
+   */
+  #scrollLocalJump(target: ChatMessage): void {
+    const idx = this.messages.indexOf(target);
+    if (idx !== -1) {
+      // Park the target ~100 from the bottom of the rendered window;
+      // ChatMessages's WINDOW_SIZE (500) covers ~400 messages above it,
+      // giving the user immediate context in both directions without
+      // mounting the entire transcript.
+      const end = Math.min(this.messages.length, idx + 100);
+      this.chatWindowEnd = { agent: this.focusedAgent, end };
+    }
+    this.pinnedToBottom = false;
+    this.scrollNonce += 1;
+    this.scrollTarget = { id: target.id, nonce: this.scrollNonce };
+  }
+
   async jumpTo(agent: string, arg: string): Promise<void> {
     const trimmed = arg.trim();
     if (!trimmed) {
@@ -594,6 +717,62 @@ export class ChatState {
     }
     const ts = parseJumpDate(trimmed);
     const isDateJump = ts !== null;
+
+    // Local-first path (plan §39 phase 3 "lazy on demand"): if the
+    // target is within the client retention horizon, every matching
+    // block is already in `this.messages` — there's no REST round-trip
+    // needed. Try to land the jump from the local Zero replica first;
+    // fall through to the REST endpoint only when local doesn't have
+    // a candidate (e.g., the date is older than the 90d retention or
+    // the FTS match needs Postgres tsvector ranking).
+    const RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+    const targetTsWithinRetention = isDateJump
+      ? (ts as number) > Date.now() - RETENTION_MS
+      : false;
+    if (isDateJump && targetTsWithinRetention) {
+      // Earliest block on or after the target ts that the user would
+      // recognize as "the start of that day's chat" — same selection
+      // rule the REST-driven branch uses.
+      const targetTs = ts as number;
+      let candidate: ChatMessage | undefined;
+      for (const m of this.messages) {
+        if (m.role !== "user" && m.role !== "assistant") continue;
+        // Skip error / no-response affordance bubbles — they carry no
+        // user-recognizable body text to land a jump on. (Regular
+        // assistant text + user_chat messages have `kind === undefined`.)
+        if (m.kind !== undefined) continue;
+        if (m.ts < targetTs) continue;
+        if (!candidate || m.ts < candidate.ts) candidate = m;
+      }
+      if (candidate) {
+        this.#scrollLocalJump(candidate);
+        return;
+      }
+      // Target ts is within retention but no local candidate at-or-after.
+      // Could be a date past the end of chat — let the REST path warn.
+    } else if (!isDateJump) {
+      // Term mode: try a case-insensitive substring scan on the local
+      // replica first. Pure-JS scan over the ~thousand-message Zero
+      // snapshot is sub-millisecond and avoids the daemon round-trip
+      // for the common case where the user is searching recent chat.
+      // Newest match wins (FTS would rank; the local fallback prefers
+      // recency since that's what a humans reasoning about "did I just
+      // say X" expects).
+      const needle = trimmed.toLowerCase();
+      let recentMatch: ChatMessage | undefined;
+      for (const m of this.messages) {
+        if (m.role !== "user" && m.role !== "assistant") continue;
+        if (typeof m.text !== "string" || m.text.length === 0) continue;
+        if (!m.text.toLowerCase().includes(needle)) continue;
+        if (!recentMatch || m.ts > recentMatch.ts) recentMatch = m;
+      }
+      if (recentMatch) {
+        this.#scrollLocalJump(recentMatch);
+        return;
+      }
+      // No local hit — fall through to the REST FTS endpoint.
+    }
+
     const url = isDateJump
       ? `/api/agents/${encodeURIComponent(agent)}/blocks?around_ts=${ts}&before_limit=10&after_limit=40`
       : `/api/agents/${encodeURIComponent(agent)}/blocks?match=${encodeURIComponent(trimmed)}&limit=20`;
@@ -642,7 +821,9 @@ export class ChatState {
       }
     }
 
-    const parsed = parseBlocks(rawBlocks, agent);
+    const parsed = parseBlocks(rawBlocks, agent, {
+      inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+    });
 
     // Find the scroll target BEFORE the merge so we can compute it
     // against the raw response (which preserves FTS rank order for term
@@ -837,6 +1018,67 @@ export class ChatState {
     for (const [agent, slotTurnId] of Object.entries(this.inflightTurnIdByAgent)) {
       if (slotTurnId === turnId) this.inflightTurnIdByAgent[agent] = null;
     }
+  }
+
+  /**
+   * Reconcile in-memory bubble status against Zero's agents-table truth.
+   *
+   * The Phase 5b retirement of the `agent_status` SSE event made
+   * `agents.status` (replicated via Zero) the canonical signal for
+   * "is this agent doing anything right now." When that column flips
+   * to `'idle'` or `'stalled'`, every bubble for the focused agent
+   * still showing `'running'` / `'streaming'` is a wedge — either
+   * because a tool_result row was lost, the SSE per-turn replay
+   * buffer was evicted before reconnect, or parseBlocks emitted a
+   * `'running'` for a canonical tool_use row whose tool_result lands
+   * in a later Zero frame and never flipped the bubble back.
+   *
+   * This reconciler is the safety net the Phase 5 retirement plan
+   * implied but never wired. Fires from `zero.svelte.ts`'s
+   * `#bindAgents` listener on every agents snapshot — idempotent on
+   * "nothing to heal."
+   *
+   * Only acts on the focused agent (chat.messages only holds that
+   * agent's transcript). Non-focused agents' wedges heal on the next
+   * focus-switch since `applyZeroBlocks` re-parses from canonical rows
+   * and this reconciler runs again immediately after.
+   */
+  reconcileAgentStatuses(rows: readonly { name: string; status: string }[]): void {
+    const focused = this.focusedAgent;
+    if (!focused) return;
+    const focusedRow = rows.find((a) => a.name === focused);
+    if (!focusedRow) return;
+    // 'working' is the in-flight signal — don't heal. Any other
+    // terminal-or-quiescent state ('idle', 'stalled', 'error',
+    // 'archived', 'archive_requested') means the daemon isn't
+    // actively producing output for this agent; bubbles claiming
+    // otherwise are stale.
+    if (focusedRow.status === "working") return;
+    let healed = false;
+    for (const m of this.messages) {
+      if (m.role === "assistant" && m.status === "streaming") {
+        m.status = "complete";
+        healed = true;
+      } else if (
+        (m.role === "tool" || m.role === "thinking") &&
+        m.status === "running"
+      ) {
+        m.status = "done";
+        healed = true;
+      }
+    }
+    // Clear the inflight tracker too — agent isn't working, so any
+    // value in this slot is a ghost that would mis-render the Send
+    // button as Stop on the next render frame.
+    if (this.inflightTurnIdByAgent[focused] != null) {
+      this.inflightTurnIdByAgent[focused] = null;
+      healed = true;
+    }
+    // Touch `messages` so $state's reactivity fires for any consumer
+    // that does identity-based diff (the per-message mutations above
+    // are picked up by Svelte's fine-grained reactivity, but explicit
+    // is cheaper than relying on it for the listener side effect).
+    if (healed) this.messages = [...this.messages];
   }
 
   /* ------------ FRI-12: Resend / Resume helpers ------------ */
@@ -1097,19 +1339,47 @@ export class ChatState {
   }
 
   async loadAgentTurns(agent: string): Promise<void> {
-    // Clear immediately so switching agents doesn't briefly show the prior
-    // agent's messages while turns are fetching.
-    this.messages = [];
-    this.oldestBlockId = null;
-    this.reachedOldest = false;
-    this.historyError = null;
-    // Clear any stale loading-older flag from the previous agent. Without
-    // this, if the user scrolled up in agent A and clicked away before
-    // the load finished, A's `loadingOlder=true` would persist into B's
-    // chat and block B's first pagination request until A's stale finally
-    // fires (~350ms later). The new guards in `loadOlderTurns` ensure
-    // that stale call won't clobber B's state.
-    this.loadingOlder = false;
+    // User-reported bug: navigating to /tickets and back to chat shows
+    // an empty transcript until the user clicks another agent and
+    // returns. Root cause: this method always clears `messages`, even
+    // on re-entry to the same agent. The Zero binder short-circuits
+    // (`bindBlocksFor` is a no-op when already bound to the same
+    // agent), so no fresh `applyZeroBlocks` fires to re-populate the
+    // cleared array — until the next Zero update, which may not come
+    // for minutes.
+    //
+    // Guard: only clear/reset state when we're genuinely switching
+    // agents OR we have nothing to preserve. Re-entry to the same
+    // agent leaves `messages` and the cursors untouched; the binder
+    // call below is still safe (it's idempotent), the cached-load
+    // path below skips itself (messages already populated), and the
+    // post-load probe still runs.
+    const switchingAgents = this.focusedAgent !== agent;
+    const haveMessages = this.messages.length > 0;
+    const isReentry = !switchingAgents && haveMessages;
+    if (!isReentry) {
+      this.messages = [];
+      this.oldestBlockId = null;
+      this.reachedOldest = false;
+      this.historyError = null;
+      this.zeroBlocksActive = false;
+      // Phase 3.7: reset the per-agent seen-blockIds tracker so a stale
+      // entry from the previous agent doesn't trip the delete heuristic
+      // here.
+      this.zeroSeenBlockIds = new Set();
+      // Phase 4.1: focus switch invalidates the markRead memo so the
+      // first Zero snapshot for the new agent will fire a fresh cursor
+      // write (even if we'd previously marked the same blockId for the
+      // PREVIOUS agent, the (device, agent) tuple is different).
+      this.lastMarkedBlockIdByAgent.delete(agent);
+      // Clear any stale loading-older flag from the previous agent. Without
+      // this, if the user scrolled up in agent A and clicked away before
+      // the load finished, A's `loadingOlder=true` would persist into B's
+      // chat and block B's first pagination request until A's stale finally
+      // fires (~350ms later). The new guards in `loadOlderTurns` ensure
+      // that stale call won't clobber B's state.
+      this.loadingOlder = false;
+    }
 
     // Build the queue-synth bubbles once — we append them after both the
     // cached-render and the live-fetch overwrite so they're never wiped
@@ -1132,81 +1402,124 @@ export class ChatState {
     // bubble ids are stable across cache → fresh (parseBlocks uses
     // userBlockIdForTurn for user blocks and b_<blockId> for assistant),
     // so any in-flight SSE deltas attach cleanly.
-    const cached = loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
+    const cached = isReentry
+      ? []
+      : loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
     if (cached.length > 0) {
-      this.messages = [...parseBlocks(cached, agent), ...queueSynth];
-      this.oldestBlockId = oldestBlockCursor(cached);
+      this.messages = [
+        ...parseBlocks(cached, agent, {
+          inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+        }),
+        ...queueSynth,
+      ];
+      // Only seed the scroll-back cursor from cached blocks when Zero
+      // is OFF. With Zero on, the cached cursor is stale — new rows
+      // may have landed in Postgres since the cache was last saved —
+      // and a premature `loadOlderTurns` triggered by a fast scroll
+      // would call `?before=<cached-oldest>` and silently mark
+      // `reachedOldest=true` if that cursor points to the literal
+      // oldest row, hiding any rows between the cached cursor and the
+      // Zero window from REST scroll-back forever. `applyZeroBlocks`
+      // sets `oldestBlockId` from the Zero snapshot as soon as it
+      // arrives; the IntersectionObserver short-circuits while
+      // `oldestBlockId === null`.
+      if (!this.blocksBinder) {
+        this.oldestBlockId = oldestBlockCursor(cached);
+      }
     } else if (queueSynth.length > 0) {
       this.messages = [...queueSynth];
     }
 
     this.loadingInitial = cached.length === 0;
 
-    try {
-      // FIX_FORWARD 3.8: client-picked initial page size based on viewport
-      // + network class. Server clamps to ≤200 regardless.
-      const limit = initialPageSize();
-      const r = await fetchWithTimeout(
-        `/api/agents/${agent}/blocks?limit=${limit}`,
-        { timeoutMs: 15_000 },
-      );
-      // The user may have switched agents while we were awaiting. Bail
-      // before mutating shared state so a late-resolving fetch from a
-      // prior agent doesn't overwrite the just-loaded current agent.
-      if (this.focusedAgent !== agent) return;
-      if (!r.ok) {
-        if (cached.length === 0) {
-          this.historyError = `Couldn't load history (HTTP ${r.status})`;
-        }
-        return;
-      }
-      const payload = (await r.json()) as {
-        blocks: BlockRow[];
-        lastEventSeq?: number;
-      };
-      if (this.focusedAgent !== agent) return;
-      const blocks = payload.blocks ?? [];
-      // Queue-synth is appended AFTER the live blocks so queued bubbles
-      // survive the wholesale array replacement. parseBlocks returns in
-      // chronological order (oldest first); the queue items represent
-      // not-yet-sent user input that conceptually sits at the bottom
-      // until the daemon assigns turn_ids and the SSE confirmation
-      // arrives.
-      this.messages = [...parseBlocks(blocks, agent), ...queueSynth];
-      this.oldestBlockId = oldestBlockCursor(blocks);
-      // Seed the per-agent SSE cursor from the snapshot's high-water
-      // mark. The daemon updates `last_event_seq` on every block_delta
-      // (so the row's content_json reflects deltas up to that seq);
-      // by advancing the cursor to match, replayed deltas with
-      // `seq <= cursor` are dropped by `acceptEvent` and we don't
-      // double-append the partial text that's already in the row.
-      // Without this seeding, a mid-turn reload would render the
-      // partial text from /blocks and then re-append the same deltas
-      // when SSE replays them — corrupt markdown, duplicate content.
-      const seqHwm = payload.lastEventSeq ?? 0;
-      if (seqHwm > 0) {
-        this.lastSeqByAgent[agent] = Math.max(
-          this.lastSeqByAgent[agent] ?? 0,
-          seqHwm,
+    // Phase 3.7: when Zero is enabled, the per-agent blocks reactive
+    // query is the source of truth for chat history. We still fall back
+    // to the cached-transcript first-paint above (so a cold reload with
+    // an unhealthy WS doesn't show an empty chat). The binder is wired
+    // by `zero.svelte.ts` during module init — when it's null, Zero is
+    // disabled and we take the REST path below.
+    if (this.blocksBinder) {
+      this.blocksBinder(agent);
+      // The inflightTurnId probe + heal sweep at the end of this function
+      // still needs to run — it depends on `messages` being populated, and
+      // the binder's first snapshot arrives asynchronously via the
+      // `onBlocksUpdate` listener registered by zero.svelte.ts (which
+      // calls back into `applyZeroBlocks`). The probe block below races
+      // the first snapshot, which is fine: applyZeroBlocks merges (it
+      // doesn't wholesale-replace), so the heal sweep's status flips are
+      // preserved across the Zero update. Skip the REST init fetch.
+    } else {
+      try {
+        // FIX_FORWARD 3.8: client-picked initial page size based on viewport
+        // + network class. Server clamps to ≤200 regardless.
+        const limit = initialPageSize();
+        const r = await fetchWithTimeout(
+          `/api/agents/${agent}/blocks?limit=${limit}`,
+          { timeoutMs: 15_000 },
         );
+        // The user may have switched agents while we were awaiting. Bail
+        // before mutating shared state so a late-resolving fetch from a
+        // prior agent doesn't overwrite the just-loaded current agent.
+        if (this.focusedAgent !== agent) return;
+        if (!r.ok) {
+          if (cached.length === 0) {
+            this.historyError = `Couldn't load history (HTTP ${r.status})`;
+          }
+          return;
+        }
+        const payload = (await r.json()) as {
+          blocks: BlockRow[];
+          lastEventSeq?: number;
+        };
+        if (this.focusedAgent !== agent) return;
+        const blocks = payload.blocks ?? [];
+        // Queue-synth is appended AFTER the live blocks so queued bubbles
+        // survive the wholesale array replacement. parseBlocks returns in
+        // chronological order (oldest first); the queue items represent
+        // not-yet-sent user input that conceptually sits at the bottom
+        // until the daemon assigns turn_ids and the SSE confirmation
+        // arrives.
+        this.messages = [
+          ...parseBlocks(blocks, agent, {
+            inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+          }),
+          ...queueSynth,
+        ];
+        this.oldestBlockId = oldestBlockCursor(blocks);
+        // Seed the per-agent SSE cursor from the snapshot's high-water
+        // mark. The daemon updates `last_event_seq` on every block_delta
+        // (so the row's content_json reflects deltas up to that seq);
+        // by advancing the cursor to match, replayed deltas with
+        // `seq <= cursor` are dropped by `acceptEvent` and we don't
+        // double-append the partial text that's already in the row.
+        // Without this seeding, a mid-turn reload would render the
+        // partial text from /blocks and then re-append the same deltas
+        // when SSE replays them — corrupt markdown, duplicate content.
+        const seqHwm = payload.lastEventSeq ?? 0;
+        if (seqHwm > 0) {
+          this.lastSeqByAgent[agent] = Math.max(
+            this.lastSeqByAgent[agent] ?? 0,
+            seqHwm,
+          );
+        }
+        if (blocks.length === 0) {
+          this.reachedOldest = true;
+        } else {
+          // Trim before persisting: localStorage caps around 5MB per origin
+          // and content_json can carry sizable tool inputs/outputs. Cap at
+          // the initial-page heuristic so the cached payload tracks the
+          // first-paint window.
+          saveJSON(KEYS.transcript(agent), blocks.slice(0, limit));
+        }
+      } catch {
+        // Network/timeout. If a cached render is in place, leave it; otherwise
+        // surface a banner so the empty chat isn't ambiguous.
+        if (this.focusedAgent === agent && cached.length === 0) {
+          this.historyError = "Couldn't load history (network)";
+        }
+      } finally {
+        if (this.focusedAgent === agent) this.loadingInitial = false;
       }
-      if (blocks.length === 0) {
-        this.reachedOldest = true;
-      } else {
-        // Trim before persisting: localStorage caps around 5MB per origin
-        // and content_json can carry sizable tool inputs/outputs. Cap at
-        // the initial-page heuristic so the cached payload tracks the
-        // first-paint window.
-        saveJSON(KEYS.transcript(agent), blocks.slice(0, limit));
-      }
-    } catch {
-      // Network/timeout. If a cached render is in place, leave it; otherwise
-      // surface a banner so the empty chat isn't ambiguous.
-      if (this.focusedAgent === agent && cached.length === 0) {
-        this.historyError = "Couldn't load history (network)";
-      }
-    } finally {
-      if (this.focusedAgent === agent) this.loadingInitial = false;
     }
 
     // Restore `inflightTurnId` so the Send button correctly shows Stop on
@@ -1306,6 +1619,181 @@ export class ChatState {
   }
 
   /**
+   * Phase 3.7: Merge a fresh snapshot of Zero rows for `forAgent` into
+   * `this.messages`. Called by the listener `zero.svelte.ts` registers
+   * via `onBlocksUpdate` after each materialize/listener frame. Idempotent
+   * on the same row set.
+   *
+   * Contract:
+   *   - If the focused agent no longer matches `forAgent` (race: user
+   *     switched chat windows between rebind and snapshot), bail without
+   *     mutating state.
+   *   - Convert snake_case Zero rows to the camelCase `BlockRow` shape
+   *     `parseBlocks` expects; run parseBlocks to derive bubbles.
+   *   - Merge by `id` (parseBlocks's bubble ids are stable across reload
+   *     vs. live SSE — `b_<blockId>` / `userBlockIdForTurn(turnId)` /
+   *     `t_<toolId>`). Existing bubbles are replaced by their parsed
+   *     counterparts; bubbles in `messages` with no Zero match (in-flight
+   *     SSE streams, queue-synth, optimistic pending, scroll-back rows
+   *     outside the 50-row Zero window) are preserved.
+   *   - Drop superseded no-response *safety-net* bubbles (where parseBlocks
+   *     emitted `nr_<turnId>` for a turn but later assistant content
+   *     landed for the same turnId). Race-prone window: user message lands
+   *     in Zero before the first assistant block does. Sentinel-driven
+   *     no-response bubbles (`noResponseSentinel: true`) are authoritative
+   *     and never dropped.
+   *   - Update `oldestBlockId` to the lowest Zero row's blockId for
+   *     REST scroll-back continuation.
+   *   - Seed `lastSeqByAgent` from the max `last_event_seq` so SSE replay
+   *     dedups partial-content deltas already reflected in canonical rows.
+   *
+   * The `streaming=true` rows are pre-filtered by the Zero query
+   * (`bindBlocksFor` adds `where('status', '!=', 'streaming')`), so any
+   * row arriving here is canonical. In-flight content lives only in the
+   * SSE-driven overlay until the daemon flips the row to `complete`.
+   */
+  applyZeroBlocks(
+    rows: readonly ZeroBlocksRow[],
+    forAgent: string,
+    resultType: "complete" | "unknown" | "error" = "unknown",
+  ): void {
+    if (this.focusedAgent !== forAgent) return;
+    this.zeroBlocksActive = true;
+    this.loadingInitial = false;
+
+    // Plan §39 phase 2 completion signal: when Zero confirms the local
+    // replica matches the upstream filter (`resultType === 'complete'`),
+    // there are no older rows the server has but the client hasn't
+    // received — `reachedOldest` is honest. While the result is still
+    // `'unknown'` (initial bootstrap streaming in), the UI keeps any
+    // existing "load more" affordance as a no-op spinner; the next
+    // snapshot frame will either bring more rows or flip to 'complete'.
+    if (resultType === "complete") this.reachedOldest = true;
+
+    if (rows.length === 0) {
+      // Empty agent (no history yet). Preserve queue-synth + any in-flight
+      // bubbles already in `messages`.
+      if (resultType === "complete") this.reachedOldest = true;
+      return;
+    }
+
+    const blockRows: BlockRow[] = rows.map(zeroBlockRowToBlockRow);
+    const parsed = parseBlocks(blockRows, forAgent, {
+      inflightTurnId: this.inflightTurnIdByAgent[forAgent] ?? null,
+    });
+    const parsedById = new Map<string, ChatMessage>();
+    for (const m of parsed) parsedById.set(m.id, m);
+
+    // Track which block_ids the current snapshot contains so we can
+    // detect deletes: a `blockId` previously delivered by Zero but
+    // absent now is a real upstream removal (cancel-queued mutator,
+    // daemon `block_canceled`). Without this, deleted rows would
+    // linger as ghost bubbles on receivers' devices until they
+    // reload. The `zeroSeenBlockIds` tracker grows as new block_ids
+    // appear (bounded by distinct blocks ever surfaced for this
+    // agent in this session); it resets on focus switch in
+    // `loadAgentTurns`.
+    const snapshotBlockIds = new Set<string>();
+    for (const r of rows) snapshotBlockIds.add(r.block_id);
+
+    const merged: ChatMessage[] = [];
+    const seen = new Set<string>();
+    for (const m of this.messages) {
+      const parsedMatch = parsedById.get(m.id);
+      if (parsedMatch) {
+        merged.push(parsedMatch);
+        seen.add(m.id);
+        continue;
+      }
+      // No parsed counterpart. Decide whether to keep or drop.
+      if (
+        m.blockId !== undefined &&
+        this.zeroSeenBlockIds.has(m.blockId) &&
+        !snapshotBlockIds.has(m.blockId)
+      ) {
+        // The bubble's `blockId` was in a prior Zero snapshot but is
+        // missing now — the upstream row was deleted. Drop the
+        // bubble so cancel-queued / block_canceled propagate.
+        continue;
+      }
+      // Otherwise preserve. Covers in-flight SSE streams (no
+      // blockId yet, or blockId-having streaming row that Zero will
+      // deliver as `complete` on the next snapshot), queue-synth
+      // (no blockId), optimistic-pending user bubbles, and
+      // scroll-back rows older than the 50-row Zero window
+      // (blockId-having but not previously seen via Zero — they
+      // came from the REST `?before=…` fallback).
+      merged.push(m);
+    }
+    for (const m of parsed) {
+      if (!seen.has(m.id)) merged.push(m);
+    }
+    merged.sort((a, b) => a.ts - b.ts);
+
+    // Update the seen tracker AFTER the merge so this snapshot's
+    // block_ids are recognized as "seen via Zero" on the next call.
+    for (const bid of snapshotBlockIds) this.zeroSeenBlockIds.add(bid);
+
+    this.messages = dropSupersededNoResponseSafetyNet(merged);
+    const newOldest = oldestBlockCursor(blockRows);
+    if (newOldest !== this.oldestBlockId) {
+      // The Zero snapshot shifted the scroll-back cursor. Re-arm
+      // pagination: if a prior stale-cursor `loadOlderTurns` set
+      // `reachedOldest=true` (cursor pointed at an actually-oldest row,
+      // server returned empty), the user would otherwise be stuck —
+      // any rows that landed between the stale cursor and the new
+      // Zero window would be permanently unreachable via scroll-back.
+      this.reachedOldest = false;
+    }
+    this.oldestBlockId = newOldest;
+
+    let maxSeq = 0;
+    for (const r of rows) {
+      if (r.last_event_seq > maxSeq) maxSeq = r.last_event_seq;
+    }
+    if (maxSeq > 0) {
+      this.lastSeqByAgent[forAgent] = Math.max(
+        this.lastSeqByAgent[forAgent] ?? 0,
+        maxSeq,
+      );
+    }
+
+    // Phase 4.1: advance the per-device read cursor for this agent to
+    // the newest block in the snapshot. While the user is focused on
+    // this agent's chat, every new block delivery advances the cursor
+    // — the semantic is "if you're looking at it, you've seen it."
+    // The mutator is idempotent on the (device, agent, block) PK so a
+    // re-fire with the same args is a server-side no-op; the
+    // `lastMarkedBlockIdByAgent` memo dedups at the client to avoid
+    // even sending the redundant push. The first frame after a focus
+    // switch always sends a fresh write because `loadAgentTurns`
+    // clears the memo for the new agent.
+    if (this.markReadFn) {
+      // Find the chronologically newest row. Bare `r.id > newest.id`
+      // would be a lex-string comparison and Phase 4.11's mixed
+      // numeric-string + UUID alphabet makes that meaningless (see
+      // `oldestBlockCursor` for the full writeup). Use `(ts, id)`
+      // tuple, same as the materialized-view query now orders by.
+      let newest: ZeroBlocksRow | null = null;
+      for (const r of rows) {
+        if (
+          !newest ||
+          r.ts > newest.ts ||
+          (r.ts === newest.ts && r.id > newest.id)
+        )
+          newest = r;
+      }
+      if (newest) {
+        const prev = this.lastMarkedBlockIdByAgent.get(forAgent);
+        if (prev !== newest.block_id) {
+          this.lastMarkedBlockIdByAgent.set(forAgent, newest.block_id);
+          this.markReadFn(forAgent, newest.block_id);
+        }
+      }
+    }
+  }
+
+  /**
    * Fetch and prepend the next older page of turns. Idempotent on re-entry
    * via `loadingOlder`. Stops once a fetch returns empty (`reachedOldest`).
    *
@@ -1323,6 +1811,19 @@ export class ChatState {
      *  sees ~350ms of unanchored scroll before the fix lands. */
     onPrepended?: () => void;
   }): Promise<void> {
+    // Plan §39 local-first contract: when the Zero binder owns the
+    // blocks path, the local IndexedDB replica already holds every
+    // block within the 90-day retention window. Scroll-up reads from
+    // `this.messages` (already populated by `applyZeroBlocks`); there
+    // is no network round-trip. While Zero's initial materialization
+    // is still streaming in (`blocksResultType === 'unknown'`),
+    // applyZeroBlocks will append additional rows as they arrive —
+    // no manual pagination needed. The legacy REST `?before=` path
+    // remains below only as the no-Zero fallback (SSR / disabled).
+    if (this.blocksBinder) {
+      this.reachedOldest = this.reachedOldest || false;
+      return;
+    }
     if (this.loadingOlder || this.reachedOldest) return;
     if (this.oldestBlockId === null) return;
     const MIN_LOADING_MS = 350;
@@ -1348,7 +1849,9 @@ export class ChatState {
         this.reachedOldest = true;
         return;
       }
-      const older = parseBlocks(blocks, agent);
+      const older = parseBlocks(blocks, agent, {
+        inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+      });
       // FRI-81 D2/D3: older history is, by definition, from past turns —
       // no streaming/running bubble in this page is the active turn. Heal
       // them eagerly (the parseBlocks heuristic doesn't see the current
@@ -1439,17 +1942,11 @@ export class ChatState {
         if (event.agent !== this.focusedAgent) break;
         this.handleBlockCanceled(event);
         break;
-      case "block_meta_update":
-        if (event.agent !== this.focusedAgent) break;
-        this.handleBlockMetaUpdate(event);
-        break;
-      case "block_reload":
-        if (event.agent !== this.focusedAgent) break;
-        // Daemon's JSONL recovery scan inserted/updated rows for this agent
-        // (FIX_FORWARD 1.3). Re-seed history so the dashboard mirrors the
-        // canonical blocks table.
-        void this.loadAgentTurns(event.agent);
-        break;
+      // Phase 5: `block_meta_update` + `block_reload` retired.
+      // Zero replicates the underlying blocks-table UPDATEs/INSERTs
+      // (queued → complete, aborted-then-deleted, JSONL-recovery
+      // inserts) reactively into the dashboard's `applyZeroBlocks`
+      // path — no SSE consumer or REST refetch needed.
       case "turn_done":
         // FRI-12: always clear the per-agent inflight slot for this
         // turn — quarantine of inflight state is global state and must
@@ -1468,35 +1965,11 @@ export class ChatState {
         if (event.agent !== this.focusedAgent) break;
         if (event.turn_id) this.finishTurn(event.turn_id, "error");
         break;
-      case "agent_lifecycle":
-        if (event.event === "spawn") {
-          this.upsertAgent(event.agent, {
-            type: event.agentType,
-            status: "working",
-          });
-        } else if (event.event === "archive") {
-          // Mark as archived; row stays in chat.agents so "Show archived"
-          // can surface it. Sessions persist as history forever.
-          this.upsertAgent(event.agent, { status: "archived" });
-        } else if (event.event === "complete") {
-          // F2-A: worker exited cleanly. The daemon already flipped
-          // status to idle (F1-A); reflect it locally so tabs that
-          // missed the prior agent_status: idle don't drift. upsertAgent
-          // refuses to create with type="unknown" (F2-B), so a stray
-          // complete for an unknown agent is a safe no-op — the next
-          // /api/agents poll will surface it.
-          //
-          // Archived is terminal — see applyAgentStatus comment. A
-          // ring-buffer replay's `complete` for an already-archived
-          // agent must not flip status back to idle.
-          const existing = this.agents.find((a) => a.name === event.agent);
-          if (existing?.status === "archived") break;
-          this.upsertAgent(event.agent, { status: "idle" });
-        }
-        break;
-      case "agent_status":
-        this.applyAgentStatus(event.agent, event.status);
-        break;
+      // Phase 5: `agent_lifecycle` + `agent_status` SSE retired.
+      // Zero's `agents` slice (Phase 2) mirrors into `chat.agents`
+      // via the `#bindAgents` listener in zero.svelte.ts; the
+      // dashboard sidebar gets spawn / archive / idle / working
+      // status reactively without these SSE handlers.
       case "agent_message":
         // FIX_FORWARD 3.6: badge unfocused agents on new user-visible
         // block_complete. The focused agent never accumulates a badge —
@@ -1505,14 +1978,10 @@ export class ChatState {
           this.bumpUnread(event.agent);
         }
         break;
-      case "mail_delivered":
-        // F3-B (PR C): we used to bump unread here as a faster nudge
-        // before the recipient's assistant reply landed. That produced
-        // double-counts (mail_delivered + later assistant agent_message
-        // → two badges per logical event). The assistant reply is the
-        // signal that warrants a badge; until then the chat shows
-        // nothing the user can act on. Intentional no-op here.
-        break;
+      // Phase 5: `mail_delivered` SSE retired. Zero replicates the
+      // `mail` slice (Phase 3.6); the recipient's badge is bumped
+      // by the eventual assistant `agent_message` SSE — same
+      // F3-B PR C behavior, just with the redundant nudge gone.
       default:
         break;
     }
@@ -1840,17 +2309,13 @@ export class ChatState {
         if (typeof parsed.text === "string") m.output = parsed.text;
         return;
       }
-      // No preceding tool_use bubble — likely a ring eviction. Synthesize one.
-      this.messages.push({
-        id,
-        role: "tool",
-        text: "",
-        status: parsed.is_error ? "error" : "done",
-        toolId,
-        toolName: "(unknown)",
-        output: parsed.text ?? "",
-        ts: event.ts,
-      });
+      // No preceding tool_use bubble — likely a ring eviction OR the
+      // first 50-row Zero window cut mid-turn. A "(unknown)" tool card
+      // with just the result text ("mail 154 closed", a bare exit code,
+      // …) is more noise than signal; the user already lost the tool
+      // call's input, name, and motivation. Drop the orphan; if its
+      // tool_use later arrives via scroll-back, parseBlocks's
+      // tool_result branch will produce a paired bubble at that point.
     }
   }
 
@@ -1875,43 +2340,10 @@ export class ChatState {
     this.messages = this.messages.filter((m) => m.blockId !== event.block_id);
   }
 
-  private handleBlockMetaUpdate(event: {
-    block_id: string;
-    turn_id: string;
-    status?: "streaming" | "complete" | "aborted" | "error" | "queued";
-    ts?: number;
-  }): void {
-    if (event.status === "aborted") {
-      this.messages = this.messages.filter(
-        (m) =>
-          m.blockId !== event.block_id &&
-          // userBlockIdForTurn keys also serve as a fallback when the row
-          // was synthesized late (no block_id captured on the bubble).
-          m.id !== userBlockIdForTurn(event.turn_id),
-      );
-      return;
-    }
-    for (const m of this.messages) {
-      const matches =
-        m.blockId === event.block_id ||
-        m.id === userBlockIdForTurn(event.turn_id);
-      if (!matches) continue;
-      if (event.status) {
-        m.status =
-          event.status === "complete"
-            ? "complete"
-            : event.status === "queued"
-              ? "queued"
-              : event.status === "error"
-                ? "error"
-                : event.status === "streaming"
-                  ? "streaming"
-                  : m.status;
-      }
-      if (typeof event.ts === "number") m.ts = event.ts;
-      return;
-    }
-  }
+  // Phase 5: `handleBlockMetaUpdate` removed — Zero replicates the
+  // queued → complete UPDATEs (and aborted DELETEs) on the blocks
+  // table; `applyZeroBlocks` re-derives the message list via
+  // `parseBlocks` which re-sorts by ts.
 
   /**
    * Yank a queued user-chat turn out of the daemon's `nextPrompts` FIFO
@@ -2032,7 +2464,11 @@ function extractMailMeta(
 /** Wire shape of a row from `GET /api/agents/:name/blocks`. Mirrors the
  *  `blocks` table columns (FIX_FORWARD 1.1). */
 export interface BlockRow {
-  id: number;
+  /** Phase 4.11: text UUID (was bigserial number). Equal to
+   *  blockId for mutator-INSERTed rows; for legacy daemon-written
+   *  rows the column still holds the original bigserial value as
+   *  text (e.g. "123"). */
+  id: string;
   blockId: string;
   turnId: string;
   agentName: string;
@@ -2046,6 +2482,105 @@ export interface BlockRow {
   status: string;
   ts: number;
   lastEventSeq: number;
+}
+
+/** Phase 3.7: snake_case Zero row shape mirrors the Postgres `blocks`
+ *  table — exposed here (not imported from `zero.svelte.ts`) to avoid
+ *  the chat → zero circular dependency. Aligned with `ZeroBlockRow`
+ *  in `stores/zero.svelte.ts`. */
+export interface ZeroBlocksRow {
+  /** Phase 4.11: flipped from `number` → `string` alongside the
+   *  Drizzle bigserial→text(uuid) migration. */
+  id: string;
+  block_id: string;
+  turn_id: string;
+  agent_name: string;
+  session_id: string;
+  message_id: string | null;
+  block_index: number;
+  role: string;
+  kind: string;
+  source: string | null;
+  content_json: unknown;
+  status: string;
+  streaming: boolean;
+  origin_mutation_id: string | null;
+  ts: number;
+  last_event_seq: number;
+}
+
+/** Convert a Zero row (snake_case, jsonb columns auto-parsed) to the
+ *  `BlockRow` shape `parseBlocks` consumes (camelCase, `content_json`
+ *  re-serialized to a JSON string). The string round-trip is load-
+ *  bearing: parseBlocks runs `parseBlockContent` which calls JSON.parse
+ *  on `contentJson` — passing a parsed object would double-parse and
+ *  throw. */
+export function zeroBlockRowToBlockRow(r: ZeroBlocksRow): BlockRow {
+  return {
+    id: r.id,
+    blockId: r.block_id,
+    turnId: r.turn_id,
+    agentName: r.agent_name,
+    sessionId: r.session_id,
+    messageId: r.message_id,
+    blockIndex: r.block_index,
+    role: r.role,
+    kind: r.kind,
+    source: r.source,
+    contentJson:
+      typeof r.content_json === "string"
+        ? r.content_json
+        : JSON.stringify(r.content_json ?? null),
+    status: r.status,
+    ts: r.ts,
+    lastEventSeq: r.last_event_seq,
+  };
+}
+
+/** Strip safety-net "Agent didn't respond" bubbles that are no longer
+ *  load-bearing. Two cases:
+ *
+ *   1. **Superseded**: the turn has since produced real assistant
+ *      content. parseBlocks emits `nr_<turnId>` with
+ *      `noResponseSentinel=false` for any user_chat turn that lacks
+ *      assistant blocks at parse time — a fundamentally stateful
+ *      inference that's wrong during the brief race where the user
+ *      message lands in Zero before the first assistant block does.
+ *   2. **Orphaned**: the user_chat user bubble that anchored the
+ *      affordance is gone. Happens when the upstream blocks row was
+ *      deleted (cancel-queued mutator, daemon block_canceled) but the
+ *      nr_ synth from a prior parse run is still in `messages`.
+ *
+ *  Sentinel-driven nr_ bubbles (`noResponseSentinel=true`) come from
+ *  the SDK's trained marker block and are authoritative; we never
+ *  drop those. */
+export function dropSupersededNoResponseSafetyNet(
+  messages: ChatMessage[],
+): ChatMessage[] {
+  const respondedTurns = new Set<string>();
+  const userChatTurns = new Set<string>();
+  for (const m of messages) {
+    if (!m.turnId) continue;
+    if (m.role === "assistant" && m.kind !== "no-response") {
+      respondedTurns.add(m.turnId);
+    } else if (m.role === "thinking" || m.role === "tool") {
+      respondedTurns.add(m.turnId);
+    } else if (m.role === "user" && (m.source ?? "user_chat") === "user_chat") {
+      userChatTurns.add(m.turnId);
+    }
+  }
+  return messages.filter((m) => {
+    if (
+      m.role === "assistant" &&
+      m.kind === "no-response" &&
+      m.noResponseSentinel === false &&
+      m.turnId
+    ) {
+      if (respondedTurns.has(m.turnId)) return false;
+      if (!userChatTurns.has(m.turnId)) return false;
+    }
+    return true;
+  });
 }
 
 /**
@@ -2162,10 +2697,33 @@ export function healOrphanStreamingBubbles(
   }
 }
 
-export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
+export function parseBlocks(
+  blocks: BlockRow[],
+  agent: string,
+  opts: { inflightTurnId?: string | null } = {},
+): ChatMessage[] {
   const orphans = classifyOrphanRows(blocks);
   const out: ChatMessage[] = [];
   const toolByToolId = new Map<string, ChatMessage>();
+  // Pre-scan: which tool_use_ids actually have a tool_use row in this
+  // batch. The 50-row Zero window — and the `?before=` scroll-back
+  // batches that share the same shape — often slice between a tool_use
+  // and its tool_result; we want to drop the orphan tool_result rather
+  // than render a `toolName="(unknown)"` card with just the result text
+  // ("mail 154 closed", a bare exit code, …) which is noise without the
+  // tool name + input. FRI-81 D1 still has to work: when both rows ARE
+  // in the batch but `finalizeStreamingBlocks` bumped the tool_use past
+  // the tool_result's ts, the sort processes tool_result first and the
+  // fold-in-existing path needs to materialize a placeholder. So:
+  // window-cut orphan ⇒ drop, ts-reorder orphan ⇒ synth-then-fold.
+  const toolUseIdsInBatch = new Set<string>();
+  for (const b of blocks) {
+    if (b.kind === "tool_use") {
+      const p = parseBlockContent(b.contentJson);
+      const tid = p.tool_use_id ?? b.blockId;
+      toolUseIdsInBatch.add(tid);
+    }
+  }
   // FRI-85: track which turns produced any assistant-side content, and
   // which turns we've already synthesized a no-response affordance for
   // (sentinel-driven). After the main pass we scan user-only turns and
@@ -2182,7 +2740,13 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
   // (failed attempt before its retry) instead of trailing the successful
   // retry. `id` stays as the tiebreaker for blocks sharing a ts (a single
   // live message's thinking + tool_use can land within the same ms).
-  const sorted = [...blocks].sort((a, b) => a.ts - b.ts || a.id - b.id);
+  // Phase 4.11: id is now a text UUID, so the chronological
+  // tiebreak switches from numeric subtraction to lexical
+  // comparison. Within a millisecond the lexical order is
+  // arbitrary-but-stable — same property bigserial provided.
+  const sorted = [...blocks].sort(
+    (a, b) => a.ts - b.ts || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
   for (const b of sorted) {
     const parsed = parseBlockContent(b.contentJson);
     if (b.kind === "text") {
@@ -2374,7 +2938,11 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
       if (existing) {
         existing.status = status;
         existing.output = parsed.text ?? "";
-      } else {
+      } else if (toolUseIdsInBatch.has(toolId)) {
+        // FRI-81 D1: the tool_use IS in this batch but hasn't been
+        // processed yet because `finalizeStreamingBlocks` bumped its
+        // ts past the tool_result's. Materialize a placeholder so the
+        // upcoming tool_use can fold its name + input in.
         const synth: ChatMessage = {
           id: `t_${toolId}`,
           role: "tool",
@@ -2383,16 +2951,14 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
           toolId,
           toolName: "(unknown)",
           output: parsed.text ?? "",
-          // FRI-81 N3: stamp turnId at synth time so the D1 fold doesn't
-          // depend on it being unset (`if (!existing.turnId) existing.turnId = b.turnId`).
-          // tool_result rows always carry the turnId; no reason to wait for
-          // tool_use to fill it.
           turnId: b.turnId,
           ts: b.ts,
         };
         out.push(synth);
         toolByToolId.set(toolId, synth);
       }
+      // Else: window-cut orphan — drop. See `toolUseIdsInBatch`
+      // pre-scan comment at the top of parseBlocks.
     }
   }
   // FRI-85 safety net: for any user_chat-sourced user message whose turn
@@ -2404,8 +2970,22 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
   // leave a visible artifact. Inserted just after the user block by ts so
   // the natural chronological sort keeps it adjacent.
   let synthesized = false;
+  // Suppress the synth for the agent's currently in-flight turn.
+  // The Claude SDK's first stream_event can land anywhere from
+  // hundreds of ms to many seconds after submit (model latency,
+  // queue depth, tool-call subprocess startup). A blanket time
+  // grace would either flash the "Agent didn't respond" affordance
+  // for slow turns or hide it for genuinely-failed-fast turns; the
+  // chat store's `inflightTurnIdByAgent` is the unambiguous signal.
+  // While a turn is the agent's in-flight turn, the safety-net
+  // never fires; once it stops being in-flight (turn_done from
+  // SSE or agents.status flip to idle), the next parseBlocks run
+  // will see no inflight match and the synth can fire if the turn
+  // genuinely produced no assistant content.
+  const inflight = opts.inflightTurnId;
   for (const [turnId, info] of userTurns) {
     if (assistantTurns.has(turnId)) continue;
+    if (inflight && turnId === inflight) continue;
     synthesized = true;
     out.push({
       id: noResponseIdForTurn(turnId),
@@ -2434,9 +3014,22 @@ export function parseBlocks(blocks: BlockRow[], agent: string): ChatMessage[] {
 /** Lowest block_id across an array. Used as the next `before` cursor for
  *  scroll-up pagination (FIX_FORWARD 3.7). */
 export function oldestBlockCursor(blocks: BlockRow[]): string | null {
+  // Compare by `(ts, id)` tuple, NOT by bare `id`. Phase 4.11 made
+  // `blocks.id` a text UUID; the pre-migration rows that came in via
+  // legacy_sqlite restore kept their old bigserial ids as strings
+  // ("9943", "9942", …). A bare lexical `b.id < oldest.id` is meaningless
+  // across that mixed alphabet — e.g. `"2241..." < "9943" < "ebec..."` —
+  // and chooses an "oldest" that has nothing to do with chronology, then
+  // hands that anchor to the daemon's `?before=` pagination which
+  // dutifully fetches rows older than the wrong row.
   let oldest: BlockRow | null = null;
   for (const b of blocks) {
-    if (oldest === null || b.id < oldest.id) oldest = b;
+    if (
+      oldest === null ||
+      b.ts < oldest.ts ||
+      (b.ts === oldest.ts && b.id < oldest.id)
+    )
+      oldest = b;
   }
   return oldest?.blockId ?? null;
 }

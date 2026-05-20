@@ -11,76 +11,75 @@
  * Drives the registry directly (no real worker) and inspects the rows.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createTestDb, type TestDbHandle } from "@friday/shared";
 
-const dataRoot = mkdtempSync(join(tmpdir(), "friday-archive-race-"));
-process.env.FRIDAY_DATA_DIR = dataRoot;
+let handle: TestDbHandle;
+let registry: typeof import("./registry.js");
 
-const { runMigrations, closeDb } = await import("@friday/shared");
-const registry = await import("./registry.js");
-
-beforeAll(() => {
-  runMigrations();
+beforeAll(async () => {
+  handle = await createTestDb({ label: "archive_race" });
+  registry = await import("./registry.js");
 });
 
-afterAll(() => {
-  closeDb();
-  rmSync(dataRoot, { recursive: true, force: true });
+afterAll(async () => {
+  await handle.drop();
+});
+
+beforeEach(async () => {
+  await handle.truncate();
 });
 
 describe("F1-A: archive race", () => {
-  it("archiveAgent marks status=archived synchronously", () => {
-    registry.registerAgent({
+  it("archiveAgent marks status=archived synchronously", async () => {
+    await registry.registerAgent({
       name: "alpha",
       type: "bare",
     });
-    registry.setStatus("alpha", "working");
+    await registry.setStatus("alpha", "working");
 
-    registry.archiveAgent("alpha");
+    await registry.archiveAgent("alpha");
 
-    const a = registry.getAgent("alpha");
+    const a = await registry.getAgent("alpha");
     expect(a?.status).toBe("archived");
   });
 
-  it("terminal `archived` status is not overwritten by a subsequent setStatus(idle) check", () => {
+  it("terminal `archived` status is not overwritten by a subsequent setStatus(idle) check", async () => {
     // The bug was that the worker's `exit` handler called setStatus("idle")
     // unconditionally. The fix in lifecycle.ts wraps the setStatus in a
     // status check. The check itself lives in lifecycle.ts; here we
     // simulate it the same way the exit handler does and pin the expected
     // behaviour at the registry layer.
-    registry.registerAgent({ name: "beta", type: "bare" });
-    registry.archiveAgent("beta"); // → archived
-    const cur = registry.getAgent("beta");
+    await registry.registerAgent({ name: "beta", type: "bare" });
+    await registry.archiveAgent("beta"); // → archived
+    const cur = await registry.getAgent("beta");
     // Emulates the F1-A guard.
     if (cur && cur.status !== "archived" && cur.status !== "error") {
-      registry.setStatus("beta", "idle");
+      await registry.setStatus("beta", "idle");
     }
-    expect(registry.getAgent("beta")?.status).toBe("archived");
+    expect((await registry.getAgent("beta"))?.status).toBe("archived");
   });
 
-  it("terminal `error` status is also preserved", () => {
-    registry.registerAgent({ name: "gamma", type: "bare" });
-    registry.setStatus("gamma", "error");
-    const cur = registry.getAgent("gamma");
+  it("terminal `error` status is also preserved", async () => {
+    await registry.registerAgent({ name: "gamma", type: "bare" });
+    await registry.setStatus("gamma", "error");
+    const cur = await registry.getAgent("gamma");
     if (cur && cur.status !== "archived" && cur.status !== "error") {
-      registry.setStatus("gamma", "idle");
+      await registry.setStatus("gamma", "idle");
     }
-    expect(registry.getAgent("gamma")?.status).toBe("error");
+    expect((await registry.getAgent("gamma"))?.status).toBe("error");
   });
 
-  it("non-terminal `working` status DOES flip to idle on the same guard", () => {
+  it("non-terminal `working` status DOES flip to idle on the same guard", async () => {
     // Regression check: the guard only suppresses idle-reset for terminal
     // states. A live worker that legitimately went idle still gets the
     // reset (the guard isn't a blanket no-op).
-    registry.registerAgent({ name: "delta", type: "bare" });
-    registry.setStatus("delta", "working");
-    const cur = registry.getAgent("delta");
+    await registry.registerAgent({ name: "delta", type: "bare" });
+    await registry.setStatus("delta", "working");
+    const cur = await registry.getAgent("delta");
     if (cur && cur.status !== "archived" && cur.status !== "error") {
-      registry.setStatus("delta", "idle");
+      await registry.setStatus("delta", "idle");
     }
-    expect(registry.getAgent("delta")?.status).toBe("idle");
+    expect((await registry.getAgent("delta"))?.status).toBe("idle");
   });
 });

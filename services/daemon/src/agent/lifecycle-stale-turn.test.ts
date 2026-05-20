@@ -1,7 +1,6 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { eq, and } from "drizzle-orm";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
 // FRI-33: stale-turn ceiling and IPC error boundary.
 //
@@ -17,26 +16,25 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 //      payload can't escape into the unhandled `child.on("message")`
 //      listener and crash the daemon.
 
-const dataDir = mkdtempSync(join(tmpdir(), "friday-lifecycle-stale-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
+let handle: TestDbHandle;
 
 beforeAll(async () => {
-  const { runMigrations } = await import("@friday/shared");
-  runMigrations();
+  handle = await createTestDb({ label: "lifecycle_stale" });
 });
 
 afterAll(async () => {
-  const { closeDb } = await import("@friday/shared");
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+  await handle.drop();
 });
 
 beforeEach(async () => {
-  const { getRawDb } = await import("@friday/shared");
-  getRawDb().prepare("DELETE FROM blocks").run();
+  await handle.truncate();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+async function settle(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 50));
+}
 
 interface FakeChild {
   send: ReturnType<typeof vi.fn>;
@@ -93,7 +91,6 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
       await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
     const { logger } = await import("../log.js");
-    const { getRawDb } = await import("@friday/shared");
 
     const FIVE_HOURS = 5 * 60 * 60 * 1000;
     const { worker } = makeFakeWorker({
@@ -109,7 +106,7 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
 
     // Heartbeats are a valid trigger per the proposal — any inbound IPC
     // gives the daemon a chance to notice the wedge.
-    handleEvent(worker as never, { type: "heartbeat" });
+    await handleEvent(worker as never, { type: "heartbeat" });
     unsub();
 
     // Structured log emitted with exact event name + agent + msSinceTurnStart.
@@ -125,12 +122,13 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     expect(p.msSinceTurnStart).toBeGreaterThanOrEqual(FIVE_HOURS);
 
     // Force-kill ran: error block persisted with turn_timed_out code.
-    const rows = getRawDb()
-      .prepare("SELECT content_json, kind FROM blocks WHERE turn_id = ?")
-      .all("turn-stale-old") as Array<{ content_json: string; kind: string }>;
+    const rows = await getDb()
+      .select()
+      .from(schema.blocks)
+      .where(eq(schema.blocks.turnId, "turn-stale-old"));
     expect(rows.length).toBe(1);
     expect(rows[0].kind).toBe("error");
-    const errPayload = JSON.parse(rows[0].content_json) as { code: string; headline: string };
+    const errPayload = rows[0].contentJson as { code: string; headline: string };
     expect(errPayload.code).toBe("turn_timed_out");
     expect(errPayload.headline).toContain("Turn timed out");
 
@@ -163,7 +161,7 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     __putLiveWorkerForTest("stale-agent", worker as never);
 
     const logSpy = vi.spyOn(logger, "log");
-    handleEvent(worker as never, { type: "heartbeat" });
+    await handleEvent(worker as never, { type: "heartbeat" });
 
     expect(
       logSpy.mock.calls.find(([, event]) => event === "worker.turn.stale-killed"),
@@ -182,7 +180,6 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
       await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
     const { logger } = await import("../log.js");
-    const { getRawDb } = await import("@friday/shared");
 
     const { worker } = makeFakeWorker({
       turnId: "turn-stale-idem",
@@ -194,9 +191,9 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
     const logSpy = vi.spyOn(logger, "log");
-    handleEvent(worker as never, { type: "heartbeat" });
-    handleEvent(worker as never, { type: "heartbeat" });
-    handleEvent(worker as never, {
+    await handleEvent(worker as never, { type: "heartbeat" });
+    await handleEvent(worker as never, { type: "heartbeat" });
+    await handleEvent(worker as never, {
       type: "status-change",
       status: "idle",
     });
@@ -208,9 +205,15 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     expect(staleLogs.length).toBe(1);
 
     // Load-bearing: exactly one error block in the DB for this turn.
-    const errorRows = getRawDb()
-      .prepare("SELECT id FROM blocks WHERE turn_id = ? AND kind = 'error'")
-      .all("turn-stale-idem") as Array<{ id: string }>;
+    const errorRows = await getDb()
+      .select()
+      .from(schema.blocks)
+      .where(
+        and(
+          eq(schema.blocks.turnId, "turn-stale-idem"),
+          eq(schema.blocks.kind, "error"),
+        ),
+      );
     expect(errorRows.length).toBe(1);
 
     // Load-bearing: exactly one turn_done emitted for this turn.
@@ -230,8 +233,11 @@ describe("lifecycle: IPC handler error boundary (FRI-33)", () => {
   // the boundary itself by driving `safeHandleEvent` directly (same call
   // shape that `child.on("message")` uses in production).
 
+  // Phase 5: the `status-change` branch no longer publishes (the
+  // legacy `agent_status` SSE was retired); only branches that still
+  // hit eventBus.publish are exercised here. `turn-complete` still
+  // publishes turn_done.
   for (const [branch, event] of [
-    ["status-change", { type: "status-change", status: "working" } as const],
     [
       "turn-complete",
       { type: "turn-complete", sessionId: "sess-x" } as const,
@@ -258,7 +264,10 @@ describe("lifecycle: IPC handler error boundary (FRI-33)", () => {
 
       const logSpy = vi.spyOn(logger, "log");
 
-      expect(() => safeHandleEvent(worker as never, event)).not.toThrow();
+      await expect(
+        safeHandleEvent(worker as never, event),
+      ).resolves.toBeUndefined();
+      await settle();
 
       const ipcErr = logSpy.mock.calls.find(
         ([, ev]) => ev === "worker.ipc.error",
@@ -285,9 +294,9 @@ describe("lifecycle: IPC handler error boundary (FRI-33)", () => {
     __putLiveWorkerForTest("stale-agent", worker as never);
 
     const logSpy = vi.spyOn(logger, "log");
-    expect(() =>
+    await expect(
       safeHandleEvent(worker as never, { type: "heartbeat" }),
-    ).not.toThrow();
+    ).resolves.toBeUndefined();
 
     // No error log on the happy path.
     expect(

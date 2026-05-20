@@ -4,6 +4,7 @@
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
   import { Sun, Moon, MonitorCog } from "lucide-svelte";
   import { setMode, userPrefersMode } from "mode-watcher";
+  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
 
   type Mode = "light" | "dark" | "system";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
@@ -11,7 +12,39 @@
     wakeLockSettings,
     wakeLockState,
   } from "$lib/stores/wake-lock.svelte";
+  import type { AppSummary } from "./+page.server";
   let { data }: { data: PageData } = $props();
+
+  // Phase 3.4 (ADR-024): when the Zero flag is on, derive the
+  // installed-apps panel from `zeroSync.apps` joined against
+  // `zeroSync.agents` + `zeroSync.schedules` (already reactive).
+  // Falls back to the SSR-loaded `data.apps` when the flag is off.
+  const zeroOn = useZero();
+  const apps = $derived.by<AppSummary[]>(() => {
+    if (!zeroOn) return data.apps;
+    const allAgents = zeroSync.agents;
+    const allSchedules = zeroSync.schedules;
+    return zeroSync.apps.map((r) => {
+      const manifest = r.manifest_json ?? null;
+      return {
+        id: r.id,
+        name: r.name,
+        version: r.version,
+        status: r.status,
+        installedAt: r.installed_at,
+        folderPath: r.folder_path,
+        agents: allAgents
+          .filter((a) => a.app_id === r.id)
+          .map((a) => ({ name: a.name, type: a.type, status: a.status })),
+        schedules: allSchedules
+          .filter((s) => s.app_id === r.id)
+          .map((s) => ({ name: s.name, cron: s.cron })),
+        mcpServers: (manifest?.mcpServers ?? []).map((m) => ({
+          name: m.name,
+        })),
+      };
+    });
+  });
 
   // Hydrate the wake-lock setting on first paint (SSR-safe: hydrate() reads
   // localStorage behind a typeof guard).
@@ -30,15 +63,43 @@
   // learned the palette yet.
   const selectedMode = $derived<Mode>(userPrefersMode.current ?? "system");
 
-  // FIX_FORWARD 6.3: configurable Friday settings (model + watchdog).
-  // PATCH writes back to ~/.friday/config.json via the dashboard's
-  // /api/settings endpoint. The server snapshot seeds these once; user
-  // edits are reflected locally from the PATCH response.
+  // FIX_FORWARD 6.3 + Phase 4.3: configurable Friday settings (model +
+  // watchdog). Under Zero (`useZero()`), the live values come from the
+  // reactive `zeroSync.settings` singleton row and writes go through
+  // the `updateSettings` mutator; the daemon's LISTEN handler re-syncs
+  // ~/.friday/config.json so worker spawns see the new value on the
+  // next read (no restart required). The SSR `data.settings` seed
+  // covers first paint before Zero's WS handshake completes.
+  const liveSettings = $derived.by<{ model: string; watchdogRefork: boolean }>(
+    () => {
+      if (!zeroOn) {
+        return {
+          model: data.settings.model,
+          watchdogRefork: data.settings.watchdogRefork,
+        };
+      }
+      const row = zeroSync.settings[0];
+      return {
+        model: row?.model ?? data.settings.model,
+        watchdogRefork: row?.watchdog_refork ?? data.settings.watchdogRefork,
+      };
+    },
+  );
+  // Two-way bindings for the form inputs. `$effect` mirrors the
+  // derived live values into the writable state so cross-tab updates
+  // converge the inputs without trampling an in-progress edit.
   // svelte-ignore state_referenced_locally
   let model = $state(data.settings.model);
   // svelte-ignore state_referenced_locally
   let watchdogRefork = $state(data.settings.watchdogRefork);
   let savingSettings = $state(false);
+
+  $effect(() => {
+    if (!zeroOn) return;
+    if (savingSettings) return; // don't trample an in-flight save
+    model = liveSettings.model;
+    watchdogRefork = liveSettings.watchdogRefork;
+  });
 
   const MODEL_OPTIONS: Array<{ id: string; label: string }> = [
     { id: "claude-opus-4-7", label: "Claude Opus 4.7 — best for reasoning" },
@@ -59,9 +120,26 @@
     }, 4500);
   }
 
-  async function patchSettings(body: Record<string, unknown>) {
+  async function patchSettings(body: {
+    model?: string;
+    watchdogRefork?: boolean;
+  }) {
     savingSettings = true;
     try {
+      if (zeroOn) {
+        // Phase 4.3: write via the Zero mutator. Optimistic client
+        // write lands immediately; the canonical Postgres UPSERT and
+        // daemon's LISTEN-driven config.json resync follow within a
+        // second. The reactive `$effect` above will mirror the new
+        // values back into the inputs once they arrive — until then
+        // the inputs reflect the user's keystrokes.
+        zeroSync.updateSettings(body);
+        priorModel = body.model ?? priorModel;
+        priorWatchdog = body.watchdogRefork ?? priorWatchdog;
+        showSettingsToast("saved", "ok");
+        return;
+      }
+      // Legacy REST path — only reachable with Zero disabled.
       let r: Response;
       try {
         r = await fetch("/api/settings", {
@@ -70,8 +148,6 @@
           body: JSON.stringify(body),
         });
       } catch (err) {
-        // Network failed entirely — revert and surface so the user
-        // doesn't see a control sitting on the failed value.
         model = priorModel;
         watchdogRefork = priorWatchdog;
         showSettingsToast(
@@ -101,9 +177,6 @@
       watchdogRefork = fresh.watchdogRefork;
       priorModel = fresh.model;
       priorWatchdog = fresh.watchdogRefork;
-      // Config is written to disk, but the running daemon caches its
-      // config at boot — these changes take effect for the next daemon
-      // start, not the next turn.
       showSettingsToast("saved · restart daemon for changes to take effect", "ok");
     } finally {
       savingSettings = false;
@@ -154,8 +227,25 @@
   }
 
   /** FIX_FORWARD 5.11: revoke one session. If it's the current one, the
-   *  next request will fail auth and the browser redirects to /login. */
+   *  next request will fail auth and the browser redirects to /login.
+   *
+   *  Also forgets the matching client_devices row(s) so the storage
+   *  telemetry doesn't orphan — per Seth's spec, "tracking the usage
+   *  only makes sense for logged in sessions." Best-effort: matches
+   *  by exact userAgent (or by deviceId for the current tab); a
+   *  session with no matching device is a clean no-op on the forget
+   *  leg. */
   async function revokeSession(id: string, isCurrent: boolean) {
+    if (zeroOn) {
+      const session = data.sessions.find((s) => s.id === id);
+      if (session) {
+        const device = deviceForSession({
+          userAgent: session.userAgent,
+          isCurrent,
+        });
+        if (device) zeroSync.forgetDevice(device.device_id);
+      }
+    }
     await fetch("/api/sessions/revoke", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -183,6 +273,69 @@
 
   function fmtTimestamp(ms: number): string {
     return new Date(ms).toLocaleString();
+  }
+
+  /** Phase 6: human-readable bytes (MB / GB) for storage indicators.
+   *  Browser storage quotas live in the GB range; usage typically sits
+   *  in MB. Both surfaces are coarse — no need for KB / B detail. */
+  function fmtBytes(bytes: number | null | undefined): string {
+    if (!Number.isFinite(bytes ?? NaN) || (bytes ?? 0) <= 0) return "—";
+    const b = bytes as number;
+    const gb = b / (1024 ** 3);
+    if (gb >= 0.5) return `${gb.toFixed(2)} GB`;
+    const mb = b / (1024 ** 2);
+    if (mb >= 1) return `${mb.toFixed(1)} MB`;
+    const kb = b / 1024;
+    return `${kb.toFixed(1)} KB`;
+  }
+
+  function fmtStorageUsage(
+    used: number | null | undefined,
+    quota: number | null | undefined,
+  ): string {
+    const usedText = fmtBytes(used);
+    if (!Number.isFinite(quota ?? NaN) || (quota ?? 0) <= 0) return usedText;
+    return `${usedText} / ${fmtBytes(quota)}`;
+  }
+
+  /**
+   * Match a BetterAuth session to a Zero `client_devices` row so we
+   * can render storage telemetry inline with the session.
+   *
+   * Strategy:
+   *   - Current session: use the tab's known `currentDeviceId` (most
+   *     precise — no userAgent ambiguity).
+   *   - Other sessions: best-effort match by exact userAgent string.
+   *     If multiple devices share the same userAgent (same browser
+   *     install, separate sign-ins), pick the most-recently-seen one.
+   *   - No device row yet (a session whose tab hasn't reported storage
+   *     stats in this account's history): return null and the row
+   *     renders without the storage column.
+   *
+   * The "logged in sessions only" semantic from Seth's spec falls out
+   * naturally: we iterate `data.sessions` and only sessions with a
+   * device get the storage UI. Orphaned devices (no matching session)
+   * are not rendered — they'll get cleaned up when the user revokes
+   * the session or the `forgetDevice` mutator fires from a future
+   * Settings affordance.
+   */
+  function deviceForSession(session: {
+    userAgent: string | null;
+    isCurrent: boolean;
+  }): import("$lib/stores/zero.svelte").ZeroClientDeviceRow | null {
+    // Revoked devices are tombstones — they shouldn't surface storage
+    // info next to a session. Filter them out across both branches.
+    if (session.isCurrent && zeroSync.currentDeviceId) {
+      const cur = zeroSync.clientDevices.find(
+        (d) => d.device_id === zeroSync.currentDeviceId,
+      );
+      return cur && cur.revoked_at === null ? cur : null;
+    }
+    const candidates = zeroSync.clientDevices.filter(
+      (d) => d.user_agent === session.userAgent && d.revoked_at === null,
+    );
+    if (candidates.length === 0) return null;
+    return [...candidates].sort((a, b) => b.last_seen_at - a.last_seen_at)[0]!;
   }
 
   function shortenUserAgent(ua: string | null): string {
@@ -297,11 +450,11 @@
       uninstall, and reload are CLI/MCP-only in v1 — this card is
       read-only.
     </p>
-    {#if data.apps.length === 0}
+    {#if apps.length === 0}
       <p class="row-value muted">No apps installed.</p>
     {:else}
       <ul class="apps-list">
-        {#each data.apps as app (app.id)}
+        {#each apps as app (app.id)}
           <li class="app-row">
             <div class="app-head">
               <span class="app-id">{app.id}</span>
@@ -393,13 +546,16 @@
     <div class="card-header"><h2>Active sessions</h2></div>
     <p class="row-value">
       Devices and browsers currently signed in to this account. Revoke one to force
-      that session to re-authenticate.
+      that session to re-authenticate. Storage usage is reported by the device
+      when it has a live sync connection — sessions without a recent sync show
+      no storage column.
     </p>
     {#if data.sessions.length === 0}
       <p class="row-value muted">No active sessions.</p>
     {:else}
       <ul class="session-list">
         {#each data.sessions as s (s.id)}
+          {@const device = zeroOn ? deviceForSession(s) : null}
           <li class="session-row" class:current={s.isCurrent}>
             <div class="session-meta">
               <span class="session-client">{shortenUserAgent(s.userAgent)}</span>
@@ -410,6 +566,23 @@
                 <span class="session-current">this device</span>
               {/if}
             </div>
+            {#if device}
+              <div class="session-storage" aria-label="Storage usage">
+                <span class="storage-usage">
+                  {fmtStorageUsage(
+                    device.storage_used_bytes,
+                    device.storage_quota_bytes,
+                  )}
+                </span>
+                <span class="session-last-seen">
+                  Last sync {fmtTimestamp(device.last_seen_at)}
+                </span>
+              </div>
+            {:else}
+              <div class="session-storage muted" aria-label="No storage data">
+                <span class="storage-usage muted">—</span>
+              </div>
+            {/if}
             <div class="session-times">
               <span>Signed in {fmtTimestamp(s.createdAt)}</span>
               <span class="session-expires">Expires {fmtTimestamp(s.expiresAt)}</span>
@@ -481,6 +654,7 @@
   }
   .config-card { grid-column: 1 / -1; }
   .sessions-card { grid-column: 1 / -1; }
+  .storage-usage { color: var(--text-primary); }
 
   .theme-picker {
     display: flex;
@@ -541,13 +715,29 @@
   }
   .session-row {
     display: grid;
-    grid-template-columns: 1fr auto auto;
-    gap: 0.75rem;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    gap: 0.75rem 1rem;
     align-items: center;
     padding: 0.6rem 0.75rem;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     background: var(--bg-secondary);
+  }
+  .session-storage {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.15rem;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    min-width: 8rem;
+  }
+  .session-storage.muted .storage-usage {
+    color: var(--text-tertiary);
+  }
+  .session-last-seen {
+    color: var(--text-tertiary);
   }
   .session-row.current {
     border-color: var(--accent-primary);
@@ -596,7 +786,10 @@
     .session-row {
       grid-template-columns: 1fr;
     }
-    .session-times { align-items: flex-start; }
+    .session-times,
+    .session-storage {
+      align-items: flex-start;
+    }
   }
 
   .settings-toast {

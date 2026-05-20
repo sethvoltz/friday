@@ -62,23 +62,21 @@ export interface InstallResult {
  * Install or re-install the app whose manifest sits at
  * `<folderPath>/manifest.json`.
  */
-export function installApp(
+export async function installApp(
   folderPath: string,
   opts: InstallOptions = {},
-): InstallResult {
+): Promise<InstallResult> {
   const manifest = loadManifest(folderPath);
   const db = getDb();
 
   // Cross-app MCP-name collision: check before opening a transaction so
-  // the error path doesn't need to roll back.
-  const otherApps = db
-    .select()
-    .from(schema.apps)
-    .all()
-    .filter((r) => r.id !== manifest.id);
+  // the error path doesn't need to roll back. `manifestJson` is jsonb so
+  // Drizzle returns it parsed.
+  const allApps = await db.select().from(schema.apps);
+  const otherApps = allApps.filter((r) => r.id !== manifest.id);
   for (const srv of manifest.mcpServers) {
     for (const other of otherApps) {
-      const otherManifest = JSON.parse(other.manifestJson) as Manifest;
+      const otherManifest = other.manifestJson as Manifest;
       if (otherManifest.mcpServers.some((s) => s.name === srv.name)) {
         throw new AppInstallError(
           `mcpServer name "${srv.name}" already declared by installed app "${other.id}"`,
@@ -98,9 +96,9 @@ export function installApp(
     | { kind: "rebind"; clearSession: boolean; wasArchived: boolean };
   const dispositions = new Map<string, Dispo>();
   for (const agent of manifest.agents) {
-    const existing = registry.getAgent(agent.name);
+    const existing = await registry.getAgent(agent.name);
     const existingAppId = existing
-      ? registry.getAppId(agent.name)
+      ? await registry.getAppId(agent.name)
       : null;
     if (!existing) {
       dispositions.set(agent.name, { kind: "create" });
@@ -142,11 +140,12 @@ export function installApp(
   // Schedule name collisions: only fail if the existing schedule is
   // owned by a different app. Same-app reinstall reuses the row.
   for (const sched of manifest.schedules) {
-    const row = db
+    const rows = await db
       .select()
       .from(schema.schedules)
       .where(eq(schema.schedules.name, sched.name))
-      .get();
+      .limit(1);
+    const row = rows[0];
     if (row && row.appId && row.appId !== manifest.id) {
       throw new AppInstallError(
         `schedule "${sched.name}" already declared by installed app "${row.appId}"`,
@@ -161,14 +160,16 @@ export function installApp(
     }
   }
 
-  const appRow = db
+  const appRows = await db
     .select()
     .from(schema.apps)
     .where(eq(schema.apps.id, manifest.id))
-    .get();
+    .limit(1);
+  const appRow = appRows[0];
 
   const now = new Date();
-  const manifestJson = JSON.stringify(manifest);
+  // Store manifest as parsed jsonb; Drizzle accepts the object directly.
+  const manifestParsed = manifest as unknown as Record<string, unknown>;
   const isReinstall = appRow != null;
 
   if (appRow && appRow.status === "installed") {
@@ -180,68 +181,65 @@ export function installApp(
     );
   }
 
-  db.transaction((tx) => {
+  await db.transaction(async (tx) => {
     if (appRow) {
-      tx.update(schema.apps)
+      await tx
+        .update(schema.apps)
         .set({
           name: manifest.name,
           version: manifest.version,
           manifestVersion: manifest.manifestVersion,
           folderPath,
-          manifestJson,
+          manifestJson: manifestParsed,
           status: "installed",
           upgradedAt: now,
         })
-        .where(eq(schema.apps.id, manifest.id))
-        .run();
+        .where(eq(schema.apps.id, manifest.id));
     } else {
-      tx.insert(schema.apps)
-        .values({
-          id: manifest.id,
-          name: manifest.name,
-          version: manifest.version,
-          manifestVersion: manifest.manifestVersion,
-          folderPath,
-          manifestJson,
-          status: "installed",
-          installedAt: now,
-          upgradedAt: null,
-        })
-        .run();
+      await tx.insert(schema.apps).values({
+        id: manifest.id,
+        name: manifest.name,
+        version: manifest.version,
+        manifestVersion: manifest.manifestVersion,
+        folderPath,
+        manifestJson: manifestParsed,
+        status: "installed",
+        installedAt: now,
+        upgradedAt: null,
+      });
     }
 
     for (const agent of manifest.agents) {
       const dispo = dispositions.get(agent.name)!;
       switch (dispo.kind) {
         case "create": {
-          tx.insert(schema.agents)
-            .values({
-              name: agent.name,
-              type: agent.type,
-              status: "idle",
-              appId: manifest.id,
-              createdAt: now,
-              updatedAt: now,
-            })
-            .run();
+          await tx.insert(schema.agents).values({
+            name: agent.name,
+            type: agent.type,
+            status: "idle",
+            appId: manifest.id,
+            createdAt: now,
+            updatedAt: now,
+          });
           break;
         }
         case "noop":
           break;
         case "unarchive": {
-          tx.update(schema.agents)
+          await tx
+            .update(schema.agents)
             .set({
               status: "idle",
               appId: manifest.id,
               updatedAt: now,
               ...(dispo.clearSession ? { sessionId: null } : {}),
             })
-            .where(eq(schema.agents.name, agent.name))
-            .run();
+            .where(eq(schema.agents.name, agent.name));
           break;
         }
         case "rebind": {
-          tx.update(schema.agents)
+          await tx
+            .update(schema.agents)
             .set({
               appId: manifest.id,
               type: agent.type,
@@ -249,8 +247,7 @@ export function installApp(
               ...(dispo.wasArchived ? { status: "idle" } : {}),
               ...(dispo.clearSession ? { sessionId: null } : {}),
             })
-            .where(eq(schema.agents.name, agent.name))
-            .run();
+            .where(eq(schema.agents.name, agent.name));
           break;
         }
       }
@@ -259,14 +256,15 @@ export function installApp(
     // Schedules: upsert each. Same-app reinstall overwrites cron/prompt.
     const declaredScheduleNames = new Set(manifest.schedules.map((s) => s.name));
     for (const s of manifest.schedules) {
-      const existing = tx
+      const existingRows = await tx
         .select()
         .from(schema.schedules)
         .where(eq(schema.schedules.name, s.name))
-        .get();
+        .limit(1);
       const next = computeNextRun(s.cron);
-      if (existing) {
-        tx.update(schema.schedules)
+      if (existingRows[0]) {
+        await tx
+          .update(schema.schedules)
           .set({
             cron: s.cron,
             runAt: null,
@@ -274,43 +272,39 @@ export function installApp(
             paused: false,
             nextRunAt: next,
             appId: manifest.id,
-            updatedAt: Date.now(),
+            updatedAt: new Date(),
           })
-          .where(eq(schema.schedules.name, s.name))
-          .run();
+          .where(eq(schema.schedules.name, s.name));
       } else {
-        tx.insert(schema.schedules)
-          .values({
-            name: s.name,
-            cron: s.cron,
-            runAt: null,
-            taskPrompt: s.taskPrompt,
-            paused: false,
-            nextRunAt: next,
-            lastRunAt: null,
-            lastRunId: null,
-            metaJson: null,
-            appId: manifest.id,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          })
-          .run();
+        await tx.insert(schema.schedules).values({
+          name: s.name,
+          cron: s.cron,
+          runAt: null,
+          taskPrompt: s.taskPrompt,
+          paused: false,
+          nextRunAt: next,
+          lastRunAt: null,
+          lastRunId: null,
+          metaJson: null,
+          appId: manifest.id,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
       }
     }
 
     // Reinstall: drop schedule rows owned by us that disappeared from
     // the manifest. Same idea as the §6.4 reload path.
     if (isReinstall) {
-      const ourSchedules = tx
+      const ourSchedules = await tx
         .select()
         .from(schema.schedules)
-        .where(eq(schema.schedules.appId, manifest.id))
-        .all();
+        .where(eq(schema.schedules.appId, manifest.id));
       for (const row of ourSchedules) {
         if (!declaredScheduleNames.has(row.name)) {
-          tx.delete(schema.schedules)
-            .where(eq(schema.schedules.name, row.name))
-            .run();
+          await tx
+            .delete(schema.schedules)
+            .where(eq(schema.schedules.name, row.name));
         }
       }
     }
@@ -351,29 +345,29 @@ export interface UninstallResult {
   archivedFolderPath?: string;
 }
 
-export function uninstallApp(
+export async function uninstallApp(
   id: string,
   opts: { folderDisposition?: FolderDisposition } = {},
-): UninstallResult {
+): Promise<UninstallResult> {
   const folderDisposition = opts.folderDisposition ?? "archive";
   const db = getDb();
-  const row = db
+  const rows = await db
     .select()
     .from(schema.apps)
     .where(eq(schema.apps.id, id))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) {
     throw new AppInstallError(`app "${id}" is not installed`, "not_installed");
   }
 
   // Capture the agents owned by this app *before* tearing down so we can
   // archive them outside the transaction (archive does worker teardown).
-  const ourAgents = db
+  const ourAgentRows = await db
     .select({ name: schema.agents.name })
     .from(schema.agents)
-    .where(eq(schema.agents.appId, id))
-    .all()
-    .map((r) => r.name);
+    .where(eq(schema.agents.appId, id));
+  const ourAgents = ourAgentRows.map((r) => r.name);
 
   // Archive workers + agents. `archiveAgent` is fire-and-forget for our
   // purposes — it handles worker teardown + linked-ticket close. We do
@@ -382,11 +376,11 @@ export function uninstallApp(
     void lifecycleArchiveAgent(name, { reason: "abandoned" });
   }
 
-  db.transaction((tx) => {
-    tx.delete(schema.schedules)
-      .where(eq(schema.schedules.appId, id))
-      .run();
-    tx.delete(schema.apps).where(eq(schema.apps.id, id)).run();
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(schema.schedules)
+      .where(eq(schema.schedules.appId, id));
+    await tx.delete(schema.apps).where(eq(schema.apps.id, id));
   });
 
   const result: UninstallResult = { id, folderDisposition };
@@ -440,21 +434,24 @@ export function uninstallApp(
  * Does NOT auto-archive agents removed from the manifest — that's
  * destructive; explicit uninstall is required for archival.
  */
-export function reloadApp(id: string): { id: string; changed: boolean } {
+export async function reloadApp(
+  id: string,
+): Promise<{ id: string; changed: boolean }> {
   const db = getDb();
-  const row = db
+  const rows = await db
     .select()
     .from(schema.apps)
     .where(eq(schema.apps.id, id))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) {
     throw new AppInstallError(`app "${id}" is not installed`, "not_installed");
   }
   if (!existsSync(row.folderPath)) {
-    db.update(schema.apps)
+    await db
+      .update(schema.apps)
       .set({ status: "orphaned" })
-      .where(eq(schema.apps.id, id))
-      .run();
+      .where(eq(schema.apps.id, id));
     eventBus.publish({
       v: 1,
       type: "app_lifecycle",
@@ -471,43 +468,47 @@ export function reloadApp(id: string): { id: string; changed: boolean } {
       "manifest_id_mismatch",
     );
   }
-  const manifestJson = JSON.stringify(manifest);
-  if (manifestJson === row.manifestJson && row.status === "installed") {
+  const manifestParsed = manifest as unknown as Record<string, unknown>;
+  // Compare structurally: jsonb storage doesn't preserve key order on
+  // round-trip, so we canonicalize both sides (sort keys recursively)
+  // before stringifying. Without this every reload looks "changed" even
+  // when the manifest on disk hasn't been touched.
+  const existingManifestJson = canonicalJson(row.manifestJson);
+  const incomingManifestJson = canonicalJson(manifest);
+  if (existingManifestJson === incomingManifestJson && row.status === "installed") {
     return { id, changed: false };
   }
 
   const now = new Date();
-  db.transaction((tx) => {
-    tx.update(schema.apps)
+  await db.transaction(async (tx) => {
+    await tx
+      .update(schema.apps)
       .set({
         name: manifest.name,
         version: manifest.version,
         manifestVersion: manifest.manifestVersion,
-        manifestJson,
+        manifestJson: manifestParsed,
         status: "installed",
         upgradedAt: now,
       })
-      .where(eq(schema.apps.id, id))
-      .run();
+      .where(eq(schema.apps.id, id));
 
     // Create new agents listed in manifest. Never overwrite live rows.
     for (const agent of manifest.agents) {
-      const existing = tx
+      const existingRows = await tx
         .select()
         .from(schema.agents)
         .where(eq(schema.agents.name, agent.name))
-        .get();
-      if (!existing) {
-        tx.insert(schema.agents)
-          .values({
-            name: agent.name,
-            type: agent.type,
-            status: "idle",
-            appId: id,
-            createdAt: now,
-            updatedAt: now,
-          })
-          .run();
+        .limit(1);
+      if (!existingRows[0]) {
+        await tx.insert(schema.agents).values({
+          name: agent.name,
+          type: agent.type,
+          status: "idle",
+          appId: id,
+          createdAt: now,
+          updatedAt: now,
+        });
       }
     }
 
@@ -516,52 +517,49 @@ export function reloadApp(id: string): { id: string; changed: boolean } {
     const declared = new Set(manifest.schedules.map((s) => s.name));
     for (const s of manifest.schedules) {
       const next = computeNextRun(s.cron);
-      const existing = tx
+      const existingRows = await tx
         .select()
         .from(schema.schedules)
         .where(eq(schema.schedules.name, s.name))
-        .get();
-      if (existing) {
-        tx.update(schema.schedules)
+        .limit(1);
+      if (existingRows[0]) {
+        await tx
+          .update(schema.schedules)
           .set({
             cron: s.cron,
             runAt: null,
             taskPrompt: s.taskPrompt,
             nextRunAt: next,
             appId: id,
-            updatedAt: Date.now(),
+            updatedAt: new Date(),
           })
-          .where(eq(schema.schedules.name, s.name))
-          .run();
+          .where(eq(schema.schedules.name, s.name));
       } else {
-        tx.insert(schema.schedules)
-          .values({
-            name: s.name,
-            cron: s.cron,
-            runAt: null,
-            taskPrompt: s.taskPrompt,
-            paused: false,
-            nextRunAt: next,
-            lastRunAt: null,
-            lastRunId: null,
-            metaJson: null,
-            appId: id,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          })
-          .run();
+        await tx.insert(schema.schedules).values({
+          name: s.name,
+          cron: s.cron,
+          runAt: null,
+          taskPrompt: s.taskPrompt,
+          paused: false,
+          nextRunAt: next,
+          lastRunAt: null,
+          lastRunId: null,
+          metaJson: null,
+          appId: id,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
       }
     }
-    const ours = tx
+    const ours = await tx
       .select()
       .from(schema.schedules)
-      .where(eq(schema.schedules.appId, id))
-      .all();
+      .where(eq(schema.schedules.appId, id));
     for (const r of ours) {
       if (!declared.has(r.name)) {
-        tx.delete(schema.schedules)
-          .where(eq(schema.schedules.name, r.name))
-          .run();
+        await tx
+          .delete(schema.schedules)
+          .where(eq(schema.schedules.name, r.name));
       }
     }
   });
@@ -586,20 +584,17 @@ export interface AppListing {
   folderPath: string;
 }
 
-export function listApps(): AppListing[] {
+export async function listApps(): Promise<AppListing[]> {
   const db = getDb();
-  return db
-    .select()
-    .from(schema.apps)
-    .all()
-    .map((r) => ({
-      id: r.id,
-      name: r.name,
-      version: r.version,
-      status: r.status,
-      installedAt: new Date(r.installedAt).getTime(),
-      folderPath: r.folderPath,
-    }));
+  const rows = await db.select().from(schema.apps);
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    version: r.version,
+    status: r.status,
+    installedAt: r.installedAt.getTime(),
+    folderPath: r.folderPath,
+  }));
 }
 
 export interface AppInspection extends AppListing {
@@ -609,33 +604,36 @@ export interface AppInspection extends AppListing {
   mcpServers: { name: string }[];
 }
 
-export function inspectApp(id: string): AppInspection | null {
+export async function inspectApp(id: string): Promise<AppInspection | null> {
   const db = getDb();
-  const row = db
+  const rows = await db
     .select()
     .from(schema.apps)
     .where(eq(schema.apps.id, id))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return null;
-  const manifest = JSON.parse(row.manifestJson) as Manifest;
-  const agents = db
+  const manifest = row.manifestJson as Manifest;
+  const agentRows = await db
     .select()
     .from(schema.agents)
-    .where(eq(schema.agents.appId, id))
-    .all()
-    .map((a) => ({ name: a.name, type: a.type, status: a.status }));
-  const schedules = db
+    .where(eq(schema.agents.appId, id));
+  const agents = agentRows.map((a) => ({
+    name: a.name,
+    type: a.type,
+    status: a.status,
+  }));
+  const scheduleRows = await db
     .select()
     .from(schema.schedules)
-    .where(eq(schema.schedules.appId, id))
-    .all()
-    .map((s) => ({ name: s.name, cron: s.cron }));
+    .where(eq(schema.schedules.appId, id));
+  const schedules = scheduleRows.map((s) => ({ name: s.name, cron: s.cron }));
   return {
     id: row.id,
     name: row.name,
     version: row.version,
     status: row.status,
-    installedAt: new Date(row.installedAt).getTime(),
+    installedAt: row.installedAt.getTime(),
     folderPath: row.folderPath,
     manifest,
     agents,
@@ -647,8 +645,10 @@ export function inspectApp(id: string): AppInspection | null {
 /** Resolve the app folder for a worker spawn. Null when the agent has
  *  no `app_id` set. Pure DB lookup; used by the worker spawn site so
  *  there's no need to round-trip through the manifest cache. */
-export function appFolderForAgent(agentName: string): string | null {
-  const id = registry.getAppId(agentName);
+export async function appFolderForAgent(
+  agentName: string,
+): Promise<string | null> {
+  const id = await registry.getAppId(agentName);
   if (!id) return null;
   return appDir(id);
 }
@@ -667,21 +667,22 @@ export interface AppContextForWorker {
  * to an empty `envFile` rather than throwing — a worker should still
  * boot even if the secrets file is malformed.
  */
-export function appContextForAgent(
+export async function appContextForAgent(
   agentName: string,
-): AppContextForWorker | null {
-  const appId = registry.getAppId(agentName);
+): Promise<AppContextForWorker | null> {
+  const appId = await registry.getAppId(agentName);
   if (!appId) return null;
   const db = getDb();
-  const row = db
+  const rows = await db
     .select()
     .from(schema.apps)
     .where(eq(schema.apps.id, appId))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row || row.status !== "installed") return null;
   let manifest: Manifest;
   try {
-    manifest = JSON.parse(row.manifestJson) as Manifest;
+    manifest = row.manifestJson as Manifest;
   } catch {
     return null;
   }
@@ -738,7 +739,25 @@ function ensureGitignore(folderPath: string): void {
   }
 }
 
-function computeNextRun(cron: string): number | null {
-  const d = nextRun(cron);
-  return d ? d.getTime() : null;
+function computeNextRun(cron: string): Date | null {
+  return nextRun(cron);
+}
+
+/**
+ * JSON-stringify with object keys sorted recursively. Used by `reloadApp`
+ * to compare the on-disk manifest against the DB row's manifestJson: the
+ * jsonb round-trip rearranges keys, so a byte-for-byte stringify diff
+ * spuriously reports `changed: true` on every reload.
+ */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v) => {
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+        sorted[k] = (v as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    return v;
+  });
 }

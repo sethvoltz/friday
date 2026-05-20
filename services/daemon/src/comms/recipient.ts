@@ -27,12 +27,12 @@ export type RecipientResolution =
  * Resolve a symbolic recipient (`parent` / `self`) against the calling
  * agent's registry row. Literal names pass through unchanged.
  */
-export function resolveRecipient(
+export async function resolveRecipient(
   fromAgent: string,
   to: string,
-): RecipientResolution {
+): Promise<RecipientResolution> {
   if (!SYMBOLIC_RECIPIENTS.has(to)) return { ok: true, agent: to };
-  const caller = registry.getAgent(fromAgent);
+  const caller = await registry.getAgent(fromAgent);
   if (!caller) {
     return {
       ok: false,
@@ -60,11 +60,11 @@ export type RecipientCheck =
  * Falls back to a Levenshtein-nearest hint when the name is close to a real
  * one (distance ≤ 3, and strictly less than half the candidate's length).
  */
-export function validateRecipient(name: string): RecipientCheck {
+export async function validateRecipient(name: string): Promise<RecipientCheck> {
   if (!name || typeof name !== "string") {
     return { ok: false, error: "recipient name is required" };
   }
-  const all = registry.listAgents();
+  const all = await registry.listAgents();
   const live = all.filter((a) => a.status !== "archived");
   const match = live.find((a) => a.name === name);
   if (match) return { ok: true, agent: match.name };

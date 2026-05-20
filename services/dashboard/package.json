@@ -10,15 +10,17 @@
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests --exclude '**/*.e2e.test.ts' --exclude 'e2e/**'",
+    "test:e2e": "vitest run --passWithNoTests --config ./vitest.e2e.config.ts",
+    "test:playwright": "playwright test"
   },
   "dependencies": {
     "@friday/evolve": "workspace:*",
     "@friday/integrations-linear": "workspace:*",
     "@friday/memory": "workspace:*",
     "@friday/shared": "workspace:*",
+    "@rocicorp/zero": "1.5.0",
     "better-auth": "^1.4.0",
-    "better-sqlite3": "^12.0.0",
     "bits-ui": "^2.18.0",
     "fuzzysort": "^3.1.0",
     "isomorphic-dompurify": "^3.10.0",
@@ -27,14 +29,16 @@
     "marked": "^18.0.2",
     "mermaid": "^11.4.0",
     "mode-watcher": "^1.1.0",
+    "sharp": "^0.33.0",
     "shiki": "^1.24.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.50.0",
     "@sveltejs/adapter-node": "^5.2.0",
     "@sveltejs/kit": "^2.57.0",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
-    "@types/better-sqlite3": "^7.6.13",
-    "sharp": "^0.33.0",
+    "@types/pg": "^8.11.10",
+    "pg": "^8.13.0",
     "svelte": "^5.55.2",
     "svelte-check": "^4.4.6",
     "typescript": "^5.7.0",

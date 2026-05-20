@@ -5,13 +5,13 @@ import { searchMemories } from "./search.js";
  * pull top N memories matching the user's text, embed them inline. Empty when
  * nothing matches.
  */
-export function buildAutoRecallBlock(
+export async function buildAutoRecallBlock(
   userText: string,
   opts: { limit?: number; minScore?: number } = {},
-): string {
+): Promise<string> {
   const limit = opts.limit ?? 5;
   const minScore = opts.minScore ?? 1;
-  const results = searchMemories({
+  const results = await searchMemories({
     query: userText,
     limit,
     trackRecall: true,

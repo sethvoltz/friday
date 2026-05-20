@@ -3,11 +3,33 @@
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import { goto, invalidateAll } from "$app/navigation";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
+  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
 
   let { data }: { data: PageData } = $props();
 
+  // Phase 3.3: when Zero is on, overlay the row from `zeroSync.memory`
+  // so edits in another tab propagate <1s without `invalidateAll`.
+  // The SSR-loaded `data.entry` is the warm baseline.
+  const zeroOn = useZero();
   // svelte-ignore state_referenced_locally
   let entry = $state(data.entry);
+  $effect(() => {
+    if (!zeroOn) return;
+    const row = zeroSync.memory.find((r) => r.id === data.entry.id);
+    if (row) {
+      entry = {
+        ...entry,
+        title: row.title,
+        content: row.content,
+        tags: Array.isArray(row.tags_json) ? row.tags_json : [],
+        updatedAt: new Date(row.updated_at).toISOString(),
+        recallCount: row.recall_count,
+        lastRecalledAt: row.last_recalled_at
+          ? new Date(row.last_recalled_at).toISOString()
+          : null,
+      };
+    }
+  });
   let editing = $state(false);
   let saving = $state(false);
   let title = $state("");
@@ -44,6 +66,30 @@
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean);
+      if (zeroOn) {
+        // Phase 4.5: optimistic UPDATE via mutator; daemon
+        // re-writes the markdown file in response to the
+        // status='pending_file' notification.
+        const result = zeroSync.updateMemoryEntry({
+          id: entry.id,
+          title: title.trim(),
+          content,
+          tags,
+        });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`save failed: ${sr.error.message}`, "err");
+          return;
+        }
+        // Local optimistic update so the rendered entry doesn't
+        // briefly flash back to the SSR baseline before the Zero
+        // snapshot lands (the reactive $effect above will reconcile
+        // when the row updates).
+        entry = { ...entry, title: title.trim(), content, tags };
+        editing = false;
+        showToast("saved");
+        return;
+      }
       const r = await fetch(`/api/memory/${encodeURIComponent(entry.id)}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -71,6 +117,19 @@
       danger: true,
     });
     if (!ok) return;
+    if (zeroOn) {
+      // Phase 4.5: soft-delete via mutator (status='pending_delete').
+      // Dashboard list filters this status out so the row vanishes
+      // optimistically; daemon moves the file to trash.
+      const result = zeroSync.deleteMemoryEntry({ id: entry.id });
+      const sr = await result?.server;
+      if (sr && sr.type === "error") {
+        showToast(`delete failed: ${sr.error.message}`, "err");
+        return;
+      }
+      void goto("/memory");
+      return;
+    }
     const r = await fetch(`/api/memory/${encodeURIComponent(entry.id)}`, {
       method: "DELETE",
     });

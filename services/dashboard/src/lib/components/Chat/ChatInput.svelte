@@ -1,6 +1,9 @@
 <script lang="ts">
   import { chat } from "$lib/stores/chat.svelte";
   import { chatInputBridge } from "$lib/stores/chat-input-bridge.svelte";
+  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
+
+  const zeroOn = useZero();
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { portal } from "$lib/actions/portal";
@@ -512,6 +515,33 @@
     text = "";
     await tick();
     autoresize();
+    // Phase 4.8: route the `archive` destructive command through
+    // the Zero mutator when the feature flag is on. Other
+    // destructive commands (reset-context, restart) stay on the
+    // legacy `/api/commands` REST path — they're not in Phase 4
+    // scope.
+    if (zeroOn && name === "archive" && args) {
+      const result = zeroSync.archiveAgent({ name: args });
+      const sr = await result?.server;
+      if (sr && sr.type === "error") {
+        chat.messages.push({
+          id: `sys_${Date.now()}`,
+          role: "assistant",
+          text: `**/archive** — error: ${sr.error.message}`,
+          status: "error",
+          ts: Date.now(),
+        });
+        return;
+      }
+      chat.messages.push({
+        id: `sys_${Date.now()}`,
+        role: "assistant",
+        text: `**/archive** — requested archive of ${args}`,
+        status: "complete",
+        ts: Date.now(),
+      });
+      return;
+    }
     await dispatchSystem(name, args);
   }
 
@@ -525,6 +555,16 @@
     // synchronously but the actual SDK unwind happens asynchronously, so
     // there's nothing useful to await here.
     chat.requestStop(id);
+    if (useZero()) {
+      // Phase 4.10: Zero-path uses the abortTurn mutator + fast-path
+      // for synchronous worker abort + durable cross-device signal.
+      // Fire-and-forget because the wrapper internally awaits both
+      // legs; we want the UI to flip immediately without blocking.
+      void zeroSync.abortTurn(id).catch(() => {
+        /* swallow — turn_done reconciles */
+      });
+      return;
+    }
     void fetch(`/api/chat/turn/${id}/abort`, { method: "POST" }).catch(() => {
       /* network errors are tolerable — the next turn_done will reconcile.
          If it never lands, the user can refresh; we don't want a thrown
@@ -598,10 +638,50 @@
     textarea?.focus();
   }
 
-  /** Mobile keyboard preservation: prevent input from blurring on tap. */
+  /**
+   * Mobile keyboard preservation + tap-vs-scroll discrimination for
+   * the slash command picker.
+   *
+   * Previous shape (apply-on-pointerdown) made the list un-scrollable
+   * on touch: the FIRST contact with any row immediately committed
+   * the selection and closed the menu, so a drag-scroll could never
+   * start. The user couldn't see commands below the fold.
+   *
+   * New shape: record the pointer-down position. On pointerup, only
+   * apply if the pointer hasn't moved beyond a tap threshold (10px).
+   * Scrolls move past that threshold and the release is treated as
+   * a no-op. `e.preventDefault()` on pointerdown still fires to keep
+   * keyboard focus (otherwise the textarea blurs on tap and the soft
+   * keyboard collapses).
+   *
+   * Combined with `touch-action: pan-y` on the autocomplete
+   * container so the browser routes vertical drags to the scroller
+   * before our handlers see them.
+   */
+  let suggestionPointerStart: { x: number; y: number; idx: number } | null =
+    null;
+  const SUGGESTION_TAP_THRESHOLD_PX = 10;
   function onSuggestionPointerdown(e: PointerEvent, idx: number) {
     e.preventDefault();
+    suggestionPointerStart = { x: e.clientX, y: e.clientY, idx };
+  }
+  function onSuggestionPointerup(e: PointerEvent, idx: number) {
+    const start = suggestionPointerStart;
+    suggestionPointerStart = null;
+    if (!start || start.idx !== idx) return;
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+    if (
+      Math.abs(dx) > SUGGESTION_TAP_THRESHOLD_PX ||
+      Math.abs(dy) > SUGGESTION_TAP_THRESHOLD_PX
+    ) {
+      // Scrolled past the tap threshold — user was dragging, not picking.
+      return;
+    }
     applySuggestion(idx);
+  }
+  function onSuggestionPointercancel() {
+    suggestionPointerStart = null;
   }
 
   interface ConfirmSummary {
@@ -797,7 +877,9 @@
           role="option"
           tabindex="-1"
           aria-selected={i === selectedIdx}
-          onpointerdown={(e) => onSuggestionPointerdown(e, i)}>
+          onpointerdown={(e) => onSuggestionPointerdown(e, i)}
+          onpointerup={(e) => onSuggestionPointerup(e, i)}
+          onpointercancel={onSuggestionPointercancel}>
           <span class="name">/{s.name}</span>
           <span class="badge {s.kind}">{s.kind}</span>
           <span class="desc">{s.description}</span>
@@ -902,7 +984,6 @@
     border-radius: inherit;
     background: var(--header-float-bg);
     backdrop-filter: blur(20px) saturate(160%);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
     /* Sits between the aurora (z-index: 0) and the form/chips (z-index:
        2) so its backdrop-filter samples the aurora and the chat content
        behind, but never the textarea text we put on top. */
@@ -1197,6 +1278,15 @@
     box-shadow: var(--shadow-lg);
     max-height: 240px;
     overflow-y: auto;
+    /* Mobile: route vertical drags to the scroller, not the row's
+       pointerdown handler. Without this, every tap is recognized as
+       a "click" by the row before the browser decides it's actually
+       a scroll gesture. The pointerdown handler's preventDefault
+       (kept for keyboard-focus preservation) also tells the browser
+       NOT to scroll on touch — touch-action: pan-y reinstates the
+       vertical-pan gesture explicitly. */
+    touch-action: pan-y;
+    overscroll-behavior: contain;
     z-index: 10;
   }
   .row {

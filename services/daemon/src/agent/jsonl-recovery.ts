@@ -41,7 +41,9 @@
  *    use ↔ result.
  *  - User-role text content is ignored: those blocks are written by the
  *    daemon at chat/turn / mail-bridge time, never derived from JSONL.
- *  - A `block_reload` SSE event fires per session with any net changes so
+ *  - Phase 5: net changes are picked up by Zero replication (the
+ *    blocks reactive query); the legacy `block_reload` SSE event
+ *    is retired. Diagnostic logging via `jsonl-recovery.session.applied` so
  *    connected dashboards can refetch.
  *
  * Invocation sites:
@@ -86,7 +88,9 @@ export interface RecoveryAgent {
   workingDirectory: string;
 }
 
-export function recoverFromJsonl(agents: RecoveryAgent[]): RecoveryStats {
+export async function recoverFromJsonl(
+  agents: RecoveryAgent[],
+): Promise<RecoveryStats> {
   const stats: RecoveryStats = {
     sessionsScanned: 0,
     inserted: 0,
@@ -98,7 +102,7 @@ export function recoverFromJsonl(agents: RecoveryAgent[]): RecoveryStats {
     const filePath = sessionFilePath(a.workingDirectory, a.sessionId);
     if (!existsSync(filePath)) continue;
     try {
-      const { inserted, updated, skipped, blockIds } = reconcileSession(
+      const { inserted, updated, skipped, blockIds } = await reconcileSession(
         a.agentName,
         a.sessionId,
         filePath,
@@ -107,16 +111,18 @@ export function recoverFromJsonl(agents: RecoveryAgent[]): RecoveryStats {
       stats.inserted += inserted;
       stats.updated += updated;
       stats.skipped += skipped;
+      // Phase 5 (SSE narrowing): the `block_reload` event was the
+      // signal for the dashboard to re-fetch blocks via REST after
+      // JSONL recovery touched rows. Zero's blocks reactive query
+      // now auto-replicates those INSERTs/UPDATEs, so the event is
+      // retired; we still log the recovery for diagnostics.
       if (blockIds.length > 0) {
-        eventBus.publish({
-          v: 1,
-          type: "block_reload",
+        logger.log("info", "jsonl-recovery.session.applied", {
           agent: a.agentName,
-          session_id: a.sessionId,
-          block_ids: blockIds,
+          session: a.sessionId,
           inserted,
           updated,
-          ts: Date.now(),
+          block_count: blockIds.length,
         });
       }
     } catch (err) {
@@ -145,11 +151,11 @@ interface ReconcileResult {
   blockIds: string[];
 }
 
-function reconcileSession(
+async function reconcileSession(
   agentName: string,
   sessionId: string,
   filePath: string,
-): ReconcileResult {
+): Promise<ReconcileResult> {
   const out: ReconcileResult = {
     inserted: 0,
     updated: 0,
@@ -164,9 +170,9 @@ function reconcileSession(
     if ((entry as { isSidechain?: boolean }).isSidechain === true) continue;
     const type = (entry.type ?? "") as string;
     if (type === "assistant") {
-      processAssistantEntry(out, agentName, sessionId, entry);
+      await processAssistantEntry(out, agentName, sessionId, entry);
     } else if (type === "user") {
-      processUserEntry(out, agentName, sessionId, entry);
+      await processUserEntry(out, agentName, sessionId, entry);
     }
     // Other entry types (system, summary, queue-operation, …) carry no
     // chat-visible blocks and are intentionally skipped.
@@ -174,12 +180,12 @@ function reconcileSession(
   return out;
 }
 
-function processAssistantEntry(
+async function processAssistantEntry(
   out: ReconcileResult,
   agentName: string,
   sessionId: string,
   entry: RawEntry,
-): void {
+): Promise<void> {
   const msg = entry.message as
     | { id?: string; content?: unknown[] }
     | undefined;
@@ -189,8 +195,11 @@ function processAssistantEntry(
     return;
   }
   const ts = entryTs(entry);
-  msg.content.forEach((rawBlock, idx) => {
-    const b = rawBlock as {
+  // Sequential — same `(messageId, kind)` natural key could otherwise
+  // race itself between the existence check and the insert in
+  // reconcileBlock.
+  for (let idx = 0; idx < msg.content.length; idx++) {
+    const b = msg.content[idx] as {
       type?: string;
       text?: string;
       thinking?: string;
@@ -199,7 +208,7 @@ function processAssistantEntry(
       input?: unknown;
     };
     if (b.type === "text" && typeof b.text === "string") {
-      reconcileBlock(out, {
+      await reconcileBlock(out, {
         agentName,
         sessionId,
         messageId,
@@ -211,7 +220,7 @@ function processAssistantEntry(
         ts,
       });
     } else if (b.type === "thinking" && typeof b.thinking === "string") {
-      reconcileBlock(out, {
+      await reconcileBlock(out, {
         agentName,
         sessionId,
         messageId,
@@ -224,7 +233,7 @@ function processAssistantEntry(
       });
     } else if (b.type === "tool_use") {
       const toolUseId = b.id ?? `idx_${idx}`;
-      reconcileToolUse(out, {
+      await reconcileToolUse(out, {
         agentName,
         sessionId,
         messageId,
@@ -238,15 +247,15 @@ function processAssistantEntry(
         ts,
       });
     }
-  });
+  }
 }
 
-function processUserEntry(
+async function processUserEntry(
   out: ReconcileResult,
   agentName: string,
   sessionId: string,
   entry: RawEntry,
-): void {
+): Promise<void> {
   // Only reconcile tool_result blocks from user entries — the user's typed
   // prompts are already persisted via /api/chat/turn (and mail user-blocks
   // via mail-bridge). Importing user-text from JSONL would duplicate them.
@@ -266,15 +275,15 @@ function processUserEntry(
     return;
   }
   const ts = entryTs(entry);
-  msg.content.forEach((rawBlock, idx) => {
-    const b = rawBlock as {
+  for (let idx = 0; idx < msg.content.length; idx++) {
+    const b = msg.content[idx] as {
       type?: string;
       tool_use_id?: string;
       content?: unknown;
       is_error?: boolean;
     };
-    if (b.type !== "tool_result" || !b.tool_use_id) return;
-    reconcileToolResult(out, {
+    if (b.type !== "tool_result" || !b.tool_use_id) continue;
+    await reconcileToolResult(out, {
       agentName,
       sessionId,
       messageId: msg?.id ?? null,
@@ -287,7 +296,7 @@ function processUserEntry(
       }),
       ts,
     });
-  });
+  }
 }
 
 interface ReconcileInput {
@@ -302,11 +311,11 @@ interface ReconcileInput {
   ts: number;
 }
 
-function reconcileBlock(
+async function reconcileBlock(
   out: ReconcileResult,
   input: ReconcileInput,
-): void {
-  const existing = getBlockByNaturalKey(
+): Promise<void> {
+  const existing = await getBlockByNaturalKey(
     input.sessionId,
     input.messageId,
     input.kind,
@@ -314,7 +323,7 @@ function reconcileBlock(
   if (!existing) {
     const blockId = randomUUID();
     const seq = eventBus.currentSeq() + 1;
-    insertBlock({
+    await insertBlock({
       blockId,
       // turnId is unknown for recovered rows (the original turn_id lived in
       // worker memory at write time). Use a recovery-tagged id so callers can
@@ -336,12 +345,12 @@ function reconcileBlock(
     out.blockIds.push(blockId);
     return;
   }
-  if (existing.contentJson === input.contentJson) {
+  if (sameContent(existing.contentJson, input.contentJson)) {
     out.skipped += 1;
     return;
   }
   const seq = eventBus.currentSeq() + 1;
-  updateBlock(existing.blockId, {
+  await updateBlock(existing.blockId, {
     contentJson: input.contentJson,
     status: "complete",
     ts: input.ts,
@@ -374,15 +383,18 @@ interface ReconcileToolUseInput {
  * `tool_use_id` (stable, unique) keeps recovery idempotent against
  * live-written rows regardless of streaming-chunk boundaries.
  */
-function reconcileToolUse(
+async function reconcileToolUse(
   out: ReconcileResult,
   input: ReconcileToolUseInput,
-): void {
-  const existing = getToolUseByToolUseId(input.sessionId, input.toolUseId);
+): Promise<void> {
+  const existing = await getToolUseByToolUseId(
+    input.sessionId,
+    input.toolUseId,
+  );
   if (!existing) {
     const blockId = randomUUID();
     const seq = eventBus.currentSeq() + 1;
-    insertBlock({
+    await insertBlock({
       blockId,
       turnId: `recover_${input.sessionId}`,
       agentName: input.agentName,
@@ -401,12 +413,12 @@ function reconcileToolUse(
     out.blockIds.push(blockId);
     return;
   }
-  if (existing.contentJson === input.contentJson) {
+  if (sameContent(existing.contentJson, input.contentJson)) {
     out.skipped += 1;
     return;
   }
   const seq = eventBus.currentSeq() + 1;
-  updateBlock(existing.blockId, {
+  await updateBlock(existing.blockId, {
     contentJson: input.contentJson,
     status: "complete",
     ts: input.ts,
@@ -432,15 +444,18 @@ interface ReconcileToolResultInput {
  * tool_use_id)` because the JSONL never carries a stable message_id for
  * these entries. Inserts with `message_id = null` if absent.
  */
-function reconcileToolResult(
+async function reconcileToolResult(
   out: ReconcileResult,
   input: ReconcileToolResultInput,
-): void {
-  const existing = getToolResultByToolUseId(input.sessionId, input.toolUseId);
+): Promise<void> {
+  const existing = await getToolResultByToolUseId(
+    input.sessionId,
+    input.toolUseId,
+  );
   if (!existing) {
     const blockId = randomUUID();
     const seq = eventBus.currentSeq() + 1;
-    insertBlock({
+    await insertBlock({
       blockId,
       turnId: `recover_${input.sessionId}`,
       agentName: input.agentName,
@@ -459,12 +474,12 @@ function reconcileToolResult(
     out.blockIds.push(blockId);
     return;
   }
-  if (existing.contentJson === input.contentJson) {
+  if (sameContent(existing.contentJson, input.contentJson)) {
     out.skipped += 1;
     return;
   }
   const seq = eventBus.currentSeq() + 1;
-  updateBlock(existing.blockId, {
+  await updateBlock(existing.blockId, {
     contentJson: input.contentJson,
     status: "complete",
     ts: input.ts,
@@ -472,6 +487,40 @@ function reconcileToolResult(
   });
   out.updated += 1;
   out.blockIds.push(existing.blockId);
+}
+
+/**
+ * Structurally compare two JSON-string payloads. The existing row's
+ * contentJson is stringified by the service layer from a jsonb-parsed
+ * object — and Postgres jsonb storage does not preserve key order on
+ * round-trip — so a byte-for-byte equality check spuriously declares the
+ * JSONL freshly-stringified payload "different" on every recovery pass.
+ * Parse both sides and deep-compare instead.
+ */
+function sameContent(a: string, b: string): boolean {
+  if (a === b) return true;
+  let pa: unknown;
+  let pb: unknown;
+  try {
+    pa = JSON.parse(a);
+    pb = JSON.parse(b);
+  } catch {
+    return false;
+  }
+  return canonical(pa) === canonical(pb);
+}
+
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, v) => {
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+        sorted[k] = (v as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    return v;
+  });
 }
 
 function sessionFilePath(cwd: string, sessionId: string): string {

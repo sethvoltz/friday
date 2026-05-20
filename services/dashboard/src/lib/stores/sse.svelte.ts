@@ -28,9 +28,6 @@ import { loadString, saveJSON, saveString } from "./persistent";
 
 const DASHBOARD_BUMP_TYPES = new Set([
   "turn_done",
-  "agent_lifecycle",
-  "agent_status",
-  "schedule_fired",
 ]);
 
 const HANDLED_TYPES = new Set([
@@ -38,18 +35,14 @@ const HANDLED_TYPES = new Set([
   "error",
   "turn_done",
   "agent_message",
-  "agent_lifecycle",
-  "agent_status",
-  "mail_delivered",
-  "schedule_fired",
-  "evolve_critical",
-  "system_banner",
   "block_start",
   "block_delta",
   "block_complete",
   "block_canceled",
-  "block_meta_update",
-  "block_reload",
+  // Phase 5 retirements (Zero reactive queries / Postgres tables
+  // replace the SSE role): `block_meta_update`, `block_reload`,
+  // `mail_delivered`, `schedule_fired`, `agent_lifecycle`,
+  // `agent_status`, `evolve_critical`, `system_banner`.
   "connection_established",
 ]);
 
@@ -96,9 +89,13 @@ let onlineListener: (() => void) | null = null;
  *  closure of each fetch's reader loop so a stale chunk arriving on an
  *  abandoned connection can't apply events to the current one. */
 let connectionId = 0;
-/** Last `id:` field we saw on the wire. Sent as `Last-Event-ID` on the
- *  next reconnect so the daemon resumes from `replaySince(lastEventId)`. */
-let lastEventId: string | null = null;
+// Phase 5: the legacy `Last-Event-ID` cursor send is retired (plan
+// §211). The per-agent SSE channel (`?agent=<name>`) hits the
+// daemon's per-turn replay buffer, which scopes the replay to the
+// in-flight turn automatically — the cursor is no longer
+// informative on that path. The chat-store's `lastSeqByAgent`
+// continues to dedupe events at apply-time across replay/live
+// boundaries, so re-applying a replayed delta is a no-op.
 /** localStorage key for the last daemon boot_id we connected to. Hydrated
  *  at module load so a fresh page load can detect a daemon restart on the
  *  very first `connection_established` event — without this, the
@@ -126,8 +123,21 @@ async function connect(): Promise<void> {
     const headers: HeadersInit = {
       accept: "text/event-stream",
     };
-    if (lastEventId !== null) headers["last-event-id"] = lastEventId;
-    const res = await fetch("/api/events", {
+    // Phase 5: no `last-event-id` header — daemon's per-agent path
+    // ignores it (replays the current turn buffer instead), and the
+    // legacy path's 500-event back-walk is a fine default for the
+    // no-`?agent=` callers.
+    // Phase 5: per-agent SSE channel. When a focused agent is set,
+    // pass `?agent=<name>` so the daemon filters to that agent's
+    // turn-lifecycle events. The connection re-opens whenever
+    // `chat.focusedAgent` changes via `reopenForAgent`. With no
+    // focused agent (sidebar landing state), keep the legacy global
+    // stream so connection_established still lands.
+    const focused = chat.focusedAgent;
+    const url = focused
+      ? `/api/events?agent=${encodeURIComponent(focused)}`
+      : "/api/events";
+    const res = await fetch(url, {
       headers,
       signal: ctrl.signal,
       // Defensive: SSE responses must NOT be cached by intermediaries; the
@@ -269,11 +279,9 @@ export function acceptConnectionEstablished(
 
 function handleEvent(evt: ParsedEvent, myId: number): void {
   if (myId !== connectionId) return;
-  // Update Last-Event-ID cursor (used on the next reconnect's headers).
-  // `connection_established` deliberately skips `id:` so the cursor only
-  // ever advances to real bus seqs.
-  if (evt.id !== undefined && evt.id !== "") lastEventId = evt.id;
-
+  // Phase 5: `last-event-id` cursor tracking retired (see comment
+  // at the top of this module). The chat store's per-agent seq
+  // dedup handles re-applied events on reconnect.
   const type = evt.event ?? "";
   if (!HANDLED_TYPES.has(type)) return;
   let parsed: WireEvent;
@@ -328,6 +336,10 @@ export function startSSE(): void {
   stopped = false;
   freshLoad = true;
   attempt = 0;
+  // Phase 5: register the focus-change hook so chat.focusedAgent
+  // switches trigger an SSE reconnect with the new `?agent=` filter.
+  // Idempotent — `bindFocusChange` overwrites a single slot.
+  chat.bindFocusChange(reopenForAgent);
   void connect();
   if (typeof document !== "undefined" && !visListener) {
     visListener = () => {
@@ -341,6 +353,27 @@ export function startSSE(): void {
     onlineListener = () => reconnectNow();
     window.addEventListener("online", onlineListener);
   }
+}
+
+/**
+ * Phase 5: tear down the current SSE connection and open a fresh one,
+ * picking up whatever agent `chat.focusedAgent` now points at. Used by
+ * the chat store on focus switch — the new connection's `?agent=`
+ * query string scopes the stream to that agent, and the daemon's
+ * per-agent replay buffer (when wired) replays the current turn so
+ * the dashboard rebuilds the in-flight accumulator.
+ *
+ * No-op when SSE isn't running (stopSSE / startSSE bookkeeping
+ * stays the source of truth for lifecycle).
+ */
+export function reopenForAgent(): void {
+  if (stopped) return;
+  // Abort the current connection; the existing reconnect ladder will
+  // open a new one immediately via scheduleReconnect, picking up the
+  // new `chat.focusedAgent`. Phase 5: no cursor to clear here — the
+  // daemon's per-agent path replays the current-turn buffer from
+  // scratch on every connect.
+  abortController?.abort();
 }
 
 export function stopSSE(): void {

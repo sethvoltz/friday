@@ -12,7 +12,7 @@ export const attachCommand = defineCommand({
     service: {
       type: "positional",
       required: true,
-      description: "daemon | dashboard",
+      description: "daemon | dashboard | zero-cache",
     },
   },
   run({ args }) {
@@ -28,7 +28,8 @@ export const attachCommand = defineCommand({
     }
     if (!validateService(target)) {
       console.error(
-        pc.red(`unknown service: ${target}`) + ` (expected: daemon | dashboard)`,
+        pc.red(`unknown service: ${target}`) +
+          ` (expected: daemon | dashboard | zero-cache)`,
       );
       process.exit(1);
     }
@@ -42,6 +43,8 @@ export const attachCommand = defineCommand({
   },
 });
 
-function validateService(s: string): s is "daemon" | "dashboard" {
-  return s === "daemon" || s === "dashboard";
+function validateService(
+  s: string,
+): s is "daemon" | "dashboard" | "zero-cache" {
+  return s === "daemon" || s === "dashboard" || s === "zero-cache";
 }

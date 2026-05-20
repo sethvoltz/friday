@@ -12,6 +12,7 @@
     wakeLockState,
   } from "$lib/stores/wake-lock.svelte";
   import ConnectivityWidget from "$lib/components/Connectivity/ConnectivityWidget.svelte";
+  import SyncOverlay from "$lib/components/SyncOverlay/SyncOverlay.svelte";
   import { Zap } from "lucide-svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
@@ -127,18 +128,45 @@
     // drags `position: fixed` elements (the floating header, in
     // particular) out of view. Track visualViewport.offsetTop in a CSS
     // var so the header can stay anchored to the *visible* top edge.
+    //
+    // **Only update while an input or textarea is focused** — without
+    // this gate, iOS fires `visualViewport.scroll` events during chat
+    // scroll-to-bottom animations and the offset wanders to mid-screen,
+    // dragging the floating header down with it (the "snaps to center
+    // of the screen while running" symptom). When no input is focused,
+    // the keyboard isn't open and the offset is always 0 anyway; clearing
+    // it explicitly prevents a stale value from sticking past a blur.
+    //
+    // Clamp the value defensively too: a runaway vv.offsetTop (older
+    // Safari pinch-zoom edge case) would otherwise position the header
+    // at arbitrary screen coordinates. 200px caps it at "definitely
+    // still near the top of the visible area."
     const vv = window.visualViewport;
     let vvUpdate: (() => void) | undefined;
     if (vv) {
-      vvUpdate = () => {
+      const setOffset = (value: number) => {
+        const clamped = Math.max(0, Math.min(value, 200));
         document.documentElement.style.setProperty(
           "--vv-offset-top",
-          `${vv.offsetTop}px`,
+          `${clamped}px`,
         );
+      };
+      vvUpdate = () => {
+        const active = document.activeElement;
+        const tag = active?.tagName;
+        const isTextField =
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          (active instanceof HTMLElement && active.isContentEditable);
+        setOffset(isTextField ? vv.offsetTop : 0);
       };
       vvUpdate();
       vv.addEventListener("resize", vvUpdate);
       vv.addEventListener("scroll", vvUpdate);
+      // Re-evaluate when focus state changes — blur on the input must
+      // immediately reset the offset to 0 even if no vv event fires.
+      document.addEventListener("focusin", vvUpdate);
+      document.addEventListener("focusout", vvUpdate);
     }
 
     return () => {
@@ -149,22 +177,16 @@
       if (vv && vvUpdate) {
         vv.removeEventListener("resize", vvUpdate);
         vv.removeEventListener("scroll", vvUpdate);
+        document.removeEventListener("focusin", vvUpdate);
+        document.removeEventListener("focusout", vvUpdate);
       }
     };
   });
-  // Offline banner: only show after the SSE has been disconnected for a few
-  // seconds, so a momentary blip during reconnect doesn't flash a banner.
-  let showOfflineBanner = $state(false);
-  $effect(() => {
-    if (sseConnected.value) {
-      showOfflineBanner = false;
-      return;
-    }
-    const t = setTimeout(() => {
-      if (!sseConnected.value) showOfflineBanner = true;
-    }, 5000);
-    return () => clearTimeout(t);
-  });
+  // The "Daemon unreachable — retrying" banner used to live here, gated
+  // on `sseConnected` with a 5 s debounce. The ConnectivityWidget's
+  // three dots already carry the same signal (and finer state — sync
+  // vs daemon, reconnecting vs down), so the banner was redundant
+  // visual noise.
   function fmtDuration(ms: number) {
     const s = Math.max(0, Math.floor(ms / 1000));
     if (s < 60) return `${s}s`;
@@ -188,12 +210,10 @@
 </svelte:head>
 
 <ModeWatcher />
+{#if signedIn && !isLogin}
+  <SyncOverlay />
+{/if}
 <div class="app-shell">
-  {#if signedIn && !isLogin && showOfflineBanner}
-    <div class="offline-banner" role="status" aria-live="polite">
-      Daemon unreachable — retrying. Sent messages are queued and will flush on reconnect.
-    </div>
-  {/if}
   {#if signedIn && !isLogin}
     <header class="app-header">
       <div class="header-left">
@@ -262,20 +282,6 @@
     transition: background var(--transition-normal);
   }
 
-  .offline-banner {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    z-index: 300;
-    padding: 0.5rem 1rem;
-    text-align: center;
-    background: var(--status-warn, #b45309);
-    color: var(--text-inverse, #fff);
-    font-size: 0.8rem;
-    font-weight: 500;
-  }
-
   .app-header {
     display: flex;
     align-items: center;
@@ -298,7 +304,6 @@
        at the top-right can route to the sidebar's stacking context first. */
     z-index: 250;
     backdrop-filter: blur(20px) saturate(160%);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
     border-radius: 999px;
     box-shadow: var(--shadow-lg);
     gap: 1rem;

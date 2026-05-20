@@ -12,8 +12,10 @@ export interface Attachment {
   filename: string;
   mime: string;
   sizeBytes: number;
-  uploadedAt: number;
-  firstTurnId: number | null;
+  /** ISO 8601 string. */
+  uploadedAt: string;
+  /** Per ADR-016 turn_id is a stable UUID, not an integer. */
+  firstTurnId: string | null;
   /** Absolute path to the bytes on disk. */
   path: string;
 }
@@ -22,7 +24,7 @@ export interface UploadInput {
   bytes: Buffer;
   filename: string;
   mime: string;
-  firstTurnId?: number;
+  firstTurnId?: string;
 }
 
 /** Pixel-dimension cap on the longest edge when downscaling oversized images. */
@@ -65,11 +67,12 @@ export async function uploadAttachment(
   const path = pathFor(sha256, ext);
 
   const db = getDb();
-  const existing = db
+  const existingRows = await db
     .select()
     .from(schema.attachments)
     .where(eq(schema.attachments.sha256, sha256))
-    .get();
+    .limit(1);
+  const existing = existingRows[0];
 
   if (!existsSync(path)) {
     const dir = dirname(path);
@@ -81,19 +84,18 @@ export async function uploadAttachment(
     return rowToAttachment(existing, path);
   }
 
-  const inserted = db
+  const insertedRows = await db
     .insert(schema.attachments)
     .values({
       sha256,
       filename,
       mime,
       sizeBytes: bytes.length,
-      uploadedAt: Date.now(),
+      uploadedAt: new Date(),
       firstTurnId: input.firstTurnId ?? null,
     })
-    .returning()
-    .get();
-  return rowToAttachment(inserted, path);
+    .returning();
+  return rowToAttachment(insertedRows[0], path);
 }
 
 function isHeic(buf: Buffer, mime: string): boolean {
@@ -121,19 +123,24 @@ function swapExt(filename: string, newExt: string): string {
   return `${base}${newExt}`;
 }
 
-export function getAttachment(sha256: string): Attachment | null {
+export async function getAttachment(
+  sha256: string,
+): Promise<Attachment | null> {
   const db = getDb();
-  const row = db
+  const rows = await db
     .select()
     .from(schema.attachments)
     .where(eq(schema.attachments.sha256, sha256))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return null;
   return rowToAttachment(row, pathFor(sha256, sanitizeExt(row.filename)));
 }
 
-export function readAttachmentBytes(sha256: string): Buffer | null {
-  const att = getAttachment(sha256);
+export async function readAttachmentBytes(
+  sha256: string,
+): Promise<Buffer | null> {
+  const att = await getAttachment(sha256);
   if (!att) return null;
   if (!existsSync(att.path)) return null;
   return readFileSync(att.path);
@@ -162,7 +169,7 @@ function rowToAttachment(
     filename: r.filename,
     mime: r.mime,
     sizeBytes: r.sizeBytes,
-    uploadedAt: r.uploadedAt,
+    uploadedAt: r.uploadedAt.toISOString(),
     firstTurnId: r.firstTurnId,
     path,
   };

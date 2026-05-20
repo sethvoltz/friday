@@ -1,6 +1,5 @@
 import { eq } from "drizzle-orm";
 import { getDb, isValidCron, nextRun, schema } from "@friday/shared";
-import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import { isAgentLive } from "../agent/lifecycle.js";
 import * as registry from "../agent/registry.js";
@@ -28,27 +27,28 @@ export interface ScheduleSpec {
   paused?: boolean;
 }
 
-export function upsertSchedule(spec: ScheduleSpec): void {
+export async function upsertSchedule(spec: ScheduleSpec): Promise<void> {
   if (spec.cron && !isValidCron(spec.cron)) {
     throw new Error(`invalid cron: ${spec.cron}`);
   }
   // FRI-76: eagerly register a stub agent so mail to this scheduled agent
   // passes recipient validation before the first cron fire. Reject if a
   // non-scheduled agent already owns the name — mail would be misrouted.
-  const existingAgent = registry.getAgent(spec.name);
+  const existingAgent = await registry.getAgent(spec.name);
   if (existingAgent && existingAgent.type !== "scheduled") {
     throw new ScheduleNameCollisionError(spec.name, existingAgent.type);
   }
   const db = getDb();
-  const now = Date.now();
+  const now = new Date();
   const next = computeNext(spec);
-  const existing = db
+  const existingRows = await db
     .select()
     .from(schema.schedules)
     .where(eq(schema.schedules.name, spec.name))
-    .get();
-  if (existing) {
-    db.update(schema.schedules)
+    .limit(1);
+  if (existingRows[0]) {
+    await db
+      .update(schema.schedules)
       .set({
         cron: spec.cron ?? null,
         runAt: spec.runAt ?? null,
@@ -57,62 +57,58 @@ export function upsertSchedule(spec: ScheduleSpec): void {
         nextRunAt: next,
         updatedAt: now,
       })
-      .where(eq(schema.schedules.name, spec.name))
-      .run();
+      .where(eq(schema.schedules.name, spec.name));
   } else {
-    db.insert(schema.schedules)
-      .values({
-        name: spec.name,
-        cron: spec.cron ?? null,
-        runAt: spec.runAt ?? null,
-        taskPrompt: spec.taskPrompt,
-        paused: spec.paused ?? false,
-        nextRunAt: next,
-        lastRunAt: null,
-        lastRunId: null,
-        metaJson: null,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .run();
+    await db.insert(schema.schedules).values({
+      name: spec.name,
+      cron: spec.cron ?? null,
+      runAt: spec.runAt ?? null,
+      taskPrompt: spec.taskPrompt,
+      paused: spec.paused ?? false,
+      nextRunAt: next,
+      lastRunAt: null,
+      lastRunId: null,
+      metaJson: null,
+      createdAt: now,
+      updatedAt: now,
+    });
   }
   // Ensure the registry stub exists. Idempotent: if the agent has already
   // fired, this leaves the existing row's session/status untouched beyond
   // the standard registerAgent conflict-update (status=idle), which is the
   // correct state for a scheduled agent between fires.
   if (!existingAgent) {
-    registry.registerAgent({ name: spec.name, type: "scheduled" });
+    await registry.registerAgent({ name: spec.name, type: "scheduled" });
   }
 }
 
-export function listSchedules(): unknown[] {
-  return getDb().select().from(schema.schedules).all();
+export async function listSchedules(): Promise<unknown[]> {
+  return await getDb().select().from(schema.schedules);
 }
 
-export function getSchedule(
+export async function getSchedule(
   name: string,
-): typeof schema.schedules.$inferSelect | null {
-  const row = getDb()
+): Promise<typeof schema.schedules.$inferSelect | null> {
+  const rows = await getDb()
     .select()
     .from(schema.schedules)
     .where(eq(schema.schedules.name, name))
-    .get();
-  return row ?? null;
+    .limit(1);
+  return rows[0] ?? null;
 }
 
-export function pauseSchedule(name: string): boolean {
-  const r = getSchedule(name);
+export async function pauseSchedule(name: string): Promise<boolean> {
+  const r = await getSchedule(name);
   if (!r) return false;
-  getDb()
+  await getDb()
     .update(schema.schedules)
-    .set({ paused: true, updatedAt: Date.now() })
-    .where(eq(schema.schedules.name, name))
-    .run();
+    .set({ paused: true, updatedAt: new Date() })
+    .where(eq(schema.schedules.name, name));
   return true;
 }
 
-export function resumeSchedule(name: string): boolean {
-  const r = getSchedule(name);
+export async function resumeSchedule(name: string): Promise<boolean> {
+  const r = await getSchedule(name);
   if (!r) return false;
   // Recompute nextRunAt so a paused-during-due schedule doesn't immediately
   // fire on resume.
@@ -122,56 +118,67 @@ export function resumeSchedule(name: string): boolean {
     runAt: r.runAt ?? undefined,
     taskPrompt: r.taskPrompt,
   });
-  getDb()
+  await getDb()
     .update(schema.schedules)
-    .set({ paused: false, nextRunAt: next, updatedAt: Date.now() })
-    .where(eq(schema.schedules.name, name))
-    .run();
+    .set({ paused: false, nextRunAt: next, updatedAt: new Date() })
+    .where(eq(schema.schedules.name, name));
   return true;
 }
 
-export function deleteSchedule(name: string): boolean {
-  const r = getSchedule(name);
+export async function deleteSchedule(name: string): Promise<boolean> {
+  const r = await getSchedule(name);
   if (!r) return false;
   const db = getDb();
-  db.delete(schema.schedules)
-    .where(eq(schema.schedules.name, name))
-    .run();
+  await db
+    .delete(schema.schedules)
+    .where(eq(schema.schedules.name, name));
   // FRI-76: if the registry stub was never used (no session, no blocks),
   // remove it too. Once the agent has fired, the row holds audit history
   // (sessionId, block rows) and is preserved.
-  const agent = registry.getAgent(name);
+  const agent = await registry.getAgent(name);
   if (agent && agent.type === "scheduled" && !agent.sessionId) {
-    const blockCount = db
+    const blockCount = await db
       .select({ id: schema.blocks.id })
       .from(schema.blocks)
       .where(eq(schema.blocks.agentName, name))
-      .limit(1)
-      .all();
+      .limit(1);
     if (blockCount.length === 0) {
-      registry.deleteAgent(name);
+      await registry.deleteAgent(name);
     }
   }
   return true;
 }
 
 export function startScheduler(): NodeJS.Timeout {
-  return setInterval(tick, 30_000);
+  return setInterval(() => {
+    void tick().catch((err: unknown) => {
+      logger.log("warn", "scheduler.tick.error", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 30_000);
 }
 
-function tick(): void {
+async function tick(): Promise<void> {
   const db = getDb();
-  const now = Date.now();
-  const due = db
-    .select()
-    .from(schema.schedules)
-    .all()
-    .filter(
-      (r) =>
-        !r.paused &&
-        r.nextRunAt !== null &&
-        (r.nextRunAt as number) <= now,
-    );
+  const now = new Date();
+  const all = await db.select().from(schema.schedules);
+  // Phase 4.6: skip 'deleted' (tombstone — dashboard mutator
+  // soft-deleted; row stays for cross-device convergence but the
+  // schedule is logically gone) AND 'pending_register' /
+  // 'reload_requested' (the LISTEN handler hasn't completed
+  // the register/recompute yet; `nextRunAt` may be null or
+  // stale). The 'active' and 'paused' statuses are the only ones
+  // the tick should fire from.
+  const due = all.filter(
+    (r) =>
+      !r.paused &&
+      r.status !== "deleted" &&
+      r.status !== "pending_register" &&
+      r.status !== "reload_requested" &&
+      r.nextRunAt !== null &&
+      r.nextRunAt <= now,
+  );
   for (const r of due) {
     if (isAgentLive(r.name)) {
       // FIX_FORWARD 4.4: previous fire still running. Don't leave
@@ -184,34 +191,32 @@ function tick(): void {
         runAt: r.runAt ?? undefined,
         taskPrompt: r.taskPrompt,
       });
-      db.update(schema.schedules)
+      await db
+        .update(schema.schedules)
         .set({ nextRunAt: nextAt })
-        .where(eq(schema.schedules.name, r.name))
-        .run();
+        .where(eq(schema.schedules.name, r.name));
       logger.log("info", "schedule.skip-busy", {
         name: r.name,
-        nextRunAt: nextAt,
+        nextRunAt: nextAt?.toISOString() ?? null,
       });
       continue;
     }
-    fireSchedule(r);
+    await fireSchedule(r);
   }
 }
 
-export function fireSchedule(
+export async function fireSchedule(
   r: typeof schema.schedules.$inferSelect,
-): string {
+): Promise<string> {
   const runId = `r_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   logger.log("info", "schedule.fire", { name: r.name, runId });
-  eventBus.publish({
-    v: 1,
-    type: "schedule_fired",
-    schedule: r.name,
-    run_id: runId,
-  });
+  // Phase 5: `schedule_fired` SSE retired — Zero replicates the
+  // `schedules` slice (and the `schedule_runs` history table) so
+  // the dashboard sees the row's last_run_at / last_run_id update
+  // through its reactive query.
 
   try {
-    spawnScheduledRun(r, runId);
+    await spawnScheduledRun(r, runId);
   } catch (err) {
     logger.log("error", "schedule.spawn-error", {
       name: r.name,
@@ -227,10 +232,10 @@ export function fireSchedule(
     taskPrompt: r.taskPrompt,
   });
   const db = getDb();
-  db.update(schema.schedules)
-    .set({ lastRunAt: Date.now(), lastRunId: runId, nextRunAt: next })
-    .where(eq(schema.schedules.name, r.name))
-    .run();
+  await db
+    .update(schema.schedules)
+    .set({ lastRunAt: new Date(), lastRunId: runId, nextRunAt: next })
+    .where(eq(schema.schedules.name, r.name));
   return runId;
 }
 
@@ -239,26 +244,26 @@ export function fireSchedule(
  * for the spawned run, or null if the schedule doesn't exist or is already
  * running.
  */
-export function triggerSchedule(name: string): string | null {
+export async function triggerSchedule(name: string): Promise<string | null> {
   const db = getDb();
-  const r = db
+  const rows = await db
     .select()
     .from(schema.schedules)
     .where(eq(schema.schedules.name, name))
-    .get();
+    .limit(1);
+  const r = rows[0];
   if (!r) return null;
   if (isAgentLive(r.name)) return null;
-  return fireSchedule(r);
+  return await fireSchedule(r);
 }
 
-function computeNext(spec: ScheduleSpec): number | null {
+function computeNext(spec: ScheduleSpec): Date | null {
   if (spec.cron) {
-    const d = nextRun(spec.cron);
-    return d ? d.getTime() : null;
+    return nextRun(spec.cron);
   }
   if (spec.runAt) {
     const t = Date.parse(spec.runAt);
-    return Number.isFinite(t) ? t : null;
+    return Number.isFinite(t) ? new Date(t) : null;
   }
   return null;
 }
@@ -296,26 +301,27 @@ const META_WEEKLY_PROMPT = [
   "Do not auto-apply or dismiss; that's the orchestrator's call.",
 ].join("\n");
 
-export function seedMetaAgents(): void {
-  const existing = getDb()
+export async function seedMetaAgents(): Promise<void> {
+  const db = getDb();
+  const existing = await db
     .select()
     .from(schema.schedules)
     .where(eq(schema.schedules.name, "scheduled-meta-daily"))
-    .get();
-  if (!existing) {
-    upsertSchedule({
+    .limit(1);
+  if (!existing[0]) {
+    await upsertSchedule({
       name: "scheduled-meta-daily",
       cron: "0 4 * * *",
       taskPrompt: META_DAILY_PROMPT,
     });
   }
-  const weekly = getDb()
+  const weekly = await db
     .select()
     .from(schema.schedules)
     .where(eq(schema.schedules.name, "scheduled-meta-weekly"))
-    .get();
-  if (!weekly) {
-    upsertSchedule({
+    .limit(1);
+  if (!weekly[0]) {
+    await upsertSchedule({
       name: "scheduled-meta-weekly",
       cron: "0 5 * * 0",
       taskPrompt: META_WEEKLY_PROMPT,

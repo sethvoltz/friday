@@ -59,18 +59,20 @@ Installed Friday Apps live under `~/.friday/apps/<id>/` (override with `FRIDAY_D
 
 ```bash
 pnpm install
-pnpm test
+pnpm test               # unit suite (fast — no subprocesses)
+pnpm test:e2e           # multi-subprocess e2e (daemon + dashboard + zero-cache against scratch PG); slow
+pnpm test:playwright    # browser-driven user-visible round-trip; slowest, needs chromium installed
 pnpm --filter @friday/daemon exec vitest run src/path/to/file.test.ts
 ```
 
 - TypeScript throughout, Vitest for tests, pnpm workspaces + Turborepo.
-- Tests are co-located with source as `*.test.ts`.
+- Tests are co-located with source as `*.test.ts`. Files named `*.e2e.test.ts` are heavy multi-subprocess suites — excluded from `pnpm test`, run via `pnpm test:e2e`. The Playwright browser suite lives in `services/dashboard/e2e/`.
 - All state lives in `~/.friday/` (override with `FRIDAY_DATA_DIR`). Never hardcode paths; use constants from `@friday/shared`.
 - `@friday/shared` is consumed via its built `dist/`. When you edit shared source, run `pnpm --filter @friday/shared build` before exercising the change in the daemon or dashboard.
 
 ## Database migrations
 
-Drizzle's SQLite migrator filters journal entries by their `when` field against `__drizzle_migrations.created_at` — **not by `idx` or filename order**. A migration whose `when` is less than the current max `created_at` in the DB is silently skipped (no error, no log). One bad `when` poisons every later migration on every machine that has already applied the bad row.
+Friday uses Drizzle ORM with the Postgres adapter (Postgres replaced SQLite per ADR-023). Drizzle's Postgres migrator filters journal entries by their `when` field against `__drizzle_migrations.created_at` — **not by `idx` or filename order**. A migration whose `when` is less than the current max `created_at` in the DB is silently skipped (no error, no log). One bad `when` poisons every later migration on every machine that has already applied the bad row. The mechanics are the same as they were under SQLite; the rules are the same.
 
 **Rules — non-negotiable:**
 
@@ -78,6 +80,7 @@ Drizzle's SQLite migrator filters journal entries by their `when` field against 
 2. **Prefer `drizzle-kit generate`** — it writes `Date.now()` for you and keeps the snapshot chain consistent. Run `pnpm --filter @friday/shared exec drizzle-kit generate` whenever the schema in `packages/shared/src/db/schema.ts` changes.
 3. **Hand-authored migrations are allowed only for data fixes and release-boundary markers** (cases where `drizzle-kit` has no diff to emit, e.g. `UPDATE …` data backfills or `SELECT 1;` markers that pin a value to a release). When you must add a journal entry by hand: use the actual current `Date.now()` (e.g. paste the output of `node -e "console.log(Date.now())"` *at the moment you author the entry*) — never a rounded approximation, never a future value, and always strictly greater than the previous entry's `when`.
 4. **`runMigrations()` asserts that journal entry count equals `__drizzle_migrations` row count** after every run and throws if they diverge. If you ever see `drizzle journal/db mismatch` at boot, do not "fix" it by deleting rows — diagnose which `when` is wrong and correct both the journal *and* the DB's `created_at`.
+5. **Migrations run on daemon boot, before zero-cache reconnects.** The startup sequence is: Postgres (host-managed) → daemon (runs migrations, opens LISTEN, starts SSE) → zero-cache (picks up the new schema via logical replication) → dashboard (proxies WS + SSE + mutators) → clients reload on schema-version mismatch. **Never run migrations from the dashboard or from a builder's worktree against the user's `friday` database** — only daemon boot runs them.
 
 These rules apply to Builders and any other agent working in a worktree of this repo. If you find yourself reaching for `1779…00000`-shaped timestamps, stop.
 
@@ -87,11 +90,16 @@ These rules apply to Builders and any other agent working in a worktree of this 
 
 - **Don't assume — research.** When two thorough passes through the code don't explain a symptom, stop reading the same files harder and switch tools. The answer is in the logs, the DB, the SSE stream, or temporary instrumentation — not in another round of speculation. A proposed cause without a backing log line, DB row, or network event is a *hypothesis*, not a diagnosis; flag it as such when reporting and say what evidence would confirm or kill it. Two unproductive code-reading rounds is the signal to gather evidence, not the signal to write a longer write-up.
 
-- **Logs and canonical state live under `~/.friday/`** (override with `FRIDAY_DATA_DIR`). Path resolution is `getLogPath(service)` in `packages/shared/src/config.ts`.
-  - `logs/daemon.jsonl` — every daemon event in JSONL. Useful event names to grep for: `worker.fork`, `worker.prompt.queued`, `worker.exit`, `worker.turn.stalled`, `worker.abort.force-kill`, `block.seq-skew`, `blocks.update.error`, `chat.turn.user-block.error`, `queued-block.meta-update.error`, `jsonl-recovery.post-turn.error`, `daemon.shutdown`, `daemon.ready`. `tail -F` works fine; entries are one JSON per line.
-  - `logs/dashboard-<ts>-<id>.jsonl[.gz]` — per-session rotating dashboard logs.
+- **Logs live under `~/.friday/`** (override with `FRIDAY_DATA_DIR`). Path resolution is `getLogPath(service)` in `packages/shared/src/config.ts`.
+  - `logs/daemon.jsonl` — every daemon event in JSONL. Useful event names to grep for: `worker.fork`, `worker.prompt.queued`, `worker.exit`, `worker.turn.stalled`, `worker.abort.force-kill`, `block.seq-skew`, `blocks.update.error`, `chat.turn.user-block.error`, `queued-block.meta-update.error`, `jsonl-recovery.post-turn.error`, `daemon.shutdown`, `daemon.ready`, `pg.listen.<channel>`, `mutator.<name>.execute`, `mutator.<name>.fast-path`. `tail -F` works fine; entries are one JSON per line.
+  - `logs/dashboard-<ts>-<id>.jsonl[.gz]` — per-session rotating dashboard logs. Includes mutator-execution logs (`mutator.<name>.received` / `mutator.<name>.committed`).
+  - `logs/zero-cache.log` — zero-cache process log (verbosity configurable via `ZERO_LOG_LEVEL`).
   - `logs/tunnel.log` — cloudflared plain text (only file in this dir that isn't JSONL).
-  - `db.sqlite` — canonical state for blocks, turns, agents, usage, mail, tickets. `sqlite3 ~/.friday/db.sqlite "SELECT block_id, turn_id, role, kind, status, ts, last_event_seq FROM blocks WHERE turn_id = '…' ORDER BY ts;"` settles arguments about what the daemon actually persisted vs. what the dashboard rendered — when a bubble's visual state disagrees with reality, the DB row is the source of truth and the next question is "which write path produced that status?"
+- **Canonical state lives in Postgres** (database `friday`, host-managed via `brew services`). When a bubble's visual state disagrees with reality, the Postgres row is the source of truth and the next question is "which write path produced that status?" Useful queries:
+  - `psql friday -c "SELECT block_id, turn_id, role, kind, status, ts, streaming FROM blocks WHERE turn_id = '…' ORDER BY ts;"` — what blocks does Postgres actually have for this turn? Note `streaming=1` rows shouldn't appear (the daemon writes rows only on close); if you see one, something wrote a partial row out-of-spec.
+  - `psql friday -c "SELECT name, status, archive_reason FROM agents WHERE name = '…';"` — what's the registry's view of this agent?
+  - `psql friday -c "SELECT * FROM blocks WHERE status='pending' ORDER BY ts;"` — pending mutators that haven't been picked up yet (should drain quickly; persistent rows mean the daemon's LISTEN handler or boot recovery is wedged).
+  - `psql friday -c "SELECT pg_notification_queue_usage();"` — how full is Postgres's pending-notification queue? Should be near 0; persistent non-zero means a LISTENer is hung.
 
 ## Versioning
 

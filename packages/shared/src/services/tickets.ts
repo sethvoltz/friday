@@ -1,5 +1,5 @@
-import { and, desc, eq } from "drizzle-orm";
-import { getDb, getRawDb } from "../db/client.js";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
 
 export type TicketStatus =
@@ -18,6 +18,7 @@ export interface Ticket {
   kind: TicketKind;
   assignee: string | null;
   meta: Record<string, unknown> | null;
+  /** Milliseconds since epoch. */
   createdAt: number;
   updatedAt: number;
 }
@@ -33,26 +34,31 @@ export interface CreateTicketInput {
 
 const TICKET_PREFIX = "FRI";
 
-export function nextTicketId(): string {
-  const raw = getRawDb();
-  // Use db_meta as a simple monotonic counter source.
-  const get = raw
-    .prepare("SELECT value FROM db_meta WHERE key = ?")
-    .get("ticket_counter") as { value: string } | undefined;
-  const next = (get ? parseInt(get.value, 10) : 0) + 1;
-  raw
-    .prepare(
-      "INSERT INTO db_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    )
-    .run("ticket_counter", String(next));
+export async function nextTicketId(): Promise<string> {
+  const db = getDb();
+  // Use db_meta as a simple monotonic counter source. Postgres-side we
+  // emulate the same upsert pattern via Drizzle.
+  const rows = await db
+    .select()
+    .from(schema.dbMeta)
+    .where(eq(schema.dbMeta.key, "ticket_counter"))
+    .limit(1);
+  const next = (rows[0] ? parseInt(rows[0].value, 10) : 0) + 1;
+  await db
+    .insert(schema.dbMeta)
+    .values({ key: "ticket_counter", value: String(next) })
+    .onConflictDoUpdate({
+      target: schema.dbMeta.key,
+      set: { value: String(next) },
+    });
   return `${TICKET_PREFIX}-${next}`;
 }
 
-export function createTicket(input: CreateTicketInput): Ticket {
+export async function createTicket(input: CreateTicketInput): Promise<Ticket> {
   const db = getDb();
-  const id = nextTicketId();
-  const now = Date.now();
-  const inserted = db
+  const id = await nextTicketId();
+  const now = new Date();
+  const insertedRows = await db
     .insert(schema.tickets)
     .values({
       id,
@@ -61,113 +67,124 @@ export function createTicket(input: CreateTicketInput): Ticket {
       status: input.status ?? "open",
       kind: input.kind ?? "task",
       assignee: input.assignee ?? null,
-      metaJson: input.meta ? JSON.stringify(input.meta) : null,
+      metaJson: input.meta ?? null,
       createdAt: now,
       updatedAt: now,
     })
-    .returning()
-    .get();
-  return rowToTicket(inserted);
+    .returning();
+  return rowToTicket(insertedRows[0]);
 }
 
-export function getTicket(id: string): Ticket | null {
+export async function getTicket(id: string): Promise<Ticket | null> {
   const db = getDb();
-  const row = db
+  const rows = await db
     .select()
     .from(schema.tickets)
     .where(eq(schema.tickets.id, id))
-    .get();
-  return row ? rowToTicket(row) : null;
+    .limit(1);
+  return rows[0] ? rowToTicket(rows[0]) : null;
 }
 
-export function listTickets(opts?: {
+export async function listTickets(opts?: {
   status?: TicketStatus;
   assignee?: string;
-}): Ticket[] {
+}): Promise<Ticket[]> {
   const db = getDb();
   const where = [];
   if (opts?.status) where.push(eq(schema.tickets.status, opts.status));
   if (opts?.assignee) where.push(eq(schema.tickets.assignee, opts.assignee));
-  const base = db.select().from(schema.tickets);
-  const filtered = where.length > 0 ? base.where(and(...where)) : base;
-  return filtered
-    .orderBy(desc(schema.tickets.updatedAt))
-    .all()
-    .map(rowToTicket);
+  const rows =
+    where.length > 0
+      ? await db
+          .select()
+          .from(schema.tickets)
+          .where(and(...where))
+          .orderBy(desc(schema.tickets.updatedAt))
+      : await db
+          .select()
+          .from(schema.tickets)
+          .orderBy(desc(schema.tickets.updatedAt));
+  return rows.map(rowToTicket);
 }
 
-export function updateTicket(
+export async function updateTicket(
   id: string,
   patch: Partial<Omit<Ticket, "id" | "createdAt">>,
-): Ticket | null {
+): Promise<Ticket | null> {
   const db = getDb();
-  const updates: Record<string, unknown> = { updatedAt: Date.now() };
+  // Build a typed update payload. Date columns expect Date instances.
+  const updates: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.title !== undefined) updates.title = patch.title;
   if (patch.body !== undefined) updates.body = patch.body;
   if (patch.status !== undefined) updates.status = patch.status;
   if (patch.kind !== undefined) updates.kind = patch.kind;
   if (patch.assignee !== undefined) updates.assignee = patch.assignee;
-  if (patch.meta !== undefined) {
-    updates.metaJson = patch.meta ? JSON.stringify(patch.meta) : null;
-  }
-  db.update(schema.tickets).set(updates).where(eq(schema.tickets.id, id)).run();
+  if (patch.meta !== undefined) updates.metaJson = patch.meta ?? null;
+  await db
+    .update(schema.tickets)
+    .set(updates)
+    .where(eq(schema.tickets.id, id));
   return getTicket(id);
 }
 
-export function addComment(
+export async function addComment(
   ticketId: string,
   author: string,
   body: string,
-): void {
+): Promise<void> {
   const db = getDb();
-  db.insert(schema.ticketComments)
-    .values({ ticketId, author, body, ts: Date.now() })
-    .run();
-  db.update(schema.tickets)
-    .set({ updatedAt: Date.now() })
-    .where(eq(schema.tickets.id, ticketId))
-    .run();
+  const now = new Date();
+  await db
+    .insert(schema.ticketComments)
+    .values({ ticketId, author, body, ts: now });
+  await db
+    .update(schema.tickets)
+    .set({ updatedAt: now })
+    .where(eq(schema.tickets.id, ticketId));
 }
 
-export function listComments(ticketId: string): Array<{
-  id: number;
-  author: string;
-  body: string;
-  ts: number;
-}> {
+export async function listComments(ticketId: string): Promise<
+  Array<{
+    /** UUID — Phase 4.4 flipped from bigserial to text. */
+    id: string;
+    author: string;
+    body: string;
+    /** Milliseconds since epoch. */
+    ts: number;
+  }>
+> {
   const db = getDb();
-  return db
+  const rows = await db
     .select()
     .from(schema.ticketComments)
-    .where(eq(schema.ticketComments.ticketId, ticketId))
-    .all()
-    .map((r) => ({
-      id: r.id,
-      author: r.author,
-      body: r.body,
-      ts: r.ts,
-    }));
+    .where(eq(schema.ticketComments.ticketId, ticketId));
+  return rows.map((r) => ({
+    id: r.id,
+    author: r.author,
+    body: r.body,
+    ts: r.ts.getTime(),
+  }));
 }
 
-export function linkExternal(input: {
+export async function linkExternal(input: {
   ticketId: string;
   system: string;
   externalId: string;
   url?: string;
   meta?: Record<string, unknown>;
-}): void {
+}): Promise<void> {
   const db = getDb();
-  db.insert(schema.ticketExternalLinks)
+  await db
+    .insert(schema.ticketExternalLinks)
     .values({
       ticketId: input.ticketId,
       system: input.system,
       externalId: input.externalId,
       url: input.url ?? null,
-      metaJson: input.meta ? JSON.stringify(input.meta) : null,
-      linkedAt: Date.now(),
+      metaJson: input.meta ?? null,
+      linkedAt: new Date(),
     })
-    .onConflictDoNothing()
-    .run();
+    .onConflictDoNothing();
 }
 
 /**
@@ -175,13 +192,13 @@ export function linkExternal(input: {
  * row was deleted, false otherwise. The (ticketId, system, externalId)
  * triple is the PK so the delete is unambiguous.
  */
-export function unlinkExternal(input: {
+export async function unlinkExternal(input: {
   ticketId: string;
   system: string;
   externalId: string;
-}): boolean {
+}): Promise<boolean> {
   const db = getDb();
-  const result = db
+  const result = await db
     .delete(schema.ticketExternalLinks)
     .where(
       and(
@@ -189,9 +206,8 @@ export function unlinkExternal(input: {
         eq(schema.ticketExternalLinks.system, input.system),
         eq(schema.ticketExternalLinks.externalId, input.externalId),
       ),
-    )
-    .run();
-  return (result.changes ?? 0) > 0;
+    );
+  return (result.rowCount ?? 0) > 0;
 }
 
 export interface TicketExternalLinkRow {
@@ -200,48 +216,47 @@ export interface TicketExternalLinkRow {
   externalId: string;
   url: string | null;
   meta: Record<string, unknown> | null;
+  /** Milliseconds since epoch. */
   linkedAt: number;
 }
 
-export function externalLinksBySystem(
+export async function externalLinksBySystem(
   system: string,
-): TicketExternalLinkRow[] {
+): Promise<TicketExternalLinkRow[]> {
   const db = getDb();
-  return db
+  const rows = await db
     .select()
     .from(schema.ticketExternalLinks)
-    .where(eq(schema.ticketExternalLinks.system, system))
-    .all()
-    .map((r) => ({
-      ticketId: r.ticketId,
-      system: r.system,
-      externalId: r.externalId,
-      url: r.url,
-      meta: r.metaJson
-        ? (JSON.parse(r.metaJson) as Record<string, unknown>)
-        : null,
-      linkedAt: r.linkedAt,
-    }));
+    .where(eq(schema.ticketExternalLinks.system, system));
+  return rows.map((r) => ({
+    ticketId: r.ticketId,
+    system: r.system,
+    externalId: r.externalId,
+    url: r.url,
+    meta: (r.metaJson as Record<string, unknown> | null) ?? null,
+    linkedAt: r.linkedAt.getTime(),
+  }));
 }
 
-export function externalLinks(ticketId: string): Array<{
-  system: string;
-  externalId: string;
-  url: string | null;
-  meta: Record<string, unknown> | null;
-}> {
+export async function externalLinks(ticketId: string): Promise<
+  Array<{
+    system: string;
+    externalId: string;
+    url: string | null;
+    meta: Record<string, unknown> | null;
+  }>
+> {
   const db = getDb();
-  return db
+  const rows = await db
     .select()
     .from(schema.ticketExternalLinks)
-    .where(eq(schema.ticketExternalLinks.ticketId, ticketId))
-    .all()
-    .map((r) => ({
-      system: r.system,
-      externalId: r.externalId,
-      url: r.url,
-      meta: r.metaJson ? (JSON.parse(r.metaJson) as Record<string, unknown>) : null,
-    }));
+    .where(eq(schema.ticketExternalLinks.ticketId, ticketId));
+  return rows.map((r) => ({
+    system: r.system,
+    externalId: r.externalId,
+    url: r.url,
+    meta: (r.metaJson as Record<string, unknown> | null) ?? null,
+  }));
 }
 
 function rowToTicket(r: typeof schema.tickets.$inferSelect): Ticket {
@@ -252,8 +267,11 @@ function rowToTicket(r: typeof schema.tickets.$inferSelect): Ticket {
     status: r.status as TicketStatus,
     kind: r.kind as TicketKind,
     assignee: r.assignee,
-    meta: r.metaJson ? (JSON.parse(r.metaJson) as Record<string, unknown>) : null,
-    createdAt: r.createdAt,
-    updatedAt: r.updatedAt,
+    meta: (r.metaJson as Record<string, unknown> | null) ?? null,
+    createdAt: r.createdAt.getTime(),
+    updatedAt: r.updatedAt.getTime(),
   };
 }
+
+// Re-export sql for ad-hoc compositions by consumers.
+export { sql };

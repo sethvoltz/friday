@@ -1,3 +1,4 @@
+export * from "./client-devices.js";
 export * from "./mail.js";
 export * from "./tickets.js";
 export * from "./attachments.js";

@@ -1,7 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 // Pending-message feature: a second POST /api/chat/turn while the worker
 // is mid-turn lands as status='queued' in the blocks table and parks in
@@ -10,26 +8,24 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 // and a `block_meta_update` SSE event tells the dashboard to unpin the
 // bubble and re-sort it inline.
 
-const dataDir = mkdtempSync(join(tmpdir(), "friday-lifecycle-queued-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
+let handle: TestDbHandle;
 
 beforeAll(async () => {
-  const { runMigrations } = await import("@friday/shared");
-  runMigrations();
+  handle = await createTestDb({ label: "lifecycle_queued" });
 });
 
 afterAll(async () => {
-  const { closeDb } = await import("@friday/shared");
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+  await handle.drop();
 });
 
 beforeEach(async () => {
-  const { getRawDb } = await import("@friday/shared");
-  getRawDb().prepare("DELETE FROM blocks").run();
-  getRawDb().prepare("DELETE FROM agents").run();
+  await handle.truncate();
   vi.useRealTimers();
 });
+
+async function settle(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 50));
+}
 
 interface CapturedEvent {
   type: string;
@@ -82,9 +78,9 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
 describe("lifecycle: queued user-block dispatch", () => {
   it("recordUserBlock(status='queued') persists status='queued' on the row", async () => {
     const { recordUserBlock } = await import("./lifecycle.js");
-    const { getRawDb } = await import("@friday/shared");
+    const { getBlockById } = await import("@friday/shared/services");
 
-    const { blockId } = recordUserBlock({
+    const { blockId } = await recordUserBlock({
       turnId: "t_q1",
       agentName: "queued-agent",
       sessionId: "sess-1",
@@ -93,21 +89,12 @@ describe("lifecycle: queued user-block dispatch", () => {
       status: "queued",
     });
 
-    const row = getRawDb()
-      .prepare("SELECT status, role, source, content_json FROM blocks WHERE block_id = ?")
-      .get(blockId) as
-      | {
-          status: string;
-          role: string;
-          source: string;
-          content_json: string;
-        }
-      | undefined;
-    expect(row).toBeDefined();
+    const row = await getBlockById(blockId);
+    expect(row).not.toBeNull();
     expect(row!.status).toBe("queued");
     expect(row!.role).toBe("user");
     expect(row!.source).toBe("user_chat");
-    const parsed = JSON.parse(row!.content_json) as { text: string };
+    const parsed = JSON.parse(row!.contentJson) as { text: string };
     expect(parsed.text).toBe("follow up while busy");
   });
 
@@ -118,7 +105,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    recordUserBlock({
+    await recordUserBlock({
       turnId: "t_q2",
       agentName: "queued-agent",
       sessionId: "sess-1",
@@ -151,7 +138,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    const { blockId, seq } = recordUserBlock({
+    const { blockId, seq } = await recordUserBlock({
       turnId: "t_immediate",
       agentName: "queued-agent",
       sessionId: "sess-1",
@@ -250,18 +237,18 @@ describe("lifecycle: queued user-block dispatch", () => {
     __deleteLiveWorkerForTest("queued-agent");
   });
 
-  it("queued → drained: block_meta_update flips status + bumps ts, the DB row tracks", async () => {
-    // Stand up a real queued user block, then drive the queue-drain path
-    // (turn-complete) and assert: SSE meta-update fires with complete +
-    // new ts, the row in `blocks` matches, and the new ts strictly
-    // beats the original POST ts. Test seam writes a fake LiveWorker
-    // with a single queued WorkerPromptCommand carrying its userBlockId.
+  it("queued → drained: the DB row's status + ts track the drain timestamp; no SSE meta event (Phase 5)", async () => {
+    // Phase 5: the legacy `block_meta_update` SSE event is retired —
+    // Zero replicates the row UPDATE to the dashboard's blocks slice.
+    // The test asserts the canonical DB state (status='complete' + a
+    // fresh ts strictly greater than the original POST ts) AND that
+    // no SSE event of that type fires.
     const { recordUserBlock, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
-    const { getRawDb } = await import("@friday/shared");
+    const { getBlockById } = await import("@friday/shared/services");
 
-    const { blockId, seq: originalSeq } = recordUserBlock({
+    const { blockId } = await recordUserBlock({
       turnId: "t_drain",
       agentName: "queued-agent",
       sessionId: "sess-1",
@@ -269,11 +256,9 @@ describe("lifecycle: queued user-block dispatch", () => {
       source: "user_chat",
       status: "queued",
     });
-    expect(originalSeq).toBeGreaterThan(0); // queued emits SSE
-    const beforeRow = getRawDb()
-      .prepare("SELECT status, ts FROM blocks WHERE block_id = ?")
-      .get(blockId) as { status: string; ts: number };
-    expect(beforeRow.status).toBe("queued");
+    const beforeRow = await getBlockById(blockId);
+    expect(beforeRow!.status).toBe("queued");
+    const beforeTs = beforeRow!.ts;
 
     const { worker, child } = makeFakeWorker({
       // Pretend a queued prompt is parked behind the in-flight turn.
@@ -296,30 +281,26 @@ describe("lifecycle: queued user-block dispatch", () => {
     // Drive turn-complete on the live worker. The handler drains
     // nextPrompts → sendPrompt → restampQueuedUserBlock fires.
     const { handleEvent } = await import("./lifecycle.js");
-    handleEvent(worker as never, {
+    await handleEvent(worker as never, {
       type: "turn-complete",
       sessionId: "sess-1",
       usage: undefined,
     } as never);
+    // restampQueuedUserBlock is fire-and-forget — let the DB write
+    // land.
+    await settle();
 
     unsub();
     __deleteLiveWorkerForTest("queued-agent");
 
-    const meta = captured.find(
-      (e) =>
-        e.type === "block_meta_update" &&
-        e.block_id === blockId &&
-        e.status === "complete",
-    );
-    expect(meta).toBeDefined();
-    expect(typeof meta!.ts).toBe("number");
-    expect(meta!.ts!).toBeGreaterThan(beforeRow.ts);
+    // No block_meta_update SSE event — Phase 5 retired it.
+    expect(
+      captured.find((e) => e.type === "block_meta_update"),
+    ).toBeUndefined();
 
-    const afterRow = getRawDb()
-      .prepare("SELECT status, ts FROM blocks WHERE block_id = ?")
-      .get(blockId) as { status: string; ts: number };
-    expect(afterRow.status).toBe("complete");
-    expect(afterRow.ts).toBe(meta!.ts);
+    const afterRow = await getBlockById(blockId);
+    expect(afterRow!.status).toBe("complete");
+    expect(afterRow!.ts).toBeGreaterThan(beforeTs);
     // The queued IPC ran too: the worker received `prompt` after the drain.
     expect(child.send).toHaveBeenCalledWith(
       expect.objectContaining({ type: "prompt" }),
@@ -331,7 +312,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     const { listQueuedUserBlocks } = await import("@friday/shared/services");
 
     const before = Date.now();
-    const { blockId: b1 } = recordUserBlock({
+    const { blockId: b1 } = await recordUserBlock({
       turnId: "t_old",
       agentName: "queued-agent",
       sessionId: "sess-1",
@@ -341,7 +322,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     });
     // Bump time a hair so the ts strictly differs even on fast machines.
     await new Promise((r) => setTimeout(r, 5));
-    const { blockId: b2 } = recordUserBlock({
+    const { blockId: b2 } = await recordUserBlock({
       turnId: "t_new",
       agentName: "queued-agent",
       sessionId: "sess-1",
@@ -350,7 +331,7 @@ describe("lifecycle: queued user-block dispatch", () => {
       status: "queued",
     });
     // A complete row should NOT show up in the queued list.
-    recordUserBlock({
+    await recordUserBlock({
       turnId: "t_done",
       agentName: "queued-agent",
       sessionId: "sess-1",
@@ -359,7 +340,7 @@ describe("lifecycle: queued user-block dispatch", () => {
       status: "complete",
     });
 
-    const rows = listQueuedUserBlocks();
+    const rows = await listQueuedUserBlocks();
     const ours = rows.filter((r) => r.agentName === "queued-agent");
     expect(ours.map((r) => r.blockId)).toEqual([b1, b2]);
     expect(ours[0].ts).toBeGreaterThanOrEqual(before);

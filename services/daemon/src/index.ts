@@ -3,7 +3,6 @@ import {
   ensureDirs,
   ensureFridayEnv,
   ensureSoul,
-  getRawDb,
   loadConfig,
   normalizeModelConfig,
   runMigrations,
@@ -19,6 +18,7 @@ import * as registry from "./agent/registry.js";
 import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js";
 import { startMailBridge } from "./comms/mail-bridge.js";
 import { reconcileAppsOnBoot } from "./apps/reconcile.js";
+import { runEvolveBootSync } from "./evolve/projector.js";
 import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
 import {
   dispatchTurn,
@@ -33,6 +33,35 @@ import {
 } from "./agent/invariants.js";
 import { wrapWithRecall } from "./agent/recall.js";
 import { closeTicketForArchive } from "./services/ticket-close.js";
+import {
+  runSettingsBootScan,
+  startSettingsListener,
+} from "./settings/listener.js";
+import {
+  runMemoryBootScan,
+  startMemoryListener,
+} from "./memory/listener.js";
+import {
+  runScheduleBootScan,
+  startScheduleListener,
+} from "./scheduler/listener.js";
+import { runAppBootScan, startAppListener } from "./apps/listener.js";
+import {
+  runArchiveBootScan,
+  startArchiveListener,
+} from "./agent/archive-listener.js";
+import {
+  runCancelBootScan,
+  startCancelListener,
+} from "./agent/cancel-listener.js";
+import {
+  runAbortBootScan,
+  startAbortListener,
+} from "./agent/abort-listener.js";
+import {
+  runDispatchBootScan,
+  startDispatchListener,
+} from "./agent/dispatch-listener.js";
 import {
   composeSystemPrompt,
   readPromptStack,
@@ -49,10 +78,10 @@ import { existsSync } from "node:fs";
 async function main(): Promise<void> {
   ensureDirs();
   ensureFridayEnv();
-  runMigrations();
+  await runMigrations();
   ensureSoul();
 
-  const backfill = backfillUsageFromLegacyJsonl();
+  const backfill = await backfillUsageFromLegacyJsonl();
   if ("skipped" in backfill && backfill.skipped) {
     logger.log("info", "usage.backfill.skip", { reason: backfill.reason });
   } else {
@@ -62,17 +91,96 @@ async function main(): Promise<void> {
     });
   }
 
+  // Phase 4.3: settings boot-recovery scan. Must run BEFORE the
+  // first `loadConfig()` below — settings changes that landed while
+  // the daemon was down need to be applied to ~/.friday/config.json
+  // so the daemon sees the user's intent on the very first read.
+  await runSettingsBootScan();
+
   const cfg = loadConfig();
   const server = startServer({ port: cfg.daemonPort });
   const heartbeat = startHealthHeartbeat();
 
+  // Phase 4.3: open the long-lived LISTEN connection for
+  // `friday_settings_changed`. Subsequent settings updates from the
+  // dashboard mutator rewrite config.json without a daemon restart,
+  // so the next worker spawn picks up the new value.
+  const settingsListener = await startSettingsListener();
+
+  // Phase 4.5: open the long-lived LISTEN connection for
+  // `friday_memory_file_changed`. Boot-recovery scan first to apply
+  // any pending rows that landed while the daemon was down.
+  await runMemoryBootScan();
+  const memoryListener = await startMemoryListener();
+
+  // Phase 4.6: open the long-lived LISTEN connection for
+  // `friday_schedule_changed`. Boot-recovery scan first to apply
+  // pending registers/reloads/deletes that landed while the daemon
+  // was down. Runs BEFORE the scheduler's 30s tick starts so a
+  // dashboard-created schedule is registered before its first fire
+  // window opens.
+  await runScheduleBootScan();
+  const scheduleListener = await startScheduleListener();
+
+  // Item #54: project FS-canonical evolve proposals into Postgres so
+  // the dashboard's /evolve page can read them via Zero reactively.
+  // Idempotent UPSERT — re-running this on a clean tree is a no-op
+  // write set. Drops PG rows whose FS file was deleted during the
+  // downtime window.
+  await runEvolveBootSync();
+
+  // Phase 4.7: open the long-lived LISTEN connection for
+  // `friday_app_changed`. Boot-recovery scan runs AFTER
+  // `reconcileAppsOnBoot()` (already invoked earlier) — that one
+  // handles disk-vs-DB drift; this one handles the narrower case
+  // of dashboard-mutator-initiated pending requests that didn't
+  // get processed before the daemon went down.
+  await runAppBootScan();
+  const appListener = await startAppListener();
+
+  // Phase 4.8: open the long-lived LISTEN connection for
+  // `friday_archive_requested`. Boot-recovery scan picks up
+  // archive requests that landed during daemon downtime.
+  await runArchiveBootScan();
+  const archiveListener = await startArchiveListener();
+
+  // Phase 4.9: open the long-lived LISTEN connection for
+  // `friday_block_canceled`. Boot-recovery scan applies any
+  // `status='cancel_requested'` rows that landed during daemon
+  // downtime (the mutator commits durably even when the daemon is
+  // down; the LISTEN handler picks them up on next boot). Must run
+  // BEFORE `recoverQueuedTurns()` so a row marked `cancel_requested`
+  // pre-shutdown is yanked from the queue before any worker re-spawn
+  // could re-dispatch it.
+  await runCancelBootScan();
+  const cancelListener = await startCancelListener();
+
+  // Phase 4.10: open the long-lived LISTEN connection for
+  // `friday_abort_requested`. Boot-recovery scan applies any
+  // `status='abort_requested'` rows that landed during daemon
+  // downtime, calls the lifecycle abort (no-op if no live worker)
+  // and flips the row back to 'complete'. Must run BEFORE
+  // `recoverQueuedTurns()` so a turn marked aborted pre-shutdown
+  // isn't accidentally re-dispatched on restart.
+  await runAbortBootScan();
+  const abortListener = await startAbortListener();
+
+  // Phase 4.11b: open the long-lived LISTEN connection for
+  // `friday_new_pending_block`. Boot-recovery scan dispatches any
+  // user-chat blocks that landed at status='pending' while the
+  // daemon was down (the mutator commits durably even when the
+  // daemon is offline). Must run BEFORE `recoverQueuedTurns()` so
+  // the dispatch path isn't doubled up.
+  await runDispatchBootScan();
+  const dispatchListener = await startDispatchListener();
+
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
-  replayPending();
-  seedMetaAgents();
-  reconcileAppsOnBoot();
-  recoverAgents(cfg);
-  recoverQueuedTurns(cfg);
+  await replayPending();
+  await seedMetaAgents();
+  await reconcileAppsOnBoot();
+  await recoverAgents(cfg);
+  await recoverQueuedTurns(cfg);
   const schedTick = startScheduler();
   const watchdog = startWatchdog();
   startTurnStallWatchdog();
@@ -84,18 +192,10 @@ async function main(): Promise<void> {
         return;
       }
       if (result.orphans.length > 0) {
-        const sample = result.orphans
-          .slice(0, 3)
-          .map((o) => o.identifier)
-          .join(", ");
-        eventBus.publish({
-          v: 1,
-          type: "system_banner",
-          level: "info",
-          text: `Linear: ${result.orphans.length} active ticket${
-            result.orphans.length === 1 ? "" : "s"
-          } not linked to Friday — first few: ${sample}`,
-        });
+        // Phase 5: `system_banner` SSE retired. The dashboard's
+        // sidebar will pick up the orphan-count signal from the
+        // `system_banners` table (ADR-024) in Phase 6; for now the
+        // info-level surface is the daemon log entry below.
         logger.log("info", "linear.reconcile.orphans", {
           count: result.orphans.length,
           stale: result.staleLinks.length,
@@ -145,6 +245,30 @@ async function main(): Promise<void> {
     stopWatchdog();
     stopTurnStallWatchdog();
     stopInvariantAuditor();
+    void settingsListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void memoryListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void scheduleListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void appListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void archiveListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void cancelListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void abortListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
+    void dispatchListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
     clearHealth();
     flushDb();
     server.close(() => process.exit(0));
@@ -167,9 +291,9 @@ async function main(): Promise<void> {
  *  - For long-lived agents (orchestrator/builder/helper/bare) with non-empty
  *    inboxes, dispatch a fresh turn so the pending mail isn't stranded.
  */
-function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
+async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> {
   const jsonlAgents: RecoveryAgent[] = [];
-  for (const a of registry.listAgents()) {
+  for (const a of await registry.listAgents()) {
     // Heal-on-boot: a builder whose worktree was already removed cannot
     // run another turn. If we don't archive it here, the eligibility
     // check below would happily re-dispatch (sending it into the
@@ -192,15 +316,10 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
       // Capture ticketId before archive — the closer fires after the
       // registry row is flipped but reads from this captured value.
       const ticketId = a.ticketId ?? null;
-      registry.archiveAgent(a.name);
-      eventBus.publish({
-        v: 1,
-        type: "agent_lifecycle",
-        agent: a.name,
-        agentType: a.type,
-        event: "archive",
-        reason: "orphan-worktree",
-      });
+      await registry.archiveAgent(a.name);
+      // Phase 5: `agent_lifecycle` SSE retired — Zero's `agents`
+      // slice replicates the status transition reactively to the
+      // dashboard sidebar.
       // Newly-discovered orphan whose worktree is gone — work definitely
       // did not complete. Mark the linked ticket abandoned. Not a backfill
       // sweep of pre-existing in_progress rows; only orphans we observe
@@ -214,9 +333,9 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
     }
     if (a.status === "working") {
       logger.log("info", "agent.recovery.reset-working", { agent: a.name });
-      registry.setStatus(a.name, "idle");
+      await registry.setStatus(a.name, "idle");
     }
-    const cwd = registry.workingDirectoryFor(a);
+    const cwd = await registry.workingDirectoryFor(a);
     if (a.sessionId) {
       jsonlAgents.push({
         agentName: a.name,
@@ -226,7 +345,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
     }
 
     if (a.type !== "scheduled" && a.status !== "archived") {
-      const pending = mailInbox(a.name);
+      const pending = await mailInbox(a.name);
       if (pending.length > 0) {
         const stack = readPromptStack(a.type, []);
         const systemPrompt = composeSystemPrompt(stack, {
@@ -245,6 +364,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
           // FIX_FORWARD 2.5: wrap with recall on the joined mail bodies.
           const intent = pending.map((m) => m.body).join("\n\n");
           const mailPrompt = buildMailPrompt(a.name, pending);
+          const wrappedMailPrompt = await wrapWithRecall(intent, mailPrompt, "mail");
           dispatchTurn({
             agentName: a.name,
             options: {
@@ -252,7 +372,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
               agentType: a.type,
               workingDirectory: cwd,
               systemPrompt,
-              prompt: wrapWithRecall(intent, mailPrompt, "mail"),
+              prompt: wrappedMailPrompt,
               turnId,
               model: modelCfg.name,
               thinking: modelCfg.thinking,
@@ -276,7 +396,7 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
 
   if (jsonlAgents.length > 0) {
     try {
-      recoverFromJsonl(jsonlAgents);
+      await recoverFromJsonl(jsonlAgents);
     } catch (err) {
       logger.log("warn", "agent.recovery.jsonl-error", {
         message: err instanceof Error ? err.message : String(err),
@@ -299,19 +419,19 @@ function recoverAgents(cfg: ReturnType<typeof loadConfig>): void {
  * worker to send the prompt to, and leaving them in the table would
  * surface as ghost pinned bubbles on the dashboard forever.
  */
-function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): void {
-  const queued = listQueuedUserBlocks();
+async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<void> {
+  const queued = await listQueuedUserBlocks();
   if (queued.length === 0) return;
   const modelCfg = normalizeModelConfig(cfg.model);
   for (const block of queued) {
-    const a = registry.getAgent(block.agentName);
+    const a = await registry.getAgent(block.agentName);
     if (!a || a.status === "archived") {
       logger.log("info", "queued-turn.recovery.skip", {
         agent: block.agentName,
         turnId: block.turnId,
         reason: a ? "archived" : "agent_missing",
       });
-      deleteBlockById(block.blockId);
+      await deleteBlockById(block.blockId);
       continue;
     }
     let text = "";
@@ -332,11 +452,11 @@ function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): void {
         agent: block.agentName,
         turnId: block.turnId,
       });
-      deleteBlockById(block.blockId);
+      await deleteBlockById(block.blockId);
       continue;
     }
     if (!text.trim() && !attachments) {
-      deleteBlockById(block.blockId);
+      await deleteBlockById(block.blockId);
       continue;
     }
     const stack = readPromptStack(a.type, []);
@@ -345,14 +465,15 @@ function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): void {
       agentType: a.type,
       parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
     });
-    const wrappedPrompt = wrapWithRecall(text, text, "user_chat");
+    const wrappedPrompt = await wrapWithRecall(text, text, "user_chat");
+    const queuedCwd = await registry.workingDirectoryFor(a);
     try {
       dispatchTurn({
         agentName: a.name,
         options: {
           agentName: a.name,
           agentType: a.type,
-          workingDirectory: registry.workingDirectoryFor(a),
+          workingDirectory: queuedCwd,
           systemPrompt,
           prompt: wrappedPrompt,
           attachments,
@@ -382,27 +503,44 @@ function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): void {
 }
 
 /**
- * Run a WAL checkpoint (TRUNCATE) and close the DB handle on shutdown.
- * Without this the WAL file grows unbounded across restarts and the main
- * `.sqlite` file stays cold. Data is durable either way (NORMAL sync), but
- * this keeps the on-disk shape sane and reads fast after restart.
+ * Close the Postgres pool on shutdown. Postgres manages its own WAL —
+ * no explicit checkpoint needed (Postgres autovacuum + bgwriter handle
+ * it). This is fire-and-forget; the shutdown timer below caps wait time.
  */
 function flushDb(): void {
-  try {
-    getRawDb().pragma("wal_checkpoint(TRUNCATE)");
-  } catch (err) {
-    logger.log("warn", "db.checkpoint.error", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
-  try {
-    closeDb();
-  } catch (err) {
+  void closeDb().catch((err: unknown) => {
     logger.log("warn", "db.close.error", {
       message: err instanceof Error ? err.message : String(err),
     });
-  }
+  });
 }
+
+// Node 15+ defaults to terminating the process on an unhandled promise
+// rejection. The daemon owns long-lived listeners and async worker IPC
+// pipes that don't always propagate failures back through awaited
+// boundaries — a stray rejection from a child callback or LISTEN handler
+// would otherwise kill the daemon with no log at all (tmux session
+// vanishes, last log line is whatever happened before the rejection).
+//
+// Log with the rejection's stack so the underlying bug is fixable, but
+// don't exit: a single misbehaved subsystem shouldn't take the daemon
+// down. `uncaughtException` is a different beast — the runtime state is
+// unsafe to continue in, so log and exit 1.
+process.on("unhandledRejection", (reason, promise) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  logger.log("error", "daemon.unhandled-rejection", {
+    message: err.message,
+    stack: err.stack,
+    promise: String(promise),
+  });
+});
+process.on("uncaughtException", (err) => {
+  logger.log("error", "daemon.uncaught-exception", {
+    message: err.message,
+    stack: err.stack,
+  });
+  process.exit(1);
+});
 
 main().catch((err: unknown) => {
   logger.log("error", "daemon.fatal", {

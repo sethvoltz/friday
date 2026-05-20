@@ -5,12 +5,13 @@ import { spawnSync } from "node:child_process";
 import {
   CONFIG_PATH,
   DATA_DIR,
-  DB_PATH,
   ENV_PATH,
+  FRIDAY_PG_CONSTANTS,
   LOGS_DIR,
   SOUL_PATH,
   ensureFridayEnv,
   getDb,
+  probePostgresHealth,
   schema,
 } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
@@ -31,7 +32,6 @@ export const doctorCommand = defineCommand({
     checks.push(check(`data dir ${DATA_DIR}`, existsSync(DATA_DIR)));
     checks.push(check(`config ${CONFIG_PATH}`, existsSync(CONFIG_PATH)));
     checks.push(check(`env ${ENV_PATH}`, existsSync(ENV_PATH)));
-    checks.push(check(`db ${DB_PATH}`, existsSync(DB_PATH)));
     checks.push(check(`SOUL.md ${SOUL_PATH}`, existsSync(SOUL_PATH)));
     checks.push(check(`logs dir ${LOGS_DIR}`, existsSync(LOGS_DIR)));
 
@@ -39,7 +39,7 @@ export const doctorCommand = defineCommand({
     let accountOk = false;
     try {
       const db = getDb();
-      const users = db.select().from(schema.users).limit(1).all();
+      const users = await db.select().from(schema.users).limit(1);
       accountOk = users.length > 0;
     } catch {
       // db not migrated yet
@@ -93,10 +93,96 @@ export const doctorCommand = defineCommand({
       }
     }
 
+    // Postgres (ADR-023). All sub-checks roll into one health probe.
+    try {
+      const pg = await probePostgresHealth();
+      const { FRIDAY_DB, FRIDAY_ROLE, FRIDAY_PUBLICATION } = FRIDAY_PG_CONSTANTS;
+      if (!pg.reachable) {
+        checks.push(
+          check(
+            "Postgres reachable",
+            false,
+            pg.reachableReason ?? "pg_isready failed — `brew services start postgresql@18`",
+          ),
+        );
+      } else {
+        checks.push(check("Postgres reachable", true));
+        checks.push(
+          check(
+            `Postgres role ${FRIDAY_ROLE}`,
+            pg.roleExists,
+            pg.roleExists ? undefined : "run `friday setup`",
+          ),
+        );
+        checks.push(
+          check(
+            `Postgres database ${FRIDAY_DB}`,
+            pg.databaseExists,
+            pg.databaseExists ? undefined : "run `friday setup`",
+          ),
+        );
+        checks.push(
+          check(
+            `Postgres migrations at head (${pg.migrationsApplied}/${pg.migrationsExpected})`,
+            pg.migrationsAtHead,
+            pg.migrationsAtHead
+              ? undefined
+              : "run `friday setup` to apply pending migrations",
+          ),
+        );
+        checks.push(
+          check(
+            `Postgres publication ${FRIDAY_PUBLICATION}`,
+            pg.publicationExists,
+            pg.publicationExists ? undefined : "run `friday setup`",
+          ),
+        );
+        checks.push(
+          check(
+            "ZERO_AUTH_SECRET present",
+            pg.zeroAuthSecretPresent,
+            pg.zeroAuthSecretPresent
+              ? undefined
+              : "run `friday setup` to generate the secret",
+          ),
+        );
+        checks.push(
+          check(
+            `Postgres wal_level=logical (Zero replication)`,
+            pg.walLevelLogical,
+            pg.walLevelLogical
+              ? undefined
+              : `actual: ${pg.walLevelActual ?? "unknown"} — run \`friday setup\` then \`brew services restart postgresql@18\``,
+          ),
+        );
+      }
+    } catch (err) {
+      checks.push(
+        check(
+          "Postgres health probe",
+          false,
+          err instanceof Error ? err.message : String(err),
+        ),
+      );
+    }
+
     // daemon reachable
     const client = new DaemonClient();
     const reachable = await client.ping();
     checks.push(check("daemon reachable (localhost)", reachable, reachable ? undefined : "not running — `friday start`"));
+
+    // zero-cache reachable (Phase 2 / ADR-024). zero-cache binds
+    // ws://127.0.0.1:4848 by default; treat a TCP-open as "alive". A more
+    // thorough health probe (replication slot caught up, etc.) lives in
+    // the zero-cache process logs.
+    const zeroReachable = await tcpReachable("127.0.0.1", 4848, 500);
+    checks.push(
+      check(
+        "zero-cache reachable (localhost:4848)",
+        zeroReachable,
+        zeroReachable ? undefined : "not running — `friday start zero-cache`",
+      ),
+    );
 
     // disk
     try {
@@ -134,4 +220,30 @@ function check(name: string, ok: boolean, detail?: string) {
 
 function warn(name: string, detail?: string) {
   return { name, ok: false, warn: true, detail };
+}
+
+/** TCP-connect with timeout. Used as a cheap liveness probe for
+ *  zero-cache; a full WS handshake would be more accurate but the open
+ *  port is sufficient signal for the doctor's purposes. */
+async function tcpReachable(
+  host: string,
+  port: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const { Socket } = await import("node:net");
+  return new Promise<boolean>((resolve) => {
+    const sock = new Socket();
+    let done = false;
+    const finish = (ok: boolean): void => {
+      if (done) return;
+      done = true;
+      sock.destroy();
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.once("connect", () => finish(true));
+    sock.once("timeout", () => finish(false));
+    sock.once("error", () => finish(false));
+    sock.connect(port, host);
+  });
 }

@@ -1,17 +1,61 @@
 <script lang="ts">
   import type { PageData } from "./$types";
-  import type { Proposal } from "@friday/evolve";
+  import type {
+    BlastRadius,
+    Proposal,
+    ProposalStatus,
+    ProposalType,
+    Signal,
+  } from "@friday/evolve";
   import { invalidateAll } from "$app/navigation";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
+  import {
+    useZero,
+    zeroSync,
+    type ZeroEvolveProposalRow,
+  } from "$lib/stores/zero.svelte";
 
   let { data }: { data: PageData } = $props();
 
-  // FIX_FORWARD 6.5: keep a local mutable copy seeded from the server snapshot.
-  // Bulk + per-row mutations refresh from /api/evolve/proposals after each op
-  // so the table reflects the latest scan/enrich/cluster output without a
-  // full page navigation.
+  // Item #54: reactive read from the Zero `evolve_proposals` slice.
+  // Daemon-side projector keeps PG in sync with the filesystem
+  // canonical store; the dashboard binds reactively and drops the
+  // post-mutation refreshList() round-trip. SSR data seeds first
+  // paint and serves as the no-Zero fallback.
+  const zeroOn = useZero();
   // svelte-ignore state_referenced_locally
   let proposals = $state<Proposal[]>(data.proposals);
+  $effect(() => {
+    if (zeroOn && zeroSync.status === "live") {
+      proposals = zeroSync.evolveProposals.map(zeroToProposal);
+    }
+  });
+  function zeroToProposal(r: ZeroEvolveProposalRow): Proposal {
+    return {
+      id: r.id,
+      title: r.title,
+      type: r.proposal_type as ProposalType,
+      status: r.status as ProposalStatus,
+      clusterId: r.cluster_id,
+      score: r.score,
+      signals: r.signals as Signal[],
+      proposedChange: r.body,
+      blastRadius: r.blast_radius as BlastRadius,
+      appliesTo: r.applies_to,
+      createdBy: r.created_by,
+      createdAt: new Date(r.created_at).toISOString(),
+      updatedAt: new Date(r.updated_at).toISOString(),
+      appliedAt: r.applied_at ? new Date(r.applied_at).toISOString() : null,
+      appliedBy: r.applied_by,
+      enrichedAt: r.enriched_at ? new Date(r.enriched_at).toISOString() : null,
+      enrichedBy: r.enriched_by,
+      lastEnrichError: r.last_enrich_error,
+      lastEnrichFailedAt: r.last_enrich_failed_at
+        ? new Date(r.last_enrich_failed_at).toISOString()
+        : null,
+      appliedTicketId: r.applied_ticket_id,
+    };
+  }
 
   let selected = $state<Set<string>>(new Set());
   let expanded = $state<Set<string>>(new Set());

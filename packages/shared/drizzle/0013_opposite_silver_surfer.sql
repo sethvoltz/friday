@@ -1,0 +1,2 @@
+ALTER TABLE "schedules" DROP CONSTRAINT "schedules_status_check";--> statement-breakpoint
+ALTER TABLE "schedules" ADD CONSTRAINT "schedules_status_check" CHECK ("schedules"."status" IN ('active','pending_register','reload_requested','deleted','paused','trigger_requested'));

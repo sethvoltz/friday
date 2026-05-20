@@ -30,6 +30,25 @@ export function ensureFridayEnv(): void {
     appendFileSync(ENV_PATH, `BETTER_AUTH_SECRET=${secret}\n`);
     process.env.BETTER_AUTH_SECRET = secret;
   }
+
+  // ADR-023: dashboard mints short-lived JWTs from this secret to authenticate
+  // to zero-cache. Generated once; rotated only on explicit action by setup
+  // (not auto). 32 bytes hex matches Zero's documented format.
+  if (!process.env.ZERO_AUTH_SECRET) {
+    const secret = randomBytes(32).toString("hex");
+    appendFileSync(ENV_PATH, `ZERO_AUTH_SECRET=${secret}\n`);
+    process.env.ZERO_AUTH_SECRET = secret;
+  }
+
+  // Zero 1.5+ requires ZERO_ADMIN_PASSWORD in production mode (admin RPC
+  // gate). Friday's zero-cache instance is local-only, so the password is
+  // effectively a self-witness — but Zero refuses to boot without it.
+  // Generate once at setup.
+  if (!process.env.ZERO_ADMIN_PASSWORD) {
+    const secret = randomBytes(24).toString("base64url");
+    appendFileSync(ENV_PATH, `ZERO_ADMIN_PASSWORD=${secret}\n`);
+    process.env.ZERO_ADMIN_PASSWORD = secret;
+  }
 }
 
 /**

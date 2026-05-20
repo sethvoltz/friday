@@ -43,8 +43,8 @@ export const memoryCommand = defineCommand({
   subCommands: {
     ls: defineCommand({
       meta: { name: "ls", description: "List entries" },
-      run() {
-        const all = listEntries();
+      async run() {
+        const all = await listEntries();
         for (const e of all) {
           console.log(`  ${e.id.padEnd(40)} recall=${e.recallCount}`);
         }
@@ -53,8 +53,8 @@ export const memoryCommand = defineCommand({
     show: defineCommand({
       meta: { name: "show", description: "Print one entry" },
       args: { id: { type: "positional", required: true } },
-      run({ args }) {
-        const e = getEntry(args.id as string);
+      async run({ args }) {
+        const e = await getEntry(args.id as string);
         if (!e) {
           console.error("not found");
           process.exit(1);

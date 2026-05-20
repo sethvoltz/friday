@@ -1,7 +1,6 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
 // FRI-12: when the worker emits an `error` IPC (SDK threw — 529, 429, 401,
 // network), the lifecycle handler must (a) persist a `kind="error"` block,
@@ -10,24 +9,23 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 // was published, no block was persisted, no turn_done fired — the dashboard
 // bubble hung in `running` until daemon restart.
 
-const dataDir = mkdtempSync(join(tmpdir(), "friday-lifecycle-error-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
+let handle: TestDbHandle;
 
 beforeAll(async () => {
-  const { runMigrations } = await import("@friday/shared");
-  runMigrations();
+  handle = await createTestDb({ label: "lifecycle_error" });
 });
 
 afterAll(async () => {
-  const { closeDb } = await import("@friday/shared");
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+  await handle.drop();
 });
 
 beforeEach(async () => {
-  const { getRawDb } = await import("@friday/shared");
-  getRawDb().prepare("DELETE FROM blocks").run();
+  await handle.truncate();
 });
+
+async function settle(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 50));
+}
 
 function makeFakeWorker(overrides: Record<string, unknown> = {}): unknown {
   return {
@@ -71,12 +69,12 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
   it("persists an error block + emits block_start/complete/turn_done for an SDK 529", async () => {
     const { handleEvent } = await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
-    const { getRawDb } = await import("@friday/shared");
 
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    handleEvent(makeFakeWorker() as never, {
+    const worker = makeFakeWorker() as { status: string };
+    handleEvent(worker as never, {
       type: "error",
       message: "Anthropic temporarily overloaded — usually clears in a moment",
       recoverable: false,
@@ -86,18 +84,20 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
       requestId: "req_abc",
       rawMessage: `529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
     });
+    await settle();
     unsub();
 
     // (a) one error block row exists for this turn.
-    const rows = getRawDb()
-      .prepare("SELECT block_id, kind, role, status, content_json FROM blocks WHERE turn_id = ?")
-      .all("turn-err-1") as Array<Record<string, unknown>>;
+    const rows = await getDb()
+      .select()
+      .from(schema.blocks)
+      .where(eq(schema.blocks.turnId, "turn-err-1"));
     expect(rows.length).toBe(1);
     const row = rows[0];
     expect(row.kind).toBe("error");
     expect(row.role).toBe("assistant");
     expect(row.status).toBe("complete");
-    const payload = JSON.parse(row.content_json as string) as Record<string, unknown>;
+    const payload = row.contentJson as Record<string, unknown>;
     expect(payload).toMatchObject({
       code: "overloaded",
       httpStatus: 529,
@@ -107,17 +107,24 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     expect(payload.rawMessage).toContain("529");
 
     // (b) the SSE event sequence: block_start → block_complete → error → turn_done.
-    const blockEvents = captured.filter((e) => e.block_id === row.block_id);
-    expect(blockEvents.map((e) => e.type)).toEqual(["block_start", "block_complete"]);
+    const blockEvents = captured.filter((e) => e.block_id === row.blockId);
+    expect(blockEvents.map((e) => e.type)).toEqual([
+      "block_start",
+      "block_complete",
+    ]);
     const completeEvent = blockEvents[1];
     expect(completeEvent.kind).toBe("error");
     expect(completeEvent.status).toBe("complete");
 
-    const errEvent = captured.find((e) => e.type === "error" && e.turn_id === "turn-err-1");
+    const errEvent = captured.find(
+      (e) => e.type === "error" && e.turn_id === "turn-err-1",
+    );
     expect(errEvent).toBeDefined();
     expect(errEvent!.code).toBe("overloaded");
 
-    const doneEvent = captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-err-1");
+    const doneEvent = captured.find(
+      (e) => e.type === "turn_done" && e.turn_id === "turn-err-1",
+    );
     expect(doneEvent).toBeDefined();
     expect(doneEvent!.status).toBe("error");
     expect(doneEvent!.agent).toBe("test-agent");
@@ -125,21 +132,26 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     // Ordering: block_complete strictly before turn_done so a client
     // applying events in seq order materializes the bubble before the
     // turn flips terminal.
-    const completeIdx = captured.findIndex((e) => e.type === "block_complete" && e.block_id === row.block_id);
-    const doneIdx = captured.findIndex((e) => e.type === "turn_done" && e.turn_id === "turn-err-1");
+    const completeIdx = captured.findIndex(
+      (e) => e.type === "block_complete" && e.block_id === row.blockId,
+    );
+    const doneIdx = captured.findIndex(
+      (e) => e.type === "turn_done" && e.turn_id === "turn-err-1",
+    );
     expect(completeIdx).toBeGreaterThan(-1);
     expect(doneIdx).toBeGreaterThan(completeIdx);
 
-    // (c) agent flipped to idle.
-    const statusEvent = [...captured].reverse().find((e) => e.type === "agent_status");
-    expect(statusEvent).toBeDefined();
-    expect(statusEvent!.status).toBe("idle");
+    // (c) Phase 5: `agent_status` SSE retired. The status flip is
+    // observable via setWorkerStatus mutating the live worker's
+    // `status` field (and via the registry UPDATE Zero replicates
+    // when the agent has a registry row — this fake worker doesn't
+    // pre-register so we assert the in-memory worker state here).
+    expect(worker.status).toBe("idle");
   });
 
   it("aborted branch emits turn_done(aborted) but does NOT insert an error block", async () => {
     const { handleEvent } = await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
-    const { getRawDb } = await import("@friday/shared");
 
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
@@ -152,24 +164,29 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
         recoverable: true,
       },
     );
+    await settle();
     unsub();
 
-    const rows = getRawDb()
-      .prepare("SELECT block_id FROM blocks WHERE turn_id = ?")
-      .all("turn-abort-1");
+    const rows = await getDb()
+      .select()
+      .from(schema.blocks)
+      .where(eq(schema.blocks.turnId, "turn-abort-1"));
     expect(rows.length).toBe(0);
 
-    const errEvent = captured.find((e) => e.type === "error" && e.turn_id === "turn-abort-1");
+    const errEvent = captured.find(
+      (e) => e.type === "error" && e.turn_id === "turn-abort-1",
+    );
     expect(errEvent!.code).toBe("aborted");
 
-    const doneEvent = captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-abort-1");
+    const doneEvent = captured.find(
+      (e) => e.type === "turn_done" && e.turn_id === "turn-abort-1",
+    );
     expect(doneEvent).toBeDefined();
     expect(doneEvent!.status).toBe("aborted");
   });
 
   it("preserves the rate-limit retry hint through to the persisted block", async () => {
     const { handleEvent } = await import("./lifecycle.js");
-    const { getRawDb } = await import("@friday/shared");
 
     handleEvent(makeFakeWorker({ turnId: "turn-rl-1" }) as never, {
       type: "error",
@@ -181,11 +198,14 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
       retryAfterSeconds: 30,
       rawMessage: `429 {"error":{"message":"slow down"}}`,
     });
+    await settle();
 
-    const row = getRawDb()
-      .prepare("SELECT content_json FROM blocks WHERE turn_id = ?")
-      .get("turn-rl-1") as { content_json: string };
-    const payload = JSON.parse(row.content_json) as Record<string, unknown>;
+    const rows = await getDb()
+      .select()
+      .from(schema.blocks)
+      .where(eq(schema.blocks.turnId, "turn-rl-1"));
+    expect(rows.length).toBe(1);
+    const payload = rows[0].contentJson as Record<string, unknown>;
     expect(payload.retryAfterSeconds).toBe(30);
     expect(payload.code).toBe("rate_limited");
   });
@@ -195,18 +215,20 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     // hasn't been updated to call classifySdkError) might emit an error
     // IPC without the structured fields. We still persist the bubble.
     const { handleEvent } = await import("./lifecycle.js");
-    const { getRawDb } = await import("@friday/shared");
 
     handleEvent(makeFakeWorker({ turnId: "turn-bare-1" }) as never, {
       type: "error",
       message: "something blew up",
       recoverable: false,
     });
+    await settle();
 
-    const row = getRawDb()
-      .prepare("SELECT content_json FROM blocks WHERE turn_id = ?")
-      .get("turn-bare-1") as { content_json: string };
-    const payload = JSON.parse(row.content_json) as Record<string, unknown>;
+    const rows = await getDb()
+      .select()
+      .from(schema.blocks)
+      .where(eq(schema.blocks.turnId, "turn-bare-1"));
+    expect(rows.length).toBe(1);
+    const payload = rows[0].contentJson as Record<string, unknown>;
     expect(payload.code).toBe("worker_error");
     expect(payload.headline).toBe("something blew up");
     expect(payload.rawMessage).toBe("something blew up");

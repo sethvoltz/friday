@@ -1,31 +1,34 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  createTestDb,
+  getDb,
+  schema,
+  type TestDbHandle,
+} from "@friday/shared";
 
 // Cross-boundary contract: when the worker emits `turn-complete` with a
 // usage payload, the lifecycle handler must insert a row into the `usage`
-// table whose columns match the WorkerEvent shape. This pins the field-name
-// mapping that the original bug regressed past.
+// table whose columns map the SDK→protocol field names. The handler's
+// insertUsage is fire-and-forget async (ADR-023); tests `settle()` a few
+// ms after invocation before reading.
 
-const dataDir = mkdtempSync(join(tmpdir(), "friday-lifecycle-usage-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
+let handle: TestDbHandle;
 
 beforeAll(async () => {
-  const { runMigrations } = await import("@friday/shared");
-  runMigrations();
+  handle = await createTestDb({ label: "lifecycle_usage" });
 });
 
 afterAll(async () => {
-  const { closeDb } = await import("@friday/shared");
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+  await handle.drop();
 });
 
 beforeEach(async () => {
-  const { getRawDb } = await import("@friday/shared");
-  getRawDb().prepare("DELETE FROM usage").run();
+  await handle.truncate();
 });
+
+async function settle(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 50));
+}
 
 function makeFakeWorker(): unknown {
   return {
@@ -51,7 +54,6 @@ function makeFakeWorker(): unknown {
 describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
   it("inserts a usage row whose columns map the SDK→protocol field names", async () => {
     const { handleEvent } = await import("./lifecycle.js");
-    const { getRawDb } = await import("@friday/shared");
 
     handleEvent(makeFakeWorker() as never, {
       type: "turn-complete",
@@ -64,43 +66,35 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
         cost_usd: 0.1234,
       },
     });
+    await settle();
 
-    const row = getRawDb()
-      .prepare(
-        "SELECT cost_usd, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, agent_name, model FROM usage",
-      )
-      .get() as Record<string, unknown> | undefined;
-
-    expect(row).toBeDefined();
-    expect(row).toMatchObject({
-      cost_usd: 0.1234,
-      input_tokens: 1234,
-      output_tokens: 567,
-      cache_creation_tokens: 89,
-      cache_read_tokens: 4321,
-      agent_name: "test-agent",
-      model: "claude-opus-4-7",
-    });
+    const rows = await getDb().select().from(schema.usage);
+    expect(rows.length).toBe(1);
+    const row = rows[0];
+    expect(row.costUsd).toBeCloseTo(0.1234);
+    expect(row.inputTokens).toBe(1234);
+    expect(row.outputTokens).toBe(567);
+    expect(row.cacheCreationTokens).toBe(89);
+    expect(row.cacheReadTokens).toBe(4321);
+    expect(row.agentName).toBe("test-agent");
+    expect(row.model).toBe("claude-opus-4-7");
   });
 
   it("inserts nothing when turn-complete carries no usage payload", async () => {
     const { handleEvent } = await import("./lifecycle.js");
-    const { getRawDb } = await import("@friday/shared");
 
     handleEvent(makeFakeWorker() as never, {
       type: "turn-complete",
       sessionId: "sess-1",
     });
+    await settle();
 
-    const { c } = getRawDb()
-      .prepare("SELECT count(*) c FROM usage")
-      .get() as { c: number };
-    expect(c).toBe(0);
+    const rows = await getDb().select().from(schema.usage);
+    expect(rows.length).toBe(0);
   });
 
   it("inserts nothing when there is no session id (neither worker nor event)", async () => {
     const { handleEvent } = await import("./lifecycle.js");
-    const { getRawDb } = await import("@friday/shared");
 
     const w = makeFakeWorker() as Record<string, unknown>;
     w.sessionId = undefined;
@@ -116,10 +110,9 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
         cost_usd: 0.01,
       },
     });
+    await settle();
 
-    const { c } = getRawDb()
-      .prepare("SELECT count(*) c FROM usage")
-      .get() as { c: number };
-    expect(c).toBe(0);
+    const rows = await getDb().select().from(schema.usage);
+    expect(rows.length).toBe(0);
   });
 });

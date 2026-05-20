@@ -125,7 +125,19 @@
     }
   }
 
-  function jumpToBottom() {
+  async function jumpToBottom() {
+    if (!scrollEl) return;
+    // With sliding-window virtualization, the bottom of the rendered
+    // DOM is the bottom of the WINDOW, not the bottom of history. If
+    // the user has slid the window back into history (chatWindowEnd <
+    // chat.messages.length), simply scrolling to scrollHeight lands
+    // them at the bottom of the wrong slice. Reset the window to the
+    // tail first, await a tick so ChatMessages re-slices and remounts
+    // the latest bubbles, then scroll.
+    if (!readonly) {
+      chat.resetChatWindowToLatest();
+      await tick();
+    }
     if (!scrollEl) return;
     scrollEl.scrollTop = scrollEl.scrollHeight;
     // Optimistic update so the jump-button hides immediately; the
@@ -449,7 +461,6 @@
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-lg);
     backdrop-filter: blur(20px) saturate(160%);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
     z-index: 90;
   }
 
@@ -502,7 +513,6 @@
     border-radius: var(--radius-lg);
     background: var(--header-float-bg);
     backdrop-filter: blur(20px) saturate(160%);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
     color: var(--text-primary);
     font-size: 0.8rem;
     font-weight: 500;

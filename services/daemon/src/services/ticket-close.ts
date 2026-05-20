@@ -64,14 +64,14 @@ export async function closeTicketForArchive(input: CloseInput): Promise<void> {
   if (status === null) return; // refork — leave the ticket alone
 
   try {
-    const existing = getTicket(ticketId);
+    const existing = await getTicket(ticketId);
     if (!existing) {
       logger.log("warn", "ticket.close.stale", { ticketId, agentName, reason });
       return;
     }
 
     try {
-      updateTicket(ticketId, { status });
+      await updateTicket(ticketId, { status });
     } catch (err) {
       logger.log("warn", "ticket.close.local.fail", {
         ticketId,
@@ -84,7 +84,7 @@ export async function closeTicketForArchive(input: CloseInput): Promise<void> {
 
     if (reason === "failed") {
       try {
-        addComment(ticketId, agentName, "agent archived: failed");
+        await addComment(ticketId, agentName, "agent archived: failed");
       } catch (err) {
         logger.log("warn", "ticket.close.comment.fail", {
           ticketId,
@@ -110,7 +110,7 @@ async function propagateExternal(opts: {
   status: TicketStatus;
   agentName: string;
 }): Promise<void> {
-  const links = externalLinks(opts.ticketId);
+  const links = await externalLinks(opts.ticketId);
   if (links.length === 0) return;
 
   for (const link of links) {

@@ -70,13 +70,13 @@ export const evolveCommand = defineCommand({
       args: {
         windowHours: { type: "string" },
       },
-      run({ args }) {
+      async run({ args }) {
         const windowHours = args.windowHours
           ? Number(args.windowHours)
           : 24;
         const since = sinceHoursAgo(windowHours);
         const windowEnd = new Date().toISOString();
-        const signals = scanAll({ since });
+        const signals = await scanAll({ since });
         const propose = proposeFromSignals(signals, {
           rule: DEFAULT_RULE,
           createdBy: "cli",

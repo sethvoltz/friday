@@ -39,11 +39,15 @@
     <polyline points="12,4 16,7 12,10" />
   </svg>
   <span
-    class={statusClass(view.sse.status)}
-    title={view.sse.tooltip}
-    aria-label={view.sse.tooltip}>
+    class={statusClass(view.sync.status)}
+    title={view.sync.tooltip}
+    aria-label={view.sync.tooltip}>
     <span class="dot"></span>
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <!-- Satellite-dish glyph. Phase 6a rewired the middle stage from
+           SSE → Sync semantics but the dish icon reads more clearly as
+           "signal" than the refresh arrows did; keep the dish, the
+           binding still resolves Zero WS health via `view.sync`. -->
       <path d="M4 10a7.31 7.31 0 0 0 10 10Z" />
       <path d="m9 15 3-3" />
       <path d="M17 13a6 6 0 0 0-6-6" />
@@ -128,12 +132,23 @@
     border-radius: 50%;
     flex-shrink: 0;
     background: var(--stage-color);
-    /* The animation is ALWAYS running on every dot — that's how we keep
-       the three pulses in sync. State transitions mutate `--stage-color`
-       only; the timeline never restarts. `color-mix` re-resolves each
-       frame so the halo follows the dot's current color. */
+    /* The animation runs on `.stage-live` and `.stage-reconnecting`
+       dots — pulsing means "active" (green) or "trying to reconnect"
+       (yellow). `.stage-down` (red) and `.stage-unknown` (grey) stay
+       static because there's nothing happening to communicate. The
+       animation timeline lives on the dot itself rather than on a
+       per-state rule so the green↔yellow transition (e.g. brief
+       reconnect blip during a Zero auth refresh) keeps a single
+       continuous timeline instead of restarting the keyframe at 0%.
+       `color-mix` re-resolves each frame so the halo follows the
+       dot's current color. */
     animation: stage-pulse 1.6s ease-out infinite;
     transition: background-color 200ms ease;
+  }
+  .stage-down .dot,
+  .stage-unknown .dot {
+    animation: none;
+    box-shadow: none;
   }
   @keyframes stage-pulse {
     0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--stage-color) 65%, transparent); }

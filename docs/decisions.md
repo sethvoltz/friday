@@ -2,25 +2,29 @@
 
 ## ADR-001 — SQLite + WAL, not Postgres
 
-**Status:** accepted
+**Status:** superseded by ADR-023 (2026-05-18). Original rationale below preserved for context.
 
 Single-user system (multi-device). Workload is sub-millisecond commits at tens of writes/sec at peak. Postgres requires a separate service that fights the local-first model. SQLite WAL handles the multi-process write contention — daemon, dashboard server proc, CLI inspections — without contention in practice. `busy_timeout=5000` mops up the rare collisions. One-file backup, content-addressed branch-isolation if we ever need it.
 
 ## ADR-002 — Daemon owns the Claude SDK; dashboard is auth + UI proxy
 
-**Status:** accepted
+**Status:** accepted (amended by ADR-023, 2026-05-18)
 
 Single SDK runtime keeps long-lived sessions, agent registry, fork pool, file watchers, and the EventBus all in one process. SvelteKit hot-reloads don't kill conversations. Auth boundary is clean: daemon binds to `127.0.0.1`, dashboard is the only public surface, CFT exposes only the dashboard.
 
+**Amendment (ADR-023, 2026-05-18):** Under the Postgres + Zero sync model, the dashboard's role expands beyond auth + UI proxy: it also hosts Zero mutator execution (`/api/mutators`), reverse-proxies the Zero WS (`/api/sync` → `127.0.0.1:zero-cache`), and mints short-lived JWTs from BetterAuth sessions for zero-cache auth. The daemon still owns the SDK + worker runtime; it no longer "owns the database" — dashboard and daemon are peer writers to Postgres. The single public port + CFT-only-sees-dashboard invariant is preserved.
+
 ## ADR-003 — Single SSE channel, NDJSON via SSE framing
 
-**Status:** accepted
+**Status:** superseded by ADR-024 (2026-05-18). Original rationale below preserved for context.
 
 `EventSource('/api/events')` is the only persistent connection from the browser. Per-turn POST returns `{turn_id}` immediately; turn events flow on the same SSE channel tagged by `turn_id`. Native `Last-Event-ID` reconnect against the daemon's 200-event ring buffer.
 
 ## ADR-004 — DB write before SSE emit, with `last_event_seq` cursor
 
-**Status:** accepted (refined 2026-05-12, FIX_FORWARD 8.2)
+**Status:** superseded for settled-state events by ADR-024 (2026-05-18); narrows for live-turn events. Original rationale below preserved for context.
+
+**Amendment (ADR-024, 2026-05-18):** Under the Postgres + Zero sync architecture, settled-state convergence is handled by Postgres logical replication via zero-cache — the per-block `last_event_seq` cursor + boot_id invalidation pattern retires. The invariant **narrows** to the live-turn delta path: the daemon's in-memory accumulator for the in-flight block is updated *before* the corresponding SSE `block_delta` is emitted; on `block_complete` the Postgres row is written with `streaming=0` (which is what Zero replicates). Per-turn SSE replay buffer remains the safety net for refresh-mid-stream.
 
 Each event has a monotonic `seq`. The block row is updated to `last_event_seq = N` *before* the event with that seq is broadcast. Browsers on focus switch / reconnect can read DB up to cursor K and live-render only events with `seq > K`. No double-application, no missed events.
 
@@ -56,9 +60,11 @@ Single-user system. `friday setup` is the only path to create the primary accoun
 
 ## ADR-009 — Tmux-backed daemon supervision
 
-**Status:** accepted
+**Status:** accepted (amended by ADR-023, 2026-05-18)
 
 `friday start` launches daemon and dashboard inside a tmux session named `friday`. `friday stop` kills the session. `friday attach` opens the panes for live debugging. No launchd or systemd to configure. Restart-on-crash via tmux + a small wrapper.
+
+**Amendment (ADR-023, 2026-05-18):** The tmux session gains a `zero-cache` pane alongside daemon, dashboard, and CFT. Postgres itself is **not** in tmux — it's managed by `brew services` as a host-level service, lifecycle-independent of `friday start/stop`. `friday doctor` checks `pg_isready` and surfaces actionable guidance ("Run `brew services start postgresql@18`") if Postgres is down. The `friday` tmux session lifecycle remains short and bounded: start it, attach to debug, kill it to stop Friday — without taking down a database that other host tools might share.
 
 ## ADR-010 — `/scratch` spawns Bare agents, not Helpers
 
@@ -68,9 +74,11 @@ User-spawned ad-hoc sessions use the existing Bare agent type. Bares already exi
 
 ## ADR-011 — Daemon binds one port for HTTP + SSE
 
-**Status:** accepted
+**Status:** accepted (note: ADR-023 adds zero-cache on a separate localhost port)
 
 The early plan called for two daemon ports (HTTP API + SSE) — a holdover from the old Slack-era event server. SSE is just a long-lived HTTP response; there's no operational reason to split. One port keeps `friday doctor`, port-conflict diagnostics, and the dashboard's reverse proxy simpler. The dashboard's `/api/events` proxies to the same `daemonPort` everything else hits.
+
+**Note (ADR-023, 2026-05-18):** The daemon still binds a single port for its own HTTP + SSE. The new `zero-cache` sidecar process binds its own localhost port (default `4848`). Both are `127.0.0.1`-only; the dashboard's reverse proxy is the sole public surface. CFT continues to expose exactly one port to the internet (the dashboard's).
 
 ## ADR-012 — JSONL is boot-recovery only; the daemon writes blocks directly from worker IPC
 
@@ -87,13 +95,15 @@ The original design tried to surface in-flight text by writing streaming preview
 
 ## ADR-013 — `agents.json` and per-channel session files removed; SQLite is the registry
 
-**Status:** accepted
+**Status:** accepted (amended by ADR-023, 2026-05-18 — registry storage is Postgres, not SQLite)
 
 The old Friday tracked agents in `~/.friday/agents.json` and per-Slack-channel session metadata in JSON files under `~/.friday/sessions/`. The new system collapses both into the `agents` SQLite table. Single writer (the daemon), atomic updates, queryable, indexed. Boot recovery scans the table; no more JSON-rewrite races.
 
+**Amendment (ADR-023, 2026-05-18):** The `agents` table moves from SQLite to Postgres along with the rest of the schema. The single-writer property is replaced by Postgres MVCC — daemon writes registry transitions for worker lifecycle, dashboard mutators write registry transitions for archive/spawn intents (which the daemon then picks up and acts on). The "atomic updates, queryable, indexed, no JSON-rewrite races" properties all carry forward.
+
 ## ADR-014 — Mail bus event names: `mail:to:<agent>` + `mail:any`
 
-**Status:** accepted
+**Status:** accepted (amended by ADR-023, 2026-05-18)
 
 The shared `mailBus` EventEmitter (`packages/shared/src/services/mail.ts`) emits two events on every `sendMail()` call: a per-recipient `mail:to:<agentName>` for direct subscription, and a generic `mail:any` for spectator subscribers (the daemon's mail-bridge re-publishes both as SSE `mail_delivered` and IPC `mail-wakeup`). Event-name collisions are prevented by the agent-name regex (`/^[a-z0-9][a-z0-9-]{0,62}$/`).
 
@@ -104,11 +114,15 @@ The shared `mailBus` EventEmitter (`packages/shared/src/services/mail.ts`) emits
 
 Mid-turn injection is opt-in per send; the bus event names and the SSE `mail_delivered` shape are unchanged.
 
+**Amendment (ADR-023, 2026-05-18):** Under Postgres + Zero, the in-process `mailBus` EventEmitter remains the **fast path** for daemon-internal callers (a worker's `mail_send` tool call hitting the mail-bridge handler with sub-millisecond latency). The **durable path** is Postgres LISTEN on `new_mail` — the same handler fires whether the mail row was written by daemon-internal code, by a dashboard mutator, or by boot recovery. The SSE `mail_delivered` event is **retired** (settled state is conveyed by the row insert replicating via Zero — clients' reactive query on `mail` updates automatically). The `mail-wakeup-critical` IPC path retains its fast-path-plus-LISTEN-durable-path shape (see ADR-023's fast-path/durable-path pattern).
+
 ## ADR-015 — BetterAuth tables in our Drizzle schema, BetterAuth owns its migrations
 
-**Status:** accepted
+**Status:** accepted (amended by ADR-023, 2026-05-18 — Postgres adapter replaces SQLite adapter)
 
 `accounts`, `sessions`, `users`, `verification` are declared in `schema.ts` for typed access from the rest of the app, but BetterAuth's CLI (`@better-auth/cli`) handles the actual table creation. Field names match BetterAuth's defaults. If they ever drift, BetterAuth's runtime wins and we update our typed declarations to match.
+
+**Amendment (ADR-023, 2026-05-18):** BetterAuth switches from its SQLite adapter to its Postgres adapter. Field names and the "BetterAuth owns its migrations, we own the typed declarations" contract are unchanged. The dashboard additionally mints short-lived JWTs from BetterAuth sessions for zero-cache auth (server-to-server credential; never exposed to the browser).
 
 ## ADR-016 — `blocks` table replaces `turns`; live in-flight state lives in daemon memory
 
@@ -153,7 +167,7 @@ Consequences:
 
 ## ADR-018 — Connectivity-chain widget replaces Bot/Live status dots
 
-**Status:** accepted (2026-05-12, FIX_FORWARD 8.6)
+**Status:** accepted (amended by ADR-024, 2026-05-18 — SSE stage becomes Sync stage)
 
 The old header had two indicator dots — "Bot" (is the agent alive?) and "Live" (is SSE streaming?) — that turned out to under-communicate the failure mode in the most common outage: the *browser* lost connectivity. The dots stayed colored based on stale daemon state, and the user spent a minute confused about why nothing was updating.
 
@@ -170,6 +184,8 @@ Rules:
 - **Tooltips are informational only.** Hovering reveals the last error, last successful sample timestamp, and the action the user can take ("check your wifi", "see daemon logs"). No clickable mitigations — this is a status surface, not a control plane.
 
 Implementation: `services/dashboard/src/lib/components/Connectivity/ConnectivityWidget.svelte`. The fetch-based SSE client (WS-3) feeds it the SSE stage; an in-page periodic `/api/health` poll feeds the Daemon stage.
+
+**Amendment (ADR-024, 2026-05-18):** The middle stage becomes **Sync** (Zero WS health) rather than **SSE**. SSE remains in the system as the live-turn delta side-channel (per ADR-024); its health is shown as a sub-indicator on the Sync stage tooltip rather than as its own top-level stage. Rationale: sync health is the dominant signal — if Zero is down, the user has no realtime feed of anything; if SSE is briefly down but Zero is up, the user still sees settled state flowing and only loses live-typing fidelity on the active turn (a smaller failure mode that deserves an inline affordance, not a top-level dot). Grey-cascade rule unchanged.
 
 ## ADR-019 — Older-history prepend anchors on a rendered DOM element, with a WebKit overflow-toggle for paint commit
 
@@ -384,6 +400,316 @@ The hard structural rule — enforced in code at the API handler — is *only* t
 - **`reason` format.** Free-form text vs. small enum (`research`, `parallel-analysis`, `digest`, etc.)? Free-form is more honest and harder to game; enum is more queryable. Leaning free-form for the MVP; if dashboards or evolve digests want a structured cut later, we can introduce a `kind` enum alongside the free-form field.
 - **Auto-archival lineage.** When a Builder (or Helper) archives, do in-flight sub-Helpers cascade-archive, or persist? Probably cascade for `status === "working"` children and persist for `status === "idle"` already-completed children — but flag it.
 - **Mail injection.** The orchestrator can already *read* Builder ↔ Helper mail via the dashboard. Should it be able to *inject* into that mailbox (e.g. interrupt a runaway nested-Helper exchange)? Today no agent can inject into another's mailbox out-of-band; the orchestrator's only lever is `agent_archive`. Leaving this open until we see whether read-only visibility plus the evolve signal is enough.
+
+## ADR-023 — Postgres + Zero sync layer; daemon and dashboard as peer writers; row-as-intent for side-effect dispatch
+
+**Status:** proposed (2026-05-18)
+
+Supersedes ADR-001. Reshapes ADR-002, ADR-013, ADR-014, ADR-015. Pairs with ADR-024 (SSE narrowed to live-turn deltas).
+
+The current architecture — daemon-owned SQLite + dashboard-as-proxy + bespoke SSE wire — was designed against a "single-user, single-device" mental model with multi-device as a small additive case. In practice the multi-device case is now load-bearing: Seth uses Friday across personal laptop, phone, and a third device (automated Claude sessions), with a tablet on the horizon. Each surface is "two windows watching the same DB through different keyholes" — cursor state diverges, optimistic bubbles only exist on the originating device, unread badges disagree, "phone shows stale state after wake-from-sleep" is a regular complaint. The bespoke SSE + per-block `last_event_seq` + boot_id cursor + paginated REST reload machinery (ADR-003, ADR-004, FIX_FORWARD 8.x) solves the single-device race-free-render problem honestly, but it cannot make the multi-device convergence problem go away — it's the wrong shape for it.
+
+Local-first architecture (Linear-style: durable client-side cache + reactive sync engine + optimistic mutators with server-side replay) is the industry-settled answer to exactly this problem class. The remaining decision was *which* sync engine and *what server* it sits on.
+
+### Decision
+
+1. **Postgres replaces SQLite as the canonical store.** Friday's data layer migrates from `~/.friday/db.sqlite` to a Postgres database hosted by the user's local Postgres install (Homebrew + `brew services`). The "everything in `~/.friday/`" property is preserved with a footnote: the Postgres data dir lives wherever Homebrew puts it; Friday gets a database + role inside that install.
+2. **Zero (by Rocicorp) is the sync engine.** `zero-cache` runs as a sidecar process tailing Postgres logical replication and serving clients over WebSocket. Client storage is Zero's reactive cache (IndexedDB-backed). The Apache-2 license, the optimistic-mutator model, the SQL-on-the-client reactive-query story, and the active flagship-product status of Zero within Rocicorp's portfolio were the dominant factors.
+3. **Daemon and dashboard are peer writers.** Neither owns the DB. The daemon writes Postgres for runtime state (block rows on close, agent status transitions, mail-bridge rows, scheduler firings, app-lifecycle state). The dashboard writes Postgres for mutator-driven changes (user messages, abort intents, archive intents, ticket/memory/schedule edits, settings, client-device telemetry). The single-writer constraint that drove ADR-001's SQLite choice is dissolved by Postgres.
+4. **Single public port preserved via reverse proxy.** Cloudflare Tunnel publishes the dashboard only. The dashboard reverse-proxies `/api/sync` (auth-gated WS upgrade → `127.0.0.1:zero-cache-port`) and continues to proxy `/api/events` (SSE → daemon). Zero, daemon, and Postgres remain on `127.0.0.1`.
+
+### Alternatives considered
+
+- **cr-sqlite (vlcn)** — true SQLite ↔ SQLite CRDT. Preserves ADR-001. Rejected: light maintenance heartbeat, schema constraints (special table declaration, historical FK limitations) that would scrape against the existing 12-table schema, and the conflict-resolution machinery is overkill for our single-writer-canonical model.
+- **PowerSync** — full SQLite client + Sync Rules. Excellent mobile-SDK story. Rejected: requires Postgres anyway, mobile-SDK advantage is wasted on a PWA-via-browser shape, the bucket/sync-rules model is heavier than Friday's needs.
+- **ElectricSQL (current Shapes)** — Postgres + read-path Shapes. Rejected: writes go through a separately-implemented backend API, so half the integration work is still ours; less complete than Zero on the mutator side.
+- **Replicache** — backend-agnostic, would have preserved SQLite. Rejected: in maintenance mode at Rocicorp (Zero is the heir). For a system that ships and lives for years, betting on the maintained product is correct.
+- **Custom protocol over SQLite + ws library** — viable, ~1500 LOC total. Rejected: the implementation tax across bootstrap, schema-version negotiation, optimistic-mutator replay, and reconnect/resume far exceeds the marginal complexity of running Postgres and Zero, and lacks the cross-team battle-testing those products have.
+- **Postgres as canonical with no sync engine** — i.e., keep SSE everywhere, just move the DB. Rejected: moves the operational cost without buying the local-first UX. The whole point is the engine.
+
+### Topology
+
+```
+              Cloudflare Tunnel (public)
+                         │
+                         ▼
+              ┌────────────────────────┐
+              │   SvelteKit Dashboard  │ ◄── BetterAuth
+              │   /api/sync            │ — WS proxy → zero-cache
+              │   /api/events          │ — SSE proxy → daemon
+              │   /api/mutators        │ — Zero push-url (mutator host)
+              └─────┬───────────┬──────┘
+                    │           │
+                    │           │ writes Postgres directly
+                    │           │ for mutator-driven changes
+                    ▼           ▼
+              ┌────────────────────────┐
+              │       Postgres         │ ◄── zero-cache
+              │  (logical replication) │       │
+              └────▲───────────────────┘       │ WS over /api/sync
+                   │                           ▼
+                   │ writes runtime state    Clients (PWA / browser)
+                   │
+              ┌────┴───────────────────┐
+              │    Friday Daemon       │
+              │  /api/events  (SSE)    │
+              │  /api/internal/*       │ — localhost-only fast-path
+              │  Claude SDK + workers  │
+              │  LISTEN on Postgres    │ — row-as-intent dispatch
+              └────────────────────────┘
+```
+
+Reboot independence:
+- **Dashboard reboot:** already-connected client WS to zero-cache survive (reverse proxy WS-upgrade pattern; brief blip on the reverse-proxy hop, sockets remain on the upstream zero-cache). Daemon continues writing Postgres → zero-cache → already-connected clients see realtime updates throughout. New WS connections fail until dashboard returns. Mutators fail until dashboard returns; Zero queues them locally on the client; flush on reconnect. **No data loss, no missed events for live clients.**
+- **Daemon reboot:** dashboard mutators continue to commit. zero-cache continues to replicate. Already-connected clients see new mutator-written rows in real time. Side effects (Claude turns, worker forks, mail delivery) pause until the daemon comes back; daemon's boot recovery scans for `status='pending'` rows and re-dispatches the missed side effects. **Writes always succeed; side effects are eventually-consistent.**
+
+### Row-as-intent pattern
+
+Mutators do not write to a separate `intents` table. Each mutator writes the row(s) it cares about (user blocks, mail rows, ticket rows, etc.), encoding "side-effect required" as a status field value (`pending`, `abort_requested`, `archive_requested`, etc.). The daemon LISTENs on Postgres NOTIFY channels keyed per status transition. On wake, the daemon processes the row with a handler that:
+
+1. Reads the row's current state to detect duplicate dispatch (idempotency).
+2. Runs the side effect (fork worker, fire AbortController, kill agent, etc.).
+3. Transitions the row's status to its terminal state (`dispatched`, `aborted`, `archived`, etc.) inside the same logical commit as any downstream rows the side effect produces (e.g. assistant block rows for a dispatched turn).
+
+**Boot recovery scans the same WHERE clauses the LISTEN handlers react to.** If the daemon was down when a mutator wrote a `pending` row, boot recovery picks it up on the next start. The live path and recovery path are the same code.
+
+**Determinism contract:** every side effect has a row-state precondition (the WHERE clause that selects it) and a row-state postcondition (the status transition or downstream row inserts that prove it ran). Mutators are idempotent on Zero's `mutation_id` (Zero's contract) and on row primary key (Friday's contract). No "soft" state exists separately from the data — if you ask "is this dispatched?" the answer is the existence of downstream rows, not a flag.
+
+### Fast-path + durable-path pattern
+
+For mutations where end-to-end latency to the daemon's runtime matters (abort, mail-wakeup-critical, cancel-queued), the row-as-intent path is supplemented by a sideband fast-path:
+
+1. The dashboard mutator writes the durable row (contract). Postgres LISTEN will eventually wake the daemon.
+2. The dashboard mutator additionally fires `POST 127.0.0.1:<daemonPort>/api/internal/<op>` (fire-and-forget). The daemon's localhost-only internal endpoint invokes the same handler that LISTEN would invoke.
+3. The handler is idempotent: whichever path fires first wins; the other path's invocation is a no-op against the post-state.
+
+The `/api/internal/*` endpoints are localhost-only, unauthenticated, and treated the same as the existing CLI inspection surface — `~/.friday/`'s `0700` permissions are the boundary. Daemon-internal callers (mail-bridge re-emitting a `mail_send` tool call from a worker) bypass both paths and invoke the handler directly in-process. Three call sites, one handler, idempotent against all three.
+
+This pattern stays small: the abort, critical-mail-wakeup, and cancel-queued ops are the entire fast-path catalog as of v1. Archive, ticket-edit, memory-edit, schedule-edit, and similar do not need the fast path — Postgres LISTEN latency (~tens of milliseconds) is invisible.
+
+### Bootstrap policy (two-phase, Linear-inspired)
+
+A fresh device (new install, cleared PWA storage, or `Forget this device`) bootstraps in two phases.
+
+**Phase 1 — foreground, blocks first usable UI, target <2s broadband:**
+- Last 50 blocks for the orchestrator.
+- All non-archived rows from `agents`, `tickets` (counts + last 20), `schedules`, `apps`, `settings`.
+- Mail unread count for orchestrator + last 10 rows.
+- Memory entry headers (titles + types, no bodies yet).
+
+**Phase 2 — background, progress-indicated, target <2min:**
+- Full block history for all non-archived agents and agents archived within the last 24h.
+- Full ticket history with comments + relations + external links.
+- Full mail history within the last 30 days.
+- Full memory entry bodies.
+- Full schedule history.
+- Full apps state.
+- Full evolve proposals.
+
+**Phase 3 — lazy on demand:**
+- Blocks for agents archived >24h ago (fetched when user opens that agent's chat).
+- Blocks older than 90 days for any agent (fetched on scroll-back via the existing `/api/agents/:name/blocks?before=...` REST endpoint — kept for this fallback).
+- Mail older than 30 days (fetched when search triggers it).
+
+### Client retention budget
+
+- Synced data for any agent archived more than 30 days ago and already fully synced: expunged from the local cache.
+- Blocks older than 90 days: expunged from the local cache regardless of agent state.
+- Memory, tickets, agents, schedules, apps: never expunged from the local cache (small).
+
+Retention enforcement runs client-side as a periodic task (every 24h while the app is active) and on Phase 2 completion. Server-side data is never deleted by this — retention is a client-cache property only.
+
+### Client telemetry
+
+A `client_devices` table tracks per-device storage and sync state:
+
+| Column | Notes |
+|---|---|
+| `device_id` | UUID minted on first bootstrap, persisted in localStorage. |
+| `user_agent` | Set on registration. |
+| `label` | User-editable display name (defaults to UA-derived guess). |
+| `last_seen_ts` | Updated by the `reportClientStats` mutator. |
+| `storage_used_bytes` | `navigator.storage.estimate().usage` (null if browser unsupported). |
+| `storage_quota_bytes` | `navigator.storage.estimate().quota` (null if browser unsupported). |
+| `last_sync_ts` | Updated when Phase 2 completes or after a heavy mutator burst. |
+
+The `reportClientStats` mutator fires from the client every 5 minutes while active, and on Phase 2 completion. The Settings page renders a per-device table with storage indicators; each row offers a "Forget this device" action that calls `forgetDevice` mutator (deletes the row + revokes Zero credentials for that device, forcing re-bootstrap on its next connect).
+
+### Side-effect-bearing mutators (the catalog)
+
+Initial catalog (subject to refinement during implementation):
+
+| Mutator | Writes | Side effect | Status transitions |
+|---|---|---|---|
+| `sendUserMessage` | `blocks` (kind=user, status=pending) | Daemon forks/dispatches worker | `pending → dispatched` (worker forks ack) |
+| `abortTurn` | `blocks` UPDATE WHERE turn_id (status=abort_requested) | Daemon `AbortController.abort()` (fast path) | `abort_requested → aborted` (worker exits) |
+| `cancelQueued` | `blocks` DELETE WHERE block_id AND status=queued | Daemon splices `nextPrompts` (fast path) | (row deleted) |
+| `archiveAgent` | `agents` UPDATE (status=archive_requested, reason) | Daemon archives worktree, closes linked tickets, kills worker | `archive_requested → archived` |
+| `createTicket` | `tickets` INSERT | None (pure data) | — |
+| `updateTicket` | `tickets` UPDATE | None | — |
+| `addTicketComment` | `ticket_comments` INSERT | None | — |
+| `addTicketRelation` | `ticket_relations` INSERT | None | — |
+| `linkTicketExternal` | `ticket_external_links` INSERT | None (Linear push happens via daemon's ticket-close path only) | — |
+| `createMemoryEntry` | `memory_entries` INSERT + filesystem write via daemon | Daemon writes `~/.friday/memory/entries/<id>.md` | `pending_file → ready` |
+| `updateMemoryEntry` | `memory_entries` UPDATE + filesystem write via daemon | Daemon rewrites the file | `pending_file → ready` |
+| `deleteMemoryEntry` | `memory_entries` soft-delete + filesystem move | Daemon moves file to trash | — |
+| `createSchedule` | `schedules` INSERT | Daemon registers cron tick | `pending_register → active` |
+| `updateSchedule` | `schedules` UPDATE | Daemon re-registers cron | `pending_register → active` |
+| `deleteSchedule` | `schedules` DELETE | Daemon unregisters cron | — |
+| `installApp` | `apps` INSERT + `agents` INSERT(es) + `schedules` INSERT(es) in one tx | Daemon runs installer (collision matrix already enforced inside tx) | `pending_install → installed` |
+| `uninstallApp` | `apps` UPDATE (status=uninstall_requested) | Daemon archives owned agents, drops schedules | `uninstall_requested → uninstalled` |
+| `reloadApp` | `apps` UPDATE (status=reload_requested) | Daemon re-reads manifest, reconciles | `reload_requested → installed` |
+| `markRead` | `read_cursors` UPSERT (agent_id, device_id?, last_seen_block_id) | None | — |
+| `reportClientStats` | `client_devices` UPSERT | None | — |
+| `forgetDevice` | `client_devices` DELETE | Daemon revokes Zero credentials (LISTEN-only) | — |
+| `updateSettings` | `settings` UPDATE | Daemon picks up changes (LISTEN-only, varies by setting) | — |
+
+Daemon-internal writes (no mutator, no client-originated) continue to land directly in Postgres from the daemon process: block streaming on close, agent status transitions during worker lifecycle, mail rows from `mail_send` tool calls, scheduler tick firings, app-lifecycle reconcile-on-boot, telemetry/usage rows, BetterAuth tables. These are subject to the same row-as-intent semantics where they trigger side effects (e.g., the daemon writes a mail row, daemon also LISTENs on `new_mail` to fire `mail-wakeup` IPC — same handler whether the mail was written by daemon or by dashboard mutator).
+
+### Auth bridge
+
+Dashboard's `/api/sync` WS-upgrade handler reads the BetterAuth session cookie, validates it, mints a short-lived signed JWT (5-minute TTL, refreshed on activity) containing `{userId, sub, deviceId}`, and passes it as the `Authorization` header on the upstream WS to zero-cache. zero-cache's auth callback verifies the JWT signature against a shared secret. Clients never see the JWT directly — it's a server-to-server credential minted from the user's session.
+
+### Schema migration discipline
+
+Drizzle migrations transfer from SQLite to Postgres. The `Date.now()` rule from the project CLAUDE.md still applies: `when` in `_journal.json` must be a real `Date.now()` captured at generation time, never fabricated, never future-dated. The mechanics differ slightly (Postgres-Drizzle uses `__drizzle_migrations` in the public schema; failure mode of one bad `when` poisoning the chain is identical). Migrations run as part of daemon boot before zero-cache reconnects.
+
+Live-client schema-version negotiation is handled by Zero: a client connecting on a stale schema is rejected with a version-mismatch code; the client's PWA service worker delivers the new build; the page hard-reloads. This is the same flow as any PWA dropping a stale cache.
+
+### Consequences
+
+- **Operational surface grows:** Brewfile gains `postgresql@18`; `friday setup` runs `CREATE DATABASE friday OWNER friday` + migrations; `friday doctor` checks `pg_isready`; tmux gains a `zero-cache` pane (Postgres itself is `brew services`-managed, not in tmux).
+- **Code surface shrinks net:** localStorage send-queue retired (Zero subsumes); paginated REST block-fetch becomes a lazy fallback only; per-block `last_event_seq` cursor retired; boot_id cursor reset retired; SSE narrows to live-turn deltas only (ADR-024).
+- **`~/.friday/db.sqlite` retires.** Existing-install migration is a one-shot scripted dump → Postgres-import on the upgrade path, with a backup of the old `db.sqlite` kept at `~/.friday/db.sqlite.pre-postgres.bak`.
+- **Per-branch worktree dev DB story changes.** Each worktree's daemon previously got its own SQLite file; under Postgres, worktrees share the host's Postgres but use distinct database names (e.g. `friday_dev_<branch-hash>` provisioned by `friday setup --dev-branch`). Acknowledged as a small dev-ergonomics tax.
+- **Backup story changes.** `cp ~/.friday/db.sqlite` is replaced by `pg_dump friday > friday.dump.sql`. Documented in setup.md.
+- **Multi-device convergence is correct by construction.** Unread badges, cursor positions, queued messages, optimistic state — all become synced state.
+- **Dashboard-down-but-daemon-up:** existing live clients keep reading; new clients block on dashboard. Daemon-down-but-dashboard-up: writes succeed, side effects queue, full UX returns when daemon resumes.
+
+### Open questions (deliberately not decided here)
+
+- **Per-device read cursors vs. global read cursors.** Should "mark read" be device-specific (each surface tracks its own read state) or globally shared (read on phone = read on laptop)? Defaulting to **device-specific** for v1 (read state is part of where-you-are, not what-you-know); revisit if behavior is awkward.
+- **Mutator-side validation rigor.** The Zero mutator framework supports schema validation; Friday will use zod schemas alongside Drizzle schemas. Catalog of schemas TBD during implementation.
+- **Telemetry retention.** `client_devices` rows for never-returning devices — auto-prune at 90d idle? Leaving as user-driven (`Forget this device`) for v1.
+
+## ADR-024 — SSE narrowed to live-turn delta side-channel; settled events flow via Zero
+
+**Status:** proposed (2026-05-18)
+
+Supersedes the all-events-via-SSE portion of ADR-003. Refines ADR-004 (DB-write-before-SSE-emit narrows to in-memory-accumulator-before-SSE-emit). Pairs with ADR-023.
+
+Under the new sync architecture, almost every event today carried on SSE becomes redundant with the reactive query layer: `block_complete`, `agent_lifecycle`, `agent_status`, `mail_delivered`, `schedule_fired`, `evolve_critical`, `system_banner`, and `turn_started` / `turn_done` envelope events all derive from row changes that Zero replicates natively. Carrying them on SSE *and* sync would create the two-notification-paths anti-pattern; the client would have to dedupe and order them, and would have a stale-channel problem if the two sources disagreed.
+
+But **live token streaming is genuinely the firehose problem sync engines don't want to be.** Postgres logical replication with 5–50 Hz row updates per active block is outside Zero's designed envelope, and per-row replication-lag at that frequency would degrade perceived live-typing fidelity. Token streaming wants a separate transport.
+
+### Decision
+
+**SSE survives only for live-turn deltas.** Its scope narrows to a small, well-defined set of frames:
+
+- `connection_established` — first frame on every (re)connect. Carries the daemon's `boot_id`. (Retained from ADR-003.)
+- `turn_started` — `{turn_id, agent, ts}` — informs clients to start a per-block in-memory accumulator. Survives because the live in-memory state machine must know when to begin.
+- `block_start` — `{block_id, turn_id, agent, kind, ts}` — open an in-memory accumulator for this block.
+- `block_delta` — `{block_id, delta}` — incremental bytes / partial-JSON for tool-use input.
+- `block_complete` — `{block_id, status?}` — signal to client that the in-memory accumulator can be discarded; the canonical row will arrive via Zero shortly (and may already have).
+- `turn_done` — `{turn_id, status}` — informs clients the turn envelope is closed; clients drop any leftover live state for this turn.
+- `error` — `{turn_id?, code, message, recoverable}` — narrow to live-turn errors.
+- `:keepalive` — every 20s, unchanged.
+
+**All other event types move to Zero:** `agent_lifecycle`, `agent_status`, `mail_delivered`, `schedule_fired`, `evolve_critical`, `system_banner`, `compaction_start` / `compaction_end`, `block_reload`, `block_meta_update`. These are derived from row inserts/updates/deletes that Zero replicates.
+
+### In-memory accumulator (replaces the partial-bytes-in-DB story)
+
+Today, the daemon writes partial bytes to `blocks` row columns continuously during streaming, so refresh-mid-stream returns the same bytes (ADR-016). Under the new model:
+
+- **Daemon holds partial bytes in memory only.** The `liveTurns` in-memory registry (ADR-016) is the only place mid-stream bytes live on the server.
+- **The block row is written to Postgres only on `block_complete`** with `streaming=0`.
+- **Zero filters streaming rows from sync.** Clients' reactive queries on `blocks` are scoped to `WHERE streaming = 0` (today's table will gain a `streaming` boolean column for this purpose — already implicit in the model per ADR-016). Streaming rows don't exist in Postgres at all; the filter is structural, not a permission.
+- **Refresh-mid-stream:** the client (originating or non-originating) loads closed blocks via Zero, then opens SSE; the daemon's per-turn SSE replay buffer (now small, since it only buffers ~1 turn worth of events at a time) replays from `turn_started` forward; the client rebuilds the in-memory accumulator and joins the live stream. This is the per-turn replay invariant Seth flagged as load-bearing — preserved.
+- **Crash recovery:** if the daemon crashes mid-stream, JSONL boot recovery (ADR-012) walks the session's JSONL and writes the canonical closed-block row. The in-memory bytes are gone; the canonical bytes survive on disk. Clients reload via Zero on reconnect.
+
+### Per-agent SSE scope
+
+Today SSE is a single global channel; clients filter events by `agent` field. Under the new model, with sync handling all cross-agent state changes, the SSE channel can be **scoped per-agent**: clients open `GET /api/events?agent=<name>` when focusing an agent's chat, close it on focus switch. The replay buffer per channel is naturally small (~1 turn ≈ tens to hundreds of frames; not the 5000-event ring of today).
+
+Focus switch flow:
+1. Click sidebar entry for agent B.
+2. Close SSE to agent A (if open).
+3. Zero already has agent B's settled blocks (Phase 2 bootstrap or reactive subscription).
+4. Open SSE `?agent=B` — daemon replays the current in-flight turn (if any) from `turn_started`.
+5. Live stream resumes.
+
+The boot_id cursor pattern from ADR-004 retires: per-turn replay buffer is bounded enough that "always replay the current turn" is the correct default. No cross-restart cursor logic.
+
+### Connectivity widget
+
+ADR-018's three-stage widget becomes:
+
+1. **Internet** — `navigator.onLine` + lightweight ping (unchanged).
+2. **Sync** — Zero's connection state (replaces SSE-only). Reports both sync (Zero WS) and live-stream (SSE) health, with a tooltip breakdown.
+3. **Daemon** — `/api/health` poll (unchanged).
+
+Grey-cascade rule retained: if Internet is down, Sync and Daemon render grey, not red.
+
+If the live SSE is dropped but Zero is healthy, the Sync indicator stays green (settled state continues to flow); the chat header shows a small inline "live stream reconnecting" affordance during the brief gap. This is the right separation of concerns — sync health is the dominant signal; live-stream health is a per-feature affordance.
+
+### Read-cursor / unread badges
+
+Unread badges move to synced state. A `read_cursors` table (`agent_id, device_id, last_seen_block_id, ts`) is written by the `markRead` mutator. Per-device by default (each surface tracks its own read state); reactive query joins this against `blocks` to produce per-agent unread counts.
+
+The today's per-device localStorage-only badge state is retired; cross-device badge agreement is now correct by construction.
+
+### Consequences
+
+- **SSE wire schema** in `packages/shared/src/wire/events.ts` shrinks to the live-turn subset above.
+- **The `lastSeqByAgent` cursor** in `services/dashboard/src/lib/stores/sse.svelte.ts` retires; per-turn replay is the default.
+- **`block_reload`, `block_meta_update`, `agent_status`, `agent_lifecycle`, `mail_delivered`** SSE event handlers are removed from the client; their effects are observed via Zero reactive query updates instead.
+- **Boot_id cursor invalidation** retires from the SSE layer; Zero handles cross-restart correctness.
+- **The ring buffer's 5000-event size** (ADR-003) shrinks to a per-turn buffer (bounded by max turn length; expect ~100–500 frames typical, <2000 worst-case).
+- **Dashboard's `/api/events` proxy** narrows; per-agent `?agent=<name>` query parameter is added.
+
+### Open questions
+
+- **Should the in-memory accumulator survive a daemon refork?** Today the worker fork can be relaunched; the parent's `liveTurns` registry holds enough state to resume. With per-turn SSE replay, the answer might be "no — let the JSONL recovery + Zero sync do the rebuild." Leaving as an implementation discovery.
+- **Per-device vs. global read cursors.** Mirrored from ADR-023's open question. Same default (per-device for v1).
+
+## ADR-025 — Memory full-text search stays REST while Zero lacks generated-column replication
+
+**Status:** Accepted, 2026-05-20.
+**Driver:** Item #53/#55 audit of the Postgres + Zero sync layer.
+
+### Context
+
+After ADR-023 / ADR-024 the dashboard's `/memory` list reads come from the Zero replica reactively — open the page, see entries land in real time as the daemon `memory_save` mutator + LISTEN handler write them. The list-and-detail surface is fully local-first.
+
+**Full-text search is not.** The Postgres `memory_entries` table carries a generated `tsvector` column (`content_tsv`) populated from `title + content + tags_json`, with a GIN index. The `/api/memory/search` endpoint executes `content_tsv @@ plainto_tsquery(q)` with `ts_rank` ordering. The dashboard's search box hits this endpoint.
+
+Zero 1.5 does not replicate generated/functional columns. The local replica has the title/content/tags rows but not `content_tsv`, and ZQL has no `@@` operator. We considered three alternatives during the Phase 3.3 design:
+
+1. **Replicate the tsvector**. Would require teaching Zero to materialize the generated column on the client. Not a small feature; not on the Zero roadmap as of 1.5.
+2. **Pure-JS substring search over the local snapshot**. Works for trivial corpus sizes but loses Postgres FTS's tokenizer, stemming, and rank ordering. The memory corpus is small now (single-digit hundreds of entries) so JS would be fast — but degrades silently as the corpus grows past a few thousand entries.
+3. **Pre-materialize a rank column per query**. Infeasible for arbitrary user queries.
+
+### Decision
+
+Keep the hybrid contract:
+
+- **List + detail reads**: Zero reactive query (status, recency, tags, content). Already shipped.
+- **Search (`?q=…`)**: dashboard's `/memory` page calls the existing `/api/memory/search` REST endpoint. The result is a ranked array of `id`s; the dashboard renders by overlaying those ids against the local Zero snapshot so the rendered cards still get reactive updates if a search-result entry is edited from another device.
+
+The user-perceptible difference: search hits pay one network round-trip (~50–150ms on the live deploy); browsing and editing don't.
+
+### Revisit trigger
+
+Bring this ADR back to the table if any of these fire:
+
+- Zero ships generated-column replication (would let us drop the REST endpoint entirely).
+- The memory corpus crosses ~5000 entries AND search latency tail (`p95(/api/memory/search)`) exceeds 500ms — at which point the JS-on-local fallback becomes attractive vs. the network cost.
+- A future "search across all Friday data" surface (memory + tickets + chat history) ships, in which case the answer probably involves an external search index rather than Postgres FTS regardless.
+
+### Consequences
+
+- The /memory page has two distinct data paths (Zero for list, REST for search). The dashboard treats them as orthogonal: search results don't update the Zero snapshot's order, and Zero updates don't re-trigger the active search query.
+- No code change from this ADR. Existing implementation is correct; this entry documents *why* the hybrid lives and *when* we'd change it, so future architectural audits don't keep re-discovering the gap as a TODO.
 
 ## Watch list
 

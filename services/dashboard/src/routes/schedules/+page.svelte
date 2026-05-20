@@ -3,11 +3,41 @@
   import type { ScheduleRow } from "./+page.server";
   import { nextRuns } from "@friday/shared/cron";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
+  import {
+    useZero,
+    zeroSync,
+    type ZeroScheduleRow,
+  } from "$lib/stores/zero.svelte";
 
   let { data }: { data: PageData } = $props();
 
+  // Phase 3.2 (ADR-024): when the Zero flag is on the schedules list
+  // is sourced from `zeroSync.schedules`. Same pattern as the tickets
+  // slice — keep `schedules` as a mutable $state so downstream call
+  // sites (refresh, mutation handlers) stay untouched, and push Zero
+  // rows in via an $effect when the flag is on.
+  const zeroOn = useZero();
   // svelte-ignore state_referenced_locally
   let schedules = $state<ScheduleRow[]>(data.schedules);
+  $effect(() => {
+    if (zeroOn) {
+      schedules = zeroSync.schedules.map(toScheduleRow);
+    }
+  });
+  function toScheduleRow(r: ZeroScheduleRow): ScheduleRow {
+    return {
+      name: r.name,
+      cron: r.cron,
+      runAt: r.run_at,
+      taskPrompt: r.task_prompt,
+      paused: r.paused,
+      nextRunAt: r.next_run_at,
+      lastRunAt: r.last_run_at,
+      lastRunId: r.last_run_id,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
+  }
   let busy = $state<string | null>(null);
   let toast = $state<{ msg: string; kind: "ok" | "err" | "info" } | null>(null);
 
@@ -43,6 +73,9 @@
   }
 
   async function refresh() {
+    // Phase 3.2: under the Zero flag the reactive query keeps schedules
+    // in sync without a manual REST hit.
+    if (zeroOn) return;
     try {
       const r = await fetch("/api/schedules");
       if (!r.ok) return;
@@ -54,13 +87,32 @@
 
   async function action(
     name: string,
-    label: string,
+    label: "pause" | "resume" | "trigger",
     past: string,
     path: string,
   ) {
     if (busy) return;
     busy = `${label} ${name}`;
     try {
+      if (zeroOn) {
+        // Item #53: pause/resume/trigger as mutators. The Zero path
+        // dispatches the matching mutator + the daemon LISTEN
+        // handler (or the scheduler's tick(), for pure-data pause)
+        // applies the side effect. Replaces the REST POSTs.
+        const result =
+          label === "pause"
+            ? zeroSync.pauseSchedule({ name })
+            : label === "resume"
+              ? zeroSync.resumeSchedule({ name })
+              : zeroSync.triggerSchedule({ name });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`${label} failed: ${sr.error.message}`, "err");
+          return;
+        }
+        showToast(`${past} ${name}`);
+        return;
+      }
       const r = await fetch(path, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -91,6 +143,19 @@
     if (!ok) return;
     busy = `delete ${name}`;
     try {
+      if (zeroOn) {
+        // Phase 4.6: soft-delete via Zero mutator. Reactive query
+        // filters status='deleted' so the row disappears
+        // immediately from the list (optimistic).
+        const result = zeroSync.deleteSchedule({ name });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`delete failed: ${sr.error.message}`, "err");
+          return;
+        }
+        showToast(`deleted ${name}`);
+        return;
+      }
       const r = await fetch(`/api/schedules/${encodeURIComponent(name)}`, {
         method: "DELETE",
       });

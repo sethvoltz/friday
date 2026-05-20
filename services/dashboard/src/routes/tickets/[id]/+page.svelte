@@ -4,6 +4,7 @@
   import { invalidateAll } from "$app/navigation";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
   import type { TicketStatus } from "@friday/shared/services";
+  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
 
   let { data }: { data: PageData } = $props();
 
@@ -13,7 +14,65 @@
   // ref follows. The previous version mirrored `data.ticket` into a
   // local $state and shallow-cloned on each mutation, which left stale
   // comment/external-link arrays whenever two mutations interleaved.
-  const t = $derived(data.ticket);
+  //
+  // Phase 3.1: when the Zero flag is on, the row itself comes from the
+  // reactive `zeroSync.tickets` query — so updates from another browser
+  // tab arrive in <1s instead of waiting for the next `invalidateAll`.
+  // Comments + external links still load via the SvelteKit page load
+  // (REST) until a Phase 3 follow-up adds those tables as Zero queries.
+  const zeroOn = useZero();
+  const zeroTicket = $derived(
+    zeroOn ? zeroSync.tickets.find((r) => r.id === data.ticket.id) : undefined,
+  );
+
+  // Phase 3.1 follow-up: comments + external_links derived from the
+  // reactive Zero queries once Zero is live. Mutations from other tabs
+  // land reactively (no more invalidateAll round-trip). SSR-loaded
+  // `data.ticket.comments` / `data.ticket.externalLinks` seed first
+  // paint and serve as the fallback when Zero isn't yet connected.
+  const zeroLive = $derived(zeroOn && zeroSync.status === "live");
+  const zeroComments = $derived(
+    zeroLive
+      ? zeroSync.ticketComments
+          .filter((c) => c.ticket_id === data.ticket.id)
+          .map((c) => ({ id: c.id, author: c.author, body: c.body, ts: c.ts }))
+          .sort((a, b) => a.ts - b.ts)
+      : null,
+  );
+  const zeroExternalLinks = $derived(
+    zeroLive
+      ? zeroSync.ticketExternalLinks
+          .filter((l) => l.ticket_id === data.ticket.id)
+          .map((l) => ({
+            system: l.system,
+            externalId: l.external_id,
+            url: l.url,
+            meta: l.meta_json,
+          }))
+      : null,
+  );
+  const t = $derived(
+    zeroTicket
+      ? {
+          ...data.ticket,
+          title: zeroTicket.title,
+          body: zeroTicket.body,
+          status: zeroTicket.status,
+          kind: zeroTicket.kind,
+          assignee: zeroTicket.assignee,
+          meta: zeroTicket.meta_json,
+          updatedAt: zeroTicket.updated_at,
+          comments:
+            zeroComments !== null
+              ? (zeroComments as typeof data.ticket.comments)
+              : data.ticket.comments,
+          externalLinks:
+            zeroExternalLinks !== null
+              ? (zeroExternalLinks as typeof data.ticket.externalLinks)
+              : data.ticket.externalLinks,
+        }
+      : data.ticket,
+  );
   let savingStatus = $state(false);
   let savingAssignee = $state(false);
   // svelte-ignore state_referenced_locally
@@ -71,6 +130,19 @@
     if (status === t.status || !canTransition(status)) return;
     savingStatus = true;
     try {
+      if (zeroOn) {
+        // Phase 4.4: optimistic via Zero mutator. The reactive
+        // query updates t (via zeroTicket) within ms; no need to
+        // invalidateAll.
+        const result = zeroSync.updateTicket({ id: t.id, status });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`status update failed: ${sr.error.message}`, "err");
+          return;
+        }
+        showToast(`status → ${status}`);
+        return;
+      }
       const r = await fetch(`/api/tickets/${t.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -92,6 +164,16 @@
     if (next === t.assignee) return;
     savingAssignee = true;
     try {
+      if (zeroOn) {
+        const result = zeroSync.updateTicket({ id: t.id, assignee: next });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`assignee update failed: ${sr.error.message}`, "err");
+          return;
+        }
+        showToast(next ? `assigned → ${next}` : "unassigned");
+        return;
+      }
       const r = await fetch(`/api/tickets/${t.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -113,6 +195,32 @@
     if (!commentBody.trim()) return;
     postingComment = true;
     try {
+      if (zeroOn) {
+        // Phase 4.4: comment id is a client-generated UUID. The
+        // mutator inserts the row + bumps the parent ticket's
+        // updated_at so list-sort reorders the ticket to the top.
+        const id =
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? (crypto as { randomUUID: () => string }).randomUUID()
+            : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const result = zeroSync.addTicketComment({
+          id,
+          ticketId: t.id,
+          author: data.defaultAuthor,
+          body: commentBody,
+        });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`comment failed: ${sr.error.message}`, "err");
+          return;
+        }
+        commentBody = "";
+        // Comments now derive reactively from `zeroSync.ticketComments`
+        // — no invalidateAll round-trip needed; the new row lands in
+        // the reactive view via the mutator's optimistic write.
+        showToast("comment posted");
+        return;
+      }
       const r = await fetch(`/api/tickets/${t.id}/comments`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -138,6 +246,27 @@
     if (!linkSystem.trim() || !linkExternalId.trim()) return;
     linking = true;
     try {
+      if (zeroOn) {
+        const result = zeroSync.linkTicketExternal({
+          ticketId: t.id,
+          system: linkSystem.trim(),
+          externalId: linkExternalId.trim(),
+          url: linkUrl.trim() || undefined,
+        });
+        const sr = await result?.server;
+        if (sr && sr.type === "error") {
+          showToast(`link failed: ${sr.error.message}`, "err");
+          return;
+        }
+        linkSystem = "";
+        linkExternalId = "";
+        linkUrl = "";
+        // External-links derive reactively from
+        // `zeroSync.ticketExternalLinks`; the optimistic Zero write
+        // makes the new link appear without an invalidateAll.
+        showToast("link added");
+        return;
+      }
       const r = await fetch(`/api/tickets/${t.id}/links`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -169,6 +298,20 @@
       danger: true,
     });
     if (!ok) return;
+    if (zeroOn) {
+      const result = zeroSync.unlinkTicketExternal({
+        ticketId: t.id,
+        system,
+        externalId,
+      });
+      const sr = await result?.server;
+      if (sr && sr.type === "error") {
+        showToast(`detach failed: ${sr.error.message}`, "err");
+        return;
+      }
+      showToast("link removed");
+      return;
+    }
     const qs = `?system=${encodeURIComponent(system)}&externalId=${encodeURIComponent(externalId)}`;
     const r = await fetch(`/api/tickets/${t.id}/links${qs}`, {
       method: "DELETE",

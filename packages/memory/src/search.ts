@@ -1,4 +1,4 @@
-import { getRawDb } from "@friday/shared";
+import { getPool } from "@friday/shared";
 import { listEntries, touchRecall, type MemoryEntry } from "./store.js";
 
 export interface SearchOptions {
@@ -14,31 +14,37 @@ export interface SearchResult {
   matchedOn: string[];
 }
 
-export function searchMemories(opts: SearchOptions): SearchResult[] {
+export async function searchMemories(
+  opts: SearchOptions,
+): Promise<SearchResult[]> {
   const limit = opts.limit ?? 10;
   const q = opts.query.trim();
   if (!q) return [];
 
-  const raw = getRawDb();
+  // Postgres FTS: use the `content_tsv` generated column populated by
+  // schema.ts FTS_SETUP_SQL. plainto_tsquery is forgiving on user input
+  // (handles missing operators, stop words, etc.).
+  const pool = getPool();
   let candidateIds: string[] = [];
   try {
-    const ftsRows = raw
-      .prepare(
-        `SELECT id FROM memory_entries WHERE rowid IN (
-           SELECT rowid FROM memory_fts WHERE memory_fts MATCH ? LIMIT 100
-         )`,
-      )
-      .all(q) as Array<{ id: string }>;
-    candidateIds = ftsRows.map((r) => r.id);
+    const ftsRows = await pool.query<{ id: string }>(
+      `SELECT id
+         FROM memory_entries
+        WHERE content_tsv @@ plainto_tsquery('english', $1)
+        ORDER BY ts_rank(content_tsv, plainto_tsquery('english', $1)) DESC
+        LIMIT 100`,
+      [q],
+    );
+    candidateIds = ftsRows.rows.map((r) => r.id);
   } catch {
     candidateIds = [];
   }
 
-  const allEntries = listEntries();
+  const allEntries = await listEntries();
   const candidatePool =
     candidateIds.length > 0
       ? allEntries.filter((e) => candidateIds.includes(e.id))
-      : allEntries; // FTS5 fallback: scan all
+      : allEntries; // FTS fallback: scan all
 
   const tokens = q
     .toLowerCase()
@@ -91,7 +97,7 @@ export function searchMemories(opts: SearchOptions): SearchResult[] {
   results.sort((a, b) => b.score - a.score);
   const top = results.slice(0, limit);
   if (opts.trackRecall) {
-    for (const r of top) touchRecall(r.entry.id);
+    for (const r of top) await touchRecall(r.entry.id);
   }
   return top;
 }

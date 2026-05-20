@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 export const DATA_DIR =
   process.env.FRIDAY_DATA_DIR ?? join(homedir(), ".friday");
 
-export const DB_PATH = join(DATA_DIR, "db.sqlite");
 export const CONFIG_PATH = join(DATA_DIR, "config.json");
 export const ENV_PATH = join(DATA_DIR, ".env");
 export const SOUL_PATH = join(DATA_DIR, "SOUL.md");
@@ -34,8 +33,18 @@ export function appDir(id: string): string {
   return join(APPS_DIR, id);
 }
 
-export type ServiceName = "daemon" | "dashboard" | "tunnel";
-export const SERVICES: ServiceName[] = ["daemon", "dashboard", "tunnel"];
+export type ServiceName = "daemon" | "dashboard" | "zero-cache" | "tunnel";
+export const SERVICES: ServiceName[] = [
+  "daemon",
+  "dashboard",
+  "zero-cache",
+  "tunnel",
+];
+
+/** ~/.friday/zero/ — zero-cache's internal replica + lock files. Not part
+ *  of Friday's data; safe to delete (zero-cache will rebuild from
+ *  Postgres logical replication on next start). */
+export const ZERO_DIR = join(DATA_DIR, "zero");
 
 export function statePathFor(service: ServiceName): string {
   return join(STATE_DIR, `${service}.json`);
@@ -206,6 +215,7 @@ export function ensureDirs(): void {
     EVOLVE_PROPOSALS_DIR,
     EVOLVE_CLUSTERS_DIR,
     APPS_DIR,
+    ZERO_DIR,
   ]) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }

@@ -4,6 +4,35 @@
     type AgentInfo,
     type SidebarSessionSummary,
   } from "$lib/stores/chat.svelte";
+  // Importing `zeroSidebar` triggers its singleton constructor — which
+  // opens the Zero WS subscription and writes `chat.agents` live. The
+  // Sidebar reads `chat.agents`; the import side-effect is the only
+  // reason this symbol appears in scope.
+  import { zeroSidebar, zeroSync } from "$lib/stores/zero.svelte";
+  void zeroSidebar;
+
+  // Item #52: unread badge counts derived from Zero `read_cursors`
+  // for the current device. The Postgres trigger
+  // (`friday_blocks_increment_unread_trigger`) bumps `unread_count`
+  // on every new block; the markRead mutator resets it. Cross-device
+  // by construction — view the chat on the phone, the laptop badge
+  // clears.
+  //
+  // Falls back to `chat.unreadByAgent` (SSE-driven) for the brief
+  // window before Zero finishes its initial sync OR for agents that
+  // don't have a read_cursors row yet (a freshly-installed device
+  // hasn't visited them; the SSE-driven count is the cold-start
+  // signal until the user opens the chat once and markRead fires).
+  const unreadByAgent = $derived.by<Record<string, number>>(() => {
+    const out: Record<string, number> = { ...chat.unreadByAgent };
+    const did = zeroSync.currentDeviceId;
+    if (!did) return out;
+    for (const row of zeroSync.readCursors) {
+      if (row.device_id !== did) continue;
+      out[row.agent_name] = row.unread_count;
+    }
+    return out;
+  });
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
@@ -29,34 +58,9 @@
   // "friday" is the orchestrator's pinned name and the default for `/`.
   let activeAgent = $derived(routeAgent || "friday");
 
-  async function loadAgents() {
-    try {
-      const r = await fetch("/api/agents");
-      if (!r.ok) return;
-      chat.agents = (await r.json()) as AgentInfo[];
-    } catch {
-      // ignore
-    }
-  }
-
-  // F2-A: SSE drives the sidebar (lifecycle / status / message events
-  // update chat.agents inline), but a periodic /api/agents poll
-  // self-heals any missed event (cross-tab divergence, reconnect gap,
-  // tab hidden during a flurry). 30s default; overridable via
-  // FRIDAY_AGENTS_POLL_MS for power users with a custom build.
-  const POLL_MS = (() => {
-    const env = (
-      import.meta as unknown as { env?: Record<string, string | undefined> }
-    ).env;
-    const raw = env?.PUBLIC_FRIDAY_AGENTS_POLL_MS;
-    const n = raw ? Number(raw) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : 30_000;
-  })();
-  onMount(() => {
-    void loadAgents();
-    const id = setInterval(() => void loadAgents(), POLL_MS);
-    return () => clearInterval(id);
-  });
+  // Zero writes `chat.agents` live (ADR-024); the REST poll path that
+  // used to back this in the SSE+REST era is retired. No onMount-driven
+  // poll here.
 
   function hrefFor(name: string, type: string): string {
     return type === "orchestrator" ? "/" : `/sessions/${name}`;
@@ -417,11 +421,11 @@
         </span>
         <span class="name">{a.name}</span>
       {/if}
-      {#if (chat.unreadByAgent[a.name] ?? 0) > 0}
+      {#if (unreadByAgent[a.name] ?? 0) > 0}
         <span
           class="unread"
-          aria-label={`${chat.unreadByAgent[a.name]} unread`}>
-          {chat.unreadByAgent[a.name]}
+          aria-label={`${unreadByAgent[a.name]} unread`}>
+          {unreadByAgent[a.name]}
         </span>
       {/if}
     </button>

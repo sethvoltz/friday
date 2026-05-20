@@ -4,7 +4,11 @@ import { daemonGet } from "$lib/server/daemon";
 import type { Ticket } from "@friday/shared/services";
 
 export interface TicketComment {
-  id: number;
+  // Phase 4.4 flipped ticket_comments.id from bigserial to text (UUID)
+  // so the Zero mutator can pass the PK at INSERT time. The daemon's
+  // REST response surfaces the same string id; coerce on the way in
+  // if any legacy numeric ids ever leak.
+  id: string;
   author: string;
   body: string;
   ts: number;

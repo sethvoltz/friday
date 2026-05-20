@@ -141,7 +141,89 @@ friday app install ~/path/to/my-app
 
 The folder must contain a `manifest.json`. Friday's apps live under `~/.friday/apps/<id>/`. See `docs/architecture.md` §Apps for the layout, and `services/daemon/src/apps/fixtures/example-app/` for a canonical minimal example.
 
-## 8. Troubleshooting
+## 8. Backup, restore, and the SQLite cutover
+
+Friday's canonical state lives in two places:
+
+1. The `friday` Postgres database (agents, blocks, tickets, mail, memory, schedules, apps, settings, read-cursors, client-devices).
+2. `~/.friday/` (config, secrets, SOUL.md, skills, memory entries on disk, evolve proposals, app folders, uploads, schedules).
+
+`friday backup` packs both into a single portable `.tar.gz`. `friday restore` is the inverse.
+
+### Routine backup
+
+```bash
+# Default output: ~/.friday/backups/<timestamp>.tar.gz
+friday backup
+
+# Or pick a path:
+friday backup /path/to/backup.tar.gz
+```
+
+Contents (per the bundle's `manifest.json`):
+
+- `postgres.dump` — `pg_dump -Fc` of the `friday` database.
+- `.env`, `SOUL.md`, `config.json` — top-level configuration.
+- `skills/`, `memory/entries/`, `evolve/proposals/`, `apps/`, `schedules/`, `uploads/` — filesystem state.
+
+Excludes by design: `workspaces/` (rebuildable git worktrees), `logs/`, `health.json`, `usage.jsonl`, `zero/` (zero-cache's replica, rebuilt from Postgres logical replication on next start), `state/` (tied to the running supervisor).
+
+The bundle write is atomic — stages in a tempdir, single `tar -czf` to `<path>.tmp`, then renames to the final name.
+
+### Restore
+
+```bash
+friday stop daemon
+friday stop zero-cache
+friday restore ~/path/to/backup.tar.gz [--force]
+friday start daemon
+```
+
+`friday restore` refuses if the daemon or zero-cache is running (both hold connections to the friday database / replication slot). It refuses to overwrite a non-empty `friday` database unless `--force` is passed.
+
+Sequence:
+
+1. Validate the bundle (checksum of `postgres.dump` matches the manifest).
+2. Drop any zero-cache logical replication slots — the daemon and zero-cache re-create them on next start.
+3. `DROP DATABASE friday; CREATE DATABASE friday OWNER friday;`.
+4. Restore filesystem.
+5. Run `pg_restore` against the `friday` role via `DATABASE_URL` so restored objects end up correctly owned.
+6. Re-apply pending migrations.
+7. Run `friday doctor` for a readiness check.
+
+### One-time SQLite → Postgres cutover
+
+Existing users coming from the pre-Postgres SQLite era migrate with two one-shot commands. The path is non-interactive and idempotent against partial runs:
+
+```bash
+# 1. Quiesce Friday.
+friday stop
+
+# 2. Preserve the old SQLite as a sidecar (the export reads this exact path
+#    by default; pass --source if you stored it elsewhere).
+mv ~/.friday/db.sqlite ~/.friday/db.sqlite.pre-postgres.bak
+
+# 3. Export the SQLite contents to a portable JSON+filesystem bundle.
+friday export-legacy-sqlite ~/legacy.bundle.tar.gz
+
+# 4. Provision Postgres + the friday role + schema.
+friday setup
+
+# 5. Restore the legacy bundle into the empty Postgres database.
+friday restore ~/legacy.bundle.tar.gz
+
+# 6. Bring Friday back up + verify.
+friday start
+friday doctor
+```
+
+The export writes one NDJSON file per table under `rows/<table>.ndjson`, applies the column conversions Postgres needs (integer-ms timestamps → ISO strings; SQLite text JSON → object literals), filters out streaming-only blocks (in-flight bytes at the moment the daemon was stopped), and skips the retired `turns` table (ADR-016). The bundle's `manifest.json` carries per-table SHA-256 so the restore side verifies completeness before INSERTing.
+
+`friday restore` auto-detects the bundle type from `manifest.bundleType` (`pg_dump` from `friday backup`, `legacy_sqlite` from `friday export-legacy-sqlite`) and dispatches accordingly.
+
+If the export errors on a column you don't recognize, check the source SQLite schema (`sqlite3 ~/.friday/db.sqlite.pre-postgres.bak ".schema <table>"`) and the column maps in `packages/cli/src/commands/export-legacy-sqlite.ts` (`TIMESTAMP_COLUMNS`, `JSON_COLUMNS`). The cutover happens once per user, so a one-off schema patch is the expected friction point.
+
+## 9. Troubleshooting
 
 | Symptom | Try |
 |---|---|
@@ -150,3 +232,5 @@ The folder must contain a `manifest.json`. Friday's apps live under `~/.friday/a
 | Dashboard shows "daemon not reachable" | Confirm daemon is running: `friday status` |
 | Tunnel won't connect | `friday doctor` then `friday logs tunnel -f` |
 | SSE drops on phone | Check Cloudflare Tunnel timeout; the daemon sends keepalives every 20s |
+| `friday restore` fails with "slot active for PID …" | A backend still holds the replication slot. `friday stop zero-cache` then retry. |
+| `friday restore` fails with "permission denied for schema drizzle" | Rare ownership mismatch after pg_restore. Drop the database manually, `friday setup`, retry. |

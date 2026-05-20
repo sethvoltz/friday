@@ -2,31 +2,24 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { asc } from "drizzle-orm";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
-// DATA_DIR is frozen at @friday/shared module-load time. Set it before any
-// import, then reuse the same DB across tests and clear rows in between.
-
-const dataDir = mkdtempSync(join(tmpdir(), "friday-data-"));
-process.env.FRIDAY_DATA_DIR = dataDir;
-
+let handle: TestDbHandle;
 let projectsRoot: string;
 
 beforeAll(async () => {
-  const { runMigrations } = await import("@friday/shared");
-  runMigrations();
+  handle = await createTestDb({ label: "jsonl_recovery" });
 });
 
 afterAll(async () => {
-  const { closeDb } = await import("@friday/shared");
-  closeDb();
-  rmSync(dataDir, { recursive: true, force: true });
+  await handle.drop();
 });
 
 beforeEach(async () => {
   projectsRoot = mkdtempSync(join(tmpdir(), "friday-home-"));
   process.env.HOME = projectsRoot;
-  const { getRawDb } = await import("@friday/shared");
-  getRawDb().prepare("DELETE FROM blocks").run();
+  await handle.truncate();
 });
 
 afterEach(() => {
@@ -47,29 +40,30 @@ function writeSessionJsonl(
   );
 }
 
-async function rawBlocks(): Promise<
-  Array<{
-    message_id: string | null;
-    block_index: number;
-    kind: string;
-    role: string;
-    content_json: string;
-    status: string;
-  }>
-> {
-  const { getRawDb } = await import("@friday/shared");
-  return getRawDb()
-    .prepare(
-      "SELECT message_id, block_index, kind, role, content_json, status FROM blocks ORDER BY message_id, block_index",
-    )
-    .all() as Array<{
-      message_id: string | null;
-      block_index: number;
-      kind: string;
-      role: string;
-      content_json: string;
-      status: string;
-    }>;
+interface BlockRow {
+  message_id: string | null;
+  block_index: number;
+  kind: string;
+  role: string;
+  content_json: string;
+  status: string;
+}
+
+async function rawBlocks(): Promise<BlockRow[]> {
+  const rows = await getDb()
+    .select()
+    .from(schema.blocks)
+    .orderBy(asc(schema.blocks.messageId), asc(schema.blocks.blockIndex));
+  // contentJson comes back as the parsed jsonb object — stringify to match
+  // the historical assertion shape (`JSON.parse(rows[0].content_json)`).
+  return rows.map((r) => ({
+    message_id: r.messageId,
+    block_index: r.blockIndex,
+    kind: r.kind,
+    role: r.role,
+    content_json: JSON.stringify(r.contentJson),
+    status: r.status,
+  }));
 }
 
 describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
@@ -119,7 +113,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
       captured.push(e as { type?: string; inserted?: number; block_ids?: string[] }),
     );
 
-    const stats = recoverFromJsonl([
+    const stats = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     unsub();
@@ -136,10 +130,10 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
       { mid: "msg-B", idx: 0, kind: "tool_result" },
     ]);
 
-    const reload = captured.find((e) => e.type === "block_reload");
-    expect(reload).toBeDefined();
-    expect(reload!.inserted).toBe(4);
-    expect((reload!.block_ids ?? []).length).toBe(4);
+    // Phase 5: `block_reload` SSE event is retired; Zero replicates
+    // JSONL-recovery INSERTs/UPDATEs reactively to the dashboard's
+    // blocks slice. The recovery emits no SSE event.
+    expect(captured.find((e) => e.type === "block_reload")).toBeUndefined();
   });
 
   it("is idempotent: re-running inserts nothing and emits no reload event", async () => {
@@ -157,7 +151,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     ]);
 
     const { recoverFromJsonl } = await import("./jsonl-recovery.js");
-    const first = recoverFromJsonl([
+    const first = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     expect(first.inserted).toBe(1);
@@ -167,7 +161,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     const unsub = eventBus.subscribe((e) =>
       captured.push(e as { type?: string }),
     );
-    const second = recoverFromJsonl([
+    const second = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     unsub();
@@ -199,7 +193,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     ]);
 
     const { recoverFromJsonl } = await import("./jsonl-recovery.js");
-    const stats = recoverFromJsonl([
+    const stats = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     expect(stats.inserted).toBe(1);
@@ -225,7 +219,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     ]);
 
     const { recoverFromJsonl } = await import("./jsonl-recovery.js");
-    const stats = recoverFromJsonl([
+    const stats = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     expect(stats.inserted).toBe(0);
@@ -239,7 +233,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     // partial content) for the natural key (sess, msg-Z, 0). Recovery
     // should bring it to status='complete' with the JSONL's full content.
     const { insertBlock } = await import("@friday/shared/services");
-    insertBlock({
+    await insertBlock({
       blockId: "preexisting-block",
       turnId: "turn-old",
       agentName: "alpha",
@@ -267,7 +261,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     ]);
 
     const { recoverFromJsonl } = await import("./jsonl-recovery.js");
-    const stats = recoverFromJsonl([
+    const stats = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     expect(stats.updated).toBe(1);
@@ -275,9 +269,9 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
 
     const rows = await rawBlocks();
     expect(rows.length).toBe(1);
-    expect(rows[0].content_json).toBe(
-      JSON.stringify({ text: "complete content from JSONL" }),
-    );
+    expect(JSON.parse(rows[0].content_json)).toEqual({
+      text: "complete content from JSONL",
+    });
     expect(rows[0].status).toBe("complete");
   });
 
@@ -326,7 +320,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     ]);
 
     const { recoverFromJsonl } = await import("./jsonl-recovery.js");
-    const stats = recoverFromJsonl([
+    const stats = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     expect(stats.inserted).toBe(2); // tool_use + tool_result
@@ -407,7 +401,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     ]);
 
     const { recoverFromJsonl } = await import("./jsonl-recovery.js");
-    const stats = recoverFromJsonl([
+    const stats = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     expect(stats.inserted).toBe(4); // thinking + text + tool_use + tool_result
@@ -450,7 +444,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
 
     // Pre-write the row the live IPC would have produced: tool_use at
     // block_index=1 (after a hypothetical thinking block at 0).
-    insertBlock({
+    await insertBlock({
       blockId: "live-tu",
       turnId: "t-live",
       agentName: "alpha",
@@ -489,7 +483,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     ]);
 
     const { recoverFromJsonl } = await import("./jsonl-recovery.js");
-    const stats = recoverFromJsonl([
+    const stats = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     // Content matches → skipped, no duplicate inserted.
@@ -515,7 +509,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     const { insertBlock } = await import("@friday/shared/services");
 
     // Pre-write the live IPC row: text at block_index=1.
-    insertBlock({
+    await insertBlock({
       blockId: "live-text",
       turnId: "t-live-text",
       agentName: "alpha",
@@ -543,7 +537,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     ]);
 
     const { recoverFromJsonl } = await import("./jsonl-recovery.js");
-    const stats = recoverFromJsonl([
+    const stats = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     // Live row matches by (session, message_id, kind) regardless of
@@ -578,12 +572,12 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     ]);
 
     const { recoverFromJsonl } = await import("./jsonl-recovery.js");
-    const first = recoverFromJsonl([
+    const first = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     expect(first.inserted).toBe(1);
 
-    const second = recoverFromJsonl([
+    const second = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
     // Same content → skipped, not duplicated.

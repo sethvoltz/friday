@@ -38,7 +38,7 @@
 
 ## Modes
 
-- **Production** (no flag): runs the built artifacts (`node dist/index.js` for the daemon, `node build/index.js` for the dashboard). Run `pnpm build` first.
+- **Production** (no flag): runs the built artifacts (`node dist/index.js` for the daemon, `node server-entry.mjs` for the dashboard — a custom adapter-node wrapper that adds the `/api/sync` WS reverse-proxy to zero-cache). Run `pnpm build` first.
 - **Dev** (`--dev`): runs `tsx watch` for the daemon and `vite dev` for the dashboard. Hot reload, slower startup, expects source on disk.
 
 ## Data location
@@ -47,20 +47,24 @@ Everything lives at `~/.friday/`:
 
 ```
 ~/.friday/
-├── db.sqlite              SQLite + WAL — the source of truth for app state
+├── .env                   Secrets (DATABASE_URL, ZERO_AUTH_SECRET, LINEAR_API_KEY, etc.)
 ├── config.json            Settings + MCP server config
-├── .env                   Secrets (LINEAR_API_KEY, etc.)
 ├── SOUL.md                Your editable identity layer
 ├── skills/*.md            User-additive slash skills
 ├── uploads/<bucket>/      Content-addressed attachments
-├── memory/entries/*.md    Memory entries (mirrored to memory_entries table)
+├── memory/entries/*.md    Memory entries (mirrored to memory_entries Postgres table)
 ├── evolve/proposals/*.md  Evolve proposals
 ├── apps/<id>/             Installed Friday Apps (ADR-021)
+├── schedules/             Scheduled-agent worktrees
 ├── workspaces/<name>/     Builder git worktrees
-├── logs/{daemon,dashboard}.jsonl   Structured logs (rotated at 1 MiB)
+├── backups/<ts>.tar.gz    Output of `friday backup` (gitignored)
+├── zero/replica.db        zero-cache's local replica (rebuilt from PG logical replication)
+├── logs/{daemon,dashboard,zero-cache}.jsonl   Structured logs (rotated at 1 MiB)
 ├── usage.jsonl            Per-turn usage records
 └── health.json            Daemon heartbeat (refreshed every 30s)
 ```
+
+Canonical persistence lives in the **`friday` Postgres database** (host-managed via `brew services start postgresql@18`), not `~/.friday/`. The directory above carries config, secrets, and content-addressed file blobs; everything else (agents, blocks, tickets, mail, memory, schedules, apps, settings, read-cursors, client-devices) is in Postgres. See `docs/architecture.md` and ADR-023 for the topology.
 
 Override the location with `FRIDAY_DATA_DIR=$HOME/.friday-v2 friday start`.
 

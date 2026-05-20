@@ -1,1 +1,0 @@
-ALTER TABLE `mail` ADD `priority` text DEFAULT 'normal' NOT NULL;

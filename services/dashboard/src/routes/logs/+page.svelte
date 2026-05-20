@@ -1,7 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
-  let active = $state<"daemon" | "dashboard">("daemon");
+  // Order matches `friday status` so operators see the same column
+  // order in both surfaces. `tunnel` is cloudflared's plain-text log
+  // (everything else is JSONL); `fmtLine` falls back to the raw line
+  // on a parse failure so the mixed-format case still renders.
+  type LogService = "daemon" | "dashboard" | "zero-cache" | "tunnel";
+  const SERVICES: LogService[] = ["daemon", "dashboard", "zero-cache", "tunnel"];
+  let active = $state<LogService>("daemon");
   let lines = $state<string[]>([]);
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   let scrollEl: HTMLElement | undefined = $state();
@@ -33,17 +39,42 @@
     void poll();
   });
 
+  // zero-cache emits `{level:"INFO", pid, worker, workerIndex, message,
+  // ...}` with no `ts` field and uppercase level names, whereas the daemon
+  // + dashboard loggers emit `{ts, level:"info", service, event, ...}`.
+  // Normalize both shapes through one renderer: prefer `event`, fall back
+  // to `message`; lowercase the level so the CSS class selectors still
+  // hit; collapse zero-cache's noisy `pid`/`worker`/`workerIndex` into a
+  // single `[pid/worker]` token to keep one log line per row.
   function fmtLine(l: string): string {
     try {
       const o = JSON.parse(l) as Record<string, unknown>;
       const t = String(o.ts ?? "").slice(11, 19);
-      const lvl = String(o.level ?? "info");
-      const ev = String(o.event ?? "");
+      const lvl = String(o.level ?? "info").toLowerCase();
+      const ev = String(o.event ?? o.message ?? "");
+      const zeroPrefix =
+        typeof o.pid === "number" && typeof o.worker === "string"
+          ? `[${o.pid}/${o.worker}${
+              typeof o.workerIndex === "number" ? `#${o.workerIndex}` : ""
+            }] `
+          : "";
       const rest = Object.entries(o)
-        .filter(([k]) => !["ts", "level", "service", "event"].includes(k))
+        .filter(
+          ([k]) =>
+            ![
+              "ts",
+              "level",
+              "service",
+              "event",
+              "message",
+              "pid",
+              "worker",
+              "workerIndex",
+            ].includes(k),
+        )
         .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
         .join(" ");
-      return `${t} ${lvl.padEnd(5)} ${ev} ${rest}`.trim();
+      return `${t} ${lvl.padEnd(5)} ${zeroPrefix}${ev} ${rest}`.trim();
     } catch {
       return l;
     }
@@ -52,7 +83,7 @@
   function lineClass(l: string): string {
     try {
       const o = JSON.parse(l);
-      return String(o.level ?? "info");
+      return String(o.level ?? "info").toLowerCase();
     } catch {
       return "";
     }
@@ -66,10 +97,11 @@
 
 <div class="card">
   <div class="card-header">
-    <h2>{active}.jsonl</h2>
+    <h2>{active}.{active === "tunnel" ? "log" : "jsonl"}</h2>
     <div class="tabs">
-      <button class="ghost" class:active={active === "daemon"} onclick={() => (active = "daemon")}>daemon</button>
-      <button class="ghost" class:active={active === "dashboard"} onclick={() => (active = "dashboard")}>dashboard</button>
+      {#each SERVICES as svc}
+        <button class="ghost" class:active={active === svc} onclick={() => (active = svc)}>{svc}</button>
+      {/each}
     </div>
   </div>
   <div class="log-scroll" bind:this={scrollEl}>

@@ -2,8 +2,17 @@
 # its `dist/` (notably @friday/shared) must be rebuilt before any commit so
 # the artifacts in the staged source tree match the source itself.
 #
+# Scoped to `packages/**` — those are the workspaces other packages import
+# from at runtime. Building `services/dashboard` here was actively harmful:
+# vite emits hashed chunk filenames (`build/server/chunks/1-<hash>.js`),
+# and a running `node build/index.js` keeps its old manifest in memory
+# pointing at the previous hashes. A commit then silently breaks the live
+# dashboard's next route load with `ERR_MODULE_NOT_FOUND`. Services'
+# `dist/` and `build/` are gitignored anyway; they're only consumed by
+# `friday start <service>`, which builds what it needs at boot time.
+#
 # turbo's build cache makes this cheap on no-source-change commits and
 # correct on source-change commits. If you're committing a one-line README
 # fix and want to skip the build, pass `--no-verify` — but the default is
 # to never trust dist drift past a commit boundary.
-pnpm -r build
+pnpm exec turbo build --filter=./packages/**

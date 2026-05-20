@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import {
   LOGS_DIR,
   ensureFridayEnv,
+  getLogPath,
   loadConfig,
   type ServiceName,
   SERVICES,
@@ -34,10 +35,12 @@ interface ServiceSpec {
   devCmd?: string;
 }
 
+type TmuxService = "daemon" | "dashboard" | "zero-cache";
+
 function tmuxSpecs(
   repoRoot: string,
   dashboardPort: number,
-): Record<"daemon" | "dashboard", ServiceSpec> {
+): Record<TmuxService, ServiceSpec> {
   return {
     daemon: {
       cwd: join(repoRoot, "services", "daemon"),
@@ -46,14 +49,67 @@ function tmuxSpecs(
     },
     dashboard: {
       cwd: join(repoRoot, "services", "dashboard"),
-      prodCmd: "node build/index.js",
+      // Custom entrypoint that wraps adapter-node's handler with a
+      // `/api/sync` WebSocket reverse-proxy to zero-cache (see
+      // server-entry.mjs). Falls back to adapter-node's PORT env knob
+      // for the HTTP listener so the rest of the stack (vite proxies,
+      // `friday status`, the SvelteKit dev URL, Cloudflare Tunnel
+      // ingress) all agree on the configured `dashboardPort`.
+      prodCmd: `PORT=${dashboardPort} node server-entry.mjs`,
       devCmd: `exec pnpm exec vite dev --port ${dashboardPort}`,
+    },
+    // zero-cache is a stateless sidecar; no dev/prod distinction. It
+    // replicates from Postgres (ZERO_UPSTREAM_DB) into its own internal
+    // sqlite (ZERO_REPLICA_FILE) and serves WS clients on port 4848.
+    // ADR-024. Zero lives in the dashboard's deps (it's also the Zero
+    // client host), so we spawn the binary from that package — its
+    // node_modules/.bin/zero-cache is the canonical path.
+    //
+    // Restart loop: zero-cache exits with code 14 on AutoResetSignal
+    // (replica out-of-sync; needs a fresh sync from upstream). The
+    // parent runner expects us to restart it; tmux on its own doesn't,
+    // so we wrap in a `while true` loop with a short backoff. A
+    // pathological crash loop will still spin every second — that's
+    // visible in `friday attach zero-cache` so the operator can see it.
+    "zero-cache": {
+      cwd: join(repoRoot, "services", "dashboard"),
+      // Source ~/.friday/.env before exec — zero-cache reads its
+      // upstream + replica config from env vars (ZERO_UPSTREAM_DB,
+      // ZERO_REPLICA_FILE, ZERO_AUTH_SECRET, ZERO_APP_PUBLICATIONS,
+      // ZERO_MUTATE_URL), and the tmux session's parent shell may
+      // not have those exported. `set -a` auto-exports every var
+      // assigned by the source.
+      //
+      // Deploy Zero permissions before the cache boots. The schema's
+      // `definePermissions(...)` block only takes effect once it's
+      // written into upstream Postgres via `zero-deploy-permissions`;
+      // without this step zero-cache logs "No permission rules found
+      // for table 'X'. No rows will be returned." on every subscribe
+      // and the client sees empty materializations. Idempotent — the
+      // tool no-ops when the deployed hash already matches.
+      //
+      // ZERO_LOG_FORMAT=json makes every log line a structured JSON
+      // record so the dashboard's `/api/logs/zero-cache` endpoint can
+      // parse and color-code by `level` the same way it does for
+      // daemon + dashboard. The `tee -a` after `2>&1` mirrors the
+      // stream to `~/.friday/logs/zero-cache.jsonl` AND keeps it
+      // visible in the tmux pane (`friday attach zero-cache`). The
+      // file is the only durable artifact across daemon restarts —
+      // tmux scrollback is bounded and resets when the session is
+      // killed.
+      prodCmd:
+        'set -a && source ~/.friday/.env && set +a && ' +
+        'pnpm exec zero-deploy-permissions --schema-path ../../packages/shared/dist/sync/schema.js && ' +
+        `while true; do ` +
+        `ZERO_LOG_FORMAT=json pnpm exec zero-cache 2>&1 | tee -a "${getLogPath("zero-cache")}"; ` +
+        `ec=\${PIPESTATUS[0]}; echo "zero-cache exited code $ec — restarting in 1s"; sleep 1; ` +
+        `done`,
     },
   };
 }
 
 function startTmuxService(
-  service: "daemon" | "dashboard",
+  service: TmuxService,
   spec: ServiceSpec,
   mode: ServiceMode,
 ): { started: boolean; detail: string } {
@@ -158,6 +214,35 @@ function buildPackagesOrAbort(repoRoot: string): void {
 }
 
 /**
+ * Build the SvelteKit dashboard. Turbo handles incrementality — a no-op
+ * build returns in a few hundred ms when nothing under `services/dashboard/`
+ * has changed since the last build.
+ */
+function buildDashboardOrAbort(repoRoot: string): void {
+  const r = spawnSync(
+    "pnpm",
+    ["exec", "turbo", "build", "--filter=@friday/dashboard"],
+    {
+      cwd: repoRoot,
+      stdio: "inherit",
+    },
+  );
+  if (r.status !== 0) {
+    console.error(
+      pc.red(
+        "dashboard build failed — refusing to start prod-mode dashboard against a stale or missing build/.",
+      ),
+    );
+    console.error(
+      pc.dim(
+        "  fix the build errors above and re-run `friday start dashboard`.",
+      ),
+    );
+    process.exit(1);
+  }
+}
+
+/**
  * Resolve why the tunnel can't start, if anything. Returns null when ready.
  */
 function tunnelBlocker(): string | null {
@@ -226,12 +311,25 @@ export const startCommand = defineCommand({
     // Build workspace packages before launching anything that imports their
     // dist/. The tunnel doesn't need them, so skip when only tunnel is
     // queued (FIX_FORWARD 7.2).
+    //
+    // In prod mode, also build the dashboard service itself — `node
+    // server-entry.mjs` runs whatever's already in `services/dashboard/build/`,
+    // and that artifact does not auto-update when the dashboard source
+    // changes. Until this gate landed, `friday restart dashboard` after a
+    // source edit silently kept serving the previous bundle, producing the
+    // worst possible feedback loop: "the fix doesn't work" reports against
+    // changes that simply hadn't shipped. Dev mode is exempt because
+    // `vite dev` rebuilds on demand.
     const needsPackages = services.some(
       (s) => s === "daemon" || s === "dashboard",
     );
     if (needsPackages) {
       console.log(pc.dim("  · building workspace packages…"));
       buildPackagesOrAbort(repoRoot);
+    }
+    if (services.includes("dashboard") && mode === "prod") {
+      console.log(pc.dim("  · building dashboard (prod)…"));
+      buildDashboardOrAbort(repoRoot);
     }
 
     console.log(pc.green(`starting ${services.join(" + ")} in ${mode} mode`));
@@ -247,10 +345,13 @@ export const startCommand = defineCommand({
     console.log();
     console.log(pc.dim(`  daemon API     http://localhost:${cfg.daemonPort}`));
     console.log(pc.dim(`  dashboard      http://localhost:${cfg.dashboardPort}`));
+    console.log(pc.dim(`  zero-cache     ws://localhost:4848`));
     if (services.includes("tunnel") && cfg.publicUrl) {
       console.log(pc.dim(`  public URL     ${cfg.publicUrl}`));
     }
-    console.log(pc.dim(`  attach with:   friday attach <daemon|dashboard>`));
+    console.log(
+      pc.dim(`  attach with:   friday attach <daemon|dashboard|zero-cache>`),
+    );
     console.log(pc.dim(`  tunnel logs:   friday logs tunnel -f`));
   },
 });

@@ -9,32 +9,26 @@
  *
  * FIX_FORWARD 1.5 collapsed token-level streaming events (`text_delta`,
  * `thinking_*`, `tool_use_*`, `compaction_*`) into the block-level lifecycle
- * (`block_start`, `block_delta`, `block_complete`, `block_reload`). The
+ * (`block_start`, `block_delta`, `block_complete`). The
  * `connection_established` event is sent first on every new SSE connection
  * to carry the daemon's `boot_id` (FIX_FORWARD 1.6) — clients reset their
  * per-agent cursors on `boot_id` mismatch.
  */
 
-import type { AgentStatus, AgentType } from "../agents.js";
+// Phase 5: AgentType/AgentStatus imports removed — the
+// AgentLifecycleEvent/AgentStatusEvent shapes that referenced them
+// are retired.
 
 export type WireEvent =
   | TurnStartedEvent
   | TurnErrorEvent
   | TurnDoneEvent
   | AgentMessageEvent
-  | AgentLifecycleEvent
-  | AgentStatusEvent
-  | MailDeliveredEvent
-  | ScheduleFiredEvent
-  | EvolveCriticalEvent
-  | SystemBannerEvent
   | AppLifecycleEvent
   | BlockStartEvent
   | BlockDeltaEvent
   | BlockCompleteEvent
   | BlockCanceledEvent
-  | BlockMetaUpdateEvent
-  | BlockReloadEvent
   | ConnectionEstablishedEvent;
 
 export interface BaseEvent {
@@ -95,50 +89,21 @@ export interface AgentMessageEvent extends BaseEvent {
   preview?: string;
 }
 
-export interface AgentLifecycleEvent extends BaseEvent {
-  type: "agent_lifecycle";
-  agent: string;
-  agentType: AgentType;
-  /** Name of the agent that spawned this one, when known. The dashboard uses
-   * this to attach the spawn message to the spawner's chat (not the focused
-   * agent's, which may be unrelated). Undefined for top-level agents like the
-   * orchestrator and bare scratch agents created from a system command. */
-  parentName?: string;
-  event: "spawn" | "archive" | "crash" | "refork" | "complete";
-  reason?: string;
-}
+// Phase 5: `agent_lifecycle` + `agent_status` retired — Zero
+// replicates the `agents` slice (Phase 2) so the dashboard sidebar
+// reads spawn / archive / idle / working / stalled status directly
+// from the row.
 
-export interface AgentStatusEvent extends BaseEvent {
-  type: "agent_status";
-  agent: string;
-  status: AgentStatus;
-  since: number;
-}
+// Phase 5: `mail_delivered` retired — Zero replicates the `mail`
+// slice (Phase 3.6); the dashboard's reactive query picks up new
+// rows. `schedule_fired` retired — Zero replicates the `schedules`
+// slice (and the `schedule_runs` history table) so the dashboard
+// sees the row's last_run_at / last_run_id update directly.
 
-export interface MailDeliveredEvent extends BaseEvent {
-  type: "mail_delivered";
-  mail_id: number;
-  from: string;
-  to: string;
-}
-
-export interface ScheduleFiredEvent extends BaseEvent {
-  type: "schedule_fired";
-  schedule: string;
-  run_id: string;
-}
-
-export interface EvolveCriticalEvent extends BaseEvent {
-  type: "evolve_critical";
-  proposal_id: string;
-  count: number;
-}
-
-export interface SystemBannerEvent extends BaseEvent {
-  type: "system_banner";
-  level: "info" | "warn" | "error";
-  text: string;
-}
+// Phase 5: `evolve_critical` + `system_banner` retired. Both move
+// to canonical Postgres tables (`evolve_proposals` count derives
+// via Zero; `system_banners` per ADR-024 carries level + text).
+// The dashboard sidebar surfaces will be wired up in Phase 6.
 
 /**
  * Apps platform lifecycle event (FRI-78). Fires when an app is
@@ -228,41 +193,12 @@ export interface BlockCanceledEvent extends BaseEvent {
   block_id: string;
 }
 
-/**
- * Late-binding update to an already-emitted block's metadata. Today the only
- * producer is the queued-prompt drain path: a user block was inserted with
- * `status='queued'` on POST, and now (when the worker is finally ready to
- * dispatch it) the daemon stamps the real dispatch time on it and flips the
- * status to `complete`. Clients should patch their in-memory row by
- * `block_id` and re-sort if the new `ts` changes ordering.
- */
-export interface BlockMetaUpdateEvent extends BaseEvent {
-  type: "block_meta_update";
-  turn_id: string;
-  agent: string;
-  block_id: string;
-  status?: "streaming" | "complete" | "aborted" | "error" | "queued";
-  ts?: number;
-}
-
-/**
- * Emitted by the daemon when boot-time JSONL recovery (FIX_FORWARD 1.3) has
- * INSERTed or UPDATEd canonical blocks that an SSE client should refetch.
- * Carries the affected block ids so clients can decide whether to refetch
- * the focused agent's history.
- */
-export interface BlockReloadEvent extends BaseEvent {
-  type: "block_reload";
-  agent: string;
-  /** Sessions touched by the recovery scan. */
-  session_id: string;
-  block_ids: string[];
-  /** Number of net-new blocks inserted by recovery. */
-  inserted: number;
-  /** Number of existing blocks whose content was refreshed. */
-  updated: number;
-  ts: number;
-}
+// Phase 5: `block_meta_update` retired — Zero replicates the
+// underlying queued → complete UPDATEs (and aborted DELETEs) on
+// the blocks slice; the dashboard's reactive query re-sorts on
+// the new ts automatically. Same removal applies to `block_reload`,
+// which signaled JSONL-recovery INSERTs/UPDATEs that Zero now
+// replicates without an SSE-triggered REST refetch.
 
 /**
  * First SSE event the daemon emits on every new connection (FIX_FORWARD 1.6).

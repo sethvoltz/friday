@@ -175,7 +175,7 @@ export interface UsageScanOptions {
  * exceeded `spikeMultiplier × median(turn-tokens)` for that agent in the
  * window.
  */
-export function scanUsage(opts: UsageScanOptions = {}): Signal[] {
+export async function scanUsage(opts: UsageScanOptions = {}): Promise<Signal[]> {
   const sinceMs = opts.since ? Date.parse(opts.since) : 0;
   const multiplier = opts.spikeMultiplier ?? 4;
 
@@ -184,7 +184,7 @@ export function scanUsage(opts: UsageScanOptions = {}): Signal[] {
     Array<{ tokens: number; ts: string; pointer: EvidencePointer }>
   >();
 
-  for (const row of getAllUsageEntries()) {
+  for (const row of await getAllUsageEntries()) {
     const agent = row.agentName;
     if (!agent) continue;
     if (agent.startsWith(META_AGENT_PREFIX)) continue;
@@ -488,10 +488,13 @@ function cosine(a: Map<string, number>, b: Map<string, number>): number {
  * Friction scanning is async (Haiku-driven) and lives in scan-friction.ts;
  * call `scanFriction()` separately and concat the results.
  */
-export function scanAll(opts: ScanOptions & UsageScanOptions = {}): Signal[] {
-  return [
-    ...scanDaemonLog(opts),
-    ...scanUsage(opts),
-    ...scanTranscripts(opts),
-  ];
+export async function scanAll(
+  opts: ScanOptions & UsageScanOptions = {},
+): Promise<Signal[]> {
+  const [daemonSignals, usageSignals, transcriptSignals] = await Promise.all([
+    Promise.resolve(scanDaemonLog(opts)),
+    scanUsage(opts),
+    Promise.resolve(scanTranscripts(opts)),
+  ]);
+  return [...daemonSignals, ...usageSignals, ...transcriptSignals];
 }

@@ -15,6 +15,30 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
 
+    # Phase 1+ moved Friday's canonical persistence from SQLite to
+    # Postgres (ADR-023). Tests in @friday/daemon, @friday/cli, and
+    # @friday/shared use `createTestDb()` from `@friday/shared`'s
+    # `test-pg.ts` to spin up a scratch DB per file. That helper calls
+    # `pg_isready` and refuses to start without a reachable Postgres.
+    # Service container exposes `postgres:18` on the standard port; the
+    # helper builds its admin URL as `postgresql://${USER}@localhost:5432/postgres`
+    # so we set POSTGRES_USER to `runner` (GHA's default user) and use
+    # trust auth (no password) to match the local peer-auth setup.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: runner
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     strategy:
       matrix:
         node-version: [22]
@@ -28,6 +52,13 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
+
+      # The Postgres service container is reachable on TCP but the
+      # `pg_isready` binary that `test-pg.ts:assertPgReady()` shells
+      # out to lives on the runner host, not the container. Install
+      # the lightweight client-only package so the assertion finds it.
+      - name: Install postgres client (for pg_isready)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -64,3 +95,121 @@ jobs:
 
       - name: Svelte check
         run: pnpm --filter @friday/dashboard check
+
+  e2e:
+    name: E2E (sync harness)
+    runs-on: ubuntu-latest
+
+    # Item #50 multi-subprocess suites need Postgres with `wal_level=logical`
+    # so zero-cache can set up logical replication. The default `services:`
+    # block can't override the container CMD, so we launch Postgres as a
+    # manual `docker run` step that passes the wal_level + slot + sender
+    # flags as positional args.
+    #
+    # Gated separately from the unit-test `tests` job because each e2e
+    # file spawns daemon + dashboard + zero-cache subprocesses (~7s per
+    # file). The full suite is on the order of 30-60s; not worth running
+    # on every push of every unrelated PR diff.
+    strategy:
+      matrix:
+        node-version: [22]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Start Postgres (logical replication enabled)
+        run: |
+          docker run -d --name postgres \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            -e POSTGRES_USER=runner \
+            -e POSTGRES_DB=postgres \
+            -p 5432:5432 \
+            postgres:18 \
+            postgres \
+              -c wal_level=logical \
+              -c max_wal_senders=20 \
+              -c max_replication_slots=20 \
+              -c max_connections=200
+          # Wait for Postgres to accept connections.
+          for i in $(seq 1 30); do
+            if docker exec postgres pg_isready -U runner; then break; fi
+            sleep 1
+          done
+
+      - name: Install postgres client (for pg_isready)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: E2E suites (multi-subprocess)
+        run: pnpm test:e2e
+
+  playwright:
+    name: E2E (Playwright browser)
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [22]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Start Postgres (logical replication enabled)
+        run: |
+          docker run -d --name postgres \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            -e POSTGRES_USER=runner \
+            -e POSTGRES_DB=postgres \
+            -p 5432:5432 \
+            postgres:18 \
+            postgres \
+              -c wal_level=logical \
+              -c max_wal_senders=20 \
+              -c max_replication_slots=20 \
+              -c max_connections=200
+          for i in $(seq 1 30); do
+            if docker exec postgres pg_isready -U runner; then break; fi
+            sleep 1
+          done
+
+      - name: Install postgres client (for pg_isready)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Install Playwright Chromium + system deps
+        run: pnpm --filter @friday/dashboard exec playwright install --with-deps chromium
+
+      - name: Playwright suite (browser-driven round-trip)
+        run: pnpm test:playwright
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: services/dashboard/playwright-report/
+          retention-days: 7

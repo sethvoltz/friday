@@ -1,6 +1,6 @@
 /**
  * Sliding-window rate limiter backed by the `db_meta` key/value table
- * (FIX_FORWARD 5.7). Persisted to SQLite so the limiter survives daemon
+ * (FIX_FORWARD 5.7). Persisted to Postgres so the limiter survives daemon
  * and dashboard restarts — a lockout placed seconds before a crash isn't
  * forgotten on the next boot.
  *
@@ -24,13 +24,14 @@ interface BucketState {
   lockedUntil?: number;
 }
 
-function readBucket(fullKey: string): BucketState {
+async function readBucket(fullKey: string): Promise<BucketState> {
   const db = getDb();
-  const row = db
+  const rows = await db
     .select()
     .from(schema.dbMeta)
     .where(eq(schema.dbMeta.key, fullKey))
-    .get();
+    .limit(1);
+  const row = rows[0];
   if (!row) return { hits: [] };
   try {
     return JSON.parse(row.value) as BucketState;
@@ -39,15 +40,15 @@ function readBucket(fullKey: string): BucketState {
   }
 }
 
-function writeBucket(fullKey: string, b: BucketState): void {
+async function writeBucket(fullKey: string, b: BucketState): Promise<void> {
   const db = getDb();
-  db.insert(schema.dbMeta)
+  await db
+    .insert(schema.dbMeta)
     .values({ key: fullKey, value: JSON.stringify(b) })
     .onConflictDoUpdate({
       target: schema.dbMeta.key,
       set: { value: JSON.stringify(b) },
-    })
-    .run();
+    });
 }
 
 export interface ConsumeOpts {
@@ -78,10 +79,12 @@ export interface ConsumeResult {
  * when within the window AND no active lockout; otherwise returns
  * `retryAfterMs` for the soonest retry window.
  */
-export function consumeRateLimit(opts: ConsumeOpts): ConsumeResult {
+export async function consumeRateLimit(
+  opts: ConsumeOpts,
+): Promise<ConsumeResult> {
   const fullKey = KEY_PREFIX + opts.key;
   const now = Date.now();
-  const bucket = readBucket(fullKey);
+  const bucket = await readBucket(fullKey);
 
   if (bucket.lockedUntil && bucket.lockedUntil > now) {
     return {
@@ -106,31 +109,30 @@ export function consumeRateLimit(opts: ConsumeOpts): ConsumeResult {
       bucket.lockedUntil = now + opts.lockoutMs;
       retryAfterMs = opts.lockoutMs;
     }
-    writeBucket(fullKey, bucket);
+    await writeBucket(fullKey, bucket);
     return { allowed: false, remaining: 0, retryAfterMs };
   }
 
   bucket.hits.push(now);
-  writeBucket(fullKey, bucket);
+  await writeBucket(fullKey, bucket);
   return { allowed: true, remaining: opts.max - bucket.hits.length };
 }
 
 /** Drop a single key's bucket (auth success, manual override). */
-export function resetRateLimit(key: string): void {
+export async function resetRateLimit(key: string): Promise<void> {
   const db = getDb();
-  db.delete(schema.dbMeta)
-    .where(eq(schema.dbMeta.key, KEY_PREFIX + key))
-    .run();
+  await db
+    .delete(schema.dbMeta)
+    .where(eq(schema.dbMeta.key, KEY_PREFIX + key));
 }
 
 /** Drop every bucket whose logical key starts with `prefix` (e.g. wipe
  *  every `auth:*` entry when the user resets their password). */
-export function resetRateLimitPrefix(prefix: string): number {
+export async function resetRateLimitPrefix(prefix: string): Promise<number> {
   const db = getDb();
   const fullPrefix = KEY_PREFIX + prefix;
-  const result = db
+  const result = await db
     .delete(schema.dbMeta)
-    .where(like(schema.dbMeta.key, `${fullPrefix}%`))
-    .run();
-  return result.changes ?? 0;
+    .where(like(schema.dbMeta.key, `${fullPrefix}%`));
+  return result.rowCount ?? 0;
 }

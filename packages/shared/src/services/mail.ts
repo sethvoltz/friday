@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { EventEmitter } from "node:events";
 import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
@@ -37,6 +37,7 @@ export interface MailRow {
   threadId: string | null;
   body: string;
   meta: Record<string, unknown> | null;
+  /** Milliseconds since epoch. */
   ts: number;
   readAt: number | null;
   closedAt: number | null;
@@ -50,11 +51,10 @@ export interface MailRow {
  */
 export const mailBus = new EventEmitter();
 
-export function sendMail(input: SendMailInput): MailRow {
+export async function sendMail(input: SendMailInput): Promise<MailRow> {
   const db = getDb();
-  const ts = Date.now();
   const priority: MailPriority = input.priority ?? "normal";
-  const inserted = db
+  const insertedRows = await db
     .insert(schema.mail)
     .values({
       fromAgent: input.fromAgent,
@@ -64,13 +64,12 @@ export function sendMail(input: SendMailInput): MailRow {
       subject: input.subject ?? null,
       threadId: input.threadId ?? null,
       body: input.body,
-      metaJson: input.meta ? JSON.stringify(input.meta) : null,
-      ts,
+      metaJson: input.meta ?? null,
+      ts: new Date(),
       priority,
     })
-    .returning()
-    .get();
-  const row = rowToMail(inserted);
+    .returning();
+  const row = rowToMail(insertedRows[0]);
   // Push delivery. The mail-bridge subscribes to `mail:any`; the worker may
   // subscribe to its own `mail:to:<recipient>` channel. Critical mail emits
   // an extra `mail:critical:<recipient>` so 2.4's mid-turn-injection check
@@ -83,9 +82,9 @@ export function sendMail(input: SendMailInput): MailRow {
   return row;
 }
 
-export function inbox(toAgent: string): MailRow[] {
+export async function inbox(toAgent: string): Promise<MailRow[]> {
   const db = getDb();
-  const rows = db
+  const rows = await db
     .select()
     .from(schema.mail)
     .where(
@@ -94,46 +93,45 @@ export function inbox(toAgent: string): MailRow[] {
         eq(schema.mail.delivery, "pending"),
       ),
     )
-    .orderBy(asc(schema.mail.ts))
-    .all();
+    .orderBy(asc(schema.mail.ts));
   return rows.map(rowToMail);
 }
 
-export function markRead(id: number): void {
+export async function markRead(id: number): Promise<void> {
   const db = getDb();
-  db.update(schema.mail)
-    .set({ delivery: "read", readAt: Date.now() })
-    .where(eq(schema.mail.id, id))
-    .run();
+  await db
+    .update(schema.mail)
+    .set({ delivery: "read", readAt: new Date() })
+    .where(eq(schema.mail.id, id));
 }
 
-export function markDelivered(id: number): void {
+export async function markDelivered(id: number): Promise<void> {
   const db = getDb();
-  db.update(schema.mail)
+  await db
+    .update(schema.mail)
     .set({ delivery: "delivered" })
-    .where(eq(schema.mail.id, id))
-    .run();
+    .where(eq(schema.mail.id, id));
 }
 
-export function closeMail(id: number): void {
+export async function closeMail(id: number): Promise<void> {
   const db = getDb();
-  db.update(schema.mail)
-    .set({ delivery: "closed", closedAt: Date.now() })
-    .where(eq(schema.mail.id, id))
-    .run();
+  await db
+    .update(schema.mail)
+    .set({ delivery: "closed", closedAt: new Date() })
+    .where(eq(schema.mail.id, id));
 }
 
-export function getMail(id: number): MailRow | null {
+export async function getMail(id: number): Promise<MailRow | null> {
   const db = getDb();
-  const row = db
+  const rows = await db
     .select()
     .from(schema.mail)
     .where(eq(schema.mail.id, id))
-    .get();
-  return row ? rowToMail(row) : null;
+    .limit(1);
+  return rows[0] ? rowToMail(rows[0]) : null;
 }
 
-export function pendingForAgent(toAgent: string): MailRow[] {
+export async function pendingForAgent(toAgent: string): Promise<MailRow[]> {
   return inbox(toAgent);
 }
 
@@ -141,13 +139,12 @@ export function pendingForAgent(toAgent: string): MailRow[] {
  * Boot recovery: all rows still pending when the daemon last shut down need to
  * be re-emitted on the bus so workers waiting on mail get woken up.
  */
-export function replayPending(): void {
+export async function replayPending(): Promise<void> {
   const db = getDb();
-  const rows = db
+  const rows = await db
     .select()
     .from(schema.mail)
-    .where(eq(schema.mail.delivery, "pending"))
-    .all();
+    .where(eq(schema.mail.delivery, "pending"));
   for (const r of rows) {
     const row = rowToMail(r);
     mailBus.emit(`mail:to:${row.toAgent}`, row);
@@ -164,10 +161,10 @@ function rowToMail(r: typeof schema.mail.$inferSelect): MailRow {
     subject: r.subject,
     threadId: r.threadId,
     body: r.body,
-    meta: r.metaJson ? (JSON.parse(r.metaJson) as Record<string, unknown>) : null,
-    ts: r.ts,
-    readAt: r.readAt,
-    closedAt: r.closedAt,
+    meta: (r.metaJson as Record<string, unknown> | null) ?? null,
+    ts: r.ts.getTime(),
+    readAt: r.readAt ? r.readAt.getTime() : null,
+    closedAt: r.closedAt ? r.closedAt.getTime() : null,
     priority: (r.priority as MailPriority) ?? "normal",
   };
 }
