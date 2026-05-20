@@ -4,34 +4,26 @@
 
 export interface SynthesizeOpts {
   homeDir?: string | null;
+  dataDir?: string | null;
 }
 
-export function compressPath(p: string, homeDir?: string | null): string {
+export function aliasPath(
+  p: string,
+  homeDir?: string | null,
+  dataDir?: string | null,
+): string {
   if (!p) return p;
-  let path = p;
-  let prefix = "";
-  if (homeDir && (path === homeDir || path.startsWith(homeDir + "/"))) {
-    path = path.slice(homeDir.length);
-    if (path.startsWith("/")) path = path.slice(1);
-    prefix = "~/";
-  } else if (path.startsWith("/")) {
-    path = path.slice(1);
-    prefix = "/";
+  if (dataDir) {
+    const wsPrefix = dataDir + "/workspaces/";
+    if (p.startsWith(wsPrefix)) return "@workspaces/" + p.slice(wsPrefix.length);
+    const appsPrefix = dataDir + "/apps/";
+    if (p.startsWith(appsPrefix)) return "@apps/" + p.slice(appsPrefix.length);
   }
-  const segments = path.split("/").filter((s) => s.length > 0);
-  if (segments.length === 0) return prefix.replace(/\/$/, "") || p;
-  if (segments.length === 1) {
-    // No directories to compress; drop the trailing slash from the prefix.
-    return prefix.replace(/\/$/, "") + (prefix ? "/" : "") + segments[0];
+  if (homeDir && (p === homeDir || p.startsWith(homeDir + "/"))) {
+    const rest = p.slice(homeDir.length);
+    return "~" + rest;
   }
-  const last = segments[segments.length - 1];
-  const rest = segments.slice(0, -1).map(compressSegment);
-  return prefix + rest.join("/") + "/" + last;
-}
-
-function compressSegment(seg: string): string {
-  if (seg.startsWith(".") && seg.length > 1) return seg.slice(0, 2);
-  return seg.slice(0, 1);
+  return p;
 }
 
 function trunc(s: string, n = 60): string {
@@ -50,6 +42,35 @@ function asObj(v: unknown): Record<string, unknown> | undefined {
 
 function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+const FRIDAY_MCP_FRIENDLY: Record<string, string> = {
+  agent_status: "Agent status", agent_list: "List agents",
+  agent_inspect: "Inspect agent", agent_create: "Create agent",
+  agent_archive: "Archive agent",
+  linear_import: "Import from Linear", linear_create_issue: "Create Linear issue",
+  linear_update_issue: "Update Linear issue", linear_reconcile: "Reconcile Linear",
+  linear_create_relation: "Link Linear issues",
+  app_list: "List apps", app_inspect: "Inspect app", app_install: "Install app",
+  app_reload: "Reload app", app_uninstall: "Uninstall app",
+  evolve_list: "List proposals", evolve_get: "Get proposal",
+  evolve_save: "Save proposal", evolve_update: "Update proposal",
+  evolve_apply: "Apply proposal", evolve_dismiss: "Dismiss proposal",
+  evolve_scan: "Scan for proposals", evolve_enrich: "Enrich proposals",
+  evolve_cluster: "Cluster proposals",
+  echo: "Echo",
+};
+
+export function friendlyToolName(toolName: string): string {
+  const fridayMatch = /^mcp__friday-[^_]+__(.+)$/.exec(toolName);
+  if (fridayMatch) {
+    const short = fridayMatch[1];
+    if (FRIDAY_MCP_FRIENDLY[short]) return FRIDAY_MCP_FRIENDLY[short];
+    return short;
+  }
+  const mcpMatch = /^mcp__[^_]+__(.+)$/.exec(toolName);
+  if (mcpMatch) return mcpMatch[1];
+  return toolName;
 }
 
 const SCHEDULE_VERBS: Record<string, string> = {
@@ -76,24 +97,26 @@ export function synthesizeHeadline(
   const inp = asObj(input);
   if (!inp) return undefined;
   const home = opts.homeDir ?? null;
+  const data = opts.dataDir ?? null;
+  const alias = (p: string) => aliasPath(p, home, data);
 
   try {
     switch (name) {
       case "Read": {
         const p = asString(inp.file_path) ?? asString(inp.path);
-        return p ? `Reading ${compressPath(p, home)}` : undefined;
+        return p ? `Reading ${alias(p)}` : undefined;
       }
       case "Edit": {
         const p = asString(inp.file_path) ?? asString(inp.path);
-        return p ? `Editing ${compressPath(p, home)}` : undefined;
+        return p ? `Editing ${alias(p)}` : undefined;
       }
       case "Write": {
         const p = asString(inp.file_path) ?? asString(inp.path);
-        return p ? `Writing ${compressPath(p, home)}` : undefined;
+        return p ? `Writing ${alias(p)}` : undefined;
       }
       case "NotebookEdit": {
         const p = asString(inp.notebook_path) ?? asString(inp.file_path);
-        return p ? `Editing ${compressPath(p, home)}` : undefined;
+        return p ? `Editing ${alias(p)}` : undefined;
       }
       case "Glob": {
         const pat = asString(inp.pattern);
@@ -104,7 +127,7 @@ export function synthesizeHeadline(
         if (!pat) return undefined;
         const path = asString(inp.path);
         return path
-          ? `Grepping ${pat} in ${compressPath(path, home)}`
+          ? `Grepping ${pat} in ${alias(path)}`
           : `Grepping ${pat}`;
       }
       case "WebFetch": {
@@ -132,9 +155,8 @@ export function synthesizeHeadline(
 
     const mcp = /^mcp__friday-[^_]+__(.+)$/.exec(name);
     const short = mcp ? mcp[1] : null;
-    if (!short) return undefined;
 
-    switch (short) {
+    if (short) switch (short) {
       case "mail_read": {
         const id = asString(inp.id) ?? asString(inp.mailId);
         return id ? `Reading mail #${id}` : "Reading mail";
@@ -226,18 +248,25 @@ export function synthesizeHeadline(
         return "Reconciling Linear links";
     }
 
-    const sched = /^schedule_(.+)$/.exec(short);
-    if (sched) {
-      const verb = SCHEDULE_VERBS[sched[1]] ?? cap(sched[1]);
-      const n = asString(inp.name) ?? asString(inp.id);
-      return n ? `${verb} schedule ${n}` : `${verb} schedules`;
+    if (short) {
+      const sched = /^schedule_(.+)$/.exec(short);
+      if (sched) {
+        const verb = SCHEDULE_VERBS[sched[1]] ?? cap(sched[1]);
+        const n = asString(inp.name) ?? asString(inp.id);
+        return n ? `${verb} schedule ${n}` : `${verb} schedules`;
+      }
+      const ev = /^evolve_(.+)$/.exec(short);
+      if (ev) {
+        const verb = EVOLVE_VERBS[ev[1]] ?? cap(ev[1]);
+        const id = asString(inp.id) ?? asString(inp.proposalId);
+        return id ? `${verb} evolve proposal ${id}` : `${verb} evolve proposals`;
+      }
     }
-    const ev = /^evolve_(.+)$/.exec(short);
-    if (ev) {
-      const verb = EVOLVE_VERBS[ev[1]] ?? cap(ev[1]);
-      const id = asString(inp.id) ?? asString(inp.proposalId);
-      return id ? `${verb} evolve proposal ${id}` : `${verb} evolve proposals`;
-    }
+
+    const fridayMatch = name.match(/^mcp__friday-[^_]+__(.+)$/);
+    if (fridayMatch) return `Friday MCP: ${fridayMatch[1]}`;
+    const mcpMatch = name.match(/^mcp__[^_]+__(.+)$/);
+    if (mcpMatch) return `MCP: ${mcpMatch[1]}`;
   } catch {
     return undefined;
   }

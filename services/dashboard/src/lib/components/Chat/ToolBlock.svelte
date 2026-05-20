@@ -1,10 +1,13 @@
 <script lang="ts">
-  import { Wrench } from "lucide-svelte";
+  import { File, Wrench } from "lucide-svelte";
   import { page } from "$app/stores";
   import { synthesizeHeadline } from "./tool-headlines";
+  import FileDiff from "./FileDiff.svelte";
 
   interface Props {
     toolName: string;
+    /** Human-readable tool name for the pill (raw toolName stays for title/hover). */
+    friendlyName?: string;
     status: "running" | "done" | "error" | "aborted";
     input?: unknown;
     output?: string;
@@ -13,7 +16,7 @@
      *  parsed. Pretty-print if parseable; fall back to raw otherwise. */
     inputPartialJson?: string;
   }
-  let { toolName, status, input, output, inputPartialJson }: Props = $props();
+  let { toolName, friendlyName, status, input, output, inputPartialJson }: Props = $props();
 
   function fmtInput(v: unknown): string {
     if (v === undefined || v === null) return "";
@@ -26,12 +29,15 @@
   let homeDir = $derived(
     (($page.data as { homeDir?: string | null } | undefined)?.homeDir) ?? null,
   );
+  let dataDir = $derived(
+    (($page.data as { dataDir?: string | null } | undefined)?.dataDir) ?? null,
+  );
   let description = $derived.by(() => {
     if (input && typeof input === "object" && !Array.isArray(input)) {
       const d = (input as Record<string, unknown>).description;
       if (typeof d === "string" && d.trim().length > 0) return d.trim();
     }
-    const synth = synthesizeHeadline(toolName, input, { homeDir });
+    const synth = synthesizeHeadline(toolName, input, { homeDir, dataDir });
     if (typeof synth === "string" && synth.length > 0) return synth;
     return "";
   });
@@ -59,8 +65,19 @@
   // derived above falls back to `inputPartialJson`, so a running tool
   // with partial input is now expandable (it previously wasn't, because
   // canonical `input` only landed at block_complete).
+  let isFileOp = $derived(toolName === "Read" || toolName === "Write" || toolName === "Edit");
+  let showFileDiff = $derived(
+    (toolName === "Write" || toolName === "Edit") &&
+    input !== undefined && input !== null,
+  );
   let canExpand = $derived(hasInput || hasOutput);
   let open = $state(false);
+
+  function inputField(key: string): string | undefined {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+    const v = (input as Record<string, unknown>)[key];
+    return typeof v === "string" ? v : undefined;
+  }
 
   function badgeClass(s: string): string {
     if (s === "done") return "ok";
@@ -83,10 +100,16 @@
     onclick={() => canExpand && (open = !open)}
     aria-expanded={canExpand ? open : undefined}
     disabled={!canExpand}>
-    <span class="tool-icon" aria-hidden="true"><Wrench size={16} /></span>
+    <span class="tool-icon" aria-hidden="true">
+      {#if isFileOp}
+        <File size={16} />
+      {:else}
+        <Wrench size={16} />
+      {/if}
+    </span>
     {#if description}
       <span class="tool-description">{description}</span>
-      <code class="tool-name tool-name-pill" title={toolName}>{toolName}</code>
+      <code class="tool-name tool-name-pill" title={toolName}>{friendlyName ?? toolName}</code>
     {:else}
       <code class="tool-name">{toolName}</code>
     {/if}
@@ -95,7 +118,16 @@
       <span class="expand-toggle" aria-hidden="true">{open ? "−" : "+"}</span>
     {/if}
   </button>
-  {#if open && hasInput}
+  {#if showFileDiff}
+    <div class="block-section">
+      <FileDiff
+        toolName={toolName as "Write" | "Edit"}
+        filePath={inputField("file_path") ?? inputField("path")}
+        content={inputField("content")}
+        oldString={inputField("old_string")}
+        newString={inputField("new_string")} />
+    </div>
+  {:else if open && hasInput}
     <div class="block-section">
       <div class="block-label">Input</div>
       <pre class="block-pre"><code>{inputText}</code></pre>
