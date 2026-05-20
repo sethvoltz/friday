@@ -214,6 +214,35 @@ function buildPackagesOrAbort(repoRoot: string): void {
 }
 
 /**
+ * Build the SvelteKit dashboard. Turbo handles incrementality — a no-op
+ * build returns in a few hundred ms when nothing under `services/dashboard/`
+ * has changed since the last build.
+ */
+function buildDashboardOrAbort(repoRoot: string): void {
+  const r = spawnSync(
+    "pnpm",
+    ["exec", "turbo", "build", "--filter=@friday/dashboard"],
+    {
+      cwd: repoRoot,
+      stdio: "inherit",
+    },
+  );
+  if (r.status !== 0) {
+    console.error(
+      pc.red(
+        "dashboard build failed — refusing to start prod-mode dashboard against a stale or missing build/.",
+      ),
+    );
+    console.error(
+      pc.dim(
+        "  fix the build errors above and re-run `friday start dashboard`.",
+      ),
+    );
+    process.exit(1);
+  }
+}
+
+/**
  * Resolve why the tunnel can't start, if anything. Returns null when ready.
  */
 function tunnelBlocker(): string | null {
@@ -282,12 +311,25 @@ export const startCommand = defineCommand({
     // Build workspace packages before launching anything that imports their
     // dist/. The tunnel doesn't need them, so skip when only tunnel is
     // queued (FIX_FORWARD 7.2).
+    //
+    // In prod mode, also build the dashboard service itself — `node
+    // server-entry.mjs` runs whatever's already in `services/dashboard/build/`,
+    // and that artifact does not auto-update when the dashboard source
+    // changes. Until this gate landed, `friday restart dashboard` after a
+    // source edit silently kept serving the previous bundle, producing the
+    // worst possible feedback loop: "the fix doesn't work" reports against
+    // changes that simply hadn't shipped. Dev mode is exempt because
+    // `vite dev` rebuilds on demand.
     const needsPackages = services.some(
       (s) => s === "daemon" || s === "dashboard",
     );
     if (needsPackages) {
       console.log(pc.dim("  · building workspace packages…"));
       buildPackagesOrAbort(repoRoot);
+    }
+    if (services.includes("dashboard") && mode === "prod") {
+      console.log(pc.dim("  · building dashboard (prod)…"));
+      buildDashboardOrAbort(repoRoot);
     }
 
     console.log(pc.green(`starting ${services.join(" + ")} in ${mode} mode`));
