@@ -1,10 +1,12 @@
 import { defineCommand } from "citty";
 import pc from "picocolors";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import {
   ensureFridayEnv,
   HEALTH_PATH,
   loadConfig,
+  PROD_DAEMON_PORT,
+  PROD_DASHBOARD_PORT,
   SERVICES,
   type ServiceName,
 } from "@friday/shared";
@@ -12,6 +14,81 @@ import { hasSession } from "../lib/tmux.js";
 import { clearState, readState, tmuxSessionFor } from "../lib/state.js";
 import { isAlive } from "../lib/proc.js";
 import { DaemonClient } from "../lib/api.js";
+
+/** A heartbeat older than this is treated as stale (heartbeat interval
+ *  is 30s, so 60s gives one missed beat of grace before status falls
+ *  back to config-derived values). */
+const HEALTH_STALE_MS = 60_000;
+
+interface HealthSnapshot {
+  port?: number;
+  pid?: number;
+  uptimeSec?: number;
+  stale: boolean;
+  present: boolean;
+}
+
+/**
+ * Read the daemon's `health.json` and report what's there. The `port`
+ * field is the daemon's actually-bound HTTP port (added 2026-05-20);
+ * older daemons that haven't been restarted since the field landed
+ * won't have it — fall back to config in that case.
+ *
+ * Exported for tests.
+ */
+export function readHealth(): HealthSnapshot {
+  if (!existsSync(HEALTH_PATH)) {
+    return { stale: false, present: false };
+  }
+  try {
+    const raw = JSON.parse(readFileSync(HEALTH_PATH, "utf8")) as {
+      port?: number;
+      pid?: number;
+      uptimeSec?: number;
+      ts?: string;
+    };
+    const mtimeMs = statSync(HEALTH_PATH).mtimeMs;
+    const stale = Date.now() - mtimeMs > HEALTH_STALE_MS;
+    return {
+      port: typeof raw.port === "number" ? raw.port : undefined,
+      pid: typeof raw.pid === "number" ? raw.pid : undefined,
+      uptimeSec:
+        typeof raw.uptimeSec === "number" ? raw.uptimeSec : undefined,
+      stale,
+      present: true,
+    };
+  } catch {
+    return { stale: false, present: false };
+  }
+}
+
+/**
+ * Probe the dashboard at `port`. Returns the response status when the
+ * server answers within `timeoutMs`, otherwise `null` for any failure
+ * (connection refused, timeout, network error). The dashboard's root
+ * usually 200s or redirects to `/login`; anything < 500 means the
+ * process is alive and serving.
+ *
+ * Exported for tests.
+ */
+export async function probeDashboard(
+  port: number,
+  timeoutMs = 1000,
+): Promise<number | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://localhost:${port}/`, {
+      signal: controller.signal,
+      redirect: "manual",
+    });
+    return res.status;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export const statusCommand = defineCommand({
   meta: { name: "status", description: "Show daemon + dashboard status" },
@@ -56,29 +133,62 @@ export const statusCommand = defineCommand({
 
     const client = new DaemonClient();
     const reachable = await client.ping();
-    let health: Record<string, unknown> | null = null;
-    if (existsSync(HEALTH_PATH)) {
-      try {
-        health = JSON.parse(readFileSync(HEALTH_PATH, "utf8")) as Record<
-          string,
-          unknown
-        >;
-      } catch {
-        // ignore
-      }
+    const health = readHealth();
+
+    // Daemon's actually-bound port (from health.json's `port` field,
+    // written by the daemon after `startServer` returns). Stale or
+    // missing heartbeat falls back to the config-resolved value and
+    // surfaces the discrepancy.
+    const cfgDaemonPort = cfg.daemonPort ?? PROD_DAEMON_PORT;
+    let daemonPort = cfgDaemonPort;
+    let daemonPortSource = "config";
+    if (health.present && !health.stale && typeof health.port === "number") {
+      daemonPort = health.port;
+      daemonPortSource = "probed";
+    } else if (health.present && health.stale) {
+      daemonPortSource = "config — heartbeat stale";
+    } else {
+      daemonPortSource = "config — no heartbeat";
     }
 
+    // Dashboard probe — `start.ts` passes `cfg.dashboardPort ??
+    // PROD_DASHBOARD_PORT` as the PORT env. If the dashboard answered
+    // we trust that port is right; if not, fall back to the resolved
+    // value with a "(config: …)" hint.
+    const cfgDashboardPort = cfg.dashboardPort ?? PROD_DASHBOARD_PORT;
+    const dashboardStatus = await probeDashboard(cfgDashboardPort);
+    const dashboardReachable = dashboardStatus !== null && dashboardStatus < 500;
+
     console.log();
+    const daemonPortTag = daemonPortSource === "probed"
+      ? pc.dim(`(${daemonPortSource})`)
+      : pc.yellow(`(${daemonPortSource})`);
     console.log(
-      `  daemon API     ${reachable ? pc.green("reachable") : pc.red("not responding")} @ localhost:${cfg.daemonPort}`,
+      `  daemon API     ${reachable ? pc.green("reachable") : pc.red("not responding")} @ localhost:${daemonPort} ${daemonPortTag}`,
     );
-    if (health) {
-      console.log(pc.dim(`  daemon pid     ${health.pid}`));
+    if (health.present) {
+      if (health.pid !== undefined) {
+        console.log(pc.dim(`  daemon pid     ${health.pid}`));
+      }
+      if (health.uptimeSec !== undefined) {
+        console.log(
+          pc.dim(`  daemon uptime  ${formatUptime(health.uptimeSec)}`),
+        );
+      }
+    }
+    if (dashboardReachable) {
       console.log(
-        pc.dim(`  daemon uptime  ${formatUptime(Number(health.uptimeSec))}`),
+        `  dashboard      ${pc.green("up")} @ http://localhost:${cfgDashboardPort}`,
+      );
+    } else {
+      console.log(
+        `  dashboard      ${pc.red("down")} (config: http://localhost:${cfgDashboardPort})`,
       );
     }
-    console.log(`  dashboard      http://localhost:${cfg.dashboardPort}`);
+    // zero-cache is internal-only behind the dashboard's `/api/sync` WS
+    // proxy; surface a literal so the operator knows where it should be.
+    // `friday doctor` covers reachability.
+    console.log(pc.dim(`  zero-cache     ws://localhost:4848`));
   },
 });
 
