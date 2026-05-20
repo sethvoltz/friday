@@ -30,14 +30,22 @@ import {
   it,
 } from "vitest";
 import { eq, and, sql } from "drizzle-orm";
-import { getDb, type TestDbHandle } from "../index.js";
+import { getDb } from "../index.js";
 import { spawnTestSyncEnv } from "../test/sync-harness.js";
 import * as schema from "../db/schema.js";
 
-let env: { databaseUrl: string; db: TestDbHandle; cleanup(): Promise<void> };
+// Loose env shape — the trigger tests only need databaseUrl, db, and
+// cleanup. Skip the multi-subprocess parts for speed (this is a pure
+// SQL test against the migration's trigger code).
+let env: Awaited<ReturnType<typeof spawnTestSyncEnv>>;
 
 beforeAll(async () => {
-  env = await spawnTestSyncEnv({ label: "unread_trigger" });
+  env = await spawnTestSyncEnv({
+    label: "unread_trigger",
+    skipDashboard: true,
+    skipDaemon: true,
+    skipZeroCache: true,
+  });
 });
 
 afterAll(async () => {

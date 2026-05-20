@@ -29,9 +29,9 @@ import { getProposal, listProposals } from "@friday/evolve";
 import { logger } from "../log.js";
 import type { Proposal } from "@friday/evolve";
 
-function proposalToRow(
-  p: Proposal,
-): typeof schema.evolveProposals.$inferInsert {
+type EvolveProposalInsert = typeof schema.evolveProposals.$inferInsert;
+
+function proposalToRow(p: Proposal): EvolveProposalInsert {
   return {
     id: p.id,
     title: p.title,
@@ -40,9 +40,9 @@ function proposalToRow(
     clusterId: p.clusterId,
     score: p.score,
     blastRadius: p.blastRadius,
-    appliesTo: p.appliesTo as unknown as schema.evolveProposals["$inferInsert"]["appliesTo"],
-    signals:
-      p.signals as unknown as schema.evolveProposals["$inferInsert"]["signals"],
+    appliesTo:
+      p.appliesTo as unknown as EvolveProposalInsert["appliesTo"],
+    signals: p.signals as unknown as EvolveProposalInsert["signals"],
     body: p.proposedChange,
     createdBy: p.createdBy,
     createdAt: new Date(p.createdAt),

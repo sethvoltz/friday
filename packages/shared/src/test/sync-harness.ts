@@ -1,125 +1,611 @@
 /**
- * Shared e2e test harness for the Postgres + Zero sync surface
- * (item #50 in `~/.claude/plans/mellow-sparking-dusk.md`).
+ * Multi-subprocess e2e test harness for the Postgres + Zero sync surface
+ * (item #50 in `~/.claude/plans/mellow-sparking-dusk.md`,
+ * full plan at `~/.claude/plans/item-50-full-test-harness.md`).
  *
- * # What this provides today
+ * `spawnTestSyncEnv` spins up a scratch Postgres database, a `zero-cache`
+ * subprocess, a daemon subprocess, and a dashboard subprocess — each on
+ * its own free port. Returns handles for every subprocess + a
+ * `mintTestSessionCookie` helper that creates a BetterAuth session row
+ * and returns a signed session-cookie pair so test clients can hit the
+ * dashboard's auth-gated `/api/*` surface.
  *
- * - **`spawnTestSyncEnv()`**: brings up a scratch Postgres database
- *   (via `createTestDb`), runs migrations, returns a handle with
- *   `databaseUrl` and `cleanup()`. The minimal seed every e2e test
- *   needs.
- * - **`runMutatorDirect(name, args)`**: invokes a mutator body
- *   directly against the scratch DB via the shared
- *   `createMutators()` map + `zeroNodePg(schema, pool)` adapter.
- *   Exercises the same PushProcessor code path the dashboard's
- *   `/api/mutators` endpoint runs, without spinning up an HTTP
- *   listener or a Zero client. Sufficient to verify that a mutator's
- *   server-side body writes the expected row state.
+ * Lifecycle: one env per test file via beforeAll / afterAll; tests inside
+ * the file share the env and use `db.truncate()` (or write to isolated
+ * agents / unique block ids) between tests to avoid cross-pollution.
  *
- * # What this does NOT yet provide
- *
- * The plan calls for:
- *   - **Convergence suite** (write on client A → observe on client
- *     B within 1s). This requires a real `zero-cache` subprocess
- *     bridging Postgres logical replication to two Zero client
- *     instances. The harness factory below leaves the subprocess
- *     plumbing as a TODO — see the `spawnZeroCacheForTest` stub.
- *   - **Stress suite** (100 rapid `sendUserMessage` mutations,
- *     exactly-once dispatch). Same harness with a daemon subprocess
- *     in the mix; the daemon's `friday_new_pending_block` LISTEN
- *     handler is the load-bearing piece. The harness scaffolds the
- *     entrypoint but the daemon-subprocess wiring isn't built yet.
- *   - **Daemon-down / dashboard-down resilience**. Same shape but
- *     with subprocess SIGTERM mid-operation, plus boot-recovery
- *     assertions.
- *   - **Playwright live-typing** (`services/dashboard/e2e/`). Out of
- *     scope for this harness — it needs its own
- *     `playwright.config.ts` + browser-context setup.
- *
- * Build those by extending this file: add `spawnZeroCacheForTest`
- * (and `spawnDaemonForTest` / `spawnDashboardForTest`) as real
- * subprocess spawners, plumb their env + health probes, return them
- * from `spawnTestSyncEnv` alongside the existing `cleanup`. Each new
- * suite consumes the same factory.
- *
- * # Why this scope
- *
- * The full subprocess harness is a multi-hour engineering effort.
- * Shipping the scaffold + the in-process mutator path now means:
- *
- *   - Every new mutator body can be e2e-tested today (against a real
- *     scratch Postgres, not a mock).
- *   - The remaining subprocess work has a documented seam to extend.
- *   - No false-positive "test harness exists" claim that hides the
- *     gap from future audits.
+ * Subprocess spawning + readiness probing + orderly teardown is roughly
+ * 2-4 seconds per test file. e2e suites are gated behind a separate
+ * `pnpm test:e2e` script from the unit-test runner.
  */
 
+import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID, randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import * as net from "node:net";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Client } from "pg";
 import { createTestDb, type TestDbHandle } from "../db/test-pg.js";
+
+// ─────────────────────────────────────────────────────────────────────
+// Repo-root resolution. The harness lives at
+// packages/shared/src/test/sync-harness.ts → repo root is ../../../..
+// from this file. Used to locate daemon/dashboard build artifacts +
+// zero-cache binary in node_modules.
+// ─────────────────────────────────────────────────────────────────────
+
+const __dirname_local = fileURLToPath(new URL(".", import.meta.url));
+const REPO_ROOT = resolve(__dirname_local, "..", "..", "..", "..");
+const DAEMON_ENTRY = join(REPO_ROOT, "services/daemon/dist/index.js");
+const DASHBOARD_DIR = join(REPO_ROOT, "services/dashboard");
+const DASHBOARD_ENTRY = join(DASHBOARD_DIR, "server-entry.mjs");
+
+// ─────────────────────────────────────────────────────────────────────
+// Free-port allocation. listen(0) → kernel picks an unused port; close
+// immediately and reuse the number. Race-prone in theory but acceptable
+// for test isolation given vitest's --no-file-parallelism (set in the
+// e2e script).
+// ─────────────────────────────────────────────────────────────────────
+
+export async function freePort(): Promise<number> {
+  return new Promise<number>((res, rej) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on("error", rej);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      if (typeof addr === "object" && addr) {
+        const p = addr.port;
+        srv.close(() => res(p));
+      } else {
+        srv.close();
+        rej(new Error("listen(0) returned non-AddressInfo"));
+      }
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// TCP readiness probe. Polls a connect attempt every 100ms up to a
+// timeout. Used as the "is the subprocess listening yet" gate for every
+// spawner — simpler and more general than parsing log lines.
+// ─────────────────────────────────────────────────────────────────────
+
+export async function waitForTcp(
+  port: number,
+  opts: { timeoutMs?: number; host?: string } = {},
+): Promise<void> {
+  const host = opts.host ?? "127.0.0.1";
+  const timeoutMs = opts.timeoutMs ?? 15_000;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ok = await new Promise<boolean>((res) => {
+      const sock = net.connect(port, host);
+      const cleanup = (v: boolean) => {
+        sock.removeAllListeners();
+        sock.destroy();
+        res(v);
+      };
+      sock.once("connect", () => cleanup(true));
+      sock.once("error", () => cleanup(false));
+      setTimeout(() => cleanup(false), 500);
+    });
+    if (ok) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(
+    `waitForTcp: ${host}:${port} did not accept connections within ${timeoutMs}ms`,
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Subprocess spawners. Each returns { child, port, ... } + signals the
+// `child` exited on cleanup. SIGTERM first; SIGKILL after 1.5s if the
+// child hasn't died.
+// ─────────────────────────────────────────────────────────────────────
+
+async function sigtermThenSigkill(
+  child: ChildProcess,
+  ms = 1_500,
+): Promise<void> {
+  if (child.exitCode !== null || child.killed) return;
+  child.kill("SIGTERM");
+  await Promise.race([
+    new Promise<void>((res) => child.once("exit", () => res())),
+    new Promise<void>((res) =>
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already dead */
+        }
+        res();
+      }, ms),
+    ),
+  ]);
+}
+
+export interface ZeroCacheHandle {
+  port: number;
+  child: ChildProcess;
+  replicaFile: string;
+  /** Resolves when zero-cache has logged its first "Replicating" event
+   *  OR when its TCP port accepts a connection — whichever comes first. */
+  ready: Promise<void>;
+}
+
+export interface SpawnZeroCacheOpts {
+  databaseUrl: string;
+  authSecret: string;
+  adminPassword: string;
+  /** Optional explicit port; defaults to a free port. */
+  port?: number;
+  /** Tmpdir parent for the replica file. Defaults to os.tmpdir(). */
+  tmpRoot?: string;
+}
+
+export async function spawnZeroCacheForTest(
+  opts: SpawnZeroCacheOpts,
+): Promise<ZeroCacheHandle> {
+  const port = opts.port ?? (await freePort());
+  // Each test gets its own SQLite replica file — sharing one across
+  // tests would let stale logical-replication state leak between
+  // scratch databases.
+  const tmpDir = mkdtempSync(join(opts.tmpRoot ?? tmpdir(), "zero-cache-"));
+  const replicaFile = join(tmpDir, "replica.db");
+  const env = {
+    ...process.env,
+    ZERO_UPSTREAM_DB: opts.databaseUrl,
+    ZERO_REPLICA_FILE: replicaFile,
+    ZERO_AUTH_SECRET: opts.authSecret,
+    ZERO_ADMIN_PASSWORD: opts.adminPassword,
+    ZERO_APP_PUBLICATIONS: "friday_pub",
+    ZERO_LOG_LEVEL: "warn",
+    ZERO_PORT: String(port),
+  };
+  const child = spawn("pnpm", ["exec", "zero-cache"], {
+    cwd: DASHBOARD_DIR,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  // Drain output silently — keep child writable, no-op consumer.
+  child.stdout?.on("data", () => {});
+  child.stderr?.on("data", () => {});
+  const ready = waitForTcp(port, { timeoutMs: 20_000 });
+  return { port, child, replicaFile, ready };
+}
+
+export interface DaemonHandle {
+  port: number;
+  child: ChildProcess;
+  /** Per-test FRIDAY_DATA_DIR — config.json + secrets are scoped here. */
+  dataDir: string;
+  ready: Promise<void>;
+}
+
+export interface SpawnDaemonOpts {
+  databaseUrl: string;
+  /** Port the daemon listens on. */
+  port?: number;
+  /** Tmpdir parent for FRIDAY_DATA_DIR. */
+  tmpRoot?: string;
+  /** Pre-generated daemon secret (so the dashboard subprocess can
+   *  read the same value). If omitted a fresh secret is generated. */
+  daemonSecret?: string;
+  /** Existing data dir to reuse (e.g., across a daemon-down restart
+   *  test where the daemon's state must persist). When omitted a fresh
+   *  one is created. */
+  dataDir?: string;
+}
+
+export async function spawnDaemonForTest(
+  opts: SpawnDaemonOpts,
+): Promise<DaemonHandle> {
+  const port = opts.port ?? (await freePort());
+  const dataDir =
+    opts.dataDir ??
+    mkdtempSync(join(opts.tmpRoot ?? tmpdir(), "friday-daemon-"));
+  mkdirSync(join(dataDir, "logs"), { recursive: true });
+  // Write the daemon config: pin daemonPort + dashboardPort (we'll
+  // overwrite dashboardPort in the dashboard spawner if needed).
+  writeFileSync(
+    join(dataDir, "config.json"),
+    JSON.stringify({ daemonPort: port, dashboardPort: 0 }, null, 2),
+  );
+  // Daemon secret — random per-test unless provided. The dashboard
+  // subprocess reads the same file via FRIDAY_DATA_DIR.
+  if (!opts.daemonSecret) {
+    writeFileSync(
+      join(dataDir, ".daemon-secret"),
+      randomBytes(32).toString("hex"),
+      { mode: 0o600 },
+    );
+  } else {
+    writeFileSync(join(dataDir, ".daemon-secret"), opts.daemonSecret, {
+      mode: 0o600,
+    });
+  }
+  const env = {
+    ...process.env,
+    FRIDAY_DATA_DIR: dataDir,
+    DATABASE_URL: opts.databaseUrl,
+  };
+  const child = spawn("node", [DAEMON_ENTRY], {
+    cwd: REPO_ROOT,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", () => {});
+  child.stderr?.on("data", () => {});
+  const ready = waitForTcp(port, { timeoutMs: 15_000 });
+  return { port, child, dataDir, ready };
+}
+
+export interface DashboardHandle {
+  port: number;
+  child: ChildProcess;
+  ready: Promise<void>;
+}
+
+export interface SpawnDashboardOpts {
+  databaseUrl: string;
+  zeroCachePort: number;
+  daemonPort: number;
+  authSecret: string;
+  betterAuthSecret: string;
+  daemonSecret: string;
+  dataDir: string;
+  port?: number;
+}
+
+export async function spawnDashboardForTest(
+  opts: SpawnDashboardOpts,
+): Promise<DashboardHandle> {
+  const port = opts.port ?? (await freePort());
+  const env = {
+    ...process.env,
+    PORT: String(port),
+    HOST: "127.0.0.1",
+    DATABASE_URL: opts.databaseUrl,
+    ZERO_AUTH_SECRET: opts.authSecret,
+    ZERO_ADMIN_PASSWORD: "test-admin-password",
+    BETTER_AUTH_SECRET: opts.betterAuthSecret,
+    BETTER_AUTH_URL: `http://127.0.0.1:${port}`,
+    ZERO_CACHE_HOST: "127.0.0.1",
+    ZERO_CACHE_PORT: String(opts.zeroCachePort),
+    ZERO_MUTATE_URL: `http://127.0.0.1:${port}/api/mutators`,
+    FRIDAY_DATA_DIR: opts.dataDir,
+    NODE_ENV: "production",
+  };
+  const child = spawn("node", [DASHBOARD_ENTRY], {
+    cwd: DASHBOARD_DIR,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  // FRIDAY_TEST_DEBUG=1 surfaces subprocess output to the test runner's
+  // stderr so debugging spawner / dashboard boot issues doesn't require
+  // editing the harness. Default silent so e2e log noise stays low.
+  if (process.env.FRIDAY_TEST_DEBUG === "1") {
+    child.stdout?.on("data", (d) => process.stderr.write(`[dash stdout] ${d}`));
+    child.stderr?.on("data", (d) => process.stderr.write(`[dash stderr] ${d}`));
+  } else {
+    child.stdout?.on("data", () => {});
+    child.stderr?.on("data", () => {});
+  }
+  const ready = waitForTcp(port, { timeoutMs: 15_000 });
+  return { port, child, ready };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Auth-bypass helper. The dashboard's `hooks.server.ts` gates every
+// /api/* call on a valid BetterAuth session cookie. Hand-signing the
+// cookie is brittle (better-call URL-encodes the wire format, signs
+// with WebCrypto, validates with a 44-char `endsWith("=")` length
+// check, and rejects on any mismatch). Instead we go through the real
+// HTTP sign-in flow: seed a user + credential-account row in the
+// scratch DB, then POST `/api/auth/sign-in/email` against the live
+// dashboard subprocess. The returned `Set-Cookie` header is by
+// definition a cookie the same BetterAuth instance accepts.
+// ─────────────────────────────────────────────────────────────────────
+
+const TEST_PASSWORD = "test-password-123";
+
+export interface TestSessionCookie {
+  /** The full HTTP Cookie header value to attach to test requests. */
+  cookie: string;
+  /** User id of the test account (FK target for any test data rows). */
+  userId: string;
+  /** Device id baked into the friday-device-id cookie. */
+  deviceId: string;
+  /** Session token (the un-signed token, useful for direct DB joins). */
+  sessionToken: string;
+}
+
+/**
+ * BetterAuth's scrypt hash — must match `@better-auth/utils/password`
+ * exactly so the dashboard's sign-in path verifies the seeded password.
+ * Cribbed from `@better-auth/utils@0.4.0/dist/password.node.mjs` —
+ * N=16384, r=16, p=1, dkLen=64, hex(salt) + ":" + hex(key).
+ */
+async function hashBetterAuthPassword(password: string): Promise<string> {
+  const { scrypt, randomBytes } = await import("node:crypto");
+  const salt = randomBytes(16).toString("hex");
+  const key = await new Promise<Buffer>((resolve, reject) => {
+    scrypt(
+      password.normalize("NFKC"),
+      salt,
+      64,
+      { N: 16384, r: 16, p: 1, maxmem: 128 * 16384 * 16 * 2 },
+      (err, derived) => (err ? reject(err) : resolve(derived as Buffer)),
+    );
+  });
+  return `${salt}:${key.toString("hex")}`;
+}
+
+export interface MintTestSessionOpts {
+  databaseUrl: string;
+  /** Dashboard HTTP origin (e.g. http://127.0.0.1:50905). The sign-in
+   *  POST round-trips through this so BetterAuth produces the cookie. */
+  dashboardBase: string;
+  /** Email of the test user; same email reuses the existing user row. */
+  email?: string;
+  /** Display name. */
+  name?: string;
+}
+
+export async function mintTestSessionCookie(
+  opts: MintTestSessionOpts,
+): Promise<TestSessionCookie> {
+  // BetterAuth validates email with `z.email()` which rejects host-only
+  // addresses (`foo@local`), so use a fully-qualified test address.
+  const email = opts.email ?? "e2e-test@example.com";
+  const name = opts.name ?? "E2E Test";
+  const c = new Client({ connectionString: opts.databaseUrl });
+  await c.connect();
+  let persistedUserId: string;
+  try {
+    // Upsert the user row by email — reuse across tests in the same env
+    // so a multi-context test (e.g. convergence) sees the same userId
+    // on both clients without coordinating.
+    const now = new Date();
+    const userRes = await c.query<{ id: string }>(
+      `INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, true, $4, $4)
+       ON CONFLICT (email) DO UPDATE SET "updatedAt" = $4
+       RETURNING id`,
+      [randomUUID(), name, email, now],
+    );
+    persistedUserId = userRes.rows[0]!.id;
+    // Seed the credential account so the email/password sign-in path
+    // succeeds. BetterAuth stores the password hash on the `account`
+    // row with `providerId='credential'` and `accountId=<userId>`. The
+    // schema has no unique constraint covering (providerId, accountId),
+    // so DELETE-then-INSERT instead of ON CONFLICT.
+    const passwordHash = await hashBetterAuthPassword(TEST_PASSWORD);
+    await c.query(
+      `DELETE FROM "account" WHERE "providerId" = 'credential' AND "userId" = $1`,
+      [persistedUserId],
+    );
+    await c.query(
+      `INSERT INTO "account"
+         (id, "accountId", "providerId", "userId", password, "createdAt", "updatedAt")
+       VALUES ($1, $2, 'credential', $3, $4, $5, $5)`,
+      [randomUUID(), persistedUserId, persistedUserId, passwordHash, now],
+    );
+  } finally {
+    await c.end();
+  }
+
+  // Sign in via the dashboard's BetterAuth HTTP handler — this produces
+  // a Set-Cookie header that the same BetterAuth instance will accept
+  // on subsequent requests. Origin matches BETTER_AUTH_URL (set by the
+  // dashboard spawner) so the CSRF gate passes.
+  const signInRes = await fetch(`${opts.dashboardBase}/api/auth/sign-in/email`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: opts.dashboardBase,
+    },
+    body: JSON.stringify({ email, password: TEST_PASSWORD, rememberMe: true }),
+  });
+  if (!signInRes.ok) {
+    const body = await signInRes.text();
+    throw new Error(
+      `mintTestSessionCookie: sign-in failed ${signInRes.status} ${body}`,
+    );
+  }
+  // adapter-node merges Set-Cookie headers into a single comma-joined
+  // string when accessed via `headers.get`, but `getSetCookie()` (Node
+  // 18.14+ / undici) preserves the array. Either way, parse out the
+  // name=value pairs and rebuild as a Cookie header.
+  const setCookies = signInRes.headers.getSetCookie
+    ? signInRes.headers.getSetCookie()
+    : [signInRes.headers.get("set-cookie") ?? ""];
+  const cookiePairs: string[] = [];
+  let sessionToken = "";
+  for (const sc of setCookies) {
+    if (!sc) continue;
+    const firstSemi = sc.indexOf(";");
+    const pair = firstSemi === -1 ? sc : sc.slice(0, firstSemi);
+    cookiePairs.push(pair);
+    const eq = pair.indexOf("=");
+    if (eq > 0) {
+      const k = pair.slice(0, eq).trim();
+      if (k.endsWith(".session_token")) {
+        // value is URL-encoded `token.signature` — decode and split on
+        // the LAST `.` to recover the raw token.
+        const decoded = decodeURIComponent(pair.slice(eq + 1));
+        const lastDot = decoded.lastIndexOf(".");
+        sessionToken = lastDot >= 0 ? decoded.slice(0, lastDot) : decoded;
+      }
+    }
+  }
+  // Stamp a friday-device-id cookie alongside — tests that mint a JWT
+  // via /api/sync/refresh pull this from the cookie jar, so harness
+  // callers shouldn't have to remember to add it.
+  const deviceId = randomUUID();
+  cookiePairs.push(`friday-device-id=${deviceId}`);
+  return {
+    cookie: cookiePairs.join("; "),
+    userId: persistedUserId,
+    deviceId,
+    sessionToken,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// spawnTestSyncEnv: the composed factory. The previous scaffold only
+// gave callers a scratch DB; this version returns a full multi-process
+// environment ready for e2e assertions.
+// ─────────────────────────────────────────────────────────────────────
 
 export interface SyncEnv {
   databaseUrl: string;
-  /** Scratch DB handle — exposes `.truncate()` and `.drop()` for
-   *  per-test isolation. The full subprocess harness future-extends
-   *  this interface with `daemon`, `dashboard`, `zeroCache` handles. */
   db: TestDbHandle;
-  /** Tear down: drops the scratch database. Future-extends to SIGTERM
-   *  every spawned subprocess. */
+  daemon: DaemonHandle;
+  dashboard: DashboardHandle;
+  zeroCache: ZeroCacheHandle;
+  betterAuthSecret: string;
+  zeroAuthSecret: string;
+  daemonSecret: string;
+  /** Mint a signed session cookie for hitting /api/* on the dashboard.
+   *  Each call returns a fresh sessionId; pass `email` to reuse a user. */
+  mintCookie: (opts?: {
+    email?: string;
+    name?: string;
+  }) => Promise<TestSessionCookie>;
   cleanup(): Promise<void>;
 }
 
 export interface SpawnEnvOpts {
-  /** Optional label appended to the scratch DB name for debuggability. */
   label?: string;
+  /** Skip the dashboard subprocess — used by daemon-only stress tests. */
+  skipDashboard?: boolean;
+  /** Skip the daemon subprocess — used by dashboard-only tests. */
+  skipDaemon?: boolean;
+  /** Skip zero-cache — used when the test only needs the scratch DB. */
+  skipZeroCache?: boolean;
 }
 
 export async function spawnTestSyncEnv(
   opts: SpawnEnvOpts = {},
 ): Promise<SyncEnv> {
-  const db = await createTestDb({ label: opts.label ?? "sync_harness" });
+  const db = await createTestDb({ label: opts.label ?? "sync_env" });
+  const databaseUrl = db.databaseUrl;
+  const betterAuthSecret = randomBytes(32).toString("hex");
+  const zeroAuthSecret = randomBytes(32).toString("hex");
+  const daemonSecret = randomBytes(32).toString("hex");
+  // Set this so the friday_pub publication exists for zero-cache to
+  // bind to. createTestDb ran migrations but didn't create the
+  // publication. CREATE PUBLICATION FOR ALL TABLES requires superuser;
+  // the friday role doesn't have it locally, so use the test runner's
+  // user (which CREATE'd the DB and is its owner). Skipped when the
+  // caller opts out of zero-cache (e.g., pure SQL trigger tests).
+  if (!opts.skipZeroCache) {
+    const admin = new Client({ connectionString: databaseUrl });
+    await admin.connect();
+    try {
+      await admin.query("CREATE PUBLICATION friday_pub FOR ALL TABLES");
+    } finally {
+      await admin.end();
+    }
+  }
+
+  const zeroCachePort = await freePort();
+  const daemonPort = await freePort();
+  const dashboardPort = await freePort();
+
+  const zeroCache = opts.skipZeroCache
+    ? (null as unknown as ZeroCacheHandle)
+    : await spawnZeroCacheForTest({
+        databaseUrl,
+        authSecret: zeroAuthSecret,
+        adminPassword: "test-admin-password",
+        port: zeroCachePort,
+      });
+  const daemon = opts.skipDaemon
+    ? (null as unknown as DaemonHandle)
+    : await spawnDaemonForTest({
+        databaseUrl,
+        port: daemonPort,
+        daemonSecret,
+      });
+
+  // Wait for the daemon to be ready before spinning up the dashboard —
+  // the dashboard's mutator endpoint forwards to the daemon's internal
+  // fast-path endpoints.
+  if (daemon) await daemon.ready;
+  if (zeroCache) await zeroCache.ready;
+
+  const dashboard = opts.skipDashboard
+    ? (null as unknown as DashboardHandle)
+    : await spawnDashboardForTest({
+        databaseUrl,
+        zeroCachePort,
+        daemonPort,
+        authSecret: zeroAuthSecret,
+        betterAuthSecret,
+        daemonSecret,
+        dataDir: daemon?.dataDir ?? mkdtempSync(join(tmpdir(), "friday-dash-")),
+        port: dashboardPort,
+      });
+  if (dashboard) await dashboard.ready;
+
   return {
-    databaseUrl: db.databaseUrl,
+    databaseUrl,
     db,
+    daemon,
+    dashboard,
+    zeroCache,
+    betterAuthSecret,
+    zeroAuthSecret,
+    daemonSecret,
+    mintCookie: async (cookieOpts = {}) => {
+      if (!dashboard) {
+        throw new Error(
+          "mintCookie requires the dashboard subprocess; spawn the env without skipDashboard",
+        );
+      }
+      return mintTestSessionCookie({
+        databaseUrl,
+        dashboardBase: `http://127.0.0.1:${dashboard.port}`,
+        ...cookieOpts,
+      });
+    },
     cleanup: async () => {
+      // SIGTERM in reverse spawn order: dashboard depends on daemon +
+      // zero-cache; daemon depends on the database; zero-cache depends
+      // on the database. Tear down top-down.
+      if (dashboard) await sigtermThenSigkill(dashboard.child);
+      if (daemon) {
+        await sigtermThenSigkill(daemon.child);
+        // Clean the per-test data dir so a re-run doesn't accumulate
+        // tmp directories.
+        try {
+          rmSync(daemon.dataDir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
+      }
+      if (zeroCache) {
+        await sigtermThenSigkill(zeroCache.child);
+        try {
+          rmSync(zeroCache.replicaFile, { force: true });
+          rmSync(zeroCache.replicaFile + "-shm", { force: true });
+          rmSync(zeroCache.replicaFile + "-wal", { force: true });
+        } catch {
+          /* ignore */
+        }
+      }
       await db.drop();
     },
   };
-}
-
-/**
- * Run a mutator body directly against the scratch DB via the same
- * `zeroNodePg(schema, pool)` adapter + `createMutators()` map the
- * dashboard's `/api/mutators` endpoint uses. Exercises the server-
- * side execution path without an HTTP listener.
- *
- * Returns the row(s) the mutator wrote against the target table so
- * callers can assert on the post-state. The current implementation
- * uses Drizzle's `db.select(table).where(...)` — caller supplies the
- * verification query because the harness can't predict which row(s)
- * a mutator touched without knowing the mutator's PK shape.
- *
- * Skipped here because:
- *   - Wiring `zeroNodePg` + `PushProcessor` from a test context
- *     requires re-stating the dashboard's
- *     `services/dashboard/src/routes/api/mutators/+server.ts`
- *     handler. That's a small duplication, but worth keeping out
- *     of the harness until at least one consumer of this helper
- *     exists.
- *   - Most mutator-body unit tests today (e.g.
- *     `packages/shared/src/sync/mutators.test.ts`) drive the
- *     mutator function directly with a mock `tx`. That covers the
- *     mutator body logic; the harness's value-add comes when we
- *     need the full PG round-trip (e.g., trigger-fired side
- *     effects).
- *
- * Documenting the pattern here so the next consumer has a clear
- * shape to follow. Throws so callers don't accidentally treat a
- * scaffold call as a passing test.
- */
-export async function runMutatorDirect(
-  _name: string,
-  _args: unknown,
-): Promise<never> {
-  throw new Error(
-    "runMutatorDirect not yet implemented — see sync-harness.ts comments for the scaffold",
-  );
 }
