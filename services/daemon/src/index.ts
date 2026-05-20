@@ -5,6 +5,7 @@ import {
   ensureSoul,
   loadConfig,
   normalizeModelConfig,
+  resolveDaemonPort,
   runMigrations,
 } from "@friday/shared";
 import { logger } from "./log.js";
@@ -98,8 +99,9 @@ async function main(): Promise<void> {
   await runSettingsBootScan();
 
   const cfg = loadConfig();
-  const server = startServer({ port: cfg.daemonPort });
-  const heartbeat = startHealthHeartbeat(cfg.daemonPort);
+  const daemonPort = resolveDaemonPort(cfg);
+  const server = startServer({ port: daemonPort });
+  const heartbeat = startHealthHeartbeat(daemonPort);
 
   // Phase 4.3: open the long-lived LISTEN connection for
   // `friday_settings_changed`. Subsequent settings updates from the

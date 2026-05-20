@@ -210,6 +210,43 @@ export type AgentTypeName =
 export const PROD_DAEMON_PORT = 7610;
 export const PROD_DASHBOARD_PORT = 7615;
 
+/**
+ * Resolve the daemon's port from the standard chain:
+ *   `process.env.FRIDAY_DAEMON_PORT ?? cfg.daemonPort ?? PROD_DAEMON_PORT`
+ *
+ * Used by:
+ * - `services/daemon/src/index.ts` for its own `startServer` bind.
+ * - `services/dashboard/src/lib/server/daemon.ts` for the upstream URL.
+ *
+ * Symmetric on both sides of the dev IPC: when the dev wrappers set
+ * `FRIDAY_DAEMON_PORT=7444`, both the daemon (binding) and the
+ * dashboard (fetching) resolve to 7444 without a rebuild or a config
+ * edit. In prod the env is unset, so the chain falls through to the
+ * config override (if set) or the prod constant.
+ *
+ * Invalid env values (non-numeric, NaN, ≤0) are ignored so a typo
+ * doesn't silently mis-bind.
+ */
+export function resolveDaemonPort(cfg: FridayConfig): number {
+  const envRaw = process.env.FRIDAY_DAEMON_PORT;
+  if (envRaw) {
+    const parsed = Number(envRaw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return cfg.daemonPort ?? PROD_DAEMON_PORT;
+}
+
+/**
+ * Resolve the dashboard's port from `cfg.dashboardPort ??
+ * PROD_DASHBOARD_PORT`. No env override — adapter-node's `PORT` is the
+ * dashboard process's own knob and is set by `start.ts` from this
+ * chain, so the env var is downstream of the resolution, not part of
+ * it.
+ */
+export function resolveDashboardPort(cfg: FridayConfig): number {
+  return cfg.dashboardPort ?? PROD_DASHBOARD_PORT;
+}
+
 export const DEFAULT_CONFIG: FridayConfig = {
   model: "claude-opus-4-7",
   daemonPort: PROD_DAEMON_PORT,

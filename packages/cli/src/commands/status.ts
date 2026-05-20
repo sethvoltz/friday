@@ -5,8 +5,8 @@ import {
   ensureFridayEnv,
   HEALTH_PATH,
   loadConfig,
-  PROD_DAEMON_PORT,
-  PROD_DASHBOARD_PORT,
+  resolveDaemonPort,
+  resolveDashboardPort,
   SERVICES,
   type ServiceName,
 } from "@friday/shared";
@@ -139,7 +139,7 @@ export const statusCommand = defineCommand({
     // written by the daemon after `startServer` returns). Stale or
     // missing heartbeat falls back to the config-resolved value and
     // surfaces the discrepancy.
-    const cfgDaemonPort = cfg.daemonPort ?? PROD_DAEMON_PORT;
+    const cfgDaemonPort = resolveDaemonPort(cfg);
     let daemonPort = cfgDaemonPort;
     let daemonPortSource = "config";
     if (health.present && !health.stale && typeof health.port === "number") {
@@ -151,11 +151,11 @@ export const statusCommand = defineCommand({
       daemonPortSource = "config — no heartbeat";
     }
 
-    // Dashboard probe — `start.ts` passes `cfg.dashboardPort ??
-    // PROD_DASHBOARD_PORT` as the PORT env. If the dashboard answered
-    // we trust that port is right; if not, fall back to the resolved
-    // value with a "(config: …)" hint.
-    const cfgDashboardPort = cfg.dashboardPort ?? PROD_DASHBOARD_PORT;
+    // Dashboard probe — `start.ts` passes `resolveDashboardPort(cfg)`
+    // as the PORT env. If the dashboard answered we trust that port is
+    // right; if not, fall back to the resolved value with a
+    // "(config: …)" hint.
+    const cfgDashboardPort = resolveDashboardPort(cfg);
     const dashboardStatus = await probeDashboard(cfgDashboardPort);
     const dashboardReachable = dashboardStatus !== null && dashboardStatus < 500;
 
