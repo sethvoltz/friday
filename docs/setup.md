@@ -13,15 +13,21 @@ The Brewfile installs:
 
 - `claude-code` — Claude Code CLI (Anthropic's official) — required, runs the Agent SDK
 - `gh` — GitHub CLI for builders
-- `tmux` — daemon + dashboard supervision
-- `cloudflared` — Cloudflare Tunnel client
+- `cloudflared` — Cloudflare Tunnel client (optional, for public reachability)
 
-## 2. Install dependencies
+`tmux` is no longer required — Friday's prod supervision moved to launchd (ADR-028). Contributors who want it for the dev workflow can `brew install tmux` separately.
+
+## 2. Install Friday
 
 ```bash
-pnpm install
-pnpm build
+brew install sethvoltz/friday/friday
 ```
+
+Auto-taps `sethvoltz/homebrew-friday`, installs the formula's `postgresql@18` + `cloudflared` deps if missing, clones Friday's source, runs `pnpm install --prod && pnpm -r build`, and installs the launchd plist that supervises the prod stack.
+
+First-time install is 5–10 minutes (the build runs on your machine). Subsequent `brew upgrade friday` runs pull the latest commit and rebuild.
+
+**For contributors who want to source-edit:** clone the repo and use the dev workflow instead — see [Developing Friday](../README.md#developing) in the README. The dev workflow doesn't need the brew formula.
 
 ## 3. First-time account setup
 
@@ -50,16 +56,18 @@ Verifies the data dir, config, db migrations, account presence, and external CLI
 ## 5. Run
 
 ```bash
-friday start          # production mode (requires `pnpm build` first)
+friday start          # delegates to `brew services start friday`
 ```
 
-This starts the daemon, dashboard, and zero-cache inside a tmux session named `friday`. For dev hot-reload, use `pnpm dev:daemon` / `pnpm dev:dashboard` (see `docs/running.md`).
+The launchd plist runs `friday-supervisor` which forks daemon + dashboard + zero-cache as children with proper process-group cascade-stop (ADR-028). `RunAtLoad: true` means Friday comes back automatically after Mac reboot/login.
+
+For dev hot-reload, use `pnpm dev:daemon` / `pnpm dev:dashboard` (see `docs/running.md`) — they don't touch the launchd-supervised stack.
 
 ```bash
-friday status         # show pids, ports, uptime
-friday attach         # attach to the tmux session
+friday status         # supervisor + service state + probed ports
+friday attach daemon  # tail ~/.friday/logs/daemon.jsonl (Ctrl-C exits)
 friday logs --follow  # tail daemon log
-friday stop           # shut everything down
+friday stop           # shut the stack down (cascade-stops every child)
 ```
 
 By default:
@@ -71,7 +79,7 @@ Open `http://localhost:7615` and sign in with the credentials you set in step 3.
 
 ## 6. Public access via Cloudflare Tunnel
 
-Friday manages the tunnel for you. You provide one connector token; `friday start` runs `cloudflared` alongside the daemon and dashboard, and `friday stop` tears it down.
+Cloudflare's `cloudflared` is its own brew service post-FRI-88. You provide one connector token; `brew services start cloudflared` runs it independently of Friday's launchd job. `friday start` ALSO kicks off `brew services start cloudflared` when a token is configured, but the lifecycle is separate (you can `brew services stop cloudflared` without affecting Friday's stack).
 
 ### Create the tunnel in Cloudflare
 

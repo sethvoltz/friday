@@ -766,6 +766,62 @@ Three issues surfaced during Seth's first prod flip onto `:7610` / `:7615`. All 
 - **`friday doctor` could grow a "stale runtime-state" check** that warns when `config.json` carries `daemonPort` / `dashboardPort` that match neither the prod constants nor a documented dev value, and when `.env` carries `ZERO_MUTATE_URL` (which is now spawn-time-only). Flagged for FRI-88's doctor surface.
 - **Process-supervision gap surfaced during the flip:** `friday stop` doesn't always propagate kill signals to zero-cache's grandchild workers (replicator/syncer). Multiple zombie workers held replica.db locks and ports 4848/4849 across restart cycles, causing `EADDRINUSE` and `SQLITE_BUSY` crash loops. Manual `kill -9` cleared each. This is a known cost of tmux supervision and is owned by FRI-88's launchd plist (process-group semantics handle this correctly).
 
+## ADR-028 — Brew packaging + launchd supervision; tmux retired from prod
+
+**Status:** accepted (FRI-88, 2026-05-20)
+
+**Supersedes ADR-009** (tmux-backed daemon supervision).
+
+Friday's production stack moves from `tmux new-session -d` to a Homebrew formula + launchd plist. The catalyst was the FRI-83 operator flip, which surfaced a concrete failure mode of tmux supervision: `tmux kill-session` signals only the pane shell, not the process group of its descendants. zero-cache's worker pool (`@rocicorp/zero/out/zero-cache/src/server/replicator.js` and `syncer.js`) routinely survived `friday stop`, holding `~/.friday/zero/replica.db` SQLite locks and TCP ports 4848/4849. Each restart cycle required manual `kill -9 <zombie-pid>`. **Zombies are unacceptable in a prod world.** ADR-028 closes that gap.
+
+### Decision
+
+1. **One Homebrew tap, one formula.** Tap: `sethvoltz/homebrew-friday`. Formula: `Friday < Formula`. `brew install sethvoltz/friday/friday` auto-taps, installs `postgresql@18` + `cloudflared` + Node + pnpm if missing, clones the source repo into `libexec`, runs `pnpm install --prod && pnpm -r build`, and registers a launchd plist via brew's `service do` DSL. Source install (not binary tarball) for v1 — binary install is a follow-up that needs a release pipeline.
+
+2. **One launchd plist, one supervisor binary.** The plist target is `bin/friday-supervisor` (a tiny shell wrapper that `exec node` invokes `packages/cli/dist/bin/supervisor.js`). The supervisor forks daemon + dashboard + zero-cache as children with `detached: true` — each becomes its own process-group leader (pid == pgid). Boots in order (daemon → zero-cache → dashboard). KeepAlive on per-child crash with exponential backoff (1s → 8s cap); zero-cache exit code 14 (`AutoResetSignal`) is fast-restart. Crash-loop guard: 5 failures inside 60s causes the supervisor to exit non-zero so launchd surfaces it.
+
+3. **Process-group cascade-stop is the load-bearing semantics.** SIGTERM (or SIGINT) to the supervisor triggers `process.kill(-child.pid, "SIGTERM")` for each child — signaling the child AND every descendant in its tree (the worker pool, the daemon's worker forks, anything grandchildren spawn). 10s deadline, then escalate stragglers to `SIGKILL`. launchd's own job-level process-group cleanup is the safety net under any supervisor failure. The `pgrep -f "rocicorp.+zero"` check returns empty within 5 seconds of `brew services stop friday` — pinned by `supervisor.test.ts`.
+
+4. **No bash respawn wrappers.** The pre-FRI-88 zero-cache `prodCmd` wrapped `pnpm exec zero-cache` in `while true; do …; sleep 1; done` because tmux on its own doesn't respawn. That loop was the zombie nursery — it happily spawned a new instance before the previous one had released its ports / SQLite locks. The supervisor's KeepAlive logic with backoff and a per-child shutdown gate replaces it.
+
+5. **`friday start/stop/restart` are thin aliases over `brew services`.** The CLI surface stays for operator muscle memory and gives a portability seam: when Linux/systemd support lands (out of scope for v1, designed-for), the alias dispatches to `systemctl --user` instead of `brew services` without changing the user-facing command. Single-service operations (`friday restart daemon`) error out — the supervisor owns the whole stack atomically. Per-service IPC via supervisor socket is a v2 follow-up.
+
+6. **`friday attach` tails launchd logs, not tmux panes.** The supervisor pipes each child's stdout + stderr to `~/.friday/logs/<service>.jsonl`. `friday attach <service>` becomes interactive `tail -n 50 -F <log>`. Same operator ergonomic, durable across supervisor restarts, no pane state to recover.
+
+7. **cloudflared is its own brew service.** `cloudflare/cloudflare/cloudflared` is a well-maintained external formula; declaring it as a `depends_on` and letting it run as `homebrew.mxcl.cloudflared` is simpler than wrapping it inside Friday's supervisor. `friday start` kicks off `brew services start cloudflared` when a token is configured but doesn't manage its lifecycle.
+
+8. **Postgres is host-managed.** Same as today — `brew services start postgresql@18`. Friday's supervisor doesn't supervise Postgres; it depends on it being up (caught by `friday doctor`'s `pg_isready` check).
+
+### Design constraints (non-negotiable; enforced by AC#5 / AC#8)
+
+- **No tmux in prod.** tmux was a dev convenience that ADR-009 promoted to a supervision mechanism. Post-ADR-028, tmux is **not** part of the production supervision tree. Contributors who want it for the dev workflow install it independently.
+- **Proper parent → child PID hierarchy with cascade stop.** When the supervised parent dies — for any reason — every descendant dies with it. Verified by `supervisor.test.ts` (3 grandchildren forked from a fixture; killChildGroup sends SIGTERM to the group; all PIDs are dead within 5s).
+- **`friday stop` leaves zero descendants alive.** `pgrep -f "rocicorp.+zero"` empty within 5 seconds. Same for daemon and dashboard subtrees.
+- **No bash-while-loop respawn wrappers.** The supervisor's KeepAlive policy is the only restart mechanism.
+
+### Alternatives considered
+
+- **Three launchd plists, one per service.** Brew's idiomatic shape, but cross-service ordering (daemon → zero-cache → dashboard) requires plist tricks (`KeepAlive: { OtherJobEnabled: ... }`) that don't compose cleanly. A custom supervisor owning the ordering is simpler. Rejected.
+- **Don't write a supervisor — let launchd KeepAlive each process directly.** Doesn't handle zero-cache's `AutoResetSignal` (exit code 14) as a fast-restart case; doesn't handle cross-service ordering; doesn't get us a single log channel for cascade-stop events. Rejected.
+- **Keep tmux for prod and use `kill -9 -- -PID` on supervisor stop.** Doesn't compose with `brew services` lifecycle, doesn't handle Mac reboot (no `RunAtLoad`), still has the zombie window between `kill-session` and `kill -9`. Rejected.
+- **Use the existing `tmux` toolchain with `systemd-cgls`-style cgroup tracking via macOS's launchd anyway.** Mixes two supervision layers; the zombie failure mode still exists in the tmux layer. Rejected.
+
+### Consequences
+
+- **Code deleted:** `packages/cli/src/lib/tmux.ts` and `packages/cli/src/lib/state.ts` (entire files); the `tmuxSpecs` / `startTmuxService` / `startTunnel` / `buildPackagesOrAbort` / `buildDashboardOrAbort` / `tunnelBlocker` / `cloudflaredOnPath` / `findRepoRoot` helpers in `start.ts`; the per-service tmux-kill loop and legacy-session cleanup in `stop.ts`; `detectMode` and the spawn-into-self gymnastics in `restart.ts`. Net deletion across the FRI-88 work is ~700 LOC.
+- **Code added:** `packages/cli/src/bin/supervisor.ts` (~270 LOC), `packages/cli/src/bin/supervisor.test.ts` (~210 LOC, 6 tests).
+- **Brewfile loses `tmux`** as a required dep; the README and setup.md both note it's now optional for the dev workflow.
+- **`friday status` reshapes** to show one `supervisor` row (launchd job) instead of three per-service tmux rows. The probed per-service ports (FRI-83 helpers) carry forward unchanged.
+- **`friday doctor` gains** a `friday-supervisor (launchd: homebrew.mxcl.friday)` check, replacing the obsolete `tmux installed` check. Plus three new stale-runtime-state warnings (FRI-88 Q11): `ZERO_MUTATE_URL` in `.env`, `daemonPort`/`dashboardPort` in `config.json`, orphaned `replica.db-wal` from an unclean previous shutdown.
+- **Operator flip is one-shot** per FRI-88 §5 runbook: `friday stop` (old tmux) → `brew install sethvoltz/friday/friday` → `brew services start friday` → smoke-test the cascade-stop assertion. After that, prod survives reboots automatically.
+- **Per-service IPC** (`friday restart zero-cache`) is explicitly deferred. The whole-stack restart is the v1 contract.
+
+### Bring this ADR back to the table if any of these fire
+
+- The cascade-stop assertion regresses (zombies survive `brew services stop friday`). That's a hard failure of §0; investigate before shipping any further FRI-88-style change.
+- The single-service ops gap becomes operationally painful — the supervisor IPC follow-up is the answer, not abandoning launchd supervision.
+- Cross-platform support (Linux/systemd) demands a different supervisor model. The CLI alias layer abstracts the supervision backend; the supervisor binary itself may stay the same (Node + child_process portable) or get replaced with a systemd-native equivalent. ADR-028 doesn't pin one over the other for Linux.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.
