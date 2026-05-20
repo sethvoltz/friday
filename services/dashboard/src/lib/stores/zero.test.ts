@@ -179,6 +179,8 @@ vi.mock("@rocicorp/zero", () => {
         client_devices: makeQueryProxy(),
         settings: makeQueryProxy(),
         blocks: makeQueryProxy(),
+        evolve_proposals: makeQueryProxy(),
+        read_cursors: makeQueryProxy(),
       };
       instances.push(this as unknown as MockedZero);
     }

@@ -32,6 +32,36 @@ import {
   table,
 } from "@rocicorp/zero";
 
+/* ---------------- evolve_proposals (item #54) ---------------- */
+// Mirrors `db/schema.ts:evolveProposals`. The dashboard's /evolve page
+// reads from this slice reactively; the daemon's evolve store dual-
+// writes to PG + filesystem during the migration window.
+
+const evolveProposals = table("evolve_proposals")
+  .columns({
+    id: string(),
+    title: string(),
+    proposal_type: string(),
+    status: string(),
+    cluster_id: string().optional(),
+    score: number(),
+    blast_radius: string(),
+    applies_to: json(),
+    signals: json(),
+    body: string(),
+    created_by: string(),
+    created_at: number(),
+    updated_at: number(),
+    applied_at: number().optional(),
+    applied_by: string().optional(),
+    enriched_at: number().optional(),
+    enriched_by: string().optional(),
+    last_enrich_error: string().optional(),
+    last_enrich_failed_at: number().optional(),
+    applied_ticket_id: string().optional(),
+  })
+  .primaryKey("id");
+
 /* ---------------- agents (sidebar) ---------------- */
 // Mirrors `db/schema.ts:agents`. Columns kept in lock-step with the
 // Drizzle table. `created_at` / `updated_at` are sent over the wire as
@@ -402,6 +432,7 @@ export const schema: ZeroSchema & { readonly enableLegacyQueries: true } =
     readCursors,
     clientDevices,
     settings,
+    evolveProposals,
   ],
   // Phase 3: enable the deprecated `z.query.<table>` field. The
   // createBuilder() path returns query objects that aren't bound to a
@@ -428,6 +459,7 @@ export type Schema = typeof schema;
 
 export const permissions = definePermissions(schema, () => ({
   agents: { row: { select: ANYONE_CAN } },
+  evolve_proposals: { row: { select: ANYONE_CAN } },
   tickets: { row: { select: ANYONE_CAN } },
   // Ticket sub-tables — writes flow through Phase 4.4 mutators.
   ticket_comments: { row: { select: ANYONE_CAN } },

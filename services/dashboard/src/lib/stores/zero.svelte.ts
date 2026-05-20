@@ -118,6 +118,30 @@ export interface ZeroMemoryEntryRow {
   status: "ready" | "pending_file" | "pending_delete" | "deleted";
 }
 
+/** Row shape mirrors the `evolve_proposals` Zero table definition (item #54). */
+export interface ZeroEvolveProposalRow {
+  id: string;
+  title: string;
+  proposal_type: string;
+  status: string;
+  cluster_id: string | null;
+  score: number;
+  blast_radius: string;
+  applies_to: string[];
+  signals: unknown[];
+  body: string;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  applied_at: number | null;
+  applied_by: string | null;
+  enriched_at: number | null;
+  enriched_by: string | null;
+  last_enrich_error: string | null;
+  last_enrich_failed_at: number | null;
+  applied_ticket_id: string | null;
+}
+
 /** Row shape mirrors the `read_cursors` Zero table definition (Phase 4.1).
  *  Per-device, per-agent — primary key is (device_id, agent_name). */
 export interface ZeroReadCursorRow {
@@ -220,6 +244,12 @@ class ZeroSyncStore {
   /** Live ticket external links (Phase 3.1 follow-up — reactive read
    *  path for the detail page's link list). */
   ticketExternalLinks = $state<ZeroTicketExternalLinkRow[]>([]);
+
+  /** Live evolve proposals (item #54). Replaces the REST poll on the
+   *  /evolve dashboard page. Daemon-side projector keeps the
+   *  filesystem (canonical) in sync with the Postgres row Zero
+   *  replicates from. */
+  evolveProposals = $state<ZeroEvolveProposalRow[]>([]);
 
   /** Live schedule rows from Zero (Phase 3.2). */
   schedules = $state<ZeroScheduleRow[]>([]);
@@ -377,6 +407,7 @@ class ZeroSyncStore {
       this.#bindTickets();
       this.#bindTicketComments();
       this.#bindTicketExternalLinks();
+      this.#bindEvolveProposals();
       this.#bindSchedules();
       this.#bindMemory();
       this.#bindApps();
@@ -530,6 +561,29 @@ class ZeroSyncStore {
     const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       this.ticketExternalLinks = data as ZeroTicketExternalLinkRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  #bindEvolveProposals(): void {
+    if (!this.#zero) return;
+    // Filter out the legacy `rejected`/`dismissed` tombstones from
+    // the foreground list — the /evolve UI shows open + applied +
+    // critical by default. (No client-side filter equivalent in
+    // ZQL: the dashboard's filter chip does the final filter UI-side.)
+    const query = this.#zero!.query.evolve_proposals.orderBy(
+      "updated_at",
+      "desc",
+    );
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      this.evolveProposals = data as ZeroEvolveProposalRow[];
     };
     update(view.data as readonly unknown[]);
     view.addListener((data) => update(data as readonly unknown[]));

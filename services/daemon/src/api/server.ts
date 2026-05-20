@@ -71,6 +71,10 @@ import {
   type UpdateProposalInput,
 } from "@friday/evolve";
 import {
+  deleteProposalFromPg,
+  syncProposalToPg,
+} from "../evolve/projector.js";
+import {
   createIssueWithConfiguredTeam as linearCreateIssue,
   getStateIdByType as linearGetStateIdByType,
   importIssue as linearImportIssue,
@@ -1007,6 +1011,10 @@ async function handle(
     }
     const callerName = String(req.headers["x-friday-caller-name"] ?? "user");
     const p = saveProposal({ ...body, createdBy: callerName });
+    // Item #54: project the FS write to Postgres so /evolve's Zero
+    // reactive query sees the new row. Fire-and-forget — FS stays
+    // canonical; a PG sync failure logs but doesn't fail the HTTP 201.
+    void syncProposalToPg(p.id);
     return json(res, 201, p);
   }
   if (
@@ -1027,6 +1035,7 @@ async function handle(
       return json(res, 404, { error: "proposal not found" });
     const patch = await readJson<UpdateProposalInput>(req);
     const next = updateProposal(id, patch);
+    void syncProposalToPg(id);
     return json(res, 200, next);
   }
   if (
@@ -1036,6 +1045,7 @@ async function handle(
     const id = decodeURIComponent(path.split("/")[4]);
     if (!deleteProposal(id))
       return json(res, 404, { error: "proposal not found" });
+    void deleteProposalFromPg(id);
     return json(res, 200, { ok: true });
   }
   if (
@@ -1068,6 +1078,7 @@ async function handle(
       appliedBy: callerName,
       appliedTicketId: ticket.id,
     });
+    void syncProposalToPg(id);
     return json(res, 200, { proposal: updated, ticket });
   }
   if (
@@ -1085,6 +1096,7 @@ async function handle(
       status: "rejected",
       proposedChange: newBody,
     });
+    void syncProposalToPg(id);
     return json(res, 200, updated);
   }
 

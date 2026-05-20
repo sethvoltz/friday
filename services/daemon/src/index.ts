@@ -18,6 +18,7 @@ import * as registry from "./agent/registry.js";
 import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js";
 import { startMailBridge } from "./comms/mail-bridge.js";
 import { reconcileAppsOnBoot } from "./apps/reconcile.js";
+import { runEvolveBootSync } from "./evolve/projector.js";
 import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
 import {
   dispatchTurn,
@@ -120,6 +121,13 @@ async function main(): Promise<void> {
   // window opens.
   await runScheduleBootScan();
   const scheduleListener = await startScheduleListener();
+
+  // Item #54: project FS-canonical evolve proposals into Postgres so
+  // the dashboard's /evolve page can read them via Zero reactively.
+  // Idempotent UPSERT — re-running this on a clean tree is a no-op
+  // write set. Drops PG rows whose FS file was deleted during the
+  // downtime window.
+  await runEvolveBootSync();
 
   // Phase 4.7: open the long-lived LISTEN connection for
   // `friday_app_changed`. Boot-recovery scan runs AFTER

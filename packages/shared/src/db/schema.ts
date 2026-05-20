@@ -437,6 +437,51 @@ export const memoryEntries = pgTable(
   }),
 );
 
+/* ---------------- Item #54: evolve proposals ---------------- */
+// Mirrors the YAML frontmatter at `~/.friday/evolve/proposals/<id>.md`.
+// Dashboard /evolve reads from Zero reactively (replaces the REST
+// proxy). The daemon's existing evolve store dual-writes to PG + FS
+// during the transition; FS stays as the audit trail.
+
+export const evolveProposals = pgTable(
+  "evolve_proposals",
+  {
+    id: text("id").primaryKey(),
+    title: text("title").notNull(),
+    // memory | docs | code | prompts | tooling (open string; the
+    // evolve store doesn't enforce a closed enum)
+    proposalType: text("proposal_type").notNull(),
+    // open | applied | dismissed | critical
+    status: text("status").notNull().default("open"),
+    clusterId: text("cluster_id"),
+    score: doublePrecision("score").notNull().default(0),
+    // low | medium | high
+    blastRadius: text("blast_radius").notNull().default("low"),
+    appliesTo: jsonb("applies_to").notNull().default(sql`'[]'::jsonb`),
+    signals: jsonb("signals").notNull().default(sql`'[]'::jsonb`),
+    body: text("body").notNull(), // the markdown proposedChange
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    appliedBy: text("applied_by"),
+    enrichedAt: timestamp("enriched_at", { withTimezone: true }),
+    enrichedBy: text("enriched_by"),
+    lastEnrichError: text("last_enrich_error"),
+    lastEnrichFailedAt: timestamp("last_enrich_failed_at", {
+      withTimezone: true,
+    }),
+    appliedTicketId: text("applied_ticket_id"),
+  },
+  (t) => ({
+    statusIdx: index("evolve_proposals_status_updated").on(
+      t.status,
+      t.updatedAt,
+    ),
+    clusterIdx: index("evolve_proposals_cluster").on(t.clusterId),
+  }),
+);
+
 /* ---------------- Usage (Claude API call accounting) ---------------- */
 
 export const usage = pgTable(
