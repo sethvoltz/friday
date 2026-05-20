@@ -672,6 +672,45 @@ The today's per-device localStorage-only badge state is retired; cross-device ba
 - **Should the in-memory accumulator survive a daemon refork?** Today the worker fork can be relaunched; the parent's `liveTurns` registry holds enough state to resume. With per-turn SSE replay, the answer might be "no — let the JSONL recovery + Zero sync do the rebuild." Leaving as an implementation discovery.
 - **Per-device vs. global read cursors.** Mirrored from ADR-023's open question. Same default (per-device for v1).
 
+## ADR-025 — Memory full-text search stays REST while Zero lacks generated-column replication
+
+**Status:** Accepted, 2026-05-20.
+**Driver:** Item #53/#55 audit of the Postgres + Zero sync layer.
+
+### Context
+
+After ADR-023 / ADR-024 the dashboard's `/memory` list reads come from the Zero replica reactively — open the page, see entries land in real time as the daemon `memory_save` mutator + LISTEN handler write them. The list-and-detail surface is fully local-first.
+
+**Full-text search is not.** The Postgres `memory_entries` table carries a generated `tsvector` column (`content_tsv`) populated from `title + content + tags_json`, with a GIN index. The `/api/memory/search` endpoint executes `content_tsv @@ plainto_tsquery(q)` with `ts_rank` ordering. The dashboard's search box hits this endpoint.
+
+Zero 1.5 does not replicate generated/functional columns. The local replica has the title/content/tags rows but not `content_tsv`, and ZQL has no `@@` operator. We considered three alternatives during the Phase 3.3 design:
+
+1. **Replicate the tsvector**. Would require teaching Zero to materialize the generated column on the client. Not a small feature; not on the Zero roadmap as of 1.5.
+2. **Pure-JS substring search over the local snapshot**. Works for trivial corpus sizes but loses Postgres FTS's tokenizer, stemming, and rank ordering. The memory corpus is small now (single-digit hundreds of entries) so JS would be fast — but degrades silently as the corpus grows past a few thousand entries.
+3. **Pre-materialize a rank column per query**. Infeasible for arbitrary user queries.
+
+### Decision
+
+Keep the hybrid contract:
+
+- **List + detail reads**: Zero reactive query (status, recency, tags, content). Already shipped.
+- **Search (`?q=…`)**: dashboard's `/memory` page calls the existing `/api/memory/search` REST endpoint. The result is a ranked array of `id`s; the dashboard renders by overlaying those ids against the local Zero snapshot so the rendered cards still get reactive updates if a search-result entry is edited from another device.
+
+The user-perceptible difference: search hits pay one network round-trip (~50–150ms on the live deploy); browsing and editing don't.
+
+### Revisit trigger
+
+Bring this ADR back to the table if any of these fire:
+
+- Zero ships generated-column replication (would let us drop the REST endpoint entirely).
+- The memory corpus crosses ~5000 entries AND search latency tail (`p95(/api/memory/search)`) exceeds 500ms — at which point the JS-on-local fallback becomes attractive vs. the network cost.
+- A future "search across all Friday data" surface (memory + tickets + chat history) ships, in which case the answer probably involves an external search index rather than Postgres FTS regardless.
+
+### Consequences
+
+- The /memory page has two distinct data paths (Zero for list, REST for search). The dashboard treats them as orthogonal: search results don't update the Zero snapshot's order, and Zero updates don't re-trigger the active search query.
+- No code change from this ADR. Existing implementation is correct; this entry documents *why* the hybrid lives and *when* we'd change it, so future architectural audits don't keep re-discovering the gap as a TODO.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.
