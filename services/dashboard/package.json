@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "test:playwright": "playwright test"
   },
   "dependencies": {
     "@friday/evolve": "workspace:*",
@@ -31,9 +32,12 @@
     "shiki": "^1.24.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.50.0",
     "@sveltejs/adapter-node": "^5.2.0",
     "@sveltejs/kit": "^2.57.0",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
+    "@types/pg": "^8.11.10",
+    "pg": "^8.13.0",
     "svelte": "^5.55.2",
     "svelte-check": "^4.4.6",
     "typescript": "^5.7.0",

@@ -166,6 +166,12 @@ export interface SpawnZeroCacheOpts {
   port?: number;
   /** Tmpdir parent for the replica file. Defaults to os.tmpdir(). */
   tmpRoot?: string;
+  /** Dashboard's `/api/mutators` URL. Zero 1.5+ requires this on
+   *  zero-cache (not just the dashboard) so its push processor knows
+   *  where to dispatch server-side mutator runs. Without it the
+   *  client sees `InvalidPush: A ZERO_MUTATE_URL must be set in
+   *  order to process custom mutations.` from zero-cache. */
+  mutateUrl?: string;
 }
 
 export async function spawnZeroCacheForTest(
@@ -177,7 +183,7 @@ export async function spawnZeroCacheForTest(
   // scratch databases.
   const tmpDir = mkdtempSync(join(opts.tmpRoot ?? tmpdir(), "zero-cache-"));
   const replicaFile = join(tmpDir, "replica.db");
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     ZERO_UPSTREAM_DB: opts.databaseUrl,
     ZERO_REPLICA_FILE: replicaFile,
@@ -187,6 +193,7 @@ export async function spawnZeroCacheForTest(
     ZERO_LOG_LEVEL: "warn",
     ZERO_PORT: String(port),
   };
+  if (opts.mutateUrl) env.ZERO_MUTATE_URL = opts.mutateUrl;
   const child = spawn("pnpm", ["exec", "zero-cache"], {
     cwd: DASHBOARD_DIR,
     env,
@@ -641,6 +648,15 @@ export async function spawnTestSyncEnv(
         authSecret: zeroAuthSecret,
         adminPassword: "test-admin-password",
         port: zeroCachePort,
+        // dashboardPort is pre-allocated above; zero-cache needs the
+        // dashboard's mutator URL at boot to accept custom-mutator
+        // pushes. Without this every Zero `mutate.*` call dies on
+        // the server with `InvalidPush: A ZERO_MUTATE_URL must be
+        // set in order to process custom mutations`, the optimistic
+        // client write never converges, and the PG row never lands.
+        mutateUrl: opts.skipDashboard
+          ? undefined
+          : `http://127.0.0.1:${dashboardPort}/api/mutators`,
       });
       await zeroCache.ready;
     }
@@ -750,14 +766,25 @@ export async function spawnTestSyncEnv(
         }
         // zero-cache leaves a logical-replication slot on the upstream
         // DB. Postgres refuses DROP DATABASE while a slot exists for
-        // that DB. Drop it explicitly so `db.drop()` succeeds; without
-        // this every e2e run leaks its scratch DB and `friday_test_*`
-        // accumulates in pg_database until manual cleanup. Best-effort:
-        // tolerate the slot being gone or the DB unreachable.
+        // that DB. The slot can also remain `active=true` for a brief
+        // window after zero-cache's SIGKILL while the walsender
+        // backend finishes draining — `pg_drop_replication_slot`
+        // refuses to drop an active slot. Force-disconnect the
+        // walsender first, then drop the slot, then `db.drop()`.
+        // Without this every e2e run leaks its scratch DB and
+        // `friday_test_*` accumulates in pg_database.
         try {
           const admin = new Client({ connectionString: databaseUrl });
           await admin.connect();
           try {
+            await admin.query(
+              `SELECT pg_terminate_backend(active_pid)
+                 FROM pg_replication_slots
+                 WHERE database = current_database()
+                   AND active_pid IS NOT NULL`,
+            );
+            // Small grace for the terminated walsender to release.
+            await new Promise((r) => setTimeout(r, 200));
             await admin.query(
               `SELECT pg_drop_replication_slot(slot_name)
                  FROM pg_replication_slots
