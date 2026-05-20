@@ -337,6 +337,34 @@ export class ChatState {
    * pinned) or render everything (when the user is reading older history). */
   pinnedToBottom = $state(true);
 
+  /**
+   * Sliding-window DOM virtualization cursor (exclusive end into the
+   * full per-agent `allMessages` array). ChatMessages renders the
+   * slice `[max(0, windowEnd - WINDOW_SIZE), windowEnd)` so the DOM
+   * is always bounded. Lives on the store so the Latest button in
+   * ChatShell can reset it (`resetChatWindowToLatest()`) without
+   * needing a direct ref to the ChatMessages component.
+   *
+   * `0` means "uninitialized" — ChatMessages snaps it to
+   * `allMessages.length` on first effect run for the focused agent.
+   * Switching agents re-anchors via the focused-agent effect.
+   */
+  chatWindowEnd = $state(0);
+
+  /**
+   * Reset the sliding window to the tail of all messages. Called by
+   * the "↓ Latest" button in ChatShell; ChatMessages reactively
+   * re-slices the rendered list to the new windowEnd value, and
+   * the caller follows up with a scroll-to-bottom.
+   *
+   * Takes the new value explicitly rather than reading from any
+   * messages array — keeps this method ignorant of the agent-vs-
+   * past-session split and the parseBlocks call site.
+   */
+  resetChatWindowToLatest(totalMessages: number): void {
+    this.chatWindowEnd = totalMessages;
+  }
+
   /** Per-agent debounce timers for working→idle transitions. Long-lived
    * workers emit `status-change: idle` between back-to-back turns
    * (worker.ts waits for the next prompt in an idle loop), which would

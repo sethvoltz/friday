@@ -125,55 +125,82 @@
     return queued.length === 0 ? rawMessages : [...nonQueued, ...queued];
   });
 
-  // DOM windowing — bounded initial slice that goes unbounded on the
-  // first scroll-up. The window exists ONLY to keep mobile first-paint
-  // cheap on dense chats; once the user signals interest in older
-  // history (top sentinel intersects), we reveal everything in one
-  // shot with anchor-restore so they don't have to scroll up 15 times
-  // to see a year of conversation.
+  // Sliding-window DOM virtualization. The local replica holds the
+  // entire 90-day history (plan §39 phase 2 background sync); the DOM
+  // only ever holds a bounded slice of WINDOW_SIZE messages. As the
+  // user scrolls toward either edge of the window, the slice slides:
+  // we mount more on the side they're approaching and unmount the
+  // same count on the opposite side. Net DOM size stays constant;
+  // memory and layout cost are bounded regardless of how deep the
+  // user scrolls.
   //
-  // Sizing: `WINDOW_SIZE = 2000` covers the vast majority of active
-  // chats in one render — friday's 3300-message agent loads ~60% of
-  // it in the initial window, and chats under 2000 messages render
-  // entirely from the start. The previous WINDOW_SIZE of 200 produced
-  // the "a couple days" symptom: a dense chat showing only its last
-  // 33-ish hours despite having 12 days of history locally synced.
+  // Sizing trade-off: WINDOW_SIZE bounds the maximum DOM nodes;
+  // SLIDE_AMOUNT is how many we add/remove per slide. The sentinel's
+  // rootMargin determines how close to the edge of the rendered list
+  // a scroll has to reach before a slide fires — keep this generous
+  // so the new content renders BEFORE the user's scroll actually
+  // reaches the visual edge (otherwise they see "nothing more to
+  // scroll" for the few frames it takes to mount the new batch).
   //
-  // Anchor-restore on the expand handler keeps the user's viewport
-  // pinned to their current bubble. Read-only past-session views are
-  // unaffected: their messages array is bounded by the session length
-  // and rendered in full.
-  const WINDOW_SIZE = 2000;
-  let renderTake = $state(WINDOW_SIZE);
-  // Reset the rendered window whenever the focused agent changes —
-  // switching agents starts fresh from the bottom; without this,
-  // hopping between a 3000-message chat and a 5-message chat would
-  // leave the new agent's view rendering its 5 messages plus 2995
-  // ghost-slots' worth of expansion budget the user hadn't actually
-  // scrolled into.
+  // Read-only past-session views are bounded by the session length
+  // and render in full — no windowing.
+  const WINDOW_SIZE = 500;
+  const SLIDE_AMOUNT = 100;
+  // `windowEnd` lives on the chat store (chat.chatWindowEnd) so the
+  // "↓ Latest" button in ChatShell can reset it without a direct ref
+  // to this component. Derived `windowStart` clamps to a slice of at
+  // most WINDOW_SIZE rows.
+  let windowStart = $derived(Math.max(0, chat.chatWindowEnd - WINDOW_SIZE));
+  let list = $derived.by(() => {
+    if (readonly) return allMessages;
+    // Clamp the upper bound defensively: a Zero update could shrink
+    // allMessages (e.g., cancel-queued mutator deletes a row) and
+    // leave chatWindowEnd pointing past the new tail.
+    const end = Math.min(chat.chatWindowEnd, allMessages.length);
+    return allMessages.slice(windowStart, end);
+  });
+  // Initialize / re-anchor the window when the focused agent changes
+  // (route navigation) — drop in at the latest tail of the new agent's
+  // transcript so the user sees the most recent N messages first.
+  // Also catches the cold-start case where chat.chatWindowEnd is the
+  // default 0 sentinel on first mount.
   $effect(() => {
     chat.focusedAgent;
     untrack(() => {
-      renderTake = WINDOW_SIZE;
+      chat.chatWindowEnd = allMessages.length;
     });
   });
-  let list = $derived.by(() => {
-    if (readonly) return allMessages;
-    if (allMessages.length <= renderTake) return allMessages;
-    return allMessages.slice(allMessages.length - renderTake);
+  // Follow live appends while the user is pinned to the bottom of all
+  // history. When a new block lands and the user is already viewing
+  // the latest, slide the window forward to include it. If the user
+  // is mid-history (chatWindowEnd < allMessages.length) the window
+  // stays where they parked it; the new message is "below" the
+  // rendered slice until they scroll down (slide-down handler) or
+  // hit Latest.
+  $effect(() => {
+    const total = allMessages.length;
+    untrack(() => {
+      if (readonly) return;
+      if (chat.pinnedToBottom && chat.chatWindowEnd >= total - 1) {
+        if (chat.chatWindowEnd !== total) chat.chatWindowEnd = total;
+      }
+    });
   });
-  // Honest "no older messages" gate: once the rendered window contains
-  // every message in the agent's transcript AND Zero confirms the local
-  // replica matches the upstream filter, scroll-up should stop offering
-  // expansion. This flips `chat.reachedOldest` so the top-sentinel guard
-  // bails (and the day-separator at the top of history finally surfaces).
+  // Honest "no older messages" gate: when windowStart hits 0 AND the
+  // local replica is the canonical full set (Zero `resultType ===
+  // 'complete'`), there is genuinely nothing older to slide to.
+  // Flips `chat.reachedOldest` so the top-sentinel handler bails and
+  // the "Beginning of history" affordance surfaces.
   $effect(() => {
     if (readonly) return;
-    const total = allMessages.length;
+    const ws = windowStart;
     const complete = zeroSync.blocksResultType === "complete";
     untrack(() => {
-      if (complete && renderTake >= total) {
+      const atTop = ws === 0;
+      if (complete && atTop) {
         if (!chat.reachedOldest) chat.reachedOldest = true;
+      } else if (!atTop && chat.reachedOldest) {
+        chat.reachedOldest = false;
       }
     });
   });
@@ -199,6 +226,82 @@
   function timestampableMessage(msg: ChatMessage): boolean {
     // tool/thinking are continuations; they never carry their own timestamp.
     return msg.role !== "tool" && msg.role !== "thinking";
+  }
+
+  /**
+   * Slide the windowEnd cursor and restore the user's viewport to the
+   * same content they were looking at. Same anchor-restore math the
+   * old REST scroll-back path used — only the source of the new rows
+   * changed (the Zero local replica instead of a server fetch).
+   *
+   * Direction:
+   *   - "up"   → reveal older. Decreases windowEnd, shifting the
+   *              slice toward the head of allMessages. New bubbles
+   *              mount ABOVE the existing ones; oldest of the prior
+   *              window unmount from the BOTTOM. DOM stays bounded.
+   *   - "down" → reveal newer. Increases windowEnd. Symmetric: new
+   *              bubbles mount BELOW, oldest unmount from the TOP.
+   *
+   * Anchor is the FIRST visible bubble (topmost in viewport).
+   * Capturing the first bubble works for both directions because
+   * after the slide it stays in the rendered DOM (only the edges
+   * change) and its viewport-relative offset shifts predictably.
+   */
+  function slideWindow(
+    scroller: HTMLElement | null,
+    direction: "up" | "down",
+  ): void {
+    if (!scroller) return;
+    const anchorEl =
+      scroller.querySelector<HTMLElement>("[data-msg-id]") ?? null;
+    const anchorId = anchorEl?.getAttribute("data-msg-id") ?? null;
+    const anchorOffset =
+      anchorEl
+        ? anchorEl.getBoundingClientRect().top -
+          scroller.getBoundingClientRect().top
+        : 0;
+
+    if (direction === "up") {
+      chat.chatWindowEnd = Math.max(
+        WINDOW_SIZE,
+        chat.chatWindowEnd - SLIDE_AMOUNT,
+      );
+    } else {
+      chat.chatWindowEnd = Math.min(
+        allMessages.length,
+        chat.chatWindowEnd + SLIDE_AMOUNT,
+      );
+    }
+
+    void (async () => {
+      if (!anchorId) return;
+      await tick();
+      const target = scroller.querySelector<HTMLElement>(
+        `[data-msg-id="${CSS.escape(anchorId)}"]`,
+      );
+      // If the anchor scrolled out of the new slice (window slid past
+      // it — happens on a fast slide-down when the user was already
+      // near the top of the old window), there's nothing to restore
+      // against. Bail rather than guess; the next scroll event will
+      // re-anchor naturally.
+      if (!target) return;
+      const newOffset =
+        target.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top;
+      const delta = newOffset - anchorOffset;
+      if (delta === 0) return;
+      // WebKit/Safari/Orion paint-deferral fix. A programmatic
+      // scrollTop write while the scroll thread is hot (momentum or
+      // recent input) defers paint of the newly-revealed region
+      // until the next user scroll. Toggling overflow-y: hidden
+      // synchronously detaches the element from the scroll thread,
+      // forcing WebKit to commit + flush a full paint.
+      scroller.style.overflowY = "hidden";
+      scroller.scrollTop += delta;
+      setTimeout(() => {
+        if (scroller) scroller.style.overflowY = "";
+      }, 0);
+    })();
   }
 
   // Top-sentinel pagination. When the user scrolls up to the top of the
@@ -261,60 +364,21 @@
             });
             continue;
           }
-          if (chat.reachedOldest) continue;
-          if (renderTake >= allMessages.length) continue;
-          // Anchor on a concrete rendered message rather than scrollHeight
-          // math: capture the first currently-rendered bubble's id + its
-          // distance from the viewport top, then after the window expands,
-          // scroll so that same bubble lands at the same offset. Works
-          // identically in Chromium and WebKit; `scrollHeight -
-          // beforeHeight` did not (WebKit's layout flush ordering left
-          // the read stale).
+          // Slide the window UP (reveal older). No-op when already at
+          // the start of history or when there's nothing more to slide
+          // toward. The Zero local replica already holds the older
+          // messages we're about to mount — there is no network call.
+          if (windowStart === 0) continue;
           const scroller = el.closest(".chat-scroll") as HTMLElement | null;
-          const anchorEl =
-            scroller?.querySelector<HTMLElement>("[data-msg-id]") ?? null;
-          const anchorId = anchorEl?.getAttribute("data-msg-id") ?? null;
-          const anchorOffset =
-            anchorEl && scroller
-              ? anchorEl.getBoundingClientRect().top -
-                scroller.getBoundingClientRect().top
-              : 0;
-          // Local-first window expansion. Plan §39: the Zero replica
-          // already holds the full 90-day history in IndexedDB — there
-          // is no network round-trip. The top-sentinel hit means "the
-          // user wants older messages"; reveal *all* of them in one
-          // shot rather than incrementing by a fixed step (a dense
-          // chat would otherwise need 15+ scroll-ups to surface a
-          // year of history, which feels broken). Anchor-restore
-          // below keeps the user's viewport pinned through the bulk
-          // mount.
-          renderTake = allMessages.length;
-          void (async () => {
-            if (!scroller || !anchorId) return;
-            await tick();
-            if (!scroller) return;
-            const target = scroller.querySelector<HTMLElement>(
-              `[data-msg-id="${CSS.escape(anchorId)}"]`,
-            );
-            if (!target) return;
-            const newOffset =
-              target.getBoundingClientRect().top -
-              scroller.getBoundingClientRect().top;
-            const delta = newOffset - anchorOffset;
-            // WebKit/Safari/Orion paint-deferral fix — same shape as the
-            // past-session block above. Detach the scroll thread, write,
-            // reattach next tick. Without it the freshly-rendered region
-            // above the user's viewport stays unpainted until the next
-            // scroll event.
-            scroller.style.overflowY = "hidden";
-            scroller.scrollTop += delta;
-            setTimeout(() => {
-              if (scroller) scroller.style.overflowY = "";
-            }, 0);
-          })();
+          slideWindow(scroller, "up");
         }
       },
-      { rootMargin: "200px 0px 0px 0px" },
+      // Generous top margin: fire the slide BEFORE the user's scroll
+      // actually reaches the top edge of the rendered DOM so the new
+      // batch has time to mount + anchor-restore in. Without this
+      // headroom the user briefly sees a hard stop at the top while
+      // the new chunk renders.
+      { rootMargin: "600px 0px 0px 0px" },
     );
     obs.observe(el);
     topSentinelObserver = obs;
@@ -367,19 +431,39 @@
   $effect(() => {
     if (readonly) return;
     if (!bottomSentinel) return;
+    const sentinel = bottomSentinel;
     const obs = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
-          chat.pinnedToBottom = e.isIntersecting;
+          const atBottomOfWindow = e.isIntersecting;
+          // `pinnedToBottom` means "user is viewing the live tail of
+          // history" — at the bottom of the rendered window AND that
+          // window's end is the end of all messages. With the sliding
+          // window, "at bottom of rendered" alone is not enough: it
+          // might just mean "at the bottom of the slice we currently
+          // have mounted, with more newer messages waiting to slide in."
+          chat.pinnedToBottom =
+            atBottomOfWindow && chat.chatWindowEnd >= allMessages.length;
+          // Symmetric slide-down: when the user reaches the bottom of
+          // the rendered window AND there are newer messages beyond it
+          // (e.g., they scrolled up earlier, were mid-history, now
+          // scrolling back down), advance the window. Anchor restore
+          // keeps their viewport pinned through the mount.
+          if (atBottomOfWindow && chat.chatWindowEnd < allMessages.length) {
+            const scroller =
+              sentinel.closest(".chat-scroll") as HTMLElement | null;
+            slideWindow(scroller, "down");
+          }
         }
       },
       // Match the old scroll-math threshold: treat "within 200px of the
-      // bottom" as pinned. Positive `bottom` rootMargin extends the
-      // observation root downward, so the sentinel keeps reporting
-      // intersecting for 200px after it scrolls up out of strict view.
+      // bottom" as pinned. The slide-down trigger uses the same
+      // intersection so the window starts mounting newer messages
+      // ~200px before the user's scroll actually reaches the visual
+      // bottom — same headroom strategy as the top-sentinel.
       { rootMargin: "0px 0px 200px 0px" },
     );
-    obs.observe(bottomSentinel);
+    obs.observe(sentinel);
     return () => obs.disconnect();
   });
 
