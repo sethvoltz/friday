@@ -159,28 +159,42 @@
     const end = Math.min(chat.chatWindowEnd, allMessages.length);
     return allMessages.slice(windowStart, end);
   });
-  // Initialize / re-anchor the window when the focused agent changes
-  // (route navigation) — drop in at the latest tail of the new agent's
-  // transcript so the user sees the most recent N messages first.
-  // Also catches the cold-start case where chat.chatWindowEnd is the
-  // default 0 sentinel on first mount.
+  // Single effect that does three jobs against the same dependency
+  // set (focusedAgent, allMessages.length):
+  //
+  //   1. **Cold-start / agent-switch snap**: chat.chatWindowEnd is
+  //      `0` either at module init or right after a route change. If
+  //      we don't catch that here, the next render slices
+  //      allMessages[0..0] and the chat is empty — the regression
+  //      this commit is fixing.
+  //
+  //   2. **Defensive clamp**: a Zero update can shrink allMessages
+  //      (cancel-queued / block_canceled drops a row), and a stale
+  //      chatWindowEnd pointing past the new tail would slice past
+  //      the end. Snap back to total.
+  //
+  //   3. **Live tail follow**: when the user is already viewing the
+  //      latest message and a new block lands, advance windowEnd to
+  //      include it so the chat keeps streaming. Mid-history users
+  //      (chatWindowEnd well below total) stay parked.
+  //
+  // Tracks BOTH chat.focusedAgent (agent switch) AND
+  // allMessages.length (length growth or shrink). Without the length
+  // track, the cold-start path would not fire when Zero populates
+  // chat.messages asynchronously after this component mounts.
   $effect(() => {
     chat.focusedAgent;
-    untrack(() => {
-      chat.chatWindowEnd = allMessages.length;
-    });
-  });
-  // Follow live appends while the user is pinned to the bottom of all
-  // history. When a new block lands and the user is already viewing
-  // the latest, slide the window forward to include it. If the user
-  // is mid-history (chatWindowEnd < allMessages.length) the window
-  // stays where they parked it; the new message is "below" the
-  // rendered slice until they scroll down (slide-down handler) or
-  // hit Latest.
-  $effect(() => {
     const total = allMessages.length;
     untrack(() => {
       if (readonly) return;
+      // Cold start (sentinel 0) or defensive clamp past the new tail.
+      if (chat.chatWindowEnd === 0 || chat.chatWindowEnd > total) {
+        chat.chatWindowEnd = total;
+        return;
+      }
+      // Live tail follow: only when the user is already pinned to the
+      // bottom of all history AND the window's prior end was within 1
+      // of the prior total (i.e., we're following the live cursor).
       if (chat.pinnedToBottom && chat.chatWindowEnd >= total - 1) {
         if (chat.chatWindowEnd !== total) chat.chatWindowEnd = total;
       }
@@ -194,9 +208,18 @@
   $effect(() => {
     if (readonly) return;
     const ws = windowStart;
+    const we = chat.chatWindowEnd;
+    const total = allMessages.length;
     const complete = zeroSync.blocksResultType === "complete";
     untrack(() => {
-      const atTop = ws === 0;
+      // "Beginning of history" affordance fires only when:
+      //   - the rendered window genuinely starts at index 0, AND
+      //   - the window has been initialized past the 0-sentinel (we == 0
+      //     is the cold-start state, not "at the top of a 3000-row
+      //     transcript"), AND
+      //   - Zero confirms the local replica matches the upstream filter
+      //     (no more rows the server has that the client hasn't seen).
+      const atTop = ws === 0 && we > 0 && total > 0;
       if (complete && atTop) {
         if (!chat.reachedOldest) chat.reachedOldest = true;
       } else if (!atTop && chat.reachedOldest) {
