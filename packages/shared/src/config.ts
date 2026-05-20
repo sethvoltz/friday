@@ -80,9 +80,14 @@ export interface FridayConfig {
    * - an object with `name` plus optional `thinking` and `effort`
    */
   model: string | ModelConfig;
-  /** Daemon HTTP port (localhost only). */
+  /** Daemon HTTP port (localhost only). Defaults to `PROD_DAEMON_PORT`. */
   daemonPort: number;
-  /** Dashboard port. */
+  /**
+   * Dashboard port. Defaults to `PROD_DASHBOARD_PORT`. `start.ts`
+   * resolves the value and passes it as `PORT=<resolved>` to the
+   * dashboard spawn (adapter-node's convention). `vite dev` ignores
+   * this entirely and binds 5173 from `vite.config.ts`.
+   */
   dashboardPort: number;
   /** SSE keepalive interval in seconds. */
   sseKeepaliveSec: number;
@@ -188,10 +193,27 @@ export type AgentTypeName =
   | "scheduled"
   | "bare";
 
+/**
+ * Production port assignments. The full resolution chain everywhere is
+ *   `process.env.FRIDAY_<X>_PORT ?? cfg.<x>Port ?? PROD_<X>_PORT`
+ * for the daemon (so the dev dashboard wrapper can override without
+ * rebuilding) and
+ *   `cfg.dashboardPort ?? PROD_DASHBOARD_PORT`
+ * for the dashboard (start.ts passes the result as `PORT` to the
+ * dashboard spawn). Dev keeps its existing ports — daemon 7444, vite
+ * 5173 — via the wrappers in root package.json, not via these defaults.
+ * Zero-cache stays at the Zero convention (4848); no constant here
+ * because `server-entry.mjs` already reads `ZERO_CACHE_PORT` env.
+ *
+ * "TGIF" is the dashboard mnemonic — 7615.
+ */
+export const PROD_DAEMON_PORT = 7610;
+export const PROD_DASHBOARD_PORT = 7615;
+
 export const DEFAULT_CONFIG: FridayConfig = {
   model: "claude-opus-4-7",
-  daemonPort: 7444,
-  dashboardPort: 5173,
+  daemonPort: PROD_DAEMON_PORT,
+  dashboardPort: PROD_DASHBOARD_PORT,
   sseKeepaliveSec: 20,
   workerMemoryBudgetMb: 2048,
   mcpServers: [],
