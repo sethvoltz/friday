@@ -2,10 +2,15 @@
  * Server-side proxy to the localhost daemon.
  */
 
-import { DAEMON_SECRET_HEADER, getDaemonSecret, loadConfig } from "@friday/shared";
+import {
+  DAEMON_SECRET_HEADER,
+  getDaemonSecret,
+  loadConfig,
+  resolveDaemonPort,
+} from "@friday/shared";
 
 const cfg = loadConfig();
-const BASE = `http://localhost:${cfg.daemonPort}`;
+const BASE = `http://localhost:${resolveDaemonPort(cfg)}`;
 /**
  * Single default timeout for every non-streaming daemon-proxy fetch
  * (FIX_FORWARD 3.4). The previous 2s was an arbitrary "feels snappy"

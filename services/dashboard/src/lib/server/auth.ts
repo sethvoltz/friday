@@ -1,20 +1,46 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { ensureFridayEnv, getDb, loadConfig, schema } from "@friday/shared";
+import {
+  ensureFridayEnv,
+  getDb,
+  loadConfig,
+  PROD_DASHBOARD_PORT,
+  resolveDashboardPort,
+  schema,
+} from "@friday/shared";
 
 ensureFridayEnv();
 const cfg = loadConfig();
 
 const db = getDb();
 
-const port = cfg.dashboardPort;
-const localUrl = `http://localhost:${port}`;
+const resolvedPort = resolveDashboardPort(cfg);
+// `localUrl` is the canonical localhost origin for THIS process — used
+// as the BetterAuth baseURL fallback when no public URL is configured.
+const localUrl = `http://localhost:${resolvedPort}`;
 
 // trustedOrigins gates BetterAuth's CSRF check (Origin header must match).
-// We accept localhost (laptop access) plus the public Cloudflare Tunnel
-// URL when configured (phone / remote access). BETTER_AUTH_URL stays as
-// an explicit override for unusual setups.
-const trustedOrigins = [localUrl];
+// The list is intentionally permissive on localhost:
+// - http://localhost:7615 (prod dashboard, PROD_DASHBOARD_PORT)
+// - http://localhost:5173 (vite dev, the contributor wrapper)
+// - http://localhost:<resolvedPort> if the user overrode `cfg.dashboardPort`
+//   to something other than the two well-known values
+// - cfg.publicUrl (the Cloudflare Tunnel hostname, for phone / remote access)
+// - process.env.BETTER_AUTH_URL (explicit override for unusual setups)
+//
+// Both localhost ports are listed unconditionally so a developer can
+// sign in on the dev origin (`:5173`) without the prod dashboard having
+// to know about dev's port — same shape from the operator's view, no
+// per-environment branching.
+const DEV_DASHBOARD_LOCAL = "http://localhost:5173";
+const PROD_DASHBOARD_LOCAL = `http://localhost:${PROD_DASHBOARD_PORT}`;
+const trustedOrigins: string[] = [PROD_DASHBOARD_LOCAL, DEV_DASHBOARD_LOCAL];
+if (
+  resolvedPort !== PROD_DASHBOARD_PORT &&
+  localUrl !== DEV_DASHBOARD_LOCAL
+) {
+  trustedOrigins.push(localUrl);
+}
 if (cfg.publicUrl) trustedOrigins.push(cfg.publicUrl);
 if (process.env.BETTER_AUTH_URL) trustedOrigins.push(process.env.BETTER_AUTH_URL);
 

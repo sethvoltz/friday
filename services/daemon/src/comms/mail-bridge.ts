@@ -20,6 +20,7 @@ import {
   loadConfig,
   normalizeModelConfig,
   readPromptStack,
+  resolveDaemonPort,
 } from "@friday/shared";
 import { inbox, mailBus, type MailRow } from "@friday/shared/services";
 import { logger } from "../log.js";
@@ -145,7 +146,7 @@ async function maybeSpawnFromMail(agentName: string): Promise<void> {
       thinking: modelCfg.thinking,
       effort: modelCfg.effort,
       resumeSessionId: agentRow.sessionId ?? undefined,
-      daemonPort: cfg.daemonPort,
+      daemonPort: resolveDaemonPort(cfg),
       parentName:
         "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
       mode: "long-lived",

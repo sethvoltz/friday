@@ -125,14 +125,15 @@ Creates `~/.friday/`, provisions the `friday` Postgres database and role, runs i
 
 ```bash
 friday start            # production (requires `pnpm build`)
-friday start --dev      # tsx watch + vite dev, in tmux
 
 friday status                    # pids, ports, uptime
-friday attach daemon             # attach a service's tmux pane (daemon | dashboard)
+friday attach daemon             # attach a service's tmux pane (daemon | dashboard | zero-cache)
 friday logs --follow             # tail daemon log
 ```
 
-`friday start` prints the local dashboard URL on launch — open it and sign in.
+`friday start` always runs prod. For dev hot-reload, see [Developing Friday](#developing-friday) below.
+
+`friday start` prints the local dashboard URL (`http://localhost:7615`) on launch — open it and sign in.
 
 > **Tip:** add `./bin` to your `PATH` to call `friday` from anywhere, or invoke `./bin/friday` from the repo root during development.
 
@@ -153,12 +154,12 @@ The `friday` CLI manages services and inspects state. Inspection commands work r
 # Lifecycle
 friday setup [--cloudflare] [--reset-password]
 friday doctor                                  # data dir, db, account, external CLIs
-friday start [--dev]                           # daemon + dashboard (+ tunnel if configured)
+friday start                                   # daemon + dashboard + zero-cache (+ tunnel if configured)
 friday stop                                    # tear down the tmux session
-friday restart <daemon|dashboard|tunnel|all>   # mode-preserving restart
+friday restart <daemon|dashboard|zero-cache|tunnel|all>   # restart a service
 friday status                                  # pids, ports, uptime, public URL
-friday attach <daemon|dashboard>               # attach the tmux pane (service arg required)
-friday logs [daemon|dashboard|tunnel] [--follow]
+friday attach <daemon|dashboard|zero-cache>    # attach the tmux pane (service arg required)
+friday logs [daemon|dashboard|zero-cache|tunnel] [--follow]
 
 # Inspection (read-only; daemon optional)
 friday agents ls
@@ -253,13 +254,18 @@ pnpm build          # Turborepo: shared first, then services in parallel
 pnpm --filter @friday/shared build
 ```
 
-### Dev mode
+### Developing Friday
+
+Dev mode runs directly from the repo with two pnpm scripts — **not** the `friday` CLI:
 
 ```bash
-friday start --dev               # daemon + dashboard with hot reload in tmux
-friday attach dashboard          # attach the dashboard pane (Ctrl-b d to detach)
-friday logs daemon --follow      # tail daemon logs without attaching
+pnpm dev:daemon       # tsx watch on the daemon — binds :7444
+pnpm dev:dashboard    # vite dev on the dashboard — binds :5173
 ```
+
+Both wrappers set `FRIDAY_DAEMON_PORT=7444` so the dev dashboard's SvelteKit server-side fetches reach the dev daemon (`:7444`) rather than the prod daemon (`:7610`). Prod (`friday start`) and dev (`pnpm dev:*`) can run side-by-side without TCP collisions — prod uses `:7610` / `:7615`, dev uses `:7444` / `:5173`. They share `~/.friday/` (and the prod Postgres `friday` DB + zero-cache) by default; for full isolation, prefix with `FRIDAY_DATA_DIR=$HOME/.friday-dev`. See `docs/running.md` for the parallel-Postgres + parallel-zero-cache caveat.
+
+The `--dev` CLI flag was retired (FRI-83) — `friday start --dev` now exits with citty's unknown-flag error.
 
 ### Testing
 

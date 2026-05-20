@@ -80,10 +80,22 @@ export interface FridayConfig {
    * - an object with `name` plus optional `thinking` and `effort`
    */
   model: string | ModelConfig;
-  /** Daemon HTTP port (localhost only). */
-  daemonPort: number;
-  /** Dashboard port. */
-  dashboardPort: number;
+  /**
+   * Daemon HTTP port (localhost only). Optional — `~/.friday/config.json`
+   * may omit it, in which case `resolveDaemonPort()` falls back to
+   * `process.env.FRIDAY_DAEMON_PORT` (used by dev wrappers) and finally
+   * to `PROD_DAEMON_PORT`.
+   */
+  daemonPort?: number;
+  /**
+   * Dashboard port. Optional — `~/.friday/config.json` may omit it, in
+   * which case `resolveDashboardPort()` falls back to
+   * `PROD_DASHBOARD_PORT`. `start.ts` resolves and passes the value as
+   * `PORT=<resolved>` to the dashboard spawn (adapter-node's
+   * convention). `vite dev` ignores this entirely and binds 5173 from
+   * `vite.config.ts`.
+   */
+  dashboardPort?: number;
   /** SSE keepalive interval in seconds. */
   sseKeepaliveSec: number;
   /** Aggregate worker memory budget in MB; surfaces a banner over this. */
@@ -188,10 +200,64 @@ export type AgentTypeName =
   | "scheduled"
   | "bare";
 
+/**
+ * Production port assignments. The full resolution chain everywhere is
+ *   `process.env.FRIDAY_<X>_PORT ?? cfg.<x>Port ?? PROD_<X>_PORT`
+ * for the daemon (so the dev dashboard wrapper can override without
+ * rebuilding) and
+ *   `cfg.dashboardPort ?? PROD_DASHBOARD_PORT`
+ * for the dashboard (start.ts passes the result as `PORT` to the
+ * dashboard spawn). Dev keeps its existing ports — daemon 7444, vite
+ * 5173 — via the wrappers in root package.json, not via these defaults.
+ * Zero-cache stays at the Zero convention (4848); no constant here
+ * because `server-entry.mjs` already reads `ZERO_CACHE_PORT` env.
+ *
+ * "TGIF" is the dashboard mnemonic — 7615.
+ */
+export const PROD_DAEMON_PORT = 7610;
+export const PROD_DASHBOARD_PORT = 7615;
+
+/**
+ * Resolve the daemon's port from the standard chain:
+ *   `process.env.FRIDAY_DAEMON_PORT ?? cfg.daemonPort ?? PROD_DAEMON_PORT`
+ *
+ * Used by:
+ * - `services/daemon/src/index.ts` for its own `startServer` bind.
+ * - `services/dashboard/src/lib/server/daemon.ts` for the upstream URL.
+ *
+ * Symmetric on both sides of the dev IPC: when the dev wrappers set
+ * `FRIDAY_DAEMON_PORT=7444`, both the daemon (binding) and the
+ * dashboard (fetching) resolve to 7444 without a rebuild or a config
+ * edit. In prod the env is unset, so the chain falls through to the
+ * config override (if set) or the prod constant.
+ *
+ * Invalid env values (non-numeric, NaN, ≤0) are ignored so a typo
+ * doesn't silently mis-bind.
+ */
+export function resolveDaemonPort(cfg: FridayConfig): number {
+  const envRaw = process.env.FRIDAY_DAEMON_PORT;
+  if (envRaw) {
+    const parsed = Number(envRaw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return cfg.daemonPort ?? PROD_DAEMON_PORT;
+}
+
+/**
+ * Resolve the dashboard's port from `cfg.dashboardPort ??
+ * PROD_DASHBOARD_PORT`. No env override — adapter-node's `PORT` is the
+ * dashboard process's own knob and is set by `start.ts` from this
+ * chain, so the env var is downstream of the resolution, not part of
+ * it.
+ */
+export function resolveDashboardPort(cfg: FridayConfig): number {
+  return cfg.dashboardPort ?? PROD_DASHBOARD_PORT;
+}
+
 export const DEFAULT_CONFIG: FridayConfig = {
   model: "claude-opus-4-7",
-  daemonPort: 7444,
-  dashboardPort: 5173,
+  daemonPort: PROD_DAEMON_PORT,
+  dashboardPort: PROD_DASHBOARD_PORT,
   sseKeepaliveSec: 20,
   workerMemoryBudgetMb: 2048,
   mcpServers: [],

@@ -51,10 +51,9 @@ Verifies the data dir, config, db migrations, account presence, and external CLI
 
 ```bash
 friday start          # production mode (requires `pnpm build` first)
-friday start --dev    # dev mode with hot reload (tsx watch + vite dev)
 ```
 
-This starts the daemon and dashboard inside a tmux session named `friday`.
+This starts the daemon, dashboard, and zero-cache inside a tmux session named `friday`. For dev hot-reload, use `pnpm dev:daemon` / `pnpm dev:dashboard` (see `docs/running.md`).
 
 ```bash
 friday status         # show pids, ports, uptime
@@ -64,10 +63,11 @@ friday stop           # shut everything down
 ```
 
 By default:
-- Daemon listens on `127.0.0.1:7444` (localhost only).
-- Dashboard listens on `127.0.0.1:5173`.
+- Daemon listens on `127.0.0.1:7610` (localhost only).
+- Dashboard listens on `127.0.0.1:7615` ("TGIF").
+- Zero-cache listens on `127.0.0.1:4848` (internal-only behind the dashboard's `/api/sync` WS proxy).
 
-Open `http://localhost:5173` and sign in with the credentials you set in step 3.
+Open `http://localhost:7615` and sign in with the credentials you set in step 3.
 
 ## 6. Public access via Cloudflare Tunnel
 
@@ -77,7 +77,7 @@ Friday manages the tunnel for you. You provide one connector token; `friday star
 
 1. Cloudflare Zero Trust dashboard → **Networks → Connectors → Create a tunnel**.
 2. Pick the **Cloudflared** connector, name it `friday`, and copy the **connector token** shown on the install screen.
-3. Under **Public Hostname**, add a route: `friday.<your-domain>.com` → `http://127.0.0.1:5173`.
+3. Under **Public Hostname**, add a route: `friday.<your-domain>.com` → `http://127.0.0.1:7615`. (This is the prod dashboard port — see `docs/running.md`.)
 
 ### Configure Friday
 

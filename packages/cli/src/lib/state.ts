@@ -12,18 +12,23 @@ import {
   type ServiceName,
 } from "@friday/shared";
 
-export type ServiceMode = "dev" | "prod";
-
 export interface ServiceState {
   service: ServiceName;
-  mode: ServiceMode;
-  /** Set for tmux-supervised services (daemon, dashboard). */
+  /** Set for tmux-supervised services (daemon, dashboard, zero-cache). */
   tmuxSession?: string;
   /** Set for pid-supervised services (tunnel). */
   pid?: number;
   startedAt: string;
 }
 
+/**
+ * Pre-2026-05 state files carried a `mode: "dev" | "prod"` field — the
+ * concept was retired with the path-to-prod work (FRI-83), since prod is
+ * now the only thing the CLI launches. Older files load without error
+ * because JSON.parse keeps the extra property in memory; this interface
+ * just omits it so callers can't reference it. `writeState` doesn't
+ * emit `mode` so the field disappears on the next rewrite.
+ */
 export function readState(service: ServiceName): ServiceState | null {
   const path = statePathFor(service);
   if (!existsSync(path)) return null;
