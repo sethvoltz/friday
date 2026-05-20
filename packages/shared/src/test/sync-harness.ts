@@ -106,21 +106,43 @@ export async function waitForTcp(
 // child hasn't died.
 // ─────────────────────────────────────────────────────────────────────
 
+/**
+ * SIGTERM the process group; SIGKILL it if not gone in `ms` ms.
+ *
+ * zero-cache forks 10+ worker subprocesses (runner, change-streamer,
+ * replicator, syncers, write-worker, reaper). A plain `child.kill()`
+ * only signals the immediate spawn — the workers survive, hold ports,
+ * lock the SQLite replica, and stall the next test's spawn with
+ * EADDRINUSE / file-busy. Spawning with `detached: true` puts every
+ * descendant in the child's process group; `process.kill(-pid, sig)`
+ * delivers the signal to the whole group.
+ */
 async function sigtermThenSigkill(
   child: ChildProcess,
   ms = 1_500,
 ): Promise<void> {
   if (child.exitCode !== null || child.killed) return;
-  child.kill("SIGTERM");
+  const pid = child.pid;
+  const sigGroup = (signal: NodeJS.Signals) => {
+    if (pid === undefined) return;
+    try {
+      process.kill(-pid, signal); // negative pid → process group
+    } catch {
+      // The group may already be gone, or the platform may not
+      // support negative pid signaling; fall back to direct child.
+      try {
+        child.kill(signal);
+      } catch {
+        /* already dead */
+      }
+    }
+  };
+  sigGroup("SIGTERM");
   await Promise.race([
     new Promise<void>((res) => child.once("exit", () => res())),
     new Promise<void>((res) =>
       setTimeout(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* already dead */
-        }
+        sigGroup("SIGKILL");
         res();
       }, ms),
     ),
@@ -168,14 +190,69 @@ export async function spawnZeroCacheForTest(
   const child = spawn("pnpm", ["exec", "zero-cache"], {
     cwd: DASHBOARD_DIR,
     env,
+    // `detached: true` lifts the spawn into its own process group so
+    // the SIGTERM in cleanup reaches every worker zero-cache forks
+    // (runner, syncers, replicator, write-worker, reaper). Without it,
+    // workers leak between tests and the next harness boot hits
+    // EADDRINUSE on the previously-allocated port.
+    detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
-  // Drain output silently — keep child writable, no-op consumer.
-  child.stdout?.on("data", () => {});
-  child.stderr?.on("data", () => {});
-  const ready = waitForTcp(port, { timeoutMs: 20_000 });
+  if (process.env.FRIDAY_TEST_DEBUG === "1") {
+    child.stdout?.on("data", (d) =>
+      process.stderr.write(`[zero stdout] ${d}`),
+    );
+    child.stderr?.on("data", (d) =>
+      process.stderr.write(`[zero stderr] ${d}`),
+    );
+  } else {
+    child.stdout?.on("data", () => {});
+    child.stderr?.on("data", () => {});
+  }
+  // Open TCP isn't enough: zero-cache binds early but rejects the WS
+  // upgrade until its syncer workers finish their initial CVR install
+  // (~10-60s on a cold tmp filesystem). Probe with the actual Zero
+  // sync URL — when the server responds with a 101 Upgrade or any
+  // valid HTTP status (4xx is fine; means it accepted the request),
+  // we know clients can connect.
+  const ready = (async () => {
+    await waitForTcp(port, { timeoutMs: 90_000 });
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      const ok = await new Promise<boolean>((resolve) => {
+        const ws = new globalThis.WebSocket(
+          `ws://127.0.0.1:${port}/sync/v50/connect`,
+        );
+        const settle = (v: boolean) => {
+          try {
+            ws.close();
+          } catch {
+            /* ignore */
+          }
+          resolve(v);
+        };
+        ws.onopen = () => settle(true);
+        ws.onclose = (ev) => {
+          // Zero may close with 1002 / 1006 right after handshake if
+          // we send no auth; that's still proof the WS endpoint is
+          // alive. A clean refusal (TCP RST during handshake) shows
+          // up as a connect-time error event, NOT a close, so a
+          // close event here means the server reached the protocol
+          // negotiation step.
+          settle(ev.code > 0);
+        };
+        ws.onerror = () => settle(false);
+        setTimeout(() => settle(false), 2_000);
+      });
+      if (ok) return;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    throw new Error(
+      `zero-cache WS upgrade on :${port} didn't succeed within 90s`,
+    );
+  })();
   return { port, child, replicaFile, ready };
 }
 
@@ -237,12 +314,24 @@ export async function spawnDaemonForTest(
   const child = spawn("node", [DAEMON_ENTRY], {
     cwd: REPO_ROOT,
     env,
+    // See spawnZeroCacheForTest: detached → own process group →
+    // group-wide SIGTERM in cleanup catches every subprocess.
+    detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
-  child.stdout?.on("data", () => {});
-  child.stderr?.on("data", () => {});
+  if (process.env.FRIDAY_TEST_DEBUG === "1") {
+    child.stdout?.on("data", (d) =>
+      process.stderr.write(`[daemon stdout] ${d}`),
+    );
+    child.stderr?.on("data", (d) =>
+      process.stderr.write(`[daemon stderr] ${d}`),
+    );
+  } else {
+    child.stdout?.on("data", () => {});
+    child.stderr?.on("data", () => {});
+  }
   const ready = waitForTcp(port, { timeoutMs: 15_000 });
   return { port, child, dataDir, ready };
 }
@@ -286,6 +375,9 @@ export async function spawnDashboardForTest(
   const child = spawn("node", [DASHBOARD_ENTRY], {
     cwd: DASHBOARD_DIR,
     env,
+    // See spawnZeroCacheForTest: detached → own process group →
+    // group-wide SIGTERM in cleanup catches every subprocess.
+    detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout?.setEncoding("utf8");
@@ -523,31 +615,46 @@ export async function spawnTestSyncEnv(
   const daemonPort = await freePort();
   const dashboardPort = await freePort();
 
-  const zeroCache = opts.skipZeroCache
-    ? (null as unknown as ZeroCacheHandle)
-    : await spawnZeroCacheForTest({
+  // Track partially-spawned subprocesses so a failure during setup
+  // still tears them down. Without this, a timeout in zero-cache.ready
+  // leaks the daemon + zero-cache subprocesses + their PG connections,
+  // which leaves the next test's PG pool exhausted ("too many clients
+  // already") and the next harness boot hitting EADDRINUSE.
+  let zeroCache: ZeroCacheHandle | null = null;
+  let daemon: DaemonHandle | null = null;
+  let dashboard: DashboardHandle | null = null;
+  try {
+    // SERIALIZE the spawn chain. Earlier versions spawned all three
+    // subprocesses in parallel and waited on their `.ready` promises
+    // together; that pattern raced zero-cache's `initial CVR snapshot`
+    // (which takes a table-level lock on the publication's tables)
+    // against the daemon's `evolve.projector.boot-sync` writes to
+    // `evolve_proposals`. The contention surfaced as Postgres
+    // `canceling statement due to lock timeout`, zero-cache crashing
+    // mid-setup, and every subsequent WS connect timing out with
+    // "Zero was unable to connect for 60 seconds." The order below
+    // (zero-cache → daemon → dashboard, each fully ready before the
+    // next starts) eliminates that race.
+    if (!opts.skipZeroCache) {
+      zeroCache = await spawnZeroCacheForTest({
         databaseUrl,
         authSecret: zeroAuthSecret,
         adminPassword: "test-admin-password",
         port: zeroCachePort,
       });
-  const daemon = opts.skipDaemon
-    ? (null as unknown as DaemonHandle)
-    : await spawnDaemonForTest({
+      await zeroCache.ready;
+    }
+    if (!opts.skipDaemon) {
+      daemon = await spawnDaemonForTest({
         databaseUrl,
         port: daemonPort,
         daemonSecret,
       });
+      await daemon.ready;
+    }
 
-  // Wait for the daemon to be ready before spinning up the dashboard —
-  // the dashboard's mutator endpoint forwards to the daemon's internal
-  // fast-path endpoints.
-  if (daemon) await daemon.ready;
-  if (zeroCache) await zeroCache.ready;
-
-  const dashboard = opts.skipDashboard
-    ? (null as unknown as DashboardHandle)
-    : await spawnDashboardForTest({
+    if (!opts.skipDashboard) {
+      dashboard = await spawnDashboardForTest({
         databaseUrl,
         zeroCachePort,
         daemonPort,
@@ -557,14 +664,49 @@ export async function spawnTestSyncEnv(
         dataDir: daemon?.dataDir ?? mkdtempSync(join(tmpdir(), "friday-dash-")),
         port: dashboardPort,
       });
-  if (dashboard) await dashboard.ready;
+      await dashboard.ready;
+    }
+  } catch (err) {
+    // Best-effort partial cleanup so a setup failure doesn't leak
+    // subprocesses / PG connections / replica files.
+    if (dashboard) await sigtermThenSigkill(dashboard.child);
+    if (daemon) {
+      await sigtermThenSigkill(daemon.child);
+      try {
+        rmSync(daemon.dataDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+    if (zeroCache) {
+      await sigtermThenSigkill(zeroCache.child);
+      try {
+        rmSync(zeroCache.replicaFile, { force: true });
+        rmSync(zeroCache.replicaFile + "-shm", { force: true });
+        rmSync(zeroCache.replicaFile + "-wal", { force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      await db.drop();
+    } catch {
+      /* ignore */
+    }
+    throw err;
+  }
 
   return {
     databaseUrl,
     db,
-    daemon,
-    dashboard,
-    zeroCache,
+    // The Skip* opts produce nulls here; the interface keeps these
+    // non-null for the (overwhelming) typical case. Callers that pass
+    // a skip flag are responsible for not dereferencing the missing
+    // handle — see how `unread-count-trigger.test.ts` only touches
+    // `env.db` after a `skipDaemon: true, skipZeroCache: true` boot.
+    daemon: daemon as unknown as DaemonHandle,
+    dashboard: dashboard as unknown as DashboardHandle,
+    zeroCache: zeroCache as unknown as ZeroCacheHandle,
     betterAuthSecret,
     zeroAuthSecret,
     daemonSecret,
