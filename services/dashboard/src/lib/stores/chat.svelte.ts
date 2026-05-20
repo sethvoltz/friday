@@ -806,6 +806,7 @@ export class ChatState {
 
     const parsed = parseBlocks(rawBlocks, agent, {
       inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+      noResponseGraceUntil: this.noResponseGraceUntil,
     });
 
     // Find the scroll target BEFORE the merge so we can compute it
@@ -992,14 +993,47 @@ export class ChatState {
   }
 
   /**
+   * Per-turn grace deadline (epoch ms) after `clearInflightForTurn`.
+   * SSE `turn_done` arrives on a separate transport from Zero's WS
+   * push of the assistant blocks — there's a brief window where
+   * the slot is cleared but the assistant content hasn't replicated
+   * to this client yet. parseBlocks's FRI-85 safety net consults
+   * this to avoid synthesizing a spurious "Agent didn't respond"
+   * bubble in that gap.
+   */
+  noResponseGraceUntil = $state<Record<string, number>>({});
+
+  /**
    * Clear any per-agent inflight slot whose value matches `turnId`.
    * Preserves the requestStop race invariant — if a mail-driven T2
    * started on the same agent before T1's terminal event landed, the
    * slot was already overwritten to T2 and won't be clobbered here.
+   *
+   * Also records a short grace window for `noResponseGraceUntil` so
+   * the FRI-85 safety net doesn't flash "Agent didn't respond" in
+   * the SSE-faster-than-Zero race described on that field.
    */
   clearInflightForTurn(turnId: string): void {
+    let cleared = false;
     for (const [agent, slotTurnId] of Object.entries(this.inflightTurnIdByAgent)) {
-      if (slotTurnId === turnId) this.inflightTurnIdByAgent[agent] = null;
+      if (slotTurnId === turnId) {
+        this.inflightTurnIdByAgent[agent] = null;
+        cleared = true;
+      }
+    }
+    if (cleared) {
+      // 2s is enough to absorb local Zero replication latency
+      // (typically <500ms) plus the dashboard-side parse pass; longer
+      // would risk hiding a genuinely-failed turn for too long.
+      const NO_RESPONSE_GRACE_MS = 2_000;
+      this.noResponseGraceUntil[turnId] = Date.now() + NO_RESPONSE_GRACE_MS;
+      // Self-clean so the map doesn't grow without bound. The +250ms
+      // slop keeps the deadline check above the cleanup delay so a
+      // parseBlocks pass right at the boundary doesn't see a stale
+      // entry that's already been deleted.
+      setTimeout(() => {
+        delete this.noResponseGraceUntil[turnId];
+      }, NO_RESPONSE_GRACE_MS + 250);
     }
   }
 
@@ -1465,6 +1499,7 @@ export class ChatState {
         this.messages = [
           ...parseBlocks(blocks, agent, {
             inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+            noResponseGraceUntil: this.noResponseGraceUntil,
           }),
           ...queueSynth,
         ];
@@ -1834,6 +1869,7 @@ export class ChatState {
       }
       const older = parseBlocks(blocks, agent, {
         inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+        noResponseGraceUntil: this.noResponseGraceUntil,
       });
       // FRI-81 D2/D3: older history is, by definition, from past turns —
       // no streaming/running bubble in this page is the active turn. Heal
@@ -2683,7 +2719,14 @@ export function healOrphanStreamingBubbles(
 export function parseBlocks(
   blocks: BlockRow[],
   agent: string,
-  opts: { inflightTurnId?: string | null } = {},
+  opts: {
+    inflightTurnId?: string | null;
+    /** Per-turn grace deadline (epoch ms) for the FRI-85 safety net.
+     *  Owned by ChatState.noResponseGraceUntil; covers the SSE-faster-
+     *  than-Zero race where the inflight slot has cleared but the
+     *  assistant block hasn't replicated to this client yet. */
+    noResponseGraceUntil?: Record<string, number>;
+  } = {},
 ): ChatMessage[] {
   const orphans = classifyOrphanRows(blocks);
   const out: ChatMessage[] = [];
@@ -2966,9 +3009,18 @@ export function parseBlocks(
   // will see no inflight match and the synth can fire if the turn
   // genuinely produced no assistant content.
   const inflight = opts.inflightTurnId;
+  const grace = opts.noResponseGraceUntil;
+  const now = Date.now();
   for (const [turnId, info] of userTurns) {
     if (assistantTurns.has(turnId)) continue;
     if (inflight && turnId === inflight) continue;
+    // Post-clear grace: SSE turn_done cleared the inflight slot, but
+    // Zero may still be pushing the assistant block over WS. Without
+    // this check, the next parseBlocks pass on a frame between SSE
+    // turn_done and Zero block-landing flashes a spurious
+    // "Agent didn't respond" bubble that vanishes ~1 frame later.
+    const graceDeadline = grace?.[turnId];
+    if (graceDeadline && graceDeadline > now) continue;
     synthesized = true;
     out.push({
       id: noResponseIdForTurn(turnId),

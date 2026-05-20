@@ -1742,6 +1742,109 @@ describe("unread badge gating (PR C)", () => {
     expect(out[1]!.id).toBe("nr_t-dead");
   });
 
+  it("FRI-85 safety net: post-clear grace prevents 'Agent didn't respond' flash when SSE turn_done lands before Zero pushes the assistant block", async () => {
+    // The race: SSE turn_done arrives → clearInflightForTurn fires
+    // → inflightTurnId is null. But Zero hasn't pushed the assistant
+    // block to this client yet (different transport). parseBlocks
+    // runs on a frame in that gap, sees user-only turn + no inflight
+    // match, and (without this grace) flashes nr_<turnId>. A frame
+    // later Zero catches up and the synth vanishes — but the bubble
+    // already rendered. The grace deadline closes that window.
+    const { parseBlocks } = await import("./chat.svelte");
+    const userOnly = [
+      {
+        id: "1",
+        blockId: "blk-u",
+        turnId: "t-race",
+        agentName: "friday",
+        sessionId: "s",
+        messageId: null,
+        blockIndex: 0,
+        role: "user",
+        kind: "text",
+        source: "user_chat",
+        contentJson: '{"text":"hey"}',
+        status: "complete",
+        ts: 100,
+        lastEventSeq: 1,
+      } as Parameters<typeof parseBlocks>[0][number],
+    ];
+    // Without grace: synth fires (the existing safety-net contract).
+    const withoutGrace = parseBlocks(userOnly, "friday");
+    expect(withoutGrace.find((m) => m.id === "nr_t-race")).toBeDefined();
+
+    // With an in-window grace deadline: synth suppressed.
+    const inWindow = parseBlocks(userOnly, "friday", {
+      noResponseGraceUntil: { "t-race": Date.now() + 1_000 },
+    });
+    expect(inWindow.find((m) => m.id === "nr_t-race")).toBeUndefined();
+    // The user block is still there — grace only suppresses the synth,
+    // it doesn't drop the real block.
+    expect(inWindow.length).toBe(1);
+    expect(inWindow[0]!.role).toBe("user");
+
+    // Expired grace deadline: synth fires again (covers the case where
+    // the turn legitimately produced no content and the grace ran out).
+    const expired = parseBlocks(userOnly, "friday", {
+      noResponseGraceUntil: { "t-race": Date.now() - 1 },
+    });
+    expect(expired.find((m) => m.id === "nr_t-race")).toBeDefined();
+
+    // Grace for a DIFFERENT turn doesn't suppress this one's synth —
+    // map entries are turn-scoped, not global.
+    const otherTurn = parseBlocks(userOnly, "friday", {
+      noResponseGraceUntil: { "t-other": Date.now() + 5_000 },
+    });
+    expect(otherTurn.find((m) => m.id === "nr_t-race")).toBeDefined();
+  });
+
+  it("FRI-85 safety net: clearInflightForTurn records a grace deadline that suppresses parseBlocks's synth for ~2s", async () => {
+    // Cross-boundary contract test: ChatState.clearInflightForTurn
+    // populates the noResponseGraceUntil map that parseBlocks reads.
+    // Without this end-to-end check, the two halves of the fix can
+    // drift apart (rename one field, the synth flashes again).
+    const { ChatState, parseBlocks } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.markInflight("friday", "t-end-to-end");
+    chat.clearInflightForTurn("t-end-to-end");
+
+    const out = parseBlocks(
+      [
+        {
+          id: "1",
+          blockId: "blk-u",
+          turnId: "t-end-to-end",
+          agentName: "friday",
+          sessionId: "s",
+          messageId: null,
+          blockIndex: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          contentJson: '{"text":"hey"}',
+          status: "complete",
+          ts: 100,
+          lastEventSeq: 1,
+        } as Parameters<typeof parseBlocks>[0][number],
+      ],
+      "friday",
+      {
+        // Caller threads the chat-state grace map into parseBlocks —
+        // mirrors the three real call sites in chat.svelte.ts.
+        noResponseGraceUntil: chat.noResponseGraceUntil,
+      },
+    );
+
+    // The synth must NOT fire; grace deadline is ~2s in the future.
+    expect(out.find((m) => m.id === "nr_t-end-to-end")).toBeUndefined();
+    expect(out.length).toBe(1);
+
+    // The grace entry exists with a deadline strictly in the future.
+    expect(chat.noResponseGraceUntil["t-end-to-end"]).toBeGreaterThan(
+      Date.now(),
+    );
+  });
+
   it("FRI-85 safety net: non-user_chat sources (mail, scratch, etc.) do NOT trigger the synth", async () => {
     // Mail-delivered user blocks represent agent-to-agent traffic; a
     // silent acknowledgment is normal. Same for queue_inject / scratch /
