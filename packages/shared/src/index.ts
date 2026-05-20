@@ -30,6 +30,10 @@ export {
   withTestDb,
   type TestDbHandle,
 } from "./db/test-pg.js";
+// Item #50 scaffold. Subprocess-spawning extensions are TODO; the
+// current export gives every e2e test a per-test scratch Postgres
+// with migrations applied + a single shared cleanup hook.
+export { spawnTestSyncEnv, type SyncEnv } from "./test/sync-harness.js";
 
 export type {
   WireEvent,
