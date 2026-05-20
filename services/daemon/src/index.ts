@@ -99,7 +99,7 @@ async function main(): Promise<void> {
 
   const cfg = loadConfig();
   const server = startServer({ port: cfg.daemonPort });
-  const heartbeat = startHealthHeartbeat();
+  const heartbeat = startHealthHeartbeat(cfg.daemonPort);
 
   // Phase 4.3: open the long-lived LISTEN connection for
   // `friday_settings_changed`. Subsequent settings updates from the
