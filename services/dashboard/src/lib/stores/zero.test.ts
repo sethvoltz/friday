@@ -296,7 +296,11 @@ describe("ZeroSyncStore initialization", () => {
     const opts = instances[0].__ctorOpts;
     expect(opts.userID).toBe("test-user-id");
     expect(opts.auth).toBe("test-token-123");
-    expect(opts.kvStore).toBe("mem");
+    // Local-first contract (plan §39): Zero persists its replica to
+    // IndexedDB across reloads. `kvStore: "mem"` was the deferred-Phase-6
+    // bug that broke offline access + made every reload re-sync from the
+    // network; `'idb'` is the load-bearing fix.
+    expect(opts.kvStore).toBe("idb");
   });
 });
 
@@ -393,43 +397,95 @@ describe("toAgentInfo mapping (via materialize update)", () => {
 });
 
 describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
-  it("bindBlocksFor materializes a per-agent query with status filter + ordering + limit", async () => {
+  it("bindBlocksFor materializes a per-agent query with status filter + 90d retention bound + ts ordering (no row limit — plan §39 local-first)", async () => {
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     expect(instances).toHaveLength(1);
     const z = instances[0];
 
-    zeroSync.bindBlocksFor("friday");
-    expect(zeroSync.blocksAgent).toBe("friday");
-
-    // Inspect the recorded call sequence on the blocks-query proxy to
-    // verify the filter shape. `streaming` rows MUST be excluded —
-    // otherwise the chat would render in-flight placeholders.
+    // The background-sync prime (`#bindAllBlocksBackground`) calls
+    // `.where` on the SAME query proxy during init, so snapshot the
+    // call count before invoking bindBlocksFor and assert against the
+    // delta — otherwise this test couples to the background prime's
+    // internal call shape.
     const blocksQuery = z.query.blocks as {
       __calls: Array<{ method: string; args: unknown[] }>;
     };
-    expect(blocksQuery.__calls).toEqual([
-      { method: "where", args: ["agent_name", "=", "friday"] },
-      { method: "where", args: ["status", "!=", "streaming"] },
-      // Phase 4.9: rows the dashboard's cancelQueued mutator just
-      // flipped to 'cancel_requested' (mid-flight, before the daemon
-      // LISTEN handler DELETEs the row) are excluded so the bubble
-      // vanishes optimistically.
-      { method: "where", args: ["status", "!=", "cancel_requested"] },
-      // Order by `ts DESC`, not `id DESC`. Phase 4.11 flipped
-      // `blocks.id` from bigserial to text(UUID); pre-migration rows
-      // kept their old numeric ids as strings, so the mixed alphabet
-      // makes lex-DESC on id pick a "top 50" that's chronologically
-      // arbitrary — a brand-new post-cutover UUID starting with a low
-      // digit sinks to rank ~2300 and the chat scroller never sees
-      // it. ts-DESC is the chronological intent.
-      { method: "orderBy", args: ["ts", "desc"] },
-      { method: "limit", args: [50] },
-    ]);
-    // Materialize was called once for blocks (in addition to the
-    // global slice bindings during init).
+    const baseline = blocksQuery.__calls.length;
+
+    const before = Date.now();
+    zeroSync.bindBlocksFor("friday");
+    expect(zeroSync.blocksAgent).toBe("friday");
+
+    // Local-first contract (plan §39 phase 1 + §40 retention):
+    //   - filter streaming + cancel_requested in-flight markers
+    //   - filter ts > now - 90 days (client retention bound; server
+    //     keeps everything beyond that for the jump-to-message path)
+    //   - order by ts DESC for the chat scroller
+    //   - NO `.limit(N)` — the local replica IS the source of truth;
+    //     dropping the limit is what kills REST `?before=` pagination.
+    const fgCalls = blocksQuery.__calls.slice(baseline);
+    expect(fgCalls).toHaveLength(5);
+    expect(fgCalls[0]).toEqual({
+      method: "where",
+      args: ["agent_name", "=", "friday"],
+    });
+    expect(fgCalls[1]).toEqual({
+      method: "where",
+      args: ["status", "!=", "streaming"],
+    });
+    expect(fgCalls[2]).toEqual({
+      method: "where",
+      args: ["status", "!=", "cancel_requested"],
+    });
+    expect(fgCalls[3].method).toBe("where");
+    expect((fgCalls[3].args as unknown[]).slice(0, 2)).toEqual(["ts", ">"]);
+    const cutoff = (fgCalls[3].args as unknown[])[2] as number;
+    const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
+    expect(cutoff).toBeGreaterThanOrEqual(before - ninetyDaysMs - 5000);
+    expect(cutoff).toBeLessThanOrEqual(Date.now() - ninetyDaysMs + 5);
+    expect(fgCalls[4]).toEqual({
+      method: "orderBy",
+      args: ["ts", "desc"],
+    });
+    // No `.limit(N)` in the foreground bind — that's the architectural
+    // contract this test is pinning.
+    expect(fgCalls.some((c) => c.method === "limit")).toBe(false);
     const materializeCallCount = z.materialize.mock.calls.length;
     expect(materializeCallCount).toBeGreaterThan(0);
+  });
+
+  it("background-syncs all-agent blocks within the 90-day retention bound (plan §39 phase 2)", async () => {
+    const { zeroSync: _zs } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+
+    // `#bindAllBlocksBackground` runs during #init and preloads (no
+    // materialize) the full 90d window across every agent. This is
+    // what makes a focus switch instant — the rows are already in
+    // IndexedDB by the time the foreground per-agent bind fires.
+    const blocksQuery = z.query.blocks as {
+      __calls: Array<{ method: string; args: unknown[] }>;
+    };
+    // Background prime is the only blocks-query activity that fires
+    // during init (bindBlocksFor is on-demand from chat focus).
+    expect(blocksQuery.__calls).toEqual([
+      { method: "where", args: ["status", "!=", "streaming"] },
+      { method: "where", args: ["status", "!=", "cancel_requested"] },
+      {
+        method: "where",
+        args: [
+          "ts",
+          ">",
+          expect.any(Number) as unknown as number,
+        ],
+      },
+    ]);
+    // Preload was invoked for the background prime; materialize is
+    // skipped because we don't want every agent's blocks in memory.
+    const preloadCallCount = z.preload.mock.calls.length;
+    expect(preloadCallCount).toBeGreaterThan(0);
   });
 
   it("rebinding to a new agent tears down the previous view", async () => {

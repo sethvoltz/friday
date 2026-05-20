@@ -175,6 +175,14 @@ const STATS_REPORT_INTERVAL_MS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 5 * 60 * 1000;
 })();
 
+/** Plan §40 client retention bound for `blocks`. The Zero queries
+ *  filter `where("ts", ">", now - BLOCKS_RETENTION_MS)` on both the
+ *  foreground per-agent view and the background all-agent prime so
+ *  the IndexedDB replica stays bounded. Server keeps everything
+ *  (ADR-023 "preserve over delete"); blocks older than this stay
+ *  reachable via the jump-to-message search path. */
+const BLOCKS_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
 class ZeroSyncStore {
   /** Live agent rows from Zero, filtered server-side to non-archived. */
   agents = $state<ZeroAgentRow[]>([]);
@@ -218,6 +226,14 @@ class ZeroSyncStore {
    *  to decide whether a focus-switch needs to rebind. */
   blocksAgent = $state<string | null>(null);
 
+  /** Zero's materialization status for the focused-agent blocks query.
+   *  `'unknown'` while the local replica may still be backfilling from
+   *  the server; `'complete'` once Zero confirms the local set matches
+   *  the upstream filter (plan §39 phase 2 completion signal). The
+   *  chat store reads this to decide when "you've reached the oldest"
+   *  is honest vs. provisional. */
+  blocksResultType = $state<"complete" | "unknown" | "error">("unknown");
+
   /** Connection status of the underlying Zero client. `pending` until
    *  the first materialization, `live` once a snapshot has been
    *  delivered, `error` when the WS bridge is unhealthy. */
@@ -250,7 +266,12 @@ class ZeroSyncStore {
    *  + every subsequent reactive frame). Used by the chat store to
    *  merge Zero rows into `chat.messages` without re-subscribing on
    *  every reactive read. */
-  #blocksListeners = new Set<(rows: ZeroBlocksRow[]) => void>();
+  #blocksListeners = new Set<
+    (
+      rows: ZeroBlocksRow[],
+      resultType: "complete" | "unknown" | "error",
+    ) => void
+  >();
   /**
    * Phase 4.2: telemetry-loop handle. `setInterval` token returned by
    * `#init` after `#zero` is constructed; cleared in `destroy()`.
@@ -304,13 +325,21 @@ class ZeroSyncStore {
       // The mutator runs once optimistically on the client + once
       // canonically on the server (dashboard's `/api/mutators` push
       // handler routes the server-side execution).
+      // `kvStore: "idb"` persists Zero's local replica to IndexedDB
+      // across reloads. This is the load-bearing line for the
+      // local-first promise (ADR-023, plan §39 two-phase bootstrap):
+      // without it, every page load re-syncs from the network, the
+      // app refuses to boot offline, and "all access looks local"
+      // is a lie. Schema-version changes invalidate the cache
+      // automatically (Zero handles that on its own); tab leader
+      // election dedupes the write side across multiple tabs.
       this.#zero = new Zero<Schema, Mutators>({
         schema,
         mutators: createMutators(),
         server: zeroServerUrl(),
         auth: token,
         userID: userId,
-        kvStore: "mem", // Phase 6 promotes to IDB for offline cache.
+        kvStore: "idb",
       });
 
       this.#bindAgents();
@@ -321,6 +350,11 @@ class ZeroSyncStore {
       this.#bindReadCursors();
       this.#bindClientDevices();
       this.#bindSettings();
+      // Plan §39 phase 2: background-sync the 90-day blocks window
+      // across every agent so a focus switch is served entirely from
+      // the local IndexedDB replica. Fires after the foreground
+      // slices so the user-visible first-paint isn't gated on this.
+      this.#bindAllBlocksBackground();
       this.status = "live";
       // Phase 4.2: report storage stats immediately on connect +
       // every 5 minutes thereafter. The `client_devices` row already
@@ -598,10 +632,17 @@ class ZeroSyncStore {
    * daemon writes on `block_start` and finalizes at `block_complete`;
    * the chat should only render canonical rows).
    *
-   * The reactive view materializes the last 50 blocks for the focused
-   * agent. Scroll-back beyond that window is served by the REST endpoint
-   * (`GET /api/agents/:name/blocks?before=…`) and merged into the
-   * dashboard's chat state by the existing `loadOlderTurns` path.
+   * Local-first contract (plan §39, §40): syncs the entire 90-day
+   * retention window for the focused agent into IndexedDB. No row
+   * limit, no REST scroll-back — the local replica IS the source of
+   * truth the UI reads from. The 90-day bound caps client storage
+   * (server keeps everything per ADR-023); blocks older than that
+   * are reachable only via the "lazy on demand" jump-to-message
+   * search path (kept on REST for now since it crosses retention).
+   *
+   * Background sync of OTHER agents is primed by
+   * {@link #bindAllBlocksBackground} at init time so a focus switch
+   * to a previously-untouched agent finds its rows already local.
    */
   bindBlocksFor(agentName: string): void {
     if (!this.#zero) {
@@ -614,49 +655,52 @@ class ZeroSyncStore {
     if (this.blocksAgent === agentName && this.#blocksTeardown) return;
     this.unbindBlocks();
     this.blocksAgent = agentName;
-    // `this.unbindBlocks()` above invalidates TS's narrowing of
-    // `this.#zero` because it touches `this`, so the per-line reads
-    // below trip the same "possibly undefined" lint as the other
-    // `#bind*` methods (this is a pre-existing pattern, not new
-    // sloppiness — the early-return at top guarantees non-null).
-    // Filter out:
-    //   - 'streaming' rows (in-flight blocks; written via SSE only).
-    //   - 'cancel_requested' rows (Phase 4.9): the mutator UPDATEs to
-    //     this terminal-pending status BEFORE the daemon's LISTEN
-    //     handler deletes the row. Excluding it here is what makes
-    //     the optimistic-UX bubble-vanish happen on click.
-    // Order by `ts DESC`, not `id DESC`. Phase 4.11 flipped
-    // `blocks.id` from bigserial to text(UUID) — pre-migration rows
-    // kept their old numeric ids as strings ("9943", "9942", …),
-    // post-migration rows are UUIDs. Lex-DESC on that mixed alphabet
-    // pins UUIDs starting with high hex chars at the top forever
-    // (every numeric "9XXX" sorts below "a…"); a brand-new UUID
-    // beginning with a low digit (`2241585c-…`) lands ~2300 rows
-    // below the top-50 cut and never reaches the chat scroller. The
-    // `(agent_name, ts)` index in the schema makes the ts-DESC range
-    // scan efficient. parseBlocks's client-side sort already uses
-    // `ts` first with `id` only as a same-ms tiebreak, so the render
-    // order is unchanged — this only affects which 50 rows the
-    // materialized view holds.
+    const cutoff = Date.now() - BLOCKS_RETENTION_MS;
     const query = this.#zero!.query.blocks
       .where("agent_name", "=", agentName)
       .where("status", "!=", "streaming")
       .where("status", "!=", "cancel_requested")
-      .orderBy("ts", "desc")
-      .limit(50);
+      .where("ts", ">", cutoff)
+      .orderBy("ts", "desc");
     const preload = this.#zero!.preload(query);
     const view = this.#zero!.materialize(query);
-    const update = (data: readonly unknown[]): void => {
+    const update = (
+      data: readonly unknown[],
+      resultType: "complete" | "unknown" | "error",
+    ): void => {
       const rows = data as readonly ZeroBlocksRow[];
       this.blocks = rows as ZeroBlocksRow[];
-      for (const listener of this.#blocksListeners) listener(this.blocks);
+      this.blocksResultType = resultType;
+      for (const listener of this.#blocksListeners)
+        listener(this.blocks, resultType);
     };
-    update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    update(view.data as readonly unknown[], "unknown");
+    view.addListener((data, resultType) =>
+      update(data as readonly unknown[], resultType),
+    );
     this.#blocksTeardown = (): void => {
       preload.cleanup();
       view.destroy();
     };
+  }
+
+  /**
+   * Plan §39 phase 2 ("background full active state"): after the
+   * foreground per-agent query for the focused agent is bound, prime
+   * the local replica with the 90-day window across *all* agents so
+   * focus switches don't pay network cost. Preloads only — no JS
+   * materialization (we don't need every agent's blocks in memory).
+   * Runs once per `#init` and is torn down with the other slices.
+   */
+  #bindAllBlocksBackground(): void {
+    if (!this.#zero) return;
+    const cutoff = Date.now() - BLOCKS_RETENTION_MS;
+    const query = this.#zero!.query.blocks
+      .where("status", "!=", "streaming")
+      .where("status", "!=", "cancel_requested")
+      .where("ts", ">", cutoff);
+    const handle = this.#zero!.preload(query, { ttl: "1d" });
+    this.#unsubscribers.push(() => handle.cleanup());
   }
 
   /** Release the per-agent blocks subscription. Idempotent on a
@@ -676,10 +720,18 @@ class ZeroSyncStore {
   /** Register a listener that fires on every blocks-view update. Returns
    *  an unsubscribe function. Listeners are notified synchronously on
    *  registration with the current snapshot so callers don't miss the
-   *  initial frame. */
-  onBlocksUpdate(listener: (rows: ZeroBlocksRow[]) => void): () => void {
+   *  initial frame. The `resultType` argument forwards Zero's
+   *  materialization status (`'complete'` once the local replica
+   *  matches the upstream filter — used by the chat store to decide
+   *  when "no more older messages" is honest). */
+  onBlocksUpdate(
+    listener: (
+      rows: ZeroBlocksRow[],
+      resultType: "complete" | "unknown" | "error",
+    ) => void,
+  ): () => void {
     this.#blocksListeners.add(listener);
-    listener(this.blocks);
+    listener(this.blocks, this.blocksResultType);
     return () => {
       this.#blocksListeners.delete(listener);
     };
@@ -1255,10 +1307,10 @@ if (browser) {
       if (agent) zeroSync.bindBlocksFor(agent);
       else zeroSync.unbindBlocks();
     });
-    zeroSync.onBlocksUpdate((rows) => {
+    zeroSync.onBlocksUpdate((rows, resultType) => {
       const agent = zeroSync.blocksAgent;
       if (!agent) return;
-      chat.applyZeroBlocks(rows, agent);
+      chat.applyZeroBlocks(rows, agent, resultType);
     });
     // Phase 4.1: register the markRead callback. Chat calls this from
     // `applyZeroBlocks` after each per-agent snapshot to advance the

@@ -3891,7 +3891,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     expect(chat.reachedOldest).toBe(false);
   });
 
-  it("(11) empty Zero snapshot preserves queue-synth + sets reachedOldest", async () => {
+  it("(11) empty Zero snapshot preserves queue-synth + sets reachedOldest only when Zero signals 'complete'", async () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
@@ -3905,9 +3905,19 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
         ts: 5_000,
       },
     ];
-    chat.applyZeroBlocks([], "friday");
+
+    // Initial frame with `resultType='unknown'` — Zero may still be
+    // backfilling. Queue-synth is preserved but we don't yet claim
+    // "no older messages" because we don't actually know.
+    chat.applyZeroBlocks([], "friday", "unknown");
     expect(chat.messages).toHaveLength(1);
     expect(chat.messages[0]!.queueId).toBe("q1");
+    expect(chat.reachedOldest).toBe(false);
+
+    // Once Zero confirms the local replica matches the upstream
+    // filter (`resultType='complete'`), `reachedOldest` is honest:
+    // no older row exists on the server within retention.
+    chat.applyZeroBlocks([], "friday", "complete");
     expect(chat.reachedOldest).toBe(true);
   });
 });

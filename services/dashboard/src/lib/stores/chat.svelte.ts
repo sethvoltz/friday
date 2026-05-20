@@ -1449,16 +1449,28 @@ export class ChatState {
    * row arriving here is canonical. In-flight content lives only in the
    * SSE-driven overlay until the daemon flips the row to `complete`.
    */
-  applyZeroBlocks(rows: readonly ZeroBlocksRow[], forAgent: string): void {
+  applyZeroBlocks(
+    rows: readonly ZeroBlocksRow[],
+    forAgent: string,
+    resultType: "complete" | "unknown" | "error" = "unknown",
+  ): void {
     if (this.focusedAgent !== forAgent) return;
     this.zeroBlocksActive = true;
     this.loadingInitial = false;
 
+    // Plan §39 phase 2 completion signal: when Zero confirms the local
+    // replica matches the upstream filter (`resultType === 'complete'`),
+    // there are no older rows the server has but the client hasn't
+    // received — `reachedOldest` is honest. While the result is still
+    // `'unknown'` (initial bootstrap streaming in), the UI keeps any
+    // existing "load more" affordance as a no-op spinner; the next
+    // snapshot frame will either bring more rows or flip to 'complete'.
+    if (resultType === "complete") this.reachedOldest = true;
+
     if (rows.length === 0) {
       // Empty agent (no history yet). Preserve queue-synth + any in-flight
-      // bubbles already in `messages`. Don't claim `reachedOldest=true`
-      // here — a fresh agent with no blocks rightly has nothing older.
-      this.reachedOldest = true;
+      // bubbles already in `messages`.
+      if (resultType === "complete") this.reachedOldest = true;
       return;
     }
 
@@ -1594,6 +1606,19 @@ export class ChatState {
      *  sees ~350ms of unanchored scroll before the fix lands. */
     onPrepended?: () => void;
   }): Promise<void> {
+    // Plan §39 local-first contract: when the Zero binder owns the
+    // blocks path, the local IndexedDB replica already holds every
+    // block within the 90-day retention window. Scroll-up reads from
+    // `this.messages` (already populated by `applyZeroBlocks`); there
+    // is no network round-trip. While Zero's initial materialization
+    // is still streaming in (`blocksResultType === 'unknown'`),
+    // applyZeroBlocks will append additional rows as they arrive —
+    // no manual pagination needed. The legacy REST `?before=` path
+    // remains below only as the no-Zero fallback (SSR / disabled).
+    if (this.blocksBinder) {
+      this.reachedOldest = this.reachedOldest || false;
+      return;
+    }
     if (this.loadingOlder || this.reachedOldest) return;
     if (this.oldestBlockId === null) return;
     const MIN_LOADING_MS = 350;
