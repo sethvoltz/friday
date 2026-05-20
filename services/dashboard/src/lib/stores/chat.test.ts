@@ -2632,6 +2632,139 @@ describe("window-cut orphan tool_result is dropped, not rendered as (unknown)", 
   });
 });
 
+describe("Post-Phase-5b: reconcileAgentStatuses heals wedged running/streaming bubbles when agents.status leaves 'working'", () => {
+  it("focused agent flipping to 'idle' flips a running tool bubble to 'done' and clears the inflight tracker", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.inflightTurnIdByAgent.friday = "t-wedged";
+    chat.messages = [
+      {
+        id: "u_t-wedged",
+        role: "user",
+        text: "do the thing",
+        status: "complete",
+        agent: "friday",
+        turnId: "t-wedged",
+        ts: 1_000,
+      },
+      {
+        id: "t_tool-1",
+        role: "tool",
+        text: "",
+        status: "running",
+        toolId: "tool-1",
+        toolName: "Bash",
+        turnId: "t-wedged",
+        ts: 1_001,
+      },
+    ];
+
+    // Zero replicates agents.status='idle' — turn is done, but the
+    // tool_result row was lost / SSE replay buffer evicted, so the
+    // tool bubble is wedged at 'running'. The reconciler is the
+    // safety net that converts Zero's canonical state into a UI
+    // status flip.
+    chat.reconcileAgentStatuses([
+      { name: "friday", status: "idle" },
+    ]);
+
+    const tool = chat.messages.find((m) => m.id === "t_tool-1");
+    expect(tool).toBeDefined();
+    expect(tool!.status).toBe("done");
+    expect(chat.inflightTurnIdByAgent.friday).toBeNull();
+  });
+
+  it("streaming assistant text flips to 'complete' when focused agent goes idle", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.messages = [
+      {
+        id: "b_blk-1",
+        role: "assistant",
+        text: "Partial response that never got a turn_done",
+        status: "streaming",
+        agent: "friday",
+        turnId: "t-wedged",
+        ts: 1_000,
+      },
+    ];
+    chat.reconcileAgentStatuses([
+      { name: "friday", status: "idle" },
+    ]);
+    expect(chat.messages[0]!.status).toBe("complete");
+  });
+
+  it("agent in 'working' status is the no-op case — running bubbles preserved", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.inflightTurnIdByAgent.friday = "t-live";
+    chat.messages = [
+      {
+        id: "t_live-tool",
+        role: "tool",
+        text: "",
+        status: "running",
+        toolId: "live-tool",
+        toolName: "WebFetch",
+        turnId: "t-live",
+        ts: 2_000,
+      },
+    ];
+    chat.reconcileAgentStatuses([
+      { name: "friday", status: "working" },
+    ]);
+    expect(chat.messages[0]!.status).toBe("running");
+    expect(chat.inflightTurnIdByAgent.friday).toBe("t-live");
+  });
+
+  it("non-focused agent's status flip is a no-op (chat.messages only holds focused agent's transcript)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.messages = [
+      {
+        id: "t_focused-tool",
+        role: "tool",
+        text: "",
+        status: "running",
+        toolId: "focused-tool",
+        toolName: "Bash",
+        turnId: "t-focused",
+        ts: 3_000,
+      },
+    ];
+    chat.reconcileAgentStatuses([
+      { name: "other-agent", status: "idle" },
+    ]);
+    // Focused agent absent from the rows → reconciler bails without
+    // touching messages.
+    expect(chat.messages[0]!.status).toBe("running");
+  });
+
+  it("reconciler is idempotent on already-terminal bubbles", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.messages = [
+      {
+        id: "t_done-tool",
+        role: "tool",
+        text: "",
+        status: "done",
+        toolId: "done-tool",
+        toolName: "Bash",
+        turnId: "t-prev",
+        ts: 4_000,
+      },
+    ];
+    chat.reconcileAgentStatuses([{ name: "friday", status: "idle" }]);
+    expect(chat.messages[0]!.status).toBe("done");
+  });
+});
+
 describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
   it("reload: streaming thinking from a previous turn is flipped to aborted when a later turn exists", async () => {
     mockFetchWithTimeout

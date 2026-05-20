@@ -908,6 +908,67 @@ export class ChatState {
     }
   }
 
+  /**
+   * Reconcile in-memory bubble status against Zero's agents-table truth.
+   *
+   * The Phase 5b retirement of the `agent_status` SSE event made
+   * `agents.status` (replicated via Zero) the canonical signal for
+   * "is this agent doing anything right now." When that column flips
+   * to `'idle'` or `'stalled'`, every bubble for the focused agent
+   * still showing `'running'` / `'streaming'` is a wedge — either
+   * because a tool_result row was lost, the SSE per-turn replay
+   * buffer was evicted before reconnect, or parseBlocks emitted a
+   * `'running'` for a canonical tool_use row whose tool_result lands
+   * in a later Zero frame and never flipped the bubble back.
+   *
+   * This reconciler is the safety net the Phase 5 retirement plan
+   * implied but never wired. Fires from `zero.svelte.ts`'s
+   * `#bindAgents` listener on every agents snapshot — idempotent on
+   * "nothing to heal."
+   *
+   * Only acts on the focused agent (chat.messages only holds that
+   * agent's transcript). Non-focused agents' wedges heal on the next
+   * focus-switch since `applyZeroBlocks` re-parses from canonical rows
+   * and this reconciler runs again immediately after.
+   */
+  reconcileAgentStatuses(rows: readonly { name: string; status: string }[]): void {
+    const focused = this.focusedAgent;
+    if (!focused) return;
+    const focusedRow = rows.find((a) => a.name === focused);
+    if (!focusedRow) return;
+    // 'working' is the in-flight signal — don't heal. Any other
+    // terminal-or-quiescent state ('idle', 'stalled', 'error',
+    // 'archived', 'archive_requested') means the daemon isn't
+    // actively producing output for this agent; bubbles claiming
+    // otherwise are stale.
+    if (focusedRow.status === "working") return;
+    let healed = false;
+    for (const m of this.messages) {
+      if (m.role === "assistant" && m.status === "streaming") {
+        m.status = "complete";
+        healed = true;
+      } else if (
+        (m.role === "tool" || m.role === "thinking") &&
+        m.status === "running"
+      ) {
+        m.status = "done";
+        healed = true;
+      }
+    }
+    // Clear the inflight tracker too — agent isn't working, so any
+    // value in this slot is a ghost that would mis-render the Send
+    // button as Stop on the next render frame.
+    if (this.inflightTurnIdByAgent[focused] != null) {
+      this.inflightTurnIdByAgent[focused] = null;
+      healed = true;
+    }
+    // Touch `messages` so $state's reactivity fires for any consumer
+    // that does identity-based diff (the per-message mutations above
+    // are picked up by Svelte's fine-grained reactivity, but explicit
+    // is cheaper than relying on it for the listener side effect).
+    if (healed) this.messages = [...this.messages];
+  }
+
   /* ------------ FRI-12: Resend / Resume helpers ------------ */
 
   /** Find the original user text for a turn, when present in the

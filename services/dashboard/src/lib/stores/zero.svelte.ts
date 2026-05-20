@@ -426,6 +426,13 @@ class ZeroSyncStore {
       // changes — the sidebar's REST poll is gated behind the same
       // feature flag and is skipped when Zero is active.
       chat.agents = rows.map(toAgentInfo);
+      // Phase 5b retirement of the `agent_status` SSE event made
+      // `agents.status` the canonical "is this agent working" signal.
+      // The reconciler heals stale running/streaming bubbles whenever
+      // the focused agent's row arrives in a non-'working' state —
+      // wedges from lost tool_result rows or evicted per-turn replay
+      // buffers converge to terminal here.
+      chat.reconcileAgentStatuses(rows);
     };
     update(view.data as readonly unknown[]);
     view.addListener((data) => update(data as readonly unknown[]));
