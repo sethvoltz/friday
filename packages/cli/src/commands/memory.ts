@@ -164,5 +164,70 @@ export const memoryCommand = defineCommand({
         console.log(pc.green(`deleted ${id}`));
       },
     }),
+    "pin-repo": defineCommand({
+      // FRI-61: write friday's repo-path pinned memory entry directly
+      // through the memory store. Works whether or not the daemon is
+      // running — the memory store talks to Postgres + writes the
+      // markdown file on disk; the daemon's settings LISTEN handler
+      // will pick up the row on its next boot if it isn't already up.
+      meta: {
+        name: "pin-repo",
+        description:
+          "Pin friday's agent-friday repo path as a memory entry (FRI-61). Idempotent unless --force.",
+      },
+      args: {
+        path: {
+          type: "positional",
+          required: true,
+          description: "Absolute path to the agent-friday repo",
+        },
+        force: {
+          type: "boolean",
+          default: false,
+          description: "Overwrite an existing pinned-repo memory",
+        },
+      },
+      async run({ args }) {
+        const path = args.path as string;
+        if (!path.startsWith("/")) {
+          console.error(pc.red(`path must be absolute: ${path}`));
+          process.exit(1);
+        }
+        const { saveEntry, getEntry } = await import("@friday/memory");
+        const id = "pin-repo-agent-friday";
+        const existing = await getEntry(id);
+        if (existing && !args.force) {
+          console.log(
+            pc.yellow(
+              `memory "${id}" already exists; pass --force to overwrite.`,
+            ),
+          );
+          return;
+        }
+        const now = new Date().toISOString();
+        await saveEntry({
+          id,
+          title: "agent-friday repo path",
+          content:
+            `The agent-friday repo lives at \`${path}\`. Use this path ` +
+            `when you need to Read, Edit, or run Bash against Friday's ` +
+            `own source; open PRs against it; or hand a worktree off to ` +
+            `a builder. Same pattern applies to any other repos pinned ` +
+            `for you — each is on equal footing.`,
+          tags: ["pinned", "repo"],
+          createdBy: "friday",
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+          recallCount: existing?.recallCount ?? 0,
+          lastRecalledAt: existing?.lastRecalledAt ?? null,
+        });
+        console.log(
+          pc.green(
+            `pinned repo path for friday: ${path}` +
+              (args.force && existing ? " (overwrote)" : ""),
+          ),
+        );
+      },
+    }),
   },
 });

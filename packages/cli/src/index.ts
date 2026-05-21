@@ -14,6 +14,7 @@ import { mailCommand } from "./commands/mail.js";
 import { ticketsCommand } from "./commands/tickets.js";
 import { memoryCommand } from "./commands/memory.js";
 import { evolveCommand } from "./commands/evolve.js";
+import { migrateCommand } from "./commands/migrate.js";
 import { schedulesCommand } from "./commands/schedules.js";
 import { appsCommand } from "./commands/apps.js";
 import { backupCommand } from "./commands/backup.js";
@@ -40,6 +41,7 @@ const main = defineCommand({
     mail: mailCommand,
     tickets: ticketsCommand,
     memory: memoryCommand,
+    migrate: migrateCommand,
     evolve: evolveCommand,
     schedules: schedulesCommand,
     app: appsCommand,
