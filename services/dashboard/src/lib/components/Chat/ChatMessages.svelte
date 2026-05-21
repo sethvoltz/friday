@@ -14,6 +14,7 @@
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import ToolBlock from "$lib/components/Chat/ToolBlock.svelte";
   import { friendlyToolName } from "$lib/components/Chat/tool-headlines";
+  import { stopFooter } from "$lib/components/Chat/stop-footer";
   import ThinkingBlock from "$lib/components/Chat/ThinkingBlock.svelte";
   import MailBlock from "$lib/components/Chat/MailBlock.svelte";
   import ErrorBlock from "$lib/components/Chat/ErrorBlock.svelte";
@@ -704,30 +705,18 @@
               </div>
             {/if}
             <!-- FRI-95: user-block is the always-present render surface
-                 for the Stop affordance. Shows when requestStop has
-                 flipped this block to "stopping" (optimistic, instant
-                 feedback) and through its terminal state on turn_done. -->
-            {#if msg.status === "stopping"}
-              <div class="footer-tag stopping">Stopping…</div>
-            {:else if msg.status === "aborted"}
-              <div class="footer-tag">
-                {msg.abortReason === "forced"
-                  ? "Stopped — worker had to be force-killed"
-                  : "Stopped"}
-              </div>
-            {:else if msg.status === "already_finished"}
-              <div class="footer-tag">Already finished</div>
+                 for the Stop affordance. Copy + classname come from the
+                 pure `stopFooter` lookup so the contract is pinned at the
+                 unit-test layer (`stop-footer.test.ts`). -->
+            {@const userFooter = stopFooter(msg.status, msg.abortReason)}
+            {#if userFooter}
+              <div class="footer-tag {userFooter.className ?? ''}">{userFooter.text}</div>
             {/if}
           {:else}
             <Markdown source={msg.text} streaming={msg.status === "streaming"} />
-            {#if msg.status === "aborted"}
-              <div class="footer-tag">
-                {msg.abortReason === "forced"
-                  ? "Stopped — worker had to be force-killed"
-                  : "Stopped"}
-              </div>
-            {:else if msg.status === "stopping"}
-              <div class="footer-tag stopping">Stopping…</div>
+            {@const assistantFooter = stopFooter(msg.status, msg.abortReason)}
+            {#if assistantFooter}
+              <div class="footer-tag {assistantFooter.className ?? ''}">{assistantFooter.text}</div>
             {:else if msg.status === "error"}
               <div class="footer-tag err">Error</div>
             {:else if msg.status === "streaming"}
