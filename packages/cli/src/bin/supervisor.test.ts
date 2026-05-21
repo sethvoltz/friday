@@ -48,15 +48,23 @@ import {
  */
 const GRANDCHILD_COUNT = 3;
 
-function writeFixture(scriptPath: string, pidFile: string): void {
+function writeFixture(
+  scriptPath: string,
+  pidFile: string,
+  detachedGrandchildren = false,
+): void {
+  // `detached: true` on the grandchildren makes each one its own
+  // pgid leader — the zero-cache pattern that defeats process-group
+  // signaling and motivates the supervisor's tree-walk approach.
+  const detachOpt = detachedGrandchildren ? "true" : "false";
+  const unref = detachedGrandchildren ? "c.unref();" : "";
   const src = `
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const pids = [process.pid];
 for (let i = 0; i < ${GRANDCHILD_COUNT}; i++) {
-  // Default spawn — grandchild inherits this script's pgid.
-  // \`sleep\` is a portable, signal-respecting subprocess on macOS + Linux.
-  const c = spawn("sleep", ["99999"], { stdio: "ignore" });
+  const c = spawn("sleep", ["99999"], { stdio: "ignore", detached: ${detachOpt} });
+  ${unref}
   pids.push(c.pid);
 }
 fs.writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify(pids));
@@ -171,6 +179,56 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
       );
     }
     // Explicit assertion so the test name's promise load-bears.
+    for (const pid of pids) {
+      expect(isAlive(pid), `post: pid ${pid} should be dead`).toBe(false);
+    }
+  });
+
+  it("catches grandchildren that set their own pgid (the zero-cache setsid pattern)", async () => {
+    // Spawn grandchildren with `detached: true` so each is its own
+    // pgid leader. A naive `kill -<child.pgid>` would miss them
+    // (they're in different pgids); only the tree-walk via
+    // `pgrep -P` catches them. This is the exact failure mode
+    // surfaced during the FRI-88 operator flip.
+    const scriptPath = join(tmpDir, "fixture-detached.js");
+    const pidFile = join(tmpDir, "pids-detached.json");
+    writeFixture(scriptPath, pidFile, /* detachedGrandchildren */ true);
+
+    proc = spawn("node", [scriptPath], {
+      stdio: "ignore",
+      detached: true,
+    });
+    const wrote = await waitFor(() => existsSync(pidFile), 5_000);
+    expect(wrote).toBe(true);
+    pids = JSON.parse(readFileSync(pidFile, "utf8")) as number[];
+    expect(pids.length).toBe(GRANDCHILD_COUNT + 1);
+
+    // Pre-condition: all alive.
+    for (const pid of pids) {
+      expect(isAlive(pid), `pre: pid ${pid} should be alive`).toBe(true);
+    }
+
+    const state: ChildState = {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      spec: { name: "zero-cache" } as any,
+      proc,
+      exitTimestamps: [],
+      backoffMs: 0,
+      shuttingDown: true,
+    };
+
+    killChildGroup(state, "SIGTERM");
+
+    const allDead = await waitFor(
+      () => pids.every((pid) => !isAlive(pid)),
+      5_000,
+    );
+    if (!allDead) {
+      const stillAlive = pids.filter((pid) => isAlive(pid));
+      throw new Error(
+        `cascade-stop incomplete for setsid grandchildren: pids still alive: ${stillAlive.join(", ")}`,
+      );
+    }
     for (const pid of pids) {
       expect(isAlive(pid), `post: pid ${pid} should be dead`).toBe(false);
     }

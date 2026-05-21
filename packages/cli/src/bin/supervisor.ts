@@ -329,20 +329,61 @@ function scheduleRestart(state: ChildState, exitCode: number | null = null): voi
 // ---- Shutdown ---------------------------------------------------------
 
 /**
- * Signal a child's entire process group. Each child was spawned with
- * `detached: true`, so its pid is also its pgid; `process.kill(-pid,
- * sig)` reaches the child plus every descendant in its tree (the
- * load-bearing semantics against FRI-83's zombie pattern, where
- * zero-cache's worker pool survived the parent's signal).
+ * Walk a process subtree and signal every descendant of `rootPid`,
+ * post-order (leaves first, root last). Uses `pgrep -P <pid>` to find
+ * direct children; recurses.
+ *
+ * Process-group signaling (`kill -<pgid>`) alone is NOT sufficient.
+ * Discovered during the FRI-88 operator flip: zero-cache's
+ * multi-process server (`replicator.js`, `change-streamer.js`,
+ * `reaper.js`, `syncer.js` x N) explicitly calls `setsid()` on each
+ * worker, placing them in their own process group. A `kill -<pgid>`
+ * against the supervisor's child pgid then misses every worker.
+ * Walking the parent-child tree via `pgrep -P` finds them regardless
+ * of how many pgid boundaries they've crossed.
+ */
+function pgrepDirectChildren(parentPid: number): number[] {
+  const r = spawnSync("pgrep", ["-P", String(parentPid)], { encoding: "utf8" });
+  if (r.status !== 0 || !r.stdout) return [];
+  return r.stdout
+    .split("\n")
+    .map((line) => Number(line.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
+
+function killDescendantTree(rootPid: number, signal: NodeJS.Signals): void {
+  for (const child of pgrepDirectChildren(rootPid)) {
+    killDescendantTree(child, signal); // post-order: kill grandchildren first
+    try {
+      process.kill(child, signal);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH") {
+        logSupervisor("descendant.kill.error", {
+          pid: child,
+          signal,
+          code,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Cascade-kill a child and every descendant in its process tree.
+ * Walks the parent-child tree post-order (leaves first), then signals
+ * the immediate child. The tree walk catches descendants that
+ * `setsid()`'d themselves into their own process group — the pattern
+ * that defeats naive `kill -<pgid>` cascade-stop.
  */
 function killChildGroup(state: ChildState, signal: NodeJS.Signals): void {
   const pid = state.proc?.pid;
   if (!pid) return;
+  killDescendantTree(pid, signal);
   try {
-    process.kill(-pid, signal);
+    process.kill(pid, signal);
   } catch (err) {
-    // ESRCH means the group already exited; that's fine. Anything else
-    // is logged so the operator can see why cascade-stop fell short.
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== "ESRCH") {
       logSupervisor("child.kill.error", {
