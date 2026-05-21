@@ -249,4 +249,128 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     const { abortTurn } = await import("./lifecycle.js");
     expect(abortTurn("not-a-real-agent")).toBe(false);
   });
+
+  // FRI-95 A.1: the LISTEN handler races the fast-path. After the fast-path
+  // already drove the worker to idle (clearing the deadline), the LISTEN
+  // handler's redundant abortTurn() must NOT re-arm a fresh deadline on
+  // the cooperative worker. Pre-fix this would force-kill a worker that
+  // had already cleanly aborted ~30ms earlier — see the log evidence in
+  // the FRI-95 ticket for a real recurrence.
+  it("A.1: second abortTurn on an idle worker is a no-op (no IPC, no deadline, no force-kill)", async () => {
+    const { abortTurn, handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const { eventBus } = await import("../events/bus.js");
+
+    vi.useFakeTimers();
+    const { worker, child } = makeFakeWorker({ turnId: "turn-fk-a1" });
+    __putLiveWorkerForTest("fk-agent", worker as never);
+
+    const captured: CapturedEvent[] = [];
+    const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
+
+    // Fast-path abort. Worker is working — full body runs (IPC sent, deadline armed).
+    expect(abortTurn("fk-agent")).toBe(true);
+    expect(child.send).toHaveBeenCalledWith({ type: "abort" });
+    const ipcCallsAfterFirst = child.send.mock.calls.length;
+    expect(
+      (worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline,
+    ).toBeDefined();
+
+    // Worker honors the abort — error IPC clears the deadline AND flips status to idle.
+    await vi.advanceTimersByTimeAsync(30);
+    await handleEvent(worker as never, {
+      type: "error",
+      message: "aborted",
+      recoverable: true,
+    });
+    expect((worker as { status: string }).status).toBe("idle");
+    expect(
+      (worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline,
+    ).toBeUndefined();
+
+    // LISTEN handler fires the second abortTurn ~91ms after the fast-path
+    // (matching the real-world log timing). With the A.1 gate this is a no-op.
+    expect(abortTurn("fk-agent")).toBe(false);
+    // No new IPC sent — the gate short-circuited before send().
+    expect(child.send.mock.calls.length).toBe(ipcCallsAfterFirst);
+    // No new deadline armed — would otherwise force-kill at +500ms.
+    expect(
+      (worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline,
+    ).toBeUndefined();
+    // abortRequested still latched (idempotent state, not destructive).
+    expect((worker as { abortRequested: boolean }).abortRequested).toBe(true);
+
+    // Advance well past the 500ms window — confirm no force-kill fires.
+    await vi.advanceTimersByTimeAsync(3000);
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 50));
+    unsub();
+
+    // No stopped_forced block, no stopped_forced error event.
+    const rows = await getDb()
+      .select()
+      .from(schema.blocks)
+      .where(eq(schema.blocks.turnId, "turn-fk-a1"));
+    const stoppedForced = rows.find((r) => {
+      const p = r.contentJson as { code?: string } | null;
+      return p?.code === "stopped_forced";
+    });
+    expect(stoppedForced).toBeUndefined();
+    expect(captured.find((e) => e.code === "stopped_forced")).toBeUndefined();
+
+    __deleteLiveWorkerForTest("fk-agent");
+  });
+
+  // FRI-95 A.2: a status-change → idle (without an accompanying
+  // turn-complete or error) must also clear the deadline. Otherwise a
+  // worker that exits its for-await before emitting turn-complete leaves
+  // the safety net armed and gets force-killed despite being idle.
+  it("A.2: status-change → idle clears the abort deadline", async () => {
+    const { abortTurn, handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const { eventBus } = await import("../events/bus.js");
+
+    vi.useFakeTimers();
+    const { worker } = makeFakeWorker({ turnId: "turn-fk-a2" });
+    __putLiveWorkerForTest("fk-agent", worker as never);
+
+    const captured: CapturedEvent[] = [];
+    const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
+
+    abortTurn("fk-agent");
+    expect(
+      (worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline,
+    ).toBeDefined();
+
+    // Lone status-change → idle, no turn-complete or error.
+    await vi.advanceTimersByTimeAsync(100);
+    await handleEvent(worker as never, {
+      type: "status-change",
+      status: "idle",
+    });
+
+    expect((worker as { status: string }).status).toBe("idle");
+    expect(
+      (worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline,
+    ).toBeUndefined();
+
+    // Advance past 500ms — would have force-killed without A.2.
+    await vi.advanceTimersByTimeAsync(3000);
+    vi.useRealTimers();
+    await new Promise((r) => setTimeout(r, 50));
+    unsub();
+
+    const rows = await getDb()
+      .select()
+      .from(schema.blocks)
+      .where(eq(schema.blocks.turnId, "turn-fk-a2"));
+    const stoppedForced = rows.find((r) => {
+      const p = r.contentJson as { code?: string } | null;
+      return p?.code === "stopped_forced";
+    });
+    expect(stoppedForced).toBeUndefined();
+    expect(captured.find((e) => e.code === "stopped_forced")).toBeUndefined();
+
+    __deleteLiveWorkerForTest("fk-agent");
+  });
 });
