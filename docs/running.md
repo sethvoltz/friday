@@ -84,9 +84,10 @@ Everything lives at `~/.friday/`:
 ```
 ~/.friday/
 ├── .env                   Secrets (DATABASE_URL, ZERO_AUTH_SECRET, LINEAR_API_KEY, etc.)
-├── config.json            Settings + MCP server config
+├── config.json            Settings + MCP server config (incl. optional fridayRepoPath)
 ├── SOUL.md                Your editable identity layer
 ├── skills/*.md            User-additive slash skills
+├── agents/<name>/         Per-agent home — orchestrator/helper/scheduled cwd (ADR-029)
 ├── uploads/<bucket>/      Content-addressed attachments
 ├── memory/entries/*.md    Memory entries (mirrored to memory_entries Postgres table)
 ├── evolve/proposals/*.md  Evolve proposals
@@ -94,11 +95,23 @@ Everything lives at `~/.friday/`:
 ├── schedules/             Scheduled-agent worktrees
 ├── workspaces/<name>/     Builder git worktrees
 ├── backups/<ts>.tar.gz    Output of `friday backup` (gitignored)
+├── state/                 Daemon runtime state (per-service start markers; ADR-028)
 ├── zero/replica.db        zero-cache's local replica (rebuilt from PG logical replication)
 ├── logs/{daemon,dashboard,zero-cache}.jsonl   Structured logs (rotated at 1 MiB)
 ├── usage.jsonl            Per-turn usage records
 └── health.json            Daemon heartbeat (refreshed every 30s)
 ```
+
+### Friday's own repo (ADR-029)
+
+Per-agent home dirs in `~/.friday/agents/<name>/` are intentionally empty — the SDK runs there so its session transcripts get a stable `~/.claude/projects/<encoded-cwd>/` location, but no operational state lives in the agent home.
+
+When friday needs to operate on its own source repo (Read/Edit/Bash, open PRs, hand off to a builder), it uses an absolute path that's pinned as a memory at boot. To set that path, either:
+
+- `friday memory pin-repo /abs/path/to/agent-friday` (one-shot CLI, works whether or not the daemon is up), or
+- Edit `~/.friday/config.json` and add `"fridayRepoPath": "/abs/path/..."` — the daemon picks it up on the next boot's `seedRepoPins()`.
+
+`FRIDAY_REPO_PATH` env wins over the config field. If neither is set, the pin is silently omitted — friday operates without direct repo affordance.
 
 Canonical persistence lives in the **`friday` Postgres database** (host-managed via `brew services start postgresql@18`), not `~/.friday/`. The directory above carries config, secrets, and content-addressed file blobs; everything else (agents, blocks, tickets, mail, memory, schedules, apps, settings, read-cursors, client-devices) is in Postgres. See `docs/architecture.md` and ADR-023 for the topology.
 

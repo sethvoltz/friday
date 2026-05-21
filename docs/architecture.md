@@ -374,6 +374,30 @@ Hybrid worker model:
 - **Long-lived** for orchestrator, builder, helper, bare. Worker mainLoop: run `query()` → drain mail → idle on `waitForMail` (60s timeout fallback) → repeat. Driven by user input on `/api/chat/turn` or by `mail-wakeup` IPC from the daemon's mail bridge.
 - **One-shot** for scheduled. Worker fires, runs the SDK iterator, exits. State continuity across fires is handled by `<stateDir>/state.md` (agent-written) + `<stateDir>/last-run.md` (daemon-written), each capped at 64 KiB on injection.
 
+### Per-agent home directories (FRI-61)
+
+Each worker runs with a stable `cwd` so the Claude SDK's session-transcript layout (`~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`) doesn't shift across daemon-install changes:
+
+| Agent type | `workingDirectoryFor()` returns |
+| --- | --- |
+| **builder** | The agent's git-worktree path |
+| **app-installed** (any type) | `~/.friday/apps/<appId>/` |
+| **orchestrator / helper / scheduled / bare** | `~/.friday/agents/<name>/` |
+
+Pre-FRI-61 the non-builder, non-app branch fell through to `process.cwd()`. That made every prior `agents.session_id` unreachable to the SDK whenever the daemon was relaunched from a different directory (e.g. dev-tree → Homebrew install). The dedicated home + the boot-time `agent-cwd-pin-v1` state migration (which renames existing JSONLs into the new layout) close that gap.
+
+### Pinned-memory injection in the prompt stack (FRI-61)
+
+`composeSystemPrompt(stack, identity?, pinnedFacts?)` accepts an optional pinned-facts block, rendered between the Identity layer and `agents/<type>.md`. The daemon's `renderPinnedFacts(agentName)` queries `listPinnedForAgent(agentName, "pinned")` and concatenates each entry as a `# Pinned facts` markdown section. Pins are owned-by-agent (`memory_entries.createdBy = agentName`) and tagged (`tags_json ? 'pinned'`); the model sees them every turn, no FTS recall required.
+
+The first consumer is friday's own repo path: `seedRepoPins()` writes a `pin-repo-agent-friday` entry from `FRIDAY_REPO_PATH` env or `config.fridayRepoPath` so friday can act on the agent-friday repo using absolute paths. Same surface generalises to any other repo or constant fact friday wants pinned for itself.
+
+### Wedge detector — zero-block-streak (FRI-61)
+
+A worker can land in a busy-loop where its SDK iterator yields only `result` (no `content_block_start` ever fires) — observed in production on 2026-05-20 when the daemon's cwd shifted and the SDK couldn't find prior session JSONLs. The heartbeat / turn-stall / 4-hour stale-turn guards all sleep through this (chatty worker, healthy block IPC inside other turns, threshold too lax).
+
+The lifecycle handler tracks `blocksThisTurn` (incremented on every `block-start`) and `zeroBlockTurnStreak` (incremented when a `turn-complete` or `error` arrives with zero blocks, reset otherwise). When the streak reaches `FRIDAY_WEDGE_THRESHOLD` (default 10), the daemon calls `forceKillStuckWorker(w, { reason: "wedge" })`. Per-event signal: `worker.zero-block-turn` warn line. Final kill: `worker.wedge.force-kill`.
+
 Worker IPC (`worker-protocol.ts`):
 
 ```
