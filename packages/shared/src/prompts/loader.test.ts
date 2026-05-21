@@ -70,6 +70,52 @@ describe("composeSystemPrompt with identity", () => {
   });
 });
 
+describe("composeSystemPrompt pinned facts (FRI-61)", () => {
+  it("includes the pinned-facts block verbatim between Identity and agentBase", () => {
+    const stack = readPromptStack("orchestrator", []);
+    const pinnedFacts = "# Pinned facts\n\n- **repo**: lives at /tmp/test";
+    const composed = composeSystemPrompt(
+      stack,
+      { agentName: "friday", agentType: "orchestrator" },
+      pinnedFacts,
+    );
+    expect(composed).toContain(pinnedFacts);
+    // Order: Identity must precede pinned-facts, which must precede agentBase.
+    const idxIdentity = composed.indexOf("# Identity");
+    const idxPinned = composed.indexOf("# Pinned facts");
+    const idxAgentBase = composed.indexOf(stack.agentBase);
+    expect(idxIdentity).toBeGreaterThanOrEqual(0);
+    expect(idxPinned).toBeGreaterThan(idxIdentity);
+    expect(idxAgentBase).toBeGreaterThan(idxPinned);
+  });
+
+  it("omits the pinned-facts block when arg is undefined", () => {
+    const stack = readPromptStack("orchestrator", []);
+    const composed = composeSystemPrompt(stack, {
+      agentName: "friday",
+      agentType: "orchestrator",
+    });
+    expect(composed).not.toContain("# Pinned facts");
+  });
+
+  it("omits the pinned-facts block when arg is the empty string", () => {
+    const stack = readPromptStack("orchestrator", []);
+    const composed = composeSystemPrompt(
+      stack,
+      { agentName: "friday", agentType: "orchestrator" },
+      "",
+    );
+    expect(composed).not.toContain("# Pinned facts");
+  });
+
+  it("renders pinned facts even when identity is omitted", () => {
+    const stack = readPromptStack("orchestrator", []);
+    const pinnedFacts = "# Pinned facts\n\n- **x**: y";
+    const composed = composeSystemPrompt(stack, undefined, pinnedFacts);
+    expect(composed).toContain(pinnedFacts);
+  });
+});
+
 describe("default protocols by agent type", () => {
   it("orchestrator stack auto-includes the memory protocol", () => {
     const stack = readPromptStack("orchestrator", []);
