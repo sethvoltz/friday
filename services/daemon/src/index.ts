@@ -35,6 +35,9 @@ import {
 } from "./agent/invariants.js";
 import { wrapWithRecall } from "./agent/recall.js";
 import { renderPinnedFacts } from "./agent/pinned-facts.js";
+import { seedRepoPins } from "./memory/seed.js";
+import { agentCwdPinV1 } from "./state-migrations/agent-cwd-pin-v1.js";
+import { runStateMigrations } from "./state-migrations/runner.js";
 import { closeTicketForArchive } from "./services/ticket-close.js";
 import {
   runSettingsBootScan,
@@ -82,6 +85,11 @@ async function main(): Promise<void> {
   ensureDirs();
   ensureFridayEnv();
   await runMigrations();
+  // FRI-61: state migrations run AFTER schema migrations (Drizzle just
+  // created the `_friday_state_migrations` table) and BEFORE any
+  // dispatch / mail bridge / scheduler / recovery path that could spawn
+  // a worker against stale paths.
+  await runStateMigrations([agentCwdPinV1]);
   ensureSoul();
 
   const backfill = await backfillUsageFromLegacyJsonl();
@@ -182,6 +190,8 @@ async function main(): Promise<void> {
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
   await replayPending();
   await seedMetaAgents();
+  // FRI-61: seed friday's repo pin (no-op if unset or already present).
+  await seedRepoPins();
   await reconcileAppsOnBoot();
   await recoverAgents(cfg);
   // Heal SDK sessions wedged on an unresolved tool_use (worker died
