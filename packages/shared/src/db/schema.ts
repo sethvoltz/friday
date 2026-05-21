@@ -623,6 +623,21 @@ export const dbMeta = pgTable("db_meta", {
   value: text("value").notNull(),
 });
 
+/* ---------------- One-shot daemon-side state migrations ---------------- */
+// Distinct from Drizzle's schema migrations (`drizzle.__drizzle_migrations`).
+// Tracks imperative data/filesystem migrations the daemon runs once at
+// boot — e.g. renaming SDK JSONL paths after FRI-61's cwd pin. Versioned
+// by ID; a re-run with patched logic ships a new ID (`*-v2`) rather than
+// mutating the existing row, mirroring Drizzle's "preserve over delete"
+// stance for migration history.
+export const fridayStateMigrations = pgTable("_friday_state_migrations", {
+  id: text("id").primaryKey(),
+  appliedAt: timestamp("applied_at", { withTimezone: true })
+    .notNull()
+    .default(sql`now()`),
+  metaJson: jsonb("meta_json"),
+});
+
 /* ---------------- FTS setup SQL ---------------- */
 // Postgres tsvector + GIN indexes. Run after the Drizzle migration creates
 // the base tables. The generated `*_tsv` columns are populated by trigger;
