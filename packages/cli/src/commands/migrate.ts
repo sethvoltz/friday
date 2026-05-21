@@ -18,8 +18,10 @@ import { join } from "node:path";
 import pc from "picocolors";
 import {
   AGENTS_DIR,
+  ENV_PATH,
   appDir,
   ensureDirs,
+  ensureFridayEnv,
   getDb,
   schema,
 } from "@friday/shared";
@@ -62,6 +64,10 @@ export const migrateCommand = defineCommand({
         },
       },
       async run() {
+        // Load ~/.friday/.env into process.env before any DB access; other
+        // CLI commands gate on existsSync(ENV_PATH) for fresh installs that
+        // haven't run `friday setup` yet.
+        if (existsSync(ENV_PATH)) ensureFridayEnv();
         ensureDirs();
         const projectsDir = join(homedir(), ".claude", "projects");
         if (!existsSync(projectsDir)) {
