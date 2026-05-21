@@ -703,10 +703,29 @@
                 </button>
               </div>
             {/if}
+            <!-- FRI-95: user-block is the always-present render surface
+                 for the Stop affordance. Shows when requestStop has
+                 flipped this block to "stopping" (optimistic, instant
+                 feedback) and through its terminal state on turn_done. -->
+            {#if msg.status === "stopping"}
+              <div class="footer-tag stopping">Stopping…</div>
+            {:else if msg.status === "aborted"}
+              <div class="footer-tag">
+                {msg.abortReason === "forced"
+                  ? "Stopped — worker had to be force-killed"
+                  : "Stopped"}
+              </div>
+            {:else if msg.status === "already_finished"}
+              <div class="footer-tag">Already finished</div>
+            {/if}
           {:else}
             <Markdown source={msg.text} streaming={msg.status === "streaming"} />
             {#if msg.status === "aborted"}
-              <div class="footer-tag">Stopped</div>
+              <div class="footer-tag">
+                {msg.abortReason === "forced"
+                  ? "Stopped — worker had to be force-killed"
+                  : "Stopped"}
+              </div>
             {:else if msg.status === "stopping"}
               <div class="footer-tag stopping">Stopping…</div>
             {:else if msg.status === "error"}

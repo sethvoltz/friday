@@ -2208,6 +2208,189 @@ describe("requestStop (stopping state machine)", () => {
   });
 });
 
+// FRI-95: Stop end-to-end — optimistic client signal + always-visible
+// server confirmation. The four cases here mirror the Test Plan's
+// "Dashboard — B.4 + B.5" section in the ticket and exercise the
+// behavioral contract on the user-block surface (the always-present
+// fallback when no assistant bubble has streamed yet).
+describe("requestStop (FRI-95 end-to-end)", () => {
+  // Helper: seed a user-block message for a turn the way the SSE handler
+  // would, so the test starts from the same shape the real flow produces.
+  // Typed loosely as { applyEvent } to avoid the import-cycle that
+  // referencing ChatState here would create — tests import the class at
+  // call time.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function seedUserBlock(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    chat: any,
+    turnId: string,
+    text = "hello",
+    ts = 1000,
+  ): void {
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      turn_id: turnId,
+      agent: "friday",
+      block_id: `blk-${turnId}`,
+      kind: "text",
+      role: "user",
+      content_json: JSON.stringify({ text }),
+      status: "complete",
+      ts,
+      seq: 1,
+    });
+  }
+
+  it("case 1: clean abort with streaming bubble — both assistant and user block flip to stopping then aborted", async () => {
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    seedUserBlock(chat, "turn-c1");
+    chat.startAssistantTurn("turn-c1", "friday");
+    chat.appendDelta("turn-c1", "partial response");
+
+    expect(chat.requestStop("turn-c1")).toBe(true);
+    const userMsg = chat.messages.find(
+      (m) => m.id === userBlockIdForTurn("turn-c1"),
+    );
+    const assistantMsg = chat.messages.find((m) => m.id === "turn-c1");
+    expect(userMsg?.status).toBe("stopping");
+    expect(assistantMsg?.status).toBe("stopping");
+
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-c1",
+      agent: "friday",
+      status: "aborted",
+      abort_reason: "cooperative",
+      seq: 10,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(userMsg?.status).toBe("aborted");
+    expect(userMsg?.abortReason).toBe("cooperative");
+    expect(assistantMsg?.status).toBe("aborted");
+    expect(assistantMsg?.abortReason).toBe("cooperative");
+  });
+
+  it("case 2: clean abort with no streaming bubble — user block carries the full stop affordance", async () => {
+    // The path that was silent pre-FRI-95: Stop fires before any
+    // block-start, so there's no assistant bubble to flip. The user
+    // block is the load-bearing render surface.
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    seedUserBlock(chat, "turn-c2");
+    expect(
+      chat.messages.find((m) => m.id === userBlockIdForTurn("turn-c2"))?.status,
+    ).toBe("complete");
+    // No startAssistantTurn — simulating Stop pressed before any tokens stream.
+    const assistantBefore = chat.messages.find((m) => m.id === "turn-c2");
+    expect(assistantBefore).toBeUndefined();
+
+    expect(chat.requestStop("turn-c2")).toBe(true);
+    const userMsg = chat.messages.find(
+      (m) => m.id === userBlockIdForTurn("turn-c2"),
+    );
+    expect(userMsg?.status).toBe("stopping");
+    // No synthetic assistant bubble manufactured by requestStop.
+    expect(chat.messages.find((m) => m.id === "turn-c2")).toBeUndefined();
+
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-c2",
+      agent: "friday",
+      status: "aborted",
+      abort_reason: "cooperative",
+      seq: 10,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(userMsg?.status).toBe("aborted");
+    expect(userMsg?.abortReason).toBe("cooperative");
+  });
+
+  it("case 3: force-kill abort — user block carries abortReason='forced' so the bubble can render the distinct copy", async () => {
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    seedUserBlock(chat, "turn-c3");
+    chat.requestStop("turn-c3");
+
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-c3",
+      agent: "friday",
+      status: "aborted",
+      abort_reason: "forced",
+      seq: 10,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    const userMsg = chat.messages.find(
+      (m) => m.id === userBlockIdForTurn("turn-c3"),
+    );
+    expect(userMsg?.status).toBe("aborted");
+    expect(userMsg?.abortReason).toBe("forced");
+  });
+
+  it("case 4a: stop on a turn that races to completion — user block transitions through 'already_finished' then settles to 'complete'", async () => {
+    vi.useFakeTimers();
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    seedUserBlock(chat, "turn-c4");
+    chat.requestStop("turn-c4");
+    const userMsg = chat.messages.find(
+      (m) => m.id === userBlockIdForTurn("turn-c4"),
+    );
+    expect(userMsg?.status).toBe("stopping");
+
+    // Daemon emits turn_done with status='complete' — the abort lost the
+    // race against the model's final token. The user-block transitions
+    // through 'already_finished' so the user knows the click registered,
+    // then settles back to 'complete'.
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      turn_id: "turn-c4",
+      agent: "friday",
+      status: "complete",
+      seq: 10,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(userMsg?.status).toBe("already_finished");
+    expect(userMsg?.abortReason).toBeUndefined();
+
+    // 1s later it settles back to 'complete'.
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(userMsg?.status).toBe("complete");
+  });
+
+  it("case 4b: re-pressing Stop while already stopping is a no-op (idempotent on the user-block surface)", async () => {
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    seedUserBlock(chat, "turn-c4b");
+    expect(chat.requestStop("turn-c4b")).toBe(true);
+    const userMsg = chat.messages.find(
+      (m) => m.id === userBlockIdForTurn("turn-c4b"),
+    );
+    expect(userMsg?.status).toBe("stopping");
+
+    // Second click — still returns true (caller's "I requested stop"
+    // branch keeps running) and doesn't disturb the existing state.
+    expect(chat.requestStop("turn-c4b")).toBe(true);
+    expect(userMsg?.status).toBe("stopping");
+  });
+});
+
 // FRI-12: error visibility + per-agent inflight quarantine.
 //
 // Three regressions covered here:

@@ -24,7 +24,11 @@ export interface ChatMessage {
     // event flips it to 'complete' with a fresh ts. Carries an X cancel
     // affordance that yanks it from the daemon's queue and stuffs the
     // text back into the input bar.
-    | "queued";
+    | "queued"
+    // FRI-95: Stop fired on a turn that completed before the abort took
+    // effect. Brief 1s transient on the user-block to acknowledge the click
+    // without falsely claiming "Stopped". Settles back to "complete".
+    | "already_finished";
   agent?: string;
   ts: number;
 
@@ -134,6 +138,15 @@ export interface ChatMessage {
   retryAfterSeconds?: number;
   requestId?: string;
   rawErrorMessage?: string;
+
+  /** FRI-95: set on the user-block message when its turn ends in an
+   *  aborted state, so the bubble's terminal footer can distinguish
+   *  "Stopped" (cooperative — worker honored the abort cleanly) from
+   *  "Stopped — worker had to be force-killed" (forced — the daemon's
+   *  500ms deadline elapsed and the worker was SIGTERMed). Sourced from
+   *  the daemon's `turn_done.abort_reason` field. Undefined for
+   *  non-user-block messages and for turns that didn't end in abort. */
+  abortReason?: "cooperative" | "forced";
 }
 
 export interface AgentInfo {
@@ -959,6 +972,7 @@ export class ChatState {
   finishTurn(
     turnId: string,
     status: "complete" | "aborted" | "error",
+    abortReason?: "cooperative" | "forced",
   ): void {
     // Safety net for the iterator-error path. The worker now flushes
     // in-flight blocks with a terminal status on catch, but if any tool /
@@ -967,7 +981,41 @@ export class ChatState {
     // leave a `running` bubble pinned to a turn the daemon has declared
     // done. Assistant text bubbles use the same matching rule they always
     // have.
+    const userBlockId = userBlockIdForTurn(turnId);
     for (const m of this.messages) {
+      // FRI-95: the user block participates in turn-level terminal-state
+      // resolution. It's the always-present render surface for the Stop
+      // affordance (Stopping… → Stopped / Stopped — worker had to be
+      // force-killed / Already finished), independent of whether an
+      // assistant bubble streamed.
+      if (m.id === userBlockId) {
+        if (status === "aborted") {
+          m.status = "aborted";
+          if (abortReason) m.abortReason = abortReason;
+        } else if (
+          status === "complete" &&
+          m.status === "stopping"
+        ) {
+          // Race: user clicked Stop but the turn raced to a clean
+          // completion before the daemon could honor the abort. Render
+          // a brief `already_finished` transient so the user knows the
+          // click registered, then settle back to `complete`.
+          m.status = "already_finished";
+          const settleAfterMs = 1000;
+          setTimeout(() => {
+            // Re-find the message — the user may have navigated away or
+            // the row may have been swapped by reconcile. Only flip if
+            // it's still in the transient state we set.
+            for (const m2 of this.messages) {
+              if (m2.id === userBlockId && m2.status === "already_finished") {
+                m2.status = "complete";
+                break;
+              }
+            }
+          }, settleAfterMs);
+        }
+        continue;
+      }
       if (m.id !== turnId && m.turnId !== turnId) continue;
       if (m.role === "assistant") {
         if (
@@ -978,6 +1026,12 @@ export class ChatState {
           continue;
         }
         m.status = status;
+        // FRI-95: thread abort reason through to the assistant bubble too,
+        // so a streaming assistant bubble that ended on abort shows the
+        // same terminal copy distinction as the user block.
+        if (status === "aborted" && abortReason) {
+          m.abortReason = abortReason;
+        }
       } else if (m.role === "tool" || m.role === "thinking") {
         if (m.status === "done" || m.status === "error" || m.status === "aborted") {
           continue;
@@ -1223,6 +1277,8 @@ export class ChatState {
    *     `aborted: false` from the server's findAgentByTurnId.
    */
   requestStop(turnId: string): boolean {
+    let assistantMarked = false;
+    let assistantTerminal = false;
     for (const m of this.messages) {
       if (m.role !== "assistant") continue;
       if (m.id !== turnId && m.turnId !== turnId) continue;
@@ -1231,16 +1287,55 @@ export class ChatState {
         m.status === "aborted" ||
         m.status === "error"
       ) {
-        return false;
+        assistantTerminal = true;
+        break;
       }
       // Already stopping: caller can still fire the POST again but the
       // UI is already in the right place. Return true so the caller's
       // "I requested stop" branch keeps running.
-      if (m.status === "stopping") return true;
+      if (m.status === "stopping") {
+        assistantMarked = true;
+        break;
+      }
+      m.status = "stopping";
+      assistantMarked = true;
+      break;
+    }
+    // If the assistant bubble exists and is in a terminal state, the turn
+    // is fully done. Don't smear "stopping" onto the user block — that
+    // would falsely claim Stop is meaningful on a finished turn.
+    if (assistantTerminal) return false;
+    // FRI-95: fall through to the user-block message. When Stop fires
+    // before the first assistant block-start (queued turn, early stop, or
+    // worker still in initial-thinking phase), there's no assistant bubble
+    // to flip — but the user block is always present from the moment the
+    // user pressed Send. Marking it `stopping` gives the dashboard a
+    // stable surface for the optimistic "Stopping…" affordance.
+    //
+    // The user block's NORMAL baseline is `status="complete"` (the user's
+    // message is itself a completed block — it's the turn that's still
+    // in flight, not the user message). So `complete` is NOT a reason to
+    // refuse Stop here. Only the turn-terminal post-abort states are.
+    const userBlockId = userBlockIdForTurn(turnId);
+    for (const m of this.messages) {
+      if (m.id !== userBlockId) continue;
+      if (
+        m.status === "aborted" ||
+        m.status === "error" ||
+        m.status === "already_finished"
+      ) {
+        // User block already settled in a turn-terminal state. Defer to
+        // the assistant-side decision.
+        return assistantMarked;
+      }
+      if (m.status === "stopping") return true; // already optimistic
       m.status = "stopping";
       return true;
     }
-    return false;
+    // No user block in messages (e.g., reload-mid-flight before the
+    // block_complete arrives). The assistant marking is the load-bearing
+    // affordance; return its result.
+    return assistantMarked;
   }
 
   pushTool(toolId: string, toolName: string, input: unknown): void {
@@ -1975,7 +2070,10 @@ export class ChatState {
         // focused agent's bubbles.
         this.clearInflightForTurn(event.turn_id);
         if (event.agent !== this.focusedAgent) break;
-        this.finishTurn(event.turn_id, event.status);
+        // FRI-95: thread abort_reason through so the user-block bubble can
+        // distinguish "Stopped" (cooperative) from "Stopped — worker had
+        // to be force-killed" (forced).
+        this.finishTurn(event.turn_id, event.status, event.abort_reason);
         break;
       case "error":
         // Same per-agent quarantine: clear the slot for this turn even
