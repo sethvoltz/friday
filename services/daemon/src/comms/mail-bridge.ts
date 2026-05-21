@@ -32,6 +32,7 @@ import {
   wakeAgentCritical,
 } from "../agent/lifecycle.js";
 import { wrapWithRecall } from "../agent/recall.js";
+import { renderPinnedFacts } from "../agent/pinned-facts.js";
 import * as registry from "../agent/registry.js";
 import { randomUUID } from "node:crypto";
 import { buildMailPrompt } from "./mail-prompt.js";
@@ -117,12 +118,17 @@ async function maybeSpawnFromMail(agentName: string): Promise<void> {
 
   const cfg = loadConfig();
   const stack = readPromptStack(agentRow.type, []);
-  const systemPrompt = composeSystemPrompt(stack, {
-    agentName: agentRow.name,
-    agentType: agentRow.type,
-    parentName:
-      "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
-  });
+  const pinnedFacts = await renderPinnedFacts(agentRow.name);
+  const systemPrompt = composeSystemPrompt(
+    stack,
+    {
+      agentName: agentRow.name,
+      agentType: agentRow.type,
+      parentName:
+        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+    },
+    pinnedFacts,
+  );
   const modelCfg = normalizeModelConfig(cfg.model);
   const turnId = `t_${randomUUID()}`;
 

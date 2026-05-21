@@ -23,6 +23,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
+import { renderPinnedFacts } from "./pinned-facts.js";
 import * as registry from "./registry.js";
 import {
   dispatchTurn,
@@ -143,11 +144,16 @@ async function refork(agentName: string): Promise<void> {
 
   const cfg = loadConfig();
   const stack = readPromptStack(a.type, []);
-  const systemPrompt = composeSystemPrompt(stack, {
-    agentName,
-    agentType: a.type,
-    parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
-  });
+  const pinnedFacts = await renderPinnedFacts(agentName);
+  const systemPrompt = composeSystemPrompt(
+    stack,
+    {
+      agentName,
+      agentType: a.type,
+      parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
+    },
+    pinnedFacts,
+  );
   const modelCfg = normalizeModelConfig(cfg.model);
 
   // Empty prompt — the worker will idle and drain mail on its own (the long-

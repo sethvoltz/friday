@@ -34,6 +34,7 @@ import {
   stopInvariantAuditor,
 } from "./agent/invariants.js";
 import { wrapWithRecall } from "./agent/recall.js";
+import { renderPinnedFacts } from "./agent/pinned-facts.js";
 import { closeTicketForArchive } from "./services/ticket-close.js";
 import {
   runSettingsBootScan,
@@ -358,12 +359,17 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
       const pending = await mailInbox(a.name);
       if (pending.length > 0) {
         const stack = readPromptStack(a.type, []);
-        const systemPrompt = composeSystemPrompt(stack, {
-          agentName: a.name,
-          agentType: a.type,
-          parentName:
-            "parentName" in a ? a.parentName ?? undefined : undefined,
-        });
+        const pinnedFacts = await renderPinnedFacts(a.name);
+        const systemPrompt = composeSystemPrompt(
+          stack,
+          {
+            agentName: a.name,
+            agentType: a.type,
+            parentName:
+              "parentName" in a ? a.parentName ?? undefined : undefined,
+          },
+          pinnedFacts,
+        );
         const modelCfg = normalizeModelConfig(cfg.model);
         const turnId = `t_${randomUUID()}`;
         logger.log("info", "agent.recovery.drain-mail", {
@@ -471,11 +477,16 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
       continue;
     }
     const stack = readPromptStack(a.type, []);
-    const systemPrompt = composeSystemPrompt(stack, {
-      agentName: a.name,
-      agentType: a.type,
-      parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
-    });
+    const pinnedFacts = await renderPinnedFacts(a.name);
+    const systemPrompt = composeSystemPrompt(
+      stack,
+      {
+        agentName: a.name,
+        agentType: a.type,
+        parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
+      },
+      pinnedFacts,
+    );
     const wrappedPrompt = await wrapWithRecall(text, text, "user_chat");
     const queuedCwd = await registry.workingDirectoryFor(a);
     try {

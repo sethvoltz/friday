@@ -49,6 +49,7 @@ import {
   updateEntry,
   type MemoryEntry,
 } from "@friday/memory";
+import { renderPinnedFacts } from "../agent/pinned-facts.js";
 import { wrapWithRecall } from "../agent/recall.js";
 import { resolveRecipient, validateRecipient } from "../comms/recipient.js";
 import {
@@ -203,12 +204,17 @@ async function handle(
     const resumeSessionId = agentRow.sessionId ?? undefined;
 
     const stack = readPromptStack(agentRow.type, []);
-    const baseSystemPrompt = composeSystemPrompt(stack, {
-      agentName: agentRow.name,
-      agentType: agentRow.type,
-      parentName:
-        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
-    });
+    const pinnedFacts = await renderPinnedFacts(agentRow.name);
+    const baseSystemPrompt = composeSystemPrompt(
+      stack,
+      {
+        agentName: agentRow.name,
+        agentType: agentRow.type,
+        parentName:
+          "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+      },
+      pinnedFacts,
+    );
 
     // Skill detection: if the user typed `/<name> <args>`, look up the skill
     // and inject its body as a per-turn `<skill-context>` block. The user
@@ -481,12 +487,17 @@ async function handle(
     }
 
     const stack = readPromptStack(agentRow.type, []);
-    const baseSystemPrompt = composeSystemPrompt(stack, {
-      agentName: agentRow.name,
-      agentType: agentRow.type,
-      parentName:
-        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
-    });
+    const pinnedFacts = await renderPinnedFacts(agentRow.name);
+    const baseSystemPrompt = composeSystemPrompt(
+      stack,
+      {
+        agentName: agentRow.name,
+        agentType: agentRow.type,
+        parentName:
+          "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+      },
+      pinnedFacts,
+    );
     const wrappedPrompt = await wrapWithRecall(parsedText, parsedText, "user_chat");
     const modelCfg = normalizeModelConfig(cfg.model);
     const resumeCwd = await registry.workingDirectoryFor(agentRow);
@@ -615,11 +626,16 @@ async function handle(
 
     const turnId = `t_${randomUUID()}`;
     const stack = readPromptStack(body.type, []);
-    const baseSystemPrompt = composeSystemPrompt(stack, {
-      agentName: body.name,
-      agentType: body.type,
-      parentName: body.parentName,
-    });
+    const pinnedFacts = await renderPinnedFacts(body.name);
+    const baseSystemPrompt = composeSystemPrompt(
+      stack,
+      {
+        agentName: body.name,
+        agentType: body.type,
+        parentName: body.parentName,
+      },
+      pinnedFacts,
+    );
     const systemPrompt =
       body.type === "builder" && worktreePath
         ? `${baseSystemPrompt}\n\n---\n\nYou are running in a git worktree at \`${worktreePath}\` on branch \`${branch}\`. **Do not read, write, or modify files outside this directory.** All Bash commands run with this directory as cwd by default; do not \`cd\` outside it.`
@@ -1827,10 +1843,15 @@ async function handleSystemCommand(
       if (topic) {
         const seedTurnId = `t_${randomUUID()}`;
         const stack = readPromptStack("bare", []);
-        const systemPrompt = composeSystemPrompt(stack, {
-          agentName: name,
-          agentType: "bare",
-        });
+        const seedPinnedFacts = await renderPinnedFacts(name);
+        const systemPrompt = composeSystemPrompt(
+          stack,
+          {
+            agentName: name,
+            agentType: "bare",
+          },
+          seedPinnedFacts,
+        );
         const modelCfg = normalizeModelConfig(cfg.model);
         const wrappedTopic = await wrapWithRecall(topic, topic, "scratch");
         // FRI-71: persist the seed topic as a user block so the bare agent's
