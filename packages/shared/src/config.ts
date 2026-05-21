@@ -24,6 +24,12 @@ export const DAEMON_LOG_PATH = join(LOGS_DIR, "daemon.jsonl");
 export const SCHEDULES_DIR = join(DATA_DIR, "schedules");
 export const STATE_DIR = join(DATA_DIR, "state");
 export const APPS_DIR = join(DATA_DIR, "apps");
+/** ~/.friday/agents/<name>/ — per-agent home for the orchestrator, every
+ *  helper, and every scheduled agent. Pins their `cwd` so the Claude SDK's
+ *  `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` lookup is stable
+ *  across daemon-install changes (FRI-61). Builders unaffected — they
+ *  keep their git-worktree cwd. */
+export const AGENTS_DIR = join(DATA_DIR, "agents");
 
 export function appsDir(): string {
   return APPS_DIR;
@@ -282,6 +288,8 @@ export function ensureDirs(): void {
     EVOLVE_CLUSTERS_DIR,
     APPS_DIR,
     ZERO_DIR,
+    STATE_DIR,
+    AGENTS_DIR,
   ]) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
