@@ -8,7 +8,8 @@
  * observe.
  */
 
-import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -20,16 +21,20 @@ import {
   it,
   vi,
 } from "vitest";
-import { createTestDb, type TestDbHandle } from "@friday/shared";
 
-vi.mock("../agent/lifecycle.js", () => ({
-  archiveAgent: vi.fn(async () => []),
-}));
+// MUST set FRIDAY_DATA_DIR before any @friday/shared import — APPS_DIR is
+// captured at module evaluation. Without this guard, the rmSync(appDir(""))
+// calls below target the real ~/.friday/apps/ and silently wipe user data.
+// See CLAUDE.md "Testing discipline" and the May 2026 Kitchen-app incident.
+const FRIDAY_DATA_DIR = mkdtempSync(join(tmpdir(), "friday-apps-installer-"));
+process.env.FRIDAY_DATA_DIR = FRIDAY_DATA_DIR;
 
-let handle: TestDbHandle;
-let getDb: typeof import("@friday/shared")["getDb"];
-let schema: typeof import("@friday/shared")["schema"];
-let appDir: typeof import("@friday/shared")["appDir"];
+type SharedModule = typeof import("@friday/shared");
+let createTestDb: SharedModule["createTestDb"];
+let handle: Awaited<ReturnType<SharedModule["createTestDb"]>>;
+let getDb: SharedModule["getDb"];
+let schema: SharedModule["schema"];
+let appDir: SharedModule["appDir"];
 let registry: typeof import("../agent/registry.js");
 let AppInstallError: typeof import("./installer.js")["AppInstallError"];
 let installApp: typeof import("./installer.js")["installApp"];
@@ -37,6 +42,10 @@ let inspectApp: typeof import("./installer.js")["inspectApp"];
 let listApps: typeof import("./installer.js")["listApps"];
 let reloadApp: typeof import("./installer.js")["reloadApp"];
 let uninstallApp: typeof import("./installer.js")["uninstallApp"];
+
+vi.mock("../agent/lifecycle.js", () => ({
+  archiveAgent: vi.fn(async () => []),
+}));
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_SRC = resolve(__dirname, "fixtures/example-app");
@@ -56,8 +65,8 @@ function freshFixture(id = "example-app"): string {
 }
 
 beforeAll(async () => {
+  ({ createTestDb, getDb, schema, appDir } = await import("@friday/shared"));
   handle = await createTestDb({ label: "apps_installer" });
-  ({ getDb, schema, appDir } = await import("@friday/shared"));
   registry = await import("../agent/registry.js");
   ({
     AppInstallError,
@@ -71,10 +80,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await handle.drop();
-  // FRIDAY_DATA_DIR was set by createTestDb; clean the apps folder so
-  // future test runs (different label, different DB) don't see leftovers.
-  const appsRoot = appDir("");
-  if (existsSync(appsRoot)) rmSync(appsRoot, { recursive: true, force: true });
+  // Tear down the scoped FRIDAY_DATA_DIR tmp tree, including the apps folder
+  // we created under it. We delete the whole DATA_DIR — appDir("") would also
+  // work, but removing the tmp root is more explicit about what we own.
+  if (existsSync(FRIDAY_DATA_DIR)) {
+    rmSync(FRIDAY_DATA_DIR, { recursive: true, force: true });
+  }
 });
 
 beforeEach(async () => {
