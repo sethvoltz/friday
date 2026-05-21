@@ -11,7 +11,7 @@
   }
   let { toolName, filePath, content, oldString, newString }: Props = $props();
 
-  let open = $state(false);
+  let open = $state(true);
 
   function langFromPath(p: string | undefined): string {
     if (!p) return "text";
@@ -252,10 +252,23 @@
     font-style: italic;
   }
 
-  /* Side-by-side: visible at ≥768px */
+  /* Base — mobile defaults */
   .diff-side-by-side {
     display: none;
   }
+  .diff-unified {
+    display: flex;
+    flex-direction: column;
+    margin-top: 0.35rem;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    max-height: 400px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+  }
+
+  /* Desktop ≥768px — swap */
   @media (min-width: 768px) {
     .diff-side-by-side {
       display: flex;
@@ -270,19 +283,6 @@
     .diff-unified {
       display: none;
     }
-  }
-
-  /* Unified: visible at <768px */
-  .diff-unified {
-    display: flex;
-    flex-direction: column;
-    margin-top: 0.35rem;
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-    max-height: 400px;
-    overflow-y: auto;
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
   }
 
   .diff-column {
