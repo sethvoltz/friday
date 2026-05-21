@@ -1793,6 +1793,18 @@ export class ChatState {
     const blockRows: BlockRow[] = rows.map(zeroBlockRowToBlockRow);
     const parsed = parseBlocks(blockRows, forAgent, {
       inflightTurnId: this.inflightTurnIdByAgent[forAgent] ?? null,
+      // FRI-91 Part A: complete the bf34884 grace-map plumbing on this
+      // call site — `applyZeroBlocks` runs on every Zero snapshot frame
+      // and was the only of the four parseBlocks callers that skipped
+      // the grace map. Covers the SSE-cleared-inflight-but-Zero-hasn't-
+      // landed-the-block-yet flash, mirroring the REST fetch path.
+      noResponseGraceUntil: this.noResponseGraceUntil,
+      // FRI-91 Part B: the structural fix. Until Zero confirms the
+      // local replica matches upstream for this query, treat any
+      // user-only turn as "assistant block hasn't replicated yet,"
+      // not "the agent didn't respond." See parseBlocks's safety-net
+      // loop for the suppression logic.
+      zeroResultIncomplete: resultType !== "complete",
     });
     const parsedById = new Map<string, ChatMessage>();
     for (const m of parsed) parsedById.set(m.id, m);
@@ -2824,6 +2836,15 @@ export function parseBlocks(
      *  than-Zero race where the inflight slot has cleared but the
      *  assistant block hasn't replicated to this client yet. */
     noResponseGraceUntil?: Record<string, number>;
+    /** FRI-91: the input came from a Zero snapshot whose `resultType` is
+     *  not yet `"complete"` (initial bootstrap still streaming in, or the
+     *  local IndexedDB replica is behind upstream). The safety-net loop
+     *  must NOT synthesize "Agent didn't respond" for user-only turns
+     *  while this is true — the missing assistant blocks may simply not
+     *  have replicated yet. Only call sites that hand parseBlocks a
+     *  partial view (applyZeroBlocks) set this; REST-driven paths pass
+     *  full server payloads and leave it falsy. */
+    zeroResultIncomplete?: boolean;
   } = {},
 ): ChatMessage[] {
   const orphans = classifyOrphanRows(blocks);
@@ -3119,6 +3140,13 @@ export function parseBlocks(
     // "Agent didn't respond" bubble that vanishes ~1 frame later.
     const graceDeadline = grace?.[turnId];
     if (graceDeadline && graceDeadline > now) continue;
+    // FRI-91: while Zero hasn't confirmed the local replica matches
+    // upstream, a missing assistant block is indistinguishable from
+    // "the worker died" vs. "the row just hasn't replicated yet."
+    // The in-memory grace map can't cover this on page reload (it's
+    // wiped on every load); the resultType signal is the only thing
+    // that survives. Skip synthesis until Zero says "complete."
+    if (opts.zeroResultIncomplete) continue;
     synthesized = true;
     out.push({
       id: noResponseIdForTurn(turnId),

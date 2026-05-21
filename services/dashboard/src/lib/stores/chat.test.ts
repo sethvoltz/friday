@@ -1918,6 +1918,158 @@ describe("unread badge gating (PR C)", () => {
     expect(out.find((m) => m.kind === "no-response")).toBeUndefined();
   });
 
+  it("FRI-91: parseBlocks with zeroResultIncomplete=true suppresses the safety-net synth for a user-only turn (assistant block may not have replicated yet)", async () => {
+    // Part B of the FRI-91 fix. The in-memory grace map can't help on
+    // page reload (it's wiped to {} on every load), so the structural
+    // fix is to gate the safety net on Zero's `resultType`: until the
+    // local replica is confirmed to match upstream, a missing assistant
+    // block is ambiguous between "the worker died" and "replication
+    // hasn't caught up." Suppress synthesis in that window.
+    const { parseBlocks, userBlockIdForTurn } = await import("./chat.svelte");
+    const userOnly = [
+      {
+        id: "1",
+        blockId: "blk-u",
+        turnId: "t-incomplete",
+        agentName: "friday",
+        sessionId: "s",
+        messageId: null,
+        blockIndex: 0,
+        role: "user",
+        kind: "text",
+        source: "user_chat",
+        contentJson: '{"text":"hey"}',
+        status: "complete",
+        ts: 100,
+        lastEventSeq: 1,
+      } as Parameters<typeof parseBlocks>[0][number],
+    ];
+    // With zeroResultIncomplete=true: synth must NOT fire. Output is
+    // exactly the user bubble — nothing else.
+    const incomplete = parseBlocks(userOnly, "friday", {
+      zeroResultIncomplete: true,
+    });
+    expect(incomplete).toHaveLength(1);
+    expect(incomplete[0]!.id).toBe(userBlockIdForTurn("t-incomplete"));
+    expect(incomplete[0]!.role).toBe("user");
+    expect(
+      incomplete.find((m) => m.id === "nr_t-incomplete"),
+    ).toBeUndefined();
+
+    // Control: with zeroResultIncomplete=false (the REST path's default)
+    // the existing FRI-85 safety net still fires. This is the load-bearing
+    // pair — the flag is what's gating, not some unrelated change.
+    const complete = parseBlocks(userOnly, "friday", {
+      zeroResultIncomplete: false,
+    });
+    expect(complete).toHaveLength(2);
+    const nr = complete.find((m) => m.id === "nr_t-incomplete");
+    expect(nr).toBeDefined();
+    expect(nr?.kind).toBe("no-response");
+    expect(nr?.noResponseSentinel).toBe(false);
+  });
+
+  it("FRI-91: applyZeroBlocks with resultType='unknown' on a user-only snapshot does NOT add nr_<turnId> to chat.messages", async () => {
+    // Cross-boundary contract: applyZeroBlocks (the live Zero binding's
+    // snapshot handler) must thread `resultType` through to parseBlocks
+    // as `zeroResultIncomplete`. Without this plumb the safety net
+    // synthesizes "Agent didn't respond" on every initial-bootstrap
+    // frame where the assistant block hasn't replicated yet, and the
+    // bubble persists across page refreshes because the in-memory
+    // grace map resets to {} on every load.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // A user-only Zero snapshot — the assistant block exists upstream
+    // but hasn't replicated to this client yet. resultType='unknown'
+    // is Zero's "I haven't confirmed the local replica matches upstream"
+    // signal; it's what every frame during initial bootstrap carries.
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "1",
+          block_id: "blk-u",
+          turn_id: "t-bootstrap",
+          agent_name: "friday",
+          session_id: "s",
+          message_id: null,
+          block_index: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          content_json: { text: "hey" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1_000,
+          last_event_seq: 3,
+        } as Parameters<typeof chat.applyZeroBlocks>[0][number],
+      ],
+      "friday",
+      "unknown",
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0]!.role).toBe("user");
+    expect(chat.messages[0]!.turnId).toBe("t-bootstrap");
+    // The bug: this affordance used to land here on every initial
+    // snapshot frame and stayed visible across multi-refresh until
+    // Zero finally pushed the assistant block.
+    expect(
+      chat.messages.find((m) => m.id === "nr_t-bootstrap"),
+    ).toBeUndefined();
+  });
+
+  it("FRI-91: applyZeroBlocks transitions unknown→complete; nr_<turnId> appears only once Zero confirms the user-only turn is authoritative", async () => {
+    // Reload-mid-state shape: the load-bearing test for the fix. Frame
+    // 1 is `unknown` with the user block alone — replication may still
+    // be catching up, so the bubble must NOT render. Frame 2 flips to
+    // `complete` with the same user-only payload — now Zero is
+    // authoritative; the assistant truly never produced a block, so
+    // the existing FRI-85 safety net fires and the affordance appears.
+    // Tests both interleavings of the FRI-91 gate (suppress while
+    // incomplete; release on complete) in the same agent's lifecycle.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    const userBlockRow = {
+      id: "1",
+      block_id: "blk-u",
+      turn_id: "t-silent",
+      agent_name: "friday",
+      session_id: "s",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: { text: "hey" },
+      status: "complete",
+      streaming: false,
+      origin_mutation_id: null,
+      ts: 1_000,
+      last_event_seq: 3,
+    } as Parameters<typeof chat.applyZeroBlocks>[0][number];
+
+    chat.applyZeroBlocks([userBlockRow], "friday", "unknown");
+    expect(chat.messages).toHaveLength(1);
+    expect(
+      chat.messages.find((m) => m.id === "nr_t-silent"),
+    ).toBeUndefined();
+
+    chat.applyZeroBlocks([userBlockRow], "friday", "complete");
+    expect(chat.messages).toHaveLength(2);
+    const userBubble = chat.messages.find((m) => m.role === "user");
+    const nr = chat.messages.find((m) => m.id === "nr_t-silent");
+    expect(userBubble?.turnId).toBe("t-silent");
+    expect(nr).toBeDefined();
+    expect(nr?.kind).toBe("no-response");
+    expect(nr?.noResponseSentinel).toBe(false);
+    expect(nr?.turnId).toBe("t-silent");
+  });
+
   it("FRI-9: a user message containing the same literal text is NOT filtered", async () => {
     // The sentinel only applies to assistant-role blocks. A user who
     // literally types "No response requested." must still see their
@@ -4093,7 +4245,11 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    // First snapshot: a single user block.
+    // First snapshot: a single user block. Pass resultType='complete'
+    // — without it, FRI-91 suppresses the safety net (the local replica
+    // may not have caught up yet, so a missing assistant block is
+    // ambiguous). This test's intent is to verify the supersedure
+    // logic, which requires the safety net to actually fire first.
     chat.applyZeroBlocks(
       [
         makeZeroBlocksRow({
@@ -4106,6 +4262,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
         }),
       ],
       "friday",
+      "complete",
     );
     expect(chat.messages).toHaveLength(2); // user bubble + nr_ safety net
     // Second snapshot: assistant block landed (receiver-device path,
@@ -4130,6 +4287,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
         }),
       ],
       "friday",
+      "complete",
     );
     expect(chat.messages.some((m) => m.text === "second")).toBe(true);
     // The nr_ safety-net bubble should be gone now (real assistant
