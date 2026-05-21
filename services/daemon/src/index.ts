@@ -35,7 +35,6 @@ import {
 } from "./agent/invariants.js";
 import { wrapWithRecall } from "./agent/recall.js";
 import { renderPinnedFacts } from "./agent/pinned-facts.js";
-import { seedRepoPins } from "./memory/seed.js";
 import { agentCwdPinV1 } from "./state-migrations/agent-cwd-pin-v1.js";
 import { runStateMigrations } from "./state-migrations/runner.js";
 import { closeTicketForArchive } from "./services/ticket-close.js";
@@ -190,8 +189,6 @@ async function main(): Promise<void> {
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
   await replayPending();
   await seedMetaAgents();
-  // FRI-61: seed friday's repo pin (no-op if unset or already present).
-  await seedRepoPins();
   await reconcileAppsOnBoot();
   await recoverAgents(cfg);
   // Heal SDK sessions wedged on an unresolved tool_use (worker died

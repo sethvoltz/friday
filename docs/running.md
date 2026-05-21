@@ -84,7 +84,7 @@ Everything lives at `~/.friday/`:
 ```
 ~/.friday/
 ├── .env                   Secrets (DATABASE_URL, ZERO_AUTH_SECRET, LINEAR_API_KEY, etc.)
-├── config.json            Settings + MCP server config (incl. optional fridayRepoPath)
+├── config.json            Settings + MCP server config
 ├── SOUL.md                Your editable identity layer
 ├── skills/*.md            User-additive slash skills
 ├── agents/<name>/         Per-agent home — orchestrator/helper/scheduled cwd (ADR-029)
@@ -102,16 +102,7 @@ Everything lives at `~/.friday/`:
 └── health.json            Daemon heartbeat (refreshed every 30s)
 ```
 
-### Friday's own repo (ADR-029)
-
-Per-agent home dirs in `~/.friday/agents/<name>/` are intentionally empty — the SDK runs there so its session transcripts get a stable `~/.claude/projects/<encoded-cwd>/` location, but no operational state lives in the agent home.
-
-When friday needs to operate on its own source repo (Read/Edit/Bash, open PRs, hand off to a builder), it uses an absolute path that's pinned as a memory at boot. To set that path, either:
-
-- `friday memory pin-repo /abs/path/to/agent-friday` (one-shot CLI, works whether or not the daemon is up), or
-- Edit `~/.friday/config.json` and add `"fridayRepoPath": "/abs/path/..."` — the daemon picks it up on the next boot's `seedRepoPins()`.
-
-`FRIDAY_REPO_PATH` env wins over the config field. If neither is set, the pin is silently omitted — friday operates without direct repo affordance.
+Friday's own repo is a memory like any other. Add it via the dashboard memory UI, via `friday memory add` (writes as `createdBy=user`), or by `curl POST /api/memory` with the `x-friday-caller-name` header set to the owning agent. Friday writes its own memories via the `memory_save` MCP tool. Same mechanism for any other repo or always-inject fact a builder/helper needs.
 
 Canonical persistence lives in the **`friday` Postgres database** (host-managed via `brew services start postgresql@18`), not `~/.friday/`. The directory above carries config, secrets, and content-addressed file blobs; everything else (agents, blocks, tickets, mail, memory, schedules, apps, settings, read-cursors, client-devices) is in Postgres. See `docs/architecture.md` and ADR-023 for the topology.
 

@@ -388,9 +388,9 @@ Pre-FRI-61 the non-builder, non-app branch fell through to `process.cwd()`. That
 
 ### Pinned-memory injection in the prompt stack (FRI-61)
 
-`composeSystemPrompt(stack, identity?, pinnedFacts?)` accepts an optional pinned-facts block, rendered between the Identity layer and `agents/<type>.md`. The daemon's `renderPinnedFacts(agentName)` queries `listPinnedForAgent(agentName, "pinned")` and concatenates each entry as a `# Pinned facts` markdown section. Pins are owned-by-agent (`memory_entries.createdBy = agentName`) and tagged (`tags_json ? 'pinned'`); the model sees them every turn, no FTS recall required.
+Any agent can own pinned memories: `composeSystemPrompt(stack, identity?, pinnedFacts?)` accepts an optional `pinnedFacts` string and renders it as a `# Pinned facts` section between Identity and `agents/<type>.md`. The daemon's `renderPinnedFacts(agentName)` queries `listPinnedForAgent(agentName)` (owner-filtered + tag-filtered + `status='ready'`) and assembles the block. Threaded into every `composeSystemPrompt` call site so every agent sees its own pins on every turn.
 
-The first consumer is friday's own repo path: `seedRepoPins()` writes a `pin-repo-agent-friday` entry from `FRIDAY_REPO_PATH` env or `config.fridayRepoPath` so friday can act on the agent-friday repo using absolute paths. Same surface generalises to any other repo or constant fact friday wants pinned for itself.
+The agent-friday repo path is a memory owned by `friday` with tag `pinned` (and a secondary `repo` tag for human filtering). Builders that need repo awareness use the same primitive — a memory owned by the builder, tagged `pinned` for always-inject, or with searchable name tokens for FTS recall. No daemon-side special-case per fact-type.
 
 ### Wedge detector — zero-block-streak (FRI-61)
 

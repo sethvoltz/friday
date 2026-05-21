@@ -120,16 +120,6 @@ export interface FridayConfig {
   publicUrl?: string;
   /** Linear integration settings. Read by `@friday/integrations-linear`. */
   linear?: LinearIntegrationConfig;
-  /**
-   * Absolute path to the agent-friday repo, surfaced to friday as a pinned
-   * memory at boot (FRI-61). When set, the daemon seeds the
-   * `pin-repo-agent-friday` memory entry pointing here, so the orchestrator
-   * knows where its own source lives without coupling to `process.cwd()`.
-   * Also overridable via `FRIDAY_REPO_PATH` env. If neither is set, the pin
-   * is omitted — friday operates without direct repo affordance and the
-   * user can run `friday memory pin-repo <path>` to set it later.
-   */
-  fridayRepoPath?: string;
 }
 
 export interface LinearIntegrationConfig {

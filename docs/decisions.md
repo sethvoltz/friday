@@ -834,13 +834,29 @@ The orchestrator + non-builder agents ran with the daemon's `process.cwd()`. The
 
 1. **Per-agent home dirs.** `workingDirectoryFor(a)` returns `~/.friday/agents/<a.name>/` for any non-builder, non-app-installed agent. Builders keep their git-worktree cwd; app-installed agents keep `~/.friday/apps/<appId>/`. New constant `AGENTS_DIR` from `@friday/shared`; created at boot by `ensureDirs()`.
 
-2. **Pinned-memory prompt injection.** Friday's repo path (and any other always-include per-agent fact) flows through the same memory store every agent already uses, via a new non-FTS query path: `listPinnedForAgent(agentName, tag = "pinned")`. The daemon's `renderPinnedFacts` renders a `# Pinned facts` block injected into `composeSystemPrompt` between Identity and `agents/<type>.md`. `seedRepoPins()` writes the `pin-repo-agent-friday` entry idempotently from `FRIDAY_REPO_PATH` env or `config.fridayRepoPath`; the daemon never writes `config.json` itself (the settings LISTEN handler races, and there's no temp+rename in `writeConfig`). Rejected: env-var-only resolution at every prompt site (would invert friday's "treat my own repo on par with any other repo" instinct) and auto-detect from binary location (lands in the read-only Homebrew Cellar, recreated on every `brew upgrade`).
+### 2. Pinned-memory injection in the prompt stack
+
+**Correction landed 2026-05-21 (FRI-101):** the original §2 text proposed a `seedRepoPins()` boot helper, a `friday memory pin-repo` CLI, and a `fridayRepoPath` config field as part of the architecture. All three were deleted as wrong-shape. The actual mechanism is simpler than the original §2 described:
+
+* `listPinnedForAgent(agentName, tag = "pinned")` returns memory entries owned by `agentName` (filter on `created_by`), tagged with `tag` (jsonb `?` operator), `status='ready'`. Ordered by id for byte-stable prompt assembly.
+* `composeSystemPrompt(stack, identity?, pinnedFacts?)` accepts an optional `pinnedFacts` string and renders it as a `# Pinned facts` section between Identity and `agents/<type>.md`.
+* The daemon's `renderPinnedFacts(agentName)` queries `listPinnedForAgent` and renders the section. Threaded into every `composeSystemPrompt` call site so every agent sees its own pins on every turn.
+
+That's the entire mechanism. No daemon-side seeder per fact-type, no CLI subcommand per fact-type, no config field per fact-type. The agent-friday repo path is a memory owned by `friday` with tag `pinned` (and a secondary `repo` tag for human filtering). Any other always-inject fact uses the same shape — a builder's target-repo URL, a Linear team UUID, a kitchen-app manifest pointer — all are memories tagged `pinned`, owned by the relevant agent.
+
+Builders that need *contextual* (FTS-recalled) repo awareness use the same memory store, just without the `pinned` tag — auto-recall (`packages/memory/src/auto-recall.ts`) surfaces them when the user message tokens match. Same store. Same query. Same code path.
+
+Architectural rule (checkable in review): any code touching `composeSystemPrompt`, `listPinnedForAgent`, or memory writes that's specific to a single fact-type is a violation.
 
 3. **State-migrations table.** New `_friday_state_migrations` table (`id TEXT PK`, `applied_at TIMESTAMPTZ`, `meta_json JSONB`) tracks imperative one-shot data/filesystem migrations, distinct from Drizzle's schema migrations. Runner uses a Postgres advisory lock; first consumer `agent-cwd-pin-v1` renames SDK JSONLs (and their `<sessionId>/tool-results/` sidecar dirs) from old encoded-cwd locations to the new per-agent-home encoded locations, EXDEV-falling-back to copy + unlink. Boot order: Drizzle migrations → state migrations → everything else. Versioned re-runs ship a new id (`*-v2`).
 
 4. **Zero-block wedge detector.** `LiveWorker` gains `blocksThisTurn` (incremented in `handleBlockStart`, reset on `sendPrompt`/`turn-complete`/`error`) and `zeroBlockTurnStreak` (incremented when a `turn-complete` or `error` arrives with no observed blocks, reset otherwise). When the streak reaches `FRIDAY_WEDGE_THRESHOLD` (default 10), the daemon force-kills via `forceKillStuckWorker(w, { reason: "wedge" })`. Gated on `!w.abortRequested` so user-initiated stops don't trip the counter. Distinct from the heartbeat watchdog (the wedge passes — workers are chatty) and the turn-stall watchdog (the wedge passes — block-stops still fire in other turns, and the threshold is too lax for a tight loop).
 
-5. **CLI surfaces.** `friday memory pin-repo <abs-path>` writes the repo-pin memory directly through `@friday/memory` (works whether the daemon is up or not). `friday migrate cwd --dry-run` previews the JSONL moves; applying stays daemon-boot-only so the advisory-locked runner is the single source of truth.
+### 5. CLI
+
+`packages/cli` adds one subcommand: `friday migrate cwd --dry-run` — previews the JSONL moves the `agent-cwd-pin-v1` state migration will perform on next daemon boot. Applies stay daemon-boot-only so the advisory-locked runner is the single source of truth.
+
+**Correction landed 2026-05-21 (FRI-101):** an earlier draft of §5 also documented `friday memory pin-repo <absolute-path>` as a bespoke CLI seeder for friday's repo memory. Removed as wrong-shape — repo memories (and every other always-inject fact) use the existing memory write paths: `memory_save` MCP from agents, `friday memory add` or the dashboard memory UI from humans, or `curl POST /api/memory` with the `x-friday-caller-name` header for one-shot programmatic seeding.
 
 ### Consequences
 
