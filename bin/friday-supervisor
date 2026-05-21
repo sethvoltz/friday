@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# friday-supervisor — launchd-supervised entrypoint for the Friday stack.
+# Invoked by the brew formula's plist; not normally run by users directly.
+# See ADR-028 (forthcoming with FRI-88) for the design.
+exec node "$(dirname "$0")/../packages/cli/dist/bin/supervisor.js" "$@"

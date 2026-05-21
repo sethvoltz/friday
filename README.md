@@ -95,8 +95,9 @@ Installs:
 - **`postgresql@18`** — Friday's canonical store. Managed by `brew services`, lifecycle-independent of `friday start/stop`.
 - **`claude-code`** — Claude Code CLI; runs the Agent SDK against the Pro/Max subscription tied to your interactive `claude` login (no `ANTHROPIC_API_KEY` needed once signed in)
 - **`gh`** — GitHub CLI for Builders to clone and open PRs
-- **`tmux`** — daemon + dashboard + zero-cache supervision
 - **`cloudflared`** — Cloudflare Tunnel client (optional, for public reachability)
+
+`tmux` is no longer required — Friday's prod supervision moved to launchd via the Homebrew formula (see ADR-028). Contributors who want it for the dev workflow can `brew install tmux` separately.
 
 Built and tested against Node 22 and pnpm 10. Start Postgres if it isn't already running:
 
@@ -106,12 +107,15 @@ brew services start postgresql@18
 
 > Sign in to Claude Code once before running Friday: `claude` (the CLI walks you through the OAuth flow). Friday's workers spawn the SDK as a child process and inherit that login.
 
-### 2. Install and build
+### 2. Install Friday
 
 ```bash
-pnpm install
-pnpm build
+brew install sethvoltz/friday/friday
 ```
+
+The formula auto-taps `sethvoltz/homebrew-friday`, installs Node + pnpm + `postgresql@18` + `cloudflared` (if missing), clones Friday's source, and runs `pnpm install --prod && pnpm -r build`. First install takes 5–10 minutes; subsequent `brew upgrade friday` runs are faster.
+
+Source-editing contributors who don't want to install via brew can clone + `pnpm install + pnpm build` from the repo — see [Developing Friday](#developing-friday) below. The dev workflow doesn't need the brew formula.
 
 ### 3. First-time setup
 
@@ -119,23 +123,23 @@ pnpm build
 friday setup
 ```
 
-Creates `~/.friday/`, provisions the `friday` Postgres database and role, runs initial Drizzle migrations, copies the default `SOUL.md`, and creates your primary account (email + password). Idempotent — re-run anytime. Use `friday setup --reset-password` to change the password.
+Provisions the `friday` Postgres database and role, runs initial Drizzle migrations, creates `~/.friday/`, copies the default `SOUL.md`, and creates your primary account (email + password). Idempotent — re-run anytime. Use `friday setup --reset-password` to change the password.
 
 ### 4. Run
 
 ```bash
-friday start            # production (requires `pnpm build`)
+friday start             # delegates to `brew services start friday`
 
-friday status                    # pids, ports, uptime
-friday attach daemon             # attach a service's tmux pane (daemon | dashboard | zero-cache)
-friday logs --follow             # tail daemon log
+friday status            # supervisor + per-service status + probed ports
+friday attach daemon     # tail ~/.friday/logs/<service>.jsonl (Ctrl-C exits)
+friday logs --follow     # tail the daemon's structured log
 ```
 
-`friday start` always runs prod. For dev hot-reload, see [Developing Friday](#developing-friday) below.
+`friday start` starts the launchd-supervised stack (daemon + dashboard + zero-cache, owned by one supervisor process — ADR-028). The supervisor's `RunAtLoad: true` means Friday comes back up automatically after Mac reboot/login; you don't have to `friday start` again.
 
 `friday start` prints the local dashboard URL (`http://localhost:7615`) on launch — open it and sign in.
 
-> **Tip:** add `./bin` to your `PATH` to call `friday` from anywhere, or invoke `./bin/friday` from the repo root during development.
+For dev hot-reload, use the `pnpm dev:*` wrappers — see [Developing Friday](#developing-friday).
 
 ### 5. (Optional) Public access via Cloudflare Tunnel
 
@@ -154,11 +158,11 @@ The `friday` CLI manages services and inspects state. Inspection commands work r
 # Lifecycle
 friday setup [--cloudflare] [--reset-password]
 friday doctor                                  # data dir, db, account, external CLIs
-friday start                                   # daemon + dashboard + zero-cache (+ tunnel if configured)
-friday stop                                    # tear down the tmux session
-friday restart <daemon|dashboard|zero-cache|tunnel|all>   # restart a service
-friday status                                  # pids, ports, uptime, public URL
-friday attach <daemon|dashboard|zero-cache>    # attach the tmux pane (service arg required)
+friday start                                   # `brew services start friday` (whole stack atomically)
+friday stop                                    # `brew services stop friday` (cascade-stops every child)
+friday restart                                 # `brew services restart friday`
+friday status                                  # supervisor + service state + probed ports
+friday attach <daemon|dashboard|zero-cache>    # `tail -F ~/.friday/logs/<service>.jsonl`
 friday logs [daemon|dashboard|zero-cache|tunnel] [--follow]
 
 # Inspection (read-only; daemon optional)

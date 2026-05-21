@@ -1,18 +1,14 @@
 import { defineCommand } from "citty";
 import pc from "picocolors";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import {
   ensureFridayEnv,
   HEALTH_PATH,
   loadConfig,
   resolveDaemonPort,
   resolveDashboardPort,
-  SERVICES,
-  type ServiceName,
 } from "@friday/shared";
-import { hasSession } from "../lib/tmux.js";
-import { clearState, readState, tmuxSessionFor } from "../lib/state.js";
-import { isAlive } from "../lib/proc.js";
 import { DaemonClient } from "../lib/api.js";
 
 /** A heartbeat older than this is treated as stale (heartbeat interval
@@ -90,52 +86,84 @@ export async function probeDashboard(
   }
 }
 
+interface LaunchdJob {
+  loaded: boolean;
+  pid?: number;
+}
+
+/**
+ * Query launchd for a job's load + pid status. Replaces the tmux
+ * session check from the pre-FRI-88 era. Brew's `service do` block
+ * generates a plist named `homebrew.mxcl.<formula>` — that's the label
+ * we query.
+ *
+ * `launchctl print gui/<uid>/<label>` returns 0 when the job is
+ * loaded; the textual output carries `pid = NNNN` when the job's
+ * process is currently running.
+ *
+ * Exported for tests.
+ */
+export function launchdJobStatus(label: string): LaunchdJob {
+  const uid = process.getuid?.() ?? 0;
+  const r = spawnSync("launchctl", ["print", `gui/${uid}/${label}`], {
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (r.status !== 0) return { loaded: false };
+  const out = r.stdout?.toString() ?? "";
+  const m = out.match(/^\s*pid\s*=\s*(\d+)/m);
+  return { loaded: true, pid: m ? Number(m[1]) : undefined };
+}
+
+function formatUptime(sec: number): string {
+  if (!Number.isFinite(sec)) return "—";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return `${h}h ${m}m ${s}s`;
+}
+
 export const statusCommand = defineCommand({
-  meta: { name: "status", description: "Show daemon + dashboard status" },
+  meta: { name: "status", description: "Show supervisor + daemon + dashboard + tunnel status" },
   async run() {
     ensureFridayEnv();
     const cfg = loadConfig();
-    const tunnelTokenSet = !!process.env.CLOUDFLARE_TUNNEL_TOKEN;
 
     console.log(pc.bold("Friday status"));
-    for (const svc of SERVICES) {
-      const state = readState(svc);
 
-      if (svc === "tunnel") {
-        // Skip the tunnel row on installs that haven't opted in, to keep
-        // the default `friday status` uncluttered.
-        if (!tunnelTokenSet && !state) continue;
-        const alive = !!state?.pid && isAlive(state.pid);
-        if (state && state.pid && !alive) {
-          // pid file lingered after the process died — clear it so the
-          // next command starts cleanly.
-          clearState("tunnel");
-        }
-        const tag = alive ? pc.green("up") : pc.dim("down");
-        const detail = alive
-          ? `pid=${state!.pid}`
-          : state?.pid
-            ? `(stale pid ${state.pid})`
-            : "not started";
-        const suffix = alive && cfg.publicUrl ? `  ${pc.cyan(cfg.publicUrl)}` : "";
-        console.log(`  ${svc.padEnd(10)} ${tag}  ${detail}${suffix}`);
-        continue;
-      }
-
-      const session = tmuxSessionFor(svc);
-      const up = hasSession(session);
-      const tag = up ? pc.green("up") : pc.dim("down");
-      console.log(`  ${svc.padEnd(10)} ${tag}  session=${session}`);
+    // Supervisor (launchd job homebrew.mxcl.friday)
+    const fridayJob = launchdJobStatus("homebrew.mxcl.friday");
+    if (fridayJob.loaded) {
+      const detail = fridayJob.pid !== undefined
+        ? `pid=${fridayJob.pid}`
+        : "(loaded; no current pid — restarting?)";
+      console.log(
+        `  supervisor  ${pc.green("up")}  ${detail}  (launchd: homebrew.mxcl.friday)`,
+      );
+    } else {
+      console.log(
+        `  supervisor  ${pc.dim("down")}  (run ${pc.cyan("friday start")} or ${pc.cyan("brew services start friday")})`,
+      );
     }
 
+    // cloudflared (separate brew service, only checked when a token is configured)
+    if (process.env.CLOUDFLARE_TUNNEL_TOKEN) {
+      const cfJob = launchdJobStatus("homebrew.mxcl.cloudflared");
+      if (cfJob.loaded) {
+        const detail = cfJob.pid !== undefined ? `pid=${cfJob.pid}` : "(loaded)";
+        const suffix = cfg.publicUrl ? `  ${pc.cyan(cfg.publicUrl)}` : "";
+        console.log(`  tunnel      ${pc.green("up")}  ${detail}${suffix}`);
+      } else {
+        console.log(
+          `  tunnel      ${pc.dim("down")}  (run ${pc.cyan("brew services start cloudflared")})`,
+        );
+      }
+    }
+
+    // Daemon API — actually-bound port from health.json, plus an HTTP
+    // ping. The FRI-83 probe semantics carry forward unchanged.
     const client = new DaemonClient();
     const reachable = await client.ping();
     const health = readHealth();
-
-    // Daemon's actually-bound port (from health.json's `port` field,
-    // written by the daemon after `startServer` returns). Stale or
-    // missing heartbeat falls back to the config-resolved value and
-    // surfaces the discrepancy.
     const cfgDaemonPort = resolveDaemonPort(cfg);
     let daemonPort = cfgDaemonPort;
     let daemonPortSource = "config";
@@ -147,19 +175,10 @@ export const statusCommand = defineCommand({
     } else {
       daemonPortSource = "config — no heartbeat";
     }
-
-    // Dashboard probe — `start.ts` passes `resolveDashboardPort(cfg)`
-    // as the PORT env. If the dashboard answered we trust that port is
-    // right; if not, fall back to the resolved value with a
-    // "(config: …)" hint.
-    const cfgDashboardPort = resolveDashboardPort(cfg);
-    const dashboardStatus = await probeDashboard(cfgDashboardPort);
-    const dashboardReachable = dashboardStatus !== null && dashboardStatus < 500;
-
-    console.log();
     const daemonPortTag = daemonPortSource === "probed"
       ? pc.dim(`(${daemonPortSource})`)
       : pc.yellow(`(${daemonPortSource})`);
+    console.log();
     console.log(
       `  daemon API     ${reachable ? pc.green("reachable") : pc.red("not responding")} @ localhost:${daemonPort} ${daemonPortTag}`,
     );
@@ -173,6 +192,11 @@ export const statusCommand = defineCommand({
         );
       }
     }
+
+    // Dashboard — probe-validated.
+    const cfgDashboardPort = resolveDashboardPort(cfg);
+    const dashboardStatus = await probeDashboard(cfgDashboardPort);
+    const dashboardReachable = dashboardStatus !== null && dashboardStatus < 500;
     if (dashboardReachable) {
       console.log(
         `  dashboard      ${pc.green("up")} @ http://localhost:${cfgDashboardPort}`,
@@ -182,17 +206,10 @@ export const statusCommand = defineCommand({
         `  dashboard      ${pc.red("down")} (config: http://localhost:${cfgDashboardPort})`,
       );
     }
+
     // zero-cache is internal-only behind the dashboard's `/api/sync` WS
-    // proxy; surface a literal so the operator knows where it should be.
-    // `friday doctor` covers reachability.
+    // proxy. `friday doctor` covers reachability; status surfaces the
+    // literal endpoint for operator context.
     console.log(pc.dim(`  zero-cache     ws://localhost:4848`));
   },
 });
-
-function formatUptime(sec: number): string {
-  if (!Number.isFinite(sec)) return "—";
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = Math.floor(sec % 60);
-  return `${h}h ${m}m ${s}s`;
-}

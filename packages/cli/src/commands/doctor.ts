@@ -1,7 +1,8 @@
 import { defineCommand } from "citty";
 import pc from "picocolors";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import {
   CONFIG_PATH,
   DATA_DIR,
@@ -16,6 +17,7 @@ import {
 } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
 import { BANNER } from "../lib/branding.js";
+import { launchdJobStatus } from "./status.js";
 
 export const doctorCommand = defineCommand({
   meta: { name: "doctor", description: "Check system health" },
@@ -46,9 +48,19 @@ export const doctorCommand = defineCommand({
     }
     checks.push(check("primary account exists", accountOk, accountOk ? undefined : "run `friday setup`"));
 
-    // tmux
-    const tmux = spawnSync("which", ["tmux"], { encoding: "utf8" });
-    checks.push(check("tmux installed", tmux.status === 0));
+    // launchd supervisor (homebrew.mxcl.friday). Replaces the pre-FRI-88
+    // tmux check — the supervised set lives in one launchd job now, not
+    // a tmux session per service.
+    const fridayJob = launchdJobStatus("homebrew.mxcl.friday");
+    checks.push(
+      check(
+        "friday-supervisor (launchd: homebrew.mxcl.friday)",
+        fridayJob.loaded,
+        fridayJob.loaded
+          ? undefined
+          : "not loaded — `brew services start friday` (or `friday start`). Install via `brew install sethvoltz/friday/friday` if you haven't yet.",
+      ),
+    );
 
     // claude
     const claude = spawnSync("which", ["claude"], { encoding: "utf8" });
@@ -183,6 +195,72 @@ export const doctorCommand = defineCommand({
         zeroReachable ? undefined : "not running — `friday start zero-cache`",
       ),
     );
+
+    // Stale runtime-state warnings (FRI-88 Q11). These don't fail the
+    // doctor — they're "should-be-derived" values that an operator may
+    // have inherited from pre-FRI-83 or pre-FRI-88 setup. Each warning
+    // points at the canonical source of truth.
+
+    // 1. ZERO_MUTATE_URL in .env (now spawn-time-only via supervisor)
+    if (existsSync(ENV_PATH)) {
+      try {
+        const envText = readFileSync(ENV_PATH, "utf8");
+        if (/^ZERO_MUTATE_URL=/m.test(envText)) {
+          checks.push(
+            warn(
+              "stale ZERO_MUTATE_URL in ~/.friday/.env",
+              "remove this line — the supervisor exports it dynamically at spawn time (FRI-83 follow-up). Stale value will be ignored but is misleading.",
+            ),
+          );
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // 2. daemonPort / dashboardPort in config.json (now optional)
+    try {
+      const cfgRaw = JSON.parse(
+        readFileSync(CONFIG_PATH, "utf8"),
+      ) as Record<string, unknown>;
+      const staleFields: string[] = [];
+      if ("daemonPort" in cfgRaw) staleFields.push("daemonPort");
+      if ("dashboardPort" in cfgRaw) staleFields.push("dashboardPort");
+      if ("daemonBaseUrl" in cfgRaw) staleFields.push("daemonBaseUrl");
+      if ("dashboardBaseUrl" in cfgRaw) staleFields.push("dashboardBaseUrl");
+      if (staleFields.length > 0) {
+        checks.push(
+          warn(
+            `stale field(s) in ~/.friday/config.json: ${staleFields.join(", ")}`,
+            "these fields are now optional and resolve via PROD_*_PORT constants. Remove unless you intentionally need an override.",
+          ),
+        );
+      }
+    } catch {
+      // ignore missing/malformed config (other checks cover that case)
+    }
+
+    // 3. Orphaned zero-cache replica WAL — large WAL with no live
+    // zero-cache process suggests an unclean previous shutdown that
+    // the auto-reset loop hasn't re-checkpointed. Not a hard failure;
+    // operator can `rm -rf ~/.friday/zero/` to force a fresh sync from
+    // Postgres logical replication.
+    const walPath = join(DATA_DIR, "zero", "replica.db-wal");
+    if (existsSync(walPath)) {
+      try {
+        const walSize = statSync(walPath).size;
+        if (walSize > 0 && !zeroReachable) {
+          checks.push(
+            warn(
+              `orphaned zero-cache WAL (${walSize} bytes, no live zero-cache)`,
+              "unclean previous shutdown — `rm -rf ~/.friday/zero/` to force a fresh sync from Postgres on next start.",
+            ),
+          );
+        }
+      } catch {
+        // ignore
+      }
+    }
 
     // disk
     try {
