@@ -145,16 +145,18 @@ export const statusCommand = defineCommand({
       );
     }
 
-    // cloudflared (separate brew service, only checked when a token is configured)
+    // cloudflared (its own user launch agent installed by
+    // `friday setup --cloudflare` → `cloudflared service install`; only
+    // checked when a token is configured).
     if (process.env.CLOUDFLARE_TUNNEL_TOKEN) {
-      const cfJob = launchdJobStatus("homebrew.mxcl.cloudflared");
+      const cfJob = launchdJobStatus("com.cloudflare.cloudflared");
       if (cfJob.loaded) {
         const detail = cfJob.pid !== undefined ? `pid=${cfJob.pid}` : "(loaded)";
         const suffix = cfg.publicUrl ? `  ${pc.cyan(cfg.publicUrl)}` : "";
         console.log(`  tunnel      ${pc.green("up")}  ${detail}${suffix}`);
       } else {
         console.log(
-          `  tunnel      ${pc.dim("down")}  (run ${pc.cyan("brew services start cloudflared")})`,
+          `  tunnel      ${pc.dim("down")}  (run ${pc.cyan("friday setup --cloudflare")})`,
         );
       }
     }

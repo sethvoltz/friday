@@ -79,7 +79,7 @@ Open `http://localhost:7615` and sign in with the credentials you set in step 3.
 
 ## 6. Public access via Cloudflare Tunnel
 
-Cloudflare's `cloudflared` is its own brew service post-FRI-88. You provide one connector token; `brew services start cloudflared` runs it independently of Friday's launchd job. `friday start` ALSO kicks off `brew services start cloudflared` when a token is configured, but the lifecycle is separate (you can `brew services stop cloudflared` without affecting Friday's stack).
+`friday setup --cloudflare` handles the persistence end-to-end: it saves the token to `~/.friday/.env` and invokes `cloudflared service install <TOKEN>`, which writes `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist` with `RunAtLoad: true` + `KeepAlive`. The tunnel comes back automatically after reboot — no separate `brew services start` step. (Brew's auto-generated `homebrew.mxcl.cloudflared.plist` runs `cloudflared` bare, which only supports config-file-based named tunnels — connector tokens have no config.yml equivalent, so we sidestep that plist entirely.)
 
 ### Create the tunnel in Cloudflare
 
@@ -93,20 +93,22 @@ Cloudflare's `cloudflared` is its own brew service post-FRI-88. You provide one 
 friday setup --cloudflare
 ```
 
-Paste the token and your public URL (e.g. `https://friday.example.com`). The token is written to `~/.friday/.env` as `CLOUDFLARE_TUNNEL_TOKEN`; the public URL is stored in `~/.friday/config.json` for display.
+Paste the token and your public URL (e.g. `https://friday.example.com`). The token is written to `~/.friday/.env` as `CLOUDFLARE_TUNNEL_TOKEN`; the public URL is stored in `~/.friday/config.json` for display; the launch agent is installed and started immediately.
 
 ### Run
 
-`friday start` brings the tunnel up automatically when a token is present:
+The tunnel runs under its own launchd job, independent of Friday's stack:
 
 ```bash
-friday start          # daemon + dashboard + tunnel
-friday status         # shows the public URL when the tunnel is up
+friday status         # shows tunnel up/down + public URL
 friday logs tunnel -f # tail cloudflared output
-friday stop           # tears all three down
+launchctl kickstart -k gui/$(id -u)/com.cloudflare.cloudflared   # restart the tunnel
+cloudflared service uninstall   # tear down the launch agent
 ```
 
-If `cloudflared` is missing from `PATH` or the token is unset, the tunnel is skipped with a one-line note and the daemon + dashboard still come up. `friday doctor` surfaces both conditions.
+`friday start` / `friday stop` no longer touch cloudflared — the launchd job manages itself.
+
+If `cloudflared` is missing from `PATH` when you run `friday setup --cloudflare`, the token is still saved to `.env` but the launch agent install is skipped with a one-line note; install `cloudflared` then re-run setup. `friday doctor` surfaces both conditions.
 
 ### Important: dashboard listens on localhost
 

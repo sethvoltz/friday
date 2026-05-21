@@ -148,7 +148,7 @@ friday setup --cloudflare    # paste connector token + public URL
 friday start                  # daemon + dashboard + tunnel
 ```
 
-`friday start` brings the tunnel up automatically when a token is present and tears it down on stop. If `cloudflared` is missing or no token is set, the tunnel is skipped — daemon and dashboard come up regardless. See [docs/setup.md](docs/setup.md) for the full Cloudflare walkthrough.
+`friday setup --cloudflare` installs cloudflared as its own user launch agent (`com.cloudflare.cloudflared`) — it self-starts at login and survives reboots independently of Friday's stack. If `cloudflared` is missing or no token is set, the tunnel is skipped — daemon and dashboard come up regardless. See [docs/setup.md](docs/setup.md) for the full Cloudflare walkthrough.
 
 ## CLI
 

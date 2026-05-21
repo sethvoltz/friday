@@ -22,18 +22,15 @@ import {
  * individual services via `friday restart` (also whole-stack); the
  * per-service IPC story is an explicit follow-up ticket.
  *
- * cloudflared is its own brew service (`cloudflare/cloudflare/cloudflared`).
- * `friday start` ensures it's also running when a `CLOUDFLARE_TUNNEL_TOKEN`
- * is configured, but its lifecycle is independent of Friday's stack.
+ * cloudflared is installed as its own user launch agent by
+ * `friday setup --cloudflare` (`cloudflared service install <TOKEN>`),
+ * which writes `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist`
+ * with `RunAtLoad: true` + `KeepAlive`. Once installed, launchd brings
+ * it up automatically — `friday start` doesn't need to touch it.
  */
 
 function brewFridayInstalled(): boolean {
   const r = spawnSync("brew", ["list", "friday"], { stdio: "ignore" });
-  return r.status === 0;
-}
-
-function brewCloudflaredInstalled(): boolean {
-  const r = spawnSync("brew", ["list", "cloudflared"], { stdio: "ignore" });
   return r.status === 0;
 }
 
@@ -87,15 +84,13 @@ export const startCommand = defineCommand({
     });
     if (r.status !== 0) process.exit(r.status ?? 1);
 
-    // cloudflared is supervised independently. `friday start` kicks it
-    // off too if a token is configured + the formula is installed —
-    // a convenience, not a coupling.
-    if (process.env.CLOUDFLARE_TUNNEL_TOKEN && brewCloudflaredInstalled()) {
-      console.log(pc.dim("  · starting cloudflared (separate brew service)…"));
-      spawnSync("brew", ["services", "start", "cloudflared"], { stdio: "inherit" });
-    } else if (process.env.CLOUDFLARE_TUNNEL_TOKEN) {
+    // cloudflared is supervised independently via its own launchd job
+    // (`com.cloudflare.cloudflared`), installed by `friday setup --cloudflare`.
+    // RunAtLoad + KeepAlive bring it up automatically; nothing to do here
+    // beyond reminding the user when they haven't run setup yet.
+    if (!process.env.CLOUDFLARE_TUNNEL_TOKEN) {
       console.log(
-        pc.dim(`  · cloudflared not installed — ${pc.cyan("brew install cloudflared")} to enable the tunnel`),
+        pc.dim(`  · no public tunnel — ${pc.cyan("friday setup --cloudflare")} to enable`),
       );
     }
 
