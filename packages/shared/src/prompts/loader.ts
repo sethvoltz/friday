@@ -129,18 +129,22 @@ export function renderIdentityBlock(identity: AgentIdentity): string {
  *   1. CONSTITUTION
  *   2. SOUL
  *   3. Identity (when provided — FRI-11)
- *   4. agents/<type>
- *   5. protocols/*
+ *   4. Pinned facts (when provided — FRI-61; daemon-rendered from per-agent
+ *      pinned memories)
+ *   5. agents/<type>
+ *   6. protocols/*
  */
 export function composeSystemPrompt(
   stack: PromptStack,
   identity?: AgentIdentity,
+  pinnedFacts?: string,
 ): string {
   const identityBlock = identity ? renderIdentityBlock(identity) : "";
   return [
     stack.constitution,
     stack.soul,
     identityBlock,
+    pinnedFacts ?? "",
     stack.agentBase,
     stack.protocols,
   ]

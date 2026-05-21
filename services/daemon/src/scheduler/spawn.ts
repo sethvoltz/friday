@@ -22,6 +22,7 @@ import {
 } from "@friday/shared";
 import { logger } from "../log.js";
 import { dispatchTurn, recordUserBlock } from "../agent/lifecycle.js";
+import { renderPinnedFacts } from "../agent/pinned-facts.js";
 import { wrapWithRecall } from "../agent/recall.js";
 import * as registry from "../agent/registry.js";
 import {
@@ -47,10 +48,15 @@ export async function spawnScheduledRun(
   }
 
   const stack = readPromptStack("scheduled", []);
-  const systemPrompt = composeSystemPrompt(stack, {
-    agentName: scheduleRow.name,
-    agentType: "scheduled",
-  });
+  const pinnedFacts = await renderPinnedFacts(scheduleRow.name);
+  const systemPrompt = composeSystemPrompt(
+    stack,
+    {
+      agentName: scheduleRow.name,
+      agentType: "scheduled",
+    },
+    pinnedFacts,
+  );
   const modelCfg = normalizeModelConfig(cfg.model);
 
   // FIX_FORWARD 2.5: wrap with recall against the raw task prompt — the

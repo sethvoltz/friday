@@ -119,6 +119,20 @@ export interface LiveWorker {
    *  killed the worker. Subsequent error/turn-complete IPC messages from
    *  the dying worker are ignored so we don't double-publish turn_done. */
   forceKilled?: boolean;
+  /** FRI-61 wedge detector: count of `block-start` IPCs observed on the
+   *  current turn. Reset on every `turn-complete`/`error` and on
+   *  `sendPrompt` (defense-in-depth for future re-orderings). */
+  blocksThisTurn: number;
+  /** FRI-61 wedge detector: consecutive `turn-complete`/`error` events
+   *  that arrived with `blocksThisTurn === 0`. The SDK iterator only
+   *  produces zero content blocks when the model emitted nothing —
+   *  observed on the 2026-05-20 wedge where SDK could not find the
+   *  resume transcript and silently returned an empty `result`. Healthy
+   *  turns always emit ≥1 block-start (`mail_close`-only responses
+   *  produce 2: tool_use + tool_result). When the streak reaches
+   *  `FRIDAY_WEDGE_THRESHOLD` (default 10), force-kill with
+   *  `reason: "wedge"`. */
+  zeroBlockTurnStreak: number;
 }
 
 const live = new Map<string, LiveWorker>();
@@ -351,6 +365,8 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     lastExitStatus: "complete",
     completedAtLeastOnce: false,
     onExit: input.onExit,
+    blocksThisTurn: 0,
+    zeroBlockTurnStreak: 0,
   };
   live.set(input.agentName, w);
 
@@ -586,6 +602,11 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   w.turnId = p.turnId;
   w.turnStart = Date.now();
   w.abortRequested = false;
+  // FRI-61 wedge detector: a fresh turn starts with no observed blocks.
+  // Today's IPC chain serialises events so this is a no-op (turn-complete
+  // already reset the counter before this), but pinning it here protects
+  // against future re-orderings.
+  w.blocksThisTurn = 0;
   setWorkerStatus(w, "working", "sendPrompt");
   // Fire-and-forget: registry.setStatus is async under Postgres (ADR-023);
   // sendPrompt is sync because it's called from the IPC dispatcher and the
@@ -720,7 +741,11 @@ function clearAbortDeadline(w: LiveWorker): void {
  */
 async function forceKillStuckWorker(
   w: LiveWorker,
-  opts: { reason?: "abort" | "stale"; msSinceTurnStart?: number } = {},
+  opts: {
+    reason?: "abort" | "stale" | "wedge";
+    msSinceTurnStart?: number;
+    zeroBlockTurnStreak?: number;
+  } = {},
 ): Promise<void> {
   if (w.forceKilled) return;
   if (!live.has(w.agentName)) return;
@@ -733,6 +758,12 @@ async function forceKillStuckWorker(
       agent: w.agentName,
       turnId: w.turnId,
       msSinceTurnStart: opts.msSinceTurnStart ?? null,
+    });
+  } else if (reason === "wedge") {
+    logger.log("warn", "worker.wedge.force-kill", {
+      agent: w.agentName,
+      turnId: w.turnId,
+      zeroBlockTurnStreak: opts.zeroBlockTurnStreak ?? null,
     });
   } else {
     logger.log("warn", "worker.abort.force-kill", {
@@ -751,6 +782,19 @@ async function forceKillStuckWorker(
             "for more than 4 hours. The agent has been killed; the next " +
             "message will spawn a fresh worker.",
         }
+      : reason === "wedge"
+      ? {
+          code: "worker_wedged",
+          headline:
+            "Agent looped without producing output — restarted",
+          rawMessage:
+            "Wedge detected: the worker produced N consecutive turns with " +
+            "zero content blocks. Likely cause: SDK could not resume the " +
+            "prior session (transcript missing from the encoded-cwd " +
+            "project dir), or the model emitted nothing for N turns in a " +
+            "row. The agent has been killed; the next message will spawn " +
+            "a fresh worker.",
+        }
       : {
           code: "stopped_forced",
           headline: "Stopped — worker did not respond to abort, restarted",
@@ -759,8 +803,11 @@ async function forceKillStuckWorker(
             "for 500ms. The agent has been killed; the next message will spawn a " +
             "fresh worker.",
         };
+  // Wedge and stale-turn both ride `error` status; only an explicit abort
+  // synthesizes `abort_reason: "forced"`.
+  const ridesError = reason === "stale" || reason === "wedge";
   await insertErrorBlock(w, errorPayload);
-  await finalizeStreamingBlocks(w, reason === "stale" ? "error" : "aborted");
+  await finalizeStreamingBlocks(w, ridesError ? "error" : "aborted");
   // Emit the in-band TurnErrorEvent so any consumers still listening for
   // it know a force-kill happened (vs. a clean abort).
   eventBus.publish({
@@ -772,6 +819,8 @@ async function forceKillStuckWorker(
     message:
       reason === "stale"
         ? "Turn timed out — stale-turn ceiling exceeded"
+        : reason === "wedge"
+        ? "Wedge detected — agent looped without producing output"
         : "Stop forced — worker unresponsive",
     recoverable: true,
   });
@@ -780,16 +829,14 @@ async function forceKillStuckWorker(
     type: "turn_done",
     turn_id: w.turnId,
     agent: w.agentName,
-    status: reason === "stale" ? "error" : "aborted",
-    // FRI-95: force-kill is the only path that synthesizes `abort_reason: "forced"`.
-    // Stale-turn timeouts ride status="error" instead and don't set the field.
+    status: ridesError ? "error" : "aborted",
     ...(reason === "abort" ? { abort_reason: "forced" as const } : {}),
   });
   // Drop the live-turn entry now so the upcoming child.exit handler's
   // safety-net `finalizeStreamingBlocks` is a no-op (would otherwise
   // double-publish block_complete for the same blocks).
   liveTurns.dropTurn(w.turnId);
-  w.lastExitStatus = reason === "stale" ? "error" : "aborted";
+  w.lastExitStatus = ridesError ? "error" : "aborted";
   setWorkerStatus(w, "idle", "forceKillStuckWorker");
   await registry.setStatus(w.agentName, "idle").catch((err: unknown) => {
     logger.log("warn", "registry.set-status.error", {
@@ -949,6 +996,25 @@ function staleTurnCeilingMs(): number {
   if (!raw) return DEFAULT_STALE_TURN_CEILING_MS;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_STALE_TURN_CEILING_MS;
+}
+
+/**
+ * FRI-61 wedge threshold: the number of consecutive `turn-complete` /
+ * `error` events with zero block-starts that triggers force-kill.
+ *
+ * The 2026-05-20 wedge produced ~290 such turns in 13 minutes; a healthy
+ * long-lived worker draining mail emits ≥1 block per turn (even a
+ * `mail_close`-only response emits a `tool_use` + `tool_result` pair).
+ * A streak of 10 is conservative but well below pathological — overridable
+ * via `FRIDAY_WEDGE_THRESHOLD`.
+ */
+const DEFAULT_WEDGE_THRESHOLD = 10;
+
+function wedgeThreshold(): number {
+  const raw = process.env.FRIDAY_WEDGE_THRESHOLD;
+  if (!raw) return DEFAULT_WEDGE_THRESHOLD;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_WEDGE_THRESHOLD;
 }
 
 let stallInterval: NodeJS.Timeout | undefined;
@@ -1262,6 +1328,32 @@ export async function handleEvent(
         // runs because the worker's for-await closed and emitted error IPC).
         ...(wasAbort ? { abort_reason: "cooperative" as const } : {}),
       });
+      // FRI-61 wedge detector: count consecutive turn-error events that
+      // produced zero blocks. Skip when the user requested the abort
+      // (that's not a wedge, it's cooperative). When the streak reaches
+      // FRIDAY_WEDGE_THRESHOLD, force-kill.
+      if (!wasAbort) {
+        if (w.blocksThisTurn === 0) {
+          w.zeroBlockTurnStreak++;
+          logger.log("warn", "worker.zero-block-turn", {
+            agent: w.agentName,
+            turnId: w.turnId,
+            streak: w.zeroBlockTurnStreak,
+            source: "error",
+            errorCode: e.code,
+          });
+          if (w.zeroBlockTurnStreak >= wedgeThreshold()) {
+            await forceKillStuckWorker(w, {
+              reason: "wedge",
+              zeroBlockTurnStreak: w.zeroBlockTurnStreak,
+            });
+            return;
+          }
+        } else {
+          w.zeroBlockTurnStreak = 0;
+        }
+      }
+      w.blocksThisTurn = 0;
       // Clean up live state the way turn-complete would. The worker
       // process keeps running (long-lived agents stay alive across
       // failures); reset its bookkeeping so the next prompt dispatches
@@ -1348,6 +1440,32 @@ export async function handleEvent(
       // transitions cleanly off `streaming` and the dashboard's bubble
       // moves off `running`.
       await finalizeStreamingBlocks(w, "aborted");
+      // FRI-61 wedge detector: count consecutive turn-completes that
+      // produced zero content blocks. Skip when the user-requested
+      // abort raced the turn-complete (the model genuinely produced
+      // nothing because we asked it to stop).
+      if (!w.abortRequested) {
+        if (w.blocksThisTurn === 0) {
+          w.zeroBlockTurnStreak++;
+          logger.log("warn", "worker.zero-block-turn", {
+            agent: w.agentName,
+            turnId: w.turnId,
+            sessionId: e.sessionId,
+            streak: w.zeroBlockTurnStreak,
+            source: "turn-complete",
+          });
+          if (w.zeroBlockTurnStreak >= wedgeThreshold()) {
+            await forceKillStuckWorker(w, {
+              reason: "wedge",
+              zeroBlockTurnStreak: w.zeroBlockTurnStreak,
+            });
+            return;
+          }
+        } else {
+          w.zeroBlockTurnStreak = 0;
+        }
+      }
+      w.blocksThisTurn = 0;
       // The in-flight registry holds per-turn block accumulators (FIX_FORWARD
       // 1.4). Drop the entry once the turn completes; canonical block content
       // already lives in the `blocks` table.
@@ -1509,6 +1627,11 @@ async function handleBlockStart(
     tool?: { id: string; name: string };
   },
 ): Promise<void> {
+  // FRI-61 wedge detector: count every block-start (text, thinking,
+  // tool_use, tool_result). The detector at turn-complete/error reads
+  // this to decide whether the turn produced any model output at all.
+  w.blocksThisTurn++;
+
   const sessionId = w.sessionId ?? "__pending__";
   const blockId = randomUUID();
   const ts = Date.now();

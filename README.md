@@ -224,16 +224,18 @@ Operational files live at `~/.friday/`. Canonical state (blocks, mail, tickets, 
 
 ```
 ~/.friday/
-├── config.json             Settings + MCP server config
+├── config.json             Settings + MCP server config (incl. optional fridayRepoPath)
 ├── .env                    Secrets (LINEAR_API_KEY, BETTER_AUTH_SECRET, DB url, ...)
 ├── SOUL.md                 Your editable identity layer
 ├── skills/*.md             User-additive slash skills
+├── agents/<name>/          Per-agent home (orchestrator/helper/scheduled cwd; FRI-61)
 ├── memory/entries/*.md     Memory entry bodies (indexed in Postgres)
 ├── evolve/proposals/*.md   Evolve proposal bodies
 ├── apps/<id>/              Installed Friday Apps (manifest, prompt, state/, .env)
 ├── schedules/<name>/       state.md + last-run.md continuity
 ├── workspaces/<name>/      Builder git worktrees
 ├── uploads/<sha-bucket>/   Content-addressed attachment bytes
+├── state/                  Daemon runtime state (per-service start markers)
 ├── logs/*.jsonl            Rotated at 1 MiB (daemon, dashboard, zero-cache)
 ├── usage.jsonl             Per-turn usage records
 └── health.json             Daemon heartbeat (30s)

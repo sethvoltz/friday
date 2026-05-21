@@ -47,6 +47,7 @@ import {
   dispatchTurn,
   peekLiveWorker,
 } from "./lifecycle.js";
+import { renderPinnedFacts } from "./pinned-facts.js";
 import { wrapWithRecall } from "./recall.js";
 import { matchSkillInvocation } from "../api/server.js";
 import { logger } from "../log.js";
@@ -124,12 +125,17 @@ async function processPendingBlockRow(id: string): Promise<void> {
 
   // Compose system prompt + skill detection + memory recall.
   const stack = readPromptStack(agentRow.type, []);
-  const baseSystemPrompt = composeSystemPrompt(stack, {
-    agentName: agentRow.name,
-    agentType: agentRow.type,
-    parentName:
-      "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
-  });
+  const pinnedFacts = await renderPinnedFacts(agentRow.name);
+  const baseSystemPrompt = composeSystemPrompt(
+    stack,
+    {
+      agentName: agentRow.name,
+      agentType: agentRow.type,
+      parentName:
+        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+    },
+    pinnedFacts,
+  );
   const skillMatch = matchSkillInvocation(userText, agentRow.type);
   const promptText = skillMatch ? skillMatch.userText : userText;
   const systemPrompt = skillMatch

@@ -1,5 +1,8 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import {
+  AGENTS_DIR,
   type AgentEntry,
   type AgentStatus,
   type AgentType,
@@ -200,21 +203,28 @@ function rowToEntry(r: typeof schema.agents.$inferSelect): AgentEntry {
 }
 
 /**
- * Resolve the cwd a worker should run under for a given agent. Builders run
- * inside their git worktree; everything else runs under the daemon's cwd.
- * Centralized here so all dispatch paths (initial create, mail-driven,
- * watchdog refork, recovery) agree — divergence means the SDK's JSONL
- * transcript ends up in a different `~/.claude/projects/<encoded-cwd>/`
- * directory than the mirror is watching, which silently drops history.
+ * Resolve the cwd a worker should run under for a given agent. Branch order:
+ *
+ *   1. Builders → their git worktree (workspace containment, Constitution rule).
+ *   2. App-installed agents → `~/.friday/apps/<id>/` (the app owns its dir).
+ *   3. Everyone else → `~/.friday/agents/<name>/` (FRI-61 per-agent home).
+ *
+ * Centralized so every dispatch path (initial create, mail-driven,
+ * watchdog refork, recovery) agrees. Pre-FRI-61 the fallback was
+ * `process.cwd()`, which silently broke session resume when the daemon's
+ * launch cwd changed (e.g. dev-tree → Homebrew). The SDK encodes cwd
+ * into the JSONL transcript path, so any divergence vs. previous fires
+ * makes the prior session unreachable.
+ *
+ * AgentEntry doesn't carry `appId` (it's not part of the user-facing wire
+ * shape), so we re-read it via `getAppId(a.name)` when the appDir branch
+ * needs to fire.
  */
 export async function workingDirectoryFor(a: AgentEntry): Promise<string> {
-  // Workspace containment is the stronger Constitution rule: builders run
-  // inside their worktree even if a future ticket ever surfaces builders
-  // under an app. AgentEntry doesn't carry `appId` (it's not part of the
-  // user-facing wire shape), so we re-read the row when only the
-  // base-typed entry is in hand.
   if ("worktreePath" in a && a.worktreePath) return a.worktreePath;
   const appId = await getAppId(a.name);
   if (appId) return appDir(appId);
-  return process.cwd();
+  const home = join(AGENTS_DIR, a.name);
+  mkdirSync(home, { recursive: true });
+  return home;
 }

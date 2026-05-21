@@ -65,6 +65,10 @@ import {
   type RawEntry,
 } from "@friday/shared";
 import {
+  encodeProjectDir,
+  sessionFilePath,
+} from "./jsonl-paths.js";
+import {
   getBlockByNaturalKey,
   getToolResultByToolUseId,
   getToolUseByToolUseId,
@@ -523,19 +527,17 @@ function canonical(value: unknown): string {
   });
 }
 
-function sessionFilePath(cwd: string, sessionId: string): string {
-  const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-  const projectsDir = join(homedir(), ".claude", "projects");
-  return join(projectsDir, encoded, `${sessionId}.jsonl`);
-}
-
 /**
  * Used by tests / debug tools: list all JSONL files under a project dir.
  * Boot recovery walks agents from the registry, not the filesystem.
  */
 export function listSessionJsonlFiles(workingDirectory: string): string[] {
-  const encoded = workingDirectory.replace(/[^a-zA-Z0-9]/g, "-");
-  const projectsDir = join(homedir(), ".claude", "projects", encoded);
+  const projectsDir = join(
+    homedir(),
+    ".claude",
+    "projects",
+    encodeProjectDir(workingDirectory),
+  );
   if (!existsSync(projectsDir)) return [];
   return readdirSync(projectsDir)
     .filter((f) => f.endsWith(".jsonl"))

@@ -24,6 +24,12 @@ export const DAEMON_LOG_PATH = join(LOGS_DIR, "daemon.jsonl");
 export const SCHEDULES_DIR = join(DATA_DIR, "schedules");
 export const STATE_DIR = join(DATA_DIR, "state");
 export const APPS_DIR = join(DATA_DIR, "apps");
+/** ~/.friday/agents/<name>/ — per-agent home for the orchestrator, every
+ *  helper, and every scheduled agent. Pins their `cwd` so the Claude SDK's
+ *  `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` lookup is stable
+ *  across daemon-install changes (FRI-61). Builders unaffected — they
+ *  keep their git-worktree cwd. */
+export const AGENTS_DIR = join(DATA_DIR, "agents");
 
 export function appsDir(): string {
   return APPS_DIR;
@@ -114,6 +120,16 @@ export interface FridayConfig {
   publicUrl?: string;
   /** Linear integration settings. Read by `@friday/integrations-linear`. */
   linear?: LinearIntegrationConfig;
+  /**
+   * Absolute path to the agent-friday repo, surfaced to friday as a pinned
+   * memory at boot (FRI-61). When set, the daemon seeds the
+   * `pin-repo-agent-friday` memory entry pointing here, so the orchestrator
+   * knows where its own source lives without coupling to `process.cwd()`.
+   * Also overridable via `FRIDAY_REPO_PATH` env. If neither is set, the pin
+   * is omitted — friday operates without direct repo affordance and the
+   * user can run `friday memory pin-repo <path>` to set it later.
+   */
+  fridayRepoPath?: string;
 }
 
 export interface LinearIntegrationConfig {
@@ -282,6 +298,8 @@ export function ensureDirs(): void {
     EVOLVE_CLUSTERS_DIR,
     APPS_DIR,
     ZERO_DIR,
+    STATE_DIR,
+    AGENTS_DIR,
   ]) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }

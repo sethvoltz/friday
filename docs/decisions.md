@@ -822,6 +822,39 @@ Friday's production stack moves from `tmux new-session -d` to a Homebrew formula
 - The single-service ops gap becomes operationally painful — the supervisor IPC follow-up is the answer, not abandoning launchd supervision.
 - Cross-platform support (Linux/systemd) demands a different supervisor model. The CLI alias layer abstracts the supervision backend; the supervisor binary itself may stay the same (Node + child_process portable) or get replaced with a systemd-native equivalent. ADR-028 doesn't pin one over the other for Linux.
 
+## ADR-029 — Per-agent home dirs, pinned-memory prompt injection, zero-block wedge detector
+
+**Status:** accepted (2026-05-21)
+
+### Context
+
+The orchestrator + non-builder agents ran with the daemon's `process.cwd()`. The Claude SDK keys session transcripts by `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`, so a change in daemon launch directory makes every prior `agents.session_id` unreachable to the SDK's resume path. This bit production on 2026-05-20 when ADR-027 / FRI-83's prod rollout moved the daemon from the dev tree to the Homebrew install (`/Users/seth/Development/Seth/Friday/agent-friday/services/daemon` → `/opt/homebrew/Cellar/friday/0.0.1/libexec/services/daemon`). Friday's `mainLoop` looped against an empty SDK response ~290 times in 13 minutes; mail stayed pending; none of the existing runtime guards caught it.
+
+### Decision
+
+1. **Per-agent home dirs.** `workingDirectoryFor(a)` returns `~/.friday/agents/<a.name>/` for any non-builder, non-app-installed agent. Builders keep their git-worktree cwd; app-installed agents keep `~/.friday/apps/<appId>/`. New constant `AGENTS_DIR` from `@friday/shared`; created at boot by `ensureDirs()`.
+
+2. **Pinned-memory prompt injection.** Friday's repo path (and any other always-include per-agent fact) flows through the same memory store every agent already uses, via a new non-FTS query path: `listPinnedForAgent(agentName, tag = "pinned")`. The daemon's `renderPinnedFacts` renders a `# Pinned facts` block injected into `composeSystemPrompt` between Identity and `agents/<type>.md`. `seedRepoPins()` writes the `pin-repo-agent-friday` entry idempotently from `FRIDAY_REPO_PATH` env or `config.fridayRepoPath`; the daemon never writes `config.json` itself (the settings LISTEN handler races, and there's no temp+rename in `writeConfig`). Rejected: env-var-only resolution at every prompt site (would invert friday's "treat my own repo on par with any other repo" instinct) and auto-detect from binary location (lands in the read-only Homebrew Cellar, recreated on every `brew upgrade`).
+
+3. **State-migrations table.** New `_friday_state_migrations` table (`id TEXT PK`, `applied_at TIMESTAMPTZ`, `meta_json JSONB`) tracks imperative one-shot data/filesystem migrations, distinct from Drizzle's schema migrations. Runner uses a Postgres advisory lock; first consumer `agent-cwd-pin-v1` renames SDK JSONLs (and their `<sessionId>/tool-results/` sidecar dirs) from old encoded-cwd locations to the new per-agent-home encoded locations, EXDEV-falling-back to copy + unlink. Boot order: Drizzle migrations → state migrations → everything else. Versioned re-runs ship a new id (`*-v2`).
+
+4. **Zero-block wedge detector.** `LiveWorker` gains `blocksThisTurn` (incremented in `handleBlockStart`, reset on `sendPrompt`/`turn-complete`/`error`) and `zeroBlockTurnStreak` (incremented when a `turn-complete` or `error` arrives with no observed blocks, reset otherwise). When the streak reaches `FRIDAY_WEDGE_THRESHOLD` (default 10), the daemon force-kills via `forceKillStuckWorker(w, { reason: "wedge" })`. Gated on `!w.abortRequested` so user-initiated stops don't trip the counter. Distinct from the heartbeat watchdog (the wedge passes — workers are chatty) and the turn-stall watchdog (the wedge passes — block-stops still fire in other turns, and the threshold is too lax for a tight loop).
+
+5. **CLI surfaces.** `friday memory pin-repo <abs-path>` writes the repo-pin memory directly through `@friday/memory` (works whether the daemon is up or not). `friday migrate cwd --dry-run` previews the JSONL moves; applying stays daemon-boot-only so the advisory-locked runner is the single source of truth.
+
+### Consequences
+
+- **Prior `agents.session_id` rows survive a daemon-cwd change.** The first boot after upgrade runs the migration, renames JSONLs into the new layout, records the row, and never runs again. Subsequent daemon installs that change cwd are no-ops because the agent cwd is now stable in `~/.friday/agents/<name>/`.
+- **`process.cwd()` becomes irrelevant to runtime correctness for non-builders.** Pre-existing builder default-repo fallbacks in `api/server.ts` and `scheduler/spawn.ts` still resolve to the daemon's source dir — that's a separate concern (the daemon source dir is a sub-dir of the agent-friday repo, not the repo root), tracked as a follow-up, not a regression introduced here.
+- **Pinning is on par across repos.** Friday's repo memory uses the same tag/owner shape any other repo memory would. Down the road, a builder-spawn flow that clones `repo:foo` against a memory-pinned path uses the same primitive — exercises the cloning code path against friday itself.
+- **Wedge detection now catches the SDK-can't-find-resume-target failure mode at ~20 seconds** (10 turns × ~2s/turn under the pathological cadence) instead of waiting for the 4-hour stale-turn ceiling. Healthy long-lived workers never hit the threshold because legitimate turns emit ≥1 block-start (even `mail_close`-only responses emit 2 blocks: `tool_use` + `tool_result`).
+
+### Bring this ADR back to the table if
+
+- The detector ever force-kills a worker that *was* making real progress. Inspect the `worker.zero-block-turn` log streak in `daemon.jsonl` and decide whether the threshold should rise or the signal should refine to "fewer than N tokens emitted" rather than "zero blocks."
+- The `~/.friday/agents/<name>/` dir collides with a workflow that wants to put real files there. Today the dir is intentionally empty; if friday or a helper starts writing artifacts into its own home, the implicit "empty home" contract becomes a doc'd contract.
+- Cross-volume `~/.claude` setups become common. The EXDEV-fallback path is non-atomic on sidecar-dir moves; if anyone runs into a half-migrated state, a manifest-driven retry replaces the current "skip if dest exists" idempotency.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.
