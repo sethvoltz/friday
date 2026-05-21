@@ -626,6 +626,20 @@ export function abortTurn(agentName: string): boolean {
   const w = live.get(agentName);
   if (!w) return false;
   w.abortRequested = true;
+  // FRI-95: gate on worker state. If the worker isn't currently working,
+  // the abort is a no-op — the fast-path got there first (and the worker
+  // already emitted error/turn-complete IPC clearing the deadline), the
+  // turn completed independently, or this is a stale LISTEN re-fire.
+  // Re-arming the 500ms force-kill deadline on an already-idle worker
+  // SIGTERMs a cooperative worker 500ms after it cleanly aborted.
+  if (w.status !== "working") {
+    logger.log("info", "worker.abort.noop-idle", {
+      agent: w.agentName,
+      turnId: w.turnId,
+      workerStatus: w.status,
+    });
+    return false;
+  }
   // FRI-72 instrumentation: pair this with `worker.ipc.recv` so the log
   // shows whether the worker acknowledged the abort (turn-complete /
   // status-change / error) before forceKillStuckWorker's safety net.
@@ -742,7 +756,7 @@ async function forceKillStuckWorker(
           headline: "Stopped — worker did not respond to abort, restarted",
           rawMessage:
             "Stop deadline exceeded: the worker process ignored the abort signal " +
-            "for 2s. The agent has been killed; the next message will spawn a " +
+            "for 500ms. The agent has been killed; the next message will spawn a " +
             "fresh worker.",
         };
   await insertErrorBlock(w, errorPayload);
@@ -767,6 +781,9 @@ async function forceKillStuckWorker(
     turn_id: w.turnId,
     agent: w.agentName,
     status: reason === "stale" ? "error" : "aborted",
+    // FRI-95: force-kill is the only path that synthesizes `abort_reason: "forced"`.
+    // Stale-turn timeouts ride status="error" instead and don't set the field.
+    ...(reason === "abort" ? { abort_reason: "forced" as const } : {}),
   });
   // Drop the live-turn entry now so the upcoming child.exit handler's
   // safety-net `finalizeStreamingBlocks` is a no-op (would otherwise
@@ -1241,6 +1258,9 @@ export async function handleEvent(
         turn_id: w.turnId,
         agent: w.agentName,
         status: wasAbort ? "aborted" : "error",
+        // FRI-95: worker cooperatively honored the abort (this code path
+        // runs because the worker's for-await closed and emitted error IPC).
+        ...(wasAbort ? { abort_reason: "cooperative" as const } : {}),
       });
       // Clean up live state the way turn-complete would. The worker
       // process keeps running (long-lived agents stay alive across
@@ -1258,6 +1278,13 @@ export async function handleEvent(
     }
     case "status-change":
       setWorkerStatus(w, e.status, "handleEvent.status-change");
+      // FRI-95 defense in depth: a worker that flips to idle has acknowledged
+      // any in-flight abort. The turn-complete / error handlers normally
+      // clear the deadline, but a status-change without one of those
+      // (e.g., the worker exits the for-await before emitting turn-complete)
+      // would otherwise leave the safety net armed and force-kill an
+      // already-cooperative worker.
+      if (e.status === "idle") clearAbortDeadline(w);
       // Phase 5: `agent_status` SSE retired — Zero replicates the
       // setWorkerStatus → registry UPDATE reactively. The internal
       // `setWorkerStatus` log line preserves diagnostic visibility.
@@ -1276,6 +1303,9 @@ export async function handleEvent(
         turn_id: w.turnId,
         agent: w.agentName,
         status: w.abortRequested ? "aborted" : "complete",
+        // FRI-95: worker honored the abort and ran to a clean
+        // turn-complete IPC (raced to completion right around the abort).
+        ...(w.abortRequested ? { abort_reason: "cooperative" as const } : {}),
         usage: e.usage
           ? {
               input_tokens: e.usage.input_tokens,

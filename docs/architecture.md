@@ -310,7 +310,7 @@ Schema in `packages/shared/src/wire/events.ts`. Only live-turn events remain:
 - `block_start` — `{block_id, turn_id, agent, kind, ts}`
 - `block_delta` — `{block_id, delta}` (text deltas, partial-JSON tool_use input)
 - `block_complete` — `{block_id, status?}` — signal to client that the in-memory accumulator can be discarded; canonical row arrives via Zero with `streaming=0`.
-- `turn_done` — `{turn_id, status: 'complete'|'aborted'|'error'}` — usage rolls up via a synced row.
+- `turn_done` — `{turn_id, status: 'complete'|'aborted'|'error', abort_reason?: 'cooperative'|'forced'}` — usage rolls up via a synced row. `abort_reason` is present only when `status='aborted'` and distinguishes a worker-cooperative abort (`'cooperative'`) from a daemon-driven force-kill (`'forced'`). The dashboard reads it to pick the right terminal copy on the user-block footer. (FRI-95.)
 - `error` — `{turn_id?, code, message, recoverable}` (live-turn errors only)
 - `:keepalive` comment line every 20s.
 
