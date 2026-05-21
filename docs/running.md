@@ -48,7 +48,7 @@ Each child is spawned with `detached: true` so its pid is its own process-group 
 
 Ports default to the prod constants. Override either via `~/.friday/config.json`'s `daemonPort` / `dashboardPort` (both optional). Zero-cache's port is fixed at 4848 (Zero's convention; if you need a parallel instance later, override via `ZERO_PORT` env at spawn time).
 
-**RunAtLoad: true** — Friday's stack comes back automatically after Mac reboot/login, no manual `friday start`. Postgres + cloudflared are separate brew services with their own RunAtLoad.
+**RunAtLoad: true** — Friday's stack comes back automatically after Mac reboot/login, no manual `friday start`. Postgres is a separate brew service with its own RunAtLoad. The Cloudflare tunnel is installed by `friday setup --cloudflare` (`cloudflared service install <TOKEN>`) as a user launch agent at `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist`, also with RunAtLoad — it self-starts independently of Friday's supervisor.
 
 **Logs:**
 - Supervisor's own events: `~/.friday/logs/supervisor.jsonl` (spawn/exit/cascade-stop trace).

@@ -40,10 +40,13 @@ export const attachCommand = defineCommand({
     const target = (args.service as string).toLowerCase();
     if (target === "tunnel") {
       console.error(
-        pc.red(`cloudflared is a separate brew service.`),
+        pc.red(`cloudflared runs as its own user launch agent (com.cloudflare.cloudflared).`),
       );
       console.error(
-        `  watch its log: ${pc.cyan(`brew services info cloudflared`)} or ${pc.cyan(`friday logs tunnel -f`)}`,
+        `  tail its log: ${pc.cyan(`friday logs tunnel -f`)}`,
+      );
+      console.error(
+        `  inspect job: ${pc.cyan(`launchctl print gui/$(id -u)/com.cloudflare.cloudflared`)}`,
       );
       process.exit(1);
     }

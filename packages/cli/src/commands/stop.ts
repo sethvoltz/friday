@@ -40,8 +40,9 @@ export const stopCommand = defineCommand({
       stdio: "inherit",
     });
     if (r.status !== 0) process.exit(r.status ?? 1);
-    // Don't auto-stop cloudflared — it's a separate service with its own
-    // lifecycle. The user controls it via `brew services stop cloudflared`
-    // if they want.
+    // Don't auto-stop cloudflared — it's a separate user launch agent
+    // (`com.cloudflare.cloudflared`) installed by `friday setup --cloudflare`.
+    // Operators tear it down with `cloudflared service uninstall` when they
+    // actually want the tunnel gone, not on every `friday stop`.
   },
 });
