@@ -13,7 +13,7 @@
     "check": "turbo run check",
     "clean": "turbo run clean",
     "drizzle:generate": "pnpm --filter @friday/shared run drizzle:generate",
-    "prepare": "husky"
+    "prepare": "husky 2>/dev/null || true"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
