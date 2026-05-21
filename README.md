@@ -224,7 +224,7 @@ Operational files live at `~/.friday/`. Canonical state (blocks, mail, tickets, 
 
 ```
 ~/.friday/
-├── config.json             Settings + MCP server config (incl. optional fridayRepoPath)
+├── config.json             Settings + MCP server config
 ├── .env                    Secrets (LINEAR_API_KEY, BETTER_AUTH_SECRET, DB url, ...)
 ├── SOUL.md                 Your editable identity layer
 ├── skills/*.md             User-additive slash skills
