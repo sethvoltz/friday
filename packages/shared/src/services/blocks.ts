@@ -25,6 +25,10 @@ export type BlockSource =
   | "schedule"
   /** Watchdog-injected notice when a stalled worker is reforked. */
   | "refork_notice"
+  /** Boot-time heal for an SDK session wedged on a dangling
+   *  `tool_use` (worker died mid-tool-call). See
+   *  `services/daemon/src/agent/dangling-tool-use-recovery.ts`. */
+  | "recovery_heal"
   | null;
 
 export interface BlockRow {

@@ -17,6 +17,7 @@ import { reconcile as reconcileLinear } from "@friday/integrations-linear";
 import { eventBus } from "./events/bus.js";
 import * as registry from "./agent/registry.js";
 import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js";
+import { recoverDanglingToolUses } from "./agent/dangling-tool-use-recovery.js";
 import { startMailBridge } from "./comms/mail-bridge.js";
 import { reconcileAppsOnBoot } from "./apps/reconcile.js";
 import { runEvolveBootSync } from "./evolve/projector.js";
@@ -182,6 +183,12 @@ async function main(): Promise<void> {
   await seedMetaAgents();
   await reconcileAppsOnBoot();
   await recoverAgents(cfg);
+  // Heal SDK sessions wedged on an unresolved tool_use (worker died
+  // mid-tool-call — `kill -9`, OOM, daemon crash). Runs BEFORE
+  // `recoverQueuedTurns` so any queued user block waiting on a
+  // wedged agent dispatches into a freshly-reset session, not the
+  // dead one.
+  await recoverDanglingToolUses();
   await recoverQueuedTurns(cfg);
   const schedTick = startScheduler();
   const watchdog = startWatchdog();
