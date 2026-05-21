@@ -26,9 +26,13 @@ beforeEach(async () => {
 });
 
 /** Drain the microtask + macrotask queue so the mail-bridge's
- *  fire-and-forget IIFE finishes its DB write before the test reads. */
+ *  fire-and-forget IIFE finishes its DB write before the test reads.
+ *  300ms (was 50ms) gives the GitHub-Actions runner enough headroom
+ *  under load — locally the IIFE settles in single-digit ms, but a
+ *  contended runner can stretch it past 50ms and flake (see CI run
+ *  on PR #38, lifecycle/mail-bridge ~5% flake rate pre-bump). */
 async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 50));
+  await new Promise((r) => setTimeout(r, 300));
 }
 
 describe("mail-bridge → mail-as-block (FIX_FORWARD 2.2)", () => {
