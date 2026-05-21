@@ -141,6 +141,19 @@ describe("installApp", () => {
     await expect(installApp(folder)).rejects.toThrow(/already installed/);
   });
 
+  it("double-install throws AppInstallError with code already_installed", async () => {
+    const folder = freshFixture();
+    await installApp(folder);
+    let caught: unknown;
+    try {
+      await installApp(folder);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AppInstallError);
+    expect((caught as InstanceType<typeof AppInstallError>).code).toBe("already_installed");
+  });
+
   it("acceptance §16.6: name collision fails with no DB writes when adopt=false", async () => {
     // Pre-create an unaffiliated agent with the same name
     await registry.registerAgent({ name: "example-owner", type: "bare" });

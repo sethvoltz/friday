@@ -1419,9 +1419,9 @@ async function handle(
   }
   if (method === "POST" && /^\/api\/mail\/\d+\/close$/.test(path)) {
     const id = Number(path.split("/")[3]);
-    const row = getMail(id);
+    const row = await getMail(id);
     if (!row) return json(res, 404, { error: "mail not found" });
-    closeMail(id);
+    await closeMail(id);
     return json(res, 200, { ok: true });
   }
 
@@ -1564,7 +1564,7 @@ async function handle(
       return json(res, 400, { error: "folderPath required" });
     }
     try {
-      const result = installApp(body.folderPath, { adopt: !!body.adopt });
+      const result = await installApp(body.folderPath, { adopt: !!body.adopt });
       return json(res, 201, result);
     } catch (err) {
       if (err instanceof AppInstallError) {
@@ -1588,7 +1588,7 @@ async function handle(
       return json(res, 401, { error: "unauthorized" });
     }
     const id = decodeURIComponent(path.split("/")[3]);
-    const row = inspectApp(id);
+    const row = await inspectApp(id);
     if (!row) return json(res, 404, { error: "not found" });
     return json(res, 200, row);
   }
@@ -1601,7 +1601,7 @@ async function handle(
       folderDisposition?: "archive" | "keep" | "delete";
     }>(req).catch(() => ({}) as { folderDisposition?: "archive" | "keep" | "delete" });
     try {
-      const result = uninstallApp(id, {
+      const result = await uninstallApp(id, {
         folderDisposition: body.folderDisposition,
       });
       return json(res, 200, result);
@@ -1620,7 +1620,7 @@ async function handle(
     }
     const id = decodeURIComponent(path.split("/")[3]);
     try {
-      const result = reloadApp(id);
+      const result = await reloadApp(id);
       return json(res, 200, result);
     } catch (err) {
       if (err instanceof AppInstallError) {
