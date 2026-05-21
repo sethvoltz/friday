@@ -479,7 +479,14 @@ class ZeroSyncStore {
     // the connection-bound `z.query.<table>` field; the alternative
     // `createBuilder(schema)` path returns unbound builders that
     // register 0 desired queries with zero-cache.
-    const query = this.#zero!.query.agents.where("status", "!=", "archived");
+    //
+    // No status filter here: the Sidebar's "Show archived" / "Show
+    // inactive" toggles are client-side gates over the full agent
+    // list. Filtering archived rows at the query level (prior bug)
+    // meant the toggle had nothing to reveal — archived rows never
+    // reached the client at all, and the Settings page's per-app
+    // agent list silently lost archived entries too.
+    const query = this.#zero!.query.agents;
     const preload = this.#zero!.preload(query);
     const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {

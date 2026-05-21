@@ -398,6 +398,99 @@ describe("toAgentInfo mapping (via materialize update)", () => {
   });
 });
 
+describe("#bindAgents query (FRI-101 regression): no status filter", () => {
+  // Regression for the bug where `#bindAgents` filtered `status != "archived"`
+  // at the Zero query level. That hid archived rows from the client entirely,
+  // so the Sidebar's "Show archived" toggle had nothing to reveal and the
+  // Settings page's per-app agent list silently dropped archived entries.
+  // The Sidebar owns archive/inactive visibility client-side via the
+  // showArchived + showInactive toggles; the data layer must hand it the
+  // full agent list.
+  it("registers no status-based .where on the agents query", async () => {
+    await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+    const agentsQuery = z.query.agents as {
+      __calls: Array<{ method: string; args: unknown[] }>;
+    };
+    const statusFilters = agentsQuery.__calls.filter(
+      (c) =>
+        c.method === "where" &&
+        Array.isArray(c.args) &&
+        c.args[0] === "status",
+    );
+    expect(statusFilters).toEqual([]);
+  });
+
+  it("archived rows reach chat.agents end-to-end (Sidebar toggle has data)", async () => {
+    const mockedZero = await import("@rocicorp/zero");
+    const ZeroCtor = mockedZero.Zero as unknown as new (
+      opts: Record<string, unknown>,
+    ) => MockedZero;
+    const origCtor = ZeroCtor;
+    const patched = function (opts: Record<string, unknown>) {
+      const inst = new origCtor(opts);
+      let nth = 0;
+      inst.materialize = vi.fn(() => {
+        const isFirst = nth === 0;
+        nth += 1;
+        return {
+          data: isFirst
+            ? [
+                {
+                  name: "live",
+                  type: "builder",
+                  status: "working",
+                  session_id: "sess-live",
+                  created_at: 1_700_000_000_000,
+                  updated_at: 1_700_000_000_000,
+                },
+                {
+                  name: "killed",
+                  type: "helper",
+                  status: "archived",
+                  session_id: null,
+                  created_at: 1_700_000_000_000,
+                  updated_at: 1_700_000_001_000,
+                },
+                {
+                  name: "broken",
+                  type: "helper",
+                  status: "error",
+                  session_id: null,
+                  created_at: 1_700_000_000_000,
+                  updated_at: 1_700_000_002_000,
+                },
+              ]
+            : [],
+          addListener: vi.fn(() => () => {}),
+          destroy: vi.fn(),
+        };
+      });
+      return inst;
+    };
+    (mockedZero as unknown as { Zero: unknown }).Zero = patched;
+
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(zeroSync.agents).toHaveLength(3);
+    const { chat } = await import("./chat.svelte.js");
+    expect(chat.agents.map((a) => a.name).sort()).toEqual([
+      "broken",
+      "killed",
+      "live",
+    ]);
+    expect(chat.agents.find((a) => a.name === "killed")?.status).toBe(
+      "archived",
+    );
+    expect(chat.agents.find((a) => a.name === "broken")?.status).toBe("error");
+
+    (mockedZero as unknown as { Zero: unknown }).Zero = origCtor;
+  });
+});
+
 describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
   it("bindBlocksFor materializes a per-agent query with status filter + 90d retention bound + ts ordering (no row limit — plan §39 local-first)", async () => {
     const { zeroSync } = await importStore();
