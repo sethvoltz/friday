@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   existsSync,
   mkdirSync,
@@ -171,6 +171,37 @@ export async function listEntries(): Promise<MemoryEntry[]> {
   const db = getDb();
   const rows = await db.select().from(schema.memoryEntries);
   return rows.map(rowToEntry);
+}
+
+/**
+ * Return memory entries that should be deterministically included in an
+ * agent's system prompt — `tag` membership in `tags_json` AND ownership by
+ * `agentName` AND `status === 'ready'`. Distinct from FTS recall: this
+ * fires unconditionally at prompt-assembly time, so the agent sees the
+ * pin every turn regardless of user-message content.
+ *
+ * Order is stable by `id` so the rendered prompt is byte-identical across
+ * boots — important for SDK prompt caching (FRI-61).
+ */
+export async function listPinnedForAgent(
+  agentName: string,
+  tag: string = "pinned",
+): Promise<MemoryEntry[]> {
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(schema.memoryEntries)
+    .where(
+      and(
+        eq(schema.memoryEntries.createdBy, agentName),
+        // jsonb `?` operator: "does the top-level JSON array/object contain
+        // the given key/element?" For our tags-as-array shape this is an
+        // exact-element membership check.
+        sql`${schema.memoryEntries.tagsJson} ? ${tag}`,
+        eq(schema.memoryEntries.status, "ready"),
+      ),
+    );
+  return rows.map(rowToEntry).sort((a, b) => a.id.localeCompare(b.id));
 }
 
 export async function touchRecall(id: string): Promise<void> {
