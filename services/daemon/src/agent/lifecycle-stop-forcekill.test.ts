@@ -76,6 +76,7 @@ interface CapturedEvent {
   block_id?: string;
   kind?: string;
   code?: string;
+  abort_reason?: "cooperative" | "forced";
 }
 
 describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
@@ -120,10 +121,12 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     expect(payload.code).toBe("stopped_forced");
     expect(payload.headline).toContain("worker did not respond");
 
-    // turn_done aborted was published.
+    // turn_done aborted was published, tagged with the force-kill reason
+    // (FRI-95: dashboard reads abort_reason to pick the right terminal copy).
     const done = captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-fk-1");
     expect(done).toBeDefined();
     expect(done!.status).toBe("aborted");
+    expect(done!.abort_reason).toBe("forced");
 
     // TurnErrorEvent with the stopped_forced code published too.
     const err = captured.find((e) => e.type === "error" && e.code === "stopped_forced");
@@ -173,6 +176,12 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     // No stopped_forced TurnErrorEvent.
     expect(captured.find((e) => e.type === "error" && e.code === "stopped_forced")).toBeUndefined();
 
+    // FRI-95: cooperative-abort turn_done carries abort_reason="cooperative".
+    const done = captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-fk-2");
+    expect(done).toBeDefined();
+    expect(done!.status).toBe("aborted");
+    expect(done!.abort_reason).toBe("cooperative");
+
     __deleteLiveWorkerForTest("fk-agent");
   });
 
@@ -208,6 +217,12 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     const aborted = captured.find((e) => e.type === "error" && e.code === "aborted");
     expect(aborted).toBeDefined();
     expect(captured.find((e) => e.code === "stopped_forced")).toBeUndefined();
+
+    // FRI-95: error-path cooperative abort tags turn_done with "cooperative".
+    const done = captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-fk-3");
+    expect(done).toBeDefined();
+    expect(done!.status).toBe("aborted");
+    expect(done!.abort_reason).toBe("cooperative");
 
     __deleteLiveWorkerForTest("fk-agent");
   });

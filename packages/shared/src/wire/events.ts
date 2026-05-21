@@ -58,6 +58,14 @@ export interface TurnDoneEvent extends BaseEvent {
   turn_id: string;
   agent: string;
   status: "complete" | "aborted" | "error";
+  /**
+   * FRI-95: when status === "aborted", distinguishes worker-cooperative
+   * (`"cooperative"`) from daemon-force-kill (`"forced"`) paths. The
+   * dashboard uses this to pick the right terminal copy on the user-block
+   * affordance without round-tripping through the error block. Omitted
+   * when status !== "aborted".
+   */
+  abort_reason?: "cooperative" | "forced";
   usage?: TurnUsage;
 }
 

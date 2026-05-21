@@ -781,6 +781,9 @@ async function forceKillStuckWorker(
     turn_id: w.turnId,
     agent: w.agentName,
     status: reason === "stale" ? "error" : "aborted",
+    // FRI-95: force-kill is the only path that synthesizes `abort_reason: "forced"`.
+    // Stale-turn timeouts ride status="error" instead and don't set the field.
+    ...(reason === "abort" ? { abort_reason: "forced" as const } : {}),
   });
   // Drop the live-turn entry now so the upcoming child.exit handler's
   // safety-net `finalizeStreamingBlocks` is a no-op (would otherwise
@@ -1255,6 +1258,9 @@ export async function handleEvent(
         turn_id: w.turnId,
         agent: w.agentName,
         status: wasAbort ? "aborted" : "error",
+        // FRI-95: worker cooperatively honored the abort (this code path
+        // runs because the worker's for-await closed and emitted error IPC).
+        ...(wasAbort ? { abort_reason: "cooperative" as const } : {}),
       });
       // Clean up live state the way turn-complete would. The worker
       // process keeps running (long-lived agents stay alive across
@@ -1297,6 +1303,9 @@ export async function handleEvent(
         turn_id: w.turnId,
         agent: w.agentName,
         status: w.abortRequested ? "aborted" : "complete",
+        // FRI-95: worker honored the abort and ran to a clean
+        // turn-complete IPC (raced to completion right around the abort).
+        ...(w.abortRequested ? { abort_reason: "cooperative" as const } : {}),
         usage: e.usage
           ? {
               input_tokens: e.usage.input_tokens,
