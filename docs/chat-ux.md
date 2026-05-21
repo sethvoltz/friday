@@ -102,6 +102,21 @@ auto_invoke: true                # default true; built-ins set false
 - Aborts at next SDK iteration. Tool calls already in flight finish; no next step. Honest UI copy: *Stop prevents future steps. It can't undo a step already started.*
 - Stop only cancels the running turn — anything sitting in `nextPrompts` after it stays queued and dispatches on the next idle window.
 
+### Stop confirmation (FRI-95)
+
+The Stop affordance is rendered on the **user block** for the turn (id `user_<turn_id>`) — it's the always-present surface, independent of whether an assistant bubble has streamed yet. The assistant bubble keeps its own existing footer for the streaming case; the user-block footer is the load-bearing one for early-stop / queued / pre-token aborts.
+
+Three outcomes, each with deterministic chat-visible copy:
+
+| Outcome | When | User-block footer |
+|---|---|---|
+| Optimistic (`status="stopping"`) | Client-side, the instant Stop is clicked. Flipped by `chat.requestStop(turnId)`. | `Stopping…` |
+| Clean abort (`status="aborted"`, `abortReason="cooperative"`) | Daemon `turn_done` with `abort_reason="cooperative"` — worker honored the abort cleanly. | `Stopped` |
+| Force-killed abort (`status="aborted"`, `abortReason="forced"`) | Daemon `turn_done` with `abort_reason="forced"` — the 500ms deadline elapsed, worker SIGTERMed. The `stopped_forced` error block lands as a sibling chat message. | `Stopped — worker had to be force-killed` |
+| Already-finished race (`status="already_finished"`) | Stop fired but the daemon's `turn_done` arrived with `status="complete"` — model's last token raced ahead of the abort. Brief 1s transient, settles back to `complete`. | `Already finished` |
+
+Re-pressing Stop while already in the `stopping` state is a no-op (the in-flight POST is fire-and-forget; the UI is already in the right place).
+
 ## Chat input
 
 - Plain text → orchestrator turn.
