@@ -66,12 +66,13 @@
   // with partial input is now expandable (it previously wasn't, because
   // canonical `input` only landed at block_complete).
   let isFileOp = $derived(toolName === "Read" || toolName === "Write" || toolName === "Edit");
+  let open = $state(false);
   let showFileDiff = $derived(
+    open &&
     (toolName === "Write" || toolName === "Edit") &&
     input !== undefined && input !== null,
   );
   let canExpand = $derived(hasInput || hasOutput);
-  let open = $state(false);
 
   function inputField(key: string): string | undefined {
     if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
