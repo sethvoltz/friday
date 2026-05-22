@@ -5,7 +5,7 @@
 
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { daemonFetch } from "./http.js";
+import { daemonFetch, signalFrom } from "./http.js";
 
 export const MAIL_SERVER_NAME = "friday-mail";
 
@@ -68,9 +68,10 @@ export function buildMailServer(opts: BuildMailServerOptions) {
             .optional()
             .describe("Optional structured metadata."),
         },
-        async (args) => {
+        async (args, extra) => {
           const row = (await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/mail/send",
             method: "POST",
             body: {
@@ -93,9 +94,10 @@ export function buildMailServer(opts: BuildMailServerOptions) {
         "mail_inbox",
         "List pending mail addressed to you, oldest first.",
         {},
-        async () => {
+        async (_args, extra) => {
           const rows = await daemonFetch<unknown[]>({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/mail/inbox/${encodeURIComponent(opts.callerName)}`,
           });
           return {
@@ -109,9 +111,10 @@ export function buildMailServer(opts: BuildMailServerOptions) {
         {
           id: z.number().int().describe("Mail id from mail_inbox."),
         },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/mail/${args.id}/read`,
             method: "POST",
           });
@@ -126,9 +129,10 @@ export function buildMailServer(opts: BuildMailServerOptions) {
         {
           id: z.number().int().describe("Mail id."),
         },
-        async (args) => {
+        async (args, extra) => {
           await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/mail/${args.id}/close`,
             method: "POST",
           });

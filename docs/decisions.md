@@ -873,6 +873,51 @@ Architectural rule (checkable in review): any code touching `composeSystemPrompt
 - The `~/.friday/agents/<name>/` dir collides with a workflow that wants to put real files there. Today the dir is intentionally empty; if friday or a helper starts writing artifacts into its own home, the implicit "empty home" contract becomes a doc'd contract.
 - Cross-volume `~/.claude` setups become common. The EXDEV-fallback path is non-atomic on sidecar-dir moves; if anyone runs into a half-migrated state, a manifest-driven retry replaces the current "skip if dest exists" idempotency.
 
+## ADR-030 — Stop propagates cooperatively; daemon writes are fire-and-forget on cancel
+
+**Status:** accepted (2026-05-21)
+
+### Context
+
+FRI-66: when the user hits Stop, every layer between the dashboard and an in-flight Friday MCP handler needs a path to cancel. Pre-FRI-66 the only guaranteed termination of a destructive tool was the safety-net pgrp SIGTERM at the abort-deadline (originally 2s, now 500ms). FRI-78 wired the worker's `AbortController` into the SDK's `query()` options so the SDK can cancel its own CLI subprocess and built-in tools (Bash, WebFetch, Read/Edit/Write/Glob/Grep, Task subagents) cooperatively. FRI-95 added a T+0 `killPgrpDescendants` so destructive subprocesses die in milliseconds without waiting on the SDK.
+
+That left one gap: Friday's in-process MCP servers (`friday-{mail,memory,tickets,agents,schedule,evolve,integrations,echo,apps}`) ran inside the worker, called the daemon over HTTP via `daemonFetch`, and ignored the `extra.signal` the MCP SDK threads into every tool handler. A long write — `linear_create_issue` issuing a network round-trip, `ticket_create` running a Postgres mutation through the daemon — blocked the worker on its response even after the user hit Stop. The worker only learned the consumer was gone when the safety-net fired and tore down the process.
+
+### Decision
+
+**Two-layer policy:** the worker stops *waiting* on cancel; the daemon's authoritative write does not necessarily stop *executing*.
+
+1. **Worker side: signal propagation is mandatory.** `daemonFetch` accepts `signal: AbortSignal` and forwards it to the underlying `fetch()`. Every Friday MCP tool handler accepts `(args, extra)` and threads `extra.signal` (extracted via the typed `signalFrom(extra)` helper in `services/daemon/src/mcp/http.ts`) into its `daemonFetch` call. On Stop, the worker's `AbortController` fires; the MCP SDK signals every in-flight handler; `fetch()` raises `AbortError`; the worker's catch arm flushes blocks with `status='aborted'` and emits `turn-complete` cleanly. Cooperative path target: 200ms from Stop click to `turn_done`. The 500ms force-kill deadline becomes the abnormal-case backstop, not the common path.
+
+2. **Daemon side: no cancellation, no compensation.** The HTTP routes the worker hits are *not* AbortSignal-aware. A write that's already crossed the worker → daemon boundary completes — including the round-trip to Linear, the Postgres `INSERT`, the mail-bus broadcast. The cancel only stops the worker from blocking on the response.
+
+   - **Idempotent reads** (`mail_inbox`, `memory_search`, `memory_get`, `ticket_list`, `ticket_get`, `agent_list`, `agent_status`, `agent_inspect`, `schedule_list`, `schedule_show`, `evolve_list`, `evolve_get`, `linear_reconcile`, `app_list`, `app_inspect`): the daemon may finish or not — neither outcome affects correctness. The worker drops the response.
+
+   - **Writes** (`mail_send`, `mail_read`, `mail_close`, `memory_save`, `memory_update`, `memory_forget`, `ticket_create`, `ticket_update`, `ticket_comment`, `ticket_link_external`, `agent_create`, `agent_archive`, `schedule_*` mutations, `evolve_save`/`update`/`apply`/`dismiss`/`scan`/`enrich`/`cluster`, `linear_import`/`create_issue`/`update_issue`, `app_install`/`uninstall`/`reload`): the daemon completes the operation as if Stop never happened. The next turn sees the canonical state (a new mail row, an updated ticket, a created Linear issue) and the model reconciles from there. Externally-visible side effects (Linear API writes, mail addressed to other agents) are not rolled back.
+
+### Why not propagate cancel into the daemon?
+
+Three reasons.
+
+1. **External writes are already past the safety horizon.** By the time the worker's signal would propagate to the daemon and the daemon would propagate it to Linear/Postgres/the mail bus, the side effect is already on its way. Threading a signal into the daemon's outbound `fetch` to Linear only narrows a window that's measured in tens of milliseconds for the common case; for the rare slow case, partial-write semantics on the third-party side are worse than completion.
+
+2. **Compensation is per-endpoint and adds permanent complexity.** Rolling back a `linear_create_issue` means a `linear_delete_issue` call that itself may fail; rolling back a `mail_send` means deleting a mail row the recipient might already have read. Each endpoint becomes a transaction-or-compensation pair forever. Compared to "let it complete; the next turn sees reality," the maintenance cost is hard to justify.
+
+3. **The worker doesn't need to wait to abort cleanly.** The cancellation contract is "the worker stops blocking and emits `turn_done`," not "no daemon-side bytes are written." With `signal:` on `daemonFetch` the worker no longer needs the daemon's response to abort.
+
+### Consequences
+
+- **A Stop during a `linear_create_issue` may create the Linear issue.** The next turn's `mail_inbox` or `ticket_list` will show it; the model proceeds from observed state. Same applies to `linear_update_issue`, `mail_send` to a third party, `ticket_create`, `schedule_upsert`, `agent_create`, `app_install`.
+- **A Stop during a long `memory_search` or `linear_reconcile` is free.** The daemon may finish the work (no harm) or the underlying query may complete past the cancel; either way the worker has moved on.
+- **The model's mental model is "Stop interrupts the conversation, not the world."** This matches Claude Code's behavior: hitting Stop while a slash command is reaching out to an external API doesn't undo the API call.
+- **Force-kill safety-net stays.** `forceKillStuckWorker` at 500ms remains for the case where the SDK iterator wedges (the original FRI-12 motivation — Anthropic 529s, MCP transports that don't honor cancel). With FRI-66 in place this is rare; the error copy reads "Stop forced — SDK did not honor abort" so dashboard readers know they hit the abnormal case.
+
+### Bring this ADR back to the table if
+
+- A Stop-during-write race produces user-visible damage (a builder spawned twice, a Linear issue created and then a duplicate on retry). Today the failure mode is "the next turn sees one extra row"; if it ever becomes "the next turn writes a destructive correction," tighten by adding idempotency keys to the write paths rather than threading signals into the daemon.
+- An MCP handler grows non-`fetch` async work that ignores `extra.signal` (a long in-process loop, a Promise that never resolves on its own). Today every Friday handler funnels through `daemonFetch`; if that changes, audit those handlers for signal-honoring.
+- The cooperative-abort path measurably exceeds 200ms in production. Today the descendant-kill at T+0 and the signal on `daemonFetch` should put it well under that; if not, the SDK's CLI subprocess shutdown is the next layer to instrument.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.

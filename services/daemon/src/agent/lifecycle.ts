@@ -797,11 +797,13 @@ async function forceKillStuckWorker(
         }
       : {
           code: "stopped_forced",
-          headline: "Stopped — worker did not respond to abort, restarted",
+          headline: "Stop forced — SDK did not honor abort, worker restarted",
           rawMessage:
-            "Stop deadline exceeded: the worker process ignored the abort signal " +
-            "for 500ms. The agent has been killed; the next message will spawn a " +
-            "fresh worker.",
+            "Cooperative abort failed: the SDK iterator stayed wedged after 500ms " +
+            "(descendants already SIGTERMed at T+0; daemonFetch signal propagated " +
+            "to in-flight MCP handlers). The agent has been killed; the next message " +
+            "will spawn a fresh worker. Healthy turns clean up via the SDK's own " +
+            "abortController and never reach this path.",
         };
   // Wedge and stale-turn both ride `error` status; only an explicit abort
   // synthesizes `abort_reason: "forced"`.

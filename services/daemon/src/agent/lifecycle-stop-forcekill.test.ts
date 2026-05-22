@@ -124,7 +124,10 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     expect(rows[0].kind).toBe("error");
     const payload = rows[0].contentJson as Record<string, unknown>;
     expect(payload.code).toBe("stopped_forced");
-    expect(payload.headline).toContain("worker did not respond");
+    // FRI-66: copy distinguishes "cooperative abort" (SDK honored it,
+    // healthy path) from "Stop forced" (SDK iterator wedged, abnormal).
+    expect(payload.headline).toContain("Stop forced");
+    expect(payload.headline).toContain("SDK did not honor abort");
 
     // turn_done aborted was published, tagged with the force-kill reason
     // (FRI-95: dashboard reads abort_reason to pick the right terminal copy).
