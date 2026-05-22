@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, and } from "drizzle-orm";
 import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
@@ -308,5 +311,169 @@ describe("lifecycle: IPC handler error boundary (FRI-33)", () => {
     ).toBeUndefined();
 
     __deleteLiveWorkerForTest("stale-agent");
+  });
+});
+
+describe("lifecycle: turn-end clears w.turnStart (FRI-110)", () => {
+  // FRI-110: the stale-turn watchdog reads `w.turnStart` on every inbound
+  // IPC. Before this fix, `turnStart` was set at fork time and never
+  // cleared on turn-complete — so a worker that finished a turn and then
+  // sat idle for 4h+ emitting between-turns `status-change: idle` IPC
+  // would get force-killed by the watchdog measuring against the
+  // long-completed turn's start time. Fix: clear `turnStart = undefined`
+  // at every turn-end exit. The watchdog and the diagnostic log already
+  // gate on truthy, so an undefined value short-circuits cleanly.
+  //
+  // Stateful code needs stateful tests (CLAUDE.md): the bug lives at the
+  // boundary between the turn-complete write and the next IPC's read, so
+  // AC #3 spans both events. Per-handler unit tests on the clear alone
+  // would not catch a regression where the clear lands but the watchdog
+  // grows a new read site that misses the new invariant.
+
+  it("does not force-kill when worker has been idle (status=idle, turnStart cleared) for 5h after a completed turn", async () => {
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const { logger } = await import("../log.js");
+
+    // The post-FRI-110 idle-between-turns shape: `turnStart` undefined,
+    // status idle, `completedAtLeastOnce` true. The worker has been sitting
+    // here for 5h (longer than the 4h stale ceiling) before a status-change
+    // IPC arrives — the watchdog must not arithmetic against an undefined
+    // timestamp.
+    const { worker } = makeFakeWorker({
+      status: "idle",
+      turnStart: undefined,
+      turnId: "turn-completed-old",
+      completedAtLeastOnce: true,
+    });
+    __putLiveWorkerForTest("stale-agent", worker as never);
+
+    const logSpy = vi.spyOn(logger, "log");
+    await handleEvent(worker as never, { type: "status-change", status: "idle" });
+
+    // The bug-site assertion: watchdog did NOT force-kill.
+    expect(
+      logSpy.mock.calls.find(([, ev]) => ev === "worker.turn.stale-killed"),
+    ).toBeUndefined();
+    expect((worker as { forceKilled?: boolean }).forceKilled).toBeFalsy();
+
+    // Diagnostic log emitted with `msSinceTurnStart: null` — this is the
+    // ternary fallback at the diagnostic site that already gates on
+    // truthy. Pins that the clear *propagates* to the next IPC's read,
+    // not just that the field was written.
+    const ipcRecv = logSpy.mock.calls.find(([, ev]) => ev === "worker.ipc.recv");
+    expect(ipcRecv).toBeDefined();
+    const [, , payload] = ipcRecv!;
+    const p = payload as { msSinceTurnStart: number | null };
+    expect(p.msSinceTurnStart).toBe(null);
+
+    __deleteLiveWorkerForTest("stale-agent");
+  });
+
+  it("turn-complete handler clears turnStart so the next idle IPC does not arithmetic against a stale value", async () => {
+    // AC #3: the load-bearing cross-boundary assertion. Drive turn-complete,
+    // then drive a follow-up status-change: idle, and prove the watchdog's
+    // and diagnostic log's reads both see `turnStart` as falsy.
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const { logger } = await import("../log.js");
+
+    const { worker } = makeFakeWorker({
+      status: "working",
+      turnStart: Date.now() - 60_000,
+      turnId: "turn-complete-clear",
+      sessionId: "sess-x",
+    });
+    __putLiveWorkerForTest("stale-agent", worker as never);
+
+    // First: drive turn-complete with the matching sessionId so the usage-
+    // insertion branch is reached without an `e.usage` payload (we don't
+    // care about usage here, just the state transition).
+    await handleEvent(worker as never, {
+      type: "turn-complete",
+      sessionId: "sess-x",
+    });
+
+    // Clear and status flipped.
+    expect((worker as { turnStart?: number }).turnStart).toBeUndefined();
+    expect((worker as { status: string }).status).toBe("idle");
+
+    // Second (cross-boundary): drive a follow-up status-change: idle. The
+    // diagnostic log entry for this IPC must show `msSinceTurnStart: null`
+    // — proving the clear actually propagates to the read sites.
+    const logSpy = vi.spyOn(logger, "log");
+    await handleEvent(worker as never, { type: "status-change", status: "idle" });
+
+    const ipcRecv = logSpy.mock.calls.find(([, ev]) => ev === "worker.ipc.recv");
+    expect(ipcRecv).toBeDefined();
+    const [, , payload] = ipcRecv!;
+    const p = payload as { msSinceTurnStart: number | null };
+    expect(p.msSinceTurnStart).toBe(null);
+
+    __deleteLiveWorkerForTest("stale-agent");
+  });
+
+  it("case error handler clears turnStart on turn-end", async () => {
+    // AC #4: same guarantee as turn-complete, on the error path. The error
+    // path also finalizes the turn and flips status idle; without this
+    // clear, a 4h idle period after an errored turn would also reap.
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+
+    const { worker } = makeFakeWorker({
+      status: "working",
+      turnStart: Date.now() - 60_000,
+      turnId: "turn-error-clear",
+    });
+    __putLiveWorkerForTest("stale-agent", worker as never);
+
+    await handleEvent(worker as never, {
+      type: "error",
+      code: "synthetic",
+      message: "synthetic",
+      recoverable: false,
+    } as never);
+
+    expect((worker as { turnStart?: number }).turnStart).toBeUndefined();
+    expect((worker as { status: string }).status).toBe("idle");
+
+    __deleteLiveWorkerForTest("stale-agent");
+  });
+
+  it("spawnTurn-fresh LiveWorker has turnStart=undefined; first start-IPC dispatch sets it", () => {
+    // AC #5: file-level static contract test for Change 2. The fork-time
+    // `LiveWorker` literal no longer carries an unconditional `turnStart:
+    // Date.now()` write — instead, the `child.once("message", …)` callback
+    // (which fires when the worker emits `ready`) is the natural "first
+    // turn dispatched" site and sets turnStart there. This grep matches
+    // the change's bundle boundary at lower cost than spinning up a real
+    // worker subprocess.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(here, "lifecycle.ts"), "utf8");
+
+    // Locate the spawnTurn LiveWorker literal. Anchor on the literal
+    // declaration and stop before the `live.set` that closes the spawn
+    // setup so we are looking at the fork-time object literal only.
+    const literalStart = src.indexOf("const w: LiveWorker = {");
+    expect(literalStart).toBeGreaterThan(-1);
+    const literalEnd = src.indexOf("live.set(input.agentName, w);");
+    expect(literalEnd).toBeGreaterThan(literalStart);
+    const literalBlock = src.slice(literalStart, literalEnd);
+
+    // The unconditional fork-time turnStart write is gone.
+    expect(literalBlock).not.toMatch(/turnStart:\s*Date\.now\(\),/);
+    // The literal explicitly initializes turnStart to undefined (so
+    // the field is present and the type stays satisfied).
+    expect(literalBlock).toMatch(/turnStart:\s*undefined,/);
+
+    // The `child.once("message", …)` callback now sets turnStart before
+    // sending `start`. Anchor on the once block and stop before the
+    // restampQueuedUserBlock call that closes the setup region.
+    const onceStart = src.indexOf('child.once("message"');
+    expect(onceStart).toBeGreaterThan(-1);
+    const onceEnd = src.indexOf("restampQueuedUserBlock(", onceStart);
+    expect(onceEnd).toBeGreaterThan(onceStart);
+    const onceBlock = src.slice(onceStart, onceEnd);
+    expect(onceBlock).toMatch(/w\.turnStart\s*=\s*Date\.now\(\)/);
   });
 });

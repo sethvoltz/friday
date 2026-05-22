@@ -88,8 +88,15 @@ export interface LiveWorker {
   workingDirectory: string;
   abortRequested: boolean;
   lastHeartbeat: number;
-  /** Wall-clock start of the *current* turn, for usage duration. */
-  turnStart: number;
+  /** Wall-clock start of the *current* turn, for usage duration. Undefined
+   *  between turns — set on prompt dispatch (sendPrompt + the first
+   *  child.once("message", …) callback for the spawn-fresh path) and cleared
+   *  at every turn-end exit (`turn-complete`, `error`, `forceKillStuckWorker`).
+   *  The watchdog's `if (!w.forceKilled && w.turnStart)` gate relies on this
+   *  field being falsy between turns so a 4h idle period does not get
+   *  arithmetic'd against a stale timestamp from a long-completed turn
+   *  (FRI-110). */
+  turnStart: number | undefined;
   /** Wall-clock start of the worker process; used for one-shot duration. */
   spawnedAt: number;
   /** Wall-clock of the most recent block-stop. The turn-stall timer uses
@@ -357,7 +364,14 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     workingDirectory: input.options.workingDirectory,
     abortRequested: false,
     lastHeartbeat: Date.now(),
-    turnStart: Date.now(),
+    // FRI-110: `turnStart` is set only when a turn actually dispatches —
+    // here (the first turn after fork) it is set inside the
+    // `child.once("message", …)` callback below, immediately before the
+    // `start` IPC ships. For subsequent turns, `sendPrompt` sets it. A
+    // worker sitting idle between turns has `turnStart === undefined`, which
+    // is what keeps the stale-turn watchdog from arithmetic-ing against a
+    // stale value after a 4h idle.
+    turnStart: undefined,
     spawnedAt: Date.now(),
     lastBlockStop: Date.now(),
     status: "working",
@@ -458,6 +472,12 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   child.once("message", () => {
     const userMcpServers =
       input.options.userMcpServers ?? loadConfig().mcpServers ?? [];
+    // FRI-110: stamp the turn-start clock at the *actual* turn dispatch
+    // (not at fork) so the stale-turn watchdog measures from when the
+    // worker began the turn — not from when the worker process came up
+    // (which could be milliseconds before, but conceptually is "no turn
+    // is live"). Symmetric with `sendPrompt` for subsequent turns.
+    w.turnStart = Date.now();
     send(child, {
       type: "start",
       options: { ...input.options, userMcpServers },
@@ -841,6 +861,12 @@ async function forceKillStuckWorker(
   liveTurns.dropTurn(w.turnId);
   w.lastExitStatus = ridesError ? "error" : "aborted";
   setWorkerStatus(w, "idle", "forceKillStuckWorker");
+  // FRI-110: keep the `turnStart` invariant universally true. After
+  // force-kill the worker is being torn down — no further IPC arithmetic
+  // *should* run — but a late IPC that races the kill and bypasses the
+  // `w.forceKilled` short-circuit (or a future read site that doesn't
+  // check the flag) would otherwise see a stale timestamp.
+  w.turnStart = undefined;
   await registry.setStatus(w.agentName, "idle").catch((err: unknown) => {
     logger.log("warn", "registry.set-status.error", {
       agent: w.agentName,
@@ -1206,11 +1232,17 @@ export async function handleEvent(
   // Idempotent via `forceKilled`; safe if multiple events land in the same
   // tick.
   //
-  // Invariant: the worker only emits `heartbeat` from inside `runQuery`'s
-  // setInterval, cleared in the finally — so no IPC fires between turns,
-  // and `w.turnStart` reflects the *current* turn. If a future change adds
-  // a between-turns heartbeat, this check would spuriously fire on the
-  // first heartbeat after a 4h idle; update both sides together.
+  // FRI-110 invariant: `w.turnStart` is non-undefined *only* when a turn is
+  // live — set on prompt dispatch (sendPrompt + the spawn-fresh
+  // `child.once("message", …)` callback) and cleared at every turn-end
+  // exit (turn-complete, error, forceKillStuckWorker). The truthy gate
+  // below makes between-turns IPC (e.g. the `status-change: idle` the
+  // worker emits in its mail-poll loop, which has existed since `0f59da1`
+  // and which the original FRI-33 comment incorrectly claimed did not
+  // exist) short-circuit cleanly. If a future change re-adds a code path
+  // where `turnStart` survives past the turn it describes, the 4h reaper
+  // resumes the original FRI-110 bug — keep the three turn-end clears in
+  // sync with any new turn-end exit.
   if (!w.forceKilled && w.turnStart) {
     const msSinceTurnStart = Date.now() - w.turnStart;
     if (msSinceTurnStart > staleTurnCeilingMs()) {
@@ -1404,6 +1436,12 @@ export async function handleEvent(
       // cleanly.
       liveTurns.dropTurn(w.turnId);
       setWorkerStatus(w, "idle", "handleEvent.error");
+      // FRI-110: same reasoning as the `turn-complete` clear — the turn is
+      // over (error-terminated rather than completed) and any subsequent
+      // between-turns IPC must not arithmetic against this turn's start
+      // time. The `sendPrompt(w, next)` below will restamp if a queued
+      // prompt drains.
+      w.turnStart = undefined;
       w.completedAtLeastOnce = true;
       await registry.setStatus(w.agentName, "idle");
       // Phase 5: `agent_status` SSE retired — Zero replicates the
@@ -1432,7 +1470,13 @@ export async function handleEvent(
       // a successful (or cleanly-aborted) turn.
       clearAbortDeadline(w);
       if (w.forceKilled) break;
-      const durationMs = Date.now() - w.turnStart;
+      // FRI-110: `w.turnStart` is non-undefined in the normal flow (a
+      // turn-complete IPC by definition implies a turn ran), but the type
+      // is `number | undefined` so the typechecker needs a narrowing.
+      // Pinned form: ternary fallback to 0. The 0 sentinel is unreachable
+      // in practice — emitting NaN via `Date.now() - undefined` is the
+      // observable failure mode this guards against.
+      const durationMs = w.turnStart ? Date.now() - w.turnStart : 0;
       eventBus.publish({
         v: 1,
         type: "turn_done",
@@ -1517,6 +1561,14 @@ export async function handleEvent(
       // Long-lived worker: flush queued prompt if any. Don't send `stop` — the
       // worker manages its own lifecycle.
       setWorkerStatus(w, "idle", "handleEvent.turn-complete");
+      // FRI-110: the turn is over. Clear `turnStart` so the stale-turn
+      // watchdog (handleEvent prologue at ~1214) and the diagnostic log
+      // (~1239) — both of which already gate on truthy `w.turnStart` —
+      // see "no turn live" rather than arithmetic-ing against a
+      // long-completed turn's start time. The worker may sit idle for
+      // hours between turns; the next `sendPrompt` (line 604) or the
+      // queued-prompt drain below will restamp it when a new turn starts.
+      w.turnStart = undefined;
       w.completedAtLeastOnce = true;
       w.lastExitStatus = w.abortRequested ? "aborted" : "complete";
       await registry.setStatus(w.agentName, "idle");
