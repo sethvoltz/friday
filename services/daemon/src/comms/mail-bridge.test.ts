@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
@@ -6,8 +6,8 @@ import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 // bridge materializes a `role='user'`, `kind='text'`, `source='mail'` block
 // in the recipient's session and surfaces the sender via content_json.
 //
-// The mail-bridge handler is fire-and-forget async (ADR-023), so each
-// test awaits a small settling tick after emit before reading rows.
+// The mail-bridge handler is fire-and-forget async (ADR-023). Each test
+// polls the recipient's blocks with vi.waitFor until the DB write lands.
 
 let handle: TestDbHandle;
 
@@ -24,16 +24,6 @@ afterAll(async () => {
 beforeEach(async () => {
   await handle.truncate();
 });
-
-/** Drain the microtask + macrotask queue so the mail-bridge's
- *  fire-and-forget IIFE finishes its DB write before the test reads.
- *  300ms (was 50ms) gives the GitHub-Actions runner enough headroom
- *  under load — locally the IIFE settles in single-digit ms, but a
- *  contended runner can stretch it past 50ms and flake (see CI run
- *  on PR #38, lifecycle/mail-bridge ~5% flake rate pre-bump). */
-async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 300));
-}
 
 describe("mail-bridge → mail-as-block (FIX_FORWARD 2.2)", () => {
   it("a fresh mailBus event lands a user-role source='mail' block", async () => {
@@ -56,23 +46,26 @@ describe("mail-bridge → mail-as-block (FIX_FORWARD 2.2)", () => {
       priority: "normal",
     });
 
-    await settle();
-    const rows = await db
-      .select()
-      .from(schema.blocks)
-      .where(eq(schema.blocks.agentName, "unknown-recipient-1"));
-    expect(rows.length).toBe(1);
-    expect(rows[0].role).toBe("user");
-    expect(rows[0].kind).toBe("text");
-    expect(rows[0].source).toBe("mail");
-
-    // contentJson is jsonb; Drizzle returns the parsed object.
-    const parsed = rows[0].contentJson as {
-      text: string;
-      from_agent?: string;
-    };
-    expect(parsed.text).toBe("hello via mail");
-    expect(parsed.from_agent).toBe("alpha");
+    await vi.waitFor(
+      async () => {
+        const rows = await db
+          .select()
+          .from(schema.blocks)
+          .where(eq(schema.blocks.agentName, "unknown-recipient-1"));
+        expect(rows.length).toBe(1);
+        expect(rows[0].role).toBe("user");
+        expect(rows[0].kind).toBe("text");
+        expect(rows[0].source).toBe("mail");
+        // contentJson is jsonb; Drizzle returns the parsed object.
+        const parsed = rows[0].contentJson as {
+          text: string;
+          from_agent?: string;
+        };
+        expect(parsed.text).toBe("hello via mail");
+        expect(parsed.from_agent).toBe("alpha");
+      },
+      { timeout: 5000, interval: 25 },
+    );
   });
 
   it("multiple mail deliveries each get their own block keyed by mail id", async () => {
@@ -97,16 +90,20 @@ describe("mail-bridge → mail-as-block (FIX_FORWARD 2.2)", () => {
       });
     }
 
-    await settle();
-    const rows = await db
-      .select({ turnId: schema.blocks.turnId })
-      .from(schema.blocks)
-      .where(eq(schema.blocks.agentName, "unknown-recipient-2"))
-      .orderBy(schema.blocks.turnId);
-    expect(rows.map((r) => r.turnId)).toEqual([
-      "mail_200",
-      "mail_201",
-      "mail_202",
-    ]);
+    await vi.waitFor(
+      async () => {
+        const rows = await db
+          .select({ turnId: schema.blocks.turnId })
+          .from(schema.blocks)
+          .where(eq(schema.blocks.agentName, "unknown-recipient-2"))
+          .orderBy(schema.blocks.turnId);
+        expect(rows.map((r) => r.turnId)).toEqual([
+          "mail_200",
+          "mail_201",
+          "mail_202",
+        ]);
+      },
+      { timeout: 5000, interval: 25 },
+    );
   });
 });

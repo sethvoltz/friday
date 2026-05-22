@@ -17,7 +17,7 @@
  * plumbing only.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTestDb,
   getDb,
@@ -83,13 +83,14 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
         .update(schema.blocks)
         .set({ status: "abort_requested" });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.channel).toBe("friday_abort_requested");
-      expect(received[0]!.payload).toBe("blk-abort-1");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.channel).toBe("friday_abort_requested");
+          expect(received[0]!.payload).toBe("blk-abort-1");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -106,7 +107,8 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
     try {
       await insertUserBlock("blk-abort-2", "abort_requested");
       await client.query("LISTEN friday_abort_requested");
-      // Drain any boot-time notification first.
+      // negative-space: drain any buffered notification before attaching
+      // our handler so the assertion below isn't polluted.
       await new Promise((r) => setTimeout(r, 250));
 
       const received: Array<{ payload: string }> = [];
@@ -117,6 +119,8 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
       const db = getDb();
       await db.update(schema.blocks).set({ status: "complete" });
 
+      // negative-space: trigger predicate excludes flips to 'complete' —
+      // a bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -143,6 +147,9 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
       await db.update(schema.blocks).set({ lastEventSeq: 42 });
       await db.update(schema.blocks).set({ blockIndex: 1 });
 
+      // negative-space: trigger predicate fires only on transitions to
+      // 'abort_requested' — a bounded real-time wait confirms no
+      // spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -166,6 +173,8 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
 
       await insertUserBlock("blk-abort-insert", "abort_requested");
 
+      // negative-space: trigger is AFTER UPDATE only — INSERTs don't fire.
+      // A bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {

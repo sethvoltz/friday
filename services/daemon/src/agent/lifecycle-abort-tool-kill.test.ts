@@ -147,19 +147,16 @@ describe("abortTurn kills in-flight tool subprocesses immediately", () => {
       expect(pidIsAlive(shellPid)).toBe(true);
 
       // Fire.
-      const t0 = Date.now();
       expect(abortTurn("abort-tool-kill-agent")).toBe(true);
       expect(worker.child.send).toHaveBeenCalledWith({ type: "abort" });
 
-      // Poll until sleep is reaped. The test fails if it takes longer than
-      // 100ms — the whole point of the descendant-kill is that destructive
-      // tools die within a human-imperceptible window.
-      const deadline = t0 + 100;
-      while (Date.now() < deadline) {
-        if (!pidIsAlive(sleepPid)) break;
-        await new Promise((r) => setTimeout(r, 5));
-      }
-      expect(pidIsAlive(sleepPid)).toBe(false);
+      // Poll until sleep is reaped. The whole point of the descendant-kill
+      // is that destructive tools die within a human-imperceptible window —
+      // pin a tight 100ms timeout here so a regression is caught.
+      await vi.waitFor(
+        () => expect(pidIsAlive(sleepPid)).toBe(false),
+        { timeout: 100, interval: 5 },
+      );
 
       // Worker stand-in (the shell) is still alive — descendant-kill is
       // surgical. The shell runs `while :; do sleep 30; done` so it stays

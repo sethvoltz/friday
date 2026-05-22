@@ -23,10 +23,6 @@ beforeEach(async () => {
   vi.useRealTimers();
 });
 
-async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 50));
-}
-
 interface CapturedEvent {
   type: string;
   turn_id?: string;
@@ -275,7 +271,10 @@ describe("lifecycle: queued user-block dispatch", () => {
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    // Sleep so the drain timestamp is strictly newer than the row's ts.
+    // negative-space (clock-advance): the assertion below requires
+    // afterRow.ts > beforeTs. Wall-clock has to actually move forward; a
+    // bounded real-time sleep is the right primitive — neither vi.waitFor
+    // nor vi.useFakeTimers helps with a strictly-increasing real ts.
     await new Promise((r) => setTimeout(r, 10));
 
     // Drive turn-complete on the live worker. The handler drains
@@ -286,9 +285,16 @@ describe("lifecycle: queued user-block dispatch", () => {
       sessionId: "sess-1",
       usage: undefined,
     } as never);
-    // restampQueuedUserBlock is fire-and-forget — let the DB write
-    // land.
-    await settle();
+    // restampQueuedUserBlock is fire-and-forget — wait for the DB row
+    // to flip to complete with a fresher ts.
+    await vi.waitFor(
+      async () => {
+        const r = await getBlockById(blockId);
+        expect(r!.status).toBe("complete");
+        expect(r!.ts).toBeGreaterThan(beforeTs);
+      },
+      { timeout: 5000, interval: 25 },
+    );
 
     unsub();
     __deleteLiveWorkerForTest("queued-agent");
@@ -320,7 +326,9 @@ describe("lifecycle: queued user-block dispatch", () => {
       source: "user_chat",
       status: "queued",
     });
-    // Bump time a hair so the ts strictly differs even on fast machines.
+    // negative-space (clock-advance): the assertion below requires the
+    // two rows' ts values to strictly differ. Wall-clock has to actually
+    // move; a bounded real-time sleep is the right primitive here.
     await new Promise((r) => setTimeout(r, 5));
     const { blockId: b2 } = await recordUserBlock({
       turnId: "t_new",

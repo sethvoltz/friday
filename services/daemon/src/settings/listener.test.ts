@@ -13,7 +13,7 @@
  * smoke instead.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTestDb,
   getDb,
@@ -67,17 +67,18 @@ describe("Postgres trigger: friday_settings_notify_trigger", () => {
         .update(schema.settings)
         .set({ model: "claude-opus-4-7", updatedAt: new Date() });
 
-      // Allow up to 1s for the NOTIFY to round-trip the change-
-      // streamer + the test client's socket.
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.channel).toBe("friday_settings_changed");
-      // Payload is `NEW.id` per the trigger function (line in 0002
-      // migration: `PERFORM pg_notify('friday_settings_changed', NEW.id);`).
-      expect(received[0]!.payload).toBe("singleton");
+      // Poll until the NOTIFY round-trips through the change-streamer
+      // and the test client's socket.
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.channel).toBe("friday_settings_changed");
+          // Payload is `NEW.id` per the trigger function (line in 0002
+          // migration: `PERFORM pg_notify('friday_settings_changed', NEW.id);`).
+          expect(received[0]!.payload).toBe("singleton");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -103,7 +104,10 @@ describe("Postgres trigger: friday_settings_notify_trigger", () => {
         id: "singleton",
         updatedAt: new Date(),
       });
-      // Wait briefly to see if any notification fires.
+      // negative-space: the trigger is AFTER UPDATE — an INSERT should
+      // produce zero notifications. A bounded real-time wait is the right
+      // shape here; vi.waitFor on "received remains empty" would resolve
+      // on the first tick before any spurious NOTIFY could round-trip.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {

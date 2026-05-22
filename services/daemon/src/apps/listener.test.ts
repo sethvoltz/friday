@@ -7,7 +7,7 @@
  * already-tested functions); this file pins the trigger contract.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTestDb,
   getDb,
@@ -56,13 +56,14 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
         metaJson: null,
       });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.channel).toBe("friday_app_changed");
-      expect(received[0]!.payload).toBe("test-install");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.channel).toBe("friday_app_changed");
+          expect(received[0]!.payload).toBe("test-install");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -97,12 +98,13 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
         .update(schema.apps)
         .set({ status: "uninstall_requested" });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.payload).toBe("test-uninstall");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.payload).toBe("test-uninstall");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -135,12 +137,13 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
 
       await db.update(schema.apps).set({ status: "reload_requested" });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.payload).toBe("test-reload");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.payload).toBe("test-reload");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -180,6 +183,8 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
         .update(schema.apps)
         .set({ version: "1.0.1", upgradedAt: new Date() });
 
+      // negative-space: trigger predicate excludes 'installed' UPDATEs —
+      // a bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -209,6 +214,8 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
       });
 
       await client.query("LISTEN friday_app_changed");
+      // negative-space: drain the pending_install INSERT notification
+      // before attaching our handler so the assertion below isn't polluted.
       await new Promise((r) => setTimeout(r, 250));
       const received: Array<{ payload: string }> = [];
       client.on("notification", (msg) =>
@@ -225,6 +232,8 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
           manifestJson: { id: "test-flip" },
         });
 
+      // negative-space: trigger predicate excludes 'installed' UPDATEs —
+      // a bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {

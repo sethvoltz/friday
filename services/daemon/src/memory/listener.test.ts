@@ -18,7 +18,7 @@
  *   - The boot-recovery scan picks up pending rows.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,13 +78,14 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
         status: "pending_file",
       });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.channel).toBe("friday_memory_file_changed");
-      expect(received[0]!.payload).toBe("test-create");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.channel).toBe("friday_memory_file_changed");
+          expect(received[0]!.payload).toBe("test-create");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -122,12 +123,13 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
         .update(schema.memoryEntries)
         .set({ status: "pending_file", updatedAt: new Date() });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.payload).toBe("test-update");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.payload).toBe("test-update");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -163,12 +165,13 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
         .update(schema.memoryEntries)
         .set({ status: "pending_delete", updatedAt: new Date() });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.payload).toBe("test-delete");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.payload).toBe("test-delete");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -206,6 +209,8 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
         .update(schema.memoryEntries)
         .set({ recallCount: 1, lastRecalledAt: new Date() });
 
+      // negative-space: the trigger predicate excludes 'ready' rows — a
+      // bounded real-time wait is the right shape to confirm nothing fires.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -237,7 +242,9 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
         status: "pending_file",
       });
 
-      // Drain initial notification.
+      // negative-space: drain any backlog from the pending_file INSERT
+      // notification before attaching our handler so the assertion below
+      // (zero notifications on the 'ready' UPDATE) isn't polluted.
       await client.query("LISTEN friday_memory_file_changed");
       await new Promise((r) => setTimeout(r, 250));
       const received: Array<{ payload: string }> = [];
@@ -250,6 +257,8 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
         .update(schema.memoryEntries)
         .set({ status: "ready" });
 
+      // negative-space: the trigger predicate excludes 'ready' rows —
+      // a bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       // 0 notifications — the trigger predicate excludes 'ready'.
       expect(received).toHaveLength(0);

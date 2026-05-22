@@ -103,16 +103,18 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     await vi.advanceTimersByTimeAsync(300);
     expect(captured.find((e) => e.type === "turn_done")).toBeUndefined();
 
-    // After the 500ms deadline, force-kill fires.
+    // After the 500ms deadline, force-kill fires. forceKillStuckWorker is
+    // fire-and-forget from the setTimeout callback, so wait on the observable
+    // signal (turn_done) instead of a fixed real-time sleep.
     await vi.advanceTimersByTimeAsync(300);
-    // Drop back to real timers and let any pending DB writes flush.
-    // 300ms (was 50ms) — forceKillStuckWorker is fire-and-forget from
-    // the setTimeout callback (`void forceKillStuckWorker(w).catch(…)`),
-    // so advanceTimersByTimeAsync doesn't await its full async chain.
-    // 50ms is plenty locally; under GitHub Actions load it occasionally
-    // misses the eventBus.publish (see CI flake on PR #38).
     vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 300));
+    await vi.waitFor(
+      () =>
+        expect(
+          captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-fk-1"),
+        ).toBeDefined(),
+      { timeout: 5000, interval: 25 },
+    );
     unsub();
 
     // Error block was inserted with stopped_forced.
@@ -164,7 +166,15 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     // Advance well past the 500ms deadline to confirm the timer was cleared.
     await vi.advanceTimersByTimeAsync(3000);
     vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for the cooperative turn_done from handleEvent above — once it
+    // lands, the entire turn-complete path (incl. any side effects) has run.
+    await vi.waitFor(
+      () =>
+        expect(
+          captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-fk-2"),
+        ).toBeDefined(),
+      { timeout: 5000, interval: 25 },
+    );
     unsub();
 
     // No stopped_forced block — the worker cleaned up.
@@ -214,7 +224,15 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
 
     await vi.advanceTimersByTimeAsync(3000);
     vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for the cooperative turn_done from handleEvent's error path —
+    // once it lands, the error handler (incl. error-event publish) has run.
+    await vi.waitFor(
+      () =>
+        expect(
+          captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-fk-3"),
+        ).toBeDefined(),
+      { timeout: 5000, interval: 25 },
+    );
     unsub();
 
     // The worker's error path emits TurnErrorEvent with code='aborted'
@@ -255,7 +273,14 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
       sessionId: "sess-fk-1",
     });
     vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for the force-kill's turn_done — async fire-and-forget chain.
+    await vi.waitFor(
+      () =>
+        expect(
+          captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-fk-4"),
+        ).toBeDefined(),
+      { timeout: 5000, interval: 25 },
+    );
     unsub();
 
     const turnDoneEvents = captured.filter((e) => e.type === "turn_done" && e.turn_id === "turn-fk-4");
@@ -323,7 +348,15 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     // Advance well past the 500ms window — confirm no force-kill fires.
     await vi.advanceTimersByTimeAsync(3000);
     vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 300));
+    // Wait for the cooperative turn_done from the error IPC handleEvent
+    // above — once it lands the entire error-path side effect has run.
+    await vi.waitFor(
+      () =>
+        expect(
+          captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-fk-a1"),
+        ).toBeDefined(),
+      { timeout: 5000, interval: 25 },
+    );
     unsub();
 
     // No stopped_forced block, no stopped_forced error event.
@@ -377,7 +410,10 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     // Advance past 500ms — would have force-killed without A.2.
     await vi.advanceTimersByTimeAsync(3000);
     vi.useRealTimers();
-    await new Promise((r) => setTimeout(r, 300));
+    // negative-space: status-change → idle publishes no turn_done — there is
+    // no positive arrival event to await. clearAbortDeadline ran synchronously
+    // inside handleEvent above, so the deadline timer is gone before the
+    // timer-advance; the absence assertions below can fire immediately.
     unsub();
 
     const rows = await getDb()

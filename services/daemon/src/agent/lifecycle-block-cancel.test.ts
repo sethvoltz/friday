@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 // FRI-78 follow-up: the worker emits `block-cancel` (instead of `block-stop`)
@@ -24,10 +24,6 @@ beforeEach(async () => {
   const liveTurns = await import("./live-turns.js");
   liveTurns.__resetForTest();
 });
-
-async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 30));
-}
 
 function makeFakeWorker(): unknown {
   return {
@@ -86,8 +82,19 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
       blockIndex: 0,
       messageId: "msg-cancel-1",
     } as never);
-    // handleBlockStart writes via fire-and-forget; let the row land.
-    await settle();
+    // handleBlockStart writes via fire-and-forget; wait for the SSE to land.
+    await vi.waitFor(
+      () =>
+        expect(
+          captured.find(
+            (e) =>
+              e.type === "block_start" &&
+              e.turn_id === "turn-cancel-1" &&
+              e.agent === "cancel-agent",
+          ),
+        ).toBeDefined(),
+      { timeout: 5000, interval: 25 },
+    );
 
     const startEvt = captured.find(
       (e) =>
@@ -107,7 +114,15 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
       type: "block-cancel",
       clientBlockId: "c-thinking-empty",
     } as never);
-    await settle();
+    await vi.waitFor(
+      () =>
+        expect(
+          captured.find(
+            (e) => e.type === "block_canceled" && e.block_id === blockId,
+          ),
+        ).toBeDefined(),
+      { timeout: 5000, interval: 25 },
+    );
 
     unsub();
 
@@ -141,7 +156,12 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
         clientBlockId: "c-unknown",
       } as never);
     }).not.toThrow();
-    await settle();
+    // negative-space: a stale block-cancel for an unknown clientBlockId must
+    // publish nothing. handleEvent is fire-and-forget — give the async chain
+    // a bounded real-time window to fire (so a regression would be visible)
+    // before asserting nothing was emitted. vi.waitFor would resolve on the
+    // first tick because the assertion already passes.
+    await new Promise((r) => setTimeout(r, 100));
 
     unsub();
 
