@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, gt } from "drizzle-orm";
 import { EventEmitter } from "node:events";
 import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
@@ -138,15 +138,30 @@ export async function pendingForAgent(toAgent: string): Promise<MailRow[]> {
 }
 
 /**
- * Boot recovery: all rows still pending when the daemon last shut down need to
- * be re-emitted on the bus so workers waiting on mail get woken up.
+ * FRI-118: replayPending caps re-emission at 7 days. Older pending rows
+ * remain in the DB (surfaced via `pendingForAgent` / `inbox` for human
+ * triage) but are NOT re-dispatched on the mail bus. The boot-storm of
+ * a multi-month accumulation — observed pre-2026-05-22 as 9 rows that
+ * survived ~10 daemon restarts because nothing aged them out — is what
+ * this guard closes. Paired with `mail-prune` (services/mail-prune.ts)
+ * which hard-deletes pending rows older than 30 days whose recipient
+ * is archived or missing.
+ */
+export const REPLAY_PENDING_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Boot recovery: re-emit every `delivery='pending'` row from the last
+ * REPLAY_PENDING_MAX_AGE_MS so workers waiting on mail get woken up.
  */
 export async function replayPending(): Promise<void> {
   const db = getDb();
+  const cutoff = new Date(Date.now() - REPLAY_PENDING_MAX_AGE_MS);
   const rows = await db
     .select()
     .from(schema.mail)
-    .where(eq(schema.mail.delivery, "pending"));
+    .where(
+      and(eq(schema.mail.delivery, "pending"), gt(schema.mail.ts, cutoff)),
+    );
   for (const r of rows) {
     const row = rowToMail(r);
     mailBus.emit(`mail:to:${row.toAgent}`, row);

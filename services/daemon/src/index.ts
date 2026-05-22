@@ -33,6 +33,10 @@ import {
   startInvariantAuditor,
   stopInvariantAuditor,
 } from "./agent/invariants.js";
+import {
+  startMailPruner,
+  stopMailPruner,
+} from "./services/mail-prune.js";
 import { composeDispatchPrompt } from "./agent/compose-dispatch-prompt.js";
 import "./hooks/register.js";
 import { renderPinnedFacts } from "./agent/pinned-facts.js";
@@ -203,6 +207,7 @@ async function main(): Promise<void> {
   const watchdog = startWatchdog();
   startTurnStallWatchdog();
   startInvariantAuditor();
+  startMailPruner();
   void reconcileLinear()
     .then((result) => {
       if (!result.ran) {
@@ -263,6 +268,7 @@ async function main(): Promise<void> {
     stopWatchdog();
     stopTurnStallWatchdog();
     stopInvariantAuditor();
+    stopMailPruner();
     void settingsListener.stop().catch(() => {
       /* shutdown best-effort; the process is about to exit */
     });
