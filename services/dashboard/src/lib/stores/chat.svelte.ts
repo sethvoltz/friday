@@ -1208,13 +1208,32 @@ export class ChatState {
     // re-keys it to its canonical user-block id.
     const item = sendQueue.enqueue({ agent: this.focusedAgent, text });
     this.addUser(text, { queueId: item.id });
+    // Same eager-inflight claim as ChatInput's send handler — see the
+    // long comment there. Without it, the Zero mutator's optimistic
+    // write fires applyZeroBlocks before flush() resolves and the
+    // FRI-85 safety net flashes "Agent didn't respond" for the
+    // entire submit-to-first-block gap.
+    const agent = this.focusedAgent;
+    const eagerTurnId = `t_${item.queueBlockId}`;
+    const claimedInflight = this.inflightTurnIdByAgent[agent] == null;
+    if (claimedInflight) this.markInflight(agent, eagerTurnId);
     void sendQueue.flush().then((result) => {
+      let dispatchedEagerTurn = false;
       for (const s of result.sent) {
         this.confirmPending(s.queueId, s.turnId);
-        this.markInflight(this.focusedAgent, s.turnId);
+        if (!s.queued) this.markInflight(agent, s.turnId);
+        if (s.turnId === eagerTurnId && !s.queued) dispatchedEagerTurn = true;
       }
       for (const qid of result.failed) this.markPendingFailed(qid);
       for (const qid of result.retrying) this.markPendingRetrying(qid);
+      // Release the eager claim if the send didn't dispatch immediately.
+      if (
+        claimedInflight &&
+        !dispatchedEagerTurn &&
+        this.inflightTurnIdByAgent[agent] === eagerTurnId
+      ) {
+        this.markInflight(agent, null);
+      }
     });
   }
 

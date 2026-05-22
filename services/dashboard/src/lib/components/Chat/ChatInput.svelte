@@ -439,6 +439,22 @@
       queueId: queueItem.id,
       attachments: attachments.length > 0 ? attachments : undefined,
     });
+    // Eagerly claim the per-agent inflight slot before the Zero mutator's
+    // optimistic local write commits. `zeroSync.sendUserMessage` derives
+    // the turnId as `t_${blockId}`, so the queue item's pre-minted
+    // queueBlockId already pins the eventual turnId. Without the eager
+    // claim, this ordering creates a ~submit-to-first-block window where
+    // applyZeroBlocks fires for the new user_chat block, parseBlocks's
+    // safety net sees no inflight match, and the user sees an "Agent
+    // didn't respond" bubble that flashes for as long as it takes the
+    // model to emit its first stream_event (sometimes 20+ seconds on
+    // tool-call-heavy turns). Only claim if the slot is free — a queued
+    // send (a prior turn is still running) must not displace the running
+    // turn's slot; the SSE `turn_started` for the queued turn will own
+    // the slot when it actually dispatches.
+    const eagerTurnId = `t_${queueItem.queueBlockId}`;
+    const claimedInflight = chat.inflightTurnId === null;
+    if (claimedInflight) chat.inflightTurnId = eagerTurnId;
     // Release object URLs and clear the chip row.
     for (const a of pendingAttachments) {
       if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
@@ -451,6 +467,7 @@
     await tick();
     autoresize();
     const result = await sendQueue.flush();
+    let dispatchedEagerTurn = false;
     for (const s of result.sent) {
       // FIX_FORWARD 2.6: re-key the pending bubble to its canonical
       // turn-derived id so the daemon's `block_complete` for the user-role
@@ -464,9 +481,24 @@
       // a click on Stop targets the wrong turn id). The SSE `turn_started`
       // event will set the slot when this turn actually dispatches.
       if (!s.queued) chat.inflightTurnId = s.turnId;
+      if (s.turnId === eagerTurnId && !s.queued) dispatchedEagerTurn = true;
     }
     for (const qid of result.failed) chat.markPendingFailed(qid);
     for (const qid of result.retrying) chat.markPendingRetrying(qid);
+    // Release the eager claim if the server didn't confirm an immediate
+    // dispatch for this turn — either the send failed outright, or the
+    // daemon queued it behind a prior turn. In both cases the slot must
+    // not stay pinned to the eager id: a failed send has no SSE pipeline
+    // to clear it later, and a queued send's eventual SSE `turn_started`
+    // is the authoritative slot owner (the dispatch may be reordered or
+    // even canceled before then).
+    if (
+      claimedInflight &&
+      !dispatchedEagerTurn &&
+      chat.inflightTurnId === eagerTurnId
+    ) {
+      chat.inflightTurnId = null;
+    }
   }
 
   async function dispatchSystem(name: string, args: string): Promise<void> {
