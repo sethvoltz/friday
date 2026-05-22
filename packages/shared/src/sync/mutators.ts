@@ -426,12 +426,14 @@ export interface ReloadAppArgs {
 //
 // `reason` is required because the linked-ticket closer behaves
 // differently per reason (e.g., 'completed' marks the ticket done;
-// 'abandoned' marks it abandoned; 'refork' is a no-op for tickets).
-// The dashboard's `/archive <name>` slash command surfaces a
-// dropdown to pick the reason; the default is 'abandoned' to match
-// the legacy slash-command default.
+// 'abandoned' marks it abandoned). The dashboard's `/archive <name>`
+// slash command surfaces a dropdown to pick the reason; the default is
+// 'abandoned' to match the legacy slash-command default. Forced reforks
+// (/clear, watchdog refork) go through `forceWorkerRefork` and never
+// touch the archive write path — that's why the union doesn't include
+// a 'refork' variant.
 
-export type ArchiveReason = "completed" | "abandoned" | "failed" | "refork";
+export type ArchiveReason = "completed" | "abandoned" | "failed";
 
 export interface ArchiveAgentArgs {
   name: string;

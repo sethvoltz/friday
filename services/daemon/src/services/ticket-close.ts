@@ -22,7 +22,7 @@ import {
 } from "@friday/shared/services";
 import { logger } from "../log.js";
 
-export type ArchiveReason = "completed" | "abandoned" | "failed" | "refork";
+export type ArchiveReason = "completed" | "abandoned" | "failed";
 
 interface CloseInput {
   ticketId: string | null | undefined;
@@ -30,15 +30,13 @@ interface CloseInput {
   agentName: string;
 }
 
-function reasonToStatus(reason: ArchiveReason): TicketStatus | null {
+function reasonToStatus(reason: ArchiveReason): TicketStatus {
   switch (reason) {
     case "completed":
       return "done";
     case "abandoned":
     case "failed":
       return "closed";
-    case "refork":
-      return null;
   }
 }
 
@@ -61,7 +59,6 @@ export async function closeTicketForArchive(input: CloseInput): Promise<void> {
   if (!ticketId) return;
 
   const status = reasonToStatus(reason);
-  if (status === null) return; // refork — leave the ticket alone
 
   try {
     const existing = await getTicket(ticketId);

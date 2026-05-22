@@ -27,7 +27,7 @@ import { renderPinnedFacts } from "./pinned-facts.js";
 import * as registry from "./registry.js";
 import {
   dispatchTurn,
-  archiveAgent,
+  forceWorkerRefork,
   liveAgentNames,
   peekLiveWorker,
   recordUserBlock,
@@ -120,35 +120,16 @@ async function refork(agentName: string): Promise<void> {
   // raced the dying worker's exit handler, which then live.delete()d
   // the *new* worker's slot.
   //
-  // F4-B (FRI-4): `archiveAgent` returns whatever prompts the user had
-  // queued on the old worker's `nextPrompts`. Without this, the cheap
+  // F4-B (FRI-4): `forceWorkerRefork` returns whatever prompts the user
+  // had queued on the old worker's `nextPrompts`. Without this, the cheap
   // failure mode of "user typed a message while the previous turn was
   // hung; the worker died before the SDK saw it" silently drops their
   // message. Redispatch them on the fresh worker after the timeout
   // notice (or as the only payload if they're all we have).
-  // Refork: tear down the hung worker and re-register a fresh one. The
-  // linked ticket (if any) must not be closed — work is continuing.
-  const drained = await archiveAgent(agentName, { reason: "refork" });
-
-  // ADR-022 (FRI-102 AC #11): refork preserves the row's `spawn_reason`.
-  // AgentEntry omits this field (it's audit metadata, not part of the
-  // wire shape), so read it directly off the registry row before
-  // re-registering. Losing it on every refork would silently strip the
-  // audit trail the column exists to provide.
-  const priorSpawnReason = await registry.getSpawnReason(agentName);
-
-  // The registry row was archived by archiveAgent. Re-register so the new
-  // turn has a row to bind onto.
-  await registry.registerAgent({
-    name: agentName,
-    type: a.type,
-    parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
-    ticketId: "ticketId" in a ? a.ticketId ?? undefined : undefined,
-    worktreePath:
-      "worktreePath" in a ? a.worktreePath ?? undefined : undefined,
-    branch: "branch" in a ? a.branch ?? undefined : undefined,
-    spawnReason: priorSpawnReason,
-  });
+  // Refork: tear down the hung worker without archiving the row — work
+  // is continuing, the linked ticket (if any) must not be closed, and
+  // the agent stays dispatchable for the replacement fork below.
+  const drained = await forceWorkerRefork(agentName);
 
   const cfg = loadConfig();
   const stack = readPromptStack(a.type, []);

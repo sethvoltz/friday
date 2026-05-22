@@ -191,14 +191,9 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
 });
 
 describe("agents status enum + archive_reason", () => {
-  it("accepts the four ArchiveReason values", async () => {
+  it("accepts the three ArchiveReason values", async () => {
     const db = getDb();
-    for (const reason of [
-      "completed",
-      "abandoned",
-      "failed",
-      "refork",
-    ] as const) {
+    for (const reason of ["completed", "abandoned", "failed"] as const) {
       await db
         .insert(schema.agents)
         .values({
@@ -217,7 +212,7 @@ describe("agents status enum + archive_reason", () => {
       })
       .from(schema.agents);
     expect(rows.map((r) => r.reason).sort()).toEqual(
-      ["abandoned", "completed", "failed", "refork"].sort(),
+      ["abandoned", "completed", "failed"].sort(),
     );
   });
 });

@@ -112,6 +112,7 @@ import {
   archiveAgent,
   dispatchTurn,
   findAgentByTurnId,
+  forceWorkerRefork,
   peekLiveWorker,
   recordUserBlock,
   removeQueuedPrompt,
@@ -1884,12 +1885,12 @@ async function handleSystemCommand(
       const name = args || cfg.orchestratorName;
       const a = await registry.getAgent(name);
       if (!a) return json(res, 404, { error: `agent not found: ${name}` });
-      // If a worker is currently running, archive it so the next turn forks
+      // If a worker is currently running, tear it down so the next turn forks
       // a fresh process with no `resume` arg. setStatus + clearSession alone
-      // wouldn't take effect until the worker exits naturally. Use "refork"
-      // so the linked ticket (if any) isn't moved to a terminal status —
-      // the agent is being cleared, not closed.
-      void archiveAgent(name, { reason: "refork" });
+      // wouldn't take effect until the worker exits naturally. Await the
+      // refork before clearSession so the exit handler's setStatus(agent,
+      // 'idle') reset can't race the session wipe.
+      await forceWorkerRefork(name);
       await registry.clearSession(name);
       // Phase 5: `agent_lifecycle:refork` SSE retired — Zero replicates
       // the session-clear (agents.session_id=null) reactively.

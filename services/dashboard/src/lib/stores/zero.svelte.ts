@@ -1217,7 +1217,7 @@ class ZeroSyncStore {
    */
   archiveAgent(args: {
     name: string;
-    reason?: "completed" | "abandoned" | "failed" | "refork";
+    reason?: "completed" | "abandoned" | "failed";
   }): MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero!.mutate.archiveAgent({
