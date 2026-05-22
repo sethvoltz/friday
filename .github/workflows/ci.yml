@@ -96,6 +96,39 @@ jobs:
       - name: Svelte check
         run: pnpm --filter @friday/dashboard check
 
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    # FRI-117: peer of `checks` (svelte-check). Runs eslint flat-config +
+    # prettier format-check across the workspace. Build is not required —
+    # the initial ruleset deliberately avoids type-aware rules (e.g.
+    # @typescript-eslint/no-floating-promises) that would need a
+    # parserOptions.project across every package's tsconfig.
+
+    strategy:
+      matrix:
+        node-version: [22]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Eslint
+        run: pnpm lint
+
+      - name: Prettier
+        run: pnpm format:check
+
   e2e:
     name: E2E (sync harness)
     runs-on: ubuntu-latest
