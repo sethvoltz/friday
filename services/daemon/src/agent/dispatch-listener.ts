@@ -48,8 +48,8 @@ import {
   peekLiveWorker,
 } from "./lifecycle.js";
 import { renderPinnedFacts } from "./pinned-facts.js";
-import { wrapWithRecall } from "./recall.js";
-import { matchSkillInvocation } from "../api/server.js";
+import { composeDispatchPrompt } from "./compose-dispatch-prompt.js";
+import { matchSkillInvocation } from "../skills/match.js";
 import { logger } from "../log.js";
 
 const { Client } = pgPkg;
@@ -138,11 +138,18 @@ async function processPendingBlockRow(id: string): Promise<void> {
   );
   const skillMatch = matchSkillInvocation(userText, agentRow.type);
   const promptText = skillMatch ? skillMatch.userText : userText;
-  const systemPrompt = skillMatch
-    ? `${baseSystemPrompt}\n\n<skill-context name="${skillMatch.skill.name}">\n${skillMatch.skill.body}\n</skill-context>`
-    : baseSystemPrompt;
-  const allowedToolsOverride = skillMatch?.skill.allowedTools ?? undefined;
-  const wrappedPrompt = await wrapWithRecall(promptText, promptText, "user_chat");
+  const {
+    body: wrappedPrompt,
+    systemPrompt: dispatchSystemPrompt,
+    allowedToolsOverride,
+  } = await composeDispatchPrompt({
+    intentText: promptText,
+    intentTag: "user_chat",
+    body: promptText,
+    agentType: agentRow.type,
+    baseSystemPrompt,
+    skillMatch: skillMatch ?? undefined,
+  });
 
   // Decide queued-vs-immediate using the live-worker peek. Mirrors
   // the legacy REST path's `willQueue` decision.
@@ -174,7 +181,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
       agentName,
       agentType: agentRow.type,
       workingDirectory: turnCwd,
-      systemPrompt,
+      systemPrompt: dispatchSystemPrompt,
       prompt: wrappedPrompt,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
       turnId: row.turnId,

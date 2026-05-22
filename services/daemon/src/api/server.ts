@@ -9,11 +9,9 @@ import {
   isLocalHost,
   loadConfig,
   composeSystemPrompt,
-  loadSkills,
   normalizeModelConfig,
   readPromptStack,
   resolveDaemonPort,
-  skillsForAgent,
 } from "@friday/shared";
 import {
   addComment,
@@ -49,8 +47,10 @@ import {
   updateEntry,
   type MemoryEntry,
 } from "@friday/memory";
+import { runHooks } from "@friday/shared";
 import { renderPinnedFacts } from "../agent/pinned-facts.js";
-import { wrapWithRecall } from "../agent/recall.js";
+import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
+import { matchSkillInvocation } from "../skills/match.js";
 import { resolveRecipient, validateRecipient } from "../comms/recipient.js";
 import {
   DEFAULT_RULE,
@@ -221,18 +221,25 @@ async function handle(
       pinnedFacts,
     );
 
-    // Skill detection: if the user typed `/<name> <args>`, look up the skill
-    // and inject its body as a per-turn `<skill-context>` block. The user
-    // message becomes the args portion; if the skill restricts allowedTools,
-    // that restriction applies for this turn only.
+    // Skill detection: if the user typed `/<name> <args>`, the user-message
+    // body becomes the args portion. The skill-context block + per-turn
+    // allowedTools restriction are emitted by the before_prompt_build hook
+    // when composeDispatchPrompt threads skillMatch through.
     const skillMatch = matchSkillInvocation(body.text, agentRow.type);
     const userText = skillMatch ? skillMatch.userText : body.text;
-    const systemPrompt = skillMatch
-      ? `${baseSystemPrompt}\n\n<skill-context name="${skillMatch.skill.name}">\n${skillMatch.skill.body}\n</skill-context>`
-      : baseSystemPrompt;
-    const allowedToolsOverride = skillMatch?.skill.allowedTools ?? undefined;
 
-    const wrappedPrompt = await wrapWithRecall(userText, userText, "user_chat");
+    const {
+      body: wrappedPrompt,
+      systemPrompt: dispatchSystemPrompt,
+      allowedToolsOverride,
+    } = await composeDispatchPrompt({
+      intentText: userText,
+      intentTag: "user_chat",
+      body: userText,
+      agentType: agentRow.type,
+      baseSystemPrompt,
+      skillMatch: skillMatch ?? undefined,
+    });
 
     // Persist the user's typed prompt as a `role='user'`, `source='user_chat'`
     // block before dispatching. Stays scoped to the user's literal input —
@@ -281,7 +288,7 @@ async function handle(
         agentName,
         agentType: agentRow.type,
         workingDirectory: turnCwd,
-        systemPrompt,
+        systemPrompt: dispatchSystemPrompt,
         prompt: wrappedPrompt,
         attachments: attachments.length > 0 ? attachments : undefined,
         turnId,
@@ -503,7 +510,14 @@ async function handle(
       },
       pinnedFacts,
     );
-    const wrappedPrompt = await wrapWithRecall(parsedText, parsedText, "user_chat");
+    const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } =
+      await composeDispatchPrompt({
+        intentText: parsedText,
+        intentTag: "user_chat",
+        body: parsedText,
+        agentType: agentRow.type,
+        baseSystemPrompt,
+      });
     const modelCfg = normalizeModelConfig(cfg.model);
     const resumeCwd = await registry.workingDirectoryFor(agentRow);
     dispatchTurn({
@@ -512,7 +526,7 @@ async function handle(
         agentName,
         agentType: agentRow.type,
         workingDirectory: resumeCwd,
-        systemPrompt: baseSystemPrompt,
+        systemPrompt: dispatchSystemPrompt,
         prompt: wrappedPrompt,
         turnId, // <-- reuse the failed turn's id
         model: modelCfg.name,
@@ -691,16 +705,28 @@ async function handle(
       },
       pinnedFacts,
     );
+    const bootstrapResults = await runHooks("agent:bootstrap", {
+      agentName: body.name,
+      agentType: body.type,
+      workingDirectory: worktreePath ?? workingDirectory,
+      branch,
+    });
+    const bootstrapAppends = bootstrapResults
+      .map((r) => r?.appendSystemPrompt)
+      .filter((s): s is string => typeof s === "string" && s.length > 0);
     const systemPrompt =
-      body.type === "builder" && worktreePath
-        ? `${baseSystemPrompt}\n\n---\n\nYou are running in a git worktree at \`${worktreePath}\` on branch \`${branch}\`. **Do not read, write, or modify files outside this directory.** All Bash commands run with this directory as cwd by default; do not \`cd\` outside it.`
+      bootstrapAppends.length > 0
+        ? `${baseSystemPrompt}\n\n---\n\n${bootstrapAppends.join("\n\n")}`
         : baseSystemPrompt;
     const modelCfg = normalizeModelConfig(cfg.model);
-    const wrappedSpawnPrompt = await wrapWithRecall(
-      body.prompt,
-      body.prompt,
-      "agent_spawn",
-    );
+    const { body: wrappedSpawnPrompt, systemPrompt: spawnSystemPrompt } =
+      await composeDispatchPrompt({
+        intentText: body.prompt,
+        intentTag: "agent_spawn",
+        body: body.prompt,
+        agentType: body.type,
+        baseSystemPrompt: systemPrompt,
+      });
     // FRI-71: persist the spawn-time prompt as a user block so the very first
     // turn renders with the originating user bubble (not just an orphan
     // assistant reply). The session id isn't known yet — `recordUserBlock`
@@ -726,7 +752,7 @@ async function handle(
         agentName: body.name,
         agentType: body.type,
         workingDirectory,
-        systemPrompt,
+        systemPrompt: spawnSystemPrompt,
         prompt: wrappedSpawnPrompt,
         turnId,
         model: body.model ?? modelCfg.name,
@@ -1908,7 +1934,14 @@ async function handleSystemCommand(
           seedPinnedFacts,
         );
         const modelCfg = normalizeModelConfig(cfg.model);
-        const wrappedTopic = await wrapWithRecall(topic, topic, "scratch");
+        const { body: wrappedTopic, systemPrompt: scratchSystemPrompt } =
+          await composeDispatchPrompt({
+            intentText: topic,
+            intentTag: "scratch",
+            body: topic,
+            agentType: "bare",
+            baseSystemPrompt: systemPrompt,
+          });
         // FRI-71: persist the seed topic as a user block so the bare agent's
         // first turn renders with the originating user bubble.
         try {
@@ -1931,7 +1964,7 @@ async function handleSystemCommand(
             agentName: name,
             agentType: "bare",
             workingDirectory: process.cwd(),
-            systemPrompt,
+            systemPrompt: scratchSystemPrompt,
             prompt: wrappedTopic,
             turnId: seedTurnId,
             model: modelCfg.name,
@@ -1958,26 +1991,6 @@ async function handleSystemCommand(
     default:
       return json(res, 404, { error: `unknown system command: ${body.command}` });
   }
-}
-
-/**
- * Detect a `/<skill-name> ...args` invocation at the start of a user message.
- * Returns the matched Skill plus the remaining args (the user message minus
- * the slash command), or null if no match. Filters by agent type.
- */
-export function matchSkillInvocation(
-  text: string,
-  agentType: AgentEntry["type"],
-): { skill: ReturnType<typeof loadSkills>[number]; userText: string } | null {
-  const m = /^\/([a-z][a-z0-9-]*)(?:\s+([\s\S]*))?$/.exec(text.trim());
-  if (!m) return null;
-  const name = m[1];
-  const rest = (m[2] ?? "").trim();
-  const all = loadSkills();
-  const eligible = skillsForAgent(all, agentType);
-  const skill = eligible.find((s) => s.name === name);
-  if (!skill) return null;
-  return { skill, userText: rest };
 }
 
 /**

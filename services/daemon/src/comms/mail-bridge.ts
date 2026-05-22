@@ -31,7 +31,7 @@ import {
   wakeAgent,
   wakeAgentCritical,
 } from "../agent/lifecycle.js";
-import { wrapWithRecall } from "../agent/recall.js";
+import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
 import { renderPinnedFacts } from "../agent/pinned-facts.js";
 import * as registry from "../agent/registry.js";
 import { randomUUID } from "node:crypto";
@@ -132,12 +132,19 @@ async function maybeSpawnFromMail(agentName: string): Promise<void> {
   const modelCfg = normalizeModelConfig(cfg.model);
   const turnId = `t_${randomUUID()}`;
 
-  // FIX_FORWARD 2.5: wrap with recall. Use the joined mail bodies as the
-  // intent text so the memory query reflects what the recipient is being
-  // asked to act on, not the surrounding mail-listing prose.
+  // Use the joined mail bodies as the intent text so the memory query
+  // reflects what the recipient is being asked to act on, not the
+  // surrounding mail-listing prose.
   const intent = pending.map((m) => m.body).join("\n\n");
   const mailPrompt = buildMailPrompt(agentName, pending);
-  const wrappedPrompt = await wrapWithRecall(intent, mailPrompt, "mail");
+  const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } =
+    await composeDispatchPrompt({
+      intentText: intent,
+      intentTag: "mail",
+      body: mailPrompt,
+      agentType: agentRow.type,
+      baseSystemPrompt: systemPrompt,
+    });
   const workingDirectory = await registry.workingDirectoryFor(agentRow);
   dispatchTurn({
     agentName,
@@ -145,7 +152,7 @@ async function maybeSpawnFromMail(agentName: string): Promise<void> {
       agentName,
       agentType: agentRow.type,
       workingDirectory,
-      systemPrompt,
+      systemPrompt: dispatchSystemPrompt,
       prompt: wrappedPrompt,
       turnId,
       model: modelCfg.name,

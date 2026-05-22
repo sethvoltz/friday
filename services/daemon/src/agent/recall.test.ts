@@ -1,67 +1,159 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createTestDb, type TestDbHandle } from "@friday/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { __resetHooksForTest, registerHook } from "@friday/shared";
+import { composeDispatchPrompt } from "./compose-dispatch-prompt.js";
 
-// FIX_FORWARD 2.5: safeRecall is best-effort. wrapWithRecall returns the
-// body unchanged when recall is empty; prepends `<memory-context>` when
-// memory has hits. We don't seed real memory entries here; instead we
-// verify behaviour against an empty store (the most common path on a
-// fresh daemon) and verify that a thrown buildAutoRecallBlock is caught
-// and the body still flows through.
-
-let handle: TestDbHandle;
-
-beforeAll(async () => {
-  handle = await createTestDb({ label: "recall" });
+beforeEach(() => {
+  __resetHooksForTest();
 });
 
-afterAll(async () => {
-  await handle.drop();
+afterEach(() => {
+  __resetHooksForTest();
+  vi.resetModules();
 });
 
-describe("recall helpers (FIX_FORWARD 2.5)", () => {
-  it("wrapWithRecall returns the body verbatim when memory is empty", async () => {
-    const { wrapWithRecall } = await import("./recall.js");
-    // Distinct intentText vs body so a regression that accidentally
-    // emitted the intent into the output (instead of the body) would
-    // surface — the previous version passed body for both.
-    const out = await wrapWithRecall(
-      "recall query",
-      "response body",
-      "user_chat",
+describe("memory recall hook (FRI-89)", () => {
+  it("memoryRecallHook returns void when memory is empty so the dispatch site appends nothing", async () => {
+    vi.resetModules();
+    vi.doMock("@friday/memory", () => ({
+      buildAutoRecallBlock: async () => "",
+    }));
+    const { memoryRecallHook } = await import(
+      "../hooks/memory-recall-hook.js"
     );
-    expect(out).toBe("response body");
+
+    const result = await memoryRecallHook({
+      intent: "query",
+      intentTag: "user_chat",
+      body: "user body",
+      agentType: "orchestrator",
+    });
+
+    expect(result).toBeUndefined();
   });
 
-  it("wrapWithRecall preserves the body when buildAutoRecallBlock throws", async () => {
+  it("memoryRecallHook surfaces the <memory-context> block via appendSystemPrompt when memory has hits", async () => {
+    vi.resetModules();
+    vi.doMock("@friday/memory", () => ({
+      buildAutoRecallBlock: async () =>
+        "<memory-context>\nrelevant fact\n</memory-context>",
+    }));
+    const { memoryRecallHook } = await import(
+      "../hooks/memory-recall-hook.js"
+    );
+
+    const result = await memoryRecallHook({
+      intent: "query",
+      intentTag: "user_chat",
+      body: "user body",
+      agentType: "orchestrator",
+    });
+
+    expect(result).toEqual({
+      appendSystemPrompt:
+        "<memory-context>\nrelevant fact\n</memory-context>",
+    });
+  });
+
+  it("memoryRecallHook returns void (best-effort) when buildAutoRecallBlock throws", async () => {
     vi.resetModules();
     vi.doMock("@friday/memory", () => ({
       buildAutoRecallBlock: () => {
         throw new Error("memory backend down");
       },
     }));
-    const { wrapWithRecall } = await import("./recall.js");
-    const body = "fallback path body";
-    expect(await wrapWithRecall("intent", body, "mail")).toBe(body);
-    vi.unmock("@friday/memory");
-    vi.resetModules();
+    const { memoryRecallHook } = await import(
+      "../hooks/memory-recall-hook.js"
+    );
+
+    const result = await memoryRecallHook({
+      intent: "query",
+      intentTag: "mail",
+      body: "fallback path body",
+      agentType: "orchestrator",
+    });
+
+    expect(result).toBeUndefined();
   });
 
-  it("wrapWithRecall prepends the block when buildAutoRecallBlock returns content", async () => {
-    vi.resetModules();
-    vi.doMock("@friday/memory", () => ({
-      buildAutoRecallBlock: async (_t: string) =>
-        "<memory-context>\nrelevant fact\n</memory-context>",
+  it("composeDispatchPrompt routes appendSystemPrompt into systemPrompt and leaves body untouched", async () => {
+    registerHook("before_prompt_build", async () => ({
+      appendSystemPrompt: "<memory-context>\nrelevant fact\n</memory-context>",
     }));
-    const { wrapWithRecall } = await import("./recall.js");
-    const body = "actual prompt body";
-    const out = await wrapWithRecall("intent", body, "scheduled");
-    // Pin the exact join — `\n\n` between the block and the body is the
-    // documented contract. `startsWith` + `endsWith` would let a regression
-    // that fused the two (`...</memory-context>actual prompt body`) pass.
-    expect(out).toBe(
-      "<memory-context>\nrelevant fact\n</memory-context>\n\n" + body,
+
+    const { body, systemPrompt } = await composeDispatchPrompt({
+      intentText: "user query",
+      intentTag: "user_chat",
+      body: "actual user body",
+      agentType: "orchestrator",
+      baseSystemPrompt: "you are a helpful agent",
+    });
+
+    expect(body).toBe("actual user body");
+    expect(body).not.toContain("<memory-context>");
+    expect(systemPrompt).toBe(
+      "you are a helpful agent\n\n<memory-context>\nrelevant fact\n</memory-context>",
     );
-    vi.unmock("@friday/memory");
-    vi.resetModules();
+  });
+
+  it("composeDispatchPrompt leaves body and systemPrompt unchanged when no handlers are registered", async () => {
+    const { body, systemPrompt } = await composeDispatchPrompt({
+      intentText: "x",
+      intentTag: "scheduled",
+      body: "body",
+      agentType: "scheduled",
+      baseSystemPrompt: "base",
+    });
+
+    expect(body).toBe("body");
+    expect(systemPrompt).toBe("base");
+  });
+
+  it("composeDispatchPrompt threads skillMatch through hook ctx", async () => {
+    let seenName: string | undefined;
+    let seenUserText: string | undefined;
+    registerHook("before_prompt_build", async (ctx) => {
+      seenName = ctx.skillMatch?.skill.name;
+      seenUserText = ctx.skillMatch?.userText;
+    });
+
+    await composeDispatchPrompt({
+      intentText: "args",
+      intentTag: "user_chat",
+      body: "args",
+      agentType: "orchestrator",
+      baseSystemPrompt: "base",
+      skillMatch: {
+        skill: {
+          name: "skill-foo",
+          description: "test",
+          agents: null,
+          allowedTools: [],
+          autoInvoke: false,
+          body: "skill body",
+          source: "user",
+          filePath: "/tmp/foo.md",
+        },
+        userText: "args",
+      },
+    });
+
+    expect(seenName).toBe("skill-foo");
+    expect(seenUserText).toBe("args");
+  });
+
+  it("composeDispatchPrompt propagates allowedToolsOverride from handler results", async () => {
+    registerHook("before_prompt_build", async () => ({
+      allowedToolsOverride: ["Read", "Grep"],
+    }));
+
+    const { allowedToolsOverride } = await composeDispatchPrompt({
+      intentText: "x",
+      intentTag: "user_chat",
+      body: "x",
+      agentType: "orchestrator",
+      baseSystemPrompt: "base",
+    });
+
+    expect(allowedToolsOverride).toEqual(["Read", "Grep"]);
   });
 });

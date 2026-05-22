@@ -33,7 +33,8 @@ import {
   startInvariantAuditor,
   stopInvariantAuditor,
 } from "./agent/invariants.js";
-import { wrapWithRecall } from "./agent/recall.js";
+import { composeDispatchPrompt } from "./agent/compose-dispatch-prompt.js";
+import "./hooks/register.js";
 import { renderPinnedFacts } from "./agent/pinned-facts.js";
 import { agentCwdPinV1 } from "./state-migrations/agent-cwd-pin-v1.js";
 import { runStateMigrations } from "./state-migrations/runner.js";
@@ -384,18 +385,24 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
           pending: pending.length,
         });
         try {
-          // FIX_FORWARD 2.5: wrap with recall on the joined mail bodies.
           const intent = pending.map((m) => m.body).join("\n\n");
           const mailPrompt = buildMailPrompt(a.name, pending);
-          const wrappedMailPrompt = await wrapWithRecall(intent, mailPrompt, "mail");
+          const { body: dispatchBody, systemPrompt: finalSystemPrompt } =
+            await composeDispatchPrompt({
+              intentText: intent,
+              intentTag: "mail",
+              body: mailPrompt,
+              agentType: a.type,
+              baseSystemPrompt: systemPrompt,
+            });
           dispatchTurn({
             agentName: a.name,
             options: {
               agentName: a.name,
               agentType: a.type,
               workingDirectory: cwd,
-              systemPrompt,
-              prompt: wrappedMailPrompt,
+              systemPrompt: finalSystemPrompt,
+              prompt: dispatchBody,
               turnId,
               model: modelCfg.name,
               thinking: modelCfg.thinking,
@@ -494,7 +501,14 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
       },
       pinnedFacts,
     );
-    const wrappedPrompt = await wrapWithRecall(text, text, "user_chat");
+    const { body: dispatchBody, systemPrompt: finalSystemPrompt } =
+      await composeDispatchPrompt({
+        intentText: text,
+        intentTag: "user_chat",
+        body: text,
+        agentType: a.type,
+        baseSystemPrompt: systemPrompt,
+      });
     const queuedCwd = await registry.workingDirectoryFor(a);
     try {
       dispatchTurn({
@@ -503,8 +517,8 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
           agentName: a.name,
           agentType: a.type,
           workingDirectory: queuedCwd,
-          systemPrompt,
-          prompt: wrappedPrompt,
+          systemPrompt: finalSystemPrompt,
+          prompt: dispatchBody,
           attachments,
           turnId: block.turnId,
           model: modelCfg.name,

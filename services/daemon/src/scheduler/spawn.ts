@@ -23,7 +23,7 @@ import {
 import { logger } from "../log.js";
 import { dispatchTurn, recordUserBlock } from "../agent/lifecycle.js";
 import { renderPinnedFacts } from "../agent/pinned-facts.js";
-import { wrapWithRecall } from "../agent/recall.js";
+import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
 import * as registry from "../agent/registry.js";
 import {
   buildFirstTurnWithState,
@@ -59,18 +59,21 @@ export async function spawnScheduledRun(
   );
   const modelCfg = normalizeModelConfig(cfg.model);
 
-  // FIX_FORWARD 2.5: wrap with recall against the raw task prompt — the
-  // first-turn template adds state-injection scaffolding that would noise
-  // the memory query otherwise.
+  // Use the raw task prompt as recall intent — the first-turn template
+  // adds state-injection scaffolding that would noise the memory query
+  // otherwise.
   const promptBody = buildFirstTurnWithState({
     scheduleName: scheduleRow.name,
     taskPrompt: scheduleRow.taskPrompt,
   });
-  const prompt = await wrapWithRecall(
-    scheduleRow.taskPrompt,
-    promptBody,
-    "scheduled",
-  );
+  const { body: prompt, systemPrompt: dispatchSystemPrompt } =
+    await composeDispatchPrompt({
+      intentText: scheduleRow.taskPrompt,
+      intentTag: "scheduled",
+      body: promptBody,
+      agentType: "scheduled",
+      baseSystemPrompt: systemPrompt,
+    });
 
   const turnId = `t_${randomUUID()}`;
 
@@ -120,7 +123,7 @@ export async function spawnScheduledRun(
       agentName: scheduleRow.name,
       agentType: "scheduled",
       workingDirectory: process.cwd(),
-      systemPrompt,
+      systemPrompt: dispatchSystemPrompt,
       prompt,
       turnId,
       model: modelCfg.name,
