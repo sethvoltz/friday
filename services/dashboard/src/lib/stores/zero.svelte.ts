@@ -452,7 +452,7 @@ class ZeroSyncStore {
       this.errorMessage = err instanceof Error ? err.message : String(err);
       // Surface unexpected init failures in dev — Phase 6 will route
       // these through the connectivity widget.
-      // eslint-disable-next-line no-console
+       
       console.error("[zeroSync] init failed:", err);
       // Report to the server-side diagnostic endpoint so a watcher on
       // `friday logs dashboard -f` can see what crashed on a phone /

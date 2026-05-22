@@ -80,7 +80,7 @@ function verifyDaemonSecretPermissions(): void {
   if ((perm & 0o077) !== 0) {
     const octal = perm.toString(8).padStart(3, "0");
     const msg = `FATAL: daemon-secret file ${DAEMON_SECRET_PATH} has mode ${octal} (group/other bits set). Run: chmod 0600 ${DAEMON_SECRET_PATH}`;
-    // eslint-disable-next-line no-console
+     
     console.error(msg);
     process.exit(1);
   }

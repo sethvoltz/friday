@@ -217,13 +217,13 @@ test.describe("user-visible round-trip (item #50 — plan §4 step 4e)", () => {
             await c.end();
           }
         });
-      // eslint-disable-next-line no-console
+       
       console.error("[live-typing] marker not found; recent rows:", JSON.stringify(all, null, 2));
-      // eslint-disable-next-line no-console
+       
       console.error("[live-typing] marker:", marker);
-      // eslint-disable-next-line no-console
+       
       console.error("[live-typing] mutator + sync calls:", JSON.stringify(mutatorCalls, null, 2));
-      // eslint-disable-next-line no-console
+       
       console.error("[live-typing] console errors:", consoleErrors);
     }
     expect(rows.length).toBe(1);

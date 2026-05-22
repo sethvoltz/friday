@@ -156,7 +156,7 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
     // Build a ChildState shell — killChildGroup only reads `proc.pid`
     // and `spec.name`. The rest is irrelevant to this call.
     const state: ChildState = {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       spec: { name: "daemon" } as any,
       proc,
       exitTimestamps: [],
@@ -209,7 +209,7 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
     }
 
     const state: ChildState = {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       spec: { name: "zero-cache" } as any,
       proc,
       exitTimestamps: [],
@@ -245,7 +245,7 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
     await new Promise<void>((resolve) => proc!.on("exit", () => resolve()));
 
     const state: ChildState = {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       spec: { name: "daemon" } as any,
       proc,
       exitTimestamps: [],

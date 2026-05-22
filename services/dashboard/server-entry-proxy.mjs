@@ -99,7 +99,7 @@ export function createZeroUpgradeHandler(opts) {
         /* already destroyed */
       }
       if (err && debug) {
-        // eslint-disable-next-line no-console
+         
         console.error(`[zero-proxy] ${where} error:`, err.message);
       }
     };

@@ -60,7 +60,7 @@ for (const [source, url] of PUBLIC_BASE_URL_SOURCES) {
     const msg =
       `FATAL: ${source}=${url} is not present in BetterAuth trustedOrigins ` +
       `(${trustedOrigins.join(", ")}). Refusing to start.`;
-    // eslint-disable-next-line no-console
+     
     console.error(msg);
     process.exit(1);
   }

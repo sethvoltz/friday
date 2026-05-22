@@ -2583,9 +2583,9 @@ describe("requestStop (FRI-95 end-to-end)", () => {
   // Typed loosely as { applyEvent } to avoid the import-cycle that
   // referencing ChatState here would create — tests import the class at
   // call time.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   function seedUserBlock(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     chat: any,
     turnId: string,
     text = "hello",

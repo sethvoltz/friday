@@ -46,7 +46,7 @@ function emitProxyLog(event, payload) {
     event,
     ...payload,
   });
-  // eslint-disable-next-line no-console
+   
   console.log(line);
 }
 

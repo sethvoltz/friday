@@ -118,7 +118,7 @@ export async function scanFriction(
       results = await score(payload, model);
     } catch (err) {
       // Better to score fewer turns than abort the whole pass; log loudly.
-      // eslint-disable-next-line no-console
+       
       console.error(
         `friction scoring batch ${i}-${i + batch.length - 1} failed: ${
           err instanceof Error ? err.message : String(err)

@@ -47,7 +47,7 @@ describe("sync-harness smoke (item #50)", () => {
     );
     if (r.status !== 200) {
       const body = await r.text();
-      // eslint-disable-next-line no-console
+       
       console.error("/api/sync/refresh non-200:", r.status, body, "cookie:", session.cookie);
     }
     expect(r.status).toBe(200);

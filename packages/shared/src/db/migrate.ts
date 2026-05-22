@@ -135,14 +135,14 @@ async function assertJournalApplied(
   client: { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> },
   journal: Journal,
 ): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const result = (await client.query(
     `SELECT COUNT(*)::int AS c FROM drizzle.__drizzle_migrations`,
   )) as { rows: { c: number }[] };
   const dbCount = result.rows[0]?.c ?? 0;
   if (dbCount === journal.entries.length) return;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const applied = (await client.query(
     `SELECT created_at FROM drizzle.__drizzle_migrations`,
   )) as { rows: { created_at: string }[] };

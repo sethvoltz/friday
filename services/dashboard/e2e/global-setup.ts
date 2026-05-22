@@ -45,7 +45,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     deviceId: session.deviceId,
   };
   writeFileSync(envPath(), JSON.stringify(envSnapshot, null, 2));
-  // eslint-disable-next-line no-console
+   
   console.log(
     `[playwright globalSetup] env up: ${envSnapshot.dashboardURL}`,
   );
@@ -57,7 +57,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       /* ignore */
     }
     await env.cleanup();
-    // eslint-disable-next-line no-console
+     
     console.log("[playwright globalTeardown] env down");
   };
 }

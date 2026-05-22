@@ -1,0 +1,21 @@
+# Build outputs
+**/dist/**
+**/build/**
+**/.svelte-kit/**
+**/.turbo/**
+**/node_modules/**
+**/coverage/**
+
+# Generated migrations + lockfiles (Drizzle owns the journal format)
+packages/shared/drizzle/**
+pnpm-lock.yaml
+
+# SvelteKit-generated client artifacts
+services/dashboard/.svelte-kit/**
+services/dashboard/build/**
+
+# Friday-owned local data dir (never in repo, but defensive)
+.friday/**
+
+# Skip svelte files — handled by `pnpm --filter @friday/dashboard check`
+*.svelte

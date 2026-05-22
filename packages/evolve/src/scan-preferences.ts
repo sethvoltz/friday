@@ -85,7 +85,7 @@ export async function scanPreferences(
     try {
       results = await score(payload, model);
     } catch (err) {
-      // eslint-disable-next-line no-console
+       
       console.error(
         `preference scoring batch ${i}-${i + batch.length - 1} failed: ${
           err instanceof Error ? err.message : String(err)
