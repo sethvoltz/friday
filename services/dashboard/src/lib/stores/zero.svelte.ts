@@ -33,6 +33,7 @@ import {
   type Schema,
 } from "@friday/shared/sync";
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
+import { awaitMutatorServer } from "./mutator-result";
 import { reconcileWakeLock } from "./wake-lock.svelte";
 
 /** Row shape mirrors the `agents` Zero table definition. Kept narrow:
@@ -764,11 +765,18 @@ class ZeroSyncStore {
     // Bail again — the estimate await may have racey-resolved after
     // a destroy().
     if (!this.#zero || !this.#deviceId) return;
-    void this.#zero!.mutate.reportClientStats({
+    const result = this.#zero!.mutate.reportClientStats({
       deviceId: this.#deviceId,
       storageUsedBytes: used,
       storageQuotaBytes: quota,
       ts: Date.now(),
+    });
+    // Background hygiene — debug-level only. Failures are recoverable
+    // (next interval re-tries) and not user-visible.
+    void awaitMutatorServer(result).then((outcome) => {
+      if (typeof outcome === "object" && outcome.kind !== "success") {
+        console.debug(`reportClientStats mutator error: ${outcome.message}`);
+      }
     });
   }
 
@@ -917,11 +925,18 @@ class ZeroSyncStore {
    */
   markRead(agentName: string, blockId: string): void {
     if (!this.#zero || !this.#deviceId) return;
-    void this.#zero!.mutate.markRead({
+    const result = this.#zero!.mutate.markRead({
       deviceId: this.#deviceId,
       agentName,
       lastSeenBlockId: blockId,
       ts: Date.now(),
+    });
+    // Background hygiene — debug-level only. Failure is self-correcting
+    // (next focus event re-issues the mutator with a fresh cursor).
+    void awaitMutatorServer(result).then((outcome) => {
+      if (typeof outcome === "object" && outcome.kind !== "success") {
+        console.debug(`markRead mutator error: ${outcome.message}`);
+      }
     });
   }
 
@@ -939,7 +954,19 @@ class ZeroSyncStore {
    */
   forgetDevice(deviceId: string): void {
     if (!this.#zero) return;
-    void this.#zero!.mutate.forgetDevice({ deviceId, ts: Date.now() });
+    const result = this.#zero!.mutate.forgetDevice({
+      deviceId,
+      ts: Date.now(),
+    });
+    // Explicit user action — warn-level so the failure lands in devtools.
+    // The settings panel surfaces the failure eyeball-style (the device
+    // stays in the list) rather than via a dedicated toast; this ticket
+    // only guarantees the error isn't invisible at the log layer.
+    void awaitMutatorServer(result).then((outcome) => {
+      if (typeof outcome === "object" && outcome.kind !== "success") {
+        console.warn(`forgetDevice mutator error: ${outcome.message}`);
+      }
+    });
   }
 
   /**
@@ -957,9 +984,19 @@ class ZeroSyncStore {
     watchdogRefork?: boolean;
   }): void {
     if (!this.#zero) return;
-    void this.#zero!.mutate.updateSettings({
+    const result = this.#zero!.mutate.updateSettings({
       ...args,
       ts: Date.now(),
+    });
+    // Explicit user action — warn-level so the failure lands in devtools.
+    // The reactive `$effect` in the settings panel mirrors canonical
+    // values back into inputs ("slider snaps back") if the write failed;
+    // the unconditional "saved" toast bug in `settings/+page.svelte` is
+    // a separate UX issue and out of scope for FRI-104.
+    void awaitMutatorServer(result).then((outcome) => {
+      if (typeof outcome === "object" && outcome.kind !== "success") {
+        console.warn(`updateSettings mutator error: ${outcome.message}`);
+      }
     });
   }
 
@@ -1229,27 +1266,30 @@ class ZeroSyncStore {
     if (!this.#zero) return null;
     const blockId = args.blockId;
     const turnId = `t_${blockId}`;
-    try {
-      await this.#zero!.mutate.sendUserMessage({
-        id: blockId,
-        turnId,
-        agentName: args.agent,
-        text: args.text,
-        attachments: args.attachments,
-        ts: Date.now(),
-      }).server;
-    } catch (err) {
-      // Server-side error path. Note FRI-104: Zero 1.5.0's
-      // MutatorResult.server never actually rejects — application
-      // errors resolve to {type:"error"} and slip past this catch.
-      // The realistic null-return paths today are (1) the `!this.#zero`
-      // guard above (user typed before Zero connected) and (2) a
-      // synchronous throw inside the SDK call before `.server` access.
-      // FRI-104 owns the rework of this branch.
-      void err;
-      return null;
+    const result = this.#zero!.mutate.sendUserMessage({
+      id: blockId,
+      turnId,
+      agentName: args.agent,
+      text: args.text,
+      attachments: args.attachments,
+      ts: Date.now(),
+    });
+    const outcome = await awaitMutatorServer(result);
+    if (outcome === "no-zero") return null;
+    if (outcome.kind === "success") return { blockId, turnId };
+    if (outcome.kind === "app-error" && outcome.pkCollision) {
+      // PK collision on the canonical `blocks.id` is the dedup success
+      // path — the original push committed; this retry is idempotent
+      // (FRI-103 invariant). Return the success shape so sendQueue
+      // clears the entry instead of looping on the same id forever.
+      return { blockId, turnId };
     }
-    return { blockId, turnId };
+    // Genuine app-error (non-PK) OR transport `zero-error`. Returning
+    // `null` lets sendQueue's existing retry path (`send-queue.svelte.ts:247-263`)
+    // increment `attempts`, set `lastError = "zero_not_ready"`, and
+    // surface the failed-row UI via the standard `MAX_ATTEMPTS` fence.
+    // The queue entry IS preserved — FRI-103 data-safety invariant.
+    return null;
   }
 
   /**
@@ -1313,13 +1353,19 @@ class ZeroSyncStore {
         b.source === "user_chat",
     );
     if (row) {
-      try {
-        await this.#zero!.mutate.abortTurn({ id: row.id, ts: Date.now() })
-          .server;
-      } catch {
-        // Server-side mutator failure (e.g. row has moved on to
-        // 'aborted' already from a fast worker). User-visible state
-        // is still correct — the turn is gone. Swallow.
+      const result = this.#zero!.mutate.abortTurn({
+        id: row.id,
+        ts: Date.now(),
+      });
+      const outcome = await awaitMutatorServer(result);
+      if (typeof outcome === "object" && outcome.kind !== "success") {
+        // Server-side mutator failure (e.g. row already on 'aborted',
+        // or transport-level Zero error). User-visible state is still
+        // correct — the fast-path POST already aborted the worker.
+        // Log to console for diagnostics; no toast required since the
+        // fast-path is the primary lever and Zero's outbox will re-push
+        // any transport-level miss.
+        console.warn(`abortTurn mutator error: ${outcome.message}`);
       }
     }
 
@@ -1363,14 +1409,17 @@ class ZeroSyncStore {
       if (parsed && typeof parsed.text === "string") recoveredText = parsed.text;
     }
 
-    try {
-      await this.#zero!.mutate.cancelQueued({ id: row.id, ts: Date.now() })
-        .server;
-    } catch {
+    const cancelResult = this.#zero!.mutate.cancelQueued({
+      id: row.id,
+      ts: Date.now(),
+    });
+    const outcome = await awaitMutatorServer(cancelResult);
+    if (typeof outcome === "object" && outcome.kind !== "success") {
       // Server-side mutator failure (e.g. row already DELETEd by the
-      // LISTEN-path winning the race). The user-visible state is
-      // already correct — the bubble is gone, the prompt text is
-      // recovered. Swallow.
+      // LISTEN-path winning the race) or transport-level Zero error.
+      // User-visible state is already correct — the bubble is gone and
+      // the prompt text is recovered. Log to console for diagnostics.
+      console.warn(`cancelQueued mutator error: ${outcome.message}`);
     }
 
     return recoveredText;
