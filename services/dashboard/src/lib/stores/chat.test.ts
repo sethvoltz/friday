@@ -2087,6 +2087,176 @@ describe("unread badge gating (PR C)", () => {
     expect(nr?.turnId).toBe("t-silent");
   });
 
+  it("submit-time eager inflight: applyZeroBlocks(resultType='complete') for a fresh user_chat block does NOT flash 'Agent didn't respond' when inflightTurnId was claimed before the Zero mutator's local commit", async () => {
+    // The reported regression. Sequence the bug reproduces:
+    //   1. User clicks Send. ChatInput enqueues a queue item (pre-minted
+    //      queueBlockId).
+    //   2. ChatInput calls `chat.addUser(...)` and (in the fix) eagerly
+    //      sets `chat.inflightTurnId = "t_${queueBlockId}"` BEFORE
+    //      awaiting `sendQueue.flush()`.
+    //   3. `sendQueue.flush` calls `zeroSync.sendUserMessage`, whose
+    //      Zero mutator commits the user block to the LOCAL replica
+    //      synchronously. Zero's reactive query fires `applyZeroBlocks`
+    //      with resultType='complete' (the local row is authoritative
+    //      against the local query).
+    //   4. `parseBlocks` runs. The user_chat user turn has no assistant
+    //      content yet, no later assistant blocks (it's the latest),
+    //      `zeroResultIncomplete` is false (Zero confirmed). Without
+    //      step 2's eager claim, the safety net synthesizes
+    //      "Agent didn't respond" because the inflight slot is null;
+    //      the bubble flashes for the entire submit-to-first-block
+    //      window (often 20+ seconds on tool-call-heavy turns).
+    //
+    // With the eager-claim fix, inflightTurnId matches the new turnId
+    // when applyZeroBlocks fires — synth is suppressed.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // Simulate the eager-claim step done by ChatInput before flush.
+    const queueBlockId = "blk-eager";
+    const turnId = `t_${queueBlockId}`;
+    chat.inflightTurnId = turnId;
+
+    // The Zero mutator's local optimistic commit lands as a complete
+    // snapshot for the per-agent query: resultType='complete' is what
+    // Zero reports when the local replica matches the local query
+    // (the row is right there).
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "1",
+          block_id: queueBlockId,
+          turn_id: turnId,
+          agent_name: "friday",
+          session_id: "s",
+          message_id: null,
+          block_index: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          content_json: { text: "hey" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1_000,
+          last_event_seq: 0,
+        } as Parameters<typeof chat.applyZeroBlocks>[0][number],
+      ],
+      "friday",
+      "complete",
+    );
+
+    expect(chat.messages.find((m) => m.id === `nr_${turnId}`)).toBeUndefined();
+    expect(chat.messages.filter((m) => m.kind === "no-response")).toHaveLength(
+      0,
+    );
+    const userBubble = chat.messages.find((m) => m.role === "user");
+    expect(userBubble?.turnId).toBe(turnId);
+  });
+
+  it("submit-time eager inflight: resendUserText claims inflightTurnId synchronously, before sendQueue.flush() resolves", async () => {
+    // Contract test for the call-site half of the fix. The parseBlocks
+    // suppression already exists ("inflight===turnId → no synth"); the
+    // bug was that the call site set inflightTurnId only AFTER awaiting
+    // flush, leaving a synth window during the Zero mutator's local
+    // commit. This test pins the synchronous order: by the time we
+    // yield to the microtask queue, inflightTurnId must already equal
+    // `t_${queueBlockId}` — proving the eager claim landed before any
+    // applyZeroBlocks frame the mutator can schedule.
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const { sendQueue } = await import("./send-queue.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Seed a prior user message so `originalUserTextForTurn` resolves.
+    chat.messages.push({
+      id: userBlockIdForTurn("t-old"),
+      role: "user",
+      text: "earlier prompt",
+      status: "complete",
+      ts: 1,
+      turnId: "t-old",
+      source: "user_chat",
+    });
+
+    const queueBlockId = "blk-resend-eager";
+    const eagerTurnId = `t_${queueBlockId}`;
+    (sendQueue.enqueue as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "q1",
+      agent: "friday",
+      text: "earlier prompt",
+      attempts: 0,
+      createdAt: Date.now(),
+      queueBlockId,
+    });
+    // flush stays pending — proves the eager claim doesn't depend on
+    // the round-trip resolving.
+    let resolveFlush: (() => void) | null = null;
+    (sendQueue.flush as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Promise<{ sent: never[]; failed: never[]; retrying: never[] }>(
+        (resolve) => {
+          resolveFlush = () =>
+            resolve({ sent: [], failed: [], retrying: [] });
+        },
+      ),
+    );
+
+    chat.resendUserText("t-old");
+    // Synchronous: inflight slot must already point at the eager turnId.
+    expect(chat.inflightTurnId).toBe(eagerTurnId);
+
+    // Now let flush resolve with no `sent` entries (simulating a
+    // failed/retrying dispatch). The eager claim should release because
+    // the server never confirmed an immediate dispatch.
+    resolveFlush!();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(chat.inflightTurnId).toBeNull();
+  });
+
+  it("submit-time eager inflight: resendUserText does NOT displace an already-running turn's inflight slot", async () => {
+    // The queued-send invariant — covers the ChatInput-line-466 comment
+    // about not clobbering. If another turn is currently running on the
+    // focused agent, the eager claim is skipped; SSE turn_started for
+    // the new turn becomes the authoritative slot owner when it
+    // actually dispatches.
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const { sendQueue } = await import("./send-queue.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.messages.push({
+      id: userBlockIdForTurn("t-old"),
+      role: "user",
+      text: "earlier",
+      status: "complete",
+      ts: 1,
+      turnId: "t-old",
+      source: "user_chat",
+    });
+    chat.markInflight("friday", "t-running");
+
+    (sendQueue.enqueue as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "q1",
+      agent: "friday",
+      text: "earlier",
+      attempts: 0,
+      createdAt: Date.now(),
+      queueBlockId: "blk-queued",
+    });
+    (sendQueue.flush as ReturnType<typeof vi.fn>).mockResolvedValue({
+      sent: [],
+      failed: [],
+      retrying: [],
+    });
+
+    chat.resendUserText("t-old");
+    // Running turn's slot is untouched.
+    expect(chat.inflightTurnId).toBe("t-running");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(chat.inflightTurnId).toBe("t-running");
+  });
+
   it("FRI-9: a user message containing the same literal text is NOT filtered", async () => {
     // The sentinel only applies to assistant-role blocks. A user who
     // literally types "No response requested." must still see their
