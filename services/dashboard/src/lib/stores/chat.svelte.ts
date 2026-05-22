@@ -537,10 +537,7 @@ export class ChatState {
     // `agent_message` events, producing phantom unread badges. The cursor
     // is invalidated separately when the connection_established event
     // carries a new boot_id (see acceptConnectionEstablished).
-    const persisted = loadJSON<Record<string, number>>(
-      ChatState.LAST_SEQ_KEY,
-      {},
-    );
+    const persisted = loadJSON<Record<string, number>>(ChatState.LAST_SEQ_KEY, {});
     if (persisted && typeof persisted === "object") {
       this.lastSeqByAgent = { ...persisted };
     }
@@ -556,10 +553,7 @@ export class ChatState {
    * rendered as a literal UNKNOWN label in the sidebar until the next
    * spawn event landed. Better to drop the upsert and wait for either
    * a lifecycle event (which has `type`) or the next /api/agents poll. */
-  upsertAgent(
-    name: string,
-    patch: Partial<Omit<AgentInfo, "name">>,
-  ): void {
+  upsertAgent(name: string, patch: Partial<Omit<AgentInfo, "name">>): void {
     const i = this.agents.findIndex((a) => a.name === name);
     if (i === -1) {
       if (!patch.type) return;
@@ -741,9 +735,7 @@ export class ChatState {
     // for `user_chat` source) should make this path unreachable in
     // practice, but the check stays as belt-and-braces for the `mail` /
     // `scheduled` SSE paths where the SSE frame is the sole source.
-    const sseAlreadyHere = this.messages.some(
-      (m, i) => i !== optIdx && m.id === targetId,
-    );
+    const sseAlreadyHere = this.messages.some((m, i) => i !== optIdx && m.id === targetId);
     if (sseAlreadyHere) {
       this.messages = this.messages.filter((_, i) => i !== optIdx);
       return;
@@ -859,9 +851,7 @@ export class ChatState {
     // a candidate (e.g., the date is older than the 90d retention or
     // the FTS match needs Postgres tsvector ranking).
     const RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
-    const targetTsWithinRetention = isDateJump
-      ? (ts as number) > Date.now() - RETENTION_MS
-      : false;
+    const targetTsWithinRetention = isDateJump ? (ts as number) > Date.now() - RETENTION_MS : false;
     if (isDateJump && targetTsWithinRetention) {
       // Earliest block on or after the target ts that the user would
       // recognize as "the start of that day's chat" — same selection
@@ -920,18 +910,12 @@ export class ChatState {
       const data = (await r.json()) as { blocks: BlockRow[] };
       rawBlocks = data.blocks ?? [];
     } catch (err) {
-      this.setToast(
-        err instanceof Error ? err.message : "Jump failed.",
-        "warn",
-      );
+      this.setToast(err instanceof Error ? err.message : "Jump failed.", "warn");
       return;
     }
 
     if (rawBlocks.length === 0) {
-      this.setToast(
-        isDateJump ? "No chat on that date." : "No matches.",
-        "warn",
-      );
+      this.setToast(isDateJump ? "No chat on that date." : "No matches.", "warn");
       return;
     }
 
@@ -993,14 +977,10 @@ export class ChatState {
       // top-ranked hit. parseBlocks re-sorts by id, which is why we pick
       // the target id from the raw response.
       const top = rawBlocks.find(
-        (b) =>
-          (b.role === "user" || b.role === "assistant") && b.kind === "text",
+        (b) => (b.role === "user" || b.role === "assistant") && b.kind === "text",
       );
       if (top) {
-        targetId =
-          top.role === "user"
-            ? userBlockIdForTurn(top.turnId)
-            : `b_${top.blockId}`;
+        targetId = top.role === "user" ? userBlockIdForTurn(top.turnId) : `b_${top.blockId}`;
       }
     }
 
@@ -1030,13 +1010,9 @@ export class ChatState {
       if (!isDateJump) {
         this.highlightedMessageId = targetId;
         const matchCount = rawBlocks.filter(
-          (b) =>
-            (b.role === "user" || b.role === "assistant") && b.kind === "text",
+          (b) => (b.role === "user" || b.role === "assistant") && b.kind === "text",
         ).length;
-        this.setToast(
-          `${matchCount} match${matchCount === 1 ? "" : "es"}`,
-          "info",
-        );
+        this.setToast(`${matchCount} match${matchCount === 1 ? "" : "es"}`, "info");
       }
     } else if (!isDateJump) {
       // Term mode returned only tool/thinking rows — nothing the user
@@ -1129,10 +1105,7 @@ export class ChatState {
         if (status === "aborted") {
           m.status = "aborted";
           if (abortReason) m.abortReason = abortReason;
-        } else if (
-          status === "complete" &&
-          m.status === "stopping"
-        ) {
+        } else if (status === "complete" && m.status === "stopping") {
           // Race: user clicked Stop but the turn raced to a clean
           // completion before the daemon could honor the abort. Render
           // a brief `already_finished` transient so the user knows the
@@ -1155,11 +1128,7 @@ export class ChatState {
       }
       if (m.id !== turnId && m.turnId !== turnId) continue;
       if (m.role === "assistant") {
-        if (
-          m.status === "complete" ||
-          m.status === "aborted" ||
-          m.status === "error"
-        ) {
+        if (m.status === "complete" || m.status === "aborted" || m.status === "error") {
           continue;
         }
         m.status = status;
@@ -1267,10 +1236,7 @@ export class ChatState {
       if (m.role === "assistant" && m.status === "streaming") {
         m.status = "complete";
         healed = true;
-      } else if (
-        (m.role === "tool" || m.role === "thinking") &&
-        m.status === "running"
-      ) {
+      } else if ((m.role === "tool" || m.role === "thinking") && m.status === "running") {
         m.status = "done";
         healed = true;
       }
@@ -1383,10 +1349,10 @@ export class ChatState {
    */
   async resumeTurn(turnId: string): Promise<void> {
     try {
-      const r = await fetchWithTimeout(
-        `/api/chat/turn/${encodeURIComponent(turnId)}/resume`,
-        { method: "POST", timeoutMs: 10_000 },
-      );
+      const r = await fetchWithTimeout(`/api/chat/turn/${encodeURIComponent(turnId)}/resume`, {
+        method: "POST",
+        timeoutMs: 10_000,
+      });
       if (!r.ok) {
         let msg = `Resume failed (${r.status})`;
         try {
@@ -1438,11 +1404,7 @@ export class ChatState {
     for (const m of this.messages) {
       if (m.role !== "assistant") continue;
       if (m.id !== turnId && m.turnId !== turnId) continue;
-      if (
-        m.status === "complete" ||
-        m.status === "aborted" ||
-        m.status === "error"
-      ) {
+      if (m.status === "complete" || m.status === "aborted" || m.status === "error") {
         assistantTerminal = true;
         break;
       }
@@ -1475,11 +1437,7 @@ export class ChatState {
     const userBlockId = userBlockIdForTurn(turnId);
     for (const m of this.messages) {
       if (m.id !== userBlockId) continue;
-      if (
-        m.status === "aborted" ||
-        m.status === "error" ||
-        m.status === "already_finished"
-      ) {
+      if (m.status === "aborted" || m.status === "error" || m.status === "already_finished") {
         // User block already settled in a turn-terminal state. Defer to
         // the assistant-side decision.
         return assistantMarked;
@@ -1670,9 +1628,7 @@ export class ChatState {
     // bubble ids are stable across cache → fresh (parseBlocks uses
     // userBlockIdForTurn for user blocks and b_<blockId> for assistant),
     // so any in-flight SSE deltas attach cleanly.
-    const cachedRaw = isReentry
-      ? []
-      : loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
+    const cachedRaw = isReentry ? [] : loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
     // Apply the same session filter `applyZeroBlocks` uses, so the
     // first-paint cache can't bleed prior sessions onto the screen
     // post-`/clear`. The cache pre-dates Zero (its only writer is the
@@ -1733,10 +1689,9 @@ export class ChatState {
         // FIX_FORWARD 3.8: client-picked initial page size based on viewport
         // + network class. Server clamps to ≤200 regardless.
         const limit = initialPageSize();
-        const r = await fetchWithTimeout(
-          `/api/agents/${agent}/blocks?limit=${limit}`,
-          { timeoutMs: 15_000 },
-        );
+        const r = await fetchWithTimeout(`/api/agents/${agent}/blocks?limit=${limit}`, {
+          timeoutMs: 15_000,
+        });
         // The user may have switched agents while we were awaiting. Bail
         // before mutating shared state so a late-resolving fetch from a
         // prior agent doesn't overwrite the just-loaded current agent.
@@ -1778,10 +1733,7 @@ export class ChatState {
         // when SSE replays them — corrupt markdown, duplicate content.
         const seqHwm = payload.lastEventSeq ?? 0;
         if (seqHwm > 0) {
-          this.lastSeqByAgent[agent] = Math.max(
-            this.lastSeqByAgent[agent] ?? 0,
-            seqHwm,
-          );
+          this.lastSeqByAgent[agent] = Math.max(this.lastSeqByAgent[agent] ?? 0, seqHwm);
         }
         if (blocks.length === 0) {
           this.reachedOldest = true;
@@ -1811,10 +1763,9 @@ export class ChatState {
     // SSE frame populates it.
     if (this.focusedAgent !== agent) return;
     try {
-      const ar = await fetchWithTimeout(
-        `/api/agents/${encodeURIComponent(agent)}`,
-        { timeoutMs: 5_000 },
-      );
+      const ar = await fetchWithTimeout(`/api/agents/${encodeURIComponent(agent)}`, {
+        timeoutMs: 5_000,
+      });
       if (!ar.ok) {
         // FRI-81 PR #22 review B1: probe failed with a non-2xx. We don't
         // have authoritative idle/working, but if a prior turn_started SSE
@@ -1824,11 +1775,7 @@ export class ChatState {
         // cases in parseBlocks and SSE `turn_started` will catch up.
         const cachedInflight = this.inflightTurnIdByAgent[agent] ?? null;
         if (cachedInflight) {
-          healOrphanStreamingBubbles(
-            this.messages,
-            "preserve-active",
-            cachedInflight,
-          );
+          healOrphanStreamingBubbles(this.messages, "preserve-active", cachedInflight);
         }
         return;
       }
@@ -1877,11 +1824,7 @@ export class ChatState {
         // bubble outside the active turn is an orphan. Heal them now —
         // the active turn's bubbles stay streaming so SSE deltas continue
         // to attach.
-        healOrphanStreamingBubbles(
-          this.messages,
-          "preserve-active",
-          latestTurnId,
-        );
+        healOrphanStreamingBubbles(this.messages, "preserve-active", latestTurnId);
       }
     } catch {
       // FRI-81 PR #22 review B1: probe threw (network/timeout). Same as
@@ -1890,11 +1833,7 @@ export class ChatState {
       // No inflight known → conservative bail.
       const cachedInflight = this.inflightTurnIdByAgent[agent] ?? null;
       if (cachedInflight) {
-        healOrphanStreamingBubbles(
-          this.messages,
-          "preserve-active",
-          cachedInflight,
-        );
+        healOrphanStreamingBubbles(this.messages, "preserve-active", cachedInflight);
       }
     }
   }
@@ -2098,10 +2037,7 @@ export class ChatState {
       if (r.last_event_seq > maxSeq) maxSeq = r.last_event_seq;
     }
     if (maxSeq > 0) {
-      this.lastSeqByAgent[forAgent] = Math.max(
-        this.lastSeqByAgent[forAgent] ?? 0,
-        maxSeq,
-      );
+      this.lastSeqByAgent[forAgent] = Math.max(this.lastSeqByAgent[forAgent] ?? 0, maxSeq);
     }
 
     // Phase 4.1: advance the per-device read cursor for this agent to
@@ -2122,12 +2058,7 @@ export class ChatState {
       // tuple, same as the materialized-view query now orders by.
       let newest: ZeroBlocksRow | null = null;
       for (const r of rows) {
-        if (
-          !newest ||
-          r.ts > newest.ts ||
-          (r.ts === newest.ts && r.id > newest.id)
-        )
-          newest = r;
+        if (!newest || r.ts > newest.ts || (r.ts === newest.ts && r.id > newest.id)) newest = r;
       }
       if (newest) {
         const prev = this.lastMarkedBlockIdByAgent.get(forAgent);
@@ -2222,9 +2153,7 @@ export class ChatState {
     } finally {
       const elapsed = Date.now() - startedAt;
       if (elapsed < MIN_LOADING_MS) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, MIN_LOADING_MS - elapsed),
-        );
+        await new Promise((resolve) => setTimeout(resolve, MIN_LOADING_MS - elapsed));
       }
       // Only clear the flag if we still own this load — if the user
       // switched agents mid-flight, `loadAgentTurns` already reset
@@ -2242,9 +2171,7 @@ export class ChatState {
    * the cursor. Events without an `agent` field land in `__system__`. */
   private acceptEvent(event: WireEvent): boolean {
     const bucket =
-      "agent" in event && typeof event.agent === "string"
-        ? event.agent
-        : SYSTEM_BUCKET;
+      "agent" in event && typeof event.agent === "string" ? event.agent : SYSTEM_BUCKET;
     const cur = this.lastSeqByAgent[bucket] ?? 0;
     if (event.seq <= cur) return false;
     this.lastSeqByAgent[bucket] = event.seq;
@@ -2357,8 +2284,7 @@ export class ChatState {
       // FIX_FORWARD 2.6: user blocks key by turn_id so the local pending
       // bubble (re-keyed on POST-success) and the canonical block from the
       // daemon converge on the same row.
-      const id =
-        role === "user" ? userBlockIdForTurn(event.turn_id) : `b_${event.block_id}`;
+      const id = role === "user" ? userBlockIdForTurn(event.turn_id) : `b_${event.block_id}`;
       if (this.messages.some((m) => m.id === id)) return;
       this.messages.push({
         id,
@@ -2515,10 +2441,7 @@ export class ChatState {
         }
         return;
       }
-      const id =
-        event.role === "user"
-          ? userBlockIdForTurn(event.turn_id)
-          : `b_${event.block_id}`;
+      const id = event.role === "user" ? userBlockIdForTurn(event.turn_id) : `b_${event.block_id}`;
       const mappedStatus: ChatMessage["status"] =
         event.status === "complete"
           ? "complete"
@@ -2578,8 +2501,7 @@ export class ChatState {
       // block_canceled IPC) is a ghost; drop the placeholder that
       // block_start created. Aborted/error preserve their bubble so the
       // user sees a "stopped" affordance.
-      const hasText =
-        typeof parsed.text === "string" && parsed.text.length > 0;
+      const hasText = typeof parsed.text === "string" && parsed.text.length > 0;
       if (!hasText && event.status === "complete") {
         this.messages = this.messages.filter((m) => m.id !== id);
         return;
@@ -2590,11 +2512,7 @@ export class ChatState {
       // `api_retry` — gets the matching state so the bubble isn't left
       // spinning.
       const status: ChatMessage["status"] =
-        event.status === "aborted"
-          ? "aborted"
-          : event.status === "error"
-            ? "error"
-            : "done";
+        event.status === "aborted" ? "aborted" : event.status === "error" ? "error" : "done";
       for (const m of this.messages) {
         if (m.id !== id) continue;
         if (typeof parsed.text === "string") m.text = parsed.text;
@@ -2632,11 +2550,7 @@ export class ChatState {
       }
       // Late mount.
       const status: ChatMessage["status"] =
-        event.status === "aborted"
-          ? "aborted"
-          : event.status === "error"
-            ? "error"
-            : "running";
+        event.status === "aborted" ? "aborted" : event.status === "error" ? "error" : "running";
       this.messages.push({
         id,
         role: "tool",
@@ -2714,9 +2628,7 @@ export class ChatState {
       });
       if (!r.ok) return null;
       const data = (await r.json().catch(() => ({}))) as { text?: string };
-      this.messages = this.messages.filter(
-        (m) => m.turnId !== turnId || m.role !== "user",
-      );
+      this.messages = this.messages.filter((m) => m.turnId !== turnId || m.role !== "user");
       return typeof data.text === "string" ? data.text : "";
     } catch {
       return null;
@@ -2797,9 +2709,7 @@ function parseErrorContent(contentJson: string): ParsedErrorContent {
  *  daemon writes these fields only for `source='mail'` blocks; older mail
  *  rows persisted before the schema gained these fields will return
  *  undefined and MailBlock will fall back to a header-only view. */
-function extractMailMeta(
-  parsed: ParsedBlockContent,
-): ChatMessage["mailMeta"] | undefined {
+function extractMailMeta(parsed: ParsedBlockContent): ChatMessage["mailMeta"] | undefined {
   if (typeof parsed.mail_id !== "number") return undefined;
   return {
     id: parsed.mail_id,
@@ -2878,9 +2788,7 @@ export function zeroBlockRowToBlockRow(r: ZeroBlocksRow): BlockRow {
     kind: r.kind,
     source: r.source,
     contentJson:
-      typeof r.content_json === "string"
-        ? r.content_json
-        : JSON.stringify(r.content_json ?? null),
+      typeof r.content_json === "string" ? r.content_json : JSON.stringify(r.content_json ?? null),
     status: r.status,
     ts: r.ts,
     lastEventSeq: r.last_event_seq,
@@ -2904,9 +2812,7 @@ export function zeroBlockRowToBlockRow(r: ZeroBlocksRow): BlockRow {
  *  Sentinel-driven nr_ bubbles (`noResponseSentinel=true`) come from
  *  the SDK's trained marker block and are authoritative; we never
  *  drop those. */
-export function dropSupersededNoResponseSafetyNet(
-  messages: ChatMessage[],
-): ChatMessage[] {
+export function dropSupersededNoResponseSafetyNet(messages: ChatMessage[]): ChatMessage[] {
   const respondedTurns = new Set<string>();
   const userChatTurns = new Set<string>();
   for (const m of messages) {
@@ -3037,10 +2943,7 @@ export function healOrphanStreamingBubbles(
     if (m.role === "assistant" && m.status === "streaming") {
       if (mode === "preserve-active" && m.turnId === activeTurnId) continue;
       m.status = "aborted";
-    } else if (
-      (m.role === "thinking" || m.role === "tool") &&
-      m.status === "running"
-    ) {
+    } else if ((m.role === "thinking" || m.role === "tool") && m.status === "running") {
       if (mode === "preserve-active" && m.turnId === activeTurnId) continue;
       m.status = "aborted";
     }
@@ -3151,8 +3054,7 @@ export function parseBlocks(
           userTurns.set(b.turnId, { ts: b.ts, index: out.length });
         }
       }
-      const id =
-        role === "user" ? userBlockIdForTurn(b.turnId) : `b_${b.blockId}`;
+      const id = role === "user" ? userBlockIdForTurn(b.turnId) : `b_${b.blockId}`;
       // Preserve the row's `streaming` state. On reload during a turn,
       // the assistant block is still being filled — collapsing it to
       // `complete` here would make `handleBlockDelta` reject every
@@ -3198,8 +3100,7 @@ export function parseBlocks(
       // preserved because they carry the user-visible "stopped" affordance
       // (the worker explicitly tore the block down). Streaming rows are
       // preserved so reload-mid-turn deltas still attach.
-      const hasText =
-        typeof parsed.text === "string" && parsed.text.length > 0;
+      const hasText = typeof parsed.text === "string" && parsed.text.length > 0;
       if (!hasText && b.status === "complete") continue;
       // FRI-85: only count rows that survive the D4 filter as assistant
       // content. A dropped ghost thinking row should not suppress the
@@ -3406,12 +3307,7 @@ export function oldestBlockCursor(blocks: BlockRow[]): string | null {
   // dutifully fetches rows older than the wrong row.
   let oldest: BlockRow | null = null;
   for (const b of blocks) {
-    if (
-      oldest === null ||
-      b.ts < oldest.ts ||
-      (b.ts === oldest.ts && b.id < oldest.id)
-    )
-      oldest = b;
+    if (oldest === null || b.ts < oldest.ts || (b.ts === oldest.ts && b.id < oldest.id)) oldest = b;
   }
   return oldest?.blockId ?? null;
 }
@@ -3447,14 +3343,13 @@ export function parseJumpDate(input: string): number | null {
   if (rel) {
     const n = Number(rel[1]);
     const unit = rel[2];
-    const ms =
-      unit.startsWith("minute")
-        ? n * 60_000
-        : unit.startsWith("hour")
-          ? n * 3_600_000
-          : unit.startsWith("week")
-            ? n * 7 * 86_400_000
-            : n * 86_400_000;
+    const ms = unit.startsWith("minute")
+      ? n * 60_000
+      : unit.startsWith("hour")
+        ? n * 3_600_000
+        : unit.startsWith("week")
+          ? n * 7 * 86_400_000
+          : n * 86_400_000;
     return now - ms;
   }
   // Last resort: Date.parse. Filter out values too far from "now" to be
@@ -3466,4 +3361,3 @@ export function parseJumpDate(input: string): number | null {
   if (year < 2000 || year > 2100) return null;
   return parsed;
 }
-

@@ -66,9 +66,7 @@ function summarizeBlock(b: BlockRow): string {
   }
   if (b.kind === "tool_result") {
     const result =
-      typeof parsed.text === "string"
-        ? parsed.text
-        : JSON.stringify(parsed.text ?? "");
+      typeof parsed.text === "string" ? parsed.text : JSON.stringify(parsed.text ?? "");
     return `↳ tool_result (${parsed.is_error ? "error" : "ok"}): ${truncate(result)}`;
   }
   return truncate(b.contentJson, 200);
@@ -108,38 +106,27 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
             .describe("Sub-agent type. Builders get a fresh git worktree."),
           name: z
             .string()
-            .describe(
-              "Unique agent name. Lowercase alphanumeric + dashes, up to 64 chars.",
-            ),
+            .describe("Unique agent name. Lowercase alphanumeric + dashes, up to 64 chars."),
           prompt: z
             .string()
             .describe(
               "First-turn instructions for the new agent. Be specific about deliverable + how to report back.",
             ),
           model: z.string().optional().describe("Override model. Optional."),
-          ticketId: z
-            .string()
-            .optional()
-            .describe("Linked ticket id, if any."),
+          ticketId: z.string().optional().describe("Linked ticket id, if any."),
           worktree: z
             .object({
               repo: z
                 .string()
                 .optional()
-                .describe(
-                  "Path to the base git repo. Defaults to the daemon's cwd.",
-                ),
+                .describe("Path to the base git repo. Defaults to the daemon's cwd."),
               branch: z
                 .string()
                 .optional()
-                .describe(
-                  "Branch name to create for the builder. Defaults to `friday/<name>`.",
-                ),
+                .describe("Branch name to create for the builder. Defaults to `friday/<name>`."),
             })
             .optional()
-            .describe(
-              "Builder-only. Specifies which repo / branch the worktree is cut from.",
-            ),
+            .describe("Builder-only. Specifies which repo / branch the worktree is cut from."),
           reason: z
             .string()
             .optional()
@@ -173,12 +160,8 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
         "agent_list",
         "List registered agents, optionally filtered by type or status.",
         {
-          type: z
-            .enum(["orchestrator", "builder", "helper", "scheduled", "bare"])
-            .optional(),
-          status: z
-            .enum(["idle", "working", "stalled", "error", "archived"])
-            .optional(),
+          type: z.enum(["orchestrator", "builder", "helper", "scheduled", "bare"]).optional(),
+          status: z.enum(["idle", "working", "stalled", "error", "archived"]).optional(),
         },
         async (args, extra) => {
           const params = new URLSearchParams();
@@ -217,7 +200,7 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
         // it removes the worktree and force-deletes the branch). The model
         // MUST NOT autonomously invoke this. Every call must be preceded
         // by an explicit user "yes" in the conversation.
-        "Archive a sub-agent: stop it from receiving work, set status=archived. For builders, also remove the git worktree under `~/.friday/workspaces/<name>/` and force-delete the `friday/<name>` branch from the parent repo. Sessions persist in perpetuity — this just frees the disk and prevents future work. NEVER auto-invoke this tool. Always present the proposed archive to the user (which agent, which workspace path for builders) and wait for explicit confirmation before calling. The user MUST say yes by message before this tool is called. The daemon double-checks that the resolved workspace path is inside `~/.friday/workspaces/` before any filesystem op. `reason` is required: pass `\"completed\"` if the work landed (linked ticket → done, Linear → completed state), `\"abandoned\"` if the user is dropping the work (ticket → closed, Linear → canceled), or `\"failed\"` if the agent gave up or errored irrecoverably (ticket → closed + failure comment). Ask the user which one before calling — \"archive as done, abandoned, or failed?\"",
+        'Archive a sub-agent: stop it from receiving work, set status=archived. For builders, also remove the git worktree under `~/.friday/workspaces/<name>/` and force-delete the `friday/<name>` branch from the parent repo. Sessions persist in perpetuity — this just frees the disk and prevents future work. NEVER auto-invoke this tool. Always present the proposed archive to the user (which agent, which workspace path for builders) and wait for explicit confirmation before calling. The user MUST say yes by message before this tool is called. The daemon double-checks that the resolved workspace path is inside `~/.friday/workspaces/` before any filesystem op. `reason` is required: pass `"completed"` if the work landed (linked ticket → done, Linear → completed state), `"abandoned"` if the user is dropping the work (ticket → closed, Linear → canceled), or `"failed"` if the agent gave up or errored irrecoverably (ticket → closed + failure comment). Ask the user which one before calling — "archive as done, abandoned, or failed?"',
         {
           name: z.string(),
           reason: z.enum(["completed", "abandoned", "failed"]),
@@ -247,10 +230,7 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
             .max(200)
             .optional()
             .describe("Max number of blocks. Default 30."),
-          format: z
-            .enum(["markdown", "json"])
-            .optional()
-            .describe("Default `markdown`."),
+          format: z.enum(["markdown", "json"]).optional().describe("Default `markdown`."),
         },
         async (args, extra) => {
           const params = new URLSearchParams();

@@ -29,9 +29,7 @@ export const restartCommand = defineCommand({
   },
   async run({ args }) {
     if (args.service) {
-      console.error(
-        pc.red(`single-service operations not supported under launchd supervision.`),
-      );
+      console.error(pc.red(`single-service operations not supported under launchd supervision.`));
       console.error(`  ${pc.cyan("friday restart")} restarts the whole stack atomically.`);
       console.error(
         `  per-service IPC (e.g. ${pc.cyan("friday restart zero-cache")}) is an explicit follow-up ticket.`,

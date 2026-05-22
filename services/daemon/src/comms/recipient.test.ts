@@ -7,16 +7,14 @@ import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
 let registry: typeof import("../agent/registry.js");
-let validateRecipient: typeof import("./recipient.js")["validateRecipient"];
-let levenshtein: typeof import("./recipient.js")["levenshtein"];
-let resolveRecipient: typeof import("./recipient.js")["resolveRecipient"];
+let validateRecipient: (typeof import("./recipient.js"))["validateRecipient"];
+let levenshtein: (typeof import("./recipient.js"))["levenshtein"];
+let resolveRecipient: (typeof import("./recipient.js"))["resolveRecipient"];
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "recipient" });
   registry = await import("../agent/registry.js");
-  ({ validateRecipient, levenshtein, resolveRecipient } = await import(
-    "./recipient.js"
-  ));
+  ({ validateRecipient, levenshtein, resolveRecipient } = await import("./recipient.js"));
 });
 
 afterAll(async () => {

@@ -84,12 +84,7 @@ describe("assistantMessageHasToolUses", () => {
 
   it("ignores entries that aren't objects or lack a type field", () => {
     const msg = {
-      content: [
-        null,
-        "raw-string-not-block",
-        { notAType: true },
-        { type: "text", text: "ok" },
-      ],
+      content: [null, "raw-string-not-block", { notAType: true }, { type: "text", text: "ok" }],
     };
     expect(assistantMessageHasToolUses(msg)).toBe(false);
   });

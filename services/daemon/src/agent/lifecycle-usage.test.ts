@@ -1,10 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
 // Cross-boundary contract: when the worker emits `turn-complete` with a
 // usage payload, the lifecycle handler must insert a row into the `usage`

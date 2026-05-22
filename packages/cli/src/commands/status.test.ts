@@ -8,14 +8,7 @@
  */
 
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import {
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-  unlinkSync,
-  existsSync,
-  utimesSync,
-} from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, unlinkSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:http";
@@ -99,9 +92,7 @@ describe("readHealth", () => {
 describe("probeDashboard", () => {
   let server: Server | null = null;
 
-  function startServerOn(
-    handler: (status: number) => number,
-  ): Promise<number> {
+  function startServerOn(handler: (status: number) => number): Promise<number> {
     return new Promise((resolve) => {
       server = createServer((_req, res) => {
         const status = handler(0);
@@ -155,9 +146,7 @@ describe("probeDashboard", () => {
       // Never answer — let the AbortController fire.
       setTimeout(() => res.end(), 5000);
     });
-    await new Promise<void>((resolve) =>
-      slow.listen(0, "127.0.0.1", () => resolve()),
-    );
+    await new Promise<void>((resolve) => slow.listen(0, "127.0.0.1", () => resolve()));
     const addr = slow.address();
     const port = typeof addr === "object" && addr !== null ? addr.port : 0;
     try {

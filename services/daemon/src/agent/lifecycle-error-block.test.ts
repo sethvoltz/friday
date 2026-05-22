@@ -93,9 +93,7 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     await vi.waitFor(
       () =>
         expect(
-          captured.find(
-            (e) => e.type === "turn_done" && e.turn_id === "turn-err-1",
-          ),
+          captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-err-1"),
         ).toBeDefined(),
       { timeout: 5000, interval: 25 },
     );
@@ -122,23 +120,16 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
 
     // (b) the SSE event sequence: block_start → block_complete → error → turn_done.
     const blockEvents = captured.filter((e) => e.block_id === row.blockId);
-    expect(blockEvents.map((e) => e.type)).toEqual([
-      "block_start",
-      "block_complete",
-    ]);
+    expect(blockEvents.map((e) => e.type)).toEqual(["block_start", "block_complete"]);
     const completeEvent = blockEvents[1];
     expect(completeEvent.kind).toBe("error");
     expect(completeEvent.status).toBe("complete");
 
-    const errEvent = captured.find(
-      (e) => e.type === "error" && e.turn_id === "turn-err-1",
-    );
+    const errEvent = captured.find((e) => e.type === "error" && e.turn_id === "turn-err-1");
     expect(errEvent).toBeDefined();
     expect(errEvent!.code).toBe("overloaded");
 
-    const doneEvent = captured.find(
-      (e) => e.type === "turn_done" && e.turn_id === "turn-err-1",
-    );
+    const doneEvent = captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-err-1");
     expect(doneEvent).toBeDefined();
     expect(doneEvent!.status).toBe("error");
     expect(doneEvent!.agent).toBe("test-agent");
@@ -149,9 +140,7 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     const completeIdx = captured.findIndex(
       (e) => e.type === "block_complete" && e.block_id === row.blockId,
     );
-    const doneIdx = captured.findIndex(
-      (e) => e.type === "turn_done" && e.turn_id === "turn-err-1",
-    );
+    const doneIdx = captured.findIndex((e) => e.type === "turn_done" && e.turn_id === "turn-err-1");
     expect(completeIdx).toBeGreaterThan(-1);
     expect(doneIdx).toBeGreaterThan(completeIdx);
 
@@ -170,22 +159,17 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    await handleEvent(
-      makeFakeWorker({ turnId: "turn-abort-1", abortRequested: true }) as never,
-      {
-        type: "error",
-        message: "aborted",
-        recoverable: true,
-      },
-    );
+    await handleEvent(makeFakeWorker({ turnId: "turn-abort-1", abortRequested: true }) as never, {
+      type: "error",
+      message: "aborted",
+      recoverable: true,
+    });
     // The aborted branch skips insertErrorBlock entirely — wait on the
     // observable signal that the error path ran (turn_done aborted).
     await vi.waitFor(
       () =>
         expect(
-          captured.find(
-            (e) => e.type === "turn_done" && e.turn_id === "turn-abort-1",
-          ),
+          captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-abort-1"),
         ).toBeDefined(),
       { timeout: 5000, interval: 25 },
     );
@@ -197,14 +181,10 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
       .where(eq(schema.blocks.turnId, "turn-abort-1"));
     expect(rows.length).toBe(0);
 
-    const errEvent = captured.find(
-      (e) => e.type === "error" && e.turn_id === "turn-abort-1",
-    );
+    const errEvent = captured.find((e) => e.type === "error" && e.turn_id === "turn-abort-1");
     expect(errEvent!.code).toBe("aborted");
 
-    const doneEvent = captured.find(
-      (e) => e.type === "turn_done" && e.turn_id === "turn-abort-1",
-    );
+    const doneEvent = captured.find((e) => e.type === "turn_done" && e.turn_id === "turn-abort-1");
     expect(doneEvent).toBeDefined();
     expect(doneEvent!.status).toBe("aborted");
   });

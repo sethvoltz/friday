@@ -103,10 +103,7 @@ function hydrate(): QueuedMessage[] {
     const entry = m as Partial<QueuedMessage> & Record<string, unknown>;
     return {
       ...entry,
-      queueBlockId:
-        typeof entry.queueBlockId === "string"
-          ? entry.queueBlockId
-          : mintBlockId(),
+      queueBlockId: typeof entry.queueBlockId === "string" ? entry.queueBlockId : mintBlockId(),
     } as QueuedMessage;
   });
 }

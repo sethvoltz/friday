@@ -16,7 +16,7 @@ A pure function (`checkBashForDisaster(command, workspaceReal)`)
 tokenizes the worker's `Bash` arg with `shell-quote` and applies nine
 deny rules to the resulting argv. Wired in
 `services/daemon/src/agent/workspace-guard.ts` as a PreToolUse hook;
-runs *before* the SDK dispatches the tool.
+runs _before_ the SDK dispatches the tool.
 
 - Rules cover: `rm`, `find -exec`, `cp`/`mv` with destination outside
   the worktree, `tee` / `> redirect` to forbidden paths, the binary
@@ -52,7 +52,7 @@ Profile shape (`(allow default)` + explicit denies):
   `~/.docker`, `~/.gnupg`, `~/.netrc`, `~/.config/{gh,git,fish}`,
   shell rcs (`.bashrc`/`.zshrc`/`.profile`/…), `~/Library/LaunchAgents`,
   `~/Library/LaunchDaemons`, `~/Library/Keychains`, the matching
-  `/Library/...` paths, and all of `<DATA_DIR>` *except* the carve-outs
+  `/Library/...` paths, and all of `<DATA_DIR>` _except_ the carve-outs
   for `<DATA_DIR>/logs` (worker logs its own progress) and
   `<this-worktree>` (the Builder's own workspace).
 - `process-exec*` denied for `launchctl`, `crontab`, `at`,
@@ -140,8 +140,8 @@ land in v1:
 2. **pgrp-kill is not a kernel sandbox.** A worker descendant that
    does `python -c "import os; os.setsid()"` (or equivalent) creates a
    new session and detaches from the pgrp. The pgrp signal misses it
-   on archive teardown. The kernel sandbox (M2) constrains *what the
-   descendant can do* but not whether it survives the parent's death.
+   on archive teardown. The kernel sandbox (M2) constrains _what the
+   descendant can do_ but not whether it survives the parent's death.
    Acceptable today because the worktree's denies prevent persistence
    outside the worktree and the host's launchd will eventually reap
    ownerless processes at shutdown.

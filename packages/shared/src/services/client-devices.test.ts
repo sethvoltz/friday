@@ -2,11 +2,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb, type TestDbHandle } from "../db/test-pg.js";
 
 let handle: TestDbHandle;
-let getClientDevice: typeof import("./client-devices.js")["getClientDevice"];
-let upsertClientDevice: typeof import("./client-devices.js")["upsertClientDevice"];
-let listClientDevicesForUser: typeof import("./client-devices.js")["listClientDevicesForUser"];
-let forgetClientDevice: typeof import("./client-devices.js")["forgetClientDevice"];
-let getDb: typeof import("../db/client.js")["getDb"];
+let getClientDevice: (typeof import("./client-devices.js"))["getClientDevice"];
+let upsertClientDevice: (typeof import("./client-devices.js"))["upsertClientDevice"];
+let listClientDevicesForUser: (typeof import("./client-devices.js"))["listClientDevicesForUser"];
+let forgetClientDevice: (typeof import("./client-devices.js"))["forgetClientDevice"];
+let getDb: (typeof import("../db/client.js"))["getDb"];
 let schema: typeof import("../db/schema.js");
 
 beforeAll(async () => {

@@ -8,22 +8,13 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
 let workspaceRoot: string;
 let registry: typeof import("./registry.js");
-let audit: typeof import("./invariants.js")["audit"];
+let audit: (typeof import("./invariants.js"))["audit"];
 let lifecycle: typeof import("./lifecycle.js");
 
 beforeAll(async () => {
@@ -56,9 +47,7 @@ afterEach(async () => {
       await registry.setStatus(a.name, "idle").catch(() => {});
       continue;
     }
-    await registry
-      .archiveAgent(a.name, { reason: "abandoned" })
-      .catch(() => {});
+    await registry.archiveAgent(a.name, { reason: "abandoned" }).catch(() => {});
   }
 });
 
@@ -126,9 +115,7 @@ describe("invariant auditor", () => {
     });
     await registry.setStatus("zombie-1", "working");
     // Critical assumption: nothing in the live map for "zombie-1".
-    vi.spyOn(lifecycle, "isAgentLive").mockImplementation(
-      (name: string) => name !== "zombie-1",
-    );
+    vi.spyOn(lifecycle, "isAgentLive").mockImplementation((name: string) => name !== "zombie-1");
 
     const result = await audit();
 
@@ -142,9 +129,7 @@ describe("invariant auditor", () => {
       type: "bare",
     });
     await registry.setStatus("real-worker", "working");
-    vi.spyOn(lifecycle, "isAgentLive").mockImplementation(
-      (name: string) => name === "real-worker",
-    );
+    vi.spyOn(lifecycle, "isAgentLive").mockImplementation((name: string) => name === "real-worker");
 
     const result = await audit();
 

@@ -36,10 +36,7 @@ describe("CommandPaletteState.pushRecent", () => {
     // Re-push the first entry. It must move to the front, NOT duplicate.
     s.pushRecent({ kind: "page", id: "/tickets" });
 
-    expect(s.recents.map((r) => `${r.kind}:${r.id}`)).toEqual([
-      "page:/tickets",
-      "page:/dashboard",
-    ]);
+    expect(s.recents.map((r) => `${r.kind}:${r.id}`)).toEqual(["page:/tickets", "page:/dashboard"]);
     expect(s.recents[0].ts).toBe(3_000);
   });
 
@@ -79,10 +76,7 @@ describe("CommandPaletteState.hydrate", () => {
     const { CommandPaletteState } = await import("./store.svelte");
     const s = new CommandPaletteState();
     s.hydrate();
-    expect(s.recents.map((r) => `${r.kind}:${r.id}`)).toEqual([
-      "page:/tickets",
-      "agent:bob",
-    ]);
+    expect(s.recents.map((r) => `${r.kind}:${r.id}`)).toEqual(["page:/tickets", "agent:bob"]);
   });
 
   it("is idempotent: a second call does not re-load or duplicate", async () => {

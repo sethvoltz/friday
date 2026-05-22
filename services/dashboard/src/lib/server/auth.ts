@@ -35,10 +35,7 @@ const localUrl = `http://localhost:${resolvedPort}`;
 const DEV_DASHBOARD_LOCAL = "http://localhost:5173";
 const PROD_DASHBOARD_LOCAL = `http://localhost:${PROD_DASHBOARD_PORT}`;
 const trustedOrigins: string[] = [PROD_DASHBOARD_LOCAL, DEV_DASHBOARD_LOCAL];
-if (
-  resolvedPort !== PROD_DASHBOARD_PORT &&
-  localUrl !== DEV_DASHBOARD_LOCAL
-) {
+if (resolvedPort !== PROD_DASHBOARD_PORT && localUrl !== DEV_DASHBOARD_LOCAL) {
   trustedOrigins.push(localUrl);
 }
 if (cfg.publicUrl) trustedOrigins.push(cfg.publicUrl);
@@ -60,7 +57,7 @@ for (const [source, url] of PUBLIC_BASE_URL_SOURCES) {
     const msg =
       `FATAL: ${source}=${url} is not present in BetterAuth trustedOrigins ` +
       `(${trustedOrigins.join(", ")}). Refusing to start.`;
-     
+
     console.error(msg);
     process.exit(1);
   }

@@ -295,15 +295,15 @@ Verifies the data dir, config, db migrations, account presence, external CLIs, a
 
 ## Documentation
 
-| Doc | What's in it |
-|---|---|
-| [docs/architecture.md](docs/architecture.md) | System overview, topology, prompt stack, block model, wire protocol, agent lifecycle |
-| [docs/chat-ux.md](docs/chat-ux.md) | Single-chat UX, sidebar, focus model, slash commands, attachments, markdown |
-| [docs/mobile-ux.md](docs/mobile-ux.md) | Priority+ nav, virtualization, PWA, mobile autocomplete |
-| [docs/mcp.md](docs/mcp.md) | MCP server surface (Friday-internal + user-configured) |
-| [docs/sandbox.md](docs/sandbox.md) | Worker isolation: M1–M5 rollout (PreToolUse rules, sandbox-exec, pgrp containment, stall watchdog) + residual risk |
-| [docs/decisions.md](docs/decisions.md) | Architecture Decision Records (ADRs) + watch list |
-| [docs/roadmap.md](docs/roadmap.md) | Open work, sequenced for execution |
-| [docs/setup.md](docs/setup.md) | Full setup including Cloudflare Tunnel walkthrough |
-| [docs/running.md](docs/running.md) | Daily commands, modes, data layout, cutover from old Friday |
-| [docs/ui-conventions.md](docs/ui-conventions.md) | Cross-cutting UI patterns and icon map |
+| Doc                                              | What's in it                                                                                                       |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| [docs/architecture.md](docs/architecture.md)     | System overview, topology, prompt stack, block model, wire protocol, agent lifecycle                               |
+| [docs/chat-ux.md](docs/chat-ux.md)               | Single-chat UX, sidebar, focus model, slash commands, attachments, markdown                                        |
+| [docs/mobile-ux.md](docs/mobile-ux.md)           | Priority+ nav, virtualization, PWA, mobile autocomplete                                                            |
+| [docs/mcp.md](docs/mcp.md)                       | MCP server surface (Friday-internal + user-configured)                                                             |
+| [docs/sandbox.md](docs/sandbox.md)               | Worker isolation: M1–M5 rollout (PreToolUse rules, sandbox-exec, pgrp containment, stall watchdog) + residual risk |
+| [docs/decisions.md](docs/decisions.md)           | Architecture Decision Records (ADRs) + watch list                                                                  |
+| [docs/roadmap.md](docs/roadmap.md)               | Open work, sequenced for execution                                                                                 |
+| [docs/setup.md](docs/setup.md)                   | Full setup including Cloudflare Tunnel walkthrough                                                                 |
+| [docs/running.md](docs/running.md)               | Daily commands, modes, data layout, cutover from old Friday                                                        |
+| [docs/ui-conventions.md](docs/ui-conventions.md) | Cross-cutting UI patterns and icon map                                                                             |

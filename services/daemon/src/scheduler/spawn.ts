@@ -66,14 +66,13 @@ export async function spawnScheduledRun(
     scheduleName: scheduleRow.name,
     taskPrompt: scheduleRow.taskPrompt,
   });
-  const { body: prompt, systemPrompt: dispatchSystemPrompt } =
-    await composeDispatchPrompt({
-      intentText: scheduleRow.taskPrompt,
-      intentTag: "scheduled",
-      body: promptBody,
-      agentType: "scheduled",
-      baseSystemPrompt: systemPrompt,
-    });
+  const { body: prompt, systemPrompt: dispatchSystemPrompt } = await composeDispatchPrompt({
+    intentText: scheduleRow.taskPrompt,
+    intentTag: "scheduled",
+    body: promptBody,
+    agentType: "scheduled",
+    baseSystemPrompt: systemPrompt,
+  });
 
   const turnId = `t_${randomUUID()}`;
 

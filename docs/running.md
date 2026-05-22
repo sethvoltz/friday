@@ -2,39 +2,39 @@
 
 ## Daily commands
 
-| Command | What it does |
-|---|---|
-| `friday start` | Thin alias for `brew services start friday`. The launchd plist runs `friday-supervisor`, which forks daemon + dashboard + zero-cache as children with proper process-group cascade-stop semantics (ADR-028). For dev hot-reload, use `pnpm dev:daemon` / `pnpm dev:dashboard` — see "Dev mode" below. |
-| `friday stop` | Thin alias for `brew services stop friday`. launchd sends SIGTERM to the supervisor, which cascade-kills every child's process group — no zombie zero-cache workers (the FRI-83 failure mode this supervision rework closes). |
-| `friday restart` | Thin alias for `brew services restart friday`. Single-service restarts (`friday restart daemon`) are not supported under launchd supervision — the supervisor owns the whole stack atomically. Per-service IPC is an explicit follow-up. |
-| `friday status` | Show pids, ports, uptime. |
-| `friday doctor` | Health check. |
-| `friday logs [daemon\|dashboard] [--follow]` | Tail logs. |
-| `friday attach <daemon\|dashboard\|zero-cache>` | Interactive `tail -F ~/.friday/logs/<service>.jsonl`. Ctrl-C exits the tail; the underlying service is untouched. |
+| Command                                         | What it does                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `friday start`                                  | Thin alias for `brew services start friday`. The launchd plist runs `friday-supervisor`, which forks daemon + dashboard + zero-cache as children with proper process-group cascade-stop semantics (ADR-028). For dev hot-reload, use `pnpm dev:daemon` / `pnpm dev:dashboard` — see "Dev mode" below. |
+| `friday stop`                                   | Thin alias for `brew services stop friday`. launchd sends SIGTERM to the supervisor, which cascade-kills every child's process group — no zombie zero-cache workers (the FRI-83 failure mode this supervision rework closes).                                                                         |
+| `friday restart`                                | Thin alias for `brew services restart friday`. Single-service restarts (`friday restart daemon`) are not supported under launchd supervision — the supervisor owns the whole stack atomically. Per-service IPC is an explicit follow-up.                                                              |
+| `friday status`                                 | Show pids, ports, uptime.                                                                                                                                                                                                                                                                             |
+| `friday doctor`                                 | Health check.                                                                                                                                                                                                                                                                                         |
+| `friday logs [daemon\|dashboard] [--follow]`    | Tail logs.                                                                                                                                                                                                                                                                                            |
+| `friday attach <daemon\|dashboard\|zero-cache>` | Interactive `tail -F ~/.friday/logs/<service>.jsonl`. Ctrl-C exits the tail; the underlying service is untouched.                                                                                                                                                                                     |
 
 ## Inspection (read-only; daemon doesn't need to be running)
 
-| Command | What it does |
-|---|---|
-| `friday agents ls` | List agents. |
-| `friday sessions ls` | List sessions. |
-| `friday memory ls` / `show <id>` | Read memory entries. |
-| `friday tickets ls` / `show <id>` | Read tickets. |
-| `friday mail inbox <agent>` | Read pending mail. |
+| Command                           | What it does         |
+| --------------------------------- | -------------------- |
+| `friday agents ls`                | List agents.         |
+| `friday sessions ls`              | List sessions.       |
+| `friday memory ls` / `show <id>`  | Read memory entries. |
+| `friday tickets ls` / `show <id>` | Read tickets.        |
+| `friday mail inbox <agent>`       | Read pending mail.   |
 
 ## Mutations (require daemon running)
 
-| Command | What it does |
-|---|---|
-| `friday agents archive <name>` | Archive an agent. For builders this also removes the worktree and force-deletes the `friday/<name>` branch. |
-| `friday tickets create --title ... --body ...` | Create a ticket. |
-| `friday tickets update <id> --status ...` | Update status. |
-| `friday tickets comment <id> --author --body` | Add a comment. |
-| `friday mail send --from --to --type --body` | Send mail. |
-| `friday app install <path> [--adopt]` | Install a Friday App from a folder (FRI-78, ADR-021). |
-| `friday app uninstall <id> [--folder=archive\|keep\|delete] [--yes]` | Uninstall. `--folder=delete` is irreversible and prompts unless `--yes`. |
-| `friday app list` / `friday app inspect <id>` | Read-only inspection. |
-| `friday app reload <id>` | Re-read the manifest from disk and reconcile. |
+| Command                                                              | What it does                                                                                                |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `friday agents archive <name>`                                       | Archive an agent. For builders this also removes the worktree and force-deletes the `friday/<name>` branch. |
+| `friday tickets create --title ... --body ...`                       | Create a ticket.                                                                                            |
+| `friday tickets update <id> --status ...`                            | Update status.                                                                                              |
+| `friday tickets comment <id> --author --body`                        | Add a comment.                                                                                              |
+| `friday mail send --from --to --type --body`                         | Send mail.                                                                                                  |
+| `friday app install <path> [--adopt]`                                | Install a Friday App from a folder (FRI-78, ADR-021).                                                       |
+| `friday app uninstall <id> [--folder=archive\|keep\|delete] [--yes]` | Uninstall. `--folder=delete` is irreversible and prompts unless `--yes`.                                    |
+| `friday app list` / `friday app inspect <id>`                        | Read-only inspection.                                                                                       |
+| `friday app reload <id>`                                             | Re-read the manifest from disk and reconcile.                                                               |
 
 ## Production (launchd-supervised via Homebrew)
 
@@ -51,6 +51,7 @@ Ports default to the prod constants. Override either via `~/.friday/config.json`
 **RunAtLoad: true** — Friday's stack comes back automatically after Mac reboot/login, no manual `friday start`. Postgres is a separate brew service with its own RunAtLoad. The Cloudflare tunnel is installed by `friday setup --cloudflare` (`cloudflared service install <TOKEN>`) as a user launch agent at `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist`, also with RunAtLoad — it self-starts independently of Friday's supervisor.
 
 **Logs:**
+
 - Supervisor's own events: `~/.friday/logs/supervisor.jsonl` (spawn/exit/cascade-stop trace).
 - Each child's stdout + stderr: `~/.friday/logs/{daemon,dashboard,zero-cache}.jsonl` (replacing what tmux pane scrollback used to carry).
 - launchd's own job-level log: `$(brew --prefix)/var/log/friday.log` and `friday.err.log`.
@@ -114,11 +115,11 @@ Override the location with `FRIDAY_DATA_DIR=$HOME/.friday-v2 friday start`.
 
 Knobs that don't live in `config.toml`:
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `FRIDAY_DATA_DIR` | `~/.friday` | Override the data directory root. |
-| `FRIDAY_TURN_STALL_MS` | `1800000` (30 min) | Stall watchdog threshold — a working worker with no `block-stop` for longer than this gets pgrp-SIGTERMed. |
-| `FRIDAY_TURN_STALE_CEILING_MS` | `14400000` (4 h) | Hard ceiling on a single turn (FRI-33). Any inbound IPC from a worker whose `turnStart` is older than this triggers a force-kill via `forceKillStuckWorker(reason: "stale")`. Defense against turns that stay alive past any plausible runtime (12.5h has been observed). |
+| Variable                       | Default            | Purpose                                                                                                                                                                                                                                                                   |
+| ------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FRIDAY_DATA_DIR`              | `~/.friday`        | Override the data directory root.                                                                                                                                                                                                                                         |
+| `FRIDAY_TURN_STALL_MS`         | `1800000` (30 min) | Stall watchdog threshold — a working worker with no `block-stop` for longer than this gets pgrp-SIGTERMed.                                                                                                                                                                |
+| `FRIDAY_TURN_STALE_CEILING_MS` | `14400000` (4 h)   | Hard ceiling on a single turn (FRI-33). Any inbound IPC from a worker whose `turnStart` is older than this triggers a force-kill via `forceKillStuckWorker(reason: "stale")`. Defense against turns that stay alive past any plausible runtime (12.5h has been observed). |
 
 ## Cutover from old Friday
 

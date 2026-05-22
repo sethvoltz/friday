@@ -56,9 +56,7 @@ export function mintZeroJwt(opts: MintOptions): string {
     exp: now + ttl,
   };
   const signing =
-    base64UrlEncode(JSON.stringify(header)) +
-    "." +
-    base64UrlEncode(JSON.stringify(payload));
+    base64UrlEncode(JSON.stringify(header)) + "." + base64UrlEncode(JSON.stringify(payload));
   const sig = createHmac("sha256", opts.secret).update(signing).digest();
   return signing + "." + base64UrlEncodeBuffer(sig);
 }

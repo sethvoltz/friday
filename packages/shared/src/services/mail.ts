@@ -97,12 +97,7 @@ export async function inbox(toAgent: string): Promise<MailRow[]> {
   const rows = await db
     .select()
     .from(schema.mail)
-    .where(
-      and(
-        eq(schema.mail.toAgent, toAgent),
-        eq(schema.mail.delivery, "pending"),
-      ),
-    )
+    .where(and(eq(schema.mail.toAgent, toAgent), eq(schema.mail.delivery, "pending")))
     .orderBy(asc(schema.mail.ts));
   return rows.map(rowToMail);
 }
@@ -125,11 +120,7 @@ export async function closeMail(id: number): Promise<void> {
 
 export async function getMail(id: number): Promise<MailRow | null> {
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.mail)
-    .where(eq(schema.mail.id, id))
-    .limit(1);
+  const rows = await db.select().from(schema.mail).where(eq(schema.mail.id, id)).limit(1);
   return rows[0] ? rowToMail(rows[0]) : null;
 }
 
@@ -159,9 +150,7 @@ export async function replayPending(): Promise<void> {
   const rows = await db
     .select()
     .from(schema.mail)
-    .where(
-      and(eq(schema.mail.delivery, "pending"), gt(schema.mail.ts, cutoff)),
-    );
+    .where(and(eq(schema.mail.delivery, "pending"), gt(schema.mail.ts, cutoff)));
   for (const r of rows) {
     const row = rowToMail(r);
     mailBus.emit(`mail:to:${row.toAgent}`, row);

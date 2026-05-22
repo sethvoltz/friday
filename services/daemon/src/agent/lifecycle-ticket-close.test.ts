@@ -7,35 +7,25 @@
  * tests `settle()` briefly after archiveAgent before reading ticket state.
  */
 
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 // Don't leak Linear API calls in tests that don't install a fetch mock.
 delete process.env.LINEAR_API_KEY;
 
 let handle: TestDbHandle;
-let createTicket: typeof import("@friday/shared/services")["createTicket"];
-let getTicket: typeof import("@friday/shared/services")["getTicket"];
-let linkExternal: typeof import("@friday/shared/services")["linkExternal"];
-let listComments: typeof import("@friday/shared/services")["listComments"];
+let createTicket: (typeof import("@friday/shared/services"))["createTicket"];
+let getTicket: (typeof import("@friday/shared/services"))["getTicket"];
+let linkExternal: (typeof import("@friday/shared/services"))["linkExternal"];
+let listComments: (typeof import("@friday/shared/services"))["listComments"];
 let registry: typeof import("./registry.js");
-let archiveAgent: typeof import("./lifecycle.js")["archiveAgent"];
-let forceWorkerRefork: typeof import("./lifecycle.js")["forceWorkerRefork"];
+let archiveAgent: (typeof import("./lifecycle.js"))["archiveAgent"];
+let forceWorkerRefork: (typeof import("./lifecycle.js"))["forceWorkerRefork"];
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "lc_ticket_close" });
-  ({ createTicket, getTicket, linkExternal, listComments } = await import(
-    "@friday/shared/services"
-  ));
+  ({ createTicket, getTicket, linkExternal, listComments } =
+    await import("@friday/shared/services"));
   registry = await import("./registry.js");
   ({ archiveAgent, forceWorkerRefork } = await import("./lifecycle.js"));
 });
@@ -52,10 +42,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function registerBuilderWithTicket(
-  name: string,
-  ticketId?: string,
-): Promise<void> {
+async function registerBuilderWithTicket(name: string, ticketId?: string): Promise<void> {
   await registry.registerAgent({
     name,
     type: "builder",
@@ -151,9 +138,7 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
   it("archive with stale ticketId (pointing at a deleted row) succeeds without throwing", async () => {
     await registerBuilderWithTicket("zeta", "FRI-stale-and-gone");
 
-    await expect(
-      archiveAgent("zeta", { reason: "completed" }),
-    ).resolves.toBeDefined();
+    await expect(archiveAgent("zeta", { reason: "completed" })).resolves.toBeDefined();
     expect((await registry.getAgent("zeta"))?.status).toBe("archived");
   });
 
@@ -194,9 +179,9 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     // "archived", ...)`; the gate throws `IllegalTransitionError` with
     // code `ORCHESTRATOR_NOT_ARCHIVABLE` before the closer is invoked.
     const { IllegalTransitionError } = await import("./registry.js");
-    await expect(
-      archiveAgent("main", { reason: "abandoned" }),
-    ).rejects.toBeInstanceOf(IllegalTransitionError);
+    await expect(archiveAgent("main", { reason: "abandoned" })).rejects.toBeInstanceOf(
+      IllegalTransitionError,
+    );
 
     // The row must still be `idle` and the unrelated ticket untouched.
     expect((await registry.getAgent("main"))?.status).toBe("idle");

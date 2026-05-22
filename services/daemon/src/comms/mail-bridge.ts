@@ -124,8 +124,7 @@ async function maybeSpawnFromMail(agentName: string): Promise<void> {
     {
       agentName: agentRow.name,
       agentType: agentRow.type,
-      parentName:
-        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+      parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
     },
     pinnedFacts,
   );
@@ -137,14 +136,13 @@ async function maybeSpawnFromMail(agentName: string): Promise<void> {
   // surrounding mail-listing prose.
   const intent = pending.map((m) => m.body).join("\n\n");
   const mailPrompt = buildMailPrompt(agentName, pending);
-  const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } =
-    await composeDispatchPrompt({
-      intentText: intent,
-      intentTag: "mail",
-      body: mailPrompt,
-      agentType: agentRow.type,
-      baseSystemPrompt: systemPrompt,
-    });
+  const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } = await composeDispatchPrompt({
+    intentText: intent,
+    intentTag: "mail",
+    body: mailPrompt,
+    agentType: agentRow.type,
+    baseSystemPrompt: systemPrompt,
+  });
   const workingDirectory = await registry.workingDirectoryFor(agentRow);
   dispatchTurn({
     agentName,
@@ -160,8 +158,7 @@ async function maybeSpawnFromMail(agentName: string): Promise<void> {
       effort: modelCfg.effort,
       resumeSessionId: agentRow.sessionId ?? undefined,
       daemonPort: resolveDaemonPort(cfg),
-      parentName:
-        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+      parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
       mode: "long-lived",
     },
   });

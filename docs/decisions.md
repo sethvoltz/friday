@@ -24,11 +24,11 @@ Single SDK runtime keeps long-lived sessions, agent registry, fork pool, file wa
 
 **Status:** superseded for settled-state events by ADR-024 (2026-05-18); narrows for live-turn events. Original rationale below preserved for context.
 
-**Amendment (ADR-024, 2026-05-18):** Under the Postgres + Zero sync architecture, settled-state convergence is handled by Postgres logical replication via zero-cache — the per-block `last_event_seq` cursor + boot_id invalidation pattern retires. The invariant **narrows** to the live-turn delta path: the daemon's in-memory accumulator for the in-flight block is updated *before* the corresponding SSE `block_delta` is emitted; on `block_complete` the Postgres row is written with `streaming=0` (which is what Zero replicates). Per-turn SSE replay buffer remains the safety net for refresh-mid-stream.
+**Amendment (ADR-024, 2026-05-18):** Under the Postgres + Zero sync architecture, settled-state convergence is handled by Postgres logical replication via zero-cache — the per-block `last_event_seq` cursor + boot*id invalidation pattern retires. The invariant **narrows** to the live-turn delta path: the daemon's in-memory accumulator for the in-flight block is updated \_before* the corresponding SSE `block_delta` is emitted; on `block_complete` the Postgres row is written with `streaming=0` (which is what Zero replicates). Per-turn SSE replay buffer remains the safety net for refresh-mid-stream.
 
-Each event has a monotonic `seq`. The block row is updated to `last_event_seq = N` *before* the event with that seq is broadcast. Browsers on focus switch / reconnect can read DB up to cursor K and live-render only events with `seq > K`. No double-application, no missed events.
+Each event has a monotonic `seq`. The block row is updated to `last_event_seq = N` _before_ the event with that seq is broadcast. Browsers on focus switch / reconnect can read DB up to cursor K and live-render only events with `seq > K`. No double-application, no missed events.
 
-**Per-block granularity (WS-1).** The invariant now holds at the *block* row level, not the turn level. Each row in the `blocks` table — one per content block (text / thinking / tool_use / tool_result / user / mail) — carries its own `last_event_seq`. Streaming deltas advance the row before the corresponding `block_delta` SSE event is emitted; `block_stop` flips `streaming = 0` after the row is final. This means a refresh mid-turn lands on exactly the bytes the live stream had: there's nothing to reconcile because there's no separate per-turn "canonical" representation.
+**Per-block granularity (WS-1).** The invariant now holds at the _block_ row level, not the turn level. Each row in the `blocks` table — one per content block (text / thinking / tool_use / tool_result / user / mail) — carries its own `last_event_seq`. Streaming deltas advance the row before the corresponding `block_delta` SSE event is emitted; `block_stop` flips `streaming = 0` after the row is final. This means a refresh mid-turn lands on exactly the bytes the live stream had: there's nothing to reconcile because there's no separate per-turn "canonical" representation.
 
 **boot_id cursor reset.** SSE consumers cache `lastSeqByAgent`, which keeps them caught up across reconnects within a single daemon lifetime. Across a daemon restart, sequence numbers reset to 1 — a cached cursor of 500 would silently skip half the post-restart events. The daemon now generates a fresh `boot_id` on startup and stamps it on every `connection_established` SSE frame. Clients compare boot_ids on reconnect: a mismatch invalidates the cached cursor and triggers a full reload from the DB. Sequences stay simple integers, but cross-restart correctness is preserved.
 
@@ -107,7 +107,7 @@ The old Friday tracked agents in `~/.friday/agents.json` and per-Slack-channel s
 
 The shared `mailBus` EventEmitter (`packages/shared/src/services/mail.ts`) emits two events on every `sendMail()` call: a per-recipient `mail:to:<agentName>` for direct subscription, and a generic `mail:any` for spectator subscribers (the daemon's mail-bridge re-publishes both as SSE `mail_delivered` and IPC `mail-wakeup`). Event-name collisions are prevented by the agent-name regex (`/^[a-z0-9][a-z0-9-]{0,62}$/`).
 
-**Priority mail (amended 2026-05-12, FIX_FORWARD 8.4).** The `mail.priority` field gates *when* the recipient sees the message:
+**Priority mail (amended 2026-05-12, FIX_FORWARD 8.4).** The `mail.priority` field gates _when_ the recipient sees the message:
 
 - `'normal'` (default): mail is queued and re-injected at the **next turn boundary**, matching the original ADR-014 behavior. The receiving worker finishes whatever it's doing, then receives the queued items in its next turn.
 - `'critical'`: the daemon emits an IPC `mail-wakeup-critical` on delivery. Workers check for pending critical mail at every SDK iteration boundary inside a turn and break out early, so the next iteration sees the message even mid-turn. Use sparingly — interrupting tool loops costs work in flight.
@@ -128,7 +128,7 @@ Mid-turn injection is opt-in per send; the bus event names and the SSE `mail_del
 
 **Status:** accepted (2026-05-12, FIX_FORWARD 8.3; supersedes the granularity portion of ADR-012 / ADR-004)
 
-The `turns` table modeled one row per turn, with the entire content array serialized as JSON inside it. That worked for post-hoc rendering but coupled the two distinct concerns — *what eventually lands in the transcript* and *what's currently streaming* — into the same row. Live updates required either rewriting the JSON blob on every delta (expensive, race-prone) or living with the lie that the in-flight UI was extrapolating from SSE events with no DB-side ground truth.
+The `turns` table modeled one row per turn, with the entire content array serialized as JSON inside it. That worked for post-hoc rendering but coupled the two distinct concerns — _what eventually lands in the transcript_ and _what's currently streaming_ — into the same row. Live updates required either rewriting the JSON blob on every delta (expensive, race-prone) or living with the lie that the in-flight UI was extrapolating from SSE events with no DB-side ground truth.
 
 **The new model:**
 
@@ -169,7 +169,7 @@ Consequences:
 
 **Status:** accepted (amended by ADR-024, 2026-05-18 — SSE stage becomes Sync stage)
 
-The old header had two indicator dots — "Bot" (is the agent alive?) and "Live" (is SSE streaming?) — that turned out to under-communicate the failure mode in the most common outage: the *browser* lost connectivity. The dots stayed colored based on stale daemon state, and the user spent a minute confused about why nothing was updating.
+The old header had two indicator dots — "Bot" (is the agent alive?) and "Live" (is SSE streaming?) — that turned out to under-communicate the failure mode in the most common outage: the _browser_ lost connectivity. The dots stayed colored based on stale daemon state, and the user spent a minute confused about why nothing was updating.
 
 **The new model:** a connectivity-chain widget with three sequential stages, each rendered as a small dot:
 
@@ -213,12 +213,14 @@ The fix is a one-tick `overflow-y: hidden` window around the `scrollTop` write:
 const prev = scroller.style.overflowY;
 scroller.style.overflowY = "hidden";
 scroller.scrollTop += delta;
-setTimeout(() => { scroller.style.overflowY = prev; }, 0);
+setTimeout(() => {
+  scroller.style.overflowY = prev;
+}, 0);
 ```
 
 Setting `overflow-y: hidden` synchronously detaches the element from WebKit's scroll thread, forcing it to commit the pending scroll position and flush a paint of the now-non-scrollable region. The async restore (`setTimeout 0`) reattaches the scroll thread once the paint has happened. **A synchronous restore reproduces the bug** — the asynchronous tick is load-bearing; this is not a place to "clean up" by inlining. Pattern adopted from `inokawa/virtua` PR #862, originally `prud/ios-overflow-scroll-to-top`. Preserves inertial / momentum scrolling because the toggle window is one task wide and visually invisible.
 
-Implementation lives at the call site in `services/dashboard/src/lib/components/Chat/ChatMessages.svelte` (`onPrepended` + the past-session equivalent). The CSS rule on `.chat-scroll` keeps `overflow-anchor: none` as Chromium-side belt-and-braces (free on WebKit); layer-promotion hints are deliberately *not* added.
+Implementation lives at the call site in `services/dashboard/src/lib/components/Chat/ChatMessages.svelte` (`onPrepended` + the past-session equivalent). The CSS rule on `.chat-scroll` keeps `overflow-anchor: none` as Chromium-side belt-and-braces (free on WebKit); layer-promotion hints are deliberately _not_ added.
 
 ## ADR-020 — Invariant auditor is a timer-based safety net, not the primary enforcement
 
@@ -241,6 +243,7 @@ What shipped instead is a **periodic invariant auditor** (`services/daemon/src/a
 **Path forward (deferred, not blocked):**
 
 If/when we harden further:
+
 - Promote `registry.setStatus` to a state-machine gate; codify the transition table (`idle ↔ working`, `working → stalled`, `* → archived` is terminal, etc.).
 - Add inline checks at `spawnTurn` / `dispatchTurn` / mail-bridge dispatch / the `/api/agents/:name/archive` handler for the agent-row-vs-filesystem invariant.
 - Drop the auditor interval to 5–10 min once the inline checks carry the load; keep it as defense-in-depth for Class B.
@@ -328,22 +331,22 @@ entirely, not deferred — replaced by the hard split.
 
 Today the Builder prompt reads "Do not create new builders. Do not spawn helpers" (`packages/shared/src/prompts/agents/builder.md:8`) and the `friday-agents` MCP server is hard-gated to `callerType === "orchestrator"` (`services/daemon/src/mcp/builder.ts:84`). A Builder mid-task that needs scoped research — "what does this third-party API actually return?", "summarize this 30-file directory before I edit", "fetch and digest an upstream RFC" — has to package the question, mail the orchestrator, wait for a turn, and resume. The orchestrator then spawns the Helper anyway. The middleman adds latency, drains the orchestrator's context with sub-agent bookkeeping, and discourages sub-agents from asking for help they should be asking for. The same goes for a Helper doing genuinely large comprehensive analysis — there are real tasks (five independent dependency trees, ten files of cross-cutting refactor analysis) where parallel sub-Helpers are the right shape.
 
-In Seth's framing: *"research aids to the agents making shit is super helpful."* And later: *"If a builder needs to do research and the context of that research isn't important but the results are: Helper. If a helper is tasked with doing really comprehensive analysis of some tricky problem: sub-Helpers. This seems obvious, we just need to codify it so it also seems obvious to the agents WHILE ALSO not creating runaway conditions. An infinite trail of helpers deeply nested helps no one."* That's the value frame **and** the failure mode the rules below have to navigate.
+In Seth's framing: _"research aids to the agents making shit is super helpful."_ And later: _"If a builder needs to do research and the context of that research isn't important but the results are: Helper. If a helper is tasked with doing really comprehensive analysis of some tricky problem: sub-Helpers. This seems obvious, we just need to codify it so it also seems obvious to the agents WHILE ALSO not creating runaway conditions. An infinite trail of helpers deeply nested helps no one."_ That's the value frame **and** the failure mode the rules below have to navigate.
 
 **Decision.** The spawn matrix is:
 
-| Spawner | Helper | Builder |
-|---|---|---|
-| Orchestrator | ✅ | ✅ |
-| Builder | ✅ *with reason* | ❌ |
-| Helper | ✅ *with reason* | ❌ |
+| Spawner      | Helper           | Builder |
+| ------------ | ---------------- | ------- |
+| Orchestrator | ✅               | ✅      |
+| Builder      | ✅ _with reason_ | ❌      |
+| Helper       | ✅ _with reason_ | ❌      |
 
-The hard structural rule — enforced in code at the API handler — is *only* the Builder column: **no agent other than the orchestrator can create a Builder.** Helpers spawning Helpers is allowed in code; the discipline against unjustified nesting lives in prompts, telemetry, and the evolve signal, not in a daemon-side count cap.
+The hard structural rule — enforced in code at the API handler — is _only_ the Builder column: **no agent other than the orchestrator can create a Builder.** Helpers spawning Helpers is allowed in code; the discipline against unjustified nesting lives in prompts, telemetry, and the evolve signal, not in a daemon-side count cap.
 
 **Why this shape:**
 
-1. **Containment holds for Helpers under Builders.** Helpers don't have worktrees — `services/daemon/src/api/server.ts:501` only branches on `body.type === "builder"` for `createWorkspace`; every other type starts with `workingDirectory = process.cwd()`. A Builder-spawned Helper therefore lands in the daemon's cwd, **not** in the Builder's worktree. The constitutional rule "Workspace containment for builders" is preserved by construction: the Helper has no path into the worktree, and the Builder's prompt-level "do not read, write, or modify files outside it" rule still binds the *Builder*. If a Builder passes its worktree path to a Helper as data, the Helper could read it; that's a prompt-discipline issue, not a containment break, and it's identical to the surface a Helper has today when the orchestrator hands it the same path.
-2. **Helpers spawning Helpers is justified by real workload shapes.** Parallelizing five independent investigations costs roughly 5× the API spend but converges in roughly 1× the wall-clock time *and* keeps the parent Helper's context clean (each sub-Helper's verbose tool-call traffic stays in its own session). Forcing every helper-of-helper to route through the orchestrator just to be re-spawned by it is theater.
+1. **Containment holds for Helpers under Builders.** Helpers don't have worktrees — `services/daemon/src/api/server.ts:501` only branches on `body.type === "builder"` for `createWorkspace`; every other type starts with `workingDirectory = process.cwd()`. A Builder-spawned Helper therefore lands in the daemon's cwd, **not** in the Builder's worktree. The constitutional rule "Workspace containment for builders" is preserved by construction: the Helper has no path into the worktree, and the Builder's prompt-level "do not read, write, or modify files outside it" rule still binds the _Builder_. If a Builder passes its worktree path to a Helper as data, the Helper could read it; that's a prompt-discipline issue, not a containment break, and it's identical to the surface a Helper has today when the orchestrator hands it the same path.
+2. **Helpers spawning Helpers is justified by real workload shapes.** Parallelizing five independent investigations costs roughly 5× the API spend but converges in roughly 1× the wall-clock time _and_ keeps the parent Helper's context clean (each sub-Helper's verbose tool-call traffic stays in its own session). Forcing every helper-of-helper to route through the orchestrator just to be re-spawned by it is theater.
 3. **Builders can't be spawned by anyone but the orchestrator.** Each Builder is a worktree + branch + push-rights surface. Letting a Builder or Helper cut another worktree turns the blast radius of a single rogue task into N rogue tasks with N branches and N PRs. The orchestrator's "user approval gate before creating Builders" (Constitution §3) exists precisely because Builders are the irreversible surface; delegating that gate to another agent defeats it. This is the **only** rule the API handler enforces unconditionally.
 
 **Cost runaway is real but not solved with a hard cap.** Each Helper consumes its own context + API spend; a 4-deep nested fanout multiplies fast. We considered (and rejected for v1) a per-agent concurrent-helper count cap. The reason: the right number depends on the task — a Helper doing genuine 10-way parallel analysis should not be blocked by a `>=3` heuristic, and a Helper doing pointless 2-way nesting shouldn't be rewarded just for staying under the line. We instead bound runaway via prompt discipline + visibility + a feedback loop:
@@ -352,7 +355,7 @@ The hard structural rule — enforced in code at the API handler — is *only* t
 - **Structured spawn telemetry.** Every successful spawn emits a daemon event `agent.spawn` with shape `{ parent, child, type, depth, parentChain: string[], reason, ts }` to `logs/daemon.jsonl`. `depth` is computed at registration time by walking `parentName` upward through the registry until a null parent (orchestrator). `parentChain` is the full ordered list root→leaf, capped at a sane length (e.g. 16) just to bound log line size.
 - **Evolve signal, not a hard block.** If `agent.spawn` events at `depth >= 4` fire more than N times in a rolling window (threshold telemetry-driven, see open questions), the meta-agent in `packages/evolve` emits a proposal that lands in the daily digest. The orchestrator (and user) get a visibility flag — not an interrupt, not a kill. Depth 1–3 is everyday work; depth ≥ 4 is "look at this" without prejudging whether it's good or bad.
 
-**Prompt-level antipattern, named explicitly.** Both `builder.md` and `helper.md` get a "When to spawn a Helper" section with concrete YES / NO examples and the line *"infinite trails of nested helpers help no one"* verbatim. Giving the agent that exact language makes the failure mode recognizable from inside its own reasoning. Examples:
+**Prompt-level antipattern, named explicitly.** Both `builder.md` and `helper.md` get a "When to spawn a Helper" section with concrete YES / NO examples and the line _"infinite trails of nested helpers help no one"_ verbatim. Giving the agent that exact language makes the failure mode recognizable from inside its own reasoning. Examples:
 
 - **YES — Builder spawning a Helper:** "Five third-party APIs return shapes I haven't seen; I'll spawn a Helper per API to digest its docs and report back a one-paragraph contract each."
 - **YES — Helper spawning sub-Helpers:** "Comprehensive analysis of a 12-file refactor; I'll spawn one sub-Helper per file to summarize its surface area in parallel."
@@ -365,7 +368,7 @@ The hard structural rule — enforced in code at the API handler — is *only* t
 
 **Implementation plan (for the follow-up builder, not this PR):**
 
-1. **`builder.md` prompt.** Rewrite the line at `packages/shared/src/prompts/agents/builder.md:8` from `Do not create new builders. Do not spawn helpers.` to `Do not create new builders. You **may** spawn Helpers via agent_create when their results matter to you but their working context shouldn't pollute yours. Every spawn requires a non-empty reason field.` Add a new "When to spawn a Helper" subsection with the YES / NO examples above and the verbatim *"Infinite trails of nested helpers help no one."* Update the Tools list to include `agent_create` / `agent_list` / `agent_status` / `agent_inspect` / `agent_archive`. Revise the line 40 paragraph (`Do not use the built-in Task tool…`) to clarify `agent_create` is the spawn path.
+1. **`builder.md` prompt.** Rewrite the line at `packages/shared/src/prompts/agents/builder.md:8` from `Do not create new builders. Do not spawn helpers.` to `Do not create new builders. You **may** spawn Helpers via agent_create when their results matter to you but their working context shouldn't pollute yours. Every spawn requires a non-empty reason field.` Add a new "When to spawn a Helper" subsection with the YES / NO examples above and the verbatim _"Infinite trails of nested helpers help no one."_ Update the Tools list to include `agent_create` / `agent_list` / `agent_status` / `agent_inspect` / `agent_archive`. Revise the line 40 paragraph (`Do not use the built-in Task tool…`) to clarify `agent_create` is the spawn path.
 
 2. **`helper.md` prompt.** Drop the "leaf" framing entirely. Add a parallel "When to spawn a sub-Helper" section with the same YES / NO examples scoped to Helpers, the verbatim antipattern line, and a sentence: `You may spawn sub-Helpers when a task is genuinely large and parallelizable. Every spawn requires a non-empty reason field. You may not spawn Builders.` Update line 19 (`Do not use the built-in Task tool…`) to read `mail your parent` (parent may now be a Builder or another Helper). Update the Tools list to include `agent_create` / `agent_list` / `agent_status` / `agent_inspect` / `agent_archive`.
 
@@ -399,7 +402,7 @@ The hard structural rule — enforced in code at the API handler — is *only* t
 - **Evolve threshold.** What's the right depth + count combination for the evolve signal? `depth >= 4`, more than `5` events / `24h` is a starting guess. Telemetry-driven — let real `agent.spawn` data calibrate this once it's flowing.
 - **`reason` format.** Free-form text vs. small enum (`research`, `parallel-analysis`, `digest`, etc.)? Free-form is more honest and harder to game; enum is more queryable. Leaning free-form for the MVP; if dashboards or evolve digests want a structured cut later, we can introduce a `kind` enum alongside the free-form field.
 - **Auto-archival lineage.** When a Builder (or Helper) archives, do in-flight sub-Helpers cascade-archive, or persist? Probably cascade for `status === "working"` children and persist for `status === "idle"` already-completed children — but flag it.
-- **Mail injection.** The orchestrator can already *read* Builder ↔ Helper mail via the dashboard. Should it be able to *inject* into that mailbox (e.g. interrupt a runaway nested-Helper exchange)? Today no agent can inject into another's mailbox out-of-band; the orchestrator's only lever is `agent_archive`. Leaving this open until we see whether read-only visibility plus the evolve signal is enough.
+- **Mail injection.** The orchestrator can already _read_ Builder ↔ Helper mail via the dashboard. Should it be able to _inject_ into that mailbox (e.g. interrupt a runaway nested-Helper exchange)? Today no agent can inject into another's mailbox out-of-band; the orchestrator's only lever is `agent_archive`. Leaving this open until we see whether read-only visibility plus the evolve signal is enough.
 
 ## ADR-023 — Postgres + Zero sync layer; daemon and dashboard as peer writers; row-as-intent for side-effect dispatch
 
@@ -409,7 +412,7 @@ Supersedes ADR-001. Reshapes ADR-002, ADR-013, ADR-014, ADR-015. Pairs with ADR-
 
 The current architecture — daemon-owned SQLite + dashboard-as-proxy + bespoke SSE wire — was designed against a "single-user, single-device" mental model with multi-device as a small additive case. In practice the multi-device case is now load-bearing: Seth uses Friday across personal laptop, phone, and a third device (automated Claude sessions), with a tablet on the horizon. Each surface is "two windows watching the same DB through different keyholes" — cursor state diverges, optimistic bubbles only exist on the originating device, unread badges disagree, "phone shows stale state after wake-from-sleep" is a regular complaint. The bespoke SSE + per-block `last_event_seq` + boot_id cursor + paginated REST reload machinery (ADR-003, ADR-004, FIX_FORWARD 8.x) solves the single-device race-free-render problem honestly, but it cannot make the multi-device convergence problem go away — it's the wrong shape for it.
 
-Local-first architecture (Linear-style: durable client-side cache + reactive sync engine + optimistic mutators with server-side replay) is the industry-settled answer to exactly this problem class. The remaining decision was *which* sync engine and *what server* it sits on.
+Local-first architecture (Linear-style: durable client-side cache + reactive sync engine + optimistic mutators with server-side replay) is the industry-settled answer to exactly this problem class. The remaining decision was _which_ sync engine and _what server_ it sits on.
 
 ### Decision
 
@@ -460,6 +463,7 @@ Local-first architecture (Linear-style: durable client-side cache + reactive syn
 ```
 
 Reboot independence:
+
 - **Dashboard reboot:** already-connected client WS to zero-cache survive (reverse proxy WS-upgrade pattern; brief blip on the reverse-proxy hop, sockets remain on the upstream zero-cache). Daemon continues writing Postgres → zero-cache → already-connected clients see realtime updates throughout. New WS connections fail until dashboard returns. Mutators fail until dashboard returns; Zero queues them locally on the client; flush on reconnect. **No data loss, no missed events for live clients.**
 - **Daemon reboot:** dashboard mutators continue to commit. zero-cache continues to replicate. Already-connected clients see new mutator-written rows in real time. Side effects (Claude turns, worker forks, mail delivery) pause until the daemon comes back; daemon's boot recovery scans for `status='pending'` rows and re-dispatches the missed side effects. **Writes always succeed; side effects are eventually-consistent.**
 
@@ -492,12 +496,14 @@ This pattern stays small: the abort, critical-mail-wakeup, and cancel-queued ops
 A fresh device (new install, cleared PWA storage, or `Forget this device`) bootstraps in two phases.
 
 **Phase 1 — foreground, blocks first usable UI, target <2s broadband:**
+
 - Last 50 blocks for the orchestrator.
 - All non-archived rows from `agents`, `tickets` (counts + last 20), `schedules`, `apps`, `settings`.
 - Mail unread count for orchestrator + last 10 rows.
 - Memory entry headers (titles + types, no bodies yet).
 
 **Phase 2 — background, progress-indicated, target <2min:**
+
 - Full block history for all non-archived agents and agents archived within the last 24h.
 - Full ticket history with comments + relations + external links.
 - Full mail history within the last 30 days.
@@ -507,6 +513,7 @@ A fresh device (new install, cleared PWA storage, or `Forget this device`) boots
 - Full evolve proposals.
 
 **Phase 3 — lazy on demand:**
+
 - Blocks for agents archived >24h ago (fetched when user opens that agent's chat).
 - Blocks older than 90 days for any agent (fetched on scroll-back via the existing `/api/agents/:name/blocks?before=...` REST endpoint — kept for this fallback).
 - Mail older than 30 days (fetched when search triggers it).
@@ -523,15 +530,15 @@ Retention enforcement runs client-side as a periodic task (every 24h while the a
 
 A `client_devices` table tracks per-device storage and sync state:
 
-| Column | Notes |
-|---|---|
-| `device_id` | UUID minted on first bootstrap, persisted in localStorage. |
-| `user_agent` | Set on registration. |
-| `label` | User-editable display name (defaults to UA-derived guess). |
-| `last_seen_ts` | Updated by the `reportClientStats` mutator. |
-| `storage_used_bytes` | `navigator.storage.estimate().usage` (null if browser unsupported). |
+| Column                | Notes                                                               |
+| --------------------- | ------------------------------------------------------------------- |
+| `device_id`           | UUID minted on first bootstrap, persisted in localStorage.          |
+| `user_agent`          | Set on registration.                                                |
+| `label`               | User-editable display name (defaults to UA-derived guess).          |
+| `last_seen_ts`        | Updated by the `reportClientStats` mutator.                         |
+| `storage_used_bytes`  | `navigator.storage.estimate().usage` (null if browser unsupported). |
 | `storage_quota_bytes` | `navigator.storage.estimate().quota` (null if browser unsupported). |
-| `last_sync_ts` | Updated when Phase 2 completes or after a heavy mutator burst. |
+| `last_sync_ts`        | Updated when Phase 2 completes or after a heavy mutator burst.      |
 
 The `reportClientStats` mutator fires from the client every 5 minutes while active, and on Phase 2 completion. The Settings page renders a per-device table with storage indicators; each row offers a "Forget this device" action that calls `forgetDevice` mutator (deletes the row + revokes Zero credentials for that device, forcing re-bootstrap on its next connect).
 
@@ -539,30 +546,30 @@ The `reportClientStats` mutator fires from the client every 5 minutes while acti
 
 Initial catalog (subject to refinement during implementation):
 
-| Mutator | Writes | Side effect | Status transitions |
-|---|---|---|---|
-| `sendUserMessage` | `blocks` (kind=user, status=pending) | Daemon forks/dispatches worker | `pending → dispatched` (worker forks ack) |
-| `abortTurn` | `blocks` UPDATE WHERE turn_id (status=abort_requested) | Daemon `AbortController.abort()` (fast path) | `abort_requested → aborted` (worker exits) |
-| `cancelQueued` | `blocks` DELETE WHERE block_id AND status=queued | Daemon splices `nextPrompts` (fast path) | (row deleted) |
-| `archiveAgent` | `agents` UPDATE (status=archive_requested, reason) | Daemon archives worktree, closes linked tickets, kills worker | `archive_requested → archived` |
-| `createTicket` | `tickets` INSERT | None (pure data) | — |
-| `updateTicket` | `tickets` UPDATE | None | — |
-| `addTicketComment` | `ticket_comments` INSERT | None | — |
-| `addTicketRelation` | `ticket_relations` INSERT | None | — |
-| `linkTicketExternal` | `ticket_external_links` INSERT | None (Linear push happens via daemon's ticket-close path only) | — |
-| `createMemoryEntry` | `memory_entries` INSERT + filesystem write via daemon | Daemon writes `~/.friday/memory/entries/<id>.md` | `pending_file → ready` |
-| `updateMemoryEntry` | `memory_entries` UPDATE + filesystem write via daemon | Daemon rewrites the file | `pending_file → ready` |
-| `deleteMemoryEntry` | `memory_entries` soft-delete + filesystem move | Daemon moves file to trash | — |
-| `createSchedule` | `schedules` INSERT | Daemon registers cron tick | `pending_register → active` |
-| `updateSchedule` | `schedules` UPDATE | Daemon re-registers cron | `pending_register → active` |
-| `deleteSchedule` | `schedules` DELETE | Daemon unregisters cron | — |
-| `installApp` | `apps` INSERT + `agents` INSERT(es) + `schedules` INSERT(es) in one tx | Daemon runs installer (collision matrix already enforced inside tx) | `pending_install → installed` |
-| `uninstallApp` | `apps` UPDATE (status=uninstall_requested) | Daemon archives owned agents, drops schedules | `uninstall_requested → uninstalled` |
-| `reloadApp` | `apps` UPDATE (status=reload_requested) | Daemon re-reads manifest, reconciles | `reload_requested → installed` |
-| `markRead` | `read_cursors` UPSERT (agent_id, device_id?, last_seen_block_id) | None | — |
-| `reportClientStats` | `client_devices` UPSERT | None | — |
-| `forgetDevice` | `client_devices` DELETE | Daemon revokes Zero credentials (LISTEN-only) | — |
-| `updateSettings` | `settings` UPDATE | Daemon picks up changes (LISTEN-only, varies by setting) | — |
+| Mutator              | Writes                                                                 | Side effect                                                         | Status transitions                         |
+| -------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------ |
+| `sendUserMessage`    | `blocks` (kind=user, status=pending)                                   | Daemon forks/dispatches worker                                      | `pending → dispatched` (worker forks ack)  |
+| `abortTurn`          | `blocks` UPDATE WHERE turn_id (status=abort_requested)                 | Daemon `AbortController.abort()` (fast path)                        | `abort_requested → aborted` (worker exits) |
+| `cancelQueued`       | `blocks` DELETE WHERE block_id AND status=queued                       | Daemon splices `nextPrompts` (fast path)                            | (row deleted)                              |
+| `archiveAgent`       | `agents` UPDATE (status=archive_requested, reason)                     | Daemon archives worktree, closes linked tickets, kills worker       | `archive_requested → archived`             |
+| `createTicket`       | `tickets` INSERT                                                       | None (pure data)                                                    | —                                          |
+| `updateTicket`       | `tickets` UPDATE                                                       | None                                                                | —                                          |
+| `addTicketComment`   | `ticket_comments` INSERT                                               | None                                                                | —                                          |
+| `addTicketRelation`  | `ticket_relations` INSERT                                              | None                                                                | —                                          |
+| `linkTicketExternal` | `ticket_external_links` INSERT                                         | None (Linear push happens via daemon's ticket-close path only)      | —                                          |
+| `createMemoryEntry`  | `memory_entries` INSERT + filesystem write via daemon                  | Daemon writes `~/.friday/memory/entries/<id>.md`                    | `pending_file → ready`                     |
+| `updateMemoryEntry`  | `memory_entries` UPDATE + filesystem write via daemon                  | Daemon rewrites the file                                            | `pending_file → ready`                     |
+| `deleteMemoryEntry`  | `memory_entries` soft-delete + filesystem move                         | Daemon moves file to trash                                          | —                                          |
+| `createSchedule`     | `schedules` INSERT                                                     | Daemon registers cron tick                                          | `pending_register → active`                |
+| `updateSchedule`     | `schedules` UPDATE                                                     | Daemon re-registers cron                                            | `pending_register → active`                |
+| `deleteSchedule`     | `schedules` DELETE                                                     | Daemon unregisters cron                                             | —                                          |
+| `installApp`         | `apps` INSERT + `agents` INSERT(es) + `schedules` INSERT(es) in one tx | Daemon runs installer (collision matrix already enforced inside tx) | `pending_install → installed`              |
+| `uninstallApp`       | `apps` UPDATE (status=uninstall_requested)                             | Daemon archives owned agents, drops schedules                       | `uninstall_requested → uninstalled`        |
+| `reloadApp`          | `apps` UPDATE (status=reload_requested)                                | Daemon re-reads manifest, reconciles                                | `reload_requested → installed`             |
+| `markRead`           | `read_cursors` UPSERT (agent_id, device_id?, last_seen_block_id)       | None                                                                | —                                          |
+| `reportClientStats`  | `client_devices` UPSERT                                                | None                                                                | —                                          |
+| `forgetDevice`       | `client_devices` DELETE                                                | Daemon revokes Zero credentials (LISTEN-only)                       | —                                          |
+| `updateSettings`     | `settings` UPDATE                                                      | Daemon picks up changes (LISTEN-only, varies by setting)            | —                                          |
 
 Daemon-internal writes (no mutator, no client-originated) continue to land directly in Postgres from the daemon process: block streaming on close, agent status transitions during worker lifecycle, mail rows from `mail_send` tool calls, scheduler tick firings, app-lifecycle reconcile-on-boot, telemetry/usage rows, BetterAuth tables. These are subject to the same row-as-intent semantics where they trigger side effects (e.g., the daemon writes a mail row, daemon also LISTENs on `new_mail` to fire `mail-wakeup` IPC — same handler whether the mail was written by daemon or by dashboard mutator).
 
@@ -598,7 +605,7 @@ Live-client schema-version negotiation is handled by Zero: a client connecting o
 
 Supersedes the all-events-via-SSE portion of ADR-003. Refines ADR-004 (DB-write-before-SSE-emit narrows to in-memory-accumulator-before-SSE-emit). Pairs with ADR-023.
 
-Under the new sync architecture, almost every event today carried on SSE becomes redundant with the reactive query layer: `block_complete`, `agent_lifecycle`, `agent_status`, `mail_delivered`, `schedule_fired`, `evolve_critical`, `system_banner`, and `turn_started` / `turn_done` envelope events all derive from row changes that Zero replicates natively. Carrying them on SSE *and* sync would create the two-notification-paths anti-pattern; the client would have to dedupe and order them, and would have a stale-channel problem if the two sources disagreed.
+Under the new sync architecture, almost every event today carried on SSE becomes redundant with the reactive query layer: `block_complete`, `agent_lifecycle`, `agent_status`, `mail_delivered`, `schedule_fired`, `evolve_critical`, `system_banner`, and `turn_started` / `turn_done` envelope events all derive from row changes that Zero replicates natively. Carrying them on SSE _and_ sync would create the two-notification-paths anti-pattern; the client would have to dedupe and order them, and would have a stale-channel problem if the two sources disagreed.
 
 But **live token streaming is genuinely the firehose problem sync engines don't want to be.** Postgres logical replication with 5–50 Hz row updates per active block is outside Zero's designed envelope, and per-row replication-lag at that frequency would degrade perceived live-typing fidelity. Token streaming wants a separate transport.
 
@@ -632,6 +639,7 @@ Today, the daemon writes partial bytes to `blocks` row columns continuously duri
 Today SSE is a single global channel; clients filter events by `agent` field. Under the new model, with sync handling all cross-agent state changes, the SSE channel can be **scoped per-agent**: clients open `GET /api/events?agent=<name>` when focusing an agent's chat, close it on focus switch. The replay buffer per channel is naturally small (~1 turn ≈ tens to hundreds of frames; not the 5000-event ring of today).
 
 Focus switch flow:
+
 1. Click sidebar entry for agent B.
 2. Close SSE to agent A (if open).
 3. Zero already has agent B's settled blocks (Phase 2 bootstrap or reactive subscription).
@@ -709,7 +717,7 @@ Bring this ADR back to the table if any of these fire:
 ### Consequences
 
 - The /memory page has two distinct data paths (Zero for list, REST for search). The dashboard treats them as orthogonal: search results don't update the Zero snapshot's order, and Zero updates don't re-trigger the active search query.
-- No code change from this ADR. Existing implementation is correct; this entry documents *why* the hybrid lives and *when* we'd change it, so future architectural audits don't keep re-discovering the gap as a TODO.
+- No code change from this ADR. Existing implementation is correct; this entry documents _why_ the hybrid lives and _when_ we'd change it, so future architectural audits don't keep re-discovering the gap as a TODO.
 
 ## ADR-027 — Path to production: prod-mode-by-default, dev as pnpm wrappers, port surgery
 
@@ -733,7 +741,7 @@ Friday's CLI used to launch dev mode on demand (`friday start --dev`) and prod m
 - **Why optional config fields, not deleted ones.** `~/.friday/config.json` is the user's override surface; deleting the fields would force every operator who'd customized them to discover the new shared constants and edit different code. Optional + `DEFAULT_CONFIG = PROD_*` means a fresh install gets prod defaults and an existing install with a custom port keeps it.
 - **Why an env var (`FRIDAY_DAEMON_PORT`) for dev when prod has none.** Prod reads only config and constants. Dev needs to redirect the daemon-fetch URL on a process-by-process basis (the prod dashboard reads the prod config; the dev dashboard reads the same prod config but needs to talk to a different daemon). An env var is the cheapest mechanism that doesn't require dev to carry its own config file.
 - **Why prod can't avoid `PORT` env.** `@sveltejs/adapter-node` always reads `process.env.PORT` and has no other knob. The custom `server-entry.mjs` consumes it too. We accept the asymmetry: daemon resolves its port from the chain directly; dashboard's chain is computed in `start.ts` and propagated via `PORT`.
-- **Why probing instead of trusting config.** The daemon's IPC consumers (workers, scheduler, mail-bridge) get the port from `workerOpts.daemonPort` already; surfacing the *actually-bound* port in `friday status` is a hedge against config drift between `cfg.daemonPort` and the running process. Probe-validated dashboard is the same idea — config says one thing, the live process is asked.
+- **Why probing instead of trusting config.** The daemon's IPC consumers (workers, scheduler, mail-bridge) get the port from `workerOpts.daemonPort` already; surfacing the _actually-bound_ port in `friday status` is a hedge against config drift between `cfg.daemonPort` and the running process. Probe-validated dashboard is the same idea — config says one thing, the live process is asked.
 - **Why retain breaking `--dev` removal.** A deprecation rejection-shim is ~5 lines of code that exists forever. Citty's unknown-flag error is the user-facing message; muscle-memory recovery happens once, then never again.
 
 ### Cross-references
@@ -753,7 +761,7 @@ Friday's CLI used to launch dev mode on demand (`friday start --dev`) and prod m
 
 Three issues surfaced during Seth's first prod flip onto `:7610` / `:7615`. All trace to the same shape of bug — port info baked into persisted runtime state files that the FRI-83 audit didn't include. Captured here so the FRI-88 brew packaging work doesn't re-encounter them and so future port migrations have a checklist.
 
-1. **`~/.friday/config.json` carrying stale `daemonPort: 7444` / `dashboardPort: 5173`.** Pre-flip these values matched DEFAULT_CONFIG; post-flip they overrode the new prod constants because the resolution chain is `cfg.<x>Port ?? PROD_<X>_PORT` and explicit-config-set wins. Fix during flip: removed the four stale fields (`daemonPort`, `dashboardPort`, plus two leftover `*BaseUrl` fields no longer referenced anywhere in the codebase) from `config.json`. The settings-sync listener doesn't write port fields, so the state stays clean.
+1. **`~/.friday/config.json` carrying stale `daemonPort: 7444` / `dashboardPort: 5173`.** Pre-flip these values matched DEFAULT*CONFIG; post-flip they overrode the new prod constants because the resolution chain is `cfg.<x>Port ?? PROD*<X>\_PORT` and explicit-config-set wins. Fix during flip: removed the four stale fields (`daemonPort`, `dashboardPort`, plus two leftover `\*BaseUrl`fields no longer referenced anywhere in the codebase) from`config.json`. The settings-sync listener doesn't write port fields, so the state stays clean.
 
 2. **`~/.friday/.env` carrying stale `ZERO_MUTATE_URL=http://localhost:5173/api/mutators`.** Zero's push URL is read from env at zero-cache startup; the value was written once at `friday setup` and never updated when ports moved. Fix landed in code (see #3 below); during flip I patched `.env` directly to unblock prod.
 
@@ -840,13 +848,13 @@ The orchestrator + non-builder agents ran with the daemon's `process.cwd()`. The
 
 **Correction landed 2026-05-21 (FRI-101):** the original §2 text proposed a `seedRepoPins()` boot helper, a `friday memory pin-repo` CLI, and a `fridayRepoPath` config field as part of the architecture. All three were deleted as wrong-shape. The actual mechanism is simpler than the original §2 described:
 
-* `listPinnedForAgent(agentName, tag = "pinned")` returns memory entries owned by `agentName` (filter on `created_by`), tagged with `tag` (jsonb `?` operator), `status='ready'`. Ordered by id for byte-stable prompt assembly.
-* `composeSystemPrompt(stack, identity?, pinnedFacts?)` accepts an optional `pinnedFacts` string and renders it as a `# Pinned facts` section between Identity and `agents/<type>.md`.
-* The daemon's `renderPinnedFacts(agentName)` queries `listPinnedForAgent` and renders the section. Threaded into every `composeSystemPrompt` call site so every agent sees its own pins on every turn.
+- `listPinnedForAgent(agentName, tag = "pinned")` returns memory entries owned by `agentName` (filter on `created_by`), tagged with `tag` (jsonb `?` operator), `status='ready'`. Ordered by id for byte-stable prompt assembly.
+- `composeSystemPrompt(stack, identity?, pinnedFacts?)` accepts an optional `pinnedFacts` string and renders it as a `# Pinned facts` section between Identity and `agents/<type>.md`.
+- The daemon's `renderPinnedFacts(agentName)` queries `listPinnedForAgent` and renders the section. Threaded into every `composeSystemPrompt` call site so every agent sees its own pins on every turn.
 
 That's the entire mechanism. No daemon-side seeder per fact-type, no CLI subcommand per fact-type, no config field per fact-type. The agent-friday repo path is a memory owned by `friday` with tag `pinned` (and a secondary `repo` tag for human filtering). Any other always-inject fact uses the same shape — a builder's target-repo URL, a Linear team UUID, a kitchen-app manifest pointer — all are memories tagged `pinned`, owned by the relevant agent.
 
-Builders that need *contextual* (FTS-recalled) repo awareness use the same memory store, just without the `pinned` tag — auto-recall (`packages/memory/src/auto-recall.ts`) surfaces them when the user message tokens match. Same store. Same query. Same code path.
+Builders that need _contextual_ (FTS-recalled) repo awareness use the same memory store, just without the `pinned` tag — auto-recall (`packages/memory/src/auto-recall.ts`) surfaces them when the user message tokens match. Same store. Same query. Same code path.
 
 Architectural rule (checkable in review): any code touching `composeSystemPrompt`, `listPinnedForAgent`, or memory writes that's specific to a single fact-type is a violation.
 
@@ -869,7 +877,7 @@ Architectural rule (checkable in review): any code touching `composeSystemPrompt
 
 ### Bring this ADR back to the table if
 
-- The detector ever force-kills a worker that *was* making real progress. Inspect the `worker.zero-block-turn` log streak in `daemon.jsonl` and decide whether the threshold should rise or the signal should refine to "fewer than N tokens emitted" rather than "zero blocks."
+- The detector ever force-kills a worker that _was_ making real progress. Inspect the `worker.zero-block-turn` log streak in `daemon.jsonl` and decide whether the threshold should rise or the signal should refine to "fewer than N tokens emitted" rather than "zero blocks."
 - The `~/.friday/agents/<name>/` dir collides with a workflow that wants to put real files there. Today the dir is intentionally empty; if friday or a helper starts writing artifacts into its own home, the implicit "empty home" contract becomes a doc'd contract.
 - Cross-volume `~/.claude` setups become common. The EXDEV-fallback path is non-atomic on sidecar-dir moves; if anyone runs into a half-migrated state, a manifest-driven retry replaces the current "skip if dest exists" idempotency.
 
@@ -885,12 +893,11 @@ That left one gap: Friday's in-process MCP servers (`friday-{mail,memory,tickets
 
 ### Decision
 
-**Two-layer policy:** the worker stops *waiting* on cancel; the daemon's authoritative write does not necessarily stop *executing*.
+**Two-layer policy:** the worker stops _waiting_ on cancel; the daemon's authoritative write does not necessarily stop _executing_.
 
 1. **Worker side: signal propagation is mandatory.** `daemonFetch` accepts `signal: AbortSignal` and forwards it to the underlying `fetch()`. Every Friday MCP tool handler accepts `(args, extra)` and threads `extra.signal` (extracted via the typed `signalFrom(extra)` helper in `services/daemon/src/mcp/http.ts`) into its `daemonFetch` call. On Stop, the worker's `AbortController` fires; the MCP SDK signals every in-flight handler; `fetch()` raises `AbortError`; the worker's catch arm flushes blocks with `status='aborted'` and emits `turn-complete` cleanly. Cooperative path target: 200ms from Stop click to `turn_done`. The 500ms force-kill deadline becomes the abnormal-case backstop, not the common path.
 
-2. **Daemon side: no cancellation, no compensation.** The HTTP routes the worker hits are *not* AbortSignal-aware. A write that's already crossed the worker → daemon boundary completes — including the round-trip to Linear, the Postgres `INSERT`, the mail-bus broadcast. The cancel only stops the worker from blocking on the response.
-
+2. **Daemon side: no cancellation, no compensation.** The HTTP routes the worker hits are _not_ AbortSignal-aware. A write that's already crossed the worker → daemon boundary completes — including the round-trip to Linear, the Postgres `INSERT`, the mail-bus broadcast. The cancel only stops the worker from blocking on the response.
    - **Idempotent reads** (`mail_inbox`, `memory_search`, `memory_get`, `ticket_list`, `ticket_get`, `agent_list`, `agent_status`, `agent_inspect`, `schedule_list`, `schedule_show`, `evolve_list`, `evolve_get`, `linear_reconcile`, `app_list`, `app_inspect`): the daemon may finish or not — neither outcome affects correctness. The worker drops the response.
 
    - **Writes** (`mail_send`, `mail_read`, `mail_close`, `memory_save`, `memory_update`, `memory_forget`, `ticket_create`, `ticket_update`, `ticket_comment`, `ticket_link_external`, `agent_create`, `agent_archive`, `schedule_*` mutations, `evolve_save`/`update`/`apply`/`dismiss`/`scan`/`enrich`/`cluster`, `linear_import`/`create_issue`/`update_issue`, `app_install`/`uninstall`/`reload`): the daemon completes the operation as if Stop never happened. The next turn sees the canonical state (a new mail row, an updated ticket, a created Linear issue) and the model reconciles from there. Externally-visible side effects (Linear API writes, mail addressed to other agents) are not rolled back.
@@ -939,13 +946,13 @@ The grill on 2026-05-22 lifted ADR-020's "path forward" into scope as FRI-113.
 
 2. **Transition matrix** (compiled into `services/daemon/src/agent/registry.ts`):
 
-   | from \ to    | idle | working | stalled | error | archived           |
-   |--------------|------|---------|---------|-------|--------------------|
-   | `idle`       | (no-op)  | ✅  | ✅  | ✅ | ✅ (non-orchestrator only) |
-   | `working`    | ✅   | (no-op) | ✅  | ✅ | ✅ (non-orchestrator only) |
-   | `stalled`    | ✅   | ✅      | (no-op) | ✅ | ✅ (non-orchestrator only) |
-   | `error`      | ✅   | ❌      | ❌      | (no-op) | ✅ (non-orchestrator only) |
-   | `archived`   | ❌\* | ❌      | ❌      | ❌    | (no-op)            |
+   | from \ to  | idle    | working | stalled | error   | archived                   |
+   | ---------- | ------- | ------- | ------- | ------- | -------------------------- |
+   | `idle`     | (no-op) | ✅      | ✅      | ✅      | ✅ (non-orchestrator only) |
+   | `working`  | ✅      | (no-op) | ✅      | ✅      | ✅ (non-orchestrator only) |
+   | `stalled`  | ✅      | ✅      | (no-op) | ✅      | ✅ (non-orchestrator only) |
+   | `error`    | ✅      | ❌      | ❌      | (no-op) | ✅ (non-orchestrator only) |
+   | `archived` | ❌\*    | ❌      | ❌      | ❌      | (no-op)                    |
 
    \* `archived → idle` is reachable only via `unarchiveAgent` (the apps installer's re-adopt path), which uses the privileged unchecked write helper.
 

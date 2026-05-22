@@ -25,13 +25,7 @@
 
 import { eq, and } from "drizzle-orm";
 import pgPkg from "pg";
-import {
-  type ArchiveReason,
-  getDb,
-  getPool,
-  schema,
-  LISTEN_CHANNELS,
-} from "@friday/shared";
+import { type ArchiveReason, getDb, getPool, schema, LISTEN_CHANNELS } from "@friday/shared";
 import { archiveAgent } from "./lifecycle.js";
 import { logger } from "../log.js";
 
@@ -54,12 +48,7 @@ async function processPendingArchiveRow(name: string): Promise<void> {
   const rows = await db
     .select()
     .from(schema.agents)
-    .where(
-      and(
-        eq(schema.agents.name, name),
-        eq(schema.agents.status, "archive_requested"),
-      ),
-    )
+    .where(and(eq(schema.agents.name, name), eq(schema.agents.status, "archive_requested")))
     .limit(1);
   const row = rows[0];
   if (!row) {
@@ -111,12 +100,9 @@ export interface ArchiveListenerHandle {
 export async function startArchiveListener(): Promise<ArchiveListenerHandle> {
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ??
-    process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL must be set to start the archive LISTEN connection.",
-    );
+    throw new Error("DATABASE_URL must be set to start the archive LISTEN connection.");
   }
 
   const client = new Client({ connectionString });

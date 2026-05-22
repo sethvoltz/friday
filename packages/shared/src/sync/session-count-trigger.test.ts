@@ -22,14 +22,7 @@
  *     block INSERT itself still succeeds.
  */
 
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { getDb } from "../index.js";
 import { spawnTestSyncEnv } from "../test/sync-harness.js";
@@ -65,10 +58,7 @@ async function insertAgent(name: string): Promise<void> {
   });
 }
 
-async function insertBlock(opts: {
-  agentName: string;
-  sessionId: string;
-}): Promise<void> {
+async function insertBlock(opts: { agentName: string; sessionId: string }): Promise<void> {
   await getDb()
     .insert(schema.blocks)
     .values({
@@ -149,9 +139,7 @@ describe("friday_blocks_increment_session_count_trigger (migration 0020)", () =>
   });
 
   it("no agent row → block INSERT still succeeds; UPDATE matches 0 rows", async () => {
-    await expect(
-      insertBlock({ agentName: "friday", sessionId: "sess-1" }),
-    ).resolves.not.toThrow();
+    await expect(insertBlock({ agentName: "friday", sessionId: "sess-1" })).resolves.not.toThrow();
     expect(await getSessionCount("friday")).toBeNull();
   });
 });

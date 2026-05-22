@@ -101,11 +101,7 @@ function normalizeTokens(raw: ReadonlyArray<unknown>): Tok[] {
     const t = raw[i];
     if (t === "$" && i + 1 < raw.length) {
       const next = raw[i + 1];
-      if (
-        next &&
-        typeof next === "object" &&
-        (next as { op?: string }).op === "("
-      ) {
+      if (next && typeof next === "object" && (next as { op?: string }).op === "(") {
         let depth = 1;
         i += 1;
         while (i + 1 < raw.length && depth > 0) {
@@ -367,10 +363,7 @@ function checkGit(cmd: ParsedCommand): string | null {
     return `git update-ref -d blocked — refusing to delete refs`;
   }
   if (sub === "reflog") {
-    if (
-      cmd.argv.includes("expire") &&
-      cmd.argv.some((a) => a.startsWith("--expire=now"))
-    ) {
+    if (cmd.argv.includes("expire") && cmd.argv.some((a) => a.startsWith("--expire=now"))) {
       return `git reflog expire --expire=now blocked — irrevocable`;
     }
   }
@@ -386,9 +379,7 @@ function checkGit(cmd: ParsedCommand): string | null {
   if (sub === "push") {
     // Walk args after `push` looking for force flags and the refspec.
     const after = cmd.argv.slice(subIdx + 1);
-    const force = after.some(
-      (a) => a === "-f" || a === "--force" || a === "--force-with-lease",
-    );
+    const force = after.some((a) => a === "-f" || a === "--force" || a === "--force-with-lease");
     // Refspecs are positional args (no leading `-`). Collect them.
     const positionals: { value: string; subst: boolean }[] = [];
     for (let j = subIdx + 1; j < cmd.argv.length; j++) {
@@ -413,9 +404,7 @@ function checkGit(cmd: ParsedCommand): string | null {
         // Refspec form: [+]src[:dst] — protected if dst (or src when no dst)
         // is a protected branch.
         const stripped = p.value.replace(/^\+/, "");
-        const [src, dst] = stripped.includes(":")
-          ? stripped.split(":", 2)
-          : [stripped, stripped];
+        const [src, dst] = stripped.includes(":") ? stripped.split(":", 2) : [stripped, stripped];
         const target = (dst || src).replace(/^refs\/heads\//, "");
         if (PROTECTED_BRANCHES.has(target)) {
           return `git push --force blocked — refusing to force-push to "${target}"`;
@@ -470,10 +459,7 @@ const RULES: RuleFn[] = [
  * deny reason on the first matching rule across all logical commands in
  * the string; null if every clause is allowed.
  */
-export function checkBashForDisaster(
-  command: string,
-  workspaceReal: string,
-): string | null {
+export function checkBashForDisaster(command: string, workspaceReal: string): string | null {
   if (!command.trim()) return null;
   let raw: ReadonlyArray<unknown>;
   try {

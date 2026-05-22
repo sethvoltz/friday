@@ -10,12 +10,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 import pgPkg from "pg";
 
 let handle: TestDbHandle;
@@ -97,14 +92,10 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
       });
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_schedule_changed");
 
-      await db
-        .update(schema.schedules)
-        .set({ status: "reload_requested", updatedAt: new Date() });
+      await db.update(schema.schedules).set({ status: "reload_requested", updatedAt: new Date() });
 
       await vi.waitFor(
         () => {
@@ -141,14 +132,10 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
       });
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_schedule_changed");
 
-      await db
-        .update(schema.schedules)
-        .set({ status: "deleted", updatedAt: new Date() });
+      await db.update(schema.schedules).set({ status: "deleted", updatedAt: new Date() });
 
       await vi.waitFor(
         () => {
@@ -188,16 +175,12 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
       });
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_schedule_changed");
 
       // Bumps nextRunAt — common scheduler-tick behavior — but
       // status stays 'active'. No NOTIFY expected.
-      await db
-        .update(schema.schedules)
-        .set({ nextRunAt: new Date(), updatedAt: new Date() });
+      await db.update(schema.schedules).set({ nextRunAt: new Date(), updatedAt: new Date() });
 
       // negative-space: the trigger predicate excludes 'active' UPDATEs —
       // a bounded real-time wait confirms no spurious NOTIFY arrives.
@@ -238,9 +221,7 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
       await client.query("LISTEN friday_schedule_changed");
       await new Promise((r) => setTimeout(r, 250));
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
 
       await db.update(schema.schedules).set({ status: "active" });
 
@@ -257,28 +238,22 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
 describe("schedules status enum", () => {
   it("accepts 'pending_register', 'reload_requested', and 'deleted'", async () => {
     const db = getDb();
-    for (const status of [
-      "pending_register",
-      "reload_requested",
-      "deleted",
-    ] as const) {
-      await db
-        .insert(schema.schedules)
-        .values({
-          name: `enum-test-${status}`,
-          cron: null,
-          runAt: null,
-          taskPrompt: "X",
-          paused: false,
-          nextRunAt: null,
-          lastRunAt: null,
-          lastRunId: null,
-          metaJson: null,
-          appId: null,
-          status,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
+    for (const status of ["pending_register", "reload_requested", "deleted"] as const) {
+      await db.insert(schema.schedules).values({
+        name: `enum-test-${status}`,
+        cron: null,
+        runAt: null,
+        taskPrompt: "X",
+        paused: false,
+        nextRunAt: null,
+        lastRunAt: null,
+        lastRunId: null,
+        metaJson: null,
+        appId: null,
+        status,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
     }
     const rows = await db.select().from(schema.schedules);
     expect(rows.map((r) => r.status).sort()).toEqual(

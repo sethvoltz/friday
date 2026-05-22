@@ -23,8 +23,7 @@ describe("awaitMutatorServer", () => {
         type: "error",
         error: {
           type: "app",
-          message:
-            'duplicate key value violates unique constraint "blocks_pkey"',
+          message: 'duplicate key value violates unique constraint "blocks_pkey"',
           details: { name: "PostgresError" },
         },
       }),
@@ -32,8 +31,7 @@ describe("awaitMutatorServer", () => {
     });
     expect(outcome).toEqual({
       kind: "app-error",
-      message:
-        'duplicate key value violates unique constraint "blocks_pkey"',
+      message: 'duplicate key value violates unique constraint "blocks_pkey"',
       details: { name: "PostgresError" },
       pkCollision: true,
     });
@@ -59,14 +57,13 @@ describe("awaitMutatorServer", () => {
     });
   });
 
-  it("awaitMutatorServer returns {kind:\"app-error\", pkCollision:false} for a non-blocks PK collision (ticket_pkey, etc.) so non-blocks unique violations don't false-positive as send-dedup", async () => {
+  it('awaitMutatorServer returns {kind:"app-error", pkCollision:false} for a non-blocks PK collision (ticket_pkey, etc.) so non-blocks unique violations don\'t false-positive as send-dedup', async () => {
     const outcome = await awaitMutatorServer({
       server: Promise.resolve({
         type: "error",
         error: {
           type: "app",
-          message:
-            'duplicate key value violates unique constraint "tickets_pkey"',
+          message: 'duplicate key value violates unique constraint "tickets_pkey"',
           details: { name: "PostgresError" },
         },
       }),
@@ -115,25 +112,17 @@ describe("awaitMutatorServer", () => {
 describe("isPkCollision", () => {
   it("returns true only when BOTH the duplicate-key substring AND the blocks_pkey constraint name are present", () => {
     expect(
-      isPkCollision(
-        'duplicate key value violates unique constraint "blocks_pkey"',
-        undefined,
-      ),
+      isPkCollision('duplicate key value violates unique constraint "blocks_pkey"', undefined),
     ).toBe(true);
   });
 
   it("returns false when the substring is present but the constraint name is not blocks_pkey", () => {
     expect(
-      isPkCollision(
-        'duplicate key value violates unique constraint "tickets_pkey"',
-        undefined,
-      ),
+      isPkCollision('duplicate key value violates unique constraint "tickets_pkey"', undefined),
     ).toBe(false);
   });
 
   it("returns false when the constraint name appears without the duplicate-key substring", () => {
-    expect(isPkCollision("blocks_pkey is broken somehow", undefined)).toBe(
-      false,
-    );
+    expect(isPkCollision("blocks_pkey is broken somehow", undefined)).toBe(false);
   });
 });

@@ -182,21 +182,14 @@ export const blocks = pgTable(
   },
   (t) => ({
     agentTsIdx: index("blocks_agent_ts").on(t.agentName, t.ts),
-    sessionMsgIdx: index("blocks_session_msg").on(
-      t.sessionId,
-      t.messageId,
-      t.blockIndex,
-    ),
+    sessionMsgIdx: index("blocks_session_msg").on(t.sessionId, t.messageId, t.blockIndex),
     turnIdx: index("blocks_turn").on(t.turnId),
     // ADR-023: daemon LISTENs on (source='dashboard-mutator', status='pending')
     // and similar — speed those scans up.
     pendingIdx: index("blocks_pending")
       .on(t.status, t.ts)
       .where(sql`${t.status} IN ('pending','abort_requested')`),
-    roleCheck: check(
-      "blocks_role_check",
-      sql`${t.role} IN ('user','assistant','system')`,
-    ),
+    roleCheck: check("blocks_role_check", sql`${t.role} IN ('user','assistant','system')`),
     kindCheck: check(
       "blocks_kind_check",
       sql`${t.kind} IN ('text','thinking','tool_use','tool_result','error','mail')`,
@@ -236,10 +229,7 @@ export const mail = pgTable(
   (t) => ({
     inboxIdx: index("mail_inbox").on(t.toAgent, t.delivery, t.ts),
     threadIdx: index("mail_thread").on(t.threadId, t.ts),
-    priorityCheck: check(
-      "mail_priority_check",
-      sql`${t.priority} IN ('normal','critical')`,
-    ),
+    priorityCheck: check("mail_priority_check", sql`${t.priority} IN ('normal','critical')`),
     deliveryCheck: check(
       "mail_delivery_check",
       sql`${t.delivery} IN ('pending','delivered','read','closed')`,
@@ -294,7 +284,9 @@ export const ticketComments = pgTable(
     // round-trip. Default is server-side `gen_random_uuid()::text`
     // so the legacy `addComment` REST service path continues to
     // work without changes.
-    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()::text`),
     ticketId: text("ticket_id").notNull(),
     author: text("author").notNull(),
     body: text("body").notNull(),
@@ -382,10 +374,7 @@ export const scheduleRuns = pgTable(
     error: text("error"),
   },
   (t) => ({
-    scheduleTsIdx: index("schedule_runs_schedule_ts").on(
-      t.scheduleName,
-      t.firedAt,
-    ),
+    scheduleTsIdx: index("schedule_runs_schedule_ts").on(t.scheduleName, t.firedAt),
     statusCheck: check(
       "schedule_runs_status_check",
       sql`${t.status} IN ('running','complete','error')`,
@@ -429,7 +418,9 @@ export const memoryEntries = pgTable(
     id: text("id").primaryKey(),
     title: text("title").notNull(),
     content: text("content").notNull(),
-    tagsJson: jsonb("tags_json").notNull().default(sql`'[]'::jsonb`),
+    tagsJson: jsonb("tags_json")
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     createdBy: text("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
@@ -468,8 +459,12 @@ export const evolveProposals = pgTable(
     score: doublePrecision("score").notNull().default(0),
     // low | medium | high
     blastRadius: text("blast_radius").notNull().default("low"),
-    appliesTo: jsonb("applies_to").notNull().default(sql`'[]'::jsonb`),
-    signals: jsonb("signals").notNull().default(sql`'[]'::jsonb`),
+    appliesTo: jsonb("applies_to")
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    signals: jsonb("signals")
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     body: text("body").notNull(), // the markdown proposedChange
     createdBy: text("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
@@ -485,10 +480,7 @@ export const evolveProposals = pgTable(
     appliedTicketId: text("applied_ticket_id"),
   },
   (t) => ({
-    statusIdx: index("evolve_proposals_status_updated").on(
-      t.status,
-      t.updatedAt,
-    ),
+    statusIdx: index("evolve_proposals_status_updated").on(t.status, t.updatedAt),
     clusterIdx: index("evolve_proposals_cluster").on(t.clusterId),
   }),
 );
@@ -598,10 +590,7 @@ export const systemBanners = pgTable(
     activeIdx: index("system_banners_active")
       .on(t.ts)
       .where(sql`${t.dismissedAt} IS NULL`),
-    levelCheck: check(
-      "system_banners_level_check",
-      sql`${t.level} IN ('info','warn','error')`,
-    ),
+    levelCheck: check("system_banners_level_check", sql`${t.level} IN ('info','warn','error')`),
   }),
 );
 
@@ -722,8 +711,7 @@ export const LISTEN_CHANNELS = {
   blockCancelRequested: "friday_block_canceled",
 } as const;
 
-export type ListenChannel =
-  (typeof LISTEN_CHANNELS)[keyof typeof LISTEN_CHANNELS];
+export type ListenChannel = (typeof LISTEN_CHANNELS)[keyof typeof LISTEN_CHANNELS];
 
 /* ---------------- Re-exports for callsites ---------------- */
 // uniqueIndex is intentionally imported above for future use; suppress

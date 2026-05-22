@@ -40,24 +40,17 @@ export function buildScheduleServer(opts: BuildScheduleServerOptions) {
           cron: z
             .string()
             .optional()
-            .describe(
-              "5-field cron expression, e.g. `0 4 * * *` (daily at 04:00).",
-            ),
+            .describe("5-field cron expression, e.g. `0 4 * * *` (daily at 04:00)."),
           runAt: z
             .string()
             .optional()
-            .describe(
-              "ISO timestamp for a one-shot run. Used instead of `cron`.",
-            ),
+            .describe("ISO timestamp for a one-shot run. Used instead of `cron`."),
           taskPrompt: z
             .string()
             .describe(
               "What the scheduled agent should do when it fires. The first-turn prompt for the spawned worker.",
             ),
-          paused: z
-            .boolean()
-            .optional()
-            .describe("Start paused. Default false."),
+          paused: z.boolean().optional().describe("Start paused. Default false."),
         },
         async (args, extra) => {
           await daemonFetch({
@@ -87,21 +80,16 @@ export function buildScheduleServer(opts: BuildScheduleServerOptions) {
           };
         },
       ),
-      tool(
-        "schedule_show",
-        "Read one schedule.",
-        { name: z.string() },
-        async (args, extra) => {
-          const row = await daemonFetch({
-            ...ctx,
-            signal: signalFrom(extra),
-            path: `/api/schedules/${encodeURIComponent(args.name)}`,
-          });
-          return {
-            content: [{ type: "text", text: JSON.stringify(row, null, 2) }],
-          };
-        },
-      ),
+      tool("schedule_show", "Read one schedule.", { name: z.string() }, async (args, extra) => {
+        const row = await daemonFetch({
+          ...ctx,
+          signal: signalFrom(extra),
+          path: `/api/schedules/${encodeURIComponent(args.name)}`,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(row, null, 2) }],
+        };
+      }),
       tool(
         "schedule_pause",
         "Pause a schedule. The cron tick will skip it until resumed.",

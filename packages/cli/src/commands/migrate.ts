@@ -71,9 +71,7 @@ export const migrateCommand = defineCommand({
         ensureDirs();
         const projectsDir = join(homedir(), ".claude", "projects");
         if (!existsSync(projectsDir)) {
-          console.log(
-            pc.yellow(`no ~/.claude/projects dir — nothing to migrate.`),
-          );
+          console.log(pc.yellow(`no ~/.claude/projects dir — nothing to migrate.`));
           return;
         }
         const candidates = readdirSync(projectsDir);
@@ -101,16 +99,10 @@ export const migrateCommand = defineCommand({
           if (!a.sessionId) continue;
           const newCwd = await resolveAgentCwd(a);
           const newEncoded = encodeProjectDir(newCwd);
-          const newJsonl = join(
-            projectsDir,
-            newEncoded,
-            `${a.sessionId}.jsonl`,
-          );
+          const newJsonl = join(projectsDir, newEncoded, `${a.sessionId}.jsonl`);
           if (existsSync(newJsonl)) {
             console.log(
-              pc.dim(
-                `  skip  ${a.name} (${a.sessionId.slice(0, 8)}…) — already at new path`,
-              ),
+              pc.dim(`  skip  ${a.name} (${a.sessionId.slice(0, 8)}…) — already at new path`),
             );
             alreadyAtDest++;
             continue;
@@ -122,14 +114,8 @@ export const migrateCommand = defineCommand({
             if (!existsSync(old)) continue;
             const oldSidecar = join(projectsDir, dir, a.sessionId);
             const sidecarTag =
-              existsSync(oldSidecar) && statSync(oldSidecar).isDirectory()
-                ? " (+sidecar)"
-                : "";
-            console.log(
-              pc.cyan(
-                `  move  ${a.name} (${a.sessionId.slice(0, 8)}…)${sidecarTag}`,
-              ),
-            );
+              existsSync(oldSidecar) && statSync(oldSidecar).isDirectory() ? " (+sidecar)" : "";
+            console.log(pc.cyan(`  move  ${a.name} (${a.sessionId.slice(0, 8)}…)${sidecarTag}`));
             console.log(pc.dim(`        from: ${old}`));
             console.log(pc.dim(`        to:   ${newJsonl}`));
             wouldMove++;
@@ -138,9 +124,7 @@ export const migrateCommand = defineCommand({
           }
           if (!found) {
             console.log(
-              pc.dim(
-                `  miss  ${a.name} (${a.sessionId.slice(0, 8)}…) — no source JSONL found`,
-              ),
+              pc.dim(`  miss  ${a.name} (${a.sessionId.slice(0, 8)}…) — no source JSONL found`),
             );
             missingSource++;
           }

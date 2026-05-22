@@ -139,7 +139,7 @@ async function refork(agentName: string): Promise<void> {
     {
       agentName,
       agentType: a.type,
-      parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
+      parentName: "parentName" in a ? (a.parentName ?? undefined) : undefined,
     },
     pinnedFacts,
   );
@@ -167,8 +167,7 @@ async function refork(agentName: string): Promise<void> {
         effort: modelCfg.effort,
         resumeSessionId: a.sessionId ?? undefined,
         daemonPort: resolveDaemonPort(cfg),
-        parentName:
-          "parentName" in a ? a.parentName ?? undefined : undefined,
+        parentName: "parentName" in a ? (a.parentName ?? undefined) : undefined,
         mode: "long-lived",
       },
     });

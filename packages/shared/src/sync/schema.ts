@@ -72,14 +72,7 @@ const agents = table("agents")
   .columns({
     name: string(),
     type: string<"orchestrator" | "builder" | "helper" | "scheduled" | "bare">(),
-    status: string<
-      | "idle"
-      | "working"
-      | "stalled"
-      | "error"
-      | "archived"
-      | "archive_requested"
-    >(),
+    status: string<"idle" | "working" | "stalled" | "error" | "archived" | "archive_requested">(),
     session_id: string().optional(),
     parent_name: string().optional(),
     worktree_path: string().optional(),
@@ -108,9 +101,7 @@ const tickets = table("tickets")
     id: string(), // "FRI-1234"
     title: string(),
     body: string().optional(),
-    status: string<
-      "open" | "in_progress" | "done" | "blocked" | "closed"
-    >(),
+    status: string<"open" | "in_progress" | "done" | "blocked" | "closed">(),
     kind: string<"task" | "epic" | "bug" | "chore">(),
     assignee: string().optional(),
     meta_json: json().optional(),
@@ -213,9 +204,7 @@ const memoryEntries = table("memory_entries")
     file_mtime: number(),
     recall_count: number(),
     last_recalled_at: number().optional(),
-    status: string<
-      "ready" | "pending_file" | "pending_delete" | "deleted"
-    >(),
+    status: string<"ready" | "pending_file" | "pending_delete" | "deleted">(),
   })
   .primaryKey("id");
 
@@ -357,9 +346,7 @@ const blocks = table("blocks")
     message_id: string().optional(),
     block_index: number(),
     role: string<"user" | "assistant" | "system">(),
-    kind: string<
-      "text" | "thinking" | "tool_use" | "tool_result" | "error" | "mail"
-    >(),
+    kind: string<"text" | "thinking" | "tool_use" | "tool_result" | "error" | "mail">(),
     source: string().optional(),
     content_json: json(),
     status: string<
@@ -417,8 +404,7 @@ const mail = table("mail")
 // "Object is possibly 'undefined'" at type-check time. The flag is
 // load-bearing at runtime (Phase 3 entrance gate); pinning it in the
 // type matches the runtime contract.
-export const schema: ZeroSchema & { readonly enableLegacyQueries: true } =
-  createSchema({
+export const schema: ZeroSchema & { readonly enableLegacyQueries: true } = createSchema({
   tables: [
     agents,
     tickets,

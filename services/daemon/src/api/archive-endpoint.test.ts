@@ -12,15 +12,7 @@
  */
 
 import type { Server } from "node:http";
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 delete process.env.LINEAR_API_KEY;
@@ -28,8 +20,8 @@ delete process.env.LINEAR_API_KEY;
 let handle: TestDbHandle;
 let server: Server;
 let port: number;
-let createTicket: typeof import("@friday/shared/services")["createTicket"];
-let getTicket: typeof import("@friday/shared/services")["getTicket"];
+let createTicket: (typeof import("@friday/shared/services"))["createTicket"];
+let getTicket: (typeof import("@friday/shared/services"))["getTicket"];
 let registry: typeof import("../agent/registry.js");
 
 beforeAll(async () => {
@@ -38,9 +30,7 @@ beforeAll(async () => {
   registry = await import("../agent/registry.js");
   const { startServer } = await import("./server.js");
   server = startServer({ port: 0 });
-  await new Promise<void>((resolve) =>
-    server.once("listening", () => resolve()),
-  );
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("no port assigned");
   port = addr.port;
@@ -79,9 +69,7 @@ describe("POST /api/agents/:name/archive — contract", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("reason");
     // Agent must not have been archived on a 400.
-    expect((await registry.getAgent("rest-missing-reason"))?.status).not.toBe(
-      "archived",
-    );
+    expect((await registry.getAgent("rest-missing-reason"))?.status).not.toBe("archived");
   });
 
   it("returns 400 when reason is not one of the allowed values", async () => {
@@ -127,9 +115,7 @@ describe("POST /api/agents/:name/archive — contract", () => {
       },
       { timeout: 5000, interval: 25 },
     );
-    expect((await registry.getAgent("rest-completed"))?.status).toBe(
-      "archived",
-    );
+    expect((await registry.getAgent("rest-completed"))?.status).toBe("archived");
   });
 
   it("with reason='abandoned' moves the linked ticket to 'closed'", async () => {

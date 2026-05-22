@@ -33,11 +33,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import {
-  encodeProjectDir,
-  sessionFilePath,
-  sessionSidecarDir,
-} from "../agent/jsonl-paths.js";
+import { encodeProjectDir, sessionFilePath, sessionSidecarDir } from "../agent/jsonl-paths.js";
 import * as registry from "../agent/registry.js";
 import { logger } from "../log.js";
 import type { StateMigration } from "./runner.js";
@@ -167,12 +163,7 @@ export const agentCwdPinV1: StateMigration = {
     for (const a of agents) {
       if (!a.sessionId) continue;
       const newCwd = await registry.workingDirectoryFor(a);
-      const outcome = await migrateOneAgent(
-        a.name,
-        a.sessionId,
-        newCwd,
-        errors,
-      );
+      const outcome = await migrateOneAgent(a.name, a.sessionId, newCwd, errors);
       if (outcome.moved) movedSessions++;
     }
 

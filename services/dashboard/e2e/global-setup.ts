@@ -20,10 +20,7 @@
 
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import {
-  spawnTestSyncEnv,
-  type SyncEnv,
-} from "@friday/shared/test/sync-harness";
+import { spawnTestSyncEnv, type SyncEnv } from "@friday/shared/test/sync-harness";
 
 export function envPath(): string {
   return join(import.meta.dirname, ".env.json");
@@ -45,10 +42,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     deviceId: session.deviceId,
   };
   writeFileSync(envPath(), JSON.stringify(envSnapshot, null, 2));
-   
-  console.log(
-    `[playwright globalSetup] env up: ${envSnapshot.dashboardURL}`,
-  );
+
+  console.log(`[playwright globalSetup] env up: ${envSnapshot.dashboardURL}`);
 
   return async () => {
     try {
@@ -57,7 +52,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       /* ignore */
     }
     await env.cleanup();
-     
+
     console.log("[playwright globalTeardown] env down");
   };
 }

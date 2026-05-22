@@ -110,10 +110,7 @@ async function cacheFirst(request: Request): Promise<Response> {
   }
 }
 
-async function networkFirstHtml(
-  request: Request,
-  url: URL,
-): Promise<Response> {
+async function networkFirstHtml(request: Request, url: URL): Promise<Response> {
   const cache = await caches.open(CACHE);
   try {
     const fresh = await fetch(request);

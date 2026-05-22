@@ -94,7 +94,11 @@ const cases: Case[] = [
   { command: "launchctl load -w foo.plist", expected: "deny", reasonMatch: /launchctl.*deny list/ },
   { command: "crontab -e", expected: "deny", reasonMatch: /crontab.*deny list/ },
   { command: "sudo whoami", expected: "deny", reasonMatch: /sudo.*deny list/ },
-  { command: 'osascript -e "do shell script"', expected: "deny", reasonMatch: /osascript.*deny list/ },
+  {
+    command: 'osascript -e "do shell script"',
+    expected: "deny",
+    reasonMatch: /osascript.*deny list/,
+  },
   { command: "su admin", expected: "deny", reasonMatch: /su.*deny list/ },
   { command: "tccutil reset All", expected: "deny", reasonMatch: /tccutil.*deny list/ },
 
@@ -171,7 +175,11 @@ const cases: Case[] = [
 
   // Rule 8: workspace marker
   { command: "rm .friday-workspace.json", expected: "deny", reasonMatch: /worker identity marker/ },
-  { command: "rm ./.friday-workspace.json", expected: "deny", reasonMatch: /worker identity marker/ },
+  {
+    command: "rm ./.friday-workspace.json",
+    expected: "deny",
+    reasonMatch: /worker identity marker/,
+  },
 
   // Rule 9: command substitution in catastrophe positions
   {
@@ -233,8 +241,6 @@ describe("disaster-patterns / checkBashForDisaster", () => {
   // (an unterminated quote becomes a single literal token), but the
   // disaster check should still run without throwing.
   it("does not throw on malformed input", () => {
-    expect(() =>
-      checkBashForDisaster("rm -rf 'unterminated", WORKSPACE),
-    ).not.toThrow();
+    expect(() => checkBashForDisaster("rm -rf 'unterminated", WORKSPACE)).not.toThrow();
   });
 });

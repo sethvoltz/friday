@@ -26,12 +26,7 @@
 
 import { eq } from "drizzle-orm";
 import pgPkg from "pg";
-import {
-  getDb,
-  getPool,
-  schema,
-  LISTEN_CHANNELS,
-} from "@friday/shared";
+import { getDb, getPool, schema, LISTEN_CHANNELS } from "@friday/shared";
 import { deleteBlockById, getBlockById } from "@friday/shared/services";
 import { removeQueuedPrompt } from "./lifecycle.js";
 import { logger } from "../log.js";
@@ -105,12 +100,9 @@ export interface CancelListenerHandle {
 export async function startCancelListener(): Promise<CancelListenerHandle> {
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ??
-    process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL must be set to start the cancelQueued LISTEN connection.",
-    );
+    throw new Error("DATABASE_URL must be set to start the cancelQueued LISTEN connection.");
   }
 
   const client = new Client({ connectionString });

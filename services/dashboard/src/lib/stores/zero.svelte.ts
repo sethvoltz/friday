@@ -26,12 +26,7 @@ import { Zero } from "@rocicorp/zero";
 // `PromiseWithServerResult`. Alias on import to keep the existing
 // mutator-method return-type readable.
 import type { PromiseWithServerResult as MutatorResult } from "@rocicorp/zero";
-import {
-  createMutators,
-  schema,
-  type Mutators,
-  type Schema,
-} from "@friday/shared/sync";
+import { createMutators, schema, type Mutators, type Schema } from "@friday/shared/sync";
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
 import { awaitMutatorServer } from "./mutator-result";
 import { reconcileWakeLock } from "./wake-lock.svelte";
@@ -95,12 +90,7 @@ export interface ZeroScheduleRow {
   last_run_id: string | null;
   meta_json: Record<string, unknown> | null;
   app_id: string | null;
-  status:
-    | "active"
-    | "pending_register"
-    | "reload_requested"
-    | "deleted"
-    | "paused";
+  status: "active" | "pending_register" | "reload_requested" | "deleted" | "paused";
   created_at: number;
   updated_at: number;
 }
@@ -215,9 +205,7 @@ interface RefreshResponse {
  *  the Zero replica is on the order of bytes-per-minute under
  *  normal usage). Override via env for tests / soak runs. */
 const STATS_REPORT_INTERVAL_MS = (() => {
-  const env = (
-    import.meta as unknown as { env?: Record<string, string | undefined> }
-  ).env;
+  const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
   const raw = env?.PUBLIC_FRIDAY_STATS_REPORT_MS;
   const n = raw ? Number(raw) : NaN;
   return Number.isFinite(n) && n > 0 ? n : 5 * 60 * 1000;
@@ -330,10 +318,7 @@ class ZeroSyncStore {
    *  merge Zero rows into `chat.messages` without re-subscribing on
    *  every reactive read. */
   #blocksListeners = new Set<
-    (
-      rows: ZeroBlocksRow[],
-      resultType: "complete" | "unknown" | "error",
-    ) => void
+    (rows: ZeroBlocksRow[], resultType: "complete" | "unknown" | "error") => void
   >();
   /**
    * Phase 4.2: telemetry-loop handle. `setInterval` token returned by
@@ -452,7 +437,7 @@ class ZeroSyncStore {
       this.errorMessage = err instanceof Error ? err.message : String(err);
       // Surface unexpected init failures in dev — Phase 6 will route
       // these through the connectivity widget.
-       
+
       console.error("[zeroSync] init failed:", err);
       // Report to the server-side diagnostic endpoint so a watcher on
       // `friday logs dashboard -f` can see what crashed on a phone /
@@ -466,8 +451,7 @@ class ZeroSyncStore {
           message: err instanceof Error ? err.message : String(err),
           stack: err instanceof Error ? err.stack : undefined,
           url: typeof window !== "undefined" ? window.location.href : null,
-          userAgent:
-            typeof navigator !== "undefined" ? navigator.userAgent : null,
+          userAgent: typeof navigator !== "undefined" ? navigator.userAgent : null,
         }),
       }).catch(() => {
         /* best-effort — we're already in the error path */
@@ -519,10 +503,7 @@ class ZeroSyncStore {
       // null update — chat.messages flips from the (already-emptied)
       // prior session to filtered-empty without waiting for the next
       // blocks event.
-      if (
-        this.blocksAgent !== null &&
-        this.blocksAgent === chat.focusedAgent
-      ) {
+      if (this.blocksAgent !== null && this.blocksAgent === chat.focusedAgent) {
         chat.applyZeroBlocks(this.blocks, this.blocksAgent, this.blocksResultType);
       }
       // Explicit wake-lock reconcile. The wake-lock module's $effect
@@ -604,10 +585,7 @@ class ZeroSyncStore {
     // the foreground list — the /evolve UI shows open + applied +
     // critical by default. (No client-side filter equivalent in
     // ZQL: the dashboard's filter chip does the final filter UI-side.)
-    const query = this.#zero!.query.evolve_proposals.orderBy(
-      "updated_at",
-      "desc",
-    );
+    const query = this.#zero!.query.evolve_proposals.orderBy("updated_at", "desc");
     const preload = this.#zero!.preload(query);
     const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
@@ -626,11 +604,7 @@ class ZeroSyncStore {
     // Phase 4.6: filter `deleted` tombstones server-side.
     // dashboards see the schedule disappear immediately on user
     // delete (the mutator sets status='deleted' as a soft-delete).
-    const query = this.#zero!.query.schedules.where(
-      "status",
-      "!=",
-      "deleted",
-    );
+    const query = this.#zero!.query.schedules.where("status", "!=", "deleted");
     const preload = this.#zero!.preload(query);
     const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
@@ -652,9 +626,11 @@ class ZeroSyncStore {
     // the file to trash). The dashboard list disappears the entry
     // immediately after the delete mutator fires — the daemon's
     // subsequent flip to `deleted` is invisible to the read path.
-    const query = this.#zero!.query.memory_entries
-      .where("status", "!=", "deleted")
-      .where("status", "!=", "pending_delete");
+    const query = this.#zero!.query.memory_entries.where("status", "!=", "deleted").where(
+      "status",
+      "!=",
+      "pending_delete",
+    );
     const preload = this.#zero!.preload(query);
     const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
@@ -677,11 +653,7 @@ class ZeroSyncStore {
     // milliseconds. Filtering keeps the placeholder out of the
     // settings page's apps list until the daemon flips status
     // to 'installed'.
-    const query = this.#zero!.query.apps.where(
-      "status",
-      "!=",
-      "pending_install",
-    );
+    const query = this.#zero!.query.apps.where("status", "!=", "pending_install");
     const preload = this.#zero!.preload(query);
     const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
@@ -770,8 +742,7 @@ class ZeroSyncStore {
     if (!this.#zero || !this.#deviceId) return;
     let used: number | undefined;
     let quota: number | undefined;
-    const storage = (navigator as Navigator & { storage?: StorageManager })
-      .storage;
+    const storage = (navigator as Navigator & { storage?: StorageManager }).storage;
     if (storage?.estimate) {
       try {
         const est = await storage.estimate();
@@ -846,8 +817,7 @@ class ZeroSyncStore {
     this.unbindBlocks();
     this.blocksAgent = agentName;
     const cutoff = Date.now() - BLOCKS_RETENTION_MS;
-    const query = this.#zero!.query.blocks
-      .where("agent_name", "=", agentName)
+    const query = this.#zero!.query.blocks.where("agent_name", "=", agentName)
       .where("status", "!=", "streaming")
       .where("status", "!=", "cancel_requested")
       .where("ts", ">", cutoff)
@@ -861,13 +831,10 @@ class ZeroSyncStore {
       const rows = data as readonly ZeroBlocksRow[];
       this.blocks = rows as ZeroBlocksRow[];
       this.blocksResultType = resultType;
-      for (const listener of this.#blocksListeners)
-        listener(this.blocks, resultType);
+      for (const listener of this.#blocksListeners) listener(this.blocks, resultType);
     };
     update(view.data as readonly unknown[], "unknown");
-    view.addListener((data, resultType) =>
-      update(data as readonly unknown[], resultType),
-    );
+    view.addListener((data, resultType) => update(data as readonly unknown[], resultType));
     this.#blocksTeardown = (): void => {
       preload.cleanup();
       view.destroy();
@@ -885,8 +852,7 @@ class ZeroSyncStore {
   #bindAllBlocksBackground(): void {
     if (!this.#zero) return;
     const cutoff = Date.now() - BLOCKS_RETENTION_MS;
-    const query = this.#zero!.query.blocks
-      .where("status", "!=", "streaming")
+    const query = this.#zero!.query.blocks.where("status", "!=", "streaming")
       .where("status", "!=", "cancel_requested")
       .where("ts", ">", cutoff);
     // `ttl` here only matters AFTER `handle.cleanup()` fires — while
@@ -923,10 +889,7 @@ class ZeroSyncStore {
    *  matches the upstream filter — used by the chat store to decide
    *  when "no more older messages" is honest). */
   onBlocksUpdate(
-    listener: (
-      rows: ZeroBlocksRow[],
-      resultType: "complete" | "unknown" | "error",
-    ) => void,
+    listener: (rows: ZeroBlocksRow[], resultType: "complete" | "unknown" | "error") => void,
   ): () => void {
     this.#blocksListeners.add(listener);
     listener(this.blocks, this.blocksResultType);
@@ -1013,10 +976,7 @@ class ZeroSyncStore {
    * No-op when Zero hasn't finished init (the Settings page can call
    * this from the input handler without gating on `status === 'live'`).
    */
-  updateSettings(args: {
-    model?: string;
-    watchdogRefork?: boolean;
-  }): void {
+  updateSettings(args: { model?: string; watchdogRefork?: boolean }): void {
     if (!this.#zero) return;
     const result = this.#zero!.mutate.updateSettings({
       ...args,
@@ -1135,9 +1095,7 @@ class ZeroSyncStore {
     if (!this.#zero) return;
     return this.#zero!.mutate.updateMemoryEntry({ ...args, ts: Date.now() });
   }
-  deleteMemoryEntry(args: {
-    id: string;
-  }): MutatorResult | undefined {
+  deleteMemoryEntry(args: { id: string }): MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero!.mutate.deleteMemoryEntry({ ...args, ts: Date.now() });
   }
@@ -1167,9 +1125,7 @@ class ZeroSyncStore {
     if (!this.#zero) return;
     return this.#zero!.mutate.updateSchedule({ ...args, ts: Date.now() });
   }
-  deleteSchedule(args: {
-    name: string;
-  }): MutatorResult | undefined {
+  deleteSchedule(args: { name: string }): MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero!.mutate.deleteSchedule({ ...args, ts: Date.now() });
   }
@@ -1198,22 +1154,15 @@ class ZeroSyncStore {
    * dashboard's apps reactive query filters status='pending_install'
    * so the placeholder is never user-visible.
    */
-  installApp(args: {
-    id: string;
-    folderPath: string;
-  }): MutatorResult | undefined {
+  installApp(args: { id: string; folderPath: string }): MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero!.mutate.installApp({ ...args, ts: Date.now() });
   }
-  uninstallApp(args: {
-    id: string;
-  }): MutatorResult | undefined {
+  uninstallApp(args: { id: string }): MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero!.mutate.uninstallApp({ ...args, ts: Date.now() });
   }
-  reloadApp(args: {
-    id: string;
-  }): MutatorResult | undefined {
+  reloadApp(args: { id: string }): MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero!.mutate.reloadApp({ ...args, ts: Date.now() });
   }
@@ -1381,10 +1330,7 @@ class ZeroSyncStore {
     }
 
     const row = this.blocks.find(
-      (b) =>
-        b.turn_id === turnId &&
-        b.role === "user" &&
-        b.source === "user_chat",
+      (b) => b.turn_id === turnId && b.role === "user" && b.source === "user_chat",
     );
     if (row) {
       const result = this.#zero!.mutate.abortTurn({
@@ -1627,9 +1573,7 @@ if (browser) {
 // inspection). Removed in Phase 6 when the connectivity widget surfaces
 // the same signals natively.
 if (browser) {
-  (
-    globalThis as unknown as { __fridayZero?: ZeroSyncStore }
-  ).__fridayZero = zeroSync;
+  (globalThis as unknown as { __fridayZero?: ZeroSyncStore }).__fridayZero = zeroSync;
 }
 
 /**

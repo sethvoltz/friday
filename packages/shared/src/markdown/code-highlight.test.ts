@@ -53,9 +53,7 @@ describe("applyCodeHighlight", () => {
 
   it("non-streaming + single block: highlights and stamps data-shiki-rendered", async () => {
     highlightMock.mockResolvedValue(`<span>token spans</span>`);
-    const container = makeContainer(
-      `<pre><code class="language-ts">const x = 1</code></pre>`,
-    );
+    const container = makeContainer(`<pre><code class="language-ts">const x = 1</code></pre>`);
     const code = container.querySelector<HTMLElement>("code")!;
     const count = await applyCodeHighlight(container, {
       streaming: false,
@@ -69,9 +67,7 @@ describe("applyCodeHighlight", () => {
   });
 
   it("streaming + single (trailing) block: skipped, plain text preserved", async () => {
-    const container = makeContainer(
-      `<pre><code class="language-ts">const x =</code></pre>`,
-    );
+    const container = makeContainer(`<pre><code class="language-ts">const x =</code></pre>`);
     const code = container.querySelector<HTMLElement>("code")!;
     const count = await applyCodeHighlight(container, {
       streaming: true,
@@ -90,9 +86,7 @@ describe("applyCodeHighlight", () => {
       <p>middle prose</p>
       <pre><code class="language-py">def foo</code></pre>
     `);
-    const codes = Array.from(
-      container.querySelectorAll<HTMLElement>("pre > code"),
-    );
+    const codes = Array.from(container.querySelectorAll<HTMLElement>("pre > code"));
     const count = await applyCodeHighlight(container, {
       streaming: true,
       highlight: highlightMock,
@@ -125,9 +119,7 @@ describe("applyCodeHighlight", () => {
       <pre><code class="language-ts" data-shiki-rendered="true"><span>old</span></code></pre>
       <pre><code class="language-py">B</code></pre>
     `);
-    const codes = Array.from(
-      container.querySelectorAll<HTMLElement>("pre > code"),
-    );
+    const codes = Array.from(container.querySelectorAll<HTMLElement>("pre > code"));
     const count = await applyCodeHighlight(container, {
       streaming: false,
       highlight: highlightMock,
@@ -139,7 +131,7 @@ describe("applyCodeHighlight", () => {
     expect(codes[0].innerHTML).toBe(`<span>old</span>`);
   });
 
-  it("skips language-mermaid even if a stray <code class=\"language-mermaid\"> sneaks in", async () => {
+  it('skips language-mermaid even if a stray <code class="language-mermaid"> sneaks in', async () => {
     const container = makeContainer(
       `<pre><code class="language-mermaid">graph TD; A-->B</code></pre>`,
     );
@@ -153,9 +145,7 @@ describe("applyCodeHighlight", () => {
 
   it("if highlight throws, leaves the block alone (defensive)", async () => {
     highlightMock.mockRejectedValue(new Error("no grammar"));
-    const container = makeContainer(
-      `<pre><code class="language-xx">whatever</code></pre>`,
-    );
+    const container = makeContainer(`<pre><code class="language-xx">whatever</code></pre>`);
     const code = container.querySelector<HTMLElement>("code")!;
     const count = await applyCodeHighlight(container, {
       streaming: false,
@@ -168,9 +158,7 @@ describe("applyCodeHighlight", () => {
 
   it("if highlight returns empty string, leaves the block alone", async () => {
     highlightMock.mockResolvedValue("");
-    const container = makeContainer(
-      `<pre><code class="language-xx">whatever</code></pre>`,
-    );
+    const container = makeContainer(`<pre><code class="language-xx">whatever</code></pre>`);
     const code = container.querySelector<HTMLElement>("code")!;
     const count = await applyCodeHighlight(container, {
       streaming: false,
@@ -189,9 +177,7 @@ describe("applyCodeHighlight", () => {
       <pre><code class="language-py">second</code></pre>
       <p>more</p>
     `);
-    const codes = Array.from(
-      container.querySelectorAll<HTMLElement>("pre > code"),
-    );
+    const codes = Array.from(container.querySelectorAll<HTMLElement>("pre > code"));
     const count = await applyCodeHighlight(container, {
       streaming: true,
       highlight: highlightMock,
@@ -203,9 +189,7 @@ describe("applyCodeHighlight", () => {
 
   it("idempotent: second call is a no-op when nothing has changed", async () => {
     highlightMock.mockResolvedValue(`<span>x</span>`);
-    const container = makeContainer(
-      `<pre><code class="language-ts">A</code></pre>`,
-    );
+    const container = makeContainer(`<pre><code class="language-ts">A</code></pre>`);
     const first = await applyCodeHighlight(container, {
       streaming: false,
       highlight: highlightMock,

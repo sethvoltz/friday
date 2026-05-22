@@ -58,9 +58,7 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
   });
 
   it("updateBlock replaces content and bumps last_event_seq", async () => {
-    const { insertBlock, updateBlock, getBlockById } = await import(
-      "./blocks.js"
-    );
+    const { insertBlock, updateBlock, getBlockById } = await import("./blocks.js");
     await insertBlock({
       blockId: "blk-svc-2",
       turnId: "turn-1",

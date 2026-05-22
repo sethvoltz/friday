@@ -31,14 +31,7 @@
 
 import { defineCommand } from "citty";
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -165,14 +158,12 @@ export const exportLegacySqliteCommand = defineCommand({
   args: {
     output: {
       type: "positional",
-      description:
-        "Output path for the tarball (default: ~/.friday/backups/legacy-<ts>.tar.gz).",
+      description: "Output path for the tarball (default: ~/.friday/backups/legacy-<ts>.tar.gz).",
       required: false,
     },
     source: {
       type: "string",
-      description:
-        "Path to the SQLite database (default: ~/.friday/db.sqlite.pre-postgres.bak).",
+      description: "Path to the SQLite database (default: ~/.friday/db.sqlite.pre-postgres.bak).",
     },
   },
   async run({ args }) {
@@ -219,9 +210,10 @@ export const exportLegacySqliteCommand = defineCommand({
             `sqlite3 export of "${table}" failed with status ${raw.status}: ${raw.stderr}`,
           );
         }
-        const rows = raw.stdout.trim().length > 0
-          ? (JSON.parse(raw.stdout) as Array<Record<string, unknown>>)
-          : [];
+        const rows =
+          raw.stdout.trim().length > 0
+            ? (JSON.parse(raw.stdout) as Array<Record<string, unknown>>)
+            : [];
         const converted = rows.map((r) => convertRow(table, r));
         const ndjson = converted.map((r) => JSON.stringify(r)).join("\n");
         const filePath = join(rowsDir, `${table}.ndjson`);
@@ -262,19 +254,14 @@ export const exportLegacySqliteCommand = defineCommand({
         tables: tableManifests,
         files: fileInventory,
       };
-      writeFileSync(
-        join(stageDir, "manifest.json"),
-        JSON.stringify(manifest, null, 2) + "\n",
-      );
+      writeFileSync(join(stageDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 
       // 4. Tarball with atomic rename.
       const tmpOutput = outputPath + ".tmp";
       if (existsSync(tmpOutput)) unlinkSync(tmpOutput);
-      const tar = spawnSync(
-        "tar",
-        ["-czf", tmpOutput, "-C", stageDir, "."],
-        { stdio: ["ignore", "inherit", "inherit"] },
-      );
+      const tar = spawnSync("tar", ["-czf", tmpOutput, "-C", stageDir, "."], {
+        stdio: ["ignore", "inherit", "inherit"],
+      });
       if (tar.status !== 0) {
         throw new Error(`tar exited with status ${tar.status}.`);
       }
@@ -307,10 +294,7 @@ function tableExists(dbPath: string, table: string): boolean {
   return res.stdout.trim().length > 0 && res.stdout !== "[]";
 }
 
-function convertRow(
-  table: string,
-  row: Record<string, unknown>,
-): Record<string, unknown> {
+function convertRow(table: string, row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [col, raw] of Object.entries(row)) {
     const key = `${table}.${col}`;
@@ -336,11 +320,7 @@ function convertRow(
 
 function resolveOutputPath(arg: unknown): string {
   if (typeof arg === "string" && arg.length > 0) return arg;
-  const ts = new Date()
-    .toISOString()
-    .replace(/[:.]/g, "-")
-    .replace(/T/, "_")
-    .replace(/Z$/, "");
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").replace(/T/, "_").replace(/Z$/, "");
   return join(DATA_DIR, "backups", `legacy-${ts}.tar.gz`);
 }
 
@@ -355,4 +335,3 @@ function formatBytes(bytes: number): string {
   }
   return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
-

@@ -66,9 +66,7 @@ describe("FRI-8: boot_id mismatch on fresh page load clears stale cursor", () =>
       if (key === "chat:lastSeqByAgent") return { friday: 500 };
       return {};
     });
-    mockLoadString.mockImplementation((key: string) =>
-      key === "sse:bootId" ? "boot-A" : null,
-    );
+    mockLoadString.mockImplementation((key: string) => (key === "sse:bootId" ? "boot-A" : null));
 
     const sse = await import("./sse.svelte");
     const { chat } = await import("./chat.svelte");
@@ -110,9 +108,7 @@ describe("FRI-8: boot_id mismatch on fresh page load clears stale cursor", () =>
     mockLoadJSON.mockImplementation((key: string) =>
       key === "chat:lastSeqByAgent" ? { friday: 500 } : {},
     );
-    mockLoadString.mockImplementation((key: string) =>
-      key === "sse:bootId" ? "boot-A" : null,
-    );
+    mockLoadString.mockImplementation((key: string) => (key === "sse:bootId" ? "boot-A" : null));
 
     const sse = await import("./sse.svelte");
     const { chat } = await import("./chat.svelte");

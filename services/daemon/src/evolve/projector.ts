@@ -40,8 +40,7 @@ function proposalToRow(p: Proposal): EvolveProposalInsert {
     clusterId: p.clusterId,
     score: p.score,
     blastRadius: p.blastRadius,
-    appliesTo:
-      p.appliesTo as unknown as EvolveProposalInsert["appliesTo"],
+    appliesTo: p.appliesTo as unknown as EvolveProposalInsert["appliesTo"],
     signals: p.signals as unknown as EvolveProposalInsert["signals"],
     body: p.proposedChange,
     createdBy: p.createdBy,
@@ -52,9 +51,7 @@ function proposalToRow(p: Proposal): EvolveProposalInsert {
     enrichedAt: p.enrichedAt ? new Date(p.enrichedAt) : null,
     enrichedBy: p.enrichedBy,
     lastEnrichError: p.lastEnrichError,
-    lastEnrichFailedAt: p.lastEnrichFailedAt
-      ? new Date(p.lastEnrichFailedAt)
-      : null,
+    lastEnrichFailedAt: p.lastEnrichFailedAt ? new Date(p.lastEnrichFailedAt) : null,
     appliedTicketId: p.appliedTicketId,
   };
 }
@@ -105,15 +102,11 @@ export async function runEvolveBootSync(): Promise<void> {
     }
     // Drop any PG rows whose FS file is gone (deletes during downtime).
     const fsIds = new Set(proposals.map((p) => p.id));
-    const pgIds = await db
-      .select({ id: schema.evolveProposals.id })
-      .from(schema.evolveProposals);
+    const pgIds = await db.select({ id: schema.evolveProposals.id }).from(schema.evolveProposals);
     let dropped = 0;
     for (const r of pgIds) {
       if (!fsIds.has(r.id)) {
-        await db
-          .delete(schema.evolveProposals)
-          .where(eq(schema.evolveProposals.id, r.id));
+        await db.delete(schema.evolveProposals).where(eq(schema.evolveProposals.id, r.id));
         dropped += 1;
       }
     }
@@ -179,9 +172,7 @@ export async function syncProposalToPg(id: string): Promise<void> {
 export async function deleteProposalFromPg(id: string): Promise<void> {
   try {
     const db = getDb();
-    await db
-      .delete(schema.evolveProposals)
-      .where(eq(schema.evolveProposals.id, id));
+    await db.delete(schema.evolveProposals).where(eq(schema.evolveProposals.id, id));
   } catch (err) {
     logger.log("warn", "evolve.projector.delete.error", {
       id,

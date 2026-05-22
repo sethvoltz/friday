@@ -6,9 +6,7 @@ describe("event bus boot_id (FIX_FORWARD 1.6)", () => {
     const a = getBootId();
     const b = getBootId();
     expect(a).toBe(b);
-    expect(a).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-    );
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
 
   it("getBootTs returns a finite timestamp set at module load", () => {
@@ -100,9 +98,7 @@ describe("event bus per-turn buffer (Phase 5)", () => {
     const replayed = eventBus.replayForAgent(agent);
     // After turn_done the buffer is evicted; no events remain for
     // this agent until a fresh turn_started opens a new buffer.
-    expect(replayed.filter((e) => "agent" in e && e.agent === agent)).toEqual(
-      [],
-    );
+    expect(replayed.filter((e) => "agent" in e && e.agent === agent)).toEqual([]);
   });
 
   it("a fresh turn_started for the same agent replaces the prior turn's buffer", () => {
@@ -134,9 +130,7 @@ describe("event bus per-turn buffer (Phase 5)", () => {
     });
     const replayed = eventBus.replayForAgent(agent);
     const turnIds = new Set(
-      replayed
-        .filter((e) => "turn_id" in e)
-        .map((e) => (e as { turn_id: string }).turn_id),
+      replayed.filter((e) => "turn_id" in e).map((e) => (e as { turn_id: string }).turn_id),
     );
     expect(turnIds.has("t-old")).toBe(false);
     expect(turnIds.has("t-new")).toBe(true);
@@ -206,14 +200,10 @@ describe("event bus per-turn buffer (Phase 5)", () => {
     const replayedA = eventBus.replayForAgent(a1);
     const replayedB = eventBus.replayForAgent(a2);
     const blockIdsA = new Set(
-      replayedA
-        .filter((e) => "block_id" in e)
-        .map((e) => (e as { block_id: string }).block_id),
+      replayedA.filter((e) => "block_id" in e).map((e) => (e as { block_id: string }).block_id),
     );
     const blockIdsB = new Set(
-      replayedB
-        .filter((e) => "block_id" in e)
-        .map((e) => (e as { block_id: string }).block_id),
+      replayedB.filter((e) => "block_id" in e).map((e) => (e as { block_id: string }).block_id),
     );
     expect(blockIdsA.has("blk-multi-a")).toBe(true);
     expect(blockIdsA.has("blk-multi-b")).toBe(false);

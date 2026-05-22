@@ -32,22 +32,14 @@
 
 import { and, eq, inArray } from "drizzle-orm";
 import pgPkg from "pg";
-import {
-  getDb,
-  getPool,
-  nextRun,
-  schema,
-  LISTEN_CHANNELS,
-} from "@friday/shared";
+import { getDb, getPool, nextRun, schema, LISTEN_CHANNELS } from "@friday/shared";
 import * as registry from "../agent/registry.js";
 import { logger } from "../log.js";
 import { fireSchedule } from "./scheduler.js";
 
 const { Client } = pgPkg;
 
-function computeNext(
-  row: typeof schema.schedules.$inferSelect,
-): Date | null {
+function computeNext(row: typeof schema.schedules.$inferSelect): Date | null {
   if (row.cron) return nextRun(row.cron);
   if (row.runAt) {
     const t = Date.parse(row.runAt);
@@ -206,12 +198,9 @@ export interface ScheduleListenerHandle {
 export async function startScheduleListener(): Promise<ScheduleListenerHandle> {
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ??
-    process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL must be set to start the schedule LISTEN connection.",
-    );
+    throw new Error("DATABASE_URL must be set to start the schedule LISTEN connection.");
   }
 
   const client = new Client({ connectionString });

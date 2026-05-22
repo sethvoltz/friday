@@ -1,10 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  __resetHooksForTest,
-  registerHook,
-  type Skill,
-  type SkillMatch,
-} from "@friday/shared";
+import { __resetHooksForTest, registerHook, type Skill, type SkillMatch } from "@friday/shared";
 import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
 import { skillContextHook } from "./skill-context.js";
 
@@ -105,18 +100,17 @@ describe("skill-context hook (FRI-107)", () => {
   it("integration: composeDispatchPrompt + skillContextHook routes skill body to systemPrompt and allowedToolsOverride", async () => {
     registerHook("before_prompt_build", skillContextHook);
 
-    const { body, systemPrompt, allowedToolsOverride } =
-      await composeDispatchPrompt({
-        intentText: "args",
-        intentTag: "user_chat",
-        body: "args",
-        agentType: "orchestrator",
-        baseSystemPrompt: "you are a helpful agent",
-        skillMatch: {
-          skill: makeSkill({ name: "deploy", body: "ship it", allowedTools: ["Bash", "Read"] }),
-          userText: "args",
-        },
-      });
+    const { body, systemPrompt, allowedToolsOverride } = await composeDispatchPrompt({
+      intentText: "args",
+      intentTag: "user_chat",
+      body: "args",
+      agentType: "orchestrator",
+      baseSystemPrompt: "you are a helpful agent",
+      skillMatch: {
+        skill: makeSkill({ name: "deploy", body: "ship it", allowedTools: ["Bash", "Read"] }),
+        userText: "args",
+      },
+    });
 
     expect(body).toBe("args");
     expect(body).not.toContain("<skill-context");

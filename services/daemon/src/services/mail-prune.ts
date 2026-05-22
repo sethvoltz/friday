@@ -79,12 +79,7 @@ export async function prune(): Promise<{ deleted: number }> {
   const archivedRecipient = db
     .select()
     .from(schema.agents)
-    .where(
-      and(
-        eq(schema.agents.name, schema.mail.toAgent),
-        eq(schema.agents.status, "archived"),
-      ),
-    );
+    .where(and(eq(schema.agents.name, schema.mail.toAgent), eq(schema.agents.status, "archived")));
   const anyRecipient = db
     .select()
     .from(schema.agents)

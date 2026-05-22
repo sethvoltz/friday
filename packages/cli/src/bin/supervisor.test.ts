@@ -16,13 +16,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -48,11 +42,7 @@ import {
  */
 const GRANDCHILD_COUNT = 3;
 
-function writeFixture(
-  scriptPath: string,
-  pidFile: string,
-  detachedGrandchildren = false,
-): void {
+function writeFixture(scriptPath: string, pidFile: string, detachedGrandchildren = false): void {
   // `detached: true` on the grandchildren makes each one its own
   // pgid leader — the zero-cache pattern that defeats process-group
   // signaling and motivates the supervisor's tree-walk approach.
@@ -156,7 +146,6 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
     // Build a ChildState shell — killChildGroup only reads `proc.pid`
     // and `spec.name`. The rest is irrelevant to this call.
     const state: ChildState = {
-       
       spec: { name: "daemon" } as any,
       proc,
       exitTimestamps: [],
@@ -168,15 +157,10 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
     killChildGroup(state, "SIGTERM");
 
     // SIGTERM is delivered async. Give the kernel a moment to reap.
-    const allDead = await waitFor(
-      () => pids.every((pid) => !isAlive(pid)),
-      5_000,
-    );
+    const allDead = await waitFor(() => pids.every((pid) => !isAlive(pid)), 5_000);
     if (!allDead) {
       const stillAlive = pids.filter((pid) => isAlive(pid));
-      throw new Error(
-        `cascade-stop incomplete: pids still alive: ${stillAlive.join(", ")}`,
-      );
+      throw new Error(`cascade-stop incomplete: pids still alive: ${stillAlive.join(", ")}`);
     }
     // Explicit assertion so the test name's promise load-bears.
     for (const pid of pids) {
@@ -209,7 +193,6 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
     }
 
     const state: ChildState = {
-       
       spec: { name: "zero-cache" } as any,
       proc,
       exitTimestamps: [],
@@ -219,10 +202,7 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
 
     killChildGroup(state, "SIGTERM");
 
-    const allDead = await waitFor(
-      () => pids.every((pid) => !isAlive(pid)),
-      5_000,
-    );
+    const allDead = await waitFor(() => pids.every((pid) => !isAlive(pid)), 5_000);
     if (!allDead) {
       const stillAlive = pids.filter((pid) => isAlive(pid));
       throw new Error(
@@ -245,7 +225,6 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
     await new Promise<void>((resolve) => proc!.on("exit", () => resolve()));
 
     const state: ChildState = {
-       
       spec: { name: "daemon" } as any,
       proc,
       exitTimestamps: [],
@@ -276,13 +255,7 @@ describe("crash-loop guard arithmetic", () => {
 
   it("retains crashes within the window", () => {
     const now = Date.now();
-    const recent = [
-      now - 50_000,
-      now - 40_000,
-      now - 30_000,
-      now - 20_000,
-      now - 10_000,
-    ];
+    const recent = [now - 50_000, now - 40_000, now - 30_000, now - 20_000, now - 10_000];
     const pruned = pruneToWindow(recent, now);
     expect(pruned.length).toBe(5);
     expect(pruned.length >= CRASH_LOOP_MAX).toBe(true);

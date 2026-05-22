@@ -7,11 +7,7 @@ export interface SynthesizeOpts {
   dataDir?: string | null;
 }
 
-export function aliasPath(
-  p: string,
-  homeDir?: string | null,
-  dataDir?: string | null,
-): string {
+export function aliasPath(p: string, homeDir?: string | null, dataDir?: string | null): string {
   if (!p) return p;
   if (dataDir) {
     const wsPrefix = dataDir + "/workspaces/";
@@ -35,8 +31,7 @@ function asString(v: unknown): string | undefined {
 }
 
 function asObj(v: unknown): Record<string, unknown> | undefined {
-  if (v && typeof v === "object" && !Array.isArray(v))
-    return v as Record<string, unknown>;
+  if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
   return undefined;
 }
 
@@ -45,18 +40,29 @@ function cap(s: string): string {
 }
 
 const FRIDAY_MCP_FRIENDLY: Record<string, string> = {
-  agent_status: "Agent status", agent_list: "List agents",
-  agent_inspect: "Inspect agent", agent_create: "Create agent",
+  agent_status: "Agent status",
+  agent_list: "List agents",
+  agent_inspect: "Inspect agent",
+  agent_create: "Create agent",
   agent_archive: "Archive agent",
-  linear_import: "Import from Linear", linear_create_issue: "Create Linear issue",
-  linear_update_issue: "Update Linear issue", linear_reconcile: "Reconcile Linear",
+  linear_import: "Import from Linear",
+  linear_create_issue: "Create Linear issue",
+  linear_update_issue: "Update Linear issue",
+  linear_reconcile: "Reconcile Linear",
   linear_create_relation: "Link Linear issues",
-  app_list: "List apps", app_inspect: "Inspect app", app_install: "Install app",
-  app_reload: "Reload app", app_uninstall: "Uninstall app",
-  evolve_list: "List proposals", evolve_get: "Get proposal",
-  evolve_save: "Save proposal", evolve_update: "Update proposal",
-  evolve_apply: "Apply proposal", evolve_dismiss: "Dismiss proposal",
-  evolve_scan: "Scan for proposals", evolve_enrich: "Enrich proposals",
+  app_list: "List apps",
+  app_inspect: "Inspect app",
+  app_install: "Install app",
+  app_reload: "Reload app",
+  app_uninstall: "Uninstall app",
+  evolve_list: "List proposals",
+  evolve_get: "Get proposal",
+  evolve_save: "Save proposal",
+  evolve_update: "Update proposal",
+  evolve_apply: "Apply proposal",
+  evolve_dismiss: "Dismiss proposal",
+  evolve_scan: "Scan for proposals",
+  evolve_enrich: "Enrich proposals",
   evolve_cluster: "Cluster proposals",
   echo: "Echo",
 };
@@ -126,9 +132,7 @@ export function synthesizeHeadline(
         const pat = asString(inp.pattern);
         if (!pat) return undefined;
         const path = asString(inp.path);
-        return path
-          ? `Grepping ${pat} in ${alias(path)}`
-          : `Grepping ${pat}`;
+        return path ? `Grepping ${pat} in ${alias(path)}` : `Grepping ${pat}`;
       }
       case "WebFetch": {
         const url = asString(inp.url);
@@ -156,97 +160,98 @@ export function synthesizeHeadline(
     const mcp = /^mcp__friday-[^_]+__(.+)$/.exec(name);
     const short = mcp ? mcp[1] : null;
 
-    if (short) switch (short) {
-      case "mail_read": {
-        const id = asString(inp.id) ?? asString(inp.mailId);
-        return id ? `Reading mail #${id}` : "Reading mail";
-      }
-      case "mail_close": {
-        const id = asString(inp.id) ?? asString(inp.mailId);
-        return id ? `Closing mail #${id}` : "Closing mail";
-      }
-      case "mail_send": {
-        const to = asString(inp.to);
-        return to ? `Sending mail to ${to}` : "Sending mail";
-      }
-      case "mail_inbox":
-        return "Checking mail inbox";
+    if (short)
+      switch (short) {
+        case "mail_read": {
+          const id = asString(inp.id) ?? asString(inp.mailId);
+          return id ? `Reading mail #${id}` : "Reading mail";
+        }
+        case "mail_close": {
+          const id = asString(inp.id) ?? asString(inp.mailId);
+          return id ? `Closing mail #${id}` : "Closing mail";
+        }
+        case "mail_send": {
+          const to = asString(inp.to);
+          return to ? `Sending mail to ${to}` : "Sending mail";
+        }
+        case "mail_inbox":
+          return "Checking mail inbox";
 
-      case "agent_status": {
-        const n = asString(inp.name);
-        return n ? `Checking agent ${n}` : "Checking agent";
-      }
-      case "agent_list":
-        return "Listing agents";
-      case "agent_inspect": {
-        const n = asString(inp.name);
-        return n ? `Inspecting agent ${n}` : "Inspecting agent";
-      }
-      case "agent_create": {
-        const n = asString(inp.name);
-        const t = asString(inp.type) ?? asString(inp.kind);
-        if (t && n) return `Spawning ${t} ${n}`;
-        if (n) return `Spawning ${n}`;
-        return "Spawning agent";
-      }
-      case "agent_kill": {
-        const n = asString(inp.name);
-        return n ? `Killing agent ${n}` : "Killing agent";
-      }
-      case "agent_archive": {
-        const n = asString(inp.name);
-        return n ? `Archiving ${n}` : "Archiving agent";
-      }
-      case "agent_delete_workspace": {
-        const n = asString(inp.name);
-        return n ? `Deleting workspace ${n}` : "Deleting workspace";
-      }
+        case "agent_status": {
+          const n = asString(inp.name);
+          return n ? `Checking agent ${n}` : "Checking agent";
+        }
+        case "agent_list":
+          return "Listing agents";
+        case "agent_inspect": {
+          const n = asString(inp.name);
+          return n ? `Inspecting agent ${n}` : "Inspecting agent";
+        }
+        case "agent_create": {
+          const n = asString(inp.name);
+          const t = asString(inp.type) ?? asString(inp.kind);
+          if (t && n) return `Spawning ${t} ${n}`;
+          if (n) return `Spawning ${n}`;
+          return "Spawning agent";
+        }
+        case "agent_kill": {
+          const n = asString(inp.name);
+          return n ? `Killing agent ${n}` : "Killing agent";
+        }
+        case "agent_archive": {
+          const n = asString(inp.name);
+          return n ? `Archiving ${n}` : "Archiving agent";
+        }
+        case "agent_delete_workspace": {
+          const n = asString(inp.name);
+          return n ? `Deleting workspace ${n}` : "Deleting workspace";
+        }
 
-      case "ticket_get": {
-        const id = asString(inp.id);
-        return id ? `Getting ticket ${id}` : "Getting ticket";
-      }
-      case "ticket_create": {
-        const title = asString(inp.title);
-        return title ? `Creating ticket: ${trunc(title)}` : "Creating ticket";
-      }
-      case "ticket_update": {
-        const id = asString(inp.id);
-        return id ? `Updating ticket ${id}` : "Updating ticket";
-      }
-      case "ticket_list":
-        return "Listing tickets";
-      case "ticket_comment": {
-        const id = asString(inp.id);
-        return id ? `Commenting on ${id}` : "Commenting on ticket";
-      }
+        case "ticket_get": {
+          const id = asString(inp.id);
+          return id ? `Getting ticket ${id}` : "Getting ticket";
+        }
+        case "ticket_create": {
+          const title = asString(inp.title);
+          return title ? `Creating ticket: ${trunc(title)}` : "Creating ticket";
+        }
+        case "ticket_update": {
+          const id = asString(inp.id);
+          return id ? `Updating ticket ${id}` : "Updating ticket";
+        }
+        case "ticket_list":
+          return "Listing tickets";
+        case "ticket_comment": {
+          const id = asString(inp.id);
+          return id ? `Commenting on ${id}` : "Commenting on ticket";
+        }
 
-      case "memory_save": {
-        const title = asString(inp.title);
-        return title ? `Saving memory: ${trunc(title)}` : "Saving memory";
-      }
-      case "memory_search": {
-        const q = asString(inp.query);
-        return q ? `Searching memory: ${trunc(q)}` : "Searching memory";
-      }
-      case "memory_get": {
-        const id = asString(inp.id);
-        return id ? `Getting memory ${id}` : "Getting memory";
-      }
-      case "memory_update": {
-        const id = asString(inp.id);
-        return id ? `Updating memory ${id}` : "Updating memory";
-      }
-      case "memory_forget": {
-        const id = asString(inp.id);
-        return id ? `Forgetting memory ${id}` : "Forgetting memory";
-      }
+        case "memory_save": {
+          const title = asString(inp.title);
+          return title ? `Saving memory: ${trunc(title)}` : "Saving memory";
+        }
+        case "memory_search": {
+          const q = asString(inp.query);
+          return q ? `Searching memory: ${trunc(q)}` : "Searching memory";
+        }
+        case "memory_get": {
+          const id = asString(inp.id);
+          return id ? `Getting memory ${id}` : "Getting memory";
+        }
+        case "memory_update": {
+          const id = asString(inp.id);
+          return id ? `Updating memory ${id}` : "Updating memory";
+        }
+        case "memory_forget": {
+          const id = asString(inp.id);
+          return id ? `Forgetting memory ${id}` : "Forgetting memory";
+        }
 
-      case "linear_import":
-        return "Importing from Linear";
-      case "linear_reconcile":
-        return "Reconciling Linear links";
-    }
+        case "linear_import":
+          return "Importing from Linear";
+        case "linear_reconcile":
+          return "Reconciling Linear links";
+      }
 
     if (short) {
       const sched = /^schedule_(.+)$/.exec(short);

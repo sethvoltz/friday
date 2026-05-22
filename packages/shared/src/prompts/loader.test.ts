@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  composeSystemPrompt,
-  readPromptStack,
-  renderIdentityBlock,
-} from "./loader.js";
+import { composeSystemPrompt, readPromptStack, renderIdentityBlock } from "./loader.js";
 
 describe("renderIdentityBlock (FRI-11)", () => {
   it("pins the agent's literal name and parent name into the prompt", () => {

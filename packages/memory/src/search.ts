@@ -14,9 +14,7 @@ export interface SearchResult {
   matchedOn: string[];
 }
 
-export async function searchMemories(
-  opts: SearchOptions,
-): Promise<SearchResult[]> {
+export async function searchMemories(opts: SearchOptions): Promise<SearchResult[]> {
   const limit = opts.limit ?? 10;
   const q = opts.query.trim();
   if (!q) return [];
@@ -42,9 +40,7 @@ export async function searchMemories(
 
   const allEntries = await listEntries();
   const candidatePool =
-    candidateIds.length > 0
-      ? allEntries.filter((e) => candidateIds.includes(e.id))
-      : allEntries; // FTS fallback: scan all
+    candidateIds.length > 0 ? allEntries.filter((e) => candidateIds.includes(e.id)) : allEntries; // FTS fallback: scan all
 
   const tokens = q
     .toLowerCase()

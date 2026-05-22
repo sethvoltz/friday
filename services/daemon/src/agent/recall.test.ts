@@ -17,9 +17,7 @@ describe("memory recall hook (FRI-89)", () => {
     vi.doMock("@friday/memory", () => ({
       buildAutoRecallBlock: async () => "",
     }));
-    const { memoryRecallHook } = await import(
-      "../hooks/memory-recall-hook.js"
-    );
+    const { memoryRecallHook } = await import("../hooks/memory-recall-hook.js");
 
     const result = await memoryRecallHook({
       intent: "query",
@@ -34,12 +32,9 @@ describe("memory recall hook (FRI-89)", () => {
   it("memoryRecallHook surfaces the <memory-context> block via appendSystemPrompt when memory has hits", async () => {
     vi.resetModules();
     vi.doMock("@friday/memory", () => ({
-      buildAutoRecallBlock: async () =>
-        "<memory-context>\nrelevant fact\n</memory-context>",
+      buildAutoRecallBlock: async () => "<memory-context>\nrelevant fact\n</memory-context>",
     }));
-    const { memoryRecallHook } = await import(
-      "../hooks/memory-recall-hook.js"
-    );
+    const { memoryRecallHook } = await import("../hooks/memory-recall-hook.js");
 
     const result = await memoryRecallHook({
       intent: "query",
@@ -49,8 +44,7 @@ describe("memory recall hook (FRI-89)", () => {
     });
 
     expect(result).toEqual({
-      appendSystemPrompt:
-        "<memory-context>\nrelevant fact\n</memory-context>",
+      appendSystemPrompt: "<memory-context>\nrelevant fact\n</memory-context>",
     });
   });
 
@@ -61,9 +55,7 @@ describe("memory recall hook (FRI-89)", () => {
         throw new Error("memory backend down");
       },
     }));
-    const { memoryRecallHook } = await import(
-      "../hooks/memory-recall-hook.js"
-    );
+    const { memoryRecallHook } = await import("../hooks/memory-recall-hook.js");
 
     const result = await memoryRecallHook({
       intent: "query",

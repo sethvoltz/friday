@@ -67,9 +67,7 @@ describe("rate-limit (FIX_FORWARD 5.7)", () => {
   });
 
   it("resetRateLimit clears one key", async () => {
-    const { consumeRateLimit, resetRateLimit } = await import(
-      "./rate-limit.js"
-    );
+    const { consumeRateLimit, resetRateLimit } = await import("./rate-limit.js");
     for (let i = 0; i < 5; i++) {
       await consumeRateLimit({
         key: "auth:1.2.3.4",
@@ -87,9 +85,7 @@ describe("rate-limit (FIX_FORWARD 5.7)", () => {
   });
 
   it("resetRateLimitPrefix wipes every matching bucket", async () => {
-    const { consumeRateLimit, resetRateLimitPrefix } = await import(
-      "./rate-limit.js"
-    );
+    const { consumeRateLimit, resetRateLimitPrefix } = await import("./rate-limit.js");
     for (let i = 0; i < 5; i++) {
       await consumeRateLimit({
         key: "auth:1.2.3.4",

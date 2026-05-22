@@ -7,14 +7,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -32,11 +25,9 @@ function runSandboxed(
   profilePath: string,
   cmd: string,
 ): { code: number | null; stderr: string; stdout: string } {
-  const r = spawnSync(
-    SANDBOX_EXEC,
-    ["-f", profilePath, "/bin/bash", "-c", cmd],
-    { encoding: "utf8" },
-  );
+  const r = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/bin/bash", "-c", cmd], {
+    encoding: "utf8",
+  });
   return { code: r.status, stderr: r.stderr ?? "", stdout: r.stdout ?? "" };
 }
 
@@ -167,11 +158,9 @@ describeOnDarwin("M2 kernel-enforced sandbox", () => {
        process.send({ ready: true });`,
     );
 
-    const child = spawn(
-      SANDBOX_EXEC,
-      ["-f", profilePath, process.execPath, probeScript],
-      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
-    );
+    const child = spawn(SANDBOX_EXEC, ["-f", profilePath, process.execPath, probeScript], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
     const messages: Array<Record<string, unknown>> = [];
     child.on("message", (m) => {
       messages.push(m as Record<string, unknown>);

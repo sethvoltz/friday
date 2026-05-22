@@ -64,9 +64,7 @@ async function buildHarness(): Promise<Harness> {
       }
     });
   });
-  await new Promise<void>((resolve) =>
-    upstreamServer.listen(0, "127.0.0.1", resolve),
-  );
+  await new Promise<void>((resolve) => upstreamServer.listen(0, "127.0.0.1", resolve));
   const upstreamPort = (upstreamServer.address() as net.AddressInfo).port;
 
   // Proxy: an HTTP server (request handler returns 404 because
@@ -83,9 +81,7 @@ async function buildHarness(): Promise<Harness> {
       upstreamPort,
     }),
   );
-  await new Promise<void>((resolve) =>
-    proxyServer.listen(0, "127.0.0.1", resolve),
-  );
+  await new Promise<void>((resolve) => proxyServer.listen(0, "127.0.0.1", resolve));
   const proxyPort = (proxyServer.address() as net.AddressInfo).port;
 
   return {
@@ -153,85 +149,76 @@ describe("createZeroUpgradeHandler", () => {
     await closeHarness(h);
   });
 
-  test(
-    "upgrade on /zero/sync/v50/connect arrives at upstream with /zero stripped from request line",
-    async () => {
-      const client = await rawConnect("127.0.0.1", h.proxyPort);
-      const upgradeReq =
-        "GET /zero/sync/v50/connect?clientID=abc HTTP/1.1\r\n" +
+  test("upgrade on /zero/sync/v50/connect arrives at upstream with /zero stripped from request line", async () => {
+    const client = await rawConnect("127.0.0.1", h.proxyPort);
+    const upgradeReq =
+      "GET /zero/sync/v50/connect?clientID=abc HTTP/1.1\r\n" +
+      "Host: dashboard.local\r\n" +
+      "Connection: Upgrade\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+      "Sec-WebSocket-Version: 13\r\n" +
+      "\r\n";
+    client.write(upgradeReq);
+
+    // Wait until the upstream observes the proxied head. Polling
+    // here is fine — the proxy runs in the same event loop and
+    // the byte-count test below resolves as soon as it arrives.
+    for (let i = 0; i < 50 && h.upstreamFirstChunks.length === 0; i++) {
+      await sleep(10);
+    }
+    expect(h.upstreamFirstChunks.length).toBe(1);
+    const proxied = h.upstreamFirstChunks[0]!.toString();
+
+    // Request line: prefix stripped, query string preserved, HTTP
+    // version preserved.
+    expect(proxied.startsWith("GET /sync/v50/connect?clientID=abc HTTP/1.1\r\n")).toBe(true);
+
+    // Headers preserved verbatim — these are exactly what zero-cache
+    // needs to honor the WS handshake.
+    expect(proxied).toContain("\r\nupgrade: websocket\r\n");
+    expect(proxied).toContain("\r\nconnection: Upgrade\r\n");
+    expect(proxied).toContain("\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n");
+    expect(proxied).toContain("\r\nsec-websocket-version: 13\r\n");
+
+    client.destroy();
+  });
+
+  test("bytes flow client→upstream and upstream→client after the upgrade handshake", async () => {
+    const client = await rawConnect("127.0.0.1", h.proxyPort);
+    client.write(
+      "GET /zero/sync/v50/connect HTTP/1.1\r\n" +
         "Host: dashboard.local\r\n" +
         "Connection: Upgrade\r\n" +
         "Upgrade: websocket\r\n" +
-        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+        "Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n" +
         "Sec-WebSocket-Version: 13\r\n" +
-        "\r\n";
-      client.write(upgradeReq);
+        "\r\n",
+    );
 
-      // Wait until the upstream observes the proxied head. Polling
-      // here is fine — the proxy runs in the same event loop and
-      // the byte-count test below resolves as soon as it arrives.
-      for (let i = 0; i < 50 && h.upstreamFirstChunks.length === 0; i++) {
-        await sleep(10);
-      }
-      expect(h.upstreamFirstChunks.length).toBe(1);
-      const proxied = h.upstreamFirstChunks[0]!.toString();
+    // Wait for upstream to register the connection.
+    for (let i = 0; i < 50 && h.upstreamSockets.length === 0; i++) {
+      await sleep(10);
+    }
+    expect(h.upstreamSockets.length).toBe(1);
 
-      // Request line: prefix stripped, query string preserved, HTTP
-      // version preserved.
-      expect(proxied.startsWith("GET /sync/v50/connect?clientID=abc HTTP/1.1\r\n")).toBe(true);
+    // Client → upstream. The fake upstream's data handler stores
+    // post-first-chunk bytes in `upstreamLaterBytes`.
+    client.write("HELLO-FROM-CLIENT");
+    for (let i = 0; i < 50 && h.upstreamLaterBytes.length === 0; i++) {
+      await sleep(10);
+    }
+    expect(Buffer.concat(h.upstreamLaterBytes).toString()).toBe("HELLO-FROM-CLIENT");
 
-      // Headers preserved verbatim — these are exactly what zero-cache
-      // needs to honor the WS handshake.
-      expect(proxied).toContain("\r\nupgrade: websocket\r\n");
-      expect(proxied).toContain("\r\nconnection: Upgrade\r\n");
-      expect(proxied).toContain("\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n");
-      expect(proxied).toContain("\r\nsec-websocket-version: 13\r\n");
+    // Upstream → client. The fake upstream's echo path responds to
+    // payloads prefixed `ECHO:` — write one and read it back through
+    // the proxy.
+    client.write("ECHO:WS-FRAME-BYTES");
+    const echoed = await readUntil(client, (buf) => buf.toString().includes("WS-FRAME-BYTES"));
+    expect(echoed.toString()).toBe("WS-FRAME-BYTES");
 
-      client.destroy();
-    },
-  );
-
-  test(
-    "bytes flow client→upstream and upstream→client after the upgrade handshake",
-    async () => {
-      const client = await rawConnect("127.0.0.1", h.proxyPort);
-      client.write(
-        "GET /zero/sync/v50/connect HTTP/1.1\r\n" +
-          "Host: dashboard.local\r\n" +
-          "Connection: Upgrade\r\n" +
-          "Upgrade: websocket\r\n" +
-          "Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n" +
-          "Sec-WebSocket-Version: 13\r\n" +
-          "\r\n",
-      );
-
-      // Wait for upstream to register the connection.
-      for (let i = 0; i < 50 && h.upstreamSockets.length === 0; i++) {
-        await sleep(10);
-      }
-      expect(h.upstreamSockets.length).toBe(1);
-
-      // Client → upstream. The fake upstream's data handler stores
-      // post-first-chunk bytes in `upstreamLaterBytes`.
-      client.write("HELLO-FROM-CLIENT");
-      for (let i = 0; i < 50 && h.upstreamLaterBytes.length === 0; i++) {
-        await sleep(10);
-      }
-      expect(Buffer.concat(h.upstreamLaterBytes).toString()).toBe("HELLO-FROM-CLIENT");
-
-      // Upstream → client. The fake upstream's echo path responds to
-      // payloads prefixed `ECHO:` — write one and read it back through
-      // the proxy.
-      client.write("ECHO:WS-FRAME-BYTES");
-      const echoed = await readUntil(
-        client,
-        (buf) => buf.toString().includes("WS-FRAME-BYTES"),
-      );
-      expect(echoed.toString()).toBe("WS-FRAME-BYTES");
-
-      client.destroy();
-    },
-  );
+    client.destroy();
+  });
 
   test("upgrade on path outside /zero is refused with HTTP 400 and no upstream connection", async () => {
     const client = await rawConnect("127.0.0.1", h.proxyPort);

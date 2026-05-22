@@ -24,19 +24,8 @@
  *    `brew services stop friday`) leaves zero descendants alive.
  */
 
-import {
-  ChildProcess,
-  spawn,
-  spawnSync,
-  type StdioOptions,
-} from "node:child_process";
-import {
-  appendFileSync,
-  createWriteStream,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-} from "node:fs";
+import { ChildProcess, spawn, spawnSync, type StdioOptions } from "node:child_process";
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -155,14 +144,7 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
       // vs upstream Postgres); restart immediately, no backoff.
       fastRestartCodes: [14],
       async preStart(): Promise<void> {
-        const schemaPath = join(
-          repoRoot,
-          "packages",
-          "shared",
-          "dist",
-          "sync",
-          "schema.js",
-        );
+        const schemaPath = join(repoRoot, "packages", "shared", "dist", "sync", "schema.js");
         const r = spawnSync(
           "pnpm",
           ["exec", "zero-deploy-permissions", "--schema-path", schemaPath],
@@ -325,9 +307,7 @@ async function spawnChild(state: ChildState): Promise<void> {
 
 function scheduleRestart(state: ChildState, exitCode: number | null = null): void {
   if (state.shuttingDown || supervisorShuttingDown) return;
-  const fastRestart =
-    exitCode !== null &&
-    (state.spec.fastRestartCodes ?? []).includes(exitCode);
+  const fastRestart = exitCode !== null && (state.spec.fastRestartCodes ?? []).includes(exitCode);
   const delayMs = fastRestart ? 0 : state.backoffMs;
   if (!fastRestart) {
     state.backoffMs = Math.min(state.backoffMs * 2, BACKOFF_CAP_MS);

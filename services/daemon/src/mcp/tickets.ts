@@ -48,9 +48,7 @@ export function buildTicketsServer(opts: BuildTicketsServerOptions) {
           assignee: z
             .string()
             .optional()
-            .describe(
-              "Agent name or human handle. Leave empty for unassigned.",
-            ),
+            .describe("Agent name or human handle. Leave empty for unassigned."),
           meta: z
             .record(z.string(), z.unknown())
             .optional()
@@ -158,12 +156,8 @@ export function buildTicketsServer(opts: BuildTicketsServerOptions) {
         "Link a ticket to an external system (Linear, GitHub, etc.). Used by reconcile flows; safe for the orchestrator to call directly when it has authoritative external ids.",
         {
           id: z.string().describe("Friday ticket id."),
-          system: z
-            .string()
-            .describe("External system name, e.g. `linear`, `github`."),
-          externalId: z
-            .string()
-            .describe("System-specific identifier, e.g. `FRI-42` in Linear."),
+          system: z.string().describe("External system name, e.g. `linear`, `github`."),
+          externalId: z.string().describe("System-specific identifier, e.g. `FRI-42` in Linear."),
           url: z.string().optional(),
           meta: z.record(z.string(), z.unknown()).optional(),
         },

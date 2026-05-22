@@ -25,12 +25,7 @@ export interface PromptStack {
   protocols: string;
 }
 
-export type AgentBaseKey =
-  | "orchestrator"
-  | "builder"
-  | "helper"
-  | "scheduled"
-  | "bare";
+export type AgentBaseKey = "orchestrator" | "builder" | "helper" | "scheduled" | "bare";
 
 /**
  * Protocols loaded automatically for an agent type, regardless of the
@@ -67,10 +62,7 @@ export function readPromptStack(
   const dir = bundledPromptsDir();
   const constitution = readFileSync(join(dir, "CONSTITUTION.md"), "utf8");
   const soul = readSoul();
-  const agentBase = readFileSync(
-    join(dir, "agents", `${agentType}.md`),
-    "utf8",
-  );
+  const agentBase = readFileSync(join(dir, "agents", `${agentType}.md`), "utf8");
   // Merge type-default protocols with env-gated and caller-requested ones,
   // dedup, preserve order. Env-gated protocols sit between type-defaults and
   // caller-requested so that explicit caller overrides still win on position.
@@ -159,14 +151,8 @@ export function composeSystemPrompt(
 export function ensureSoul(): void {
   if (existsSync(SOUL_PATH)) return;
   const dir = bundledPromptsDir();
-  const defaultSoul = readFileSync(
-    join(dir, "fragments", "soul.default.md"),
-    "utf8",
-  );
-  const personalized = defaultSoul.replaceAll(
-    "{{YOUR_NAME}}",
-    deriveUserName(),
-  );
+  const defaultSoul = readFileSync(join(dir, "fragments", "soul.default.md"), "utf8");
+  const personalized = defaultSoul.replaceAll("{{YOUR_NAME}}", deriveUserName());
   writeFileSync(SOUL_PATH, personalized);
 }
 

@@ -43,10 +43,7 @@ import {
 } from "@friday/shared";
 import { getBlockById } from "@friday/shared/services";
 import * as registry from "./registry.js";
-import {
-  dispatchTurn,
-  peekLiveWorker,
-} from "./lifecycle.js";
+import { dispatchTurn, peekLiveWorker } from "./lifecycle.js";
 import { renderPinnedFacts } from "./pinned-facts.js";
 import { composeDispatchPrompt } from "./compose-dispatch-prompt.js";
 import { matchSkillInvocation } from "../skills/match.js";
@@ -131,8 +128,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
     {
       agentName: agentRow.name,
       agentType: agentRow.type,
-      parentName:
-        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+      parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
     },
     pinnedFacts,
   );
@@ -165,9 +161,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
       status: willQueue ? "queued" : "complete",
       sessionId: resumeSessionId ?? "__pending__",
     })
-    .where(
-      and(eq(schema.blocks.id, row.id), eq(schema.blocks.status, "pending")),
-    );
+    .where(and(eq(schema.blocks.id, row.id), eq(schema.blocks.status, "pending")));
 
   // Dispatch the turn. The userBlockId is only passed when the prompt
   // will queue — that's the legacy contract: dispatchTurn uses it to
@@ -190,8 +184,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
       effort: modelCfg.effort,
       resumeSessionId,
       daemonPort: resolveDaemonPort(cfg),
-      parentName:
-        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+      parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
       mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
       allowedToolsOverride,
     },
@@ -212,9 +205,7 @@ export async function runDispatchBootScan(): Promise<void> {
     const rows = await db
       .select({ id: schema.blocks.id })
       .from(schema.blocks)
-      .where(
-        and(eq(schema.blocks.status, "pending"), eq(schema.blocks.role, "user")),
-      );
+      .where(and(eq(schema.blocks.status, "pending"), eq(schema.blocks.role, "user")));
     for (const row of rows) {
       await processPendingBlockRow(row.id);
     }
@@ -235,12 +226,9 @@ export interface DispatchListenerHandle {
 export async function startDispatchListener(): Promise<DispatchListenerHandle> {
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ??
-    process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL must be set to start the sendUserMessage LISTEN connection.",
-    );
+    throw new Error("DATABASE_URL must be set to start the sendUserMessage LISTEN connection.");
   }
 
   const client = new Client({ connectionString });

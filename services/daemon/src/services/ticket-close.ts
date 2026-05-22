@@ -40,9 +40,7 @@ function reasonToStatus(reason: ArchiveReason): TicketStatus {
 }
 
 // Linear's enum maps cleanly: done→completed, closed→canceled.
-function statusToLinearStateType(
-  status: TicketStatus,
-): "completed" | "canceled" | null {
+function statusToLinearStateType(status: TicketStatus): "completed" | "canceled" | null {
   switch (status) {
     case "done":
       return "completed";

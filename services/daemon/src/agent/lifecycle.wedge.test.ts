@@ -86,46 +86,42 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
     __putLiveWorkerForTest("wedge-agent", worker as never);
 
     const captured: CapturedEvent[] = [];
-    const unsub = eventBus.subscribe((e) =>
-      captured.push(e as CapturedEvent),
-    );
+    const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
     const logSpy = vi.spyOn(logger, "log");
 
     // 9 turn-completes don't trigger the kill.
     for (let i = 0; i < 9; i++) {
-      await handleEvent(worker as never, {
-        type: "turn-complete",
-        sessionId: "sess-wedge-1",
-      } as never);
-      expect(
-        (worker as { forceKilled?: boolean }).forceKilled,
-      ).toBeUndefined();
+      await handleEvent(
+        worker as never,
+        {
+          type: "turn-complete",
+          sessionId: "sess-wedge-1",
+        } as never,
+      );
+      expect((worker as { forceKilled?: boolean }).forceKilled).toBeUndefined();
     }
-    expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(
-      9,
-    );
+    expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(9);
 
     // 10th turn-complete trips the threshold.
-    await handleEvent(worker as never, {
-      type: "turn-complete",
-      sessionId: "sess-wedge-1",
-    } as never);
+    await handleEvent(
+      worker as never,
+      {
+        type: "turn-complete",
+        sessionId: "sess-wedge-1",
+      } as never,
+    );
     unsub();
 
     expect((worker as { forceKilled?: boolean }).forceKilled).toBe(true);
 
-    const killLog = logSpy.mock.calls.find(
-      ([, event]) => event === "worker.wedge.force-kill",
-    );
+    const killLog = logSpy.mock.calls.find(([, event]) => event === "worker.wedge.force-kill");
     expect(killLog).toBeDefined();
     const [level, , payload] = killLog!;
     expect(level).toBe("warn");
     const p = payload as { zeroBlockTurnStreak: number };
     expect(p.zeroBlockTurnStreak).toBe(10);
 
-    const errorEvent = captured.find(
-      (e) => e.type === "error" && e.code === "worker_wedged",
-    );
+    const errorEvent = captured.find((e) => e.type === "error" && e.code === "worker_wedged");
     expect(errorEvent).toBeDefined();
     expect(errorEvent?.code).toBe("worker_wedged");
 
@@ -150,27 +146,24 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
     __putLiveWorkerForTest("wedge-err-agent", worker as never);
 
     const captured: CapturedEvent[] = [];
-    const unsub = eventBus.subscribe((e) =>
-      captured.push(e as CapturedEvent),
-    );
+    const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
     for (let i = 0; i < 10; i++) {
-      await handleEvent(worker as never, {
-        type: "error",
-        message: "SDK CLI exited 1 — resume target missing",
-        code: "resume_missing",
-        recoverable: false,
-      } as never);
+      await handleEvent(
+        worker as never,
+        {
+          type: "error",
+          message: "SDK CLI exited 1 — resume target missing",
+          code: "resume_missing",
+          recoverable: false,
+        } as never,
+      );
     }
     unsub();
 
     expect((worker as { forceKilled?: boolean }).forceKilled).toBe(true);
-    expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(
-      10,
-    );
-    const wedgeError = captured.find(
-      (e) => e.type === "error" && e.code === "worker_wedged",
-    );
+    expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(10);
+    const wedgeError = captured.find((e) => e.type === "error" && e.code === "worker_wedged");
     expect(wedgeError).toBeDefined();
 
     __deleteLiveWorkerForTest("wedge-err-agent");
@@ -193,16 +186,17 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
       // which would require a fuller scaffold; the increment is the
       // load-bearing signal for the detector.
       (worker as { blocksThisTurn: number }).blocksThisTurn = 1;
-      await handleEvent(worker as never, {
-        type: "turn-complete",
-        sessionId: "sess-healthy",
-      } as never);
+      await handleEvent(
+        worker as never,
+        {
+          type: "turn-complete",
+          sessionId: "sess-healthy",
+        } as never,
+      );
     }
 
     expect((worker as { forceKilled?: boolean }).forceKilled).toBeUndefined();
-    expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(
-      0,
-    );
+    expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(0);
 
     __deleteLiveWorkerForTest("wedge-healthy-agent");
   });
@@ -222,16 +216,17 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
 
       // 3 zero-block turn-completes trigger the override threshold.
       for (let i = 0; i < 3; i++) {
-        await handleEvent(worker as never, {
-          type: "turn-complete",
-          sessionId: "sess-env",
-        } as never);
+        await handleEvent(
+          worker as never,
+          {
+            type: "turn-complete",
+            sessionId: "sess-env",
+          } as never,
+        );
       }
 
       expect((worker as { forceKilled?: boolean }).forceKilled).toBe(true);
-      expect(
-        (worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak,
-      ).toBe(3);
+      expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(3);
 
       __deleteLiveWorkerForTest("wedge-env-agent");
     } finally {
@@ -254,19 +249,20 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
     // Multiple abort-triggered turn-completes with zero blocks — must
     // NOT trip the wedge detector.
     for (let i = 0; i < 15; i++) {
-      await handleEvent(worker as never, {
-        type: "turn-complete",
-        sessionId: "sess-abort",
-      } as never);
+      await handleEvent(
+        worker as never,
+        {
+          type: "turn-complete",
+          sessionId: "sess-abort",
+        } as never,
+      );
       // Re-arm abort flag per call — the abort handler resets it after
       // each turn.
       (worker as { abortRequested: boolean }).abortRequested = true;
     }
 
     expect((worker as { forceKilled?: boolean }).forceKilled).toBeUndefined();
-    expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(
-      0,
-    );
+    expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(0);
 
     __deleteLiveWorkerForTest("wedge-abort-agent");
   });

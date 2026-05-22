@@ -110,12 +110,7 @@ export default tseslint.config(
   },
   // Tests: mock-heavy patterns need `any` and untyped callback shapes.
   {
-    files: [
-      "**/*.test.ts",
-      "**/*.spec.ts",
-      "**/test/**/*.ts",
-      "**/__tests__/**/*.ts",
-    ],
+    files: ["**/*.test.ts", "**/*.spec.ts", "**/test/**/*.ts", "**/__tests__/**/*.ts"],
     rules: {
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-unused-vars": "off",

@@ -100,11 +100,7 @@ export class IllegalTransitionError extends Error {
  * "is this (type, status) the legal resting set for this agent?" without
  * doing a no-op write to provoke the gate.
  */
-export function isLegalTransition(
-  type: AgentType,
-  from: AgentStatus,
-  to: AgentStatus,
-): boolean {
+export function isLegalTransition(type: AgentType, from: AgentStatus, to: AgentStatus): boolean {
   if (from === to) return true;
   const allowed = TRANSITIONS_BY_TYPE[type][from] ?? [];
   return allowed.includes(to);
@@ -118,11 +114,7 @@ export async function listAgents(): Promise<AgentEntry[]> {
 
 export async function getAgent(name: string): Promise<AgentEntry | null> {
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.agents)
-    .where(eq(schema.agents.name, name))
-    .limit(1);
+  const rows = await db.select().from(schema.agents).where(eq(schema.agents.name, name)).limit(1);
   return rows[0] ? rowToEntry(rows[0]) : null;
 }
 
@@ -193,10 +185,7 @@ export async function getSpawnReason(name: string): Promise<string | null> {
  * installer when rebinding a previously-unaffiliated or other-app agent
  * to a new owner. Pass `null` to clear.
  */
-export async function setAppId(
-  name: string,
-  appId: string | null,
-): Promise<void> {
+export async function setAppId(name: string, appId: string | null): Promise<void> {
   const db = getDb();
   await db
     .update(schema.agents)
@@ -243,10 +232,7 @@ async function _setStatusUnchecked(
   if (opts.archiveReason !== undefined) {
     setShape.archiveReason = opts.archiveReason;
   }
-  await db
-    .update(schema.agents)
-    .set(setShape)
-    .where(eq(schema.agents.name, name));
+  await db.update(schema.agents).set(setShape).where(eq(schema.agents.name, name));
 }
 
 /**
@@ -325,10 +311,7 @@ export async function setStatus(
   });
 }
 
-export async function setSession(
-  name: string,
-  sessionId: string,
-): Promise<void> {
+export async function setSession(name: string, sessionId: string): Promise<void> {
   const db = getDb();
   await db
     .update(schema.agents)
@@ -351,10 +334,7 @@ export async function clearSession(name: string): Promise<void> {
  * attempts throw `IllegalTransitionError` with code
  * `ORCHESTRATOR_NOT_ARCHIVABLE`.
  */
-export async function archiveAgent(
-  name: string,
-  opts: { reason: ArchiveReason },
-): Promise<void> {
+export async function archiveAgent(name: string, opts: { reason: ArchiveReason }): Promise<void> {
   await setStatus(name, "archived", { archiveReason: opts.reason });
 }
 
@@ -371,9 +351,7 @@ export async function unarchiveAgent(name: string): Promise<void> {
   const row = await getAgent(name);
   if (!row) throw new Error(`unarchiveAgent: no agent named "${name}"`);
   if (row.status !== "archived") {
-    throw new Error(
-      `unarchiveAgent: "${name}" is not archived (status=${row.status})`,
-    );
+    throw new Error(`unarchiveAgent: "${name}" is not archived (status=${row.status})`);
   }
   await _setStatusUnchecked(row.name, "idle", { archiveReason: null });
 }

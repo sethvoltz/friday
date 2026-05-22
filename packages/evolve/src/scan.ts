@@ -16,17 +16,10 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import {
-  DAEMON_LOG_PATH,
-  USAGE_LOG_PATH,
-} from "@friday/shared";
+import { DAEMON_LOG_PATH, USAGE_LOG_PATH } from "@friday/shared";
 import { getAllUsageEntries } from "@friday/shared/services";
 import { scanAgentSpawnDepth } from "./scan-agent-depth.js";
-import type {
-  EvidencePointer,
-  Signal,
-  SignalSeverity,
-} from "./types.js";
+import type { EvidencePointer, Signal, SignalSeverity } from "./types.js";
 
 export interface ScanOptions {
   /** Path to the daemon JSONL log. Defaults to DAEMON_LOG_PATH. */
@@ -156,10 +149,7 @@ export function signalHash(event: string, agent?: string): string {
   return createHash("sha1").update(key).digest("hex").slice(0, 8);
 }
 
-export function sinceHoursAgo(
-  windowHours: number,
-  now: Date = new Date(),
-): string {
+export function sinceHoursAgo(windowHours: number, now: Date = new Date()): string {
   return new Date(now.getTime() - windowHours * 3_600_000).toISOString();
 }
 
@@ -316,8 +306,7 @@ function bucketAppend(
   if (existing) {
     existing.count++;
     existing.lastSeenAt = ts;
-    if (existing.evidencePointers.length < 3)
-      existing.evidencePointers.push(pointer);
+    if (existing.evidencePointers.length < 3) existing.evidencePointers.push(pointer);
     return;
   }
 
@@ -348,8 +337,7 @@ function bucketAppendWithPointer(
   if (existing) {
     existing.count++;
     existing.lastSeenAt = ts;
-    if (existing.evidencePointers.length < 3)
-      existing.evidencePointers.push(pointer);
+    if (existing.evidencePointers.length < 3) existing.evidencePointers.push(pointer);
     return;
   }
   buckets.set(hash, {
@@ -393,10 +381,7 @@ function safeStat(path: string): { mtimeMs: number } | null {
   }
 }
 
-function collectUserTurns(
-  filePath: string,
-  sinceMs: number,
-): TranscriptUserTurn[] {
+function collectUserTurns(filePath: string, sinceMs: number): TranscriptUserTurn[] {
   const out: TranscriptUserTurn[] = [];
   let raw: string;
   try {
@@ -439,18 +424,13 @@ function extractText(content: unknown): string {
   for (const c of content) {
     if (c && typeof c === "object" && "type" in c) {
       const obj = c as { type: string; text?: string };
-      if (obj.type === "text" && typeof obj.text === "string")
-        parts.push(obj.text);
+      if (obj.type === "text" && typeof obj.text === "string") parts.push(obj.text);
     }
   }
   return parts.join(" ");
 }
 
-function countRetries(
-  turns: TranscriptUserTurn[],
-  threshold: number,
-  windowMs: number,
-): number {
+function countRetries(turns: TranscriptUserTurn[], threshold: number, windowMs: number): number {
   let retries = 0;
   for (let i = 1; i < turns.length; i++) {
     const a = turns[i - 1];
@@ -489,26 +469,18 @@ function cosine(a: Map<string, number>, b: Map<string, number>): number {
  * Friction scanning is async (Haiku-driven) and lives in scan-friction.ts;
  * call `scanFriction()` separately and concat the results.
  */
-export async function scanAll(
-  opts: ScanOptions & UsageScanOptions = {},
-): Promise<Signal[]> {
-  const [daemonSignals, usageSignals, transcriptSignals, depthSignals] =
-    await Promise.all([
-      Promise.resolve(scanDaemonLog(opts)),
-      scanUsage(opts),
-      Promise.resolve(scanTranscripts(opts)),
-      Promise.resolve(
-        scanAgentSpawnDepth({
-          daemonLogPath: opts.daemonLogPath,
-          since: opts.since,
-          now: opts.now,
-        }),
-      ),
-    ]);
-  return [
-    ...daemonSignals,
-    ...usageSignals,
-    ...transcriptSignals,
-    ...depthSignals,
-  ];
+export async function scanAll(opts: ScanOptions & UsageScanOptions = {}): Promise<Signal[]> {
+  const [daemonSignals, usageSignals, transcriptSignals, depthSignals] = await Promise.all([
+    Promise.resolve(scanDaemonLog(opts)),
+    scanUsage(opts),
+    Promise.resolve(scanTranscripts(opts)),
+    Promise.resolve(
+      scanAgentSpawnDepth({
+        daemonLogPath: opts.daemonLogPath,
+        since: opts.since,
+        now: opts.now,
+      }),
+    ),
+  ]);
+  return [...daemonSignals, ...usageSignals, ...transcriptSignals, ...depthSignals];
 }

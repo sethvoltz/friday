@@ -1,19 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  MEMORY_ENTRIES_DIR,
-  ensureDirs,
-  getDb,
-  schema,
-} from "@friday/shared";
+import { MEMORY_ENTRIES_DIR, ensureDirs, getDb, schema } from "@friday/shared";
 
 export interface MemoryEntry {
   id: string;
@@ -63,14 +51,8 @@ export function parseEntry(id: string, raw: string): MemoryEntry {
     content: m[2],
     tags: Array.isArray(fm.tags) ? (fm.tags as string[]) : [],
     createdBy: typeof fm.createdBy === "string" ? fm.createdBy : "unknown",
-    createdAt:
-      typeof fm.createdAt === "string"
-        ? fm.createdAt
-        : new Date().toISOString(),
-    updatedAt:
-      typeof fm.updatedAt === "string"
-        ? fm.updatedAt
-        : new Date().toISOString(),
+    createdAt: typeof fm.createdAt === "string" ? fm.createdAt : new Date().toISOString(),
+    updatedAt: typeof fm.updatedAt === "string" ? fm.updatedAt : new Date().toISOString(),
     recallCount: 0,
     lastRecalledAt: null,
   };
@@ -143,10 +125,7 @@ export async function getEntry(id: string): Promise<MemoryEntry | null> {
   return rowToEntry(rows[0]);
 }
 
-export async function updateEntry(
-  id: string,
-  patch: Partial<MemoryEntry>,
-): Promise<void> {
+export async function updateEntry(id: string, patch: Partial<MemoryEntry>): Promise<void> {
   const cur = await getEntry(id);
   if (!cur) return;
   const next: MemoryEntry = {
@@ -162,9 +141,7 @@ export async function forgetEntry(id: string): Promise<void> {
   const path = entryPath(id);
   if (existsSync(path)) rmSync(path);
   const db = getDb();
-  await db
-    .delete(schema.memoryEntries)
-    .where(eq(schema.memoryEntries.id, id));
+  await db.delete(schema.memoryEntries).where(eq(schema.memoryEntries.id, id));
 }
 
 export async function listEntries(): Promise<MemoryEntry[]> {
@@ -240,9 +217,7 @@ function rowToEntry(r: typeof schema.memoryEntries.$inferSelect): MemoryEntry {
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
     recallCount: r.recallCount,
-    lastRecalledAt: r.lastRecalledAt
-      ? r.lastRecalledAt.toISOString()
-      : null,
+    lastRecalledAt: r.lastRecalledAt ? r.lastRecalledAt.toISOString() : null,
   };
 }
 

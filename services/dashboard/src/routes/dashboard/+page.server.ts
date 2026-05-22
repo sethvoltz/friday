@@ -1,11 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import {
-  CONFIG_PATH,
-  HEALTH_PATH,
-  SOUL_PATH,
-  loadConfig,
-  type AgentEntry,
-} from "@friday/shared";
+import { CONFIG_PATH, HEALTH_PATH, SOUL_PATH, loadConfig, type AgentEntry } from "@friday/shared";
 import {
   getCostByAgent,
   getDailyByModel,
@@ -13,11 +7,7 @@ import {
   type UsageStats,
 } from "@friday/shared/services";
 import { daemonGet } from "$lib/server/daemon";
-import {
-  buildActivityByDate,
-  buildDailyCost,
-  buildTokenViews,
-} from "./_aggregations.js";
+import { buildActivityByDate, buildDailyCost, buildTokenViews } from "./_aggregations.js";
 import type { PageServerLoad } from "./$types";
 
 export const load: PageServerLoad = async () => {

@@ -49,21 +49,11 @@ export const startCommand = defineCommand({
   },
   async run({ args }) {
     if (args.service) {
-      console.error(
-        pc.red(
-          `single-service operations not supported under launchd supervision.`,
-        ),
-      );
-      console.error(
-        `  the supervisor owns the whole stack atomically; bounce it with:`,
-      );
+      console.error(pc.red(`single-service operations not supported under launchd supervision.`));
+      console.error(`  the supervisor owns the whole stack atomically; bounce it with:`);
       console.error(`    ${pc.cyan("friday restart")}    # whole stack`);
-      console.error(
-        `    ${pc.cyan("brew services restart friday")}    # same thing, no alias`,
-      );
-      console.error(
-        `  per-service IPC is an explicit follow-up ticket — see ADR-028.`,
-      );
+      console.error(`    ${pc.cyan("brew services restart friday")}    # same thing, no alias`);
+      console.error(`  per-service IPC is an explicit follow-up ticket — see ADR-028.`);
       process.exit(1);
     }
 

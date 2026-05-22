@@ -24,6 +24,7 @@ export const load: LayoutServerLoad = async ({ locals }) => {
     health,
     daemonOnline,
     homeDir: process.env.HOME ?? null,
-    dataDir: process.env.FRIDAY_DATA_DIR ?? (process.env.HOME ? `${process.env.HOME}/.friday` : null),
+    dataDir:
+      process.env.FRIDAY_DATA_DIR ?? (process.env.HOME ? `${process.env.HOME}/.friday` : null),
   };
 };

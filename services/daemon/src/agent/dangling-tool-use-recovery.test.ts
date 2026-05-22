@@ -100,7 +100,7 @@ async function countDanglingFor(agentName: string): Promise<number> {
           AND r.agent_name = b.agent_name
       )
   `);
-  const rows = Array.isArray(r) ? r : (r as { rows: { n: number }[] }).rows ?? [];
+  const rows = Array.isArray(r) ? r : ((r as { rows: { n: number }[] }).rows ?? []);
   return rows[0]?.n ?? 0;
 }
 
@@ -152,11 +152,7 @@ describe("recoverDanglingToolUses", () => {
     await seed({
       agentName: "multi-wedge",
       sessionId: "session-BBB",
-      toolUses: [
-        { id: "toolu_one" },
-        { id: "toolu_two" },
-        { id: "toolu_three" },
-      ],
+      toolUses: [{ id: "toolu_one" }, { id: "toolu_two" }, { id: "toolu_three" }],
     });
 
     expect(await countDanglingFor("multi-wedge")).toBe(3);
@@ -172,16 +168,11 @@ describe("recoverDanglingToolUses", () => {
       .select()
       .from(schema.blocks)
       .where(
-        and(
-          eq(schema.blocks.agentName, "multi-wedge"),
-          eq(schema.blocks.source, "recovery_heal"),
-        ),
+        and(eq(schema.blocks.agentName, "multi-wedge"), eq(schema.blocks.source, "recovery_heal")),
       );
     expect(heals.length).toBe(3);
     const healIds = new Set(
-      heals.map(
-        (h) => (h.contentJson as { tool_use_id: string }).tool_use_id,
-      ),
+      heals.map((h) => (h.contentJson as { tool_use_id: string }).tool_use_id),
     );
     expect(healIds).toEqual(new Set(["toolu_one", "toolu_two", "toolu_three"]));
   });
@@ -260,10 +251,7 @@ describe("recoverDanglingToolUses", () => {
       .select()
       .from(schema.blocks)
       .where(
-        and(
-          eq(schema.blocks.agentName, "old-archived"),
-          eq(schema.blocks.source, "recovery_heal"),
-        ),
+        and(eq(schema.blocks.agentName, "old-archived"), eq(schema.blocks.source, "recovery_heal")),
       );
     expect(heals.length).toBe(0);
     // Session_id left intact too — we don't disturb the archived
@@ -290,10 +278,7 @@ describe("recoverDanglingToolUses", () => {
       .select()
       .from(schema.blocks)
       .where(
-        and(
-          eq(schema.blocks.agentName, "double-heal"),
-          eq(schema.blocks.source, "recovery_heal"),
-        ),
+        and(eq(schema.blocks.agentName, "double-heal"), eq(schema.blocks.source, "recovery_heal")),
       );
     expect(after1.length).toBe(1);
 
@@ -305,10 +290,7 @@ describe("recoverDanglingToolUses", () => {
       .select()
       .from(schema.blocks)
       .where(
-        and(
-          eq(schema.blocks.agentName, "double-heal"),
-          eq(schema.blocks.source, "recovery_heal"),
-        ),
+        and(eq(schema.blocks.agentName, "double-heal"), eq(schema.blocks.source, "recovery_heal")),
       );
     expect(after2.length).toBe(1);
   });

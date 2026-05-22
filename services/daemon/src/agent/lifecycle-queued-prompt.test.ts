@@ -112,10 +112,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     unsub();
 
     const event = captured.find(
-      (e) =>
-        e.type === "block_complete" &&
-        e.turn_id === "t_q2" &&
-        e.role === "user",
+      (e) => e.type === "block_complete" && e.turn_id === "t_q2" && e.role === "user",
     );
     expect(event).toBeDefined();
     expect(event!.status).toBe("queued");
@@ -157,11 +154,8 @@ describe("lifecycle: queued user-block dispatch", () => {
   });
 
   it("dispatchTurn queues a second prompt for a working worker and signals prompts-pending", async () => {
-    const {
-      dispatchTurn,
-      __putLiveWorkerForTest,
-      __deleteLiveWorkerForTest,
-    } = await import("./lifecycle.js");
+    const { dispatchTurn, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
 
     const { worker, child } = makeFakeWorker();
     __putLiveWorkerForTest("queued-agent", worker as never);
@@ -194,12 +188,8 @@ describe("lifecycle: queued user-block dispatch", () => {
   });
 
   it("removeQueuedPrompt yanks an entry out of nextPrompts and returns it", async () => {
-    const {
-      dispatchTurn,
-      removeQueuedPrompt,
-      __putLiveWorkerForTest,
-      __deleteLiveWorkerForTest,
-    } = await import("./lifecycle.js");
+    const { dispatchTurn, removeQueuedPrompt, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
 
     const { worker } = makeFakeWorker();
     __putLiveWorkerForTest("queued-agent", worker as never);
@@ -280,11 +270,14 @@ describe("lifecycle: queued user-block dispatch", () => {
     // Drive turn-complete on the live worker. The handler drains
     // nextPrompts → sendPrompt → restampQueuedUserBlock fires.
     const { handleEvent } = await import("./lifecycle.js");
-    await handleEvent(worker as never, {
-      type: "turn-complete",
-      sessionId: "sess-1",
-      usage: undefined,
-    } as never);
+    await handleEvent(
+      worker as never,
+      {
+        type: "turn-complete",
+        sessionId: "sess-1",
+        usage: undefined,
+      } as never,
+    );
     // restampQueuedUserBlock is fire-and-forget — wait for the DB row
     // to flip to complete with a fresher ts.
     await vi.waitFor(
@@ -300,17 +293,13 @@ describe("lifecycle: queued user-block dispatch", () => {
     __deleteLiveWorkerForTest("queued-agent");
 
     // No block_meta_update SSE event — Phase 5 retired it.
-    expect(
-      captured.find((e) => e.type === "block_meta_update"),
-    ).toBeUndefined();
+    expect(captured.find((e) => e.type === "block_meta_update")).toBeUndefined();
 
     const afterRow = await getBlockById(blockId);
     expect(afterRow!.status).toBe("complete");
     expect(afterRow!.ts).toBeGreaterThan(beforeTs);
     // The queued IPC ran too: the worker received `prompt` after the drain.
-    expect(child.send).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "prompt" }),
-    );
+    expect(child.send).toHaveBeenCalledWith(expect.objectContaining({ type: "prompt" }));
   });
 
   it("listQueuedUserBlocks returns queued rows in ts order (oldest first)", async () => {

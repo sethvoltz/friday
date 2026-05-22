@@ -36,9 +36,7 @@ const DEFAULT_ROTATE_BYTES = 1024 * 1024;
 export function createLogger(opts: CreateLoggerOptions): Logger {
   const path = opts.logPath ?? getLogPath(opts.service);
   const rotateBytes = opts.rotateBytes ?? DEFAULT_ROTATE_BYTES;
-  const stdoutMode =
-    opts.stdoutMode ??
-    (process.env.FRIDAY_LOG_STDOUT === "off" ? "off" : "json");
+  const stdoutMode = opts.stdoutMode ?? (process.env.FRIDAY_LOG_STDOUT === "off" ? "off" : "json");
 
   if (!existsSync(dirname(path))) mkdirSync(dirname(path), { recursive: true });
 
@@ -73,11 +71,7 @@ export function createLogger(opts: CreateLoggerOptions): Logger {
     writeSync(fd, line);
   }
 
-  function log(
-    level: LogLevel,
-    event: string,
-    data?: Record<string, unknown>,
-  ): void {
+  function log(level: LogLevel, event: string, data?: Record<string, unknown>): void {
     const entry = {
       ts: new Date().toISOString(),
       level,

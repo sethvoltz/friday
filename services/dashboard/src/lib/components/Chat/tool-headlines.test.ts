@@ -6,21 +6,21 @@ const DATA = "/Users/seth/.friday";
 
 describe("aliasPath", () => {
   it("aliases workspaces paths to @workspaces/<name>", () => {
-    expect(
-      aliasPath("/Users/seth/.friday/workspaces/my-agent/src/foo.ts", HOME, DATA),
-    ).toBe("@workspaces/my-agent/src/foo.ts");
+    expect(aliasPath("/Users/seth/.friday/workspaces/my-agent/src/foo.ts", HOME, DATA)).toBe(
+      "@workspaces/my-agent/src/foo.ts",
+    );
   });
 
   it("aliases apps paths to @apps/<name>", () => {
-    expect(
-      aliasPath("/Users/seth/.friday/apps/my-app/index.ts", HOME, DATA),
-    ).toBe("@apps/my-app/index.ts");
+    expect(aliasPath("/Users/seth/.friday/apps/my-app/index.ts", HOME, DATA)).toBe(
+      "@apps/my-app/index.ts",
+    );
   });
 
   it("aliases home paths to ~/...", () => {
-    expect(
-      aliasPath("/Users/seth/Development/project/src/main.ts", HOME, DATA),
-    ).toBe("~/Development/project/src/main.ts");
+    expect(aliasPath("/Users/seth/Development/project/src/main.ts", HOME, DATA)).toBe(
+      "~/Development/project/src/main.ts",
+    );
   });
 
   it("passes through paths with no matching alias", () => {
@@ -29,9 +29,7 @@ describe("aliasPath", () => {
   });
 
   it("workspace alias takes priority over home alias", () => {
-    expect(
-      aliasPath("/Users/seth/.friday/workspaces/foo", HOME, DATA),
-    ).toBe("@workspaces/foo");
+    expect(aliasPath("/Users/seth/.friday/workspaces/foo", HOME, DATA)).toBe("@workspaces/foo");
   });
 
   it("passes through when dataDir is not provided", () => {
@@ -44,47 +42,27 @@ describe("aliasPath", () => {
 describe("synthesizeHeadline — built-ins", () => {
   it("Read uses file_path with home alias", () => {
     expect(
-      synthesizeHeadline(
-        "Read",
-        { file_path: "/Users/seth/Development/x.ts" },
-        { homeDir: HOME },
-      ),
+      synthesizeHeadline("Read", { file_path: "/Users/seth/Development/x.ts" }, { homeDir: HOME }),
     ).toBe("Reading ~/Development/x.ts");
   });
 
   it("Edit / Write use the same home alias", () => {
+    expect(synthesizeHeadline("Edit", { file_path: "/Users/seth/a/b.ts" }, { homeDir: HOME })).toBe(
+      "Editing ~/a/b.ts",
+    );
     expect(
-      synthesizeHeadline(
-        "Edit",
-        { file_path: "/Users/seth/a/b.ts" },
-        { homeDir: HOME },
-      ),
-    ).toBe("Editing ~/a/b.ts");
-    expect(
-      synthesizeHeadline(
-        "Write",
-        { file_path: "/Users/seth/a/b.ts" },
-        { homeDir: HOME },
-      ),
+      synthesizeHeadline("Write", { file_path: "/Users/seth/a/b.ts" }, { homeDir: HOME }),
     ).toBe("Writing ~/a/b.ts");
   });
 
   it("Glob does not compress its pattern", () => {
-    expect(
-      synthesizeHeadline("Glob", { pattern: "src/**/*.ts" }),
-    ).toBe("Finding src/**/*.ts");
+    expect(synthesizeHeadline("Glob", { pattern: "src/**/*.ts" })).toBe("Finding src/**/*.ts");
   });
 
   it("Grep includes path when present", () => {
+    expect(synthesizeHeadline("Grep", { pattern: "TODO" })).toBe("Grepping TODO");
     expect(
-      synthesizeHeadline("Grep", { pattern: "TODO" }),
-    ).toBe("Grepping TODO");
-    expect(
-      synthesizeHeadline(
-        "Grep",
-        { pattern: "TODO", path: "/Users/seth/repo" },
-        { homeDir: HOME },
-      ),
+      synthesizeHeadline("Grep", { pattern: "TODO", path: "/Users/seth/repo" }, { homeDir: HOME }),
     ).toBe("Grepping TODO in ~/repo");
   });
 
@@ -133,21 +111,19 @@ describe("synthesizeHeadline — Friday MCP tools", () => {
   });
 
   it("mail_read uses id", () => {
-    expect(
-      synthesizeHeadline("mcp__friday-mail__mail_read", { id: "abc123" }),
-    ).toBe("Reading mail #abc123");
+    expect(synthesizeHeadline("mcp__friday-mail__mail_read", { id: "abc123" })).toBe(
+      "Reading mail #abc123",
+    );
   });
 
   it("mail_inbox is a fixed string", () => {
-    expect(
-      synthesizeHeadline("mcp__friday-mail__mail_inbox", {}),
-    ).toBe("Checking mail inbox");
+    expect(synthesizeHeadline("mcp__friday-mail__mail_inbox", {})).toBe("Checking mail inbox");
   });
 
   it("ticket_get uses id", () => {
-    expect(
-      synthesizeHeadline("mcp__friday-tickets__ticket_get", { id: "FRI-10" }),
-    ).toBe("Getting ticket FRI-10");
+    expect(synthesizeHeadline("mcp__friday-tickets__ticket_get", { id: "FRI-10" })).toBe(
+      "Getting ticket FRI-10",
+    );
   });
 
   it("ticket_create truncates title", () => {
@@ -175,9 +151,9 @@ describe("synthesizeHeadline — Friday MCP tools", () => {
   });
 
   it("evolve_propose uses verb + id", () => {
-    expect(
-      synthesizeHeadline("mcp__friday-evolve__evolve_propose", { id: "p7" }),
-    ).toBe("Proposing evolve proposal p7");
+    expect(synthesizeHeadline("mcp__friday-evolve__evolve_propose", { id: "p7" })).toBe(
+      "Proposing evolve proposal p7",
+    );
   });
 });
 

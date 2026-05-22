@@ -14,12 +14,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
 let registry: typeof import("./registry.js");
@@ -157,9 +152,7 @@ describe("registry FSM gate (ADR-031)", () => {
     // already-deleted name (e.g. worker-exit IPC after a fast unlink).
     // Pre-FSM this was a silent UPDATE-matches-zero-rows no-op; the
     // gate preserves that contract — only transition violations throw.
-    await expect(
-      registry.setStatus("ghost", "idle"),
-    ).resolves.toBeUndefined();
+    await expect(registry.setStatus("ghost", "idle")).resolves.toBeUndefined();
   });
 
   it("isLegalTransition matrix matches the documented edges", async () => {

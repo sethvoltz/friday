@@ -78,11 +78,7 @@ export function startConnectivity(): void {
   // Node returns a Timeout object; the browser returns a number. The
   // `in` check would throw `TypeError` on the primitive, so probe via
   // typeof first.
-  if (
-    tickInterval !== null &&
-    typeof tickInterval === "object" &&
-    "unref" in tickInterval
-  ) {
+  if (tickInterval !== null && typeof tickInterval === "object" && "unref" in tickInterval) {
     (tickInterval as { unref?: () => void }).unref?.();
   }
 }
@@ -125,10 +121,8 @@ export function resolveWidget(): WidgetView {
   // at least one success; otherwise a fresh page load would always
   // start "stale" simply because no chunk has arrived yet.
   const haveSuccess = connectivity.lastSuccessAt > 0;
-  const sseFresh =
-    haveSuccess && now - connectivity.lastSuccessAt < SUCCESS_FRESH_MS;
-  const sseStale =
-    haveSuccess && now - connectivity.lastSuccessAt > SUCCESS_STALE_MS;
+  const sseFresh = haveSuccess && now - connectivity.lastSuccessAt < SUCCESS_FRESH_MS;
+  const sseStale = haveSuccess && now - connectivity.lastSuccessAt > SUCCESS_STALE_MS;
 
   // Stage 1 — Internet. The page itself rendered, so we know HTTP works
   // when the dashboard server is reachable from the browser. The honest
@@ -221,8 +215,7 @@ function syncTooltip(
         : "Sync — Zero WS reconnecting";
   let sseText: string;
   if (sse === "unknown") sseText = "SSE waiting";
-  else if (sse === "live")
-    sseText = fresh ? "SSE live (< 30s)" : "SSE live";
+  else if (sse === "live") sseText = fresh ? "SSE live (< 30s)" : "SSE live";
   else if (sse === "down") sseText = "SSE down";
   else if (stale) sseText = "SSE stale (no frame 60s+)";
   else if (!haveSuccess) sseText = "SSE connecting";

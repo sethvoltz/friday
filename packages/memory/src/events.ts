@@ -14,11 +14,7 @@ export interface MemoryEvent {
 
 const EVENTS_PATH = join(MEMORY_DIR, "events.jsonl");
 
-export function logEvent(
-  type: MemoryEventType,
-  id: string,
-  entry?: Partial<MemoryEntry>,
-): void {
+export function logEvent(type: MemoryEventType, id: string, entry?: Partial<MemoryEntry>): void {
   const dir = dirname(EVENTS_PATH);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const event: MemoryEvent = { ts: new Date().toISOString(), type, id, entry };

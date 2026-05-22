@@ -76,9 +76,7 @@ describe("mail priority (FIX_FORWARD 2.3)", () => {
 
 describe("replayPending age cap (FRI-118)", () => {
   it("emits only pending rows younger than 7 days", async () => {
-    const { mailBus, replayPending, REPLAY_PENDING_MAX_AGE_MS } = await import(
-      "./mail.js"
-    );
+    const { mailBus, replayPending, REPLAY_PENDING_MAX_AGE_MS } = await import("./mail.js");
     const { getDb } = await import("../db/client.js");
     const schema = await import("../db/schema.js");
 

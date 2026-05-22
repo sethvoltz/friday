@@ -21,14 +21,7 @@
  * stateful trigger code needs a stateful test, against real PG.
  */
 
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { getDb } from "../index.js";
 import { spawnTestSyncEnv } from "../test/sync-harness.js";
@@ -155,11 +148,7 @@ describe("claimPendingSession sweep + trigger interaction (migration 0021)", () 
       turnId: "t-today",
     });
 
-    const rewritten = await claimPendingSession(
-      "friday",
-      "t-today",
-      "sess-today",
-    );
+    const rewritten = await claimPendingSession("friday", "t-today", "sess-today");
 
     expect(rewritten).toBe(1);
     expect(await sessionIdOf(current)).toBe("sess-today");
@@ -185,11 +174,7 @@ describe("claimPendingSession sweep + trigger interaction (migration 0021)", () 
       turnId: "t-shared",
     });
 
-    const rewritten = await claimPendingSession(
-      "friday",
-      "t-shared",
-      "friday-sess",
-    );
+    const rewritten = await claimPendingSession("friday", "t-shared", "friday-sess");
 
     expect(rewritten).toBe(1);
     expect(await sessionIdOf(ours)).toBe("friday-sess");

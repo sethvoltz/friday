@@ -2,12 +2,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
 
-export type TicketStatus =
-  | "open"
-  | "in_progress"
-  | "done"
-  | "blocked"
-  | "closed";
+export type TicketStatus = "open" | "in_progress" | "done" | "blocked" | "closed";
 export type TicketKind = "task" | "epic" | "bug" | "chore";
 
 export interface Ticket {
@@ -77,11 +72,7 @@ export async function createTicket(input: CreateTicketInput): Promise<Ticket> {
 
 export async function getTicket(id: string): Promise<Ticket | null> {
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.tickets)
-    .where(eq(schema.tickets.id, id))
-    .limit(1);
+  const rows = await db.select().from(schema.tickets).where(eq(schema.tickets.id, id)).limit(1);
   return rows[0] ? rowToTicket(rows[0]) : null;
 }
 
@@ -100,10 +91,7 @@ export async function listTickets(opts?: {
           .from(schema.tickets)
           .where(and(...where))
           .orderBy(desc(schema.tickets.updatedAt))
-      : await db
-          .select()
-          .from(schema.tickets)
-          .orderBy(desc(schema.tickets.updatedAt));
+      : await db.select().from(schema.tickets).orderBy(desc(schema.tickets.updatedAt));
   return rows.map(rowToTicket);
 }
 
@@ -120,27 +108,15 @@ export async function updateTicket(
   if (patch.kind !== undefined) updates.kind = patch.kind;
   if (patch.assignee !== undefined) updates.assignee = patch.assignee;
   if (patch.meta !== undefined) updates.metaJson = patch.meta ?? null;
-  await db
-    .update(schema.tickets)
-    .set(updates)
-    .where(eq(schema.tickets.id, id));
+  await db.update(schema.tickets).set(updates).where(eq(schema.tickets.id, id));
   return getTicket(id);
 }
 
-export async function addComment(
-  ticketId: string,
-  author: string,
-  body: string,
-): Promise<void> {
+export async function addComment(ticketId: string, author: string, body: string): Promise<void> {
   const db = getDb();
   const now = new Date();
-  await db
-    .insert(schema.ticketComments)
-    .values({ ticketId, author, body, ts: now });
-  await db
-    .update(schema.tickets)
-    .set({ updatedAt: now })
-    .where(eq(schema.tickets.id, ticketId));
+  await db.insert(schema.ticketComments).values({ ticketId, author, body, ts: now });
+  await db.update(schema.tickets).set({ updatedAt: now }).where(eq(schema.tickets.id, ticketId));
 }
 
 export async function listComments(ticketId: string): Promise<
@@ -220,9 +196,7 @@ export interface TicketExternalLinkRow {
   linkedAt: number;
 }
 
-export async function externalLinksBySystem(
-  system: string,
-): Promise<TicketExternalLinkRow[]> {
+export async function externalLinksBySystem(system: string): Promise<TicketExternalLinkRow[]> {
   const db = getDb();
   const rows = await db
     .select()

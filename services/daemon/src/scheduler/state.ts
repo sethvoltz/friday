@@ -55,9 +55,7 @@ export interface BuildScheduledFirstTurnInput {
   taskPrompt: string;
 }
 
-export function buildFirstTurnWithState(
-  input: BuildScheduledFirstTurnInput,
-): string {
+export function buildFirstTurnWithState(input: BuildScheduledFirstTurnInput): string {
   const dir = ensureScheduleStateDir(input.scheduleName);
   const state = readIfExists(join(dir, "state.md"));
   const lastRun = readIfExists(join(dir, "last-run.md"));
@@ -65,14 +63,10 @@ export function buildFirstTurnWithState(
   const sections: string[] = [input.taskPrompt.trim()];
 
   if (state && state.trim().length > 0) {
-    sections.push(
-      "## State from your previous run\n\n" + truncateForInjection(state),
-    );
+    sections.push("## State from your previous run\n\n" + truncateForInjection(state));
   }
   if (lastRun && lastRun.trim().length > 0) {
-    sections.push(
-      "## Last run metadata\n\n" + truncateForInjection(lastRun),
-    );
+    sections.push("## Last run metadata\n\n" + truncateForInjection(lastRun));
   }
 
   sections.push(
@@ -114,10 +108,7 @@ export function readScheduleArtifacts(scheduleName: string): ScheduleArtifacts {
   };
 }
 
-export function writeLastRun(
-  scheduleName: string,
-  meta: LastRunMetadata,
-): void {
+export function writeLastRun(scheduleName: string, meta: LastRunMetadata): void {
   const dir = ensureScheduleStateDir(scheduleName);
   const lines = [
     `- timestamp: ${meta.timestamp}`,

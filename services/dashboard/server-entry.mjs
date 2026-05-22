@@ -22,9 +22,7 @@ import http from "node:http";
 import process from "node:process";
 
 const { handler } = await import("./build/handler.js");
-const { createZeroUpgradeHandler, PROXY_PREFIX } = await import(
-  "./server-entry-proxy.mjs"
-);
+const { createZeroUpgradeHandler, PROXY_PREFIX } = await import("./server-entry-proxy.mjs");
 
 const PORT = Number(process.env.PORT ?? 3000);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -46,7 +44,7 @@ function emitProxyLog(event, payload) {
     event,
     ...payload,
   });
-   
+
   console.log(line);
 }
 

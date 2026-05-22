@@ -4,9 +4,7 @@ import { withDaemon } from "$lib/server/with-daemon";
 
 export const GET: RequestHandler = async ({ params, locals, request }) => {
   if (!locals.user) return new Response("unauthorized", { status: 401 });
-  return withDaemon((d) =>
-    d.get(`/api/tickets/${params.id}`, { signal: request.signal }),
-  );
+  return withDaemon((d) => d.get(`/api/tickets/${params.id}`, { signal: request.signal }));
 };
 
 export const PATCH: RequestHandler = async ({ params, request, locals }) => {

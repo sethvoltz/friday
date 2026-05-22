@@ -18,19 +18,19 @@ export interface HookContextMap {
     workingDirectory: string;
     branch?: string;
   };
-  "before_prompt_build": {
+  before_prompt_build: {
     intent: string;
     intentTag: "user_chat" | "mail" | "scheduled" | "scratch" | "agent_spawn";
     body: string;
     agentType: string;
     skillMatch?: SkillMatch;
   };
-  "before_tool_call": {
+  before_tool_call: {
     workspacePath: string;
     toolName: string | undefined;
     toolInput: Record<string, unknown>;
   };
-  "before_compaction": {
+  before_compaction: {
     sessionId: string;
     transcriptPath: string;
     trigger: "manual" | "auto";
@@ -39,13 +39,13 @@ export interface HookContextMap {
 
 export interface HookResultMap {
   "agent:bootstrap": { appendSystemPrompt?: string };
-  "before_prompt_build": {
+  before_prompt_build: {
     prependBody?: string;
     appendSystemPrompt?: string;
     allowedToolsOverride?: string[];
   };
-  "before_tool_call": { deny?: { reason: string } };
-  "before_compaction": { snapshot?: unknown };
+  before_tool_call: { deny?: { reason: string } };
+  before_compaction: { snapshot?: unknown };
 }
 
 export type HookHandler<E extends HookEvent> = (

@@ -43,17 +43,13 @@ describe("createLogger rotation", () => {
     await waitFor(() => {
       const files = readdirSync(dir);
       const hasGz = files.some((f) => f.endsWith(".jsonl.gz"));
-      const rotatedJsonl = files.filter(
-        (f) => f !== "svc.jsonl" && f.endsWith(".jsonl"),
-      );
+      const rotatedJsonl = files.filter((f) => f !== "svc.jsonl" && f.endsWith(".jsonl"));
       return hasGz && rotatedJsonl.length === 0;
     });
 
     const files = readdirSync(dir);
     expect(files.some((f) => f.endsWith(".jsonl.gz"))).toBe(true);
-    expect(
-      files.filter((f) => f !== "svc.jsonl" && f.endsWith(".jsonl")),
-    ).toEqual([]);
+    expect(files.filter((f) => f !== "svc.jsonl" && f.endsWith(".jsonl"))).toEqual([]);
     expect(files).toContain("svc.jsonl");
   });
 });

@@ -2,12 +2,7 @@ import type { AgentTypeName } from "./config.js";
 
 export type AgentType = AgentTypeName;
 
-export type AgentStatus =
-  | "idle"
-  | "working"
-  | "stalled"
-  | "error"
-  | "archived";
+export type AgentStatus = "idle" | "working" | "stalled" | "error" | "archived";
 
 /**
  * Terminal reason captured when an agent transitions to `archived`.
@@ -81,8 +76,6 @@ export function isValidAgentName(name: string): boolean {
 
 export function assertValidAgentName(name: string): void {
   if (!isValidAgentName(name)) {
-    throw new Error(
-      `invalid agent name "${name}": must match ${NAME_RE.toString()}`,
-    );
+    throw new Error(`invalid agent name "${name}": must match ${NAME_RE.toString()}`);
   }
 }

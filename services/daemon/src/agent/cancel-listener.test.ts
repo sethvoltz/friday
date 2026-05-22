@@ -19,12 +19,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 import pgPkg from "pg";
 
 let handle: TestDbHandle;
@@ -77,9 +72,7 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
       await client.query("LISTEN friday_block_canceled");
 
       const db = getDb();
-      await db
-        .update(schema.blocks)
-        .set({ status: "cancel_requested" });
+      await db.update(schema.blocks).set({ status: "cancel_requested" });
 
       await vi.waitFor(
         () => {
@@ -111,15 +104,11 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
       // negative-space: drain the cancel_requested NOTIFY before attaching
       // our handler so the assertion below isn't polluted.
       const db = getDb();
-      await db
-        .update(schema.blocks)
-        .set({ status: "cancel_requested" });
+      await db.update(schema.blocks).set({ status: "cancel_requested" });
       await new Promise((r) => setTimeout(r, 250));
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
 
       await db.delete(schema.blocks);
 
@@ -142,9 +131,7 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
       await insertQueuedBlock("blk-cancel-3");
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_block_canceled");
 
       const db = getDb();
@@ -170,9 +157,7 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
     await client.connect();
     try {
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_block_canceled");
 
       const db = getDb();
@@ -227,9 +212,7 @@ describe("blocks status enum + cancel_requested", () => {
       ts: new Date(),
       lastEventSeq: 0,
     });
-    const rows = await db
-      .select({ status: schema.blocks.status })
-      .from(schema.blocks);
+    const rows = await db.select({ status: schema.blocks.status }).from(schema.blocks);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.status).toBe("cancel_requested");
   });

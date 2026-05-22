@@ -49,10 +49,7 @@ function walk(dir: string, pred: (path: string) => boolean): string[] {
  *   - `{ kind: "param" }`            // `[name]` — matches one segment
  *   - `{ kind: "rest"  }`            // `[...rest]` — matches any tail
  */
-type Seg =
-  | { kind: "literal"; value: string }
-  | { kind: "param" }
-  | { kind: "rest" };
+type Seg = { kind: "literal"; value: string } | { kind: "param" } | { kind: "rest" };
 
 function routeDirToSegments(routeDir: string): Seg[] {
   const rel = routeDir.slice(ROUTES_DIR.length).replace(/^\/+/, "");
@@ -101,11 +98,7 @@ function extractFetchPaths(src: string): { path: string; line: number }[] {
 
 /** Find the matching closing quote starting at `from`, respecting escaped
  *  quotes and balanced `${...}` interpolations inside backticks. */
-function findClosingQuote(
-  src: string,
-  from: number,
-  quote: string,
-): number {
+function findClosingQuote(src: string, from: number, quote: string): number {
   let i = from;
   while (i < src.length) {
     const c = src[i]!;
@@ -180,9 +173,9 @@ function segMatch(urlSeg: string, routeSeg: Seg): boolean {
 
 describe("dashboard URL ↔ SvelteKit route contract", () => {
   it("every fetched /api/... has a matching +server.ts", () => {
-    const routes = walk(API_ROUTES_DIR, (p) =>
-      p.endsWith("+server.ts"),
-    ).map((p) => routeDirToSegments(dirname(p)));
+    const routes = walk(API_ROUTES_DIR, (p) => p.endsWith("+server.ts")).map((p) =>
+      routeDirToSegments(dirname(p)),
+    );
     expect(routes.length).toBeGreaterThan(0);
 
     // Client code only: skip server-side daemon-proxy files (those call
@@ -211,10 +204,7 @@ describe("dashboard URL ↔ SvelteKit route contract", () => {
     }
     if (orphans.length > 0) {
       const summary = orphans
-        .map(
-          (o) =>
-            `  ${o.path}\n      at ${o.file.replace(SRC_DIR + "/", "")}:${o.line}`,
-        )
+        .map((o) => `  ${o.path}\n      at ${o.file.replace(SRC_DIR + "/", "")}:${o.line}`)
         .join("\n");
       throw new Error(
         `Found ${orphans.length} fetched URL(s) with no matching SvelteKit route:\n${summary}`,

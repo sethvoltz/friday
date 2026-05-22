@@ -93,7 +93,9 @@ function parseCookiesForPlaywright(
 async function readBlocksForUser(
   databaseUrl: string,
   textFilter: string,
-): Promise<Array<{ block_id: string; agent_name: string; status: string; content: { text?: string } }>> {
+): Promise<
+  Array<{ block_id: string; agent_name: string; status: string; content: { text?: string } }>
+> {
   const c = new Client({ connectionString: databaseUrl });
   await c.connect();
   try {
@@ -125,14 +127,10 @@ async function readBlocksForUser(
 }
 
 test.describe("user-visible round-trip (item #50 — plan §4 step 4e)", () => {
-  test("auth cookie + send message → bubble renders + row lands in PG", async ({
-    browser,
-  }) => {
+  test("auth cookie + send message → bubble renders + row lands in PG", async ({ browser }) => {
     const env = loadEnv();
     const context = await browser.newContext();
-    await context.addCookies(
-      parseCookiesForPlaywright(env.cookie, env.dashboardURL),
-    );
+    await context.addCookies(parseCookiesForPlaywright(env.cookie, env.dashboardURL));
     const page = await context.newPage();
 
     // Surface browser console errors in the Playwright report so a
@@ -183,9 +181,9 @@ test.describe("user-visible round-trip (item #50 — plan §4 step 4e)", () => {
     // "Queued — waiting to send" bubble for its response shell —
     // pick the FIRST matching bubble (the user-typed one always
     // lands before the daemon's placeholder).
-    await expect(
-      page.locator(".bubble").filter({ hasText: marker }).first(),
-    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".bubble").filter({ hasText: marker }).first()).toBeVisible({
+      timeout: 10_000,
+    });
 
     // Canonical-write check: poll Postgres until a row with our
     // marker appears. Proves the mutator round-trip (client →
@@ -209,7 +207,13 @@ test.describe("user-visible round-trip (item #50 — plan §4 step 4e)", () => {
           const c = new Client({ connectionString: env.databaseUrl });
           await c.connect();
           try {
-            const r = await c.query<{ block_id: string; agent_name: string; role: string; source: string; status: string }>(
+            const r = await c.query<{
+              block_id: string;
+              agent_name: string;
+              role: string;
+              source: string;
+              status: string;
+            }>(
               `SELECT block_id, agent_name, role, source, status FROM blocks ORDER BY ts DESC LIMIT 5`,
             );
             return r.rows;
@@ -217,13 +221,13 @@ test.describe("user-visible round-trip (item #50 — plan §4 step 4e)", () => {
             await c.end();
           }
         });
-       
+
       console.error("[live-typing] marker not found; recent rows:", JSON.stringify(all, null, 2));
-       
+
       console.error("[live-typing] marker:", marker);
-       
+
       console.error("[live-typing] mutator + sync calls:", JSON.stringify(mutatorCalls, null, 2));
-       
+
       console.error("[live-typing] console errors:", consoleErrors);
     }
     expect(rows.length).toBe(1);
@@ -242,13 +246,8 @@ test.describe("user-visible round-trip (item #50 — plan §4 step 4e)", () => {
     // turn), not application bugs. A genuine JS exception or a Zero
     // protocol error would surface as a non-"Failed to load
     // resource:" string and trip this assertion.
-    const realErrors = consoleErrors.filter(
-      (e) => !e.startsWith("Failed to load resource:"),
-    );
-    expect(
-      realErrors,
-      `Unexpected JS errors: ${realErrors.join("\n")}`,
-    ).toEqual([]);
+    const realErrors = consoleErrors.filter((e) => !e.startsWith("Failed to load resource:"));
+    expect(realErrors, `Unexpected JS errors: ${realErrors.join("\n")}`).toEqual([]);
 
     await context.close();
   });

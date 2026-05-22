@@ -21,10 +21,7 @@ import {
   runMigrations,
   schema,
 } from "@friday/shared";
-import {
-  resetRateLimitPrefix,
-  revokeAllSessionsForUser,
-} from "@friday/shared/services";
+import { resetRateLimitPrefix, revokeAllSessionsForUser } from "@friday/shared/services";
 import { BANNER } from "../lib/branding.js";
 
 export const setupCommand = defineCommand({
@@ -40,8 +37,7 @@ export const setupCommand = defineCommand({
     },
     cloudflare: {
       type: "boolean",
-      description:
-        "Skip account flow; configure Cloudflare Tunnel token + public URL only",
+      description: "Skip account flow; configure Cloudflare Tunnel token + public URL only",
       default: false,
     },
   },
@@ -113,9 +109,7 @@ export const setupCommand = defineCommand({
       // BetterAuth's expected singular names (`user`, `session`, etc.).
       // `usePlural: true` tells the adapter to look up the plural symbol.
       database: drizzleAdapter(db, { provider: "pg", schema, usePlural: true }),
-      baseURL:
-        process.env.BETTER_AUTH_URL ??
-        `http://localhost:${resolveDashboardPort(cfg)}`,
+      baseURL: process.env.BETTER_AUTH_URL ?? `http://localhost:${resolveDashboardPort(cfg)}`,
       emailAndPassword: { enabled: true, disableSignUp: false },
       secret: process.env.BETTER_AUTH_SECRET!,
     });
@@ -125,8 +119,7 @@ export const setupCommand = defineCommand({
     if (existing.length === 0) {
       const email = (await text({
         message: "Email (login id — any address; nothing is sent):",
-        validate: (v) =>
-          v && v.includes("@") ? undefined : "must contain @",
+        validate: (v) => (v && v.includes("@") ? undefined : "must contain @"),
       })) as string;
       const name = (await text({
         message: "Display name:",
@@ -134,8 +127,7 @@ export const setupCommand = defineCommand({
       })) as string;
       const pw = (await password({
         message: "Password:",
-        validate: (v) =>
-          !v || v.length < 8 ? "minimum 8 characters" : undefined,
+        validate: (v) => (!v || v.length < 8 ? "minimum 8 characters" : undefined),
       })) as string;
 
       try {
@@ -145,9 +137,7 @@ export const setupCommand = defineCommand({
         console.log(pc.green(`  created account for ${email}`));
       } catch (err) {
         console.error(
-          pc.red(
-            `  signup failed: ${err instanceof Error ? err.message : String(err)}`,
-          ),
+          pc.red(`  signup failed: ${err instanceof Error ? err.message : String(err)}`),
         );
         process.exit(1);
       }
@@ -155,8 +145,7 @@ export const setupCommand = defineCommand({
       const user = existing[0];
       const pw = (await password({
         message: `New password for ${user.email}:`,
-        validate: (v) =>
-          !v || v.length < 8 ? "minimum 8 characters" : undefined,
+        validate: (v) => (!v || v.length < 8 ? "minimum 8 characters" : undefined),
       })) as string;
       try {
         const ctx = await auth.$context;
@@ -175,11 +164,7 @@ export const setupCommand = defineCommand({
         const revoked = await revokeAllSessionsForUser(user.id);
         console.log(pc.green(`  password updated for ${user.email}`));
         if (revoked > 0) {
-          console.log(
-            pc.dim(
-              `  revoked ${revoked} active session${revoked === 1 ? "" : "s"}`,
-            ),
-          );
+          console.log(pc.dim(`  revoked ${revoked} active session${revoked === 1 ? "" : "s"}`));
         }
         if (cleared > 0) {
           console.log(
@@ -188,22 +173,16 @@ export const setupCommand = defineCommand({
         }
       } catch (err) {
         console.error(
-          pc.red(
-            `  reset failed: ${err instanceof Error ? err.message : String(err)}`,
-          ),
+          pc.red(`  reset failed: ${err instanceof Error ? err.message : String(err)}`),
         );
         process.exit(1);
       }
     } else {
-      console.log(
-        pc.dim(`  existing account: ${existing[0].email} — keep? [Y/n]`),
-      );
+      console.log(pc.dim(`  existing account: ${existing[0].email} — keep? [Y/n]`));
       const keep = (await confirm({ message: "Keep existing account?" })) as boolean;
       if (!keep) {
         const ok = (await confirm({
-          message: pc.red(
-            "This will DELETE the user account. Are you absolutely sure?",
-          ),
+          message: pc.red("This will DELETE the user account. Are you absolutely sure?"),
         })) as boolean;
         if (ok) {
           await db.delete(schema.accounts);
@@ -237,16 +216,14 @@ async function runCloudflareSetup({ force }: { force: boolean }): Promise<void> 
   const token = (await password({
     message: "Connector token (Cloudflare Zero Trust → Networks → Tunnels):",
     mask: "•",
-    validate: (v) =>
-      v && v.length > 20 ? undefined : "token looks too short",
+    validate: (v) => (v && v.length > 20 ? undefined : "token looks too short"),
   })) as string;
 
   const initialUrl = cfg.publicUrl ?? "https://friday.example.com";
   const publicUrl = (await text({
     message: "Public URL (e.g. https://friday.example.com):",
     initialValue: initialUrl,
-    validate: (v) =>
-      v && /^https?:\/\//.test(v) ? undefined : "must start with http(s)://",
+    validate: (v) => (v && /^https?:\/\//.test(v) ? undefined : "must start with http(s)://"),
   })) as string;
 
   upsertEnvVar("CLOUDFLARE_TUNNEL_TOKEN", token);
@@ -266,8 +243,7 @@ async function runCloudflareSetup({ force }: { force: boolean }): Promise<void> 
 // agent (`~/Library/LaunchAgents/com.cloudflare.cloudflared.plist`) and
 // bootstraps it. We sidestep brew's plist entirely.
 function installCloudflaredLaunchAgent(token: string): void {
-  const cloudflaredOnPath =
-    spawnSync("which", ["cloudflared"], { stdio: "ignore" }).status === 0;
+  const cloudflaredOnPath = spawnSync("which", ["cloudflared"], { stdio: "ignore" }).status === 0;
   if (!cloudflaredOnPath) {
     console.log(
       pc.yellow(
@@ -290,11 +266,7 @@ function installCloudflaredLaunchAgent(token: string): void {
   // errors out cleanly if nothing is installed, which we don't care about.
   spawnSync("cloudflared", ["service", "uninstall"], { stdio: "ignore" });
 
-  const install = spawnSync(
-    "cloudflared",
-    ["service", "install", token],
-    { encoding: "utf8" },
-  );
+  const install = spawnSync("cloudflared", ["service", "install", token], { encoding: "utf8" });
   if (install.status !== 0) {
     console.error(pc.red("  cloudflared service install failed:"));
     if (install.stderr.trim()) console.error(install.stderr.trim());

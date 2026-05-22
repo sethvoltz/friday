@@ -26,11 +26,7 @@ afterEach(() => {
   rmSync(projectsRoot, { recursive: true, force: true });
 });
 
-function writeSessionJsonl(
-  cwd: string,
-  sessionId: string,
-  lines: object[],
-): void {
+function writeSessionJsonl(cwd: string, sessionId: string, lines: object[]): void {
   const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
   const sdkDir = join(projectsRoot, ".claude", "projects", encoded);
   mkdirSync(sdkDir, { recursive: true });
@@ -158,9 +154,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
 
     const { eventBus } = await import("../events/bus.js");
     const captured: Array<{ type?: string }> = [];
-    const unsub = eventBus.subscribe((e) =>
-      captured.push(e as { type?: string }),
-    );
+    const unsub = eventBus.subscribe((e) => captured.push(e as { type?: string }));
     const second = await recoverFromJsonl([
       { agentName: "alpha", sessionId, workingDirectory: cwd },
     ]);
@@ -427,9 +421,7 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
     });
     expect(byKind.tool_result).toBeDefined();
     // The tool_result is no longer orphaned — its tool_use is in DB.
-    expect(JSON.parse(byKind.tool_result.content_json).tool_use_id).toBe(
-      "toolu_MultiX",
-    );
+    expect(JSON.parse(byKind.tool_result.content_json).tool_use_id).toBe("toolu_MultiX");
   });
 
   it("tool_use dedup uses tool_use_id (live IPC wrote at a different block_index)", async () => {

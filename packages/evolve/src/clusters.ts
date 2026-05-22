@@ -6,13 +6,7 @@
  * Ported nearly verbatim from old SlackAgents Friday.
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { EVOLVE_CLUSTERS_DIR } from "@friday/shared";
 import { listProposals, updateProposal } from "./store.js";
@@ -60,14 +54,8 @@ export function parseCluster(id: string, raw: string): Cluster {
     id,
     title: typeof fields.title === "string" ? fields.title : id,
     members: Array.isArray(fields.members) ? (fields.members as string[]) : [],
-    createdAt:
-      typeof fields.createdAt === "string"
-        ? fields.createdAt
-        : new Date().toISOString(),
-    updatedAt:
-      typeof fields.updatedAt === "string"
-        ? fields.updatedAt
-        : new Date().toISOString(),
+    createdAt: typeof fields.createdAt === "string" ? fields.createdAt : new Date().toISOString(),
+    updatedAt: typeof fields.updatedAt === "string" ? fields.updatedAt : new Date().toISOString(),
   };
 }
 
@@ -109,19 +97,12 @@ function parseValue(raw: string): unknown {
 
 export function listClusters(): Cluster[] {
   ensureClustersDir();
-  const files = readdirSync(EVOLVE_CLUSTERS_DIR).filter((f) =>
-    f.endsWith(".md"),
-  );
+  const files = readdirSync(EVOLVE_CLUSTERS_DIR).filter((f) => f.endsWith(".md"));
   const out: Cluster[] = [];
   for (const file of files) {
     const id = basename(file, ".md");
     try {
-      out.push(
-        parseCluster(
-          id,
-          readFileSync(join(EVOLVE_CLUSTERS_DIR, file), "utf-8"),
-        ),
-      );
+      out.push(parseCluster(id, readFileSync(join(EVOLVE_CLUSTERS_DIR, file), "utf-8")));
     } catch {
       // Skip malformed.
     }
@@ -159,9 +140,7 @@ export function mergeClusters(opts: MergeOptions = {}): MergeResult {
     proposalsAttached: 0,
   };
 
-  const proposals = listProposals().filter(
-    (p) => p.status === "open" || p.status === "critical",
-  );
+  const proposals = listProposals().filter((p) => p.status === "open" || p.status === "critical");
   if (proposals.length < 2) return result;
 
   const hashSets = proposals.map((p) => new Set(p.signals.map((s) => s.hash)));
@@ -202,8 +181,7 @@ export function mergeClusters(opts: MergeOptions = {}): MergeResult {
 
     const memberProposals = indices.map((i) => proposals[i]);
     const memberIds = memberProposals.map((p) => p.id);
-    const existingClusterId =
-      memberProposals.find((p) => p.clusterId)?.clusterId ?? null;
+    const existingClusterId = memberProposals.find((p) => p.clusterId)?.clusterId ?? null;
     const now = new Date().toISOString();
     const title = clusterTitleFor(memberProposals);
     const body = clusterBody(memberProposals);

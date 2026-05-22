@@ -55,8 +55,7 @@ export const handle: Handle = async ({ event, resolve }) => {
     // Rate-limit the sign-in attempt before forwarding. /api/auth/sign-in/*
     // covers /sign-in/email; /api/auth/sign-out etc. pass through.
     const isSignIn =
-      event.url.pathname.startsWith("/api/auth/sign-in") &&
-      event.request.method === "POST";
+      event.url.pathname.startsWith("/api/auth/sign-in") && event.request.method === "POST";
     const ip = isSignIn ? clientIp(event) : null;
     if (isSignIn && ip) {
       const r = await consumeRateLimit({

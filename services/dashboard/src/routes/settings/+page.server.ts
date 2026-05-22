@@ -1,12 +1,6 @@
 import { redirect, type ServerLoad } from "@sveltejs/kit";
 import { listActiveSessionsForUser } from "@friday/shared/services";
-import {
-  getDb,
-  loadConfig,
-  type Manifest,
-  normalizeModelConfig,
-  schema,
-} from "@friday/shared";
+import { getDb, loadConfig, type Manifest, normalizeModelConfig, schema } from "@friday/shared";
 
 export interface SessionSummary {
   id: string;
@@ -49,9 +43,7 @@ async function loadApps(): Promise<AppSummary[]> {
   const allSchedules = await db.select().from(schema.schedules);
   return rows.map((r) => {
     const manifest: Manifest | null =
-      r.manifestJson && typeof r.manifestJson === "object"
-        ? (r.manifestJson as Manifest)
-        : null;
+      r.manifestJson && typeof r.manifestJson === "object" ? (r.manifestJson as Manifest) : null;
     return {
       id: r.id,
       name: r.name,

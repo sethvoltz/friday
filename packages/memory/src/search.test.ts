@@ -75,9 +75,7 @@ describe("searchMemories scoring", () => {
     const results = await searchMemories({ query: "daemon orchestrator" });
     expect(results.map((r) => r.entry.id)).toEqual(["split"]);
     const r = results[0];
-    expect(r.matchedOn).toEqual(
-      expect.arrayContaining(["title", "content"]),
-    );
+    expect(r.matchedOn).toEqual(expect.arrayContaining(["title", "content"]));
   });
 
   it("single-word query keeps prior scoring behavior", async () => {
@@ -103,11 +101,7 @@ describe("searchMemories scoring", () => {
 
     const results = await searchMemories({ query: "alpha" });
     // Tag exact-match (5) > title contains (3) > content contains (1).
-    expect(results.map((r) => r.entry.id)).toEqual([
-      "tag-hit",
-      "title-hit",
-      "content-hit",
-    ]);
+    expect(results.map((r) => r.entry.id)).toEqual(["tag-hit", "title-hit", "content-hit"]);
     expect(results[0].matchedOn).toEqual(["tag:alpha"]);
   });
 

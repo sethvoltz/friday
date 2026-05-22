@@ -26,9 +26,7 @@ function readContent(opts: {
   if (opts.contentFile) return readFileSync(opts.contentFile, "utf8");
   // Fallback: read piped stdin if any.
   if (!input.isTTY) return readFileSync(0, "utf8");
-  throw new Error(
-    "no content provided; pass --content, --content-file <path>, or pipe to stdin",
-  );
+  throw new Error("no content provided; pass --content, --content-file <path>, or pipe to stdin");
 }
 
 async function confirm(prompt: string): Promise<boolean> {
@@ -114,8 +112,7 @@ export const memoryCommand = defineCommand({
         if (args.title !== undefined) patch.title = args.title;
         const tags = parseTags(args.tags as string | undefined);
         if (tags) patch.tags = tags;
-        const hasContent =
-          args.content !== undefined || args["content-file"] !== undefined;
+        const hasContent = args.content !== undefined || args["content-file"] !== undefined;
         if (hasContent) {
           patch.content = readContent({
             content: args.content as string | undefined,
@@ -124,17 +121,12 @@ export const memoryCommand = defineCommand({
         }
         if (Object.keys(patch).length === 0) {
           console.error(
-            pc.red(
-              "no edits — pass at least one of --title, --tags, --content, --content-file",
-            ),
+            pc.red("no edits — pass at least one of --title, --tags, --content, --content-file"),
           );
           process.exit(1);
         }
         const c = new DaemonClient();
-        const updated = await c.patch<MemoryEntry>(
-          `/api/memory/${encodeURIComponent(id)}`,
-          patch,
-        );
+        const updated = await c.patch<MemoryEntry>(`/api/memory/${encodeURIComponent(id)}`, patch);
         console.log(pc.green(`updated ${updated.id}`));
       },
     }),
@@ -151,9 +143,7 @@ export const memoryCommand = defineCommand({
       async run({ args }) {
         const id = args.id as string;
         if (!args.force) {
-          const ok = await confirm(
-            pc.yellow(`Delete memory "${id}"? Type "yes" to confirm: `),
-          );
+          const ok = await confirm(pc.yellow(`Delete memory "${id}"? Type "yes" to confirm: `));
           if (!ok) {
             console.log(pc.dim("aborted"));
             return;

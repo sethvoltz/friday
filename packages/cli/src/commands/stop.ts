@@ -28,9 +28,7 @@ export const stopCommand = defineCommand({
   },
   async run({ args }) {
     if (args.service) {
-      console.error(
-        pc.red(`single-service operations not supported under launchd supervision.`),
-      );
+      console.error(pc.red(`single-service operations not supported under launchd supervision.`));
       console.error(`  ${pc.cyan("friday stop")} stops the whole stack atomically.`);
       process.exit(1);
     }

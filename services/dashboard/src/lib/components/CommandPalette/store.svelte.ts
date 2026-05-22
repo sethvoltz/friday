@@ -48,9 +48,7 @@ export class CommandPaletteState {
 
   pushRecent(entry: Omit<RecentEntry, "ts">): void {
     const next: RecentEntry = { ...entry, ts: Date.now() };
-    const filtered = this.recents.filter(
-      (r) => !(r.kind === next.kind && r.id === next.id),
-    );
+    const filtered = this.recents.filter((r) => !(r.kind === next.kind && r.id === next.id));
     this.recents = [next, ...filtered].slice(0, RECENT_CAP);
     saveJSON(KEYS.paletteRecent, this.recents);
   }

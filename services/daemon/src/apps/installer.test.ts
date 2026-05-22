@@ -12,15 +12,7 @@ import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // MUST set FRIDAY_DATA_DIR before any @friday/shared import — APPS_DIR is
 // captured at module evaluation. Without this guard, the rmSync(appDir(""))
@@ -36,12 +28,12 @@ let getDb: SharedModule["getDb"];
 let schema: SharedModule["schema"];
 let appDir: SharedModule["appDir"];
 let registry: typeof import("../agent/registry.js");
-let AppInstallError: typeof import("./installer.js")["AppInstallError"];
-let installApp: typeof import("./installer.js")["installApp"];
-let inspectApp: typeof import("./installer.js")["inspectApp"];
-let listApps: typeof import("./installer.js")["listApps"];
-let reloadApp: typeof import("./installer.js")["reloadApp"];
-let uninstallApp: typeof import("./installer.js")["uninstallApp"];
+let AppInstallError: (typeof import("./installer.js"))["AppInstallError"];
+let installApp: (typeof import("./installer.js"))["installApp"];
+let inspectApp: (typeof import("./installer.js"))["inspectApp"];
+let listApps: (typeof import("./installer.js"))["listApps"];
+let reloadApp: (typeof import("./installer.js"))["reloadApp"];
+let uninstallApp: (typeof import("./installer.js"))["uninstallApp"];
 
 vi.mock("../agent/lifecycle.js", () => ({
   archiveAgent: vi.fn(async () => []),
@@ -68,14 +60,8 @@ beforeAll(async () => {
   ({ createTestDb, getDb, schema, appDir } = await import("@friday/shared"));
   handle = await createTestDb({ label: "apps_installer" });
   registry = await import("../agent/registry.js");
-  ({
-    AppInstallError,
-    installApp,
-    inspectApp,
-    listApps,
-    reloadApp,
-    uninstallApp,
-  } = await import("./installer.js"));
+  ({ AppInstallError, installApp, inspectApp, listApps, reloadApp, uninstallApp } =
+    await import("./installer.js"));
 });
 
 afterAll(async () => {
@@ -105,9 +91,7 @@ describe("installApp", () => {
       { name: "example-owner", type: "bare" },
       { name: "example-weekly", type: "scheduled" },
     ]);
-    expect(result.schedules).toEqual([
-      { name: "example-weekly-run", cron: "0 4 * * 1" },
-    ]);
+    expect(result.schedules).toEqual([{ name: "example-weekly-run", cron: "0 4 * * 1" }]);
     expect(result.mcpServers).toEqual([{ name: "example-echo" }]);
 
     const owner = await registry.getAgent("example-owner");
@@ -309,9 +293,7 @@ describe("reloadApp", () => {
     await installApp(folder);
     const manifestPath = join(folder, "manifest.json");
     const m = JSON.parse(readFileSync(manifestPath, "utf8"));
-    m.agents = m.agents.filter(
-      (a: { name: string }) => a.name !== "example-weekly",
-    );
+    m.agents = m.agents.filter((a: { name: string }) => a.name !== "example-weekly");
     m.schedules = [];
     writeFileSync(manifestPath, JSON.stringify(m));
     await reloadApp("example-app");
@@ -332,10 +314,7 @@ describe("listApps / inspectApp", () => {
     const detail = await inspectApp("example-app");
     expect(detail).not.toBeNull();
     expect(detail!.manifest.id).toBe("example-app");
-    expect(detail!.agents.map((a) => a.name).sort()).toEqual([
-      "example-owner",
-      "example-weekly",
-    ]);
+    expect(detail!.agents.map((a) => a.name).sort()).toEqual(["example-owner", "example-weekly"]);
     expect(detail!.schedules.map((s) => s.name)).toEqual(["example-weekly-run"]);
     expect(detail!.mcpServers.map((m) => m.name)).toEqual(["example-echo"]);
 

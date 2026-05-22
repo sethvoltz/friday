@@ -87,10 +87,13 @@ describe("lifecycle: w.turnStart cleared on every turn-end path (FRI-110, FRI-11
       blocksThisTurn: 1, // produced a block → not wedge
       zeroBlockTurnStreak: 0,
     });
-    await handleEvent(worker as never, {
-      type: "turn-complete",
-      sessionId: "sess-ts-1",
-    } as never);
+    await handleEvent(
+      worker as never,
+      {
+        type: "turn-complete",
+        sessionId: "sess-ts-1",
+      } as never,
+    );
     expect(worker.turnStart).toBeUndefined();
   });
 
@@ -100,14 +103,17 @@ describe("lifecycle: w.turnStart cleared on every turn-end path (FRI-110, FRI-11
       blocksThisTurn: 1,
       zeroBlockTurnStreak: 0,
     });
-    await handleEvent(worker as never, {
-      type: "error",
-      message: "SDK error",
-      recoverable: true,
-      code: "test_error",
-      headline: "test error",
-      rawMessage: "test",
-    } as never);
+    await handleEvent(
+      worker as never,
+      {
+        type: "error",
+        message: "SDK error",
+        recoverable: true,
+        code: "test_error",
+        headline: "test error",
+        rawMessage: "test",
+      } as never,
+    );
     expect(worker.turnStart).toBeUndefined();
   });
 
@@ -123,10 +129,13 @@ describe("lifecycle: w.turnStart cleared on every turn-end path (FRI-110, FRI-11
       blocksThisTurn: 0,
       zeroBlockTurnStreak: 9, // one more zero-block turn trips the default threshold of 10
     });
-    await handleEvent(worker as never, {
-      type: "turn-complete",
-      sessionId: "sess-ts-1",
-    } as never);
+    await handleEvent(
+      worker as never,
+      {
+        type: "turn-complete",
+        sessionId: "sess-ts-1",
+      } as never,
+    );
     expect(worker.turnStart).toBeUndefined();
   });
 
@@ -138,14 +147,17 @@ describe("lifecycle: w.turnStart cleared on every turn-end path (FRI-110, FRI-11
       blocksThisTurn: 0,
       zeroBlockTurnStreak: 9,
     });
-    await handleEvent(worker as never, {
-      type: "error",
-      message: "SDK error",
-      recoverable: true,
-      code: "wedge_error",
-      headline: "wedge error",
-      rawMessage: "test",
-    } as never);
+    await handleEvent(
+      worker as never,
+      {
+        type: "error",
+        message: "SDK error",
+        recoverable: true,
+        code: "wedge_error",
+        headline: "wedge error",
+        rawMessage: "test",
+      } as never,
+    );
     expect(worker.turnStart).toBeUndefined();
   });
 
@@ -171,9 +183,12 @@ describe("lifecycle: w.turnStart cleared on every turn-end path (FRI-110, FRI-11
     });
     __putLiveWorkerForTest("ts-clear-agent", worker as never);
     try {
-      await handleEvent(worker as never, {
-        type: "heartbeat",
-      } as never);
+      await handleEvent(
+        worker as never,
+        {
+          type: "heartbeat",
+        } as never,
+      );
       expect(worker.turnStart).toBeUndefined();
     } finally {
       __deleteLiveWorkerForTest("ts-clear-agent");

@@ -17,9 +17,7 @@ export const sessionsCommand = defineCommand({
       args: { id: { type: "positional", required: true } },
       async run({ args }) {
         const c = new DaemonClient();
-        const turns = await c.get<unknown[]>(
-          `/api/sessions/${args.id}/turns`,
-        );
+        const turns = await c.get<unknown[]>(`/api/sessions/${args.id}/turns`);
         console.log(JSON.stringify(turns, null, 2));
       },
     }),

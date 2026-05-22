@@ -32,16 +32,12 @@ export interface ApplyOptions {
   appliedBy: string;
 }
 
-export async function applyProposal(
-  id: string,
-  opts: ApplyOptions,
-): Promise<ApplyOutcome> {
+export async function applyProposal(id: string, opts: ApplyOptions): Promise<ApplyOutcome> {
   const proposal = getProposal(id);
   if (!proposal) return { ok: false, reason: `proposal not found: ${id}` };
   if (proposal.status === "applied")
     return { ok: false, reason: `proposal already applied: ${id}` };
-  if (proposal.status === "rejected")
-    return { ok: false, reason: `proposal was rejected: ${id}` };
+  if (proposal.status === "rejected") return { ok: false, reason: `proposal was rejected: ${id}` };
 
   if (proposal.type === "memory") {
     const id = slugify(proposal.title);
@@ -72,24 +68,14 @@ export async function applyProposal(
   const ticket = await createTicket({
     title: proposal.title,
     body: buildTicketBody(proposal),
-    kind:
-      proposal.type === "code"
-        ? "task"
-        : proposal.type === "config"
-          ? "chore"
-          : "task",
+    kind: proposal.type === "code" ? "task" : proposal.type === "config" ? "chore" : "task",
     meta: {
       evolveProposalId: proposal.id,
       proposalType: proposal.type,
       blastRadius: proposal.blastRadius,
     },
   });
-  const applied = markApplied(
-    proposal,
-    opts.appliedBy,
-    `ticket:${ticket.id}`,
-    ticket,
-  );
+  const applied = markApplied(proposal, opts.appliedBy, `ticket:${ticket.id}`, ticket);
   return {
     ...applied,
     restartHint:
@@ -117,11 +103,8 @@ function markApplied(
 }
 
 function touchesMetaAgent(proposal: Proposal): boolean {
-  if (proposal.appliesTo.some((target) => target.includes(SELF_MOD_GUARD)))
-    return true;
-  return proposal.signals.some(
-    (s) => s.agent?.startsWith(SELF_MOD_GUARD) ?? false,
-  );
+  if (proposal.appliesTo.some((target) => target.includes(SELF_MOD_GUARD))) return true;
+  return proposal.signals.some((s) => s.agent?.startsWith(SELF_MOD_GUARD) ?? false);
 }
 
 export function rejectProposal(
@@ -134,9 +117,7 @@ export function rejectProposal(
   return updateProposal(id, {
     status: "rejected",
     appliedAt: new Date().toISOString(),
-    appliedBy: opts.reason
-      ? `${opts.rejectedBy}: ${opts.reason}`
-      : opts.rejectedBy,
+    appliedBy: opts.reason ? `${opts.rejectedBy}: ${opts.reason}` : opts.rejectedBy,
   });
 }
 
@@ -162,8 +143,7 @@ function buildTicketBody(proposal: Proposal): string {
   const sections = [proposal.proposedChange.trim()];
   if (proposal.signals.length > 0) {
     const lines = proposal.signals.map(
-      (s) =>
-        `- \`${s.source}/${s.key}\` (${s.severity}, count=${s.count})`,
+      (s) => `- \`${s.source}/${s.key}\` (${s.severity}, count=${s.count})`,
     );
     sections.push(`## Evidence\n\n${lines.join("\n")}`);
   }

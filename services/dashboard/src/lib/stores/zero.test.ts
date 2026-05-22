@@ -233,16 +233,17 @@ beforeEach(() => {
   instances.length = 0;
   installLocalStorageStub();
   // Stub fetch with the refresh-token response.
-  const fetchSpy = vi.fn(async () =>
-    new Response(
-      JSON.stringify({
-        token: "test-token-123",
-        deviceId: "test-device-id",
-        userId: "test-user-id",
-        expiresAt: Date.now() + 900_000,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    ),
+  const fetchSpy = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({
+          token: "test-token-123",
+          deviceId: "test-device-id",
+          userId: "test-user-id",
+          expiresAt: Date.now() + 900_000,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
   );
   vi.stubGlobal("fetch", fetchSpy);
 });
@@ -390,12 +391,8 @@ describe("toAgentInfo mapping (via materialize update)", () => {
     });
     expect(chat.agents[1].sessionId).toBeUndefined();
     expect(chat.agents[1].sessionCount).toBe(0);
-    expect(chat.agents[0].createdAt).toBe(
-      new Date(1_700_000_000_000).toISOString(),
-    );
-    expect(chat.agents[1].updatedAt).toBe(
-      new Date(1_700_000_002_000).toISOString(),
-    );
+    expect(chat.agents[0].createdAt).toBe(new Date(1_700_000_000_000).toISOString());
+    expect(chat.agents[1].updatedAt).toBe(new Date(1_700_000_002_000).toISOString());
 
     // Restore for other tests.
     (mockedZero as unknown as { Zero: unknown }).Zero = origCtor;
@@ -419,10 +416,7 @@ describe("#bindAgents query (FRI-101 regression): no status filter", () => {
       __calls: Array<{ method: string; args: unknown[] }>;
     };
     const statusFilters = agentsQuery.__calls.filter(
-      (c) =>
-        c.method === "where" &&
-        Array.isArray(c.args) &&
-        c.args[0] === "status",
+      (c) => c.method === "where" && Array.isArray(c.args) && c.args[0] === "status",
     );
     expect(statusFilters).toEqual([]);
   });
@@ -484,14 +478,8 @@ describe("#bindAgents query (FRI-101 regression): no status filter", () => {
 
     expect(zeroSync.agents).toHaveLength(3);
     const { chat } = await import("./chat.svelte.js");
-    expect(chat.agents.map((a) => a.name).sort()).toEqual([
-      "broken",
-      "killed",
-      "live",
-    ]);
-    expect(chat.agents.find((a) => a.name === "killed")?.status).toBe(
-      "archived",
-    );
+    expect(chat.agents.map((a) => a.name).sort()).toEqual(["broken", "killed", "live"]);
+    expect(chat.agents.find((a) => a.name === "killed")?.status).toBe("archived");
     expect(chat.agents.find((a) => a.name === "broken")?.status).toBe("error");
 
     (mockedZero as unknown as { Zero: unknown }).Zero = origCtor;
@@ -577,11 +565,7 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
       { method: "where", args: ["status", "!=", "cancel_requested"] },
       {
         method: "where",
-        args: [
-          "ts",
-          ">",
-          expect.any(Number) as unknown as number,
-        ],
+        args: ["ts", ">", expect.any(Number) as unknown as number],
       },
     ]);
     // Preload was invoked for the background prime; materialize is
@@ -1040,9 +1024,7 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    expect(warnSpy).toHaveBeenCalledWith(
-      "forgetDevice mutator error: already-revoked",
-    );
+    expect(warnSpy).toHaveBeenCalledWith("forgetDevice mutator error: already-revoked");
     warnSpy.mockRestore();
   });
 
@@ -1071,9 +1053,7 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    expect(warnSpy).toHaveBeenCalledWith(
-      "updateSettings mutator error: invalid model",
-    );
+    expect(warnSpy).toHaveBeenCalledWith("updateSettings mutator error: invalid model");
     warnSpy.mockRestore();
   });
 
@@ -1100,9 +1080,7 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
       vi.fn(() => new Promise(() => {})),
     );
     const { zeroSync } = await importStore();
-    expect(() =>
-      zeroSync.updateSettings({ model: "claude-opus-4-7" }),
-    ).not.toThrow();
+    expect(() => zeroSync.updateSettings({ model: "claude-opus-4-7" })).not.toThrow();
     expect(instances).toHaveLength(0);
   });
 
@@ -1118,9 +1096,7 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
       zeroSync.destroy();
       // Advance 6 minutes; the cleared interval should not fire.
       vi.advanceTimersByTime(6 * 60 * 1000);
-      expect(z.mutate.reportClientStats.mock.calls.length).toBe(
-        callsBeforeDestroy,
-      );
+      expect(z.mutate.reportClientStats.mock.calls.length).toBe(callsBeforeDestroy);
     } finally {
       vi.useRealTimers();
     }
@@ -1244,9 +1220,7 @@ describe("Phase 4.4: ticket mutator dispatch", () => {
       vi.fn(() => new Promise(() => {})),
     );
     const { zeroSync } = await importStore();
-    expect(() =>
-      zeroSync.createTicket({ id: "FRI-1", title: "x" }),
-    ).not.toThrow();
+    expect(() => zeroSync.createTicket({ id: "FRI-1", title: "x" })).not.toThrow();
     expect(() => zeroSync.updateTicket({ id: "FRI-1" })).not.toThrow();
     expect(() =>
       zeroSync.addTicketComment({
@@ -1418,9 +1392,7 @@ describe("Phase 4.6: schedule mutator dispatch", () => {
       vi.fn(() => new Promise(() => {})),
     );
     const { zeroSync } = await importStore();
-    expect(() =>
-      zeroSync.createSchedule({ name: "x", taskPrompt: "X" }),
-    ).not.toThrow();
+    expect(() => zeroSync.createSchedule({ name: "x", taskPrompt: "X" })).not.toThrow();
     expect(() => zeroSync.updateSchedule({ name: "x" })).not.toThrow();
     expect(() => zeroSync.deleteSchedule({ name: "x" })).not.toThrow();
   });
@@ -1478,9 +1450,7 @@ describe("Phase 4.7: app mutator dispatch", () => {
       vi.fn(() => new Promise(() => {})),
     );
     const { zeroSync } = await importStore();
-    expect(() =>
-      zeroSync.installApp({ id: "x", folderPath: "/x" }),
-    ).not.toThrow();
+    expect(() => zeroSync.installApp({ id: "x", folderPath: "/x" })).not.toThrow();
     expect(() => zeroSync.uninstallApp({ id: "x" })).not.toThrow();
     expect(() => zeroSync.reloadApp({ id: "x" })).not.toThrow();
   });
@@ -1791,9 +1761,7 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
 
   it("forwards attachments verbatim to the mutator", async () => {
     const { zeroSync, z } = await bootedZero();
-    const attachments = [
-      { sha256: "a".repeat(64), filename: "shot.png", mime: "image/png" },
-    ];
+    const attachments = [{ sha256: "a".repeat(64), filename: "shot.png", mime: "image/png" }];
     await zeroSync.sendUserMessage({
       blockId: "11111111-2222-3333-4444-555555555555",
       agent: "friday",
@@ -1818,8 +1786,7 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
         type: "error",
         error: {
           type: "app",
-          message:
-            'duplicate key value violates unique constraint "blocks_pkey"',
+          message: 'duplicate key value violates unique constraint "blocks_pkey"',
           details: { name: "PostgresError" },
         },
       }),

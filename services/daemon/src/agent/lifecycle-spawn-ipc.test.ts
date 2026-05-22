@@ -15,8 +15,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
-const hasSandboxExec =
-  process.platform === "darwin" && existsSync(SANDBOX_EXEC);
+const hasSandboxExec = process.platform === "darwin" && existsSync(SANDBOX_EXEC);
 const describeOnDarwin = hasSandboxExec ? describe : describe.skip;
 
 const ULIMIT_PRELUDE = `ulimit -t 3600; ulimit -n 4096; exec "$@"`;
@@ -52,9 +51,7 @@ describeOnDarwin("M2 + M5 spawn chain preserves IPC", () => {
   // worktree available. The point is to verify the IPC contract through
   // the exec chain, not to test SBPL rules (covered by
   // sandbox-profile-kernel.test.ts).
-  const playground = realpathSync(
-    mkdtempSync(join(tmpdir(), "friday-ipc-smoke-")),
-  );
+  const playground = realpathSync(mkdtempSync(join(tmpdir(), "friday-ipc-smoke-")));
   const profilePath = join(playground, "permissive.sb");
   writeFileSync(profilePath, `(version 1)\n(allow default)\n`);
 
@@ -125,22 +122,18 @@ describeOnDarwin("M2 + M5 spawn chain preserves IPC", () => {
        process.on('message', () => setTimeout(() => process.exit(0), 20));
       `,
     );
-    const result = await new Promise<{ cpu: string; nofile: string }>(
-      (resolve, reject) => {
-        const child = spawn(
-          "/bin/bash",
-          ["-c", ULIMIT_PRELUDE, "--", process.execPath, probe],
-          { stdio: ["ignore", "ignore", "ignore", "ipc"] },
-        );
-        child.on("message", (m: { cpu?: string; nofile?: string }) => {
-          if (m.cpu) {
-            resolve({ cpu: m.cpu, nofile: m.nofile ?? "" });
-            child.send({ exit: true });
-          }
-        });
-        child.on("error", reject);
-      },
-    );
+    const result = await new Promise<{ cpu: string; nofile: string }>((resolve, reject) => {
+      const child = spawn("/bin/bash", ["-c", ULIMIT_PRELUDE, "--", process.execPath, probe], {
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      });
+      child.on("message", (m: { cpu?: string; nofile?: string }) => {
+        if (m.cpu) {
+          resolve({ cpu: m.cpu, nofile: m.nofile ?? "" });
+          child.send({ exit: true });
+        }
+      });
+      child.on("error", reject);
+    });
     expect(result.cpu).toBe("3600");
     expect(result.nofile).toBe("4096");
   });

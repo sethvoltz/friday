@@ -7,7 +7,7 @@
 export function portal(node: HTMLElement, target: HTMLElement | string = document.body) {
   const dest =
     typeof target === "string"
-      ? (document.querySelector(target) as HTMLElement | null) ?? document.body
+      ? ((document.querySelector(target) as HTMLElement | null) ?? document.body)
       : target;
   dest.appendChild(node);
   return {

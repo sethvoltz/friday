@@ -8,9 +8,7 @@
 
 import type { Config } from "drizzle-kit";
 
-const databaseUrl =
-  process.env.DATABASE_URL ??
-  "postgresql://friday:friday@localhost:5432/friday";
+const databaseUrl = process.env.DATABASE_URL ?? "postgresql://friday:friday@localhost:5432/friday";
 
 export default {
   schema: "./src/db/schema.ts",

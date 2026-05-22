@@ -14,11 +14,7 @@ export function nextRun(cron: string, from: Date = new Date()): Date | null {
  * Schedules UI's "Next N fires" preview (FIX_FORWARD 6.6). Returns an empty
  * array if the expression is invalid; otherwise an array of length `count`.
  */
-export function nextRuns(
-  cron: string,
-  count: number,
-  from: Date = new Date(),
-): Date[] {
+export function nextRuns(cron: string, count: number, from: Date = new Date()): Date[] {
   try {
     const it = CronExpressionParser.parse(cron, { currentDate: from });
     const out: Date[] = [];

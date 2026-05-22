@@ -43,10 +43,7 @@ async function seedAgent(opts: {
       type: opts.type ?? "builder",
       status: opts.status,
       parentName: opts.type === "builder" || !opts.type ? "friday" : null,
-      worktreePath:
-        opts.type === "builder" || !opts.type
-          ? `/tmp/${opts.name}`
-          : null,
+      worktreePath: opts.type === "builder" || !opts.type ? `/tmp/${opts.name}` : null,
       createdAt: now,
       updatedAt: now,
     });
@@ -78,10 +75,7 @@ async function seedMail(opts: {
 
 async function mailCount(id: number): Promise<number> {
   const { getDb } = await import("@friday/shared");
-  const rows = await getDb()
-    .select()
-    .from(schema.mail)
-    .where(eq(schema.mail.id, id));
+  const rows = await getDb().select().from(schema.mail).where(eq(schema.mail.id, id));
   return rows.length;
 }
 

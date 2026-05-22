@@ -88,8 +88,7 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
       options: queryOptions,
     })) {
       if (message.type === "assistant") {
-        const content = (message as { message?: { content?: unknown } }).message
-          ?.content;
+        const content = (message as { message?: { content?: unknown } }).message?.content;
         if (Array.isArray(content)) {
           for (const block of content) {
             if (
@@ -134,10 +133,7 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
 
     if (isAbortLike) {
       if (timedOut) {
-        throw new ChatAbortError(
-          "timeout",
-          `enrichment timed out after ${timeoutMs / 1000}s`,
-        );
+        throw new ChatAbortError("timeout", `enrichment timed out after ${timeoutMs / 1000}s`);
       }
       throw new ChatAbortError(
         "interrupted",

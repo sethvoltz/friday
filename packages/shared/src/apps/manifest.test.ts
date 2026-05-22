@@ -2,11 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  ManifestValidationError,
-  loadManifest,
-  parseManifest,
-} from "./manifest.js";
+import { ManifestValidationError, loadManifest, parseManifest } from "./manifest.js";
 
 function mkFolder(): string {
   return mkdtempSync(join(tmpdir(), "friday-app-test-"));
@@ -33,29 +29,28 @@ describe("parseManifest", () => {
 
   it("rejects unknown manifestVersion with a clear message", () => {
     const folder = mkFolder();
-    expect(() => parseManifest({ ...minimal(), manifestVersion: 2 }, folder))
-      .toThrowError(/unsupported manifestVersion: 2/);
+    expect(() => parseManifest({ ...minimal(), manifestVersion: 2 }, folder)).toThrowError(
+      /unsupported manifestVersion: 2/,
+    );
   });
 
   it("rejects bad app id", () => {
     const folder = mkFolder();
-    expect(() => parseManifest(minimal("BadID"), folder)).toThrowError(
-      ManifestValidationError,
-    );
+    expect(() => parseManifest(minimal("BadID"), folder)).toThrowError(ManifestValidationError);
   });
 
   it("rejects non-semver version", () => {
     const folder = mkFolder();
-    expect(() =>
-      parseManifest({ ...minimal(), version: "v1" }, folder),
-    ).toThrowError(ManifestValidationError);
+    expect(() => parseManifest({ ...minimal(), version: "v1" }, folder)).toThrowError(
+      ManifestValidationError,
+    );
   });
 
   it("rejects empty agents array", () => {
     const folder = mkFolder();
-    expect(() =>
-      parseManifest({ ...minimal(), agents: [] }, folder),
-    ).toThrowError(ManifestValidationError);
+    expect(() => parseManifest({ ...minimal(), agents: [] }, folder)).toThrowError(
+      ManifestValidationError,
+    );
   });
 
   it("rejects schedule referencing missing agent", () => {
@@ -64,9 +59,7 @@ describe("parseManifest", () => {
       parseManifest(
         {
           ...minimal(),
-          schedules: [
-            { name: "s1", cron: "0 4 * * *", agent: "ghost", taskPrompt: "go" },
-          ],
+          schedules: [{ name: "s1", cron: "0 4 * * *", agent: "ghost", taskPrompt: "go" }],
         },
         folder,
       ),
@@ -102,9 +95,7 @@ describe("parseManifest", () => {
           { name: "owner", type: "bare" as const },
           { name: "weekly", type: "scheduled" as const },
         ],
-        schedules: [
-          { name: "weekly-run", cron: "0 4 * * *", agent: "weekly", taskPrompt: "go" },
-        ],
+        schedules: [{ name: "weekly-run", cron: "0 4 * * *", agent: "weekly", taskPrompt: "go" }],
       },
       folder,
     );
@@ -133,9 +124,7 @@ describe("parseManifest", () => {
       parseManifest(
         {
           ...minimal(),
-          mcpServers: [
-            { name: "x", command: "python", args: ["mcp/x.py"] },
-          ],
+          mcpServers: [{ name: "x", command: "python", args: ["mcp/x.py"] }],
         },
         folder,
       ),
@@ -148,9 +137,7 @@ describe("parseManifest", () => {
       parseManifest(
         {
           ...minimal(),
-          mcpServers: [
-            { name: "friday-evil", command: "node", args: ["mcp/x.js"] },
-          ],
+          mcpServers: [{ name: "friday-evil", command: "node", args: ["mcp/x.js"] }],
         },
         folder,
       ),
@@ -163,9 +150,7 @@ describe("parseManifest", () => {
       parseManifest(
         {
           ...minimal(),
-          mcpServers: [
-            { name: "x", command: "node", args: ["/etc/passwd"] },
-          ],
+          mcpServers: [{ name: "x", command: "node", args: ["/etc/passwd"] }],
         },
         folder,
       ),
@@ -178,9 +163,7 @@ describe("parseManifest", () => {
       parseManifest(
         {
           ...minimal(),
-          mcpServers: [
-            { name: "x", command: "node", args: ["../escape.js"] },
-          ],
+          mcpServers: [{ name: "x", command: "node", args: ["../escape.js"] }],
         },
         folder,
       ),
@@ -212,9 +195,7 @@ describe("parseManifest", () => {
       parseManifest(
         {
           ...minimal(),
-          mcpServers: [
-            { name: "x", command: "node", args: ["mcp/x.js", "--flag"] },
-          ],
+          mcpServers: [{ name: "x", command: "node", args: ["mcp/x.js", "--flag"] }],
         },
         folder,
       ),
@@ -225,10 +206,7 @@ describe("parseManifest", () => {
 describe("loadManifest", () => {
   it("loads and parses a real on-disk manifest", () => {
     const folder = mkFolder();
-    writeFileSync(
-      join(folder, "manifest.json"),
-      JSON.stringify(minimal("disk-app"), null, 2),
-    );
+    writeFileSync(join(folder, "manifest.json"), JSON.stringify(minimal("disk-app"), null, 2));
     const m = loadManifest(folder);
     expect(m.id).toBe("disk-app");
   });

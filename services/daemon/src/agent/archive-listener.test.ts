@@ -12,12 +12,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 import pgPkg from "pg";
 
 let handle: TestDbHandle;
@@ -98,13 +93,9 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
       // is paranoid coverage for handler-attach timing.
       await new Promise((r) => setTimeout(r, 250));
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
 
-      await db
-        .update(schema.agents)
-        .set({ status: "archived" });
+      await db.update(schema.agents).set({ status: "archived" });
 
       // negative-space: trigger predicate excludes flips to 'archived' —
       // a bounded real-time wait confirms no spurious NOTIFY arrives.
@@ -130,18 +121,12 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
       });
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_archive_requested");
 
       // Normal worker lifecycle UPDATEs — must not spam NOTIFY.
-      await db
-        .update(schema.agents)
-        .set({ status: "working" });
-      await db
-        .update(schema.agents)
-        .set({ status: "idle" });
+      await db.update(schema.agents).set({ status: "working" });
+      await db.update(schema.agents).set({ status: "idle" });
 
       // negative-space: trigger predicate excludes idle/working UPDATEs —
       // a bounded real-time wait confirms no spurious NOTIFY arrives.
@@ -164,9 +149,7 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
     try {
       const received: Array<{ payload: string }> = [];
       const db = getDb();
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_archive_requested");
 
       // Insert directly at 'archive_requested' (a hypothetical
@@ -194,16 +177,14 @@ describe("agents status enum + archive_reason", () => {
   it("accepts the three ArchiveReason values", async () => {
     const db = getDb();
     for (const reason of ["completed", "abandoned", "failed"] as const) {
-      await db
-        .insert(schema.agents)
-        .values({
-          name: `reason-${reason}`,
-          type: "builder",
-          status: "archive_requested",
-          archiveReason: reason,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
+      await db.insert(schema.agents).values({
+        name: `reason-${reason}`,
+        type: "builder",
+        status: "archive_requested",
+        archiveReason: reason,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
     }
     const rows = await db
       .select({
@@ -211,8 +192,6 @@ describe("agents status enum + archive_reason", () => {
         reason: schema.agents.archiveReason,
       })
       .from(schema.agents);
-    expect(rows.map((r) => r.reason).sort()).toEqual(
-      ["abandoned", "completed", "failed"].sort(),
-    );
+    expect(rows.map((r) => r.reason).sort()).toEqual(["abandoned", "completed", "failed"].sort());
   });
 });

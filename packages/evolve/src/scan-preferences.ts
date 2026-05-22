@@ -62,9 +62,7 @@ export type PreferenceScoreFn = (
   model: string,
 ) => Promise<PreferenceScoredTurn[]>;
 
-export async function scanPreferences(
-  opts: PreferenceScanOptions = {},
-): Promise<Signal[]> {
+export async function scanPreferences(opts: PreferenceScanOptions = {}): Promise<Signal[]> {
   const sinceMs = opts.since ? Date.parse(opts.since) : 0;
   const maxTurns = opts.maxTurns ?? 1000;
   const batchSize = opts.batchSize ?? 30;
@@ -85,7 +83,6 @@ export async function scanPreferences(
     try {
       results = await score(payload, model);
     } catch (err) {
-       
       console.error(
         `preference scoring batch ${i}-${i + batch.length - 1} failed: ${
           err instanceof Error ? err.message : String(err)
@@ -104,9 +101,7 @@ export async function scanPreferences(
   return bucketByCategory(scored);
 }
 
-export function bucketByCategory(
-  scored: Array<OrchestratorTurn & PreferenceScoredTurn>,
-): Signal[] {
+export function bucketByCategory(scored: Array<OrchestratorTurn & PreferenceScoredTurn>): Signal[] {
   const buckets = new Map<string, Signal>();
   const ranked = [...scored].sort((a, b) => b.signal_score - a.signal_score);
 
@@ -134,8 +129,7 @@ export function bucketByCategory(
       if (severityRank(severity) > severityRank(existing.severity)) {
         existing.severity = severity;
       }
-      if (existing.evidencePointers.length < 3)
-        existing.evidencePointers.push(pointer);
+      if (existing.evidencePointers.length < 3) existing.evidencePointers.push(pointer);
     } else {
       buckets.set(hash, {
         hash,

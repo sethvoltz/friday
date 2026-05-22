@@ -42,16 +42,12 @@ export interface StateMigration {
   run: () => Promise<Record<string, unknown>>;
 }
 
-export async function runStateMigrations(
-  migrations: readonly StateMigration[],
-): Promise<void> {
+export async function runStateMigrations(migrations: readonly StateMigration[]): Promise<void> {
   if (migrations.length === 0) return;
   const pool = getPool();
   const client = await pool.connect();
   try {
-    await client.query(`SELECT pg_advisory_lock($1)`, [
-      ADVISORY_LOCK_KEY.toString(),
-    ]);
+    await client.query(`SELECT pg_advisory_lock($1)`, [ADVISORY_LOCK_KEY.toString()]);
     try {
       const { rows } = await client.query<{ id: string }>(
         `SELECT id FROM _friday_state_migrations`,
@@ -73,9 +69,7 @@ export async function runStateMigrations(
         logger.log("info", "state-migration.done", { id: m.id, meta });
       }
     } finally {
-      await client.query(`SELECT pg_advisory_unlock($1)`, [
-        ADVISORY_LOCK_KEY.toString(),
-      ]);
+      await client.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY.toString()]);
     }
   } finally {
     client.release();

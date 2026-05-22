@@ -140,7 +140,9 @@ function retryAfterFromBody(raw: string): number | undefined {
       // fall through to regex
     }
   }
-  const match = raw.match(/retry[\s_-]?after[^0-9]{0,10}(\d+(?:\.\d+)?)\s*(s|sec|seconds|ms|milli)?/i);
+  const match = raw.match(
+    /retry[\s_-]?after[^0-9]{0,10}(\d+(?:\.\d+)?)\s*(s|sec|seconds|ms|milli)?/i,
+  );
   if (match) {
     const n = Number.parseFloat(match[1]);
     if (Number.isFinite(n) && n >= 0) {
@@ -178,7 +180,9 @@ function networkErrnoCode(err: unknown, raw: string): string | undefined {
     const causeCode = readString(cause, "code");
     if (causeCode && /^E[A-Z]+$/.test(causeCode)) return causeCode;
   }
-  const m = raw.match(/\b(ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH)\b/);
+  const m = raw.match(
+    /\b(ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH)\b/,
+  );
   return m ? m[1] : undefined;
 }
 
@@ -211,7 +215,10 @@ export function classifySdkError(err: unknown): ClassifiedError {
       return { code: "network", headline: HEADLINE.network, rawMessage };
     }
     // Connection error class without an explicit errno.
-    const ctor = err && typeof err === "object" ? (err as { constructor?: { name?: string } }).constructor?.name : undefined;
+    const ctor =
+      err && typeof err === "object"
+        ? (err as { constructor?: { name?: string } }).constructor?.name
+        : undefined;
     if (ctor && /Connection/i.test(ctor)) {
       return { code: "network", headline: HEADLINE.network, rawMessage };
     }
@@ -220,8 +227,7 @@ export function classifySdkError(err: unknown): ClassifiedError {
   if (httpStatus !== undefined) {
     const code = codeForStatus(httpStatus);
     const headers = (err as { headers?: unknown })?.headers;
-    const retryAfterSeconds =
-      retryAfterFromHeaders(headers) ?? retryAfterFromBody(rawMessage);
+    const retryAfterSeconds = retryAfterFromHeaders(headers) ?? retryAfterFromBody(rawMessage);
     const requestId = requestIdFromObj(err, headers);
     let headline = HEADLINE[code] ?? HEADLINE.unknown;
     // Surface the SDK's error.message detail for 4xx — it typically says
@@ -242,7 +248,10 @@ export function classifySdkError(err: unknown): ClassifiedError {
 
   return {
     code: "unknown",
-    headline: rawMessage.length > 200 ? `${HEADLINE.unknown}: ${rawMessage.slice(0, 200)}…` : rawMessage || HEADLINE.unknown,
+    headline:
+      rawMessage.length > 200
+        ? `${HEADLINE.unknown}: ${rawMessage.slice(0, 200)}…`
+        : rawMessage || HEADLINE.unknown,
     rawMessage,
   };
 }

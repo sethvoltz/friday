@@ -263,21 +263,15 @@ function makeMockTx(): {
   const ticketUpdate = vi.fn(async (row: MockTicketUpdateCall) => {
     ticketUpdates.push(row);
   });
-  const ticketCommentInsert = vi.fn(
-    async (row: MockTicketCommentInsertCall) => {
-      ticketCommentInserts.push(row);
-    },
-  );
-  const ticketRelationInsert = vi.fn(
-    async (row: MockTicketRelationInsertCall) => {
-      ticketRelationInserts.push(row);
-    },
-  );
-  const ticketExternalLinkInsert = vi.fn(
-    async (row: MockTicketExternalLinkInsertCall) => {
-      ticketExternalLinkInserts.push(row);
-    },
-  );
+  const ticketCommentInsert = vi.fn(async (row: MockTicketCommentInsertCall) => {
+    ticketCommentInserts.push(row);
+  });
+  const ticketRelationInsert = vi.fn(async (row: MockTicketRelationInsertCall) => {
+    ticketRelationInserts.push(row);
+  });
+  const ticketExternalLinkInsert = vi.fn(async (row: MockTicketExternalLinkInsertCall) => {
+    ticketExternalLinkInserts.push(row);
+  });
   const memoryInserts: MockMemoryInsertCall[] = [];
   const memoryUpdates: MockMemoryUpdateCall[] = [];
   const memoryInsert = vi.fn(async (row: MockMemoryInsertCall) => {
@@ -605,9 +599,7 @@ describe("forgetDevice (plan §41 — JWT revocation tombstone)", () => {
     const { tx, clientDeviceUpdates, clientDeviceDeletes } = makeMockTx();
     const args: ForgetDeviceArgs = { deviceId: "dev-evict", ts: 9_999 };
     await mutators.forgetDevice(tx, args);
-    expect(clientDeviceUpdates).toEqual([
-      { device_id: "dev-evict", revoked_at: 9_999 },
-    ]);
+    expect(clientDeviceUpdates).toEqual([{ device_id: "dev-evict", revoked_at: 9_999 }]);
     // Critical: no DELETE. The prior delete-only behavior was the bug
     // §41 documented — `/api/sync/refresh` re-upserted the row on the
     // next mint, so "forget" had no security effect.
@@ -640,21 +632,17 @@ describe("nextTicketIdFrom", () => {
   });
 
   it("returns max(numeric_suffix) + 1", () => {
-    expect(
-      nextTicketIdFrom([{ id: "FRI-3" }, { id: "FRI-1" }, { id: "FRI-7" }]),
-    ).toBe("FRI-8");
+    expect(nextTicketIdFrom([{ id: "FRI-3" }, { id: "FRI-1" }, { id: "FRI-7" }])).toBe("FRI-8");
   });
 
   it("ignores non-FRI-pattern ids (defensive — shouldn't happen in practice)", () => {
-    expect(
-      nextTicketIdFrom([{ id: "FRI-5" }, { id: "other-id" }, { id: "FRI-10" }]),
-    ).toBe("FRI-11");
+    expect(nextTicketIdFrom([{ id: "FRI-5" }, { id: "other-id" }, { id: "FRI-10" }])).toBe(
+      "FRI-11",
+    );
   });
 
   it("returns FRI-1 if no ids match the FRI-N pattern", () => {
-    expect(nextTicketIdFrom([{ id: "weird" }, { id: "uuid-shape" }])).toBe(
-      "FRI-1",
-    );
+    expect(nextTicketIdFrom([{ id: "weird" }, { id: "uuid-shape" }])).toBe("FRI-1");
   });
 });
 
@@ -836,10 +824,7 @@ describe("addTicketRelation", () => {
       childId: "FRI-2",
       kind: "blocks",
     });
-    expect(ticketRelationInserts.map((r) => r.kind)).toEqual([
-      "depends_on",
-      "blocks",
-    ]);
+    expect(ticketRelationInserts.map((r) => r.kind)).toEqual(["depends_on", "blocks"]);
   });
 });
 
@@ -1013,9 +998,7 @@ describe("deleteMemoryEntry", () => {
       id: "to-delete",
       ts: 7,
     } as DeleteMemoryEntryArgs);
-    expect(memoryUpdates).toEqual([
-      { id: "to-delete", updated_at: 7, status: "pending_delete" },
-    ]);
+    expect(memoryUpdates).toEqual([{ id: "to-delete", updated_at: 7, status: "pending_delete" }]);
   });
 
   it("is idempotent — re-running with same args produces identical writes", async () => {
@@ -1160,9 +1143,7 @@ describe("deleteSchedule", () => {
       name: "to-delete",
       ts: 7,
     } as DeleteScheduleArgs);
-    expect(scheduleUpdates).toEqual([
-      { name: "to-delete", updated_at: 7, status: "deleted" },
-    ]);
+    expect(scheduleUpdates).toEqual([{ name: "to-delete", updated_at: 7, status: "deleted" }]);
   });
 
   it("is idempotent — re-running produces identical writes", async () => {
@@ -1192,9 +1173,7 @@ describe("pauseSchedule (item #53)", () => {
     const mutators = createMutators();
     const { tx, scheduleUpdates } = makeMockTx();
     await mutators.pauseSchedule(tx, { name: "s", ts: 11 } as PauseScheduleArgs);
-    expect(scheduleUpdates).toEqual([
-      { name: "s", paused: true, updated_at: 11 },
-    ]);
+    expect(scheduleUpdates).toEqual([{ name: "s", paused: true, updated_at: 11 }]);
   });
 
   it("is idempotent — re-running produces identical writes", async () => {
@@ -1246,9 +1225,7 @@ describe("triggerSchedule (item #53)", () => {
       name: "s",
       ts: 33,
     } as TriggerScheduleArgs);
-    expect(scheduleUpdates).toEqual([
-      { name: "s", status: "trigger_requested", updated_at: 33 },
-    ]);
+    expect(scheduleUpdates).toEqual([{ name: "s", status: "trigger_requested", updated_at: 33 }]);
   });
 
   it("is idempotent — re-running queues identical mutations (the daemon's flip-back to 'active' is excluded from the trigger predicate)", async () => {
@@ -1323,9 +1300,7 @@ describe("uninstallApp", () => {
       id: "my-app",
       ts: 5,
     } as UninstallAppArgs);
-    expect(appUpdates).toEqual([
-      { id: "my-app", status: "uninstall_requested" },
-    ]);
+    expect(appUpdates).toEqual([{ id: "my-app", status: "uninstall_requested" }]);
   });
 
   it("is idempotent — re-running with same args produces identical writes", async () => {
@@ -1355,9 +1330,7 @@ describe("reloadApp", () => {
       id: "my-app",
       ts: 5,
     } as ReloadAppArgs);
-    expect(appUpdates).toEqual([
-      { id: "my-app", status: "reload_requested" },
-    ]);
+    expect(appUpdates).toEqual([{ id: "my-app", status: "reload_requested" }]);
   });
 
   it("is idempotent", async () => {
@@ -1394,12 +1367,7 @@ describe("archiveAgent", () => {
   it("supports all four reason values", async () => {
     const mutators = createMutators();
     const { tx, agentUpdates } = makeMockTx();
-    for (const reason of [
-      "completed",
-      "abandoned",
-      "failed",
-      "refork",
-    ] as const) {
+    for (const reason of ["completed", "abandoned", "failed", "refork"] as const) {
       await mutators.archiveAgent(tx, {
         name: `agent-${reason}`,
         reason,
@@ -1585,9 +1553,7 @@ describe("sendUserMessage", () => {
     });
     expect(blocksInserts[0]!.content_json).toEqual({
       text: "see this",
-      attachments: [
-        { sha256: "a".repeat(64), filename: "shot.png", mime: "image/png" },
-      ],
+      attachments: [{ sha256: "a".repeat(64), filename: "shot.png", mime: "image/png" }],
     });
   });
 
@@ -1606,9 +1572,7 @@ describe("sendUserMessage", () => {
       ts: 1,
     });
     expect(blocksInserts[0]!.content_json).toEqual({ text: "plain" });
-    expect("attachments" in (blocksInserts[0]!.content_json as object)).toBe(
-      false,
-    );
+    expect("attachments" in (blocksInserts[0]!.content_json as object)).toBe(false);
   });
 
   it("omits the attachments key when supplied as an empty array", async () => {
@@ -1622,9 +1586,7 @@ describe("sendUserMessage", () => {
       attachments: [],
       ts: 1,
     });
-    expect("attachments" in (blocksInserts[0]!.content_json as object)).toBe(
-      false,
-    );
+    expect("attachments" in (blocksInserts[0]!.content_json as object)).toBe(false);
   });
 
   it("status is always 'pending' on insert — the daemon owns the flip-out to 'complete' / 'queued'", async () => {

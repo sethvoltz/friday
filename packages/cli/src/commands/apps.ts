@@ -37,17 +37,16 @@ export const appsCommand = defineCommand({
         adopt: {
           type: "boolean",
           default: false,
-          description:
-            "Rebind any existing agent with a colliding name into this app",
+          description: "Rebind any existing agent with a colliding name into this app",
         },
       },
       async run({ args }) {
         const folderPath = resolve(args.path as string);
         const c = new DaemonClient();
-        const result = await c.post<{ id: string; version: string }>(
-          "/api/apps",
-          { folderPath, adopt: !!args.adopt },
-        );
+        const result = await c.post<{ id: string; version: string }>("/api/apps", {
+          folderPath,
+          adopt: !!args.adopt,
+        });
         console.log(
           pc.green(`installed ${result.id}@${result.version}`),
           pc.dim(`(${folderPath})`),
@@ -64,8 +63,7 @@ export const appsCommand = defineCommand({
         folder: {
           type: "string",
           default: "archive",
-          description:
-            "What to do with the on-disk folder: archive (default) | keep | delete",
+          description: "What to do with the on-disk folder: archive (default) | keep | delete",
         },
         yes: {
           type: "boolean",
@@ -118,27 +116,15 @@ export const appsCommand = defineCommand({
               : r.status === "orphaned"
                 ? pc.yellow(r.status)
                 : pc.red(r.status);
-          console.log(
-            `  ${pc.bold(r.id.padEnd(24))} v${r.version.padEnd(10)} ${status}`,
-          );
+          console.log(`  ${pc.bold(r.id.padEnd(24))} v${r.version.padEnd(10)} ${status}`);
           if (r.agents.length > 0) {
-            console.log(
-              pc.dim(`    agents:    ${r.agents.map((a) => a.name).join(", ")}`),
-            );
+            console.log(pc.dim(`    agents:    ${r.agents.map((a) => a.name).join(", ")}`));
           }
           if (r.schedules.length > 0) {
-            console.log(
-              pc.dim(
-                `    schedules: ${r.schedules.map((s) => s.name).join(", ")}`,
-              ),
-            );
+            console.log(pc.dim(`    schedules: ${r.schedules.map((s) => s.name).join(", ")}`));
           }
           if (r.mcpServers.length > 0) {
-            console.log(
-              pc.dim(
-                `    mcp:       ${r.mcpServers.map((m) => m.name).join(", ")}`,
-              ),
-            );
+            console.log(pc.dim(`    mcp:       ${r.mcpServers.map((m) => m.name).join(", ")}`));
           }
         }
       },
@@ -148,9 +134,7 @@ export const appsCommand = defineCommand({
       args: { id: { type: "positional", required: true } },
       async run({ args }) {
         const c = new DaemonClient();
-        const row = await c.get<AppRow>(
-          `/api/apps/${encodeURIComponent(args.id as string)}`,
-        );
+        const row = await c.get<AppRow>(`/api/apps/${encodeURIComponent(args.id as string)}`);
         console.log(JSON.stringify(row, null, 2));
       },
     }),
@@ -167,11 +151,7 @@ export const appsCommand = defineCommand({
           `/api/apps/${encodeURIComponent(id)}/reload`,
           {},
         );
-        console.log(
-          result.changed
-            ? pc.green(`reloaded ${id}`)
-            : pc.dim(`${id}: no change`),
-        );
+        console.log(result.changed ? pc.green(`reloaded ${id}`) : pc.dim(`${id}: no change`));
       },
     }),
   },

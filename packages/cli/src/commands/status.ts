@@ -48,8 +48,7 @@ export function readHealth(): HealthSnapshot {
     return {
       port: typeof raw.port === "number" ? raw.port : undefined,
       pid: typeof raw.pid === "number" ? raw.pid : undefined,
-      uptimeSec:
-        typeof raw.uptimeSec === "number" ? raw.uptimeSec : undefined,
+      uptimeSec: typeof raw.uptimeSec === "number" ? raw.uptimeSec : undefined,
       stale,
       present: true,
     };
@@ -67,10 +66,7 @@ export function readHealth(): HealthSnapshot {
  *
  * Exported for tests.
  */
-export async function probeDashboard(
-  port: number,
-  timeoutMs = 1000,
-): Promise<number | null> {
+export async function probeDashboard(port: number, timeoutMs = 1000): Promise<number | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -133,12 +129,11 @@ export const statusCommand = defineCommand({
     // Supervisor (launchd job homebrew.mxcl.friday)
     const fridayJob = launchdJobStatus("homebrew.mxcl.friday");
     if (fridayJob.loaded) {
-      const detail = fridayJob.pid !== undefined
-        ? `pid=${fridayJob.pid}`
-        : "(loaded; no current pid — restarting?)";
-      console.log(
-        `  supervisor  ${pc.green("up")}  ${detail}  (launchd: homebrew.mxcl.friday)`,
-      );
+      const detail =
+        fridayJob.pid !== undefined
+          ? `pid=${fridayJob.pid}`
+          : "(loaded; no current pid — restarting?)";
+      console.log(`  supervisor  ${pc.green("up")}  ${detail}  (launchd: homebrew.mxcl.friday)`);
     } else {
       console.log(
         `  supervisor  ${pc.dim("down")}  (run ${pc.cyan("friday start")} or ${pc.cyan("brew services start friday")})`,
@@ -177,9 +172,10 @@ export const statusCommand = defineCommand({
     } else {
       daemonPortSource = "config — no heartbeat";
     }
-    const daemonPortTag = daemonPortSource === "probed"
-      ? pc.dim(`(${daemonPortSource})`)
-      : pc.yellow(`(${daemonPortSource})`);
+    const daemonPortTag =
+      daemonPortSource === "probed"
+        ? pc.dim(`(${daemonPortSource})`)
+        : pc.yellow(`(${daemonPortSource})`);
     console.log();
     console.log(
       `  daemon API     ${reachable ? pc.green("reachable") : pc.red("not responding")} @ localhost:${daemonPort} ${daemonPortTag}`,
@@ -189,9 +185,7 @@ export const statusCommand = defineCommand({
         console.log(pc.dim(`  daemon pid     ${health.pid}`));
       }
       if (health.uptimeSec !== undefined) {
-        console.log(
-          pc.dim(`  daemon uptime  ${formatUptime(health.uptimeSec)}`),
-        );
+        console.log(pc.dim(`  daemon uptime  ${formatUptime(health.uptimeSec)}`));
       }
     }
 
@@ -200,9 +194,7 @@ export const statusCommand = defineCommand({
     const dashboardStatus = await probeDashboard(cfgDashboardPort);
     const dashboardReachable = dashboardStatus !== null && dashboardStatus < 500;
     if (dashboardReachable) {
-      console.log(
-        `  dashboard      ${pc.green("up")} @ http://localhost:${cfgDashboardPort}`,
-      );
+      console.log(`  dashboard      ${pc.green("up")} @ http://localhost:${cfgDashboardPort}`);
     } else {
       console.log(
         `  dashboard      ${pc.red("down")} (config: http://localhost:${cfgDashboardPort})`,
