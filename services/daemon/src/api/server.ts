@@ -9,11 +9,9 @@ import {
   isLocalHost,
   loadConfig,
   composeSystemPrompt,
-  loadSkills,
   normalizeModelConfig,
   readPromptStack,
   resolveDaemonPort,
-  skillsForAgent,
 } from "@friday/shared";
 import {
   addComment,
@@ -51,6 +49,7 @@ import {
 } from "@friday/memory";
 import { renderPinnedFacts } from "../agent/pinned-facts.js";
 import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
+import { matchSkillInvocation } from "../skills/match.js";
 import { resolveRecipient, validateRecipient } from "../comms/recipient.js";
 import {
   DEFAULT_RULE,
@@ -221,26 +220,25 @@ async function handle(
       pinnedFacts,
     );
 
-    // Skill detection: if the user typed `/<name> <args>`, look up the skill
-    // and inject its body as a per-turn `<skill-context>` block. The user
-    // message becomes the args portion; if the skill restricts allowedTools,
-    // that restriction applies for this turn only.
+    // Skill detection: if the user typed `/<name> <args>`, the user-message
+    // body becomes the args portion. The skill-context block + per-turn
+    // allowedTools restriction are emitted by the before_prompt_build hook
+    // when composeDispatchPrompt threads skillMatch through.
     const skillMatch = matchSkillInvocation(body.text, agentRow.type);
     const userText = skillMatch ? skillMatch.userText : body.text;
-    const systemPrompt = skillMatch
-      ? `${baseSystemPrompt}\n\n<skill-context name="${skillMatch.skill.name}">\n${skillMatch.skill.body}\n</skill-context>`
-      : baseSystemPrompt;
-    const allowedToolsOverride = skillMatch?.skill.allowedTools ?? undefined;
 
-    const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } =
-      await composeDispatchPrompt({
-        intentText: userText,
-        intentTag: "user_chat",
-        body: userText,
-        agentType: agentRow.type,
-        baseSystemPrompt: systemPrompt,
-        skillMatch: skillMatch ?? undefined,
-      });
+    const {
+      body: wrappedPrompt,
+      systemPrompt: dispatchSystemPrompt,
+      allowedToolsOverride,
+    } = await composeDispatchPrompt({
+      intentText: userText,
+      intentTag: "user_chat",
+      body: userText,
+      agentType: agentRow.type,
+      baseSystemPrompt,
+      skillMatch: skillMatch ?? undefined,
+    });
 
     // Persist the user's typed prompt as a `role='user'`, `source='user_chat'`
     // block before dispatching. Stays scoped to the user's literal input —
@@ -1983,26 +1981,6 @@ async function handleSystemCommand(
     default:
       return json(res, 404, { error: `unknown system command: ${body.command}` });
   }
-}
-
-/**
- * Detect a `/<skill-name> ...args` invocation at the start of a user message.
- * Returns the matched Skill plus the remaining args (the user message minus
- * the slash command), or null if no match. Filters by agent type.
- */
-export function matchSkillInvocation(
-  text: string,
-  agentType: AgentEntry["type"],
-): { skill: ReturnType<typeof loadSkills>[number]; userText: string } | null {
-  const m = /^\/([a-z][a-z0-9-]*)(?:\s+([\s\S]*))?$/.exec(text.trim());
-  if (!m) return null;
-  const name = m[1];
-  const rest = (m[2] ?? "").trim();
-  const all = loadSkills();
-  const eligible = skillsForAgent(all, agentType);
-  const skill = eligible.find((s) => s.name === name);
-  if (!skill) return null;
-  return { skill, userText: rest };
 }
 
 /**

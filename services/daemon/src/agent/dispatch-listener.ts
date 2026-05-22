@@ -49,7 +49,7 @@ import {
 } from "./lifecycle.js";
 import { renderPinnedFacts } from "./pinned-facts.js";
 import { composeDispatchPrompt } from "./compose-dispatch-prompt.js";
-import { matchSkillInvocation } from "../api/server.js";
+import { matchSkillInvocation } from "../skills/match.js";
 import { logger } from "../log.js";
 
 const { Client } = pgPkg;
@@ -138,19 +138,18 @@ async function processPendingBlockRow(id: string): Promise<void> {
   );
   const skillMatch = matchSkillInvocation(userText, agentRow.type);
   const promptText = skillMatch ? skillMatch.userText : userText;
-  const systemPrompt = skillMatch
-    ? `${baseSystemPrompt}\n\n<skill-context name="${skillMatch.skill.name}">\n${skillMatch.skill.body}\n</skill-context>`
-    : baseSystemPrompt;
-  const allowedToolsOverride = skillMatch?.skill.allowedTools ?? undefined;
-  const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } =
-    await composeDispatchPrompt({
-      intentText: promptText,
-      intentTag: "user_chat",
-      body: promptText,
-      agentType: agentRow.type,
-      baseSystemPrompt: systemPrompt,
-      skillMatch: skillMatch ?? undefined,
-    });
+  const {
+    body: wrappedPrompt,
+    systemPrompt: dispatchSystemPrompt,
+    allowedToolsOverride,
+  } = await composeDispatchPrompt({
+    intentText: promptText,
+    intentTag: "user_chat",
+    body: promptText,
+    agentType: agentRow.type,
+    baseSystemPrompt,
+    skillMatch: skillMatch ?? undefined,
+  });
 
   // Decide queued-vs-immediate using the live-worker peek. Mirrors
   // the legacy REST path's `willQueue` decision.
