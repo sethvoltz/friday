@@ -47,6 +47,7 @@ import {
   updateEntry,
   type MemoryEntry,
 } from "@friday/memory";
+import { runHooks } from "@friday/shared";
 import { renderPinnedFacts } from "../agent/pinned-facts.js";
 import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
 import { matchSkillInvocation } from "../skills/match.js";
@@ -704,9 +705,18 @@ async function handle(
       },
       pinnedFacts,
     );
+    const bootstrapResults = await runHooks("agent:bootstrap", {
+      agentName: body.name,
+      agentType: body.type,
+      workingDirectory: worktreePath ?? workingDirectory,
+      branch,
+    });
+    const bootstrapAppends = bootstrapResults
+      .map((r) => r?.appendSystemPrompt)
+      .filter((s): s is string => typeof s === "string" && s.length > 0);
     const systemPrompt =
-      body.type === "builder" && worktreePath
-        ? `${baseSystemPrompt}\n\n---\n\nYou are running in a git worktree at \`${worktreePath}\` on branch \`${branch}\`. **Do not read, write, or modify files outside this directory.** All Bash commands run with this directory as cwd by default; do not \`cd\` outside it.`
+      bootstrapAppends.length > 0
+        ? `${baseSystemPrompt}\n\n---\n\n${bootstrapAppends.join("\n\n")}`
         : baseSystemPrompt;
     const modelCfg = normalizeModelConfig(cfg.model);
     const { body: wrappedSpawnPrompt, systemPrompt: spawnSystemPrompt } =
