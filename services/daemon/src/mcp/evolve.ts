@@ -10,7 +10,7 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { AgentType } from "@friday/shared";
-import { daemonFetch } from "./http.js";
+import { daemonFetch, signalFrom } from "./http.js";
 
 export const EVOLVE_SERVER_NAME = "friday-evolve";
 
@@ -48,13 +48,14 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
           status: z.enum(PROPOSAL_STATUSES).optional(),
           type: z.enum(PROPOSAL_TYPES).optional(),
         },
-        async (args) => {
+        async (args, extra) => {
           const params = new URLSearchParams();
           if (args.status) params.set("status", args.status);
           if (args.type) params.set("type", args.type);
           const qs = params.toString() ? `?${params.toString()}` : "";
           const rows = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/evolve/proposals${qs}`,
           });
           return {
@@ -66,9 +67,10 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
         "evolve_get",
         "Read a single proposal in full, including its signals.",
         { id: z.string() },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/evolve/proposals/${encodeURIComponent(args.id)}`,
           });
           return {
@@ -94,9 +96,10 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
             ),
           score: z.number().min(0).max(100).optional(),
         },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/evolve/proposals",
             method: "POST",
             body: args,
@@ -120,9 +123,10 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
             appliesTo: z.array(z.string()).optional(),
           }),
         },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/evolve/proposals/${encodeURIComponent(args.id)}`,
             method: "PATCH",
             body: args.patch,
@@ -146,9 +150,10 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
             .optional()
             .describe("Optional assignee for the resulting ticket."),
         },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/evolve/proposals/${encodeURIComponent(args.id)}/apply`,
             method: "POST",
             body: { ticketKind: args.ticketKind, assignee: args.assignee },
@@ -170,9 +175,10 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
               "Optional rejection rationale; appended to the proposal body for future scans to learn from.",
             ),
         },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/evolve/proposals/${encodeURIComponent(args.id)}/dismiss`,
             method: "POST",
             body: { reason: args.reason },
@@ -195,9 +201,10 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
               "Look-back window in hours. Default 24 (the daily meta-agent's pass).",
             ),
         },
-        async (args) => {
+        async (args, extra) => {
           const result = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/evolve/scan",
             method: "POST",
             body: { windowHours: args.windowHours },
@@ -237,9 +244,10 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
             .optional()
             .describe("Max proposals enriched per run. Default 50."),
         },
-        async (args) => {
+        async (args, extra) => {
           const result = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/evolve/enrich",
             method: "POST",
             body: args,
@@ -262,9 +270,10 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
               "Jaccard overlap threshold above which two proposals merge. Default 0.5.",
             ),
         },
-        async (args) => {
+        async (args, extra) => {
           const result = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/evolve/cluster",
             method: "POST",
             body: { threshold: args.threshold },

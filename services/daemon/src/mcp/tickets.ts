@@ -11,7 +11,7 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { AgentType } from "@friday/shared";
-import { daemonFetch } from "./http.js";
+import { daemonFetch, signalFrom } from "./http.js";
 
 export const TICKETS_SERVER_NAME = "friday-tickets";
 
@@ -56,9 +56,10 @@ export function buildTicketsServer(opts: BuildTicketsServerOptions) {
             .optional()
             .describe("Optional structured metadata."),
         },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/tickets",
             method: "POST",
             body: args,
@@ -75,13 +76,14 @@ export function buildTicketsServer(opts: BuildTicketsServerOptions) {
           status: z.enum(TICKET_STATUS).optional(),
           assignee: z.string().optional(),
         },
-        async (args) => {
+        async (args, extra) => {
           const params = new URLSearchParams();
           if (args.status) params.set("status", args.status);
           if (args.assignee) params.set("assignee", args.assignee);
           const qs = params.toString() ? `?${params.toString()}` : "";
           const rows = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/tickets${qs}`,
           });
           return {
@@ -93,9 +95,10 @@ export function buildTicketsServer(opts: BuildTicketsServerOptions) {
         "ticket_get",
         "Read a ticket including its comments and external links.",
         { id: z.string().describe("Ticket id, e.g. FRI-42.") },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/tickets/${encodeURIComponent(args.id)}`,
           });
           return {
@@ -117,9 +120,10 @@ export function buildTicketsServer(opts: BuildTicketsServerOptions) {
             meta: z.record(z.string(), z.unknown()).optional(),
           }),
         },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/tickets/${encodeURIComponent(args.id)}`,
             method: "PATCH",
             body: args.patch,
@@ -136,9 +140,10 @@ export function buildTicketsServer(opts: BuildTicketsServerOptions) {
           id: z.string(),
           body: z.string(),
         },
-        async (args) => {
+        async (args, extra) => {
           await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/tickets/${encodeURIComponent(args.id)}/comments`,
             method: "POST",
             body: { author: opts.callerName, body: args.body },
@@ -162,9 +167,10 @@ export function buildTicketsServer(opts: BuildTicketsServerOptions) {
           url: z.string().optional(),
           meta: z.record(z.string(), z.unknown()).optional(),
         },
-        async (args) => {
+        async (args, extra) => {
           await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/tickets/${encodeURIComponent(args.id)}/links`,
             method: "POST",
             body: {

@@ -8,7 +8,7 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { AgentType } from "@friday/shared";
-import { daemonFetch } from "./http.js";
+import { daemonFetch, signalFrom } from "./http.js";
 
 export const SCHEDULE_SERVER_NAME = "friday-schedule";
 
@@ -59,9 +59,10 @@ export function buildScheduleServer(opts: BuildScheduleServerOptions) {
             .optional()
             .describe("Start paused. Default false."),
         },
-        async (args) => {
+        async (args, extra) => {
           await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/schedules",
             method: "POST",
             body: args,
@@ -75,8 +76,12 @@ export function buildScheduleServer(opts: BuildScheduleServerOptions) {
         "schedule_list",
         "List all schedules with their cron / runAt / next-run / last-run / paused state.",
         {},
-        async () => {
-          const rows = await daemonFetch({ ...ctx, path: "/api/schedules" });
+        async (_args, extra) => {
+          const rows = await daemonFetch({
+            ...ctx,
+            signal: signalFrom(extra),
+            path: "/api/schedules",
+          });
           return {
             content: [{ type: "text", text: JSON.stringify(rows, null, 2) }],
           };
@@ -86,9 +91,10 @@ export function buildScheduleServer(opts: BuildScheduleServerOptions) {
         "schedule_show",
         "Read one schedule.",
         { name: z.string() },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/schedules/${encodeURIComponent(args.name)}`,
           });
           return {
@@ -100,9 +106,10 @@ export function buildScheduleServer(opts: BuildScheduleServerOptions) {
         "schedule_pause",
         "Pause a schedule. The cron tick will skip it until resumed.",
         { name: z.string() },
-        async (args) => {
+        async (args, extra) => {
           await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/schedules/${encodeURIComponent(args.name)}/pause`,
             method: "POST",
           });
@@ -115,9 +122,10 @@ export function buildScheduleServer(opts: BuildScheduleServerOptions) {
         "schedule_resume",
         "Resume a paused schedule. nextRunAt is recomputed so it doesn't immediately fire.",
         { name: z.string() },
-        async (args) => {
+        async (args, extra) => {
           await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/schedules/${encodeURIComponent(args.name)}/resume`,
             method: "POST",
           });
@@ -130,9 +138,10 @@ export function buildScheduleServer(opts: BuildScheduleServerOptions) {
         "schedule_delete",
         "Delete a schedule permanently. Any in-flight run completes; future fires are cancelled.",
         { name: z.string() },
-        async (args) => {
+        async (args, extra) => {
           await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/schedules/${encodeURIComponent(args.name)}`,
             method: "DELETE",
           });
@@ -145,9 +154,10 @@ export function buildScheduleServer(opts: BuildScheduleServerOptions) {
         "schedule_trigger",
         "Fire a schedule immediately (out-of-band). Returns the runId. nextRunAt is updated as if this were a regular fire.",
         { name: z.string() },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/schedules/${encodeURIComponent(args.name)}/trigger`,
             method: "POST",
           });

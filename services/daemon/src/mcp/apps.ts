@@ -8,7 +8,7 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { AgentType } from "@friday/shared";
-import { daemonFetch } from "./http.js";
+import { daemonFetch, signalFrom } from "./http.js";
 
 export const APPS_SERVER_NAME = "friday-apps";
 
@@ -44,9 +44,10 @@ export function buildAppsServer(opts: BuildAppsServerOptions) {
               "Set true to rebind an existing agent that has the same name but a different (or no) owner. Default false fails fast on name collision.",
             ),
         },
-        async (args) => {
+        async (args, extra) => {
           const result = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/apps",
             method: "POST",
             body: { folderPath: args.path, adopt: args.adopt ?? false },
@@ -68,9 +69,10 @@ export function buildAppsServer(opts: BuildAppsServerOptions) {
               "What to do with the on-disk app folder. `archive` (default) renames to `<id>.uninstalled-<ts>/`. `keep` leaves it in place. **`delete` is irreversible** — it removes the folder contents (manifest, state/, .env, mcp/) and cannot be recovered. The agents, schedules, and registry row are preserved per Friday's preserve-over-delete rule; only the folder is destroyed. Use `archive` unless you have an explicit reason.",
             ),
         },
-        async (args) => {
+        async (args, extra) => {
           const result = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/apps/${encodeURIComponent(args.app)}`,
             method: "DELETE",
             body: { folderDisposition: args.folderDisposition ?? "archive" },
@@ -84,8 +86,12 @@ export function buildAppsServer(opts: BuildAppsServerOptions) {
         "app_list",
         "List installed apps with id, name, version, status, and install time.",
         {},
-        async () => {
-          const rows = await daemonFetch({ ...ctx, path: "/api/apps" });
+        async (_args, extra) => {
+          const rows = await daemonFetch({
+            ...ctx,
+            signal: signalFrom(extra),
+            path: "/api/apps",
+          });
           return {
             content: [{ type: "text", text: JSON.stringify(rows, null, 2) }],
           };
@@ -95,9 +101,10 @@ export function buildAppsServer(opts: BuildAppsServerOptions) {
         "app_inspect",
         "Read full app details: registry row, parsed manifest, associated agents + schedules + mcp servers, folder path.",
         { app: z.string() },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/apps/${encodeURIComponent(args.app)}`,
           });
           return {
@@ -109,9 +116,10 @@ export function buildAppsServer(opts: BuildAppsServerOptions) {
         "app_reload",
         "Re-read the manifest from disk and reconcile the DB. No-op when the manifest hasn't changed. Does not archive agents removed from the manifest — use uninstall for that.",
         { app: z.string() },
-        async (args) => {
+        async (args, extra) => {
           const result = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/apps/${encodeURIComponent(args.app)}/reload`,
             method: "POST",
           });

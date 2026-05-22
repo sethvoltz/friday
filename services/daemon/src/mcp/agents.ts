@@ -10,7 +10,7 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { AgentType } from "@friday/shared";
-import { daemonFetch } from "./http.js";
+import { daemonFetch, signalFrom } from "./http.js";
 
 interface BlockRow {
   id: number;
@@ -141,9 +141,10 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
               "Builder-only. Specifies which repo / branch the worktree is cut from.",
             ),
         },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/agents",
             method: "POST",
             body: {
@@ -172,13 +173,14 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
             .enum(["idle", "working", "stalled", "error", "archived"])
             .optional(),
         },
-        async (args) => {
+        async (args, extra) => {
           const params = new URLSearchParams();
           if (args.type) params.set("type", args.type);
           if (args.status) params.set("status", args.status);
           const qs = params.toString() ? `?${params.toString()}` : "";
           const rows = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/agents${qs}`,
           });
           return {
@@ -190,9 +192,10 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
         "agent_status",
         "Look up one agent's registry record.",
         { name: z.string() },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/agents/${encodeURIComponent(args.name)}`,
           });
           return {
@@ -212,9 +215,10 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
           name: z.string(),
           reason: z.enum(["completed", "abandoned", "failed"]),
         },
-        async (args) => {
+        async (args, extra) => {
           const row = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/agents/${encodeURIComponent(args.name)}/archive`,
             method: "POST",
             body: { reason: args.reason },
@@ -241,12 +245,13 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
             .optional()
             .describe("Default `markdown`."),
         },
-        async (args) => {
+        async (args, extra) => {
           const params = new URLSearchParams();
           params.set("limit", String(args.limit ?? 30));
           const qs = `?${params.toString()}`;
           const payload = (await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: `/api/agents/${encodeURIComponent(args.name)}/blocks${qs}`,
           })) as { blocks: BlockRow[] };
           const blocks = payload.blocks ?? [];

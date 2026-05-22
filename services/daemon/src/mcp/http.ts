@@ -14,6 +14,21 @@
 
 import { DAEMON_SECRET_HEADER, getDaemonSecret } from "@friday/shared";
 
+/**
+ * Extract the AbortSignal from the SDK's `extra` argument passed to MCP tool
+ * handlers. The Anthropic SDK types it `unknown` (it's the MCP SDK's
+ * `RequestHandlerExtra`, which carries `signal: AbortSignal`). When the user
+ * hits Stop or the worker's `abortController` fires, the SDK signals every
+ * in-flight handler via this signal — pass it into `daemonFetch` and the
+ * worker stops blocking on the daemon's response immediately. See FRI-66 and
+ * ADR-030 for the daemon-side semantics (writes still complete server-side;
+ * only the worker's wait is cancelled).
+ */
+export function signalFrom(extra: unknown): AbortSignal | undefined {
+  const s = (extra as { signal?: unknown } | null | undefined)?.signal;
+  return s instanceof AbortSignal ? s : undefined;
+}
+
 export interface DaemonFetchOptions {
   port: number;
   path: string;
@@ -21,6 +36,17 @@ export interface DaemonFetchOptions {
   body?: unknown;
   callerName?: string;
   callerType?: string;
+  /**
+   * FRI-66: optional AbortSignal forwarded to the underlying `fetch()`. MCP
+   * tool handlers receive `extra.signal` from the SDK whenever the user hits
+   * Stop or the worker's `abortController` fires; threading it here aborts
+   * the daemon-bound HTTP request at the worker → daemon boundary so an
+   * in-flight `linear_create_issue` / `mail_send` / `ticket_create` stops
+   * blocking the worker on the response. Idempotent reads are safe to drop
+   * mid-flight; write semantics are documented in ADR-030 (the daemon-side
+   * handler completes; only the worker's wait on the response is cancelled).
+   */
+  signal?: AbortSignal;
 }
 
 export async function daemonFetch<T = unknown>(
@@ -38,6 +64,7 @@ export async function daemonFetch<T = unknown>(
     method: opts.method ?? "GET",
     headers,
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    ...(opts.signal ? { signal: opts.signal } : {}),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");

@@ -7,7 +7,7 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { AgentType } from "@friday/shared";
-import { daemonFetch } from "./http.js";
+import { daemonFetch, signalFrom } from "./http.js";
 
 export const INTEGRATIONS_SERVER_NAME = "friday-integrations";
 
@@ -37,9 +37,10 @@ export function buildIntegrationsServer(
             .string()
             .describe("Linear issue identifier, e.g. `FRI-42` or `ENG-123`."),
         },
-        async (args) => {
+        async (args, extra) => {
           const result = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/integrations/linear/import",
             method: "POST",
             body: { identifier: args.identifier },
@@ -73,9 +74,10 @@ export function buildIntegrationsServer(
               'Linear issue priority. Maps to Linear\'s 0–4 wire format: "none"=0, "urgent"=1, "high"=2, "medium"=3, "low"=4. Omit to leave unset (Linear defaults to "none").',
             ),
         },
-        async (args) => {
+        async (args, extra) => {
           const result = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/integrations/linear/create-issue",
             method: "POST",
             body: {
@@ -126,9 +128,10 @@ export function buildIntegrationsServer(
               'Linear issue priority. Maps to Linear\'s 0–4 wire format: "none"=0, "urgent"=1, "high"=2, "medium"=3, "low"=4.',
             ),
         },
-        async (args) => {
+        async (args, extra) => {
           const result = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/integrations/linear/update-issue",
             method: "POST",
             body: {
@@ -148,9 +151,10 @@ export function buildIntegrationsServer(
         "linear_reconcile",
         "Run a Linear reconcile pass on demand: list active Linear issues, cross-reference against existing Friday tickets, and report orphans and stale links. Read-only — does not import.",
         {},
-        async () => {
+        async (_args, extra) => {
           const result = await daemonFetch({
             ...ctx,
+            signal: signalFrom(extra),
             path: "/api/integrations/linear/reconcile",
             method: "POST",
           });

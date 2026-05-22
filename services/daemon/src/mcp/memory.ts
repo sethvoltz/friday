@@ -14,7 +14,7 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { AgentType } from "@friday/shared";
-import { daemonFetch } from "./http.js";
+import { daemonFetch, signalFrom } from "./http.js";
 
 export const MEMORY_SERVER_NAME = "friday-memory";
 
@@ -84,7 +84,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
         .optional()
         .describe("Max results. Default 10."),
     },
-    async (args) => {
+    async (args, extra) => {
       const params = new URLSearchParams();
       params.set("q", args.query);
       if (args.tags && args.tags.length > 0)
@@ -92,6 +92,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
       if (args.limit) params.set("limit", String(args.limit));
       const rows = await daemonFetch({
         ...ctx,
+        signal: signalFrom(extra),
         path: `/api/memory/search?${params.toString()}`,
       });
       return {
@@ -104,9 +105,10 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
     "memory_get",
     "Read a memory entry in full by its id. Bumps the entry's recall counter so the FTS ranker learns which memories are useful in practice. Use when a search result's snippet isn't enough and you need the full body.",
     { id: z.string().describe("Memory entry id (slug).") },
-    async (args) => {
+    async (args, extra) => {
       const row = await daemonFetch({
         ...ctx,
+        signal: signalFrom(extra),
         path: `/api/memory/${encodeURIComponent(args.id)}`,
       });
       return {
@@ -134,13 +136,14 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
         .optional()
         .describe("Tags for retrieval. Lowercase, no spaces."),
     },
-    async (args) => {
+    async (args, extra) => {
       const titleErr = validateMemoryField("title", args.title);
       if (titleErr) return rejectionResult(titleErr);
       const contentErr = validateMemoryField("content", args.content);
       if (contentErr) return rejectionResult(contentErr);
       const row = await daemonFetch({
         ...ctx,
+        signal: signalFrom(extra),
         path: "/api/memory",
         method: "POST",
         body: {
@@ -169,7 +172,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
         })
         .describe("Fields to overwrite. Omitted fields are unchanged."),
     },
-    async (args) => {
+    async (args, extra) => {
       if (args.patch.title !== undefined) {
         const err = validateMemoryField("patch.title", args.patch.title);
         if (err) return rejectionResult(err);
@@ -180,6 +183,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
       }
       const row = await daemonFetch({
         ...ctx,
+        signal: signalFrom(extra),
         path: `/api/memory/${encodeURIComponent(args.id)}`,
         method: "PATCH",
         body: args.patch,
@@ -194,9 +198,10 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
     "memory_forget",
     "Delete a memory entry permanently. Use when a memory is outdated, contradicted by reality, or no longer relevant. Prefer `memory_update` to correct wrong details rather than forgetting and re-saving — update preserves recall history.",
     { id: z.string() },
-    async (args) => {
+    async (args, extra) => {
       await daemonFetch({
         ...ctx,
+        signal: signalFrom(extra),
         path: `/api/memory/${encodeURIComponent(args.id)}`,
         method: "DELETE",
       });
