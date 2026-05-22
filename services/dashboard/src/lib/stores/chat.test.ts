@@ -42,6 +42,26 @@ vi.mock("$lib/stores/persistent", () => ({
   KEYS: { transcript: (agent: string) => `transcript:${agent}` },
 }));
 
+/**
+ * Test helper: populate `chat.agents` with a single orchestrator row for
+ * the focused agent + given `sessionId`. The session filter in
+ * `applyZeroBlocks` now strictly requires the agent row to be present
+ * (the prior permissive "no row → return unfiltered" fallback was the
+ * post-`/clear` reload leak in production), so any test exercising
+ * `applyZeroBlocks` needs to mirror what Zero's `#bindAgents` listener
+ * does at runtime: drop an `AgentInfo` for the focused agent into
+ * `chat.agents` with whatever `sessionId` the test's row fixtures use.
+ */
+function attachSession(
+  chat: import("./chat.svelte").ChatState,
+  agent: string,
+  sessionId: string,
+): void {
+  chat.agents = [
+    { name: agent, type: "orchestrator", status: "idle", sessionId },
+  ];
+}
+
 // `sendQueue` is a singleton with internal $state. We stub the methods
 // the chat store reaches into so we can drive the queue from tests.
 const mockForAgent = vi.fn<(agent: string) => unknown[]>(() => []);
@@ -1999,6 +2019,7 @@ describe("unread badge gating (PR C)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s");
 
     // A user-only Zero snapshot — the assistant block exists upstream
     // but hasn't replicated to this client yet. resultType='unknown'
@@ -2052,6 +2073,7 @@ describe("unread badge gating (PR C)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s");
 
     const userBlockRow = {
       id: "1",
@@ -2114,6 +2136,7 @@ describe("unread badge gating (PR C)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s");
 
     // Simulate the eager-claim step done by ChatInput before flush.
     const queueBlockId = "blk-eager";
@@ -4396,6 +4419,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     const rows = [
       makeZeroBlocksRow({
         id: "1",
@@ -4434,6 +4458,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     // First snapshot: a single user block. Pass resultType='complete'
     // — without it, FRI-91 suppresses the safety net (the local replica
     // may not have caught up yet, so a missing assistant block is
@@ -4622,6 +4647,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     const { ChatState, noResponseIdForTurn } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     // Simulate parseBlocks having already synthesized an nr_ bubble
     // for turn t1 (because at parse time t1 had no assistant content).
     chat.messages = [
@@ -4680,6 +4706,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     // Pre-existing scroll-back state: an assistant bubble that's older
     // than what the Zero window will return (the user scrolled up,
     // loaded REST history). Bubble id is `b_<blockId>` so it matches
@@ -4718,6 +4745,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     // Initial snapshot: two assistant bubbles in the window.
     chat.applyZeroBlocks(
       [
@@ -4764,6 +4792,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     // Simulate the stale-cursor race: a prior REST `loadOlderTurns`
     // call hit the literal oldest row, got an empty response, and set
     // `reachedOldest = true`. Then Zero converges and brings rows in
@@ -4791,6 +4820,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     chat.messages = [
       {
         id: "u_queue_q1",
@@ -4982,6 +5012,7 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     const calls: Array<{ agent: string; blockId: string }> = [];
     chat.setMarkReadFn((agent, blockId) => calls.push({ agent, blockId }));
     chat.applyZeroBlocks(
@@ -5005,6 +5036,7 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     const calls: Array<{ agent: string; blockId: string }> = [];
     chat.setMarkReadFn((agent, blockId) => calls.push({ agent, blockId }));
     chat.applyZeroBlocks([makeZeroRow({ id: "1", block_id: "b1" })], "friday");
@@ -5017,6 +5049,7 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     const calls: Array<{ agent: string; blockId: string }> = [];
     chat.setMarkReadFn((agent, blockId) => calls.push({ agent, blockId }));
     chat.applyZeroBlocks([makeZeroRow({ id: "1", block_id: "b1" })], "friday");
@@ -5034,6 +5067,10 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
   it("focus switch resets the dedup memo so re-focusing the same agent re-fires", async () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "idle", sessionId: "s1" },
+      { name: "other", type: "orchestrator", status: "idle", sessionId: "s1" },
+    ];
     const calls: Array<{ agent: string; blockId: string }> = [];
     chat.setMarkReadFn((agent, blockId) => calls.push({ agent, blockId }));
 
@@ -5079,6 +5116,7 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
     const calls: Array<{ agent: string; blockId: string }> = [];
     chat.setMarkReadFn((agent, blockId) => calls.push({ agent, blockId }));
     chat.applyZeroBlocks([], "friday");
@@ -5146,6 +5184,7 @@ describe("FRI-103: canonical-block ack + queueSynth ghost cleanup", () => {
     const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
 
     // Push the queue-synth bubble the same way `loadAgentTurns` would
     // (mirrors the `queueSynth` map at chat.svelte.ts:1501) so the
@@ -5224,6 +5263,7 @@ describe("FRI-103: canonical-block ack + queueSynth ghost cleanup", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
 
     // Seed the synth bubble the way loadAgentTurns would after
     // rehydration.
@@ -5427,6 +5467,62 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
     fresh.clearLocalView("kitchen");
 
     expect(mockRemoveKey).not.toHaveBeenCalled();
+  });
+
+  it("applyZeroBlocks early-returns when the agents row hasn't replicated yet (no permissive fallback)", async () => {
+    // The post-`/clear` reload leak: blocks slice fired before agents
+    // slice replicated, the filter's permissive fallback rendered the
+    // agent-scoped snapshot as-is, prior session bled back onto the
+    // screen. Strict early-return is the contract now; the agents
+    // listener in zero.svelte.ts re-fires applyZeroBlocks once the
+    // agent row lands so the gate doesn't strand the view.
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    // chat.agents intentionally empty — simulate the cold-reload race.
+
+    fresh.applyZeroBlocks(
+      [
+        {
+          id: "blk-prior",
+          block_id: "blk-prior",
+          turn_id: "t-prior",
+          agent_name: "friday",
+          session_id: "sess-prior",
+          message_id: null,
+          block_index: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          content_json: { text: "from before /clear" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1_000,
+          last_event_seq: 1,
+        } as import("./chat.svelte").ZeroBlocksRow,
+      ],
+      "friday",
+      "complete",
+    );
+
+    // Critical assertion: chat.messages stays untouched. The prior
+    // session row is NOT rendered while we wait for the agents row.
+    expect(fresh.messages).toEqual([]);
+    // zeroBlocksActive stays false too — the gate is "did we process
+    // a snapshot," and we deferred.
+    expect(fresh.zeroBlocksActive).toBe(false);
+  });
+
+  it("clearLocalView clears loadingInitial so the skeleton doesn't outlive the cleared session", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    fresh.loadingInitial = true;
+
+    fresh.clearLocalView("friday");
+
+    expect(fresh.loadingInitial).toBe(false);
   });
 
   it("loadAgentTurns filters the localStorage cache to the agent's current session before painting", async () => {

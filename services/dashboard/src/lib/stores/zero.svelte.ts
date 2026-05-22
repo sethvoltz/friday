@@ -506,6 +506,25 @@ class ZeroSyncStore {
       // wedges from lost tool_result rows or evicted per-turn replay
       // buffers converge to terminal here.
       chat.reconcileAgentStatuses(rows);
+      // Re-fire applyZeroBlocks for the focused agent whenever the
+      // agents snapshot updates. The blocks slice and the agents slice
+      // materialize independently — on a cold reload the blocks
+      // listener can deliver rows before the agents query has
+      // replicated, in which case applyZeroBlocks early-returns
+      // (`!chat.agents.some(a => a.name === forAgent)`) and leaves the
+      // skeleton up. This call drains that gate the moment the agent
+      // row lands: chat.agents now has the focused agent, so the
+      // session filter can scope the existing blocks snapshot
+      // correctly. Also catches the post-`/clear` agents.session_id =
+      // null update — chat.messages flips from the (already-emptied)
+      // prior session to filtered-empty without waiting for the next
+      // blocks event.
+      if (
+        this.blocksAgent !== null &&
+        this.blocksAgent === chat.focusedAgent
+      ) {
+        chat.applyZeroBlocks(this.blocks, this.blocksAgent, this.blocksResultType);
+      }
       // Explicit wake-lock reconcile. The wake-lock module's $effect
       // tracks `chat.agents` reads in theory, but cross-context
       // propagation from a Zero listener callback is unreliable in

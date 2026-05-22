@@ -240,12 +240,20 @@ export const PENDING_SESSION_SENTINEL = "__pending__";
  * lifecycle `session-update` sweep rewrites them to the real id, and
  * the live view needs to render the user bubble during that window.
  *
- * Fallback when `agents` doesn't yet contain the focused agent (the
- * startup window before Zero's agents query replicates, or unit-test
- * fixtures that don't populate chat.agents): return the rows
- * unfiltered. Showing the legacy cache or pre-session-id snapshot
- * temporarily is better than rendering an empty chat; the next Zero
- * snapshot after the agent row lands narrows it correctly.
+ * **STRICT contract:** when `agents` does not contain a row for the
+ * focused agent, return `[]`. The earlier permissive fallback
+ * (return rows unfiltered) was the load-bearing leak behind the
+ * post-`/clear` reload bug — Zero's `agents` and `blocks` slices
+ * materialize independently, and on a cold reload the `blocks`
+ * listener can fire `applyZeroBlocks` before the `agents` query has
+ * replicated. With the permissive fallback that meant the prior
+ * session's full transcript got rendered in the window between
+ * blocks-arriving and agents-arriving. Callers must therefore
+ * either ensure `chat.agents` is populated before they invoke the
+ * filter, or accept "render nothing yet" and re-invoke once Zero
+ * pushes the agents row — see the `#bindAgents` update callback in
+ * `zero.svelte.ts` which now re-fires `applyZeroBlocks` for the
+ * focused agent whenever `chat.agents` updates.
  *
  * Duck-types over both row shapes — Zero rows expose `session_id`
  * (snake_case), `BlockRow` exposes `sessionId` (camelCase).
@@ -254,7 +262,7 @@ export function filterRowsToCurrentSession<
   T extends { sessionId?: string; session_id?: string },
 >(rows: readonly T[], agent: string, agents: readonly AgentInfo[]): T[] {
   const agentRow = agents.find((a) => a.name === agent);
-  if (!agentRow) return [...rows];
+  if (!agentRow) return [];
   const currentSessionId = agentRow.sessionId;
   return rows.filter((r) => {
     const sid = r.session_id ?? r.sessionId;
@@ -585,6 +593,11 @@ export class ChatState {
     this.zeroBlocksActive = false;
     this.zeroSeenBlockIds = new Set();
     this.loadingOlder = false;
+    // Suppress the skeleton-shimmer post-clear. Without this the empty
+    // chat that should signal "session cleared, type to start fresh"
+    // is masked by the loading affordance until the next Zero snapshot
+    // lands — confusing because the agent is intentionally at rest.
+    this.loadingInitial = false;
     // The daemon SIGTERMs the worker as part of `/clear`; any value in
     // the per-agent inflight slot points at a turn id that no longer
     // exists, which would mis-render the input bar's Send affordance
@@ -1892,6 +1905,17 @@ export class ChatState {
     resultType: "complete" | "unknown" | "error" = "unknown",
   ): void {
     if (this.focusedAgent !== forAgent) return;
+    // Defer the entire snapshot if we don't yet know which session
+    // this agent is on. Zero's `agents` and `blocks` slices materialize
+    // independently — on a cold reload the blocks listener routinely
+    // fires before the agents query has replicated, and without this
+    // gate the session filter would have nothing to scope against
+    // (the prior permissive fallback rendered the whole agent-scoped
+    // snapshot, which leaked the just-cleared session back onto the
+    // screen). The agents listener in `zero.svelte.ts` re-fires
+    // `applyZeroBlocks` for the focused agent once the row replicates,
+    // so this early return self-heals.
+    if (!this.agents.some((a) => a.name === forAgent)) return;
     this.zeroBlocksActive = true;
     this.loadingInitial = false;
 
@@ -1905,7 +1929,7 @@ export class ChatState {
     if (resultType === "complete") this.reachedOldest = true;
 
     // The live chat view is the agent's CURRENT session. See
-    // `filterRowsToCurrentSession` for the predicate + fallback.
+    // `filterRowsToCurrentSession`.
     rows = filterRowsToCurrentSession(rows, forAgent, this.agents);
 
     if (rows.length === 0) {
