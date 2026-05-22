@@ -43,7 +43,7 @@ function parseReason(raw: string | null): ArchiveReason {
   // a safe default. The lifecycle code branches on the reason for
   // ticket-close behavior; an unknown value defaulting to
   // 'abandoned' matches the slash-command default.
-  if (raw === "completed" || raw === "abandoned" || raw === "failed" || raw === "refork") {
+  if (raw === "completed" || raw === "abandoned" || raw === "failed") {
     return raw;
   }
   return "abandoned";

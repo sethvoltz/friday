@@ -29,6 +29,7 @@ let linkExternal: typeof import("@friday/shared/services")["linkExternal"];
 let listComments: typeof import("@friday/shared/services")["listComments"];
 let registry: typeof import("./registry.js");
 let archiveAgent: typeof import("./lifecycle.js")["archiveAgent"];
+let forceWorkerRefork: typeof import("./lifecycle.js")["forceWorkerRefork"];
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "lc_ticket_close" });
@@ -36,7 +37,7 @@ beforeAll(async () => {
     "@friday/shared/services"
   ));
   registry = await import("./registry.js");
-  ({ archiveAgent } = await import("./lifecycle.js"));
+  ({ archiveAgent, forceWorkerRefork } = await import("./lifecycle.js"));
 });
 
 afterAll(async () => {
@@ -112,20 +113,31 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     );
   });
 
-  it("reason='refork' leaves the linked ticket untouched (watchdog invariant)", async () => {
+  it("forceWorkerRefork leaves the linked ticket AND the agent row untouched (watchdog invariant)", async () => {
     const t = await createTicket({ title: "delta-task", status: "in_progress" });
     await registerBuilderWithTicket("delta", t.id);
 
-    await archiveAgent("delta", { reason: "refork" });
-    // Wait for the archive to land (positive signal); then assert the ticket
-    // wasn't touched (negative). 'refork' must not call into ticket close.
-    await vi.waitFor(
-      async () => {
-        expect((await registry.getAgent("delta"))?.status).toBe("archived");
-      },
-      { timeout: 5000, interval: 25 },
-    );
+    await forceWorkerRefork("delta");
+    // The refork path doesn't go through `closeTicketForArchive` at all,
+    // and the row stays at the lifecycle-owned 'idle' (not 'archived') —
+    // that's the point of replacing the prior `archiveAgent(..., refork)`
+    // call. Wait briefly to catch any stray fire-and-forget writes.
+    await new Promise((r) => setTimeout(r, 200));
     expect((await getTicket(t.id))?.status).toBe("in_progress");
+    expect((await registry.getAgent("delta"))?.status).toBe("idle");
+  });
+
+  it("forceWorkerRefork converges a 'working' row to 'idle'", async () => {
+    // The whole point: post-refork, the agent is dispatchable again — not
+    // stranded at 'working' (would block another POST in the queued state)
+    // and not 'archived' (the prior polite-lie behavior). No live worker,
+    // so this exercises the "no w" branch's explicit setStatus('idle').
+    await registerBuilderWithTicket("theta", undefined);
+    await registry.setStatus("theta", "working");
+
+    await forceWorkerRefork("theta");
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await registry.getAgent("theta"))?.status).toBe("idle");
   });
 
   it("archive of an agent with no ticketId is a no-op on tickets, archive still happens", async () => {

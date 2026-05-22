@@ -127,6 +127,13 @@ export interface LiveWorker {
    *  killed the worker. Subsequent error/turn-complete IPC messages from
    *  the dying worker are ignored so we don't double-publish turn_done. */
   forceKilled?: boolean;
+  /** Set by `forceWorkerRefork` before the live-map delete. Tells the
+   *  `child.on("exit")` handler to skip its setStatus('idle') reset — the
+   *  refork path owns the post-teardown status write itself (awaited
+   *  before the function returns), so a fire-and-forget reset from this
+   *  dying worker would race the immediate setStatus('working') from the
+   *  replacement worker's spawnTurn and silently clobber it back to idle. */
+  suppressIdleReset?: boolean;
   /** FRI-61 wedge detector: count of `block-start` IPCs observed on the
    *  current turn. Reset on every `turn-complete`/`error` and on
    *  `sendPrompt` (defense-in-depth for future re-orderings). */
@@ -427,7 +434,12 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     // of an archive call would race the wrong status. Same for "error":
     // a crash-marked row stays crashed. The lookup is async now (ADR-023);
     // do it inside a fire-and-forget so the exit handler stays sync.
+    // `suppressIdleReset` covers the forced-refork case: forceWorkerRefork
+    // owns the post-teardown status write itself, and a late fire-and-
+    // forget setStatus('idle') from here would race the replacement
+    // worker's setStatus('working').
     void (async () => {
+      if (w.suppressIdleReset) return;
       try {
         const cur = await registry.getAgent(input.agentName);
         if (cur && cur.status !== "archived" && cur.status !== "error") {
@@ -902,56 +914,23 @@ export function findAgentByTurnId(turnId: string): string | null {
 }
 
 /**
- * Tear down a live worker and clean its registry row. FIX_FORWARD 4.1: the
- * returned promise resolves only after the child process has actually
- * exited (or after a 5s SIGKILL fallback fires). The watchdog's refork
- * path awaits this so it can't race the next fork against the dying
- * worker's lingering IPC traffic.
+ * Drive a live worker through stop → exit → kill-fallback. FIX_FORWARD 4.1:
+ * the returned promise resolves only after the child process has actually
+ * exited (or after a 5s SIGKILL fallback fires). Callers await this so the
+ * next fork can't race the dying worker's lingering IPC traffic.
  *
  * F4-B: the resolved value is the captured `nextPrompts` queue. Watchdog
  * refork redispatches these so user prompts that arrived while the old
- * worker was hung aren't dropped on archive (FRI-4). Fire-and-forget
- * callers (REST archive endpoints, system commands) can ignore both the
- * promise and its value — the side-effects (registry archive,
- * agent_lifecycle event, live-map remove) happen synchronously up front.
+ * worker was hung aren't dropped (FRI-4).
  *
- * `opts.reason` is required: it both documents intent (was this a successful
- * completion, an abandonment, a failure, or an internal refork?) and drives
- * the linked-ticket close behavior. See `services/ticket-close.ts` for the
- * mapping. Watchdog refork must pass `"refork"` or the closer will move the
- * ticket to a terminal status on every transient stall.
+ * Internal helper. The caller is responsible for the synchronous side
+ * effects (live-map delete, optional registry archive, optional ticket
+ * close) BEFORE invoking — see `archiveAgent` and `forceWorkerRefork`.
  */
-export async function archiveAgent(
-  agentName: string,
-  opts: { reason: ArchiveReason },
+async function drainLiveWorker(
+  w: LiveWorker,
 ): Promise<WorkerPromptCommand[]> {
-  const w = live.get(agentName);
-  // Capture queued prompts before we drop the worker from the live map.
-  // The watchdog's refork path uses these to redispatch on the fresh
-  // worker; ad-hoc archive calls just ignore the return value.
-  const drainedPrompts: WorkerPromptCommand[] = w ? [...w.nextPrompts] : [];
-  // Capture ticketId BEFORE registry.archiveAgent — defensive against a
-  // future refactor that nulls the row's fields on archive. The closer
-  // reads from this captured value, not from the registry.
-  const agentRow = await registry.getAgent(agentName);
-  const ticketId =
-    agentRow && "ticketId" in agentRow ? agentRow.ticketId ?? null : null;
-  // Synchronous side-effects: drop from the live map so subsequent
-  // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
-  // before the child has fully exited.
-  if (w) live.delete(agentName);
-  await registry.archiveAgent(agentName);
-  // Phase 5: `agent_lifecycle:archive` SSE retired — Zero replicates
-  // the agents.status='archived' UPDATE; the dashboard sidebar drops
-  // the row via the reactive query.
-  // Fire-and-forget: the closer owns its error handling and must never
-  // bubble back into the worker-teardown path.
-  void closeTicketForArchive({
-    ticketId,
-    reason: opts.reason,
-    agentName,
-  });
-  if (!w) return drainedPrompts;
+  const drainedPrompts: WorkerPromptCommand[] = [...w.nextPrompts];
 
   // Ask the worker to stop gracefully, then wait for the actual exit
   // event. SIGTERM-on-pgrp backstop at 5s catches descendants the worker
@@ -961,7 +940,7 @@ export async function archiveAgent(
     // Child is already gone, but descendants may still be running.
     killPgrp(w.pgid, "SIGTERM");
     setTimeout(() => killPgrp(w.pgid, "SIGKILL"), 2_000).unref();
-    return Promise.resolve(drainedPrompts);
+    return drainedPrompts;
   }
 
   return new Promise<WorkerPromptCommand[]>((resolve) => {
@@ -988,6 +967,87 @@ export async function archiveAgent(
       setTimeout(() => killPgrp(w.pgid, "SIGKILL"), 2_000).unref();
     }, 5_000).unref();
   });
+}
+
+/**
+ * Tear down a live worker and archive its registry row. The archive write
+ * makes the row terminal; `opts.reason` documents intent and drives the
+ * linked-ticket close behavior (see `services/ticket-close.ts`). Fire-and-
+ * forget callers (REST archive endpoints, system commands) can ignore the
+ * returned drained-prompts queue — the side effects (registry archive,
+ * live-map remove, ticket close) happen synchronously up front.
+ */
+export async function archiveAgent(
+  agentName: string,
+  opts: { reason: ArchiveReason },
+): Promise<WorkerPromptCommand[]> {
+  const w = live.get(agentName);
+  // Capture ticketId BEFORE registry.archiveAgent — defensive against a
+  // future refactor that nulls the row's fields on archive. The closer
+  // reads from this captured value, not from the registry.
+  const agentRow = await registry.getAgent(agentName);
+  const ticketId =
+    agentRow && "ticketId" in agentRow ? agentRow.ticketId ?? null : null;
+  // Synchronous side-effects: drop from the live map so subsequent
+  // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
+  // before the child has fully exited.
+  if (w) live.delete(agentName);
+  await registry.archiveAgent(agentName);
+  // Phase 5: `agent_lifecycle:archive` SSE retired — Zero replicates
+  // the agents.status='archived' UPDATE; the dashboard sidebar drops
+  // the row via the reactive query.
+  // Fire-and-forget: the closer owns its error handling and must never
+  // bubble back into the worker-teardown path.
+  void closeTicketForArchive({
+    ticketId,
+    reason: opts.reason,
+    agentName,
+  });
+  if (!w) return [];
+  return drainLiveWorker(w);
+}
+
+/**
+ * Tear down a live worker WITHOUT archiving its registry row. Used by
+ * `/clear` and by the FRI-33 watchdog refork: the agent stays present and
+ * dispatchable, just with a freshly forked process on the next turn.
+ * Returns any queued prompts captured from the dying worker so the
+ * watchdog can redispatch them on the replacement.
+ *
+ * `archived` is reserved for actual archives; using it as a teardown
+ * mechanism made `agents.status='archived'` mean two unrelated things
+ * (terminal vs. transient refork) and left the dashboard rendering the
+ * archived dot for an agent that was about to come back. The
+ * `child.on("exit")` handler resets status to `idle` whenever the row
+ * is neither `archived` nor `error`, so the post-teardown state for a
+ * forced refork is honestly `idle` (or `working`, once the replacement
+ * worker's first turn lands).
+ */
+export async function forceWorkerRefork(
+  agentName: string,
+): Promise<WorkerPromptCommand[]> {
+  const w = live.get(agentName);
+  if (w) {
+    // Block the exit handler's fire-and-forget setStatus('idle'). We
+    // own the post-teardown status write below; without this gate the
+    // exit IIFE could land on the row AFTER a watchdog replacement
+    // worker's spawnTurn has flipped it to 'working' and silently
+    // clobber it back to 'idle'.
+    w.suppressIdleReset = true;
+    live.delete(agentName);
+  }
+  if (!w) {
+    // No live worker — the row may still be at 'working' from a stale
+    // setStatus, so converge it explicitly. No-op when already idle.
+    await registry.setStatus(agentName, "idle");
+    return [];
+  }
+  const drained = await drainLiveWorker(w);
+  // Explicit terminal write: the agent's row is now `idle` with no live
+  // worker. The exit handler's reset path is gated by suppressIdleReset,
+  // so this is the only writer of 'idle' on this teardown.
+  await registry.setStatus(agentName, "idle");
+  return drained;
 }
 
 /**

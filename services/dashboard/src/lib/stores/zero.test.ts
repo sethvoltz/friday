@@ -614,24 +614,66 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
     expect(destroyCalls).toContain("destroy-0");
   });
 
-  it("rebinding to the same agent is a no-op", async () => {
+  it("rebinding to the same agent doesn't re-materialize but does re-fire listeners", async () => {
+    // Past-session → live navigation lands here: ChatShell remounts the
+    // live view, chat.loadAgentTurns(agent) sets loadingInitial=true and
+    // calls into this binder expecting the listener to fire applyZeroBlocks
+    // (which flips loadingInitial back to false). Tearing the materialized
+    // view down + re-materializing would flash the data and waste a zero-
+    // cache round-trip, so the binder short-circuits the view work but
+    // still fires the listener set so callers see a synthetic "current
+    // snapshot" frame.
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
 
     const z = instances[0];
-    let count = 0;
+    let materializeCount = 0;
+    const row = {
+      id: 1,
+      block_id: "b1",
+      turn_id: "t1",
+      agent_name: "friday",
+      session_id: "s1",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: { text: "hi" },
+      status: "complete",
+      streaming: false,
+      origin_mutation_id: null,
+      ts: 1_000,
+      last_event_seq: 1,
+    };
     z.materialize = vi.fn(() => {
-      count++;
+      materializeCount++;
       return {
-        data: [],
+        data: [row],
         addListener: vi.fn(() => () => {}),
         destroy: vi.fn(),
       };
     });
+
+    const fired: Array<{ rows: number; resultType: string }> = [];
+    zeroSync.onBlocksUpdate((rows, resultType) => {
+      fired.push({ rows: rows.length, resultType });
+    });
+    const firedAtRegistration = fired.length;
+
     zeroSync.bindBlocksFor("friday");
-    const after = count;
+    const materializeAfterFirstBind = materializeCount;
+    const firedAfterFirstBind = fired.length;
+
     zeroSync.bindBlocksFor("friday");
-    expect(count).toBe(after);
+
+    // Materialize was NOT called again — same-agent rebind keeps the view.
+    expect(materializeCount).toBe(materializeAfterFirstBind);
+    // But listeners DID fire again, with the current snapshot (1 row).
+    expect(fired.length).toBe(firedAfterFirstBind + 1);
+    expect(fired.at(-1)).toEqual({ rows: 1, resultType: "unknown" });
+    // Sanity: the registration-time fire happened before either bind.
+    expect(firedAtRegistration).toBe(1);
   });
 
   it("unbindBlocks clears state + tears down the view", async () => {

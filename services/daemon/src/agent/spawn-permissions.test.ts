@@ -316,33 +316,31 @@ describe("registry.registerAgent persists spawn_reason (ADR-022 §6 #6)", () => 
 });
 
 describe("watchdog refork preserves spawn_reason (ADR-022 §6 #11 #33)", () => {
-  it("re-registering after archive keeps the prior spawn_reason intact", async () => {
-    // The watchdog refork path: archive → re-register via the same
-    // name. The conflict-on-name path doesn't touch spawn_reason
-    // (only status + updatedAt move), and the explicit
-    // `spawnReason: priorSpawnReason` we now pass mirrors the row
-    // in case the conflict semantics ever change. End state: the
-    // audit column survives.
+  it("forceWorkerRefork leaves spawn_reason and ticket fields untouched", async () => {
+    // The watchdog refork path used to archive → re-register; both touched
+    // (or threatened to touch) spawn_reason. The new path skips the
+    // archive write entirely and the row is never replaced, so the audit
+    // column survives by simple non-mutation. Exercise that contract:
+    // register, refork (no live worker — exit path is a no-op except for
+    // the setStatus('idle') terminal write), assert all the
+    // long-lived-row columns are intact.
+    const { forceWorkerRefork } = await import("./lifecycle.js");
     await registry.registerAgent({
       name: "refork-pin",
       type: "helper",
       parentName: "builder-A",
       spawnReason: "test-refork-pin",
     });
-    await registry.archiveAgent("refork-pin");
 
-    const priorSpawnReason = await registry.getSpawnReason("refork-pin");
-    expect(priorSpawnReason).toBe("test-refork-pin");
-
-    // Simulate the watchdog's re-register step verbatim.
-    await registry.registerAgent({
-      name: "refork-pin",
-      type: "helper",
-      parentName: "builder-A",
-      spawnReason: priorSpawnReason,
-    });
+    await forceWorkerRefork("refork-pin");
 
     expect(await registry.getSpawnReason("refork-pin")).toBe("test-refork-pin");
+    const row = await registry.getAgent("refork-pin");
+    expect(row?.status).toBe("idle");
+    expect(row?.type).toBe("helper");
+    expect(row && "parentName" in row ? row.parentName : null).toBe(
+      "builder-A",
+    );
   });
 });
 

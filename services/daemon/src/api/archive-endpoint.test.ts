@@ -96,7 +96,7 @@ describe("POST /api/agents/:name/archive — contract", () => {
     const res = await fetch(archiveUrl("rest-bad-reason"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ reason: "refork" }), // refork is internal only
+      body: JSON.stringify({ reason: "garbage" }),
     });
 
     expect(res.status).toBe(400);

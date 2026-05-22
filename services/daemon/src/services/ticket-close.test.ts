@@ -148,16 +148,6 @@ describe("closeTicketForArchive — local mapping", () => {
     });
   });
 
-  it("refork → ticket untouched", async () => {
-    const t = await createTicket({ title: "t", status: "in_progress" });
-    await closeTicketForArchive({
-      ticketId: t.id,
-      reason: "refork",
-      agentName: "delta",
-    });
-    expect((await getTicket(t.id))?.status).toBe("in_progress");
-  });
-
   it("null ticketId → no-op, no throw", async () => {
     await expect(
       closeTicketForArchive({
