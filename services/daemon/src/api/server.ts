@@ -50,7 +50,7 @@ import {
   type MemoryEntry,
 } from "@friday/memory";
 import { renderPinnedFacts } from "../agent/pinned-facts.js";
-import { wrapWithRecall } from "../agent/recall.js";
+import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
 import { resolveRecipient, validateRecipient } from "../comms/recipient.js";
 import {
   DEFAULT_RULE,
@@ -232,7 +232,15 @@ async function handle(
       : baseSystemPrompt;
     const allowedToolsOverride = skillMatch?.skill.allowedTools ?? undefined;
 
-    const wrappedPrompt = await wrapWithRecall(userText, userText, "user_chat");
+    const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } =
+      await composeDispatchPrompt({
+        intentText: userText,
+        intentTag: "user_chat",
+        body: userText,
+        agentType: agentRow.type,
+        baseSystemPrompt: systemPrompt,
+        skillMatch: skillMatch ?? undefined,
+      });
 
     // Persist the user's typed prompt as a `role='user'`, `source='user_chat'`
     // block before dispatching. Stays scoped to the user's literal input —
@@ -281,7 +289,7 @@ async function handle(
         agentName,
         agentType: agentRow.type,
         workingDirectory: turnCwd,
-        systemPrompt,
+        systemPrompt: dispatchSystemPrompt,
         prompt: wrappedPrompt,
         attachments: attachments.length > 0 ? attachments : undefined,
         turnId,
@@ -503,7 +511,14 @@ async function handle(
       },
       pinnedFacts,
     );
-    const wrappedPrompt = await wrapWithRecall(parsedText, parsedText, "user_chat");
+    const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } =
+      await composeDispatchPrompt({
+        intentText: parsedText,
+        intentTag: "user_chat",
+        body: parsedText,
+        agentType: agentRow.type,
+        baseSystemPrompt,
+      });
     const modelCfg = normalizeModelConfig(cfg.model);
     const resumeCwd = await registry.workingDirectoryFor(agentRow);
     dispatchTurn({
@@ -512,7 +527,7 @@ async function handle(
         agentName,
         agentType: agentRow.type,
         workingDirectory: resumeCwd,
-        systemPrompt: baseSystemPrompt,
+        systemPrompt: dispatchSystemPrompt,
         prompt: wrappedPrompt,
         turnId, // <-- reuse the failed turn's id
         model: modelCfg.name,
@@ -696,11 +711,14 @@ async function handle(
         ? `${baseSystemPrompt}\n\n---\n\nYou are running in a git worktree at \`${worktreePath}\` on branch \`${branch}\`. **Do not read, write, or modify files outside this directory.** All Bash commands run with this directory as cwd by default; do not \`cd\` outside it.`
         : baseSystemPrompt;
     const modelCfg = normalizeModelConfig(cfg.model);
-    const wrappedSpawnPrompt = await wrapWithRecall(
-      body.prompt,
-      body.prompt,
-      "agent_spawn",
-    );
+    const { body: wrappedSpawnPrompt, systemPrompt: spawnSystemPrompt } =
+      await composeDispatchPrompt({
+        intentText: body.prompt,
+        intentTag: "agent_spawn",
+        body: body.prompt,
+        agentType: body.type,
+        baseSystemPrompt: systemPrompt,
+      });
     // FRI-71: persist the spawn-time prompt as a user block so the very first
     // turn renders with the originating user bubble (not just an orphan
     // assistant reply). The session id isn't known yet — `recordUserBlock`
@@ -726,7 +744,7 @@ async function handle(
         agentName: body.name,
         agentType: body.type,
         workingDirectory,
-        systemPrompt,
+        systemPrompt: spawnSystemPrompt,
         prompt: wrappedSpawnPrompt,
         turnId,
         model: body.model ?? modelCfg.name,
@@ -1908,7 +1926,14 @@ async function handleSystemCommand(
           seedPinnedFacts,
         );
         const modelCfg = normalizeModelConfig(cfg.model);
-        const wrappedTopic = await wrapWithRecall(topic, topic, "scratch");
+        const { body: wrappedTopic, systemPrompt: scratchSystemPrompt } =
+          await composeDispatchPrompt({
+            intentText: topic,
+            intentTag: "scratch",
+            body: topic,
+            agentType: "bare",
+            baseSystemPrompt: systemPrompt,
+          });
         // FRI-71: persist the seed topic as a user block so the bare agent's
         // first turn renders with the originating user bubble.
         try {
@@ -1931,7 +1956,7 @@ async function handleSystemCommand(
             agentName: name,
             agentType: "bare",
             workingDirectory: process.cwd(),
-            systemPrompt,
+            systemPrompt: scratchSystemPrompt,
             prompt: wrappedTopic,
             turnId: seedTurnId,
             model: modelCfg.name,
