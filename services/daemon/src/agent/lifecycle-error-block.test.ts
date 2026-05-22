@@ -70,7 +70,13 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
     const worker = makeFakeWorker() as { status: string };
-    handleEvent(worker as never, {
+    // Await handleEvent — it runs `await registry.setStatus(agent, 'idle')`
+    // AFTER publishing turn_done. Without the await, that pool UPDATE
+    // can still be in flight when afterAll's dropTestDb fires
+    // pg_terminate_backend, producing an unhandled `57P01 terminating
+    // connection due to administrator command` that fails the run even
+    // though every assertion passes.
+    await handleEvent(worker as never, {
       type: "error",
       message: "Anthropic temporarily overloaded — usually clears in a moment",
       recoverable: false,
@@ -80,10 +86,10 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
       requestId: "req_abc",
       rawMessage: `529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
     });
-    // turn_done is the LAST event in the error chain (block_start → DB
-    // INSERT → block_complete → error → turn_done). Waiting for it
-    // guarantees every prior side effect — including block_complete —
-    // has landed.
+    // Belt-and-braces: turn_done is the last event in the error chain
+    // and is already published by the time handleEvent returns; the
+    // waitFor is now a fast no-op but kept so the assertion below
+    // reads from `captured` with the same shape.
     await vi.waitFor(
       () =>
         expect(
@@ -164,7 +170,7 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    handleEvent(
+    await handleEvent(
       makeFakeWorker({ turnId: "turn-abort-1", abortRequested: true }) as never,
       {
         type: "error",
@@ -206,7 +212,7 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
   it("preserves the rate-limit retry hint through to the persisted block", async () => {
     const { handleEvent } = await import("./lifecycle.js");
 
-    handleEvent(makeFakeWorker({ turnId: "turn-rl-1" }) as never, {
+    await handleEvent(makeFakeWorker({ turnId: "turn-rl-1" }) as never, {
       type: "error",
       message: "Rate limited",
       recoverable: false,
@@ -237,7 +243,7 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     // IPC without the structured fields. We still persist the bubble.
     const { handleEvent } = await import("./lifecycle.js");
 
-    handleEvent(makeFakeWorker({ turnId: "turn-bare-1" }) as never, {
+    await handleEvent(makeFakeWorker({ turnId: "turn-bare-1" }) as never, {
       type: "error",
       message: "something blew up",
       recoverable: false,
