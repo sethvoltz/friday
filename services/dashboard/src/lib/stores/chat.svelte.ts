@@ -1,7 +1,7 @@
 import type { WireEvent } from "@friday/shared";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { initialPageSize } from "../util/page-size";
-import { KEYS, loadJSON, saveJSON } from "./persistent";
+import { KEYS, loadJSON, removeKey, saveJSON } from "./persistent";
 import { sendQueue } from "./send-queue.svelte";
 
 export interface ChatMessage {
@@ -212,6 +212,56 @@ export function userBlockIdForTurn(turnId: string): string {
  */
 export function noResponseIdForTurn(turnId: string): string {
   return `nr_${turnId}`;
+}
+
+/**
+ * Sentinel session_id the dashboard's `sendUserMessage` mutator writes
+ * on user blocks before the daemon has resolved the SDK's real session
+ * id. Matches `PENDING_SESSION_SENTINEL` in
+ * `packages/shared/src/services/blocks.ts` — duplicated here to keep
+ * the client free of a runtime dependency on the daemon-side service
+ * module (the constant is used in a hot reactive path).
+ */
+export const PENDING_SESSION_SENTINEL = "__pending__";
+
+/**
+ * Drop rows whose session id doesn't match the focused agent's current
+ * SDK session. Used at the two ingest points where multi-session
+ * agent-scoped data shows up in the live transcript:
+ *
+ *   1. {@link ChatState.applyZeroBlocks} — Zero's blocks slice is
+ *      agent-scoped, so prior-session rows ride along.
+ *   2. {@link ChatState.loadAgentTurns} — the localStorage transcript
+ *      cache pre-dates Zero and can contain blocks from whatever
+ *      session was active when it was last written.
+ *
+ * Rows tagged with the `__pending__` sentinel pass through: the
+ * dashboard mutator writes them that way before the daemon's
+ * lifecycle `session-update` sweep rewrites them to the real id, and
+ * the live view needs to render the user bubble during that window.
+ *
+ * Fallback when `agents` doesn't yet contain the focused agent (the
+ * startup window before Zero's agents query replicates, or unit-test
+ * fixtures that don't populate chat.agents): return the rows
+ * unfiltered. Showing the legacy cache or pre-session-id snapshot
+ * temporarily is better than rendering an empty chat; the next Zero
+ * snapshot after the agent row lands narrows it correctly.
+ *
+ * Duck-types over both row shapes — Zero rows expose `session_id`
+ * (snake_case), `BlockRow` exposes `sessionId` (camelCase).
+ */
+export function filterRowsToCurrentSession<
+  T extends { sessionId?: string; session_id?: string },
+>(rows: readonly T[], agent: string, agents: readonly AgentInfo[]): T[] {
+  const agentRow = agents.find((a) => a.name === agent);
+  if (!agentRow) return [...rows];
+  const currentSessionId = agentRow.sessionId;
+  return rows.filter((r) => {
+    const sid = r.session_id ?? r.sessionId;
+    if (sid === undefined) return false;
+    if (sid === PENDING_SESSION_SENTINEL) return true;
+    return currentSessionId !== undefined && sid === currentSessionId;
+  });
 }
 
 export class ChatState {
@@ -540,6 +590,17 @@ export class ChatState {
     // exists, which would mis-render the input bar's Send affordance
     // as Stop on the next render frame.
     this.inflightTurnIdByAgent[agent] = null;
+    // Wipe the localStorage transcript cache for this agent. The cache
+    // is the first-paint source on reload (loadAgentTurns reads it
+    // before Zero pushes a snapshot), so leaving it in place lets the
+    // pre-clear session's blocks bleed back onto the screen the moment
+    // the user refreshes the tab. The cache only ever gets re-written
+    // by the legacy REST path (`saveJSON(KEYS.transcript(...))` in
+    // `loadAgentTurns`), which is dormant when Zero is the data path —
+    // historical caches from the pre-Zero era stay around indefinitely
+    // until something explicitly invalidates them. `/clear` is that
+    // moment for this agent.
+    removeKey(KEYS.transcript(agent));
   }
 
   /** Apply an agent_status event with a debounce on working→idle so brief
@@ -1567,9 +1628,16 @@ export class ChatState {
     // bubble ids are stable across cache → fresh (parseBlocks uses
     // userBlockIdForTurn for user blocks and b_<blockId> for assistant),
     // so any in-flight SSE deltas attach cleanly.
-    const cached = isReentry
+    const cachedRaw = isReentry
       ? []
       : loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
+    // Apply the same session filter `applyZeroBlocks` uses, so the
+    // first-paint cache can't bleed prior sessions onto the screen
+    // post-`/clear`. The cache pre-dates Zero (its only writer is the
+    // legacy REST path, dormant in the Zero era), so stored blocks
+    // span whatever sessions were active when the entry was written —
+    // they need scoping at load time the same way live Zero rows do.
+    const cached = filterRowsToCurrentSession(cachedRaw, agent, this.agents);
     if (cached.length > 0) {
       this.messages = [
         ...parseBlocks(cached, agent, {
@@ -1836,33 +1904,9 @@ export class ChatState {
     // snapshot frame will either bring more rows or flip to 'complete'.
     if (resultType === "complete") this.reachedOldest = true;
 
-    // The live chat view is the agent's CURRENT session. Past sessions
-    // reach the user via the sidebar's expand-history submenu, not by
-    // bleeding into the live transcript. Filter Zero's agent-scoped
-    // snapshot down to rows whose session_id matches the agents row's
-    // current session_id; `__pending__` rows pass through because that's
-    // the sentinel the dashboard mutator writes for user blocks before
-    // the daemon's dispatch-listener has resolved the real session_id
-    // (the lifecycle session-update sweep rewrites them shortly after).
-    // Without this filter `/clear` would null the server-side session
-    // but the prior session's blocks would still paint the screen — the
-    // exact "core spec violation" report this PR closes.
-    //
-    // Fallback: when `chat.agents` doesn't yet contain a row for the
-    // focused agent (the brief startup window before Zero's agents
-    // query replicates, or unit-test fixtures that don't populate
-    // chat.agents), skip the filter. As soon as the agents row lands
-    // and the next blocks snapshot arrives, the filter starts honoring
-    // the current session id.
-    const agentRow = this.agents.find((a) => a.name === forAgent);
-    if (agentRow) {
-      const currentSessionId = agentRow.sessionId;
-      rows = rows.filter(
-        (r) =>
-          r.session_id === "__pending__" ||
-          (currentSessionId !== undefined && r.session_id === currentSessionId),
-      );
-    }
+    // The live chat view is the agent's CURRENT session. See
+    // `filterRowsToCurrentSession` for the predicate + fallback.
+    rows = filterRowsToCurrentSession(rows, forAgent, this.agents);
 
     if (rows.length === 0) {
       // Empty agent (no history yet) OR a just-cleared session whose

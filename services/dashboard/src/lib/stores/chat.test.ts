@@ -34,9 +34,11 @@ vi.mock("$lib/util/fetch-with-timeout", () => ({
 // jsdom store between cases.
 const mockLoadJSON = vi.fn();
 const mockSaveJSON = vi.fn();
+const mockRemoveKey = vi.fn<(key: string) => void>();
 vi.mock("$lib/stores/persistent", () => ({
   loadJSON: mockLoadJSON,
   saveJSON: mockSaveJSON,
+  removeKey: mockRemoveKey,
   KEYS: { transcript: (agent: string) => `transcript:${agent}` },
 }));
 
@@ -5403,5 +5405,94 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
     fresh.clearLocalView("kitchen");
 
     expect(fresh.messages.map((m) => m.id)).toEqual(["u1"]);
+  });
+
+  it("clearLocalView wipes the localStorage transcript cache for the focused agent", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    mockRemoveKey.mockClear();
+
+    fresh.clearLocalView("friday");
+
+    expect(mockRemoveKey).toHaveBeenCalledWith("transcript:friday");
+  });
+
+  it("clearLocalView does NOT wipe the transcript cache for a non-focused agent", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    mockRemoveKey.mockClear();
+
+    fresh.clearLocalView("kitchen");
+
+    expect(mockRemoveKey).not.toHaveBeenCalled();
+  });
+
+  it("loadAgentTurns filters the localStorage cache to the agent's current session before painting", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    fresh.agents = [
+      {
+        name: "friday",
+        type: "orchestrator",
+        status: "idle",
+        sessionId: "sess-current",
+      },
+    ];
+    // The cache holds blocks from a prior session that pre-dated the
+    // current one. Pre-fix: these would paint on first reload. Post-fix:
+    // they're filtered out at load time and never become bubbles.
+    const priorSessionBlock = {
+      id: "blk-prior",
+      blockId: "blk-prior",
+      turnId: "t-prior",
+      agentName: "friday",
+      sessionId: "sess-OLD",
+      messageId: null,
+      blockIndex: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      contentJson: JSON.stringify({ text: "from a past life" }),
+      status: "complete",
+      ts: 1_000,
+      lastEventSeq: 0,
+    };
+    const currentSessionBlock = {
+      ...priorSessionBlock,
+      id: "blk-now",
+      blockId: "blk-now",
+      turnId: "t-now",
+      sessionId: "sess-current",
+      contentJson: JSON.stringify({ text: "this is the live one" }),
+      ts: 2_000,
+    };
+    mockLoadJSON.mockImplementation((key: string) => {
+      if (key === "transcript:friday")
+        return [priorSessionBlock, currentSessionBlock];
+      return null;
+    });
+    // No Zero binder registered → loadAgentTurns also tries to fetch
+    // REST history. Stub fetch to return empty so the test isolates the
+    // cache-load behavior we're asserting on.
+    const realFetch = global.fetch;
+    global.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ blocks: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ) as typeof global.fetch;
+    try {
+      await fresh.loadAgentTurns("friday");
+    } finally {
+      global.fetch = realFetch;
+    }
+
+    const turnIds = new Set(
+      fresh.messages.map((m) => m.turnId).filter((t): t is string => !!t),
+    );
+    expect([...turnIds]).toEqual(["t-now"]);
   });
 });
