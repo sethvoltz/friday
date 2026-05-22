@@ -103,6 +103,11 @@ import {
 } from "../scheduler/state.js";
 import * as registry from "../agent/registry.js";
 import {
+  computeSpawnDepth,
+  validateSpawnPermissions,
+  type CallerType,
+} from "../agent/spawn-permissions.js";
+import {
   abortTurn,
   archiveAgent,
   dispatchTurn,
@@ -566,6 +571,7 @@ async function handle(
       model?: string;
       ticketId?: string;
       worktree?: { repo: string; branch?: string };
+      reason?: string;
     }>(req);
     if (!body.name || !isValidAgentName(body.name)) {
       return json(res, 400, {
@@ -585,6 +591,27 @@ async function handle(
         error: `cannot create agent of type "${body.type}" via this endpoint`,
       });
     }
+
+    // ADR-022 spawn-permission gate. Resolve the caller's agent type by
+    // looking up the parent row; absent parent ⇒ implicit orchestrator
+    // (matches the implicit-create path in POST /api/chat/turn). Builder
+    // and helper callers are restricted to spawning helpers and must
+    // include a non-empty `reason`.
+    const callerRow = body.parentName
+      ? await registry.getAgent(body.parentName)
+      : null;
+    const callerType: CallerType = callerRow?.type ?? "orchestrator";
+    const rejection = validateSpawnPermissions(
+      { type: body.type, reason: body.reason },
+      callerType,
+    );
+    if (rejection) {
+      return json(res, rejection.status, rejection.body);
+    }
+    const persistedReason =
+      callerType === "orchestrator"
+        ? null
+        : (body.reason ?? "").trim() || null;
 
     let workingDirectory = process.cwd();
     let worktreePath: string | undefined;
@@ -622,7 +649,35 @@ async function handle(
       worktreePath,
       branch,
       appId: inheritedAppId ?? undefined,
+      spawnReason: persistedReason,
     });
+
+    // ADR-022 telemetry: emit one `agent.spawn` event per successful
+    // spawn. Walks the parent chain to record true `depth` (1 =
+    // orchestrator-rooted) and the orchestrator-rooted `parentChain`
+    // capped at SPAWN_PARENT_CHAIN_CAP. The evolve depth scanner
+    // (`scanAgentSpawnDepth`) feeds off these lines.
+    try {
+      const { depth, parentChain } = await computeSpawnDepth(
+        body.parentName,
+        registry.getAgent,
+      );
+      logger.log("info", "agent.spawn", {
+        parent: body.parentName,
+        child: body.name,
+        type: body.type,
+        depth,
+        parentChain,
+        reason: persistedReason,
+      });
+    } catch (err) {
+      // Telemetry failure must never block the spawn — the row is
+      // already persisted and the worker is about to dispatch.
+      logger.log("warn", "agent.spawn.telemetry.error", {
+        agent: body.name,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     const turnId = `t_${randomUUID()}`;
     const stack = readPromptStack(body.type, []);

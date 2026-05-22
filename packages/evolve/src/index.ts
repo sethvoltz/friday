@@ -17,6 +17,7 @@
 export * from "./types.js";
 export * from "./store.js";
 export * from "./scan.js";
+export * from "./scan-agent-depth.js";
 export * from "./scan-friction.js";
 export * from "./scan-preferences.js";
 export * from "./rank.js";

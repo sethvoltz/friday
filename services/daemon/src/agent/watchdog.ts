@@ -130,6 +130,13 @@ async function refork(agentName: string): Promise<void> {
   // linked ticket (if any) must not be closed — work is continuing.
   const drained = await archiveAgent(agentName, { reason: "refork" });
 
+  // ADR-022 (FRI-102 AC #11): refork preserves the row's `spawn_reason`.
+  // AgentEntry omits this field (it's audit metadata, not part of the
+  // wire shape), so read it directly off the registry row before
+  // re-registering. Losing it on every refork would silently strip the
+  // audit trail the column exists to provide.
+  const priorSpawnReason = await registry.getSpawnReason(agentName);
+
   // The registry row was archived by archiveAgent. Re-register so the new
   // turn has a row to bind onto.
   await registry.registerAgent({
@@ -140,6 +147,7 @@ async function refork(agentName: string): Promise<void> {
     worktreePath:
       "worktreePath" in a ? a.worktreePath ?? undefined : undefined,
     branch: "branch" in a ? a.branch ?? undefined : undefined,
+    spawnReason: priorSpawnReason,
   });
 
   const cfg = loadConfig();

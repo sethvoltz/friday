@@ -97,16 +97,29 @@ describe("buildMcpServers: built-in surface", () => {
     }
   });
 
-  it("orchestrator alone gets agents/schedule/evolve", () => {
+  it("orchestrator/builder/helper get agents; orchestrator alone gets schedule/evolve", () => {
+    // ADR-022: agent_create / agent_* opens up to builder + helper. The
+    // daemon-side guard at POST /api/agents enforces the actual
+    // structural rules (orchestrator-only Builders, required `reason`
+    // for non-orchestrator callers).
     const orch = buildMcpServers(baseOpts("orchestrator"));
+    const builder = buildMcpServers(baseOpts("builder"));
     const helper = buildMcpServers(baseOpts("helper"));
-    for (const name of [
-      "friday-agents",
-      "friday-schedule",
-      "friday-evolve",
-    ]) {
+    const bare = buildMcpServers(baseOpts("bare"));
+    const scheduled = buildMcpServers(baseOpts("scheduled"));
+
+    expect(orch["friday-agents"]).toBeDefined();
+    expect(builder["friday-agents"]).toBeDefined();
+    expect(helper["friday-agents"]).toBeDefined();
+    expect(bare["friday-agents"]).toBeUndefined();
+    expect(scheduled["friday-agents"]).toBeUndefined();
+
+    for (const name of ["friday-schedule", "friday-evolve"]) {
       expect(orch[name]).toBeDefined();
+      expect(builder[name]).toBeUndefined();
       expect(helper[name]).toBeUndefined();
+      expect(bare[name]).toBeUndefined();
+      expect(scheduled[name]).toBeUndefined();
     }
   });
 
