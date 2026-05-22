@@ -1204,27 +1204,30 @@ class ZeroSyncStore {
    */
   /**
    * Phase 4.11b: dispatch a new user-chat turn through the
-   * `sendUserMessage` mutator. The dashboard pre-generates a UUID
-   * (used for both the row PK and the application-level block_id)
-   * and a turn id (`t_<UUID>`); the optimistic client write lands
-   * the bubble immediately; the canonical server write fires the
-   * Postgres trigger; the daemon's LISTEN handler resolves the
-   * agent, composes prompt, detects skills, wraps with recall, and
-   * dispatches the turn.
+   * `sendUserMessage` mutator. The caller (sendQueue) pre-mints a
+   * UUID at enqueue time and threads it through here as `blockId`
+   * — every retry of the same logical send reuses that id so the
+   * canonical `blocks.id` PK acts as the natural dedup boundary
+   * (FRI-103). The turn id is derived as `t_<blockId>`. The
+   * optimistic client write lands the bubble immediately; the
+   * canonical server write fires the Postgres trigger; the daemon's
+   * LISTEN handler resolves the agent, composes prompt, detects
+   * skills, wraps with recall, and dispatches the turn.
    *
    * Returns `{ blockId, turnId }` on success, or `null` if Zero
    * hasn't initialized yet (caller should retry on next flush).
    */
   async sendUserMessage(args: {
+    /** Pre-minted by the caller — see FRI-103 invariant in
+     *  `send-queue.svelte.ts`. Used as the canonical `blocks.id` PK
+     *  AND echoed back to the caller for ack-by-blockId. */
+    blockId: string;
     agent: string;
     text: string;
     attachments?: Array<{ sha256: string; filename: string; mime: string }>;
   }): Promise<{ blockId: string; turnId: string } | null> {
     if (!this.#zero) return null;
-    const blockId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `blk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const blockId = args.blockId;
     const turnId = `t_${blockId}`;
     try {
       await this.#zero!.mutate.sendUserMessage({
@@ -1236,9 +1239,13 @@ class ZeroSyncStore {
         ts: Date.now(),
       }).server;
     } catch (err) {
-      // Server-side error (most often a PK collision on retry —
-      // shouldn't happen with fresh UUIDs but defense-in-depth).
-      // Bubble up as null so the send-queue retry path can fire.
+      // Server-side error path. Note FRI-104: Zero 1.5.0's
+      // MutatorResult.server never actually rejects — application
+      // errors resolve to {type:"error"} and slip past this catch.
+      // The realistic null-return paths today are (1) the `!this.#zero`
+      // guard above (user typed before Zero connected) and (2) a
+      // synchronous throw inside the SDK call before `.server` access.
+      // FRI-104 owns the rework of this branch.
       void err;
       return null;
     }

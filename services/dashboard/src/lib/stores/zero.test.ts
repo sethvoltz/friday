@@ -1644,15 +1644,19 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
     return { zeroSync, z: instances[0]! };
   }
 
-  it("generates a UUID + t_-prefixed turn_id and dispatches the mutator with the full args", async () => {
+  it("uses the caller-supplied blockId + derives t_-prefixed turn_id and dispatches the mutator with the full args", async () => {
+    // FRI-103: blockId is now pre-minted by sendQueue at enqueue time
+    // and threaded through so retries reuse the same canonical id.
     const { zeroSync, z } = await bootedZero();
+    const blockId = "70df2671-7d96-45c7-83bf-28bfd0317f2a";
     const out = await zeroSync.sendUserMessage({
+      blockId,
       agent: "friday",
       text: "hello agent",
     });
     expect(out).not.toBeNull();
-    expect(out!.blockId.length).toBeGreaterThan(0);
-    expect(out!.turnId).toBe(`t_${out!.blockId}`);
+    expect(out!.blockId).toBe(blockId);
+    expect(out!.turnId).toBe(`t_${blockId}`);
 
     expect(z.mutate.sendUserMessage).toHaveBeenCalledTimes(1);
     const args = z.mutate.sendUserMessage.mock.calls[0][0] as {
@@ -1663,8 +1667,8 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
       attachments?: unknown;
       ts: number;
     };
-    expect(args.id).toBe(out!.blockId);
-    expect(args.turnId).toBe(out!.turnId);
+    expect(args.id).toBe(blockId);
+    expect(args.turnId).toBe(`t_${blockId}`);
     expect(args.agentName).toBe("friday");
     expect(args.text).toBe("hello agent");
     expect(typeof args.ts).toBe("number");
@@ -1677,6 +1681,7 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
       { sha256: "a".repeat(64), filename: "shot.png", mime: "image/png" },
     ];
     await zeroSync.sendUserMessage({
+      blockId: "11111111-2222-3333-4444-555555555555",
       agent: "friday",
       text: "see this",
       attachments,
@@ -1691,12 +1696,18 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
     // Server-side mutator failure must surface as null so the
     // send-queue retries on the next flush rather than treating
     // the dispatch as successful.
+    // NOTE FRI-104: this test mocks `.server: Promise.reject(...)`,
+    // a behaviour the real Zero 1.5.0 SDK never produces — both
+    // success and error paths resolve. FRI-104 owns rewriting this
+    // test against the actual `{type:"error"}` resolve shape; this
+    // ticket (FRI-103) only updates the call signature.
     const { zeroSync, z } = await bootedZero();
     z.mutate.sendUserMessage = vi.fn(() => ({
       client: Promise.resolve({ type: "success" }),
       server: Promise.reject(new Error("pk_collision")),
     }));
     const out = await zeroSync.sendUserMessage({
+      blockId: "22222222-3333-4444-5555-666666666666",
       agent: "friday",
       text: "boom",
     });
@@ -1710,7 +1721,11 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
     );
     const { zeroSync } = await importStore();
     await expect(
-      zeroSync.sendUserMessage({ agent: "friday", text: "x" }),
+      zeroSync.sendUserMessage({
+        blockId: "33333333-4444-5555-6666-777777777777",
+        agent: "friday",
+        text: "x",
+      }),
     ).resolves.toBeNull();
   });
 });
