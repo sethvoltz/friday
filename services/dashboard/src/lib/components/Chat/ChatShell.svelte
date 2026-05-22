@@ -5,12 +5,10 @@
   import {
     chat,
     parseBlocks,
-    oldestBlockCursor,
-    type BlockRow,
-    type ChatMessage,
+    zeroBlockRowToBlockRow,
   } from "$lib/stores/chat.svelte";
-  import { initialPageSize } from "$lib/util/page-size";
-  import { onMount, tick, untrack } from "svelte";
+  import { zeroSync } from "$lib/stores/zero.svelte";
+  import { tick, untrack } from "svelte";
 
   interface Props {
     /** Agent whose chat to display. */
@@ -48,82 +46,52 @@
         ),
   );
 
-  // Read-only mode keeps its own messages list so SSE doesn't mutate it.
-  let pastMessages = $state<ChatMessage[]>([]);
-  let pastLoading = $state(false);
-  let pastError = $state<string | null>(null);
-  // FIX_FORWARD 3.7: paginated past-session loads.
-  // FIX_FORWARD 3.8: client-controlled initial page size based on viewport +
-  // network class. Older-page-loads stay at a steady 25 so scrolling up
-  // doesn't cliff into 10-row pages on slow links.
-  const PAST_PAGE_SIZE_OLDER = 25;
-  let oldestPastBlockId = $state<string | null>(null);
-  let pastReachedOldest = $state(false);
-  let loadingOlderPast = $state(false);
-
-  async function loadPastSession() {
-    if (!readonly || !sessionId) return;
+  // Read-only past-session view: source the transcript from Zero's
+  // local replica, not REST. Zero already maintains an
+  // agent-scoped slice for everything within the 90-day retention
+  // window (`bindBlocksFor` in zero.svelte.ts), and a past session
+  // touched within that window has 100% of its blocks already
+  // local — IndexedDB-backed, no network round-trip needed. The
+  // prior REST path paginated 25 blocks at a time, which for a
+  // 4,400-block session like the user's main chat meant the
+  // initial paint showed the trailing fraction and the
+  // `data.blocks.length < initialLimit` heuristic claimed the
+  // top-of-session was reached when in reality only the latest page
+  // had loaded. Wholesale-replace with a derived view:
+  //
+  //   1. Ensure `zeroSync.bindBlocksFor(agent)` is active on mount /
+  //      agent change — readonly mode deliberately doesn't touch
+  //      `chat.focusedAgent`, so the live ChatShell's binder hook
+  //      doesn't fire when the user navigates directly to
+  //      /sessions/<agent>/<session>. Binding directly here is
+  //      idempotent against a same-agent live view that already
+  //      bound (the binder early-returns on `blocksAgent === agent`).
+  //   2. Derive `pastMessages` by filtering `zeroSync.blocks` to
+  //      `session_id === sessionId` and parsing via `parseBlocks`.
+  //      ALL session blocks land in one go — no pagination, no
+  //      "scroll up to load more" wiring, no `pastReachedOldest`
+  //      heuristic.
+  //
+  // `pastLoading` flips false once Zero confirms the local replica
+  // matches upstream for this query (`blocksResultType === "complete"`).
+  // While still `'unknown'` (initial hydration from IndexedDB),
+  // ChatMessages renders the skeleton — at most a fraction-of-a-second
+  // perceived load.
+  let pastMessages = $derived.by(() => {
+    if (!readonly || !sessionId) return [];
+    if (zeroSync.blocksAgent !== agent) return [];
     const sid = sessionId;
-    const a = agent;
-    pastError = null;
-    pastLoading = true;
-    pastMessages = [];
-    oldestPastBlockId = null;
-    pastReachedOldest = false;
-    const initialLimit = initialPageSize();
-    try {
-      const r = await fetch(
-        `/api/agents/${a}/blocks?session_id=${encodeURIComponent(sid)}&limit=${initialLimit}`,
-      );
-      // Bail if user navigated to a different past session mid-fetch.
-      if (sid !== sessionId) return;
-      if (!r.ok) {
-        pastError = `Couldn't load session (HTTP ${r.status})`;
-        return;
-      }
-      const data = (await r.json()) as { blocks: BlockRow[] };
-      if (sid !== sessionId) return;
-      pastMessages = parseBlocks(data.blocks, a);
-      oldestPastBlockId = oldestBlockCursor(data.blocks);
-      if (data.blocks.length < initialLimit) pastReachedOldest = true;
-    } catch {
-      if (sid === sessionId) {
-        pastError = "Couldn't load session (network)";
-      }
-    } finally {
-      if (sid === sessionId) pastLoading = false;
-    }
-  }
-
-  async function loadOlderPastBlocks(): Promise<void> {
-    if (!readonly || !sessionId) return;
-    if (pastReachedOldest || loadingOlderPast || !oldestPastBlockId) return;
-    const sid = sessionId;
-    const a = agent;
-    const before = oldestPastBlockId;
-    loadingOlderPast = true;
-    try {
-      const r = await fetch(
-        `/api/agents/${a}/blocks?session_id=${encodeURIComponent(sid)}&before=${encodeURIComponent(before)}&limit=${PAST_PAGE_SIZE_OLDER}`,
-      );
-      if (sid !== sessionId) return;
-      if (!r.ok) return;
-      const data = (await r.json()) as { blocks: BlockRow[] };
-      if (sid !== sessionId) return;
-      if (data.blocks.length === 0) {
-        pastReachedOldest = true;
-        return;
-      }
-      const older = parseBlocks(data.blocks, a);
-      const seen = new Set(pastMessages.map((m) => m.id));
-      const fresh = older.filter((m) => !seen.has(m.id));
-      pastMessages = [...fresh, ...pastMessages];
-      oldestPastBlockId = oldestBlockCursor(data.blocks);
-      if (data.blocks.length < PAST_PAGE_SIZE_OLDER) pastReachedOldest = true;
-    } finally {
-      if (sid === sessionId) loadingOlderPast = false;
-    }
-  }
+    const filtered = zeroSync.blocks.filter((r) => r.session_id === sid);
+    if (filtered.length === 0) return [];
+    return parseBlocks(filtered.map(zeroBlockRowToBlockRow), agent);
+  });
+  let pastLoading = $derived(
+    readonly &&
+      sessionId !== undefined &&
+      (zeroSync.blocksAgent !== agent ||
+        zeroSync.blocksResultType !== "complete") &&
+      pastMessages.length === 0,
+  );
 
   async function jumpToBottom() {
     if (!scrollEl) return;
@@ -177,10 +145,18 @@
     });
   });
 
-  // Read-only mode: load past session turns whenever sessionId changes.
+  // Read-only mode: bind the Zero blocks slice for this agent so
+  // the derived `pastMessages` has data to filter. Idempotent — the
+  // binder early-returns when already bound to the same agent (e.g.
+  // the user navigates from /sessions/<agent> live view to
+  // /sessions/<agent>/<session> read-only without crossing a focus
+  // change).
   $effect(() => {
-    sessionId; // track
-    loadPastSession();
+    if (!readonly) return;
+    const a = agent;
+    untrack(() => {
+      zeroSync.bindBlocksFor(a);
+    });
   });
 
   // Initial scroll-to-bottom + scroll-pin while streaming.
@@ -364,11 +340,11 @@
   <ChatMessages
     messages={readonly ? pastMessages : undefined}
     pastLoading={readonly ? pastLoading : false}
-    pastError={readonly ? pastError : null}
-    onRetryPast={readonly ? loadPastSession : undefined}
-    onLoadOlderPast={readonly ? loadOlderPastBlocks : undefined}
-    pastReachedOldest={readonly ? pastReachedOldest : false}
-    loadingOlderPast={readonly ? loadingOlderPast : false} />
+    pastError={null}
+    onRetryPast={undefined}
+    onLoadOlderPast={undefined}
+    pastReachedOldest={readonly}
+    loadingOlderPast={false} />
 </section>
 
 {#if !readonly && chat.loadingOlder}
