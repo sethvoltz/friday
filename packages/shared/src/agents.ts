@@ -9,6 +9,23 @@ export type AgentStatus =
   | "error"
   | "archived";
 
+/**
+ * Terminal reason captured when an agent transitions to `archived`.
+ *
+ * - `completed` — orchestrator MCP `agent_archive` after a successful build;
+ *   maps the linked Friday ticket to `done` and Linear state `completed`.
+ * - `abandoned` — REST archive, boot-time orphan-worktree sweep, invariants
+ *   auditor's orphan sweep, `/archive` slash command default; maps the
+ *   linked ticket to `closed` and Linear state `canceled`.
+ * - `failed` — orchestrator MCP when the agent errored irrecoverably;
+ *   maps to `closed` + failure comment / Linear `canceled`.
+ *
+ * Forced reforks (`/clear`, watchdog refork) go through `forceWorkerRefork`
+ * and never touch the archive write path — that is why the union has no
+ * `refork` variant.
+ */
+export type ArchiveReason = "completed" | "abandoned" | "failed";
+
 export interface BaseAgentEntry {
   name: string;
   type: AgentType;

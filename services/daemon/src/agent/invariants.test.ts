@@ -46,9 +46,19 @@ beforeEach(async () => {
 
 afterEach(async () => {
   // Belt-and-braces — most state lives in the registry table which the
-  // beforeEach truncate already clears.
+  // beforeEach truncate already clears. Bypass the FSM gate via the
+  // privileged auditor-heal path so orchestrator rows can be wiped too
+  // (the gate forbids `* → archived` for orchestrators).
   for (const a of await registry.listAgents()) {
-    await registry.archiveAgent(a.name);
+    if (a.status === "archived") continue;
+    if (a.type === "orchestrator") {
+      // No archived edge for orchestrators; setStatus to idle is fine.
+      await registry.setStatus(a.name, "idle").catch(() => {});
+      continue;
+    }
+    await registry
+      .archiveAgent(a.name, { reason: "abandoned" })
+      .catch(() => {});
   }
 });
 
@@ -101,7 +111,7 @@ describe("invariant auditor", () => {
       worktreePath,
       branch: "friday/already-gone",
     });
-    await registry.archiveAgent("already-gone");
+    await registry.archiveAgent("already-gone", { reason: "abandoned" });
 
     const result = await audit();
 
@@ -162,5 +172,42 @@ describe("invariant auditor", () => {
     expect(result.archived).toContain("both-bad");
     expect(result.demoted).not.toContain("both-bad");
     expect((await registry.getAgent("both-bad"))?.status).toBe("archived");
+  });
+
+  it("Rule 3: heals orchestrator stuck at archived (FRI-113 / ADR-031)", async () => {
+    // The FSM gate prevents new orchestrator-archived writes, but a
+    // pre-FSM row (or an external psql edit) could still land in this
+    // illegal resting state. Rule 3 heals it through the privileged
+    // unchecked path because the FSM matrix has no `archived → idle`
+    // edge.
+    const { getDb, schema } = await import("@friday/shared");
+    const { eq } = await import("drizzle-orm");
+    const now = new Date();
+    // Seed directly via the DB to bypass the gate (which would forbid
+    // this write).
+    await getDb().insert(schema.agents).values({
+      name: "friday",
+      type: "orchestrator",
+      status: "archived",
+      archiveReason: "abandoned",
+      createdAt: now,
+      updatedAt: now,
+    });
+    expect((await registry.getAgent("friday"))?.status).toBe("archived");
+
+    const result = await audit();
+
+    expect(result.healed).toContain("friday");
+    expect((await registry.getAgent("friday"))?.status).toBe("idle");
+
+    // Verify `archive_reason` was also cleared on heal so the next
+    // observer doesn't read a stale "this was abandoned" tag on an
+    // active orchestrator.
+    const rows = await getDb()
+      .select({ archiveReason: schema.agents.archiveReason })
+      .from(schema.agents)
+      .where(eq(schema.agents.name, "friday"))
+      .limit(1);
+    expect(rows[0]?.archiveReason).toBeNull();
   });
 });

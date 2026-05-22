@@ -13,6 +13,7 @@
  */
 
 import { setIssueStateByType } from "@friday/integrations-linear";
+import { type ArchiveReason } from "@friday/shared";
 import {
   addComment,
   externalLinks,
@@ -21,8 +22,6 @@ import {
   updateTicket,
 } from "@friday/shared/services";
 import { logger } from "../log.js";
-
-export type ArchiveReason = "completed" | "abandoned" | "failed";
 
 interface CloseInput {
   ticketId: string | null | undefined;

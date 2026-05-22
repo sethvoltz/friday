@@ -918,6 +918,77 @@ Three reasons.
 - An MCP handler grows non-`fetch` async work that ignores `extra.signal` (a long in-process loop, a Promise that never resolves on its own). Today every Friday handler funnels through `daemonFetch`; if that changes, audit those handlers for signal-honoring.
 - The cooperative-abort path measurably exceeds 200ms in production. Today the descendant-kill at T+0 and the signal on `daemonFetch` should put it well under that; if not, the SDK's CLI subprocess shutdown is the next layer to instrument.
 
+## ADR-031 — Agent state-machine gate; `registry.setStatus` is the only door
+
+**Status:** accepted (FRI-113, 2026-05-22)
+
+**Supersedes the deferred "path forward" section of ADR-020** (the invariants auditor was always intended to be the safety net under inline checks; this ADR makes the inline check real).
+
+### Context
+
+ADR-020 shipped a periodic auditor as a workaround because `registry.setStatus` accepted any → any transitions and the inline-gate refactor was too large to bundle with the existing work. Two production failures since have lived inside that gap:
+
+1. **`archive_reason` always NULL.** The mutator path (Phase 4.8) wrote `archive_requested` + reason to the row, but every direct-archive entry point (`registry.archiveAgent(name)`, REST `/api/agents/:name/archive`, watchdog refork, boot recovery, invariants auditor, apps uninstaller, ticket-close) called the zero-arg `registry.archiveAgent` which dropped the reason. All 68 archived rows in production sit at `archive_reason IS NULL`.
+2. **Orchestrator-archived zombie.** Nothing in the code prevented `setStatus("friday", "archived")` from running; if the `/clear` flow or any other path reached for it, the row landed in a state no consumer was prepared to handle — sidebar rendered an archived row that the worker kept heartbeating.
+
+The grill on 2026-05-22 lifted ADR-020's "path forward" into scope as FRI-113.
+
+### Decision
+
+1. **`registry.setStatus` is the only door.** Every status write goes through one function that validates the `(type, current, next)` triple against an explicit FSM matrix. Illegal transitions throw `IllegalTransitionError` carrying a typed `code` (`ORCHESTRATOR_NOT_ARCHIVABLE`, `INVALID_STATUS_TRANSITION`, `MISSING_ARCHIVE_REASON`, `AGENT_NOT_FOUND` reserved).
+
+2. **Transition matrix** (compiled into `services/daemon/src/agent/registry.ts`):
+
+   | from \ to    | idle | working | stalled | error | archived           |
+   |--------------|------|---------|---------|-------|--------------------|
+   | `idle`       | (no-op)  | ✅  | ✅  | ✅ | ✅ (non-orchestrator only) |
+   | `working`    | ✅   | (no-op) | ✅  | ✅ | ✅ (non-orchestrator only) |
+   | `stalled`    | ✅   | ✅      | (no-op) | ✅ | ✅ (non-orchestrator only) |
+   | `error`      | ✅   | ❌      | ❌      | (no-op) | ✅ (non-orchestrator only) |
+   | `archived`   | ❌\* | ❌      | ❌      | ❌    | (no-op)            |
+
+   \* `archived → idle` is reachable only via `unarchiveAgent` (the apps installer's re-adopt path), which uses the privileged unchecked write helper.
+
+3. **`archive_reason` is a required arg on the archived transition.** `setStatus(name, "archived", {archiveReason})` validates the reason is present and writes both columns atomically. `archiveAgent(name, {reason})` is the thin convenience wrapper.
+
+4. **Per-type restrictions: orchestrator is never archivable.** The single user-facing chat surface has no terminal state; a "retired Friday" is conceptually a fresh install, not an archived row. The gate enforces this structurally.
+
+5. **Auditor rule #3.** The continuous invariant auditor (`services/daemon/src/agent/invariants.ts`) gains a third rule that walks every row and heals illegal `(type, status)` resting states. The canonical case is `(orchestrator, archived)` from pre-FSM history or external psql edits; the heal goes through a privileged unchecked path (`_auditorHealStatusUnchecked`) because the FSM matrix forbids `archived → idle` from anywhere but `unarchiveAgent`.
+
+6. **`ArchiveReason` is canonical in `@friday/shared/agents`.** Three values: `"completed" | "abandoned" | "failed"`. The duplicate in `services/daemon/src/services/ticket-close.ts` is deleted; both `lifecycle.ts` and `archive-listener.ts` import from shared. Watchdog refork and `/clear` go through `forceWorkerRefork`, never the archive write path — that's why the union has no `refork` value.
+
+### Privileged unchecked writes
+
+Two callers legitimately bypass the FSM gate:
+
+- **`unarchiveAgent(name)`** — terminal escape, called by the apps installer when re-adopting an archived agent on reinstall.
+- **`registry._auditorHealStatusUnchecked(name, status, {auditorHeal: true, clearArchiveReason?})`** — the only export designed for the auditor; the shape's `auditorHeal: true` key is the grep marker future readers use to find every privileged use site.
+
+No other caller may reach the unchecked path. `_setStatusUnchecked` (lowercase underscore) is module-private.
+
+### What this lands
+
+- New error class `IllegalTransitionError` in `services/daemon/src/agent/registry.ts`.
+- Refactored `setStatus`, `archiveAgent`, `unarchiveAgent`.
+- Updated three live call sites of `registry.archiveAgent` to pass the reason: `services/daemon/src/index.ts:338` (`"abandoned"` for boot-orphan sweep), `services/daemon/src/agent/lifecycle.ts:995` (forwards the wrapper's `opts.reason`), `services/daemon/src/agent/invariants.ts:99` (`"abandoned"` for orphan-worktree sweep).
+- New auditor rule #3 in `services/daemon/src/agent/invariants.ts`.
+- Deduped `ArchiveReason`: deleted from `services/daemon/src/services/ticket-close.ts:25`, re-imported from `@friday/shared`.
+- New test `services/daemon/src/agent/registry-fsm.test.ts` (7 named tests) plus one new case in `services/daemon/src/agent/invariants.test.ts` for Rule 3.
+- Audit `audit()` return shape extended from `{archived, demoted}` to `{archived, demoted, healed}`.
+
+### What this does NOT do (epic constraints)
+
+- **No backfill of historical `archive_reason IS NULL` rows.** The 68 pre-existing NULL rows stay NULL. The gate only enforces the contract for new transitions; historical data is out of scope per the epic's "no backfill" rule.
+- **No DB-level NOT NULL constraint on `archive_reason`.** Adding it would require backfilling the 68 rows. Leave as a future tightening once the column is universally populated by all live paths and we are willing to revisit history.
+- **No widening of TS `AgentStatus` to include `archive_requested`.** The `archive_requested` value is in the DB check constraint (`schema.ts:97`) but the FSM matrix treats it as a transient state we never observe at rest — the LISTEN handler flips it to `archived` immediately. Widening the TS union is a separate follow-up captured against the epic's "out of scope findings" list.
+
+### Bring this ADR back to the table if
+
+- A new agent type lands (a sixth in the union) and its allowed transitions don't fit the common matrix.
+- The privileged escape hatch list grows beyond `unarchiveAgent` + auditor heal. A third site with no orthogonal justification means the gate needs a different shape.
+- `archive_requested` becomes a state code paths read at rest (e.g. a UI hover-preview shows "archive pending…" between mutator write and LISTEN handler). At that point the TS union widens and the matrix grows an edge.
+- The 60-second auditor interval proves too slow to catch a Class A drift (a code-controlled state boundary that bypassed the inline gate). Today the gate IS the inline check; if a new direct-write path appears, the auditor's healing log lines are the canary.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.

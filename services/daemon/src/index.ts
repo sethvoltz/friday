@@ -335,7 +335,7 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
       // Capture ticketId before archive — the closer fires after the
       // registry row is flipped but reads from this captured value.
       const ticketId = a.ticketId ?? null;
-      await registry.archiveAgent(a.name);
+      await registry.archiveAgent(a.name, { reason: "abandoned" });
       // Phase 5: `agent_lifecycle` SSE retired — Zero's `agents`
       // slice replicates the status transition reactively to the
       // dashboard sidebar.

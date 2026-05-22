@@ -188,7 +188,7 @@ describe("installApp", () => {
     // Simulate the prior incarnation: the agent existed and ran, then was archived.
     await registry.registerAgent({ name: "example-owner", type: "bare" });
     await registry.setSession("example-owner", "sess-old-12345");
-    await registry.archiveAgent("example-owner");
+    await registry.archiveAgent("example-owner", { reason: "abandoned" });
 
     const folder = freshFixture();
     await installApp(folder);
@@ -205,7 +205,7 @@ describe("installApp", () => {
     await installApp(folder);
     await registry.setSession("example-owner", "sess-keep-me");
     // Simulate uninstall: archive the agent (tombstone keeps appId)
-    await registry.archiveAgent("example-owner");
+    await registry.archiveAgent("example-owner", { reason: "abandoned" });
     // Reinstall: must un-archive and preserve sessionId
     // But first we need to drop the apps row that already exists from the
     // first install (uninstallApp would normally do this; we shortcut).

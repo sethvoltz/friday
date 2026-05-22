@@ -36,10 +36,8 @@ import {
 } from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
-import {
-  type ArchiveReason,
-  closeTicketForArchive,
-} from "../services/ticket-close.js";
+import { type ArchiveReason } from "@friday/shared";
+import { closeTicketForArchive } from "../services/ticket-close.js";
 import * as registry from "./registry.js";
 import * as liveTurns from "./live-turns.js";
 import { appContextForAgent } from "../apps/installer.js";
@@ -992,7 +990,7 @@ export async function archiveAgent(
   // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
   // before the child has fully exited.
   if (w) live.delete(agentName);
-  await registry.archiveAgent(agentName);
+  await registry.archiveAgent(agentName, { reason: opts.reason });
   // Phase 5: `agent_lifecycle:archive` SSE retired — Zero replicates
   // the agents.status='archived' UPDATE; the dashboard sidebar drops
   // the row via the reactive query.

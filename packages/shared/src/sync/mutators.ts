@@ -23,7 +23,10 @@
 // Phase 4.1 ships `markRead`; subsequent sub-phases extend this file.
 
 import type { CustomMutatorDefs, Transaction } from "@rocicorp/zero";
+import type { ArchiveReason } from "../agents.js";
 import type { Schema } from "./schema.js";
+
+export type { ArchiveReason };
 
 /* ---------------- Phase 4.1: markRead ---------------- */
 // Per-device read cursor for unread-badge derivation. UPSERT on
@@ -428,12 +431,8 @@ export interface ReloadAppArgs {
 // differently per reason (e.g., 'completed' marks the ticket done;
 // 'abandoned' marks it abandoned). The dashboard's `/archive <name>`
 // slash command surfaces a dropdown to pick the reason; the default is
-// 'abandoned' to match the legacy slash-command default. Forced reforks
-// (/clear, watchdog refork) go through `forceWorkerRefork` and never
-// touch the archive write path — that's why the union doesn't include
-// a 'refork' variant.
-
-export type ArchiveReason = "completed" | "abandoned" | "failed";
+// 'abandoned' to match the legacy slash-command default. See
+// `ArchiveReason` in `../agents.ts` for the canonical type.
 
 export interface ArchiveAgentArgs {
   name: string;

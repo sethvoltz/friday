@@ -163,11 +163,13 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
 
     let readBeforeArchive = false;
     const origArchive = registry.archiveAgent;
-    const archiveSpy = vi.fn(async (name: string) => {
-      const row = await registry.getAgent(name);
-      if (row && "ticketId" in row) readBeforeArchive = row.ticketId === t.id;
-      return origArchive(name);
-    });
+    const archiveSpy = vi.fn(
+      async (name: string, opts: { reason: import("@friday/shared").ArchiveReason }) => {
+        const row = await registry.getAgent(name);
+        if (row && "ticketId" in row) readBeforeArchive = row.ticketId === t.id;
+        return origArchive(name, opts);
+      },
+    );
     vi.spyOn(registry, "archiveAgent").mockImplementation(archiveSpy);
 
     await archiveAgent("eta", { reason: "completed" });
@@ -182,20 +184,22 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     expect(readBeforeArchive).toBe(true);
   });
 
-  it("orchestrator-type agent (no ticketId field on row) archives cleanly without ticket effects", async () => {
+  it("orchestrator-type agent cannot be archived; closer never runs (FRI-113 / ADR-031)", async () => {
     await registry.registerAgent({ name: "main", type: "orchestrator" });
     const t = await createTicket({ title: "unrelated", status: "in_progress" });
 
-    await archiveAgent("main", { reason: "abandoned" });
-    // Wait for the archive to land before asserting the unrelated ticket
-    // was untouched.
-    await vi.waitFor(
-      async () => {
-        expect((await registry.getAgent("main"))?.status).toBe("archived");
-      },
-      { timeout: 5000, interval: 25 },
-    );
-    // Unrelated ticket must not be touched.
+    // Orchestrator-not-archivable: the FSM gate rejects every edge into
+    // `archived` for `type=orchestrator`. `lifecycle.archiveAgent`
+    // wraps `registry.archiveAgent` which calls `setStatus(name,
+    // "archived", ...)`; the gate throws `IllegalTransitionError` with
+    // code `ORCHESTRATOR_NOT_ARCHIVABLE` before the closer is invoked.
+    const { IllegalTransitionError } = await import("./registry.js");
+    await expect(
+      archiveAgent("main", { reason: "abandoned" }),
+    ).rejects.toBeInstanceOf(IllegalTransitionError);
+
+    // The row must still be `idle` and the unrelated ticket untouched.
+    expect((await registry.getAgent("main"))?.status).toBe("idle");
     expect((await getTicket(t.id))?.status).toBe("in_progress");
   });
 

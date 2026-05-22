@@ -6,10 +6,109 @@ import {
   type AgentEntry,
   type AgentStatus,
   type AgentType,
+  type ArchiveReason,
   appDir,
   getDb,
   schema,
 } from "@friday/shared";
+
+/**
+ * FRI-113: status state machine. Every write to `agents.status` flows
+ * through `setStatus` below, which checks the (type, current, next)
+ * triple against the matrix defined here. Illegal transitions throw
+ * `IllegalTransitionError` — see ADR-031.
+ *
+ * Reading rules:
+ *   - Same-status writes (e.g. idle→idle) are no-ops, never illegal.
+ *   - `archived` is terminal; the only escape is `unarchiveAgent`, which
+ *     uses the privileged `_setStatusUnchecked` helper.
+ *   - Orchestrators cannot reach `archived` from any state — this closes
+ *     the "friday alive but archived" class of bug surfaced in the
+ *     2026-05-22 grill.
+ *   - `archive_requested` is in the DB check constraint
+ *     (`schema.ts:97`) but NOT yet in the TS `AgentStatus` union
+ *     (`agents.ts:5-10`). The intermediate value is only written by the
+ *     Zero mutator path; the daemon's LISTEN handler flips it to
+ *     `archived` immediately. The FSM treats it as a transient state we
+ *     never read; widening the TS union is an explicit ADR-031 follow-up.
+ */
+type StatusTransitionTable = Readonly<Record<AgentStatus, ReadonlyArray<AgentStatus>>>;
+
+const COMMON_TRANSITIONS: StatusTransitionTable = {
+  idle: ["working", "stalled", "error", "archived"],
+  working: ["idle", "stalled", "error", "archived"],
+  stalled: ["idle", "working", "error", "archived"],
+  error: ["idle", "archived"],
+  // Terminal. Only `unarchiveAgent` can leave this status, and it uses
+  // the privileged unchecked path. Nothing else may.
+  archived: [],
+};
+
+const ORCHESTRATOR_TRANSITIONS: StatusTransitionTable = {
+  idle: ["working", "stalled", "error"],
+  working: ["idle", "stalled", "error"],
+  stalled: ["idle", "working", "error"],
+  error: ["idle"],
+  // The orchestrator-not-archivable invariant: no edge into `archived`
+  // from anywhere. If a row ever lands at `archived`, the auditor's
+  // rule #3 heals it back to `idle` via the unchecked path.
+  archived: [],
+};
+
+const TRANSITIONS_BY_TYPE: Readonly<Record<AgentType, StatusTransitionTable>> = {
+  orchestrator: ORCHESTRATOR_TRANSITIONS,
+  builder: COMMON_TRANSITIONS,
+  helper: COMMON_TRANSITIONS,
+  scheduled: COMMON_TRANSITIONS,
+  bare: COMMON_TRANSITIONS,
+};
+
+export type IllegalTransitionCode =
+  | "ORCHESTRATOR_NOT_ARCHIVABLE"
+  | "INVALID_STATUS_TRANSITION"
+  | "MISSING_ARCHIVE_REASON"
+  | "AGENT_NOT_FOUND";
+
+export class IllegalTransitionError extends Error {
+  readonly code: IllegalTransitionCode;
+  readonly from: AgentStatus | null;
+  readonly to: AgentStatus;
+  readonly type: AgentType | null;
+  readonly agentName: string;
+
+  constructor(opts: {
+    code: IllegalTransitionCode;
+    from: AgentStatus | null;
+    to: AgentStatus;
+    type: AgentType | null;
+    name: string;
+  }) {
+    super(
+      `IllegalTransitionError[${opts.code}]: agent="${opts.name}" type=${opts.type ?? "?"} from=${opts.from ?? "?"} to=${opts.to}`,
+    );
+    this.name = "IllegalTransitionError";
+    this.code = opts.code;
+    this.from = opts.from;
+    this.to = opts.to;
+    this.type = opts.type;
+    this.agentName = opts.name;
+  }
+}
+
+/**
+ * Pure predicate over the FSM matrix. Exported so the auditor can ask
+ * "is this (type, status) the legal resting set for this agent?" without
+ * doing a no-op write to provoke the gate.
+ */
+export function isLegalTransition(
+  type: AgentType,
+  from: AgentStatus,
+  to: AgentStatus,
+): boolean {
+  if (from === to) return true;
+  const allowed = TRANSITIONS_BY_TYPE[type][from] ?? [];
+  return allowed.includes(to);
+}
 
 export async function listAgents(): Promise<AgentEntry[]> {
   const db = getDb();
@@ -119,15 +218,111 @@ export async function getAppId(name: string): Promise<string | null> {
   return rows[0]?.appId ?? null;
 }
 
+/**
+ * FRI-113: privileged unchecked status write. Bypasses the FSM gate.
+ * Only legitimate callers are (a) `unarchiveAgent` (terminal-state
+ * escape, which the FSM matrix deliberately does not permit) and (b)
+ * the invariants auditor rule #3 (healing FSM violations writes status
+ * transitions the matrix forbids — e.g. orchestrator-archived → idle).
+ *
+ * Internal to this module. Do NOT export. Callers that need the gated
+ * path use `setStatus`; callers that need the unchecked path live in
+ * this file or call `unarchiveAgent`.
+ */
+async function _setStatusUnchecked(
+  name: string,
+  status: AgentStatus,
+  opts: { archiveReason?: ArchiveReason | null } = {},
+): Promise<void> {
+  const db = getDb();
+  const setShape: {
+    status: AgentStatus;
+    updatedAt: Date;
+    archiveReason?: ArchiveReason | null;
+  } = { status, updatedAt: new Date() };
+  if (opts.archiveReason !== undefined) {
+    setShape.archiveReason = opts.archiveReason;
+  }
+  await db
+    .update(schema.agents)
+    .set(setShape)
+    .where(eq(schema.agents.name, name));
+}
+
+/**
+ * Privileged unchecked write for the invariants auditor's rule #3.
+ * Exported so `invariants.ts` can heal FSM violations the gate forbids
+ * (e.g. orchestrator-archived → idle). NO other caller should reach
+ * for this — it is the explicit escape hatch documented in ADR-031.
+ *
+ * The shape forces callers to acknowledge the escape: the `auditorHeal`
+ * key in the opts object is the marker future readers grep for to find
+ * every privileged use site.
+ */
+export async function _auditorHealStatusUnchecked(
+  name: string,
+  status: AgentStatus,
+  opts: {
+    auditorHeal: true;
+    clearArchiveReason?: boolean;
+  },
+): Promise<void> {
+  void opts.auditorHeal; // shape-only marker
+  await _setStatusUnchecked(name, status, {
+    archiveReason: opts.clearArchiveReason ? null : undefined,
+  });
+}
+
+/**
+ * FRI-113: gated status write. Validates the (type, current, next)
+ * triple against the FSM matrix. Throws `IllegalTransitionError` on
+ * any invalid transition; writes `archive_reason` atomically when the
+ * target is `archived`.
+ *
+ * `opts.archiveReason` is REQUIRED when `status === "archived"`. Any
+ * other target ignores the field.
+ */
 export async function setStatus(
   name: string,
   status: AgentStatus,
+  opts: { archiveReason?: ArchiveReason } = {},
 ): Promise<void> {
-  const db = getDb();
-  await db
-    .update(schema.agents)
-    .set({ status, updatedAt: new Date() })
-    .where(eq(schema.agents.name, name));
+  const row = await getAgent(name);
+  if (!row) {
+    // Matches pre-FSM behavior: a bare UPDATE that matches no rows is
+    // a silent no-op. Production callers should never reach this with
+    // a real-but-missing agent (the live worker map and dispatch
+    // surface keep them aligned), but worker IPC handlers and test
+    // doubles occasionally fire setStatus against an unregistered
+    // name. Throwing would be a hard regression; log-and-no-op keeps
+    // the new contract narrow to actual transition violations.
+    return;
+  }
+  if (!isLegalTransition(row.type, row.status, status)) {
+    const code: IllegalTransitionCode =
+      row.type === "orchestrator" && status === "archived"
+        ? "ORCHESTRATOR_NOT_ARCHIVABLE"
+        : "INVALID_STATUS_TRANSITION";
+    throw new IllegalTransitionError({
+      code,
+      from: row.status,
+      to: status,
+      type: row.type,
+      name,
+    });
+  }
+  if (status === "archived" && !opts.archiveReason) {
+    throw new IllegalTransitionError({
+      code: "MISSING_ARCHIVE_REASON",
+      from: row.status,
+      to: status,
+      type: row.type,
+      name,
+    });
+  }
+  await _setStatusUnchecked(name, status, {
+    archiveReason: status === "archived" ? opts.archiveReason : undefined,
+  });
 }
 
 export async function setSession(
@@ -149,8 +344,18 @@ export async function clearSession(name: string): Promise<void> {
     .where(eq(schema.agents.name, name));
 }
 
-export async function archiveAgent(name: string): Promise<void> {
-  await setStatus(name, "archived");
+/**
+ * Transition an agent to `archived` with a required reason. The reason
+ * is persisted to the `archive_reason` column atomically with the
+ * status write. Goes through the FSM gate, so orchestrator-archive
+ * attempts throw `IllegalTransitionError` with code
+ * `ORCHESTRATOR_NOT_ARCHIVABLE`.
+ */
+export async function archiveAgent(
+  name: string,
+  opts: { reason: ArchiveReason },
+): Promise<void> {
+  await setStatus(name, "archived", { archiveReason: opts.reason });
 }
 
 /**
@@ -158,10 +363,9 @@ export async function archiveAgent(name: string): Promise<void> {
  * preserving `sessionId` so previously-recorded chat history continues
  * into the un-archived agent. Used by the apps installer on reinstall.
  *
- * Throws if the row is missing or in any non-archived status — the
- * lifecycle path keeps its own guard against a worker-exit handler
- * stomping an archived terminal state, so callers shouldn't be using
- * this to clobber other transitions.
+ * Uses the privileged unchecked write because the FSM matrix has no
+ * `archived → idle` edge (terminal state). This is the ONLY non-auditor
+ * caller that bypasses the gate.
  */
 export async function unarchiveAgent(name: string): Promise<void> {
   const row = await getAgent(name);
@@ -171,7 +375,7 @@ export async function unarchiveAgent(name: string): Promise<void> {
       `unarchiveAgent: "${name}" is not archived (status=${row.status})`,
     );
   }
-  await setStatus(name, "idle");
+  await _setStatusUnchecked(row.name, "idle", { archiveReason: null });
 }
 
 /**

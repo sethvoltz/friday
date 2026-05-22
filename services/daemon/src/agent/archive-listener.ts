@@ -26,6 +26,7 @@
 import { eq, and } from "drizzle-orm";
 import pgPkg from "pg";
 import {
+  type ArchiveReason,
   getDb,
   getPool,
   schema,
@@ -33,7 +34,6 @@ import {
 } from "@friday/shared";
 import { archiveAgent } from "./lifecycle.js";
 import { logger } from "../log.js";
-import type { ArchiveReason } from "../services/ticket-close.js";
 
 const { Client } = pgPkg;
 

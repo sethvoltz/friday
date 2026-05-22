@@ -68,7 +68,7 @@ describe("validateRecipient", () => {
       parentName: "friday",
       worktreePath: "/tmp/old",
     });
-    await registry.archiveAgent("old-builder");
+    await registry.archiveAgent("old-builder", { reason: "abandoned" });
     const r = await validateRecipient("old-builder");
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("unreachable");
