@@ -31,7 +31,8 @@ import { classifySdkError } from "./sdk-error.js";
 import { buildMcpServers } from "../mcp/builder.js";
 import { buildMailPrompt } from "../comms/mail-prompt.js";
 import { daemonFetch } from "../mcp/http.js";
-import { checkToolCall } from "./workspace-guard.js";
+import { runHooks } from "@friday/shared";
+import "../hooks/register.js";
 
 let abortController: AbortController | null = null;
 let stopped = false;
@@ -434,10 +435,12 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
 
   const allowedTools = p.allowedToolsOverride ?? opts.allowedToolsOverride;
 
-  // Defense-in-depth: builders run inside a git worktree, and the Claude SDK
-  // PreToolUse hook denies any Read/Write/Edit/Glob/Grep/Bash that escapes it.
-  // The system prompt also tells the builder this; the hook is the enforcement
-  // layer for when the prompt isn't enough.
+  // Defense-in-depth: builders run inside a git worktree. The SDK PreToolUse
+  // callback below bridges into Friday's before_tool_call hook registry; the
+  // workspace-guard handler is the registered enforcer. New tool-call gates
+  // (rate-limit, audit, etc.) compose by registering additional handlers
+  // without touching this adapter. Gating stays at the SDK-adapter layer so
+  // non-builder agents never fire the tool-call hook.
   const builderGuardHooks =
     opts.agentType === "builder"
       ? {
@@ -451,17 +454,18 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
                     tool_input?: Record<string, unknown>;
                   };
                   if (i.hook_event_name !== "PreToolUse") return {};
-                  const reason = checkToolCall(
-                    opts.workingDirectory,
-                    i.tool_name,
-                    (i.tool_input ?? {}) as Record<string, unknown>,
-                  );
-                  if (reason) {
+                  const results = await runHooks("before_tool_call", {
+                    workspacePath: opts.workingDirectory,
+                    toolName: i.tool_name,
+                    toolInput: (i.tool_input ?? {}) as Record<string, unknown>,
+                  });
+                  const denied = results.find((r) => r?.deny);
+                  if (denied?.deny) {
                     return {
                       hookSpecificOutput: {
                         hookEventName: "PreToolUse" as const,
                         permissionDecision: "deny" as const,
-                        permissionDecisionReason: reason,
+                        permissionDecisionReason: denied.deny.reason,
                       },
                     };
                   }
