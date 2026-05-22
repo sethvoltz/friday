@@ -235,10 +235,21 @@ export const PENDING_SESSION_SENTINEL = "__pending__";
  *      cache pre-dates Zero and can contain blocks from whatever
  *      session was active when it was last written.
  *
- * Rows tagged with the `__pending__` sentinel pass through: the
- * dashboard mutator writes them that way before the daemon's
- * lifecycle `session-update` sweep rewrites them to the real id, and
- * the live view needs to render the user bubble during that window.
+ * Rows tagged with the `__pending__` sentinel pass through **only if
+ * their `turn_id` matches the focused agent's current inflight turn**.
+ * The sentinel is the dashboard mutator's "no SDK session yet" marker;
+ * the daemon's lifecycle `session-update` sweep rewrites those rows
+ * to the real id once the worker announces a session, but the sweep
+ * is scoped to a single turn. When a turn dies before its
+ * `session-update` arrives (worker SIGTERM, daemon crash, `/clear`
+ * mid-turn), the `__pending__` block becomes a historical orphan that
+ * the sweep will never claim. Without the turn-id gate the orphan
+ * keeps rendering as live content every time the user reloads —
+ * which is exactly the "Yesterday at 4:23 PM bug message keeps
+ * reappearing post-`/clear`" repro. Gating on `turn_id ===
+ * inflightTurn` keeps the just-typed user bubble visible during the
+ * brief mutator-write → daemon-sweep window without resurrecting dead
+ * orphans.
  *
  * **STRICT contract:** when `agents` does not contain a row for the
  * focused agent, return `[]`. The earlier permissive fallback
@@ -255,19 +266,37 @@ export const PENDING_SESSION_SENTINEL = "__pending__";
  * `zero.svelte.ts` which now re-fires `applyZeroBlocks` for the
  * focused agent whenever `chat.agents` updates.
  *
- * Duck-types over both row shapes — Zero rows expose `session_id`
- * (snake_case), `BlockRow` exposes `sessionId` (camelCase).
+ * Duck-types over both row shapes — Zero rows expose `session_id` /
+ * `turn_id` (snake_case), `BlockRow` exposes `sessionId` / `turnId`
+ * (camelCase).
  */
 export function filterRowsToCurrentSession<
-  T extends { sessionId?: string; session_id?: string },
->(rows: readonly T[], agent: string, agents: readonly AgentInfo[]): T[] {
+  T extends {
+    sessionId?: string;
+    session_id?: string;
+    turnId?: string;
+    turn_id?: string;
+  },
+>(
+  rows: readonly T[],
+  agent: string,
+  agents: readonly AgentInfo[],
+  currentInflightTurnId: string | null,
+): T[] {
   const agentRow = agents.find((a) => a.name === agent);
   if (!agentRow) return [];
   const currentSessionId = agentRow.sessionId;
   return rows.filter((r) => {
     const sid = r.session_id ?? r.sessionId;
     if (sid === undefined) return false;
-    if (sid === PENDING_SESSION_SENTINEL) return true;
+    if (sid === PENDING_SESSION_SENTINEL) {
+      // Only pass the sentinel for rows belonging to the turn the user
+      // is actively in. Historical orphans from dead turns that the
+      // daemon's session-update sweep will never claim are dropped.
+      if (currentInflightTurnId === null) return false;
+      const tid = r.turn_id ?? r.turnId;
+      return tid === currentInflightTurnId;
+    }
     return currentSessionId !== undefined && sid === currentSessionId;
   });
 }
@@ -1650,7 +1679,12 @@ export class ChatState {
     // legacy REST path, dormant in the Zero era), so stored blocks
     // span whatever sessions were active when the entry was written —
     // they need scoping at load time the same way live Zero rows do.
-    const cached = filterRowsToCurrentSession(cachedRaw, agent, this.agents);
+    const cached = filterRowsToCurrentSession(
+      cachedRaw,
+      agent,
+      this.agents,
+      this.inflightTurnIdByAgent[agent] ?? null,
+    );
     if (cached.length > 0) {
       this.messages = [
         ...parseBlocks(cached, agent, {
@@ -1930,7 +1964,12 @@ export class ChatState {
 
     // The live chat view is the agent's CURRENT session. See
     // `filterRowsToCurrentSession`.
-    rows = filterRowsToCurrentSession(rows, forAgent, this.agents);
+    rows = filterRowsToCurrentSession(
+      rows,
+      forAgent,
+      this.agents,
+      this.inflightTurnIdByAgent[forAgent] ?? null,
+    );
 
     if (rows.length === 0) {
       // Empty agent (no history yet) OR a just-cleared session whose
