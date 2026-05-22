@@ -130,6 +130,13 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         // Daemon resolves its own port from its env / config / constant
         // chain; passing it here is belt-and-braces.
         FRIDAY_DAEMON_PORT: String(daemonPort),
+        // FRI-116: the supervisor pipes the child's stdout to the same
+        // `~/.friday/logs/<service>.jsonl` file the child's own
+        // createLogger writes via its fd. Without disabling the
+        // child's stdout-mode, every log line lands twice. Dev mode
+        // (`pnpm dev:daemon`) bypasses the supervisor and keeps the
+        // default `stdoutMode: "json"` for terminal visibility.
+        FRIDAY_LOG_STDOUT: "off",
       },
     },
     {
@@ -175,6 +182,13 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         ...process.env,
         // adapter-node + server-entry.mjs both read PORT.
         PORT: String(dashboardPort),
+        // FRI-116: same rationale as the daemon spec — supervisor pipes
+        // child stdout to dashboard.jsonl and the dashboard's
+        // createLogger writes its own fd, so without this each line
+        // doubles. Dev mode (`pnpm dev:dashboard`) bypasses the
+        // supervisor and keeps the default stdout mode for terminal
+        // visibility.
+        FRIDAY_LOG_STDOUT: "off",
       },
     },
   ];

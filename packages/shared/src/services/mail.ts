@@ -4,7 +4,17 @@ import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
 
 export type MailType = "message" | "notification" | "task";
-export type MailDelivery = "pending" | "delivered" | "read" | "closed";
+/**
+ * FRI-116: the legacy 4-value union (pending/delivered/read/closed)
+ * narrowed to three. Production data only ever lands at `pending`
+ * (insert), `read` (worker drained the inbox), or `closed` (terminal
+ * after a reply or explicit close). The DB check constraint at
+ * `schema.ts:241` still accepts the legacy 4-value set (no migration
+ * per the strategy-1 default in FRI-116); the TS union narrows the
+ * codebase-side write surface, and the unused writer helper was
+ * deleted.
+ */
+export type MailDelivery = "pending" | "read" | "closed";
 /**
  * `normal` mail drains at the next turn boundary (between full turns, as
  * today). `critical` mail drains at the next SDK iteration boundary —
@@ -102,14 +112,6 @@ export async function markRead(id: number): Promise<void> {
   await db
     .update(schema.mail)
     .set({ delivery: "read", readAt: new Date() })
-    .where(eq(schema.mail.id, id));
-}
-
-export async function markDelivered(id: number): Promise<void> {
-  const db = getDb();
-  await db
-    .update(schema.mail)
-    .set({ delivery: "delivered" })
     .where(eq(schema.mail.id, id));
 }
 

@@ -1477,6 +1477,14 @@ export async function handleEvent(
             errorCode: e.code,
           });
           if (w.zeroBlockTurnStreak >= wedgeThreshold()) {
+            // FRI-116: hoist the FRI-110 turnStart clear BEFORE the
+            // force-kill early-return so this branch's post-condition
+            // matches the happy path below. `forceKillStuckWorker`
+            // does also clear `w.turnStart` (defense-in-depth at its
+            // own exit handler), but relying on the chain is the
+            // exact "trust the trail" anti-pattern FRI-117's lint
+            // story is meant to catch at authoring time.
+            w.turnStart = undefined;
             await forceKillStuckWorker(w, {
               reason: "wedge",
               zeroBlockTurnStreak: w.zeroBlockTurnStreak,
@@ -1601,6 +1609,12 @@ export async function handleEvent(
             source: "turn-complete",
           });
           if (w.zeroBlockTurnStreak >= wedgeThreshold()) {
+            // FRI-116: hoist the FRI-110 turnStart clear BEFORE the
+            // force-kill early-return so this branch's post-condition
+            // matches the happy path below. See the symmetric
+            // restructure in the `error` case above for the
+            // "trust the trail" rationale.
+            w.turnStart = undefined;
             await forceKillStuckWorker(w, {
               reason: "wedge",
               zeroBlockTurnStreak: w.zeroBlockTurnStreak,

@@ -217,7 +217,11 @@ export const mail = pgTable(
     fromAgent: text("from_agent").notNull(),
     toAgent: text("to_agent").notNull(),
     type: text("type").notNull(), // message|notification|task
-    delivery: text("delivery").notNull(), // pending|delivered|read|closed
+    // FRI-116: TS unions narrowed to {pending,read,closed}. The DB
+    // check constraint below still accepts the legacy `delivered`
+    // value for write-back compatibility; tightening requires a
+    // migration that the epic explicitly scopes out.
+    delivery: text("delivery").notNull(), // pending|read|closed (DB also still accepts legacy 'delivered')
     subject: text("subject"),
     threadId: text("thread_id"),
     body: text("body").notNull(),

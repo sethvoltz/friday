@@ -395,7 +395,7 @@ const mail = table("mail")
     from_agent: string(),
     to_agent: string(),
     type: string<"message" | "notification" | "task">(),
-    delivery: string<"pending" | "delivered" | "read" | "closed">(),
+    delivery: string<"pending" | "read" | "closed">(),
     subject: string().optional(),
     thread_id: string().optional(),
     body: string(),
