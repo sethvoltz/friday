@@ -828,7 +828,21 @@ class ZeroSyncStore {
       this.#pendingBlocksAgent = agentName;
       return;
     }
-    if (this.blocksAgent === agentName && this.#blocksTeardown) return;
+    if (this.blocksAgent === agentName && this.#blocksTeardown) {
+      // Same-agent rebind: don't tear down + re-materialize the view (that
+      // would burn a zero-cache round-trip and flash the data). But DO
+      // re-fire the listener set with the current snapshot, because callers
+      // use this method as a "you have the current data" signal — past-
+      // session → live navigation re-enters loadAgentTurns, which sets
+      // `loadingInitial=true` and then calls this binder expecting the
+      // listener to flip it back off via applyZeroBlocks. Without this
+      // synthetic frame, the chat sits at a stuck skeleton until the next
+      // upstream delta lands (which, on a quiet agent, may be never).
+      for (const listener of this.#blocksListeners) {
+        listener(this.blocks, this.blocksResultType);
+      }
+      return;
+    }
     this.unbindBlocks();
     this.blocksAgent = agentName;
     const cutoff = Date.now() - BLOCKS_RETENTION_MS;
