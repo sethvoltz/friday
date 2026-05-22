@@ -17,7 +17,7 @@
  * trigger plumbing only.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTestDb,
   getDb,
@@ -79,13 +79,14 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
 
       await insertBlock("blk-dispatch-1", "pending");
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.channel).toBe("friday_new_pending_block");
-      expect(received[0]!.payload).toBe("blk-dispatch-1");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.channel).toBe("friday_new_pending_block");
+          expect(received[0]!.payload).toBe("blk-dispatch-1");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -107,6 +108,8 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
 
       await insertBlock("blk-dispatch-2", "complete");
 
+      // negative-space: the trigger predicate excludes non-'pending' INSERTs —
+      // a bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -127,6 +130,8 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
 
       await insertBlock("blk-dispatch-3", "queued");
 
+      // negative-space: the trigger predicate excludes non-'pending' INSERTs —
+      // a bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -145,7 +150,8 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
     try {
       await insertBlock("blk-dispatch-4", "pending");
       await client.query("LISTEN friday_new_pending_block");
-      // Drain the pending notification first.
+      // negative-space: drain the pending-INSERT NOTIFY before attaching
+      // our handler so the assertion below isn't polluted.
       await new Promise((r) => setTimeout(r, 250));
 
       const received: Array<{ payload: string }> = [];
@@ -158,6 +164,8 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
         .update(schema.blocks)
         .set({ status: "complete" });
 
+      // negative-space: trigger is AFTER INSERT only — UPDATEs don't fire.
+      // A bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -172,6 +180,8 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
     try {
       await insertBlock("blk-dispatch-5", "pending");
       await client.query("LISTEN friday_new_pending_block");
+      // negative-space: drain the pending-INSERT NOTIFY before attaching
+      // our handler so the assertion below isn't polluted.
       await new Promise((r) => setTimeout(r, 250));
 
       const received: Array<{ payload: string }> = [];
@@ -182,6 +192,8 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
       const db = getDb();
       await db.update(schema.blocks).set({ status: "queued" });
 
+      // negative-space: trigger is AFTER INSERT only — UPDATEs don't fire.
+      // A bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {

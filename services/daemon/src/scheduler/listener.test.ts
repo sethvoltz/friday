@@ -9,7 +9,7 @@
  * end-to-end smoke (psql + daemon log).
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTestDb,
   getDb,
@@ -61,13 +61,14 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
         updatedAt: new Date(),
       });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.channel).toBe("friday_schedule_changed");
-      expect(received[0]!.payload).toBe("test-create");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.channel).toBe("friday_schedule_changed");
+          expect(received[0]!.payload).toBe("test-create");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -105,12 +106,13 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
         .update(schema.schedules)
         .set({ status: "reload_requested", updatedAt: new Date() });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.payload).toBe("test-update");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.payload).toBe("test-update");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -148,12 +150,13 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
         .update(schema.schedules)
         .set({ status: "deleted", updatedAt: new Date() });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.payload).toBe("test-delete");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.payload).toBe("test-delete");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -196,6 +199,8 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
         .update(schema.schedules)
         .set({ nextRunAt: new Date(), updatedAt: new Date() });
 
+      // negative-space: the trigger predicate excludes 'active' UPDATEs —
+      // a bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -227,7 +232,9 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
         updatedAt: new Date(),
       });
 
-      // Drain the initial fire (from the INSERT).
+      // negative-space: drain the initial fire from the pending_register
+      // INSERT before attaching our handler so the assertion below isn't
+      // polluted by buffered notifications.
       await client.query("LISTEN friday_schedule_changed");
       await new Promise((r) => setTimeout(r, 250));
       const received: Array<{ payload: string }> = [];
@@ -237,6 +244,8 @@ describe("Postgres trigger: friday_schedule_notify_trigger", () => {
 
       await db.update(schema.schedules).set({ status: "active" });
 
+      // negative-space: the trigger predicate excludes 'active' UPDATEs —
+      // a bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {

@@ -32,10 +32,6 @@ beforeEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 50));
-}
-
 interface FakeChild {
   send: ReturnType<typeof vi.fn>;
   exitCode: number | null;
@@ -267,8 +263,16 @@ describe("lifecycle: IPC handler error boundary (FRI-33)", () => {
       await expect(
         safeHandleEvent(worker as never, event),
       ).resolves.toBeUndefined();
-      await settle();
 
+      await vi.waitFor(
+        () => {
+          const found = logSpy.mock.calls.find(
+            ([, ev]) => ev === "worker.ipc.error",
+          );
+          expect(found).toBeDefined();
+        },
+        { timeout: 5000, interval: 25 },
+      );
       const ipcErr = logSpy.mock.calls.find(
         ([, ev]) => ev === "worker.ipc.error",
       );

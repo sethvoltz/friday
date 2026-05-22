@@ -51,10 +51,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 50));
-}
-
 async function registerBuilderWithTicket(
   name: string,
   ticketId?: string,
@@ -75,9 +71,12 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     await registerBuilderWithTicket("alpha", t.id);
 
     await archiveAgent("alpha", { reason: "completed" });
-    await settle();
-
-    expect((await getTicket(t.id))?.status).toBe("done");
+    await vi.waitFor(
+      async () => {
+        expect((await getTicket(t.id))?.status).toBe("done");
+      },
+      { timeout: 5000, interval: 25 },
+    );
     expect((await registry.getAgent("alpha"))?.status).toBe("archived");
   });
 
@@ -86,9 +85,12 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     await registerBuilderWithTicket("beta", t.id);
 
     await archiveAgent("beta", { reason: "abandoned" });
-    await settle();
-
-    expect((await getTicket(t.id))?.status).toBe("closed");
+    await vi.waitFor(
+      async () => {
+        expect((await getTicket(t.id))?.status).toBe("closed");
+      },
+      { timeout: 5000, interval: 25 },
+    );
   });
 
   it("reason='failed' closes the ticket AND adds a failure comment authored by the agent", async () => {
@@ -96,15 +98,18 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     await registerBuilderWithTicket("gamma", t.id);
 
     await archiveAgent("gamma", { reason: "failed" });
-    await settle();
-
-    expect((await getTicket(t.id))?.status).toBe("closed");
-    const comments = await listComments(t.id);
-    expect(comments).toHaveLength(1);
-    expect(comments[0]).toMatchObject({
-      author: "gamma",
-      body: "agent archived: failed",
-    });
+    await vi.waitFor(
+      async () => {
+        expect((await getTicket(t.id))?.status).toBe("closed");
+        const comments = await listComments(t.id);
+        expect(comments).toHaveLength(1);
+        expect(comments[0]).toMatchObject({
+          author: "gamma",
+          body: "agent archived: failed",
+        });
+      },
+      { timeout: 5000, interval: 25 },
+    );
   });
 
   it("reason='refork' leaves the linked ticket untouched (watchdog invariant)", async () => {
@@ -112,10 +117,15 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     await registerBuilderWithTicket("delta", t.id);
 
     await archiveAgent("delta", { reason: "refork" });
-    await settle();
-
+    // Wait for the archive to land (positive signal); then assert the ticket
+    // wasn't touched (negative). 'refork' must not call into ticket close.
+    await vi.waitFor(
+      async () => {
+        expect((await registry.getAgent("delta"))?.status).toBe("archived");
+      },
+      { timeout: 5000, interval: 25 },
+    );
     expect((await getTicket(t.id))?.status).toBe("in_progress");
-    expect((await registry.getAgent("delta"))?.status).toBe("archived");
   });
 
   it("archive of an agent with no ticketId is a no-op on tickets, archive still happens", async () => {
@@ -150,10 +160,14 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
 
     await archiveAgent("eta", { reason: "completed" });
     vi.restoreAllMocks();
-    await settle();
+    await vi.waitFor(
+      async () => {
+        expect((await getTicket(t.id))?.status).toBe("done");
+      },
+      { timeout: 5000, interval: 25 },
+    );
 
     expect(readBeforeArchive).toBe(true);
-    expect((await getTicket(t.id))?.status).toBe("done");
   });
 
   it("orchestrator-type agent (no ticketId field on row) archives cleanly without ticket effects", async () => {
@@ -161,9 +175,14 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     const t = await createTicket({ title: "unrelated", status: "in_progress" });
 
     await archiveAgent("main", { reason: "abandoned" });
-    await settle();
-
-    expect((await registry.getAgent("main"))?.status).toBe("archived");
+    // Wait for the archive to land before asserting the unrelated ticket
+    // was untouched.
+    await vi.waitFor(
+      async () => {
+        expect((await registry.getAgent("main"))?.status).toBe("archived");
+      },
+      { timeout: 5000, interval: 25 },
+    );
     // Unrelated ticket must not be touched.
     expect((await getTicket(t.id))?.status).toBe("in_progress");
   });
@@ -187,9 +206,12 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     await archiveAgent("theta", { reason: "completed" });
-    await settle();
-
-    expect((await getTicket(t.id))?.status).toBe("done");
+    await vi.waitFor(
+      async () => {
+        expect((await getTicket(t.id))?.status).toBe("done");
+      },
+      { timeout: 5000, interval: 25 },
+    );
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

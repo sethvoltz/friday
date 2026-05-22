@@ -18,7 +18,7 @@
  * trigger plumbing only.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTestDb,
   getDb,
@@ -81,13 +81,14 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
         .update(schema.blocks)
         .set({ status: "cancel_requested" });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.channel).toBe("friday_block_canceled");
-      expect(received[0]!.payload).toBe("blk-cancel-1");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.channel).toBe("friday_block_canceled");
+          expect(received[0]!.payload).toBe("blk-cancel-1");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -107,7 +108,8 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
     try {
       await insertQueuedBlock("blk-cancel-2");
       await client.query("LISTEN friday_block_canceled");
-      // Drain the cancel_requested fire first.
+      // negative-space: drain the cancel_requested NOTIFY before attaching
+      // our handler so the assertion below isn't polluted.
       const db = getDb();
       await db
         .update(schema.blocks)
@@ -121,6 +123,8 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
 
       await db.delete(schema.blocks);
 
+      // negative-space: trigger is AFTER UPDATE only — DELETEs don't fire.
+      // A bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -147,6 +151,9 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
       await db.update(schema.blocks).set({ status: "dispatched" });
       await db.update(schema.blocks).set({ status: "complete" });
 
+      // negative-space: trigger predicate fires only on transitions to
+      // 'cancel_requested' — a bounded real-time wait confirms no
+      // spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -187,6 +194,8 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
         lastEventSeq: 0,
       });
 
+      // negative-space: trigger is AFTER UPDATE only — INSERTs don't fire.
+      // A bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {

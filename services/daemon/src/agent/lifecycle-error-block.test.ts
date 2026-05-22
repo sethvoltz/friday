@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
@@ -22,10 +22,6 @@ afterAll(async () => {
 beforeEach(async () => {
   await handle.truncate();
 });
-
-async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 50));
-}
 
 function makeFakeWorker(overrides: Record<string, unknown> = {}): unknown {
   return {
@@ -84,7 +80,19 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
       requestId: "req_abc",
       rawMessage: `529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
     });
-    await settle();
+    // turn_done is the LAST event in the error chain (block_start → DB
+    // INSERT → block_complete → error → turn_done). Waiting for it
+    // guarantees every prior side effect — including block_complete —
+    // has landed.
+    await vi.waitFor(
+      () =>
+        expect(
+          captured.find(
+            (e) => e.type === "turn_done" && e.turn_id === "turn-err-1",
+          ),
+        ).toBeDefined(),
+      { timeout: 5000, interval: 25 },
+    );
     unsub();
 
     // (a) one error block row exists for this turn.
@@ -164,7 +172,17 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
         recoverable: true,
       },
     );
-    await settle();
+    // The aborted branch skips insertErrorBlock entirely — wait on the
+    // observable signal that the error path ran (turn_done aborted).
+    await vi.waitFor(
+      () =>
+        expect(
+          captured.find(
+            (e) => e.type === "turn_done" && e.turn_id === "turn-abort-1",
+          ),
+        ).toBeDefined(),
+      { timeout: 5000, interval: 25 },
+    );
     unsub();
 
     const rows = await getDb()
@@ -198,16 +216,19 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
       retryAfterSeconds: 30,
       rawMessage: `429 {"error":{"message":"slow down"}}`,
     });
-    await settle();
-
-    const rows = await getDb()
-      .select()
-      .from(schema.blocks)
-      .where(eq(schema.blocks.turnId, "turn-rl-1"));
-    expect(rows.length).toBe(1);
-    const payload = rows[0].contentJson as Record<string, unknown>;
-    expect(payload.retryAfterSeconds).toBe(30);
-    expect(payload.code).toBe("rate_limited");
+    await vi.waitFor(
+      async () => {
+        const rows = await getDb()
+          .select()
+          .from(schema.blocks)
+          .where(eq(schema.blocks.turnId, "turn-rl-1"));
+        expect(rows.length).toBe(1);
+        const payload = rows[0].contentJson as Record<string, unknown>;
+        expect(payload.retryAfterSeconds).toBe(30);
+        expect(payload.code).toBe("rate_limited");
+      },
+      { timeout: 5000, interval: 25 },
+    );
   });
 
   it("falls back to e.message when classifier fields are absent", async () => {
@@ -221,16 +242,19 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
       message: "something blew up",
       recoverable: false,
     });
-    await settle();
-
-    const rows = await getDb()
-      .select()
-      .from(schema.blocks)
-      .where(eq(schema.blocks.turnId, "turn-bare-1"));
-    expect(rows.length).toBe(1);
-    const payload = rows[0].contentJson as Record<string, unknown>;
-    expect(payload.code).toBe("worker_error");
-    expect(payload.headline).toBe("something blew up");
-    expect(payload.rawMessage).toBe("something blew up");
+    await vi.waitFor(
+      async () => {
+        const rows = await getDb()
+          .select()
+          .from(schema.blocks)
+          .where(eq(schema.blocks.turnId, "turn-bare-1"));
+        expect(rows.length).toBe(1);
+        const payload = rows[0].contentJson as Record<string, unknown>;
+        expect(payload.code).toBe("worker_error");
+        expect(payload.headline).toBe("something blew up");
+        expect(payload.rawMessage).toBe("something blew up");
+      },
+      { timeout: 5000, interval: 25 },
+    );
   });
 });

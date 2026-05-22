@@ -25,7 +25,7 @@
  * LISTEN handler — not a re-scan.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -171,24 +171,24 @@ describe("dispatch stress / exactly-once (item #50 — plan §4 step 4b)", () =>
       // dispatch-listener.ts L149–L188. Polling only on pending=0 races
       // the log writes for the last handful of rows and produced
       // flakes around 88–99/100 on CI.
-      const deadline = Date.now() + CONVERGE_DEADLINE_MS;
       let lastPending = ROW_COUNT;
       let lastApplied = 0;
       let logBuf = "";
-      while (Date.now() < deadline) {
-        lastPending = await countPending(env.databaseUrl);
-        logBuf = await readDaemonLog(env.daemon.dataDir);
-        lastApplied = countLogEvents(logBuf, "block.dispatch.applied");
-        if (lastPending === 0 && lastApplied === ROW_COUNT) break;
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      expect(lastPending).toBe(0);
-      expect(lastApplied).toBe(ROW_COUNT);
+      await vi.waitFor(
+        async () => {
+          lastPending = await countPending(env.databaseUrl);
+          logBuf = await readDaemonLog(env.daemon.dataDir);
+          lastApplied = countLogEvents(logBuf, "block.dispatch.applied");
+          expect(lastPending).toBe(0);
+          expect(lastApplied).toBe(ROW_COUNT);
+        },
+        { timeout: CONVERGE_DEADLINE_MS, interval: 100 },
+      );
 
-      // Brief settle so any duplicate-dispatch bug (applied > ROW_COUNT)
-      // has a chance to surface. By the time pending=0 has converged
-      // the LISTEN handler is idle, so 500ms is enough to catch a
-      // stray re-entry without meaningfully extending wall time.
+      // negative-space: by the time pending=0 has converged the LISTEN
+      // handler is idle, so 500ms is enough to catch a stray re-entry
+      // (applied > ROW_COUNT) without meaningfully extending wall time.
+      // vi.waitFor on the same predicate would resolve on the first tick.
       await new Promise((r) => setTimeout(r, 500));
       logBuf = await readDaemonLog(env.daemon.dataDir);
       expect(countLogEvents(logBuf, "block.dispatch.applied")).toBe(ROW_COUNT);

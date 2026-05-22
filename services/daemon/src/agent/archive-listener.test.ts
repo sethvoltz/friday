@@ -11,7 +11,7 @@
  * tests; this file pins the trigger plumbing only.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTestDb,
   getDb,
@@ -59,13 +59,14 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
         .update(schema.agents)
         .set({ status: "archive_requested", archiveReason: "abandoned" });
 
-      const deadline = Date.now() + 1_000;
-      while (received.length === 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      expect(received).toHaveLength(1);
-      expect(received[0]!.channel).toBe("friday_archive_requested");
-      expect(received[0]!.payload).toBe("test-archive");
+      await vi.waitFor(
+        () => {
+          expect(received).toHaveLength(1);
+          expect(received[0]!.channel).toBe("friday_archive_requested");
+          expect(received[0]!.payload).toBe("test-archive");
+        },
+        { timeout: 5000, interval: 25 },
+      );
     } finally {
       await client.end();
     }
@@ -91,9 +92,10 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
       });
 
       await client.query("LISTEN friday_archive_requested");
-      // Drain the initial fire (from the INSERT — but the INSERT
-      // happens with status='archive_requested' so the trigger
-      // doesn't actually fire on insert; only on UPDATE).
+      // negative-space: drain any buffered notifications before attaching
+      // our handler. The INSERT here was at 'archive_requested' (trigger
+      // is AFTER UPDATE only, so it shouldn't have fired) — but the drain
+      // is paranoid coverage for handler-attach timing.
       await new Promise((r) => setTimeout(r, 250));
       const received: Array<{ payload: string }> = [];
       client.on("notification", (msg) =>
@@ -104,6 +106,8 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
         .update(schema.agents)
         .set({ status: "archived" });
 
+      // negative-space: trigger predicate excludes flips to 'archived' —
+      // a bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -139,6 +143,8 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
         .update(schema.agents)
         .set({ status: "idle" });
 
+      // negative-space: trigger predicate excludes idle/working UPDATEs —
+      // a bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {
@@ -174,6 +180,8 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
         updatedAt: new Date(),
       });
 
+      // negative-space: trigger is AFTER UPDATE only — INSERTs don't fire.
+      // A bounded real-time wait confirms no spurious NOTIFY arrives.
       await new Promise((r) => setTimeout(r, 250));
       expect(received).toHaveLength(0);
     } finally {

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createTestDb,
   getDb,
@@ -25,10 +25,6 @@ afterAll(async () => {
 beforeEach(async () => {
   await handle.truncate();
 });
-
-async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 50));
-}
 
 function makeFakeWorker(): unknown {
   return {
@@ -66,18 +62,21 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
         cost_usd: 0.1234,
       },
     });
-    await settle();
-
-    const rows = await getDb().select().from(schema.usage);
-    expect(rows.length).toBe(1);
-    const row = rows[0];
-    expect(row.costUsd).toBeCloseTo(0.1234);
-    expect(row.inputTokens).toBe(1234);
-    expect(row.outputTokens).toBe(567);
-    expect(row.cacheCreationTokens).toBe(89);
-    expect(row.cacheReadTokens).toBe(4321);
-    expect(row.agentName).toBe("test-agent");
-    expect(row.model).toBe("claude-opus-4-7");
+    await vi.waitFor(
+      async () => {
+        const rows = await getDb().select().from(schema.usage);
+        expect(rows.length).toBe(1);
+        const row = rows[0];
+        expect(row.costUsd).toBeCloseTo(0.1234);
+        expect(row.inputTokens).toBe(1234);
+        expect(row.outputTokens).toBe(567);
+        expect(row.cacheCreationTokens).toBe(89);
+        expect(row.cacheReadTokens).toBe(4321);
+        expect(row.agentName).toBe("test-agent");
+        expect(row.model).toBe("claude-opus-4-7");
+      },
+      { timeout: 5000, interval: 25 },
+    );
   });
 
   it("inserts nothing when turn-complete carries no usage payload", async () => {
@@ -87,7 +86,11 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
       type: "turn-complete",
       sessionId: "sess-1",
     });
-    await settle();
+    // negative-space: turn-complete without usage must not write a row.
+    // handleEvent is fire-and-forget — give the async chain a bounded
+    // real-time window to fire (so a regression would be visible) before
+    // asserting nothing landed. vi.waitFor would resolve on the first tick.
+    await new Promise((r) => setTimeout(r, 100));
 
     const rows = await getDb().select().from(schema.usage);
     expect(rows.length).toBe(0);
@@ -110,7 +113,10 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
         cost_usd: 0.01,
       },
     });
-    await settle();
+    // negative-space: missing session id must not write a row. Bounded
+    // real-time wait gives the fire-and-forget path a chance to fire (so
+    // a regression would be visible).
+    await new Promise((r) => setTimeout(r, 100));
 
     const rows = await getDb().select().from(schema.usage);
     expect(rows.length).toBe(0);

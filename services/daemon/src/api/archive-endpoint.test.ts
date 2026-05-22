@@ -19,6 +19,7 @@ import {
   describe,
   expect,
   it,
+  vi,
 } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
@@ -119,9 +120,13 @@ describe("POST /api/agents/:name/archive — contract", () => {
     });
 
     expect(res.status).toBe(200);
-    // ticket-close is fire-and-forget; let it land.
-    await new Promise((r) => setTimeout(r, 50));
-    expect((await getTicket(t.id))?.status).toBe("done");
+    // ticket-close is fire-and-forget; poll until it lands.
+    await vi.waitFor(
+      async () => {
+        expect((await getTicket(t.id))?.status).toBe("done");
+      },
+      { timeout: 5000, interval: 25 },
+    );
     expect((await registry.getAgent("rest-completed"))?.status).toBe(
       "archived",
     );
@@ -148,8 +153,12 @@ describe("POST /api/agents/:name/archive — contract", () => {
     });
 
     expect(res.status).toBe(200);
-    await new Promise((r) => setTimeout(r, 50));
-    expect((await getTicket(t.id))?.status).toBe("closed");
+    await vi.waitFor(
+      async () => {
+        expect((await getTicket(t.id))?.status).toBe("closed");
+      },
+      { timeout: 5000, interval: 25 },
+    );
   });
 
   it("returns 404 when the agent doesn't exist (before reason validation)", async () => {
