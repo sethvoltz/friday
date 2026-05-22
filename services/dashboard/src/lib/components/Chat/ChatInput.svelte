@@ -549,9 +549,8 @@
     autoresize();
     // Phase 4.8: route the `archive` destructive command through
     // the Zero mutator when the feature flag is on. Other
-    // destructive commands (reset-context, restart) stay on the
-    // legacy `/api/commands` REST path — they're not in Phase 4
-    // scope.
+    // destructive commands (restart) stay on the legacy
+    // `/api/commands` REST path — they're not in Phase 4 scope.
     if (zeroOn && name === "archive" && args) {
       const result = zeroSync.archiveAgent({ name: args });
       const sr = await result?.server;
@@ -766,37 +765,6 @@
           details:
             "The agent stops receiving work and is marked archived. For builders, the worktree is removed and the friday/<name> branch is force-deleted. Chat history is preserved.",
           confirmLabel: "Archive the agent",
-          resolvedArgs: target,
-        };
-      }
-      case "reset-context": {
-        const target = provided || focused;
-        const found = chat.agents.find((a) => a.name === target);
-        if (!target) {
-          return {
-            valid: false,
-            title: "No agent to reset",
-            details:
-              "There's no agent currently focused. Type `/reset-context <agent>` with a name.",
-            confirmLabel: "",
-            resolvedArgs: "",
-          };
-        }
-        if (!found) {
-          return {
-            valid: false,
-            title: `Agent ${target} not found`,
-            details: `No registered agent matches \`${target}\`.`,
-            confirmLabel: "",
-            resolvedArgs: target,
-          };
-        }
-        return {
-          valid: true,
-          title: `Reset context for ${target}?`,
-          details:
-            "The agent's current session is cleared so the next turn starts fresh. Memory entries persist.",
-          confirmLabel: "Reset the agent",
           resolvedArgs: target,
         };
       }

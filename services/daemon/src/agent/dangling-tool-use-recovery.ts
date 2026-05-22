@@ -18,7 +18,7 @@
  * spawn. A scan turned up **7 wedged agents** across the install,
  * the oldest dating to 2026-05-14 — every previous unclean worker
  * shutdown that landed on a `tool_use` had left the same dangling
- * state, with no operator recourse short of manual `/reset-context`.
+ * state, with no operator recourse short of manual `/clear`.
  *
  * The heal:
  *  1. Insert a synthetic `tool_result` block in Postgres marking

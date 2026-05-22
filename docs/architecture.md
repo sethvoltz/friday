@@ -439,7 +439,7 @@ Every call to `archiveAgent(name, { reason })` requires a `reason` — there is 
 | `completed` | `done` | `completed` | Orchestrator MCP `agent_archive` after a successful build |
 | `abandoned` | `closed` | `canceled` | Orchestrator MCP, REST archive, boot-time orphan sweep, `/archive` slash command |
 | `failed` | `closed` + failure comment | `canceled` | Orchestrator MCP when the agent gave up or errored irrecoverably |
-| `refork` | unchanged | unchanged | Watchdog refork path; `/system reset-context` |
+| `refork` | unchanged | unchanged | Watchdog refork path; `/clear` |
 
 The closer reads the agent row's `ticketId` **before** `registry.archiveAgent` runs — a future refactor that nulls the row's fields on archive would silently break propagation otherwise, so the read order is pinned by a test (`lifecycle-ticket-close.test.ts`). Closer execution is fire-and-forget from `archiveAgent`'s perspective; failures inside the closer (DB error, Linear unreachable, etc.) are logged but never bubble back into the worker-teardown path.
 

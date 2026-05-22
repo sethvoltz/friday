@@ -110,6 +110,13 @@ export const agents = pgTable(
     // ADR-023: when archive was requested by a mutator (before the daemon
     // picked it up). Used to drive the daemon's archive side-effect handler.
     archiveReason: text("archive_reason"),
+    // Distinct session count across this agent's `blocks` rows. Maintained
+    // by an AFTER INSERT trigger on `blocks` (see migration
+    // `0020_session_count_trigger.sql`) so the sidebar's expand-history
+    // button can render off a live-replicated column without paying a
+    // per-row `COUNT(DISTINCT)` from the dashboard. Default 0 covers the
+    // pre-first-turn window before any block has been recorded.
+    sessionCount: integer("session_count").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },

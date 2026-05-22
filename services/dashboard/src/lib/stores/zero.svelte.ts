@@ -46,6 +46,7 @@ export interface ZeroAgentRow {
   status: string;
   session_id: string | null;
   app_id: string | null;
+  session_count: number;
   created_at: number;
   updated_at: number;
 }
@@ -1449,6 +1450,7 @@ function toAgentInfo(r: ZeroAgentRow): AgentInfo {
     type: r.type,
     status: r.status,
     sessionId: r.session_id ?? undefined,
+    sessionCount: r.session_count,
     createdAt: new Date(r.created_at).toISOString(),
     updatedAt: new Date(r.updated_at).toISOString(),
   };
