@@ -334,6 +334,7 @@ describe("toAgentInfo mapping (via materialize update)", () => {
                   type: "builder",
                   status: "working",
                   session_id: "sess-1",
+                  session_count: 3,
                   created_at: 1_700_000_000_000,
                   updated_at: 1_700_000_001_000,
                 },
@@ -342,6 +343,7 @@ describe("toAgentInfo mapping (via materialize update)", () => {
                   type: "bare",
                   status: "idle",
                   session_id: null,
+                  session_count: 0,
                   created_at: 1_700_000_000_000,
                   updated_at: 1_700_000_002_000,
                 },
@@ -384,8 +386,10 @@ describe("toAgentInfo mapping (via materialize update)", () => {
       type: "builder",
       status: "working",
       sessionId: "sess-1",
+      sessionCount: 3,
     });
     expect(chat.agents[1].sessionId).toBeUndefined();
+    expect(chat.agents[1].sessionCount).toBe(0);
     expect(chat.agents[0].createdAt).toBe(
       new Date(1_700_000_000_000).toISOString(),
     );
@@ -443,6 +447,7 @@ describe("#bindAgents query (FRI-101 regression): no status filter", () => {
                   type: "builder",
                   status: "working",
                   session_id: "sess-live",
+                  session_count: 1,
                   created_at: 1_700_000_000_000,
                   updated_at: 1_700_000_000_000,
                 },
@@ -451,6 +456,7 @@ describe("#bindAgents query (FRI-101 regression): no status filter", () => {
                   type: "helper",
                   status: "archived",
                   session_id: null,
+                  session_count: 1,
                   created_at: 1_700_000_000_000,
                   updated_at: 1_700_000_001_000,
                 },
@@ -459,6 +465,7 @@ describe("#bindAgents query (FRI-101 regression): no status filter", () => {
                   type: "helper",
                   status: "error",
                   session_id: null,
+                  session_count: 0,
                   created_at: 1_700_000_000_000,
                   updated_at: 1_700_000_002_000,
                 },

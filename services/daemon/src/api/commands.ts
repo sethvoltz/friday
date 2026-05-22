@@ -11,7 +11,7 @@ export const SYSTEM_COMMANDS: SystemCommand[] = [
   { name: "restart", description: "Restart the daemon", destructive: true },
   { name: "status", description: "Show daemon + agent status" },
   { name: "inspect", description: "Show agent detail (`/inspect <agent>`)" },
-  { name: "reset-context", description: "Wipe orchestrator context (memory persists)", destructive: true },
+  { name: "clear", description: "Clear the current session so the next turn starts fresh (memory persists)" },
   { name: "scratch", description: "Spawn a fresh bare agent (`/scratch [topic]`)" },
 ];
 

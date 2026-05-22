@@ -89,6 +89,7 @@ const agents = table("agents")
     spawn_reason: string().optional(),
     app_id: string().optional(),
     archive_reason: string().optional(),
+    session_count: number(),
     created_at: number(),
     updated_at: number(),
   })

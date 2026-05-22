@@ -62,10 +62,10 @@ TypeScript-defined, deterministic, no LLM:
 
 ```
 /archive <agent> /restart        /status         /inspect <agent>
-/reset-context   /jump <date|term>    /scratch [name]
+/clear           /jump <date|term>    /scratch [name]
 ```
 
-System commands return immediately. `/reset-context`, `/restart` and other destructive commands gate behind a confirmation modal.
+System commands return immediately. `/restart`, `/archive` and other destructive commands gate behind a confirmation modal. `/clear` is non-destructive — history is preserved as a past session — so it runs without a prompt.
 
 **`/jump <date|term>`** (FIX_FORWARD 6.1). Two modes:
 

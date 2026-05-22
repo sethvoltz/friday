@@ -1853,7 +1853,7 @@ async function handleSystemCommand(
       if (!a) return json(res, 404, { error: "agent not found" });
       return json(res, 200, a);
     }
-    case "reset-context": {
+    case "clear": {
       const cfg = loadConfig();
       const name = args || cfg.orchestratorName;
       const a = await registry.getAgent(name);
@@ -1862,14 +1862,14 @@ async function handleSystemCommand(
       // a fresh process with no `resume` arg. setStatus + clearSession alone
       // wouldn't take effect until the worker exits naturally. Use "refork"
       // so the linked ticket (if any) isn't moved to a terminal status —
-      // the agent is being reset, not closed.
+      // the agent is being cleared, not closed.
       void archiveAgent(name, { reason: "refork" });
       await registry.clearSession(name);
       // Phase 5: `agent_lifecycle:refork` SSE retired — Zero replicates
       // the session-clear (agents.session_id=null) reactively.
       return json(res, 200, {
         ok: true,
-        message: `reset-context: ${name} session cleared; next turn starts fresh`,
+        message: `clear: ${name} session cleared; next turn starts fresh`,
       });
     }
     case "scratch": {
