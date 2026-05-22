@@ -140,6 +140,12 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
             .describe(
               "Builder-only. Specifies which repo / branch the worktree is cut from.",
             ),
+          reason: z
+            .string()
+            .optional()
+            .describe(
+              "Free-text rationale for why this spawn is necessary. Required by the daemon when caller is a builder or helper; ignored when caller is orchestrator. Distinct from agent_archive's `reason` field (which is a closed enum).",
+            ),
         },
         async (args, extra) => {
           const row = await daemonFetch({
@@ -155,6 +161,7 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
               model: args.model,
               ticketId: args.ticketId,
               worktree: args.worktree,
+              reason: args.reason,
             },
           });
           return {

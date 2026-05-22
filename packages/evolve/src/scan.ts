@@ -21,6 +21,7 @@ import {
   USAGE_LOG_PATH,
 } from "@friday/shared";
 import { getAllUsageEntries } from "@friday/shared/services";
+import { scanAgentSpawnDepth } from "./scan-agent-depth.js";
 import type {
   EvidencePointer,
   Signal,
@@ -491,10 +492,23 @@ function cosine(a: Map<string, number>, b: Map<string, number>): number {
 export async function scanAll(
   opts: ScanOptions & UsageScanOptions = {},
 ): Promise<Signal[]> {
-  const [daemonSignals, usageSignals, transcriptSignals] = await Promise.all([
-    Promise.resolve(scanDaemonLog(opts)),
-    scanUsage(opts),
-    Promise.resolve(scanTranscripts(opts)),
-  ]);
-  return [...daemonSignals, ...usageSignals, ...transcriptSignals];
+  const [daemonSignals, usageSignals, transcriptSignals, depthSignals] =
+    await Promise.all([
+      Promise.resolve(scanDaemonLog(opts)),
+      scanUsage(opts),
+      Promise.resolve(scanTranscripts(opts)),
+      Promise.resolve(
+        scanAgentSpawnDepth({
+          daemonLogPath: opts.daemonLogPath,
+          since: opts.since,
+          now: opts.now,
+        }),
+      ),
+    ]);
+  return [
+    ...daemonSignals,
+    ...usageSignals,
+    ...transcriptSignals,
+    ...depthSignals,
+  ];
 }

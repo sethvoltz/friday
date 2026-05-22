@@ -35,6 +35,14 @@ export interface RegisterInput {
   branch?: string;
   ticketId?: string;
   appId?: string;
+  /**
+   * ADR-022: free-text rationale recorded when a non-orchestrator (a
+   * Builder or Helper) spawned this agent. The daemon's spawn handler
+   * requires this to be non-empty for builder/helper callers; orchestrator
+   * spawns leave it null. Watchdog refork preserves the prior row's value
+   * so the audit trail survives recovery (FRI-102 AC #11).
+   */
+  spawnReason?: string | null;
 }
 
 export async function registerAgent(input: RegisterInput): Promise<AgentEntry> {
@@ -51,6 +59,7 @@ export async function registerAgent(input: RegisterInput): Promise<AgentEntry> {
       branch: input.branch ?? null,
       ticketId: input.ticketId ?? null,
       appId: input.appId ?? null,
+      spawnReason: input.spawnReason ?? null,
       createdAt: now,
       updatedAt: now,
     })
@@ -61,6 +70,23 @@ export async function registerAgent(input: RegisterInput): Promise<AgentEntry> {
   const got = await getAgent(input.name);
   if (!got) throw new Error(`registerAgent: row vanished after insert: ${input.name}`);
   return got;
+}
+
+/**
+ * Read the raw `spawn_reason` column for an agent. AgentEntry is the
+ * user-facing wire shape and deliberately omits this field, so the
+ * watchdog refork (and any future audit consumer) reads it directly via
+ * this helper. Returns null when the agent doesn't exist or was spawned
+ * by the orchestrator (no reason required, column stays null).
+ */
+export async function getSpawnReason(name: string): Promise<string | null> {
+  const db = getDb();
+  const rows = await db
+    .select({ spawnReason: schema.agents.spawnReason })
+    .from(schema.agents)
+    .where(eq(schema.agents.name, name))
+    .limit(1);
+  return rows[0]?.spawnReason ?? null;
 }
 
 /**
