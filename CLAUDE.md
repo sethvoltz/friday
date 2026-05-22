@@ -9,8 +9,9 @@ A local-first, headless agent daemon with a SvelteKit dashboard exposed via Clou
 - `docs/chat-ux.md` — Single-chat UX, sidebar, focus model, slash commands, attachments, markdown rendering.
 - `docs/mobile-ux.md` — Priority+ navigation, virtualization, PWA, mobile autocomplete.
 - `docs/mcp.md` — MCP server surface table (Friday + user-configured).
-- `docs/schema.md` — DB schema reference.
+- `docs/sandbox.md` — Worker isolation: M1–M5 rollout (PreToolUse rules, sandbox-exec, pgrp containment, stall watchdog) + residual risk.
 - `docs/decisions.md` — ADRs + watch list.
+- Schema reference: `packages/shared/src/db/schema.ts` (Drizzle source of truth; migrations under `packages/shared/drizzle/`).
 - `docs/roadmap.md` — Open work, sequenced for execution.
 - `docs/setup.md` — Setup guide including CFT walkthrough.
 - `docs/running.md` — How to run the daemon and dashboard.

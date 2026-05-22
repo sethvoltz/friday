@@ -83,23 +83,25 @@ Everything lives at `~/.friday/`:
 
 ```
 ~/.friday/
-├── .env                   Secrets (DATABASE_URL, ZERO_AUTH_SECRET, LINEAR_API_KEY, etc.)
-├── config.json            Settings + MCP server config
-├── SOUL.md                Your editable identity layer
-├── skills/*.md            User-additive slash skills
-├── agents/<name>/         Per-agent home — orchestrator/helper/scheduled cwd (ADR-029)
-├── uploads/<bucket>/      Content-addressed attachments
-├── memory/entries/*.md    Memory entries (mirrored to memory_entries Postgres table)
-├── evolve/proposals/*.md  Evolve proposals
-├── apps/<id>/             Installed Friday Apps (ADR-021)
-├── schedules/             Scheduled-agent worktrees
-├── workspaces/<name>/     Builder git worktrees
-├── backups/<ts>.tar.gz    Output of `friday backup` (gitignored)
-├── state/                 Daemon runtime state (per-service start markers; ADR-028)
-├── zero/replica.db        zero-cache's local replica (rebuilt from PG logical replication)
+├── .env                       Secrets (DATABASE_URL, ZERO_AUTH_SECRET, LINEAR_API_KEY, etc.)
+├── .daemon-secret             HMAC secret for daemon-internal auth (0600 — packages/shared/src/daemon-secret.ts)
+├── config.json                Settings + MCP server config
+├── SOUL.md                    Your editable identity layer
+├── skills/*.md                User-additive slash skills
+├── agents/<name>/             Per-agent home — orchestrator/helper/scheduled cwd (ADR-029)
+├── uploads/<bucket>/          Content-addressed attachments
+├── memory/entries/*.md        Memory entries (mirrored to memory_entries Postgres table)
+├── evolve/proposals/*.md      Evolve proposals
+├── apps/<id>/                 Installed Friday Apps (ADR-021)
+├── schedules/<name>/          Scheduled-agent state continuity (state.md + last-run.md)
+├── workspaces/<name>/         Builder git worktrees
+├── profiles/<name>.sb         Per-builder sandbox-exec SBPL profiles (0600 — see docs/sandbox.md, ADR-021)
+├── backups/<ts>.tar.gz        Output of `friday backup` (gitignored)
+├── state/                     Daemon runtime state (per-service start markers; ADR-028)
+├── zero/replica.db            zero-cache's local replica (rebuilt from PG logical replication)
 ├── logs/{daemon,dashboard,zero-cache}.jsonl   Structured logs (rotated at 1 MiB)
-├── usage.jsonl            Per-turn usage records
-└── health.json            Daemon heartbeat (refreshed every 30s)
+├── usage.jsonl                Per-turn usage records
+└── health.json                Daemon heartbeat (refreshed every 30s)
 ```
 
 Friday's own repo is a memory like any other. Add it via the dashboard memory UI, via `friday memory add` (writes as `createdBy=user`), or by `curl POST /api/memory` with the `x-friday-caller-name` header set to the owning agent. Friday writes its own memories via the `memory_save` MCP tool. Same mechanism for any other repo or always-inject fact a builder/helper needs.

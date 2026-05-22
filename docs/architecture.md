@@ -95,7 +95,7 @@ Local-first, headless agent daemon with a SvelteKit dashboard exposed via Cloudf
 | CLI | citty + @clack/prompts + picocolors |
 | Markdown | marked + DOMPurify + Shiki (Catppuccin Latte / Mocha) |
 | Image processing | sharp (HEIC → PNG, dimension caps) |
-| Process supervision | tmux for daemon/dashboard/zero-cache/cft; `brew services` for Postgres (ADR-009 + ADR-023) |
+| Process supervision | launchd via `friday-supervisor` for daemon/dashboard/zero-cache (ADR-028); `brew services` for Postgres (ADR-023); `cloudflared service install` as a separate user launch agent for the tunnel |
 
 ## Repo layout
 
@@ -115,7 +115,7 @@ agent-friday/
     chat-ux.md                      # single-chat UX, sidebar, slash, attachments
     mobile-ux.md                    # priority+ nav, virtualization, PWA
     mcp.md                          # MCP server surface table
-    schema.md                       # DB schema overview
+    sandbox.md                      # Worker isolation (M1–M5) + residual risk
     decisions.md                    # ADRs
     roadmap.md                      # open work, watch list
     setup.md
@@ -194,7 +194,7 @@ agent-friday/
 - **Drizzle ORM** for schema + migrations (Postgres adapter). Daemon applies pending migrations at startup before zero-cache reconnects. `Date.now()` discipline on `_journal.json:when` is unchanged from the SQLite era (see project CLAUDE.md).
 - **CLI inspection** queries Postgres directly via the daemon API or read-only `psql` against the `friday` database when daemon is down.
 
-Full schema reference: see `docs/schema.md`.
+Schema reference: see [`packages/shared/src/db/schema.ts`](../packages/shared/src/db/schema.ts) (Drizzle definitions; `drizzle-kit generate` derives migrations from this file).
 
 ### Sync engine (Zero) — settled state to clients
 
@@ -207,31 +207,7 @@ Full schema reference: see `docs/schema.md`.
 
 ### File storage layout (`~/.friday/`)
 
-```
-~/.friday/
-  # Postgres lives at the host level (Homebrew-managed); Friday's `friday` DB
-  # is the canonical store. `~/.friday/` continues to hold operational files.
-  config.json                       # settings, MCP server config
-  .env                              # secrets (LINEAR_API_KEY, etc.)
-  SOUL.md                           # user-overridable identity layer
-  skills/*.md                       # user-additive slash skills
-  uploads/<sha-bucket>/<sha>.<ext>  # content-addressed attachments (ADR-007)
-  memory/
-    entries/*.md                    # file-based memory bodies
-    events.jsonl                    # audit log
-  evolve/
-    proposals/*.md
-    clusters/*.md
-    feedback.jsonl
-    runs.jsonl
-  schedules/<name>/                 # scheduled-agent state continuity
-    state.md                        # agent-written
-    last-run.md                     # daemon-written
-  workspaces/<builder-name>/        # builder git worktrees
-  logs/{daemon,dashboard}.jsonl     # rotated at 1 MiB
-  health.json                       # 30s daemon heartbeat
-  usage.jsonl                       # per-turn usage records
-```
+Full layout reference lives in [`docs/running.md#data-location`](running.md#data-location). Postgres holds canonical state; `~/.friday/` holds operational files (config, secrets, identity, attachment bytes, memory-entry bodies, builder worktrees, per-agent home dirs, per-builder sandbox profiles, structured logs).
 
 ### Block model and in-flight state
 
@@ -547,7 +523,7 @@ Agents owned by an app run with `cwd = <app folder>` (resolved in `workingDirect
   README.md              # optional; ignored by daemon
 ```
 
-See `docs/schema.md` for the `apps` table; ADR-021 for the load-bearing decisions; the synthetic fixture at `services/daemon/src/apps/fixtures/example-app/` for a canonical shape.
+See [`packages/shared/src/db/schema.ts`](../packages/shared/src/db/schema.ts) for the `apps` table; ADR-021 for the load-bearing decisions; the synthetic fixture at `services/daemon/src/apps/fixtures/example-app/` for a canonical shape.
 
 ## State
 

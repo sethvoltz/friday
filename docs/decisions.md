@@ -60,7 +60,7 @@ Single-user system. `friday setup` is the only path to create the primary accoun
 
 ## ADR-009 — Tmux-backed daemon supervision
 
-**Status:** accepted (amended by ADR-023, 2026-05-18)
+**Status:** superseded by ADR-028 (2026-05-20). Original tmux design + ADR-023 zero-cache amendment preserved below for context.
 
 `friday start` launches daemon and dashboard inside a tmux session named `friday`. `friday stop` kills the session. `friday attach` opens the panes for live debugging. No launchd or systemd to configure. Restart-on-crash via tmux + a small wrapper.
 
