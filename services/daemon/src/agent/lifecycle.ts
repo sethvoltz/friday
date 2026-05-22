@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import type { AgentType, BlockKind } from "@friday/shared";
 import { loadConfig } from "@friday/shared";
 import {
+  claimPendingSession,
   deleteBlockById,
   insertBlock,
   insertUsage,
@@ -1244,6 +1245,47 @@ export async function handleEvent(
     case "session-update":
       w.sessionId = e.sessionId;
       await registry.setSession(w.agentName, e.sessionId);
+      // Sweep this turn's `__pending__` blocks over to the SDK's
+      // freshly-minted session id. The dashboard mutator writes user
+      // blocks with the sentinel before the daemon has resolved the
+      // real id, and the dispatch-listener's pre-worker UPDATE can only
+      // rewrite the row if the agent already has a `resumeSessionId` —
+      // so a fresh / just-cleared agent's first user block stays at
+      // `__pending__` until this sweep runs. Without it, the sidebar's
+      // expand-history list and the agents row's `session_count` count
+      // every cold-start as a phantom session forever.
+      //
+      // SCOPED TO `w.turnId`. Sweeping every `__pending__` row for
+      // the agent (the simpler shape) would mis-attribute historical
+      // orphan rows from prior turns into the current SDK session,
+      // pulling yesterday's user prompts into today's context.
+      try {
+        const swept = await claimPendingSession(
+          w.agentName,
+          w.turnId,
+          e.sessionId,
+        );
+        if (swept > 0) {
+          logger.log("info", "session-update.pending-swept", {
+            agent: w.agentName,
+            turnId: w.turnId,
+            session: e.sessionId,
+            rewritten: swept,
+          });
+        }
+      } catch (err) {
+        // The sweep is a follow-up data-integrity step, not a turn
+        // prerequisite — log and move on rather than wedging the
+        // session-update handler. The orphan rows stay at `__pending__`
+        // and are still excluded from the sidebar by
+        // `listAgentSessions`'s filter.
+        logger.log("warn", "session-update.pending-sweep.error", {
+          agent: w.agentName,
+          turnId: w.turnId,
+          session: e.sessionId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
       // No live JSONL tail-watcher: blocks are persisted directly via the
       // worker → daemon IPC pipeline (FIX_FORWARD 1.2). JSONL is reconciled
       // at boot (FIX_FORWARD 1.3) and after every turn-complete on this

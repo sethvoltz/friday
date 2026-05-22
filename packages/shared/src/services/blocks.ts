@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, lt, ne, or, sql } from "drizzle-orm";
 import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
 
@@ -554,6 +554,15 @@ export async function matchBlocks(
 
 /* ---------------- Agent-session summaries (FIX_FORWARD G) ---------------- */
 
+/** Sentinel session_id the dashboard mutator writes onto user blocks
+ *  before the daemon has resolved the SDK's real session id. The
+ *  lifecycle session-update sweep (`claimPendingSession`) rewrites
+ *  these rows to the real id; historical orphans from before the
+ *  sweep landed are excluded from session summaries and the agents
+ *  row's `session_count` column so the sidebar doesn't surface them
+ *  as a phantom "session" with no real conversation. */
+export const PENDING_SESSION_SENTINEL = "__pending__";
+
 export interface AgentSessionSummary {
   sessionId: string;
   /** Milliseconds since epoch. */
@@ -567,31 +576,55 @@ export async function listAgentSessions(
   agentName: string,
 ): Promise<AgentSessionSummary[]> {
   const db = getDb();
+  // Two fixes folded together:
+  //   1. Exclude the `__pending__` sentinel session — historical
+  //      orphan rows from the pre-sweep era show as a phantom session
+  //      in the sidebar's expand-history list otherwise.
+  //   2. Compute `firstTs` / `lastTs` as epoch milliseconds in SQL
+  //      via `EXTRACT(EPOCH FROM ...)`. Drizzle's `sql<Date>`
+  //      template literal is a TS hint only; the pg driver has no
+  //      type parser for aliased aggregate columns of timestamptz, so
+  //      the prior code received `undefined` at runtime, fell through
+  //      the `instanceof Date` check, called `Number(undefined)`
+  //      (= NaN), JSON-serialized as `null`, and rendered as
+  //      "Dec 31" client-side (epoch zero in PST). The bigint cast
+  //      keeps the value an integer the pg driver returns as a
+  //      string we can safely `Number(...)`.
   const rows = await db
     .select({
       sessionId: schema.blocks.sessionId,
-      firstTs: sql<Date>`MIN(${schema.blocks.ts})`.as("firstTs"),
-      lastTs: sql<Date>`MAX(${schema.blocks.ts})`.as("lastTs"),
+      firstTs: sql<string>`(EXTRACT(EPOCH FROM MIN(${schema.blocks.ts})) * 1000)::bigint`.as(
+        "firstTs",
+      ),
+      lastTs: sql<string>`(EXTRACT(EPOCH FROM MAX(${schema.blocks.ts})) * 1000)::bigint`.as(
+        "lastTs",
+      ),
       turnCount: sql<number>`COUNT(DISTINCT ${schema.blocks.turnId})::int`.as(
         "turnCount",
       ),
     })
     .from(schema.blocks)
-    .where(eq(schema.blocks.agentName, agentName))
+    .where(
+      and(
+        eq(schema.blocks.agentName, agentName),
+        ne(schema.blocks.sessionId, PENDING_SESSION_SENTINEL),
+      ),
+    )
     .groupBy(schema.blocks.sessionId)
     .orderBy(desc(sql`MAX(${schema.blocks.ts})`));
   return rows.map((r) => ({
     sessionId: r.sessionId,
-    firstTs:
-      r.firstTs instanceof Date ? r.firstTs.getTime() : Number(r.firstTs),
-    lastTs: r.lastTs instanceof Date ? r.lastTs.getTime() : Number(r.lastTs),
+    firstTs: Number(r.firstTs),
+    lastTs: Number(r.lastTs),
     turnCount: Number(r.turnCount),
   }));
 }
 
 /**
  * Distinct session counts keyed by agent name. One query supplying
- * counts for the entire registry.
+ * counts for the entire registry. Excludes the `__pending__` sentinel
+ * so the count agrees with what `listAgentSessions` returns to the
+ * sidebar.
  */
 export async function sessionCountsByAgent(): Promise<Record<string, number>> {
   const db = getDb();
@@ -603,10 +636,79 @@ export async function sessionCountsByAgent(): Promise<Record<string, number>> {
       ),
     })
     .from(schema.blocks)
+    .where(ne(schema.blocks.sessionId, PENDING_SESSION_SENTINEL))
     .groupBy(schema.blocks.agentName);
   const out: Record<string, number> = {};
   for (const r of rows) {
     if (r.agentName) out[r.agentName] = Number(r.count);
   }
   return out;
+}
+
+/**
+ * Rewrite the current turn's `__pending__` blocks for an agent to the
+ * SDK-minted session id. Called from the daemon's lifecycle
+ * `session-update` handler: the dashboard mutator writes user blocks
+ * with the `__pending__` sentinel before the worker has announced a
+ * session, and the dispatch-listener's pre-worker UPDATE can only
+ * rewrite the row when the agent already has a `resumeSessionId` (so
+ * a fresh / just-cleared agent's first user block stays at
+ * `__pending__`). Worker-side block writes that race the
+ * `session-update` IPC also land as `__pending__` via
+ * `w.sessionId ?? '__pending__'` in lifecycle.ts.
+ *
+ * Scope is `(agentName, turnId)`, NOT `(agentName)` alone — historical
+ * orphan rows from prior turns where this sweep didn't run must NOT
+ * be re-attached to the agent's current SDK session. Conflating past
+ * turns into today's fresh session would corrupt the past-sessions
+ * list and pull yesterday's user prompts into today's context. Those
+ * historical orphans stay at `__pending__` on disk (preserve-over-
+ * delete) and are excluded from `listAgentSessions` and
+ * `sessionCountsByAgent` so they don't surface in the sidebar.
+ *
+ * Cross-agent isolation: the WHERE clause is scoped to `agentName`,
+ * so agent A's session-update never claims agent B's pending rows.
+ *
+ * After the rewrite we recompute `agents.session_count` for this
+ * agent rather than relying on the INSERT-only trigger. The trigger
+ * fires per-row on AFTER INSERT and skips the sentinel, so the
+ * sweep's UPDATE (which moves rows OFF the sentinel) is the one
+ * event that would have otherwise gone uncounted. Re-deriving from
+ * `COUNT(DISTINCT … WHERE != sentinel)` here also self-heals
+ * `session_count` if historical orphans are ever migrated.
+ *
+ * Returns the number of rows updated, for diagnostic logging only.
+ */
+export async function claimPendingSession(
+  agentName: string,
+  turnId: string,
+  sessionId: string,
+): Promise<number> {
+  if (sessionId === PENDING_SESSION_SENTINEL) return 0;
+  const db = getDb();
+  const result = await db
+    .update(schema.blocks)
+    .set({ sessionId })
+    .where(
+      and(
+        eq(schema.blocks.agentName, agentName),
+        eq(schema.blocks.turnId, turnId),
+        eq(schema.blocks.sessionId, PENDING_SESSION_SENTINEL),
+      ),
+    )
+    .returning({ blockId: schema.blocks.blockId });
+  if (result.length > 0) {
+    await db
+      .update(schema.agents)
+      .set({
+        sessionCount: sql`(
+          SELECT COUNT(DISTINCT ${schema.blocks.sessionId})::int
+          FROM ${schema.blocks}
+          WHERE ${schema.blocks.agentName} = ${agentName}
+            AND ${schema.blocks.sessionId} <> ${PENDING_SESSION_SENTINEL}
+        )`,
+      })
+      .where(eq(schema.agents.name, agentName));
+  }
+  return result.length;
 }

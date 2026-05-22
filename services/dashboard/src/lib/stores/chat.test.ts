@@ -5248,3 +5248,160 @@ describe("FRI-103: canonical-block ack + queueSynth ghost cleanup", () => {
     expect(mockForAgent("friday")).toEqual([]);
   });
 });
+
+describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
+  // Stateful contract under test:
+  //   1. The live chat view is the agent's CURRENT session — applyZeroBlocks
+  //      filters Zero's agent-scoped snapshot to rows whose session_id
+  //      matches the agents row's session_id (or the `__pending__` sentinel
+  //      written by the dashboard mutator before the daemon resolves the
+  //      real id). Past sessions stay visible only via the sidebar's
+  //      expand-history submenu.
+  //   2. `clearLocalView(agent)` wipes the focused agent's view without
+  //      touching a different focused agent.
+  //   3. After `/clear` (agents.session_id → null), no rows survive the
+  //      filter; the painted chat stays empty until the next turn mints
+  //      a new session.
+
+  function makeRow(
+    overrides: Partial<import("./chat.svelte").ZeroBlocksRow> & {
+      session_id: string;
+      turn_id: string;
+      block_id: string;
+    },
+  ): import("./chat.svelte").ZeroBlocksRow {
+    return {
+      id: overrides.block_id,
+      agent_name: "friday",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: { text: "hi" },
+      status: "complete",
+      streaming: false,
+      origin_mutation_id: null,
+      ts: 1_000,
+      last_event_seq: 1,
+      ...overrides,
+    };
+  }
+
+  it("drops rows whose session_id doesn't match the agent's current session", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    fresh.agents = [
+      { name: "friday", type: "orchestrator", status: "idle", sessionId: "sess-current" },
+    ];
+
+    fresh.applyZeroBlocks(
+      [
+        makeRow({ session_id: "sess-old", turn_id: "t-old", block_id: "blk-old" }),
+        makeRow({ session_id: "sess-current", turn_id: "t-now", block_id: "blk-now" }),
+      ],
+      "friday",
+      "complete",
+    );
+
+    // Only the current-session row survives; the old-session row is
+    // filtered out before parseBlocks ever sees it. parseBlocks
+    // synthesizes a "no response" affordance for user-only turns so
+    // each surviving row produces two messages (user bubble + nr_*) —
+    // assert the unique turn-ids set, not the raw count.
+    const turns = new Set(
+      fresh.messages.map((m) => m.turnId).filter((t): t is string => !!t),
+    );
+    expect([...turns].sort()).toEqual(["t-now"]);
+  });
+
+  it("passes __pending__ rows through (window between mutator write and daemon session-update sweep)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    fresh.agents = [
+      { name: "friday", type: "orchestrator", status: "idle", sessionId: "sess-current" },
+    ];
+
+    fresh.applyZeroBlocks(
+      [
+        makeRow({ session_id: "__pending__", turn_id: "t-just-sent", block_id: "blk-p" }),
+      ],
+      "friday",
+      "complete",
+    );
+
+    const turns = new Set(
+      fresh.messages.map((m) => m.turnId).filter((t): t is string => !!t),
+    );
+    expect([...turns]).toEqual(["t-just-sent"]);
+  });
+
+  it("renders empty when the agent has no current session (post-/clear, pre-first-turn)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    fresh.agents = [
+      { name: "friday", type: "orchestrator", status: "idle" }, // sessionId undefined
+    ];
+
+    fresh.applyZeroBlocks(
+      [
+        makeRow({ session_id: "sess-old", turn_id: "t-old", block_id: "blk-old" }),
+        makeRow({ session_id: "sess-older", turn_id: "t-older", block_id: "blk-older" }),
+      ],
+      "friday",
+      "complete",
+    );
+
+    expect(fresh.messages).toEqual([]);
+  });
+
+  it("clearLocalView wipes the focused agent's transcript and resets the per-agent inflight slot", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    fresh.messages = [
+      {
+        id: "u1",
+        role: "user",
+        text: "prior",
+        status: "complete",
+        ts: 1,
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        text: "prior reply",
+        status: "complete",
+        ts: 2,
+      },
+    ];
+    fresh.oldestBlockId = "blk-oldest";
+    fresh.reachedOldest = true;
+    fresh.zeroBlocksActive = true;
+    fresh.inflightTurnIdByAgent["friday"] = "t-stale";
+
+    fresh.clearLocalView("friday");
+
+    expect(fresh.messages).toEqual([]);
+    expect(fresh.oldestBlockId).toBeNull();
+    expect(fresh.reachedOldest).toBe(false);
+    expect(fresh.zeroBlocksActive).toBe(false);
+    expect(fresh.inflightTurnIdByAgent["friday"]).toBeNull();
+  });
+
+  it("clearLocalView is a no-op when the target isn't the focused agent", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    fresh.messages = [
+      { id: "u1", role: "user", text: "still here", status: "complete", ts: 1 },
+    ];
+
+    fresh.clearLocalView("kitchen");
+
+    expect(fresh.messages.map((m) => m.id)).toEqual(["u1"]);
+  });
+});
