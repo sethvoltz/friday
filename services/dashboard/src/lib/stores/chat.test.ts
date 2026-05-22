@@ -5358,13 +5358,17 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
     expect([...turns].sort()).toEqual(["t-now"]);
   });
 
-  it("passes __pending__ rows through (window between mutator write and daemon session-update sweep)", async () => {
+  it("passes __pending__ rows through when their turn_id matches the focused agent's inflight turn", async () => {
     const { ChatState } = await import("./chat.svelte");
     const fresh = new ChatState();
     fresh.focusedAgent = "friday";
     fresh.agents = [
       { name: "friday", type: "orchestrator", status: "idle", sessionId: "sess-current" },
     ];
+    // Mirror what ChatInput.submit() does: eagerly claim inflight
+    // before the mutator commits the __pending__ block, so the row
+    // arriving via Zero is recognised as the live turn's bubble.
+    fresh.inflightTurnIdByAgent["friday"] = "t-just-sent";
 
     fresh.applyZeroBlocks(
       [
@@ -5378,6 +5382,34 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
       fresh.messages.map((m) => m.turnId).filter((t): t is string => !!t),
     );
     expect([...turns]).toEqual(["t-just-sent"]);
+  });
+
+  it("drops __pending__ historical orphans whose turn_id no longer matches the inflight turn", async () => {
+    // Repro for the user-reported regression: a __pending__ block
+    // written for a now-dead turn (worker exited before session-update
+    // fired) was keeping its bubble alive across every reload because
+    // the sentinel passthrough was unconditional.
+    const { ChatState } = await import("./chat.svelte");
+    const fresh = new ChatState();
+    fresh.focusedAgent = "friday";
+    fresh.agents = [
+      { name: "friday", type: "orchestrator", status: "idle" }, // sessionId undefined
+    ];
+    fresh.inflightTurnIdByAgent["friday"] = null;
+
+    fresh.applyZeroBlocks(
+      [
+        makeRow({
+          session_id: "__pending__",
+          turn_id: "t-yesterday-dead",
+          block_id: "blk-orphan",
+        }),
+      ],
+      "friday",
+      "complete",
+    );
+
+    expect(fresh.messages).toEqual([]);
   });
 
   it("renders empty when the agent has no current session (post-/clear, pre-first-turn)", async () => {
