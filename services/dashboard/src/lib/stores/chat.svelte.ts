@@ -508,6 +508,40 @@ export class ChatState {
     if (agent in this.unreadByAgent) delete this.unreadByAgent[agent];
   }
 
+  /**
+   * Wipe the live chat view for `agent`. Used by `/clear`: the daemon
+   * has archived the worker and nulled the agent's `session_id`, so the
+   * dashboard's painted transcript no longer reflects the agent's
+   * actual context. The empty chat is the user-facing confirmation —
+   * we deliberately do not push a synthetic "I cleared" assistant
+   * bubble, because `sys_<ts>` synthetics aren't backed by `blocks`
+   * rows and disappear on refresh / agent switch / session switch
+   * (violates the chat-content-is-durable contract).
+   *
+   * No-op when `agent` isn't the focused one: `chat.messages` only
+   * holds the focused agent's transcript, so there is nothing to wipe
+   * for a background agent. The Zero `agents` snapshot already
+   * propagated the `session_id = null` flip across devices; the next
+   * time the user focuses that agent, `applyZeroBlocks` filters the
+   * snapshot to its current session (empty, until the next turn) and
+   * paints an empty chat naturally.
+   */
+  clearLocalView(agent: string): void {
+    if (this.focusedAgent !== agent) return;
+    this.messages = [];
+    this.oldestBlockId = null;
+    this.reachedOldest = false;
+    this.historyError = null;
+    this.zeroBlocksActive = false;
+    this.zeroSeenBlockIds = new Set();
+    this.loadingOlder = false;
+    // The daemon SIGTERMs the worker as part of `/clear`; any value in
+    // the per-agent inflight slot points at a turn id that no longer
+    // exists, which would mis-render the input bar's Send affordance
+    // as Stop on the next render frame.
+    this.inflightTurnIdByAgent[agent] = null;
+  }
+
   /** Apply an agent_status event with a debounce on working→idle so brief
    * inter-turn idle pulses don't flicker the dot. Working transitions and
    * non-binary states (stalled/error/archived) apply immediately.
@@ -1802,9 +1836,42 @@ export class ChatState {
     // snapshot frame will either bring more rows or flip to 'complete'.
     if (resultType === "complete") this.reachedOldest = true;
 
+    // The live chat view is the agent's CURRENT session. Past sessions
+    // reach the user via the sidebar's expand-history submenu, not by
+    // bleeding into the live transcript. Filter Zero's agent-scoped
+    // snapshot down to rows whose session_id matches the agents row's
+    // current session_id; `__pending__` rows pass through because that's
+    // the sentinel the dashboard mutator writes for user blocks before
+    // the daemon's dispatch-listener has resolved the real session_id
+    // (the lifecycle session-update sweep rewrites them shortly after).
+    // Without this filter `/clear` would null the server-side session
+    // but the prior session's blocks would still paint the screen — the
+    // exact "core spec violation" report this PR closes.
+    //
+    // Fallback: when `chat.agents` doesn't yet contain a row for the
+    // focused agent (the brief startup window before Zero's agents
+    // query replicates, or unit-test fixtures that don't populate
+    // chat.agents), skip the filter. As soon as the agents row lands
+    // and the next blocks snapshot arrives, the filter starts honoring
+    // the current session id.
+    const agentRow = this.agents.find((a) => a.name === forAgent);
+    if (agentRow) {
+      const currentSessionId = agentRow.sessionId;
+      rows = rows.filter(
+        (r) =>
+          r.session_id === "__pending__" ||
+          (currentSessionId !== undefined && r.session_id === currentSessionId),
+      );
+    }
+
     if (rows.length === 0) {
-      // Empty agent (no history yet). Preserve queue-synth + any in-flight
-      // bubbles already in `messages`.
+      // Empty agent (no history yet) OR a just-cleared session whose
+      // first user block hasn't landed yet. Preserve queue-synth + any
+      // in-flight bubbles already in `messages` — `clearLocalView` is
+      // responsible for the explicit wipe at `/clear` time; this branch
+      // must not mutate `messages` because it also runs for an honest
+      // fresh-agent state where the optimistic bubble from `addUser` is
+      // the only thing the user sees until the canonical row replicates.
       if (resultType === "complete") this.reachedOldest = true;
       return;
     }

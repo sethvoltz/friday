@@ -502,6 +502,53 @@
   }
 
   async function dispatchSystem(name: string, args: string): Promise<void> {
+    // `/clear`: the daemon archives the worker and nulls the agent's
+    // session_id. The user-facing confirmation is the empty chat view,
+    // NOT a synthetic chat bubble — `sys_<ts>` messages aren't backed
+    // by `blocks` rows and disappear on refresh / agent switch /
+    // session switch, which violates the chat-content-is-durable
+    // contract. Resolve the target client-side so that typing
+    // `/clear` from a non-orchestrator agent's chat clears THIS chat
+    // (the user's mental model) instead of silently clearing the
+    // orchestrator (the daemon's `cfg.orchestratorName` fallback).
+    if (name === "clear") {
+      const target = args.trim() || chat.focusedAgent;
+      try {
+        const r = await fetch("/api/commands", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ command: "clear", args: target }),
+        });
+        if (r.ok) {
+          chat.clearLocalView(target);
+        } else {
+          // Failure path keeps the synthetic-error sys bubble for now —
+          // the broader "no client-only chat bubbles" cleanup is its own
+          // scope; the user's primary complaint was the success-path
+          // ghost message, which is the one that disappears unhelpfully.
+          const data = (await r.json().catch(() => ({}))) as {
+            error?: string;
+            message?: string;
+          };
+          chat.messages.push({
+            id: `sys_${Date.now()}`,
+            role: "assistant",
+            text: `**/clear** — ${data.error ?? data.message ?? `HTTP ${r.status}`}`,
+            status: "error",
+            ts: Date.now(),
+          });
+        }
+      } catch (err: unknown) {
+        chat.messages.push({
+          id: `sys_${Date.now()}`,
+          role: "assistant",
+          text: `**/clear** — error: ${err instanceof Error ? err.message : String(err)}`,
+          status: "error",
+          ts: Date.now(),
+        });
+      }
+      return;
+    }
     try {
       const r = await fetch("/api/commands", {
         method: "POST",
