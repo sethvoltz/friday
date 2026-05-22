@@ -963,6 +963,71 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
     expect(instances).toHaveLength(0);
   });
 
+  it("forgetDevice surfaces server errors via console.warn", async () => {
+    // FRI-104 AC #11: fire-and-forget mutators wrap the result through
+    // awaitMutatorServer so failures surface in devtools instead of
+    // being silently dropped. forgetDevice is a user-explicit action
+    // (Settings → Devices → Forget) so the level is `warn`.
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+    z.mutate.forgetDevice = vi.fn(() => ({
+      client: Promise.resolve({ type: "success" }),
+      server: Promise.resolve({
+        type: "error",
+        error: {
+          type: "app",
+          message: "already-revoked",
+          details: undefined,
+        },
+      }),
+    }));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    zeroSync.forgetDevice("dev");
+    // Drain microtasks: the wrapper kicks off an async `.then(...)` on
+    // the resolved server promise; two yields cover both await steps
+    // inside `awaitMutatorServer` plus the `.then` callback.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(warnSpy).toHaveBeenCalledWith(
+      "forgetDevice mutator error: already-revoked",
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("updateSettings surfaces server errors via console.warn", async () => {
+    // FRI-104 AC #11: mirror the forgetDevice test for updateSettings —
+    // also user-explicit, also warn-level. The unconditional "saved"
+    // toast in settings/+page.svelte is OUT OF SCOPE; this test only
+    // pins the wrapper-level log surface.
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+    z.mutate.updateSettings = vi.fn(() => ({
+      client: Promise.resolve({ type: "success" }),
+      server: Promise.resolve({
+        type: "error",
+        error: {
+          type: "app",
+          message: "invalid model",
+          details: undefined,
+        },
+      }),
+    }));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    zeroSync.updateSettings({ model: "claude-bogus" });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(warnSpy).toHaveBeenCalledWith(
+      "updateSettings mutator error: invalid model",
+    );
+    warnSpy.mockRestore();
+  });
+
   it("updateSettings forwards the partial patch to zero.mutate.updateSettings", async () => {
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
@@ -1692,24 +1757,81 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
     expect(args.attachments).toEqual(attachments);
   });
 
-  it("returns null when the server-side mutator throws (PK collision / Zero error)", async () => {
-    // Server-side mutator failure must surface as null so the
-    // send-queue retries on the next flush rather than treating
-    // the dispatch as successful.
-    // NOTE FRI-104: this test mocks `.server: Promise.reject(...)`,
-    // a behaviour the real Zero 1.5.0 SDK never produces — both
-    // success and error paths resolve. FRI-104 owns rewriting this
-    // test against the actual `{type:"error"}` resolve shape; this
-    // ticket (FRI-103) only updates the call signature.
+  it("sendUserMessage returns {blockId, turnId} when server resolves to {type:'error', error:{type:'app'}} that matches a blocks_pkey PK collision (idempotent retry)", async () => {
+    // FRI-104: the dashboard treats a PK violation on `blocks.id` as a
+    // dedup success — the original push committed, this retry is
+    // idempotent (FRI-103 invariant). Return the success shape so
+    // sendQueue clears the entry instead of looping on the same id.
     const { zeroSync, z } = await bootedZero();
     z.mutate.sendUserMessage = vi.fn(() => ({
       client: Promise.resolve({ type: "success" }),
-      server: Promise.reject(new Error("pk_collision")),
+      server: Promise.resolve({
+        type: "error",
+        error: {
+          type: "app",
+          message:
+            'duplicate key value violates unique constraint "blocks_pkey"',
+          details: { name: "PostgresError" },
+        },
+      }),
     }));
     const out = await zeroSync.sendUserMessage({
       blockId: "22222222-3333-4444-5555-666666666666",
       agent: "friday",
       text: "boom",
+    });
+    expect(out).toEqual({
+      blockId: "22222222-3333-4444-5555-666666666666",
+      turnId: "t_22222222-3333-4444-5555-666666666666",
+    });
+  });
+
+  it("sendUserMessage returns null when server resolves to {type:'error', error:{type:'app'}} that is NOT a PK collision (real failure, sendQueue retries)", async () => {
+    // FRI-104: a genuine app-error must NOT be treated as success.
+    // Returning `null` lets sendQueue increment attempts and surface
+    // the failed-row UI via the existing MAX_ATTEMPTS fence. The
+    // sendQueue entry stays alive (FRI-103 data-safety invariant —
+    // pinned by the cross-boundary test in send-queue.test.ts).
+    const { zeroSync, z } = await bootedZero();
+    z.mutate.sendUserMessage = vi.fn(() => ({
+      client: Promise.resolve({ type: "success" }),
+      server: Promise.resolve({
+        type: "error",
+        error: {
+          type: "app",
+          message: "agent not found",
+          details: undefined,
+        },
+      }),
+    }));
+    const out = await zeroSync.sendUserMessage({
+      blockId: "44444444-5555-6666-7777-888888888888",
+      agent: "ghost",
+      text: "lost",
+    });
+    expect(out).toBeNull();
+  });
+
+  it("sendUserMessage returns null when server resolves to {type:'error', error:{type:'zero'}} (transport — Zero outbox will re-push)", async () => {
+    // FRI-104: transport-level `zero-error` is transient — Replicache's
+    // persistent memdag has already enqueued the mutation and will
+    // re-push when the connection comes back. The wrapper returns
+    // `null` so sendQueue's existing retry path increments attempts;
+    // either Zero's outbox lands the canonical row first (clearing
+    // the entry via `ackByBlockId`) or MAX_ATTEMPTS surfaces the
+    // failed-row UI.
+    const { zeroSync, z } = await bootedZero();
+    z.mutate.sendUserMessage = vi.fn(() => ({
+      client: Promise.resolve({ type: "success" }),
+      server: Promise.resolve({
+        type: "error",
+        error: { type: "zero", message: "Offline" },
+      }),
+    }));
+    const out = await zeroSync.sendUserMessage({
+      blockId: "55555555-6666-7777-8888-999999999999",
+      agent: "friday",
+      text: "transient",
     });
     expect(out).toBeNull();
   });

@@ -328,3 +328,70 @@ describe("FRI-103 AC7: queue entry persists when canonical block never arrives",
 // AC5 lives in chat.test.ts (it's a chat-layer contract). Keeping a
 // sentinel block here just to document the layout.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// FRI-104 cross-boundary tests: pin the sendQueue ↔ sendUserMessage
+// contract after FRI-104 collapses the dead-code try/catch in the
+// wrapper into a typed `awaitMutatorServer` branch.
+//
+// AC #6: data-safety carry-over from FRI-103. A non-PK app-error from
+// sendUserMessage returns `null`; the wrapper's job is to not silently
+// remove the entry. The existing `null`-return path in
+// send-queue.svelte.ts:247-263 increments `attempts`, sets
+// `lastError = "zero_not_ready"`, and persists. We don't differentiate
+// the `lastError` text per cause yet — the invariant is "entry survives".
+//
+// AC #7: PK collision on a retry is a dedup success. The wrapper returns
+// `{blockId, turnId}` (verified in zero.test.ts); from sendQueue's
+// perspective the flow is identical to a first-push success — `remove(id)`
+// runs and `sent[]` lists the entry.
+// ---------------------------------------------------------------------------
+
+describe("FRI-104: cross-boundary contract for sendUserMessage typed outcomes", () => {
+  it("flush does NOT remove the queue entry when sendUserMessage returns null due to a non-PK app error", async () => {
+    mockLoadJSON.mockReturnValue([]);
+    const { sendQueue } = await import("./send-queue.svelte");
+    sendQueue.enqueue({ agent: "friday", text: "non-pk failure" });
+    mockSendUserMessage.mockResolvedValueOnce(null);
+
+    await sendQueue.flush();
+
+    expect(sendQueue.items).toHaveLength(1);
+    expect(sendQueue.items[0]).toMatchObject({
+      attempts: 1,
+      status: "retrying",
+      lastError: "zero_not_ready",
+    });
+  });
+
+  it("flush removes the queue entry on PK-collision retry (dedup is success)", async () => {
+    mockLoadJSON.mockReturnValue([]);
+    const { sendQueue } = await import("./send-queue.svelte");
+    const enqueued = sendQueue.enqueue({
+      agent: "friday",
+      text: "pk-dedup success",
+    });
+    const queueBlockId = enqueued.queueBlockId;
+    // PK-collision-on-retry is classified by the wrapper as success and
+    // returns the canonical {blockId, turnId} shape (see zero.test.ts
+    // "sendUserMessage returns {blockId, turnId} when server resolves to
+    // {type:'error', error:{type:'app'}} that matches a blocks_pkey PK
+    // collision (idempotent retry)").
+    mockSendUserMessage.mockResolvedValueOnce({
+      blockId: queueBlockId,
+      turnId: `t_${queueBlockId}`,
+    });
+
+    const result = await sendQueue.flush();
+
+    expect(sendQueue.items).toHaveLength(0);
+    expect(result.sent).toMatchObject([
+      {
+        queueId: enqueued.id,
+        turnId: `t_${queueBlockId}`,
+        agent: "friday",
+        queued: false,
+      },
+    ]);
+  });
+});
