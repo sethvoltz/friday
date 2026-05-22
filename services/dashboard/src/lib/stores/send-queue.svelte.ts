@@ -1,3 +1,31 @@
+/**
+ * Data-safety invariant (FRI-103, Seth approved 2026-05-21):
+ *
+ * Postgres is the source of truth for chat blocks. A `sendQueue` entry is
+ * NEVER removed without confirmation that the canonical `blocks` row with
+ * `block_id === entry.queueBlockId` exists in the Zero replica. This rules
+ * out the class of bug where a transient client error (Zero-not-ready,
+ * sync-throw) drops the localStorage entry while the durable Zero mutation
+ * queue eventually commits the row — leaving the user's text apparently
+ * "sent" but actually lost from the client's view.
+ *
+ * The mechanism:
+ *   1. `enqueue` pre-mints a UUIDv4 `queueBlockId` and persists it.
+ *   2. Every retry of the same logical send reuses the same `queueBlockId`
+ *      (threaded through `zeroSync.sendUserMessage`) so the canonical
+ *      `blocks.id` PK acts as the natural dedup boundary. Re-dispatching
+ *      after a partial failure either succeeds (first commit), or hits a
+ *      PK collision against the already-committed row (idempotent).
+ *   3. The queue entry is cleared by `ackByBlockId` once the canonical
+ *      row arrives via Zero — wired from `chat.applyZeroBlocks`. The
+ *      success path in `flush` ALSO calls `remove` directly (defense in
+ *      depth — idempotent against `ackByBlockId`).
+ *   4. If Zero's durable queue is wrong about durability and the canonical
+ *      row never lands, the entry persists in localStorage indefinitely
+ *      until `MAX_ATTEMPTS=5` trips and the UI surfaces "Discard / Keep
+ *      retrying". No silent data loss is possible by design.
+ */
+
 import { KEYS, loadJSON, saveJSON } from "./persistent";
 import { useZero, zeroSync } from "./zero.svelte";
 
@@ -22,6 +50,21 @@ export interface QueuedMessage {
    *  (4xx). Failed entries stay in the queue but do not block subsequent
    *  flushes; the UI surfaces them so the user can retry or remove. */
   status?: "queued" | "retrying" | "failed";
+  /** Pre-minted canonical `blocks.id` for the send. Generated at `enqueue`
+   *  time and reused across every retry of the same logical send so the
+   *  Postgres PK acts as a natural dedup. See the file-level data-safety
+   *  invariant comment above. */
+  queueBlockId: string;
+}
+
+/** Mint a fresh UUIDv4 for `queueBlockId`. Falls back to a non-UUID string
+ *  when crypto.randomUUID is unavailable (very old browsers, non-secure
+ *  contexts) — still unique enough to function as the PK; the canonical
+ *  row will use whatever we send. */
+function mintBlockId(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `blk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 /** Retry budget for a single message before we mark it `failed` and skip
@@ -43,20 +86,51 @@ export interface FlushSentItem {
   queued: boolean;
 }
 
+/** Hydrate persisted entries, minting a `queueBlockId` for any legacy
+ *  rows that pre-date FRI-103. Old entries without a pre-minted id are
+ *  still valid — they just need an id for the next retry. Picking
+ *  "mint on read" over "discard" because the user's text is more valuable
+ *  than a one-time risk of a duplicate row (rare, and the daemon's
+ *  jsonl-recovery would surface it).
+ *
+ *  Defensive against non-array localStorage values (corrupt JSON, broad
+ *  test mocks that return `{}` for every key, etc.): anything that isn't
+ *  an array becomes an empty queue. */
+function hydrate(): QueuedMessage[] {
+  const raw = loadJSON<unknown>(KEYS.sendQueue, []);
+  if (!Array.isArray(raw)) return [];
+  return raw.map((m) => {
+    const entry = m as Partial<QueuedMessage> & Record<string, unknown>;
+    return {
+      ...entry,
+      queueBlockId:
+        typeof entry.queueBlockId === "string"
+          ? entry.queueBlockId
+          : mintBlockId(),
+    } as QueuedMessage;
+  });
+}
+
 class SendQueue {
-  items = $state<QueuedMessage[]>(loadJSON<QueuedMessage[]>(KEYS.sendQueue, []));
+  items = $state<QueuedMessage[]>(hydrate());
   flushing = $state(false);
 
   private persist(): void {
     saveJSON(KEYS.sendQueue, $state.snapshot(this.items));
   }
 
-  enqueue(msg: Omit<QueuedMessage, "id" | "createdAt" | "attempts">): QueuedMessage {
+  enqueue(
+    msg: Omit<QueuedMessage, "id" | "createdAt" | "attempts" | "queueBlockId">,
+  ): QueuedMessage {
     const item: QueuedMessage = {
       ...msg,
       id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       createdAt: Date.now(),
       attempts: 0,
+      // Pre-mint the canonical blocks.id PK here so every retry of this
+      // logical send reuses the same id. See file-header data-safety
+      // invariant.
+      queueBlockId: mintBlockId(),
     };
     this.items.push(item);
     this.persist();
@@ -65,6 +139,19 @@ class SendQueue {
 
   remove(id: string): void {
     const idx = this.items.findIndex((m) => m.id === id);
+    if (idx >= 0) {
+      this.items.splice(idx, 1);
+      this.persist();
+    }
+  }
+
+  /** Drop the queue entry whose `queueBlockId` matches `blockId`. Wired
+   *  from `chat.applyZeroBlocks` — when the canonical user `blocks` row
+   *  shows up in the Zero replica we know Postgres has the write durably
+   *  and the localStorage ghost can be cleared safely. Idempotent: a
+   *  blockId that doesn't match any entry is a no-op. */
+  ackByBlockId(blockId: string): void {
+    const idx = this.items.findIndex((m) => m.queueBlockId === blockId);
     if (idx >= 0) {
       this.items.splice(idx, 1);
       this.persist();
@@ -147,6 +234,12 @@ class SendQueue {
           // event reconciles inflightTurnId in that case.
           if (useZero()) {
             const result = await zeroSync.sendUserMessage({
+              // Reuse the pre-minted blockId across every retry of the
+              // same logical send (FRI-103 data-safety invariant). The
+              // canonical `blocks.id` PK is what makes the second insert
+              // a PK collision — i.e. idempotent — rather than a
+              // duplicate row.
+              blockId: m.queueBlockId,
               agent: m.agent,
               text: m.text,
               attachments: m.attachments,

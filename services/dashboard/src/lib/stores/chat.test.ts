@@ -43,12 +43,27 @@ vi.mock("$lib/stores/persistent", () => ({
 // `sendQueue` is a singleton with internal $state. We stub the methods
 // the chat store reaches into so we can drive the queue from tests.
 const mockForAgent = vi.fn<(agent: string) => unknown[]>(() => []);
+const mockAckByBlockId = vi.fn<(blockId: string) => void>();
+// `items` is what `applyZeroBlocks` reads to look up queue entries by
+// `queueBlockId` (FRI-103 ack hook). Tests override this per case.
+const mockItems: Array<{
+  id: string;
+  agent: string;
+  text: string;
+  attempts: number;
+  status?: string;
+  queueBlockId: string;
+}> = [];
 vi.mock("$lib/stores/send-queue.svelte", () => ({
   sendQueue: {
     forAgent: mockForAgent,
     enqueue: vi.fn(),
     remove: vi.fn(),
     flush: vi.fn(),
+    ackByBlockId: mockAckByBlockId,
+    get items() {
+      return mockItems;
+    },
   },
 }));
 
@@ -71,8 +86,10 @@ beforeEach(() => {
   mockLoadJSON.mockReset();
   mockSaveJSON.mockReset();
   mockForAgent.mockReset();
+  mockAckByBlockId.mockReset();
   mockLoadJSON.mockReturnValue([]);
   mockForAgent.mockReturnValue([]);
+  mockItems.length = 0;
 });
 
 afterEach(() => {
@@ -4894,5 +4911,170 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
     chat.setMarkReadFn((agent, blockId) => calls.push({ agent, blockId }));
     chat.applyZeroBlocks([], "friday");
     expect(calls).toHaveLength(0);
+  });
+});
+
+/**
+ * FRI-103: when the canonical user `blocks` row arrives via Zero (matching
+ * a pre-minted `queueBlockId`), `applyZeroBlocks` must (a) call
+ * `sendQueue.ackByBlockId(blockId)` so the localStorage entry is cleared
+ * with PG as the source of truth, and (b) drop the queue-synth ghost
+ * bubble so the user sees exactly one canonical bubble — not the synth
+ * AND the canonical side by side.
+ */
+describe("FRI-103: canonical-block ack + queueSynth ghost cleanup", () => {
+  function makeFRI103Row(
+    overrides: Partial<{
+      id: string;
+      block_id: string;
+      turn_id: string;
+      role: string;
+      content_json: unknown;
+    }>,
+  ): import("./chat.svelte").ZeroBlocksRow {
+    return {
+      id: "1",
+      block_id: "70df2671-7d96-45c7-83bf-28bfd0317f2a",
+      turn_id: "t_70df2671-7d96-45c7-83bf-28bfd0317f2a",
+      agent_name: "friday",
+      session_id: "s1",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: { text: "#43 merged" },
+      status: "complete",
+      streaming: false,
+      origin_mutation_id: null,
+      ts: 1_747_000_000_000,
+      last_event_seq: 1,
+      ...overrides,
+    };
+  }
+
+  it("AC2: applyZeroBlocks clears queueSynth ghost when canonical user block arrives", async () => {
+    const queueBlockId = "70df2671-7d96-45c7-83bf-28bfd0317f2a";
+    const turnId = `t_${queueBlockId}`;
+
+    // (1) Pre-populate sendQueue.items + forAgent return so the
+    // queue-synth bubble lands in chat.messages on focus.
+    const entry = {
+      id: "q_test",
+      agent: "friday",
+      text: "#43 merged",
+      attempts: 2,
+      status: "retrying" as const,
+      queueBlockId,
+      createdAt: 1_747_000_000_000,
+    };
+    mockItems.push(entry);
+    mockForAgent.mockReturnValue([entry]);
+
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // Push the queue-synth bubble the same way `loadAgentTurns` would
+    // (mirrors the `queueSynth` map at chat.svelte.ts:1501) so the
+    // applyZeroBlocks merge has something to deduplicate against.
+    chat.messages = [
+      {
+        id: `u_queue_${entry.id}`,
+        role: "user",
+        text: "#43 merged",
+        status: "complete",
+        ts: entry.createdAt,
+        queueId: entry.id,
+      },
+    ];
+
+    // (2) Drive applyZeroBlocks with the canonical user row whose
+    // block_id matches the pre-minted queueBlockId.
+    chat.applyZeroBlocks([makeFRI103Row({})], "friday", "complete");
+
+    // (3) Exactly one user bubble with text "#43 merged" — the
+    // canonical one. The synth ghost is gone.
+    const userMsgs = chat.messages.filter(
+      (m) => m.role === "user" && m.text === "#43 merged",
+    );
+    expect(userMsgs).toHaveLength(1);
+    const survivor = chat.messages.find((m) => m.text === "#43 merged");
+    // parseBlocks emits the canonical user bubble with the stable
+    // `userBlockIdForTurn(turnId)` id; the `queueId` and `pending`
+    // flags from the optimistic / synth path are not carried over —
+    // the canonical bubble is the load-bearing one.
+    expect(survivor).toMatchObject({ id: userBlockIdForTurn(turnId) });
+    expect(survivor!.queueId).toBeUndefined();
+    expect(survivor!.pending).not.toBe(true);
+
+    // (4) `ackByBlockId` was called exactly once with the canonical id.
+    expect(mockAckByBlockId).toHaveBeenCalledTimes(1);
+    expect(mockAckByBlockId).toHaveBeenCalledWith(queueBlockId);
+  });
+
+  it("AC5: after canonical block in Zero snapshot, hard refresh shows no retrying pill", async () => {
+    // Mirrors AC3 from the send-queue side, but pinned at the
+    // chat-message layer: the load-bearing data-shape contract is
+    // "no message in chat.messages has queueId set, AND forAgent
+    // returns []". Together those two pieces drive the
+    // ChatMessages.svelte template into the "no retrying pill" branch
+    // (the queueId-gate at lines 671-689 short-circuits).
+    const queueBlockId = "70df2671-7d96-45c7-83bf-28bfd0317f2a";
+
+    // First simulate the post-reload state: localStorage rehydrated
+    // a retrying entry, forAgent returns it, the synth bubble would
+    // have been pushed by loadAgentTurns. Then the Zero snapshot
+    // arrives carrying the canonical row. Post-ack, forAgent must
+    // return [] (sendQueue cleared) and no message must carry a
+    // queueId.
+    const entry = {
+      id: "q_test",
+      agent: "friday",
+      text: "#43 merged",
+      attempts: 2,
+      status: "retrying" as const,
+      queueBlockId,
+      createdAt: 1_747_000_000_000,
+    };
+    mockItems.push(entry);
+    // Wire forAgent to reflect the post-ack state: ack splices the
+    // entry out of mockItems (we do this manually since the mock's
+    // ackByBlockId is a no-op spy). Use a getter so the chat store
+    // sees the live mutation.
+    mockForAgent.mockImplementation(() => mockItems.filter((m) => m.agent === "friday"));
+    // Make the spy honour the contract — splice on ack.
+    mockAckByBlockId.mockImplementation((blockId: string) => {
+      const idx = mockItems.findIndex((m) => m.queueBlockId === blockId);
+      if (idx >= 0) mockItems.splice(idx, 1);
+    });
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // Seed the synth bubble the way loadAgentTurns would after
+    // rehydration.
+    chat.messages = [
+      {
+        id: `u_queue_${entry.id}`,
+        role: "user",
+        text: "#43 merged",
+        status: "complete",
+        ts: entry.createdAt,
+        queueId: entry.id,
+      },
+    ];
+
+    // Drive the Zero snapshot with the canonical row.
+    chat.applyZeroBlocks([makeFRI103Row({})], "friday", "complete");
+
+    // Data-shape contract: no message carries queueId, sendQueue is
+    // empty for this agent.
+    const withQueueId = chat.messages.filter((m) => m.queueId !== undefined);
+    expect(withQueueId).toEqual([]);
+    // `forAgent` reads through to `mockItems` (which our ack impl
+    // spliced) so this MUST be empty post-ack.
+    expect(mockForAgent("friday")).toEqual([]);
   });
 });

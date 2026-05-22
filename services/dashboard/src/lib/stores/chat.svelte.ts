@@ -1821,6 +1821,26 @@ export class ChatState {
     const snapshotBlockIds = new Set<string>();
     for (const r of rows) snapshotBlockIds.add(r.block_id);
 
+    // FRI-103: clear sendQueue entries whose pre-minted `queueBlockId`
+    // matches a user row in this snapshot. The canonical block landing
+    // in the Zero replica is the durable confirmation Seth's data-safety
+    // contract requires before removing the localStorage entry. Also
+    // collect the queue ids so the bubble-merge below can drop their
+    // queue-synth / optimistic-pending bubbles (otherwise both the
+    // synth and the canonical bubble end up in the merged list and the
+    // user sees a duplicate "#43 merged").
+    const ackedQueueIds = new Set<string>();
+    for (const r of rows) {
+      if (r.role !== "user") continue;
+      const entry = sendQueue.items.find((q) => q.queueBlockId === r.block_id);
+      if (entry) ackedQueueIds.add(entry.id);
+      // Idempotent: no-op if no entry matches. The non-matching
+      // common case (every Zero snapshot frame contains user rows
+      // that never went through this client's queue) is the hot
+      // path; ackByBlockId early-returns without persisting.
+      sendQueue.ackByBlockId(r.block_id);
+    }
+
     const merged: ChatMessage[] = [];
     const seen = new Set<string>();
     for (const m of this.messages) {
@@ -1830,6 +1850,14 @@ export class ChatState {
         seen.add(m.id);
         continue;
       }
+      // FRI-103: drop synth / optimistic bubbles whose backing queue
+      // entry was just acked by the canonical Zero row above. Without
+      // this, the queue-synth bubble (id `u_queue_<qid>`) and the
+      // canonical user bubble (id `userBlockIdForTurn(turnId)`) both
+      // land in `merged` and the user sees two bubbles for the same
+      // text. parseBlocks emitted the canonical version in `parsed`
+      // already.
+      if (m.queueId !== undefined && ackedQueueIds.has(m.queueId)) continue;
       // No parsed counterpart. Decide whether to keep or drop.
       if (
         m.blockId !== undefined &&
