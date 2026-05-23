@@ -174,9 +174,7 @@ describe("archiveWorkspace + branch deletion", () => {
     // With fromRef set explicitly, the workspace should root off that ref.
     const name = "theta";
     const branch = "friday/theta";
-    expect(() =>
-      createWorkspace({ name, baseRepo, branch, fromRef: "main" }),
-    ).not.toThrow();
+    expect(() => createWorkspace({ name, baseRepo, branch, fromRef: "main" })).not.toThrow();
     expect(listWorktrees()).toContain(workspacePath(name));
     archiveWorkspace(name, baseRepo, { branch });
   });
