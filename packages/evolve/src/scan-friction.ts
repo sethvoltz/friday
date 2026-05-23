@@ -125,10 +125,10 @@ export async function scanFriction(opts: FrictionScanOptions = {}): Promise<Sign
     }
   }
 
-  return bucketByCategory(scored);
+  return bucketFrictionByCategory(scored);
 }
 
-function bucketByCategory(scored: Array<OrchestratorTurn & ScoredTurn>): Signal[] {
+export function bucketFrictionByCategory(scored: Array<OrchestratorTurn & ScoredTurn>): Signal[] {
   const buckets = new Map<string, Signal>();
   const ranked = [...scored].sort((a, b) => b.friction_score - a.friction_score);
 
@@ -154,7 +154,18 @@ function bucketByCategory(scored: Array<OrchestratorTurn & ScoredTurn>): Signal[
       if (severityRank(severity) > severityRank(existing.severity)) {
         existing.severity = severity;
       }
-      if (existing.evidencePointers.length < 3) existing.evidencePointers.push(pointer);
+      const eps = existing.evidencePointers;
+      if (eps.length < 5) {
+        eps.push(pointer);
+      } else {
+        // Prefer cross-session diversity: if all existing pointers share the
+        // same session and the new pointer is from a different session, swap
+        // out the last one so the enricher sees evidence from multiple sessions.
+        const allSameSession = eps.every((p) => p.sessionId === eps[0].sessionId);
+        if (allSameSession && pointer.sessionId !== eps[0].sessionId) {
+          eps[eps.length - 1] = pointer;
+        }
+      }
     } else {
       buckets.set(hash, {
         hash,
