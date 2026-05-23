@@ -14,7 +14,6 @@ import { startHealthHeartbeat, clearHealth } from "./monitor/health.js";
 import { backfillUsageFromLegacyJsonl, replayPending } from "@friday/shared/services";
 import { seedMetaAgents, startScheduler } from "./scheduler/scheduler.js";
 import { reconcile as reconcileLinear } from "@friday/integrations-linear";
-import { eventBus } from "./events/bus.js";
 import * as registry from "./agent/registry.js";
 import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js";
 import { recoverDanglingToolUses } from "./agent/dangling-tool-use-recovery.js";

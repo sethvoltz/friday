@@ -46,7 +46,7 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
   it("inserts a usage row whose columns map the SDK→protocol field names", async () => {
     const { handleEvent } = await import("./lifecycle.js");
 
-    handleEvent(makeFakeWorker() as never, {
+    void handleEvent(makeFakeWorker() as never, {
       type: "turn-complete",
       sessionId: "sess-1",
       usage: {
@@ -77,7 +77,7 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
   it("inserts nothing when turn-complete carries no usage payload", async () => {
     const { handleEvent } = await import("./lifecycle.js");
 
-    handleEvent(makeFakeWorker() as never, {
+    void handleEvent(makeFakeWorker() as never, {
       type: "turn-complete",
       sessionId: "sess-1",
     });
@@ -97,7 +97,7 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
     const w = makeFakeWorker() as Record<string, unknown>;
     w.sessionId = undefined;
 
-    handleEvent(w as never, {
+    void handleEvent(w as never, {
       type: "turn-complete",
       sessionId: "",
       usage: {

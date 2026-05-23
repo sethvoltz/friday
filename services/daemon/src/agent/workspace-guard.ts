@@ -171,6 +171,13 @@ export function checkToolCall(
       if (disaster) return disaster;
       break;
     }
+    default:
+      // Unknown tool names (and `undefined`) fall through to the
+      // bottom return-null: no path check applies because we don't
+      // know which arg is a path. The SBPL kernel sandbox in M2
+      // catches the genuine catastrophes; this rule is the
+      // user-space prevention layer for the tool names we DO know.
+      break;
   }
 
   return null;

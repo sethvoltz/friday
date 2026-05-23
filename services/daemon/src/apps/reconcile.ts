@@ -56,7 +56,7 @@ export async function reconcileAppsOnBoot(): Promise<void> {
   // unique folder; never auto-install.
   const root = appsDir();
   if (!existsSync(root)) return;
-  let entries: string[] = [];
+  let entries: string[];
   try {
     entries = readdirSync(root);
   } catch {

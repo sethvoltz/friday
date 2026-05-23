@@ -23,7 +23,6 @@ import type { AgentType, BlockKind } from "@friday/shared";
 import { loadConfig } from "@friday/shared";
 import {
   claimPendingSession,
-  deleteBlockById,
   insertBlock,
   insertUsage,
   updateBlock,
@@ -1610,7 +1609,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
         const an = w.agentName;
         setImmediate(() => {
           try {
-            recoverFromJsonl([
+            void recoverFromJsonl([
               { agentName: an, sessionId: sessionForRecovery, workingDirectory: wd },
             ]);
           } catch (err) {

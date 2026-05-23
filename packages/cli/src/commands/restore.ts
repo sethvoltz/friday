@@ -21,7 +21,7 @@
 
 import { defineCommand } from "citty";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -321,7 +321,7 @@ function daemonAppearsRunning(): boolean {
   // port" — health.json's mtime stays fresh even after `friday stop`
   // (the file isn't cleaned up on shutdown). Probe the port directly.
   if (!existsSync(HEALTH_PATH)) return false;
-  let health: { port?: unknown; pid?: unknown } | null = null;
+  let health: { port?: unknown; pid?: unknown };
   try {
     health = JSON.parse(readFileSync(HEALTH_PATH, "utf8")) as {
       port?: unknown;
@@ -559,6 +559,7 @@ async function importTable(
     } catch (err) {
       throw new Error(
         `INSERT into ${table} failed at batch starting row ${i}: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
       );
     }
   }

@@ -1,14 +1,14 @@
 // FRI-117: eslint flat config (eslint 9+). Rules selected to catch the
-// FRI-110-shape "trust the chain" class without being so noisy that
-// every PR fights formatter churn — prettier owns formatting.
+// FRI-110-shape "trust the chain" class plus the type-aware promise +
+// switch-exhaustiveness rules that catch authoring-time silent-omission
+// bugs. Prettier owns formatting.
 //
 // Scope notes:
-// - Type-aware rules (e.g. `no-floating-promises`) require a
-//   `parserOptions.project` pointing at the package's tsconfig.
-//   Enabling those across the workspace requires every tsconfig to
-//   include test files. Initial rollout keeps the type-aware rules
-//   OFF; a follow-up tightens to the project-graph form once every
-//   package's tsconfig is verified to include test paths.
+// - Type-aware rules (`no-floating-promises`, `no-misused-promises`,
+//   `switch-exhaustiveness-check`) run via the project-service mode of
+//   typescript-eslint, which loads each touched file's nearest
+//   tsconfig automatically — no per-package `parserOptions.project`
+//   list maintenance.
 // - Tests run with vitest globals; the `*.test.ts` override block
 //   relaxes the rules that bite mock-heavy patterns.
 
@@ -54,6 +54,18 @@ export default tseslint.config(
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",
+      parser: tseslint.parser,
+      parserOptions: {
+        // Each package's tsconfig.json EXCLUDES `src/**/*.test.ts`
+        // (Vitest transpiles tests directly; the build output skips
+        // them). typescript-eslint's project-service mode otherwise
+        // can't load test files for type-aware rules. Point it at the
+        // root-level `tsconfig.eslint.json` which includes the test
+        // files + config files + e2e + scripts as a single shadow
+        // project — type-aware rules run with full project context.
+        project: "./tsconfig.eslint.json",
+        tsconfigRootDir: import.meta.dirname,
+      },
       globals: {
         ...globals.node,
         ...globals.browser,
@@ -66,11 +78,8 @@ export default tseslint.config(
       "no-fallthrough": "error",
       "default-case-last": "error",
       "no-unused-vars": "off", // shadowed by the TS variant below
-      // Unused vars: warn (not error) for the initial rollout — there
-      // is real cleanup work (~10 dead imports across the workspace);
-      // tightening to error is a follow-up after a sweep PR.
       "@typescript-eslint/no-unused-vars": [
-        "warn",
+        "error",
         {
           argsIgnorePattern: "^_",
           varsIgnorePattern: "^_",
@@ -78,12 +87,8 @@ export default tseslint.config(
           ignoreRestSiblings: true,
         },
       ],
-      // These two are opinionated rules from eslint 9's recommended
-      // set that fire on patterns the existing codebase uses
-      // intentionally. Warn for visibility; tightening to error is a
-      // follow-up sweep, not a blocker for landing the config.
-      "no-useless-assignment": "warn",
-      "preserve-caught-error": "warn",
+      "no-useless-assignment": "error",
+      "preserve-caught-error": "error",
       "@typescript-eslint/ban-ts-comment": [
         "error",
         {
@@ -93,19 +98,30 @@ export default tseslint.config(
           "ts-check": false,
         },
       ],
-      // `any` is overused in places that pre-date the FSM-style typing
-      // work; surface as a warning so new code biases away from it
-      // without forcing a workspace-wide rewrite in this PR.
+      // `any` stays warn for legacy code; a follow-up sweep promotes
+      // to error after the remaining ~80 hits are typed or escape-
+      // hatched.
       "@typescript-eslint/no-explicit-any": "warn",
-      // Empty object type (`{}`) was a footgun in TS<4.9; allow with
-      // `Record<string, never>` for the genuine empty-object case.
       "@typescript-eslint/no-empty-object-type": [
         "error",
         { allowInterfaces: "with-single-extends" },
       ],
-      // `require` is fine in scripts/ and explicit Node entry points;
-      // the bulk of the source is ESM and never hits this rule.
       "@typescript-eslint/no-require-imports": "off",
+      // Type-aware rules: catch silent-omission patterns the FRI-110
+      // class lives in. `no-floating-promises` is the structural form
+      // of "you started an async op without `await`ing or `void`-
+      // discarding it"; `no-misused-promises` catches `if (asyncFn())`
+      // / `setTimeout(asyncFn, ...)` shapes. The `void` operator and
+      // an explicit `.catch(...)` are both acceptable discards.
+      "@typescript-eslint/no-floating-promises": ["error", { ignoreVoid: true, ignoreIIFE: true }],
+      "@typescript-eslint/no-misused-promises": ["error", { checksVoidReturn: false }],
+      "@typescript-eslint/switch-exhaustiveness-check": [
+        "error",
+        {
+          allowDefaultCaseForExhaustiveSwitch: true,
+          considerDefaultExhaustiveForUnions: true,
+        },
+      ],
     },
   },
   // Tests: mock-heavy patterns need `any` and untyped callback shapes.

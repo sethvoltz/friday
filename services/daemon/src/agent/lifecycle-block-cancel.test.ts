@@ -75,7 +75,7 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
 
     const w = makeFakeWorker();
 
-    handleEvent(
+    void handleEvent(
       w as never,
       {
         type: "block-start",
@@ -111,7 +111,7 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
     // should exist between start and cancel.
     expect(await getBlockById(blockId)).toBeNull();
 
-    handleEvent(
+    void handleEvent(
       w as never,
       {
         type: "block-cancel",
@@ -151,7 +151,7 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
     const w = makeFakeWorker();
 
     expect(() => {
-      handleEvent(
+      void handleEvent(
         w as never,
         {
           type: "block-cancel",

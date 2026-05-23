@@ -292,28 +292,6 @@ export async function collectOrchestratorTurns(
   return out;
 }
 
-function extractText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
-  for (const c of content) {
-    if (c && typeof c === "object" && "type" in c) {
-      const obj = c as { type: string; text?: string };
-      if (obj.type === "text" && typeof obj.text === "string") parts.push(obj.text);
-    }
-  }
-  return parts.join(" ");
-}
-
-function isToolResultOnly(content: unknown): boolean {
-  if (!Array.isArray(content)) return false;
-  if (content.length === 0) return false;
-  return content.every(
-    (c) =>
-      c && typeof c === "object" && "type" in c && (c as { type: string }).type === "tool_result",
-  );
-}
-
 function stripMemoryContext(text: string): string {
   return text.replace(/<memory-context>[\s\S]*?<\/memory-context>\s*/g, "");
 }

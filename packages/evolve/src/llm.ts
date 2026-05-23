@@ -205,6 +205,7 @@ export function extractJson<T>(text: string): T {
         } catch (err) {
           throw new Error(
             `Failed to parse JSON from LLM reply: ${(err as Error).message}\nRaw:\n${text}`,
+            { cause: err },
           );
         }
       }

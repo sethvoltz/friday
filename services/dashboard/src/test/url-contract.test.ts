@@ -27,7 +27,7 @@ function walk(dir: string, pred: (path: string) => boolean): string[] {
   const stack: string[] = [dir];
   while (stack.length > 0) {
     const cur = stack.pop()!;
-    let entries: string[] = [];
+    let entries: string[];
     try {
       entries = readdirSync(cur);
     } catch {

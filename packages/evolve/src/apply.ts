@@ -41,7 +41,7 @@ export async function applyProposal(id: string, opts: ApplyOptions): Promise<App
 
   if (proposal.type === "memory") {
     const id = slugify(proposal.title);
-    saveEntry({
+    await saveEntry({
       id,
       title: proposal.title,
       content: buildMemoryBody(proposal),

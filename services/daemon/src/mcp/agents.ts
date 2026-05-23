@@ -46,7 +46,7 @@ function formatBlocksAsMarkdown(agentName: string, blocks: BlockRow[]): string {
 }
 
 function summarizeBlock(b: BlockRow): string {
-  let parsed: Record<string, unknown> = {};
+  let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(b.contentJson) as Record<string, unknown>;
   } catch {

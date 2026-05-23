@@ -4,7 +4,7 @@
  * Ported nearly verbatim from old SlackAgents Friday.
  */
 
-import type { BlastRadius, Proposal, Signal, SignalSeverity } from "./types.js";
+import type { BlastRadius, Proposal, SignalSeverity } from "./types.js";
 
 const SEVERITY_WEIGHT: Record<SignalSeverity, number> = {
   high: 40,

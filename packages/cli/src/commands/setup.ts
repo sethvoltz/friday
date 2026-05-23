@@ -1,7 +1,7 @@
 import { defineCommand } from "citty";
 import { confirm, intro, outro, password, text } from "@clack/prompts";
 import pc from "picocolors";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";

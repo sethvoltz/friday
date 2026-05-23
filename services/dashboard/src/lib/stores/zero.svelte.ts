@@ -1414,7 +1414,7 @@ class ZeroSyncStore {
     this.#unsubscribers = [];
     this.unbindBlocks();
     this.#blocksListeners.clear();
-    this.#zero?.close();
+    void this.#zero?.close();
     this.#zero = null;
   }
 }
@@ -1433,13 +1433,6 @@ function toAgentInfo(r: ZeroAgentRow): AgentInfo {
     createdAt: new Date(r.created_at).toISOString(),
     updatedAt: new Date(r.updated_at).toISOString(),
   };
-}
-
-async function refreshToken(): Promise<string> {
-  const r = await fetch("/api/sync/refresh", { method: "POST" });
-  if (!r.ok) throw new Error(`refresh failed: ${r.status}`);
-  const body = (await r.json()) as RefreshResponse;
-  return body.token;
 }
 
 function zeroServerUrl(): string {

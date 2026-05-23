@@ -162,14 +162,16 @@ export const statusCommand = defineCommand({
     const reachable = await client.ping();
     const health = readHealth();
     const cfgDaemonPort = resolveDaemonPort(cfg);
-    let daemonPort = cfgDaemonPort;
-    let daemonPortSource = "config";
+    let daemonPort: number;
+    let daemonPortSource: string;
     if (health.present && !health.stale && typeof health.port === "number") {
       daemonPort = health.port;
       daemonPortSource = "probed";
     } else if (health.present && health.stale) {
+      daemonPort = cfgDaemonPort;
       daemonPortSource = "config — heartbeat stale";
     } else {
+      daemonPort = cfgDaemonPort;
       daemonPortSource = "config — no heartbeat";
     }
     const daemonPortTag =

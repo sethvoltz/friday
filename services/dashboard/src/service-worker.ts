@@ -102,7 +102,7 @@ async function cacheFirst(request: Request): Promise<Response> {
   if (cached) return cached;
   try {
     const fresh = await fetch(request);
-    if (fresh.ok) cache.put(request, fresh.clone());
+    if (fresh.ok) void cache.put(request, fresh.clone());
     return fresh;
   } catch (err) {
     if (cached) return cached;
@@ -118,7 +118,7 @@ async function networkFirstHtml(request: Request, url: URL): Promise<Response> {
     // so we never re-serve a stale auth page after a server-side
     // credential rotation; same for any other auth-flow endpoints.
     if (fresh.ok && !url.pathname.startsWith("/login")) {
-      cache.put(request, fresh.clone());
+      void cache.put(request, fresh.clone());
     }
     return fresh;
   } catch (err) {

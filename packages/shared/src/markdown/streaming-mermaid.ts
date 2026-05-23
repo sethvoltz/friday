@@ -59,7 +59,7 @@ export async function applyStreamingMermaidGate(
       node.setAttribute(PENDING_ATTR, "true");
       continue;
     }
-    let ok: unknown = false;
+    let ok: unknown;
     try {
       ok = await deps.parse(node.textContent ?? "");
     } catch {

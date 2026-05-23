@@ -38,7 +38,6 @@ let abortController: AbortController | null = null;
 let stopped = false;
 let mainLoopRunning = false;
 let pendingPrompt: WorkerPromptCommand | null = null;
-let mailWakeupPending = false;
 /**
  * Set when a `mail-wakeup-critical` IPC arrives. Read at the next SDK
  * iteration boundary inside `runQuery`; on set, the worker breaks the
@@ -98,10 +97,8 @@ process.on("message", (msg: WorkerCommand) => {
       abortController?.abort();
       wakeIdle();
     } else if (msg.type === "mail-wakeup") {
-      mailWakeupPending = true;
       wakeIdle();
     } else if (msg.type === "mail-wakeup-critical") {
-      mailWakeupPending = true;
       pendingCriticalMail = true;
       wakeIdle();
     } else if (msg.type === "prompts-pending") {
@@ -132,7 +129,6 @@ async function mainLoop(): Promise<void> {
       }
 
       // Long-lived path: check inbox before idling.
-      mailWakeupPending = false;
       const inbox = await fetchInboxQuiet(workerOpts.agentName, workerOpts.daemonPort);
       if (inbox.length > 0) {
         pendingPrompt = {

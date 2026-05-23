@@ -21,7 +21,6 @@ import {
   watchdogThresholdMs,
 } from "@friday/shared";
 import { randomUUID } from "node:crypto";
-import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import { renderPinnedFacts } from "./pinned-facts.js";
 import * as registry from "./registry.js";
