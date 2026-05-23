@@ -210,11 +210,11 @@ export const mail = pgTable(
     fromAgent: text("from_agent").notNull(),
     toAgent: text("to_agent").notNull(),
     type: text("type").notNull(), // message|notification|task
-    // FRI-116: TS unions narrowed to {pending,read,closed}. The DB
-    // check constraint below still accepts the legacy `delivered`
-    // value for write-back compatibility; tightening requires a
-    // migration that the epic explicitly scopes out.
-    delivery: text("delivery").notNull(), // pending|read|closed (DB also still accepts legacy 'delivered')
+    // FRI-117: TS unions AND DB check constraint both restricted to
+    // {pending, read, closed}. The legacy `delivered` value is fully
+    // retired (FRI-116 narrowed the TS union, FRI-119 #2 / migration
+    // 0022 tightens the DB constraint).
+    delivery: text("delivery").notNull(), // pending|read|closed
     subject: text("subject"),
     threadId: text("thread_id"),
     body: text("body").notNull(),
@@ -230,10 +230,7 @@ export const mail = pgTable(
     inboxIdx: index("mail_inbox").on(t.toAgent, t.delivery, t.ts),
     threadIdx: index("mail_thread").on(t.threadId, t.ts),
     priorityCheck: check("mail_priority_check", sql`${t.priority} IN ('normal','critical')`),
-    deliveryCheck: check(
-      "mail_delivery_check",
-      sql`${t.delivery} IN ('pending','delivered','read','closed')`,
-    ),
+    deliveryCheck: check("mail_delivery_check", sql`${t.delivery} IN ('pending','read','closed')`),
   }),
 );
 

@@ -2,7 +2,23 @@ import type { AgentTypeName } from "./config.js";
 
 export type AgentType = AgentTypeName;
 
-export type AgentStatus = "idle" | "working" | "stalled" | "error" | "archived";
+/**
+ * FRI-117 follow-up (formerly FRI-119 #1): the TS union now matches
+ * `packages/shared/src/db/schema.ts:97`'s check constraint exactly.
+ * `archive_requested` is the transient state the Zero mutator path
+ * writes; the daemon's `archive-listener` flips it to `archived`
+ * immediately. The FSM gate in `registry.setStatus` treats it as a
+ * transient state observers don't read at rest — but typing the union
+ * exhaustively means new code paths that DO observe it can do so
+ * via the type system instead of by stringly-typed surprise.
+ */
+export type AgentStatus =
+  | "idle"
+  | "working"
+  | "stalled"
+  | "error"
+  | "archived"
+  | "archive_requested";
 
 /**
  * Terminal reason captured when an agent transitions to `archived`.

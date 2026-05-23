@@ -27,18 +27,22 @@ import {
  *     2026-05-22 grill.
  *   - `archive_requested` is in the DB check constraint
  *     (`schema.ts:97`) but NOT yet in the TS `AgentStatus` union
- *     (`agents.ts:5-10`). The intermediate value is only written by the
+ *     (`agents.ts:5-10`). The intermediate value is written by the
  *     Zero mutator path; the daemon's LISTEN handler flips it to
- *     `archived` immediately. The FSM treats it as a transient state we
- *     never read; widening the TS union is an explicit ADR-031 follow-up.
+ *     `archived` immediately. The matrix below now codifies both
+ *     edges (`* → archive_requested` for non-orchestrators via the
+ *     mutator and `archive_requested → archived` for the listener).
  */
 type StatusTransitionTable = Readonly<Record<AgentStatus, ReadonlyArray<AgentStatus>>>;
 
 const COMMON_TRANSITIONS: StatusTransitionTable = {
-  idle: ["working", "stalled", "error", "archived"],
-  working: ["idle", "stalled", "error", "archived"],
-  stalled: ["idle", "working", "error", "archived"],
-  error: ["idle", "archived"],
+  idle: ["working", "stalled", "error", "archived", "archive_requested"],
+  working: ["idle", "stalled", "error", "archived", "archive_requested"],
+  stalled: ["idle", "working", "error", "archived", "archive_requested"],
+  error: ["idle", "archived", "archive_requested"],
+  // Transient state written by the Zero mutator path; the listener
+  // immediately flips to `archived`. The only legal next state.
+  archive_requested: ["archived"],
   // Terminal. Only `unarchiveAgent` can leave this status, and it uses
   // the privileged unchecked path. Nothing else may.
   archived: [],
@@ -50,8 +54,10 @@ const ORCHESTRATOR_TRANSITIONS: StatusTransitionTable = {
   stalled: ["idle", "working", "error"],
   error: ["idle"],
   // The orchestrator-not-archivable invariant: no edge into `archived`
-  // from anywhere. If a row ever lands at `archived`, the auditor's
-  // rule #3 heals it back to `idle` via the unchecked path.
+  // OR `archive_requested` from anywhere. If a row ever lands at
+  // either, the auditor's rule #3 heals it back to `idle` via the
+  // unchecked path.
+  archive_requested: [],
   archived: [],
 };
 
