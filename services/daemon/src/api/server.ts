@@ -551,7 +551,7 @@ async function handle(
       prompt: string;
       model?: string;
       ticketId?: string;
-      worktree?: { repo: string; branch?: string };
+      worktree?: { repo: string; branch?: string; fromRef?: string };
       reason?: string;
     }>(req);
     if (!body.name || !isValidAgentName(body.name)) {
@@ -596,6 +596,7 @@ async function handle(
           name: body.name,
           baseRepo: repo,
           branch,
+          fromRef: body.worktree?.fromRef,
         });
         workingDirectory = ws.path;
         worktreePath = ws.path;
