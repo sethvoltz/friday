@@ -185,17 +185,17 @@ describe("renderLocalDatetime (FRI-52)", () => {
 });
 
 describe("composeSystemPrompt datetime injection (FRI-52)", () => {
-  it("always includes the currentDateTime section", () => {
+  it("does NOT include currentDateTime — injected per-turn via hook, not at session init", () => {
     const stack = readPromptStack("orchestrator", []);
     const composed = composeSystemPrompt(stack, {
       agentName: "friday",
       agentType: "orchestrator",
     });
-    expect(composed).toContain("# currentDateTime");
-    expect(composed).toContain("Current local date and time:");
+    expect(composed).not.toContain("# currentDateTime");
+    expect(composed).not.toContain("Current local date and time:");
   });
 
-  it("datetime appears after identity and before pinned-facts", () => {
+  it("pinned-facts still appears after identity when datetime is absent", () => {
     const stack = readPromptStack("orchestrator", []);
     const pinnedFacts = "# Pinned facts\n\n- **x**: y";
     const composed = composeSystemPrompt(
@@ -204,27 +204,10 @@ describe("composeSystemPrompt datetime injection (FRI-52)", () => {
       pinnedFacts,
     );
     const idxIdentity = composed.indexOf("# Identity");
-    const idxDatetime = composed.indexOf("# currentDateTime");
     const idxPinned = composed.indexOf("# Pinned facts");
     expect(idxIdentity).toBeGreaterThanOrEqual(0);
-    expect(idxDatetime).toBeGreaterThan(idxIdentity);
-    expect(idxPinned).toBeGreaterThan(idxDatetime);
-  });
-
-  it("datetime is present even when identity is omitted", () => {
-    const stack = readPromptStack("orchestrator", []);
-    const composed = composeSystemPrompt(stack);
-    expect(composed).toContain("# currentDateTime");
-  });
-
-  it("datetime is present for builder type", () => {
-    const stack = readPromptStack("builder", []);
-    const composed = composeSystemPrompt(stack, {
-      agentName: "some-builder",
-      agentType: "builder",
-      parentName: "friday",
-    });
-    expect(composed).toContain("# currentDateTime");
+    expect(idxPinned).toBeGreaterThan(idxIdentity);
+    expect(composed).not.toContain("# currentDateTime");
   });
 });
 

@@ -4,9 +4,11 @@ import { memoryRecallHook } from "./memory-recall-hook.js";
 import { skillContextHook } from "./skill-context.js";
 import { workspaceGuardHook } from "./workspace-guard.js";
 import { builderTrailerHook } from "./builder-trailer.js";
+import { datetimeHook } from "./datetime-hook.js";
 
 setHooksLogger(logger);
 
+registerHook("before_prompt_build", datetimeHook);
 registerHook("before_prompt_build", memoryRecallHook);
 registerHook("before_prompt_build", skillContextHook);
 registerHook("before_tool_call", workspaceGuardHook);
