@@ -125,10 +125,10 @@ export async function scanFriction(opts: FrictionScanOptions = {}): Promise<Sign
     }
   }
 
-  return bucketByCategory(scored);
+  return bucketFrictionByCategory(scored);
 }
 
-export function bucketByCategory(scored: Array<OrchestratorTurn & ScoredTurn>): Signal[] {
+export function bucketFrictionByCategory(scored: Array<OrchestratorTurn & ScoredTurn>): Signal[] {
   const buckets = new Map<string, Signal>();
   const ranked = [...scored].sort((a, b) => b.friction_score - a.friction_score);
 
