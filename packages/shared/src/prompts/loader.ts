@@ -121,10 +121,11 @@ export function renderIdentityBlock(identity: AgentIdentity): string {
  *   1. CONSTITUTION
  *   2. SOUL
  *   3. Identity (when provided — FRI-11)
- *   4. Pinned facts (when provided — FRI-61; daemon-rendered from per-agent
+ *   4. Current local date and time (FRI-52; always injected, derived at call time)
+ *   5. Pinned facts (when provided — FRI-61; daemon-rendered from per-agent
  *      pinned memories)
- *   5. agents/<type>
- *   6. protocols/*
+ *   6. agents/<type>
+ *   7. protocols/*
  */
 export function composeSystemPrompt(
   stack: PromptStack,
@@ -136,12 +137,50 @@ export function composeSystemPrompt(
     stack.constitution,
     stack.soul,
     identityBlock,
+    renderLocalDatetime(),
     pinnedFacts ?? "",
     stack.agentBase,
     stack.protocols,
   ]
     .filter(Boolean)
     .join("\n\n---\n\n");
+}
+
+/**
+ * Build a human-readable current local date-and-time block for injection
+ * into the system prompt. Derived from the system timezone at call time so
+ * every new agent turn gets a fresh value.
+ *
+ * Format: "Friday, May 23 2026, 9:45 PM PDT (UTC-7)"
+ */
+export function renderLocalDatetime(): string {
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: tz,
+    timeZoneName: "short",
+  }).formatToParts(now);
+  const p: Record<string, string> = {};
+  for (const { type, value } of parts) {
+    p[type] = value;
+  }
+  // getTimezoneOffset() returns minutes *behind* UTC; negate for standard sign.
+  const offsetMinutes = -now.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absMin = Math.abs(offsetMinutes);
+  const hh = Math.floor(absMin / 60);
+  const mm = absMin % 60;
+  const offset =
+    mm > 0 ? `UTC${sign}${hh}:${String(mm).padStart(2, "0")}` : `UTC${sign}${hh}`;
+  const datetime = `${p.weekday}, ${p.month} ${p.day} ${p.year}, ${p.hour}:${p.minute} ${p.dayPeriod} ${p.timeZoneName} (${offset})`;
+  return `# currentDateTime\nCurrent local date and time: ${datetime}`;
 }
 
 /** First-boot copy: if ~/.friday/SOUL.md doesn't exist, install the default.
