@@ -1476,9 +1476,22 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // would otherwise leave the safety net armed and force-kill an
       // already-cooperative worker.
       if (e.status === "idle") clearAbortDeadline(w);
-      // Phase 5: `agent_status` SSE retired — Zero replicates the
-      // setWorkerStatus → registry UPDATE reactively. The internal
-      // `setWorkerStatus` log line preserves diagnostic visibility.
+      // Mirror the worker's in-process status into the DB so Zero replicates
+      // it to the dashboard. The sendPrompt/spawnTurn paths write "working"
+      // for dispatcher-initiated turns; this covers the mail-triggered path
+      // where the worker discovers mail in its own inbox and starts a turn
+      // without the parent calling sendPrompt — in that case no one else
+      // updates the registry and the agent's dot stays grey the entire turn.
+      // Same-status writes (e.g., working→working when a dispatcher-initiated
+      // turn fires this after sendPrompt already wrote the DB) are legal
+      // no-ops per the FSM and just bump updated_at.
+      await registry.setStatus(w.agentName, e.status).catch((err: unknown) => {
+        logger.log("warn", "registry.set-status.error", {
+          agent: w.agentName,
+          status: e.status,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
       break;
     case "turn-complete": {
       // FRI-12: same cancellation as the error path. If the worker raced
