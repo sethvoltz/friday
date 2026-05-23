@@ -1,4 +1,5 @@
 import type { WireEvent } from "@friday/shared";
+import { SvelteMap } from "svelte/reactivity";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { initialPageSize } from "../util/page-size";
 import { KEYS, loadJSON, removeKey, saveJSON } from "./persistent";
@@ -147,6 +148,141 @@ export interface ChatMessage {
    *  the daemon's `turn_done.abort_reason` field. Undefined for
    *  non-user-block messages and for turns that didn't end in abort. */
   abortReason?: "cooperative" | "forced";
+}
+
+/**
+ * Live overlay entry for an in-flight assistant / tool / thinking block.
+ *
+ * Streaming-mutable fields (`text`, `status`, `input`, `output`,
+ * `inputPartialJson`, `toolName`) are declared with `$state`. Each
+ * instance carries its own per-field reactivity, so `entry.text += delta`
+ * fires a fine-grained subscription on `entry.text` without invalidating
+ * the parent `messages` derivation — the SvelteMap holding entries
+ * tracks set/delete/clear, not value-object field mutations. This is the
+ * design property that keeps streaming-text latency at one paint frame
+ * even on a long session: per-delta work is O(1), bounded by the bubble's
+ * own text-node update.
+ *
+ * Implements `ChatMessage` so the bubble component renders entries
+ * interchangeably with canonical row-derived ChatMessage objects.
+ *
+ * `sessionId` is captured at construction from the agent's current
+ * session. The `chat.messages` derivation filters overlay entries by
+ * `entry.sessionId === currentAgentSessionId`, so a `/clear` (which
+ * nulls sessionId) naturally hides leftover in-flight entries without
+ * imperative cleanup. A `$effect` watching `agents[name].sessionId`
+ * prunes stale entries in the background.
+ */
+export class StreamingEntry implements ChatMessage {
+  readonly id: string;
+  readonly role: "assistant" | "tool" | "thinking";
+  readonly agent: string;
+  readonly ts: number;
+  readonly turnId: string;
+  readonly blockId: string;
+  readonly sessionId: string | null;
+  readonly toolId?: string;
+  readonly source?: ChatMessage["source"];
+
+  // Streaming-mutable, each field per-instance reactive.
+  text = $state("");
+  status = $state<ChatMessage["status"]>("streaming");
+  toolName = $state<string | undefined>(undefined);
+  input = $state<unknown>(undefined);
+  output = $state<string | undefined>(undefined);
+  inputPartialJson = $state<string | undefined>(undefined);
+
+  constructor(init: {
+    id: string;
+    role: "assistant" | "tool" | "thinking";
+    agent: string;
+    ts: number;
+    turnId: string;
+    blockId: string;
+    sessionId: string | null;
+    toolId?: string;
+    source?: ChatMessage["source"];
+    initialStatus?: ChatMessage["status"];
+    initialText?: string;
+    initialToolName?: string;
+  }) {
+    this.id = init.id;
+    this.role = init.role;
+    this.agent = init.agent;
+    this.ts = init.ts;
+    this.turnId = init.turnId;
+    this.blockId = init.blockId;
+    this.sessionId = init.sessionId;
+    this.toolId = init.toolId;
+    this.source = init.source;
+    if (init.initialStatus) this.status = init.initialStatus;
+    if (init.initialText) this.text = init.initialText;
+    if (init.initialToolName) this.toolName = init.initialToolName;
+  }
+}
+
+/**
+ * Optimistic overlay entry for a user bubble that hasn't yet been
+ * confirmed by the daemon's mutator path. Renders pinned to the bottom
+ * of the chat with a "queued" / "sending" affordance until the
+ * canonical row arrives via Zero (matching `userBlockIdForTurn(turnId)`
+ * or the pre-minted `queueBlockId`) and the entry is dropped from the
+ * overlay.
+ *
+ * Same reactivity contract as StreamingEntry: mutable status flags are
+ * `$state`, the SvelteMap doesn't proxy stored values, the parent
+ * derivation only re-runs on set/delete.
+ */
+export class OptimisticEntry implements ChatMessage {
+  readonly id: string;
+  readonly role = "user" as const;
+  readonly agent: string;
+  readonly ts: number;
+  readonly turnId: string;
+  readonly sessionId: string | null;
+  readonly text: string;
+  readonly source?: ChatMessage["source"];
+  readonly queueId?: string;
+  readonly attachments?: ChatMessage["attachments"];
+
+  status = $state<ChatMessage["status"]>("complete");
+  pending = $state(true);
+  failed = $state(false);
+  retrying = $state(false);
+
+  constructor(init: {
+    id: string;
+    agent: string;
+    ts: number;
+    turnId: string;
+    sessionId: string | null;
+    text: string;
+    source?: ChatMessage["source"];
+    queueId?: string;
+    attachments?: ChatMessage["attachments"];
+    initialStatus?: ChatMessage["status"];
+    initialPending?: boolean;
+  }) {
+    this.id = init.id;
+    this.agent = init.agent;
+    this.ts = init.ts;
+    this.turnId = init.turnId;
+    this.sessionId = init.sessionId;
+    this.text = init.text;
+    this.source = init.source;
+    this.queueId = init.queueId;
+    this.attachments = init.attachments;
+    if (init.initialStatus) this.status = init.initialStatus;
+    if (init.initialPending !== undefined) this.pending = init.initialPending;
+  }
+}
+
+/** Overlay-map key. Globally unique because message ids (`b_<blockId>`,
+ *  `t_<toolId>`, `th_<blockId>`, `u_queue_<qid>`, `userBlockIdForTurn(...)`)
+ *  are themselves unique within an agent. */
+export type OverlayKey = string;
+export function overlayKey(agent: string, id: string): OverlayKey {
+  return `${agent}|${id}`;
 }
 
 export interface AgentInfo {
@@ -304,6 +440,32 @@ export function filterRowsToCurrentSession<
 export class ChatState {
   messages = $state<ChatMessage[]>([]);
   agents = $state<AgentInfo[]>([]);
+
+  /**
+   * Live overlay for in-flight assistant / tool / thinking blocks. Keyed
+   * by `overlayKey(agent, msg.id)`. Entries are added on SSE `block_start`,
+   * mutated in place on `block_delta` (field-level $state reactivity), and
+   * removed on `block_canceled` or when the matching canonical row from
+   * Zero replicates with terminal status.
+   *
+   * Foundation step (FRI-XXX): the map exists but no readers / writers
+   * are wired yet — the active code path still mutates `messages`
+   * imperatively. Subsequent commits migrate the SSE handlers to write
+   * here and the `messages` array to derive from this + canonical +
+   * optimistic.
+   */
+  streaming = new SvelteMap<OverlayKey, StreamingEntry>();
+
+  /**
+   * Optimistic overlay for user bubbles that haven't yet been confirmed
+   * by Zero. Keyed by `overlayKey(agent, msg.id)`. Dropped when the
+   * canonical user row arrives via Zero or the send queue acks the
+   * `queueBlockId`.
+   *
+   * Foundation step: no readers / writers yet — see comment on
+   * `streaming` above.
+   */
+  optimistic = new SvelteMap<OverlayKey, OptimisticEntry>();
   /**
    * Instrumentation backing field (FRI-72). The public `focusedAgent`
    * getter/setter wraps this so every write logs prev/next + URL +
