@@ -133,7 +133,7 @@ function bucketByCategory(scored: Array<OrchestratorTurn & ScoredTurn>): Signal[
   const ranked = [...scored].sort((a, b) => b.friction_score - a.friction_score);
 
   for (const t of ranked) {
-    if (t.friction_score < 2) continue;
+    if (t.friction_score < 3) continue;
     if (t.category === "none") continue;
 
     const event = `friction_${t.category}`;
@@ -330,6 +330,12 @@ const SCORING_SYSTEM_PROMPT = [
   "Be calibrated. 'no problem' / 'no rush' / a polite 'sounds good' is friction_score 0.",
   "A direct factual correction ('no, the file is at X not Y') is friction_score 2 minimum.",
   "Be willing to score 0/none liberally — most turns are not friction.",
+  "",
+  "Calibration rules:",
+  "  - Greetings ('Hey', 'Hi', 'Hello', 'hey there', etc.) are always friction_score 0 / category none, regardless of context.",
+  "  - A single constructive correction where the agent adjusts correctly is score 1–2 max. Score 2 is the ceiling for isolated corrections in otherwise productive sessions.",
+  "  - Score 3+ requires repetition (user had to say the same thing twice) or explicit frustration language.",
+  "  - Normal iterative work ('try X' → agent tries → user gives feedback → agent adjusts) is score 0.",
   "",
   'Respond with a JSON object: {"turns":[{"turn_id":"...","friction_score":N,"category":"...","reason":"..."}, ...]}',
   "No prose, no markdown fences, just the JSON. Match every input turn_id exactly.",
