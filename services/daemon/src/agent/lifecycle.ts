@@ -615,17 +615,13 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   // against future re-orderings.
   w.blocksThisTurn = 0;
   setWorkerStatus(w, "working", "sendPrompt");
-  // Fire-and-forget: registry.setStatus is async under Postgres (ADR-023);
-  // sendPrompt is sync because it's called from the IPC dispatcher and the
-  // setTimeout-driven abortDeadline. Errors are surfaced via the existing
-  // log channel rather than blocking the prompt dispatch.
-  void registry.setStatus(w.agentName, "working").catch((err: unknown) => {
-    logger.log("warn", "registry.set-status.error", {
-      agent: w.agentName,
-      status: "working",
-      message: err instanceof Error ? err.message : String(err),
-    });
-  });
+  // Intentionally no registry.setStatus("working") here. The worker emits
+  // a status-change:working IPC when runQuery starts; the handleEvent handler
+  // awaits that write (see the status-change case below). A fire-and-forget
+  // write here would race with turn-complete's await setStatus("idle"),
+  // resolving late and leaving the agent stuck on "working" between turns.
+  // spawnTurn (fresh worker spawns) still does an awaited setStatus("working")
+  // before forking, which is race-free because no IPC pipeline exists yet.
   eventBus.publish({
     v: 1,
     type: "turn_started",
@@ -1476,9 +1472,22 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // would otherwise leave the safety net armed and force-kill an
       // already-cooperative worker.
       if (e.status === "idle") clearAbortDeadline(w);
-      // Phase 5: `agent_status` SSE retired — Zero replicates the
-      // setWorkerStatus → registry UPDATE reactively. The internal
-      // `setWorkerStatus` log line preserves diagnostic visibility.
+      // Mirror the worker's in-process status into the DB so Zero replicates
+      // it to the dashboard. The sendPrompt/spawnTurn paths write "working"
+      // for dispatcher-initiated turns; this covers the mail-triggered path
+      // where the worker discovers mail in its own inbox and starts a turn
+      // without the parent calling sendPrompt — in that case no one else
+      // updates the registry and the agent's dot stays grey the entire turn.
+      // Same-status writes (e.g., working→working when a dispatcher-initiated
+      // turn fires this after sendPrompt already wrote the DB) are legal
+      // no-ops per the FSM and just bump updated_at.
+      await registry.setStatus(w.agentName, e.status).catch((err: unknown) => {
+        logger.log("warn", "registry.set-status.error", {
+          agent: w.agentName,
+          status: e.status,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
       break;
     case "turn-complete": {
       // FRI-12: same cancellation as the error path. If the worker raced
