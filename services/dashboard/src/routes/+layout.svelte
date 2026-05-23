@@ -13,7 +13,7 @@
   } from "$lib/stores/wake-lock.svelte";
   import ConnectivityWidget from "$lib/components/Connectivity/ConnectivityWidget.svelte";
   import SyncOverlay from "$lib/components/SyncOverlay/SyncOverlay.svelte";
-  import { Zap } from "lucide-svelte";
+  import { Coffee } from "lucide-svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
   import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
@@ -231,7 +231,7 @@
             class="wake-lock-indicator"
             title="Screen wake lock is active — phone won't sleep while an agent is working"
             aria-label="Screen wake lock active">
-            <Zap size={14} strokeWidth={2} aria-hidden="true" />
+            <Coffee size={14} strokeWidth={2} aria-hidden="true" />
           </span>
         {/if}
       </div>
