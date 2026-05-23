@@ -615,17 +615,13 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   // against future re-orderings.
   w.blocksThisTurn = 0;
   setWorkerStatus(w, "working", "sendPrompt");
-  // Fire-and-forget: registry.setStatus is async under Postgres (ADR-023);
-  // sendPrompt is sync because it's called from the IPC dispatcher and the
-  // setTimeout-driven abortDeadline. Errors are surfaced via the existing
-  // log channel rather than blocking the prompt dispatch.
-  void registry.setStatus(w.agentName, "working").catch((err: unknown) => {
-    logger.log("warn", "registry.set-status.error", {
-      agent: w.agentName,
-      status: "working",
-      message: err instanceof Error ? err.message : String(err),
-    });
-  });
+  // Intentionally no registry.setStatus("working") here. The worker emits
+  // a status-change:working IPC when runQuery starts; the handleEvent handler
+  // awaits that write (see the status-change case below). A fire-and-forget
+  // write here would race with turn-complete's await setStatus("idle"),
+  // resolving late and leaving the agent stuck on "working" between turns.
+  // spawnTurn (fresh worker spawns) still does an awaited setStatus("working")
+  // before forking, which is race-free because no IPC pipeline exists yet.
   eventBus.publish({
     v: 1,
     type: "turn_started",
