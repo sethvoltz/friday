@@ -830,11 +830,13 @@ export class ChatState {
   #scrollLocalJump(target: ChatMessage): void {
     const idx = this.messages.indexOf(target);
     if (idx !== -1) {
-      // Park the target ~100 from the bottom of the rendered window;
-      // ChatMessages's WINDOW_SIZE (500) covers ~400 messages above it,
-      // giving the user immediate context in both directions without
-      // mounting the entire transcript.
-      const end = Math.min(this.messages.length, idx + 100);
+      // Park the target ~20 from the bottom of the rendered window;
+      // ChatMessages's WINDOW_SIZE (100) then covers ~80 messages
+      // above it, giving the user immediate context in both directions
+      // without mounting the entire transcript. The "+20" must stay
+      // strictly < WINDOW_SIZE so the target itself lands inside the
+      // window (otherwise windowStart = end - WINDOW_SIZE > idx).
+      const end = Math.min(this.messages.length, idx + 20);
       this.chatWindowEnd = { agent: this.focusedAgent, end };
     }
     this.pinnedToBottom = false;

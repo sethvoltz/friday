@@ -144,10 +144,16 @@
   // reaches the visual edge (otherwise they see "nothing more to
   // scroll" for the few frames it takes to mount the new batch).
   //
+  // SLIDE_AMOUNT must be << WINDOW_SIZE so the slide keeps the user's
+  // anchor bubble inside the new slice — otherwise the anchor lookup
+  // in `slideWindow` returns null and the scroll-restore bails,
+  // dropping the user at a disorienting scrollTop. 5:1 ratio gives
+  // the anchor plenty of headroom.
+  //
   // Read-only past-session views are bounded by the session length
   // and render in full — no windowing.
-  const WINDOW_SIZE = 500;
-  const SLIDE_AMOUNT = 100;
+  const WINDOW_SIZE = 100;
+  const SLIDE_AMOUNT = 20;
   // `windowEnd` derives from chat.chatWindowEnd, which is either:
   //   - `null` ("follow live tail") → windowEnd = allMessages.length
   //   - `{agent, end}` matching the focused agent → windowEnd = end

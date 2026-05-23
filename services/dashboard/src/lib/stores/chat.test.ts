@@ -843,13 +843,13 @@ describe("jumpTo (/jump <date|term>)", () => {
     expect(chat.scrollTarget?.id).toBe("user_t-target");
     expect(chat.pinnedToBottom).toBe(false);
     // Window slid to include the target. chatWindowEnd is tagged with the
-    // focused agent; the `end` cursor sits at most `+100` past the target's
+    // focused agent; the `end` cursor sits at most `+20` past the target's
     // index so the rendered slice (last WINDOW_SIZE rows of allMessages
     // ending at `end`) covers the target.
     const targetIdx = chat.messages.findIndex((m) => m.id === "user_t-target");
     expect(chat.chatWindowEnd).toEqual({
       agent: "friday",
-      end: Math.min(chat.messages.length, targetIdx + 100),
+      end: Math.min(chat.messages.length, targetIdx + 20),
     });
   });
 
