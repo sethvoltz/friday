@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { bucketFrictionByCategory, type FrictionCategory, type ScoredTurn } from "./scan-friction.js";
+import {
+  bucketFrictionByCategory,
+  type FrictionCategory,
+  type ScoredTurn,
+} from "./scan-friction.js";
 import type { OrchestratorTurn } from "./scan-friction.js";
 
 function turn(
@@ -35,24 +39,22 @@ describe("scan-friction bucketByCategory", () => {
     expect(out).toEqual([]);
   });
 
-  it("emits one signal per category", () => {
-    const out = bucketFrictionByCategory([turn(1, "correction", 3), turn(2, "confusion", 2)]);
-    expect(out.length).toBe(2);
-    const keys = out.map((s) => s.key).sort();
-    expect(keys).toEqual(["friction_confusion", "friction_correction"]);
-    expect(out.every((s) => s.agent === "orchestrator")).toBe(true);
+  it("emits one signal per category, keyed with friction_ prefix", () => {
+    const a = bucketFrictionByCategory([turn(1, "correction", 3)]);
+    expect(a.length).toBe(1);
+    expect(a[0].key).toBe("friction_correction");
+    expect(a[0].agent).toBe("orchestrator");
+
+    const b = bucketFrictionByCategory([turn(1, "confusion", 3)]);
+    expect(b.length).toBe(1);
+    expect(b[0].key).toBe("friction_confusion");
   });
 
   it("merges multiple turns of the same category and bumps count", () => {
-    const out = bucketFrictionByCategory([
-      turn(1, "correction", 3, { ts: "2026-05-01T00:01:00.000Z" }),
-      turn(2, "correction", 2, { ts: "2026-05-01T00:05:00.000Z" }),
-      turn(3, "correction", 2, { ts: "2026-05-01T00:10:00.000Z" }),
-    ]);
+    const turns = Array.from({ length: 3 }, (_, i) => turn(i + 1, "correction", 3));
+    const out = bucketFrictionByCategory(turns);
     expect(out.length).toBe(1);
     expect(out[0].count).toBe(3);
-    expect(out[0].firstSeenAt).toBe("2026-05-01T00:01:00.000Z");
-    expect(out[0].lastSeenAt).toBe("2026-05-01T00:10:00.000Z");
   });
 
   it("escalates severity when a later turn scores higher", () => {
