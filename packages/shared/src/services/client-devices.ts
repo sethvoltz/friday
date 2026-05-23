@@ -27,9 +27,7 @@ export interface ClientDeviceRow {
   revokedAt: number | null;
 }
 
-function rowToClientDevice(
-  r: typeof schema.clientDevices.$inferSelect,
-): ClientDeviceRow {
+function rowToClientDevice(r: typeof schema.clientDevices.$inferSelect): ClientDeviceRow {
   return {
     deviceId: r.deviceId,
     userId: r.userId,
@@ -44,9 +42,7 @@ function rowToClientDevice(
   };
 }
 
-export async function getClientDevice(
-  deviceId: string,
-): Promise<ClientDeviceRow | null> {
+export async function getClientDevice(deviceId: string): Promise<ClientDeviceRow | null> {
   const db = getDb();
   const rows = await db
     .select()
@@ -69,9 +65,7 @@ export interface UpsertClientDeviceInput {
  * users is a security event the dashboard rejects upstream, so we don't
  * need to merge / migrate ownership here.
  */
-export async function upsertClientDevice(
-  input: UpsertClientDeviceInput,
-): Promise<ClientDeviceRow> {
+export async function upsertClientDevice(input: UpsertClientDeviceInput): Promise<ClientDeviceRow> {
   const db = getDb();
   const now = new Date();
   const ua = input.userAgent ?? null;
@@ -107,9 +101,7 @@ export async function upsertClientDevice(
   return row;
 }
 
-export async function listClientDevicesForUser(
-  userId: string,
-): Promise<ClientDeviceRow[]> {
+export async function listClientDevicesForUser(userId: string): Promise<ClientDeviceRow[]> {
   const db = getDb();
   const rows = await db
     .select()
@@ -126,10 +118,7 @@ export async function listClientDevicesForUser(
  * the affected device. Phase 6 adds the UI; Phase 2 just exposes the
  * primitive.
  */
-export async function forgetClientDevice(
-  deviceId: string,
-  userId: string,
-): Promise<boolean> {
+export async function forgetClientDevice(deviceId: string, userId: string): Promise<boolean> {
   const db = getDb();
   const result = await db
     .delete(schema.clientDevices)

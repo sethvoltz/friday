@@ -23,10 +23,7 @@ import { buildMemoryServer, MEMORY_SERVER_NAME } from "./memory.js";
 import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
 import { buildScheduleServer, SCHEDULE_SERVER_NAME } from "./schedule.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
-import {
-  buildIntegrationsServer,
-  INTEGRATIONS_SERVER_NAME,
-} from "./integrations.js";
+import { buildIntegrationsServer, INTEGRATIONS_SERVER_NAME } from "./integrations.js";
 
 export interface BuildMcpServersOptions {
   callerType: AgentType;
@@ -61,9 +58,7 @@ export type AssembledMcpServers = Record<
   McpSdkServerConfigWithInstance | McpStdioServerConfig
 >;
 
-export function buildMcpServers(
-  opts: BuildMcpServersOptions,
-): AssembledMcpServers {
+export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServers {
   const servers: AssembledMcpServers = {};
   const ctx = {
     callerName: opts.callerName,
@@ -163,8 +158,7 @@ export function buildMcpServers(
       });
       continue;
     }
-    const inScope =
-      !s.scope || s.scope.length === 0 || s.scope.includes(opts.callerType);
+    const inScope = !s.scope || s.scope.length === 0 || s.scope.includes(opts.callerType);
     if (!inScope) continue;
     if (!s.command) {
       logger.log("warn", "mcp.user.missing-command", {

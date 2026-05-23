@@ -55,9 +55,7 @@ interface SpawnLine {
  * signal if the count exceeds `countThreshold`. Strictly greater-than:
  * exactly `countThreshold` matches stays silent.
  */
-export function scanAgentSpawnDepth(
-  opts: ScanAgentSpawnDepthOptions = {},
-): Signal[] {
+export function scanAgentSpawnDepth(opts: ScanAgentSpawnDepthOptions = {}): Signal[] {
   const path = opts.daemonLogPath ?? DAEMON_LOG_PATH;
   if (!existsSync(path)) return [];
 
@@ -65,9 +63,7 @@ export function scanAgentSpawnDepth(
   const depthThreshold = opts.depthThreshold ?? AGENT_DEPTH_THRESHOLD;
   const countThreshold = opts.countThreshold ?? AGENT_DEPTH_COUNT_THRESHOLD;
   const now = opts.now ?? new Date();
-  const cutoffMs = opts.since
-    ? Date.parse(opts.since)
-    : now.getTime() - windowHours * 3_600_000;
+  const cutoffMs = opts.since ? Date.parse(opts.since) : now.getTime() - windowHours * 3_600_000;
 
   const matches: SpawnLine[] = [];
 

@@ -89,9 +89,7 @@ function rowFromDb(r: typeof schema.blocks.$inferSelect): BlockRow {
     kind: r.kind,
     source: r.source,
     contentJson:
-      typeof r.contentJson === "string"
-        ? r.contentJson
-        : JSON.stringify(r.contentJson ?? null),
+      typeof r.contentJson === "string" ? r.contentJson : JSON.stringify(r.contentJson ?? null),
     status: r.status,
     ts: r.ts.getTime(),
     lastEventSeq: r.lastEventSeq,
@@ -167,15 +165,11 @@ export async function updateBlock(
     }
   }
   if (patch.status !== undefined) updates.status = patch.status;
-  if (patch.lastEventSeq !== undefined)
-    updates.lastEventSeq = patch.lastEventSeq;
+  if (patch.lastEventSeq !== undefined) updates.lastEventSeq = patch.lastEventSeq;
   if (patch.ts !== undefined) updates.ts = new Date(patch.ts);
   if (patch.blockIndex !== undefined) updates.blockIndex = patch.blockIndex;
   if (Object.keys(updates).length === 0) return rowFromDb(existing);
-  await db
-    .update(schema.blocks)
-    .set(updates)
-    .where(eq(schema.blocks.blockId, blockId));
+  await db.update(schema.blocks).set(updates).where(eq(schema.blocks.blockId, blockId));
   const refetched = await db
     .select()
     .from(schema.blocks)
@@ -200,9 +194,7 @@ export async function getBlockById(blockId: string): Promise<BlockRow | null> {
  *  if a row was deleted. */
 export async function deleteBlockById(blockId: string): Promise<boolean> {
   const db = getDb();
-  const res = await db
-    .delete(schema.blocks)
-    .where(eq(schema.blocks.blockId, blockId));
+  const res = await db.delete(schema.blocks).where(eq(schema.blocks.blockId, blockId));
   return (res.rowCount ?? 0) > 0;
 }
 
@@ -218,9 +210,7 @@ export async function listQueuedUserBlocks(): Promise<BlockRow[]> {
 }
 
 /** Look up a user block (role='user', source='user_chat') by its turn id. */
-export async function getUserChatBlockByTurnId(
-  turnId: string,
-): Promise<BlockRow | null> {
+export async function getUserChatBlockByTurnId(turnId: string): Promise<BlockRow | null> {
   const db = getDb();
   const rows = await db
     .select()
@@ -320,9 +310,7 @@ export interface ListBlocksOpts {
   ascending?: boolean;
 }
 
-export async function listBlocks(
-  opts: ListBlocksOpts = {},
-): Promise<BlockRow[]> {
+export async function listBlocks(opts: ListBlocksOpts = {}): Promise<BlockRow[]> {
   const db = getDb();
   const conds = [];
   if (opts.agentName) conds.push(eq(schema.blocks.agentName, opts.agentName));
@@ -383,9 +371,7 @@ export async function maxSeqByAgent(agentName: string): Promise<number> {
   const db = getDb();
   const rows = await db
     .select({
-      maxSeq: sql<number>`COALESCE(MAX(${schema.blocks.lastEventSeq}), 0)`.as(
-        "maxSeq",
-      ),
+      maxSeq: sql<number>`COALESCE(MAX(${schema.blocks.lastEventSeq}), 0)`.as("maxSeq"),
     })
     .from(schema.blocks)
     .where(eq(schema.blocks.agentName, agentName));
@@ -431,18 +417,14 @@ function maxSeq(rows: BlockRow[]): number {
   return m;
 }
 
-export async function fetchBlocksByAgent(
-  opts: FetchBlocksOpts,
-): Promise<FetchBlocksResult> {
+export async function fetchBlocksByAgent(opts: FetchBlocksOpts): Promise<FetchBlocksResult> {
   if (opts.match) {
     const rows = await matchBlocks({
       agentName: opts.agentName,
       match: opts.match,
       limit: clampLimit(opts.limit, 20),
     });
-    const filtered = opts.sessionId
-      ? rows.filter((r) => r.sessionId === opts.sessionId)
-      : rows;
+    const filtered = opts.sessionId ? rows.filter((r) => r.sessionId === opts.sessionId) : rows;
     return { blocks: filtered, lastEventSeq: maxSeq(filtered) };
   }
   if (typeof opts.aroundTs === "number") {
@@ -479,9 +461,7 @@ export async function fetchBlocksByAgent(
   return { blocks: rows, lastEventSeq: maxSeq(rows) };
 }
 
-async function fetchAroundTs(
-  opts: FetchBlocksOpts,
-): Promise<FetchBlocksResult> {
+async function fetchAroundTs(opts: FetchBlocksOpts): Promise<FetchBlocksResult> {
   const aroundTs = opts.aroundTs as number;
   const db = getDb();
   const beforeLimit = clampLimit(opts.beforeLimit, 10);
@@ -512,10 +492,7 @@ async function fetchAroundTs(
     .orderBy(asc(schema.blocks.ts))
     .limit(afterLimit);
   // Merge in chronological order; before-rows came back DESC.
-  const merged = [
-    ...beforeRows.reverse().map(rowFromDb),
-    ...afterRows.map(rowFromDb),
-  ];
+  const merged = [...beforeRows.reverse().map(rowFromDb), ...afterRows.map(rowFromDb)];
   return { blocks: merged, lastEventSeq: maxSeq(merged) };
 }
 
@@ -530,14 +507,10 @@ export interface MatchBlocksOpts {
  * blocks (see schema.ts FTS_SETUP_SQL). The query string is parsed via
  * `plainto_tsquery` for tolerant, prefix-friendly user input.
  */
-export async function matchBlocks(
-  opts: MatchBlocksOpts,
-): Promise<BlockRow[]> {
+export async function matchBlocks(opts: MatchBlocksOpts): Promise<BlockRow[]> {
   const db = getDb();
   const limit = Math.min(opts.limit ?? 20, 200);
-  const conds = [
-    sql`content_tsv @@ plainto_tsquery('english', ${opts.match})`,
-  ];
+  const conds = [sql`content_tsv @@ plainto_tsquery('english', ${opts.match})`];
   if (opts.agentName) {
     conds.push(eq(schema.blocks.agentName, opts.agentName));
   }
@@ -545,9 +518,7 @@ export async function matchBlocks(
     .select()
     .from(schema.blocks)
     .where(and(...conds))
-    .orderBy(
-      sql`ts_rank(content_tsv, plainto_tsquery('english', ${opts.match})) DESC`,
-    )
+    .orderBy(sql`ts_rank(content_tsv, plainto_tsquery('english', ${opts.match})) DESC`)
     .limit(limit);
   return rows.map(rowFromDb);
 }
@@ -572,9 +543,7 @@ export interface AgentSessionSummary {
   turnCount: number;
 }
 
-export async function listAgentSessions(
-  agentName: string,
-): Promise<AgentSessionSummary[]> {
+export async function listAgentSessions(agentName: string): Promise<AgentSessionSummary[]> {
   const db = getDb();
   // Two fixes folded together:
   //   1. Exclude the `__pending__` sentinel session — historical
@@ -599,9 +568,7 @@ export async function listAgentSessions(
       lastTs: sql<string>`(EXTRACT(EPOCH FROM MAX(${schema.blocks.ts})) * 1000)::bigint`.as(
         "lastTs",
       ),
-      turnCount: sql<number>`COUNT(DISTINCT ${schema.blocks.turnId})::int`.as(
-        "turnCount",
-      ),
+      turnCount: sql<number>`COUNT(DISTINCT ${schema.blocks.turnId})::int`.as("turnCount"),
     })
     .from(schema.blocks)
     .where(
@@ -631,9 +598,7 @@ export async function sessionCountsByAgent(): Promise<Record<string, number>> {
   const rows = await db
     .select({
       agentName: schema.blocks.agentName,
-      count: sql<number>`COUNT(DISTINCT ${schema.blocks.sessionId})::int`.as(
-        "count",
-      ),
+      count: sql<number>`COUNT(DISTINCT ${schema.blocks.sessionId})::int`.as("count"),
     })
     .from(schema.blocks)
     .where(ne(schema.blocks.sessionId, PENDING_SESSION_SENTINEL))

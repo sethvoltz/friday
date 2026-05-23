@@ -19,13 +19,7 @@ import {
 } from "node:fs";
 import { basename, join } from "node:path";
 import { EVOLVE_PROPOSALS_DIR } from "@friday/shared";
-import type {
-  BlastRadius,
-  Proposal,
-  ProposalStatus,
-  ProposalType,
-  Signal,
-} from "./types.js";
+import type { BlastRadius, Proposal, ProposalStatus, ProposalType, Signal } from "./types.js";
 
 export function ensureProposalsDir(): void {
   mkdirSync(EVOLVE_PROPOSALS_DIR, { recursive: true });
@@ -65,26 +59,16 @@ export function parseProposal(id: string, raw: string): Proposal {
       : "low") as BlastRadius,
     appliesTo: Array.isArray(fields.appliesTo) ? (fields.appliesTo as string[]) : [],
     createdBy: typeof fields.createdBy === "string" ? fields.createdBy : "unknown",
-    createdAt:
-      typeof fields.createdAt === "string"
-        ? fields.createdAt
-        : new Date().toISOString(),
-    updatedAt:
-      typeof fields.updatedAt === "string"
-        ? fields.updatedAt
-        : new Date().toISOString(),
+    createdAt: typeof fields.createdAt === "string" ? fields.createdAt : new Date().toISOString(),
+    updatedAt: typeof fields.updatedAt === "string" ? fields.updatedAt : new Date().toISOString(),
     appliedAt: typeof fields.appliedAt === "string" ? fields.appliedAt : null,
     appliedBy: typeof fields.appliedBy === "string" ? fields.appliedBy : null,
     enrichedAt: typeof fields.enrichedAt === "string" ? fields.enrichedAt : null,
     enrichedBy: typeof fields.enrichedBy === "string" ? fields.enrichedBy : null,
-    lastEnrichError:
-      typeof fields.lastEnrichError === "string" ? fields.lastEnrichError : null,
+    lastEnrichError: typeof fields.lastEnrichError === "string" ? fields.lastEnrichError : null,
     lastEnrichFailedAt:
-      typeof fields.lastEnrichFailedAt === "string"
-        ? fields.lastEnrichFailedAt
-        : null,
-    appliedTicketId:
-      typeof fields.appliedTicketId === "string" ? fields.appliedTicketId : null,
+      typeof fields.lastEnrichFailedAt === "string" ? fields.lastEnrichFailedAt : null,
+    appliedTicketId: typeof fields.appliedTicketId === "string" ? fields.appliedTicketId : null,
   };
 }
 
@@ -198,10 +182,7 @@ export interface UpdateProposalInput {
   updatedAt?: string;
 }
 
-export function updateProposal(
-  id: string,
-  updates: UpdateProposalInput,
-): Proposal | null {
+export function updateProposal(id: string, updates: UpdateProposalInput): Proposal | null {
   const existing = getProposal(id);
   if (!existing) return null;
 
@@ -224,19 +205,12 @@ export function deleteProposal(id: string): boolean {
 
 export function listProposals(): Proposal[] {
   ensureProposalsDir();
-  const files = readdirSync(EVOLVE_PROPOSALS_DIR).filter((f) =>
-    f.endsWith(".md"),
-  );
+  const files = readdirSync(EVOLVE_PROPOSALS_DIR).filter((f) => f.endsWith(".md"));
   const proposals: Proposal[] = [];
   for (const file of files) {
     const id = basename(file, ".md");
     try {
-      proposals.push(
-        parseProposal(
-          id,
-          readFileSync(join(EVOLVE_PROPOSALS_DIR, file), "utf-8"),
-        ),
-      );
+      proposals.push(parseProposal(id, readFileSync(join(EVOLVE_PROPOSALS_DIR, file), "utf-8")));
     } catch {
       // Skip malformed proposals — never let one bad file kill listing.
     }

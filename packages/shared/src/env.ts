@@ -1,11 +1,5 @@
 import { config as dotenvConfig } from "dotenv";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ENV_PATH } from "./config.js";
@@ -66,9 +60,7 @@ export function upsertEnvVar(key: string, value: string): void {
   if (!existsSync(dirname(ENV_PATH))) {
     mkdirSync(dirname(ENV_PATH), { recursive: true });
   }
-  const existing = existsSync(ENV_PATH)
-    ? readFileSync(ENV_PATH, "utf8")
-    : "# Friday env vars\n";
+  const existing = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, "utf8") : "# Friday env vars\n";
   const line = `${key}=${formatEnvValue(value)}`;
   const lines = existing.split("\n");
   let replaced = false;

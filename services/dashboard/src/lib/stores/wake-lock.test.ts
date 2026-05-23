@@ -114,9 +114,7 @@ describe("wake-lock store (FRI-87)", () => {
     expect(request).not.toHaveBeenCalled();
     expect(wl.wakeLockState.held).toBe(false);
 
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
     wl.__reconcileForTest();
     // request is async — wait one tick.
     await Promise.resolve();
@@ -169,9 +167,7 @@ describe("wake-lock store (FRI-87)", () => {
     const { wl, chat } = await load();
     wl.startWakeLock();
 
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
     wl.__reconcileForTest();
     await Promise.resolve();
     await Promise.resolve();
@@ -199,9 +195,7 @@ describe("wake-lock store (FRI-87)", () => {
     const { wl, chat } = await load();
     wl.startWakeLock();
 
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
     wl.__reconcileForTest();
     await Promise.resolve();
     expect(request).not.toHaveBeenCalled();
@@ -213,9 +207,7 @@ describe("wake-lock store (FRI-87)", () => {
     const { wl, chat } = await load();
     wl.startWakeLock();
 
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
     wl.__reconcileForTest();
     await Promise.resolve();
     await Promise.resolve();
@@ -236,9 +228,7 @@ describe("wake-lock store (FRI-87)", () => {
       wl.startWakeLock();
       await flushReactive();
 
-      chat.agents = [
-        { name: "friday", type: "orchestrator", status: "working" },
-      ];
+      chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
       await flushReactive();
       await Promise.resolve();
       await Promise.resolve();
@@ -252,9 +242,7 @@ describe("wake-lock store (FRI-87)", () => {
       const { wl, chat } = await load();
       wl.startWakeLock();
 
-      chat.agents = [
-        { name: "friday", type: "orchestrator", status: "idle" },
-      ];
+      chat.agents = [{ name: "friday", type: "orchestrator", status: "idle" }];
       await flushReactive();
       expect(request).not.toHaveBeenCalled();
 
@@ -277,9 +265,7 @@ describe("wake-lock store (FRI-87)", () => {
       wl.startWakeLock();
       await flushReactive();
 
-      chat.agents = [
-        { name: "friday", type: "orchestrator", status: "working" },
-      ];
+      chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
       await flushReactive();
       await Promise.resolve();
       await Promise.resolve();
@@ -319,9 +305,7 @@ describe("wake-lock store (FRI-87)", () => {
     const { wl, chat } = await load();
     wl.startWakeLock();
 
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
     wl.__reconcileForTest();
     // request() has been called and is pending.
     expect(request).toHaveBeenCalledTimes(1);
@@ -330,9 +314,7 @@ describe("wake-lock store (FRI-87)", () => {
     // All agents go idle BEFORE the sentinel resolves. shouldHold() now
     // returns false; if the in-flight acquire blindly assigns sentinel
     // we'd leak the lock.
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "idle" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle" }];
 
     // Now resolve the request — sentinel arrives.
     const s = makeFakeSentinel();
@@ -363,9 +345,7 @@ describe("wake-lock store (FRI-87)", () => {
     // do NOT call __reconcileForTest. Only the explicit reconcile
     // hook fires. If the deterministic wire is correct, the lock
     // still acquires.
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
     wl.reconcileWakeLock();
     await flushReactive();
 
@@ -378,9 +358,7 @@ describe("wake-lock store (FRI-87)", () => {
     const { request } = installFakeWakeLock();
     const { wl, chat } = await load();
     // No startWakeLock() — simulating a pre-mount Zero update.
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
     expect(() => wl.reconcileWakeLock()).not.toThrow();
     await flushReactive();
     expect(request).not.toHaveBeenCalled();
@@ -392,17 +370,13 @@ describe("wake-lock store (FRI-87)", () => {
     const { wl, chat } = await load();
     wl.startWakeLock();
 
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
     wl.reconcileWakeLock();
     await flushReactive();
     expect(sentinels).toHaveLength(1);
     expect(wl.wakeLockState.held).toBe(true);
 
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "idle" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle" }];
     wl.reconcileWakeLock();
     await flushReactive();
     expect(sentinels[0].release).toHaveBeenCalledTimes(1);
@@ -419,9 +393,7 @@ describe("wake-lock store (FRI-87)", () => {
     wl.startWakeLock();
     expect(wl.wakeLockState.supported).toBe(false);
 
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
     wl.__reconcileForTest();
     await Promise.resolve();
     expect(wl.wakeLockState.held).toBe(false);

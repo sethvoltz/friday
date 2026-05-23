@@ -5,12 +5,7 @@
  * Ported nearly verbatim from old SlackAgents Friday.
  */
 
-import {
-  findProposalBySignalHash,
-  listProposals,
-  saveProposal,
-  updateProposal,
-} from "./store.js";
+import { findProposalBySignalHash, listProposals, saveProposal, updateProposal } from "./store.js";
 import type { Proposal, ProposalStatus, Signal } from "./types.js";
 import { isCritical, scoreProposal, type CriticalityRule } from "./rank.js";
 
@@ -26,10 +21,7 @@ export interface ProposeResult {
   promotedToCritical: Proposal[];
 }
 
-export function proposeFromSignals(
-  signals: Signal[],
-  opts: ProposeOptions,
-): ProposeResult {
+export function proposeFromSignals(signals: Signal[], opts: ProposeOptions): ProposeResult {
   const result: ProposeResult = {
     created: [],
     updated: [],
@@ -40,26 +32,20 @@ export function proposeFromSignals(
     const existing = findProposalBySignalHash(signal.hash);
 
     if (existing) {
-      const mergedSignals = existing.signals.map((s) =>
-        s.hash === signal.hash ? signal : s,
-      );
+      const mergedSignals = existing.signals.map((s) => (s.hash === signal.hash ? signal : s));
       const score = scoreProposal({
         signals: mergedSignals,
         blastRadius: existing.blastRadius,
       });
       const wasCritical = existing.status === "critical";
-      const nowCritical = isCritical(
-        { score, signals: mergedSignals },
-        opts.rule,
-      );
+      const nowCritical = isCritical({ score, signals: mergedSignals }, opts.rule);
       // Severity-decay guard (FRI-79): a proposal that previously reached
       // `critical` but has never been enriched must not silently fall back
       // to `open`. Otherwise a failing enrichment pass masks severity — the
       // proposal looks routine on the dashboard while its root signal still
       // fires. Only ones that already touched critical are protected; we
       // don't auto-promote new proposals here.
-      const protectCritical =
-        existing.status === "critical" && existing.enrichedAt === null;
+      const protectCritical = existing.status === "critical" && existing.enrichedAt === null;
       const status: ProposalStatus = nowCritical
         ? "critical"
         : protectCritical
@@ -149,9 +135,7 @@ function titleFor(event: string, agent?: string): string {
     event === "role_context" ||
     event === "external_pointer";
   if (declarative) {
-    return agent
-      ? `User signal: ${friendly} (from ${agent})`
-      : `User signal: ${friendly}`;
+    return agent ? `User signal: ${friendly} (from ${agent})` : `User signal: ${friendly}`;
   }
   if (agent) return `${friendly} repeating on ${agent}`;
   return `${friendly} repeating`;
@@ -176,8 +160,7 @@ export function rerankAll(rule: CriticalityRule): {
     // See severity-decay guard in proposeFromSignals: an un-enriched critical
     // sticks at critical until enrichment lands.
     const protectCritical = wasCritical && p.enrichedAt === null;
-    const status: ProposalStatus =
-      nowCritical || protectCritical ? "critical" : "open";
+    const status: ProposalStatus = nowCritical || protectCritical ? "critical" : "open";
     if (score === p.score && status === p.status) continue;
 
     const updated = updateProposal(p.id, { score, status });

@@ -1,0 +1,27 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": [
+    "packages/*/src/**/*",
+    "packages/integrations/*/src/**/*",
+    "services/*/src/**/*",
+    "services/*/e2e/**/*",
+    "services/*/scripts/**/*",
+    "*.config.ts",
+    "*.config.mjs",
+    "*.config.mts",
+    "packages/*/*.config.ts",
+    "packages/*/*.config.mts",
+    "packages/integrations/*/*.config.ts",
+    "services/*/*.config.ts",
+    "services/*/*.config.mts",
+    "services/*/server-entry.mjs",
+    "services/*/server-entry-proxy.mjs",
+    "eslint.config.mjs"
+  ],
+  "exclude": ["node_modules", "**/dist", "**/.svelte-kit", "**/build"]
+}

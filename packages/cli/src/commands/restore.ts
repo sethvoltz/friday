@@ -21,26 +21,14 @@
 
 import { defineCommand } from "citty";
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { confirm } from "@clack/prompts";
 import pc from "picocolors";
-import {
-  DATA_DIR,
-  ENV_PATH,
-  HEALTH_PATH,
-  getPool,
-  runMigrations,
-} from "@friday/shared";
+import { DATA_DIR, ENV_PATH, HEALTH_PATH, getPool, runMigrations } from "@friday/shared";
 
 const BACKUP_PATHS = [
   ".env",
@@ -185,11 +173,7 @@ export const restoreCommand = defineCommand({
     // 1. Refuse if the daemon or zero-cache is running. Both hold
     //    connections to the friday database / replication slot.
     if (daemonAppearsRunning()) {
-      console.error(
-        pc.red(
-          "✗ daemon appears to be running. Stop it first: `friday stop daemon`.",
-        ),
-      );
+      console.error(pc.red("✗ daemon appears to be running. Stop it first: `friday stop daemon`."));
       process.exit(1);
     }
     if (zeroCacheAppearsRunning()) {
@@ -218,13 +202,9 @@ export const restoreCommand = defineCommand({
       //    in the dispatched handler below.
       const manifestPath = join(stageDir, "manifest.json");
       if (!existsSync(manifestPath)) {
-        throw new Error(
-          "Bundle is missing manifest.json — not a Friday backup tarball.",
-        );
+        throw new Error("Bundle is missing manifest.json — not a Friday backup tarball.");
       }
-      const manifest = JSON.parse(
-        readFileSync(manifestPath, "utf8"),
-      ) as BackupManifest;
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as BackupManifest;
       if (manifest.schemaVersion !== 1) {
         throw new Error(
           `Bundle schema version ${manifest.schemaVersion} is not supported by this CLI (expected 1).`,
@@ -254,9 +234,7 @@ export const restoreCommand = defineCommand({
       // 4. Drop + recreate the friday database. Zero-cache holds a
       //    logical-replication slot; drop it first (terminating any
       //    still-active backend) so DROP DATABASE doesn't fail.
-      console.log(
-        pc.dim("  dropping zero-cache replication slots (if any)…"),
-      );
+      console.log(pc.dim("  dropping zero-cache replication slots (if any)…"));
       runPsqlAdmin([
         "-c",
         `SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE database = 'friday' AND active_pid IS NOT NULL;`,
@@ -268,7 +246,7 @@ export const restoreCommand = defineCommand({
         "-c",
         "DROP DATABASE IF EXISTS friday;",
         "-c",
-        'CREATE DATABASE friday OWNER friday;',
+        "CREATE DATABASE friday OWNER friday;",
       ]);
 
       sourceEnvFromFile(ENV_PATH);
@@ -319,11 +297,9 @@ export const restoreCommand = defineCommand({
       // 8. Final readiness check. Spawn `friday doctor` so the user
       //    sees the same exit status they'd get on a fresh install.
       console.log(pc.dim("  friday doctor…"));
-      const doctor = spawnSync(
-        process.argv[0]!,
-        [process.argv[1]!, "doctor"],
-        { stdio: "inherit" },
-      );
+      const doctor = spawnSync(process.argv[0]!, [process.argv[1]!, "doctor"], {
+        stdio: "inherit",
+      });
       const doctorStatus = doctor.status ?? 1;
 
       console.log();
@@ -345,7 +321,7 @@ function daemonAppearsRunning(): boolean {
   // port" — health.json's mtime stays fresh even after `friday stop`
   // (the file isn't cleaned up on shutdown). Probe the port directly.
   if (!existsSync(HEALTH_PATH)) return false;
-  let health: { port?: unknown; pid?: unknown } | null = null;
+  let health: { port?: unknown; pid?: unknown };
   try {
     health = JSON.parse(readFileSync(HEALTH_PATH, "utf8")) as {
       port?: unknown;
@@ -357,11 +333,7 @@ function daemonAppearsRunning(): boolean {
   const port = typeof health?.port === "number" ? (health.port as number) : null;
   if (port === null) return false;
   // lsof tells us whether the port is being LISTENed on right now.
-  const probe = spawnSync(
-    "lsof",
-    ["-iTCP:" + port, "-sTCP:LISTEN", "-t"],
-    { encoding: "utf8" },
-  );
+  const probe = spawnSync("lsof", ["-iTCP:" + port, "-sTCP:LISTEN", "-t"], { encoding: "utf8" });
   return probe.status === 0 && probe.stdout.trim().length > 0;
 }
 
@@ -429,10 +401,7 @@ async function restoreLegacySqliteBundle(
   if (!existsSync(rowsDir)) {
     throw new Error("legacy_sqlite bundle is missing rows/ directory.");
   }
-  const tableMeta = new Map<
-    string,
-    { rowCount: number; sha256: string }
-  >();
+  const tableMeta = new Map<string, { rowCount: number; sha256: string }>();
   for (const t of manifest.tables ?? []) {
     tableMeta.set(t.name, { rowCount: t.rowCount, sha256: t.sha256 });
   }
@@ -450,9 +419,7 @@ async function restoreLegacySqliteBundle(
       const buf = readFileSync(filePath, "utf8");
       const meta = tableMeta.get(table);
       if (meta) {
-        const sha = createHash("sha256")
-          .update(buf.replace(/\n$/, ""))
-          .digest("hex");
+        const sha = createHash("sha256").update(buf.replace(/\n$/, "")).digest("hex");
         if (sha !== meta.sha256) {
           throw new Error(
             `legacy NDJSON SHA-256 mismatch for ${table}: bundle ${meta.sha256}, computed ${sha}. Bundle is corrupt.`,
@@ -468,9 +435,7 @@ async function restoreLegacySqliteBundle(
         continue;
       }
       await importTable(client, table, rows);
-      console.log(
-        pc.dim(`  ${table.padEnd(24)} ${String(rows.length).padStart(6)} rows`),
-      );
+      console.log(pc.dim(`  ${table.padEnd(24)} ${String(rows.length).padStart(6)} rows`));
     }
     // Legacy bundles INSERT raw row values, which never touches the
     // bigserial sequences — they stay at 1 even after restoring rows
@@ -508,7 +473,11 @@ export async function syncBigserialSequences(client: DbClient): Promise<void> {
   );
   // node-pg returns `{ rows: ... }` on SELECT; the structural DbClient
   // type only declared `rowCount`. Re-narrow locally.
-  const rows = (seqRows as unknown as { rows: Array<{ seq_name: string; table_name: string; column_name: string }> }).rows;
+  const rows = (
+    seqRows as unknown as {
+      rows: Array<{ seq_name: string; table_name: string; column_name: string }>;
+    }
+  ).rows;
   let synced = 0;
   for (const r of rows) {
     // pg_get_serial_sequence's argument quoting is fiddly; use setval
@@ -572,11 +541,7 @@ async function importTable(
         if (JSONB_COLUMNS_AT_IMPORT.has(key) && v !== null && v !== undefined) {
           v = JSON.stringify(v);
         }
-        if (
-          TIMESTAMP_COLUMNS_AT_IMPORT.has(key) &&
-          typeof v === "number" &&
-          Number.isFinite(v)
-        ) {
+        if (TIMESTAMP_COLUMNS_AT_IMPORT.has(key) && typeof v === "number" && Number.isFinite(v)) {
           v = new Date(v).toISOString();
         }
         values.push(v);
@@ -594,6 +559,7 @@ async function importTable(
     } catch (err) {
       throw new Error(
         `INSERT into ${table} failed at batch starting row ${i}: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
       );
     }
   }
@@ -603,32 +569,18 @@ function zeroCacheAppearsRunning(): boolean {
   // zero-cache binds 127.0.0.1:4848 (configurable via ZERO_PORT but the
   // default ships unchanged in our deployment). lsof tells us whether
   // anything is LISTENing there.
-  const port = process.env.ZERO_PORT
-    ? Number(process.env.ZERO_PORT)
-    : 4848;
+  const port = process.env.ZERO_PORT ? Number(process.env.ZERO_PORT) : 4848;
   if (!Number.isFinite(port)) return false;
-  const probe = spawnSync(
-    "lsof",
-    ["-iTCP:" + port, "-sTCP:LISTEN", "-t"],
-    { encoding: "utf8" },
-  );
+  const probe = spawnSync("lsof", ["-iTCP:" + port, "-sTCP:LISTEN", "-t"], { encoding: "utf8" });
   return probe.status === 0 && probe.stdout.trim().length > 0;
 }
 
 function checkDatabaseHasUsers(): boolean {
   // Probe via `psql -At` for an exit-quiet integer. `friday` may not
   // exist yet (first-time restore), which we treat as "no user data."
-  const res = spawnSync(
-    "psql",
-    [
-      "-At",
-      "-d",
-      "friday",
-      "-c",
-      "SELECT count(*) FROM \"user\";",
-    ],
-    { encoding: "utf8" },
-  );
+  const res = spawnSync("psql", ["-At", "-d", "friday", "-c", 'SELECT count(*) FROM "user";'], {
+    encoding: "utf8",
+  });
   if (res.status !== 0) return false;
   const n = Number(res.stdout.trim());
   return Number.isFinite(n) && n > 0;
@@ -667,7 +619,7 @@ function sourceEnvFromFile(path: string): void {
     let value = line.slice(eq + 1).trim();
     // Strip surrounding quotes.
     if (
-      (value.startsWith("\"") && value.endsWith("\"")) ||
+      (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
     ) {
       value = value.slice(1, -1);
@@ -675,4 +627,3 @@ function sourceEnvFromFile(path: string): void {
     if (process.env[key] === undefined) process.env[key] = value;
   }
 }
-

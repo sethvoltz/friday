@@ -49,9 +49,7 @@ export interface DaemonFetchOptions {
   signal?: AbortSignal;
 }
 
-export async function daemonFetch<T = unknown>(
-  opts: DaemonFetchOptions,
-): Promise<T> {
+export async function daemonFetch<T = unknown>(opts: DaemonFetchOptions): Promise<T> {
   const url = `http://127.0.0.1:${opts.port}${opts.path}`;
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -68,9 +66,7 @@ export async function daemonFetch<T = unknown>(
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(
-      `daemonFetch ${opts.method ?? "GET"} ${opts.path} -> ${res.status}: ${text}`,
-    );
+    throw new Error(`daemonFetch ${opts.method ?? "GET"} ${opts.path} -> ${res.status}: ${text}`);
   }
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get("content-type") ?? "";

@@ -79,10 +79,7 @@ async function syncConfigFromSettingsRow(): Promise<boolean> {
     cfg.model = row.model;
     changed = true;
   }
-  if (
-    row.watchdogRefork !== null &&
-    (cfg.watchdog?.refork ?? false) !== row.watchdogRefork
-  ) {
+  if (row.watchdogRefork !== null && (cfg.watchdog?.refork ?? false) !== row.watchdogRefork) {
     const watchdog: NonNullable<FridayConfig["watchdog"]> = {
       ...(cfg.watchdog ?? {}),
       refork: row.watchdogRefork,
@@ -139,12 +136,9 @@ export async function startSettingsListener(): Promise<SettingsListenerHandle> {
   // of the pool's connection bookkeeping.
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ??
-    process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL must be set to start the settings LISTEN connection.",
-    );
+    throw new Error("DATABASE_URL must be set to start the settings LISTEN connection.");
   }
 
   const client = new Client({ connectionString });

@@ -49,9 +49,7 @@ const CONVERSION_TIMEOUT_MS = 10_000;
  * the post-conversion bytes so the same photo uploaded twice in different
  * source formats lands on one row.
  */
-export async function uploadAttachment(
-  input: UploadInput,
-): Promise<Attachment> {
+export async function uploadAttachment(input: UploadInput): Promise<Attachment> {
   let bytes = input.bytes;
   let filename = input.filename;
   let mime = input.mime;
@@ -123,9 +121,7 @@ function swapExt(filename: string, newExt: string): string {
   return `${base}${newExt}`;
 }
 
-export async function getAttachment(
-  sha256: string,
-): Promise<Attachment | null> {
+export async function getAttachment(sha256: string): Promise<Attachment | null> {
   const db = getDb();
   const rows = await db
     .select()
@@ -137,9 +133,7 @@ export async function getAttachment(
   return rowToAttachment(row, pathFor(sha256, sanitizeExt(row.filename)));
 }
 
-export async function readAttachmentBytes(
-  sha256: string,
-): Promise<Buffer | null> {
+export async function readAttachmentBytes(sha256: string): Promise<Buffer | null> {
   const att = await getAttachment(sha256);
   if (!att) return null;
   if (!existsSync(att.path)) return null;
@@ -160,10 +154,7 @@ function sanitizeExt(filename: string): string {
   return "";
 }
 
-function rowToAttachment(
-  r: typeof schema.attachments.$inferSelect,
-  path: string,
-): Attachment {
+function rowToAttachment(r: typeof schema.attachments.$inferSelect, path: string): Attachment {
   return {
     sha256: r.sha256,
     filename: r.filename,
@@ -200,9 +191,7 @@ async function convertHeicToPng(input: Buffer): Promise<Buffer> {
     meta.width > META_MAX_DIMENSION ||
     meta.height > META_MAX_DIMENSION
   ) {
-    throw new Error(
-      `image dimensions out of bounds: ${meta.width ?? "?"}×${meta.height ?? "?"}`,
-    );
+    throw new Error(`image dimensions out of bounds: ${meta.width ?? "?"}×${meta.height ?? "?"}`);
   }
 
   const pipeline = sharp(input, {
@@ -221,11 +210,7 @@ async function convertHeicToPng(input: Buffer): Promise<Buffer> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
-      reject(
-        new Error(
-          `image conversion timed out after ${CONVERSION_TIMEOUT_MS}ms`,
-        ),
-      );
+      reject(new Error(`image conversion timed out after ${CONVERSION_TIMEOUT_MS}ms`));
     }, CONVERSION_TIMEOUT_MS);
   });
 

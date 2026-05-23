@@ -1,10 +1,4 @@
-import {
-  DraftingCompass,
-  LifeBuoy,
-  Hammer,
-  CalendarClock,
-  PawPrint,
-} from "lucide-svelte";
+import { DraftingCompass, LifeBuoy, Hammer, CalendarClock, PawPrint } from "lucide-svelte";
 
 export const AGENT_ICON: Record<string, typeof DraftingCompass> = {
   orchestrator: DraftingCompass,

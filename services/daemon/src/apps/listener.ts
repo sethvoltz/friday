@@ -31,12 +31,7 @@
 
 import { eq, inArray } from "drizzle-orm";
 import pgPkg from "pg";
-import {
-  getDb,
-  getPool,
-  schema,
-  LISTEN_CHANNELS,
-} from "@friday/shared";
+import { getDb, getPool, schema, LISTEN_CHANNELS } from "@friday/shared";
 import {
   AppInstallError,
   installApp as installerInstallApp,
@@ -57,11 +52,7 @@ const { Client } = pgPkg;
  */
 async function processPendingAppRow(id: string): Promise<void> {
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.apps)
-    .where(eq(schema.apps.id, id))
-    .limit(1);
+  const rows = await db.select().from(schema.apps).where(eq(schema.apps.id, id)).limit(1);
   const row = rows[0];
   if (!row) {
     // Already DELETEd (uninstall completed). Nothing to do.
@@ -147,11 +138,7 @@ export async function runAppBootScan(): Promise<void> {
       .select({ id: schema.apps.id })
       .from(schema.apps)
       .where(
-        inArray(schema.apps.status, [
-          "pending_install",
-          "uninstall_requested",
-          "reload_requested",
-        ]),
+        inArray(schema.apps.status, ["pending_install", "uninstall_requested", "reload_requested"]),
       );
     for (const row of rows) {
       await processPendingAppRow(row.id);
@@ -171,12 +158,9 @@ export interface AppListenerHandle {
 export async function startAppListener(): Promise<AppListenerHandle> {
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ??
-    process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL must be set to start the app LISTEN connection.",
-    );
+    throw new Error("DATABASE_URL must be set to start the app LISTEN connection.");
   }
 
   const client = new Client({ connectionString });

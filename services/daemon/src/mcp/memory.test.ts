@@ -4,10 +4,7 @@ import { validateMemoryField } from "./memory.js";
 describe("validateMemoryField", () => {
   it("accepts a normal memory body", () => {
     expect(
-      validateMemoryField(
-        "content",
-        "User prefers pnpm over npm in this monorepo.",
-      ),
+      validateMemoryField("content", "User prefers pnpm over npm in this monorepo."),
     ).toBeNull();
   });
 
@@ -23,28 +20,19 @@ describe("validateMemoryField", () => {
   });
 
   it("rejects content ending with </content>", () => {
-    const reason = validateMemoryField(
-      "content",
-      "User prefers pnpm.</content>",
-    );
+    const reason = validateMemoryField("content", "User prefers pnpm.</content>");
     expect(reason).not.toBeNull();
     expect(reason).toMatch(/parameter-closing token/i);
   });
 
   it("rejects content ending with </tags>", () => {
-    const reason = validateMemoryField(
-      "content",
-      "Some body.\n<tags>[\"user\", \"tooling\"]</tags>",
-    );
+    const reason = validateMemoryField("content", 'Some body.\n<tags>["user", "tooling"]</tags>');
     expect(reason).not.toBeNull();
     expect(reason).toMatch(/parameter-closing token/i);
   });
 
   it("rejects content ending with </content> even with trailing whitespace/newlines", () => {
-    const reason = validateMemoryField(
-      "content",
-      "Body text.</content>\n\n  \t  ",
-    );
+    const reason = validateMemoryField("content", "Body text.</content>\n\n  \t  ");
     expect(reason).not.toBeNull();
   });
 
@@ -58,10 +46,7 @@ describe("validateMemoryField", () => {
   });
 
   it("rejects </invoke> mid-string, not just trailing", () => {
-    const reason = validateMemoryField(
-      "content",
-      "Body part one.</invoke> Body part two.",
-    );
+    const reason = validateMemoryField("content", "Body part one.</invoke> Body part two.");
     expect(reason).not.toBeNull();
   });
 

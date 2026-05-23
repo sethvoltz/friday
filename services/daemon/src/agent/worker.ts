@@ -38,7 +38,6 @@ let abortController: AbortController | null = null;
 let stopped = false;
 let mainLoopRunning = false;
 let pendingPrompt: WorkerPromptCommand | null = null;
-let mailWakeupPending = false;
 /**
  * Set when a `mail-wakeup-critical` IPC arrives. Read at the next SDK
  * iteration boundary inside `runQuery`; on set, the worker breaks the
@@ -98,10 +97,8 @@ process.on("message", (msg: WorkerCommand) => {
       abortController?.abort();
       wakeIdle();
     } else if (msg.type === "mail-wakeup") {
-      mailWakeupPending = true;
       wakeIdle();
     } else if (msg.type === "mail-wakeup-critical") {
-      mailWakeupPending = true;
       pendingCriticalMail = true;
       wakeIdle();
     } else if (msg.type === "prompts-pending") {
@@ -132,11 +129,7 @@ async function mainLoop(): Promise<void> {
       }
 
       // Long-lived path: check inbox before idling.
-      mailWakeupPending = false;
-      const inbox = await fetchInboxQuiet(
-        workerOpts.agentName,
-        workerOpts.daemonPort,
-      );
+      const inbox = await fetchInboxQuiet(workerOpts.agentName, workerOpts.daemonPort);
       if (inbox.length > 0) {
         pendingPrompt = {
           prompt: buildMailPrompt(workerOpts.agentName, inbox),
@@ -170,10 +163,7 @@ async function mainLoop(): Promise<void> {
   }
 }
 
-async function fetchInboxQuiet(
-  agentName: string,
-  port: number,
-): Promise<MailRow[]> {
+async function fetchInboxQuiet(agentName: string, port: number): Promise<MailRow[]> {
   try {
     return await daemonFetch<MailRow[]>({
       port,
@@ -228,12 +218,7 @@ export function assistantMessageHasToolUses(assistantMsg: unknown): boolean {
  *  blocks. `image/jpg` is folded into `image/jpeg`. Anything outside this
  *  set (and outside `application/pdf`, handled as a document block) is
  *  dropped with a warning so the model never sees an unsupported mime. */
-const IMAGE_MEDIA_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-]);
+const IMAGE_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 
 function normalizeMediaType(mime: string): string {
   const m = mime.toLowerCase();
@@ -371,9 +356,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   //     starts a fresh message_start with new ids)
   //   - the iterator's catch handler (hard error; we owe a terminal status
   //     to every block we already announced)
-  const flushInflightBlocks = (
-    status: "aborted" | "error",
-  ): void => {
+  const flushInflightBlocks = (status: "aborted" | "error"): void => {
     for (const block of blocks.values()) {
       emit({
         type: "block-stop",
@@ -763,9 +746,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       }
 
       if (m.type === "user") {
-        const userMsg = m.message as
-          | { id?: string; content?: unknown[] }
-          | undefined;
+        const userMsg = m.message as { id?: string; content?: unknown[] } | undefined;
         const content = userMsg?.content;
         if (Array.isArray(content)) {
           content.forEach((rawBlock, idx) => {
@@ -777,9 +758,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
             };
             if (block.type === "tool_result" && block.tool_use_id) {
               const clientBlockId = nextClientBlockId();
-              const status: "complete" | "error" = block.is_error
-                ? "error"
-                : "complete";
+              const status: "complete" | "error" = block.is_error ? "error" : "complete";
               const text = stringifyToolResult(block.content);
               emit({
                 type: "block-start",

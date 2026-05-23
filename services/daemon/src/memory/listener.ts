@@ -32,14 +32,7 @@
  */
 
 import { eq, inArray } from "drizzle-orm";
-import {
-  existsSync,
-  mkdirSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import pgPkg from "pg";
 import {
@@ -108,9 +101,7 @@ async function processPendingMemoryRow(id: string): Promise<void> {
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
       recallCount: row.recallCount,
-      lastRecalledAt: row.lastRecalledAt
-        ? row.lastRecalledAt.toISOString()
-        : null,
+      lastRecalledAt: row.lastRecalledAt ? row.lastRecalledAt.toISOString() : null,
     };
     writeFileSync(path, serializeEntry(entry));
     const fileMtime = new Date(statSync(path).mtimeMs);
@@ -155,9 +146,7 @@ export async function runMemoryBootScan(): Promise<void> {
     const rows = await db
       .select({ id: schema.memoryEntries.id })
       .from(schema.memoryEntries)
-      .where(
-        inArray(schema.memoryEntries.status, ["pending_file", "pending_delete"]),
-      );
+      .where(inArray(schema.memoryEntries.status, ["pending_file", "pending_delete"]));
     for (const row of rows) {
       await processPendingMemoryRow(row.id);
     }
@@ -182,12 +171,9 @@ export interface MemoryListenerHandle {
 export async function startMemoryListener(): Promise<MemoryListenerHandle> {
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ??
-    process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL must be set to start the memory LISTEN connection.",
-    );
+    throw new Error("DATABASE_URL must be set to start the memory LISTEN connection.");
   }
 
   const client = new Client({ connectionString });

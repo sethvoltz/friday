@@ -2,8 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export const DATA_DIR =
-  process.env.FRIDAY_DATA_DIR ?? join(homedir(), ".friday");
+export const DATA_DIR = process.env.FRIDAY_DATA_DIR ?? join(homedir(), ".friday");
 
 export const CONFIG_PATH = join(DATA_DIR, "config.json");
 export const ENV_PATH = join(DATA_DIR, ".env");
@@ -40,12 +39,7 @@ export function appDir(id: string): string {
 }
 
 export type ServiceName = "daemon" | "dashboard" | "zero-cache" | "tunnel";
-export const SERVICES: ServiceName[] = [
-  "daemon",
-  "dashboard",
-  "zero-cache",
-  "tunnel",
-];
+export const SERVICES: ServiceName[] = ["daemon", "dashboard", "zero-cache", "tunnel"];
 
 /** ~/.friday/zero/ — zero-cache's internal replica + lock files. Not part
  *  of Friday's data; safe to delete (zero-cache will rebuild from
@@ -164,13 +158,8 @@ export const DEFAULT_WATCHDOG_THRESHOLDS_MS: Record<AgentTypeName, number> = {
   scheduled: 3_600_000,
 };
 
-export function watchdogThresholdMs(
-  cfg: WatchdogConfig | undefined,
-  type: AgentTypeName,
-): number {
-  return (
-    cfg?.thresholdsMs?.[type] ?? DEFAULT_WATCHDOG_THRESHOLDS_MS[type]
-  );
+export function watchdogThresholdMs(cfg: WatchdogConfig | undefined, type: AgentTypeName): number {
+  return cfg?.thresholdsMs?.[type] ?? DEFAULT_WATCHDOG_THRESHOLDS_MS[type];
 }
 
 /**
@@ -178,9 +167,7 @@ export function watchdogThresholdMs(
  * defaults filled in. Callers shouldn't have to care about the string-vs-
  * object form.
  */
-export function normalizeModelConfig(
-  model: string | ModelConfig | undefined,
-): ModelConfig {
+export function normalizeModelConfig(model: string | ModelConfig | undefined): ModelConfig {
   if (typeof model === "string") {
     return { name: model };
   }
@@ -199,12 +186,7 @@ export interface McpServerConfig {
   scope?: AgentTypeName[];
 }
 
-export type AgentTypeName =
-  | "orchestrator"
-  | "builder"
-  | "helper"
-  | "scheduled"
-  | "bare";
+export type AgentTypeName = "orchestrator" | "builder" | "helper" | "scheduled" | "bare";
 
 /**
  * Production port assignments. The full resolution chain everywhere is

@@ -1,12 +1,7 @@
 import { buildAutoRecallBlock } from "@friday/memory";
 import { logger } from "../log.js";
 
-export type RecallIntent =
-  | "user_chat"
-  | "mail"
-  | "scheduled"
-  | "scratch"
-  | "agent_spawn";
+export type RecallIntent = "user_chat" | "mail" | "scheduled" | "scratch" | "agent_spawn";
 
 /**
  * Returns the `<memory-context>` block as a string, or "" on any error.

@@ -29,8 +29,7 @@ export const evolveCommand = defineCommand({
         const all = listProposals();
         const filtered = all.filter(
           (p) =>
-            (!statusFilter || p.status === statusFilter) &&
-            (!typeFilter || p.type === typeFilter),
+            (!statusFilter || p.status === statusFilter) && (!typeFilter || p.type === typeFilter),
         );
         if (filtered.length === 0) {
           console.log(pc.dim("No proposals."));
@@ -44,9 +43,7 @@ export const evolveCommand = defineCommand({
           );
         }
         console.log(
-          pc.dim(
-            `\n${filtered.length} of ${all.length} proposal${all.length === 1 ? "" : "s"}`,
-          ),
+          pc.dim(`\n${filtered.length} of ${all.length} proposal${all.length === 1 ? "" : "s"}`),
         );
       },
     }),
@@ -71,9 +68,7 @@ export const evolveCommand = defineCommand({
         windowHours: { type: "string" },
       },
       async run({ args }) {
-        const windowHours = args.windowHours
-          ? Number(args.windowHours)
-          : 24;
+        const windowHours = args.windowHours ? Number(args.windowHours) : 24;
         const since = sinceHoursAgo(windowHours);
         const windowEnd = new Date().toISOString();
         const signals = await scanAll({ since });
@@ -186,9 +181,7 @@ export const evolveCommand = defineCommand({
           ticketKind: args.kind,
           assignee: args.assignee,
         });
-        console.log(
-          pc.green(`applied ${out.proposal.id} → ticket ${out.ticket.id}`),
-        );
+        console.log(pc.green(`applied ${out.proposal.id} → ticket ${out.ticket.id}`));
       },
     }),
     dismiss: defineCommand({

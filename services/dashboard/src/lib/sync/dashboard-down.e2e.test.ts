@@ -59,7 +59,10 @@ afterAll(async () => {
   await env?.cleanup();
 }, HARNESS_BOOT_MS);
 
-async function refreshOK(port: number, cookie: string): Promise<{
+async function refreshOK(
+  port: number,
+  cookie: string,
+): Promise<{
   token: string;
   deviceId: string;
   userId: string;
@@ -70,9 +73,7 @@ async function refreshOK(port: number, cookie: string): Promise<{
     headers: { Cookie: cookie },
   });
   if (!r.ok) {
-    throw new Error(
-      `refresh ${r.status}: ${await r.text()}`,
-    );
+    throw new Error(`refresh ${r.status}: ${await r.text()}`);
   }
   return (await r.json()) as {
     token: string;
@@ -82,11 +83,7 @@ async function refreshOK(port: number, cookie: string): Promise<{
   };
 }
 
-async function waitForRefresh(
-  port: number,
-  cookie: string,
-  timeoutMs: number,
-): Promise<void> {
+async function waitForRefresh(port: number, cookie: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastErr: unknown;
   while (Date.now() < deadline) {

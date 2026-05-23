@@ -12,14 +12,7 @@
  */
 
 import type { Server } from "node:http";
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
@@ -30,9 +23,7 @@ beforeAll(async () => {
   handle = await createTestDb({ label: "abort_fastpath" });
   const { startServer } = await import("./server.js");
   server = startServer({ port: 0 });
-  await new Promise<void>((resolve) =>
-    server.once("listening", () => resolve()),
-  );
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("no port assigned");
   port = addr.port;
@@ -127,11 +118,8 @@ describe("POST /api/internal/abort-turn (Phase 4.10 fast-path)", () => {
       body: JSON.stringify({ turn_id: "turn-shape" }),
     });
     const body = (await res.json()) as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual(
-      ["agent", "aborted", "ok", "turn_id"].sort(),
-    );
+    expect(Object.keys(body).sort()).toEqual(["agent", "aborted", "ok", "turn_id"].sort());
     expect(typeof body.aborted).toBe("boolean");
     expect(body.turn_id).toBe("turn-shape");
   });
 });
-

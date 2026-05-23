@@ -75,13 +75,16 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
 
     const w = makeFakeWorker();
 
-    handleEvent(w as never, {
-      type: "block-start",
-      clientBlockId: "c-thinking-empty",
-      kind: "thinking",
-      blockIndex: 0,
-      messageId: "msg-cancel-1",
-    } as never);
+    void handleEvent(
+      w as never,
+      {
+        type: "block-start",
+        clientBlockId: "c-thinking-empty",
+        kind: "thinking",
+        blockIndex: 0,
+        messageId: "msg-cancel-1",
+      } as never,
+    );
     // handleBlockStart writes via fire-and-forget; wait for the SSE to land.
     await vi.waitFor(
       () =>
@@ -98,9 +101,7 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
 
     const startEvt = captured.find(
       (e) =>
-        e.type === "block_start" &&
-        e.turn_id === "turn-cancel-1" &&
-        e.agent === "cancel-agent",
+        e.type === "block_start" && e.turn_id === "turn-cancel-1" && e.agent === "cancel-agent",
     );
     expect(startEvt).toBeDefined();
     const blockId = startEvt!.block_id!;
@@ -110,16 +111,17 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
     // should exist between start and cancel.
     expect(await getBlockById(blockId)).toBeNull();
 
-    handleEvent(w as never, {
-      type: "block-cancel",
-      clientBlockId: "c-thinking-empty",
-    } as never);
+    void handleEvent(
+      w as never,
+      {
+        type: "block-cancel",
+        clientBlockId: "c-thinking-empty",
+      } as never,
+    );
     await vi.waitFor(
       () =>
         expect(
-          captured.find(
-            (e) => e.type === "block_canceled" && e.block_id === blockId,
-          ),
+          captured.find((e) => e.type === "block_canceled" && e.block_id === blockId),
         ).toBeDefined(),
       { timeout: 5000, interval: 25 },
     );
@@ -129,9 +131,7 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
     // After cancel the row still doesn't exist (handleBlockCancel has
     // nothing to delete — the row was never inserted).
     expect(await getBlockById(blockId)).toBeNull();
-    const cancelEvt = captured.find(
-      (e) => e.type === "block_canceled" && e.block_id === blockId,
-    );
+    const cancelEvt = captured.find((e) => e.type === "block_canceled" && e.block_id === blockId);
     expect(cancelEvt).toBeDefined();
     expect(cancelEvt!.turn_id).toBe("turn-cancel-1");
     expect(cancelEvt!.agent).toBe("cancel-agent");
@@ -151,10 +151,13 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
     const w = makeFakeWorker();
 
     expect(() => {
-      handleEvent(w as never, {
-        type: "block-cancel",
-        clientBlockId: "c-unknown",
-      } as never);
+      void handleEvent(
+        w as never,
+        {
+          type: "block-cancel",
+          clientBlockId: "c-unknown",
+        } as never,
+      );
     }).not.toThrow();
     // negative-space: a stale block-cancel for an unknown clientBlockId must
     // publish nothing. handleEvent is fire-and-forget — give the async chain
@@ -165,8 +168,6 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
 
     unsub();
 
-    expect(
-      captured.find((e) => e.type === "block_canceled"),
-    ).toBeUndefined();
+    expect(captured.find((e) => e.type === "block_canceled")).toBeUndefined();
   });
 });

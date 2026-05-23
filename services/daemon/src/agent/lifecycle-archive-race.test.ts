@@ -38,7 +38,7 @@ describe("F1-A: archive race", () => {
     });
     await registry.setStatus("alpha", "working");
 
-    await registry.archiveAgent("alpha");
+    await registry.archiveAgent("alpha", { reason: "abandoned" });
 
     const a = await registry.getAgent("alpha");
     expect(a?.status).toBe("archived");
@@ -51,7 +51,7 @@ describe("F1-A: archive race", () => {
     // simulate it the same way the exit handler does and pin the expected
     // behaviour at the registry layer.
     await registry.registerAgent({ name: "beta", type: "bare" });
-    await registry.archiveAgent("beta"); // → archived
+    await registry.archiveAgent("beta", { reason: "abandoned" }); // → archived
     const cur = await registry.getAgent("beta");
     // Emulates the F1-A guard.
     if (cur && cur.status !== "archived" && cur.status !== "error") {

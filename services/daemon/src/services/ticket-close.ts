@@ -13,6 +13,7 @@
  */
 
 import { setIssueStateByType } from "@friday/integrations-linear";
+import { type ArchiveReason } from "@friday/shared";
 import {
   addComment,
   externalLinks,
@@ -21,8 +22,6 @@ import {
   updateTicket,
 } from "@friday/shared/services";
 import { logger } from "../log.js";
-
-export type ArchiveReason = "completed" | "abandoned" | "failed";
 
 interface CloseInput {
   ticketId: string | null | undefined;
@@ -41,9 +40,7 @@ function reasonToStatus(reason: ArchiveReason): TicketStatus {
 }
 
 // Linear's enum maps cleanly: done→completed, closed→canceled.
-function statusToLinearStateType(
-  status: TicketStatus,
-): "completed" | "canceled" | null {
+function statusToLinearStateType(status: TicketStatus): "completed" | "canceled" | null {
   switch (status) {
     case "done":
       return "completed";

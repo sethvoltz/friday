@@ -42,9 +42,9 @@ describe("resolveTeamId", () => {
 
   it("throws when a configured key has no matching team", async () => {
     mockFetch({ data: { teams: { nodes: [] } } });
-    await expect(
-      resolveTeamId({ apiKey: "k", team: "FRI" }),
-    ).rejects.toThrow(/Linear team "FRI" not found/);
+    await expect(resolveTeamId({ apiKey: "k", team: "FRI" })).rejects.toThrow(
+      /Linear team "FRI" not found/,
+    );
   });
 
   it("falls back to the first team and warns when team is unset", async () => {
@@ -67,8 +67,6 @@ describe("resolveTeamId", () => {
 
   it("throws when the API key has access to no teams", async () => {
     mockFetch({ data: { teams: { nodes: [] } } });
-    await expect(resolveTeamId({ apiKey: "k", warn: () => {} })).rejects.toThrow(
-      /no teams/,
-    );
+    await expect(resolveTeamId({ apiKey: "k", warn: () => {} })).rejects.toThrow(/no teams/);
   });
 });

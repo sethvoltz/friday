@@ -83,13 +83,7 @@ describe("buildMcpServers: per-app MCP (FRI-78)", () => {
 
 describe("buildMcpServers: built-in surface", () => {
   it("always includes echo, mail, memory for every agent type", () => {
-    for (const t of [
-      "orchestrator",
-      "builder",
-      "helper",
-      "scheduled",
-      "bare",
-    ] as const) {
+    for (const t of ["orchestrator", "builder", "helper", "scheduled", "bare"] as const) {
       const servers = buildMcpServers(baseOpts(t));
       expect(Object.keys(servers)).toEqual(
         expect.arrayContaining(["friday-echo", "friday-mail", "friday-memory"]),
@@ -124,13 +118,7 @@ describe("buildMcpServers: built-in surface", () => {
   });
 
   it("friday-integrations is wired for every agent type", () => {
-    for (const t of [
-      "orchestrator",
-      "builder",
-      "helper",
-      "scheduled",
-      "bare",
-    ] as const) {
+    for (const t of ["orchestrator", "builder", "helper", "scheduled", "bare"] as const) {
       const servers = buildMcpServers(baseOpts(t));
       expect(servers["friday-integrations"]).toBeDefined();
     }
@@ -213,13 +201,7 @@ describe("buildMcpServers: user MCPs — scope", () => {
       name: "gcal",
       command: "gcal-mcp",
     };
-    for (const t of [
-      "orchestrator",
-      "builder",
-      "helper",
-      "scheduled",
-      "bare",
-    ] as const) {
+    for (const t of ["orchestrator", "builder", "helper", "scheduled", "bare"] as const) {
       const servers = buildMcpServers({
         ...baseOpts(t),
         userMcpServers: [unscoped],

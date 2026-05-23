@@ -36,18 +36,11 @@ describe("builder-trailer hook (FRI-109)", () => {
     });
 
     expect(results).toHaveLength(1);
-    expect(results[0].appendSystemPrompt).toContain(
-      "on branch `<unknown>`",
-    );
+    expect(results[0].appendSystemPrompt).toContain("on branch `<unknown>`");
   });
 
   it("returns void (empty result array) for non-builder agentTypes", async () => {
-    for (const agentType of [
-      "orchestrator",
-      "bare",
-      "helper",
-      "scheduled",
-    ] as const) {
+    for (const agentType of ["orchestrator", "bare", "helper", "scheduled"] as const) {
       const results = await runHooks("agent:bootstrap", {
         agentName: "a",
         agentType,

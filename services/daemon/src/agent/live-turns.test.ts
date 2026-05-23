@@ -54,21 +54,11 @@ describe("liveTurns registry (FIX_FORWARD 1.4)", () => {
 
   it("appendDelta accumulates text and bumps lastEventSeq", () => {
     liveTurns.startBlock(baseStart);
-    const after = liveTurns.appendDelta(
-      "turn-1",
-      "client-1",
-      { text: "hello " },
-      6,
-    );
+    const after = liveTurns.appendDelta("turn-1", "client-1", { text: "hello " }, 6);
     expect(after).not.toBeNull();
     expect(after!.text).toBe("hello ");
 
-    const after2 = liveTurns.appendDelta(
-      "turn-1",
-      "client-1",
-      { text: "world" },
-      7,
-    );
+    const after2 = liveTurns.appendDelta("turn-1", "client-1", { text: "world" }, 7);
     expect(after2!.text).toBe("hello world");
 
     const lt = liveTurns.getLiveTurn("turn-1");
@@ -77,31 +67,17 @@ describe("liveTurns registry (FIX_FORWARD 1.4)", () => {
 
   it("appendDelta accumulates partial_json separately from text", () => {
     liveTurns.startBlock({ ...baseStart, kind: "tool_use" });
-    const a = liveTurns.appendDelta(
-      "turn-1",
-      "client-1",
-      { partial_json: '{"cmd":' },
-      6,
-    );
+    const a = liveTurns.appendDelta("turn-1", "client-1", { partial_json: '{"cmd":' }, 6);
     expect(a!.partialJson).toBe('{"cmd":');
-    const b = liveTurns.appendDelta(
-      "turn-1",
-      "client-1",
-      { partial_json: '"ls"}' },
-      7,
-    );
+    const b = liveTurns.appendDelta("turn-1", "client-1", { partial_json: '"ls"}' }, 7);
     expect(b!.partialJson).toBe('{"cmd":"ls"}');
     expect(b!.text).toBe("");
   });
 
   it("appendDelta returns null for unknown turn or block (stale event)", () => {
-    expect(
-      liveTurns.appendDelta("missing-turn", "client-1", { text: "x" }, 1),
-    ).toBeNull();
+    expect(liveTurns.appendDelta("missing-turn", "client-1", { text: "x" }, 1)).toBeNull();
     liveTurns.startBlock(baseStart);
-    expect(
-      liveTurns.appendDelta("turn-1", "missing-client", { text: "x" }, 1),
-    ).toBeNull();
+    expect(liveTurns.appendDelta("turn-1", "missing-client", { text: "x" }, 1)).toBeNull();
   });
 
   it("finishBlock removes the block but keeps the turn entry", () => {

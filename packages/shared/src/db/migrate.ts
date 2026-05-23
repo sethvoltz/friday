@@ -65,27 +65,19 @@ export async function runMigrations(): Promise<void> {
       )
     `);
 
-    await client.query(`SELECT pg_advisory_lock($1)`, [
-      ADVISORY_LOCK_KEY.toString(),
-    ]);
+    await client.query(`SELECT pg_advisory_lock($1)`, [ADVISORY_LOCK_KEY.toString()]);
     try {
       const appliedRows = await client.query<{ created_at: string }>(
         `SELECT created_at FROM drizzle.__drizzle_migrations`,
       );
-      const appliedWhens = new Set(
-        appliedRows.rows.map((r) => Number(r.created_at)),
-      );
+      const appliedWhens = new Set(appliedRows.rows.map((r) => Number(r.created_at)));
 
-      const sortedEntries = [...journal.entries].sort(
-        (a, b) => a.when - b.when,
-      );
+      const sortedEntries = [...journal.entries].sort((a, b) => a.when - b.when);
       for (const entry of sortedEntries) {
         if (appliedWhens.has(entry.when)) continue;
         const sqlPath = join(folder, `${entry.tag}.sql`);
         if (!existsSync(sqlPath)) {
-          throw new Error(
-            `Migration file missing: ${sqlPath} (referenced by journal)`,
-          );
+          throw new Error(`Migration file missing: ${sqlPath} (referenced by journal)`);
         }
         const rawSql = readFileSync(sqlPath, "utf8");
         const statements = rawSql
@@ -113,9 +105,7 @@ export async function runMigrations(): Promise<void> {
       // that add new tsvector targets flow through.
       await client.query(FTS_SETUP_SQL);
     } finally {
-      await client.query(`SELECT pg_advisory_unlock($1)`, [
-        ADVISORY_LOCK_KEY.toString(),
-      ]);
+      await client.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_KEY.toString()]);
     }
 
     await assertJournalApplied(client, journal);
@@ -135,17 +125,15 @@ async function assertJournalApplied(
   client: { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> },
   journal: Journal,
 ): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const result = (await client.query(
     `SELECT COUNT(*)::int AS c FROM drizzle.__drizzle_migrations`,
   )) as { rows: { c: number }[] };
   const dbCount = result.rows[0]?.c ?? 0;
   if (dbCount === journal.entries.length) return;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const applied = (await client.query(
-    `SELECT created_at FROM drizzle.__drizzle_migrations`,
-  )) as { rows: { created_at: string }[] };
+  const applied = (await client.query(`SELECT created_at FROM drizzle.__drizzle_migrations`)) as {
+    rows: { created_at: string }[];
+  };
   const appliedSet = new Set(applied.rows.map((r) => Number(r.created_at)));
   const missing = journal.entries.filter((e) => !appliedSet.has(e.when));
   const tags = missing.map((m) => `${m.tag} (when=${m.when})`).join(", ");
@@ -160,9 +148,6 @@ async function assertJournalApplied(
 function locateMigrationsFolder(): string | null {
   const here = dirname(fileURLToPath(import.meta.url));
   // From dist/db/migrate.js → ../../drizzle (next to package.json)
-  const candidates = [
-    join(here, "..", "..", "drizzle"),
-    join(here, "..", "..", "..", "drizzle"),
-  ];
+  const candidates = [join(here, "..", "..", "drizzle"), join(here, "..", "..", "..", "drizzle")];
   return candidates.find((p) => existsSync(p)) ?? null;
 }

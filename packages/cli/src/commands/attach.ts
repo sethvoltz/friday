@@ -27,7 +27,8 @@ function isAttachable(s: string): s is AttachableService {
 export const attachCommand = defineCommand({
   meta: {
     name: "attach",
-    description: "Tail a service's log (~/.friday/logs/<service>.jsonl) interactively. Ctrl-C exits.",
+    description:
+      "Tail a service's log (~/.friday/logs/<service>.jsonl) interactively. Ctrl-C exits.",
   },
   args: {
     service: {
@@ -42,9 +43,7 @@ export const attachCommand = defineCommand({
       console.error(
         pc.red(`cloudflared runs as its own user launch agent (com.cloudflare.cloudflared).`),
       );
-      console.error(
-        `  tail its log: ${pc.cyan(`friday logs tunnel -f`)}`,
-      );
+      console.error(`  tail its log: ${pc.cyan(`friday logs tunnel -f`)}`);
       console.error(
         `  inspect job: ${pc.cyan(`launchctl print gui/$(id -u)/com.cloudflare.cloudflared`)}`,
       );
@@ -52,8 +51,7 @@ export const attachCommand = defineCommand({
     }
     if (!isAttachable(target)) {
       console.error(
-        pc.red(`unknown service: ${target}`) +
-          ` (expected: ${SERVICES_ATTACHABLE.join(" | ")})`,
+        pc.red(`unknown service: ${target}`) + ` (expected: ${SERVICES_ATTACHABLE.join(" | ")})`,
       );
       process.exit(1);
     }

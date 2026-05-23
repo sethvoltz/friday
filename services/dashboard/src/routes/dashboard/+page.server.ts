@@ -1,11 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import {
-  CONFIG_PATH,
-  HEALTH_PATH,
-  SOUL_PATH,
-  loadConfig,
-  type AgentEntry,
-} from "@friday/shared";
+import { CONFIG_PATH, HEALTH_PATH, SOUL_PATH, loadConfig, type AgentEntry } from "@friday/shared";
 import {
   getCostByAgent,
   getDailyByModel,
@@ -13,11 +7,7 @@ import {
   type UsageStats,
 } from "@friday/shared/services";
 import { daemonGet } from "$lib/server/daemon";
-import {
-  buildActivityByDate,
-  buildDailyCost,
-  buildTokenViews,
-} from "./_aggregations.js";
+import { buildActivityByDate, buildDailyCost, buildTokenViews } from "./_aggregations.js";
 import type { PageServerLoad } from "./$types";
 
 export const load: PageServerLoad = async () => {
@@ -34,12 +24,11 @@ export const load: PageServerLoad = async () => {
     return d.toISOString();
   })();
 
-  // ADR-023: these helpers all became async when persistence moved
-  // from better-sqlite3 (sync) to node-postgres (async). Without the
-  // awaits below, `stats.today` etc. are Promises that serialize as
-  // `{}` and `dailyByModel` is a Promise — `buildDailyCost(rows)`
-  // then throws `rows is not iterable`. Parallel via Promise.all so
-  // the page still loads at the cost of one round-trip, not four.
+  // ADR-023: these helpers are async (Postgres via node-postgres);
+  // without the awaits below, `stats.today` etc. would be Promises
+  // that serialize as `{}` and `dailyByModel` would be a Promise that
+  // throws `rows is not iterable` from `buildDailyCost(rows)`. Parallel
+  // via Promise.all so the page loads in one round-trip, not four.
   const [today, week, all, dailyByModel, agentCostsRaw] = await Promise.all([
     getUsageStats(todayStartIso),
     getUsageStats(weekStartIso),

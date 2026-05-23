@@ -4,25 +4,19 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
 let registry: typeof import("../agent/registry.js");
-let upsertSchedule: typeof import("./scheduler.js")["upsertSchedule"];
-let deleteSchedule: typeof import("./scheduler.js")["deleteSchedule"];
-let ScheduleNameCollisionError: typeof import("./scheduler.js")["ScheduleNameCollisionError"];
-let validateRecipient: typeof import("../comms/recipient.js")["validateRecipient"];
+let upsertSchedule: (typeof import("./scheduler.js"))["upsertSchedule"];
+let deleteSchedule: (typeof import("./scheduler.js"))["deleteSchedule"];
+let ScheduleNameCollisionError: (typeof import("./scheduler.js"))["ScheduleNameCollisionError"];
+let validateRecipient: (typeof import("../comms/recipient.js"))["validateRecipient"];
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "scheduler" });
   registry = await import("../agent/registry.js");
-  ({ upsertSchedule, deleteSchedule, ScheduleNameCollisionError } =
-    await import("./scheduler.js"));
+  ({ upsertSchedule, deleteSchedule, ScheduleNameCollisionError } = await import("./scheduler.js"));
   ({ validateRecipient } = await import("../comms/recipient.js"));
 });
 

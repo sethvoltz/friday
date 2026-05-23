@@ -217,29 +217,21 @@ agent-friday/
 │   └── dashboard/          @friday/dashboard — SvelteKit + Svelte 5 (runes),
 │                           BetterAuth, adapter-node, PWA
 ├── bin/                    Dev shim — invokes packages/cli/dist/index.js
-└── docs/                   Architecture, setup, ADRs, schema, UX, roadmap
+└── docs/                   Architecture, setup, ADRs, sandbox, UX, roadmap
 ```
 
 Operational files live at `~/.friday/`. Canonical state (blocks, mail, tickets, agents, memory entries, schedules, apps, sessions/users, etc.) lives in the **Postgres `friday` database**, host-managed by `brew services`.
 
 ```
 ~/.friday/
-├── config.json             Settings + MCP server config
-├── .env                    Secrets (LINEAR_API_KEY, BETTER_AUTH_SECRET, DB url, ...)
-├── SOUL.md                 Your editable identity layer
-├── skills/*.md             User-additive slash skills
-├── agents/<name>/          Per-agent home (orchestrator/helper/scheduled cwd; FRI-61)
-├── memory/entries/*.md     Memory entry bodies (indexed in Postgres)
-├── evolve/proposals/*.md   Evolve proposal bodies
-├── apps/<id>/              Installed Friday Apps (manifest, prompt, state/, .env)
-├── schedules/<name>/       state.md + last-run.md continuity
-├── workspaces/<name>/      Builder git worktrees
-├── uploads/<sha-bucket>/   Content-addressed attachment bytes
-├── state/                  Daemon runtime state (per-service start markers)
-├── logs/*.jsonl            Rotated at 1 MiB (daemon, dashboard, zero-cache)
-├── usage.jsonl             Per-turn usage records
-└── health.json             Daemon heartbeat (30s)
+├── config.json, .env, SOUL.md     Settings + secrets + identity
+├── agents/<name>/                 Per-agent home (orchestrator/helper/scheduled cwd; ADR-029)
+├── apps/<id>/                     Installed Friday Apps (ADR-021)
+├── workspaces/<name>/             Builder git worktrees
+└── logs/*.jsonl                   Structured logs, rotated at 1 MiB
 ```
+
+Full layout reference: [docs/running.md#data-location](docs/running.md#data-location).
 
 Override the location with `FRIDAY_DATA_DIR=$HOME/.friday-v2`. Backups: `pg_dump friday > friday.dump.sql` for canonical state; `cp -r ~/.friday somewhere` for operational files.
 
@@ -303,15 +295,15 @@ Verifies the data dir, config, db migrations, account presence, external CLIs, a
 
 ## Documentation
 
-| Doc | What's in it |
-|---|---|
-| [docs/architecture.md](docs/architecture.md) | System overview, topology, prompt stack, block model, wire protocol, agent lifecycle |
-| [docs/chat-ux.md](docs/chat-ux.md) | Single-chat UX, sidebar, focus model, slash commands, attachments, markdown |
-| [docs/mobile-ux.md](docs/mobile-ux.md) | Priority+ nav, virtualization, PWA, mobile autocomplete |
-| [docs/mcp.md](docs/mcp.md) | MCP server surface (Friday-internal + user-configured) |
-| [docs/schema.md](docs/schema.md) | Postgres schema reference |
-| [docs/decisions.md](docs/decisions.md) | Architecture Decision Records (ADRs) + watch list |
-| [docs/roadmap.md](docs/roadmap.md) | Open work, sequenced for execution |
-| [docs/setup.md](docs/setup.md) | Full setup including Cloudflare Tunnel walkthrough |
-| [docs/running.md](docs/running.md) | Daily commands, modes, data layout, cutover from old Friday |
-| [docs/ui-conventions.md](docs/ui-conventions.md) | Cross-cutting UI patterns and icon map |
+| Doc                                              | What's in it                                                                                                       |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| [docs/architecture.md](docs/architecture.md)     | System overview, topology, prompt stack, block model, wire protocol, agent lifecycle                               |
+| [docs/chat-ux.md](docs/chat-ux.md)               | Single-chat UX, sidebar, focus model, slash commands, attachments, markdown                                        |
+| [docs/mobile-ux.md](docs/mobile-ux.md)           | Priority+ nav, virtualization, PWA, mobile autocomplete                                                            |
+| [docs/mcp.md](docs/mcp.md)                       | MCP server surface (Friday-internal + user-configured)                                                             |
+| [docs/sandbox.md](docs/sandbox.md)               | Worker isolation: M1–M5 rollout (PreToolUse rules, sandbox-exec, pgrp containment, stall watchdog) + residual risk |
+| [docs/decisions.md](docs/decisions.md)           | Architecture Decision Records (ADRs) + watch list                                                                  |
+| [docs/roadmap.md](docs/roadmap.md)               | Open work, sequenced for execution                                                                                 |
+| [docs/setup.md](docs/setup.md)                   | Full setup including Cloudflare Tunnel walkthrough                                                                 |
+| [docs/running.md](docs/running.md)               | Daily commands, modes, data layout, cutover from old Friday                                                        |
+| [docs/ui-conventions.md](docs/ui-conventions.md) | Cross-cutting UI patterns and icon map                                                                             |

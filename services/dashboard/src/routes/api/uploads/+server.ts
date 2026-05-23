@@ -7,8 +7,7 @@ const UPLOAD_TIMEOUT_MS = 60_000;
 export const POST: RequestHandler = async ({ request, locals }) => {
   if (!locals.user) return new Response("unauthorized", { status: 401 });
   const filename = request.headers.get("x-filename") ?? "upload";
-  const contentType =
-    request.headers.get("content-type") ?? "application/octet-stream";
+  const contentType = request.headers.get("content-type") ?? "application/octet-stream";
   return withDaemon(async () => {
     const r = await fetch(`${DAEMON_BASE}/api/uploads`, {
       method: "POST",

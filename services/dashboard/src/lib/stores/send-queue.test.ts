@@ -181,9 +181,7 @@ describe("FRI-103 AC4: optimistic ↔ canonical convergence (both interleavings)
     const queueBlockId = enqueued.queueBlockId;
 
     // Build a deferred so we control when flush's await resolves.
-    let resolveSend!: (
-      v: { blockId: string; turnId: string } | null,
-    ) => void;
+    let resolveSend!: (v: { blockId: string; turnId: string } | null) => void;
     mockSendUserMessage.mockImplementationOnce(
       () =>
         new Promise((resolve) => {

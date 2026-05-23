@@ -21,11 +21,7 @@
 
 import { eq, inArray } from "drizzle-orm";
 import { getDb, schema } from "@friday/shared";
-import type {
-  EvidencePointer,
-  Signal,
-  SignalSeverity,
-} from "./types.js";
+import type { EvidencePointer, Signal, SignalSeverity } from "./types.js";
 import { signalHash } from "./scan.js";
 import { chat, extractJson } from "./llm.js";
 
@@ -59,10 +55,7 @@ export interface ScoredTurn {
   reason: string;
 }
 
-export type ScoreFn = (
-  batch: TurnForScoring[],
-  model: string,
-) => Promise<ScoredTurn[]>;
+export type ScoreFn = (batch: TurnForScoring[], model: string) => Promise<ScoredTurn[]>;
 
 export interface TurnForScoring {
   turn_id: string;
@@ -93,9 +86,7 @@ export function dbTurnIdToLine(id: string): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-export async function scanFriction(
-  opts: FrictionScanOptions = {},
-): Promise<Signal[]> {
+export async function scanFriction(opts: FrictionScanOptions = {}): Promise<Signal[]> {
   const sinceMs = opts.since ? Date.parse(opts.since) : 0;
   const maxTurns = opts.maxTurns ?? 1000;
   const batchSize = opts.batchSize ?? 30;
@@ -118,7 +109,7 @@ export async function scanFriction(
       results = await score(payload, model);
     } catch (err) {
       // Better to score fewer turns than abort the whole pass; log loudly.
-      // eslint-disable-next-line no-console
+
       console.error(
         `friction scoring batch ${i}-${i + batch.length - 1} failed: ${
           err instanceof Error ? err.message : String(err)
@@ -137,13 +128,9 @@ export async function scanFriction(
   return bucketByCategory(scored);
 }
 
-function bucketByCategory(
-  scored: Array<OrchestratorTurn & ScoredTurn>,
-): Signal[] {
+function bucketByCategory(scored: Array<OrchestratorTurn & ScoredTurn>): Signal[] {
   const buckets = new Map<string, Signal>();
-  const ranked = [...scored].sort(
-    (a, b) => b.friction_score - a.friction_score,
-  );
+  const ranked = [...scored].sort((a, b) => b.friction_score - a.friction_score);
 
   for (const t of ranked) {
     if (t.friction_score < 2) continue;
@@ -167,8 +154,7 @@ function bucketByCategory(
       if (severityRank(severity) > severityRank(existing.severity)) {
         existing.severity = severity;
       }
-      if (existing.evidencePointers.length < 3)
-        existing.evidencePointers.push(pointer);
+      if (existing.evidencePointers.length < 3) existing.evidencePointers.push(pointer);
     } else {
       buckets.set(hash, {
         hash,
@@ -276,8 +262,7 @@ export async function collectOrchestratorTurns(
     const content = r.contentJson as { text?: string };
 
     if (r.role === "assistant" && r.kind === "text") {
-      const txt =
-        typeof content?.text === "string" ? content.text : "";
+      const txt = typeof content?.text === "string" ? content.text : "";
       if (txt) prevAssistantBySession.set(r.sessionId, txt);
       continue;
     }
@@ -288,8 +273,7 @@ export async function collectOrchestratorTurns(
     if (r.role !== "user" || r.kind !== "text") continue;
     if (r.source === "mail") continue;
 
-    const userText =
-      typeof content?.text === "string" ? content.text : "";
+    const userText = typeof content?.text === "string" ? content.text : "";
     if (!userText.trim()) continue;
     const cleaned = stripMemoryContext(userText).trim();
     if (!cleaned) continue;
@@ -306,32 +290,6 @@ export async function collectOrchestratorTurns(
   }
 
   return out;
-}
-
-function extractText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
-  for (const c of content) {
-    if (c && typeof c === "object" && "type" in c) {
-      const obj = c as { type: string; text?: string };
-      if (obj.type === "text" && typeof obj.text === "string")
-        parts.push(obj.text);
-    }
-  }
-  return parts.join(" ");
-}
-
-function isToolResultOnly(content: unknown): boolean {
-  if (!Array.isArray(content)) return false;
-  if (content.length === 0) return false;
-  return content.every(
-    (c) =>
-      c &&
-      typeof c === "object" &&
-      "type" in c &&
-      (c as { type: string }).type === "tool_result",
-  );
 }
 
 function stripMemoryContext(text: string): string {

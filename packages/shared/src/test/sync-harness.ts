@@ -149,9 +149,7 @@ export async function waitForTcp(
     if (ok) return;
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(
-    `waitForTcp: ${host}:${port} did not accept connections within ${timeoutMs}ms`,
-  );
+  throw new Error(`waitForTcp: ${host}:${port} did not accept connections within ${timeoutMs}ms`);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -171,10 +169,7 @@ export async function waitForTcp(
  * descendant in the child's process group; `process.kill(-pid, sig)`
  * delivers the signal to the whole group.
  */
-async function sigtermThenSigkill(
-  child: ChildProcess,
-  ms = 1_500,
-): Promise<void> {
+async function sigtermThenSigkill(child: ChildProcess, ms = 1_500): Promise<void> {
   if (child.exitCode !== null || child.killed) return;
   const pid = child.pid;
   const sigGroup = (signal: NodeJS.Signals) => {
@@ -228,9 +223,7 @@ export interface SpawnZeroCacheOpts {
   mutateUrl?: string;
 }
 
-export async function spawnZeroCacheForTest(
-  opts: SpawnZeroCacheOpts,
-): Promise<ZeroCacheHandle> {
+export async function spawnZeroCacheForTest(opts: SpawnZeroCacheOpts): Promise<ZeroCacheHandle> {
   const port = opts.port ?? (await freePort());
   // Each test gets its own SQLite replica file — sharing one across
   // tests would let stale logical-replication state leak between
@@ -262,12 +255,8 @@ export async function spawnZeroCacheForTest(
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
   if (process.env.FRIDAY_TEST_DEBUG === "1") {
-    child.stdout?.on("data", (d) =>
-      process.stderr.write(`[zero stdout] ${d}`),
-    );
-    child.stderr?.on("data", (d) =>
-      process.stderr.write(`[zero stderr] ${d}`),
-    );
+    child.stdout?.on("data", (d) => process.stderr.write(`[zero stdout] ${d}`));
+    child.stderr?.on("data", (d) => process.stderr.write(`[zero stderr] ${d}`));
   } else {
     child.stdout?.on("data", () => {});
     child.stderr?.on("data", () => {});
@@ -283,9 +272,7 @@ export async function spawnZeroCacheForTest(
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       const ok = await new Promise<boolean>((resolve) => {
-        const ws = new globalThis.WebSocket(
-          `ws://127.0.0.1:${port}/sync/v50/connect`,
-        );
+        const ws = new globalThis.WebSocket(`ws://127.0.0.1:${port}/sync/v50/connect`);
         const settle = (v: boolean) => {
           try {
             ws.close();
@@ -310,9 +297,7 @@ export async function spawnZeroCacheForTest(
       if (ok) return;
       await new Promise((r) => setTimeout(r, 250));
     }
-    throw new Error(
-      `zero-cache WS upgrade on :${port} didn't succeed within 90s`,
-    );
+    throw new Error(`zero-cache WS upgrade on :${port} didn't succeed within 90s`);
   })();
   return { port, child, replicaFile, ready };
 }
@@ -340,13 +325,9 @@ export interface SpawnDaemonOpts {
   dataDir?: string;
 }
 
-export async function spawnDaemonForTest(
-  opts: SpawnDaemonOpts,
-): Promise<DaemonHandle> {
+export async function spawnDaemonForTest(opts: SpawnDaemonOpts): Promise<DaemonHandle> {
   const port = opts.port ?? (await freePort());
-  const dataDir =
-    opts.dataDir ??
-    mkdtempSync(join(opts.tmpRoot ?? tmpdir(), "friday-daemon-"));
+  const dataDir = opts.dataDir ?? mkdtempSync(join(opts.tmpRoot ?? tmpdir(), "friday-daemon-"));
   mkdirSync(join(dataDir, "logs"), { recursive: true });
   // Write the daemon config: pin daemonPort + dashboardPort (we'll
   // overwrite dashboardPort in the dashboard spawner if needed).
@@ -357,11 +338,9 @@ export async function spawnDaemonForTest(
   // Daemon secret — random per-test unless provided. The dashboard
   // subprocess reads the same file via FRIDAY_DATA_DIR.
   if (!opts.daemonSecret) {
-    writeFileSync(
-      join(dataDir, ".daemon-secret"),
-      randomBytes(32).toString("hex"),
-      { mode: 0o600 },
-    );
+    writeFileSync(join(dataDir, ".daemon-secret"), randomBytes(32).toString("hex"), {
+      mode: 0o600,
+    });
   } else {
     writeFileSync(join(dataDir, ".daemon-secret"), opts.daemonSecret, {
       mode: 0o600,
@@ -383,12 +362,8 @@ export async function spawnDaemonForTest(
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
   if (process.env.FRIDAY_TEST_DEBUG === "1") {
-    child.stdout?.on("data", (d) =>
-      process.stderr.write(`[daemon stdout] ${d}`),
-    );
-    child.stderr?.on("data", (d) =>
-      process.stderr.write(`[daemon stderr] ${d}`),
-    );
+    child.stdout?.on("data", (d) => process.stderr.write(`[daemon stdout] ${d}`));
+    child.stderr?.on("data", (d) => process.stderr.write(`[daemon stderr] ${d}`));
   } else {
     child.stdout?.on("data", () => {});
     child.stderr?.on("data", () => {});
@@ -414,9 +389,7 @@ export interface SpawnDashboardOpts {
   port?: number;
 }
 
-export async function spawnDashboardForTest(
-  opts: SpawnDashboardOpts,
-): Promise<DashboardHandle> {
+export async function spawnDashboardForTest(opts: SpawnDashboardOpts): Promise<DashboardHandle> {
   const port = opts.port ?? (await freePort());
   const env = {
     ...process.env,
@@ -514,9 +487,7 @@ export interface MintTestSessionOpts {
   name?: string;
 }
 
-export async function mintTestSessionCookie(
-  opts: MintTestSessionOpts,
-): Promise<TestSessionCookie> {
+export async function mintTestSessionCookie(opts: MintTestSessionOpts): Promise<TestSessionCookie> {
   // BetterAuth validates email with `z.email()` which rejects host-only
   // addresses (`foo@local`), so use a fully-qualified test address.
   const email = opts.email ?? "e2e-test@example.com";
@@ -543,10 +514,9 @@ export async function mintTestSessionCookie(
     // schema has no unique constraint covering (providerId, accountId),
     // so DELETE-then-INSERT instead of ON CONFLICT.
     const passwordHash = await hashBetterAuthPassword(TEST_PASSWORD);
-    await c.query(
-      `DELETE FROM "account" WHERE "providerId" = 'credential' AND "userId" = $1`,
-      [persistedUserId],
-    );
+    await c.query(`DELETE FROM "account" WHERE "providerId" = 'credential' AND "userId" = $1`, [
+      persistedUserId,
+    ]);
     await c.query(
       `INSERT INTO "account"
          (id, "accountId", "providerId", "userId", password, "createdAt", "updatedAt")
@@ -571,9 +541,7 @@ export async function mintTestSessionCookie(
   });
   if (!signInRes.ok) {
     const body = await signInRes.text();
-    throw new Error(
-      `mintTestSessionCookie: sign-in failed ${signInRes.status} ${body}`,
-    );
+    throw new Error(`mintTestSessionCookie: sign-in failed ${signInRes.status} ${body}`);
   }
   // adapter-node merges Set-Cookie headers into a single comma-joined
   // string when accessed via `headers.get`, but `getSetCookie()` (Node
@@ -631,10 +599,7 @@ export interface SyncEnv {
   daemonSecret: string;
   /** Mint a signed session cookie for hitting /api/* on the dashboard.
    *  Each call returns a fresh sessionId; pass `email` to reuse a user. */
-  mintCookie: (opts?: {
-    email?: string;
-    name?: string;
-  }) => Promise<TestSessionCookie>;
+  mintCookie: (opts?: { email?: string; name?: string }) => Promise<TestSessionCookie>;
   cleanup(): Promise<void>;
 }
 
@@ -648,9 +613,7 @@ export interface SpawnEnvOpts {
   skipZeroCache?: boolean;
 }
 
-export async function spawnTestSyncEnv(
-  opts: SpawnEnvOpts = {},
-): Promise<SyncEnv> {
+export async function spawnTestSyncEnv(opts: SpawnEnvOpts = {}): Promise<SyncEnv> {
   const db = await createTestDb({ label: opts.label ?? "sync_env" });
   const databaseUrl = db.databaseUrl;
   const betterAuthSecret = randomBytes(32).toString("hex");

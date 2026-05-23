@@ -77,10 +77,7 @@ describe("hook registry", () => {
       agentType: "orchestrator",
     });
 
-    expect(results).toEqual([
-      { prependBody: "A" },
-      { appendSystemPrompt: "B" },
-    ]);
+    expect(results).toEqual([{ prependBody: "A" }, { appendSystemPrompt: "B" }]);
   });
 
   it("before_tool_call short-circuits on first deny", async () => {

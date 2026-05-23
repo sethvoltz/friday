@@ -5,11 +5,9 @@ export const POST: RequestHandler = async ({ params, request, locals }) => {
   if (!locals.user) return new Response("unauthorized", { status: 401 });
   const body = await request.json();
   return withDaemon((d) =>
-    d.post(
-      `/api/tickets/${encodeURIComponent(params.id ?? "")}/links`,
-      body,
-      { signal: request.signal },
-    ),
+    d.post(`/api/tickets/${encodeURIComponent(params.id ?? "")}/links`, body, {
+      signal: request.signal,
+    }),
   );
 };
 
@@ -24,9 +22,8 @@ export const DELETE: RequestHandler = async ({ params, url, request, locals }) =
   }
   const qs = `?system=${encodeURIComponent(system)}&externalId=${encodeURIComponent(externalId)}`;
   return withDaemon((d) =>
-    d.del(
-      `/api/tickets/${encodeURIComponent(params.id ?? "")}/links${qs}`,
-      { signal: request.signal },
-    ),
+    d.del(`/api/tickets/${encodeURIComponent(params.id ?? "")}/links${qs}`, {
+      signal: request.signal,
+    }),
   );
 };

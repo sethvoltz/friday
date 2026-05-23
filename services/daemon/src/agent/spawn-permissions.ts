@@ -112,7 +112,7 @@ export async function computeSpawnDepth(
     chainNewestFirst.push(cursor);
     const row = await getAgent(cursor);
     if (!row) break;
-    cursor = "parentName" in row ? row.parentName ?? null : null;
+    cursor = "parentName" in row ? (row.parentName ?? null) : null;
     steps++;
   }
   // chainNewestFirst is immediate-parent-first; flip so the orchestrator

@@ -36,29 +36,30 @@ describe("sync-harness smoke (item #50)", () => {
     expect(env.zeroCache.child.pid).toBeGreaterThan(0);
   });
 
-  it("the dashboard accepts auth-cookie'd /api/sync/refresh and mints a Zero JWT", async () => {
-    const session = await env.mintCookie();
-    const r = await fetch(
-      `http://127.0.0.1:${env.dashboard.port}/api/sync/refresh`,
-      {
+  it(
+    "the dashboard accepts auth-cookie'd /api/sync/refresh and mints a Zero JWT",
+    async () => {
+      const session = await env.mintCookie();
+      const r = await fetch(`http://127.0.0.1:${env.dashboard.port}/api/sync/refresh`, {
         method: "POST",
         headers: { Cookie: session.cookie },
-      },
-    );
-    if (r.status !== 200) {
-      const body = await r.text();
-      // eslint-disable-next-line no-console
-      console.error("/api/sync/refresh non-200:", r.status, body, "cookie:", session.cookie);
-    }
-    expect(r.status).toBe(200);
-    const body = (await r.json()) as {
-      token: string;
-      deviceId: string;
-      userId: string;
-      expiresAt: number;
-    };
-    expect(body.token).toMatch(/\./); // JWT shape: header.payload.sig
-    expect(body.userId).toBe(session.userId);
-    expect(body.expiresAt).toBeGreaterThan(Date.now());
-  }, TEST_TIMEOUT_MS);
+      });
+      if (r.status !== 200) {
+        const body = await r.text();
+
+        console.error("/api/sync/refresh non-200:", r.status, body, "cookie:", session.cookie);
+      }
+      expect(r.status).toBe(200);
+      const body = (await r.json()) as {
+        token: string;
+        deviceId: string;
+        userId: string;
+        expiresAt: number;
+      };
+      expect(body.token).toMatch(/\./); // JWT shape: header.payload.sig
+      expect(body.userId).toBe(session.userId);
+      expect(body.expiresAt).toBeGreaterThan(Date.now());
+    },
+    TEST_TIMEOUT_MS,
+  );
 });

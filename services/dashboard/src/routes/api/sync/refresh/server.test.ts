@@ -12,20 +12,13 @@
  * Phase 2 row-state pre/post-condition contract (plan §5).
  */
 
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 import { verifyZeroJwt } from "@friday/shared/sync/jwt";
 
 let handle: TestDbHandle;
 let endpoint: typeof import("./+server.js");
-let getClientDevice: typeof import("@friday/shared/services")["getClientDevice"];
+let getClientDevice: (typeof import("@friday/shared/services"))["getClientDevice"];
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "sync_refresh" });
@@ -46,11 +39,7 @@ beforeEach(async () => {
 
 interface CookieStore {
   store: Map<string, string>;
-  set: (
-    name: string,
-    value: string,
-    opts?: Record<string, unknown>,
-  ) => void;
+  set: (name: string, value: string, opts?: Record<string, unknown>) => void;
   get: (name: string) => string | undefined;
   delete: (name: string, opts?: Record<string, unknown>) => void;
 }
@@ -90,9 +79,9 @@ async function callPost(opts: CallOpts = {}): Promise<{
   };
   // The SvelteKit RequestHandler signature is broad; cast through unknown
   // to silence TS for the stub shape.
-  const response = await (endpoint.POST as unknown as (
-    e: typeof event,
-  ) => Response | Promise<Response>)(event);
+  const response = await (
+    endpoint.POST as unknown as (e: typeof event) => Response | Promise<Response>
+  )(event);
   return { response, cookies };
 }
 

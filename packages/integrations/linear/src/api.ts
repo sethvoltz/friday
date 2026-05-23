@@ -147,18 +147,14 @@ export async function findTeamByKey(opts: {
     `query Teams { teams(first: 250) { nodes { id key name } } }`,
   );
   const target = opts.key.toLowerCase();
-  return (
-    data.teams.nodes.find((t) => t.key.toLowerCase() === target) ?? null
-  );
+  return data.teams.nodes.find((t) => t.key.toLowerCase() === target) ?? null;
 }
 
 /**
  * List every team accessible to the API key. Used when no `linear.team`
  * is configured and we have to fall back to "first team."
  */
-export async function listTeams(opts: {
-  apiKey: string;
-}): Promise<LinearTeam[]> {
+export async function listTeams(opts: { apiKey: string }): Promise<LinearTeam[]> {
   interface TeamsResult {
     teams: { nodes: LinearTeam[] };
   }
@@ -231,9 +227,7 @@ export async function createIssue(opts: {
     { input: wireInput },
   );
   if (!data.issueCreate.success || !data.issueCreate.issue) {
-    throw new LinearApiError(
-      `Linear issueCreate returned success=false for "${opts.input.title}"`,
-    );
+    throw new LinearApiError(`Linear issueCreate returned success=false for "${opts.input.title}"`);
   }
   return data.issueCreate.issue;
 }
@@ -282,9 +276,7 @@ export async function updateIssue(opts: {
     { id: opts.id, input: wireInput },
   );
   if (!data.issueUpdate.success || !data.issueUpdate.issue) {
-    throw new LinearApiError(
-      `Linear issueUpdate returned success=false for id "${opts.id}"`,
-    );
+    throw new LinearApiError(`Linear issueUpdate returned success=false for id "${opts.id}"`);
   }
   return data.issueUpdate.issue;
 }
@@ -402,9 +394,7 @@ export async function setIssueStateByType(opts: {
 }): Promise<void> {
   const m = opts.issueIdentifier.match(/^([A-Z][A-Z0-9_]*)-(\d+)$/);
   if (!m) {
-    throw new LinearApiError(
-      `Invalid Linear identifier: ${opts.issueIdentifier}`,
-    );
+    throw new LinearApiError(`Invalid Linear identifier: ${opts.issueIdentifier}`);
   }
   const teamKey = m[1];
 
@@ -413,9 +403,7 @@ export async function setIssueStateByType(opts: {
     identifier: opts.issueIdentifier,
   });
   if (!issue) {
-    throw new LinearApiError(
-      `Linear issue not found: ${opts.issueIdentifier}`,
-    );
+    throw new LinearApiError(`Linear issue not found: ${opts.issueIdentifier}`);
   }
   const stateId = await getStateIdByType({
     apiKey: opts.apiKey,

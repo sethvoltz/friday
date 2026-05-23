@@ -26,9 +26,7 @@ import { loadString, saveJSON, saveString } from "./persistent";
  *      from an abandoned connection don't apply to the current one.
  */
 
-const DASHBOARD_BUMP_TYPES = new Set([
-  "turn_done",
-]);
+const DASHBOARD_BUMP_TYPES = new Set(["turn_done"]);
 
 const HANDLED_TYPES = new Set([
   "turn_started",
@@ -134,9 +132,7 @@ async function connect(): Promise<void> {
     // focused agent (sidebar landing state), keep the legacy global
     // stream so connection_established still lands.
     const focused = chat.focusedAgent;
-    const url = focused
-      ? `/api/events?agent=${encodeURIComponent(focused)}`
-      : "/api/events";
+    const url = focused ? `/api/events?agent=${encodeURIComponent(focused)}` : "/api/events";
     const res = await fetch(url, {
       headers,
       signal: ctrl.signal,
@@ -245,8 +241,7 @@ function parseEvent(block: string): ParsedEvent | null {
     else if (field === "event") event = value;
     else if (field === "data") dataParts.push(value);
   }
-  if (dataParts.length === 0 && event === undefined && id === undefined)
-    return null;
+  if (dataParts.length === 0 && event === undefined && id === undefined) return null;
   return { id, event, data: dataParts.join("\n") };
 }
 
@@ -262,10 +257,7 @@ function parseEvent(block: string): ParsedEvent | null {
  * Exported so the FRI-8 regression test can drive it without standing
  * up a real fetch + SSE reader loop.
  */
-export function acceptConnectionEstablished(
-  incomingBootId: string,
-  bootTs: number,
-): void {
+export function acceptConnectionEstablished(incomingBootId: string, bootTs: number): void {
   if (cachedBootId !== null && cachedBootId !== incomingBootId) {
     chat.lastSeqByAgent = {};
     saveJSON("chat:lastSeqByAgent", {});

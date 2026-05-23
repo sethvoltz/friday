@@ -17,14 +17,7 @@
  */
 
 import type { Server } from "node:http";
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb, type TestDbHandle, getDb, schema } from "@friday/shared";
 import { eq } from "drizzle-orm";
 
@@ -36,9 +29,7 @@ beforeAll(async () => {
   handle = await createTestDb({ label: "cancel_fastpath" });
   const { startServer } = await import("./server.js");
   server = startServer({ port: 0 });
-  await new Promise<void>((resolve) =>
-    server.once("listening", () => resolve()),
-  );
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("no port assigned");
   port = addr.port;
@@ -57,10 +48,7 @@ function url(): string {
   return `http://127.0.0.1:${port}/api/internal/cancel-queued`;
 }
 
-async function insertQueuedBlock(
-  blockId: string,
-  text: string,
-): Promise<void> {
+async function insertQueuedBlock(blockId: string, text: string): Promise<void> {
   const db = getDb();
   await db.insert(schema.blocks).values({
     blockId,

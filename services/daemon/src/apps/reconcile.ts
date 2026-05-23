@@ -28,10 +28,7 @@ export async function reconcileAppsOnBoot(): Promise<void> {
     seenFolders.add(row.folderPath);
     if (!existsSync(row.folderPath)) {
       if (row.status !== "orphaned") {
-        await db
-          .update(schema.apps)
-          .set({ status: "orphaned" })
-          .where(eq(schema.apps.id, row.id));
+        await db.update(schema.apps).set({ status: "orphaned" }).where(eq(schema.apps.id, row.id));
         eventBus.publish({
           v: 1,
           type: "app_lifecycle",
@@ -59,7 +56,7 @@ export async function reconcileAppsOnBoot(): Promise<void> {
   // unique folder; never auto-install.
   const root = appsDir();
   if (!existsSync(root)) return;
-  let entries: string[] = [];
+  let entries: string[];
   try {
     entries = readdirSync(root);
   } catch {

@@ -27,17 +27,17 @@ when validating substantial daemon changes that touch the spawn chain.
 
 ## Flow
 
-| # | Actor      | Step                                                                         |
-| - | ---------- | ---------------------------------------------------------------------------- |
-| 1 | Playwright | Navigate dashboard, find orchestrator chat input.                            |
-| 2 | Playwright | Type spawn prompt (see below). Submit.                                       |
-| 3 | Wait       | Up to 90s for `agent_create` MCP tool call + builder spawn.                  |
-| 4 | Bash       | Assertions A: worktree created, marker file, profile file, branch.          |
-| 5 | Wait       | Builder runs `ls docs/`, mails orchestrator. Orchestrator surfaces.         |
-| 6 | Bash       | Assertions D: parent repo `git status --porcelain` matches baseline.         |
-| 7 | Playwright | Type "wrap up". Orchestrator proposes `agent_archive` and waits for consent. |
-| 8 | Playwright | Type "yes — archive it". Orchestrator calls `agent_archive`.                 |
-| 9 | Bash       | Assertions F: worktree gone, branch deleted (PF-2), profile cleaned.        |
+| #   | Actor      | Step                                                                         |
+| --- | ---------- | ---------------------------------------------------------------------------- |
+| 1   | Playwright | Navigate dashboard, find orchestrator chat input.                            |
+| 2   | Playwright | Type spawn prompt (see below). Submit.                                       |
+| 3   | Wait       | Up to 90s for `agent_create` MCP tool call + builder spawn.                  |
+| 4   | Bash       | Assertions A: worktree created, marker file, profile file, branch.           |
+| 5   | Wait       | Builder runs `ls docs/`, mails orchestrator. Orchestrator surfaces.          |
+| 6   | Bash       | Assertions D: parent repo `git status --porcelain` matches baseline.         |
+| 7   | Playwright | Type "wrap up". Orchestrator proposes `agent_archive` and waits for consent. |
+| 8   | Playwright | Type "yes — archive it". Orchestrator calls `agent_archive`.                 |
+| 9   | Bash       | Assertions F: worktree gone, branch deleted (PF-2), profile cleaned.         |
 
 ## Spawn prompt
 
@@ -66,12 +66,14 @@ test -f ~/.friday/profiles/friday-e2e-probe.sb               # SBPL profile
 ### D — Parent repo unaffected
 
 Capture baseline before step 1:
+
 ```bash
 BASELINE=$(git -C /Users/seth/Development/Seth/Friday/agent-friday \
   status --porcelain | wc -l)
 ```
 
 After step 6:
+
 ```bash
 AFTER=$(git -C /Users/seth/Development/Seth/Friday/agent-friday \
   status --porcelain | wc -l)
@@ -113,7 +115,7 @@ pgrep -af friday-e2e-probe; test $? -ne 0                    # no orphans
    that finished archiving vanished from the sidebar entirely. Now archived
    rows persist; toggle "Show archived" to surface them.
 
-## What the run *doesn't* verify
+## What the run _doesn't_ verify
 
 - The SBPL profile actually denies writes to `~/.ssh` etc. — covered by
   `sandbox-profile-kernel.test.ts` (vitest, real `sandbox-exec`).
@@ -121,7 +123,7 @@ pgrep -af friday-e2e-probe; test $? -ne 0                    # no orphans
   `lifecycle-pgrp.test.ts`.
 - `disaster-patterns.ts` rule coverage — covered by the 76-case vitest
   table in `disaster-patterns.test.ts`.
-- The Builder's worker actually runs *under* the sandbox-exec wrap. The
+- The Builder's worker actually runs _under_ the sandbox-exec wrap. The
   spawn argv is the right shape (verified by the profile file existing
   while the worker is alive), but proving the kernel sandbox is applied
   to that specific PID requires `sandbox_check` syscall inspection that

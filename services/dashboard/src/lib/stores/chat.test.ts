@@ -22,9 +22,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // `fetchWithTimeout` is the network boundary the chat store uses. Mock
 // it at module level so every import gets the stubbed version. We swap
 // the implementation per-test via `mockFetchWithTimeout`.
-const mockFetchWithTimeout = vi.fn<
-  (url: string, opts?: { timeoutMs?: number }) => Promise<Response>
->();
+const mockFetchWithTimeout =
+  vi.fn<(url: string, opts?: { timeoutMs?: number }) => Promise<Response>>();
 vi.mock("$lib/util/fetch-with-timeout", () => ({
   fetchWithTimeout: mockFetchWithTimeout,
 }));
@@ -57,9 +56,7 @@ function attachSession(
   agent: string,
   sessionId: string,
 ): void {
-  chat.agents = [
-    { name: agent, type: "orchestrator", status: "idle", sessionId },
-  ];
+  chat.agents = [{ name: agent, type: "orchestrator", status: "idle", sessionId }];
 }
 
 // `sendQueue` is a singleton with internal $state. We stub the methods
@@ -124,9 +121,7 @@ describe("loadAgentTurns", () => {
     // test. Before the WS-1 cleanup the chat store called /turns; the
     // daemon stopped writing to that table and every reload returned
     // empty. The endpoint the dashboard hits MUST be /blocks.
-    mockFetchWithTimeout.mockResolvedValue(
-      makeResponse({ blocks: [], lastEventSeq: 0 }),
-    );
+    mockFetchWithTimeout.mockResolvedValue(makeResponse({ blocks: [], lastEventSeq: 0 }));
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
@@ -134,16 +129,11 @@ describe("loadAgentTurns", () => {
     expect(mockFetchWithTimeout).toHaveBeenCalled();
     const calledUrls = mockFetchWithTimeout.mock.calls.map((c) => c[0]);
     const blocksCall = calledUrls.find((u) => u.includes("/blocks"));
-    expect(
-      blocksCall,
-      `expected a /blocks call; saw: ${calledUrls.join(", ")}`,
-    ).toBeDefined();
+    expect(blocksCall, `expected a /blocks call; saw: ${calledUrls.join(", ")}`).toBeDefined();
     expect(blocksCall).toMatch(/\/api\/agents\/friday\/blocks/);
     // Must NOT regress to /turns — that endpoint reads from a table
     // the daemon doesn't write to post-WS-1.
-    const turnsCall = calledUrls.find((u) =>
-      /\/api\/agents\/[^/]+\/turns(?:\?|$)/.test(u),
-    );
+    const turnsCall = calledUrls.find((u) => /\/api\/agents\/[^/]+\/turns(?:\?|$)/.test(u));
     expect(turnsCall, "regression: chat store is calling /turns").toBeUndefined();
   });
 
@@ -151,9 +141,54 @@ describe("loadAgentTurns", () => {
     mockFetchWithTimeout.mockResolvedValue(
       makeResponse({
         blocks: [
-          { id: "3", blockId: "blk-c", turnId: "t-c", role: "assistant", kind: "text", contentJson: '{"text":"c"}', status: "complete", ts: 300, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 3 },
-          { id: "1", blockId: "blk-a", turnId: "t-a", role: "user", kind: "text", contentJson: '{"text":"a"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
-          { id: "2", blockId: "blk-b", turnId: "t-b", role: "assistant", kind: "text", contentJson: '{"text":"b"}', status: "complete", ts: 200, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 2 },
+          {
+            id: "3",
+            blockId: "blk-c",
+            turnId: "t-c",
+            role: "assistant",
+            kind: "text",
+            contentJson: '{"text":"c"}',
+            status: "complete",
+            ts: 300,
+            agentName: "friday",
+            sessionId: "s",
+            messageId: null,
+            blockIndex: 0,
+            source: null,
+            lastEventSeq: 3,
+          },
+          {
+            id: "1",
+            blockId: "blk-a",
+            turnId: "t-a",
+            role: "user",
+            kind: "text",
+            contentJson: '{"text":"a"}',
+            status: "complete",
+            ts: 100,
+            agentName: "friday",
+            sessionId: "s",
+            messageId: null,
+            blockIndex: 0,
+            source: null,
+            lastEventSeq: 1,
+          },
+          {
+            id: "2",
+            blockId: "blk-b",
+            turnId: "t-b",
+            role: "assistant",
+            kind: "text",
+            contentJson: '{"text":"b"}',
+            status: "complete",
+            ts: 200,
+            agentName: "friday",
+            sessionId: "s",
+            messageId: null,
+            blockIndex: 0,
+            source: null,
+            lastEventSeq: 2,
+          },
         ],
         lastEventSeq: 3,
       }),
@@ -186,7 +221,22 @@ describe("loadAgentTurns", () => {
     mockFetchWithTimeout.mockResolvedValue(
       makeResponse({
         blocks: [
-          { id: "1", blockId: "blk-1", turnId: "t-1", role: "user", kind: "text", contentJson: '{"text":"old"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+          {
+            id: "1",
+            blockId: "blk-1",
+            turnId: "t-1",
+            role: "user",
+            kind: "text",
+            contentJson: '{"text":"old"}',
+            status: "complete",
+            ts: 100,
+            agentName: "friday",
+            sessionId: "s",
+            messageId: null,
+            blockIndex: 0,
+            source: null,
+            lastEventSeq: 1,
+          },
         ],
         lastEventSeq: 1,
       }),
@@ -196,10 +246,7 @@ describe("loadAgentTurns", () => {
     chat.focusedAgent = "friday";
     await chat.loadAgentTurns("friday");
     const queueSynth = chat.messages.find((m) => m.queueId === "q_abc");
-    expect(
-      queueSynth,
-      "queue-synth bubble must survive the live-fetch overwrite",
-    ).toBeDefined();
+    expect(queueSynth, "queue-synth bubble must survive the live-fetch overwrite").toBeDefined();
     expect(queueSynth?.text).toBe("queued draft");
   });
 });
@@ -211,7 +258,22 @@ describe("loadOlderTurns", () => {
         // Initial load
         makeResponse({
           blocks: [
-            { id: "5", blockId: "blk-5", turnId: "t-5", role: "user", kind: "text", contentJson: '{"text":"recent"}', status: "complete", ts: 500, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 5 },
+            {
+              id: "5",
+              blockId: "blk-5",
+              turnId: "t-5",
+              role: "user",
+              kind: "text",
+              contentJson: '{"text":"recent"}',
+              status: "complete",
+              ts: 500,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              source: null,
+              lastEventSeq: 5,
+            },
           ],
           lastEventSeq: 5,
         }),
@@ -230,9 +292,7 @@ describe("loadOlderTurns", () => {
     await chat.loadAgentTurns("friday");
     expect(chat.oldestBlockId).toBe("blk-5");
     await chat.loadOlderTurns();
-    const olderCall = mockFetchWithTimeout.mock.calls.find((c) =>
-      c[0].includes("before="),
-    );
+    const olderCall = mockFetchWithTimeout.mock.calls.find((c) => c[0].includes("before="));
     expect(olderCall, "loadOlderTurns must use a `before=` cursor").toBeDefined();
     expect(olderCall![0]).toMatch(/before=blk-5/);
   });
@@ -242,7 +302,22 @@ describe("loadOlderTurns", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: "1", blockId: "blk-1", turnId: "t-1", role: "user", kind: "text", contentJson: '{"text":"a"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+            {
+              id: "1",
+              blockId: "blk-1",
+              turnId: "t-1",
+              role: "user",
+              kind: "text",
+              contentJson: '{"text":"a"}',
+              status: "complete",
+              ts: 100,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              source: null,
+              lastEventSeq: 1,
+            },
           ],
           lastEventSeq: 1,
         }),
@@ -326,7 +401,22 @@ describe("reload-mid-turn replay → SSE resumption", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: "1", blockId: "blk-asst-live", turnId: "turn-live", role: "assistant", kind: "text", contentJson: '{"text":"partial "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+            {
+              id: "1",
+              blockId: "blk-asst-live",
+              turnId: "turn-live",
+              role: "assistant",
+              kind: "text",
+              contentJson: '{"text":"partial "}',
+              status: "streaming",
+              ts: 100,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              source: null,
+              lastEventSeq: 1,
+            },
           ],
           lastEventSeq: 1,
         }),
@@ -372,7 +462,22 @@ describe("reload-mid-turn replay → SSE resumption", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: "1", blockId: "blk-1", turnId: "t-1", role: "assistant", kind: "text", contentJson: '{"text":"partial "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 42 },
+            {
+              id: "1",
+              blockId: "blk-1",
+              turnId: "t-1",
+              role: "assistant",
+              kind: "text",
+              contentJson: '{"text":"partial "}',
+              status: "streaming",
+              ts: 100,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              source: null,
+              lastEventSeq: 42,
+            },
           ],
           lastEventSeq: 42,
         }),
@@ -397,9 +502,7 @@ describe("reload-mid-turn replay → SSE resumption", () => {
       seq: 30,
       ts: 110,
     } as Parameters<typeof chat.applyEvent>[0]);
-    expect(chat.messages[0]?.text, "replayed delta must not append").toBe(
-      "partial ",
-    );
+    expect(chat.messages[0]?.text, "replayed delta must not append").toBe("partial ");
 
     // A live delta at seq=50 (newer than cursor) applies normally.
     chat.applyEvent({
@@ -420,7 +523,22 @@ describe("reload-mid-turn replay → SSE resumption", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: "1", blockId: "blk-think-live", turnId: "turn-think", role: "assistant", kind: "thinking", contentJson: '{"text":"thought so far "}', status: "streaming", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+            {
+              id: "1",
+              blockId: "blk-think-live",
+              turnId: "turn-think",
+              role: "assistant",
+              kind: "thinking",
+              contentJson: '{"text":"thought so far "}',
+              status: "streaming",
+              ts: 100,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              source: null,
+              lastEventSeq: 1,
+            },
           ],
           lastEventSeq: 1,
         }),
@@ -455,8 +573,38 @@ describe("inflight-state probe on reload", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: "1", blockId: "blk-user", turnId: "turn-flying", role: "user", kind: "text", contentJson: '{"text":"go"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
-            { id: "2", blockId: "blk-asst", turnId: "turn-flying", role: "assistant", kind: "text", contentJson: '{"text":"work"}', status: "streaming", ts: 110, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 1, source: null, lastEventSeq: 2 },
+            {
+              id: "1",
+              blockId: "blk-user",
+              turnId: "turn-flying",
+              role: "user",
+              kind: "text",
+              contentJson: '{"text":"go"}',
+              status: "complete",
+              ts: 100,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              source: null,
+              lastEventSeq: 1,
+            },
+            {
+              id: "2",
+              blockId: "blk-asst",
+              turnId: "turn-flying",
+              role: "assistant",
+              kind: "text",
+              contentJson: '{"text":"work"}',
+              status: "streaming",
+              ts: 110,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 1,
+              source: null,
+              lastEventSeq: 2,
+            },
           ],
           lastEventSeq: 2,
         }),
@@ -474,7 +622,22 @@ describe("inflight-state probe on reload", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: "1", blockId: "blk-done", turnId: "turn-old", role: "assistant", kind: "text", contentJson: '{"text":"prev"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: null, lastEventSeq: 1 },
+            {
+              id: "1",
+              blockId: "blk-done",
+              turnId: "turn-old",
+              role: "assistant",
+              kind: "text",
+              contentJson: '{"text":"prev"}',
+              status: "complete",
+              ts: 100,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              source: null,
+              lastEventSeq: 1,
+            },
           ],
           lastEventSeq: 1,
         }),
@@ -498,7 +661,22 @@ describe("inflight-state probe on reload", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: "1", blockId: "blk-mail", turnId: "mail_77", role: "user", kind: "text", contentJson: '{"text":"hi from another agent"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "mail", lastEventSeq: 1 },
+            {
+              id: "1",
+              blockId: "blk-mail",
+              turnId: "mail_77",
+              role: "user",
+              kind: "text",
+              contentJson: '{"text":"hi from another agent"}',
+              status: "complete",
+              ts: 100,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              source: "mail",
+              lastEventSeq: 1,
+            },
           ],
           lastEventSeq: 1,
         }),
@@ -520,8 +698,38 @@ describe("inflight-state probe on reload", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: "1", blockId: "blk-mail", turnId: "mail_77", role: "user", kind: "text", contentJson: '{"text":"hi"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "mail", lastEventSeq: 1 },
-            { id: "2", blockId: "blk-asst", turnId: "t_response_77", role: "assistant", kind: "text", contentJson: '{"text":"thinking..."}', status: "streaming", ts: 110, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 1, source: null, lastEventSeq: 2 },
+            {
+              id: "1",
+              blockId: "blk-mail",
+              turnId: "mail_77",
+              role: "user",
+              kind: "text",
+              contentJson: '{"text":"hi"}',
+              status: "complete",
+              ts: 100,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              source: "mail",
+              lastEventSeq: 1,
+            },
+            {
+              id: "2",
+              blockId: "blk-asst",
+              turnId: "t_response_77",
+              role: "assistant",
+              kind: "text",
+              contentJson: '{"text":"thinking..."}',
+              status: "streaming",
+              ts: 110,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 1,
+              source: null,
+              lastEventSeq: 2,
+            },
           ],
           lastEventSeq: 2,
         }),
@@ -544,7 +752,22 @@ describe("inflight-state probe on reload", () => {
       .mockResolvedValueOnce(
         makeResponse({
           blocks: [
-            { id: "1", blockId: "blk-user", turnId: "t_chat_88", role: "user", kind: "text", contentJson: '{"text":"go"}', status: "complete", ts: 100, agentName: "friday", sessionId: "s", messageId: null, blockIndex: 0, source: "user_chat", lastEventSeq: 1 },
+            {
+              id: "1",
+              blockId: "blk-user",
+              turnId: "t_chat_88",
+              role: "user",
+              kind: "text",
+              contentJson: '{"text":"go"}',
+              status: "complete",
+              ts: 100,
+              agentName: "friday",
+              sessionId: "s",
+              messageId: null,
+              blockIndex: 0,
+              source: "user_chat",
+              lastEventSeq: 1,
+            },
           ],
           lastEventSeq: 1,
         }),
@@ -571,19 +794,21 @@ describe("jumpTo (/jump <date|term>)", () => {
     vi.unstubAllGlobals();
   });
 
-  function makeBlock(overrides: Partial<{
-    // Phase 4.11 flipped `blocks.id` from bigserial to text(UUID).
-    // Tests still pass numeric-shaped strings ("10", "11", …) so the
-    // legacy fixtures keep working; accept either and coerce.
-    id: string | number;
-    blockId: string;
-    turnId: string;
-    role: "user" | "assistant";
-    kind: "text" | "thinking" | "tool_use" | "tool_result";
-    text: string;
-    ts: number;
-    status: string;
-  }> = {}) {
+  function makeBlock(
+    overrides: Partial<{
+      // Phase 4.11 flipped `blocks.id` from bigserial to text(UUID).
+      // Tests still pass numeric-shaped strings ("10", "11", …) so the
+      // legacy fixtures keep working; accept either and coerce.
+      id: string | number;
+      blockId: string;
+      turnId: string;
+      role: "user" | "assistant";
+      kind: "text" | "thinking" | "tool_use" | "tool_result";
+      text: string;
+      ts: number;
+      status: string;
+    }> = {},
+  ) {
     const rawId = overrides.id ?? 1;
     const id = String(rawId);
     const idNum = typeof rawId === "number" ? rawId : Number(rawId);
@@ -613,7 +838,14 @@ describe("jumpTo (/jump <date|term>)", () => {
     mockFetch.mockResolvedValueOnce(
       makeResponse({
         blocks: [
-          makeBlock({ id: "10", blockId: "blk-jump", turnId: "t-jump", role: "user", text: "found me", ts: 5000 }),
+          makeBlock({
+            id: "10",
+            blockId: "blk-jump",
+            turnId: "t-jump",
+            role: "user",
+            text: "found me",
+            ts: 5000,
+          }),
         ],
       }),
     );
@@ -623,7 +855,14 @@ describe("jumpTo (/jump <date|term>)", () => {
     // Pre-existing chat history that /jump must NOT clobber.
     chat.messages = [
       { id: "user_t-pre", role: "user", text: "earlier", status: "complete", ts: 1000 },
-      { id: "b_blk-pre", role: "assistant", text: "earlier reply", status: "complete", ts: 1100, turnId: "t-pre" },
+      {
+        id: "b_blk-pre",
+        role: "assistant",
+        text: "earlier reply",
+        status: "complete",
+        ts: 1100,
+        turnId: "t-pre",
+      },
     ];
     await chat.jumpTo("friday", "found");
     const ids = chat.messages.map((m) => m.id);
@@ -647,11 +886,35 @@ describe("jumpTo (/jump <date|term>)", () => {
       makeResponse({
         blocks: [
           // Two yesterday blocks (before midnight).
-          makeBlock({ id: "1", blockId: "blk-y1", turnId: "t-y1", role: "user", ts: todayMidnight - 7_200_000 }),
-          makeBlock({ id: "2", blockId: "blk-y2", turnId: "t-y1", role: "assistant", ts: todayMidnight - 7_100_000 }),
+          makeBlock({
+            id: "1",
+            blockId: "blk-y1",
+            turnId: "t-y1",
+            role: "user",
+            ts: todayMidnight - 7_200_000,
+          }),
+          makeBlock({
+            id: "2",
+            blockId: "blk-y2",
+            turnId: "t-y1",
+            role: "assistant",
+            ts: todayMidnight - 7_100_000,
+          }),
           // Today's earliest block — the scroll target.
-          makeBlock({ id: "3", blockId: "blk-t1", turnId: "t-t1", role: "user", ts: todayMidnight + 1_000 }),
-          makeBlock({ id: "4", blockId: "blk-t2", turnId: "t-t1", role: "assistant", ts: todayMidnight + 2_000 }),
+          makeBlock({
+            id: "3",
+            blockId: "blk-t1",
+            turnId: "t-t1",
+            role: "user",
+            ts: todayMidnight + 1_000,
+          }),
+          makeBlock({
+            id: "4",
+            blockId: "blk-t2",
+            turnId: "t-t1",
+            role: "assistant",
+            ts: todayMidnight + 2_000,
+          }),
         ],
       }),
     );
@@ -688,9 +951,23 @@ describe("jumpTo (/jump <date|term>)", () => {
       makeResponse({
         blocks: [
           // Top-ranked: id=42 (later by id, but ranked first by FTS).
-          makeBlock({ id: "42", blockId: "blk-best", turnId: "t-best", role: "assistant", text: "the unique token here", ts: 500 }),
+          makeBlock({
+            id: "42",
+            blockId: "blk-best",
+            turnId: "t-best",
+            role: "assistant",
+            text: "the unique token here",
+            ts: 500,
+          }),
           // Lower-ranked: id=10 (earlier by id).
-          makeBlock({ id: "10", blockId: "blk-meh", turnId: "t-meh", role: "user", text: "vaguely the token", ts: 100 }),
+          makeBlock({
+            id: "10",
+            blockId: "blk-meh",
+            turnId: "t-meh",
+            role: "user",
+            text: "vaguely the token",
+            ts: 100,
+          }),
         ],
       }),
     );
@@ -739,9 +1016,7 @@ describe("jumpTo (/jump <date|term>)", () => {
     const chat = new ChatState();
     chat.focusedAgent = "friday";
     // Seed existing messages so we can prove merge didn't run.
-    chat.messages = [
-      { id: "user_t-pre", role: "user", text: "before", status: "complete", ts: 1 },
-    ];
+    chat.messages = [{ id: "user_t-pre", role: "user", text: "before", status: "complete", ts: 1 }];
     await chat.jumpTo("friday", "zzzznomatch");
     expect(chat.toast?.message).toBe("No matches.");
     expect(chat.scrollTarget).toBeNull();
@@ -800,14 +1075,19 @@ describe("jumpTo (/jump <date|term>)", () => {
   });
 
   it("fetch failure: warn toast, messages untouched", async () => {
-    mockFetch.mockResolvedValueOnce(
-      new Response("oh no", { status: 500 }),
-    );
+    mockFetch.mockResolvedValueOnce(new Response("oh no", { status: 500 }));
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
     chat.messages = [
-      { id: "b_blk-pre", role: "assistant", text: "existing", status: "complete", ts: 1, turnId: "t-pre" },
+      {
+        id: "b_blk-pre",
+        role: "assistant",
+        text: "existing",
+        status: "complete",
+        ts: 1,
+        turnId: "t-pre",
+      },
     ];
     await chat.jumpTo("friday", "anything");
     expect(chat.toast?.level).toBe("warn");
@@ -832,9 +1112,31 @@ describe("jumpTo (/jump <date|term>)", () => {
     const todayMidnight = parseJumpDate("today") as number;
     expect(todayMidnight).toBeGreaterThan(0);
     chat.messages = [
-      { id: "user_t-old", role: "user", text: "yesterday", status: "complete", ts: todayMidnight - 3_600_000, turnId: "t-old" },
-      { id: "user_t-target", role: "user", text: "today early", status: "complete", ts: todayMidnight + 1_000, turnId: "t-target" },
-      { id: "b_blk-after", role: "assistant", text: "reply", status: "complete", ts: todayMidnight + 5_000, turnId: "t-target", blockId: "blk-after" },
+      {
+        id: "user_t-old",
+        role: "user",
+        text: "yesterday",
+        status: "complete",
+        ts: todayMidnight - 3_600_000,
+        turnId: "t-old",
+      },
+      {
+        id: "user_t-target",
+        role: "user",
+        text: "today early",
+        status: "complete",
+        ts: todayMidnight + 1_000,
+        turnId: "t-target",
+      },
+      {
+        id: "b_blk-after",
+        role: "assistant",
+        text: "reply",
+        status: "complete",
+        ts: todayMidnight + 5_000,
+        turnId: "t-target",
+        blockId: "blk-after",
+      },
     ];
 
     await chat.jumpTo("friday", "today");
@@ -863,9 +1165,31 @@ describe("jumpTo (/jump <date|term>)", () => {
     const chat = new ChatState();
     chat.focusedAgent = "friday";
     chat.messages = [
-      { id: "user_t-1", role: "user", text: "hello world", status: "complete", ts: 1_000, turnId: "t-1" },
-      { id: "user_t-2", role: "user", text: "Find this UNIQUEPHRASE somewhere", status: "complete", ts: 2_000, turnId: "t-2" },
-      { id: "b_blk-3", role: "assistant", text: "no match here", status: "complete", ts: 3_000, turnId: "t-2", blockId: "blk-3" },
+      {
+        id: "user_t-1",
+        role: "user",
+        text: "hello world",
+        status: "complete",
+        ts: 1_000,
+        turnId: "t-1",
+      },
+      {
+        id: "user_t-2",
+        role: "user",
+        text: "Find this UNIQUEPHRASE somewhere",
+        status: "complete",
+        ts: 2_000,
+        turnId: "t-2",
+      },
+      {
+        id: "b_blk-3",
+        role: "assistant",
+        text: "no match here",
+        status: "complete",
+        ts: 3_000,
+        turnId: "t-2",
+        blockId: "blk-3",
+      },
     ];
 
     await chat.jumpTo("friday", "uniquephrase");
@@ -882,8 +1206,22 @@ describe("jumpTo (/jump <date|term>)", () => {
     const chat = new ChatState();
     chat.focusedAgent = "friday";
     chat.messages = [
-      { id: "user_t-old", role: "user", text: "needle in older turn", status: "complete", ts: 1_000, turnId: "t-old" },
-      { id: "user_t-new", role: "user", text: "needle in newer turn", status: "complete", ts: 5_000, turnId: "t-new" },
+      {
+        id: "user_t-old",
+        role: "user",
+        text: "needle in older turn",
+        status: "complete",
+        ts: 1_000,
+        turnId: "t-old",
+      },
+      {
+        id: "user_t-new",
+        role: "user",
+        text: "needle in newer turn",
+        status: "complete",
+        ts: 5_000,
+        turnId: "t-new",
+      },
     ];
 
     await chat.jumpTo("friday", "needle");
@@ -911,8 +1249,22 @@ describe("jumpTo (/jump <date|term>)", () => {
     mockFetch.mockResolvedValueOnce(
       makeResponse({
         blocks: [
-          makeBlock({ id: "1", blockId: "blk-old", turnId: "t-old", role: "user", text: "ancient before", ts: targetMidnight - 60_000 }),
-          makeBlock({ id: "2", blockId: "blk-old-after", turnId: "t-old-2", role: "user", text: "ancient after", ts: targetMidnight + 60_000 }),
+          makeBlock({
+            id: "1",
+            blockId: "blk-old",
+            turnId: "t-old",
+            role: "user",
+            text: "ancient before",
+            ts: targetMidnight - 60_000,
+          }),
+          makeBlock({
+            id: "2",
+            blockId: "blk-old-after",
+            turnId: "t-old-2",
+            role: "user",
+            text: "ancient after",
+            ts: targetMidnight + 60_000,
+          }),
         ],
       }),
     );
@@ -929,7 +1281,14 @@ describe("jumpTo (/jump <date|term>)", () => {
     mockFetch.mockResolvedValueOnce(
       makeResponse({
         blocks: [
-          makeBlock({ id: "1", blockId: "blk-r", turnId: "t-r", role: "user", text: "found via fts", ts: 100 }),
+          makeBlock({
+            id: "1",
+            blockId: "blk-r",
+            turnId: "t-r",
+            role: "user",
+            text: "found via fts",
+            ts: 100,
+          }),
         ],
       }),
     );
@@ -937,7 +1296,14 @@ describe("jumpTo (/jump <date|term>)", () => {
     const chat = new ChatState();
     chat.focusedAgent = "friday";
     chat.messages = [
-      { id: "user_t-x", role: "user", text: "nothing relevant here", status: "complete", ts: 1, turnId: "t-x" },
+      {
+        id: "user_t-x",
+        role: "user",
+        text: "nothing relevant here",
+        status: "complete",
+        ts: 1,
+        turnId: "t-x",
+      },
     ];
 
     await chat.jumpTo("friday", "xyznotinlocal");
@@ -952,12 +1318,30 @@ describe("jumpTo (/jump <date|term>)", () => {
     mockFetch
       .mockResolvedValueOnce(
         makeResponse({
-          blocks: [makeBlock({ id: "1", blockId: "blk-x", turnId: "t-x", role: "user", text: "same", ts: 100 })],
+          blocks: [
+            makeBlock({
+              id: "1",
+              blockId: "blk-x",
+              turnId: "t-x",
+              role: "user",
+              text: "same",
+              ts: 100,
+            }),
+          ],
         }),
       )
       .mockResolvedValueOnce(
         makeResponse({
-          blocks: [makeBlock({ id: "1", blockId: "blk-x", turnId: "t-x", role: "user", text: "same", ts: 100 })],
+          blocks: [
+            makeBlock({
+              id: "1",
+              blockId: "blk-x",
+              turnId: "t-x",
+              role: "user",
+              text: "same",
+              ts: 100,
+            }),
+          ],
         }),
       );
     const { ChatState } = await import("./chat.svelte");
@@ -1033,8 +1417,7 @@ describe("mail block rendering", () => {
       kind: "text",
       role: "user",
       source: "mail",
-      content_json:
-        '{"text":"Page title: Example Domain","from_agent":"builtin-browser-1"}',
+      content_json: '{"text":"Page title: Example Domain","from_agent":"builtin-browser-1"}',
       status: "complete",
       ts: 1000,
       seq: 5,
@@ -1064,8 +1447,7 @@ describe("mail block rendering", () => {
               role: "user",
               kind: "text",
               source: "mail",
-              contentJson:
-                '{"text":"reload body","from_agent":"scope-sanity-2"}',
+              contentJson: '{"text":"reload body","from_agent":"scope-sanity-2"}',
               status: "complete",
               ts: 100,
               lastEventSeq: 1,
@@ -1079,9 +1461,7 @@ describe("mail block rendering", () => {
     const chat = new ChatState();
     chat.focusedAgent = "friday";
     await chat.loadAgentTurns("friday");
-    const mail = chat.messages.find(
-      (x) => x.id === userBlockIdForTurn("mail_99"),
-    );
+    const mail = chat.messages.find((x) => x.id === userBlockIdForTurn("mail_99"));
     expect(mail, "mail block must be present after reload").toBeDefined();
     expect(mail?.source).toBe("mail");
     expect(mail?.fromAgent).toBe("scope-sanity-2");
@@ -1093,9 +1473,7 @@ describe("mail block rendering", () => {
     // `content_json.attachments`. Reload reads the row back via
     // /api/agents/:name/blocks; the user-bubble must regain its chip
     // row or the image vanishes from the chat after a page refresh.
-    const atts = [
-      { sha256: "a".repeat(64), filename: "shot.png", mime: "image/png" },
-    ];
+    const atts = [{ sha256: "a".repeat(64), filename: "shot.png", mime: "image/png" }];
     mockFetchWithTimeout
       .mockResolvedValueOnce(
         makeResponse({
@@ -1128,9 +1506,7 @@ describe("mail block rendering", () => {
     const chat = new ChatState();
     chat.focusedAgent = "friday";
     await chat.loadAgentTurns("friday");
-    const m = chat.messages.find(
-      (x) => x.id === userBlockIdForTurn("turn_paste_1"),
-    );
+    const m = chat.messages.find((x) => x.id === userBlockIdForTurn("turn_paste_1"));
     expect(m, "user block must be present after reload").toBeDefined();
     expect(m?.text).toBe("look at this");
     expect(m?.attachments).toEqual(atts);
@@ -1165,9 +1541,7 @@ describe("mail block rendering", () => {
       ts: 1700000000050,
       seq: 9,
     } as Parameters<typeof chat.applyEvent>[0]);
-    const m = chat.messages.find(
-      (x) => x.id === userBlockIdForTurn("mail_77"),
-    );
+    const m = chat.messages.find((x) => x.id === userBlockIdForTurn("mail_77"));
     expect(m, "mail block must be present").toBeDefined();
     expect(m?.mailMeta).toEqual({
       id: 77,
@@ -1199,9 +1573,7 @@ describe("mail block rendering", () => {
       ts: 1000,
       seq: 1,
     } as Parameters<typeof chat.applyEvent>[0]);
-    const m = chat.messages.find(
-      (x) => x.id === userBlockIdForTurn("mail_old"),
-    );
+    const m = chat.messages.find((x) => x.id === userBlockIdForTurn("mail_old"));
     expect(m?.source).toBe("mail");
     expect(m?.fromAgent).toBe("old-agent");
     expect(m?.mailMeta).toBeUndefined();
@@ -1227,9 +1599,7 @@ describe("mail block rendering", () => {
       ts: 200,
       seq: 1,
     } as Parameters<typeof chat.applyEvent>[0]);
-    const uc = chat.messages.find(
-      (x) => x.id === userBlockIdForTurn("turn-uc-1"),
-    );
+    const uc = chat.messages.find((x) => x.id === userBlockIdForTurn("turn-uc-1"));
     expect(uc, "user_chat block should be present").toBeDefined();
     expect(uc?.source).toBe("user_chat");
     expect(uc?.fromAgent).toBeUndefined();
@@ -1379,9 +1749,7 @@ describe("mail block rendering", () => {
     chat.focusedAgent = "friday";
     await chat.loadAgentTurns("friday");
     // Pull thinking + tool entries in render order.
-    const renderable = chat.messages.filter(
-      (m) => m.role === "thinking" || m.role === "tool",
-    );
+    const renderable = chat.messages.filter((m) => m.role === "thinking" || m.role === "tool");
     const rendered = renderable.map((m) => ({
       role: m.role,
       blockId: m.blockId,
@@ -1489,9 +1857,7 @@ describe("unread badge gating (PR C)", () => {
     // corpse.
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
-    chat.agents = [
-      { name: "ghost-builder", type: "builder", status: "archived" },
-    ];
+    chat.agents = [{ name: "ghost-builder", type: "builder", status: "archived" }];
     // Phase 5b retired `agent_status` from WireEvent; cast through
     // `unknown` to feed the retired shape into applyEvent. The whole
     // point of this test is to assert that applyEvent ignores it.
@@ -1503,17 +1869,13 @@ describe("unread badge gating (PR C)", () => {
       since: 1,
       seq: 1,
     } as unknown as Parameters<typeof chat.applyEvent>[0]);
-    expect(
-      chat.agents.find((a) => a.name === "ghost-builder")?.status,
-    ).toBe("archived");
+    expect(chat.agents.find((a) => a.name === "ghost-builder")?.status).toBe("archived");
   });
 
   it("PR D: stale agent_lifecycle:complete for an archived agent does NOT flip to idle", async () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
-    chat.agents = [
-      { name: "ghost-builder", type: "builder", status: "archived" },
-    ];
+    chat.agents = [{ name: "ghost-builder", type: "builder", status: "archived" }];
     // Phase 5b retired `agent_lifecycle` from WireEvent; cast through
     // `unknown` to feed the retired shape into applyEvent.
     chat.applyEvent({
@@ -1524,9 +1886,7 @@ describe("unread badge gating (PR C)", () => {
       event: "complete",
       seq: 2,
     } as unknown as Parameters<typeof chat.applyEvent>[0]);
-    expect(
-      chat.agents.find((a) => a.name === "ghost-builder")?.status,
-    ).toBe("archived");
+    expect(chat.agents.find((a) => a.name === "ghost-builder")?.status).toBe("archived");
   });
 
   it("PR D: stale turn_started for an archived focused agent does NOT set inflightTurnId", async () => {
@@ -1537,9 +1897,7 @@ describe("unread badge gating (PR C)", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "ghost-builder";
-    chat.agents = [
-      { name: "ghost-builder", type: "builder", status: "archived" },
-    ];
+    chat.agents = [{ name: "ghost-builder", type: "builder", status: "archived" }];
     chat.applyEvent({
       v: 1,
       type: "turn_started",
@@ -1879,9 +2237,7 @@ describe("unread badge gating (PR C)", () => {
     expect(out.length).toBe(1);
 
     // The grace entry exists with a deadline strictly in the future.
-    expect(chat.noResponseGraceUntil["t-end-to-end"]).toBeGreaterThan(
-      Date.now(),
-    );
+    expect(chat.noResponseGraceUntil["t-end-to-end"]).toBeGreaterThan(Date.now());
   });
 
   it("FRI-85 safety net: non-user_chat sources (mail, scratch, etc.) do NOT trigger the synth", async () => {
@@ -1991,9 +2347,7 @@ describe("unread badge gating (PR C)", () => {
     expect(incomplete).toHaveLength(1);
     expect(incomplete[0]!.id).toBe(userBlockIdForTurn("t-incomplete"));
     expect(incomplete[0]!.role).toBe("user");
-    expect(
-      incomplete.find((m) => m.id === "nr_t-incomplete"),
-    ).toBeUndefined();
+    expect(incomplete.find((m) => m.id === "nr_t-incomplete")).toBeUndefined();
 
     // Control: with zeroResultIncomplete=false (the REST path's default)
     // the existing FRI-85 safety net still fires. This is the load-bearing
@@ -2056,9 +2410,7 @@ describe("unread badge gating (PR C)", () => {
     // The bug: this affordance used to land here on every initial
     // snapshot frame and stayed visible across multi-refresh until
     // Zero finally pushed the assistant block.
-    expect(
-      chat.messages.find((m) => m.id === "nr_t-bootstrap"),
-    ).toBeUndefined();
+    expect(chat.messages.find((m) => m.id === "nr_t-bootstrap")).toBeUndefined();
   });
 
   it("FRI-91: applyZeroBlocks transitions unknown→complete; nr_<turnId> appears only once Zero confirms the user-only turn is authoritative", async () => {
@@ -2096,9 +2448,7 @@ describe("unread badge gating (PR C)", () => {
 
     chat.applyZeroBlocks([userBlockRow], "friday", "unknown");
     expect(chat.messages).toHaveLength(1);
-    expect(
-      chat.messages.find((m) => m.id === "nr_t-silent"),
-    ).toBeUndefined();
+    expect(chat.messages.find((m) => m.id === "nr_t-silent")).toBeUndefined();
 
     chat.applyZeroBlocks([userBlockRow], "friday", "complete");
     expect(chat.messages).toHaveLength(2);
@@ -2173,9 +2523,7 @@ describe("unread badge gating (PR C)", () => {
     );
 
     expect(chat.messages.find((m) => m.id === `nr_${turnId}`)).toBeUndefined();
-    expect(chat.messages.filter((m) => m.kind === "no-response")).toHaveLength(
-      0,
-    );
+    expect(chat.messages.filter((m) => m.kind === "no-response")).toHaveLength(0);
     const userBubble = chat.messages.find((m) => m.role === "user");
     expect(userBubble?.turnId).toBe(turnId);
   });
@@ -2218,12 +2566,9 @@ describe("unread badge gating (PR C)", () => {
     // the round-trip resolving.
     let resolveFlush: (() => void) | null = null;
     (sendQueue.flush as ReturnType<typeof vi.fn>).mockReturnValue(
-      new Promise<{ sent: never[]; failed: never[]; retrying: never[] }>(
-        (resolve) => {
-          resolveFlush = () =>
-            resolve({ sent: [], failed: [], retrying: [] });
-        },
-      ),
+      new Promise<{ sent: never[]; failed: never[]; retrying: never[] }>((resolve) => {
+        resolveFlush = () => resolve({ sent: [], failed: [], retrying: [] });
+      }),
     );
 
     chat.resendUserText("t-old");
@@ -2455,9 +2800,7 @@ describe("requestStop (stopping state machine)", () => {
     // we hit going forward through the array, so verify both end up
     // covered after the daemon's eventual finishTurn.
     chat.requestStop("turn-1");
-    const stoppingCount = chat.messages.filter(
-      (m) => m.status === "stopping",
-    ).length;
+    const stoppingCount = chat.messages.filter((m) => m.status === "stopping").length;
     expect(stoppingCount).toBeGreaterThanOrEqual(1);
   });
 
@@ -2476,9 +2819,7 @@ describe("requestStop (stopping state machine)", () => {
     chat.appendDelta("turn-1", "T1 partial");
     chat.requestStop("turn-1");
     expect(chat.inflightTurnId).toBe("turn-1");
-    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe(
-      "stopping",
-    );
+    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe("stopping");
 
     // T2 starts (mail bridge → recordUserBlock → daemon dispatches a
     // fresh turn). The dashboard sees turn_started for T2 first.
@@ -2503,9 +2844,7 @@ describe("requestStop (stopping state machine)", () => {
     } as Parameters<typeof chat.applyEvent>[0]);
 
     // T1's bubble flips to aborted; inflightTurnId stays on T2.
-    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe(
-      "aborted",
-    );
+    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe("aborted");
     expect(chat.inflightTurnId).toBe("turn-2");
   });
 
@@ -2533,12 +2872,8 @@ describe("requestStop (stopping state machine)", () => {
     chat.startAssistantTurn("turn-2", "friday");
     chat.requestStop("turn-2");
 
-    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe(
-      "stopping",
-    );
-    expect(chat.messages.find((m) => m.id === "turn-2")?.status).toBe(
-      "stopping",
-    );
+    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe("stopping");
+    expect(chat.messages.find((m) => m.id === "turn-2")?.status).toBe("stopping");
 
     // Both finish independently; neither should clobber the other.
     chat.applyEvent({
@@ -2549,13 +2884,9 @@ describe("requestStop (stopping state machine)", () => {
       status: "aborted",
       seq: 6,
     } as Parameters<typeof chat.applyEvent>[0]);
-    expect(chat.messages.find((m) => m.id === "turn-2")?.status).toBe(
-      "aborted",
-    );
+    expect(chat.messages.find((m) => m.id === "turn-2")?.status).toBe("aborted");
     // T1 still stopping; not affected by T2's turn_done.
-    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe(
-      "stopping",
-    );
+    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe("stopping");
     expect(chat.inflightTurnId).toBe(null); // T2 was the active one
 
     chat.applyEvent({
@@ -2566,9 +2897,7 @@ describe("requestStop (stopping state machine)", () => {
       status: "aborted",
       seq: 7,
     } as Parameters<typeof chat.applyEvent>[0]);
-    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe(
-      "aborted",
-    );
+    expect(chat.messages.find((m) => m.id === "turn-1")?.status).toBe("aborted");
   });
 });
 
@@ -2583,14 +2912,8 @@ describe("requestStop (FRI-95 end-to-end)", () => {
   // Typed loosely as { applyEvent } to avoid the import-cycle that
   // referencing ChatState here would create — tests import the class at
   // call time.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function seedUserBlock(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    chat: any,
-    turnId: string,
-    text = "hello",
-    ts = 1000,
-  ): void {
+
+  function seedUserBlock(chat: any, turnId: string, text = "hello", ts = 1000): void {
     chat.applyEvent({
       v: 1,
       type: "block_complete",
@@ -2616,9 +2939,7 @@ describe("requestStop (FRI-95 end-to-end)", () => {
     chat.appendDelta("turn-c1", "partial response");
 
     expect(chat.requestStop("turn-c1")).toBe(true);
-    const userMsg = chat.messages.find(
-      (m) => m.id === userBlockIdForTurn("turn-c1"),
-    );
+    const userMsg = chat.messages.find((m) => m.id === userBlockIdForTurn("turn-c1"));
     const assistantMsg = chat.messages.find((m) => m.id === "turn-c1");
     expect(userMsg?.status).toBe("stopping");
     expect(assistantMsg?.status).toBe("stopping");
@@ -2648,17 +2969,15 @@ describe("requestStop (FRI-95 end-to-end)", () => {
     chat.focusedAgent = "friday";
 
     seedUserBlock(chat, "turn-c2");
-    expect(
-      chat.messages.find((m) => m.id === userBlockIdForTurn("turn-c2"))?.status,
-    ).toBe("complete");
+    expect(chat.messages.find((m) => m.id === userBlockIdForTurn("turn-c2"))?.status).toBe(
+      "complete",
+    );
     // No startAssistantTurn — simulating Stop pressed before any tokens stream.
     const assistantBefore = chat.messages.find((m) => m.id === "turn-c2");
     expect(assistantBefore).toBeUndefined();
 
     expect(chat.requestStop("turn-c2")).toBe(true);
-    const userMsg = chat.messages.find(
-      (m) => m.id === userBlockIdForTurn("turn-c2"),
-    );
+    const userMsg = chat.messages.find((m) => m.id === userBlockIdForTurn("turn-c2"));
     expect(userMsg?.status).toBe("stopping");
     // No synthetic assistant bubble manufactured by requestStop.
     expect(chat.messages.find((m) => m.id === "turn-c2")).toBeUndefined();
@@ -2695,9 +3014,7 @@ describe("requestStop (FRI-95 end-to-end)", () => {
       seq: 10,
     } as Parameters<typeof chat.applyEvent>[0]);
 
-    const userMsg = chat.messages.find(
-      (m) => m.id === userBlockIdForTurn("turn-c3"),
-    );
+    const userMsg = chat.messages.find((m) => m.id === userBlockIdForTurn("turn-c3"));
     expect(userMsg?.status).toBe("aborted");
     expect(userMsg?.abortReason).toBe("forced");
   });
@@ -2710,9 +3027,7 @@ describe("requestStop (FRI-95 end-to-end)", () => {
 
     seedUserBlock(chat, "turn-c4");
     chat.requestStop("turn-c4");
-    const userMsg = chat.messages.find(
-      (m) => m.id === userBlockIdForTurn("turn-c4"),
-    );
+    const userMsg = chat.messages.find((m) => m.id === userBlockIdForTurn("turn-c4"));
     expect(userMsg?.status).toBe("stopping");
 
     // Daemon emits turn_done with status='complete' — the abort lost the
@@ -2743,9 +3058,7 @@ describe("requestStop (FRI-95 end-to-end)", () => {
 
     seedUserBlock(chat, "turn-c4b");
     expect(chat.requestStop("turn-c4b")).toBe(true);
-    const userMsg = chat.messages.find(
-      (m) => m.id === userBlockIdForTurn("turn-c4b"),
-    );
+    const userMsg = chat.messages.find((m) => m.id === userBlockIdForTurn("turn-c4b"));
     expect(userMsg?.status).toBe("stopping");
 
     // Second click — still returns true (caller's "I requested stop"
@@ -2944,9 +3257,7 @@ describe("FRI-12: per-agent inflight quarantine", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "alpha";
-    chat.agents = [
-      { name: "beta", type: "orchestrator", status: "working" },
-    ];
+    chat.agents = [{ name: "beta", type: "orchestrator", status: "working" }];
 
     chat.applyEvent({
       v: 1,
@@ -2996,9 +3307,7 @@ describe("FRI-12: per-agent inflight quarantine", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "ghost";
-    chat.agents = [
-      { name: "ghost", type: "orchestrator", status: "archived" },
-    ];
+    chat.agents = [{ name: "ghost", type: "orchestrator", status: "archived" }];
 
     chat.applyEvent({
       v: 1,
@@ -3376,9 +3685,7 @@ describe("window-cut orphan tool_result is dropped, not rendered as (unknown)", 
     );
     expect(messages.find((m) => m.role === "tool")).toBeUndefined();
     // The legitimate text bubble in the same batch still renders.
-    expect(messages.find((m) => m.role === "assistant")?.text).toBe(
-      "OK, mail handled.",
-    );
+    expect(messages.find((m) => m.role === "assistant")?.text).toBe("OK, mail handled.");
   });
 
   it("live: tool_result SSE event with no preceding tool_use bubble produces no orphan", async () => {
@@ -3445,9 +3752,7 @@ describe("Post-Phase-5b: reconcileAgentStatuses heals wedged running/streaming b
     // tool bubble is wedged at 'running'. The reconciler is the
     // safety net that converts Zero's canonical state into a UI
     // status flip.
-    chat.reconcileAgentStatuses([
-      { name: "friday", status: "idle" },
-    ]);
+    chat.reconcileAgentStatuses([{ name: "friday", status: "idle" }]);
 
     const tool = chat.messages.find((m) => m.id === "t_tool-1");
     expect(tool).toBeDefined();
@@ -3470,9 +3775,7 @@ describe("Post-Phase-5b: reconcileAgentStatuses heals wedged running/streaming b
         ts: 1_000,
       },
     ];
-    chat.reconcileAgentStatuses([
-      { name: "friday", status: "idle" },
-    ]);
+    chat.reconcileAgentStatuses([{ name: "friday", status: "idle" }]);
     expect(chat.messages[0]!.status).toBe("complete");
   });
 
@@ -3493,9 +3796,7 @@ describe("Post-Phase-5b: reconcileAgentStatuses heals wedged running/streaming b
         ts: 2_000,
       },
     ];
-    chat.reconcileAgentStatuses([
-      { name: "friday", status: "working" },
-    ]);
+    chat.reconcileAgentStatuses([{ name: "friday", status: "working" }]);
     expect(chat.messages[0]!.status).toBe("running");
     expect(chat.inflightTurnIdByAgent.friday).toBe("t-live");
   });
@@ -3516,9 +3817,7 @@ describe("Post-Phase-5b: reconcileAgentStatuses heals wedged running/streaming b
         ts: 3_000,
       },
     ];
-    chat.reconcileAgentStatuses([
-      { name: "other-agent", status: "idle" },
-    ]);
+    chat.reconcileAgentStatuses([{ name: "other-agent", status: "idle" }]);
     // Focused agent absent from the rows → reconciler bails without
     // touching messages.
     expect(chat.messages[0]!.status).toBe("running");
@@ -3839,9 +4138,7 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
     const live = chat.messages.find((m) => m.id === "th_blk-live");
     const orphan = chat.messages.find((m) => m.id === "th_blk-orphan");
     expect(live!.status, "active-turn bubble survives probe-throw").toBe("running");
-    expect(orphan!.status, "non-active-turn bubble healed via cached inflight").toBe(
-      "aborted",
-    );
+    expect(orphan!.status, "non-active-turn bubble healed via cached inflight").toBe("aborted");
   });
 
   it("PR #22 B2 (helper-level): healOrphanStreamingBubbles refuses to flip when mode='preserve-active' and activeTurnId is null", async () => {
@@ -4506,11 +4803,9 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     expect(chat.messages.some((m) => m.text === "second")).toBe(true);
     // The nr_ safety-net bubble should be gone now (real assistant
     // content landed for the same turn).
-    expect(
-      chat.messages.some(
-        (m) => m.role === "assistant" && m.kind === "no-response",
-      ),
-    ).toBe(false);
+    expect(chat.messages.some((m) => m.role === "assistant" && m.kind === "no-response")).toBe(
+      false,
+    );
   });
 
   it("(3) SSE-first then Zero-second does not duplicate the bubble", async () => {
@@ -4582,11 +4877,9 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
       ],
       "friday",
     );
-    expect(
-      chat.messages.some(
-        (m) => m.id === "live-stream-1" && m.status === "streaming",
-      ),
-    ).toBe(true);
+    expect(chat.messages.some((m) => m.id === "live-stream-1" && m.status === "streaming")).toBe(
+      true,
+    );
   });
 
   it("(5) focus-switch race: snapshot for stale agent is a no-op", async () => {
@@ -4695,9 +4988,7 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
       "friday",
     );
     expect(
-      chat.messages.some(
-        (m) => m.kind === "no-response" && m.noResponseSentinel === false,
-      ),
+      chat.messages.some((m) => m.kind === "no-response" && m.noResponseSentinel === false),
     ).toBe(false);
     expect(chat.messages.some((m) => m.text === "real reply")).toBe(true);
   });
@@ -5206,9 +5497,7 @@ describe("FRI-103: canonical-block ack + queueSynth ghost cleanup", () => {
 
     // (3) Exactly one user bubble with text "#43 merged" — the
     // canonical one. The synth ghost is gone.
-    const userMsgs = chat.messages.filter(
-      (m) => m.role === "user" && m.text === "#43 merged",
-    );
+    const userMsgs = chat.messages.filter((m) => m.role === "user" && m.text === "#43 merged");
     expect(userMsgs).toHaveLength(1);
     const survivor = chat.messages.find((m) => m.text === "#43 merged");
     // parseBlocks emits the canonical user bubble with the stable
@@ -5352,9 +5641,7 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
     // synthesizes a "no response" affordance for user-only turns so
     // each surviving row produces two messages (user bubble + nr_*) —
     // assert the unique turn-ids set, not the raw count.
-    const turns = new Set(
-      fresh.messages.map((m) => m.turnId).filter((t): t is string => !!t),
-    );
+    const turns = new Set(fresh.messages.map((m) => m.turnId).filter((t): t is string => !!t));
     expect([...turns].sort()).toEqual(["t-now"]);
   });
 
@@ -5371,16 +5658,12 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
     fresh.inflightTurnIdByAgent["friday"] = "t-just-sent";
 
     fresh.applyZeroBlocks(
-      [
-        makeRow({ session_id: "__pending__", turn_id: "t-just-sent", block_id: "blk-p" }),
-      ],
+      [makeRow({ session_id: "__pending__", turn_id: "t-just-sent", block_id: "blk-p" })],
       "friday",
       "complete",
     );
 
-    const turns = new Set(
-      fresh.messages.map((m) => m.turnId).filter((t): t is string => !!t),
-    );
+    const turns = new Set(fresh.messages.map((m) => m.turnId).filter((t): t is string => !!t));
     expect([...turns]).toEqual(["t-just-sent"]);
   });
 
@@ -5470,9 +5753,7 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
     const { ChatState } = await import("./chat.svelte");
     const fresh = new ChatState();
     fresh.focusedAgent = "friday";
-    fresh.messages = [
-      { id: "u1", role: "user", text: "still here", status: "complete", ts: 1 },
-    ];
+    fresh.messages = [{ id: "u1", role: "user", text: "still here", status: "complete", ts: 1 }];
 
     fresh.clearLocalView("kitchen");
 
@@ -5598,19 +5879,19 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
       ts: 2_000,
     };
     mockLoadJSON.mockImplementation((key: string) => {
-      if (key === "transcript:friday")
-        return [priorSessionBlock, currentSessionBlock];
+      if (key === "transcript:friday") return [priorSessionBlock, currentSessionBlock];
       return null;
     });
     // No Zero binder registered → loadAgentTurns also tries to fetch
     // REST history. Stub fetch to return empty so the test isolates the
     // cache-load behavior we're asserting on.
     const realFetch = global.fetch;
-    global.fetch = vi.fn(async () =>
-      new Response(JSON.stringify({ blocks: [] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
+    global.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ blocks: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
     ) as typeof global.fetch;
     try {
       await fresh.loadAgentTurns("friday");
@@ -5618,9 +5899,7 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
       global.fetch = realFetch;
     }
 
-    const turnIds = new Set(
-      fresh.messages.map((m) => m.turnId).filter((t): t is string => !!t),
-    );
+    const turnIds = new Set(fresh.messages.map((m) => m.turnId).filter((t): t is string => !!t));
     expect([...turnIds]).toEqual(["t-now"]);
   });
 });

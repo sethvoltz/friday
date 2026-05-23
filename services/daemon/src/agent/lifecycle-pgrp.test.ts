@@ -35,14 +35,10 @@ describe("M4: killPgrp reaps process-group descendants", () => {
     // - disowns the job so the sleep is detached from bash's job control,
     //   simulating the honest "I forgot to clean up a watcher" leak.
     // - bash itself sleeps so it stays alive as the pgrp leader.
-    const child = spawn(
-      "bash",
-      ["-c", "sleep 30 & echo $! ; disown ; sleep 30"],
-      {
-        detached: true,
-        stdio: ["ignore", "pipe", "ignore"],
-      },
-    );
+    const child = spawn("bash", ["-c", "sleep 30 & echo $! ; disown ; sleep 30"], {
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
     expect(child.pid).toBeGreaterThan(0);
     const pgid = child.pid!;
 

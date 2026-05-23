@@ -20,10 +20,7 @@ function fmtTs(ms: number | null | undefined): string {
   return ms ? new Date(ms).toLocaleString() : "—";
 }
 
-function readPrompt(opts: {
-  prompt: string | undefined;
-  promptFile: string | undefined;
-}): string {
+function readPrompt(opts: { prompt: string | undefined; promptFile: string | undefined }): string {
   if (opts.prompt !== undefined && opts.promptFile !== undefined) {
     throw new Error("pass at most one of --prompt / --prompt-file");
   }
@@ -31,9 +28,7 @@ function readPrompt(opts: {
   if (opts.promptFile === "-") return readFileSync(0, "utf8");
   if (opts.promptFile) return readFileSync(opts.promptFile, "utf8");
   if (!input.isTTY) return readFileSync(0, "utf8");
-  throw new Error(
-    "no prompt provided; pass --prompt, --prompt-file <path>, or pipe to stdin",
-  );
+  throw new Error("no prompt provided; pass --prompt, --prompt-file <path>, or pipe to stdin");
 }
 
 async function confirm(prompt: string): Promise<boolean> {
@@ -126,10 +121,7 @@ export const schedulesCommand = defineCommand({
       args: { name: { type: "positional", required: true } },
       async run({ args }) {
         const c = new DaemonClient();
-        await c.post(
-          `/api/schedules/${encodeURIComponent(args.name as string)}/pause`,
-          {},
-        );
+        await c.post(`/api/schedules/${encodeURIComponent(args.name as string)}/pause`, {});
         console.log(pc.green(`paused ${args.name}`));
       },
     }),
@@ -138,10 +130,7 @@ export const schedulesCommand = defineCommand({
       args: { name: { type: "positional", required: true } },
       async run({ args }) {
         const c = new DaemonClient();
-        await c.post(
-          `/api/schedules/${encodeURIComponent(args.name as string)}/resume`,
-          {},
-        );
+        await c.post(`/api/schedules/${encodeURIComponent(args.name as string)}/resume`, {});
         console.log(pc.green(`resumed ${args.name}`));
       },
     }),
@@ -176,9 +165,7 @@ export const schedulesCommand = defineCommand({
       async run({ args }) {
         const name = args.name as string;
         if (!args.force) {
-          const ok = await confirm(
-            pc.yellow(`Delete schedule "${name}"? Type "yes" to confirm: `),
-          );
+          const ok = await confirm(pc.yellow(`Delete schedule "${name}"? Type "yes" to confirm: `));
           if (!ok) {
             console.log(pc.dim("aborted"));
             return;

@@ -16,7 +16,6 @@
  */
 
 import { existsSync } from "node:fs";
-import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import * as registry from "./registry.js";
 import { isAgentLive } from "./lifecycle.js";
@@ -76,10 +75,20 @@ export function stopInvariantAuditor(): void {
 /**
  * One audit pass. Exported for testability — tests drive `audit()`
  * directly instead of waiting on the interval.
+ *
+ * Rule precedence: terminal states (archive) beat transient ones
+ * (demote/heal). A row that violates multiple rules in one pass is
+ * archived rather than incrementally healed — a half-fixed row that
+ * still triggers Rule 1 next tick wastes work.
  */
-export async function audit(): Promise<{ archived: string[]; demoted: string[] }> {
+export async function audit(): Promise<{
+  archived: string[];
+  demoted: string[];
+  healed: string[];
+}> {
   const archived: string[] = [];
   const demoted: string[] = [];
+  const healed: string[] = [];
   for (const a of await registry.listAgents()) {
     // Rule 1: builder worktree presence. Filesystem is the source of
     // truth — if the dir is gone, the agent can't function and the
@@ -96,7 +105,7 @@ export async function audit(): Promise<{ archived: string[]; demoted: string[] }
         worktreePath: a.worktreePath,
         previousStatus: a.status,
       });
-      await registry.archiveAgent(a.name);
+      await registry.archiveAgent(a.name, { reason: "abandoned" });
       // Phase 5: SSE retirement — Zero replicates the agent row's
       // status transition; no `agent_lifecycle` event needed.
       archived.push(a.name);
@@ -115,13 +124,53 @@ export async function audit(): Promise<{ archived: string[]; demoted: string[] }
       // Phase 5: `agent_status` SSE retired — Zero replicates the
       // setStatus UPDATE reactively.
       demoted.push(a.name);
+      continue;
+    }
+
+    // Rule 3 (FRI-113 / ADR-031): FSM type-status invariant.
+    // The gate at `registry.setStatus` prevents new violations;
+    // this rule heals rows that arrived at an illegal (type, status)
+    // through paths the gate cannot cover — direct psql writes,
+    // pre-FSM data, future code that bypasses the registry. The
+    // canonical case is `orchestrator` rows stuck at `archived` from
+    // before this ADR landed. Heals go through the privileged
+    // unchecked path because the FSM matrix forbids `archived → idle`
+    // for anyone but `unarchiveAgent`.
+    if (isIllegalRestingState(a.type, a.status)) {
+      const target: AgentStatus = "idle";
+      logger.log("warn", "invariant.heal.illegal-resting-state", {
+        agent: a.name,
+        type: a.type,
+        from: a.status,
+        to: target,
+      });
+      await registry._auditorHealStatusUnchecked(a.name, target, {
+        auditorHeal: true,
+        clearArchiveReason: true,
+      });
+      healed.push(a.name);
     }
   }
-  if (archived.length || demoted.length) {
+  if (archived.length || demoted.length || healed.length) {
     logger.log("info", "invariant.audit.summary", {
       archived,
       demoted,
+      healed,
     });
   }
-  return { archived, demoted };
+  return { archived, demoted, healed };
 }
+
+/**
+ * Same as the FSM check, but answering "is this row in a state it is
+ * legally allowed to be in *as a resting/observed state*?" Orchestrator
+ * rows stuck at `archived` are the canonical illegal-resting case
+ * because no transition into `archived` is allowed for `orchestrator`.
+ */
+function isIllegalRestingState(type: AgentType, status: AgentStatus): boolean {
+  if (type === "orchestrator" && status === "archived") return true;
+  return false;
+}
+
+type AgentStatus = import("@friday/shared").AgentStatus;
+type AgentType = import("@friday/shared").AgentType;

@@ -26,11 +26,7 @@ interface BucketState {
 
 async function readBucket(fullKey: string): Promise<BucketState> {
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.dbMeta)
-    .where(eq(schema.dbMeta.key, fullKey))
-    .limit(1);
+  const rows = await db.select().from(schema.dbMeta).where(eq(schema.dbMeta.key, fullKey)).limit(1);
   const row = rows[0];
   if (!row) return { hits: [] };
   try {
@@ -79,9 +75,7 @@ export interface ConsumeResult {
  * when within the window AND no active lockout; otherwise returns
  * `retryAfterMs` for the soonest retry window.
  */
-export async function consumeRateLimit(
-  opts: ConsumeOpts,
-): Promise<ConsumeResult> {
+export async function consumeRateLimit(opts: ConsumeOpts): Promise<ConsumeResult> {
   const fullKey = KEY_PREFIX + opts.key;
   const now = Date.now();
   const bucket = await readBucket(fullKey);
@@ -121,9 +115,7 @@ export async function consumeRateLimit(
 /** Drop a single key's bucket (auth success, manual override). */
 export async function resetRateLimit(key: string): Promise<void> {
   const db = getDb();
-  await db
-    .delete(schema.dbMeta)
-    .where(eq(schema.dbMeta.key, KEY_PREFIX + key));
+  await db.delete(schema.dbMeta).where(eq(schema.dbMeta.key, KEY_PREFIX + key));
 }
 
 /** Drop every bucket whose logical key starts with `prefix` (e.g. wipe
@@ -131,8 +123,6 @@ export async function resetRateLimit(key: string): Promise<void> {
 export async function resetRateLimitPrefix(prefix: string): Promise<number> {
   const db = getDb();
   const fullPrefix = KEY_PREFIX + prefix;
-  const result = await db
-    .delete(schema.dbMeta)
-    .where(like(schema.dbMeta.key, `${fullPrefix}%`));
+  const result = await db.delete(schema.dbMeta).where(like(schema.dbMeta.key, `${fullPrefix}%`));
   return result.rowCount ?? 0;
 }

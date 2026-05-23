@@ -286,7 +286,9 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     );
     unsub();
 
-    const turnDoneEvents = captured.filter((e) => e.type === "turn_done" && e.turn_id === "turn-fk-4");
+    const turnDoneEvents = captured.filter(
+      (e) => e.type === "turn_done" && e.turn_id === "turn-fk-4",
+    );
     expect(turnDoneEvents.length).toBe(1);
     expect(turnDoneEvents[0].status).toBe("aborted");
 
@@ -320,9 +322,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     expect(abortTurn("fk-agent")).toBe(true);
     expect(child.send).toHaveBeenCalledWith({ type: "abort" });
     const ipcCallsAfterFirst = child.send.mock.calls.length;
-    expect(
-      (worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline,
-    ).toBeDefined();
+    expect((worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline).toBeDefined();
 
     // Worker honors the abort — error IPC clears the deadline AND flips status to idle.
     await vi.advanceTimersByTimeAsync(30);
@@ -332,9 +332,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
       recoverable: true,
     });
     expect((worker as { status: string }).status).toBe("idle");
-    expect(
-      (worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline,
-    ).toBeUndefined();
+    expect((worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline).toBeUndefined();
 
     // LISTEN handler fires the second abortTurn ~91ms after the fast-path
     // (matching the real-world log timing). With the A.1 gate this is a no-op.
@@ -342,9 +340,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     // No new IPC sent — the gate short-circuited before send().
     expect(child.send.mock.calls.length).toBe(ipcCallsAfterFirst);
     // No new deadline armed — would otherwise force-kill at +500ms.
-    expect(
-      (worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline,
-    ).toBeUndefined();
+    expect((worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline).toBeUndefined();
     // abortRequested still latched (idempotent state, not destructive).
     expect((worker as { abortRequested: boolean }).abortRequested).toBe(true);
 
@@ -394,9 +390,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
     abortTurn("fk-agent");
-    expect(
-      (worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline,
-    ).toBeDefined();
+    expect((worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline).toBeDefined();
 
     // Lone status-change → idle, no turn-complete or error.
     await vi.advanceTimersByTimeAsync(100);
@@ -406,9 +400,7 @@ describe("lifecycle: stop force-kill safety net (FRI-12)", () => {
     });
 
     expect((worker as { status: string }).status).toBe("idle");
-    expect(
-      (worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline,
-    ).toBeUndefined();
+    expect((worker as { abortDeadline?: NodeJS.Timeout }).abortDeadline).toBeUndefined();
 
     // Advance past 500ms — would have force-killed without A.2.
     await vi.advanceTimersByTimeAsync(3000);

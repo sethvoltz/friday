@@ -87,8 +87,7 @@ export function computeGroupingMeta(
       isFirstEver || dayChanged || inactivity || authorChanged || gap > FIVE_MINUTES;
 
     out[i] = {
-      showDaySeparator:
-        (isFirstEver && !options.moreOlderHistoryPossible) || dayChanged,
+      showDaySeparator: (isFirstEver && !options.moreOlderHistoryPossible) || dayChanged,
       showInactivitySeparator: inactivity,
       isFirstInGroup,
       isContinuation: false,

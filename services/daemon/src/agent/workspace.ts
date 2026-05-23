@@ -69,9 +69,7 @@ export function assertInsideWorkspacesRoot(
     throw new Error(`refusing to delete workspaces root itself: ${rootReal}`);
   }
   if (!candidateReal.startsWith(rootReal + "/")) {
-    throw new Error(
-      `refusing to operate on path outside ${rootReal}: ${candidateReal}`,
-    );
+    throw new Error(`refusing to operate on path outside ${rootReal}: ${candidateReal}`);
   }
   return candidateReal;
 }
@@ -107,11 +105,10 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
   }
   const fromRef = opts.fromRef ?? "main";
   try {
-    execFileSync(
-      "git",
-      ["worktree", "add", "-b", opts.branch, path, fromRef],
-      { cwd: opts.baseRepo, stdio: "inherit" },
-    );
+    execFileSync("git", ["worktree", "add", "-b", opts.branch, path, fromRef], {
+      cwd: opts.baseRepo,
+      stdio: "inherit",
+    });
   } catch (err) {
     logger.log("error", "workspace.create.fail", {
       name: opts.name,

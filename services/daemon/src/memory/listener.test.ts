@@ -22,12 +22,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 import pgPkg from "pg";
 
 let handle: TestDbHandle;
@@ -113,15 +108,11 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
       });
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_memory_file_changed");
 
       // Now UPDATE to pending_file.
-      await db
-        .update(schema.memoryEntries)
-        .set({ status: "pending_file", updatedAt: new Date() });
+      await db.update(schema.memoryEntries).set({ status: "pending_file", updatedAt: new Date() });
 
       await vi.waitFor(
         () => {
@@ -156,9 +147,7 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
       });
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_memory_file_changed");
 
       await db
@@ -198,16 +187,12 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
       });
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_memory_file_changed");
 
       // UPDATE that touches content but leaves status at 'ready' —
       // shouldn't fire (e.g., recallCount bump from a tool use).
-      await db
-        .update(schema.memoryEntries)
-        .set({ recallCount: 1, lastRecalledAt: new Date() });
+      await db.update(schema.memoryEntries).set({ recallCount: 1, lastRecalledAt: new Date() });
 
       // negative-space: the trigger predicate excludes 'ready' rows — a
       // bounded real-time wait is the right shape to confirm nothing fires.
@@ -248,14 +233,10 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
       await client.query("LISTEN friday_memory_file_changed");
       await new Promise((r) => setTimeout(r, 250));
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
 
       // Now flip to 'ready' (daemon's terminal write).
-      await db
-        .update(schema.memoryEntries)
-        .set({ status: "ready" });
+      await db.update(schema.memoryEntries).set({ status: "ready" });
 
       // negative-space: the trigger predicate excludes 'ready' rows —
       // a bounded real-time wait confirms no spurious NOTIFY arrives.
@@ -286,9 +267,7 @@ describe("memoryEntries status enum", () => {
       lastRecalledAt: null,
       status: "pending_delete",
     });
-    const rows = await db
-      .select()
-      .from(schema.memoryEntries);
+    const rows = await db.select().from(schema.memoryEntries);
     expect(rows[0]!.status).toBe("pending_delete");
   });
 

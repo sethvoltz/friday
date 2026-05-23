@@ -86,7 +86,10 @@ export async function resolveTeamId(opts: {
 }): Promise<LinearTeam> {
   const warn = opts.warn ?? ((m) => console.warn(m));
 
-  if (opts.team && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.team)) {
+  if (
+    opts.team &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.team)
+  ) {
     // Already a UUID. Return a stub team — name/key not needed downstream.
     return { id: opts.team, key: "", name: "" };
   }
@@ -211,9 +214,7 @@ export async function importIssue(opts: {
 
   // Check existing link.
   const existingLinks = await externalLinksBySystem(LINEAR_SYSTEM_NAME);
-  const existing = existingLinks.find(
-    (l) => l.externalId === issue.identifier,
-  );
+  const existing = existingLinks.find((l) => l.externalId === issue.identifier);
   if (existing) {
     const t = await getTicket(existing.ticketId);
     if (t) {
@@ -240,9 +241,7 @@ export async function importIssue(opts: {
   return { ticket, alreadyLinked: false, issue };
 }
 
-function mapState(
-  type: LinearIssue["state"]["type"],
-): Ticket["status"] {
+function mapState(type: LinearIssue["state"]["type"]): Ticket["status"] {
   switch (type) {
     case "started":
       return "in_progress";

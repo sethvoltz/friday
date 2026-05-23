@@ -38,6 +38,7 @@ friday setup
 ```
 
 This walks you through:
+
 1. Creating `~/.friday/` directory tree.
 2. Initializing the SQLite database and applying migrations.
 3. Copying the default `SOUL.md` into `~/.friday/SOUL.md` (your editable identity layer).
@@ -71,6 +72,7 @@ friday stop           # shut the stack down (cascade-stops every child)
 ```
 
 By default:
+
 - Daemon listens on `127.0.0.1:7610` (localhost only).
 - Dashboard listens on `127.0.0.1:7615` ("TGIF").
 - Zero-cache listens on `127.0.0.1:4848` (internal-only behind the dashboard's `/api/sync` WS proxy).
@@ -235,12 +237,12 @@ If the export errors on a column you don't recognize, check the source SQLite sc
 
 ## 9. Troubleshooting
 
-| Symptom | Try |
-|---|---|
-| Login page won't accept credentials | `friday setup --reset-password` |
-| Daemon won't start | `friday doctor`; check `~/.friday/logs/daemon.jsonl` |
-| Dashboard shows "daemon not reachable" | Confirm daemon is running: `friday status` |
-| Tunnel won't connect | `friday doctor` then `friday logs tunnel -f` |
-| SSE drops on phone | Check Cloudflare Tunnel timeout; the daemon sends keepalives every 20s |
-| `friday restore` fails with "slot active for PID …" | A backend still holds the replication slot. `friday stop zero-cache` then retry. |
+| Symptom                                                            | Try                                                                                          |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| Login page won't accept credentials                                | `friday setup --reset-password`                                                              |
+| Daemon won't start                                                 | `friday doctor`; check `~/.friday/logs/daemon.jsonl`                                         |
+| Dashboard shows "daemon not reachable"                             | Confirm daemon is running: `friday status`                                                   |
+| Tunnel won't connect                                               | `friday doctor` then `friday logs tunnel -f`                                                 |
+| SSE drops on phone                                                 | Check Cloudflare Tunnel timeout; the daemon sends keepalives every 20s                       |
+| `friday restore` fails with "slot active for PID …"                | A backend still holds the replication slot. `friday stop zero-cache` then retry.             |
 | `friday restore` fails with "permission denied for schema drizzle" | Rare ownership mismatch after pg_restore. Drop the database manually, `friday setup`, retry. |

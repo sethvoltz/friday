@@ -30,10 +30,7 @@ function turn(
 
 describe("scan-preferences bucketByCategory", () => {
   it("drops turns with signal_score < 2", () => {
-    const out = bucketByCategory([
-      turn(1, "preference_tooling", 1),
-      turn(2, "directive", 0),
-    ]);
+    const out = bucketByCategory([turn(1, "preference_tooling", 1), turn(2, "directive", 0)]);
     expect(out).toEqual([]);
   });
 
@@ -68,10 +65,7 @@ describe("scan-preferences bucketByCategory", () => {
   });
 
   it("escalates merged severity when a later turn scores higher", () => {
-    const out = bucketByCategory([
-      turn(1, "directive", 2),
-      turn(2, "directive", 4),
-    ]);
+    const out = bucketByCategory([turn(1, "directive", 2), turn(2, "directive", 4)]);
     expect(out.length).toBe(1);
     expect(out[0].severity).toBe("high");
   });

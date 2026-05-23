@@ -145,10 +145,7 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
             .enum(["task", "epic", "bug", "chore"])
             .optional()
             .describe("Ticket kind. Defaults to `task`."),
-          assignee: z
-            .string()
-            .optional()
-            .describe("Optional assignee for the resulting ticket."),
+          assignee: z.string().optional().describe("Optional assignee for the resulting ticket."),
         },
         async (args, extra) => {
           const row = await daemonFetch({
@@ -197,9 +194,7 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
             .min(1)
             .max(24 * 30)
             .optional()
-            .describe(
-              "Look-back window in hours. Default 24 (the daily meta-agent's pass).",
-            ),
+            .describe("Look-back window in hours. Default 24 (the daily meta-agent's pass)."),
         },
         async (args, extra) => {
           const result = await daemonFetch({
@@ -221,21 +216,15 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
           id: z
             .string()
             .optional()
-            .describe(
-              "Enrich only this proposal id. Mutually exclusive with `retryFailed`.",
-            ),
+            .describe("Enrich only this proposal id. Mutually exclusive with `retryFailed`."),
           retryFailed: z
             .boolean()
             .optional()
-            .describe(
-              "Enrich only proposals that have a recorded lastEnrichError.",
-            ),
+            .describe("Enrich only proposals that have a recorded lastEnrichError."),
           force: z
             .boolean()
             .optional()
-            .describe(
-              "Re-enrich even if `enrichedAt` is fresh. Use sparingly.",
-            ),
+            .describe("Re-enrich even if `enrichedAt` is fresh. Use sparingly."),
           limit: z
             .number()
             .int()
@@ -266,9 +255,7 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
             .min(0)
             .max(1)
             .optional()
-            .describe(
-              "Jaccard overlap threshold above which two proposals merge. Default 0.5.",
-            ),
+            .describe("Jaccard overlap threshold above which two proposals merge. Default 0.5."),
         },
         async (args, extra) => {
           const result = await daemonFetch({

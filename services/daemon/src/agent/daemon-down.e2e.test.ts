@@ -85,17 +85,11 @@ async function insertPendingBlock(databaseUrl: string): Promise<PendingBlock> {
   return { id, blockId: id, turnId, agentName, text };
 }
 
-async function readBlockStatus(
-  databaseUrl: string,
-  id: string,
-): Promise<string | null> {
+async function readBlockStatus(databaseUrl: string, id: string): Promise<string | null> {
   const c = new Client({ connectionString: databaseUrl });
   await c.connect();
   try {
-    const r = await c.query<{ status: string }>(
-      `SELECT status FROM blocks WHERE id = $1`,
-      [id],
-    );
+    const r = await c.query<{ status: string }>(`SELECT status FROM blocks WHERE id = $1`, [id]);
     return r.rows[0]?.status ?? null;
   } finally {
     await c.end();

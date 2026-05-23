@@ -22,10 +22,10 @@ export const GET: RequestHandler = async ({ request, locals }) => {
     if (Number.isFinite(n) && n >= 0) headers["last-event-id"] = String(n);
   }
 
-  const upstream = await fetch(
-    `http://localhost:${resolveDaemonPort(cfg)}/api/events`,
-    { headers, signal: request.signal },
-  );
+  const upstream = await fetch(`http://localhost:${resolveDaemonPort(cfg)}/api/events`, {
+    headers,
+    signal: request.signal,
+  });
 
   if (!upstream.body) {
     return new Response("upstream has no body", { status: 502 });

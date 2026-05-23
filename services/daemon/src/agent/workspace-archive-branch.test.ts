@@ -11,13 +11,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -29,13 +23,9 @@ const dataRoot = realpathSync(mkdtempSync(join(tmpdir(), "friday-ws-archive-")))
 process.env.FRIDAY_DATA_DIR = dataRoot;
 
 // Fresh module load so WORKSPACES_ROOT picks up our FRIDAY_DATA_DIR.
-const { createWorkspace, archiveWorkspace, workspacePath } = await import(
-  "./workspace.js"
-);
+const { createWorkspace, archiveWorkspace, workspacePath } = await import("./workspace.js");
 
-const baseRepo = realpathSync(
-  mkdtempSync(join(tmpdir(), "friday-ws-archive-repo-")),
-);
+const baseRepo = realpathSync(mkdtempSync(join(tmpdir(), "friday-ws-archive-repo-")));
 
 function git(args: string[], cwd = baseRepo): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -132,9 +122,7 @@ describe("archiveWorkspace + branch deletion", () => {
     execFileSync("git", ["branch", "-D", branch], { cwd: baseRepo });
 
     // archiveWorkspace should not throw even though both pieces are already gone.
-    expect(() =>
-      archiveWorkspace(name, baseRepo, { branch }),
-    ).not.toThrow();
+    expect(() => archiveWorkspace(name, baseRepo, { branch })).not.toThrow();
     expect(listBranches()).not.toContain(branch);
   });
 

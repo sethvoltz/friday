@@ -129,9 +129,7 @@ export async function deleteSchedule(name: string): Promise<boolean> {
   const r = await getSchedule(name);
   if (!r) return false;
   const db = getDb();
-  await db
-    .delete(schema.schedules)
-    .where(eq(schema.schedules.name, name));
+  await db.delete(schema.schedules).where(eq(schema.schedules.name, name));
   // FRI-76: if the registry stub was never used (no session, no blocks),
   // remove it too. Once the agent has fired, the row holds audit history
   // (sessionId, block rows) and is preserved.
@@ -205,9 +203,7 @@ async function tick(): Promise<void> {
   }
 }
 
-export async function fireSchedule(
-  r: typeof schema.schedules.$inferSelect,
-): Promise<string> {
+export async function fireSchedule(r: typeof schema.schedules.$inferSelect): Promise<string> {
   const runId = `r_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   logger.log("info", "schedule.fire", { name: r.name, runId });
   // Phase 5: `schedule_fired` SSE retired — Zero replicates the

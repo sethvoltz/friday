@@ -4,7 +4,7 @@ The dashboard's home `/` is a single persistent chat with Friday. This doc captu
 
 ## Single persistent chat
 
-- Home `/` is *the* chat with Friday. One persistent orchestrator named "Friday" (or whatever the user names it).
+- Home `/` is _the_ chat with Friday. One persistent orchestrator named "Friday" (or whatever the user names it).
 - No conversation list, no "new chat" button. Memory + compaction handle long-term context.
 - When the orchestrator spawns a sub-agent (builder/helper/bare), the spawning event renders inline in the orchestrator's transcript as a **clickable reference** (agent name + status badge + brief context). Clicking the reference switches the chat pane to that agent — full transcript, live streaming, all chat features.
 - **No collapsible / inline expansion.** Sub-agents are first-class chats you switch into, not nested views.
@@ -36,7 +36,7 @@ The dashboard's home `/` is a single persistent chat with Friday. This doc captu
 
 **DOM windowing.** When `pinnedToBottom` is true and the list exceeds 200 messages, only the last 200 are rendered — keeps the DOM bounded for long chats. The slice is suppressed while `chat.loadingOlder` is true so a mid-mutation IntersectionObserver hiccup can't shrink the rendered set out from under the user.
 
-**Scroll-anchor preservation on prepend.** Naive `scrollTop = beforeTop + (newScrollHeight - oldScrollHeight)` arithmetic is sensitive to layout-flush timing and dies on subpixel rounding. Instead we capture the first rendered bubble's `data-msg-id` and its `getBoundingClientRect().top` *before* triggering the load; after `await tick()` finds the same bubble in the new DOM, we shift `scrollTop` by the difference between its old and new offsets. Concrete elements, no scrollHeight math.
+**Scroll-anchor preservation on prepend.** Naive `scrollTop = beforeTop + (newScrollHeight - oldScrollHeight)` arithmetic is sensitive to layout-flush timing and dies on subpixel rounding. Instead we capture the first rendered bubble's `data-msg-id` and its `getBoundingClientRect().top` _before_ triggering the load; after `await tick()` finds the same bubble in the new DOM, we shift `scrollTop` by the difference between its old and new offsets. Concrete elements, no scrollHeight math.
 
 **WebKit / Safari / Orion paint-deferral.** Setting `scrollTop` while WebKit's scroll thread is still hot (fast-scroll just stopped, momentum still resolving) makes WebKit defer both the scroll-position commit and the paint of the newly-revealed region until the next user-originated scroll event. The DOM and layout are correct; the GPU paint is stale. Symptom: blank chat below a thin top band, fixed by any 1px scroll. We wrap the `scrollTop` write in a synchronous `overflow-y: hidden` → write → `setTimeout(0)` restore. Setting `overflow-y: hidden` detaches the element from the scroll thread, forcing WebKit to commit + paint synchronously; the async restore reattaches it once paint has happened. Synchronous restore reproduces the bug — the `setTimeout` tick is load-bearing. Pattern lifted from `inokawa/virtua` (PR #862, originally `prud/ios-overflow-scroll-to-top`). See ADR-019.
 
@@ -82,9 +82,9 @@ Markdown-defined, LLM-mediated. Frontmatter:
 ---
 name: plan-week
 description: Plan the upcoming week from calendar + active tickets
-agents: [orchestrator, helper]   # restriction; omit for "all types"
-allowed_tools: [tickets_search, mail_send]   # optional subset restriction
-auto_invoke: true                # default true; built-ins set false
+agents: [orchestrator, helper] # restriction; omit for "all types"
+allowed_tools: [tickets_search, mail_send] # optional subset restriction
+auto_invoke: true # default true; built-ins set false
 ---
 ```
 
@@ -99,7 +99,7 @@ auto_invoke: true                # default true; built-ins set false
 - Send is **always visible**; it does not get replaced by Stop during in-flight turns. The daemon serializes prompts per agent (`nextPrompts` FIFO in `services/daemon/src/agent/lifecycle.ts`), so the user can type and queue a follow-up without waiting for the current turn to finish. Slash commands like `/restart` and `/scratch` ride a separate endpoint (`/api/commands`) and are never gated by an in-flight turn.
 - Stop appears **alongside Send, to the right of it**, only while a turn is in flight. Sequence: paperclip · textarea · Send · Stop.
 - `POST /api/chat/turn/<id>/abort` → daemon `AbortController.abort()`.
-- Aborts at next SDK iteration. Tool calls already in flight finish; no next step. Honest UI copy: *Stop prevents future steps. It can't undo a step already started.*
+- Aborts at next SDK iteration. Tool calls already in flight finish; no next step. Honest UI copy: _Stop prevents future steps. It can't undo a step already started._
 - Stop only cancels the running turn — anything sitting in `nextPrompts` after it stays queued and dispatches on the next idle window.
 
 ### Stop confirmation (FRI-95)
@@ -108,12 +108,12 @@ The Stop affordance is rendered on the **user block** for the turn (id `user_<tu
 
 Three outcomes, each with deterministic chat-visible copy:
 
-| Outcome | When | User-block footer |
-|---|---|---|
-| Optimistic (`status="stopping"`) | Client-side, the instant Stop is clicked. Flipped by `chat.requestStop(turnId)`. | `Stopping…` |
-| Clean abort (`status="aborted"`, `abortReason="cooperative"`) | Daemon `turn_done` with `abort_reason="cooperative"` — worker honored the abort cleanly. | `Stopped` |
-| Force-killed abort (`status="aborted"`, `abortReason="forced"`) | Daemon `turn_done` with `abort_reason="forced"` — the 500ms deadline elapsed, worker SIGTERMed. The `stopped_forced` error block lands as a sibling chat message. | `Stopped — worker had to be force-killed` |
-| Already-finished race (`status="already_finished"`) | Stop fired but the daemon's `turn_done` arrived with `status="complete"` — model's last token raced ahead of the abort. Brief 1s transient, settles back to `complete`. | `Already finished` |
+| Outcome                                                         | When                                                                                                                                                                    | User-block footer                         |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| Optimistic (`status="stopping"`)                                | Client-side, the instant Stop is clicked. Flipped by `chat.requestStop(turnId)`.                                                                                        | `Stopping…`                               |
+| Clean abort (`status="aborted"`, `abortReason="cooperative"`)   | Daemon `turn_done` with `abort_reason="cooperative"` — worker honored the abort cleanly.                                                                                | `Stopped`                                 |
+| Force-killed abort (`status="aborted"`, `abortReason="forced"`) | Daemon `turn_done` with `abort_reason="forced"` — the 500ms deadline elapsed, worker SIGTERMed. The `stopped_forced` error block lands as a sibling chat message.       | `Stopped — worker had to be force-killed` |
+| Already-finished race (`status="already_finished"`)             | Stop fired but the daemon's `turn_done` arrived with `status="complete"` — model's last token raced ahead of the abort. Brief 1s transient, settles back to `complete`. | `Already finished`                        |
 
 Re-pressing Stop while already in the `stopping` state is a no-op (the in-flight POST is fire-and-forget; the UI is already in the right place).
 
@@ -121,7 +121,7 @@ Re-pressing Stop while already in the `stopping` state is a no-op (the in-flight
 
 - Plain text → orchestrator turn.
 - `/` opens autocomplete — system commands first (badged "system"), skills second.
-- **Slack-style keyboard nav** (FIX_FORWARD 6.2). With the menu open: first ArrowDown / ArrowUp transfers focus *into* the menu (the input caret stops blinking, the menu item highlights). Subsequent arrows navigate items. **Tab** or **Enter** applies the selection and returns focus to the input with the cursor at end. **Esc** closes the menu and keeps focus in the input. Enter with the menu closed submits the turn as usual.
+- **Slack-style keyboard nav** (FIX*FORWARD 6.2). With the menu open: first ArrowDown / ArrowUp transfers focus \_into* the menu (the input caret stops blinking, the menu item highlights). Subsequent arrows navigate items. **Tab** or **Enter** applies the selection and returns focus to the input with the cursor at end. **Esc** closes the menu and keeps focus in the input. Enter with the menu closed submits the turn as usual.
 - On mobile: tap-to-insert preserves keyboard focus. `pointerdown` + `preventDefault` on the autocomplete entry so the input never blurs. (Slack mobile is the reference; see `docs/mobile-ux.md`.)
 - Paperclip button + drag-drop + paste for attachments.
 - Mobile camera via `<input type="file" capture="environment">`. No PWA permissions dance.

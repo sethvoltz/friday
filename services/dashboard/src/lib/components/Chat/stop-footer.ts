@@ -26,10 +26,7 @@ export function stopFooter(
       return { text: "Stopping…", className: "stopping" };
     case "aborted":
       return {
-        text:
-          abortReason === "forced"
-            ? "Stopped — worker had to be force-killed"
-            : "Stopped",
+        text: abortReason === "forced" ? "Stopped — worker had to be force-killed" : "Stopped",
       };
     case "already_finished":
       return { text: "Already finished" };

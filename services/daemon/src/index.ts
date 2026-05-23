@@ -14,7 +14,6 @@ import { startHealthHeartbeat, clearHealth } from "./monitor/health.js";
 import { backfillUsageFromLegacyJsonl, replayPending } from "@friday/shared/services";
 import { seedMetaAgents, startScheduler } from "./scheduler/scheduler.js";
 import { reconcile as reconcileLinear } from "@friday/integrations-linear";
-import { eventBus } from "./events/bus.js";
 import * as registry from "./agent/registry.js";
 import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js";
 import { recoverDanglingToolUses } from "./agent/dangling-tool-use-recovery.js";
@@ -29,54 +28,24 @@ import {
   stopTurnStallWatchdog,
 } from "./agent/lifecycle.js";
 import { sandboxExecAvailable } from "./agent/sandbox-profile.js";
-import {
-  startInvariantAuditor,
-  stopInvariantAuditor,
-} from "./agent/invariants.js";
+import { startInvariantAuditor, stopInvariantAuditor } from "./agent/invariants.js";
+import { startMailPruner, stopMailPruner } from "./services/mail-prune.js";
 import { composeDispatchPrompt } from "./agent/compose-dispatch-prompt.js";
 import "./hooks/register.js";
 import { renderPinnedFacts } from "./agent/pinned-facts.js";
 import { agentCwdPinV1 } from "./state-migrations/agent-cwd-pin-v1.js";
 import { runStateMigrations } from "./state-migrations/runner.js";
 import { closeTicketForArchive } from "./services/ticket-close.js";
-import {
-  runSettingsBootScan,
-  startSettingsListener,
-} from "./settings/listener.js";
-import {
-  runMemoryBootScan,
-  startMemoryListener,
-} from "./memory/listener.js";
-import {
-  runScheduleBootScan,
-  startScheduleListener,
-} from "./scheduler/listener.js";
+import { runSettingsBootScan, startSettingsListener } from "./settings/listener.js";
+import { runMemoryBootScan, startMemoryListener } from "./memory/listener.js";
+import { runScheduleBootScan, startScheduleListener } from "./scheduler/listener.js";
 import { runAppBootScan, startAppListener } from "./apps/listener.js";
-import {
-  runArchiveBootScan,
-  startArchiveListener,
-} from "./agent/archive-listener.js";
-import {
-  runCancelBootScan,
-  startCancelListener,
-} from "./agent/cancel-listener.js";
-import {
-  runAbortBootScan,
-  startAbortListener,
-} from "./agent/abort-listener.js";
-import {
-  runDispatchBootScan,
-  startDispatchListener,
-} from "./agent/dispatch-listener.js";
-import {
-  composeSystemPrompt,
-  readPromptStack,
-} from "@friday/shared";
-import {
-  deleteBlockById,
-  inbox as mailInbox,
-  listQueuedUserBlocks,
-} from "@friday/shared/services";
+import { runArchiveBootScan, startArchiveListener } from "./agent/archive-listener.js";
+import { runCancelBootScan, startCancelListener } from "./agent/cancel-listener.js";
+import { runAbortBootScan, startAbortListener } from "./agent/abort-listener.js";
+import { runDispatchBootScan, startDispatchListener } from "./agent/dispatch-listener.js";
+import { composeSystemPrompt, readPromptStack } from "@friday/shared";
+import { deleteBlockById, inbox as mailInbox, listQueuedUserBlocks } from "@friday/shared/services";
 import { buildMailPrompt } from "./comms/mail-prompt.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -203,6 +172,7 @@ async function main(): Promise<void> {
   const watchdog = startWatchdog();
   startTurnStallWatchdog();
   startInvariantAuditor();
+  startMailPruner();
   void reconcileLinear()
     .then((result) => {
       if (!result.ran) {
@@ -263,6 +233,7 @@ async function main(): Promise<void> {
     stopWatchdog();
     stopTurnStallWatchdog();
     stopInvariantAuditor();
+    stopMailPruner();
     void settingsListener.stop().catch(() => {
       /* shutdown best-effort; the process is about to exit */
     });
@@ -335,7 +306,7 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
       // Capture ticketId before archive — the closer fires after the
       // registry row is flipped but reads from this captured value.
       const ticketId = a.ticketId ?? null;
-      await registry.archiveAgent(a.name);
+      await registry.archiveAgent(a.name, { reason: "abandoned" });
       // Phase 5: `agent_lifecycle` SSE retired — Zero's `agents`
       // slice replicates the status transition reactively to the
       // dashboard sidebar.
@@ -373,8 +344,7 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
           {
             agentName: a.name,
             agentType: a.type,
-            parentName:
-              "parentName" in a ? a.parentName ?? undefined : undefined,
+            parentName: "parentName" in a ? (a.parentName ?? undefined) : undefined,
           },
           pinnedFacts,
         );
@@ -409,8 +379,7 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
               effort: modelCfg.effort,
               resumeSessionId: a.sessionId ?? undefined,
               daemonPort,
-              parentName:
-                "parentName" in a ? a.parentName ?? undefined : undefined,
+              parentName: "parentName" in a ? (a.parentName ?? undefined) : undefined,
               mode: "long-lived",
             },
           });
@@ -466,9 +435,7 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
       continue;
     }
     let text = "";
-    let attachments:
-      | Array<{ sha256: string; filename: string; mime: string }>
-      | undefined;
+    let attachments: Array<{ sha256: string; filename: string; mime: string }> | undefined;
     try {
       const parsed = JSON.parse(block.contentJson) as {
         text?: unknown;
@@ -497,18 +464,17 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
       {
         agentName: a.name,
         agentType: a.type,
-        parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
+        parentName: "parentName" in a ? (a.parentName ?? undefined) : undefined,
       },
       pinnedFacts,
     );
-    const { body: dispatchBody, systemPrompt: finalSystemPrompt } =
-      await composeDispatchPrompt({
-        intentText: text,
-        intentTag: "user_chat",
-        body: text,
-        agentType: a.type,
-        baseSystemPrompt: systemPrompt,
-      });
+    const { body: dispatchBody, systemPrompt: finalSystemPrompt } = await composeDispatchPrompt({
+      intentText: text,
+      intentTag: "user_chat",
+      body: text,
+      agentType: a.type,
+      baseSystemPrompt: systemPrompt,
+    });
     const queuedCwd = await registry.workingDirectoryFor(a);
     try {
       dispatchTurn({
@@ -526,7 +492,7 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
           effort: modelCfg.effort,
           resumeSessionId: a.sessionId ?? undefined,
           daemonPort,
-          parentName: "parentName" in a ? a.parentName ?? undefined : undefined,
+          parentName: "parentName" in a ? (a.parentName ?? undefined) : undefined,
           mode: a.type === "scheduled" ? "one-shot" : "long-lived",
         },
         userBlockId: block.blockId,

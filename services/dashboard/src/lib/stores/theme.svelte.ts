@@ -48,8 +48,6 @@ export const theme = {
   get current(): "light" | "dark" {
     if (typeof document === "undefined") return "dark";
     ensureObserver();
-    return document.documentElement.classList.contains("dark")
-      ? "dark"
-      : "light";
+    return document.documentElement.classList.contains("dark") ? "dark" : "light";
   },
 };

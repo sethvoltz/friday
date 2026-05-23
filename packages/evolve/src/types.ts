@@ -16,12 +16,7 @@ export type ProposalType = "memory" | "prompt" | "config" | "code";
 
 export type BlastRadius = "low" | "medium" | "high";
 
-export type SignalSource =
-  | "daemon"
-  | "usage"
-  | "transcript"
-  | "feedback"
-  | "friction";
+export type SignalSource = "daemon" | "usage" | "transcript" | "feedback" | "friction";
 
 export type SignalSeverity = "low" | "medium" | "high";
 

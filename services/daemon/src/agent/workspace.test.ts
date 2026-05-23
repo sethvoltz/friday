@@ -8,14 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  mkdtempSync,
-  mkdirSync,
-  rmSync,
-  symlinkSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -41,9 +34,7 @@ describe("assertInsideWorkspacesRoot", () => {
   });
 
   it("rejects the workspaces root itself", () => {
-    expect(() => assertInsideWorkspacesRoot(workspacesRoot())).toThrow(
-      /root itself/,
-    );
+    expect(() => assertInsideWorkspacesRoot(workspacesRoot())).toThrow(/root itself/);
   });
 
   it("rejects an absolute path outside the workspaces root", () => {
@@ -75,8 +66,6 @@ describe("assertInsideWorkspacesRoot", () => {
 
   it("accepts a not-yet-created path inside the root when existsRequired is false", () => {
     const missing = join(workspacesRoot(), "tolerant-check");
-    expect(() =>
-      assertInsideWorkspacesRoot(missing, { existsRequired: false }),
-    ).not.toThrow();
+    expect(() => assertInsideWorkspacesRoot(missing, { existsRequired: false })).not.toThrow();
   });
 });

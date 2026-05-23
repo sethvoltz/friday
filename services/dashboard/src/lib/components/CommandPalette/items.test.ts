@@ -70,9 +70,7 @@ describe("assembleSections — section order", () => {
   });
 
   it("shows the Recent section first when populated (empty query)", () => {
-    const recents: RecentEntry[] = [
-      { kind: "page", id: "/tickets", ts: 1000 },
-    ];
+    const recents: RecentEntry[] = [{ kind: "page", id: "/tickets", ts: 1000 }];
     const sections = assembleSections({ ...baseOpts(), recents });
     expect(sections[0].id).toBe("recent");
     expect(sections[0].items[0].label).toBe("Tickets");
@@ -137,9 +135,7 @@ describe("assembleSections — current-item flag", () => {
       userMode: "system",
     });
     const settings = sections.find((s) => s.id === "settings")!;
-    expect(
-      settings.items.find((i) => i.id === "theme.system")!.current,
-    ).toBe(true);
+    expect(settings.items.find((i) => i.id === "theme.system")!.current).toBe(true);
   });
 });
 
@@ -150,9 +146,7 @@ describe("assembleSections — Agents sort", () => {
       isChat: true,
       currentPath: "/",
     });
-    const ids = sections
-      .find((s) => s.id === "agents")!
-      .items.map((i) => i.id);
+    const ids = sections.find((s) => s.id === "agents")!.items.map((i) => i.id);
     // alice's updatedAt 2026-05-14 > bob's 2026-05-13
     expect(ids).toEqual(["friday", "alice", "bob"]);
   });
@@ -162,9 +156,7 @@ describe("assembleSections — Agents sort", () => {
       ...baseOpts(),
       isChat: true,
       currentPath: "/",
-      agents: [
-        { name: "alice", type: "helper", status: "idle" },
-      ],
+      agents: [{ name: "alice", type: "helper", status: "idle" }],
     });
     const agentsSec = sections.find((s) => s.id === "agents")!;
     expect(agentsSec.items[0].id).toBe("friday");
@@ -200,9 +192,7 @@ describe("assembleSections — Agents sort", () => {
         },
       ],
     });
-    const ids = sections
-      .find((s) => s.id === "agents")!
-      .items.map((i) => i.id);
+    const ids = sections.find((s) => s.id === "agents")!.items.map((i) => i.id);
     expect(ids).toEqual(["friday", "alice", "bob", "zed"]);
   });
 
@@ -255,9 +245,7 @@ describe("assembleSections — recents hydration", () => {
   });
 
   it("hides Recent entirely when no recents survive hydration", () => {
-    const recents: RecentEntry[] = [
-      { kind: "agent", id: "ghost", ts: 1000 },
-    ];
+    const recents: RecentEntry[] = [{ kind: "agent", id: "ghost", ts: 1000 }];
     const sections = assembleSections({ ...baseOpts(), recents });
     expect(sections.find((s) => s.id === "recent")).toBeUndefined();
   });
@@ -287,9 +275,7 @@ describe("assembleSections — fuzzy query", () => {
   });
 
   it("hides Recent when a query is active even if recents exist", () => {
-    const recents: RecentEntry[] = [
-      { kind: "page", id: "/dashboard", ts: 1000 },
-    ];
+    const recents: RecentEntry[] = [{ kind: "page", id: "/dashboard", ts: 1000 }];
     const sections = assembleSections({
       ...baseOpts(),
       query: "ticket",
@@ -300,9 +286,7 @@ describe("assembleSections — fuzzy query", () => {
 
   it("decorates the matched label with labelParts", () => {
     const sections = assembleSections({ ...baseOpts(), query: "tic" });
-    const tickets = sections
-      .find((s) => s.id === "nav")!
-      .items.find((i) => i.id === "/tickets")!;
+    const tickets = sections.find((s) => s.id === "nav")!.items.find((i) => i.id === "/tickets")!;
     expect(tickets.labelParts).toBeDefined();
     // The matched substring is "Tic" at the start of "Tickets".
     const matched = tickets

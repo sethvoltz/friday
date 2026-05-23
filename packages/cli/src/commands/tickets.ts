@@ -1,12 +1,5 @@
 import { defineCommand } from "citty";
-import {
-  cancel,
-  intro,
-  isCancel,
-  outro,
-  select,
-  text,
-} from "@clack/prompts";
+import { cancel, intro, isCancel, outro, select, text } from "@clack/prompts";
 import {
   addComment,
   createTicket,
@@ -56,9 +49,7 @@ export const ticketsCommand = defineCommand({
         }
         const kind = (args.kind as string | undefined) ?? "task";
         if (!(TICKET_KINDS as readonly string[]).includes(kind)) {
-          console.error(
-            `--kind must be one of: ${TICKET_KINDS.join(", ")}`,
-          );
+          console.error(`--kind must be one of: ${TICKET_KINDS.join(", ")}`);
           process.exit(1);
         }
         const t = await createTicket({
@@ -92,11 +83,7 @@ export const ticketsCommand = defineCommand({
         body: { type: "string", required: true },
       },
       async run({ args }) {
-        await addComment(
-          args.id as string,
-          args.author as string,
-          args.body as string,
-        );
+        await addComment(args.id as string, args.author as string, args.body as string);
       },
     }),
   },

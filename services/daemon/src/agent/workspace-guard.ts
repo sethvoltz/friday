@@ -99,9 +99,7 @@ function makeGuard(workspacePath: string): Guard {
   // realpath the workspace once. If the worktree itself doesn't exist
   // (unusual) we fall back to the normalized path — the per-call checks
   // will still reject anything that can't anchor inside it.
-  const workspaceReal =
-    resolveReal(workspacePath) ??
-    normalize(workspacePath).replace(/\/+$/, "");
+  const workspaceReal = resolveReal(workspacePath) ?? normalize(workspacePath).replace(/\/+$/, "");
   return {
     workspaceReal,
     isOutside(p: unknown): boolean {
@@ -142,8 +140,7 @@ export function checkToolCall(
       break;
 
     case "Bash": {
-      const cmd =
-        typeof toolInput.command === "string" ? toolInput.command : "";
+      const cmd = typeof toolInput.command === "string" ? toolInput.command : "";
 
       // git worktree commands are always allowed — builders use these to set up repos.
       if (/\bgit\s+worktree\b/.test(cmd)) break;
@@ -159,8 +156,7 @@ export function checkToolCall(
 
       // Scan command string for absolute paths to user data outside workspace.
       // Lookbehind excludes slashes inside relative paths like dist/index.js.
-      const matches =
-        cmd.match(/(?<![a-zA-Z0-9_.])\/[^\s'"`;&|<>()\\]+/g) ?? [];
+      const matches = cmd.match(/(?<![a-zA-Z0-9_.])\/[^\s'"`;&|<>()\\]+/g) ?? [];
       for (const p of matches) {
         if (!isSystemPath(p) && isOutside(p)) {
           return `Bash blocked — command references "${p}" outside workspace "${workspaceReal}"`;
@@ -175,6 +171,13 @@ export function checkToolCall(
       if (disaster) return disaster;
       break;
     }
+    default:
+      // Unknown tool names (and `undefined`) fall through to the
+      // bottom return-null: no path check applies because we don't
+      // know which arg is a path. The SBPL kernel sandbox in M2
+      // catches the genuine catastrophes; this rule is the
+      // user-space prevention layer for the tool names we DO know.
+      break;
   }
 
   return null;

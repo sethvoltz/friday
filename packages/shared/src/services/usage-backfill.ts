@@ -24,9 +24,7 @@ export interface BackfillSkip {
  * The legacy JSONL came from old Friday and used `sessionType` instead of
  * `agentType` and carried a Slack `channelId` that the new project drops.
  */
-export async function backfillUsageFromLegacyJsonl(): Promise<
-  BackfillResult | BackfillSkip
-> {
+export async function backfillUsageFromLegacyJsonl(): Promise<BackfillResult | BackfillSkip> {
   if (!(await isUsageEmpty())) {
     return {
       inserted: 0,

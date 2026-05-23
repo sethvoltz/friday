@@ -111,9 +111,7 @@ export function parseManifest(raw: unknown, folderPath: string): Manifest {
   const seenAgents = new Set<string>();
   for (const a of m.agents) {
     if (seenAgents.has(a.name)) {
-      throw new ManifestValidationError(
-        `duplicate agent name in manifest: "${a.name}"`,
-      );
+      throw new ManifestValidationError(`duplicate agent name in manifest: "${a.name}"`);
     }
     seenAgents.add(a.name);
   }
@@ -122,9 +120,7 @@ export function parseManifest(raw: unknown, folderPath: string): Manifest {
   const seenSchedules = new Set<string>();
   for (const s of m.schedules) {
     if (seenSchedules.has(s.name)) {
-      throw new ManifestValidationError(
-        `duplicate schedule name in manifest: "${s.name}"`,
-      );
+      throw new ManifestValidationError(`duplicate schedule name in manifest: "${s.name}"`);
     }
     seenSchedules.add(s.name);
   }
@@ -133,9 +129,7 @@ export function parseManifest(raw: unknown, folderPath: string): Manifest {
   const seenMcp = new Set<string>();
   for (const srv of m.mcpServers) {
     if (seenMcp.has(srv.name)) {
-      throw new ManifestValidationError(
-        `duplicate mcpServer name in manifest: "${srv.name}"`,
-      );
+      throw new ManifestValidationError(`duplicate mcpServer name in manifest: "${srv.name}"`);
     }
     seenMcp.add(srv.name);
     if (srv.name.startsWith("friday-")) {
@@ -174,9 +168,7 @@ export function parseManifest(raw: unknown, folderPath: string): Manifest {
 export function loadManifest(folderPath: string): Manifest {
   const manifestPath = join(folderPath, "manifest.json");
   if (!existsSync(manifestPath)) {
-    throw new ManifestValidationError(
-      `manifest.json not found at ${manifestPath}`,
-    );
+    throw new ManifestValidationError(`manifest.json not found at ${manifestPath}`);
   }
   let raw: unknown;
   try {
@@ -194,11 +186,7 @@ function isLikelyPath(arg: string): boolean {
   return arg.includes("/") || /\.(m?js|cjs|ts)$/i.test(arg);
 }
 
-function assertPathInside(
-  folderPath: string,
-  relPath: string,
-  fieldLabel: string,
-): void {
+function assertPathInside(folderPath: string, relPath: string, fieldLabel: string): void {
   if (isAbsolute(relPath)) {
     throw new ManifestValidationError(
       `${fieldLabel}: absolute paths are not allowed ("${relPath}")`,
@@ -207,8 +195,6 @@ function assertPathInside(
   const resolved = normalize(join(folderPath, relPath));
   const rel = relative(folderPath, resolved);
   if (rel.startsWith("..") || isAbsolute(rel)) {
-    throw new ManifestValidationError(
-      `${fieldLabel}: path escapes app folder ("${relPath}")`,
-    );
+    throw new ManifestValidationError(`${fieldLabel}: path escapes app folder ("${relPath}")`);
   }
 }

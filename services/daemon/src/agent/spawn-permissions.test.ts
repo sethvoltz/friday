@@ -9,14 +9,7 @@
  * `api/server.ts` is short and inspectable.
  */
 
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 import type { AgentEntry } from "@friday/shared";
 
@@ -40,21 +33,15 @@ beforeEach(async () => {
 
 describe("validateSpawnPermissions (ADR-022 §6 #4 #5)", () => {
   it("orchestrator → builder is allowed with no reason", () => {
-    expect(
-      perms.validateSpawnPermissions({ type: "builder" }, "orchestrator"),
-    ).toBeNull();
+    expect(perms.validateSpawnPermissions({ type: "builder" }, "orchestrator")).toBeNull();
   });
 
   it("orchestrator → helper is allowed with no reason", () => {
-    expect(
-      perms.validateSpawnPermissions({ type: "helper" }, "orchestrator"),
-    ).toBeNull();
+    expect(perms.validateSpawnPermissions({ type: "helper" }, "orchestrator")).toBeNull();
   });
 
   it("orchestrator → bare is allowed with no reason", () => {
-    expect(
-      perms.validateSpawnPermissions({ type: "bare" }, "orchestrator"),
-    ).toBeNull();
+    expect(perms.validateSpawnPermissions({ type: "bare" }, "orchestrator")).toBeNull();
   });
 
   it("builder → helper with non-empty reason is allowed", () => {
@@ -76,10 +63,7 @@ describe("validateSpawnPermissions (ADR-022 §6 #4 #5)", () => {
   });
 
   it("builder → builder is rejected 403 BUILDER_SPAWN_ORCHESTRATOR_ONLY", () => {
-    const rej = perms.validateSpawnPermissions(
-      { type: "builder", reason: "x" },
-      "builder",
-    );
+    const rej = perms.validateSpawnPermissions({ type: "builder", reason: "x" }, "builder");
     expect(rej).toEqual({
       status: 403,
       body: {
@@ -90,10 +74,7 @@ describe("validateSpawnPermissions (ADR-022 §6 #4 #5)", () => {
   });
 
   it("helper → builder is rejected 403 BUILDER_SPAWN_ORCHESTRATOR_ONLY", () => {
-    const rej = perms.validateSpawnPermissions(
-      { type: "builder", reason: "x" },
-      "helper",
-    );
+    const rej = perms.validateSpawnPermissions({ type: "builder", reason: "x" }, "helper");
     expect(rej).toEqual({
       status: 403,
       body: {
@@ -104,10 +85,7 @@ describe("validateSpawnPermissions (ADR-022 §6 #4 #5)", () => {
   });
 
   it("builder → bare is also rejected 403 (only helpers allowed from non-orch)", () => {
-    const rej = perms.validateSpawnPermissions(
-      { type: "bare", reason: "x" },
-      "builder",
-    );
+    const rej = perms.validateSpawnPermissions({ type: "bare", reason: "x" }, "builder");
     expect(rej?.status).toBe(403);
     expect(rej?.body.code).toBe("BUILDER_SPAWN_ORCHESTRATOR_ONLY");
   });
@@ -135,10 +113,7 @@ describe("validateSpawnPermissions (ADR-022 §6 #4 #5)", () => {
   });
 
   it("builder → helper with whitespace-only reason is rejected 400 SPAWN_REASON_REQUIRED", () => {
-    const rej = perms.validateSpawnPermissions(
-      { type: "helper", reason: "   \t\n  " },
-      "builder",
-    );
+    const rej = perms.validateSpawnPermissions({ type: "helper", reason: "   \t\n  " }, "builder");
     expect(rej).toEqual({
       status: 400,
       body: {
@@ -149,19 +124,14 @@ describe("validateSpawnPermissions (ADR-022 §6 #4 #5)", () => {
   });
 
   it("builder → helper with null reason is rejected 400 SPAWN_REASON_REQUIRED", () => {
-    const rej = perms.validateSpawnPermissions(
-      { type: "helper", reason: null },
-      "builder",
-    );
+    const rej = perms.validateSpawnPermissions({ type: "helper", reason: null }, "builder");
     expect(rej?.status).toBe(400);
     expect(rej?.body.code).toBe("SPAWN_REASON_REQUIRED");
   });
 });
 
 describe("computeSpawnDepth (ADR-022 §6 #7 #30)", () => {
-  const buildGetAgent = (
-    rows: Record<string, { type: string; parentName?: string | null }>,
-  ) => {
+  const buildGetAgent = (rows: Record<string, { type: string; parentName?: string | null }>) => {
     return async (name: string): Promise<AgentEntry | null> => {
       const r = rows[name];
       if (!r) return null;
@@ -199,10 +169,7 @@ describe("computeSpawnDepth (ADR-022 §6 #7 #30)", () => {
       friday: { type: "orchestrator" },
       "builder-A": { type: "builder", parentName: "friday" },
     };
-    const result = await perms.computeSpawnDepth(
-      "builder-A",
-      buildGetAgent(rows),
-    );
+    const result = await perms.computeSpawnDepth("builder-A", buildGetAgent(rows));
     expect(result).toEqual({
       depth: 3,
       parentChain: ["friday", "builder-A"],
@@ -215,10 +182,7 @@ describe("computeSpawnDepth (ADR-022 §6 #7 #30)", () => {
       "builder-A": { type: "builder", parentName: "friday" },
       "helper-B": { type: "helper", parentName: "builder-A" },
     };
-    const result = await perms.computeSpawnDepth(
-      "helper-B",
-      buildGetAgent(rows),
-    );
+    const result = await perms.computeSpawnDepth("helper-B", buildGetAgent(rows));
     expect(result).toEqual({
       depth: 4,
       parentChain: ["friday", "builder-A", "helper-B"],
@@ -295,9 +259,7 @@ describe("registry.registerAgent persists spawn_reason (ADR-022 §6 #6)", () => 
       parentName: "builder-A",
       spawnReason: "digest the upstream RFC",
     });
-    expect(await registry.getSpawnReason("rationale-helper")).toBe(
-      "digest the upstream RFC",
-    );
+    expect(await registry.getSpawnReason("rationale-helper")).toBe("digest the upstream RFC");
   });
 
   it("explicit null spawnReason persists as NULL", async () => {
@@ -338,9 +300,6 @@ describe("watchdog refork preserves spawn_reason (ADR-022 §6 #11 #33)", () => {
     const row = await registry.getAgent("refork-pin");
     expect(row?.status).toBe("idle");
     expect(row?.type).toBe("helper");
-    expect(row && "parentName" in row ? row.parentName : null).toBe(
-      "builder-A",
-    );
+    expect(row && "parentName" in row ? row.parentName : null).toBe("builder-A");
   });
 });
-

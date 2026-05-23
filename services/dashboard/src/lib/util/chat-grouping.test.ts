@@ -17,11 +17,14 @@ const MIN = 60_000;
 
 describe("computeGroupingMeta", () => {
   it("flags the first message as first-in-group and prints a day separator", () => {
-    const meta = computeGroupingMeta([
-      mk({ id: "u1", role: "user", ts: T0 }),
-    ]);
+    const meta = computeGroupingMeta([mk({ id: "u1", role: "user", ts: T0 })]);
     expect(meta).toEqual([
-      { showDaySeparator: true, showInactivitySeparator: false, isFirstInGroup: true, isContinuation: false },
+      {
+        showDaySeparator: true,
+        showInactivitySeparator: false,
+        isFirstInGroup: true,
+        isContinuation: false,
+      },
     ]);
   });
 
@@ -136,10 +139,7 @@ describe("computeGroupingMeta", () => {
     // message of its local day, just the first one we've fetched. The
     // inline timestamp (isFirstInGroup) still fires.
     const meta = computeGroupingMeta(
-      [
-        mk({ id: "u1", role: "user", ts: T0 }),
-        mk({ id: "u2", role: "user", ts: T0 + 30 * MIN }),
-      ],
+      [mk({ id: "u1", role: "user", ts: T0 }), mk({ id: "u2", role: "user", ts: T0 + 30 * MIN })],
       { moreOlderHistoryPossible: true },
     );
     expect(meta[0].showDaySeparator).toBe(false);
@@ -153,10 +153,7 @@ describe("computeGroupingMeta", () => {
     // case is what proves it.
     const next = new Date(2026, 4, 18, 9, 0, 0, 0).getTime();
     const meta = computeGroupingMeta(
-      [
-        mk({ id: "u1", role: "user", ts: T0 }),
-        mk({ id: "u2", role: "user", ts: next }),
-      ],
+      [mk({ id: "u1", role: "user", ts: T0 }), mk({ id: "u2", role: "user", ts: next })],
       { moreOlderHistoryPossible: true },
     );
     expect(meta[0].showDaySeparator).toBe(false);
@@ -167,10 +164,9 @@ describe("computeGroupingMeta", () => {
     // moreOlderHistoryPossible=false (the default + the reached-oldest
     // case): the first loaded message IS the first message ever, so the
     // day separator above it is accurate.
-    const meta = computeGroupingMeta(
-      [mk({ id: "u1", role: "user", ts: T0 })],
-      { moreOlderHistoryPossible: false },
-    );
+    const meta = computeGroupingMeta([mk({ id: "u1", role: "user", ts: T0 })], {
+      moreOlderHistoryPossible: false,
+    });
     expect(meta[0].showDaySeparator).toBe(true);
   });
 

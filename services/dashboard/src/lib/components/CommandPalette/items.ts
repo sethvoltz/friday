@@ -154,10 +154,7 @@ function buildNavItems(currentPath: string): PaletteItem[] {
   }));
 }
 
-function buildAgentItems(
-  agents: readonly AgentInfo[],
-  currentPath: string,
-): PaletteItem[] {
+function buildAgentItems(agents: readonly AgentInfo[], currentPath: string): PaletteItem[] {
   const active = activeAgentFor(currentPath);
   const orchestrator = agents.find((a) => a.type === "orchestrator");
   // Composite sort for "others": live before archived (primary), then
@@ -175,8 +172,7 @@ function buildAgentItems(
 
   const ordered: AgentInfo[] = [];
   if (orchestrator) ordered.push(orchestrator);
-  else
-    ordered.push({ name: "friday", type: "orchestrator", status: "idle" });
+  else ordered.push({ name: "friday", type: "orchestrator", status: "idle" });
   ordered.push(...others);
 
   return ordered.map((a) => {
@@ -191,17 +187,12 @@ function buildAgentItems(
       href: isOrch ? "/" : `/sessions/${a.name}`,
       agentStatus: a.status,
       agentUpdatedMs: ageMs(a),
-      current: isOrch
-        ? active === "friday"
-        : a.name === active,
+      current: isOrch ? active === "friday" : a.name === active,
     };
   });
 }
 
-function buildSettingItems(
-  userMode: Mode,
-  onSetMode: (m: Mode) => void,
-): PaletteItem[] {
+function buildSettingItems(userMode: Mode, onSetMode: (m: Mode) => void): PaletteItem[] {
   return SETTING_SPECS.map((s) => ({
     kind: "setting" as const,
     id: s.id,
@@ -238,11 +229,7 @@ function buildHighlight(
   return parts;
 }
 
-function filterByQuery(
-  items: PaletteItem[],
-  query: string,
-  now: number,
-): PaletteItem[] {
+function filterByQuery(items: PaletteItem[], query: string, now: number): PaletteItem[] {
   if (!query.trim()) return items;
   const results = fuzzysort.go(query, items, {
     keys: ["label", "secondary"],
@@ -263,8 +250,7 @@ function filterByQuery(
   return weighted.map(({ r, item }) => {
     // Prefer the label match for highlight; fall back to secondary if label missed.
     const labelHit = r[0];
-    const indexes =
-      labelHit && labelHit.target === item.label ? labelHit.indexes : undefined;
+    const indexes = labelHit && labelHit.target === item.label ? labelHit.indexes : undefined;
     return { ...item, labelParts: buildHighlight(item.label, indexes) };
   });
 }
@@ -303,8 +289,7 @@ export interface AssembleOpts {
 }
 
 export function assembleSections(opts: AssembleOpts): PaletteSection[] {
-  const { agents, isChat, query, recents, userMode, currentPath, onSetMode } =
-    opts;
+  const { agents, isChat, query, recents, userMode, currentPath, onSetMode } = opts;
 
   const navItems = buildNavItems(currentPath);
   const agentItems = buildAgentItems(agents, currentPath);

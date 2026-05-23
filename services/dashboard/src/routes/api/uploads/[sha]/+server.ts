@@ -22,8 +22,7 @@ export const GET: RequestHandler = async ({ params, locals }) => {
       "content-type": r.headers.get("content-type") ?? "application/octet-stream",
       "content-length": r.headers.get("content-length") ?? "",
       "cache-control": r.headers.get("cache-control") ?? "private, max-age=3600",
-      "x-content-type-options":
-        r.headers.get("x-content-type-options") ?? "nosniff",
+      "x-content-type-options": r.headers.get("x-content-type-options") ?? "nosniff",
     };
     const cd = r.headers.get("content-disposition");
     if (cd) passthrough["content-disposition"] = cd;
