@@ -177,8 +177,7 @@ export function renderLocalDatetime(): string {
   const absMin = Math.abs(offsetMinutes);
   const hh = Math.floor(absMin / 60);
   const mm = absMin % 60;
-  const offset =
-    mm > 0 ? `UTC${sign}${hh}:${String(mm).padStart(2, "0")}` : `UTC${sign}${hh}`;
+  const offset = mm > 0 ? `UTC${sign}${hh}:${String(mm).padStart(2, "0")}` : `UTC${sign}${hh}`;
   const datetime = `${p.weekday}, ${p.month} ${p.day} ${p.year}, ${p.hour}:${p.minute} ${p.dayPeriod} ${p.timeZoneName} (${offset})`;
   return `# currentDateTime\nCurrent local date and time: ${datetime}`;
 }
