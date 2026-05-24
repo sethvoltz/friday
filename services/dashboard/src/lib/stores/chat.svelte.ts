@@ -2,7 +2,6 @@ import type { WireEvent } from "@friday/shared";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { initialPageSize } from "../util/page-size";
 import { KEYS, loadJSON, removeKey, saveJSON } from "./persistent";
-import { sendQueue } from "./send-queue.svelte";
 
 export interface ChatMessage {
   /** turn_id for assistant; "u_<n>" for user; "t_<toolId>"; "th_<blockId>". */
@@ -103,10 +102,6 @@ export interface ChatMessage {
   /** Set when the send-queue's flush returned a 4xx — surface a
    *  retry/discard affordance (FIX_FORWARD 2.6). */
   failed?: boolean;
-
-  /** Set when the send-queue's flush returned a 5xx / network error and
-   *  the queue is scheduling a backoff retry (FIX_FORWARD 2.6). */
-  retrying?: boolean;
 
   /** When set to `"error"`, this bubble is a synthetic error notification
    *  (FRI-12) emitted by the daemon when the SDK throws (529, 429, 401,
@@ -531,6 +526,26 @@ export class ChatState {
   setMarkReadFn(fn: (agent: string, blockId: string) => void): void {
     this.markReadFn = fn;
   }
+  /** Wired from `zero.svelte.ts` to avoid a circular import.
+   *  Calls `zeroSync.sendUserMessage` with a pre-minted blockId. */
+  private sendMessageFn:
+    | ((args: {
+        blockId: string;
+        agent: string;
+        text: string;
+        attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+      }) => Promise<{ blockId: string; turnId: string } | null>)
+    | null = null;
+  setSendMessageFn(
+    fn: (args: {
+      blockId: string;
+      agent: string;
+      text: string;
+      attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+    }) => Promise<{ blockId: string; turnId: string } | null>,
+  ): void {
+    this.sendMessageFn = fn;
+  }
   /**
    * Per-agent memo of the latest block_id we've already passed to
    * `markRead`. Suppresses the redundant write that would otherwise
@@ -765,28 +780,16 @@ export class ChatState {
     m.turnId = turnId;
     m.pending = false;
     m.failed = false;
-    m.retrying = false;
     m.queueId = undefined;
   }
 
-  /** Mark the pending bubble for this queueId as failed (4xx) so the UI
-   *  surfaces retry/discard. FIX_FORWARD 2.6. */
+  /** Mark the pending bubble for this queueId as failed so the UI
+   *  surfaces a discard affordance. Called when Zero isn't ready at
+   *  send time (very rare — only during the first ~200ms of page load). */
   markPendingFailed(queueId: string): void {
     for (const m of this.messages) {
       if (m.queueId !== queueId) continue;
       m.failed = true;
-      m.retrying = false;
-      return;
-    }
-  }
-
-  /** Mark the pending bubble for this queueId as retrying (5xx / network).
-   *  FIX_FORWARD 2.6. */
-  markPendingRetrying(queueId: string): void {
-    for (const m of this.messages) {
-      if (m.queueId !== queueId) continue;
-      m.retrying = true;
-      m.failed = false;
       return;
     }
   }
@@ -1297,8 +1300,8 @@ export class ChatState {
   canResendTurn(turnId: string | undefined): boolean {
     if (!turnId) return false;
     if (this.originalUserTextForTurn(turnId) === null) return false;
-    // Resend always queues a fresh turn — no in-flight gating needed
-    // (sendQueue handles its own concurrency).
+    // Disable while any other turn is in flight on the focused agent.
+    if (this.inflightTurnId !== null) return false;
     return true;
   }
 
@@ -1327,39 +1330,28 @@ export class ChatState {
       this.setToast("Cannot resend — original message not found.", "warn");
       return;
     }
-    // Mirror ChatInput's send path: enqueue, push the pending bubble,
-    // then flush. The optimistic bubble pins to the bottom until the
-    // daemon's `turn_started` confirms; on confirm, `confirmPending`
-    // re-keys it to its canonical user-block id.
-    const item = sendQueue.enqueue({ agent: this.focusedAgent, text });
-    this.addUser(text, { queueId: item.id });
-    // Same eager-inflight claim as ChatInput's send handler — see the
-    // long comment there. Without it, the Zero mutator's optimistic
-    // write fires applyZeroBlocks before flush() resolves and the
-    // FRI-85 safety net flashes "Agent didn't respond" for the
-    // entire submit-to-first-block gap.
+    const blockId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? (crypto as { randomUUID: () => string }).randomUUID()
+        : `blk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const newTurnId = `t_${blockId}`;
     const agent = this.focusedAgent;
-    const eagerTurnId = `t_${item.queueBlockId}`;
+    this.addUser(text, { queueId: blockId });
     const claimedInflight = this.inflightTurnIdByAgent[agent] == null;
-    if (claimedInflight) this.markInflight(agent, eagerTurnId);
-    void sendQueue.flush().then((result) => {
-      let dispatchedEagerTurn = false;
-      for (const s of result.sent) {
-        this.confirmPending(s.queueId, s.turnId);
-        if (!s.queued) this.markInflight(agent, s.turnId);
-        if (s.turnId === eagerTurnId && !s.queued) dispatchedEagerTurn = true;
-      }
-      for (const qid of result.failed) this.markPendingFailed(qid);
-      for (const qid of result.retrying) this.markPendingRetrying(qid);
-      // Release the eager claim if the send didn't dispatch immediately.
-      if (
-        claimedInflight &&
-        !dispatchedEagerTurn &&
-        this.inflightTurnIdByAgent[agent] === eagerTurnId
-      ) {
-        this.markInflight(agent, null);
-      }
-    });
+    if (claimedInflight) this.markInflight(agent, newTurnId);
+    void (this.sendMessageFn?.({ blockId, agent, text }) ?? Promise.resolve(null)).then(
+      (result) => {
+        if (!result) {
+          if (claimedInflight && this.inflightTurnIdByAgent[agent] === newTurnId) {
+            this.markInflight(agent, null);
+          }
+          this.markPendingFailed(blockId);
+          return;
+        }
+        this.confirmPending(blockId, result.turnId);
+        this.markInflight(agent, result.turnId);
+      },
+    );
   }
 
   /**
@@ -1639,21 +1631,6 @@ export class ChatState {
       saveJSON(ChatState.LAST_SEQ_KEY, this.lastSeqByAgent);
     }
 
-    // Build the queue-synth bubbles once — we append them after both the
-    // cached-render and the live-fetch overwrite so they're never wiped
-    // by `this.messages = parseBlocks(...)`. Without this, a page reload
-    // while a message is queued (offline / 5xx) would briefly show the
-    // bubble and then lose it.
-    const queueSynth: ChatMessage[] = sendQueue.forAgent(agent).map((q) => ({
-      id: `u_queue_${q.id}`,
-      role: "user" as const,
-      text: q.text,
-      status: "complete" as const,
-      ts: q.createdAt,
-      queueId: q.id,
-      attachments: q.attachments,
-    }));
-
     // Last-known transcript from a previous session. Render the cached
     // blocks immediately so a slow / offline first-paint doesn't show an
     // empty chat. The live fetch below replaces this once it lands; the
@@ -1682,7 +1659,6 @@ export class ChatState {
           inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
           agentWorking: agentIsWorking,
         }),
-        ...queueSynth,
       ];
       // Only seed the scroll-back cursor from cached blocks when Zero
       // is OFF. With Zero on, the cached cursor is stale — new rows
@@ -1698,8 +1674,6 @@ export class ChatState {
       if (!this.blocksBinder) {
         this.oldestBlockId = oldestBlockCursor(cached);
       }
-    } else if (queueSynth.length > 0) {
-      this.messages = [...queueSynth];
     }
 
     this.loadingInitial = cached.length === 0;
@@ -1744,20 +1718,11 @@ export class ChatState {
         };
         if (this.focusedAgent !== agent) return;
         const blocks = payload.blocks ?? [];
-        // Queue-synth is appended AFTER the live blocks so queued bubbles
-        // survive the wholesale array replacement. parseBlocks returns in
-        // chronological order (oldest first); the queue items represent
-        // not-yet-sent user input that conceptually sits at the bottom
-        // until the daemon assigns turn_ids and the SSE confirmation
-        // arrives.
-        this.messages = [
-          ...parseBlocks(blocks, agent, {
-            inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
-            agentWorking: agentIsWorking,
-            noResponseGraceUntil: this.noResponseGraceUntil,
-          }),
-          ...queueSynth,
-        ];
+        this.messages = parseBlocks(blocks, agent, {
+          inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+          agentWorking: agentIsWorking,
+          noResponseGraceUntil: this.noResponseGraceUntil,
+        });
         this.oldestBlockId = oldestBlockCursor(blocks);
         // Seed the per-agent SSE cursor from the snapshot's high-water
         // mark. The daemon updates `last_event_seq` on every block_delta
@@ -1994,25 +1959,11 @@ export class ChatState {
     const snapshotBlockIds = new Set<string>();
     for (const r of rows) snapshotBlockIds.add(r.block_id);
 
-    // FRI-103: clear sendQueue entries whose pre-minted `queueBlockId`
-    // matches a user row in this snapshot. The canonical block landing
-    // in the Zero replica is the durable confirmation Seth's data-safety
-    // contract requires before removing the localStorage entry. Also
-    // collect the queue ids so the bubble-merge below can drop their
-    // queue-synth / optimistic-pending bubbles (otherwise both the
-    // synth and the canonical bubble end up in the merged list and the
-    // user sees a duplicate "#43 merged").
-    const ackedQueueIds = new Set<string>();
-    for (const r of rows) {
-      if (r.role !== "user") continue;
-      const entry = sendQueue.items.find((q) => q.queueBlockId === r.block_id);
-      if (entry) ackedQueueIds.add(entry.id);
-      // Idempotent: no-op if no entry matches. The non-matching
-      // common case (every Zero snapshot frame contains user rows
-      // that never went through this client's queue) is the hot
-      // path; ackByBlockId early-returns without persisting.
-      sendQueue.ackByBlockId(r.block_id);
-    }
+    // Drop any optimistic-pending bubble whose `queueId` matches a
+    // user block_id now in the Zero snapshot — the canonical row has
+    // landed in the local replica, so the pending bubble is superseded.
+    // `queueId` is set to the pre-minted blockId at `addUser()` time
+    // and equals the Zero row's `block_id` by construction.
 
     const merged: ChatMessage[] = [];
     const seen = new Set<string>();
@@ -2023,14 +1974,10 @@ export class ChatState {
         seen.add(m.id);
         continue;
       }
-      // FRI-103: drop synth / optimistic bubbles whose backing queue
-      // entry was just acked by the canonical Zero row above. Without
-      // this, the queue-synth bubble (id `u_queue_<qid>`) and the
-      // canonical user bubble (id `userBlockIdForTurn(turnId)`) both
-      // land in `merged` and the user sees two bubbles for the same
-      // text. parseBlocks emitted the canonical version in `parsed`
-      // already.
-      if (m.queueId !== undefined && ackedQueueIds.has(m.queueId)) continue;
+      // Drop optimistic-pending bubbles whose queueId (= pre-minted blockId)
+      // now appears in the Zero snapshot as a canonical block_id.
+      // parseBlocks already emitted the canonical version in `parsed`.
+      if (m.queueId !== undefined && snapshotBlockIds.has(m.queueId)) continue;
       // No parsed counterpart. Decide whether to keep or drop.
       if (
         m.blockId !== undefined &&

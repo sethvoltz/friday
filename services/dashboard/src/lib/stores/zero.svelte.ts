@@ -1527,6 +1527,7 @@ if (browser) {
     // read cursor to the newest block. Same circular-dep avoidance
     // pattern as the binder: chat doesn't import zero.
     chat.setMarkReadFn((agent, blockId) => zeroSync.markRead(agent, blockId));
+    chat.setSendMessageFn((args) => zeroSync.sendUserMessage(args));
   });
 
   // Global error/rejection reporters — when a PWA on a phone can't
