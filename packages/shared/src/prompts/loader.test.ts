@@ -185,7 +185,7 @@ describe("renderLocalDatetime (FRI-52)", () => {
 });
 
 describe("composeSystemPrompt datetime injection (FRI-52)", () => {
-  it("does NOT include currentDateTime — injected per-turn via hook, not at session init", () => {
+  it("does NOT include currentDateTime — injected per-turn in worker.ts runQuery, not at compose time", () => {
     const stack = readPromptStack("orchestrator", []);
     const composed = composeSystemPrompt(stack, {
       agentName: "friday",
