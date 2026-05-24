@@ -3211,70 +3211,64 @@ export function healOrphanStreamingBubbles(
   }
 }
 
-export function parseBlocks(
-  blocks: BlockRow[],
+/**
+ * Per-turn slice of parseBlocks. Walks ONE turn's blocks and produces the
+ * messages they translate to, plus a small metadata bag the cross-turn
+ * safety-net loop needs.
+ *
+ * The split lets a later commit memoize per-turn output: a turn's parsed
+ * shape is a pure function of (its block rows, the orphan set). Turns
+ * without streaming-status blocks are deterministic w.r.t. the cross-turn
+ * orphan-classification too (orphans only flag streaming blocks). So a
+ * cache keyed by (agent, turnId, signature) hits whenever a turn's
+ * `last_event_seq` sum is unchanged, which is the common case during
+ * streaming on a long session (380/381 turns unchanged per frame).
+ */
+interface ParsedTurn {
+  parsed: ChatMessage[];
+  /** Set when this turn carries a `source='user_chat'` user block — drives
+   *  the cross-turn safety-net's "agent didn't respond" synthesis. */
+  userInfo: { ts: number } | null;
+  /** True if the turn produced any assistant-side content (text, thinking,
+   *  tool_use, error) OR an SDK no-response sentinel. The safety net only
+   *  synthesizes for turns where this is false. */
+  hasAssistantContent: boolean;
+}
+
+function parseTurnBlocks(
+  turnBlocks: readonly BlockRow[],
   agent: string,
-  opts: {
-    inflightTurnId?: string | null;
-    /** Per-turn grace deadline (epoch ms) for the FRI-85 safety net.
-     *  Owned by ChatState.noResponseGraceUntil; covers the SSE-faster-
-     *  than-Zero race where the inflight slot has cleared but the
-     *  assistant block hasn't replicated to this client yet. */
-    noResponseGraceUntil?: Record<string, number>;
-    /** FRI-91: the input came from a Zero snapshot whose `resultType` is
-     *  not yet `"complete"` (initial bootstrap still streaming in, or the
-     *  local IndexedDB replica is behind upstream). The safety-net loop
-     *  must NOT synthesize "Agent didn't respond" for user-only turns
-     *  while this is true — the missing assistant blocks may simply not
-     *  have replicated yet. Only call sites that hand parseBlocks a
-     *  partial view (applyZeroBlocks) set this; REST-driven paths pass
-     *  full server payloads and leave it falsy. */
-    zeroResultIncomplete?: boolean;
-  } = {},
-): ChatMessage[] {
-  const orphans = classifyOrphanRows(blocks);
+  orphans: Set<string>,
+): ParsedTurn {
   const out: ChatMessage[] = [];
   const toolByToolId = new Map<string, ChatMessage>();
   // Pre-scan: which tool_use_ids actually have a tool_use row in this
-  // batch. The 50-row Zero window — and the `?before=` scroll-back
+  // turn. The 50-row Zero window — and the `?before=` scroll-back
   // batches that share the same shape — often slice between a tool_use
   // and its tool_result; we want to drop the orphan tool_result rather
   // than render a `toolName="(unknown)"` card with just the result text
   // ("mail 154 closed", a bare exit code, …) which is noise without the
   // tool name + input. FRI-81 D1 still has to work: when both rows ARE
-  // in the batch but `finalizeStreamingBlocks` bumped the tool_use past
+  // in the turn but `finalizeStreamingBlocks` bumped the tool_use past
   // the tool_result's ts, the sort processes tool_result first and the
   // fold-in-existing path needs to materialize a placeholder. So:
   // window-cut orphan ⇒ drop, ts-reorder orphan ⇒ synth-then-fold.
   const toolUseIdsInBatch = new Set<string>();
-  for (const b of blocks) {
+  for (const b of turnBlocks) {
     if (b.kind === "tool_use") {
       const p = parseBlockContent(b.contentJson);
       const tid = p.tool_use_id ?? b.blockId;
       toolUseIdsInBatch.add(tid);
     }
   }
-  // FRI-85: track which turns produced any assistant-side content, and
-  // which turns we've already synthesized a no-response affordance for
-  // (sentinel-driven). After the main pass we scan user-only turns and
-  // backfill a "Agent didn't respond" affordance for any that ended with
-  // no assistant content at all (covers worker-died-before-block_start,
-  // Task-only responses filtered at the worker, etc.).
-  const userTurns = new Map<string, { ts: number; index: number }>();
-  const assistantTurns = new Set<string>();
-  const noResponseTurns = new Set<string>();
-  // Newest-first arrives from the API; chronological for rendering. Sort by
-  // `ts` first so boot-time jsonl-recovery rows — which receive a fresh
-  // autoincrement `id` strictly greater than the live retry blocks that came
-  // after the recovered failure — slot into the correct chronological position
-  // (failed attempt before its retry) instead of trailing the successful
-  // retry. `id` stays as the tiebreaker for blocks sharing a ts (a single
-  // live message's thinking + tool_use can land within the same ms).
-  // Phase 4.11: id is now a text UUID, so the chronological
-  // tiebreak switches from numeric subtraction to lexical
-  // comparison. Within a millisecond the lexical order is
-  // arbitrary-but-stable — same property bigserial provided.
-  const sorted = [...blocks].sort(
+  let userInfo: { ts: number } | null = null;
+  let hasAssistantContent = false;
+  let sentinelSeen = false;
+  // Sort within the turn. `ts` is primary so jsonl-recovery rows (fresh id
+  // but old ts) interleave correctly with their live siblings; `id` is the
+  // ms-collision tiebreaker (text UUID, lexical compare — arbitrary-but-
+  // stable, matching bigserial semantics pre-Phase 4.11).
+  const sorted = [...turnBlocks].sort(
     (a, b) => a.ts - b.ts || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
   for (const b of sorted) {
@@ -3287,9 +3281,9 @@ export function parseBlocks(
         // message), render a faint "Agent acknowledged — no reply needed"
         // affordance. Single bubble per turn; idempotent on duplicate
         // sentinels (a refork can produce two).
-        if (b.turnId && !noResponseTurns.has(b.turnId)) {
-          noResponseTurns.add(b.turnId);
-          assistantTurns.add(b.turnId);
+        if (b.turnId && !sentinelSeen) {
+          sentinelSeen = true;
+          hasAssistantContent = true;
           out.push({
             id: noResponseIdForTurn(b.turnId),
             role: "assistant",
@@ -3304,7 +3298,7 @@ export function parseBlocks(
         }
         continue;
       }
-      if (role === "assistant" && b.turnId) assistantTurns.add(b.turnId);
+      if (role === "assistant") hasAssistantContent = true;
       if (role === "user" && b.turnId) {
         // user_chat is the only source that carries the "I sent something
         // and expected a reply" semantics — mail / queue_inject / scratch
@@ -3312,7 +3306,7 @@ export function parseBlocks(
         // turn is fine. The safety-net synth below only fires for
         // user_chat-sourced user blocks.
         if (b.source === "user_chat") {
-          userTurns.set(b.turnId, { ts: b.ts, index: out.length });
+          userInfo = { ts: b.ts };
         }
       }
       const id =
@@ -3368,7 +3362,7 @@ export function parseBlocks(
       // FRI-85: only count rows that survive the D4 filter as assistant
       // content. A dropped ghost thinking row should not suppress the
       // user-only-turn safety-net no-response affordance below.
-      if (b.turnId) assistantTurns.add(b.turnId);
+      if (b.turnId) hasAssistantContent = true;
       // Same shape for thinking blocks. `handleBlockDelta` gates on
       // `m.status === "running"` for thinking; preserve "running"
       // for streaming rows so reload-mid-turn deltas append.
@@ -3393,7 +3387,7 @@ export function parseBlocks(
         ts: b.ts,
       });
     } else if (b.kind === "tool_use") {
-      if (b.turnId) assistantTurns.add(b.turnId);
+      if (b.turnId) hasAssistantContent = true;
       const toolId = parsed.tool_use_id ?? b.blockId;
       const isOrphan = orphans.has(b.blockId);
       const status: ChatMessage["status"] =
@@ -3438,7 +3432,7 @@ export function parseBlocks(
       out.push(msg);
       toolByToolId.set(toolId, msg);
     } else if (b.kind === "error") {
-      if (b.turnId) assistantTurns.add(b.turnId);
+      if (b.turnId) hasAssistantContent = true;
       // FRI-12: synthetic error bubble persisted by the daemon when the
       // SDK throws or the stop force-kill safety net fires. Mirror the
       // SSE `block_complete` materialization shape so reload-mid-error
@@ -3461,7 +3455,7 @@ export function parseBlocks(
         rawErrorMessage: errPayload.rawMessage,
       });
     } else if (b.kind === "tool_result") {
-      if (b.turnId) assistantTurns.add(b.turnId);
+      if (b.turnId) hasAssistantContent = true;
       const toolId = parsed.tool_use_id ?? "";
       const status = parsed.is_error ? "error" : "done";
       const existing = toolByToolId.get(toolId);
@@ -3488,9 +3482,71 @@ export function parseBlocks(
         toolByToolId.set(toolId, synth);
       }
       // Else: window-cut orphan — drop. See `toolUseIdsInBatch`
-      // pre-scan comment at the top of parseBlocks.
+      // pre-scan comment at the top of parseTurnBlocks.
     }
   }
+  return { parsed: out, userInfo, hasAssistantContent };
+}
+
+export function parseBlocks(
+  blocks: BlockRow[],
+  agent: string,
+  opts: {
+    inflightTurnId?: string | null;
+    /** Per-turn grace deadline (epoch ms) for the FRI-85 safety net.
+     *  Owned by ChatState.noResponseGraceUntil; covers the SSE-faster-
+     *  than-Zero race where the inflight slot has cleared but the
+     *  assistant block hasn't replicated to this client yet. */
+    noResponseGraceUntil?: Record<string, number>;
+    /** FRI-91: the input came from a Zero snapshot whose `resultType` is
+     *  not yet `"complete"` (initial bootstrap still streaming in, or the
+     *  local IndexedDB replica is behind upstream). The safety-net loop
+     *  must NOT synthesize "Agent didn't respond" for user-only turns
+     *  while this is true — the missing assistant blocks may simply not
+     *  have replicated yet. Only call sites that hand parseBlocks a
+     *  partial view (applyZeroBlocks) set this; REST-driven paths pass
+     *  full server payloads and leave it falsy. */
+    zeroResultIncomplete?: boolean;
+  } = {},
+): ChatMessage[] {
+  // Cross-turn input: which streaming blocks are orphans (their turn is no
+  // longer the live one, or a sibling in the same turn already moved past
+  // them). Computed once for the whole input; per-turn parsing reads from
+  // the resulting Set.
+  const orphans = classifyOrphanRows(blocks);
+
+  // Group by turnId, preserving the global chronological order of turns
+  // (by each turn's earliest ts). Within-turn ordering happens inside
+  // parseTurnBlocks via its own (ts, id) sort.
+  const byTurn = new Map<string, BlockRow[]>();
+  const turnEarliestTs = new Map<string, number>();
+  for (const b of blocks) {
+    const arr = byTurn.get(b.turnId);
+    if (arr) arr.push(b);
+    else byTurn.set(b.turnId, [b]);
+    const prev = turnEarliestTs.get(b.turnId);
+    if (prev === undefined || b.ts < prev) turnEarliestTs.set(b.turnId, b.ts);
+  }
+  const turnOrder = [...byTurn.keys()].sort((a, b) => {
+    const at = turnEarliestTs.get(a)!;
+    const bt = turnEarliestTs.get(b)!;
+    return at - bt || (a < b ? -1 : a > b ? 1 : 0);
+  });
+
+  // Per-turn parse. The Map-of-turns shape is what enables per-turn
+  // memoization in a subsequent commit — each turn's slice is a pure
+  // function of (its blocks, its slice of `orphans`). Until then this
+  // is just a re-shape of the existing single-pass parse.
+  const out: ChatMessage[] = [];
+  const userTurns = new Map<string, { ts: number }>();
+  const assistantTurns = new Set<string>();
+  for (const tid of turnOrder) {
+    const turn = parseTurnBlocks(byTurn.get(tid)!, agent, orphans);
+    if (turn.userInfo) userTurns.set(tid, turn.userInfo);
+    if (turn.hasAssistantContent) assistantTurns.add(tid);
+    out.push(...turn.parsed);
+  }
+
   // FRI-85 safety net: for any user_chat-sourced user message whose turn
   // produced zero assistant-side blocks (text/thinking/tool/error), synth
   // an "Agent didn't respond" affordance so the user is never left staring
@@ -3499,7 +3555,6 @@ export function parseBlocks(
   // and any other "turn completed silently" path that doesn't already
   // leave a visible artifact. Inserted just after the user block by ts so
   // the natural chronological sort keeps it adjacent.
-  let synthesized = false;
   // Suppress the synth for the agent's currently in-flight turn.
   // The Claude SDK's first stream_event can land anywhere from
   // hundreds of ms to many seconds after submit (model latency,
@@ -3532,7 +3587,6 @@ export function parseBlocks(
     // wiped on every load); the resultType signal is the only thing
     // that survives. Skip synthesis until Zero says "complete."
     if (opts.zeroResultIncomplete) continue;
-    synthesized = true;
     out.push({
       id: noResponseIdForTurn(turnId),
       role: "assistant",
@@ -3547,13 +3601,15 @@ export function parseBlocks(
       ts: info.ts + 1,
     });
   }
-  // Final ts-sort so the safety-net synth lands chronologically adjacent
-  // to its user message rather than at the trailing edge. Stable on
-  // existing entries (their ts ordering already matches the input-block
-  // sort one level up); only nr_<turnId> rows actually move.
-  if (synthesized) {
-    out.sort((a, b) => a.ts - b.ts);
-  }
+  // Final ts-sort. The per-turn parse emits each turn's messages in (ts,
+  // id) order, but concatenating turns by their earliest ts can leave two
+  // overlapping turns ordered as [all of X, all of Y] when the old single-
+  // pass parse would have interleaved them by ts (canonical case: a
+  // mail-source user bubble landing between sibling blocks of a user_chat
+  // turn). Sort once across the combined list to restore that
+  // chronological interleaving — and to slot any safety-net synth
+  // adjacent to its anchoring user bubble.
+  out.sort((a, b) => a.ts - b.ts);
   return out;
 }
 
