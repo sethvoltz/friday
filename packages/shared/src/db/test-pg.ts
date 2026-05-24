@@ -26,6 +26,7 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import pgPkg from "pg";
 import { _resetClientForTests, closeDb, getPool } from "./client.js";
+import { findPgIsReady } from "./pg-provision.js";
 import { FTS_SETUP_SQL } from "./schema.js";
 
 const { Client } = pgPkg;
@@ -59,7 +60,9 @@ function assertPgReady(): void {
   // is still honored by libpq if the operator wants to point at a
   // non-default host (FRIDAY_PGHOST-style runtime config can be
   // added later if needed).
-  const result = spawnSync("pg_isready", ["-h", "localhost", "-p", "5432"], { encoding: "utf8" });
+  const result = spawnSync(findPgIsReady(), ["-h", "localhost", "-p", "5432"], {
+    encoding: "utf8",
+  });
   if (result.status !== 0) {
     throw new Error(
       `pg_isready failed (exit=${result.status}). Tests require a reachable Postgres. ` +

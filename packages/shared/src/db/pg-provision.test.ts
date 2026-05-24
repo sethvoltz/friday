@@ -11,10 +11,10 @@
 
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { probePostgresHealth, provisionPostgres } from "./pg-provision.js";
+import { findPgIsReady, probePostgresHealth, provisionPostgres } from "./pg-provision.js";
 
 function pgReachable(): boolean {
-  return spawnSync("pg_isready", { encoding: "utf8" }).status === 0;
+  return spawnSync(findPgIsReady(), { encoding: "utf8" }).status === 0;
 }
 
 const skip = !pgReachable();
