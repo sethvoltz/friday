@@ -103,6 +103,12 @@ export interface LiveWorker {
    * turn_id.
    */
   nextPrompts: WorkerPromptCommand[];
+  /** The prompt currently dispatched to the worker (set by `sendPrompt`,
+   *  cleared on turn-end). `drainLiveWorker` prepends this to the drained
+   *  queue so a stall-kill redelivers the in-flight message on the fresh
+   *  worker — it was already popped off `nextPrompts` and sent, so without
+   *  this field it would be silently dropped (FRI-58). */
+  activePrompt?: WorkerPromptCommand;
   mode: "long-lived" | "one-shot";
   /** Set by handleEvent on turn-complete; consumed by onExit. */
   lastExitStatus: "complete" | "aborted" | "error";
@@ -608,6 +614,12 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   restampQueuedUserBlock(w.agentName, p.turnId, p.userBlockId);
   w.turnId = p.turnId;
   w.turnStart = Date.now();
+  // FRI-58: reset lastBlockStop so the turn-stall watchdog measures from the
+  // start of this turn, not the end of the previous one. Without this, any
+  // idle period >30min leaves lastBlockStop stale and the next watchdog tick
+  // (9s later) sees stalledMs > threshold and SIGTERMs the worker.
+  w.lastBlockStop = Date.now();
+  w.activePrompt = p;
   w.abortRequested = false;
   // FRI-61 wedge detector: a fresh turn starts with no observed blocks.
   // Today's IPC chain serialises events so this is a no-op (turn-complete
@@ -844,6 +856,7 @@ async function forceKillStuckWorker(
   // `w.forceKilled` short-circuit (or a future read site that doesn't
   // check the flag) would otherwise see a stale timestamp.
   w.turnStart = undefined;
+  w.activePrompt = undefined;
   await registry.setStatus(w.agentName, "idle").catch((err: unknown) => {
     logger.log("warn", "registry.set-status.error", {
       agent: w.agentName,
@@ -893,7 +906,12 @@ export function findAgentByTurnId(turnId: string): string | null {
  * close) BEFORE invoking — see `archiveAgent` and `forceWorkerRefork`.
  */
 async function drainLiveWorker(w: LiveWorker): Promise<WorkerPromptCommand[]> {
-  const drainedPrompts: WorkerPromptCommand[] = [...w.nextPrompts];
+  // FRI-58: prepend the in-flight prompt (already dispatched, not in nextPrompts)
+  // so the refork path redelivers it along with any queued prompts.
+  const drainedPrompts: WorkerPromptCommand[] = [
+    ...(w.activePrompt ? [w.activePrompt] : []),
+    ...w.nextPrompts,
+  ];
 
   // Ask the worker to stop gracefully, then wait for the actual exit
   // event. SIGTERM-on-pgrp backstop at 5s catches descendants the worker
@@ -1432,6 +1450,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
             // exact "trust the trail" anti-pattern FRI-117's lint
             // story is meant to catch at authoring time.
             w.turnStart = undefined;
+            w.activePrompt = undefined;
             await forceKillStuckWorker(w, {
               reason: "wedge",
               zeroBlockTurnStreak: w.zeroBlockTurnStreak,
@@ -1455,6 +1474,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // time. The `sendPrompt(w, next)` below will restamp if a queued
       // prompt drains.
       w.turnStart = undefined;
+      w.activePrompt = undefined;
       w.completedAtLeastOnce = true;
       await registry.setStatus(w.agentName, "idle");
       // Phase 5: `agent_status` SSE retired — Zero replicates the
@@ -1575,6 +1595,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
             // restructure in the `error` case above for the
             // "trust the trail" rationale.
             w.turnStart = undefined;
+            w.activePrompt = undefined;
             await forceKillStuckWorker(w, {
               reason: "wedge",
               zeroBlockTurnStreak: w.zeroBlockTurnStreak,
@@ -1601,6 +1622,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // hours between turns; the next `sendPrompt` (line 604) or the
       // queued-prompt drain below will restamp it when a new turn starts.
       w.turnStart = undefined;
+      w.activePrompt = undefined;
       w.completedAtLeastOnce = true;
       w.lastExitStatus = w.abortRequested ? "aborted" : "complete";
       await registry.setStatus(w.agentName, "idle");
