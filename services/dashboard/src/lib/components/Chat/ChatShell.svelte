@@ -411,34 +411,15 @@
     padding-right: var(--page-gutter);
     background: var(--bg-primary);
     z-index: 0;
-    /* Root cause (bug 2): WebCore's ScrollableArea scroll-gesture router
-       (Layer 2.5) runs before CSS z-index hit-testing (Layer 3). Because
-       this element is position: fixed; inset: 0 it covers the full
-       viewport, so the router checks it against every touch. Any touch
-       with micro-movement gets claimed as a scroll gesture — the sidebar
-       trigger (z-index 50) and header never receive it; CSS z-index never
-       resolves the winner.
-       Fix: touch-action: pan-y narrows the router's claim to vertical
-       pans only. Non-pan touches (taps) bypass it and fall through to
-       Layer 3 z-index hit-testing where the correct sibling wins.
+    /* touch-action: pan-y narrows the WebCore ScrollableArea router's
+       claim to vertical pans only, so taps fall through to z-index
+       hit-testing where the sidebar trigger and header correctly win.
        overscroll-behavior: contain prevents bounce compositor-frame lag
-       that causes taps immediately after a scroll to register at wrong
-       DOM positions.
-       pointer-events: none is retained as a secondary guard: it removes
-       the container from the CSS pointer-event target path for clean taps
-       that already make it to Layer 3. */
+       that causes taps immediately after a scroll to land at wrong DOM
+       positions. Both apply unconditionally — they're no-ops on desktop. */
     touch-action: pan-y;
     overscroll-behavior: contain;
-    pointer-events: none;
   }
-  /* Re-enable pointer events for all direct children so they (and their
-     descendants, via inheritance) remain interactive. pointer-events is
-     an inherited property — resetting it here cascades to chat bubbles,
-     buttons, links, and all other interactive content inside the scroll. */
-  .chat-scroll > :global(*) {
-    pointer-events: auto;
-  }
-
   .chat-sidebar-floating {
     position: fixed;
     top: var(--chat-top);
