@@ -64,7 +64,7 @@ describe("FRI-58: lastBlockStop reset prevents false stall-kills after idle", ()
 // same pattern as lifecycle-turnstart-clear.test.ts and are skipped when no DB
 // is available — the same behavior as the sibling file in this environment.
 describe("FRI-58: activePrompt cleared on every turn-end exit", () => {
-  let handle: Awaited<ReturnType<typeof import("@friday/shared")["createTestDb"]>> | undefined;
+  let handle: Awaited<ReturnType<(typeof import("@friday/shared"))["createTestDb"]>> | undefined;
 
   beforeAll(async () => {
     try {
@@ -145,10 +145,7 @@ describe("FRI-58: activePrompt cleared on every turn-end exit", () => {
       blocksThisTurn: 0,
       zeroBlockTurnStreak: 9, // one more zero-block turn trips the default threshold of 10
     });
-    await handleEvent(
-      worker as never,
-      { type: "turn-complete", sessionId: "sess-lbs-1" } as never,
-    );
+    await handleEvent(worker as never, { type: "turn-complete", sessionId: "sess-lbs-1" } as never);
     expect(worker["activePrompt"]).toBeUndefined();
   });
 
