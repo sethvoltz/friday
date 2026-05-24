@@ -733,6 +733,11 @@
       </div>
     {/if}
   {/each}
+  {#if !readonly && chat.showThinkingPlaceholder}
+    <div class="message inline">
+      <ThinkingBlock text="" status="running" />
+    </div>
+  {/if}
   {#if !readonly}
     <div
       bind:this={bottomSentinel}
