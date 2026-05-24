@@ -25,7 +25,7 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import pgPkg from "pg";
-import { _resetClientForTests, closeDb } from "./client.js";
+import { _resetClientForTests, closeDb, getPool } from "./client.js";
 import { FTS_SETUP_SQL } from "./schema.js";
 
 const { Client } = pgPkg;
@@ -134,8 +134,21 @@ async function applyMigrationsToScratch(url: string): Promise<void> {
 }
 
 async function dropTestDb(dbName: string): Promise<void> {
-  // Close the pool first so Postgres lets us drop the DB it was
-  // connected to.
+  // pg-pool calls client.removeAllListeners() before emitting 'remove'.
+  // Hooking 'remove' is our last window to add an error handler on the
+  // now-standalone client — without it, a 57P01 FATAL (sent when
+  // pg_terminate_backend kills a connection that is still in the TCP
+  // close handshake after pool.end()) becomes an unhandled exception in
+  // the Vitest process.
+  try {
+    const pool = getPool();
+    pool.on("remove", (client) => {
+      client.on("error", () => {});
+    });
+  } catch {
+    // Pool not yet initialized — nothing to attach to. Fine.
+  }
+
   try {
     await closeDb();
   } catch {
@@ -146,11 +159,18 @@ async function dropTestDb(dbName: string): Promise<void> {
   const admin = new Client({ connectionString: adminUrl() });
   await admin.connect();
   try {
-    // Force-disconnect any lingering connections (e.g., zombie
-    // connections from a crashed test) so DROP DATABASE succeeds.
+    // Kill all other sessions on this DB so the DROP succeeds. This
+    // also deactivates any Zero logical replication slots (active slots
+    // can't be dropped while their consumer PID is alive).
     await admin.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
        WHERE datname = $1 AND pid <> pg_backend_pid()`,
+      [dbName],
+    );
+    // Drop replication slots now that their consumers are terminated.
+    await admin.query(
+      `SELECT pg_drop_replication_slot(slot_name)
+       FROM pg_replication_slots WHERE database = $1`,
       [dbName],
     );
     await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
