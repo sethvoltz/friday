@@ -3235,6 +3235,63 @@ interface ParsedTurn {
   hasAssistantContent: boolean;
 }
 
+/**
+ * Per-turn parse cache. Module-scoped because there is exactly one chat
+ * store in the app and the cache key already namespaces by agent. Tests
+ * call `__resetParseCache()` between cases to keep fixtures isolated.
+ *
+ * The cache hits whenever a turn's `last_event_seq` sum is unchanged
+ * since the last parse, which is the common case during streaming on a
+ * long session: 380 of 381 turns are inert between SSE delta frames and
+ * skip re-parsing.
+ *
+ * A cache hit returns a top-level spread copy of the cached parsed
+ * array (`map(m => ({ ...m }))`). Downstream code mutates message fields
+ * in place during SSE streaming (`m.text += delta`, `m.status =
+ * 'complete'`, etc.), and a shared reference would let those mutations
+ * pollute the cache. Spread copy is cheap (~10µs per turn for typical
+ * 3-5-message turns) and sufficient because no caller mutates deep
+ * fields — top-level assignments are the entire mutation surface.
+ *
+ * Cache-eligibility gate: turns containing any streaming-status block
+ * are NEVER cached. classifyOrphanRows reads the global max ts across
+ * all blocks to decide orphan-classification, so a streaming block in
+ * turn X is sensitive to NEW blocks arriving in turn Y. By only caching
+ * turns whose blocks are all terminal (complete / aborted / error /
+ * queued), we avoid the cross-turn signature dependency that would
+ * otherwise force whole-cache invalidation on every new block.
+ */
+interface CachedTurnParse {
+  signature: number;
+  parsed: ChatMessage[];
+  userInfo: { ts: number } | null;
+  hasAssistantContent: boolean;
+}
+const _parseCache = new Map<string, CachedTurnParse>();
+
+/** Test-only hook to clear the per-turn parse cache between cases. */
+export function __resetParseCache(): void {
+  _parseCache.clear();
+}
+
+/** Sum of `last_event_seq` across a turn's blocks. Monotonic per-block,
+ *  so any block addition / update bumps the sum and forces a cache miss.
+ *  Block deletion (cancel-queued path) shrinks the sum, also a miss. */
+function turnParseSignature(blocks: readonly BlockRow[]): number {
+  let s = 0;
+  for (const b of blocks) s += b.lastEventSeq ?? 0;
+  return s;
+}
+
+/** True iff none of the turn's blocks are at status='streaming'. Streaming
+ *  blocks make the per-turn parse depend on the cross-turn orphan
+ *  classification (which reads global max ts); only terminal-block turns
+ *  are safely memoizable. */
+function turnIsCacheable(blocks: readonly BlockRow[]): boolean {
+  for (const b of blocks) if (b.status === "streaming") return false;
+  return true;
+}
+
 function parseTurnBlocks(
   turnBlocks: readonly BlockRow[],
   agent: string,
@@ -3533,15 +3590,49 @@ export function parseBlocks(
     return at - bt || (a < b ? -1 : a > b ? 1 : 0);
   });
 
-  // Per-turn parse. The Map-of-turns shape is what enables per-turn
-  // memoization in a subsequent commit — each turn's slice is a pure
-  // function of (its blocks, its slice of `orphans`). Until then this
-  // is just a re-shape of the existing single-pass parse.
+  // Per-turn parse with memoization. Cache hits return a top-level spread
+  // copy of the cached parsed array — downstream mutates message fields
+  // (m.text += delta, m.status = …) in place during SSE streaming, and
+  // sharing references would let those mutations pollute the cache.
   const out: ChatMessage[] = [];
   const userTurns = new Map<string, { ts: number }>();
   const assistantTurns = new Set<string>();
   for (const tid of turnOrder) {
-    const turn = parseTurnBlocks(byTurn.get(tid)!, agent, orphans);
+    const turnBlocks = byTurn.get(tid)!;
+    const cacheable = turnIsCacheable(turnBlocks);
+    const signature = cacheable ? turnParseSignature(turnBlocks) : -1;
+    const cacheKey = `${agent}|${tid}`;
+    let turn: ParsedTurn;
+    if (cacheable) {
+      const cached = _parseCache.get(cacheKey);
+      if (cached && cached.signature === signature) {
+        // Hit: spread-copy each cached message to insulate the cache from
+        // downstream field mutations (text/status/input/output).
+        turn = {
+          parsed: cached.parsed.map((m) => ({ ...m })),
+          userInfo: cached.userInfo,
+          hasAssistantContent: cached.hasAssistantContent,
+        };
+      } else {
+        turn = parseTurnBlocks(turnBlocks, agent, orphans);
+        _parseCache.set(cacheKey, {
+          signature,
+          // Store the fresh parse-output as the cache snapshot. Subsequent
+          // hits spread-copy from this stored array; the stored array is
+          // never mutated by downstream code because it's never returned
+          // verbatim.
+          parsed: turn.parsed.map((m) => ({ ...m })),
+          userInfo: turn.userInfo,
+          hasAssistantContent: turn.hasAssistantContent,
+        });
+      }
+    } else {
+      turn = parseTurnBlocks(turnBlocks, agent, orphans);
+      // Evict any stale entry — the turn was previously terminal-and-
+      // cached, then a fresh streaming block arrived (e.g., a refork that
+      // re-opens the turn). Clearing keeps the cache honest.
+      _parseCache.delete(cacheKey);
+    }
     if (turn.userInfo) userTurns.set(tid, turn.userInfo);
     if (turn.hasAssistantContent) assistantTurns.add(tid);
     out.push(...turn.parsed);

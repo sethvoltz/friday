@@ -103,7 +103,7 @@ function makeResponse(body: unknown, init: ResponseInit = {}): Response {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   mockFetchWithTimeout.mockReset();
   mockLoadJSON.mockReset();
   mockSaveJSON.mockReset();
@@ -112,6 +112,14 @@ beforeEach(() => {
   mockLoadJSON.mockReturnValue([]);
   mockForAgent.mockReturnValue([]);
   mockItems.length = 0;
+  // parseBlocks now memoizes per-turn parse output keyed by (agent,
+  // turnId, signature). The cache is module-scoped (one ChatState in
+  // production); tests reuse the module across cases, so we reset
+  // between tests to keep fixtures isolated. Without this, a prior
+  // test's parsed turn at the same agent + turnId + lastEventSeq sum
+  // hits as a stale entry.
+  const { __resetParseCache } = await import("./chat.svelte");
+  __resetParseCache();
 });
 
 afterEach(() => {
