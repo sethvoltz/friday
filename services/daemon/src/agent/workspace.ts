@@ -122,14 +122,17 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
     try {
       execFileSync("git", ["fetch", "origin", "main"], {
         cwd: opts.baseRepo,
-        stdio: "inherit",
+        stdio: "pipe",
       });
     } catch (err) {
       // Non-fatal: proceed with the cached origin/main. Warn so it's visible
       // in the logs, but don't abort workspace creation.
+      const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
       logger.log("warn", "workspace.fetch.fail", {
         name: opts.name,
-        message: err instanceof Error ? err.message : String(err),
+        message: e.message ?? String(err),
+        stderr: e.stderr ? String(e.stderr).trim() : undefined,
+        stdout: e.stdout ? String(e.stdout).trim() : undefined,
       });
     }
   }
@@ -153,12 +156,15 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
   try {
     execFileSync("git", ["worktree", "add", "-b", opts.branch, path, startPoint], {
       cwd: opts.baseRepo,
-      stdio: "inherit",
+      stdio: "pipe",
     });
   } catch (err) {
+    const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
     logger.log("error", "workspace.create.fail", {
       name: opts.name,
-      message: err instanceof Error ? err.message : String(err),
+      message: e.message ?? String(err),
+      stderr: e.stderr ? String(e.stderr).trim() : undefined,
+      stdout: e.stdout ? String(e.stdout).trim() : undefined,
     });
     throw err;
   }
@@ -197,12 +203,15 @@ export function archiveWorkspace(
     try {
       execFileSync("git", ["worktree", "remove", "--force", path], {
         cwd: baseRepo,
-        stdio: "inherit",
+        stdio: "pipe",
       });
     } catch (err) {
+      const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
       logger.log("warn", "workspace.destroy.fail", {
         name,
-        message: err instanceof Error ? err.message : String(err),
+        message: e.message ?? String(err),
+        stderr: e.stderr ? String(e.stderr).trim() : undefined,
+        stdout: e.stdout ? String(e.stdout).trim() : undefined,
       });
     }
     // The worktree-remove leaves the parent directory in place if anything
