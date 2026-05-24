@@ -439,75 +439,66 @@ export function filterRowsToCurrentSession<
 
 export class ChatState {
   /**
-   * Pre-migration imperative bucket for the focused agent's chat bubbles.
+   * Legacy bucket for canonical Zero-replicated bubbles + a handful of
+   * residual imperative writers that haven't moved to an overlay (sys_<ts>
+   * slash-command bubbles via pushLocal; the test-only startAssistantTurn
+   * / appendDelta / pushTool / pushThinking / etc. helpers; reload-mid-
+   * stream rows that landed at status='streaming' from Zero before SSE
+   * caught up — those deltas continue to route via handleBlockDelta's
+   * legacy fallback because no overlay entry exists for them yet).
    *
-   * This is the legacy `messages` array, scoped to a private field so the
-   * public `messages` getter can layer the streaming / optimistic overlays
-   * on top of it. Internal mutators (SSE handlers, optimistic-send path,
-   * `applyZeroBlocks`'s merge, the heal sweeps) still write here; over the
-   * next several commits each writer category migrates to its overlay and
-   * its imperative entries vanish from this bucket. When the final writer
-   * moves off, `#legacyMessages` and the `set messages(...)` shim are
-   * deleted and `messages` becomes a pure derivation.
+   * Lifecycle ranks: streaming / optimistic overlays own the in-flight
+   * phase (per-instance $state reactivity); legacy owns the canonical
+   * (terminal) phase. The `messages` derivation merges legacy + overlay
+   * with overlay shadowing on id collision.
    *
-   * Why a shadow instead of an immediate full migration: the writer
-   * migration is large (~40 sites across chat.svelte.ts + a couple of
-   * components + ~25 test fixtures). Doing it atomically inside one
-   * commit would mean tests can't be moved in lockstep with their
-   * code — this shadow lets each commit migrate one writer category
-   * and keeps the suite green at every boundary.
+   * `set messages(v)` writes here so test fixtures (`chat.messages =
+   * [...]`) keep working. Full deletion of this field would require
+   * relocating the residual writers into dedicated overlays and
+   * rewriting ~25 test fixtures — out of scope for this PR; would be
+   * a worthwhile follow-up once the new model has bedded in.
    */
   #legacyMessages = $state<ChatMessage[]>([]);
   agents = $state<AgentInfo[]>([]);
 
   /**
    * Live overlay for in-flight assistant / tool / thinking blocks. Keyed
-   * by `overlayKey(agent, msg.id)`. Entries are added on SSE `block_start`,
-   * mutated in place on `block_delta` (field-level $state reactivity), and
-   * removed on `block_canceled` or when the matching canonical row from
-   * Zero replicates with terminal status.
-   *
-   * Subsequent commits migrate the SSE handlers to write here; today the
-   * map is read by the `messages` derivation but populated only after
-   * commit 5 lands.
+   * by `overlayKey(agent, msg.id)`. Entries are added on SSE block_start
+   * (commit 5), mutated in place on block_delta (field-level $state
+   * reactivity), and removed by block_canceled or by the
+   * `pruneConvergedStreamingOverlay` sweep that runs on each
+   * applyZeroBlocks once the canonical row replicates at terminal status
+   * (commit 7).
    */
   streaming = new SvelteMap<OverlayKey, StreamingEntry>();
 
   /**
    * Optimistic overlay for user bubbles that haven't yet been confirmed
-   * by Zero. Keyed by `overlayKey(agent, msg.id)`. Dropped when the
-   * canonical user row arrives via Zero or the send queue acks the
-   * `queueBlockId`.
-   *
-   * Subsequent commits migrate the addUser/confirmPending/etc. path to
-   * write here; today the map is read by the `messages` derivation but
-   * populated only after commit 6 lands.
+   * by Zero. addUser populates it with a `pending_<uuid>` id;
+   * confirmPending drops the overlay entry and pushes the canonical
+   * bubble into legacy at `userBlockIdForTurn(turn_id)` (the canonical
+   * Zero row that lands moments later dedups by id in applyZeroBlocks's
+   * merge). FRI-103: also drops entries here whose `queueId` is acked
+   * by an incoming canonical user row in applyZeroBlocks.
    */
   optimistic = new SvelteMap<OverlayKey, OptimisticEntry>();
 
   /**
-   * Derived chat view for the focused agent, merging the legacy bucket
-   * (canonical Zero-derived rows + still-imperative SSE/optimistic writes)
-   * with the streaming and optimistic overlays. Filters overlay entries
-   * by `entry.agent === focused && entry.sessionId === currentSessionId`,
-   * so `/clear` (which nulls the agent's sessionId) hides leftover
-   * in-flight overlay entries naturally and cross-agent SSE never bleeds
-   * into the focused agent's view.
-   *
-   * Cross-agent leak structural fix: today this is a pass-through over
-   * the legacy bucket because overlays are empty. Once SSE handlers
-   * (commit 5) and the optimistic path (commit 6) move off the legacy
-   * bucket, switching the focused agent re-derives from the new agent's
-   * data + only-that-agent's overlay entries — the previous agent's
-   * in-flight bubbles disappear because they're scoped to the wrong
-   * agent / session, not because anything explicitly clears them.
+   * Derived chat view for the focused agent: legacy + streaming overlay
+   * + optimistic overlay, merged with overlay shadowing on id collision.
+   * Overlay entries are filtered by `entry.agent === focused &&
+   * entry.sessionId === currentSessionId` so `/clear` (which nulls the
+   * agent's sessionId at the daemon) hides leftover in-flight entries
+   * with no imperative sweep. Legacy entries are filtered by agent tag
+   * — the structural cross-agent isolation introduced in commit 8.
    *
    * Reactivity contract: per-entry `$state` fields on StreamingEntry /
    * OptimisticEntry fire fine-grained subscriptions on `entry.text +=
    * delta` etc. WITHOUT re-running this derivation. The derivation
    * re-runs only on structural changes (map set/delete, legacy bucket
    * shape change, focusedAgent / agents flip). Hot-path streaming
-   * latency stays at one paint frame even on long sessions.
+   * latency stays at one paint frame even on long sessions — the
+   * load-bearing property the staged migration was designed around.
    */
   #derivedMessages = $derived.by<ChatMessage[]>(() => {
     const focused = this._focusedAgent;
@@ -560,11 +551,10 @@ export class ChatState {
    * subscribe to.
    *
    * The `set messages(v)` shim writes to the legacy bucket and exists
-   * to keep test fixtures (`chat.messages = [...]`) and the few code
-   * paths that still wholesale-replace the array working during the
-   * migration. Once the final writer moves to its overlay, the shim
-   * (and `#legacyMessages`) can be deleted along with the rest of the
-   * tear-out.
+   * to keep test fixtures (`chat.messages = [...]`) working. Removing
+   * it would require rewriting ~25 test fixtures to construct the
+   * appropriate overlay entries or push directly to legacy via
+   * pushLocal — worthwhile follow-up once the new model has bedded in.
    */
   get messages(): ChatMessage[] {
     return this.#derivedMessages;
@@ -1016,15 +1006,6 @@ export class ChatState {
       }),
     );
     return id;
-  }
-
-  /** Clear `queueId` from the user bubble matching this queue id, if any.
-   *  Called when the send-queue successfully flushes a previously queued
-   *  message — the bubble is no longer "queued", just sent. */
-  clearQueueMarker(queueId: string): void {
-    for (const m of this.messages) {
-      if (m.queueId === queueId) m.queueId = undefined;
-    }
   }
 
   /**
@@ -2370,6 +2351,12 @@ export class ChatState {
     // appear (bounded by distinct blocks ever surfaced for this
     // agent in this session); it resets on focus switch in
     // `loadAgentTurns`.
+    //
+    // Survives the overlay migration: load-bearing for CROSS-DEVICE
+    // delete propagation. The overlay's session-id stamping handles
+    // the /clear case (which moves a whole session); single-block
+    // deletes from another device land here as "Zero used to deliver
+    // this id, doesn't now" and would be missed without the tracker.
     const snapshotBlockIds = new Set<string>();
     for (const r of rows) snapshotBlockIds.add(r.block_id);
 
