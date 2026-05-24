@@ -2202,7 +2202,7 @@ describe("unread badge gating (PR C)", () => {
     const chat = new ChatState();
     chat.focusedAgent = "friday";
     // Seed a prior user message so `originalUserTextForTurn` resolves.
-    chat.messages.push({
+    chat.pushLocal({
       id: userBlockIdForTurn("t-old"),
       role: "user",
       text: "earlier prompt",
@@ -2257,7 +2257,7 @@ describe("unread badge gating (PR C)", () => {
     const { sendQueue } = await import("./send-queue.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    chat.messages.push({
+    chat.pushLocal({
       id: userBlockIdForTurn("t-old"),
       role: "user",
       text: "earlier",

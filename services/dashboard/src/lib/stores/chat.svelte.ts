@@ -438,7 +438,26 @@ export function filterRowsToCurrentSession<
 }
 
 export class ChatState {
-  messages = $state<ChatMessage[]>([]);
+  /**
+   * Pre-migration imperative bucket for the focused agent's chat bubbles.
+   *
+   * This is the legacy `messages` array, scoped to a private field so the
+   * public `messages` getter can layer the streaming / optimistic overlays
+   * on top of it. Internal mutators (SSE handlers, optimistic-send path,
+   * `applyZeroBlocks`'s merge, the heal sweeps) still write here; over the
+   * next several commits each writer category migrates to its overlay and
+   * its imperative entries vanish from this bucket. When the final writer
+   * moves off, `#legacyMessages` and the `set messages(...)` shim are
+   * deleted and `messages` becomes a pure derivation.
+   *
+   * Why a shadow instead of an immediate full migration: the writer
+   * migration is large (~40 sites across chat.svelte.ts + a couple of
+   * components + ~25 test fixtures). Doing it atomically inside one
+   * commit would mean tests can't be moved in lockstep with their
+   * code — this shadow lets each commit migrate one writer category
+   * and keeps the suite green at every boundary.
+   */
+  #legacyMessages = $state<ChatMessage[]>([]);
   agents = $state<AgentInfo[]>([]);
 
   /**
@@ -448,11 +467,9 @@ export class ChatState {
    * removed on `block_canceled` or when the matching canonical row from
    * Zero replicates with terminal status.
    *
-   * Foundation step (FRI-XXX): the map exists but no readers / writers
-   * are wired yet — the active code path still mutates `messages`
-   * imperatively. Subsequent commits migrate the SSE handlers to write
-   * here and the `messages` array to derive from this + canonical +
-   * optimistic.
+   * Subsequent commits migrate the SSE handlers to write here; today the
+   * map is read by the `messages` derivation but populated only after
+   * commit 5 lands.
    */
   streaming = new SvelteMap<OverlayKey, StreamingEntry>();
 
@@ -462,10 +479,110 @@ export class ChatState {
    * canonical user row arrives via Zero or the send queue acks the
    * `queueBlockId`.
    *
-   * Foundation step: no readers / writers yet — see comment on
-   * `streaming` above.
+   * Subsequent commits migrate the addUser/confirmPending/etc. path to
+   * write here; today the map is read by the `messages` derivation but
+   * populated only after commit 6 lands.
    */
   optimistic = new SvelteMap<OverlayKey, OptimisticEntry>();
+
+  /**
+   * Derived chat view for the focused agent, merging the legacy bucket
+   * (canonical Zero-derived rows + still-imperative SSE/optimistic writes)
+   * with the streaming and optimistic overlays. Filters overlay entries
+   * by `entry.agent === focused && entry.sessionId === currentSessionId`,
+   * so `/clear` (which nulls the agent's sessionId) hides leftover
+   * in-flight overlay entries naturally and cross-agent SSE never bleeds
+   * into the focused agent's view.
+   *
+   * Cross-agent leak structural fix: today this is a pass-through over
+   * the legacy bucket because overlays are empty. Once SSE handlers
+   * (commit 5) and the optimistic path (commit 6) move off the legacy
+   * bucket, switching the focused agent re-derives from the new agent's
+   * data + only-that-agent's overlay entries — the previous agent's
+   * in-flight bubbles disappear because they're scoped to the wrong
+   * agent / session, not because anything explicitly clears them.
+   *
+   * Reactivity contract: per-entry `$state` fields on StreamingEntry /
+   * OptimisticEntry fire fine-grained subscriptions on `entry.text +=
+   * delta` etc. WITHOUT re-running this derivation. The derivation
+   * re-runs only on structural changes (map set/delete, legacy bucket
+   * shape change, focusedAgent / agents flip). Hot-path streaming
+   * latency stays at one paint frame even on long sessions.
+   */
+  #derivedMessages = $derived.by<ChatMessage[]>(() => {
+    const focused = this._focusedAgent;
+    const agentRow = this.agents.find((a) => a.name === focused);
+    const sid = agentRow?.sessionId ?? null;
+
+    // Fast-path: while no commit has migrated writers off the legacy
+    // bucket, both overlay maps are empty and the public `messages`
+    // is literally the legacy array (preserves object identity so
+    // existing in-place mutations on bubble fields still surface).
+    if (this.streaming.size === 0 && this.optimistic.size === 0) {
+      return this.#legacyMessages;
+    }
+
+    const overlayIds = new Set<string>();
+    const overlayEntries: ChatMessage[] = [];
+    for (const entry of this.streaming.values()) {
+      if (entry.agent !== focused) continue;
+      if (entry.sessionId !== sid) continue;
+      overlayEntries.push(entry);
+      overlayIds.add(entry.id);
+    }
+    for (const entry of this.optimistic.values()) {
+      if (entry.agent !== focused) continue;
+      if (entry.sessionId !== sid) continue;
+      overlayEntries.push(entry);
+      overlayIds.add(entry.id);
+    }
+    // Legacy entries lose to overlay shadows on id collision: while a
+    // bubble lives in the overlay it's the live, fine-grained-reactive
+    // surface; the legacy bucket's stale copy (if any) is suppressed.
+    // ChatMessages.svelte's `allMessages` derivation handles pending-
+    // pinning, so insertion order — legacy first, then overlay tail —
+    // matches the pre-migration "append on push" behavior.
+    const out: ChatMessage[] = [];
+    for (const m of this.#legacyMessages) {
+      if (overlayIds.has(m.id)) continue;
+      out.push(m);
+    }
+    for (const e of overlayEntries) out.push(e);
+    return out;
+  });
+
+  /**
+   * Public read API: the focused agent's chat bubbles. See the comment on
+   * `#derivedMessages` for the merge contract; this getter is the access
+   * point ChatMessages.svelte / ChatShell.svelte / ChatInput.svelte
+   * subscribe to.
+   *
+   * The `set messages(v)` shim writes to the legacy bucket and exists
+   * to keep test fixtures (`chat.messages = [...]`) and the few code
+   * paths that still wholesale-replace the array working during the
+   * migration. Once the final writer moves to its overlay, the shim
+   * (and `#legacyMessages`) can be deleted along with the rest of the
+   * tear-out.
+   */
+  get messages(): ChatMessage[] {
+    return this.#derivedMessages;
+  }
+  set messages(v: ChatMessage[]) {
+    this.#legacyMessages = v;
+  }
+
+  /**
+   * Imperative append to the legacy bucket. Used by callers that need
+   * to push a transient bubble (slash-command sys_<ts> errors in
+   * ChatInput.svelte; test fixtures setting up seed state) but don't
+   * yet have an overlay to write to. Same lifetime as the legacy
+   * bucket itself — when the final overlay migration lands, the sys_
+   * call sites should either go through a dedicated transient overlay
+   * or be removed entirely per the chat-content-is-durable contract.
+   */
+  pushLocal(msg: ChatMessage): void {
+    this.#legacyMessages.push(msg);
+  }
   /**
    * Instrumentation backing field (FRI-72). The public `focusedAgent`
    * getter/setter wraps this so every write logs prev/next + URL +
@@ -777,7 +894,7 @@ export class ChatState {
    */
   clearLocalView(agent: string): void {
     if (this.focusedAgent !== agent) return;
-    this.messages = [];
+    this.#legacyMessages = [];
     this.oldestBlockId = null;
     this.reachedOldest = false;
     this.historyError = null;
@@ -856,7 +973,7 @@ export class ChatState {
         ? (crypto as { randomUUID: () => string }).randomUUID()
         : `${Date.now()}_${Math.random().toString(36).slice(2)}`
     }`;
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "user",
       text,
@@ -907,10 +1024,10 @@ export class ChatState {
       (m, i) => i !== optIdx && m.id === targetId,
     );
     if (sseAlreadyHere) {
-      this.messages = this.messages.filter((_, i) => i !== optIdx);
+      this.#legacyMessages = this.#legacyMessages.filter((_, i) => i !== optIdx);
       return;
     }
-    const m = this.messages[optIdx];
+    const m = this.#legacyMessages[optIdx];
     m.id = targetId;
     m.turnId = turnId;
     m.pending = false;
@@ -944,13 +1061,15 @@ export class ChatState {
   /** Remove the pending bubble matching `queueId` (FIX_FORWARD 2.7 — used
    *  when the user picks "Discard and continue" or "Discard all"). */
   discardPending(queueId: string): void {
-    this.messages = this.messages.filter((m) => m.queueId !== queueId);
+    this.#legacyMessages = this.#legacyMessages.filter(
+      (m) => m.queueId !== queueId,
+    );
   }
 
   /** Remove every pending bubble in one go (FIX_FORWARD 2.7 — "Discard all
    *  and continue"). */
   discardAllPending(): void {
-    this.messages = this.messages.filter((m) => !m.pending);
+    this.#legacyMessages = this.#legacyMessages.filter((m) => !m.pending);
   }
 
   /** Show a transient toast for `ms` (default 4000). FIX_FORWARD 6.1. */
@@ -1186,7 +1305,7 @@ export class ChatState {
     // it back to true if the user is genuinely at the bottom after the
     // jump (e.g. /jump to a very recent message).
     this.pinnedToBottom = false;
-    this.messages = [...settled, ...pending];
+    this.#legacyMessages = [...settled, ...pending];
 
     if (targetId) {
       this.scrollNonce += 1;
@@ -1211,7 +1330,7 @@ export class ChatState {
 
   startAssistantTurn(turnId: string, agent: string): void {
     this.markInflight(agent, turnId);
-    this.messages.push({
+    this.#legacyMessages.push({
       id: turnId,
       role: "assistant",
       text: "",
@@ -1260,7 +1379,7 @@ export class ChatState {
         return;
       }
     }
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "assistant",
       text: delta,
@@ -1450,7 +1569,7 @@ export class ChatState {
     // that does identity-based diff (the per-message mutations above
     // are picked up by Svelte's fine-grained reactivity, but explicit
     // is cheaper than relying on it for the listener side effect).
-    if (healed) this.messages = [...this.messages];
+    if (healed) this.#legacyMessages = [...this.#legacyMessages];
   }
 
   /* ------------ FRI-12: Resend / Resume helpers ------------ */
@@ -1661,7 +1780,7 @@ export class ChatState {
   pushTool(toolId: string, toolName: string, input: unknown): void {
     const id = `t_${toolId}`;
     if (this.messages.some((m) => m.id === id)) return;
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "tool",
       text: "",
@@ -1684,7 +1803,7 @@ export class ChatState {
         return;
       }
     }
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "tool",
       text: "",
@@ -1707,7 +1826,7 @@ export class ChatState {
         return;
       }
     }
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "tool",
       text: "",
@@ -1721,7 +1840,7 @@ export class ChatState {
   pushThinking(blockId: string): void {
     const id = `th_${blockId}`;
     if (this.messages.some((m) => m.id === id)) return;
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "thinking",
       text: "",
@@ -1741,7 +1860,7 @@ export class ChatState {
         return;
       }
     }
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "thinking",
       text: delta,
@@ -1760,7 +1879,7 @@ export class ChatState {
         return;
       }
     }
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "thinking",
       text: "",
@@ -1790,7 +1909,7 @@ export class ChatState {
     const haveMessages = this.messages.length > 0;
     const isReentry = !switchingAgents && haveMessages;
     if (!isReentry) {
-      this.messages = [];
+      this.#legacyMessages = [];
       this.oldestBlockId = null;
       this.reachedOldest = false;
       this.historyError = null;
@@ -1850,7 +1969,7 @@ export class ChatState {
       this.inflightTurnIdByAgent[agent] ?? null,
     );
     if (cached.length > 0) {
-      this.messages = [
+      this.#legacyMessages = [
         ...parseBlocks(cached, agent, {
           inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
         }),
@@ -1871,7 +1990,7 @@ export class ChatState {
         this.oldestBlockId = oldestBlockCursor(cached);
       }
     } else if (queueSynth.length > 0) {
-      this.messages = [...queueSynth];
+      this.#legacyMessages = [...queueSynth];
     }
 
     this.loadingInitial = cached.length === 0;
@@ -1923,7 +2042,7 @@ export class ChatState {
         // not-yet-sent user input that conceptually sits at the bottom
         // until the daemon assigns turn_ids and the SSE confirmation
         // arrives.
-        this.messages = [
+        this.#legacyMessages = [
           ...parseBlocks(blocks, agent, {
             inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
             noResponseGraceUntil: this.noResponseGraceUntil,
@@ -2244,7 +2363,7 @@ export class ChatState {
     // block_ids are recognized as "seen via Zero" on the next call.
     for (const bid of snapshotBlockIds) this.zeroSeenBlockIds.add(bid);
 
-    this.messages = dropSupersededNoResponseSafetyNet(merged);
+    this.#legacyMessages = dropSupersededNoResponseSafetyNet(merged);
     const newOldest = oldestBlockCursor(blockRows);
     if (newOldest !== this.oldestBlockId) {
       // The Zero snapshot shifted the scroll-back cursor. Re-arm
@@ -2378,7 +2497,7 @@ export class ChatState {
       // see in DB).
       const seen = new Set(this.messages.map((m) => m.id));
       const fresh = older.filter((m) => !seen.has(m.id));
-      this.messages = [...fresh, ...this.messages];
+      this.#legacyMessages = [...fresh, ...this.#legacyMessages];
       this.oldestBlockId = oldestBlockCursor(blocks);
       opts?.onPrepended?.();
     } catch {
@@ -2524,7 +2643,7 @@ export class ChatState {
       const id =
         role === "user" ? userBlockIdForTurn(event.turn_id) : `b_${event.block_id}`;
       if (this.messages.some((m) => m.id === id)) return;
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role,
         text: "",
@@ -2538,7 +2657,7 @@ export class ChatState {
     if (event.kind === "thinking") {
       const id = `th_${event.block_id}`;
       if (this.messages.some((m) => m.id === id)) return;
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role: "thinking",
         text: "",
@@ -2553,7 +2672,7 @@ export class ChatState {
       const toolId = event.tool?.id ?? event.block_id;
       const id = `t_${toolId}`;
       if (this.messages.some((m) => m.id === id)) return;
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role: "tool",
         text: "",
@@ -2632,7 +2751,7 @@ export class ChatState {
         existing.rawErrorMessage = errPayload.rawMessage;
         return;
       }
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role: "assistant",
         kind: "error",
@@ -2661,11 +2780,11 @@ export class ChatState {
         // streaming bubble at `b_<id>` still satisfies D5's cleanup intent;
         // the new affordance bubble at `nr_<turnId>` is the converged shape.
         const streamingId = `b_${event.block_id}`;
-        const idx = this.messages.findIndex((m) => m.id === streamingId);
-        if (idx !== -1) this.messages.splice(idx, 1);
+        const idx = this.#legacyMessages.findIndex((m) => m.id === streamingId);
+        if (idx !== -1) this.#legacyMessages.splice(idx, 1);
         const nrId = noResponseIdForTurn(event.turn_id);
         if (!this.messages.some((m) => m.id === nrId)) {
-          this.messages.push({
+          this.#legacyMessages.push({
             id: nrId,
             role: "assistant",
             kind: "no-response",
@@ -2719,7 +2838,7 @@ export class ChatState {
       // Late mount: block_start was evicted from the ring (or — for mail
       // — was never emitted in the first place).
       const role = event.role === "user" ? "user" : "assistant";
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role,
         text: parsed.text ?? "",
@@ -2745,7 +2864,7 @@ export class ChatState {
       const hasText =
         typeof parsed.text === "string" && parsed.text.length > 0;
       if (!hasText && event.status === "complete") {
-        this.messages = this.messages.filter((m) => m.id !== id);
+        this.#legacyMessages = this.#legacyMessages.filter((m) => m.id !== id);
         return;
       }
       // For thinking blocks, 'complete' (and the un-aborted retry path)
@@ -2765,7 +2884,7 @@ export class ChatState {
         m.status = status;
         return;
       }
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role: "thinking",
         text: parsed.text ?? "",
@@ -2801,7 +2920,7 @@ export class ChatState {
           : event.status === "error"
             ? "error"
             : "running";
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role: "tool",
         text: "",
@@ -2851,7 +2970,9 @@ export class ChatState {
    * to disclose.
    */
   private handleBlockCanceled(event: { block_id: string }): void {
-    this.messages = this.messages.filter((m) => m.blockId !== event.block_id);
+    this.#legacyMessages = this.#legacyMessages.filter(
+      (m) => m.blockId !== event.block_id,
+    );
   }
 
   // Phase 5: `handleBlockMetaUpdate` removed — Zero replicates the
@@ -2878,7 +2999,7 @@ export class ChatState {
       });
       if (!r.ok) return null;
       const data = (await r.json().catch(() => ({}))) as { text?: string };
-      this.messages = this.messages.filter(
+      this.#legacyMessages = this.#legacyMessages.filter(
         (m) => m.turnId !== turnId || m.role !== "user",
       );
       return typeof data.text === "string" ? data.text : "";
