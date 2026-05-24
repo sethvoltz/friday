@@ -411,6 +411,22 @@
     padding-right: var(--page-gutter);
     background: var(--bg-primary);
     z-index: 0;
+    /* The scroll container is position: fixed; inset: 0 — it covers the
+       full viewport. On iOS, UIScrollView intercepts touches in its area
+       at the UIKit layer (before z-index routing) to track scroll intent,
+       causing taps on higher-z-index elements (header, sidebar trigger)
+       to route to the scroll container instead. pointer-events: none
+       removes the container from the pointer-event target path; native
+       scroll still works because UIScrollView operates below the CSS
+       pointer-events layer. Interactive descendants are re-enabled below. */
+    pointer-events: none;
+  }
+  /* Re-enable pointer events for all direct children so they (and their
+     descendants, via inheritance) remain interactive. pointer-events is
+     an inherited property — resetting it here cascades to chat bubbles,
+     buttons, links, and all other interactive content inside the scroll. */
+  .chat-scroll > :global(*) {
+    pointer-events: auto;
   }
 
   .chat-sidebar-floating {
@@ -551,10 +567,7 @@
     .chat-scroll {
       padding-left: var(--page-gutter);
       padding-right: var(--page-gutter);
-      /* 4.75rem = sidebar.mobile padding (0.8rem) + trigger height (3.75rem = 44px min-height
-         + 8px×2 padding) + 0.2rem gap. Was 3.25rem which let chat blocks render behind
-         the trigger, creating a hit-target overlap zone. */
-      padding-top: calc(var(--chat-top) + 4.75rem);
+      padding-top: calc(var(--chat-top) + 3.25rem);
     }
     .chat-input-floating {
       left: var(--page-gutter);
@@ -567,7 +580,7 @@
       right: var(--page-gutter);
     }
     .loading-older {
-      top: calc(var(--chat-top) + 4.75rem);
+      top: calc(var(--chat-top) + 3.75rem);
     }
   }
 
