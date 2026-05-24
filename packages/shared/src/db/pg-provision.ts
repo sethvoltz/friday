@@ -188,8 +188,29 @@ function defaultMigrationsDir(): string {
   return join(pkgRoot, "drizzle");
 }
 
+/**
+ * Resolves the pg_isready binary name. On Homebrew versioned installs
+ * (e.g. `postgresql@18`) only `pg_isready-18` is on PATH, not the bare
+ * `pg_isready`. Tries bare first, then versioned suffixes 18→16, then
+ * scans Homebrew opt paths directly.
+ */
+export function findPgIsReady(): string {
+  const candidates = ["pg_isready", "pg_isready-18", "pg_isready-17", "pg_isready-16"];
+  for (const name of candidates) {
+    const probe = spawnSync("which", [name], { encoding: "utf8" });
+    if (probe.status === 0 && probe.stdout.trim()) return name;
+  }
+  const homebrewPrefix = process.arch === "arm64" ? "/opt/homebrew" : "/usr/local";
+  for (const ver of [18, 17, 16]) {
+    const fullPath = `${homebrewPrefix}/opt/postgresql@${ver}/bin/pg_isready`;
+    if (existsSync(fullPath)) return fullPath;
+  }
+  return "pg_isready";
+}
+
 function assertPgReady(): void {
-  const result = spawnSync("pg_isready", { encoding: "utf8" });
+  const bin = findPgIsReady();
+  const result = spawnSync(bin, { encoding: "utf8" });
   if (result.status !== 0) {
     throw new Error(
       `Postgres is not reachable. Run \`brew services start postgresql@18\` and re-run setup.\n` +
