@@ -1447,7 +1447,11 @@ export class ChatState {
     // done. Assistant text bubbles use the same matching rule they always
     // have.
     const userBlockId = userBlockIdForTurn(turnId);
-    for (const m of this.messages) {
+    // Helper applied to each message regardless of which bucket it
+    // lives in (legacy or streaming overlay). In-place status / field
+    // mutations are reactive in both: $state items on the legacy
+    // $state array, and per-instance $state fields on StreamingEntry.
+    const flip = (m: ChatMessage): void => {
       // FRI-95: the user block participates in turn-level terminal-state
       // resolution. It's the always-present render surface for the Stop
       // affordance (Stopping… → Stopped / Stopped — worker had to be
@@ -1457,10 +1461,7 @@ export class ChatState {
         if (status === "aborted") {
           m.status = "aborted";
           if (abortReason) m.abortReason = abortReason;
-        } else if (
-          status === "complete" &&
-          m.status === "stopping"
-        ) {
+        } else if (status === "complete" && m.status === "stopping") {
           // Race: user clicked Stop but the turn raced to a clean
           // completion before the daemon could honor the abort. Render
           // a brief `already_finished` transient so the user knows the
@@ -1479,31 +1480,40 @@ export class ChatState {
             }
           }, settleAfterMs);
         }
-        continue;
+        return;
       }
-      if (m.id !== turnId && m.turnId !== turnId) continue;
+      if (m.id !== turnId && m.turnId !== turnId) return;
       if (m.role === "assistant") {
         if (
           m.status === "complete" ||
           m.status === "aborted" ||
           m.status === "error"
         ) {
-          continue;
+          return;
         }
         m.status = status;
         // FRI-95: thread abort reason through to the assistant bubble too,
         // so a streaming assistant bubble that ended on abort shows the
         // same terminal copy distinction as the user block.
-        if (status === "aborted" && abortReason) {
-          m.abortReason = abortReason;
-        }
+        if (status === "aborted" && abortReason) m.abortReason = abortReason;
       } else if (m.role === "tool" || m.role === "thinking") {
         if (m.status === "done" || m.status === "error" || m.status === "aborted") {
-          continue;
+          return;
         }
         m.status = status === "complete" ? "done" : status;
       }
+    };
+    // Streaming overlay first (this is where SSE-driven in-flight
+    // bubbles live since commit 5). Scoped to the focused agent so a
+    // turn_done for a non-focused agent doesn't touch its overlay.
+    for (const entry of this.streaming.values()) {
+      if (entry.agent !== this.focusedAgent) continue;
+      flip(entry);
     }
+    // Legacy bucket carries the user block and any reload-mid-stream
+    // canonical entries; iterate after the overlay so id collisions
+    // (overlay shadows legacy by id) still get both copies flipped.
+    for (const m of this.#legacyMessages) flip(m);
     // Inflight-slot cleanup is delegated to `clearInflightForTurn` so
     // applyEvent's `turn_done` / `error` cases can clear the slot for
     // non-focused agents without going through the message-walking
@@ -1591,7 +1601,29 @@ export class ChatState {
     // otherwise are stale.
     if (focusedRow.status === "working") return;
     let healed = false;
-    for (const m of this.messages) {
+    // Heal the streaming overlay first — that's where SSE-driven
+    // in-flight bubbles live (commit 5). Each entry's status is a
+    // $state field, so the assignment fires fine-grained reactivity
+    // on any template reader.
+    for (const entry of this.streaming.values()) {
+      if (entry.agent !== focused) continue;
+      if (entry.role === "assistant" && entry.status === "streaming") {
+        entry.status = "complete";
+        healed = true;
+      } else if (
+        (entry.role === "tool" || entry.role === "thinking") &&
+        entry.status === "running"
+      ) {
+        entry.status = "done";
+        healed = true;
+      }
+    }
+    // Legacy bucket still carries streaming/running entries in two
+    // residual cases: a reload-mid-stream that landed a status='streaming'
+    // canonical Zero row before SSE caught up (the row's deltas route
+    // via the legacy fallback in handleBlockDelta), and any pre-overlay
+    // imperative pushes a test fixture might have made.
+    for (const m of this.#legacyMessages) {
       if (m.role === "assistant" && m.status === "streaming") {
         m.status = "complete";
         healed = true;
@@ -2427,6 +2459,14 @@ export class ChatState {
         }
       }
     }
+    // Reload-heal convergence: drop streaming overlay entries whose
+    // canonical row just landed in legacy with a terminal status. The
+    // overlay shadowed the (in-flight) legacy entry while SSE was
+    // driving deltas; now that Zero has delivered the terminal version
+    // the overlay is no longer load-bearing and would otherwise hold
+    // memory + render-state forever past the turn's end. Scoped to
+    // the focused agent because we just merged that agent's rows.
+    this.pruneConvergedStreamingOverlay(forAgent);
     const newOldest = oldestBlockCursor(blockRows);
     if (newOldest !== this.oldestBlockId) {
       // The Zero snapshot shifted the scroll-back cursor. Re-arm
@@ -2684,6 +2724,33 @@ export class ChatState {
   }
 
   /* ------------ Block-level streaming handlers (FIX_FORWARD 1.7) ------------ */
+
+  /** Reload-heal convergence: drop streaming overlay entries for `agent`
+   *  whose canonical row exists in the legacy bucket at a terminal
+   *  status. While the row was in-flight the overlay shadowed the
+   *  legacy entry; once the canonical row carries the terminal status
+   *  the overlay no longer adds anything. Called from applyZeroBlocks
+   *  on every snapshot so the overlay drains as Zero finalizes blocks
+   *  for the focused agent. */
+  private pruneConvergedStreamingOverlay(agent: string): void {
+    if (this.streaming.size === 0) return;
+    const terminalIds = new Set<string>();
+    for (const m of this.#legacyMessages) {
+      if (
+        m.status === "complete" ||
+        m.status === "aborted" ||
+        m.status === "error" ||
+        m.status === "done"
+      ) {
+        terminalIds.add(m.id);
+      }
+    }
+    if (terminalIds.size === 0) return;
+    for (const [key, entry] of this.streaming.entries()) {
+      if (entry.agent !== agent) continue;
+      if (terminalIds.has(entry.id)) this.streaming.delete(key);
+    }
+  }
 
   /** Snapshot of the focused agent's current SDK session id. Stamped onto
    *  StreamingEntry / OptimisticEntry constructions so the `messages`
