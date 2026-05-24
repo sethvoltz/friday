@@ -551,7 +551,10 @@
     .chat-scroll {
       padding-left: var(--page-gutter);
       padding-right: var(--page-gutter);
-      padding-top: calc(var(--chat-top) + 3.25rem);
+      /* 4.75rem = sidebar.mobile padding (0.8rem) + trigger height (3.75rem = 44px min-height
+         + 8px×2 padding) + 0.2rem gap. Was 3.25rem which let chat blocks render behind
+         the trigger, creating a hit-target overlap zone. */
+      padding-top: calc(var(--chat-top) + 4.75rem);
     }
     .chat-input-floating {
       left: var(--page-gutter);
@@ -564,7 +567,7 @@
       right: var(--page-gutter);
     }
     .loading-older {
-      top: calc(var(--chat-top) + 3.75rem);
+      top: calc(var(--chat-top) + 4.75rem);
     }
   }
 

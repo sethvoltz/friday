@@ -369,8 +369,24 @@
   }
 
   .hamburger-btn {
-    display: none; flex-direction: column; justify-content: center; gap: 4px;
-    background: none; border: none; cursor: pointer; padding: 0.25rem; flex-shrink: 0;
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+    /* HIG minimum touch target — was ~22px effective height, now 44×44px */
+    min-width: 44px;
+    min-height: 44px;
+    /* Ensure the button wins within the header stacking context (z-index: 250)
+       and is unambiguously hittable above any lower-z sibling/overlay */
+    position: relative;
+    z-index: 1;
+    touch-action: manipulation;
   }
   .hamburger-btn span {
     display: block; width: 1.25rem; height: 2px; background: var(--text-primary);
