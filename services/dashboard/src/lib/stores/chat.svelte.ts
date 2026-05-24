@@ -396,9 +396,7 @@ export class ChatState {
    */
   get showThinkingPlaceholder(): boolean {
     if (!this.focusedAgentIsWorking) return false;
-    return !this.messages.some(
-      (m) => m.status === "streaming" || m.status === "running",
-    );
+    return !this.messages.some((m) => m.status === "streaming" || m.status === "running");
   }
   connected = $state(false);
   /** Per-agent unread badge counts (FIX_FORWARD 3.6). Bumped by SSE
