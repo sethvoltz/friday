@@ -411,14 +411,24 @@
     padding-right: var(--page-gutter);
     background: var(--bg-primary);
     z-index: 0;
-    /* The scroll container is position: fixed; inset: 0 — it covers the
-       full viewport. On iOS, UIScrollView intercepts touches in its area
-       at the UIKit layer (before z-index routing) to track scroll intent,
-       causing taps on higher-z-index elements (header, sidebar trigger)
-       to route to the scroll container instead. pointer-events: none
-       removes the container from the pointer-event target path; native
-       scroll still works because UIScrollView operates below the CSS
-       pointer-events layer. Interactive descendants are re-enabled below. */
+    /* Root cause (bug 2): WebCore's ScrollableArea scroll-gesture router
+       (Layer 2.5) runs before CSS z-index hit-testing (Layer 3). Because
+       this element is position: fixed; inset: 0 it covers the full
+       viewport, so the router checks it against every touch. Any touch
+       with micro-movement gets claimed as a scroll gesture — the sidebar
+       trigger (z-index 50) and header never receive it; CSS z-index never
+       resolves the winner.
+       Fix: touch-action: pan-y narrows the router's claim to vertical
+       pans only. Non-pan touches (taps) bypass it and fall through to
+       Layer 3 z-index hit-testing where the correct sibling wins.
+       overscroll-behavior: contain prevents bounce compositor-frame lag
+       that causes taps immediately after a scroll to register at wrong
+       DOM positions.
+       pointer-events: none is retained as a secondary guard: it removes
+       the container from the CSS pointer-event target path for clean taps
+       that already make it to Layer 3. */
+    touch-action: pan-y;
+    overscroll-behavior: contain;
     pointer-events: none;
   }
   /* Re-enable pointer events for all direct children so they (and their
