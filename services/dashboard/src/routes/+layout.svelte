@@ -18,8 +18,6 @@
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
   import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
   import { ModeWatcher, setMode } from "mode-watcher";
-  import { sendQueue } from "$lib/stores/send-queue.svelte";
-  import { chat } from "$lib/stores/chat.svelte";
   import type { LayoutData } from "./$types";
   import type { Snippet } from "svelte";
 
@@ -31,28 +29,6 @@
   // and Markdown.svelte's `:global(.dark …)` rules light up immediately
   // without a flash of the light palette.
 
-  // Flush the optimistic-send queue every time SSE reconnects. The queue
-  // itself is idempotent (in-flight POST is guarded by `flushing`), so
-  // multiple triggers in quick succession are safe.
-  let lastConnected = $state(false);
-  $effect(() => {
-    const c = sseConnected.value;
-    if (c && !lastConnected && sendQueue.items.length > 0) {
-      void sendQueue.flush().then((result) => {
-        for (const s of result.sent) {
-          chat.confirmPending(s.queueId, s.turnId);
-          // Queued turns (worker was busy when this POST hit the daemon)
-          // must not claim the inflight slot — the still-streaming turn
-          // owns it. SSE `turn_started` will set the slot when this turn
-          // actually dispatches.
-          if (!s.queued) chat.inflightTurnId = s.turnId;
-        }
-        for (const qid of result.failed) chat.markPendingFailed(qid);
-        for (const qid of result.retrying) chat.markPendingRetrying(qid);
-      });
-    }
-    lastConnected = c;
-  });
   let menuOpen = $state(false);
   function closeMenu() {
     menuOpen = false;
@@ -83,6 +59,14 @@
       // localStorage unavailable / SecurityError — ignore.
     }
 
+    // One-time migration: remove the old localStorage send queue. Zero's
+    // IDB outbox now owns durability; the localStorage key is dead weight.
+    try {
+      localStorage.removeItem("friday:sendQueue");
+    } catch {
+      // ignore
+    }
+
     // Global Cmd/Ctrl-K to toggle the command palette. Fires even when
     // an input is focused (Spotlight-style), but yields to IME composition.
     const onKey = (e: KeyboardEvent) => {
@@ -104,23 +88,6 @@
       startSSE();
       startConnectivity();
       startWakeLock();
-    }
-
-    // Best-effort flush on initial mount — drains anything left in
-    // localStorage from a previous session that ended offline.
-    if (signedIn && !isLogin && sendQueue.items.length > 0) {
-      void sendQueue.flush().then((result) => {
-        for (const s of result.sent) {
-          chat.confirmPending(s.queueId, s.turnId);
-          // Queued turns (worker was busy when this POST hit the daemon)
-          // must not claim the inflight slot — the still-streaming turn
-          // owns it. SSE `turn_started` will set the slot when this turn
-          // actually dispatches.
-          if (!s.queued) chat.inflightTurnId = s.turnId;
-        }
-        for (const qid of result.failed) chat.markPendingFailed(qid);
-        for (const qid of result.retrying) chat.markPendingRetrying(qid);
-      });
     }
 
     // Mobile keyboard handling: when the soft keyboard opens, iOS Safari

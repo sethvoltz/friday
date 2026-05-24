@@ -60,6 +60,5 @@ export const KEYS = {
   draft: (agent: string) => `draft:${agent}`,
   pinned: (agent: string) => `pinned:${agent}`,
   transcript: (agent: string) => `transcript:${agent}`,
-  sendQueue: "sendQueue",
   paletteRecent: "palette:recent",
 };
