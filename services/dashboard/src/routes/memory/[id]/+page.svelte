@@ -11,23 +11,22 @@
   // so edits in another tab propagate <1s without `invalidateAll`.
   // The SSR-loaded `data.entry` is the warm baseline.
   const zeroOn = useZero();
-  // svelte-ignore state_referenced_locally
   let entry = $state(data.entry);
   $effect(() => {
     if (!zeroOn) return;
     const row = zeroSync.memory.find((r) => r.id === data.entry.id);
     if (row) {
-      entry = {
-        ...entry,
-        title: row.title,
-        content: row.content,
-        tags: Array.isArray(row.tags_json) ? row.tags_json : [],
-        updatedAt: new Date(row.updated_at).toISOString(),
-        recallCount: row.recall_count,
-        lastRecalledAt: row.last_recalled_at
-          ? new Date(row.last_recalled_at).toISOString()
-          : null,
-      };
+      // Per-property writes avoid reading `entry` as an effect dependency,
+      // which would cause a circular re-run (write entry → effect re-runs →
+      // write entry → …) until Svelte throws effect_update_depth_exceeded.
+      entry.title = row.title;
+      entry.content = row.content;
+      entry.tags = Array.isArray(row.tags_json) ? row.tags_json : [];
+      entry.updatedAt = new Date(row.updated_at).toISOString();
+      entry.recallCount = row.recall_count;
+      entry.lastRecalledAt = row.last_recalled_at
+        ? new Date(row.last_recalled_at).toISOString()
+        : null;
     }
   });
   let editing = $state(false);
@@ -121,12 +120,10 @@
       // Phase 4.5: soft-delete via mutator (status='pending_delete').
       // Dashboard list filters this status out so the row vanishes
       // optimistically; daemon moves the file to trash.
-      const result = zeroSync.deleteMemoryEntry({ id: entry.id });
-      const sr = await result?.server;
-      if (sr && sr.type === "error") {
-        showToast(`delete failed: ${sr.error.message}`, "err");
-        return;
-      }
+      // Navigate immediately — the optimistic mutation already removed
+      // the row from Zero's local view. Blocking on result.server would
+      // hang the UI if zero-cache is slow or the mutation is queued.
+      zeroSync.deleteMemoryEntry({ id: entry.id });
       void goto("/memory");
       return;
     }
