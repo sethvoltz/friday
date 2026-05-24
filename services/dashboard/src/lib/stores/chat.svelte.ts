@@ -378,6 +378,16 @@ export class ChatState {
   markInflight(agent: string, turnId: string | null): void {
     this.inflightTurnIdByAgent[agent] = turnId;
   }
+  /**
+   * True when the focused agent's `status` is `'working'` in the DB/Zero
+   * snapshot. Complements `inflightTurnId` for cases where local ephemeral
+   * state was never set or was lost (page refresh, mail-triggered turns).
+   * The chat animation and the no-response suppression both read this so
+   * they stay accurate regardless of how the turn was initiated.
+   */
+  get focusedAgentIsWorking(): boolean {
+    return this.agents.some((a) => a.name === this.focusedAgent && a.status === "working");
+  }
   connected = $state(false);
   /** Per-agent unread badge counts (FIX_FORWARD 3.6). Bumped by SSE
    *  `agent_message` events while another agent is focused; cleared when
@@ -1643,10 +1653,14 @@ export class ChatState {
       this.agents,
       this.inflightTurnIdByAgent[agent] ?? null,
     );
+    // FRI-54: derive once so both parseBlocks call sites below can pass
+    // the DB-backed working signal without re-scanning agents twice.
+    const agentIsWorking = this.agents.find((a) => a.name === agent)?.status === "working";
     if (cached.length > 0) {
       this.messages = [
         ...parseBlocks(cached, agent, {
           inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+          agentWorking: agentIsWorking,
         }),
         ...queueSynth,
       ];
@@ -1719,6 +1733,7 @@ export class ChatState {
         this.messages = [
           ...parseBlocks(blocks, agent, {
             inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
+            agentWorking: agentIsWorking,
             noResponseGraceUntil: this.noResponseGraceUntil,
           }),
           ...queueSynth,
@@ -1927,6 +1942,10 @@ export class ChatState {
     const blockRows: BlockRow[] = rows.map(zeroBlockRowToBlockRow);
     const parsed = parseBlocks(blockRows, forAgent, {
       inflightTurnId: this.inflightTurnIdByAgent[forAgent] ?? null,
+      // FRI-54: pass DB-derived working status so the sentinel is
+      // suppressed on refresh/mail-triggered turns even when the local
+      // inflightTurnId is null and the Zero replica is already complete.
+      agentWorking: this.agents.find((a) => a.name === forAgent)?.status === "working",
       // FRI-91 Part A: complete the bf34884 grace-map plumbing on this
       // call site — `applyZeroBlocks` runs on every Zero snapshot frame
       // and was the only of the four parseBlocks callers that skipped
@@ -2957,6 +2976,14 @@ export function parseBlocks(
   agent: string,
   opts: {
     inflightTurnId?: string | null;
+    /** When true, the focused agent's `status` is `'working'` in the
+     *  DB/Zero snapshot. Suppresses the "Agent didn't respond" safety-net
+     *  for ALL pending turns — the missing assistant block is still being
+     *  generated. Covers page-refresh and mail-triggered turns where
+     *  `inflightTurnId` is null but the agent is actively producing output.
+     *  Must be checked BEFORE `zeroResultIncomplete` so a complete-replica
+     *  frame with a still-working agent doesn't fire the sentinel. */
+    agentWorking?: boolean;
     /** Per-turn grace deadline (epoch ms) for the FRI-85 safety net.
      *  Owned by ChatState.noResponseGraceUntil; covers the SSE-faster-
      *  than-Zero race where the inflight slot has cleared but the
@@ -3264,6 +3291,11 @@ export function parseBlocks(
     // "Agent didn't respond" bubble that vanishes ~1 frame later.
     const graceDeadline = grace?.[turnId];
     if (graceDeadline && graceDeadline > now) continue;
+    // FRI-54: agent.status = 'working' in the DB means a turn is
+    // actively in progress. Suppress the sentinel regardless of whether
+    // we have a local inflightTurnId — covers page refresh and mail-
+    // triggered turns where ephemeral state was never set.
+    if (opts.agentWorking) continue;
     // FRI-91: while Zero hasn't confirmed the local replica matches
     // upstream, a missing assistant block is indistinguishable from
     // "the worker died" vs. "the row just hasn't replicated yet."

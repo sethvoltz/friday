@@ -19,7 +19,10 @@
 
   let text = $state("");
   let textarea: HTMLTextAreaElement | undefined = $state();
-  let busy = $derived(chat.inflightTurnId !== null);
+  // FRI-54: include DB-derived working status so the aurora animation and
+  // Stop button stay active after a page refresh or on a mail-triggered
+  // turn where no local inflightTurnId was ever set.
+  let busy = $derived(chat.inflightTurnId !== null || chat.focusedAgentIsWorking);
   // True between the user clicking Stop and the daemon emitting turn_done
   // for the stopping turn. Drives the Stop button's disabled/dimmed look
   // so a second click doesn't fire a redundant abort POST.
@@ -624,7 +627,18 @@
   }
 
   async function stop() {
-    const id = chat.inflightTurnId;
+    let id = chat.inflightTurnId;
+    // FRI-54: on page refresh (or a mail-triggered turn), inflightTurnId is
+    // null even though the agent is actively working. Recover the turn_id
+    // from the Zero blocks snapshot — bindBlocksFor scopes zeroSync.blocks
+    // to the focused agent already, ordered ts desc, so the first user_chat
+    // row is the currently-in-flight turn.
+    if (!id && chat.focusedAgentIsWorking) {
+      const block = zeroSync.blocks.find(
+        (b) => b.role === "user" && b.source === "user_chat",
+      );
+      if (block) id = block.turn_id;
+    }
     if (!id) return;
     // Mark the bubble as stopping immediately so the UI flips out of
     // streaming-grow mode and the Stop button dims. The daemon's eventual
