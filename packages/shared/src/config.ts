@@ -290,3 +290,82 @@ export function writeConfig(config: FridayConfig): void {
   }
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
 }
+
+/**
+ * Self-contained Node.js script written to the orchestrator's .claude/ dir.
+ * Mirrors renderLocalDatetime() from shared/prompts/loader.ts — kept as a
+ * standalone file so it has no runtime dependencies and no import resolution.
+ *
+ * Output: JSON with hookSpecificOutput.additionalSystemPrompt for Claude Code's
+ * UserPromptSubmit hook protocol.
+ */
+const DATETIME_HOOK_SCRIPT = `#!/usr/bin/env node
+const now = new Date();
+const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const parts = new Intl.DateTimeFormat("en-US", {
+  weekday: "long", year: "numeric", month: "long", day: "numeric",
+  hour: "numeric", minute: "2-digit", hour12: true,
+  timeZone: tz, timeZoneName: "short",
+}).formatToParts(now);
+const p = {};
+for (const { type, value } of parts) p[type] = value;
+const offsetMinutes = -now.getTimezoneOffset();
+const sign = offsetMinutes >= 0 ? "+" : "-";
+const absMin = Math.abs(offsetMinutes);
+const hh = Math.floor(absMin / 60);
+const mm = absMin % 60;
+const offset = mm > 0 ? \`UTC\${sign}\${hh}:\${String(mm).padStart(2, "0")}\` : \`UTC\${sign}\${hh}\`;
+const datetime = \`\${p.weekday}, \${p.month} \${p.day} \${p.year}, \${p.hour}:\${p.minute} \${p.dayPeriod} \${p.timeZoneName} (\${offset})\`;
+process.stdout.write(JSON.stringify({
+  hookSpecificOutput: {
+    additionalSystemPrompt: \`# currentDateTime\\nCurrent local date and time: \${datetime}\`,
+  },
+}));
+`;
+
+/**
+ * Install a UserPromptSubmit hook into the orchestrator's .claude/settings.json
+ * that injects a live datetime block before every turn. This is the harness-level
+ * counterpart to the daemon's before_prompt_build datetime hook (FRI-52): builders
+ * and helpers get per-turn datetime from the hook registry; the orchestrator (a
+ * Claude Code CLI session) gets it from this settings.json hook instead.
+ *
+ * Idempotent — safe to call on every daemon boot and during `friday setup`.
+ */
+export function ensureHarnessDatetimeHook(orchestratorName: string = "friday"): void {
+  const agentDir = join(AGENTS_DIR, orchestratorName);
+  const claudeDir = join(agentDir, ".claude");
+  mkdirSync(claudeDir, { recursive: true });
+
+  const scriptPath = join(claudeDir, "datetime-hook.js");
+  writeFileSync(scriptPath, DATETIME_HOOK_SCRIPT, { mode: 0o755 });
+
+  const settingsPath = join(claudeDir, "settings.json");
+  let settings: Record<string, unknown> = {};
+  if (existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    } catch {
+      settings = {};
+    }
+  }
+
+  if (!settings.hooks || typeof settings.hooks !== "object") {
+    settings.hooks = {};
+  }
+  const hooks = settings.hooks as Record<string, unknown>;
+  if (!Array.isArray(hooks.UserPromptSubmit)) {
+    hooks.UserPromptSubmit = [];
+  }
+
+  type HookEntry = { hooks?: Array<{ type?: string; command?: string }> };
+  const submitHooks = hooks.UserPromptSubmit as HookEntry[];
+  const datetimeCmd = `node ${scriptPath}`;
+  const alreadyRegistered = submitHooks.some((g) =>
+    g.hooks?.some((h) => h.command === datetimeCmd),
+  );
+  if (!alreadyRegistered) {
+    submitHooks.push({ hooks: [{ type: "command", command: datetimeCmd }] });
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  }
+}

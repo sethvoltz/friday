@@ -2,6 +2,7 @@ import {
   closeDb,
   ensureDirs,
   ensureFridayEnv,
+  ensureHarnessDatetimeHook,
   ensureSoul,
   loadConfig,
   normalizeModelConfig,
@@ -60,6 +61,7 @@ async function main(): Promise<void> {
   // a worker against stale paths.
   await runStateMigrations([agentCwdPinV1]);
   ensureSoul();
+  ensureHarnessDatetimeHook(loadConfig().orchestratorName ?? "friday");
 
   const backfill = await backfillUsageFromLegacyJsonl();
   if ("skipped" in backfill && backfill.skipped) {

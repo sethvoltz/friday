@@ -11,6 +11,7 @@ import {
   DEFAULT_CONFIG,
   ensureDirs,
   ensureFridayEnv,
+  ensureHarnessDatetimeHook,
   ensureSoul,
   loadConfig,
   provisionPostgres,
@@ -49,6 +50,7 @@ export const setupCommand = defineCommand({
     ensureFridayEnv(); // load + generate BETTER_AUTH_SECRET if needed
     await runMigrations();
     ensureSoul();
+    ensureHarnessDatetimeHook(loadConfig().orchestratorName ?? "friday");
 
     // Phase 0 (ADR-023): provision the Postgres canonical store side-by-side
     // with the still-active SQLite chain. The daemon code path keeps using
