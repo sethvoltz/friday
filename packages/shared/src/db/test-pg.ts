@@ -142,7 +142,7 @@ async function dropTestDb(dbName: string): Promise<void> {
   // the Vitest process.
   try {
     const pool = getPool();
-    pool.on("remove", (client: { on: (e: string, h: () => void) => void }) => {
+    pool.on("remove", (client) => {
       client.on("error", () => {});
     });
   } catch {
