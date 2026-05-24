@@ -162,6 +162,25 @@ export interface MemoryListenerHandle {
   stop: () => Promise<void>;
 }
 
+// Readiness gate for the memory LISTEN connection.
+//
+// Starts as a pre-resolved promise so that contexts where
+// startMemoryListener() is never called (test suites, pre-listener
+// boot window before the server receives its first request) fail open
+// immediately rather than hanging for the 3-second timeout. Replaced
+// with a real deferred inside startMemoryListener() before any async
+// work begins, so recall attempts that arrive after the HTTP server
+// starts but before LISTEN succeeds will wait — and time out and fail
+// open — rather than producing spurious errors against an incomplete
+// memory state.
+let _readyResolve: (() => void) | null = null;
+let _readyPromise: Promise<void> = Promise.resolve();
+
+/** Returns a promise that resolves once startMemoryListener() has successfully issued LISTEN. */
+export function whenMemoryListenerReady(): Promise<void> {
+  return _readyPromise;
+}
+
 /**
  * Start the long-lived LISTEN connection for
  * `friday_memory_file_changed`. Dedicated `pg.Client` for the same
@@ -169,6 +188,12 @@ export interface MemoryListenerHandle {
  * silently drop subscriptions.
  */
 export async function startMemoryListener(): Promise<MemoryListenerHandle> {
+  // Replace the pre-resolved default with a real deferred so any recall
+  // that races the async setup below will wait (or time out and fail open).
+  _readyPromise = new Promise<void>((resolve) => {
+    _readyResolve = resolve;
+  });
+
   const pool = getPool();
   const connectionString =
     (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
@@ -198,6 +223,8 @@ export async function startMemoryListener(): Promise<MemoryListenerHandle> {
   });
 
   await client.query(`LISTEN ${LISTEN_CHANNELS.memoryFileChanged}`);
+  _readyResolve?.();
+  _readyResolve = null;
   logger.log("info", "memory.listen.ready", {
     channel: LISTEN_CHANNELS.memoryFileChanged,
   });
