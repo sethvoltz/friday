@@ -220,7 +220,10 @@ describe("loadAgentTurns", () => {
     );
 
     const pendingBubble = chat.messages.find((m) => m.queueId === blockId);
-    expect(pendingBubble, "pending bubble must survive when queueId is not in the snapshot").toBeDefined();
+    expect(
+      pendingBubble,
+      "pending bubble must survive when queueId is not in the snapshot",
+    ).toBeDefined();
     expect(pendingBubble?.text).toBe("pending draft");
     expect(pendingBubble?.pending).toBe(true);
   });
@@ -2530,7 +2533,10 @@ describe("unread badge gating (PR C)", () => {
     // depend on the round-trip resolving.
     let resolveSend: ((v: { blockId: string; turnId: string } | null) => void) | null = null;
     const mockSendMsg = vi.fn(
-      () => new Promise<{ blockId: string; turnId: string } | null>((r) => { resolveSend = r; }),
+      () =>
+        new Promise<{ blockId: string; turnId: string } | null>((r) => {
+          resolveSend = r;
+        }),
     );
     chat.setSendMessageFn(mockSendMsg);
 

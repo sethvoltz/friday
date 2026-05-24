@@ -103,7 +103,6 @@ export interface ChatMessage {
    *  retry/discard affordance (FIX_FORWARD 2.6). */
   failed?: boolean;
 
-
   /** When set to `"error"`, this bubble is a synthetic error notification
    *  (FRI-12) emitted by the daemon when the SDK throws (529, 429, 401,
    *  network) or the stop force-kill safety net fires. The bubble's
@@ -1631,7 +1630,6 @@ export class ChatState {
       delete this.lastSeqByAgent[agent];
       saveJSON(ChatState.LAST_SEQ_KEY, this.lastSeqByAgent);
     }
-
 
     // Last-known transcript from a previous session. Render the cached
     // blocks immediately so a slow / offline first-paint doesn't show an
