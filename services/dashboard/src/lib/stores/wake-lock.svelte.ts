@@ -1,9 +1,10 @@
 /**
  * Screen wake lock for mobile chat (FRI-87).
  *
- * Holds a `WakeLockSentinel` whenever any agent in `chat.agents` is in the
- * `working` state and the user has the feature enabled. Releases as soon as
- * every agent returns to idle.
+ * Holds a `WakeLockSentinel` whenever the front/focused agent (`chat.focusedAgent`)
+ * is in the `working` state and the user has the feature enabled. Background agents
+ * working do not trigger the lock. Switching to a working agent engages it;
+ * switching away from one releases it.
  *
  * Platform caveats:
  *   - Feature-detect `navigator.wakeLock` — desktop Firefox lacks it. Fail
@@ -96,11 +97,9 @@ let gestureListener: (() => void) | null = null;
 let started = false;
 let stopEffect: (() => void) | null = null;
 
-function anyAgentWorking(): boolean {
-  for (const a of chat.agents) {
-    if (a.status === "working") return true;
-  }
-  return false;
+function frontAgentWorking(): boolean {
+  const focused = chat.focusedAgent;
+  return chat.agents.find((a) => a.name === focused)?.status === "working";
 }
 
 async function acquire(): Promise<void> {
@@ -175,7 +174,7 @@ async function release(): Promise<void> {
 }
 
 function shouldHold(): boolean {
-  return wakeLockSettings.enabled && anyAgentWorking();
+  return wakeLockSettings.enabled && frontAgentWorking();
 }
 
 function reconcile(): void {
@@ -203,9 +202,10 @@ export function startWakeLock(): void {
   if (!wakeLockState.supported) return;
 
   stopEffect = $effect.root(() => {
-    // `reconcile()` calls `shouldHold()` which reads `wakeLockSettings.enabled`
-    // and iterates `chat.agents` — establishing subscriptions on both. The
-    // effect re-runs whenever either changes.
+    // `reconcile()` calls `shouldHold()` which reads `wakeLockSettings.enabled`,
+    // `chat.focusedAgent`, and `chat.agents` — establishing subscriptions on all
+    // three. The effect re-runs when the focused agent changes (focus switch) or
+    // when the focused agent's status changes (agent goes working/idle).
     $effect(reconcile);
   });
 

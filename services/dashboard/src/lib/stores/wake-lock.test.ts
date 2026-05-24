@@ -100,6 +100,7 @@ async function load() {
   const { chat } = await import("./chat.svelte");
   wl.__resetForTest();
   chat.agents = [];
+  chat.focusedAgent = "friday";
   return { wl, chat };
 }
 
@@ -381,6 +382,71 @@ describe("wake-lock store (FRI-87)", () => {
     await flushReactive();
     expect(sentinels[0].release).toHaveBeenCalledTimes(1);
     expect(wl.wakeLockState.held).toBe(false);
+  });
+
+  describe("focus-aware lock (only front agent triggers hold)", () => {
+    it("does not acquire when a background agent is working but the focused agent is idle", async () => {
+      const { request } = installFakeWakeLock();
+      const { wl, chat } = await load();
+
+      wl.startWakeLock();
+      chat.agents = [
+        { name: "friday", type: "orchestrator", status: "idle" },
+        { name: "builder-foo", type: "builder", status: "working" },
+      ];
+      // friday is focused (default); builder-foo is working but not front
+      wl.__reconcileForTest();
+      await flushReactive();
+
+      expect(request).not.toHaveBeenCalled();
+      expect(wl.wakeLockState.held).toBe(false);
+    });
+
+    it("acquires when the user switches focus to a working agent", async () => {
+      const { request, sentinels } = installFakeWakeLock();
+      const { wl, chat } = await load();
+
+      wl.startWakeLock();
+      chat.agents = [
+        { name: "friday", type: "orchestrator", status: "idle" },
+        { name: "builder-foo", type: "builder", status: "working" },
+      ];
+      wl.__reconcileForTest();
+      await flushReactive();
+      expect(request).not.toHaveBeenCalled();
+
+      // User taps builder-foo in the sidebar — focus switches
+      chat.focusedAgent = "builder-foo";
+      wl.__reconcileForTest();
+      await flushReactive();
+
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(sentinels).toHaveLength(1);
+      expect(wl.wakeLockState.held).toBe(true);
+    });
+
+    it("releases when the user switches focus away from the working agent", async () => {
+      const { sentinels } = installFakeWakeLock();
+      const { wl, chat } = await load();
+
+      wl.startWakeLock();
+      chat.agents = [
+        { name: "friday", type: "orchestrator", status: "idle" },
+        { name: "builder-foo", type: "builder", status: "working" },
+      ];
+      chat.focusedAgent = "builder-foo";
+      wl.__reconcileForTest();
+      await flushReactive();
+      expect(wl.wakeLockState.held).toBe(true);
+
+      // User switches back to friday (which is idle)
+      chat.focusedAgent = "friday";
+      wl.__reconcileForTest();
+      await flushReactive();
+
+      expect(sentinels[0].release).toHaveBeenCalledTimes(1);
+      expect(wl.wakeLockState.held).toBe(false);
+    });
   });
 
   it("marks itself unsupported when navigator.wakeLock is missing", async () => {
