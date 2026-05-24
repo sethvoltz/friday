@@ -17,7 +17,7 @@
 
 import { randomUUID } from "node:crypto";
 import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { stringifyToolResult } from "@friday/shared";
+import { renderLocalDatetime, stringifyToolResult } from "@friday/shared";
 import { readAttachmentBytes, type MailRow } from "@friday/shared/services";
 import type {
   WorkerAttachment,
@@ -504,9 +504,11 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         ...(allowedTools ? { allowedTools } : {}),
         ...(thinking ? { thinking } : {}),
         ...(opts.effort ? { effort: opts.effort } : {}),
-        systemPrompt: opts.systemPrompt
-          ? { type: "preset", preset: "claude_code", append: opts.systemPrompt }
-          : undefined,
+        systemPrompt: {
+          type: "preset",
+          preset: "claude_code",
+          append: (opts.systemPrompt ? opts.systemPrompt + "\n\n" : "") + renderLocalDatetime(),
+        },
         ...(sessionId ? { resume: sessionId } : {}),
       },
     })) {

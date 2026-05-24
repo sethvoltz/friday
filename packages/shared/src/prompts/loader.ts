@@ -126,9 +126,10 @@ export function renderIdentityBlock(identity: AgentIdentity): string {
  *   5. agents/<type>
  *   6. protocols/*
  *
- * Current datetime is NOT included here — it is injected per-turn via the
- * `before_prompt_build` hook (FRI-52) so every message carries the live time,
- * not the session-start time.
+ * Current datetime is NOT included here — it is appended inline in
+ * worker.ts `runQuery` (FRI-52) so every turn carries the live time,
+ * not the session-start time. This covers spawn turns, subsequent turns,
+ * and mail-initiated turns inside long-lived workers uniformly.
  */
 export function composeSystemPrompt(
   stack: PromptStack,
