@@ -895,6 +895,18 @@ export class ChatState {
   clearLocalView(agent: string): void {
     if (this.focusedAgent !== agent) return;
     this.#legacyMessages = [];
+    // Wipe the focused agent's overlay entries too. The session-id stamp
+    // on each entry would also hide them (clearLocalView is paired with
+    // the agent's sessionId flipping to null at the daemon), but the
+    // imperative drop keeps the maps from accumulating dead state across
+    // repeated `/clear`s — the SvelteMap doesn't garbage-collect
+    // mismatched-session entries on its own.
+    for (const [key, entry] of this.streaming.entries()) {
+      if (entry.agent === agent) this.streaming.delete(key);
+    }
+    for (const [key, entry] of this.optimistic.entries()) {
+      if (entry.agent === agent) this.optimistic.delete(key);
+    }
     this.oldestBlockId = null;
     this.reachedOldest = false;
     this.historyError = null;
@@ -965,25 +977,35 @@ export class ChatState {
   ): string {
     // FIX_FORWARD 2.6: mint a `pending_<uuid>` id and `pending: true` so
     // the bubble pins to the bottom of the chat until the dispatch lands.
-    // `confirmPending` re-keys to the daemon-issued turn_id once
-    // /api/chat/turn returns; the canonical user-role block carries the
-    // same id and overwrites this entry in-place.
+    // `confirmPending` drops this overlay entry and pushes a canonical
+    // bubble at `userBlockIdForTurn(turnId)` once /api/chat/turn returns;
+    // the daemon's `recordUserBlock` writes the same id and Zero
+    // replicates it next, which dedups in applyZeroBlocks's merge.
     const id = `pending_${
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? (crypto as { randomUUID: () => string }).randomUUID()
         : `${Date.now()}_${Math.random().toString(36).slice(2)}`
     }`;
-    this.#legacyMessages.push({
-      id,
-      role: "user",
-      text,
-      status: "complete",
-      ts: Date.now(),
-      source: "user_chat",
-      pending: true,
-      queueId: opts?.queueId,
-      attachments: opts?.attachments,
-    });
+    const agent = this.focusedAgent;
+    this.optimistic.set(
+      overlayKey(agent, id),
+      new OptimisticEntry({
+        id,
+        agent,
+        ts: Date.now(),
+        // No real turnId yet — the pending id stands in until confirmPending
+        // lands the daemon-issued one. Today's legacy code also left turnId
+        // unset on the pending bubble.
+        turnId: id,
+        sessionId: this.currentSessionFor(agent),
+        text,
+        source: "user_chat",
+        queueId: opts?.queueId,
+        attachments: opts?.attachments,
+        initialStatus: "complete",
+        initialPending: true,
+      }),
+    );
     return id;
   }
 
@@ -998,51 +1020,72 @@ export class ChatState {
 
   /**
    * The pending user bubble (matched by `queueId`) has been confirmed by
-   * `/api/chat/turn` returning `{turn_id}` (FIX_FORWARD 2.6). Re-key the
-   * bubble id to the daemon-issued user-block id (mirroring the canonical
-   * block id daemon's `recordUserBlock` will emit on the SSE stream), drop
-   * `pending`, drop transient send-queue state. Natural sort restores; the
-   * eventual `block_complete` SSE event finds the same id and is a no-op.
+   * `/api/chat/turn` returning `{turn_id}` (FIX_FORWARD 2.6). Drop the
+   * optimistic overlay entry and push a confirmed canonical bubble into
+   * the legacy bucket at `userBlockIdForTurn(turnId)` — the same id the
+   * daemon's `recordUserBlock` will emit on the SSE stream and the same
+   * id Zero will replicate. applyZeroBlocks's merge dedups by id, so the
+   * canonical row that lands later replaces the legacy entry without
+   * surfacing a duplicate.
    */
   confirmPending(queueId: string, turnId: string): void {
     const targetId = userBlockIdForTurn(turnId);
-    const optIdx = this.messages.findIndex((m) => m.queueId === queueId);
-    if (optIdx < 0) return;
+    const agent = this.focusedAgent;
+    let entry: OptimisticEntry | undefined;
+    let entryKey: OverlayKey | undefined;
+    for (const [k, e] of this.optimistic.entries()) {
+      if (e.queueId === queueId && e.agent === agent) {
+        entry = e;
+        entryKey = k;
+        break;
+      }
+    }
+    if (!entry || !entryKey) return;
     // Defense in depth against an SSE-first race: if the daemon's
     // `block_complete` SSE frame arrived *before* the POST /api/chat/turn
     // response (and so before this confirmPending call), `handleBlockComplete`
     // already pushed a canonical bubble with `id=userBlockIdForTurn(turnId)`.
-    // Re-keying the optimistic in place would create two messages sharing
-    // the same id, crashing the keyed `{#each}`. Drop the optimistic in
-    // that case — the SSE bubble is the canonical one.
+    // Pushing another one would surface two bubbles sharing the same id
+    // and crash the keyed `{#each}`. Drop the optimistic in that case —
+    // the SSE bubble is the canonical one.
     //
     // The daemon-side change in `recordUserBlock` (skipping the SSE emit
     // for `user_chat` source) should make this path unreachable in
     // practice, but the check stays as belt-and-braces for the `mail` /
     // `scheduled` SSE paths where the SSE frame is the sole source.
-    const sseAlreadyHere = this.messages.some(
-      (m, i) => i !== optIdx && m.id === targetId,
-    );
-    if (sseAlreadyHere) {
-      this.#legacyMessages = this.#legacyMessages.filter((_, i) => i !== optIdx);
-      return;
-    }
-    const m = this.#legacyMessages[optIdx];
-    m.id = targetId;
-    m.turnId = turnId;
-    m.pending = false;
-    m.failed = false;
-    m.retrying = false;
-    m.queueId = undefined;
+    const sseAlreadyHere =
+      this.#legacyMessages.some((m) => m.id === targetId) ||
+      [...this.streaming.values()].some((s) => s.id === targetId);
+    this.optimistic.delete(entryKey);
+    if (sseAlreadyHere) return;
+    this.#legacyMessages.push({
+      id: targetId,
+      role: "user",
+      text: entry.text,
+      status: "complete",
+      ts: entry.ts,
+      agent,
+      turnId,
+      source: entry.source,
+      attachments: entry.attachments,
+      // Explicit field presence (rather than relying on absent =
+      // undefined) so downstream callers / tests that distinguish
+      // `pending !== false` from `pending == null` keep behaving
+      // identically to the in-place-mutation predecessor.
+      pending: false,
+      failed: false,
+      retrying: false,
+      queueId: undefined,
+    });
   }
 
   /** Mark the pending bubble for this queueId as failed (4xx) so the UI
    *  surfaces retry/discard. FIX_FORWARD 2.6. */
   markPendingFailed(queueId: string): void {
-    for (const m of this.messages) {
-      if (m.queueId !== queueId) continue;
-      m.failed = true;
-      m.retrying = false;
+    for (const entry of this.optimistic.values()) {
+      if (entry.queueId !== queueId) continue;
+      entry.failed = true;
+      entry.retrying = false;
       return;
     }
   }
@@ -1050,10 +1093,10 @@ export class ChatState {
   /** Mark the pending bubble for this queueId as retrying (5xx / network).
    *  FIX_FORWARD 2.6. */
   markPendingRetrying(queueId: string): void {
-    for (const m of this.messages) {
-      if (m.queueId !== queueId) continue;
-      m.retrying = true;
-      m.failed = false;
+    for (const entry of this.optimistic.values()) {
+      if (entry.queueId !== queueId) continue;
+      entry.retrying = true;
+      entry.failed = false;
       return;
     }
   }
@@ -1061,15 +1104,17 @@ export class ChatState {
   /** Remove the pending bubble matching `queueId` (FIX_FORWARD 2.7 — used
    *  when the user picks "Discard and continue" or "Discard all"). */
   discardPending(queueId: string): void {
-    this.#legacyMessages = this.#legacyMessages.filter(
-      (m) => m.queueId !== queueId,
-    );
+    for (const [key, entry] of this.optimistic.entries()) {
+      if (entry.queueId === queueId) this.optimistic.delete(key);
+    }
   }
 
   /** Remove every pending bubble in one go (FIX_FORWARD 2.7 — "Discard all
    *  and continue"). */
   discardAllPending(): void {
-    this.#legacyMessages = this.#legacyMessages.filter((m) => !m.pending);
+    for (const [key, entry] of this.optimistic.entries()) {
+      if (entry.pending) this.optimistic.delete(key);
+    }
   }
 
   /** Show a transient toast for `ms` (default 4000). FIX_FORWARD 6.1. */
@@ -2319,7 +2364,12 @@ export class ChatState {
 
     const merged: ChatMessage[] = [];
     const seen = new Set<string>();
-    for (const m of this.messages) {
+    // Iterate the legacy bucket only — overlay entries (streaming and
+    // optimistic) render via the `messages` derivation and don't belong
+    // in legacy. The optimistic-overlay ackedQueueIds cleanup below
+    // (loop after this) drops overlay entries whose canonical row just
+    // landed in this snapshot, mirroring the FRI-103 drop here.
+    for (const m of this.#legacyMessages) {
       const parsedMatch = parsedById.get(m.id);
       if (parsedMatch) {
         merged.push(parsedMatch);
@@ -2364,6 +2414,19 @@ export class ChatState {
     for (const bid of snapshotBlockIds) this.zeroSeenBlockIds.add(bid);
 
     this.#legacyMessages = dropSupersededNoResponseSafetyNet(merged);
+    // FRI-103 (overlay companion to the merge-loop drop above): drop
+    // any optimistic overlay entry whose queueId was just acked by a
+    // canonical Zero row in this snapshot. The canonical row is in
+    // `parsed` (and now in `#legacyMessages`) at `userBlockIdForTurn`;
+    // leaving the overlay entry around would mean two distinct ids for
+    // the same text (the pending_<uuid> overlay + the canonical legacy).
+    if (ackedQueueIds.size > 0) {
+      for (const [key, entry] of this.optimistic.entries()) {
+        if (entry.queueId && ackedQueueIds.has(entry.queueId)) {
+          this.optimistic.delete(key);
+        }
+      }
+    }
     const newOldest = oldestBlockCursor(blockRows);
     if (newOldest !== this.oldestBlockId) {
       // The Zero snapshot shifted the scroll-back cursor. Re-arm
