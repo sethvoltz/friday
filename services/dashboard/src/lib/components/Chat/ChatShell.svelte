@@ -411,24 +411,15 @@
     padding-right: var(--page-gutter);
     background: var(--bg-primary);
     z-index: 0;
-    /* The scroll container is position: fixed; inset: 0 — it covers the
-       full viewport. On iOS, UIScrollView intercepts touches in its area
-       at the UIKit layer (before z-index routing) to track scroll intent,
-       causing taps on higher-z-index elements (header, sidebar trigger)
-       to route to the scroll container instead. pointer-events: none
-       removes the container from the pointer-event target path; native
-       scroll still works because UIScrollView operates below the CSS
-       pointer-events layer. Interactive descendants are re-enabled below. */
-    pointer-events: none;
+    /* touch-action: pan-y narrows the WebCore ScrollableArea router's
+       claim to vertical pans only, so taps fall through to z-index
+       hit-testing where the sidebar trigger and header correctly win.
+       overscroll-behavior: contain prevents bounce compositor-frame lag
+       that causes taps immediately after a scroll to land at wrong DOM
+       positions. Both apply unconditionally — they're no-ops on desktop. */
+    touch-action: pan-y;
+    overscroll-behavior: contain;
   }
-  /* Re-enable pointer events for all direct children so they (and their
-     descendants, via inheritance) remain interactive. pointer-events is
-     an inherited property — resetting it here cascades to chat bubbles,
-     buttons, links, and all other interactive content inside the scroll. */
-  .chat-scroll > :global(*) {
-    pointer-events: auto;
-  }
-
   .chat-sidebar-floating {
     position: fixed;
     top: var(--chat-top);
