@@ -514,14 +514,6 @@ export class ChatState {
     const agentRow = this.agents.find((a) => a.name === focused);
     const sid = agentRow?.sessionId ?? null;
 
-    // Fast-path: while no commit has migrated writers off the legacy
-    // bucket, both overlay maps are empty and the public `messages`
-    // is literally the legacy array (preserves object identity so
-    // existing in-place mutations on bubble fields still surface).
-    if (this.streaming.size === 0 && this.optimistic.size === 0) {
-      return this.#legacyMessages;
-    }
-
     const overlayIds = new Set<string>();
     const overlayEntries: ChatMessage[] = [];
     for (const entry of this.streaming.values()) {
@@ -536,15 +528,25 @@ export class ChatState {
       overlayEntries.push(entry);
       overlayIds.add(entry.id);
     }
-    // Legacy entries lose to overlay shadows on id collision: while a
-    // bubble lives in the overlay it's the live, fine-grained-reactive
-    // surface; the legacy bucket's stale copy (if any) is suppressed.
-    // ChatMessages.svelte's `allMessages` derivation handles pending-
-    // pinning, so insertion order — legacy first, then overlay tail —
-    // matches the pre-migration "append on push" behavior.
+    // Legacy filter rules:
+    //   - Skip entries an overlay shadows by id: the overlay is the
+    //     live, fine-grained-reactive surface; the legacy copy (if any)
+    //     is the older snapshot from before the SSE phase moved off
+    //     legacy.
+    //   - Skip entries explicitly tagged for a different agent. This is
+    //     the structural cross-agent isolation: with loadAgentTurns no
+    //     longer wiping the legacy bucket on focus switch (commit 8),
+    //     the previous agent's bubbles still sit in `#legacyMessages`
+    //     until applyZeroBlocks's next snapshot replaces them. The
+    //     agent-tag filter hides them in the meantime so kitchen-agent
+    //     bubbles can't bleed into friday's view (the original FRI-?
+    //     cross-agent leak).
+    //   - Pass through entries with no agent tag (legacy fixtures /
+    //     pre-migration synth bubbles that pushLocal now stamps).
     const out: ChatMessage[] = [];
     for (const m of this.#legacyMessages) {
       if (overlayIds.has(m.id)) continue;
+      if (m.agent && m.agent !== focused) continue;
       out.push(m);
     }
     for (const e of overlayEntries) out.push(e);
@@ -579,9 +581,16 @@ export class ChatState {
    * bucket itself — when the final overlay migration lands, the sys_
    * call sites should either go through a dedicated transient overlay
    * or be removed entirely per the chat-content-is-durable contract.
+   *
+   * Auto-stamps the focused agent when the caller didn't set one so
+   * the `messages` derivation's per-agent filter sees an explicit
+   * owner. Without this, untagged sys_<ts> bubbles would render
+   * across every agent the user focuses next.
    */
   pushLocal(msg: ChatMessage): void {
-    this.#legacyMessages.push(msg);
+    this.#legacyMessages.push(
+      msg.agent ? msg : { ...msg, agent: this._focusedAgent },
+    );
   }
   /**
    * Instrumentation backing field (FRI-72). The public `focusedAgent`
@@ -1429,6 +1438,7 @@ export class ChatState {
       role: "assistant",
       text: delta,
       status: "streaming",
+      agent: this.focusedAgent,
       turnId,
       ts: Date.now(),
     });
@@ -1862,6 +1872,7 @@ export class ChatState {
       role: "tool",
       text: "",
       status: "running",
+      agent: this.focusedAgent,
       toolId,
       toolName,
       input,
@@ -1885,6 +1896,7 @@ export class ChatState {
       role: "tool",
       text: "",
       status: "running",
+      agent: this.focusedAgent,
       toolId,
       input,
       ts: Date.now(),
@@ -1908,6 +1920,7 @@ export class ChatState {
       role: "tool",
       text: "",
       status: status === "ok" ? "done" : "error",
+      agent: this.focusedAgent,
       toolId,
       output,
       ts: Date.now(),
@@ -1922,6 +1935,7 @@ export class ChatState {
       role: "thinking",
       text: "",
       status: "running",
+      agent: this.focusedAgent,
       blockId,
       ts: Date.now(),
     });
@@ -1942,6 +1956,7 @@ export class ChatState {
       role: "thinking",
       text: delta,
       status: "running",
+      agent: this.focusedAgent,
       blockId,
       ts: Date.now(),
     });
@@ -1961,53 +1976,38 @@ export class ChatState {
       role: "thinking",
       text: "",
       status: "done",
+      agent: this.focusedAgent,
       blockId,
       ts: Date.now(),
     });
   }
 
   async loadAgentTurns(agent: string): Promise<void> {
-    // User-reported bug: navigating to /tickets and back to chat shows
-    // an empty transcript until the user clicks another agent and
-    // returns. Root cause: this method always clears `messages`, even
-    // on re-entry to the same agent. The Zero binder short-circuits
-    // (`bindBlocksFor` is a no-op when already bound to the same
-    // agent), so no fresh `applyZeroBlocks` fires to re-populate the
-    // cleared array — until the next Zero update, which may not come
-    // for minutes.
+    // Cross-agent isolation is now structural (commits 4-7 derived
+    // chat.messages from canonical + overlays; commit 8 added an
+    // agent-tag filter in the derivation and an agent-aware merge in
+    // applyZeroBlocks). The pre-rewrite `switchingAgents` reset block
+    // that lived here was structurally broken: the caller updates
+    // `chat.focusedAgent` BEFORE calling loadAgentTurns, so the
+    // `this.focusedAgent !== agent` check never fired and the
+    // previous agent's entries leaked into the new view. Deleting
+    // the reset block both removes the bug AND removes the
+    // user-reported "/tickets-and-back shows empty" regression
+    // (re-entry no longer clobbers messages).
     //
-    // Guard: only clear/reset state when we're genuinely switching
-    // agents OR we have nothing to preserve. Re-entry to the same
-    // agent leaves `messages` and the cursors untouched; the binder
-    // call below is still safe (it's idempotent), the cached-load
-    // path below skips itself (messages already populated), and the
-    // post-load probe still runs.
-    const switchingAgents = this.focusedAgent !== agent;
-    const haveMessages = this.messages.length > 0;
-    const isReentry = !switchingAgents && haveMessages;
-    if (!isReentry) {
-      this.#legacyMessages = [];
-      this.oldestBlockId = null;
-      this.reachedOldest = false;
-      this.historyError = null;
-      this.zeroBlocksActive = false;
-      // Phase 3.7: reset the per-agent seen-blockIds tracker so a stale
-      // entry from the previous agent doesn't trip the delete heuristic
-      // here.
-      this.zeroSeenBlockIds = new Set();
-      // Phase 4.1: focus switch invalidates the markRead memo so the
-      // first Zero snapshot for the new agent will fire a fresh cursor
-      // write (even if we'd previously marked the same blockId for the
-      // PREVIOUS agent, the (device, agent) tuple is different).
-      this.lastMarkedBlockIdByAgent.delete(agent);
-      // Clear any stale loading-older flag from the previous agent. Without
-      // this, if the user scrolled up in agent A and clicked away before
-      // the load finished, A's `loadingOlder=true` would persist into B's
-      // chat and block B's first pagination request until A's stale finally
-      // fires (~350ms later). The new guards in `loadOlderTurns` ensure
-      // that stale call won't clobber B's state.
-      this.loadingOlder = false;
-    }
+    // Per-agent state items (pagination cursor / Zero snapshot tracker
+    // / REST loading flag) still need to reset on every call so a
+    // stale value from the previous agent can't trip the new one.
+    // These are cheap field assignments; the re-entry pagination
+    // reset is the acceptable trade-off for the cross-agent
+    // pagination-cursor leak it prevents.
+    this.oldestBlockId = null;
+    this.reachedOldest = false;
+    this.historyError = null;
+    this.zeroBlocksActive = false;
+    this.zeroSeenBlockIds = new Set();
+    this.lastMarkedBlockIdByAgent.delete(agent);
+    this.loadingOlder = false;
 
     // Build the queue-synth bubbles once — we append them after both the
     // cached-render and the live-fetch overwrite so they're never wiped
@@ -2020,6 +2020,7 @@ export class ChatState {
       text: q.text,
       status: "complete" as const,
       ts: q.createdAt,
+      agent,
       queueId: q.id,
       attachments: q.attachments,
     }));
@@ -2030,9 +2031,7 @@ export class ChatState {
     // bubble ids are stable across cache → fresh (parseBlocks uses
     // userBlockIdForTurn for user blocks and b_<blockId> for assistant),
     // so any in-flight SSE deltas attach cleanly.
-    const cachedRaw = isReentry
-      ? []
-      : loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
+    const cachedRaw = loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
     // Apply the same session filter `applyZeroBlocks` uses, so the
     // first-paint cache can't bleed prior sessions onto the screen
     // post-`/clear`. The cache pre-dates Zero (its only writer is the
@@ -2402,6 +2401,14 @@ export class ChatState {
     // (loop after this) drops overlay entries whose canonical row just
     // landed in this snapshot, mirroring the FRI-103 drop here.
     for (const m of this.#legacyMessages) {
+      // Structural cross-agent isolation: drop legacy entries explicitly
+      // tagged for a different agent. loadAgentTurns no longer wipes the
+      // legacy bucket on focus switch, so the previous agent's entries
+      // sit here until this snapshot replaces them. The derivation
+      // also filters by agent for the brief window before the first
+      // snapshot lands; this drop makes the persistence permanent
+      // (subsequent snapshots don't re-include them).
+      if (m.agent && m.agent !== forAgent) continue;
       const parsedMatch = parsedById.get(m.id);
       if (parsedMatch) {
         merged.push(parsedMatch);
@@ -3137,6 +3144,7 @@ export class ChatState {
         role: "thinking",
         text: parsed.text ?? "",
         status,
+        agent,
         blockId: event.block_id,
         turnId: event.turn_id,
         ts: event.ts,
@@ -3182,6 +3190,7 @@ export class ChatState {
         role: "tool",
         text: "",
         status,
+        agent,
         toolId,
         toolName: parsed.name ?? "",
         input: parsed.input,
