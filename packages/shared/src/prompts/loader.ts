@@ -121,11 +121,14 @@ export function renderIdentityBlock(identity: AgentIdentity): string {
  *   1. CONSTITUTION
  *   2. SOUL
  *   3. Identity (when provided — FRI-11)
- *   4. Current local date and time (FRI-52; always injected, derived at call time)
- *   5. Pinned facts (when provided — FRI-61; daemon-rendered from per-agent
+ *   4. Pinned facts (when provided — FRI-61; daemon-rendered from per-agent
  *      pinned memories)
- *   6. agents/<type>
- *   7. protocols/*
+ *   5. agents/<type>
+ *   6. protocols/*
+ *
+ * Current datetime is NOT included here — it is injected per-turn via the
+ * `before_prompt_build` hook (FRI-52) so every message carries the live time,
+ * not the session-start time.
  */
 export function composeSystemPrompt(
   stack: PromptStack,
@@ -137,7 +140,6 @@ export function composeSystemPrompt(
     stack.constitution,
     stack.soul,
     identityBlock,
-    renderLocalDatetime(),
     pinnedFacts ?? "",
     stack.agentBase,
     stack.protocols,
