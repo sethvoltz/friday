@@ -146,14 +146,12 @@ async function dropTestDb(dbName: string): Promise<void> {
   const admin = new Client({ connectionString: adminUrl() });
   await admin.connect();
   try {
-    // Force-disconnect any lingering connections (e.g., zombie
-    // connections from a crashed test) so DROP DATABASE succeeds.
-    await admin.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-       WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [dbName],
-    );
-    await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
+    // WITH (FORCE) terminates lingering connections internally before
+    // dropping — Postgres 13+, this codebase requires 18. Avoids the
+    // race where pool.end() resolves while TCP sockets are still
+    // draining: a separate pg_terminate_backend() on those in-flight
+    // closes fires an unhandled 57P01 error in the Vitest process.
+    await admin.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
   } finally {
     await admin.end();
   }
