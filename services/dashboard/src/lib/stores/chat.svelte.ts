@@ -388,6 +388,18 @@ export class ChatState {
   get focusedAgentIsWorking(): boolean {
     return this.agents.some((a) => a.name === this.focusedAgent && a.status === "working");
   }
+  /**
+   * True when the focused agent is working but no streaming/running block has
+   * arrived yet. ChatMessages renders a pulsing "thinking…" placeholder so the
+   * user sees immediate feedback after sending a message instead of silence.
+   * Drops to false the moment any block starts streaming via SSE or Zero.
+   */
+  get showThinkingPlaceholder(): boolean {
+    if (!this.focusedAgentIsWorking) return false;
+    return !this.messages.some(
+      (m) => m.status === "streaming" || m.status === "running",
+    );
+  }
   connected = $state(false);
   /** Per-agent unread badge counts (FIX_FORWARD 3.6). Bumped by SSE
    *  `agent_message` events while another agent is focused; cleared when
@@ -1617,6 +1629,16 @@ export class ChatState {
       // fires (~350ms later). The new guards in `loadOlderTurns` ensure
       // that stale call won't clobber B's state.
       this.loadingOlder = false;
+      // FRI-55: reset the SSE dedup cursor for this agent whenever we clear
+      // messages. When SSE reconnects the daemon replays the entire current
+      // turn buffer from `turn_started`; events with seq <= the old cursor
+      // are dropped by `acceptEvent` before the block_start guard is ever
+      // reached, so thinking bubbles are silently lost. Clearing the cursor
+      // here lets the replay recreate them. `handleBlockStart` is already
+      // idempotent; `handleBlockDelta` gates on `status === "running"` so
+      // completed blocks in the replay don't double-accumulate text.
+      delete this.lastSeqByAgent[agent];
+      saveJSON(ChatState.LAST_SEQ_KEY, this.lastSeqByAgent);
     }
 
     // Build the queue-synth bubbles once — we append them after both the
