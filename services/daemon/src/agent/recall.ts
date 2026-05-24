@@ -21,9 +21,7 @@ export async function safeRecall(
   try {
     const isReady = await Promise.race([
       whenMemoryListenerReady().then(() => true as const),
-      new Promise<false>((resolve) =>
-        setTimeout(() => resolve(false), LISTENER_READY_TIMEOUT_MS),
-      ),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), LISTENER_READY_TIMEOUT_MS)),
     ]);
     if (!isReady) {
       logger.log("warn", "memory.recall.listener-timeout", { intent });
