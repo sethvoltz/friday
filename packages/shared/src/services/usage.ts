@@ -133,7 +133,8 @@ export async function getUsageEntriesSince(sinceIso: string): Promise<UsageEntry
     cacheReadTokens: number;
     turnNumber: number;
     durationMs: number;
-  }>(`SELECT timestamp,
+  }>(
+    `SELECT timestamp,
              session_id              AS "sessionId",
              agent_name              AS "agentName",
              agent_type              AS "agentType",

@@ -130,12 +130,7 @@ describe("scanUsage — cold-resume exclusion", () => {
   it("still detects genuine spikes on turn ≥ 2 even when turn 1 is present", async () => {
     const base = Date.parse("2026-05-01T00:00:00Z");
     // 9 normal turns + 1 genuine spike on turn 11
-    const rows = makeRows(
-      "agent-e",
-      [100, 100, 100, 100, 100, 100, 100, 100, 100, 1000],
-      base,
-      2,
-    );
+    const rows = makeRows("agent-e", [100, 100, 100, 100, 100, 100, 100, 100, 100, 1000], base, 2);
     // Cold-resume row — should be excluded from detection
     const coldResume = makeRow("agent-e", 50_000, new Date(base - 60_000).toISOString(), 1);
     vi.mocked(getUsageEntriesSince).mockResolvedValue([coldResume, ...rows]);

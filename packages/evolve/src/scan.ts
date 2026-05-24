@@ -204,9 +204,7 @@ export async function scanUsage(opts: UsageScanOptions = {}): Promise<Signal[]> 
 
   let maxTs = "";
 
-  const entries = opts.since
-    ? await getUsageEntriesSince(opts.since)
-    : await getAllUsageEntries();
+  const entries = opts.since ? await getUsageEntriesSince(opts.since) : await getAllUsageEntries();
 
   for (const row of entries) {
     const agent = row.agentName;
