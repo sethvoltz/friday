@@ -146,12 +146,31 @@ async function dropTestDb(dbName: string): Promise<void> {
   const admin = new Client({ connectionString: adminUrl() });
   await admin.connect();
   try {
-    // WITH (FORCE) terminates lingering connections internally before
-    // dropping — Postgres 13+, this codebase requires 18. Avoids the
-    // race where pool.end() resolves while TCP sockets are still
-    // draining: a separate pg_terminate_backend() on those in-flight
-    // closes fires an unhandled 57P01 error in the Vitest process.
-    await admin.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    // Drop logical replication slots first — Zero creates one per test
+    // DB and an active slot blocks DROP DATABASE even with (FORCE).
+    await admin.query(
+      `SELECT pg_drop_replication_slot(slot_name)
+       FROM pg_replication_slots WHERE database = $1`,
+      [dbName],
+    );
+
+    // Poll until pg_stat_activity shows no other connections. pool.end()
+    // resolves after the application-level close handshake but TCP sockets
+    // can still be draining. Forcing a drop while sockets drain (via
+    // pg_terminate_backend or WITH (FORCE)) sends 57P01 back over those
+    // sockets, which fires as an unhandled exception in the Vitest process.
+    // Waiting for genuine closure avoids the race entirely.
+    for (let i = 0; i < 20; i++) {
+      const r = await admin.query<{ cnt: string }>(
+        `SELECT count(*)::text AS cnt FROM pg_stat_activity
+         WHERE datname = $1 AND pid <> pg_backend_pid()`,
+        [dbName],
+      );
+      if (parseInt(r.rows[0].cnt, 10) === 0) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+
+    await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
   } finally {
     await admin.end();
   }
