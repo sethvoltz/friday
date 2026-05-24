@@ -377,16 +377,27 @@
     background: none;
     border: none;
     cursor: pointer;
-    padding: 0;
+    /* Keep original padding so the button's layout box stays at its natural
+       ~22px height — the header height is unchanged. The ::before below
+       carries the 44×44px HIG hit area as overflow (pointer-events still
+       fire because the button's overflow is visible). */
+    padding: 0.25rem;
     flex-shrink: 0;
-    /* HIG minimum touch target — was ~22px effective height, now 44×44px */
+    position: relative;
+    touch-action: manipulation;
+  }
+  /* Invisible hit-area extension. Centered on the button, overflows its
+     border box without affecting layout (position: absolute, no size on
+     the parent changes). Taps in this zone route to the button because
+     ::before is a child of the button element. */
+  .hamburger-btn::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
     min-width: 44px;
     min-height: 44px;
-    /* Ensure the button wins within the header stacking context (z-index: 250)
-       and is unambiguously hittable above any lower-z sibling/overlay */
-    position: relative;
-    z-index: 1;
-    touch-action: manipulation;
   }
   .hamburger-btn span {
     display: block; width: 1.25rem; height: 2px; background: var(--text-primary);
