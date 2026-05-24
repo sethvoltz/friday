@@ -2622,6 +2622,22 @@ export class ChatState {
 
   /* ------------ Block-level streaming handlers (FIX_FORWARD 1.7) ------------ */
 
+  /** Snapshot of the focused agent's current SDK session id. Stamped onto
+   *  StreamingEntry / OptimisticEntry constructions so the `messages`
+   *  derivation can filter overlay entries by session — /clear nulls the
+   *  agent's sessionId and stale in-flight entries become invisible
+   *  without imperative cleanup.
+   *
+   *  Returns `null` when the agents row hasn't replicated yet (Zero race
+   *  on cold reload). An entry stamped with `null` is invisible until the
+   *  agents row materializes with a matching null; in practice the
+   *  block_start that produces such an entry runs only after agents has
+   *  replicated (the SSE handler runs in the same focused-agent context
+   *  the user is actively viewing), so this is a defensive default. */
+  private currentSessionFor(agent: string): string | null {
+    return this.agents.find((a) => a.name === agent)?.sessionId ?? null;
+  }
+
   private handleBlockStart(event: {
     block_id: string;
     block_index: number;
@@ -2635,6 +2651,8 @@ export class ChatState {
     // daemon. We materialize the bubble on `block_complete` only — the
     // start carries no useful metadata and would push an empty placeholder.
     if (event.kind === "error") return;
+    const agent = this.focusedAgent;
+    const sid = this.currentSessionFor(agent);
     if (event.kind === "text") {
       const role = event.role === "user" ? "user" : "assistant";
       // FIX_FORWARD 2.6: user blocks key by turn_id so the local pending
@@ -2643,62 +2661,143 @@ export class ChatState {
       const id =
         role === "user" ? userBlockIdForTurn(event.turn_id) : `b_${event.block_id}`;
       if (this.messages.some((m) => m.id === id)) return;
-      this.#legacyMessages.push({
-        id,
-        role,
-        text: "",
-        status: role === "user" ? "complete" : "streaming",
-        agent: this.focusedAgent,
-        turnId: event.turn_id,
-        ts: event.ts,
-      });
+      if (role === "user") {
+        // User-block path stays on the legacy bucket until commit 6 lights
+        // up the optimistic overlay. handleBlockStart for users is the
+        // mail / scratch / scheduled path (user_chat blocks come in via
+        // addUser → confirmPending and skip this handler thanks to the
+        // dedup above).
+        this.#legacyMessages.push({
+          id,
+          role,
+          text: "",
+          status: "complete",
+          agent,
+          turnId: event.turn_id,
+          ts: event.ts,
+        });
+        return;
+      }
+      // Assistant text: streaming overlay. The StreamingEntry's per-field
+      // $state keeps subsequent block_delta `entry.text += delta`
+      // mutations fine-grained — the `messages` derivation does not
+      // re-run on text growth.
+      this.streaming.set(
+        overlayKey(agent, id),
+        new StreamingEntry({
+          id,
+          role: "assistant",
+          agent,
+          ts: event.ts,
+          turnId: event.turn_id,
+          blockId: event.block_id,
+          sessionId: sid,
+          initialStatus: "streaming",
+        }),
+      );
       return;
     }
     if (event.kind === "thinking") {
       const id = `th_${event.block_id}`;
       if (this.messages.some((m) => m.id === id)) return;
-      this.#legacyMessages.push({
-        id,
-        role: "thinking",
-        text: "",
-        status: "running",
-        blockId: event.block_id,
-        turnId: event.turn_id,
-        ts: event.ts,
-      });
+      this.streaming.set(
+        overlayKey(agent, id),
+        new StreamingEntry({
+          id,
+          role: "thinking",
+          agent,
+          ts: event.ts,
+          turnId: event.turn_id,
+          blockId: event.block_id,
+          sessionId: sid,
+          initialStatus: "running",
+        }),
+      );
       return;
     }
     if (event.kind === "tool_use") {
       const toolId = event.tool?.id ?? event.block_id;
       const id = `t_${toolId}`;
       if (this.messages.some((m) => m.id === id)) return;
-      this.#legacyMessages.push({
-        id,
-        role: "tool",
-        text: "",
-        status: "running",
-        toolId,
-        toolName: event.tool?.name ?? "",
-        // FRI-84: record blockId so handleBlockDelta can route
-        // input_json_delta fragments onto this bubble.
-        blockId: event.block_id,
-        turnId: event.turn_id,
-        ts: event.ts,
-      });
+      this.streaming.set(
+        overlayKey(agent, id),
+        new StreamingEntry({
+          id,
+          role: "tool",
+          agent,
+          ts: event.ts,
+          turnId: event.turn_id,
+          blockId: event.block_id,
+          sessionId: sid,
+          toolId,
+          initialStatus: "running",
+          initialToolName: event.tool?.name ?? "",
+        }),
+      );
       return;
     }
     // tool_result: created lazily on block_complete (we need content_json
     // to know which tool_use_id it belongs to).
   }
 
+  /** Find the overlay tool entry matching a SSE block_id. tool overlay
+   *  entries are keyed by `t_<toolId>` rather than `b_<blockId>` — we
+   *  need a scan-by-blockId for `input_json_delta` routing. Cost is
+   *  bounded by streaming.size (typically 1-3 entries during a turn). */
+  private findStreamingByBlockId(
+    agent: string,
+    blockId: string,
+  ): StreamingEntry | undefined {
+    for (const entry of this.streaming.values()) {
+      if (entry.agent !== agent) continue;
+      if (entry.blockId === blockId) return entry;
+    }
+    return undefined;
+  }
+
   private handleBlockDelta(event: {
     block_id: string;
     delta: { text?: string; partial_json?: string };
   }): void {
+    const agent = this.focusedAgent;
     const textId = `b_${event.block_id}`;
     const thinkId = `th_${event.block_id}`;
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const m = this.messages[i];
+
+    // Text deltas: prefer the streaming overlay. `entry.text += delta`
+    // fires fine-grained reactivity on `entry.text` only — the
+    // `messages` derivation does not re-run, so paint stays bounded
+    // by the bubble's own text-node update.
+    if (typeof event.delta.text === "string") {
+      const textEntry = this.streaming.get(overlayKey(agent, textId));
+      if (textEntry && textEntry.role === "assistant") {
+        if (textEntry.status === "streaming") textEntry.text += event.delta.text;
+        return;
+      }
+      const thinkEntry = this.streaming.get(overlayKey(agent, thinkId));
+      if (thinkEntry && thinkEntry.role === "thinking") {
+        if (thinkEntry.status === "running") thinkEntry.text += event.delta.text;
+        return;
+      }
+    }
+    if (typeof event.delta.partial_json === "string") {
+      const toolEntry = this.findStreamingByBlockId(agent, event.block_id);
+      if (toolEntry && toolEntry.role === "tool") {
+        if (toolEntry.status === "running") {
+          toolEntry.inputPartialJson =
+            (toolEntry.inputPartialJson ?? "") + event.delta.partial_json;
+        }
+        return;
+      }
+    }
+
+    // Legacy fallback: a delta whose block_start landed before the
+    // overlay migration (or for ids only the legacy bucket holds —
+    // tests using `chat.startAssistantTurn` / `chat.appendDelta` push
+    // directly to legacy without going through SSE). Preserved so
+    // mid-PR test fixtures and edge cases keep working until the rest
+    // of the migration lands.
+    for (let i = this.#legacyMessages.length - 1; i >= 0; i--) {
+      const m = this.#legacyMessages[i];
       if (m.id === textId) {
         if (typeof event.delta.text === "string" && m.status === "streaming") {
           m.text += event.delta.text;
@@ -2711,10 +2810,6 @@ export class ChatState {
         }
         return;
       }
-      // FRI-84: accumulate input_json_delta fragments on the tool bubble
-      // so the ToolBlock can render the live input under the headline
-      // during streaming. block_start for tool_use keys the bubble by
-      // `t_<toolId>` rather than block_id, so we match on role+blockId.
       if (
         m.role === "tool" &&
         m.blockId === event.block_id &&
@@ -2737,6 +2832,7 @@ export class ChatState {
     source: string | null;
     ts: number;
   }): void {
+    const agent = this.focusedAgent;
     if (event.kind === "error") {
       const errPayload = parseErrorContent(event.content_json);
       const id = `e_${event.block_id}`;
@@ -2780,6 +2876,7 @@ export class ChatState {
         // streaming bubble at `b_<id>` still satisfies D5's cleanup intent;
         // the new affordance bubble at `nr_<turnId>` is the converged shape.
         const streamingId = `b_${event.block_id}`;
+        this.streaming.delete(overlayKey(agent, streamingId));
         const idx = this.#legacyMessages.findIndex((m) => m.id === streamingId);
         if (idx !== -1) this.#legacyMessages.splice(idx, 1);
         const nrId = noResponseIdForTurn(event.turn_id);
@@ -2791,7 +2888,7 @@ export class ChatState {
             noResponseSentinel: true,
             text: "",
             status: "complete",
-            agent: this.focusedAgent,
+            agent,
             turnId: event.turn_id,
             ts: event.ts,
           });
@@ -2810,6 +2907,19 @@ export class ChatState {
             : event.status === "queued"
               ? "queued"
               : "error";
+      // Streaming overlay update first. The overlay holds the live bubble
+      // during the streaming phase; finalizing in place keeps the user's
+      // view stable until Zero replicates the canonical row (which is
+      // pruned by a later convergence sweep — see commit 9).
+      const overlayEntry =
+        event.role === "user"
+          ? undefined
+          : this.streaming.get(overlayKey(agent, id));
+      if (overlayEntry && overlayEntry.role === "assistant") {
+        if (typeof parsed.text === "string") overlayEntry.text = parsed.text;
+        overlayEntry.status = mappedStatus;
+        return;
+      }
       for (const m of this.messages) {
         if (m.id !== id) continue;
         if (typeof parsed.text === "string") m.text = parsed.text;
@@ -2836,14 +2946,15 @@ export class ChatState {
         return;
       }
       // Late mount: block_start was evicted from the ring (or — for mail
-      // — was never emitted in the first place).
+      // — was never emitted in the first place). Land canonical in the
+      // legacy bucket so Zero's eventual replicate dedupes on id.
       const role = event.role === "user" ? "user" : "assistant";
       this.#legacyMessages.push({
         id,
         role,
         text: parsed.text ?? "",
         status: mappedStatus,
-        agent: this.focusedAgent,
+        agent,
         turnId: event.turn_id,
         blockId: event.block_id,
         ts: event.ts,
@@ -2864,6 +2975,7 @@ export class ChatState {
       const hasText =
         typeof parsed.text === "string" && parsed.text.length > 0;
       if (!hasText && event.status === "complete") {
+        this.streaming.delete(overlayKey(agent, id));
         this.#legacyMessages = this.#legacyMessages.filter((m) => m.id !== id);
         return;
       }
@@ -2878,6 +2990,12 @@ export class ChatState {
           : event.status === "error"
             ? "error"
             : "done";
+      const overlayEntry = this.streaming.get(overlayKey(agent, id));
+      if (overlayEntry && overlayEntry.role === "thinking") {
+        if (typeof parsed.text === "string") overlayEntry.text = parsed.text;
+        overlayEntry.status = status;
+        return;
+      }
       for (const m of this.messages) {
         if (m.id !== id) continue;
         if (typeof parsed.text === "string") m.text = parsed.text;
@@ -2898,17 +3016,26 @@ export class ChatState {
     if (event.kind === "tool_use") {
       const toolId = parsed.tool_use_id ?? "";
       const id = `t_${toolId}`;
-      for (const m of this.messages) {
-        if (m.id !== id) continue;
-        m.input = parsed.input;
-        // FRI-84: canonical input is now in `m.input`; drop the
+      const overlayEntry = this.streaming.get(overlayKey(agent, id));
+      if (overlayEntry && overlayEntry.role === "tool") {
+        overlayEntry.input = parsed.input;
+        // FRI-84: canonical input is now in `entry.input`; drop the
         // streaming accumulator so the renderer switches to the
         // pretty-printed final form.
-        m.inputPartialJson = undefined;
-        if (parsed.name && !m.toolName) m.toolName = parsed.name;
+        overlayEntry.inputPartialJson = undefined;
+        if (parsed.name && !overlayEntry.toolName) overlayEntry.toolName = parsed.name;
         // A tool_use that completes with aborted/error never gets a
         // tool_result follow-up to flip the bubble off "running" — honor
         // the terminal status here.
+        if (event.status === "aborted") overlayEntry.status = "aborted";
+        else if (event.status === "error") overlayEntry.status = "error";
+        return;
+      }
+      for (const m of this.messages) {
+        if (m.id !== id) continue;
+        m.input = parsed.input;
+        m.inputPartialJson = undefined;
+        if (parsed.name && !m.toolName) m.toolName = parsed.name;
         if (event.status === "aborted") m.status = "aborted";
         else if (event.status === "error") m.status = "error";
         return;
@@ -2936,6 +3063,12 @@ export class ChatState {
     if (event.kind === "tool_result") {
       const toolId = parsed.tool_use_id ?? "";
       const id = `t_${toolId}`;
+      const overlayEntry = this.streaming.get(overlayKey(agent, id));
+      if (overlayEntry && overlayEntry.role === "tool") {
+        overlayEntry.status = parsed.is_error ? "error" : "done";
+        if (typeof parsed.text === "string") overlayEntry.output = parsed.text;
+        return;
+      }
       for (const m of this.messages) {
         if (m.id !== id) continue;
         m.status = parsed.is_error ? "error" : "done";
@@ -2970,6 +3103,12 @@ export class ChatState {
    * to disclose.
    */
   private handleBlockCanceled(event: { block_id: string }): void {
+    // Drop matching streaming overlay entries — the overlay key is
+    // (agent, id) and id can be `b_<bid>` / `th_<bid>` / `t_<toolId>`,
+    // so scan-by-blockId is the only correct match for the tool case.
+    for (const [key, entry] of this.streaming.entries()) {
+      if (entry.blockId === event.block_id) this.streaming.delete(key);
+    }
     this.#legacyMessages = this.#legacyMessages.filter(
       (m) => m.blockId !== event.block_id,
     );
