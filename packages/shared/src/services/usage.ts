@@ -117,6 +117,45 @@ export async function getAllUsageEntries(): Promise<UsageEntryRow[]> {
   }));
 }
 
+/** Usage rows with `timestamp >= sinceIso`, in chronological order. */
+export async function getUsageEntriesSince(sinceIso: string): Promise<UsageEntryRow[]> {
+  const pool = getPool();
+  const result = await pool.query<{
+    timestamp: Date;
+    sessionId: string;
+    agentName: string | null;
+    agentType: string | null;
+    model: string | null;
+    costUsd: number | null;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    turnNumber: number;
+    durationMs: number;
+  }>(`SELECT timestamp,
+             session_id              AS "sessionId",
+             agent_name              AS "agentName",
+             agent_type              AS "agentType",
+             model,
+             cost_usd                AS "costUsd",
+             input_tokens            AS "inputTokens",
+             output_tokens           AS "outputTokens",
+             cache_creation_tokens   AS "cacheCreationTokens",
+             cache_read_tokens       AS "cacheReadTokens",
+             COALESCE(turn_number, 0) AS "turnNumber",
+             COALESCE(duration_ms, 0) AS "durationMs"
+      FROM usage
+      WHERE timestamp >= $1
+      ORDER BY timestamp`,
+    [new Date(sinceIso)],
+  );
+  return result.rows.map((r) => ({
+    ...r,
+    timestamp: r.timestamp.toISOString(),
+  }));
+}
+
 export interface UsageStats {
   turns: number;
   cost: number;

@@ -17,6 +17,7 @@ export const EVOLVE_PROPOSALS_DIR = join(EVOLVE_DIR, "proposals");
 export const EVOLVE_CLUSTERS_DIR = join(EVOLVE_DIR, "clusters");
 export const FEEDBACK_LOG_PATH = join(EVOLVE_DIR, "feedback.jsonl");
 export const RUNS_LOG_PATH = join(EVOLVE_DIR, "runs.jsonl");
+export const SPIKE_CURSOR_PATH = join(EVOLVE_DIR, "spike-cursor.json");
 export const HEALTH_PATH = join(DATA_DIR, "health.json");
 export const USAGE_LOG_PATH = join(DATA_DIR, "usage.jsonl");
 export const DAEMON_LOG_PATH = join(LOGS_DIR, "daemon.jsonl");
