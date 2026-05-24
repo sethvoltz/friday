@@ -92,6 +92,7 @@ export const wakeLockState = new WakeLockState();
 let sentinel: WakeLockSentinelLike | null = null;
 let acquiring = false;
 let visListener: (() => void) | null = null;
+let gestureListener: (() => void) | null = null;
 let started = false;
 let stopEffect: (() => void) | null = null;
 
@@ -137,10 +138,25 @@ async function acquire(): Promise<void> {
       s.removeEventListener("release", onRelease);
     };
     s.addEventListener("release", onRelease);
-  } catch {
-    // Common path: page hidden, permission denied, or unsupported context.
-    // No-op — `held` stays false and the next visibility/state change will
-    // give us another shot.
+  } catch (err) {
+    // iOS Safari (and some other browsers) throw NotAllowedError when the
+    // request is made outside a user-gesture context — Zero's WebSocket
+    // callback is async and carries no user activation. Register a
+    // one-shot pointerdown listener so the next tap retries inside an
+    // activation window. Other errors (page hidden, permission denied)
+    // are handled by the visibilitychange listener re-running reconcile.
+    if (
+      err instanceof DOMException &&
+      err.name === "NotAllowedError" &&
+      !gestureListener &&
+      typeof document !== "undefined"
+    ) {
+      gestureListener = () => {
+        gestureListener = null;
+        void acquire();
+      };
+      document.addEventListener("pointerdown", gestureListener, { once: true });
+    }
   } finally {
     acquiring = false;
   }
@@ -212,6 +228,10 @@ export function stopWakeLock(): void {
     document.removeEventListener("visibilitychange", visListener);
     visListener = null;
   }
+  if (gestureListener && typeof document !== "undefined") {
+    document.removeEventListener("pointerdown", gestureListener);
+    gestureListener = null;
+  }
   void release();
 }
 
@@ -247,6 +267,10 @@ export function __resetForTest(): void {
   if (visListener && typeof document !== "undefined") {
     document.removeEventListener("visibilitychange", visListener);
     visListener = null;
+  }
+  if (gestureListener && typeof document !== "undefined") {
+    document.removeEventListener("pointerdown", gestureListener);
+    gestureListener = null;
   }
   sentinel = null;
   acquiring = false;
