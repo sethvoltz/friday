@@ -439,9 +439,7 @@ class ZeroSyncStore {
         }
       };
       document.addEventListener("visibilitychange", onVisible);
-      this.#unsubscribers.push(() =>
-        document.removeEventListener("visibilitychange", onVisible),
-      );
+      this.#unsubscribers.push(() => document.removeEventListener("visibilitychange", onVisible));
 
       // FRI-121 A3: 5-second watchdog nudges connect() when a send was
       // attempted recently and the connection isn't live. Only effective

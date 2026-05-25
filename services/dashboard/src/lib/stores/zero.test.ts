@@ -200,16 +200,14 @@ vi.mock("@rocicorp/zero", () => {
       this.connection = {
         state: {
           current: { name: "connected" },
-          subscribe: vi.fn(
-            (listener: (s: { name: string; reason?: unknown }) => void) => {
-              connListeners.push(listener);
-              listener({ name: "connected" });
-              return () => {
-                const idx = connListeners.indexOf(listener);
-                if (idx !== -1) connListeners.splice(idx, 1);
-              };
-            },
-          ),
+          subscribe: vi.fn((listener: (s: { name: string; reason?: unknown }) => void) => {
+            connListeners.push(listener);
+            listener({ name: "connected" });
+            return () => {
+              const idx = connListeners.indexOf(listener);
+              if (idx !== -1) connListeners.splice(idx, 1);
+            };
+          }),
         },
         connect: vi.fn(),
       };
