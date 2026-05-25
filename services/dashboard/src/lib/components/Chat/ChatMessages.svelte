@@ -553,7 +553,11 @@
         <div class="no-response">
           {msg.noResponseSentinel
             ? "Agent acknowledged — no reply needed"
-            : "Agent didn't respond"}
+            : msg.zeroBlockReason === "abort"
+              ? "Stopped"
+              : msg.zeroBlockReason === "compaction"
+                ? "Compacted — no response"
+                : "Agent didn't respond"}
         </div>
       </div>
     {:else if msg.kind === "error"}
@@ -697,6 +701,13 @@
           {/if}
         </div>
       </div>
+    {/if}
+    {#if !readonly && msg.turnId && chat.compactionTurnIds.has(msg.turnId) && list[i + 1]?.turnId !== msg.turnId}
+      <!-- FRI-60 Phase B: inline "Context compacted" notice at the turn
+           boundary where the SDK trimmed the context window. Rendered as
+           a faint italic line between the last message of the compacted
+           turn and the first message of the next turn. -->
+      <div class="compaction-notice" role="note">Context compacted</div>
     {/if}
   {/each}
   {#if !readonly && chat.showThinkingPlaceholder}
@@ -1013,5 +1024,13 @@
     font-style: italic;
     padding: 0.35rem 0.5rem;
     opacity: 0.85;
+  }
+  .compaction-notice {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+    font-style: italic;
+    text-align: center;
+    padding: 0.25rem 0.5rem;
+    opacity: 0.7;
   }
 </style>

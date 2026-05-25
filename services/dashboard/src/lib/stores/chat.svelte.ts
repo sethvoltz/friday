@@ -142,6 +142,9 @@ export interface ChatMessage {
    *  the daemon's `turn_done.abort_reason` field. Undefined for
    *  non-user-block messages and for turns that didn't end in abort. */
   abortReason?: "cooperative" | "forced";
+  /** FRI-60: set on no-response bubbles to convey why the turn produced
+   *  zero content blocks. Drives the display copy in ChatMessages. */
+  zeroBlockReason?: "abort" | "compaction" | "sdk-resume-failure";
 }
 
 export interface AgentInfo {
@@ -1175,6 +1178,16 @@ export class ChatState {
     // non-focused agents without going through the message-walking
     // path here (which only ever touches focused-agent messages).
     this.clearInflightForTurn(turnId);
+    // FRI-60: schedule cleanup of the zero-block reason. Uses a short
+    // timeout (rather than immediate delete) so the reactive applyZeroBlocks
+    // path has time to read the reason and attach it to the synthesized
+    // no-response bubble before it's removed.
+    if (this.zeroBlockReasonByTurn[turnId] !== undefined) {
+      const REASON_CLEANUP_MS = 5_000;
+      setTimeout(() => {
+        delete this.zeroBlockReasonByTurn[turnId];
+      }, REASON_CLEANUP_MS);
+    }
   }
 
   /**
@@ -1187,6 +1200,23 @@ export class ChatState {
    * bubble in that gap.
    */
   noResponseGraceUntil = $state<Record<string, number>>({});
+
+  /**
+   * FRI-60: maps turn_id → zero_block_reason for turns that ended with no
+   * content blocks. Populated by `applyEvent` when `turn_done` carries
+   * `zero_block_reason`; read by `parseBlocks` to set the right copy on the
+   * synthesized no-response bubble; cleaned up in `finishTurn` via a short
+   * setTimeout so the reactive `applyZeroBlocks` path has time to read it.
+   */
+  zeroBlockReasonByTurn = $state<Record<string, "abort" | "compaction" | "sdk-resume-failure">>(
+    {},
+  );
+
+  /**
+   * FRI-60 Phase B: set of turn_ids where the SDK emitted a compact_boundary
+   * event. Used by ChatMessages to render an inline "Context compacted" notice.
+   */
+  compactionTurnIds = $state(new Set<string>());
 
   /**
    * Clear any per-agent inflight slot whose value matches `turnId`.
@@ -1722,6 +1752,7 @@ export class ChatState {
           inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
           agentWorking: agentIsWorking,
           noResponseGraceUntil: this.noResponseGraceUntil,
+          zeroBlockReasonByTurn: this.zeroBlockReasonByTurn,
         });
         this.oldestBlockId = oldestBlockCursor(blocks);
         // Seed the per-agent SSE cursor from the snapshot's high-water
@@ -1943,6 +1974,9 @@ export class ChatState {
       // not "the agent didn't respond." See parseBlocks's safety-net
       // loop for the suppression logic.
       zeroResultIncomplete: resultType !== "complete",
+      // FRI-60: pass reason map so the synthesized no-response bubble gets
+      // the right display copy.
+      zeroBlockReasonByTurn: this.zeroBlockReasonByTurn,
     });
     const parsedById = new Map<string, ChatMessage>();
     for (const m of parsed) parsedById.set(m.id, m);
@@ -2218,10 +2252,22 @@ export class ChatState {
         // focused agent's bubbles.
         this.clearInflightForTurn(event.turn_id);
         if (event.agent !== this.focusedAgent) break;
+        // FRI-60: store zero_block_reason so parseBlocks can attach the right
+        // copy to the synthesized no-response bubble.
+        if (event.zero_block_reason) {
+          this.zeroBlockReasonByTurn[event.turn_id] = event.zero_block_reason;
+        }
         // FRI-95: thread abort_reason through so the user-block bubble can
         // distinguish "Stopped" (cooperative) from "Stopped — worker had
         // to be force-killed" (forced).
         this.finishTurn(event.turn_id, event.status, event.abort_reason);
+        break;
+      case "compaction":
+        // FRI-60 Phase B: record the turn so ChatMessages can render an
+        // inline "Context compacted" notice.
+        if (event.agent === this.focusedAgent && event.turn_id) {
+          this.compactionTurnIds = new Set([...this.compactionTurnIds, event.turn_id]);
+        }
         break;
       case "error":
         // Same per-agent quarantine: clear the slot for this turn even
@@ -2965,6 +3011,11 @@ export function parseBlocks(
      *  partial view (applyZeroBlocks) set this; REST-driven paths pass
      *  full server payloads and leave it falsy. */
     zeroResultIncomplete?: boolean;
+    /** FRI-60: maps turn_id → zero_block_reason. When the safety-net
+     *  synthesizes a no-response bubble, attaches the reason so
+     *  ChatMessages can show the right copy (abort / compaction /
+     *  sdk-resume-failure). Owned by ChatState.zeroBlockReasonByTurn. */
+    zeroBlockReasonByTurn?: Record<string, "abort" | "compaction" | "sdk-resume-failure">;
   } = {},
 ): ChatMessage[] {
   const orphans = classifyOrphanRows(blocks);
@@ -3247,6 +3298,7 @@ export function parseBlocks(
   // genuinely produced no assistant content.
   const inflight = opts.inflightTurnId;
   const grace = opts.noResponseGraceUntil;
+  const zeroReasons = opts.zeroBlockReasonByTurn;
   const now = Date.now();
   for (const [turnId, info] of userTurns) {
     if (assistantTurns.has(turnId)) continue;
@@ -3276,6 +3328,8 @@ export function parseBlocks(
       role: "assistant",
       kind: "no-response",
       noResponseSentinel: false,
+      // FRI-60: attach the reason so ChatMessages shows the right copy.
+      zeroBlockReason: zeroReasons?.[turnId],
       text: "",
       status: "complete",
       agent,

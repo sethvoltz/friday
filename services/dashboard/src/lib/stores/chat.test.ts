@@ -5806,3 +5806,74 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
     expect([...turnIds]).toEqual(["t-now"]);
   });
 });
+
+// ---- FRI-60: zero_block_reason on parseBlocks synthesized no-response bubble ----
+describe("FRI-60: parseBlocks zeroBlockReason on synthesized no-response bubble", () => {
+  const userOnlyBlock = (turnId = "t-zbr") =>
+    ({
+      id: "1",
+      blockId: "blk-u",
+      turnId,
+      agentName: "friday",
+      sessionId: "s",
+      messageId: null,
+      blockIndex: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      contentJson: '{"text":"hello"}',
+      status: "complete",
+      ts: 100,
+      lastEventSeq: 1,
+    }) as Parameters<import("./chat.svelte").parseBlocks>[0][number];
+
+  it('synthesized bubble carries zeroBlockReason "abort" when supplied', async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks([userOnlyBlock()], "friday", {
+      zeroBlockReasonByTurn: { "t-zbr": "abort" },
+    });
+    const nr = out.find((m) => m.id === "nr_t-zbr");
+    expect(nr).toBeDefined();
+    expect(nr?.kind).toBe("no-response");
+    expect(nr?.zeroBlockReason).toBe("abort");
+  });
+
+  it('synthesized bubble carries zeroBlockReason "compaction" when supplied', async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks([userOnlyBlock()], "friday", {
+      zeroBlockReasonByTurn: { "t-zbr": "compaction" },
+    });
+    const nr = out.find((m) => m.id === "nr_t-zbr");
+    expect(nr?.zeroBlockReason).toBe("compaction");
+  });
+
+  it('synthesized bubble carries zeroBlockReason "sdk-resume-failure" when supplied', async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks([userOnlyBlock()], "friday", {
+      zeroBlockReasonByTurn: { "t-zbr": "sdk-resume-failure" },
+    });
+    const nr = out.find((m) => m.id === "nr_t-zbr");
+    expect(nr?.zeroBlockReason).toBe("sdk-resume-failure");
+  });
+
+  it("synthesized bubble has undefined zeroBlockReason when none supplied", async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks([userOnlyBlock()], "friday");
+    const nr = out.find((m) => m.id === "nr_t-zbr");
+    expect(nr).toBeDefined();
+    expect(nr?.zeroBlockReason).toBeUndefined();
+  });
+
+  it("reason for one turn does not bleed into a different turn's bubble", async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const block1 = userOnlyBlock("t-a");
+    const block2 = { ...userOnlyBlock("t-b"), id: "2", blockId: "blk-b", ts: 200 };
+    const out = parseBlocks([block1, block2], "friday", {
+      zeroBlockReasonByTurn: { "t-a": "abort" },
+    });
+    const nrA = out.find((m) => m.id === "nr_t-a");
+    const nrB = out.find((m) => m.id === "nr_t-b");
+    expect(nrA?.zeroBlockReason).toBe("abort");
+    expect(nrB?.zeroBlockReason).toBeUndefined();
+  });
+});

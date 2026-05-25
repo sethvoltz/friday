@@ -478,6 +478,9 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   // consistent for the subsequent resume. See the assistant-boundary
   // comment block below for the failure mode this avoids.
   let breakAtNextUser = false;
+  // FRI-60: set when the SDK emits a compact_boundary system frame this turn.
+  // Reset to false at the top of each runQuery call (function scope).
+  let compactionSeenThisTurn = false;
 
   try {
     for await (const msg of query({
@@ -542,6 +545,24 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       // — preserve over delete — but each attempt's status is honest.
       if (m.type === "system" && m.subtype === "api_retry") {
         flushInflightBlocks("aborted");
+        continue;
+      }
+
+      // FRI-60: compact_boundary signals the SDK trimmed the context window
+      // mid-turn. Flag it for the turn-complete IPC so lifecycle.ts can tag
+      // the zero_block_reason and the dashboard can show "Context compacted".
+      if (m.type === "system" && m.subtype === "compact_boundary") {
+        compactionSeenThisTurn = true;
+        const meta = m.compact_metadata as
+          | { pre_tokens?: number; post_tokens?: number; duration_ms?: number }
+          | undefined;
+        emit({
+          type: "compaction-boundary",
+          sessionId: sessionId ?? "",
+          preTokens: meta?.pre_tokens ?? 0,
+          postTokens: meta?.post_tokens,
+          durationMs: meta?.duration_ms,
+        });
         continue;
       }
 
@@ -804,7 +825,12 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
     }
 
     lastSessionId = sessionId ?? lastSessionId;
-    emit({ type: "turn-complete", sessionId: sessionId ?? "", usage: finalUsage });
+    emit({
+      type: "turn-complete",
+      sessionId: sessionId ?? "",
+      compactionThisTurn: compactionSeenThisTurn || undefined,
+      usage: finalUsage,
+    });
     emit({ type: "status-change", status: "idle" });
   } catch (err: unknown) {
     const aborted = abortController.signal.aborted;
