@@ -733,6 +733,18 @@ async function handle(
     const name = path.split("/")[3];
     const a = await registry.getAgent(name);
     if (!a) return json(res, 404, { error: "not found" });
+    // Bare agents registered under an installed app are persistent user-facing
+    // interfaces (e.g. the kitchen agent). Archiving them resets the user's
+    // conversational context. Block the call.
+    if (a.type === "bare") {
+      const appId = await registry.getAppId(name);
+      if (appId) {
+        return json(res, 409, {
+          error: `cannot archive "${name}": it is a persistent bare agent registered under app "${appId}". Uninstall the app to remove it.`,
+          code: "app_agent_protected",
+        });
+      }
+    }
     // `reason` is required and drives the linked-ticket close behavior
     // (completed→done, abandoned/failed→closed). Refork is daemon-internal
     // and never accepted over the wire.

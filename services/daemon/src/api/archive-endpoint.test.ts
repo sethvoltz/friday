@@ -155,4 +155,41 @@ describe("POST /api/agents/:name/archive — contract", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it("returns 409 with code=app_agent_protected when archiving a bare agent with an appId", async () => {
+    await registry.registerAgent({
+      name: "kitchen",
+      type: "bare",
+      appId: "kitchen",
+    });
+
+    const res = await fetch(archiveUrl("kitchen"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "completed" }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.code).toBe("app_agent_protected");
+    expect(body.error).toContain("kitchen");
+    // Agent must not have been archived.
+    expect((await registry.getAgent("kitchen"))?.status).not.toBe("archived");
+  });
+
+  it("allows archiving a bare agent that has no appId", async () => {
+    await registry.registerAgent({
+      name: "bare-no-app",
+      type: "bare",
+    });
+
+    const res = await fetch(archiveUrl("bare-no-app"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "completed" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await registry.getAgent("bare-no-app"))?.status).toBe("archived");
+  });
 });
