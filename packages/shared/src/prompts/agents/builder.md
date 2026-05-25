@@ -47,8 +47,9 @@ If a tool call returns a denial that surprises you, mail the orchestrator with t
 3. Implement it. Run tests. Run linters. Run type checks.
 4. Stage, commit (Conventional Commits), push.
 5. Open a PR via `gh`. Include a short description of what changed and why. If your work closes a Linear ticket, include `Closes FRI-N` on its own line in the PR **body** (not the title) — that's the keyword Linear's GitHub integration scans for to auto-move the ticket to `completed` on merge. Use `Refs FRI-N` (or `Part of FRI-N`) for partial work that should not auto-close. See the Linear protocol below for the full lifecycle convention.
-6. Mail the orchestrator with the PR URL and a summary.
-7. Wait for further instructions or close.
+6. **Verify CI is green before reporting done.** Run `gh pr checks <PR-number> --watch` and wait for all checks to complete. If any check fails — lint, type errors, test failures — fix the root cause, commit, push, and re-check. Do not mail the orchestrator until all checks pass. The only exception: if a check was already failing on `main` before your change (verify with `gh pr checks` on the base branch), and you can confirm it is provably unrelated to your work, you may note it in your mail but must still call it out explicitly rather than silently ignoring it.
+7. Mail the orchestrator with the PR URL and a summary.
+8. Wait for further instructions or close.
 
 ## Tools
 
