@@ -37,6 +37,16 @@ type MockedZero = {
   mutate: Record<string, ReturnType<typeof vi.fn>>;
   // Capture the constructor args so tests can inspect them.
   __ctorOpts: Record<string, unknown>;
+  // FRI-121: connection mock
+  connection: {
+    state: {
+      subscribe: ReturnType<typeof vi.fn>;
+      current: { name: string };
+    };
+    connect: ReturnType<typeof vi.fn>;
+  };
+  /** Fire a connection-state change on all subscribers for this instance. */
+  __emitConnState: (state: { name: string; reason?: unknown }) => void;
 };
 const instances: MockedZero[] = [];
 
@@ -163,6 +173,8 @@ vi.mock("@rocicorp/zero", () => {
       })),
     };
     __ctorOpts: Record<string, unknown>;
+    connection: MockedZero["connection"];
+    __emitConnState: MockedZero["__emitConnState"];
     constructor(opts: Record<string, unknown>) {
       this.__ctorOpts = opts;
       // Phase 3+ tables: each table is its own chain-able query proxy.
@@ -181,6 +193,26 @@ vi.mock("@rocicorp/zero", () => {
         blocks: makeQueryProxy(),
         evolve_proposals: makeQueryProxy(),
         read_cursors: makeQueryProxy(),
+      };
+      // FRI-121: connection mock — subscribe captures the listener and fires
+      // with 'connected' immediately (matches Zero's BehaviorSubject-like API).
+      const connListeners: Array<(s: { name: string; reason?: unknown }) => void> = [];
+      this.connection = {
+        state: {
+          current: { name: "connected" },
+          subscribe: vi.fn((listener: (s: { name: string; reason?: unknown }) => void) => {
+            connListeners.push(listener);
+            listener({ name: "connected" });
+            return () => {
+              const idx = connListeners.indexOf(listener);
+              if (idx !== -1) connListeners.splice(idx, 1);
+            };
+          }),
+        },
+        connect: vi.fn(),
+      };
+      this.__emitConnState = (state: { name: string; reason?: unknown }) => {
+        for (const l of connListeners) l(state);
       };
       instances.push(this as unknown as MockedZero);
     }
@@ -1865,5 +1897,249 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
         text: "x",
       }),
     ).resolves.toBeNull();
+  });
+});
+
+describe("FRI-121 A1: connection.state → status transitions", () => {
+  async function bootedZero() {
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  it("initializes to 'live' because the mock emits {name:'connected'} immediately on subscribe", async () => {
+    const { zeroSync } = await bootedZero();
+    expect(zeroSync.status).toBe("live");
+    expect(zeroSync.errorMessage).toBeNull();
+  });
+
+  it("transitions to 'error' with errorMessage when reason is a string", async () => {
+    const { zeroSync, z } = await bootedZero();
+    z.__emitConnState({ name: "error", reason: "jwt expired" });
+    expect(zeroSync.status).toBe("error");
+    expect(zeroSync.errorMessage).toBe("jwt expired");
+  });
+
+  it("transitions to 'error' with null errorMessage when reason is absent", async () => {
+    const { zeroSync, z } = await bootedZero();
+    z.__emitConnState({ name: "error" });
+    expect(zeroSync.status).toBe("error");
+    expect(zeroSync.errorMessage).toBeNull();
+  });
+
+  it("transitions to 'error' on {name:'closed'}", async () => {
+    const { zeroSync, z } = await bootedZero();
+    z.__emitConnState({ name: "closed" });
+    expect(zeroSync.status).toBe("error");
+  });
+
+  it("transitions to 'error' on {name:'needs-auth'}", async () => {
+    const { zeroSync, z } = await bootedZero();
+    z.__emitConnState({ name: "needs-auth" });
+    expect(zeroSync.status).toBe("error");
+  });
+
+  it("transitions to 'pending' on {name:'connecting'}", async () => {
+    const { zeroSync, z } = await bootedZero();
+    z.__emitConnState({ name: "connecting" });
+    expect(zeroSync.status).toBe("pending");
+  });
+
+  it("transitions to 'pending' on {name:'disconnected'}", async () => {
+    const { zeroSync, z } = await bootedZero();
+    z.__emitConnState({ name: "disconnected" });
+    expect(zeroSync.status).toBe("pending");
+  });
+
+  it("clears errorMessage when connection recovers to 'connected'", async () => {
+    const { zeroSync, z } = await bootedZero();
+    z.__emitConnState({ name: "error", reason: "timeout" });
+    expect(zeroSync.errorMessage).toBe("timeout");
+    z.__emitConnState({ name: "connected" });
+    expect(zeroSync.status).toBe("live");
+    expect(zeroSync.errorMessage).toBeNull();
+  });
+});
+
+describe("FRI-121 A2: visibilitychange → terminal-state reconnect", () => {
+  // Each test must destroy the store after use so the visibilitychange
+  // listener is removed from document — otherwise handlers from prior
+  // tests accumulate and fire when the destroy test dispatches the event.
+  const teardowns: Array<() => void> = [];
+  afterEach(() => {
+    for (const td of teardowns) td();
+    teardowns.length = 0;
+  });
+
+  async function bootedZero() {
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    teardowns.push(() => zeroSync.destroy());
+    return { zeroSync, z: instances[0]! };
+  }
+
+  it("fetches /api/sync/refresh and calls connection.connect({auth}) when tab becomes visible", async () => {
+    const { z } = await bootedZero();
+
+    Object.defineProperty(document, "visibilityState", {
+      value: "visible",
+      writable: true,
+      configurable: true,
+    });
+
+    const fetchSpy = global.fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchSpy.mockClear();
+    z.connection.connect.mockClear();
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshCall = fetchSpy.mock.calls.find((c) => c[0] === "/api/sync/refresh");
+    expect(refreshCall).toBeDefined();
+    expect(z.connection.connect).toHaveBeenCalledTimes(1);
+    expect(z.connection.connect.mock.calls[0][0]).toEqual({ auth: "test-token-123" });
+  });
+
+  it("does NOT call connection.connect when the tab goes hidden", async () => {
+    const { z } = await bootedZero();
+
+    Object.defineProperty(document, "visibilityState", {
+      value: "hidden",
+      writable: true,
+      configurable: true,
+    });
+
+    z.connection.connect.mockClear();
+    document.dispatchEvent(new Event("visibilitychange"));
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(z.connection.connect).not.toHaveBeenCalled();
+  });
+
+  it("does not call connection.connect after destroy() tears down the listener", async () => {
+    const { zeroSync, z } = await bootedZero();
+    // Pop the auto-teardown so we control the destroy call ourselves.
+    teardowns.length = 0;
+
+    Object.defineProperty(document, "visibilityState", {
+      value: "visible",
+      writable: true,
+      configurable: true,
+    });
+
+    zeroSync.destroy();
+
+    // Check THIS instance's connect mock — instance-specific, unaffected by
+    // other tests' stores that may still have listeners on document.
+    z.connection.connect.mockClear();
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Either the listener was removed by destroy() or this.#zero was nulled
+    // out — either way, no reconnect is attempted on this store's connection.
+    expect(z.connection.connect).not.toHaveBeenCalled();
+  });
+});
+
+describe("FRI-121 A3: 5-second watchdog nudges connect() after a recent send", () => {
+  it("calls connect() when status !== 'live' and a message was sent within the last 30 s", async () => {
+    vi.useFakeTimers();
+    try {
+      const { zeroSync } = await importStore();
+      await vi.runAllTimersAsync().catch(() => {});
+      expect(instances).toHaveLength(1);
+      const z = instances[0]!;
+
+      z.__emitConnState({ name: "error" });
+      expect(zeroSync.status).toBe("error");
+
+      await zeroSync.sendUserMessage({
+        blockId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001",
+        agent: "friday",
+        text: "watchdog trigger",
+      });
+
+      z.connection.connect.mockClear();
+      vi.advanceTimersByTime(5_000);
+
+      // Watchdog fires connect() without args (terminal-state nudge only;
+      // auth refresh is the visibilitychange handler's job).
+      expect(z.connection.connect).toHaveBeenCalledTimes(1);
+      expect(z.connection.connect.mock.calls[0]).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does NOT call connect() when status is 'live'", async () => {
+    vi.useFakeTimers();
+    try {
+      const { zeroSync } = await importStore();
+      await vi.runAllTimersAsync().catch(() => {});
+      expect(instances).toHaveLength(1);
+      const z = instances[0]!;
+
+      // Mock fires 'connected' on subscribe → status stays 'live'.
+      expect(zeroSync.status).toBe("live");
+
+      await zeroSync.sendUserMessage({
+        blockId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002",
+        agent: "friday",
+        text: "should not trigger watchdog",
+      });
+
+      z.connection.connect.mockClear();
+      vi.advanceTimersByTime(5_000);
+
+      expect(z.connection.connect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does NOT call connect() when no message was sent recently (#lastSendAt=0)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { zeroSync } = await importStore();
+      await vi.runAllTimersAsync().catch(() => {});
+      expect(instances).toHaveLength(1);
+      const z = instances[0]!;
+
+      z.__emitConnState({ name: "error" });
+      // #lastSendAt stays at 0 (class field default).
+      // Date.now() under fake timers ≈ real system time >> 30_000 ms from epoch.
+      z.connection.connect.mockClear();
+      vi.advanceTimersByTime(5_000);
+
+      expect(z.connection.connect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops firing after destroy() clears the watchdog interval", async () => {
+    vi.useFakeTimers();
+    try {
+      const { zeroSync } = await importStore();
+      await vi.runAllTimersAsync().catch(() => {});
+      expect(instances).toHaveLength(1);
+      const z = instances[0]!;
+
+      z.__emitConnState({ name: "error" });
+      await zeroSync.sendUserMessage({
+        blockId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0003",
+        agent: "friday",
+        text: "before destroy",
+      });
+
+      zeroSync.destroy();
+      z.connection.connect.mockClear();
+      vi.advanceTimersByTime(5_000);
+
+      expect(z.connection.connect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

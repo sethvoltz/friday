@@ -105,40 +105,68 @@ export async function startCancelListener(): Promise<CancelListenerHandle> {
     throw new Error("DATABASE_URL must be set to start the cancelQueued LISTEN connection.");
   }
 
-  const client = new Client({ connectionString });
-  await client.connect();
+  let stopped = false;
+  let activeClient: InstanceType<typeof Client> | null = null;
 
-  client.on("notification", (msg) => {
-    if (msg.channel !== LISTEN_CHANNELS.blockCancelRequested) return;
-    const blockId = msg.payload;
-    if (!blockId) return;
-    void processCancelRequestedRow(blockId).catch((err) => {
-      logger.log("warn", "block.cancel-listen.process.error", {
-        block_id: blockId,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    });
-  });
+  // FRI-121 B: reconnect loop with keepAlive + exponential backoff.
+  async function connectWithRetry(): Promise<void> {
+    let delay = 1_000;
+    while (!stopped) {
+      try {
+        const c = new Client({ connectionString, keepAlive: true });
+        activeClient = c;
+        await c.connect();
+        c.on("notification", (msg) => {
+          if (msg.channel !== LISTEN_CHANNELS.blockCancelRequested) return;
+          const blockId = msg.payload;
+          if (!blockId) return;
+          void processCancelRequestedRow(blockId).catch((err) => {
+            logger.log("warn", "block.cancel-listen.process.error", {
+              block_id: blockId,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
+        });
+        c.on("error", (err) => {
+          logger.log("warn", "block.cancel-listen.client.error", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
+        await c.query(`LISTEN ${LISTEN_CHANNELS.blockCancelRequested}`);
+        logger.log("info", "block.cancel-listen.ready", {
+          channel: LISTEN_CHANNELS.blockCancelRequested,
+        });
+        await runCancelBootScan();
+        delay = 1_000;
+        await new Promise<void>((resolve) => c.once("end", resolve));
+      } catch (err) {
+        logger.log("warn", "block.cancel-listen.connect.error", {
+          message: err instanceof Error ? err.message : String(err),
+          retryIn: delay,
+        });
+        if (!stopped) {
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, 30_000);
+        }
+      } finally {
+        activeClient = null;
+      }
+    }
+  }
 
-  client.on("error", (err) => {
-    logger.log("warn", "block.cancel-listen.client.error", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-  });
-
-  await client.query(`LISTEN ${LISTEN_CHANNELS.blockCancelRequested}`);
-  logger.log("info", "block.cancel-listen.ready", {
-    channel: LISTEN_CHANNELS.blockCancelRequested,
-  });
+  void connectWithRetry();
 
   return {
     stop: async (): Promise<void> => {
-      try {
-        await client.query(`UNLISTEN ${LISTEN_CHANNELS.blockCancelRequested}`);
-      } catch {
-        // best-effort
+      stopped = true;
+      if (activeClient) {
+        try {
+          await activeClient.query(`UNLISTEN ${LISTEN_CHANNELS.blockCancelRequested}`);
+        } catch {
+          // best-effort
+        }
+        await activeClient.end().catch(() => {});
       }
-      await client.end().catch(() => {});
     },
   };
 }

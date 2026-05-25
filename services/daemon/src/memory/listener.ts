@@ -201,44 +201,73 @@ export async function startMemoryListener(): Promise<MemoryListenerHandle> {
     throw new Error("DATABASE_URL must be set to start the memory LISTEN connection.");
   }
 
-  const client = new Client({ connectionString });
-  await client.connect();
+  let stopped = false;
+  let activeClient: InstanceType<typeof Client> | null = null;
 
-  client.on("notification", (msg) => {
-    if (msg.channel !== LISTEN_CHANNELS.memoryFileChanged) return;
-    const id = msg.payload;
-    if (!id) return;
-    void processPendingMemoryRow(id).catch((err) => {
-      logger.log("warn", "memory.listen.process.error", {
-        id,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    });
-  });
+  // FRI-121 B: reconnect loop with keepAlive + exponential backoff.
+  // _readyResolve is called on the first successful LISTEN; subsequent
+  // reconnects leave _readyPromise already-resolved so callers aren't
+  // re-blocked.
+  async function connectWithRetry(): Promise<void> {
+    let delay = 1_000;
+    while (!stopped) {
+      try {
+        const c = new Client({ connectionString, keepAlive: true });
+        activeClient = c;
+        await c.connect();
+        c.on("notification", (msg) => {
+          if (msg.channel !== LISTEN_CHANNELS.memoryFileChanged) return;
+          const id = msg.payload;
+          if (!id) return;
+          void processPendingMemoryRow(id).catch((err) => {
+            logger.log("warn", "memory.listen.process.error", {
+              id,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
+        });
+        c.on("error", (err) => {
+          logger.log("warn", "memory.listen.client.error", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
+        await c.query(`LISTEN ${LISTEN_CHANNELS.memoryFileChanged}`);
+        _readyResolve?.();
+        _readyResolve = null;
+        logger.log("info", "memory.listen.ready", {
+          channel: LISTEN_CHANNELS.memoryFileChanged,
+        });
+        await runMemoryBootScan();
+        delay = 1_000;
+        await new Promise<void>((resolve) => c.once("end", resolve));
+      } catch (err) {
+        logger.log("warn", "memory.listen.connect.error", {
+          message: err instanceof Error ? err.message : String(err),
+          retryIn: delay,
+        });
+        if (!stopped) {
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, 30_000);
+        }
+      } finally {
+        activeClient = null;
+      }
+    }
+  }
 
-  client.on("error", (err) => {
-    logger.log("warn", "memory.listen.client.error", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-  });
-
-  await client.query(`LISTEN ${LISTEN_CHANNELS.memoryFileChanged}`);
-  _readyResolve?.();
-  _readyResolve = null;
-  logger.log("info", "memory.listen.ready", {
-    channel: LISTEN_CHANNELS.memoryFileChanged,
-  });
+  void connectWithRetry();
 
   return {
     stop: async (): Promise<void> => {
-      try {
-        await client.query(`UNLISTEN ${LISTEN_CHANNELS.memoryFileChanged}`);
-      } catch {
-        // best-effort shutdown
+      stopped = true;
+      if (activeClient) {
+        try {
+          await activeClient.query(`UNLISTEN ${LISTEN_CHANNELS.memoryFileChanged}`);
+        } catch {
+          // best-effort
+        }
+        await activeClient.end().catch(() => {});
       }
-      await client.end().catch(() => {
-        // ditto
-      });
     },
   };
 }

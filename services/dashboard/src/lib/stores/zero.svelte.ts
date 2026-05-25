@@ -328,6 +328,10 @@ class ZeroSyncStore {
    * leaking timers across page navigations.
    */
   #statsInterval: ReturnType<typeof setInterval> | null = null;
+  /** FRI-121 A3: timestamp of last sendUserMessage call. Used by the
+   *  5-s watchdog to decide whether to nudge Zero's connect() for
+   *  terminal-state recovery (needs-auth / error). */
+  #lastSendAt: number = 0;
 
   /**
    * When `bindBlocksFor` is called before `#init` resolves (the typical
@@ -390,6 +394,63 @@ class ZeroSyncStore {
         kvStore: "idb",
       });
 
+      // FRI-121 A1: Subscribe to Zero's connection.state so zeroSync.status
+      // reflects the actual WS health rather than being set once on init.
+      // Mapping: connected → 'live', error/closed/needs-auth → 'error',
+      // connecting/disconnected → 'pending' (shows orange in widget).
+      const connUnsub = this.#zero.connection.state.subscribe(
+        (s: { name: string; reason?: unknown }) => {
+          if (s.name === "connected") {
+            this.status = "live";
+            this.errorMessage = null;
+          } else if (s.name === "error" || s.name === "closed" || s.name === "needs-auth") {
+            this.status = "error";
+            this.errorMessage = s.reason
+              ? typeof s.reason === "string"
+                ? s.reason
+                : JSON.stringify(s.reason)
+              : null;
+          } else {
+            // 'connecting' | 'disconnected' — transient; self-heals via
+            // Zero's own run loop. Show as pending so widget goes orange.
+            this.status = "pending";
+          }
+        },
+      );
+      this.#unsubscribers.push(connUnsub);
+
+      // FRI-121 A2: visibilitychange handler for terminal-state recovery.
+      // connection.connect() is a no-op in 'disconnected' (Zero self-heals
+      // via its own visibility watcher). This handler only matters for
+      // 'needs-auth' / 'error' terminal states that can arise after a long
+      // background window (e.g., expired JWT). We fetch a fresh token so
+      // connect({ auth }) unblocks 'needs-auth' specifically.
+      const onVisible = async (): Promise<void> => {
+        if (document.visibilityState === "visible" && this.#zero) {
+          try {
+            const r = await fetch("/api/sync/refresh", { method: "POST" });
+            if (r.ok) {
+              const { token: freshToken } = (await r.json()) as { token: string };
+              void this.#zero.connection.connect({ auth: freshToken });
+            }
+          } catch {
+            // best-effort — Zero's internal reconnect is the primary path
+          }
+        }
+      };
+      document.addEventListener("visibilitychange", onVisible);
+      this.#unsubscribers.push(() => document.removeEventListener("visibilitychange", onVisible));
+
+      // FRI-121 A3: 5-second watchdog nudges connect() when a send was
+      // attempted recently and the connection isn't live. Only effective
+      // for terminal states (needs-auth / error); 'disconnected' self-heals.
+      const watchdog = setInterval(() => {
+        if (this.#zero && this.status !== "live" && Date.now() - this.#lastSendAt < 30_000) {
+          void this.#zero.connection.connect();
+        }
+      }, 5_000);
+      this.#unsubscribers.push(() => clearInterval(watchdog));
+
       this.#bindAgents();
       this.#bindTickets();
       this.#bindTicketComments();
@@ -406,7 +467,8 @@ class ZeroSyncStore {
       // the local IndexedDB replica. Fires after the foreground
       // slices so the user-visible first-paint isn't gated on this.
       this.#bindAllBlocksBackground();
-      this.status = "live";
+      // FRI-121: status is now driven by the connection.state subscriber
+      // wired above — no unconditional 'live' write here.
       // Phase 4.2: report storage stats immediately on connect +
       // every 5 minutes thereafter. The `client_devices` row already
       // exists (created by `/api/sync/refresh` before this point);
@@ -1247,6 +1309,7 @@ class ZeroSyncStore {
     attachments?: Array<{ sha256: string; filename: string; mime: string }>;
   }): Promise<{ blockId: string; turnId: string } | null> {
     if (!this.#zero) return null;
+    this.#lastSendAt = Date.now(); // FRI-121 A3: watchdog tracks last send
     const blockId = args.blockId;
     const turnId = `t_${blockId}`;
     const result = this.#zero!.mutate.sendUserMessage({
