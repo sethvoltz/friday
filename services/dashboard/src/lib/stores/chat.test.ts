@@ -5809,23 +5809,22 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
 
 // ---- FRI-60: zero_block_reason on parseBlocks synthesized no-response bubble ----
 describe("FRI-60: parseBlocks zeroBlockReason on synthesized no-response bubble", () => {
-  const userOnlyBlock = (turnId = "t-zbr") =>
-    ({
-      id: "1",
-      blockId: "blk-u",
-      turnId,
-      agentName: "friday",
-      sessionId: "s",
-      messageId: null,
-      blockIndex: 0,
-      role: "user",
-      kind: "text",
-      source: "user_chat",
-      contentJson: '{"text":"hello"}',
-      status: "complete",
-      ts: 100,
-      lastEventSeq: 1,
-    });
+  const userOnlyBlock = (turnId = "t-zbr") => ({
+    id: "1",
+    blockId: "blk-u",
+    turnId,
+    agentName: "friday",
+    sessionId: "s",
+    messageId: null,
+    blockIndex: 0,
+    role: "user",
+    kind: "text",
+    source: "user_chat",
+    contentJson: '{"text":"hello"}',
+    status: "complete",
+    ts: 100,
+    lastEventSeq: 1,
+  });
 
   it('synthesized bubble carries zeroBlockReason "abort" when supplied', async () => {
     const { parseBlocks } = await import("./chat.svelte");
