@@ -203,42 +203,68 @@ export async function startScheduleListener(): Promise<ScheduleListenerHandle> {
     throw new Error("DATABASE_URL must be set to start the schedule LISTEN connection.");
   }
 
-  const client = new Client({ connectionString });
-  await client.connect();
+  let stopped = false;
+  let activeClient: InstanceType<typeof Client> | null = null;
 
-  client.on("notification", (msg) => {
-    if (msg.channel !== LISTEN_CHANNELS.scheduleChanged) return;
-    const name = msg.payload;
-    if (!name) return;
-    void processPendingScheduleRow(name).catch((err) => {
-      logger.log("warn", "schedule.listen.process.error", {
-        name,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    });
-  });
+  // FRI-121 B: reconnect loop with keepAlive + exponential backoff.
+  async function connectWithRetry(): Promise<void> {
+    let delay = 1_000;
+    while (!stopped) {
+      try {
+        const c = new Client({ connectionString, keepAlive: true });
+        activeClient = c;
+        await c.connect();
+        c.on("notification", (msg) => {
+          if (msg.channel !== LISTEN_CHANNELS.scheduleChanged) return;
+          const name = msg.payload;
+          if (!name) return;
+          void processPendingScheduleRow(name).catch((err) => {
+            logger.log("warn", "schedule.listen.process.error", {
+              name,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
+        });
+        c.on("error", (err) => {
+          logger.log("warn", "schedule.listen.client.error", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
+        await c.query(`LISTEN ${LISTEN_CHANNELS.scheduleChanged}`);
+        logger.log("info", "schedule.listen.ready", {
+          channel: LISTEN_CHANNELS.scheduleChanged,
+        });
+        await runScheduleBootScan();
+        delay = 1_000;
+        await new Promise<void>((resolve) => c.once("end", resolve));
+      } catch (err) {
+        logger.log("warn", "schedule.listen.connect.error", {
+          message: err instanceof Error ? err.message : String(err),
+          retryIn: delay,
+        });
+        if (!stopped) {
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, 30_000);
+        }
+      } finally {
+        activeClient = null;
+      }
+    }
+  }
 
-  client.on("error", (err) => {
-    logger.log("warn", "schedule.listen.client.error", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-  });
-
-  await client.query(`LISTEN ${LISTEN_CHANNELS.scheduleChanged}`);
-  logger.log("info", "schedule.listen.ready", {
-    channel: LISTEN_CHANNELS.scheduleChanged,
-  });
+  void connectWithRetry();
 
   return {
     stop: async (): Promise<void> => {
-      try {
-        await client.query(`UNLISTEN ${LISTEN_CHANNELS.scheduleChanged}`);
-      } catch {
-        // best-effort shutdown
+      stopped = true;
+      if (activeClient) {
+        try {
+          await activeClient.query(`UNLISTEN ${LISTEN_CHANNELS.scheduleChanged}`);
+        } catch {
+          // best-effort
+        }
+        await activeClient.end().catch(() => {});
       }
-      await client.end().catch(() => {
-        // ditto
-      });
     },
   };
 }
