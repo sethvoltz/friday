@@ -1538,11 +1538,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       const durationMs = w.turnStart ? Date.now() - w.turnStart : 0;
       // FRI-60: compute the zero-block reason BEFORE publishing turn_done so
       // the dashboard knows why the turn produced no content.
-      const zeroBlockReason:
-        | "abort"
-        | "compaction"
-        | "sdk-resume-failure"
-        | undefined =
+      const zeroBlockReason: "abort" | "compaction" | "sdk-resume-failure" | undefined =
         w.blocksThisTurn === 0
           ? w.abortRequested
             ? "abort"

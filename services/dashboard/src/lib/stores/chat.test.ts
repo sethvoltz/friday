@@ -5825,7 +5825,7 @@ describe("FRI-60: parseBlocks zeroBlockReason on synthesized no-response bubble"
       status: "complete",
       ts: 100,
       lastEventSeq: 1,
-    }) as Parameters<import("./chat.svelte").parseBlocks>[0][number];
+    }) as never;
 
   it('synthesized bubble carries zeroBlockReason "abort" when supplied', async () => {
     const { parseBlocks } = await import("./chat.svelte");

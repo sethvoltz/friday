@@ -1208,9 +1208,7 @@ export class ChatState {
    * synthesized no-response bubble; cleaned up in `finishTurn` via a short
    * setTimeout so the reactive `applyZeroBlocks` path has time to read it.
    */
-  zeroBlockReasonByTurn = $state<Record<string, "abort" | "compaction" | "sdk-resume-failure">>(
-    {},
-  );
+  zeroBlockReasonByTurn = $state<Record<string, "abort" | "compaction" | "sdk-resume-failure">>({});
 
   /**
    * FRI-60 Phase B: set of turn_ids where the SDK emitted a compact_boundary

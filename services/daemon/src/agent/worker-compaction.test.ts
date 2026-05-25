@@ -102,9 +102,7 @@ function makeStartCmd() {
 }
 
 // Drain all IPC from a single one-shot worker run.
-async function runWorker(
-  sdkMsgs: Record<string, unknown>[],
-): Promise<Record<string, unknown>[]> {
+async function runWorker(sdkMsgs: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
   mockQueryImpl.mockImplementation(() => makeIterator(sdkMsgs));
 
   // Intercept process.send before importing so the ready-emit is captured.
