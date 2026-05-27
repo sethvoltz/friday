@@ -50,6 +50,22 @@ function getDbAndPool(): { db: FridayDb; pool: FridayPool } {
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
   });
+  // Late TCP-layer 'error' events on a pool client can fire AFTER the
+  // pool has detached its own listeners — e.g. when an admin issues
+  // `pg_terminate_backend()` against a backend whose local `client.end()`
+  // has already returned but whose TCP FIN hasn't completed yet (the test
+  // scratch-DB teardown path hits this). Without a baseline listener,
+  // Node treats the orphan 'error' as an unhandled exception and crashes
+  // the process — Vitest surfaces it as a job-level failure even when
+  // every test file passed. The pool's own query/error routing is
+  // unaffected: it installs its own 'error' listener for in-flight
+  // queries; this is purely a safety net for socket-level FATALs after
+  // the query path has already resolved.
+  pool.on("connect", (client) => {
+    client.on("error", () => {
+      // Intentionally swallowed. See comment above.
+    });
+  });
   const db = drizzle(pool, { schema });
   cached = { db, pool };
   return cached;

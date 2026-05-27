@@ -20,17 +20,33 @@
  * shutdown that landed on a `tool_use` had left the same dangling
  * state, with no operator recourse short of manual `/clear`.
  *
- * The heal:
+ * The heal (post-FRI-89): we resolve the dangling `tool_use` in both
+ * surfaces the SDK and the dashboard read from, **without resetting
+ * the session**. Continuity is Friday's load-bearing property — the
+ * only paths permitted to clear `agents.session_id` are user-driven
+ * `/clear` and app-reinstall-without-`--adopt`. Boot recovery must
+ * never violate that.
+ *
  *  1. Insert a synthetic `tool_result` block in Postgres marking
  *     the tool as interrupted. The dashboard renders it, so the
  *     operator sees what happened without having to read a log.
- *  2. Clear the agent's `session_id`. The next dispatched turn
- *     forks a fresh SDK session, bypassing the wedged JSONL
- *     transcript entirely. Conversation history stays in Postgres
- *     for reference; Claude just doesn't see it in the new session.
+ *  2. Append a matching `tool_result` line to the SDK's session
+ *     transcript at `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`
+ *     so the next dispatched turn resumes the same session cleanly
+ *     instead of forking a fresh one.
  *
- * Archived agents are intentionally skipped — no one's going to
- * send them new turns, so the dangling state is inert.
+ * Scoping rules:
+ *  - Only tool_uses whose `session_id` matches the agent's *current*
+ *    `agents.session_id` are considered live. Stale tool_uses from
+ *    sessions long since cleared (by `/clear` or app reinstall) are
+ *    inert — they have no SDK transcript referencing them, and treating
+ *    them as live caused the FRI-89 fragmentation bug (a brew restart
+ *    would "heal" the orchestrator's healthy session because the query
+ *    spotted a tool_use from a prior cleared session).
+ *  - Agents with `session_id IS NULL` are skipped: no live session to
+ *    fix.
+ *  - Archived agents are skipped: no one will dispatch a turn against
+ *    them, so the dangling state is inert.
  */
 
 import { randomUUID } from "node:crypto";
@@ -38,6 +54,8 @@ import { sql } from "drizzle-orm";
 import { getDb } from "@friday/shared";
 import { insertBlock } from "@friday/shared/services";
 import * as registry from "./registry.js";
+import { workingDirectoryFor } from "./registry.js";
+import { healDanglingToolUseInJsonl } from "./sdk-jsonl-heal.js";
 import { logger } from "../log.js";
 
 interface DanglingToolUseRow {
@@ -50,13 +68,17 @@ interface DanglingToolUseRow {
 }
 
 const HEAL_MARKER =
-  "[Tool call interrupted by daemon restart — agent session was reset. Send a new message to continue with a fresh context.]";
+  "[Tool call interrupted by daemon restart. Session continues; this tool is marked as an error so the conversation can pick up from the next message.]";
 
 export async function recoverDanglingToolUses(): Promise<void> {
   const db = getDb();
   // Find every `tool_use` block whose `tool_use_id` has no matching
-  // `tool_result` block scoped to the same agent. Group by agent so
-  // we clear each session at most once.
+  // `tool_result` block AND whose session_id matches the agent's
+  // current live session. The agent join filters out:
+  //  - agents with no current session (`/clear`'d or never run)
+  //  - tool_uses from prior sessions (inert; can't be resumed)
+  // Archived agents are filtered in code below so the skip count
+  // still surfaces in logs.
   const result = await db.execute<DanglingToolUseRow>(sql`
     SELECT
       b.agent_name,
@@ -65,8 +87,11 @@ export async function recoverDanglingToolUses(): Promise<void> {
       (b.content_json->>'tool_use_id') AS tool_use_id,
       b.ts
     FROM blocks b
+    JOIN agents a ON a.name = b.agent_name
     WHERE b.kind = 'tool_use'
       AND b.content_json->>'tool_use_id' IS NOT NULL
+      AND a.session_id IS NOT NULL
+      AND b.session_id = a.session_id
       AND NOT EXISTS (
         SELECT 1 FROM blocks r
         WHERE r.kind = 'tool_result'
@@ -101,6 +126,8 @@ export async function recoverDanglingToolUses(): Promise<void> {
 
   let healedAgents = 0;
   let healedBlocks = 0;
+  let jsonlAppends = 0;
+  let jsonlSkips = 0;
   let skippedAgents = 0;
 
   for (const [agentName, orphans] of byAgent) {
@@ -122,8 +149,14 @@ export async function recoverDanglingToolUses(): Promise<void> {
       continue;
     }
 
-    // Write one synthetic tool_result per dangling tool_use, then clear
-    // the session once for the agent.
+    const cwd = await workingDirectoryFor(agent);
+
+    // Resolve each dangling tool_use in both surfaces:
+    //   - Postgres: synthetic `tool_result` block so the dashboard
+    //     renders the interrupt marker in the chat stream.
+    //   - SDK JSONL transcript: matching tool_result line so the next
+    //     dispatched turn can `resume:` the same session without
+    //     Claude rejecting the conversation.
     for (const orphan of orphans) {
       const tsBase = new Date(orphan.ts).getTime();
       try {
@@ -157,26 +190,42 @@ export async function recoverDanglingToolUses(): Promise<void> {
           message: err instanceof Error ? err.message : String(err),
         });
       }
-    }
 
-    // Clear the session so the next turn forks fresh. Skip if it's
-    // already null — that signals the operator already reset by hand.
-    if (agent.sessionId) {
       try {
-        await registry.clearSession(agentName);
+        const jsonl = healDanglingToolUseInJsonl({
+          cwd,
+          sessionId: orphan.session_id,
+          toolUseId: orphan.tool_use_id,
+          healMarker: HEAL_MARKER,
+        });
+        if (jsonl.written) {
+          jsonlAppends++;
+        } else {
+          jsonlSkips++;
+          logger.log("info", "dangling-tool-use-recovery.jsonl-skip", {
+            agent: agentName,
+            tool_use_id: orphan.tool_use_id,
+            reason: jsonl.reason,
+            path: jsonl.path,
+          });
+        }
       } catch (err) {
-        logger.log("error", "dangling-tool-use-recovery.clear-session-error", {
+        logger.log("error", "dangling-tool-use-recovery.jsonl-error", {
           agent: agentName,
+          tool_use_id: orphan.tool_use_id,
           message: err instanceof Error ? err.message : String(err),
         });
       }
     }
+
     healedAgents++;
   }
 
   logger.log("info", "dangling-tool-use-recovery.done", {
     healedAgents,
     healedBlocks,
+    jsonlAppends,
+    jsonlSkips,
     skippedAgents,
   });
 }
