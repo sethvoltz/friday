@@ -290,18 +290,18 @@ async function importStore(): Promise<typeof import("./zero.svelte.js")> {
 }
 
 describe("useZero", () => {
-  it("returns true in a browser context (Zero is the only data path post-Phase 5)", async () => {
-    const { useZero, useZeroSidebar } = await importStore();
-    expect(useZero()).toBe(true);
-    // Phase 2 alias retained for callers still typing the old name.
-    expect(useZeroSidebar()).toBe(true);
-  }, // First-import cost in this file is dominated by the cold load of
+  // First-import cost in this file is dominated by the cold load of
   // `@rocicorp/zero` + its transitive Drizzle/PG imports. On a busy
   // CI runner that can edge past Vitest's default 5s ceiling even
   // though the work inside the test body is sync. Bumping just this
   // case (subsequent tests benefit from the warm module cache and
   // run in <200ms).
-  30_000);
+  it("returns true in a browser context (Zero is the only data path post-Phase 5)", async () => {
+    const { useZero, useZeroSidebar } = await importStore();
+    expect(useZero()).toBe(true);
+    // Phase 2 alias retained for callers still typing the old name.
+    expect(useZeroSidebar()).toBe(true);
+  }, 30_000);
 
   it("returns false outside a browser context (SSR has no WS / IDB)", async () => {
     // The default test setup mocks `$app/environment` to `{ browser:
