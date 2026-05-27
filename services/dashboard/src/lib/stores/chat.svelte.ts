@@ -546,9 +546,7 @@ export class ChatState {
    * sees an explicit owner.
    */
   pushLocal(msg: ChatMessage): void {
-    this.#legacyMessages.push(
-      msg.agent ? msg : { ...msg, agent: this._focusedAgent },
-    );
+    this.#legacyMessages.push(msg.agent ? msg : { ...msg, agent: this._focusedAgent });
   }
 
   /**
@@ -2625,10 +2623,7 @@ export class ChatState {
    *  entries are keyed by `t_<toolId>` rather than `b_<blockId>` — we
    *  need a scan-by-blockId for `input_json_delta` routing. Cost is
    *  bounded by streaming.size (typically 1-3 entries during a turn). */
-  private findStreamingByBlockId(
-    agent: string,
-    blockId: string,
-  ): StreamingEntry | undefined {
+  private findStreamingByBlockId(agent: string, blockId: string): StreamingEntry | undefined {
     for (const entry of this.streaming.values()) {
       if (entry.agent !== agent) continue;
       if (entry.blockId === blockId) return entry;
@@ -3075,9 +3070,7 @@ export class ChatState {
     for (const [key, entry] of this.streaming.entries()) {
       if (entry.blockId === event.block_id) this.streaming.delete(key);
     }
-    this.#legacyMessages = this.#legacyMessages.filter(
-      (m) => m.blockId !== event.block_id,
-    );
+    this.#legacyMessages = this.#legacyMessages.filter((m) => m.blockId !== event.block_id);
   }
 
   // Phase 5: `handleBlockMetaUpdate` removed — Zero replicates the

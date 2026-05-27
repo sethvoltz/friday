@@ -5875,9 +5875,7 @@ describe("derived chat.messages: cross-agent isolation", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" }];
     chat.messages = [
       {
         id: "untagged-1",
@@ -5941,19 +5939,13 @@ describe("derived chat.messages: cross-agent isolation", () => {
         initialText: "chopping onions",
       }),
     );
-    expect(
-      chat.messages.some((m) => m.text === "chopping onions"),
-    ).toBe(true);
+    expect(chat.messages.some((m) => m.text === "chopping onions")).toBe(true);
     chat.focusedAgent = "friday";
-    expect(
-      chat.messages.some((m) => m.text === "chopping onions"),
-    ).toBe(false);
+    expect(chat.messages.some((m) => m.text === "chopping onions")).toBe(false);
     // And the leak doesn't manifest if we focus back either — the
     // overlay entry is still there, just gated by current focus.
     chat.focusedAgent = "kitchen";
-    expect(
-      chat.messages.some((m) => m.text === "chopping onions"),
-    ).toBe(true);
+    expect(chat.messages.some((m) => m.text === "chopping onions")).toBe(true);
   });
 
   it("applyZeroBlocks drops legacy entries tagged for a different agent during merge", async () => {
@@ -5963,9 +5955,7 @@ describe("derived chat.messages: cross-agent isolation", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" }];
     chat.messages = [
       {
         id: "b_orphan",
@@ -6004,12 +5994,8 @@ describe("derived chat.messages: cross-agent isolation", () => {
     );
     // The legacy bucket was rebuilt by applyZeroBlocks's merge; the
     // orphan kitchen entry is dropped, not just hidden.
-    expect(
-      chat.messages.some((m) => m.text === "kitchen ghost"),
-    ).toBe(false);
-    expect(
-      chat.messages.some((m) => m.text === "friday content"),
-    ).toBe(true);
+    expect(chat.messages.some((m) => m.text === "kitchen ghost")).toBe(false);
+    expect(chat.messages.some((m) => m.text === "friday content")).toBe(true);
   });
 });
 
@@ -6023,9 +6009,7 @@ describe("derived chat.messages: SSE-overlay interleaving convergence", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" }];
     chat.markInflight("friday", "t-1");
     chat.applyEvent({
       v: 1,
@@ -6110,9 +6094,7 @@ describe("derived chat.messages: SSE-overlay interleaving convergence", () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" }];
     chat.markInflight("friday", "t-2");
     chat.applyZeroBlocks(
       [
@@ -6151,18 +6133,14 @@ describe("derived chat.messages: SSE-overlay interleaving convergence", () => {
       seq: 1,
     } as Parameters<typeof chat.applyEvent>[0]);
     expect(chat.streaming.size).toBe(0);
-    expect(
-      chat.messages.filter((m) => m.id === "b_blk-2"),
-    ).toHaveLength(1);
+    expect(chat.messages.filter((m) => m.id === "b_blk-2")).toHaveLength(1);
   });
 
   it("block_canceled drops both the streaming overlay entry and any legacy row sharing the blockId", async () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" }];
     chat.markInflight("friday", "t-3");
     chat.applyEvent({
       v: 1,
@@ -6187,9 +6165,7 @@ describe("derived chat.messages: SSE-overlay interleaving convergence", () => {
       seq: 2,
     } as Parameters<typeof chat.applyEvent>[0]);
     expect(chat.streaming.size).toBe(0);
-    expect(
-      chat.messages.some((m) => m.id === "th_blk-3"),
-    ).toBe(false);
+    expect(chat.messages.some((m) => m.id === "th_blk-3")).toBe(false);
   });
 });
 
@@ -6200,14 +6176,11 @@ describe("derived chat.messages: /clear session-id stamping", () => {
     // The derivation re-runs (agents.find changes), sees sessionId =
     // null, filters overlay entries whose stamped sessionId doesn't
     // match (i.e., everything from the just-cleared session).
-    const { ChatState, overlayKey, StreamingEntry, OptimisticEntry } = await import(
-      "./chat.svelte"
-    );
+    const { ChatState, overlayKey, StreamingEntry, OptimisticEntry } =
+      await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" }];
     chat.streaming.set(
       overlayKey("friday", "b_stream-1"),
       new StreamingEntry({
@@ -6233,25 +6206,15 @@ describe("derived chat.messages: /clear session-id stamping", () => {
         initialPending: true,
       }),
     );
-    expect(
-      chat.messages.some((m) => m.id === "b_stream-1"),
-    ).toBe(true);
-    expect(
-      chat.messages.some((m) => m.id === "pending_abc"),
-    ).toBe(true);
+    expect(chat.messages.some((m) => m.id === "b_stream-1")).toBe(true);
+    expect(chat.messages.some((m) => m.id === "pending_abc")).toBe(true);
 
     // Daemon-side /clear: agents.sessionId flips to null. Simulate
     // the Zero-driven update.
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "idle", sessionId: undefined },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: undefined }];
 
-    expect(
-      chat.messages.some((m) => m.id === "b_stream-1"),
-    ).toBe(false);
-    expect(
-      chat.messages.some((m) => m.id === "pending_abc"),
-    ).toBe(false);
+    expect(chat.messages.some((m) => m.id === "b_stream-1")).toBe(false);
+    expect(chat.messages.some((m) => m.id === "pending_abc")).toBe(false);
     // The entries are still in the overlay map (a separate sweep would
     // drop them; this test only pins the derivation's behavior). The
     // important property is the user can no longer SEE them.
@@ -6264,14 +6227,11 @@ describe("derived chat.messages: /clear session-id stamping", () => {
     // anyway, but clearLocalView's explicit imperative drop keeps
     // the SvelteMaps from accumulating dead state across repeated
     // /clears.
-    const { ChatState, overlayKey, StreamingEntry, OptimisticEntry } = await import(
-      "./chat.svelte"
-    );
+    const { ChatState, overlayKey, StreamingEntry, OptimisticEntry } =
+      await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" }];
     chat.streaming.set(
       overlayKey("friday", "x"),
       new StreamingEntry({
@@ -6306,9 +6266,7 @@ describe("derived chat.messages: optimistic confirmation lifecycle", () => {
     const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    chat.agents = [
-      { name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" },
-    ];
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" }];
     const pendingId = chat.addUser("plan dinner", { queueId: "q-1" });
     expect(chat.messages).toHaveLength(1);
     expect(chat.messages[0]!.id).toBe(pendingId);
@@ -6351,4 +6309,3 @@ describe("derived chat.messages: optimistic confirmation lifecycle", () => {
     expect(chat.messages.filter((m) => m.id === userBlockIdForTurn("turn-7"))).toHaveLength(1);
   });
 });
-
