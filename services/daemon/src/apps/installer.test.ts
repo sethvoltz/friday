@@ -182,6 +182,14 @@ describe("installApp", () => {
     expect(await registry.getAppId("example-owner")).toBe("example-app");
     // clearSession on no-adopt reinstall
     expect(row!.sessionId).toBeUndefined();
+    // archive_reason cleared on un-archive; leaving it stale poisons
+    // the dashboard's archive UI and any downstream debugging.
+    const { eq: eqArchA } = await import("drizzle-orm");
+    const liveA = await getDb()
+      .select()
+      .from(schema.agents)
+      .where(eqArchA(schema.agents.name, "example-owner"));
+    expect(liveA[0]!.archiveReason).toBeNull();
   });
 
   it("same-app reinstall (archived rows) un-archives and keeps sessionId", async () => {
@@ -199,6 +207,13 @@ describe("installApp", () => {
     const row = await registry.getAgent("example-owner");
     expect(row!.status).toBe("idle");
     expect(row!.sessionId).toBe("sess-keep-me");
+    // archive_reason cleared on un-archive (data hygiene); the prior
+    // 'abandoned' value would otherwise persist on the live row.
+    const liveB = await getDb()
+      .select()
+      .from(schema.agents)
+      .where(eq(schema.agents.name, "example-owner"));
+    expect(liveB[0]!.archiveReason).toBeNull();
   });
 
   it("rejects manifests whose mcpServer name collides across apps", async () => {

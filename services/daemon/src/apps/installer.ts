@@ -217,10 +217,15 @@ export async function installApp(
         case "noop":
           break;
         case "unarchive": {
+          // Reset archive_reason when bringing a row back to idle —
+          // leaving stale `completed`/`abandoned`/`failed` on a live
+          // agent confuses both the dashboard's archive UI and any
+          // future debugging.
           await tx
             .update(schema.agents)
             .set({
               status: "idle",
+              archiveReason: null,
               appId: manifest.id,
               updatedAt: now,
               ...(dispo.clearSession ? { sessionId: null } : {}),
@@ -235,7 +240,7 @@ export async function installApp(
               appId: manifest.id,
               type: agent.type,
               updatedAt: now,
-              ...(dispo.wasArchived ? { status: "idle" } : {}),
+              ...(dispo.wasArchived ? { status: "idle", archiveReason: null } : {}),
               ...(dispo.clearSession ? { sessionId: null } : {}),
             })
             .where(eq(schema.agents.name, agent.name));
