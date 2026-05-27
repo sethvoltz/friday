@@ -1,10 +1,20 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, gt } from "drizzle-orm";
 import { EventEmitter } from "node:events";
 import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
 
 export type MailType = "message" | "notification" | "task";
-export type MailDelivery = "pending" | "delivered" | "read" | "closed";
+/**
+ * FRI-116: the legacy 4-value union (pending/delivered/read/closed)
+ * narrowed to three. Production data only ever lands at `pending`
+ * (insert), `read` (worker drained the inbox), or `closed` (terminal
+ * after a reply or explicit close). The DB check constraint at
+ * `schema.ts:241` still accepts the legacy 4-value set (no migration
+ * per the strategy-1 default in FRI-116); the TS union narrows the
+ * codebase-side write surface, and the unused writer helper was
+ * deleted.
+ */
+export type MailDelivery = "pending" | "read" | "closed";
 /**
  * `normal` mail drains at the next turn boundary (between full turns, as
  * today). `critical` mail drains at the next SDK iteration boundary —
@@ -87,12 +97,7 @@ export async function inbox(toAgent: string): Promise<MailRow[]> {
   const rows = await db
     .select()
     .from(schema.mail)
-    .where(
-      and(
-        eq(schema.mail.toAgent, toAgent),
-        eq(schema.mail.delivery, "pending"),
-      ),
-    )
+    .where(and(eq(schema.mail.toAgent, toAgent), eq(schema.mail.delivery, "pending")))
     .orderBy(asc(schema.mail.ts));
   return rows.map(rowToMail);
 }
@@ -102,14 +107,6 @@ export async function markRead(id: number): Promise<void> {
   await db
     .update(schema.mail)
     .set({ delivery: "read", readAt: new Date() })
-    .where(eq(schema.mail.id, id));
-}
-
-export async function markDelivered(id: number): Promise<void> {
-  const db = getDb();
-  await db
-    .update(schema.mail)
-    .set({ delivery: "delivered" })
     .where(eq(schema.mail.id, id));
 }
 
@@ -123,11 +120,7 @@ export async function closeMail(id: number): Promise<void> {
 
 export async function getMail(id: number): Promise<MailRow | null> {
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.mail)
-    .where(eq(schema.mail.id, id))
-    .limit(1);
+  const rows = await db.select().from(schema.mail).where(eq(schema.mail.id, id)).limit(1);
   return rows[0] ? rowToMail(rows[0]) : null;
 }
 
@@ -136,15 +129,28 @@ export async function pendingForAgent(toAgent: string): Promise<MailRow[]> {
 }
 
 /**
- * Boot recovery: all rows still pending when the daemon last shut down need to
- * be re-emitted on the bus so workers waiting on mail get woken up.
+ * FRI-118: replayPending caps re-emission at 7 days. Older pending rows
+ * remain in the DB (surfaced via `pendingForAgent` / `inbox` for human
+ * triage) but are NOT re-dispatched on the mail bus. The boot-storm of
+ * a multi-month accumulation — observed pre-2026-05-22 as 9 rows that
+ * survived ~10 daemon restarts because nothing aged them out — is what
+ * this guard closes. Paired with `mail-prune` (services/mail-prune.ts)
+ * which hard-deletes pending rows older than 30 days whose recipient
+ * is archived or missing.
+ */
+export const REPLAY_PENDING_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Boot recovery: re-emit every `delivery='pending'` row from the last
+ * REPLAY_PENDING_MAX_AGE_MS so workers waiting on mail get woken up.
  */
 export async function replayPending(): Promise<void> {
   const db = getDb();
+  const cutoff = new Date(Date.now() - REPLAY_PENDING_MAX_AGE_MS);
   const rows = await db
     .select()
     .from(schema.mail)
-    .where(eq(schema.mail.delivery, "pending"));
+    .where(and(eq(schema.mail.delivery, "pending"), gt(schema.mail.ts, cutoff)));
   for (const r of rows) {
     const row = rowToMail(r);
     mailBus.emit(`mail:to:${row.toAgent}`, row);

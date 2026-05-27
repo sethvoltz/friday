@@ -30,10 +30,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "pg";
-import {
-  spawnTestSyncEnv,
-  type SyncEnv,
-} from "@friday/shared/test/sync-harness";
+import { spawnTestSyncEnv, type SyncEnv } from "@friday/shared/test/sync-harness";
 
 const HARNESS_BOOT_MS = 120_000;
 const TEST_TIMEOUT_MS = 60_000;

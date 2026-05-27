@@ -14,11 +14,7 @@ export const PATCH: RequestHandler = async ({ params, request, locals }) => {
   if (!locals.user) return new Response("unauthorized", { status: 401 });
   const body = await request.json();
   return withDaemon((d) =>
-    d.patch(
-      `/api/memory/${encodeURIComponent(params.id ?? "")}`,
-      body,
-      { signal: request.signal },
-    ),
+    d.patch(`/api/memory/${encodeURIComponent(params.id ?? "")}`, body, { signal: request.signal }),
   );
 };
 

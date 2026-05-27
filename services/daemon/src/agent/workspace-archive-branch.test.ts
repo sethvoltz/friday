@@ -11,13 +11,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -29,13 +23,9 @@ const dataRoot = realpathSync(mkdtempSync(join(tmpdir(), "friday-ws-archive-")))
 process.env.FRIDAY_DATA_DIR = dataRoot;
 
 // Fresh module load so WORKSPACES_ROOT picks up our FRIDAY_DATA_DIR.
-const { createWorkspace, archiveWorkspace, workspacePath } = await import(
-  "./workspace.js"
-);
+const { createWorkspace, archiveWorkspace, workspacePath } = await import("./workspace.js");
 
-const baseRepo = realpathSync(
-  mkdtempSync(join(tmpdir(), "friday-ws-archive-repo-")),
-);
+const baseRepo = realpathSync(mkdtempSync(join(tmpdir(), "friday-ws-archive-repo-")));
 
 function git(args: string[], cwd = baseRepo): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -63,6 +53,10 @@ beforeAll(() => {
   writeFileSync(join(baseRepo, "README.md"), "# test\n");
   git(["add", "README.md"]);
   git(["commit", "-q", "-m", "init"]);
+  // Add a self-referencing remote so `origin/main` exists — createWorkspace
+  // now fetches origin/main by default and uses it as the start-point.
+  git(["remote", "add", "origin", baseRepo]);
+  git(["fetch", "-q", "origin"]);
 });
 
 afterAll(() => {
@@ -132,9 +126,7 @@ describe("archiveWorkspace + branch deletion", () => {
     execFileSync("git", ["branch", "-D", branch], { cwd: baseRepo });
 
     // archiveWorkspace should not throw even though both pieces are already gone.
-    expect(() =>
-      archiveWorkspace(name, baseRepo, { branch }),
-    ).not.toThrow();
+    expect(() => archiveWorkspace(name, baseRepo, { branch })).not.toThrow();
     expect(listBranches()).not.toContain(branch);
   });
 
@@ -147,5 +139,43 @@ describe("archiveWorkspace + branch deletion", () => {
 
     // archiveWorkspace removes the directory even without a branch arg.
     expect(() => archiveWorkspace(name, baseRepo)).not.toThrow();
+  });
+
+  it("pre-flight: succeeds when branch already exists locally from a prior failed cleanup", () => {
+    // Simulate a stale local branch left by a prior failed createWorkspace run:
+    // the branch exists locally but has no associated worktree directory.
+    const name = "zeta";
+    const branch = "friday/zeta";
+
+    // Create the branch locally without a worktree so it's orphaned.
+    git(["branch", branch]);
+    expect(listBranches()).toContain(branch);
+
+    // createWorkspace must delete the stale branch and succeed.
+    expect(() => createWorkspace({ name, baseRepo, branch })).not.toThrow();
+    expect(listBranches()).toContain(branch);
+    expect(listWorktrees()).toContain(workspacePath(name));
+
+    // Clean up.
+    archiveWorkspace(name, baseRepo, { branch });
+  });
+
+  it("createWorkspace uses origin/main as the start-point by default", () => {
+    // origin/main should exist (set up in beforeAll via self-referencing remote).
+    // Create a workspace without fromRef — it should root off origin/main.
+    const name = "eta";
+    const branch = "friday/eta";
+    expect(() => createWorkspace({ name, baseRepo, branch })).not.toThrow();
+    expect(listWorktrees()).toContain(workspacePath(name));
+    archiveWorkspace(name, baseRepo, { branch });
+  });
+
+  it("createWorkspace uses caller-supplied fromRef for stacked PR (skips origin/main)", () => {
+    // With fromRef set explicitly, the workspace should root off that ref.
+    const name = "theta";
+    const branch = "friday/theta";
+    expect(() => createWorkspace({ name, baseRepo, branch, fromRef: "main" })).not.toThrow();
+    expect(listWorktrees()).toContain(workspacePath(name));
+    archiveWorkspace(name, baseRepo, { branch });
   });
 });

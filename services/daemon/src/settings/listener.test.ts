@@ -14,12 +14,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 import pgPkg from "pg";
 
 let handle: TestDbHandle;
@@ -63,9 +58,7 @@ describe("Postgres trigger: friday_settings_notify_trigger", () => {
       // Trigger fires AFTER UPDATE, so we need an actual UPDATE
       // (not the INSERT from beforeEach).
       const db = getDb();
-      await db
-        .update(schema.settings)
-        .set({ model: "claude-opus-4-7", updatedAt: new Date() });
+      await db.update(schema.settings).set({ model: "claude-opus-4-7", updatedAt: new Date() });
 
       // Poll until the NOTIFY round-trips through the change-streamer
       // and the test client's socket.
@@ -123,12 +116,8 @@ describe("singleton row idempotency", () => {
     // leaves other columns untouched. Verify against the running
     // Postgres so a schema change can't silently break this.
     const db = getDb();
-    await db
-      .update(schema.settings)
-      .set({ model: "claude-opus-4-7", watchdogRefork: true });
-    await db
-      .update(schema.settings)
-      .set({ model: "claude-sonnet-4-6", updatedAt: new Date() });
+    await db.update(schema.settings).set({ model: "claude-opus-4-7", watchdogRefork: true });
+    await db.update(schema.settings).set({ model: "claude-sonnet-4-6", updatedAt: new Date() });
     const rows = await db.select().from(schema.settings);
     expect(rows).toHaveLength(1);
     // model overwritten; watchdog_refork retained.

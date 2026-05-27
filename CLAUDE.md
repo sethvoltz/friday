@@ -9,8 +9,9 @@ A local-first, headless agent daemon with a SvelteKit dashboard exposed via Clou
 - `docs/chat-ux.md` — Single-chat UX, sidebar, focus model, slash commands, attachments, markdown rendering.
 - `docs/mobile-ux.md` — Priority+ navigation, virtualization, PWA, mobile autocomplete.
 - `docs/mcp.md` — MCP server surface table (Friday + user-configured).
-- `docs/schema.md` — DB schema reference.
+- `docs/sandbox.md` — Worker isolation: M1–M5 rollout (PreToolUse rules, sandbox-exec, pgrp containment, stall watchdog) + residual risk.
 - `docs/decisions.md` — ADRs + watch list.
+- Schema reference: `packages/shared/src/db/schema.ts` (Drizzle source of truth; migrations under `packages/shared/drizzle/`).
 - `docs/roadmap.md` — Open work, sequenced for execution.
 - `docs/setup.md` — Setup guide including CFT walkthrough.
 - `docs/running.md` — How to run the daemon and dashboard.
@@ -23,12 +24,12 @@ Treat `README.md` as part of the documentation surface, not an afterthought. Whe
 Specifically, before considering a task done, check whether your change touches:
 
 - **A user-visible feature** described in the README's "Key features" section → update the matching bullet.
-- **A CLI command** (added, renamed, removed, or changed flags) → update the "CLI" section *and* `docs/running.md`.
-- **Setup prerequisites** (Brewfile entries, Node version, required env vars) → update "Quick start" *and* `docs/setup.md`.
-- **Project structure** (new package, moved service, renamed directory) → update the "Project structure" tree *and* the structure block at the top of this CLAUDE.md.
-- **`~/.friday/` layout** (new file, renamed directory) → update the `~/.friday/` block in the README *and* `docs/running.md`.
-- **Topology / wire protocol** (new public process, new auth boundary) → update the topology diagram *and* `docs/architecture.md`.
-- **Docs themselves** (new doc page, renamed, removed) → update the README's "Documentation" table *and* the list above in this CLAUDE.md.
+- **A CLI command** (added, renamed, removed, or changed flags) → update the "CLI" section _and_ `docs/running.md`.
+- **Setup prerequisites** (Brewfile entries, Node version, required env vars) → update "Quick start" _and_ `docs/setup.md`.
+- **Project structure** (new package, moved service, renamed directory) → update the "Project structure" tree _and_ the structure block at the top of this CLAUDE.md.
+- **`~/.friday/` layout** (new file, renamed directory) → update the `~/.friday/` block in the README _and_ `docs/running.md`.
+- **Topology / wire protocol** (new public process, new auth boundary) → update the topology diagram _and_ `docs/architecture.md`.
+- **Docs themselves** (new doc page, renamed, removed) → update the README's "Documentation" table _and_ the list above in this CLAUDE.md.
 
 A docs-only change still warrants a commit with scope `docs`. A code change that lands without its README/docs counterpart is incomplete work, not "fast iteration."
 
@@ -79,17 +80,17 @@ Friday uses Drizzle ORM with the Postgres adapter (Postgres replaced SQLite per 
 
 1. **The `when` field in `packages/shared/drizzle/meta/_journal.json` MUST be a real `Date.now()` captured at the moment the migration was generated. NEVER fabricate, round, hand-type, or copy-paste a "looks plausible" value. NEVER pick a future date.** Round numbers ending in `00000` and future-dated values are immediate red flags — both have appeared in this repo via agent-authored migrations and silently broke the chain.
 2. **Prefer `drizzle-kit generate`** — it writes `Date.now()` for you and keeps the snapshot chain consistent. Run `pnpm --filter @friday/shared exec drizzle-kit generate` whenever the schema in `packages/shared/src/db/schema.ts` changes.
-3. **Hand-authored migrations are allowed only for data fixes and release-boundary markers** (cases where `drizzle-kit` has no diff to emit, e.g. `UPDATE …` data backfills or `SELECT 1;` markers that pin a value to a release). When you must add a journal entry by hand: use the actual current `Date.now()` (e.g. paste the output of `node -e "console.log(Date.now())"` *at the moment you author the entry*) — never a rounded approximation, never a future value, and always strictly greater than the previous entry's `when`.
-4. **`runMigrations()` asserts that journal entry count equals `__drizzle_migrations` row count** after every run and throws if they diverge. If you ever see `drizzle journal/db mismatch` at boot, do not "fix" it by deleting rows — diagnose which `when` is wrong and correct both the journal *and* the DB's `created_at`.
+3. **Hand-authored migrations are allowed only for data fixes and release-boundary markers** (cases where `drizzle-kit` has no diff to emit, e.g. `UPDATE …` data backfills or `SELECT 1;` markers that pin a value to a release). When you must add a journal entry by hand: use the actual current `Date.now()` (e.g. paste the output of `node -e "console.log(Date.now())"` _at the moment you author the entry_) — never a rounded approximation, never a future value, and always strictly greater than the previous entry's `when`.
+4. **`runMigrations()` asserts that journal entry count equals `__drizzle_migrations` row count** after every run and throws if they diverge. If you ever see `drizzle journal/db mismatch` at boot, do not "fix" it by deleting rows — diagnose which `when` is wrong and correct both the journal _and_ the DB's `created_at`.
 5. **Migrations run on daemon boot, before zero-cache reconnects.** The startup sequence is: Postgres (host-managed) → daemon (runs migrations, opens LISTEN, starts SSE) → zero-cache (picks up the new schema via logical replication) → dashboard (proxies WS + SSE + mutators) → clients reload on schema-version mismatch. **Never run migrations from the dashboard or from a builder's worktree against the user's `friday` database** — only daemon boot runs them.
 
 These rules apply to Builders and any other agent working in a worktree of this repo. If you find yourself reaching for `1779…00000`-shaped timestamps, stop.
 
 ## Debugging
 
-- **Trust the user; verify the system.** Seth is a developer who speaks precisely — "I didn't click X" means he didn't click X. Investigate the system, not the user. Never offer "you probably did Y by accident" as an explanation when you can't find a code path; that's the shape of giving up dressed as a hypothesis. You may *ask* a clarifying question when you genuinely need one ("did you have another tab open?", "what did the network panel show?"), but the burden of proof sits on the code, not on his behavior.
+- **Trust the user; verify the system.** Seth is a developer who speaks precisely — "I didn't click X" means he didn't click X. Investigate the system, not the user. Never offer "you probably did Y by accident" as an explanation when you can't find a code path; that's the shape of giving up dressed as a hypothesis. You may _ask_ a clarifying question when you genuinely need one ("did you have another tab open?", "what did the network panel show?"), but the burden of proof sits on the code, not on his behavior.
 
-- **Don't assume — research.** When two thorough passes through the code don't explain a symptom, stop reading the same files harder and switch tools. The answer is in the logs, the DB, the SSE stream, or temporary instrumentation — not in another round of speculation. A proposed cause without a backing log line, DB row, or network event is a *hypothesis*, not a diagnosis; flag it as such when reporting and say what evidence would confirm or kill it. Two unproductive code-reading rounds is the signal to gather evidence, not the signal to write a longer write-up.
+- **Don't assume — research.** When two thorough passes through the code don't explain a symptom, stop reading the same files harder and switch tools. The answer is in the logs, the DB, the SSE stream, or temporary instrumentation — not in another round of speculation. A proposed cause without a backing log line, DB row, or network event is a _hypothesis_, not a diagnosis; flag it as such when reporting and say what evidence would confirm or kill it. Two unproductive code-reading rounds is the signal to gather evidence, not the signal to write a longer write-up.
 
 - **Logs live under `~/.friday/`** (override with `FRIDAY_DATA_DIR`). Path resolution is `getLogPath(service)` in `packages/shared/src/config.ts`.
   - `logs/daemon.jsonl` — every daemon event in JSONL. Useful event names to grep for: `worker.fork`, `worker.prompt.queued`, `worker.exit`, `worker.turn.stalled`, `worker.abort.force-kill`, `block.seq-skew`, `blocks.update.error`, `chat.turn.user-block.error`, `queued-block.meta-update.error`, `jsonl-recovery.post-turn.error`, `daemon.shutdown`, `daemon.ready`, `pg.listen.<channel>`, `mutator.<name>.execute`, `mutator.<name>.fast-path`. `tail -F` works fine; entries are one JSON per line.

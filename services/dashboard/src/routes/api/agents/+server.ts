@@ -3,7 +3,5 @@ import { withDaemon } from "$lib/server/with-daemon";
 
 export const GET: RequestHandler = async ({ locals, request }) => {
   if (!locals.user) return new Response("unauthorized", { status: 401 });
-  return withDaemon((d) =>
-    d.get<unknown[]>("/api/agents", { signal: request.signal }),
-  );
+  return withDaemon((d) => d.get<unknown[]>("/api/agents", { signal: request.signal }));
 };

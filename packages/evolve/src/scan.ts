@@ -13,20 +13,13 @@
  *     dropped — Slack-specific and not portable to the dashboard yet.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
-import {
-  DAEMON_LOG_PATH,
-  USAGE_LOG_PATH,
-} from "@friday/shared";
-import { getAllUsageEntries } from "@friday/shared/services";
+import { DAEMON_LOG_PATH, SPIKE_CURSOR_PATH, USAGE_LOG_PATH } from "@friday/shared";
+import { getAllUsageEntries, getUsageEntriesSince } from "@friday/shared/services";
 import { scanAgentSpawnDepth } from "./scan-agent-depth.js";
-import type {
-  EvidencePointer,
-  Signal,
-  SignalSeverity,
-} from "./types.js";
+import type { EvidencePointer, Signal, SignalSeverity } from "./types.js";
 
 export interface ScanOptions {
   /** Path to the daemon JSONL log. Defaults to DAEMON_LOG_PATH. */
@@ -156,10 +149,7 @@ export function signalHash(event: string, agent?: string): string {
   return createHash("sha1").update(key).digest("hex").slice(0, 8);
 }
 
-export function sinceHoursAgo(
-  windowHours: number,
-  now: Date = new Date(),
-): string {
+export function sinceHoursAgo(windowHours: number, now: Date = new Date()): string {
   return new Date(now.getTime() - windowHours * 3_600_000).toISOString();
 }
 
@@ -171,39 +161,85 @@ export interface UsageScanOptions {
   spikeMultiplier?: number;
 }
 
+interface SpikeCursor {
+  lastSeenAt: string;
+}
+
+function loadSpikeCursor(): SpikeCursor | null {
+  if (!existsSync(SPIKE_CURSOR_PATH)) return null;
+  try {
+    return JSON.parse(readFileSync(SPIKE_CURSOR_PATH, "utf-8")) as SpikeCursor;
+  } catch {
+    return null;
+  }
+}
+
+function saveSpikeCursor(cursor: SpikeCursor): void {
+  mkdirSync(dirname(SPIKE_CURSOR_PATH), { recursive: true });
+  writeFileSync(SPIKE_CURSOR_PATH, JSON.stringify(cursor) + "\n", "utf-8");
+}
+
 /**
- * Read SQLite usage rows; flag agents whose individual turn token usage
- * exceeded `spikeMultiplier × median(turn-tokens)` for that agent in the
- * window.
+ * Read usage rows; flag agents whose individual turn token usage exceeded
+ * `spikeMultiplier × median(turn-tokens)` for that agent in the window.
+ *
+ * Two fixes over the original:
+ *   1. Read cursor — persists the latest row timestamp seen so subsequent
+ *      scans only emit signals for genuinely new data, preventing triple-fire.
+ *   2. Cold-resume exclusion — turn_number=1 rows are skipped because the
+ *      first turn of a session always creates large cache-creation bursts
+ *      (schema loading + memory recall) that look like spikes but aren't.
  */
 export async function scanUsage(opts: UsageScanOptions = {}): Promise<Signal[]> {
-  const sinceMs = opts.since ? Date.parse(opts.since) : 0;
   const multiplier = opts.spikeMultiplier ?? 4;
+
+  // Read cursor — only emit signals for rows strictly newer than this.
+  const cursor = loadSpikeCursor();
+  const cursorMs = cursor ? Date.parse(cursor.lastSeenAt) : 0;
 
   const perAgent = new Map<
     string,
-    Array<{ tokens: number; ts: string; pointer: EvidencePointer }>
+    Array<{ tokens: number; ts: string; isNew: boolean; pointer: EvidencePointer }>
   >();
 
-  for (const row of await getAllUsageEntries()) {
+  let maxTs = "";
+
+  const entries = opts.since ? await getUsageEntriesSince(opts.since) : await getAllUsageEntries();
+
+  for (const row of entries) {
     const agent = row.agentName;
     if (!agent) continue;
     if (agent.startsWith(META_AGENT_PREFIX)) continue;
-    if (sinceMs && Date.parse(row.timestamp) < sinceMs) continue;
+
+    // Skip first turn of a session — cold resume always creates a cache-creation
+    // burst (schema loading + memory recall) that would otherwise look like a spike.
+    if (row.turnNumber === 1) continue;
+
+    const rowMs = Date.parse(row.timestamp);
     const tokens =
       (row.inputTokens ?? 0) +
       (row.outputTokens ?? 0) +
       (row.cacheReadTokens ?? 0) +
       (row.cacheCreationTokens ?? 0);
     if (tokens <= 0) continue;
+
+    // Track the latest timestamp seen so we can advance the cursor.
+    if (!maxTs || rowMs > Date.parse(maxTs)) maxTs = row.timestamp;
+
+    const isNew = !cursorMs || rowMs > cursorMs;
+
     const arr = perAgent.get(agent) ?? [];
     arr.push({
       tokens,
       ts: row.timestamp,
+      isNew,
       pointer: { kind: "usage", path: USAGE_LOG_PATH, line: 0 },
     });
     perAgent.set(agent, arr);
   }
+
+  // Advance cursor so the next scan skips already-evaluated rows.
+  if (maxTs) saveSpikeCursor({ lastSeenAt: maxTs });
 
   const buckets = new Map<string, Signal>();
   for (const [agent, turns] of perAgent) {
@@ -211,7 +247,8 @@ export async function scanUsage(opts: UsageScanOptions = {}): Promise<Signal[]> 
     const sorted = [...turns].map((t) => t.tokens).sort((a, b) => a - b);
     const median = sorted[Math.floor(sorted.length / 2)];
     const threshold = median * multiplier;
-    const spikes = turns.filter((t) => t.tokens >= threshold);
+    // Only flag turns that (a) exceed the threshold AND (b) are new since last scan.
+    const spikes = turns.filter((t) => t.tokens >= threshold && t.isNew);
     if (spikes.length === 0) continue;
 
     for (const spike of spikes) {
@@ -316,8 +353,7 @@ function bucketAppend(
   if (existing) {
     existing.count++;
     existing.lastSeenAt = ts;
-    if (existing.evidencePointers.length < 3)
-      existing.evidencePointers.push(pointer);
+    if (existing.evidencePointers.length < 3) existing.evidencePointers.push(pointer);
     return;
   }
 
@@ -348,8 +384,7 @@ function bucketAppendWithPointer(
   if (existing) {
     existing.count++;
     existing.lastSeenAt = ts;
-    if (existing.evidencePointers.length < 3)
-      existing.evidencePointers.push(pointer);
+    if (existing.evidencePointers.length < 3) existing.evidencePointers.push(pointer);
     return;
   }
   buckets.set(hash, {
@@ -393,10 +428,7 @@ function safeStat(path: string): { mtimeMs: number } | null {
   }
 }
 
-function collectUserTurns(
-  filePath: string,
-  sinceMs: number,
-): TranscriptUserTurn[] {
+function collectUserTurns(filePath: string, sinceMs: number): TranscriptUserTurn[] {
   const out: TranscriptUserTurn[] = [];
   let raw: string;
   try {
@@ -439,18 +471,13 @@ function extractText(content: unknown): string {
   for (const c of content) {
     if (c && typeof c === "object" && "type" in c) {
       const obj = c as { type: string; text?: string };
-      if (obj.type === "text" && typeof obj.text === "string")
-        parts.push(obj.text);
+      if (obj.type === "text" && typeof obj.text === "string") parts.push(obj.text);
     }
   }
   return parts.join(" ");
 }
 
-function countRetries(
-  turns: TranscriptUserTurn[],
-  threshold: number,
-  windowMs: number,
-): number {
+function countRetries(turns: TranscriptUserTurn[], threshold: number, windowMs: number): number {
   let retries = 0;
   for (let i = 1; i < turns.length; i++) {
     const a = turns[i - 1];
@@ -489,26 +516,18 @@ function cosine(a: Map<string, number>, b: Map<string, number>): number {
  * Friction scanning is async (Haiku-driven) and lives in scan-friction.ts;
  * call `scanFriction()` separately and concat the results.
  */
-export async function scanAll(
-  opts: ScanOptions & UsageScanOptions = {},
-): Promise<Signal[]> {
-  const [daemonSignals, usageSignals, transcriptSignals, depthSignals] =
-    await Promise.all([
-      Promise.resolve(scanDaemonLog(opts)),
-      scanUsage(opts),
-      Promise.resolve(scanTranscripts(opts)),
-      Promise.resolve(
-        scanAgentSpawnDepth({
-          daemonLogPath: opts.daemonLogPath,
-          since: opts.since,
-          now: opts.now,
-        }),
-      ),
-    ]);
-  return [
-    ...daemonSignals,
-    ...usageSignals,
-    ...transcriptSignals,
-    ...depthSignals,
-  ];
+export async function scanAll(opts: ScanOptions & UsageScanOptions = {}): Promise<Signal[]> {
+  const [daemonSignals, usageSignals, transcriptSignals, depthSignals] = await Promise.all([
+    Promise.resolve(scanDaemonLog(opts)),
+    scanUsage(opts),
+    Promise.resolve(scanTranscripts(opts)),
+    Promise.resolve(
+      scanAgentSpawnDepth({
+        daemonLogPath: opts.daemonLogPath,
+        since: opts.since,
+        now: opts.now,
+      }),
+    ),
+  ]);
+  return [...daemonSignals, ...usageSignals, ...transcriptSignals, ...depthSignals];
 }

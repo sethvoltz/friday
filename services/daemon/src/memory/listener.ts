@@ -32,14 +32,7 @@
  */
 
 import { eq, inArray } from "drizzle-orm";
-import {
-  existsSync,
-  mkdirSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import pgPkg from "pg";
 import {
@@ -108,9 +101,7 @@ async function processPendingMemoryRow(id: string): Promise<void> {
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
       recallCount: row.recallCount,
-      lastRecalledAt: row.lastRecalledAt
-        ? row.lastRecalledAt.toISOString()
-        : null,
+      lastRecalledAt: row.lastRecalledAt ? row.lastRecalledAt.toISOString() : null,
     };
     writeFileSync(path, serializeEntry(entry));
     const fileMtime = new Date(statSync(path).mtimeMs);
@@ -155,9 +146,7 @@ export async function runMemoryBootScan(): Promise<void> {
     const rows = await db
       .select({ id: schema.memoryEntries.id })
       .from(schema.memoryEntries)
-      .where(
-        inArray(schema.memoryEntries.status, ["pending_file", "pending_delete"]),
-      );
+      .where(inArray(schema.memoryEntries.status, ["pending_file", "pending_delete"]));
     for (const row of rows) {
       await processPendingMemoryRow(row.id);
     }
@@ -173,6 +162,25 @@ export interface MemoryListenerHandle {
   stop: () => Promise<void>;
 }
 
+// Readiness gate for the memory LISTEN connection.
+//
+// Starts as a pre-resolved promise so that contexts where
+// startMemoryListener() is never called (test suites, pre-listener
+// boot window before the server receives its first request) fail open
+// immediately rather than hanging for the 3-second timeout. Replaced
+// with a real deferred inside startMemoryListener() before any async
+// work begins, so recall attempts that arrive after the HTTP server
+// starts but before LISTEN succeeds will wait — and time out and fail
+// open — rather than producing spurious errors against an incomplete
+// memory state.
+let _readyResolve: (() => void) | null = null;
+let _readyPromise: Promise<void> = Promise.resolve();
+
+/** Returns a promise that resolves once startMemoryListener() has successfully issued LISTEN. */
+export function whenMemoryListenerReady(): Promise<void> {
+  return _readyPromise;
+}
+
 /**
  * Start the long-lived LISTEN connection for
  * `friday_memory_file_changed`. Dedicated `pg.Client` for the same
@@ -180,52 +188,86 @@ export interface MemoryListenerHandle {
  * silently drop subscriptions.
  */
 export async function startMemoryListener(): Promise<MemoryListenerHandle> {
+  // Replace the pre-resolved default with a real deferred so any recall
+  // that races the async setup below will wait (or time out and fail open).
+  _readyPromise = new Promise<void>((resolve) => {
+    _readyResolve = resolve;
+  });
+
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ??
-    process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL must be set to start the memory LISTEN connection.",
-    );
+    throw new Error("DATABASE_URL must be set to start the memory LISTEN connection.");
   }
 
-  const client = new Client({ connectionString });
-  await client.connect();
+  let stopped = false;
+  let activeClient: InstanceType<typeof Client> | null = null;
 
-  client.on("notification", (msg) => {
-    if (msg.channel !== LISTEN_CHANNELS.memoryFileChanged) return;
-    const id = msg.payload;
-    if (!id) return;
-    void processPendingMemoryRow(id).catch((err) => {
-      logger.log("warn", "memory.listen.process.error", {
-        id,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    });
-  });
+  // FRI-121 B: reconnect loop with keepAlive + exponential backoff.
+  // _readyResolve is called on the first successful LISTEN; subsequent
+  // reconnects leave _readyPromise already-resolved so callers aren't
+  // re-blocked.
+  async function connectWithRetry(): Promise<void> {
+    let delay = 1_000;
+    while (!stopped) {
+      try {
+        const c = new Client({ connectionString, keepAlive: true });
+        activeClient = c;
+        await c.connect();
+        c.on("notification", (msg) => {
+          if (msg.channel !== LISTEN_CHANNELS.memoryFileChanged) return;
+          const id = msg.payload;
+          if (!id) return;
+          void processPendingMemoryRow(id).catch((err) => {
+            logger.log("warn", "memory.listen.process.error", {
+              id,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
+        });
+        c.on("error", (err) => {
+          logger.log("warn", "memory.listen.client.error", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
+        await c.query(`LISTEN ${LISTEN_CHANNELS.memoryFileChanged}`);
+        _readyResolve?.();
+        _readyResolve = null;
+        logger.log("info", "memory.listen.ready", {
+          channel: LISTEN_CHANNELS.memoryFileChanged,
+        });
+        await runMemoryBootScan();
+        delay = 1_000;
+        await new Promise<void>((resolve) => c.once("end", resolve));
+      } catch (err) {
+        logger.log("warn", "memory.listen.connect.error", {
+          message: err instanceof Error ? err.message : String(err),
+          retryIn: delay,
+        });
+        if (!stopped) {
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, 30_000);
+        }
+      } finally {
+        activeClient = null;
+      }
+    }
+  }
 
-  client.on("error", (err) => {
-    logger.log("warn", "memory.listen.client.error", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-  });
-
-  await client.query(`LISTEN ${LISTEN_CHANNELS.memoryFileChanged}`);
-  logger.log("info", "memory.listen.ready", {
-    channel: LISTEN_CHANNELS.memoryFileChanged,
-  });
+  void connectWithRetry();
 
   return {
     stop: async (): Promise<void> => {
-      try {
-        await client.query(`UNLISTEN ${LISTEN_CHANNELS.memoryFileChanged}`);
-      } catch {
-        // best-effort shutdown
+      stopped = true;
+      if (activeClient) {
+        try {
+          await activeClient.query(`UNLISTEN ${LISTEN_CHANNELS.memoryFileChanged}`);
+        } catch {
+          // best-effort
+        }
+        await activeClient.end().catch(() => {});
       }
-      await client.end().catch(() => {
-        // ditto
-      });
     },
   };
 }

@@ -46,11 +46,7 @@ function dayKey(d: Date): string {
 }
 function weekKey(d: Date): string {
   const day = d.getDay() || 7;
-  const monday = new Date(
-    d.getFullYear(),
-    d.getMonth(),
-    d.getDate() - day + 1,
-  );
+  const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - day + 1);
   return dayKey(monday);
 }
 function monthKey(d: Date): string {
@@ -96,9 +92,7 @@ export function buildDailyCost(rows: DailyByModelRow[]): {
     d.output += r.output;
     d.totalTokens += r.rawInput + r.cacheCreation + r.cacheRead + r.output;
   }
-  const dailyCost = [...byDay.values()].sort((a, b) =>
-    a.day.localeCompare(b.day),
-  );
+  const dailyCost = [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
   const models = [...modelSet].sort();
   return { dailyCost, models };
 }
@@ -110,11 +104,7 @@ export function buildTokenViews(rows: DailyByModelRow[]): {
   const dayBuckets = new Map<string, TokenStats>();
   const weekBuckets = new Map<string, TokenStats>();
   const monthBuckets = new Map<string, TokenStats>();
-  const upsertHistorical = (
-    m: Map<string, TokenStats>,
-    k: string,
-    r: DailyByModelRow,
-  ) => {
+  const upsertHistorical = (m: Map<string, TokenStats>, k: string, r: DailyByModelRow) => {
     let b = m.get(k);
     if (!b) {
       b = emptyTokenStats();
@@ -143,10 +133,7 @@ export function buildTokenViews(rows: DailyByModelRow[]): {
     if (ageMs >= 0 && ageMs < 30 * DAY_MS) addRowInto(monthCurrent, r);
   }
 
-  const buildView = (
-    historical: Map<string, TokenStats>,
-    current: TokenStats,
-  ): TokenView => {
+  const buildView = (historical: Map<string, TokenStats>, current: TokenStats): TokenView => {
     const all = [...historical.values()];
     const aggs = (key: keyof TokenStats) => {
       const values = all.map((b) => b[key]);
@@ -161,8 +148,7 @@ export function buildTokenViews(rows: DailyByModelRow[]): {
         cacheCreation: aggs("cacheCreation"),
         cacheRead: aggs("cacheRead"),
       },
-      cacheRate:
-        cacheTotal > 0 ? Math.round((current.cacheRead / cacheTotal) * 100) : 0,
+      cacheRate: cacheTotal > 0 ? Math.round((current.cacheRead / cacheTotal) * 100) : 0,
     };
   };
 

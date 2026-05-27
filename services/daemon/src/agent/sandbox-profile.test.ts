@@ -58,12 +58,8 @@ describe("renderProfile", () => {
     const out = renderProfile(PARAMS);
     // The deny line comes before the allow carve-outs so last-match-wins
     // gives the worktree/logs allows.
-    const denyIdx = out.indexOf(
-      '(deny file-write* (subpath "/Users/test/.friday"))',
-    );
-    const allowLogsIdx = out.indexOf(
-      '(allow file-write* (subpath "/Users/test/.friday/logs"))',
-    );
+    const denyIdx = out.indexOf('(deny file-write* (subpath "/Users/test/.friday"))');
+    const allowLogsIdx = out.indexOf('(allow file-write* (subpath "/Users/test/.friday/logs"))');
     const allowWorktreeIdx = out.indexOf(
       '(allow file-write* (subpath "/Users/test/.friday/workspaces/alpha"))',
     );

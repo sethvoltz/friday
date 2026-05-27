@@ -1,6 +1,6 @@
 # Roadmap
 
-Open work, sequenced for execution. Items get deleted as they ship. Architectural decisions live in `docs/decisions.md` (ADRs); user-facing usage in `docs/architecture.md`, `docs/chat-ux.md`, `docs/mobile-ux.md`, `docs/mcp.md`, and `docs/schema.md`.
+Open work, sequenced for execution. Items get deleted as they ship. Architectural decisions live in `docs/decisions.md` (ADRs); user-facing usage in `docs/architecture.md`, `docs/chat-ux.md`, `docs/mobile-ux.md`, and `docs/mcp.md`. Schema reference: `packages/shared/src/db/schema.ts` (Drizzle).
 
 ## Watch list (no immediate trigger)
 

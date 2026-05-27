@@ -63,10 +63,7 @@ function buildSignal(opts: DaemonFetchOpts | undefined): AbortSignal | undefined
   return ctrl.signal;
 }
 
-export async function daemonGet<T>(
-  path: string,
-  opts?: DaemonFetchOpts,
-): Promise<T> {
+export async function daemonGet<T>(path: string, opts?: DaemonFetchOpts): Promise<T> {
   const r = await fetch(`${BASE}${path}`, {
     headers: daemonAuthHeaders(),
     signal: buildSignal(opts),
@@ -105,10 +102,7 @@ export async function daemonPatch<T>(
   return (await r.json()) as T;
 }
 
-export async function daemonDelete<T>(
-  path: string,
-  opts?: DaemonFetchOpts,
-): Promise<T> {
+export async function daemonDelete<T>(path: string, opts?: DaemonFetchOpts): Promise<T> {
   const r = await fetch(`${BASE}${path}`, {
     method: "DELETE",
     headers: daemonAuthHeaders(),

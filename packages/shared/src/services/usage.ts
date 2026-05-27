@@ -117,6 +117,46 @@ export async function getAllUsageEntries(): Promise<UsageEntryRow[]> {
   }));
 }
 
+/** Usage rows with `timestamp >= sinceIso`, in chronological order. */
+export async function getUsageEntriesSince(sinceIso: string): Promise<UsageEntryRow[]> {
+  const pool = getPool();
+  const result = await pool.query<{
+    timestamp: Date;
+    sessionId: string;
+    agentName: string | null;
+    agentType: string | null;
+    model: string | null;
+    costUsd: number | null;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    turnNumber: number;
+    durationMs: number;
+  }>(
+    `SELECT timestamp,
+             session_id              AS "sessionId",
+             agent_name              AS "agentName",
+             agent_type              AS "agentType",
+             model,
+             cost_usd                AS "costUsd",
+             input_tokens            AS "inputTokens",
+             output_tokens           AS "outputTokens",
+             cache_creation_tokens   AS "cacheCreationTokens",
+             cache_read_tokens       AS "cacheReadTokens",
+             COALESCE(turn_number, 0) AS "turnNumber",
+             COALESCE(duration_ms, 0) AS "durationMs"
+      FROM usage
+      WHERE timestamp >= $1
+      ORDER BY timestamp`,
+    [new Date(sinceIso)],
+  );
+  return result.rows.map((r) => ({
+    ...r,
+    timestamp: r.timestamp.toISOString(),
+  }));
+}
+
 export interface UsageStats {
   turns: number;
   cost: number;
@@ -187,8 +227,7 @@ export async function getUsageStats(sinceIso?: string): Promise<UsageStats> {
     cacheCreation: row.cacheCreation,
     cacheRead: row.cacheRead,
     duration: row.duration,
-    cacheRate:
-      cacheTotal > 0 ? Math.round((row.cacheRead / cacheTotal) * 100) : 0,
+    cacheRate: cacheTotal > 0 ? Math.round((row.cacheRead / cacheTotal) * 100) : 0,
     avgCost: row.turns > 0 ? row.cost / row.turns : 0,
   };
 }
@@ -207,9 +246,7 @@ export interface DailyByModelRow {
 
 /** Per-day, per-model aggregates. Buckets by the daemon's local timezone so
  * day boundaries match what the user sees. `sinceIso` omitted = all time. */
-export async function getDailyByModel(
-  sinceIso?: string,
-): Promise<DailyByModelRow[]> {
+export async function getDailyByModel(sinceIso?: string): Promise<DailyByModelRow[]> {
   const pool = getPool();
   // Postgres equivalent of SQLite's date(timestamp, 'localtime'): convert
   // to local tz then truncate to date. Using `current_setting('TimeZone')`
@@ -285,9 +322,7 @@ export interface SessionStats {
   totalDurationMs: number;
 }
 
-export async function getSessionStats(
-  sessionId: string,
-): Promise<SessionStats | null> {
+export async function getSessionStats(sessionId: string): Promise<SessionStats | null> {
   const pool = getPool();
   const result = await pool.query<{
     turn_count: number;
@@ -318,9 +353,7 @@ export async function getSessionStats(
 
   const totalCacheTokens = row.total_cache_create + row.total_cache_read;
   const cacheHitRate =
-    totalCacheTokens > 0
-      ? Math.round((row.total_cache_read / totalCacheTokens) * 100)
-      : 0;
+    totalCacheTokens > 0 ? Math.round((row.total_cache_read / totalCacheTokens) * 100) : 0;
 
   return {
     sessionId,

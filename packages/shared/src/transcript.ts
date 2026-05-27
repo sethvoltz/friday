@@ -6,12 +6,7 @@
  * session. We surface a typed view + a turn-grouping helper.
  */
 
-export type EntryRole =
-  | "user"
-  | "assistant"
-  | "system"
-  | "tool_use"
-  | "tool_result";
+export type EntryRole = "user" | "assistant" | "system" | "tool_use" | "tool_result";
 
 export interface RawEntry {
   type?: string;
@@ -63,9 +58,7 @@ export interface EntryWithOffset {
   byteOff: number;
 }
 
-export function parseEntriesWithOffsets(
-  jsonl: string,
-): EntryWithOffset[] {
+export function parseEntriesWithOffsets(jsonl: string): EntryWithOffset[] {
   const out: EntryWithOffset[] = [];
   let off = 0;
   for (const line of jsonl.split("\n")) {

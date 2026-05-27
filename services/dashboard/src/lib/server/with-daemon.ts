@@ -45,10 +45,7 @@ const daemon: DaemonClient = {
   stream: daemonStream,
 };
 
-export type DaemonErrorKind =
-  | "daemon_unavailable"
-  | "daemon_timeout"
-  | "daemon_error";
+export type DaemonErrorKind = "daemon_unavailable" | "daemon_timeout" | "daemon_error";
 
 export interface DaemonErrorBody {
   error: DaemonErrorKind;

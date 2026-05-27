@@ -10,24 +10,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createHash,
-  randomBytes,
-} from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import {
-  encodeProjectDir,
-  sessionFilePath,
-  sessionSidecarDir,
-} from "../agent/jsonl-paths.js";
+import { encodeProjectDir, sessionFilePath, sessionSidecarDir } from "../agent/jsonl-paths.js";
 
 const projectsDir = join(homedir(), ".claude", "projects");
 
@@ -58,10 +45,7 @@ function setupFixture(opts?: { withSidecar?: boolean }): Fixture {
   const oldSidecar = join(oldEncoded, sessionId);
   if (opts?.withSidecar) {
     mkdirSync(join(oldSidecar, "tool-results"), { recursive: true });
-    writeFileSync(
-      join(oldSidecar, "tool-results", "tool-x-1.txt"),
-      "sidecar payload",
-    );
+    writeFileSync(join(oldSidecar, "tool-results", "tool-x-1.txt"), "sidecar payload");
   }
   return {
     oldCwd,
@@ -103,14 +87,8 @@ describe("agentCwdPinV1.migrateOneAgent", () => {
     const checksumBefore = checksum(fx.oldJsonl);
 
     const { migrateOneAgent } = await import("./agent-cwd-pin-v1.js");
-    const errors: Array<{ agent: string; session: string; message: string }> =
-      [];
-    const outcome = await migrateOneAgent(
-      "test-agent",
-      fx.sessionId,
-      fx.newCwd,
-      errors,
-    );
+    const errors: Array<{ agent: string; session: string; message: string }> = [];
+    const outcome = await migrateOneAgent("test-agent", fx.sessionId, fx.newCwd, errors);
 
     expect(errors).toEqual([]);
     expect(outcome.moved).toBe(true);
@@ -126,25 +104,16 @@ describe("agentCwdPinV1.migrateOneAgent", () => {
     cleanups.push(join(projectsDir, encodeProjectDir(fx.newCwd)));
 
     const { migrateOneAgent } = await import("./agent-cwd-pin-v1.js");
-    const errors: Array<{ agent: string; session: string; message: string }> =
-      [];
-    const outcome = await migrateOneAgent(
-      "test-agent",
-      fx.sessionId,
-      fx.newCwd,
-      errors,
-    );
+    const errors: Array<{ agent: string; session: string; message: string }> = [];
+    const outcome = await migrateOneAgent("test-agent", fx.sessionId, fx.newCwd, errors);
 
     expect(outcome.moved).toBe(true);
     expect(outcome.sidecarMoved).toBe(true);
     expect(existsSync(fx.newSidecar)).toBe(true);
     expect(existsSync(fx.oldSidecar)).toBe(false);
-    expect(
-      readFileSync(
-        join(fx.newSidecar, "tool-results", "tool-x-1.txt"),
-        "utf8",
-      ),
-    ).toBe("sidecar payload");
+    expect(readFileSync(join(fx.newSidecar, "tool-results", "tool-x-1.txt"), "utf8")).toBe(
+      "sidecar payload",
+    );
   });
 
   it("falls back to copy+unlink on EXDEV (file)", async () => {
@@ -155,10 +124,9 @@ describe("agentCwdPinV1.migrateOneAgent", () => {
 
     const { renameWithExdevFallback } = await import("./agent-cwd-pin-v1.js");
     const throwingRename = vi.fn((_a: string, _b: string) => {
-      const e: NodeJS.ErrnoException = Object.assign(
-        new Error("EXDEV cross-device link"),
-        { code: "EXDEV" },
-      );
+      const e: NodeJS.ErrnoException = Object.assign(new Error("EXDEV cross-device link"), {
+        code: "EXDEV",
+      });
       throw e;
     });
 
@@ -183,10 +151,9 @@ describe("agentCwdPinV1.migrateOneAgent", () => {
 
     const { renameWithExdevFallback } = await import("./agent-cwd-pin-v1.js");
     const throwingRename = vi.fn((_a: string, _b: string) => {
-      const e: NodeJS.ErrnoException = Object.assign(
-        new Error("EXDEV cross-device link"),
-        { code: "EXDEV" },
-      );
+      const e: NodeJS.ErrnoException = Object.assign(new Error("EXDEV cross-device link"), {
+        code: "EXDEV",
+      });
       throw e;
     });
 
@@ -199,12 +166,9 @@ describe("agentCwdPinV1.migrateOneAgent", () => {
     expect(throwingRename).toHaveBeenCalledOnce();
     expect(existsSync(fx.newSidecar)).toBe(true);
     expect(existsSync(fx.oldSidecar)).toBe(false);
-    expect(
-      readFileSync(
-        join(fx.newSidecar, "tool-results", "tool-x-1.txt"),
-        "utf8",
-      ),
-    ).toBe("sidecar payload");
+    expect(readFileSync(join(fx.newSidecar, "tool-results", "tool-x-1.txt"), "utf8")).toBe(
+      "sidecar payload",
+    );
   });
 
   it("is idempotent — second run is a no-op if destination already exists", async () => {
@@ -213,8 +177,7 @@ describe("agentCwdPinV1.migrateOneAgent", () => {
     cleanups.push(join(projectsDir, encodeProjectDir(fx.newCwd)));
 
     const { migrateOneAgent } = await import("./agent-cwd-pin-v1.js");
-    const errors: Array<{ agent: string; session: string; message: string }> =
-      [];
+    const errors: Array<{ agent: string; session: string; message: string }> = [];
     await migrateOneAgent("test-agent", fx.sessionId, fx.newCwd, errors);
     // Recreate the source so the test can prove the second call skips
     // rather than overwriting.
@@ -223,20 +186,13 @@ describe("agentCwdPinV1.migrateOneAgent", () => {
     });
     writeFileSync(fx.oldJsonl, "DIFFERENT CONTENT — should not move");
 
-    const outcome = await migrateOneAgent(
-      "test-agent",
-      fx.sessionId,
-      fx.newCwd,
-      errors,
-    );
+    const outcome = await migrateOneAgent("test-agent", fx.sessionId, fx.newCwd, errors);
 
     expect(outcome.moved).toBe(false);
     expect(existsSync(fx.newJsonl)).toBe(true);
     expect(readFileSync(fx.newJsonl, "utf8")).toBe(fx.body); // original body
     expect(existsSync(fx.oldJsonl)).toBe(true); // source untouched
-    expect(readFileSync(fx.oldJsonl, "utf8")).toBe(
-      "DIFFERENT CONTENT — should not move",
-    );
+    expect(readFileSync(fx.oldJsonl, "utf8")).toBe("DIFFERENT CONTENT — should not move");
   });
 
   it("returns moved:false silently when no source can be found", async () => {
@@ -244,14 +200,8 @@ describe("agentCwdPinV1.migrateOneAgent", () => {
     cleanups.push(join(projectsDir, encodeProjectDir(newCwd)));
 
     const { migrateOneAgent } = await import("./agent-cwd-pin-v1.js");
-    const errors: Array<{ agent: string; session: string; message: string }> =
-      [];
-    const outcome = await migrateOneAgent(
-      "test-agent",
-      "no-such-session",
-      newCwd,
-      errors,
-    );
+    const errors: Array<{ agent: string; session: string; message: string }> = [];
+    const outcome = await migrateOneAgent("test-agent", "no-such-session", newCwd, errors);
 
     expect(outcome.moved).toBe(false);
     expect(errors).toEqual([]);

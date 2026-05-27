@@ -12,18 +12,18 @@ The Claude `claude_code` preset provides Read, Write, Edit, Bash, Glob, Grep. Fr
 
 ## Friday MCP servers
 
-| Server | Tools | Orchestrator | Builder | Helper | Scheduled | Bare |
-|---|---|:-:|:-:|:-:|:-:|:-:|
-| `friday-mail` | `mail_send` (with `priority: 'normal' \| 'critical'`), `mail_inbox`, `mail_read`, `mail_close` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `friday-agents` | `agent_create`, `agent_list`, `agent_status`, `agent_archive`, `agent_inspect` | ✓ | — | — | — | — |
-| `friday-memory` | `memory_search`, `memory_get` (read-only); `memory_save`, `memory_update`, `memory_forget` (write) | ✓ R/W | ✓ R | ✓ R/W | ✓ R/W | ✓ R/W |
-| `friday-tickets` | `ticket_create`, `ticket_list`, `ticket_get`, `ticket_update`, `ticket_comment`, `ticket_link_external` | ✓ | ✓ | ✓ | — | — |
-| `friday-schedule` | `schedule_upsert`, `schedule_list`, `schedule_show`, `schedule_pause`, `schedule_resume`, `schedule_delete`, `schedule_trigger` | ✓ | — | — | — | — |
-| `friday-evolve` | `evolve_list`, `evolve_get`, `evolve_save`, `evolve_update`, `evolve_apply`, `evolve_dismiss`, `evolve_scan`, `evolve_enrich`, `evolve_cluster` | ✓ | — | — | — | — |
-| `friday-integrations` | `linear_import`, `linear_create_issue`, `linear_update_issue`, `linear_reconcile` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `friday-apps` | `app_install`, `app_uninstall`, `app_list`, `app_inspect`, `app_reload` | ✓ | — | — | — | — |
-| `friday-echo` | `echo` (sanity check) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `playwright` | `browser_navigate`, `browser_click`, `browser_type`, `browser_snapshot`, `browser_take_screenshot`, `browser_evaluate`, `browser_console_messages`, `browser_network_requests`, … (full `@playwright/mcp` surface) | — | ✓ | ✓ | ✓ | ✓ |
+| Server                | Tools                                                                                                                                                                                                              | Orchestrator | Builder | Helper | Scheduled | Bare  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :----------: | :-----: | :----: | :-------: | :---: |
+| `friday-mail`         | `mail_send` (with `priority: 'normal' \| 'critical'`), `mail_inbox`, `mail_read`, `mail_close`                                                                                                                     |      ✓       |    ✓    |   ✓    |     ✓     |   ✓   |
+| `friday-agents`       | `agent_create`, `agent_list`, `agent_status`, `agent_archive`, `agent_inspect`                                                                                                                                     |      ✓       |    —    |   —    |     —     |   —   |
+| `friday-memory`       | `memory_search`, `memory_get` (read-only); `memory_save`, `memory_update`, `memory_forget` (write)                                                                                                                 |    ✓ R/W     |   ✓ R   | ✓ R/W  |   ✓ R/W   | ✓ R/W |
+| `friday-tickets`      | `ticket_create`, `ticket_list`, `ticket_get`, `ticket_update`, `ticket_comment`, `ticket_link_external`                                                                                                            |      ✓       |    ✓    |   ✓    |     —     |   —   |
+| `friday-schedule`     | `schedule_upsert`, `schedule_list`, `schedule_show`, `schedule_pause`, `schedule_resume`, `schedule_delete`, `schedule_trigger`                                                                                    |      ✓       |    —    |   —    |     —     |   —   |
+| `friday-evolve`       | `evolve_list`, `evolve_get`, `evolve_save`, `evolve_update`, `evolve_apply`, `evolve_dismiss`, `evolve_scan`, `evolve_enrich`, `evolve_cluster`                                                                    |      ✓       |    —    |   —    |     —     |   —   |
+| `friday-integrations` | `linear_import`, `linear_create_issue`, `linear_update_issue`, `linear_reconcile`                                                                                                                                  |      ✓       |    ✓    |   ✓    |     ✓     |   ✓   |
+| `friday-apps`         | `app_install`, `app_uninstall`, `app_list`, `app_inspect`, `app_reload`                                                                                                                                            |      ✓       |    —    |   —    |     —     |   —   |
+| `friday-echo`         | `echo` (sanity check)                                                                                                                                                                                              |      ✓       |    ✓    |   ✓    |     ✓     |   ✓   |
+| `playwright`          | `browser_navigate`, `browser_click`, `browser_type`, `browser_snapshot`, `browser_take_screenshot`, `browser_evaluate`, `browser_console_messages`, `browser_network_requests`, … (full `@playwright/mcp` surface) |      —       |    ✓    |   ✓    |     ✓     |   ✓   |
 
 ### Gating notes
 

@@ -54,9 +54,7 @@ export function buildMailServer(opts: BuildMailServerOptions) {
           subject: z
             .string()
             .optional()
-            .describe(
-              "Optional one-line subject; surfaces in the inbox card.",
-            ),
+            .describe("Optional one-line subject; surfaces in the inbox card."),
           threadId: z
             .string()
             .optional()

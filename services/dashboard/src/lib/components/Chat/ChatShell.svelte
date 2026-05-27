@@ -411,8 +411,15 @@
     padding-right: var(--page-gutter);
     background: var(--bg-primary);
     z-index: 0;
+    /* touch-action: pan-y narrows the WebCore ScrollableArea router's
+       claim to vertical pans only, so taps fall through to z-index
+       hit-testing where the sidebar trigger and header correctly win.
+       overscroll-behavior: contain prevents bounce compositor-frame lag
+       that causes taps immediately after a scroll to land at wrong DOM
+       positions. Both apply unconditionally — they're no-ops on desktop. */
+    touch-action: pan-y;
+    overscroll-behavior: contain;
   }
-
   .chat-sidebar-floating {
     position: fixed;
     top: var(--chat-top);

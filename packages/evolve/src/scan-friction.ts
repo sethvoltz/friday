@@ -21,11 +21,7 @@
 
 import { eq, inArray } from "drizzle-orm";
 import { getDb, schema } from "@friday/shared";
-import type {
-  EvidencePointer,
-  Signal,
-  SignalSeverity,
-} from "./types.js";
+import type { EvidencePointer, Signal, SignalSeverity } from "./types.js";
 import { signalHash } from "./scan.js";
 import { chat, extractJson } from "./llm.js";
 
@@ -59,10 +55,7 @@ export interface ScoredTurn {
   reason: string;
 }
 
-export type ScoreFn = (
-  batch: TurnForScoring[],
-  model: string,
-) => Promise<ScoredTurn[]>;
+export type ScoreFn = (batch: TurnForScoring[], model: string) => Promise<ScoredTurn[]>;
 
 export interface TurnForScoring {
   turn_id: string;
@@ -93,9 +86,7 @@ export function dbTurnIdToLine(id: string): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-export async function scanFriction(
-  opts: FrictionScanOptions = {},
-): Promise<Signal[]> {
+export async function scanFriction(opts: FrictionScanOptions = {}): Promise<Signal[]> {
   const sinceMs = opts.since ? Date.parse(opts.since) : 0;
   const maxTurns = opts.maxTurns ?? 1000;
   const batchSize = opts.batchSize ?? 30;
@@ -118,7 +109,7 @@ export async function scanFriction(
       results = await score(payload, model);
     } catch (err) {
       // Better to score fewer turns than abort the whole pass; log loudly.
-      // eslint-disable-next-line no-console
+
       console.error(
         `friction scoring batch ${i}-${i + batch.length - 1} failed: ${
           err instanceof Error ? err.message : String(err)
@@ -134,19 +125,15 @@ export async function scanFriction(
     }
   }
 
-  return bucketByCategory(scored);
+  return bucketFrictionByCategory(scored);
 }
 
-function bucketByCategory(
-  scored: Array<OrchestratorTurn & ScoredTurn>,
-): Signal[] {
+export function bucketFrictionByCategory(scored: Array<OrchestratorTurn & ScoredTurn>): Signal[] {
   const buckets = new Map<string, Signal>();
-  const ranked = [...scored].sort(
-    (a, b) => b.friction_score - a.friction_score,
-  );
+  const ranked = [...scored].sort((a, b) => b.friction_score - a.friction_score);
 
   for (const t of ranked) {
-    if (t.friction_score < 2) continue;
+    if (t.friction_score < 3) continue;
     if (t.category === "none") continue;
 
     const event = `friction_${t.category}`;
@@ -167,8 +154,18 @@ function bucketByCategory(
       if (severityRank(severity) > severityRank(existing.severity)) {
         existing.severity = severity;
       }
-      if (existing.evidencePointers.length < 3)
-        existing.evidencePointers.push(pointer);
+      const eps = existing.evidencePointers;
+      if (eps.length < 5) {
+        eps.push(pointer);
+      } else {
+        // Prefer cross-session diversity: if all existing pointers share the
+        // same session and the new pointer is from a different session, swap
+        // out the last one so the enricher sees evidence from multiple sessions.
+        const allSameSession = eps.every((p) => p.sessionId === eps[0].sessionId);
+        if (allSameSession && pointer.sessionId !== eps[0].sessionId) {
+          eps[eps.length - 1] = pointer;
+        }
+      }
     } else {
       buckets.set(hash, {
         hash,
@@ -276,8 +273,7 @@ export async function collectOrchestratorTurns(
     const content = r.contentJson as { text?: string };
 
     if (r.role === "assistant" && r.kind === "text") {
-      const txt =
-        typeof content?.text === "string" ? content.text : "";
+      const txt = typeof content?.text === "string" ? content.text : "";
       if (txt) prevAssistantBySession.set(r.sessionId, txt);
       continue;
     }
@@ -288,8 +284,7 @@ export async function collectOrchestratorTurns(
     if (r.role !== "user" || r.kind !== "text") continue;
     if (r.source === "mail") continue;
 
-    const userText =
-      typeof content?.text === "string" ? content.text : "";
+    const userText = typeof content?.text === "string" ? content.text : "";
     if (!userText.trim()) continue;
     const cleaned = stripMemoryContext(userText).trim();
     if (!cleaned) continue;
@@ -306,32 +301,6 @@ export async function collectOrchestratorTurns(
   }
 
   return out;
-}
-
-function extractText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
-  for (const c of content) {
-    if (c && typeof c === "object" && "type" in c) {
-      const obj = c as { type: string; text?: string };
-      if (obj.type === "text" && typeof obj.text === "string")
-        parts.push(obj.text);
-    }
-  }
-  return parts.join(" ");
-}
-
-function isToolResultOnly(content: unknown): boolean {
-  if (!Array.isArray(content)) return false;
-  if (content.length === 0) return false;
-  return content.every(
-    (c) =>
-      c &&
-      typeof c === "object" &&
-      "type" in c &&
-      (c as { type: string }).type === "tool_result",
-  );
 }
 
 function stripMemoryContext(text: string): string {
@@ -372,6 +341,12 @@ const SCORING_SYSTEM_PROMPT = [
   "Be calibrated. 'no problem' / 'no rush' / a polite 'sounds good' is friction_score 0.",
   "A direct factual correction ('no, the file is at X not Y') is friction_score 2 minimum.",
   "Be willing to score 0/none liberally — most turns are not friction.",
+  "",
+  "Calibration rules:",
+  "  - Greetings ('Hey', 'Hi', 'Hello', 'hey there', etc.) are always friction_score 0 / category none, regardless of context.",
+  "  - A single constructive correction where the agent adjusts correctly is score 1–2 max. Score 2 is the ceiling for isolated corrections in otherwise productive sessions.",
+  "  - Score 3+ requires repetition (user had to say the same thing twice) or explicit frustration language.",
+  "  - Normal iterative work ('try X' → agent tries → user gives feedback → agent adjusts) is score 0.",
   "",
   'Respond with a JSON object: {"turns":[{"turn_id":"...","friction_score":N,"category":"...","reason":"..."}, ...]}',
   "No prose, no markdown fences, just the JSON. Match every input turn_id exactly.",

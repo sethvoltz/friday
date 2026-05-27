@@ -30,10 +30,7 @@ export const MEMORY_SERVER_NAME = "friday-memory";
  * Returns null when the value is clean; returns a human-readable rejection
  * message when it isn't.
  */
-export function validateMemoryField(
-  fieldName: string,
-  value: string,
-): string | null {
+export function validateMemoryField(fieldName: string, value: string): string | null {
   if (value.includes("</invoke>")) {
     return `${fieldName} contains the literal string \`</invoke>\` — this is a tool-call serialization error. Re-issue the call with each parameter wrapped in its own \`<parameter name="...">\` block. \`tags\` in particular must be a separate array parameter, not appended to \`content\`.`;
   }
@@ -73,22 +70,13 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
       tags: z
         .array(z.string())
         .optional()
-        .describe(
-          "Optional tag filter; entries must include all listed tags.",
-        ),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .max(50)
-        .optional()
-        .describe("Max results. Default 10."),
+        .describe("Optional tag filter; entries must include all listed tags."),
+      limit: z.number().int().min(1).max(50).optional().describe("Max results. Default 10."),
     },
     async (args, extra) => {
       const params = new URLSearchParams();
       params.set("q", args.query);
-      if (args.tags && args.tags.length > 0)
-        params.set("tags", args.tags.join(","));
+      if (args.tags && args.tags.length > 0) params.set("tags", args.tags.join(","));
       if (args.limit) params.set("limit", String(args.limit));
       const rows = await daemonFetch({
         ...ctx,
@@ -128,13 +116,8 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
           "Optional slug. Auto-derived from title if omitted. If an entry with this id already exists it is overwritten — pass an explicit id only when you want to update.",
         ),
       title: z.string().describe("Short human-readable title."),
-      content: z
-        .string()
-        .describe("Full markdown body. Be concise but complete."),
-      tags: z
-        .array(z.string())
-        .optional()
-        .describe("Tags for retrieval. Lowercase, no spaces."),
+      content: z.string().describe("Full markdown body. Be concise but complete."),
+      tags: z.array(z.string()).optional().describe("Tags for retrieval. Lowercase, no spaces."),
     },
     async (args, extra) => {
       const titleErr = validateMemoryField("title", args.title);

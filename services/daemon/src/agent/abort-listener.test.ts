@@ -18,12 +18,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 import pgPkg from "pg";
 
 let handle: TestDbHandle;
@@ -40,10 +35,7 @@ beforeEach(async () => {
   await handle.truncate();
 });
 
-async function insertUserBlock(
-  blockId: string,
-  status: string = "complete",
-): Promise<void> {
+async function insertUserBlock(blockId: string, status: string = "complete"): Promise<void> {
   const db = getDb();
   await db.insert(schema.blocks).values({
     blockId,
@@ -79,9 +71,7 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
       await client.query("LISTEN friday_abort_requested");
 
       const db = getDb();
-      await db
-        .update(schema.blocks)
-        .set({ status: "abort_requested" });
+      await db.update(schema.blocks).set({ status: "abort_requested" });
 
       await vi.waitFor(
         () => {
@@ -112,9 +102,7 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
       await new Promise((r) => setTimeout(r, 250));
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
 
       const db = getDb();
       await db.update(schema.blocks).set({ status: "complete" });
@@ -138,9 +126,7 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
       await insertUserBlock("blk-abort-3");
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_abort_requested");
 
       const db = getDb();
@@ -166,9 +152,7 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
     await client.connect();
     try {
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_abort_requested");
 
       await insertUserBlock("blk-abort-insert", "abort_requested");

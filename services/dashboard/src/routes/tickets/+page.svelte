@@ -41,7 +41,36 @@
       updatedAt: r.updated_at,
     };
   }
-  let statusFilter = $state<"all" | TicketStatus>("all");
+  // Statuses hidden by default; each has a toggle chip to show them.
+  // open + in_progress are always visible.
+  const TOGGLEABLE: TicketStatus[] = ["done", "closed", "blocked"];
+
+  function initialExtraShown(): Set<TicketStatus> {
+    if (typeof window === "undefined") return new Set();
+    const params = new URLSearchParams(window.location.search);
+    return new Set(
+      params.getAll("show").filter((s): s is TicketStatus =>
+        TOGGLEABLE.includes(s as TicketStatus),
+      ),
+    );
+  }
+  let extraShown = $state<Set<TicketStatus>>(initialExtraShown());
+
+  $effect(() => {
+    const params = new URLSearchParams(window.location.search);
+    params.delete("show");
+    for (const s of extraShown) params.append("show", s);
+    const qs = params.toString();
+    history.replaceState(history.state, "", qs ? `?${qs}` : location.pathname);
+  });
+
+  function toggleExtra(s: TicketStatus) {
+    const next = new Set(extraShown);
+    if (next.has(s)) next.delete(s);
+    else next.add(s);
+    extraShown = next;
+  }
+
   let assigneeFilter = $state<string>("all");
   let sortKey = $state<"updated" | "created" | "id" | "title" | "status">(
     "updated",
@@ -54,14 +83,6 @@
   let newBody = $state("");
   let newKind = $state<TicketKind>("task");
   let newAssignee = $state("");
-
-  const STATUSES: TicketStatus[] = [
-    "open",
-    "in_progress",
-    "blocked",
-    "done",
-    "closed",
-  ];
 
   // `$derived(() => ...)` would make the derived value the closure
   // itself; we want the closure's *result*, memoized. That's `$derived.by`.
@@ -76,10 +97,12 @@
   }
 
   const filtered = $derived.by<Ticket[]>(() => {
-    let out = tickets;
-    if (statusFilter !== "all") {
-      out = out.filter((t) => t.status === statusFilter);
-    }
+    let out = tickets.filter(
+      (t) =>
+        t.status === "open" ||
+        t.status === "in_progress" ||
+        extraShown.has(t.status),
+    );
     if (assigneeFilter !== "all") {
       if (assigneeFilter === "unassigned") {
         out = out.filter((t) => !t.assignee);
@@ -214,20 +237,15 @@
     </button>
   </div>
   <div class="chip-row">
-    <span class="chip-label">Status</span>
-    <button
-      type="button"
-      class="chip"
-      class:selected={statusFilter === "all"}
-      onclick={() => (statusFilter = "all")}>
-      all ({tickets.length})
-    </button>
-    {#each STATUSES as s (s)}
+    <span class="chip-label">Show</span>
+    <span class="chip always-on">open ({statusCount("open")})</span>
+    <span class="chip always-on">in_progress ({statusCount("in_progress")})</span>
+    {#each TOGGLEABLE as s (s)}
       <button
         type="button"
         class="chip"
-        class:selected={statusFilter === s}
-        onclick={() => (statusFilter = s)}>
+        class:selected={extraShown.has(s)}
+        onclick={() => toggleExtra(s)}>
         {s} ({statusCount(s)})
       </button>
     {/each}
@@ -381,6 +399,11 @@
     background: var(--accent-glow);
     border-color: var(--accent-primary);
     color: var(--text-primary);
+  }
+  .chip.always-on {
+    opacity: 0.5;
+    cursor: default;
+    pointer-events: none;
   }
   .newform {
     display: flex;

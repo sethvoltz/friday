@@ -79,10 +79,7 @@ async function syncConfigFromSettingsRow(): Promise<boolean> {
     cfg.model = row.model;
     changed = true;
   }
-  if (
-    row.watchdogRefork !== null &&
-    (cfg.watchdog?.refork ?? false) !== row.watchdogRefork
-  ) {
+  if (row.watchdogRefork !== null && (cfg.watchdog?.refork ?? false) !== row.watchdogRefork) {
     const watchdog: NonNullable<FridayConfig["watchdog"]> = {
       ...(cfg.watchdog ?? {}),
       refork: row.watchdogRefork,
@@ -134,59 +131,72 @@ export interface SettingsListenerHandle {
  * `pg.Client` directly to make the lifecycle explicit.
  */
 export async function startSettingsListener(): Promise<SettingsListenerHandle> {
-  // DATABASE_URL is guaranteed by `getPool()` (it throws otherwise).
-  // Re-reading it here keeps the listener's connection independent
-  // of the pool's connection bookkeeping.
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ??
-    process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL must be set to start the settings LISTEN connection.",
-    );
+    throw new Error("DATABASE_URL must be set to start the settings LISTEN connection.");
   }
 
-  const client = new Client({ connectionString });
-  await client.connect();
+  let stopped = false;
+  let activeClient: InstanceType<typeof Client> | null = null;
 
-  client.on("notification", (msg) => {
-    if (msg.channel !== LISTEN_CHANNELS.settingsChanged) return;
-    void syncConfigFromSettingsRow().catch((err) => {
-      logger.log("warn", "settings.listen.sync.error", {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    });
-  });
+  // FRI-121 B: reconnect loop with keepAlive + exponential backoff.
+  async function connectWithRetry(): Promise<void> {
+    let delay = 1_000;
+    while (!stopped) {
+      try {
+        const c = new Client({ connectionString, keepAlive: true });
+        activeClient = c;
+        await c.connect();
+        c.on("notification", (msg) => {
+          if (msg.channel !== LISTEN_CHANNELS.settingsChanged) return;
+          void syncConfigFromSettingsRow().catch((err) => {
+            logger.log("warn", "settings.listen.sync.error", {
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
+        });
+        c.on("error", (err) => {
+          logger.log("warn", "settings.listen.client.error", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
+        await c.query(`LISTEN ${LISTEN_CHANNELS.settingsChanged}`);
+        logger.log("info", "settings.listen.ready", {
+          channel: LISTEN_CHANNELS.settingsChanged,
+        });
+        await runSettingsBootScan();
+        delay = 1_000;
+        await new Promise<void>((resolve) => c.once("end", resolve));
+      } catch (err) {
+        logger.log("warn", "settings.listen.connect.error", {
+          message: err instanceof Error ? err.message : String(err),
+          retryIn: delay,
+        });
+        if (!stopped) {
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, 30_000);
+        }
+      } finally {
+        activeClient = null;
+      }
+    }
+  }
 
-  // Reconnect on error — a dropped LISTEN connection silently stops
-  // delivering notifications, so log loudly and let the operator
-  // restart the daemon. (Full self-healing reconnect is Phase 5+
-  // hardening; for now the LISTEN client gets the same lifecycle as
-  // the daemon process.)
-  client.on("error", (err) => {
-    logger.log("warn", "settings.listen.client.error", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-  });
-
-  await client.query(`LISTEN ${LISTEN_CHANNELS.settingsChanged}`);
-  logger.log("info", "settings.listen.ready", {
-    channel: LISTEN_CHANNELS.settingsChanged,
-  });
+  void connectWithRetry();
 
   return {
     stop: async (): Promise<void> => {
-      try {
-        await client.query(`UNLISTEN ${LISTEN_CHANNELS.settingsChanged}`);
-      } catch {
-        // Connection may have already been torn down; UNLISTEN is
-        // best-effort during shutdown.
+      stopped = true;
+      if (activeClient) {
+        try {
+          await activeClient.query(`UNLISTEN ${LISTEN_CHANNELS.settingsChanged}`);
+        } catch {
+          // best-effort
+        }
+        await activeClient.end().catch(() => {});
       }
-      await client.end().catch(() => {
-        // ditto — pooling code may have already closed the underlying
-        // socket. Swallow to keep shutdown forward-progressing.
-      });
     },
   };
 }

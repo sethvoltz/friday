@@ -13,13 +13,11 @@
   } from "$lib/stores/wake-lock.svelte";
   import ConnectivityWidget from "$lib/components/Connectivity/ConnectivityWidget.svelte";
   import SyncOverlay from "$lib/components/SyncOverlay/SyncOverlay.svelte";
-  import { Zap } from "lucide-svelte";
+  import { Coffee } from "lucide-svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
   import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
   import { ModeWatcher, setMode } from "mode-watcher";
-  import { sendQueue } from "$lib/stores/send-queue.svelte";
-  import { chat } from "$lib/stores/chat.svelte";
   import type { LayoutData } from "./$types";
   import type { Snippet } from "svelte";
 
@@ -31,28 +29,6 @@
   // and Markdown.svelte's `:global(.dark …)` rules light up immediately
   // without a flash of the light palette.
 
-  // Flush the optimistic-send queue every time SSE reconnects. The queue
-  // itself is idempotent (in-flight POST is guarded by `flushing`), so
-  // multiple triggers in quick succession are safe.
-  let lastConnected = $state(false);
-  $effect(() => {
-    const c = sseConnected.value;
-    if (c && !lastConnected && sendQueue.items.length > 0) {
-      void sendQueue.flush().then((result) => {
-        for (const s of result.sent) {
-          chat.confirmPending(s.queueId, s.turnId);
-          // Queued turns (worker was busy when this POST hit the daemon)
-          // must not claim the inflight slot — the still-streaming turn
-          // owns it. SSE `turn_started` will set the slot when this turn
-          // actually dispatches.
-          if (!s.queued) chat.inflightTurnId = s.turnId;
-        }
-        for (const qid of result.failed) chat.markPendingFailed(qid);
-        for (const qid of result.retrying) chat.markPendingRetrying(qid);
-      });
-    }
-    lastConnected = c;
-  });
   let menuOpen = $state(false);
   function closeMenu() {
     menuOpen = false;
@@ -83,6 +59,14 @@
       // localStorage unavailable / SecurityError — ignore.
     }
 
+    // One-time migration: remove the old localStorage send queue. Zero's
+    // IDB outbox now owns durability; the localStorage key is dead weight.
+    try {
+      localStorage.removeItem("friday:sendQueue");
+    } catch {
+      // ignore
+    }
+
     // Global Cmd/Ctrl-K to toggle the command palette. Fires even when
     // an input is focused (Spotlight-style), but yields to IME composition.
     const onKey = (e: KeyboardEvent) => {
@@ -104,23 +88,6 @@
       startSSE();
       startConnectivity();
       startWakeLock();
-    }
-
-    // Best-effort flush on initial mount — drains anything left in
-    // localStorage from a previous session that ended offline.
-    if (signedIn && !isLogin && sendQueue.items.length > 0) {
-      void sendQueue.flush().then((result) => {
-        for (const s of result.sent) {
-          chat.confirmPending(s.queueId, s.turnId);
-          // Queued turns (worker was busy when this POST hit the daemon)
-          // must not claim the inflight slot — the still-streaming turn
-          // owns it. SSE `turn_started` will set the slot when this turn
-          // actually dispatches.
-          if (!s.queued) chat.inflightTurnId = s.turnId;
-        }
-        for (const qid of result.failed) chat.markPendingFailed(qid);
-        for (const qid of result.retrying) chat.markPendingRetrying(qid);
-      });
     }
 
     // Mobile keyboard handling: when the soft keyboard opens, iOS Safari
@@ -231,7 +198,7 @@
             class="wake-lock-indicator"
             title="Screen wake lock is active — phone won't sleep while an agent is working"
             aria-label="Screen wake lock active">
-            <Zap size={14} strokeWidth={2} aria-hidden="true" />
+            <Coffee size={14} strokeWidth={2} aria-hidden="true" />
           </span>
         {/if}
       </div>
@@ -369,8 +336,35 @@
   }
 
   .hamburger-btn {
-    display: none; flex-direction: column; justify-content: center; gap: 4px;
-    background: none; border: none; cursor: pointer; padding: 0.25rem; flex-shrink: 0;
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    /* Keep original padding so the button's layout box stays at its natural
+       ~22px height — the header height is unchanged. The ::before below
+       carries the 44×44px HIG hit area as overflow (pointer-events still
+       fire because the button's overflow is visible). */
+    padding: 0.25rem;
+    flex-shrink: 0;
+    position: relative;
+    touch-action: manipulation;
+  }
+  /* Invisible hit-area extension. Centered on the button, overflows its
+     border box without affecting layout (position: absolute, no size on
+     the parent changes). Taps in this zone route to the button because
+     ::before is a child of the button element. */
+  .hamburger-btn::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 44px;
+    min-height: 44px;
   }
   .hamburger-btn span {
     display: block; width: 1.25rem; height: 2px; background: var(--text-primary);

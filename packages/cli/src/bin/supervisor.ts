@@ -24,19 +24,8 @@
  *    `brew services stop friday`) leaves zero descendants alive.
  */
 
-import {
-  ChildProcess,
-  spawn,
-  spawnSync,
-  type StdioOptions,
-} from "node:child_process";
-import {
-  appendFileSync,
-  createWriteStream,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-} from "node:fs";
+import { ChildProcess, spawn, spawnSync, type StdioOptions } from "node:child_process";
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -130,6 +119,13 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         // Daemon resolves its own port from its env / config / constant
         // chain; passing it here is belt-and-braces.
         FRIDAY_DAEMON_PORT: String(daemonPort),
+        // FRI-116: the supervisor pipes the child's stdout to the same
+        // `~/.friday/logs/<service>.jsonl` file the child's own
+        // createLogger writes via its fd. Without disabling the
+        // child's stdout-mode, every log line lands twice. Dev mode
+        // (`pnpm dev:daemon`) bypasses the supervisor and keeps the
+        // default `stdoutMode: "json"` for terminal visibility.
+        FRIDAY_LOG_STDOUT: "off",
       },
     },
     {
@@ -148,14 +144,7 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
       // vs upstream Postgres); restart immediately, no backoff.
       fastRestartCodes: [14],
       async preStart(): Promise<void> {
-        const schemaPath = join(
-          repoRoot,
-          "packages",
-          "shared",
-          "dist",
-          "sync",
-          "schema.js",
-        );
+        const schemaPath = join(repoRoot, "packages", "shared", "dist", "sync", "schema.js");
         const r = spawnSync(
           "pnpm",
           ["exec", "zero-deploy-permissions", "--schema-path", schemaPath],
@@ -175,6 +164,13 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         ...process.env,
         // adapter-node + server-entry.mjs both read PORT.
         PORT: String(dashboardPort),
+        // FRI-116: same rationale as the daemon spec — supervisor pipes
+        // child stdout to dashboard.jsonl and the dashboard's
+        // createLogger writes its own fd, so without this each line
+        // doubles. Dev mode (`pnpm dev:dashboard`) bypasses the
+        // supervisor and keeps the default stdout mode for terminal
+        // visibility.
+        FRIDAY_LOG_STDOUT: "off",
       },
     },
   ];
@@ -311,9 +307,7 @@ async function spawnChild(state: ChildState): Promise<void> {
 
 function scheduleRestart(state: ChildState, exitCode: number | null = null): void {
   if (state.shuttingDown || supervisorShuttingDown) return;
-  const fastRestart =
-    exitCode !== null &&
-    (state.spec.fastRestartCodes ?? []).includes(exitCode);
+  const fastRestart = exitCode !== null && (state.spec.fastRestartCodes ?? []).includes(exitCode);
   const delayMs = fastRestart ? 0 : state.backoffMs;
   if (!fastRestart) {
     state.backoffMs = Math.min(state.backoffMs * 2, BACKOFF_CAP_MS);

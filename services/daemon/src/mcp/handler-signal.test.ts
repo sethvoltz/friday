@@ -63,8 +63,9 @@ const fetchCalls: FetchCall[] = [];
 
 beforeEach(() => {
   fetchCalls.length = 0;
-  fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
-    async (input: RequestInfo | URL, init?: RequestInit) => {
+  fetchSpy = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       fetchCalls.push({ url, signal: init?.signal ?? undefined });
       // Return a 200 with an empty JSON body so the daemonFetch wrapper
@@ -74,8 +75,7 @@ beforeEach(() => {
         status: 200,
         headers: { "content-type": "application/json" },
       });
-    },
-  );
+    });
 });
 
 afterEach(() => {

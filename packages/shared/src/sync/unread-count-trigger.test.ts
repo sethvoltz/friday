@@ -21,14 +21,7 @@
  * `sync-harness.ts` for the scope note).
  */
 
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, and, sql } from "drizzle-orm";
 import { getDb } from "../index.js";
 import { spawnTestSyncEnv } from "../test/sync-harness.js";
@@ -62,15 +55,13 @@ async function insertCursor(
   lastSeenBlockId = "blk-init",
   unreadCount = 0,
 ): Promise<void> {
-  await getDb()
-    .insert(schema.readCursors)
-    .values({
-      deviceId,
-      agentName,
-      lastSeenBlockId,
-      ts: new Date(),
-      unreadCount,
-    });
+  await getDb().insert(schema.readCursors).values({
+    deviceId,
+    agentName,
+    lastSeenBlockId,
+    ts: new Date(),
+    unreadCount,
+  });
 }
 
 async function getCursor(
@@ -84,10 +75,7 @@ async function getCursor(
     })
     .from(schema.readCursors)
     .where(
-      and(
-        eq(schema.readCursors.deviceId, deviceId),
-        eq(schema.readCursors.agentName, agentName),
-      ),
+      and(eq(schema.readCursors.deviceId, deviceId), eq(schema.readCursors.agentName, agentName)),
     )
     .limit(1);
   return r[0] ?? null;
@@ -193,9 +181,7 @@ describe("friday_blocks_increment_unread_trigger (item #52 — end-to-end PG)", 
   it("no cursor row → INSERT is a no-op (no fan-out to non-existent rows)", async () => {
     // Empty read_cursors table; the trigger's UPDATE WHERE matches 0 rows.
     // The block INSERT itself must succeed cleanly.
-    await expect(
-      insertBlock({ agentName: "friday", role: "assistant" }),
-    ).resolves.not.toThrow();
+    await expect(insertBlock({ agentName: "friday", role: "assistant" })).resolves.not.toThrow();
     const c = await getCursor("dev-1", "friday");
     expect(c).toBeNull();
   });

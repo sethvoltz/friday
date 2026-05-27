@@ -502,7 +502,7 @@
       title={focused.type === "orchestrator"
         ? "Friday"
         : `${focused.type} · ${focused.name}`}
-      onclick={() => (open = !open)}>
+      onclick={(e) => { e.stopPropagation(); open = !open; }}>
       <span
         class="dot"
         class:pulse={focused.status === "working"}
@@ -855,11 +855,13 @@
     align-items: center;
     gap: 0.55rem;
     color: var(--text-primary);
-    min-height: 40px;
+    /* HIG minimum 44px touch target; was 40px */
+    min-height: 44px;
     font-size: 0.85rem;
     cursor: pointer;
     font-family: inherit;
     font-weight: 600;
+    touch-action: manipulation;
   }
   .trigger:hover {
     background: var(--bg-tertiary);

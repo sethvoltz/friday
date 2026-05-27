@@ -80,7 +80,7 @@ export async function recoverDanglingToolUses(): Promise<void> {
   // depending on driver — handle both.
   const rows: DanglingToolUseRow[] = Array.isArray(result)
     ? (result as unknown as DanglingToolUseRow[])
-    : (result as { rows: DanglingToolUseRow[] }).rows ?? [];
+    : ((result as { rows: DanglingToolUseRow[] }).rows ?? []);
 
   if (rows.length === 0) {
     logger.log("info", "dangling-tool-use-recovery.scan", { found: 0 });

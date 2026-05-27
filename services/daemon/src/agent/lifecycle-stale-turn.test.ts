@@ -109,9 +109,7 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     unsub();
 
     // Structured log emitted with exact event name + agent + msSinceTurnStart.
-    const staleLog = logSpy.mock.calls.find(
-      ([, event]) => event === "worker.turn.stale-killed",
-    );
+    const staleLog = logSpy.mock.calls.find(([, event]) => event === "worker.turn.stale-killed");
     expect(staleLog).toBeDefined();
     const [level, , payload] = staleLog!;
     expect(level).toBe("warn");
@@ -167,9 +165,7 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     ).toBeUndefined();
     expect((worker as { forceKilled?: boolean }).forceKilled).toBeFalsy();
     // Proves handleEvent actually executed past the ceiling check.
-    expect((worker as { lastHeartbeat: number }).lastHeartbeat).toBeGreaterThan(
-      ANCIENT,
-    );
+    expect((worker as { lastHeartbeat: number }).lastHeartbeat).toBeGreaterThan(ANCIENT);
 
     __deleteLiveWorkerForTest("stale-agent");
   });
@@ -198,21 +194,14 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     });
     unsub();
 
-    const staleLogs = logSpy.mock.calls.filter(
-      ([, event]) => event === "worker.turn.stale-killed",
-    );
+    const staleLogs = logSpy.mock.calls.filter(([, event]) => event === "worker.turn.stale-killed");
     expect(staleLogs.length).toBe(1);
 
     // Load-bearing: exactly one error block in the DB for this turn.
     const errorRows = await getDb()
       .select()
       .from(schema.blocks)
-      .where(
-        and(
-          eq(schema.blocks.turnId, "turn-stale-idem"),
-          eq(schema.blocks.kind, "error"),
-        ),
-      );
+      .where(and(eq(schema.blocks.turnId, "turn-stale-idem"), eq(schema.blocks.kind, "error")));
     expect(errorRows.length).toBe(1);
 
     // Load-bearing: exactly one turn_done emitted for this turn.
@@ -237,10 +226,7 @@ describe("lifecycle: IPC handler error boundary (FRI-33)", () => {
   // hit eventBus.publish are exercised here. `turn-complete` still
   // publishes turn_done.
   for (const [branch, event] of [
-    [
-      "turn-complete",
-      { type: "turn-complete", sessionId: "sess-x" } as const,
-    ],
+    ["turn-complete", { type: "turn-complete", sessionId: "sess-x" } as const],
   ] as const) {
     it(`logs worker.ipc.error and does not rethrow when ${branch} branch throws`, async () => {
       const { safeHandleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
@@ -255,30 +241,22 @@ describe("lifecycle: IPC handler error boundary (FRI-33)", () => {
       // blowing up (the real-world crash shape: any sync exception in
       // publish() used to bubble out of child.on("message") into Node's
       // default uncaughtException handler).
-      const publishSpy = vi
-        .spyOn(eventBus, "publish")
-        .mockImplementation((() => {
-          throw new Error(`synthetic publish failure (${branch})`);
-        }) as never);
+      const publishSpy = vi.spyOn(eventBus, "publish").mockImplementation((() => {
+        throw new Error(`synthetic publish failure (${branch})`);
+      }) as never);
 
       const logSpy = vi.spyOn(logger, "log");
 
-      await expect(
-        safeHandleEvent(worker as never, event),
-      ).resolves.toBeUndefined();
+      await expect(safeHandleEvent(worker as never, event)).resolves.toBeUndefined();
 
       await vi.waitFor(
         () => {
-          const found = logSpy.mock.calls.find(
-            ([, ev]) => ev === "worker.ipc.error",
-          );
+          const found = logSpy.mock.calls.find(([, ev]) => ev === "worker.ipc.error");
           expect(found).toBeDefined();
         },
         { timeout: 5000, interval: 25 },
       );
-      const ipcErr = logSpy.mock.calls.find(
-        ([, ev]) => ev === "worker.ipc.error",
-      );
+      const ipcErr = logSpy.mock.calls.find(([, ev]) => ev === "worker.ipc.error");
       expect(ipcErr).toBeDefined();
       const [level, , payload] = ipcErr!;
       expect(level).toBe("error");
@@ -301,14 +279,10 @@ describe("lifecycle: IPC handler error boundary (FRI-33)", () => {
     __putLiveWorkerForTest("stale-agent", worker as never);
 
     const logSpy = vi.spyOn(logger, "log");
-    await expect(
-      safeHandleEvent(worker as never, { type: "heartbeat" }),
-    ).resolves.toBeUndefined();
+    await expect(safeHandleEvent(worker as never, { type: "heartbeat" })).resolves.toBeUndefined();
 
     // No error log on the happy path.
-    expect(
-      logSpy.mock.calls.find(([, ev]) => ev === "worker.ipc.error"),
-    ).toBeUndefined();
+    expect(logSpy.mock.calls.find(([, ev]) => ev === "worker.ipc.error")).toBeUndefined();
 
     __deleteLiveWorkerForTest("stale-agent");
   });
@@ -352,9 +326,7 @@ describe("lifecycle: turn-end clears w.turnStart (FRI-110)", () => {
     await handleEvent(worker as never, { type: "status-change", status: "idle" });
 
     // The bug-site assertion: watchdog did NOT force-kill.
-    expect(
-      logSpy.mock.calls.find(([, ev]) => ev === "worker.turn.stale-killed"),
-    ).toBeUndefined();
+    expect(logSpy.mock.calls.find(([, ev]) => ev === "worker.turn.stale-killed")).toBeUndefined();
     expect((worker as { forceKilled?: boolean }).forceKilled).toBeFalsy();
 
     // Diagnostic log emitted with `msSinceTurnStart: null` — this is the
@@ -427,12 +399,15 @@ describe("lifecycle: turn-end clears w.turnStart (FRI-110)", () => {
     });
     __putLiveWorkerForTest("stale-agent", worker as never);
 
-    await handleEvent(worker as never, {
-      type: "error",
-      code: "synthetic",
-      message: "synthetic",
-      recoverable: false,
-    } as never);
+    await handleEvent(
+      worker as never,
+      {
+        type: "error",
+        code: "synthetic",
+        message: "synthetic",
+        recoverable: false,
+      } as never,
+    );
 
     expect((worker as { turnStart?: number }).turnStart).toBeUndefined();
     expect((worker as { status: string }).status).toBe("idle");

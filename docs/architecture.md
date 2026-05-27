@@ -79,23 +79,23 @@ Local-first, headless agent daemon with a SvelteKit dashboard exposed via Cloudf
 
 ## Tech stack
 
-| Concern | Choice |
-|---|---|
-| Language | TypeScript, ESM |
-| Build | pnpm workspaces + Turborepo |
-| Tests | Vitest (co-located `*.test.ts`) |
-| Daemon runtime | Node.js |
-| Agent runtime | Claude Agent SDK (default model: `claude-opus-4-7`) |
-| Database | Postgres (Homebrew, host-managed) + Drizzle ORM (ADR-023) |
-| Sync engine | Zero (Rocicorp), Apache-2; `zero-cache` sidecar tailing logical replication |
-| Client cache | Zero reactive cache (IndexedDB-backed) |
-| Live-turn stream | Per-agent SSE (`/api/events?agent=<name>`), narrow scope (ADR-024) |
-| Dashboard framework | SvelteKit + Svelte 5 (runes) + adapter-node |
-| Auth | BetterAuth (u/p only in v1; see ADR-008) + JWT bridge to zero-cache |
-| CLI | citty + @clack/prompts + picocolors |
-| Markdown | marked + DOMPurify + Shiki (Catppuccin Latte / Mocha) |
-| Image processing | sharp (HEIC → PNG, dimension caps) |
-| Process supervision | tmux for daemon/dashboard/zero-cache/cft; `brew services` for Postgres (ADR-009 + ADR-023) |
+| Concern             | Choice                                                                                                                                                                                          |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Language            | TypeScript, ESM                                                                                                                                                                                 |
+| Build               | pnpm workspaces + Turborepo                                                                                                                                                                     |
+| Tests               | Vitest (co-located `*.test.ts`)                                                                                                                                                                 |
+| Daemon runtime      | Node.js                                                                                                                                                                                         |
+| Agent runtime       | Claude Agent SDK (default model: `claude-opus-4-7`)                                                                                                                                             |
+| Database            | Postgres (Homebrew, host-managed) + Drizzle ORM (ADR-023)                                                                                                                                       |
+| Sync engine         | Zero (Rocicorp), Apache-2; `zero-cache` sidecar tailing logical replication                                                                                                                     |
+| Client cache        | Zero reactive cache (IndexedDB-backed)                                                                                                                                                          |
+| Live-turn stream    | Per-agent SSE (`/api/events?agent=<name>`), narrow scope (ADR-024)                                                                                                                              |
+| Dashboard framework | SvelteKit + Svelte 5 (runes) + adapter-node                                                                                                                                                     |
+| Auth                | BetterAuth (u/p only in v1; see ADR-008) + JWT bridge to zero-cache                                                                                                                             |
+| CLI                 | citty + @clack/prompts + picocolors                                                                                                                                                             |
+| Markdown            | marked + DOMPurify + Shiki (Catppuccin Latte / Mocha)                                                                                                                                           |
+| Image processing    | sharp (HEIC → PNG, dimension caps)                                                                                                                                                              |
+| Process supervision | launchd via `friday-supervisor` for daemon/dashboard/zero-cache (ADR-028); `brew services` for Postgres (ADR-023); `cloudflared service install` as a separate user launch agent for the tunnel |
 
 ## Repo layout
 
@@ -115,7 +115,7 @@ agent-friday/
     chat-ux.md                      # single-chat UX, sidebar, slash, attachments
     mobile-ux.md                    # priority+ nav, virtualization, PWA
     mcp.md                          # MCP server surface table
-    schema.md                       # DB schema overview
+    sandbox.md                      # Worker isolation (M1–M5) + residual risk
     decisions.md                    # ADRs
     roadmap.md                      # open work, watch list
     setup.md
@@ -173,15 +173,15 @@ agent-friday/
 
 ## Components
 
-| Path | Purpose |
-|---|---|
-| `packages/shared` | Types, config, logger, DB layer (Drizzle), wire schema, prompts, services (mail/tickets/attachments/turns/usage), markdown plugins, skills loader |
-| `packages/cli` | `friday` CLI (citty + clack + picocolors) |
-| `packages/memory` | File-based memory store + DB-backed FTS5 + auto-recall block |
-| `packages/evolve` | Self-improvement proposals (store + types; full pipeline lifts in roadmap) |
-| `packages/integrations/linear` | Optional Linear API integration (reconcile() pending) |
-| `services/daemon` | Headless API. Owns SDK, agent registry, fork-per-agent workers, MCP servers, EventBus, SSE, scheduler, mail bridge, watchdog |
-| `services/dashboard` | SvelteKit + Svelte 5 (runes). Auth-gated public surface, proxy + UI |
+| Path                           | Purpose                                                                                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/shared`              | Types, config, logger, DB layer (Drizzle), wire schema, prompts, services (mail/tickets/attachments/turns/usage), markdown plugins, skills loader |
+| `packages/cli`                 | `friday` CLI (citty + clack + picocolors)                                                                                                         |
+| `packages/memory`              | File-based memory store + DB-backed FTS5 + auto-recall block                                                                                      |
+| `packages/evolve`              | Self-improvement proposals (store + types; full pipeline lifts in roadmap)                                                                        |
+| `packages/integrations/linear` | Optional Linear API integration (reconcile() pending)                                                                                             |
+| `services/daemon`              | Headless API. Owns SDK, agent registry, fork-per-agent workers, MCP servers, EventBus, SSE, scheduler, mail bridge, watchdog                      |
+| `services/dashboard`           | SvelteKit + Svelte 5 (runes). Auth-gated public surface, proxy + UI                                                                               |
 
 ## Data architecture
 
@@ -194,7 +194,7 @@ agent-friday/
 - **Drizzle ORM** for schema + migrations (Postgres adapter). Daemon applies pending migrations at startup before zero-cache reconnects. `Date.now()` discipline on `_journal.json:when` is unchanged from the SQLite era (see project CLAUDE.md).
 - **CLI inspection** queries Postgres directly via the daemon API or read-only `psql` against the `friday` database when daemon is down.
 
-Full schema reference: see `docs/schema.md`.
+Schema reference: see [`packages/shared/src/db/schema.ts`](../packages/shared/src/db/schema.ts) (Drizzle definitions; `drizzle-kit generate` derives migrations from this file).
 
 ### Sync engine (Zero) — settled state to clients
 
@@ -207,31 +207,7 @@ Full schema reference: see `docs/schema.md`.
 
 ### File storage layout (`~/.friday/`)
 
-```
-~/.friday/
-  # Postgres lives at the host level (Homebrew-managed); Friday's `friday` DB
-  # is the canonical store. `~/.friday/` continues to hold operational files.
-  config.json                       # settings, MCP server config
-  .env                              # secrets (LINEAR_API_KEY, etc.)
-  SOUL.md                           # user-overridable identity layer
-  skills/*.md                       # user-additive slash skills
-  uploads/<sha-bucket>/<sha>.<ext>  # content-addressed attachments (ADR-007)
-  memory/
-    entries/*.md                    # file-based memory bodies
-    events.jsonl                    # audit log
-  evolve/
-    proposals/*.md
-    clusters/*.md
-    feedback.jsonl
-    runs.jsonl
-  schedules/<name>/                 # scheduled-agent state continuity
-    state.md                        # agent-written
-    last-run.md                     # daemon-written
-  workspaces/<builder-name>/        # builder git worktrees
-  logs/{daemon,dashboard}.jsonl     # rotated at 1 MiB
-  health.json                       # 30s daemon heartbeat
-  usage.jsonl                       # per-turn usage records
-```
+Full layout reference lives in [`docs/running.md#data-location`](running.md#data-location). Postgres holds canonical state; `~/.friday/` holds operational files (config, secrets, identity, attachment bytes, memory-entry bodies, builder worktrees, per-agent home dirs, per-builder sandbox profiles, structured logs).
 
 ### Block model and in-flight state
 
@@ -281,17 +257,17 @@ See ADR-016 for the original block-model rationale; ADR-024 for the in-memory-ac
 
 Two channels: **Zero WS** for settled state, **per-agent SSE** for live-turn deltas. Plus mutator HTTP for client-originated writes. See ADR-023 (sync) and ADR-024 (SSE narrowing).
 
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `WS /zero` | WS | Zero WebSocket, auth-gated by dashboard, reverse-proxied to `zero-cache`. Carries reactive query subscriptions, mutator submissions, and the bidirectional sync protocol. |
-| `POST /api/mutators` | POST | Zero `push-url`. Dashboard executes the named mutator (writes Postgres + optional sideband to daemon fast-path). Idempotent on Zero's `mutation_id`. |
-| `GET /api/events?agent=<name>` | SSE | Per-agent live-turn delta stream. Daemon replays the current in-flight turn from `turn_started` on (re)connect. |
-| `POST /api/internal/abort` | POST | Localhost-only fast-path for abort. Daemon sideband; dashboard mutator additionally writes `abort_requested` row. |
-| `POST /api/internal/mail-wakeup` | POST | Localhost-only fast-path for mail-bridge wake. Daemon-internal + dashboard sideband. |
-| `POST /api/internal/cancel-queued` | POST | Localhost-only fast-path to splice `nextPrompts`. Dashboard sideband; durable mutator deletes the row. |
-| `GET /api/agents/:name/blocks` | GET | Lazy fallback for blocks outside the client's sync window (>90 days, or agents archived >24h ago not yet fetched). Cursors: `before`/`after`/`around_ts`. |
-| `GET /api/health` | GET | Daemon health probe for the connectivity widget. |
-| Legacy REST | retired | The pre-sync `POST /api/chat/turn`, `POST /api/chat/turn/<id>/abort`, ticket/memory/schedule CRUD endpoints retire — clients call the equivalent mutators via Zero. |
+| Endpoint                           | Method  | Purpose                                                                                                                                                                   |
+| ---------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WS /zero`                         | WS      | Zero WebSocket, auth-gated by dashboard, reverse-proxied to `zero-cache`. Carries reactive query subscriptions, mutator submissions, and the bidirectional sync protocol. |
+| `POST /api/mutators`               | POST    | Zero `push-url`. Dashboard executes the named mutator (writes Postgres + optional sideband to daemon fast-path). Idempotent on Zero's `mutation_id`.                      |
+| `GET /api/events?agent=<name>`     | SSE     | Per-agent live-turn delta stream. Daemon replays the current in-flight turn from `turn_started` on (re)connect.                                                           |
+| `POST /api/internal/abort`         | POST    | Localhost-only fast-path for abort. Daemon sideband; dashboard mutator additionally writes `abort_requested` row.                                                         |
+| `POST /api/internal/mail-wakeup`   | POST    | Localhost-only fast-path for mail-bridge wake. Daemon-internal + dashboard sideband.                                                                                      |
+| `POST /api/internal/cancel-queued` | POST    | Localhost-only fast-path to splice `nextPrompts`. Dashboard sideband; durable mutator deletes the row.                                                                    |
+| `GET /api/agents/:name/blocks`     | GET     | Lazy fallback for blocks outside the client's sync window (>90 days, or agents archived >24h ago not yet fetched). Cursors: `before`/`after`/`around_ts`.                 |
+| `GET /api/health`                  | GET     | Daemon health probe for the connectivity widget.                                                                                                                          |
+| Legacy REST                        | retired | The pre-sync `POST /api/chat/turn`, `POST /api/chat/turn/<id>/abort`, ticket/memory/schedule CRUD endpoints retire — clients call the equivalent mutators via Zero.       |
 
 ### Mutator catalog (initial)
 
@@ -315,6 +291,7 @@ Schema in `packages/shared/src/wire/events.ts`. Only live-turn events remain:
 - `:keepalive` comment line every 20s.
 
 **Retired SSE events** (now observed via Zero reactive query updates instead):
+
 - `agent_lifecycle`, `agent_status` — row updates on `agents`.
 - `mail_delivered` — row insert on `mail`.
 - `schedule_fired` — row insert on `schedule_runs`.
@@ -329,7 +306,7 @@ Schema in `packages/shared/src/wire/events.ts`. Only live-turn events remain:
 
 ### Live-turn rendering (ADR-024)
 
-The daemon's contract narrows to the live-turn path: **in-memory accumulator updated before SSE emit.** The `liveTurns` registry's per-block buffer reflects the delta *before* the corresponding `block_delta` SSE frame ships. On `block_complete`, the daemon writes the canonical row to Postgres (`streaming=0`); Zero replicates it to all clients via the sync WS.
+The daemon's contract narrows to the live-turn path: **in-memory accumulator updated before SSE emit.** The `liveTurns` registry's per-block buffer reflects the delta _before_ the corresponding `block_delta` SSE frame ships. On `block_complete`, the daemon writes the canonical row to Postgres (`streaming=0`); Zero replicates it to all clients via the sync WS.
 
 Browser focus-switch flow:
 
@@ -340,9 +317,10 @@ Browser focus-switch flow:
 5. Client rebuilds the in-memory accumulator for any in-flight block; live deltas flow.
 
 **On `block_complete` arrival order:** SSE `block_complete` and Zero's canonical row insert may arrive in either order on the client.
+
 - SSE first: client clears the in-memory accumulator (block is done); Zero row arrives shortly and replaces the in-memory representation with the canonical bytes (identical content; visual no-op).
 - Zero first: client's reactive query renders the closed row; SSE `block_complete` arrives and clears any leftover in-memory state.
-Either order produces the same final state. There is no per-block cursor to manage and no boot_id invalidation needed on the SSE side.
+  Either order produces the same final state. There is no per-block cursor to manage and no boot_id invalidation needed on the SSE side.
 
 ## Identity / prompt stack
 
@@ -378,11 +356,11 @@ Hybrid worker model:
 
 Each worker runs with a stable `cwd` so the Claude SDK's session-transcript layout (`~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`) doesn't shift across daemon-install changes:
 
-| Agent type | `workingDirectoryFor()` returns |
-| --- | --- |
-| **builder** | The agent's git-worktree path |
-| **app-installed** (any type) | `~/.friday/apps/<appId>/` |
-| **orchestrator / helper / scheduled / bare** | `~/.friday/agents/<name>/` |
+| Agent type                                   | `workingDirectoryFor()` returns |
+| -------------------------------------------- | ------------------------------- |
+| **builder**                                  | The agent's git-worktree path   |
+| **app-installed** (any type)                 | `~/.friday/apps/<appId>/`       |
+| **orchestrator / helper / scheduled / bare** | `~/.friday/agents/<name>/`      |
 
 Pre-FRI-61 the non-builder, non-app branch fell through to `process.cwd()`. That made every prior `agents.session_id` unreachable to the SDK whenever the daemon was relaunched from a different directory (e.g. dev-tree → Homebrew install). The dedicated home + the boot-time `agent-cwd-pin-v1` state migration (which renames existing JSONLs into the new layout) close that gap.
 
@@ -420,13 +398,13 @@ Parent-side queue ensures multiple `prompt` IPCs don't race in-flight events wit
 
 The `agents.status` column has five values:
 
-| Status      | Meaning                                                                                     | Terminal? |
-| ----------- | ------------------------------------------------------------------------------------------- | --------- |
-| `idle`      | Registered, no worker in flight, can be dispatched to                                       | No        |
-| `working`   | A worker is alive and mid-turn                                                              | No        |
-| `stalled`   | Watchdog flagged the worker for missing its heartbeat budget (no exit yet)                  | No        |
-| `error`     | Worker crashed or returned an unrecoverable error                                           | Effectively |
-| `archived`  | Agent stopped receiving work; for builders, the worktree is gone and the branch deleted     | Yes       |
+| Status     | Meaning                                                                                 | Terminal?   |
+| ---------- | --------------------------------------------------------------------------------------- | ----------- |
+| `idle`     | Registered, no worker in flight, can be dispatched to                                   | No          |
+| `working`  | A worker is alive and mid-turn                                                          | No          |
+| `stalled`  | Watchdog flagged the worker for missing its heartbeat budget (no exit yet)              | No          |
+| `error`    | Worker crashed or returned an unrecoverable error                                       | Effectively |
+| `archived` | Agent stopped receiving work; for builders, the worktree is gone and the branch deleted | Yes         |
 
 `archived` is the **terminal** state. Once an agent is archived its session(s) remain visible in `/api/agents/:name/blocks` forever — history is history — but no new turns dispatch, no SSE events should mutate its state, and the row is never resurrected by recovery. A deliberate re-create with the same name uses `registerAgent` (status `idle`) and is conceptually a new entity sharing the namespace, not the same agent un-archived.
 
@@ -434,12 +412,12 @@ The `agents.status` column has five values:
 
 Every call to `archiveAgent(name, { reason })` requires a `reason` — there is no default. The reason both documents intent in logs and drives the linked-ticket close behavior (see ADR-006 amendment and `services/daemon/src/services/ticket-close.ts`):
 
-| `reason` | Friday ticket status | Linear stateType (if linked) | Used by |
-| --- | --- | --- | --- |
-| `completed` | `done` | `completed` | Orchestrator MCP `agent_archive` after a successful build |
-| `abandoned` | `closed` | `canceled` | Orchestrator MCP, REST archive, boot-time orphan sweep, `/archive` slash command |
-| `failed` | `closed` + failure comment | `canceled` | Orchestrator MCP when the agent gave up or errored irrecoverably |
-| `refork` | unchanged | unchanged | Watchdog refork path; `/clear` |
+| `reason`    | Friday ticket status       | Linear stateType (if linked) | Used by                                                                          |
+| ----------- | -------------------------- | ---------------------------- | -------------------------------------------------------------------------------- |
+| `completed` | `done`                     | `completed`                  | Orchestrator MCP `agent_archive` after a successful build                        |
+| `abandoned` | `closed`                   | `canceled`                   | Orchestrator MCP, REST archive, boot-time orphan sweep, `/archive` slash command |
+| `failed`    | `closed` + failure comment | `canceled`                   | Orchestrator MCP when the agent gave up or errored irrecoverably                 |
+| `refork`    | unchanged                  | unchanged                    | Watchdog refork path; `/clear`                                                   |
 
 The closer reads the agent row's `ticketId` **before** `registry.archiveAgent` runs — a future refactor that nulls the row's fields on archive would silently break propagation otherwise, so the read order is pinned by a test (`lifecycle-ticket-close.test.ts`). Closer execution is fire-and-forget from `archiveAgent`'s perspective; failures inside the closer (DB error, Linear unreachable, etc.) are logged but never bubble back into the worker-teardown path.
 
@@ -459,10 +437,10 @@ These are the load-bearing defenses. Most bugs the system has hit lived in code 
 
 `startInvariantAuditor()` runs one pass at boot and then every 60 s thereafter. Each pass walks every row in `agents` and checks two invariants against a **named source of truth**:
 
-| # | Rule                                                                  | Source of truth                  | Self-heal                                                              |
-| - | --------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------- |
-| 1 | A builder's worktree directory must exist OR status must be `archived` | Filesystem (`existsSync`)        | `registry.archiveAgent(name)` + publish `agent_lifecycle:archive(reason: orphan-worktree)` |
-| 2 | `status=working` ⇒ the agent is in the in-memory `live` worker map     | `lifecycle.live` (Map)           | `registry.setStatus(name, "idle")` + publish `agent_status:idle`       |
+| #   | Rule                                                                   | Source of truth           | Self-heal                                                                                  |
+| --- | ---------------------------------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------ |
+| 1   | A builder's worktree directory must exist OR status must be `archived` | Filesystem (`existsSync`) | `registry.archiveAgent(name)` + publish `agent_lifecycle:archive(reason: orphan-worktree)` |
+| 2   | `status=working` ⇒ the agent is in the in-memory `live` worker map     | `lifecycle.live` (Map)    | `registry.setStatus(name, "idle")` + publish `agent_status:idle`                           |
 
 Rule 1 takes precedence (a row that violates both gets archived, not demoted — archived is terminal; demoting an orphan to idle would let it slip back into mail-recovery dispatch on the next boot).
 
@@ -547,17 +525,17 @@ Agents owned by an app run with `cwd = <app folder>` (resolved in `workingDirect
   README.md              # optional; ignored by daemon
 ```
 
-See `docs/schema.md` for the `apps` table; ADR-021 for the load-bearing decisions; the synthetic fixture at `services/daemon/src/apps/fixtures/example-app/` for a canonical shape.
+See [`packages/shared/src/db/schema.ts`](../packages/shared/src/db/schema.ts) for the `apps` table; ADR-021 for the load-bearing decisions; the synthetic fixture at `services/daemon/src/apps/fixtures/example-app/` for a canonical shape.
 
 ## State
 
-| Storage | Lives at | Owns |
-|---|---|---|
-| Postgres | host `brew services postgresql`, database `friday` | accounts/sessions/users (BetterAuth), blocks (only with `streaming=0`), mail, tickets, ticket_relations, ticket_external_links, ticket_comments, attachments (metadata only), agents, schedules, memory_entries, db_meta, apps, client_devices, read_cursors, system_banners, schedule_runs, evolve_proposals. tsvector + GIN indexes on blocks + memory bodies. |
-| Filesystem | `~/.friday/` | SOUL.md, skills/*.md, uploads/<sha-bucket>/<sha>.<ext> (attachment bytes), memory/entries/*.md, evolve/proposals/*.md, schedules/<name>/{state,last-run}.md, workspaces/<name>/, logs/*.jsonl, apps/<id>/ |
-| Memory (daemon process) | daemon | `liveTurns` accumulator for in-flight blocks, per-agent SSE replay buffer (~1 turn), `lifecycle.live` worker map, in-process `mailBus` EventEmitter (fast path). |
-| Memory (zero-cache process) | zero-cache | Logical replication tail state, per-client subscription state. |
-| Memory (client) | browser / PWA | Zero reactive cache (IndexedDB-backed); in-memory render state for the live-turn accumulator built from per-agent SSE. |
+| Storage                     | Lives at                                           | Owns                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Postgres                    | host `brew services postgresql`, database `friday` | accounts/sessions/users (BetterAuth), blocks (only with `streaming=0`), mail, tickets, ticket_relations, ticket_external_links, ticket_comments, attachments (metadata only), agents, schedules, memory_entries, db_meta, apps, client_devices, read_cursors, system_banners, schedule_runs, evolve_proposals. tsvector + GIN indexes on blocks + memory bodies. |
+| Filesystem                  | `~/.friday/`                                       | SOUL.md, skills/_.md, uploads/<sha-bucket>/<sha>.<ext> (attachment bytes), memory/entries/_.md, evolve/proposals/_.md, schedules/<name>/{state,last-run}.md, workspaces/<name>/, logs/_.jsonl, apps/<id>/                                                                                                                                                        |
+| Memory (daemon process)     | daemon                                             | `liveTurns` accumulator for in-flight blocks, per-agent SSE replay buffer (~1 turn), `lifecycle.live` worker map, in-process `mailBus` EventEmitter (fast path).                                                                                                                                                                                                 |
+| Memory (zero-cache process) | zero-cache                                         | Logical replication tail state, per-client subscription state.                                                                                                                                                                                                                                                                                                   |
+| Memory (client)             | browser / PWA                                      | Zero reactive cache (IndexedDB-backed); in-memory render state for the live-turn accumulator built from per-agent SSE.                                                                                                                                                                                                                                           |
 
 ## Logs
 

@@ -1,9 +1,4 @@
-import type {
-  HookContextMap,
-  HookEvent,
-  HookHandler,
-  HookResultMap,
-} from "./types.js";
+import type { HookContextMap, HookEvent, HookHandler, HookResultMap } from "./types.js";
 
 export * from "./types.js";
 
@@ -26,10 +21,7 @@ export function setHooksLogger(next: HooksLogger | null): void {
 
 const handlers = new Map<HookEvent, AnyHandler[]>();
 
-export function registerHook<E extends HookEvent>(
-  event: E,
-  handler: HookHandler<E>,
-): () => void {
+export function registerHook<E extends HookEvent>(event: E, handler: HookHandler<E>): () => void {
   const list = handlers.get(event) ?? [];
   list.push(handler as AnyHandler);
   handlers.set(event, list);
@@ -68,9 +60,7 @@ export async function runHooks<E extends HookEvent>(
         message,
       });
       if (event === "before_tool_call") {
-        results.push(
-          { deny: { reason: "hook handler error" } } as HookResultMap[E],
-        );
+        results.push({ deny: { reason: "hook handler error" } } as HookResultMap[E]);
         return results;
       }
     }

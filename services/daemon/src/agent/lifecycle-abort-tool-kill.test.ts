@@ -153,10 +153,10 @@ describe("abortTurn kills in-flight tool subprocesses immediately", () => {
       // Poll until sleep is reaped. The whole point of the descendant-kill
       // is that destructive tools die within a human-imperceptible window —
       // pin a tight 100ms timeout here so a regression is caught.
-      await vi.waitFor(
-        () => expect(pidIsAlive(sleepPid)).toBe(false),
-        { timeout: 100, interval: 5 },
-      );
+      await vi.waitFor(() => expect(pidIsAlive(sleepPid)).toBe(false), {
+        timeout: 100,
+        interval: 5,
+      });
 
       // Worker stand-in (the shell) is still alive — descendant-kill is
       // surgical. The shell runs `while :; do sleep 30; done` so it stays

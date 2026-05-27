@@ -59,15 +59,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import {
-  entryTs,
-  parseEntries,
-  type RawEntry,
-} from "@friday/shared";
-import {
-  encodeProjectDir,
-  sessionFilePath,
-} from "./jsonl-paths.js";
+import { entryTs, parseEntries, type RawEntry } from "@friday/shared";
+import { encodeProjectDir, sessionFilePath } from "./jsonl-paths.js";
 import {
   getBlockByNaturalKey,
   getToolResultByToolUseId,
@@ -92,9 +85,7 @@ export interface RecoveryAgent {
   workingDirectory: string;
 }
 
-export async function recoverFromJsonl(
-  agents: RecoveryAgent[],
-): Promise<RecoveryStats> {
+export async function recoverFromJsonl(agents: RecoveryAgent[]): Promise<RecoveryStats> {
   const stats: RecoveryStats = {
     sessionsScanned: 0,
     inserted: 0,
@@ -190,9 +181,7 @@ async function processAssistantEntry(
   sessionId: string,
   entry: RawEntry,
 ): Promise<void> {
-  const msg = entry.message as
-    | { id?: string; content?: unknown[] }
-    | undefined;
+  const msg = entry.message as { id?: string; content?: unknown[] } | undefined;
   const messageId = msg?.id;
   if (!messageId || !Array.isArray(msg?.content)) {
     out.skipped += 1;
@@ -271,9 +260,7 @@ async function processUserEntry(
   // forever even after a daemon restart. We now dedup tool_results by
   // `(sessionId, tool_use_id)` instead (see reconcileToolResult below),
   // so a null message_id is fine and we keep walking the content array.
-  const msg = entry.message as
-    | { id?: string | null; content?: unknown[] }
-    | undefined;
+  const msg = entry.message as { id?: string | null; content?: unknown[] } | undefined;
   if (!Array.isArray(msg?.content)) {
     out.skipped += 1;
     return;
@@ -315,15 +302,8 @@ interface ReconcileInput {
   ts: number;
 }
 
-async function reconcileBlock(
-  out: ReconcileResult,
-  input: ReconcileInput,
-): Promise<void> {
-  const existing = await getBlockByNaturalKey(
-    input.sessionId,
-    input.messageId,
-    input.kind,
-  );
+async function reconcileBlock(out: ReconcileResult, input: ReconcileInput): Promise<void> {
+  const existing = await getBlockByNaturalKey(input.sessionId, input.messageId, input.kind);
   if (!existing) {
     const blockId = randomUUID();
     const seq = eventBus.currentSeq() + 1;
@@ -387,14 +367,8 @@ interface ReconcileToolUseInput {
  * `tool_use_id` (stable, unique) keeps recovery idempotent against
  * live-written rows regardless of streaming-chunk boundaries.
  */
-async function reconcileToolUse(
-  out: ReconcileResult,
-  input: ReconcileToolUseInput,
-): Promise<void> {
-  const existing = await getToolUseByToolUseId(
-    input.sessionId,
-    input.toolUseId,
-  );
+async function reconcileToolUse(out: ReconcileResult, input: ReconcileToolUseInput): Promise<void> {
+  const existing = await getToolUseByToolUseId(input.sessionId, input.toolUseId);
   if (!existing) {
     const blockId = randomUUID();
     const seq = eventBus.currentSeq() + 1;
@@ -452,10 +426,7 @@ async function reconcileToolResult(
   out: ReconcileResult,
   input: ReconcileToolResultInput,
 ): Promise<void> {
-  const existing = await getToolResultByToolUseId(
-    input.sessionId,
-    input.toolUseId,
-  );
+  const existing = await getToolResultByToolUseId(input.sessionId, input.toolUseId);
   if (!existing) {
     const blockId = randomUUID();
     const seq = eventBus.currentSeq() + 1;
@@ -532,12 +503,7 @@ function canonical(value: unknown): string {
  * Boot recovery walks agents from the registry, not the filesystem.
  */
 export function listSessionJsonlFiles(workingDirectory: string): string[] {
-  const projectsDir = join(
-    homedir(),
-    ".claude",
-    "projects",
-    encodeProjectDir(workingDirectory),
-  );
+  const projectsDir = join(homedir(), ".claude", "projects", encodeProjectDir(workingDirectory));
   if (!existsSync(projectsDir)) return [];
   return readdirSync(projectsDir)
     .filter((f) => f.endsWith(".jsonl"))

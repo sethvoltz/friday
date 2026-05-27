@@ -83,14 +83,10 @@ describe("mintZeroJwt + verifyZeroJwt", () => {
 
   it("rejects a token whose payload doesn't have the expected claim shape", async () => {
     // Manually craft a JWT with the right signature but missing required claims.
-    const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString(
-      "base64url",
-    );
+    const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
     const payload = Buffer.from(JSON.stringify({ foo: "bar" })).toString("base64url");
     const { createHmac } = await import("node:crypto");
-    const sig = createHmac("sha256", SECRET)
-      .update(`${header}.${payload}`)
-      .digest("base64url");
+    const sig = createHmac("sha256", SECRET).update(`${header}.${payload}`).digest("base64url");
     const token = `${header}.${payload}.${sig}`;
     expect(verifyZeroJwt(token, SECRET, 0)).toBeNull();
   });

@@ -11,7 +11,11 @@ function fakeHeaders(entries: Record<string, string>): { get: (name: string) => 
 }
 
 // Mimics the SDK's `APIError.makeMessage` shape: `"${status} ${body}"`.
-function makeApiError(status: number, body: string, opts: { requestId?: string; retryAfter?: string; retryAfterMs?: string } = {}): Error & {
+function makeApiError(
+  status: number,
+  body: string,
+  opts: { requestId?: string; retryAfter?: string; retryAfterMs?: string } = {},
+): Error & {
   status: number;
   headers: { get: (name: string) => string | null };
   requestID?: string;
@@ -45,9 +49,13 @@ describe("classifySdkError", () => {
   });
 
   it("classifies 429 with retry-after header (seconds)", () => {
-    const e = makeApiError(429, `{"type":"error","error":{"type":"rate_limit_error","message":"Rate limit exceeded"}}`, {
-      retryAfter: "30",
-    });
+    const e = makeApiError(
+      429,
+      `{"type":"error","error":{"type":"rate_limit_error","message":"Rate limit exceeded"}}`,
+      {
+        retryAfter: "30",
+      },
+    );
     const r = classifySdkError(e);
     expect(r.code).toBe("rate_limited");
     expect(r.httpStatus).toBe(429);

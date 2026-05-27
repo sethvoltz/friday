@@ -7,12 +7,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { getProposal, listProposals, updateProposal } from "./store.js";
-import type {
-  EvidencePointer,
-  Proposal,
-  ProposalType,
-  Signal,
-} from "./types.js";
+import type { EvidencePointer, Proposal, ProposalType, Signal } from "./types.js";
 import { chat, extractJson, ChatAbortError } from "./llm.js";
 
 export interface EnrichOptions {
@@ -69,9 +64,7 @@ const ENRICH_TIMEOUT_MS = 180_000;
 const ENRICH_RETRY_TIMEOUT_MS = 300_000;
 const ENRICH_RETRY_BACKOFF_MS = 2_000;
 
-export async function enrichProposals(
-  opts: EnrichOptions = {},
-): Promise<EnrichResult> {
+export async function enrichProposals(opts: EnrichOptions = {}): Promise<EnrichResult> {
   const result: EnrichResult = { enriched: [], skipped: [], failed: [] };
   const model = opts.model ?? DEFAULT_MODEL;
   const limit = opts.limit ?? DEFAULT_LIMIT;
@@ -101,8 +94,7 @@ export async function enrichProposals(
       enriched = await enrichWithRetry(enrich, proposal, context, model);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      const abortReason =
-        err instanceof ChatAbortError ? err.reason : undefined;
+      const abortReason = err instanceof ChatAbortError ? err.reason : undefined;
       const now = new Date().toISOString();
       updateProposal(proposal.id, {
         lastEnrichError: errorMsg,
@@ -139,9 +131,7 @@ function selectTargets(opts: EnrichOptions): Proposal[] {
     const p = getProposal(opts.id);
     return p ? [p] : [];
   }
-  const active = listProposals().filter(
-    (p) => p.status === "open" || p.status === "critical",
-  );
+  const active = listProposals().filter((p) => p.status === "open" || p.status === "critical");
   if (opts.retryFailed) {
     return active.filter((p) => p.lastEnrichError !== null);
   }
@@ -153,10 +143,7 @@ function needsEnrichment(p: Proposal): boolean {
   return p.updatedAt > p.enrichedAt;
 }
 
-export function hydrateEvidence(
-  signals: Signal[],
-  evidenceCharCap: number,
-): HydratedEvidence[] {
+export function hydrateEvidence(signals: Signal[], evidenceCharCap: number): HydratedEvidence[] {
   const out: HydratedEvidence[] = [];
   for (const signal of signals) {
     for (const pointer of signal.evidencePointers) {
@@ -196,9 +183,13 @@ const SYSTEM_PROMPT = [
   "",
   "Your job is to make the proposal actionable. The reader is the orchestrator",
   "agent or the human who reviews proposals. Write tightly. No fluff.",
+  "Draft discipline: surface the two most load-bearing points; cut the rest.",
+  "If any section exceeds 80 words, verify every sentence adds a new claim —",
+  "restatements get deleted. A 180-word response that sharpens the analysis",
+  "beats a 380-word one that covers it.",
   "",
   "Output a JSON object with these fields:",
-  '  "body": markdown body. ~150–400 words. Sections: **Signal summary** (1–2 lines)',
+  '  "body": markdown body. ~150–250 words. Sections: **Signal summary** (1–2 lines)',
   "         | **Root cause** (your hypothesis, anchored in the evidence)",
   "         | **Suggested change** (concrete, scoped to one of: memory entry,",
   "         system prompt edit, config change, or code change). Reference",
@@ -252,14 +243,12 @@ const defaultEnrichFn: EnrichFn = async (proposal, context, model) => {
     throw new Error("enrichment reply missing 'body'");
   }
   const type = sanitizeType(parsed.type) ?? proposal.type;
-  const blastRadius =
-    sanitizeBlastRadius(parsed.blastRadius) ?? proposal.blastRadius;
+  const blastRadius = sanitizeBlastRadius(parsed.blastRadius) ?? proposal.blastRadius;
   return { body, type, blastRadius };
 };
 
 function sanitizeType(raw: unknown): ProposalType | null {
-  if (raw === "memory" || raw === "prompt" || raw === "config" || raw === "code")
-    return raw;
+  if (raw === "memory" || raw === "prompt" || raw === "config" || raw === "code") return raw;
   return null;
 }
 
@@ -268,10 +257,7 @@ function sanitizeBlastRadius(raw: unknown): Proposal["blastRadius"] | null {
   return null;
 }
 
-function buildUserPrompt(
-  proposal: Proposal,
-  context: EnrichContext,
-): string {
+function buildUserPrompt(proposal: Proposal, context: EnrichContext): string {
   const lines: string[] = [];
   lines.push(`# Proposal to enrich`);
   lines.push("");
@@ -294,9 +280,7 @@ function buildUserPrompt(
     lines.push("_No evidence pointers were readable._");
   } else {
     for (const e of context.evidence) {
-      const loc = e.pointer.line
-        ? `${e.pointer.path}:${e.pointer.line}`
-        : e.pointer.path;
+      const loc = e.pointer.line ? `${e.pointer.path}:${e.pointer.line}` : e.pointer.path;
       lines.push(`### \`${e.signalKey}\` — ${loc}`);
       if (e.pointer.sessionId) lines.push(`session: ${e.pointer.sessionId}`);
       lines.push("```");
@@ -310,8 +294,6 @@ function buildUserPrompt(
   lines.push(proposal.proposedChange);
   lines.push("```");
   lines.push("");
-  lines.push(
-    "Now produce the enrichment as the JSON object specified in the system prompt.",
-  );
+  lines.push("Now produce the enrichment as the JSON object specified in the system prompt.");
   return lines.join("\n");
 }

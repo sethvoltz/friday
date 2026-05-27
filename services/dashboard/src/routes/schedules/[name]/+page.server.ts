@@ -15,15 +15,12 @@ export const load: PageServerLoad = async ({ params }) => {
   try {
     const [schedule, artifacts] = await Promise.all([
       daemonGet<ScheduleRow>(`/api/schedules/${encodeURIComponent(name)}`),
-      daemonGet<ScheduleArtifacts>(
-        `/api/schedules/${encodeURIComponent(name)}/state`,
-      ).catch(() => ({ state: null, lastRun: null, stateDir: "" })),
+      daemonGet<ScheduleArtifacts>(`/api/schedules/${encodeURIComponent(name)}/state`).catch(
+        () => ({ state: null, lastRun: null, stateDir: "" }),
+      ),
     ]);
     return { schedule, artifacts };
   } catch (err) {
-    throw error(
-      404,
-      `schedule not found: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    throw error(404, `schedule not found: ${err instanceof Error ? err.message : String(err)}`);
   }
 };

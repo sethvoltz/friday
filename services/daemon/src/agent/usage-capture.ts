@@ -12,9 +12,7 @@ export type FinalUsage = {
  * `cache_creation_input_tokens` / `cache_read_input_tokens`; this remap
  * also matches the column names on the `usage` table.
  */
-export function extractUsageFromResult(
-  m: Record<string, unknown>,
-): FinalUsage | undefined {
+export function extractUsageFromResult(m: Record<string, unknown>): FinalUsage | undefined {
   if (m.type !== "result") return undefined;
   const u = m.usage as
     | {

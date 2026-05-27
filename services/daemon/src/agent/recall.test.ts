@@ -17,9 +17,7 @@ describe("memory recall hook (FRI-89)", () => {
     vi.doMock("@friday/memory", () => ({
       buildAutoRecallBlock: async () => "",
     }));
-    const { memoryRecallHook } = await import(
-      "../hooks/memory-recall-hook.js"
-    );
+    const { memoryRecallHook } = await import("../hooks/memory-recall-hook.js");
 
     const result = await memoryRecallHook({
       intent: "query",
@@ -34,12 +32,9 @@ describe("memory recall hook (FRI-89)", () => {
   it("memoryRecallHook surfaces the <memory-context> block via appendSystemPrompt when memory has hits", async () => {
     vi.resetModules();
     vi.doMock("@friday/memory", () => ({
-      buildAutoRecallBlock: async () =>
-        "<memory-context>\nrelevant fact\n</memory-context>",
+      buildAutoRecallBlock: async () => "<memory-context>\nrelevant fact\n</memory-context>",
     }));
-    const { memoryRecallHook } = await import(
-      "../hooks/memory-recall-hook.js"
-    );
+    const { memoryRecallHook } = await import("../hooks/memory-recall-hook.js");
 
     const result = await memoryRecallHook({
       intent: "query",
@@ -49,8 +44,7 @@ describe("memory recall hook (FRI-89)", () => {
     });
 
     expect(result).toEqual({
-      appendSystemPrompt:
-        "<memory-context>\nrelevant fact\n</memory-context>",
+      appendSystemPrompt: "<memory-context>\nrelevant fact\n</memory-context>",
     });
   });
 
@@ -61,9 +55,7 @@ describe("memory recall hook (FRI-89)", () => {
         throw new Error("memory backend down");
       },
     }));
-    const { memoryRecallHook } = await import(
-      "../hooks/memory-recall-hook.js"
-    );
+    const { memoryRecallHook } = await import("../hooks/memory-recall-hook.js");
 
     const result = await memoryRecallHook({
       intent: "query",
@@ -155,5 +147,71 @@ describe("memory recall hook (FRI-89)", () => {
     });
 
     expect(allowedToolsOverride).toEqual(["Read", "Grep"]);
+  });
+});
+
+describe("safeRecall listener-ready gate (33sq)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.resetModules();
+  });
+
+  it("fails open (returns '') and logs memory.recall.listener-timeout when listener does not become ready within 3 s", async () => {
+    vi.useFakeTimers();
+    vi.doMock("../memory/listener.js", () => ({
+      whenMemoryListenerReady: () => new Promise<void>(() => {}), // never resolves
+    }));
+    const buildMock = vi.fn().mockResolvedValue("should not be reached");
+    vi.doMock("@friday/memory", () => ({ buildAutoRecallBlock: buildMock }));
+    const logMock = vi.fn();
+    vi.doMock("../log.js", () => ({ logger: { log: logMock } }));
+
+    const { safeRecall } = await import("./recall.js");
+
+    const resultPromise = safeRecall("test query", "user_chat");
+    await vi.advanceTimersByTimeAsync(3_001);
+    const result = await resultPromise;
+
+    expect(result).toBe("");
+    expect(buildMock).not.toHaveBeenCalled();
+    expect(logMock).toHaveBeenCalledWith("warn", "memory.recall.listener-timeout", {
+      intent: "user_chat",
+    });
+  });
+
+  it("proceeds to recall when listener is already ready", async () => {
+    vi.doMock("../memory/listener.js", () => ({
+      whenMemoryListenerReady: () => Promise.resolve(),
+    }));
+    vi.doMock("@friday/memory", () => ({
+      buildAutoRecallBlock: async () => "<memory-context>test</memory-context>",
+    }));
+
+    const { safeRecall } = await import("./recall.js");
+    const result = await safeRecall("test query", "user_chat");
+
+    expect(result).toBe("<memory-context>test</memory-context>");
+  });
+
+  it("falls back to '' when listener resolves but buildAutoRecallBlock throws", async () => {
+    vi.doMock("../memory/listener.js", () => ({
+      whenMemoryListenerReady: () => Promise.resolve(),
+    }));
+    vi.doMock("@friday/memory", () => ({
+      buildAutoRecallBlock: () => {
+        throw new Error("db error");
+      },
+    }));
+    const logMock = vi.fn();
+    vi.doMock("../log.js", () => ({ logger: { log: logMock } }));
+
+    const { safeRecall } = await import("./recall.js");
+    const result = await safeRecall("test query", "mail");
+
+    expect(result).toBe("");
+    expect(logMock).toHaveBeenCalledWith("warn", "memory.recall.error", {
+      intent: "mail",
+      message: "db error",
+    });
   });
 });

@@ -1,10 +1,4 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { DATA_DIR } from "./config.js";
@@ -59,9 +53,7 @@ export function getDaemonSecret(): string {
       // Lost the race — loop back and read what the winner wrote.
     }
   }
-  throw new Error(
-    `failed to read or create daemon secret at ${DAEMON_SECRET_PATH}`,
-  );
+  throw new Error(`failed to read or create daemon secret at ${DAEMON_SECRET_PATH}`);
 }
 
 /**
@@ -80,7 +72,7 @@ function verifyDaemonSecretPermissions(): void {
   if ((perm & 0o077) !== 0) {
     const octal = perm.toString(8).padStart(3, "0");
     const msg = `FATAL: daemon-secret file ${DAEMON_SECRET_PATH} has mode ${octal} (group/other bits set). Run: chmod 0600 ${DAEMON_SECRET_PATH}`;
-    // eslint-disable-next-line no-console
+
     console.error(msg);
     process.exit(1);
   }

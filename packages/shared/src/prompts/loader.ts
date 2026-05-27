@@ -25,12 +25,7 @@ export interface PromptStack {
   protocols: string;
 }
 
-export type AgentBaseKey =
-  | "orchestrator"
-  | "builder"
-  | "helper"
-  | "scheduled"
-  | "bare";
+export type AgentBaseKey = "orchestrator" | "builder" | "helper" | "scheduled" | "bare";
 
 /**
  * Protocols loaded automatically for an agent type, regardless of the
@@ -67,10 +62,7 @@ export function readPromptStack(
   const dir = bundledPromptsDir();
   const constitution = readFileSync(join(dir, "CONSTITUTION.md"), "utf8");
   const soul = readSoul();
-  const agentBase = readFileSync(
-    join(dir, "agents", `${agentType}.md`),
-    "utf8",
-  );
+  const agentBase = readFileSync(join(dir, "agents", `${agentType}.md`), "utf8");
   // Merge type-default protocols with env-gated and caller-requested ones,
   // dedup, preserve order. Env-gated protocols sit between type-defaults and
   // caller-requested so that explicit caller overrides still win on position.
@@ -133,6 +125,11 @@ export function renderIdentityBlock(identity: AgentIdentity): string {
  *      pinned memories)
  *   5. agents/<type>
  *   6. protocols/*
+ *
+ * Current datetime is NOT included here — it is appended inline in
+ * worker.ts `runQuery` (FRI-52) so every turn carries the live time,
+ * not the session-start time. This covers spawn turns, subsequent turns,
+ * and mail-initiated turns inside long-lived workers uniformly.
  */
 export function composeSystemPrompt(
   stack: PromptStack,
@@ -152,6 +149,42 @@ export function composeSystemPrompt(
     .join("\n\n---\n\n");
 }
 
+/**
+ * Build a human-readable current local date-and-time block for injection
+ * into the system prompt. Derived from the system timezone at call time so
+ * every new agent turn gets a fresh value.
+ *
+ * Format: "Friday, May 23 2026, 9:45 PM PDT (UTC-7)"
+ */
+export function renderLocalDatetime(): string {
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: tz,
+    timeZoneName: "short",
+  }).formatToParts(now);
+  const p: Record<string, string> = {};
+  for (const { type, value } of parts) {
+    p[type] = value;
+  }
+  // getTimezoneOffset() returns minutes *behind* UTC; negate for standard sign.
+  const offsetMinutes = -now.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absMin = Math.abs(offsetMinutes);
+  const hh = Math.floor(absMin / 60);
+  const mm = absMin % 60;
+  const offset = mm > 0 ? `UTC${sign}${hh}:${String(mm).padStart(2, "0")}` : `UTC${sign}${hh}`;
+  const datetime = `${p.weekday}, ${p.month} ${p.day} ${p.year}, ${p.hour}:${p.minute} ${p.dayPeriod} ${p.timeZoneName} (${offset})`;
+  return `# currentDateTime\nCurrent local date and time: ${datetime}`;
+}
+
 /** First-boot copy: if ~/.friday/SOUL.md doesn't exist, install the default.
  *  Substitutes `{{YOUR_NAME}}` with the shell user's capitalized login name
  *  (e.g. `seth` → `Seth`) so the Address rule lands ready-to-use. Personal
@@ -159,14 +192,8 @@ export function composeSystemPrompt(
 export function ensureSoul(): void {
   if (existsSync(SOUL_PATH)) return;
   const dir = bundledPromptsDir();
-  const defaultSoul = readFileSync(
-    join(dir, "fragments", "soul.default.md"),
-    "utf8",
-  );
-  const personalized = defaultSoul.replaceAll(
-    "{{YOUR_NAME}}",
-    deriveUserName(),
-  );
+  const defaultSoul = readFileSync(join(dir, "fragments", "soul.default.md"), "utf8");
+  const personalized = defaultSoul.replaceAll("{{YOUR_NAME}}", deriveUserName());
   writeFileSync(SOUL_PATH, personalized);
 }
 

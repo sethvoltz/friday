@@ -72,10 +72,7 @@ import {
   type SaveProposalInput,
   type UpdateProposalInput,
 } from "@friday/evolve";
-import {
-  deleteProposalFromPg,
-  syncProposalToPg,
-} from "../evolve/projector.js";
+import { deleteProposalFromPg, syncProposalToPg } from "../evolve/projector.js";
 import {
   createIssueWithConfiguredTeam as linearCreateIssue,
   getStateIdByType as linearGetStateIdByType,
@@ -98,9 +95,7 @@ import {
   triggerSchedule,
   upsertSchedule,
 } from "../scheduler/scheduler.js";
-import {
-  readScheduleArtifacts,
-} from "../scheduler/state.js";
+import { readScheduleArtifacts } from "../scheduler/state.js";
 import * as registry from "../agent/registry.js";
 import {
   computeSpawnDepth,
@@ -117,17 +112,9 @@ import {
   recordUserBlock,
   removeQueuedPrompt,
 } from "../agent/lifecycle.js";
-import {
-  deleteBlockById,
-  getBlockById,
-  getUserChatBlockByTurnId,
-} from "@friday/shared/services";
+import { deleteBlockById, getBlockById, getUserChatBlockByTurnId } from "@friday/shared/services";
 import { generateScratchName } from "../agent/scratch-names.js";
-import {
-  archiveWorkspace,
-  createWorkspace,
-  workspacePath,
-} from "../agent/workspace.js";
+import { archiveWorkspace, createWorkspace, workspacePath } from "../agent/workspace.js";
 import { commandsApi } from "./commands.js";
 import {
   AppInstallError,
@@ -216,8 +203,7 @@ async function handle(
       {
         agentName: agentRow.name,
         agentType: agentRow.type,
-        parentName:
-          "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+        parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
       },
       pinnedFacts,
     );
@@ -298,10 +284,7 @@ async function handle(
         effort: modelCfg.effort,
         resumeSessionId,
         daemonPort: resolveDaemonPort(cfg),
-        parentName:
-          "parentName" in agentRow
-            ? agentRow.parentName ?? undefined
-            : undefined,
+        parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
         mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
         allowedToolsOverride,
       },
@@ -314,11 +297,7 @@ async function handle(
   // block row is deleted (the message never reached the LLM) and the
   // entry is yanked from the worker's `nextPrompts`. Returns the prompt
   // text so the dashboard can stuff it back into the input bar.
-  if (
-    method === "DELETE" &&
-    path.startsWith("/api/chat/turn/") &&
-    path.endsWith("/queued")
-  ) {
+  if (method === "DELETE" && path.startsWith("/api/chat/turn/") && path.endsWith("/queued")) {
     const turnId = path.split("/")[4];
     const block = await getUserChatBlockByTurnId(turnId);
     if (!block) {
@@ -364,10 +343,7 @@ async function handle(
   // Idempotent on the in-memory state: re-running after the splice
   // has already happened returns `{ ok: true, already_canceled: true,
   // text: "" }`. The dashboard treats both responses the same way.
-  if (
-    method === "POST" &&
-    path === "/api/internal/cancel-queued"
-  ) {
+  if (method === "POST" && path === "/api/internal/cancel-queued") {
     const body = await readJson<{ block_id?: string }>(req);
     const blockId = body.block_id;
     if (typeof blockId !== "string" || blockId.length === 0) {
@@ -424,10 +400,7 @@ async function handle(
   //
   // Authenticated callers only (loopback + shared secret enforced at
   // the dashboard's proxy layer).
-  if (
-    method === "POST" &&
-    path === "/api/internal/abort-turn"
-  ) {
+  if (method === "POST" && path === "/api/internal/abort-turn") {
     const body = await readJson<{ turn_id?: string }>(req);
     const turnId = body.turn_id;
     if (typeof turnId !== "string" || turnId.length === 0) {
@@ -454,9 +427,7 @@ async function handle(
     if (blocks.length === 0) {
       return json(res, 404, { error: "turn_not_found", turn_id: turnId });
     }
-    const userBlock = blocks.find(
-      (b) => b.role === "user" && b.kind === "text",
-    );
+    const userBlock = blocks.find((b) => b.role === "user" && b.kind === "text");
     if (!userBlock) {
       return json(res, 422, {
         error: "no_user_prompt",
@@ -506,19 +477,19 @@ async function handle(
       {
         agentName: agentRow.name,
         agentType: agentRow.type,
-        parentName:
-          "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+        parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
       },
       pinnedFacts,
     );
-    const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } =
-      await composeDispatchPrompt({
+    const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } = await composeDispatchPrompt(
+      {
         intentText: parsedText,
         intentTag: "user_chat",
         body: parsedText,
         agentType: agentRow.type,
         baseSystemPrompt,
-      });
+      },
+    );
     const modelCfg = normalizeModelConfig(cfg.model);
     const resumeCwd = await registry.workingDirectoryFor(agentRow);
     dispatchTurn({
@@ -535,10 +506,7 @@ async function handle(
         effort: modelCfg.effort,
         resumeSessionId: agentRow.sessionId ?? undefined,
         daemonPort: resolveDaemonPort(cfg),
-        parentName:
-          "parentName" in agentRow
-            ? agentRow.parentName ?? undefined
-            : undefined,
+        parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
         mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
       },
     });
@@ -560,9 +528,7 @@ async function handle(
     const typeFilter = url.searchParams.get("type");
     const statusFilter = url.searchParams.get("status");
     const filtered = merged.filter(
-      (a) =>
-        (!typeFilter || a.type === typeFilter) &&
-        (!statusFilter || a.status === statusFilter),
+      (a) => (!typeFilter || a.type === typeFilter) && (!statusFilter || a.status === statusFilter),
     );
     // Augment with past-session count so the dashboard sidebar can decide
     // whether an agent has expandable history without N+1 follow-up calls.
@@ -585,23 +551,18 @@ async function handle(
       prompt: string;
       model?: string;
       ticketId?: string;
-      worktree?: { repo: string; branch?: string };
+      worktree?: { repo: string; branch?: string; fromRef?: string };
       reason?: string;
     }>(req);
     if (!body.name || !isValidAgentName(body.name)) {
       return json(res, 400, {
-        error:
-          "invalid name (must be lowercase alphanumeric + dashes, up to 64 chars)",
+        error: "invalid name (must be lowercase alphanumeric + dashes, up to 64 chars)",
       });
     }
     if (await registry.getAgent(body.name)) {
       return json(res, 409, { error: `agent "${body.name}" already exists` });
     }
-    if (
-      body.type !== "builder" &&
-      body.type !== "helper" &&
-      body.type !== "bare"
-    ) {
+    if (body.type !== "builder" && body.type !== "helper" && body.type !== "bare") {
       return json(res, 400, {
         error: `cannot create agent of type "${body.type}" via this endpoint`,
       });
@@ -612,9 +573,7 @@ async function handle(
     // (matches the implicit-create path in POST /api/chat/turn). Builder
     // and helper callers are restricted to spawning helpers and must
     // include a non-empty `reason`.
-    const callerRow = body.parentName
-      ? await registry.getAgent(body.parentName)
-      : null;
+    const callerRow = body.parentName ? await registry.getAgent(body.parentName) : null;
     const callerType: CallerType = callerRow?.type ?? "orchestrator";
     const rejection = validateSpawnPermissions(
       { type: body.type, reason: body.reason },
@@ -624,9 +583,7 @@ async function handle(
       return json(res, rejection.status, rejection.body);
     }
     const persistedReason =
-      callerType === "orchestrator"
-        ? null
-        : (body.reason ?? "").trim() || null;
+      callerType === "orchestrator" ? null : (body.reason ?? "").trim() || null;
 
     let workingDirectory = process.cwd();
     let worktreePath: string | undefined;
@@ -639,6 +596,7 @@ async function handle(
           name: body.name,
           baseRepo: repo,
           branch,
+          fromRef: body.worktree?.fromRef,
         });
         workingDirectory = ws.path;
         worktreePath = ws.path;
@@ -653,9 +611,7 @@ async function handle(
     // exempt — workspace containment (worktree cwd) is the stronger rule,
     // and builders can't be declared in a manifest in v1 anyway.
     const inheritedAppId =
-      body.type !== "builder" && body.parentName
-        ? await registry.getAppId(body.parentName)
-        : null;
+      body.type !== "builder" && body.parentName ? await registry.getAppId(body.parentName) : null;
     await registry.registerAgent({
       name: body.name,
       type: body.type,
@@ -673,10 +629,7 @@ async function handle(
     // capped at SPAWN_PARENT_CHAIN_CAP. The evolve depth scanner
     // (`scanAgentSpawnDepth`) feeds off these lines.
     try {
-      const { depth, parentChain } = await computeSpawnDepth(
-        body.parentName,
-        registry.getAgent,
-      );
+      const { depth, parentChain } = await computeSpawnDepth(body.parentName, registry.getAgent);
       logger.log("info", "agent.spawn", {
         parent: body.parentName,
         child: body.name,
@@ -788,17 +741,13 @@ async function handle(
     );
     const validReasons = ["completed", "abandoned", "failed"] as const;
     type ApiReason = (typeof validReasons)[number];
-    if (
-      !body.reason ||
-      !validReasons.includes(body.reason as ApiReason)
-    ) {
+    if (!body.reason || !validReasons.includes(body.reason as ApiReason)) {
       return json(res, 400, {
         error: `reason required, one of: ${validReasons.join(", ")}`,
       });
     }
     const reason = body.reason as ApiReason;
-    const branch =
-      a.type === "builder" && "branch" in a ? a.branch : undefined;
+    const branch = a.type === "builder" && "branch" in a ? a.branch : undefined;
     const repo = process.cwd();
     // F1-B: await the archive so the response is a strong "actually
     // archived" signal — no race against the worker's exit handler.
@@ -866,17 +815,9 @@ async function handle(
 
   // --- Tickets ---
   if (method === "GET" && path === "/api/tickets") {
-    const TICKET_STATUSES = [
-      "open",
-      "in_progress",
-      "done",
-      "blocked",
-      "closed",
-    ] as const;
+    const TICKET_STATUSES = ["open", "in_progress", "done", "blocked", "closed"] as const;
     const rawStatus = url.searchParams.get("status");
-    const status = (TICKET_STATUSES as readonly string[]).includes(
-      rawStatus ?? "",
-    )
+    const status = (TICKET_STATUSES as readonly string[]).includes(rawStatus ?? "")
       ? (rawStatus as (typeof TICKET_STATUSES)[number])
       : undefined;
     const assignee = url.searchParams.get("assignee") ?? undefined;
@@ -907,8 +848,7 @@ async function handle(
   }
   if (method === "POST" && /^\/api\/tickets\/[^/]+\/links$/.test(path)) {
     const id = path.split("/")[3];
-    if (!(await getTicket(id)))
-      return json(res, 404, { error: "ticket not found" });
+    if (!(await getTicket(id))) return json(res, 404, { error: "ticket not found" });
     const body = await readJson<{
       system: string;
       externalId: string;
@@ -929,8 +869,7 @@ async function handle(
   }
   if (method === "DELETE" && /^\/api\/tickets\/[^/]+\/links$/.test(path)) {
     const id = path.split("/")[3];
-    if (!(await getTicket(id)))
-      return json(res, 404, { error: "ticket not found" });
+    if (!(await getTicket(id))) return json(res, 404, { error: "ticket not found" });
     const system = url.searchParams.get("system");
     const externalId = url.searchParams.get("externalId");
     if (!system || !externalId) {
@@ -961,10 +900,7 @@ async function handle(
     }
     return json(res, 200, { ok: true });
   }
-  if (
-    method === "POST" &&
-    /^\/api\/schedules\/[^/]+\/trigger$/.test(path)
-  ) {
+  if (method === "POST" && /^\/api\/schedules\/[^/]+\/trigger$/.test(path)) {
     const name = decodeURIComponent(path.split("/")[3]);
     const runId = await triggerSchedule(name);
     if (!runId)
@@ -973,16 +909,10 @@ async function handle(
       });
     return json(res, 200, { runId });
   }
-  if (
-    method === "POST" &&
-    /^\/api\/schedules\/[^/]+\/(pause|resume)$/.test(path)
-  ) {
+  if (method === "POST" && /^\/api\/schedules\/[^/]+\/(pause|resume)$/.test(path)) {
     const name = decodeURIComponent(path.split("/")[3]);
     const action = path.split("/")[4];
-    const ok =
-      action === "pause"
-        ? await pauseSchedule(name)
-        : await resumeSchedule(name);
+    const ok = action === "pause" ? await pauseSchedule(name) : await resumeSchedule(name);
     if (!ok) return json(res, 404, { error: "schedule not found" });
     return json(res, 200, { ok: true });
   }
@@ -994,8 +924,7 @@ async function handle(
   }
   if (method === "GET" && /^\/api\/schedules\/[^/]+\/state$/.test(path)) {
     const name = decodeURIComponent(path.split("/")[3]);
-    if (!(await getSchedule(name)))
-      return json(res, 404, { error: "schedule not found" });
+    if (!(await getSchedule(name))) return json(res, 404, { error: "schedule not found" });
     return json(res, 200, readScheduleArtifacts(name));
   }
   if (method === "DELETE" && /^\/api\/schedules\/[^/]+$/.test(path)) {
@@ -1014,7 +943,10 @@ async function handle(
     const tagsParam = url.searchParams.get("tags");
     const limitParam = url.searchParams.get("limit");
     const tags = tagsParam
-      ? tagsParam.split(",").map((t) => t.trim()).filter(Boolean)
+      ? tagsParam
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean)
       : undefined;
     const limit = limitParam ? Math.max(1, Number(limitParam) || 10) : undefined;
     if (!q.trim()) return json(res, 400, { error: "q parameter required" });
@@ -1038,9 +970,7 @@ async function handle(
     }
     const id = (body.id?.trim() || slugifyMemoryId(body.title)).slice(0, 64);
     if (!id) return json(res, 400, { error: "could not derive id from title" });
-    const callerName = String(
-      req.headers["x-friday-caller-name"] ?? "user",
-    );
+    const callerName = String(req.headers["x-friday-caller-name"] ?? "user");
     const now = new Date().toISOString();
     const existing = await getEntry(id);
     const entry: MemoryEntry = {
@@ -1095,9 +1025,7 @@ async function handle(
     const statusFilter = url.searchParams.get("status");
     const typeFilter = url.searchParams.get("type");
     const filtered = all.filter(
-      (p) =>
-        (!statusFilter || p.status === statusFilter) &&
-        (!typeFilter || p.type === typeFilter),
+      (p) => (!statusFilter || p.status === statusFilter) && (!typeFilter || p.type === typeFilter),
     );
     return json(res, 200, filtered);
   }
@@ -1116,41 +1044,27 @@ async function handle(
     void syncProposalToPg(p.id);
     return json(res, 201, p);
   }
-  if (
-    method === "GET" &&
-    /^\/api\/evolve\/proposals\/[^/]+$/.test(path)
-  ) {
+  if (method === "GET" && /^\/api\/evolve\/proposals\/[^/]+$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[4]);
     const p = getProposal(id);
     if (!p) return json(res, 404, { error: "proposal not found" });
     return json(res, 200, p);
   }
-  if (
-    method === "PATCH" &&
-    /^\/api\/evolve\/proposals\/[^/]+$/.test(path)
-  ) {
+  if (method === "PATCH" && /^\/api\/evolve\/proposals\/[^/]+$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[4]);
-    if (!getProposal(id))
-      return json(res, 404, { error: "proposal not found" });
+    if (!getProposal(id)) return json(res, 404, { error: "proposal not found" });
     const patch = await readJson<UpdateProposalInput>(req);
     const next = updateProposal(id, patch);
     void syncProposalToPg(id);
     return json(res, 200, next);
   }
-  if (
-    method === "DELETE" &&
-    /^\/api\/evolve\/proposals\/[^/]+$/.test(path)
-  ) {
+  if (method === "DELETE" && /^\/api\/evolve\/proposals\/[^/]+$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[4]);
-    if (!deleteProposal(id))
-      return json(res, 404, { error: "proposal not found" });
+    if (!deleteProposal(id)) return json(res, 404, { error: "proposal not found" });
     void deleteProposalFromPg(id);
     return json(res, 200, { ok: true });
   }
-  if (
-    method === "POST" &&
-    /^\/api\/evolve\/proposals\/[^/]+\/apply$/.test(path)
-  ) {
+  if (method === "POST" && /^\/api\/evolve\/proposals\/[^/]+\/apply$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[4]);
     const p = getProposal(id);
     if (!p) return json(res, 404, { error: "proposal not found" });
@@ -1180,10 +1094,7 @@ async function handle(
     void syncProposalToPg(id);
     return json(res, 200, { proposal: updated, ticket });
   }
-  if (
-    method === "POST" &&
-    /^\/api\/evolve\/proposals\/[^/]+\/dismiss$/.test(path)
-  ) {
+  if (method === "POST" && /^\/api\/evolve\/proposals\/[^/]+\/dismiss$/.test(path)) {
     const id = decodeURIComponent(path.split("/")[4]);
     const p = getProposal(id);
     if (!p) return json(res, 404, { error: "proposal not found" });
@@ -1611,7 +1522,8 @@ async function handle(
       "x-content-type-options": "nosniff",
     };
     if (!inlineSafe) {
-      headers["content-disposition"] = `attachment; filename="${safeFilename.ascii}"; filename*=UTF-8''${safeFilename.rfc5987}`;
+      headers["content-disposition"] =
+        `attachment; filename="${safeFilename.ascii}"; filename*=UTF-8''${safeFilename.rfc5987}`;
     }
     res.writeHead(200, headers);
     res.end(bytes);
@@ -1841,10 +1753,7 @@ function writeEvent(res: ServerResponse, e: { type: string; seq: number }): void
  * line so the browser's `Last-Event-ID` cursor doesn't advance to seq=0,
  * which would defeat replay on the next reconnect.
  */
-function writeRawEvent(
-  res: ServerResponse,
-  e: { type: string; [k: string]: unknown },
-): void {
+function writeRawEvent(res: ServerResponse, e: { type: string; [k: string]: unknown }): void {
   try {
     res.write(`event: ${e.type}\n`);
     res.write(`data: ${JSON.stringify(e)}\n\n`);
@@ -1906,9 +1815,7 @@ async function handleSystemCommand(
       const topic = args.trim();
       // Pre-fetch all existing agent names once so the name generator's
       // collision predicate stays sync (the loop tries random pairs).
-      const existingNames = new Set(
-        (await registry.listAgents()).map((a) => a.name),
-      );
+      const existingNames = new Set((await registry.listAgents()).map((a) => a.name));
       const name = generateScratchName((n) => existingNames.has(n));
       await registry.registerAgent({
         name,
@@ -2002,8 +1909,8 @@ async function handleSystemCommand(
 function renderProposalForTicket(p: Proposal): string {
   const sections = [p.proposedChange.trim()];
   if (p.signals.length > 0) {
-    const lines = p.signals.map((s) =>
-      `- \`${s.source}/${s.key}\` (${s.severity}, count=${s.count})`,
+    const lines = p.signals.map(
+      (s) => `- \`${s.source}/${s.key}\` (${s.severity}, count=${s.count})`,
     );
     sections.push(`## Evidence\n\n${lines.join("\n")}`);
   }
@@ -2119,8 +2026,7 @@ function sanitizeFilenameForHeader(raw: string): {
   // ASCII `filename="..."` form.
   // eslint-disable-next-line no-control-regex
   const cleaned = raw.replace(/[\x00-\x1f\x7f"\\/]/g, "_").slice(0, 200);
-  const ascii =
-    cleaned.replace(/[^\x20-\x7e]/g, "_") || "attachment";
+  const ascii = cleaned.replace(/[^\x20-\x7e]/g, "_") || "attachment";
   const rfc5987 = encodeURIComponent(cleaned).replace(/['()]/g, escape);
   return { ascii, rfc5987 };
 }

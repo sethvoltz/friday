@@ -8,12 +8,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 import pgPkg from "pg";
 
 let handle: TestDbHandle;
@@ -89,14 +84,10 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
       });
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_app_changed");
 
-      await db
-        .update(schema.apps)
-        .set({ status: "uninstall_requested" });
+      await db.update(schema.apps).set({ status: "uninstall_requested" });
 
       await vi.waitFor(
         () => {
@@ -130,9 +121,7 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
       });
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_app_changed");
 
       await db.update(schema.apps).set({ status: "reload_requested" });
@@ -172,16 +161,12 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
       });
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_app_changed");
 
       // Common no-op UPDATE (version bump via the daemon — stays
       // at 'installed').
-      await db
-        .update(schema.apps)
-        .set({ version: "1.0.1", upgradedAt: new Date() });
+      await db.update(schema.apps).set({ version: "1.0.1", upgradedAt: new Date() });
 
       // negative-space: trigger predicate excludes 'installed' UPDATEs —
       // a bounded real-time wait confirms no spurious NOTIFY arrives.
@@ -218,19 +203,15 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
       // before attaching our handler so the assertion below isn't polluted.
       await new Promise((r) => setTimeout(r, 250));
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
 
-      await db
-        .update(schema.apps)
-        .set({
-          status: "installed",
-          name: "Real Name",
-          version: "1.0.0",
-          manifestVersion: 1,
-          manifestJson: { id: "test-flip" },
-        });
+      await db.update(schema.apps).set({
+        status: "installed",
+        name: "Real Name",
+        version: "1.0.0",
+        manifestVersion: 1,
+        manifestJson: { id: "test-flip" },
+      });
 
       // negative-space: trigger predicate excludes 'installed' UPDATEs —
       // a bounded real-time wait confirms no spurious NOTIFY arrives.
@@ -245,25 +226,19 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
 describe("apps status enum", () => {
   it("accepts the three pending statuses", async () => {
     const db = getDb();
-    for (const status of [
-      "pending_install",
-      "uninstall_requested",
-      "reload_requested",
-    ] as const) {
-      await db
-        .insert(schema.apps)
-        .values({
-          id: `enum-${status}`,
-          name: "",
-          version: "0.0.0",
-          manifestVersion: 0,
-          folderPath: `/tmp/enum-${status}`,
-          manifestJson: {},
-          status,
-          installedAt: new Date(),
-          upgradedAt: null,
-          metaJson: null,
-        });
+    for (const status of ["pending_install", "uninstall_requested", "reload_requested"] as const) {
+      await db.insert(schema.apps).values({
+        id: `enum-${status}`,
+        name: "",
+        version: "0.0.0",
+        manifestVersion: 0,
+        folderPath: `/tmp/enum-${status}`,
+        manifestJson: {},
+        status,
+        installedAt: new Date(),
+        upgradedAt: null,
+        metaJson: null,
+      });
     }
     const rows = await db.select().from(schema.apps);
     expect(rows.map((r) => r.status).sort()).toEqual(

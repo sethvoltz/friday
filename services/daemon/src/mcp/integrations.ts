@@ -17,9 +17,7 @@ export interface BuildIntegrationsServerOptions {
   daemonPort: number;
 }
 
-export function buildIntegrationsServer(
-  opts: BuildIntegrationsServerOptions,
-) {
+export function buildIntegrationsServer(opts: BuildIntegrationsServerOptions) {
   const ctx = {
     port: opts.daemonPort,
     callerName: opts.callerName,
@@ -33,9 +31,7 @@ export function buildIntegrationsServer(
         "linear_import",
         "Import a Linear issue as a Friday ticket. Idempotent — re-importing the same identifier returns the existing ticket with `alreadyLinked: true`. Requires LINEAR_API_KEY in the daemon env.",
         {
-          identifier: z
-            .string()
-            .describe("Linear issue identifier, e.g. `FRI-42` or `ENG-123`."),
+          identifier: z.string().describe("Linear issue identifier, e.g. `FRI-42` or `ENG-123`."),
         },
         async (args, extra) => {
           const result = await daemonFetch({
@@ -96,11 +92,7 @@ export function buildIntegrationsServer(
         "linear_update_issue",
         "WRITES to Linear: update an existing Linear issue identified by `identifier` (e.g. `FRI-75`). Requires LINEAR_API_KEY. Any of `title`, `body`, `state`, `priority` may be supplied; omitted fields are left unchanged. `state` is a Linear state type (`triage`, `backlog`, `unstarted`, `started`, `completed`, `canceled`) and resolves to the first workflow state of that type on the issue's team. `priority` is a named level (`none`, `urgent`, `high`, `medium`, `low`) mapped to Linear's 0–4 wire encoding.",
         {
-          identifier: z
-            .string()
-            .describe(
-              "Linear issue identifier, e.g. `FRI-75` (required).",
-            ),
+          identifier: z.string().describe("Linear issue identifier, e.g. `FRI-75` (required)."),
           title: z.string().optional().describe("New issue title."),
           body: z
             .string()
@@ -109,14 +101,7 @@ export function buildIntegrationsServer(
               "New issue description, markdown supported. Maps to Linear's `description` field.",
             ),
           state: z
-            .enum([
-              "triage",
-              "backlog",
-              "unstarted",
-              "started",
-              "completed",
-              "canceled",
-            ])
+            .enum(["triage", "backlog", "unstarted", "started", "completed", "canceled"])
             .optional()
             .describe(
               "Linear state type to move the issue into. Resolves to the first workflow state of that type on the issue's team.",

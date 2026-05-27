@@ -48,10 +48,7 @@ export function createZeroUpgradeHandler(opts) {
   const logEvent = log ?? (() => {});
   return function onUpgrade(req, clientSocket, head) {
     const url = req.url ?? "";
-    const remoteAddr =
-      req.socket?.remoteAddress ??
-      clientSocket.remoteAddress ??
-      "unknown";
+    const remoteAddr = req.socket?.remoteAddress ?? clientSocket.remoteAddress ?? "unknown";
     const fwd = req.headers["cf-connecting-ip"] ?? req.headers["x-forwarded-for"];
     if (!url.startsWith(PROXY_PREFIX + "/") && url !== PROXY_PREFIX) {
       // Some other route's WS upgrade; we don't know how to serve it.
@@ -63,10 +60,7 @@ export function createZeroUpgradeHandler(opts) {
         forwardedFor: typeof fwd === "string" ? fwd : null,
       });
       clientSocket.write(
-        "HTTP/1.1 400 Bad Request\r\n" +
-          "Connection: close\r\n" +
-          "Content-Length: 0\r\n" +
-          "\r\n",
+        "HTTP/1.1 400 Bad Request\r\n" + "Connection: close\r\n" + "Content-Length: 0\r\n" + "\r\n",
       );
       clientSocket.destroy();
       return;
@@ -99,7 +93,6 @@ export function createZeroUpgradeHandler(opts) {
         /* already destroyed */
       }
       if (err && debug) {
-        // eslint-disable-next-line no-console
         console.error(`[zero-proxy] ${where} error:`, err.message);
       }
     };
@@ -142,16 +135,12 @@ export function createZeroUpgradeHandler(opts) {
         // node's `net` errors are augmented with one
         // (`ECONNREFUSED`, `ETIMEDOUT`, …). Read through `unknown`
         // to satisfy strict mode without losing the value.
-        code: /** @type {{code?: string}} */ (
-          /** @type {unknown} */ (err)
-        ).code ?? null,
+        code: /** @type {{code?: string}} */ (/** @type {unknown} */ (err)).code ?? null,
       });
       teardown("upstream", err);
     });
     clientSocket.on("error", (err) => teardown("client", err));
-    upstream.on("close", () =>
-      teardown("upstream-close"),
-    );
+    upstream.on("close", () => teardown("upstream-close"));
     clientSocket.on("close", () => teardown("client-close"));
   };
 }

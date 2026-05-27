@@ -9,27 +9,18 @@
  * through `archiveAgent` so the wiring itself is covered there.
  */
 
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 process.env.LINEAR_API_KEY = "test-key";
 
 let handle: TestDbHandle;
-let createTicket: typeof import("@friday/shared/services")["createTicket"];
-let getTicket: typeof import("@friday/shared/services")["getTicket"];
-let linkExternal: typeof import("@friday/shared/services")["linkExternal"];
-let listComments: typeof import("@friday/shared/services")["listComments"];
-let updateTicket: typeof import("@friday/shared/services")["updateTicket"];
-let closeTicketForArchive: typeof import("./ticket-close.js")["closeTicketForArchive"];
+let createTicket: (typeof import("@friday/shared/services"))["createTicket"];
+let getTicket: (typeof import("@friday/shared/services"))["getTicket"];
+let linkExternal: (typeof import("@friday/shared/services"))["linkExternal"];
+let listComments: (typeof import("@friday/shared/services"))["listComments"];
+let updateTicket: (typeof import("@friday/shared/services"))["updateTicket"];
+let closeTicketForArchive: (typeof import("./ticket-close.js"))["closeTicketForArchive"];
 
 interface FetchCall {
   body: { query: string; variables: Record<string, unknown> };
@@ -350,14 +341,9 @@ describe("closeTicketForArchive — external propagation", () => {
     });
 
     // Two issueUpdate mutations, one per external link.
-    const mutationCalls = calls.filter((c) =>
-      c.body.query.includes("mutation IssueUpdate"),
-    );
+    const mutationCalls = calls.filter((c) => c.body.query.includes("mutation IssueUpdate"));
     expect(mutationCalls).toHaveLength(2);
-    expect(mutationCalls.map((c) => c.body.variables.id).sort()).toEqual([
-      "u-46",
-      "u-47",
-    ]);
+    expect(mutationCalls.map((c) => c.body.variables.id).sort()).toEqual(["u-46", "u-47"]);
   });
 });
 

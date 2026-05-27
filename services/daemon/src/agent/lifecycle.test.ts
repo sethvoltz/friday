@@ -73,9 +73,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     // a connected client needs to mount the bubble.
     expect(eventBus.currentSeq()).toBeGreaterThan(before);
     expect(seq).toBe(before + 1);
-    const evt = captured.find(
-      (e) => e.type === "block_complete" && e.block_id === blockId,
-    );
+    const evt = captured.find((e) => e.type === "block_complete" && e.block_id === blockId);
     expect(evt).toBeDefined();
     expect(evt!.seq).toBe(seq);
     expect(evt!.role).toBe("user");
@@ -118,9 +116,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(eventBus.currentSeq()).toBeGreaterThan(before);
     expect(seq).toBe(before + 1);
 
-    const evt = captured.find(
-      (e) => e.type === "block_complete" && e.block_id === blockId,
-    );
+    const evt = captured.find((e) => e.type === "block_complete" && e.block_id === blockId);
     expect(evt).toBeDefined();
     expect(evt!.seq).toBe(seq);
 

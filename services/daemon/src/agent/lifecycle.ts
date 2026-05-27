@@ -15,12 +15,7 @@
  *     in-flight turn keep their original turn_id.
  */
 
-import {
-  spawn,
-  spawnSync,
-  type ChildProcess,
-  type SpawnOptions,
-} from "node:child_process";
+import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,7 +23,6 @@ import type { AgentType, BlockKind } from "@friday/shared";
 import { loadConfig } from "@friday/shared";
 import {
   claimPendingSession,
-  deleteBlockById,
   insertBlock,
   insertUsage,
   updateBlock,
@@ -36,10 +30,8 @@ import {
 } from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
-import {
-  type ArchiveReason,
-  closeTicketForArchive,
-} from "../services/ticket-close.js";
+import { type ArchiveReason } from "@friday/shared";
+import { closeTicketForArchive } from "../services/ticket-close.js";
 import * as registry from "./registry.js";
 import * as liveTurns from "./live-turns.js";
 import { appContextForAgent } from "../apps/installer.js";
@@ -111,6 +103,12 @@ export interface LiveWorker {
    * turn_id.
    */
   nextPrompts: WorkerPromptCommand[];
+  /** The prompt currently dispatched to the worker (set by `sendPrompt`,
+   *  cleared on turn-end). `drainLiveWorker` prepends this to the drained
+   *  queue so a stall-kill redelivers the in-flight message on the fresh
+   *  worker — it was already popped off `nextPrompts` and sent, so without
+   *  this field it would be silently dropped (FRI-58). */
+  activePrompt?: WorkerPromptCommand;
   mode: "long-lived" | "one-shot";
   /** Set by handleEvent on turn-complete; consumed by onExit. */
   lastExitStatus: "complete" | "aborted" | "error";
@@ -269,14 +267,10 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // permissions because their working directory is the daemon repo and
   // they legitimately need broader filesystem access.
   const sandboxStatus = sandboxExecAvailable();
-  const wrapWithSandbox =
-    input.options.agentType === "builder" && sandboxStatus.available;
+  const wrapWithSandbox = input.options.agentType === "builder" && sandboxStatus.available;
   let profilePath: string | undefined;
   if (wrapWithSandbox) {
-    profilePath = writeProfile(
-      input.agentName,
-      profileInputsFor(input.options.workingDirectory),
-    );
+    profilePath = writeProfile(input.agentName, profileInputsFor(input.options.workingDirectory));
   }
 
   logger.log("info", "worker.fork", {
@@ -352,11 +346,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
         ],
         spawnOpts,
       )
-    : spawn(
-        "/bin/bash",
-        ["-c", ULIMIT_PRELUDE, "--", process.execPath, ...nodeArgs],
-        spawnOpts,
-      );
+    : spawn("/bin/bash", ["-c", ULIMIT_PRELUDE, "--", process.execPath, ...nodeArgs], spawnOpts);
   // With detached:true the child is the leader of its own process group, so
   // pgid === child.pid. If fork failed pid will be undefined; we keep 0 as
   // a sentinel so killPgrp can skip safely.
@@ -482,8 +472,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // don't each have to remember to wire them; tests can pre-set
   // `input.options.userMcpServers` to bypass the disk read.
   child.once("message", () => {
-    const userMcpServers =
-      input.options.userMcpServers ?? loadConfig().mcpServers ?? [];
+    const userMcpServers = input.options.userMcpServers ?? loadConfig().mcpServers ?? [];
     // FRI-110: stamp the turn-start clock at the *actual* turn dispatch
     // (not at fork) so the stale-turn watchdog measures from when the
     // worker began the turn — not from when the worker process came up
@@ -501,11 +490,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // against an offline worker), the block is sitting at status='queued'
   // with the POST-time ts. Re-stamp it now so the dashboard's pinned
   // bubble unpins as the worker comes up.
-  restampQueuedUserBlock(
-    input.agentName,
-    input.options.turnId,
-    input.userBlockId,
-  );
+  restampQueuedUserBlock(input.agentName, input.options.turnId, input.userBlockId);
   // Phase 5: `agent_lifecycle:spawn` SSE retired — Zero replicates
   // the agents row's new status (idle → working) reactively to the
   // dashboard sidebar.
@@ -543,8 +528,7 @@ export function dispatchTurn(input: SpawnTurnInput): void {
     prompt: input.options.prompt,
     attachments: input.options.attachments,
     turnId: input.options.turnId,
-    resumeSessionId:
-      input.options.resumeSessionId ?? existing.sessionId ?? undefined,
+    resumeSessionId: input.options.resumeSessionId ?? existing.sessionId ?? undefined,
     allowedToolsOverride: input.options.allowedToolsOverride,
     userBlockId: input.userBlockId,
   };
@@ -613,11 +597,7 @@ function restampQueuedUserBlock(
  * turn) points at a missing or out-of-order status update; this trace makes
  * the misordering visible without changing behavior.
  */
-function setWorkerStatus(
-  w: LiveWorker,
-  next: "idle" | "working",
-  source: string,
-): void {
+function setWorkerStatus(w: LiveWorker, next: "idle" | "working", source: string): void {
   if (w.status !== next) {
     logger.log("info", "worker.status.transition", {
       agent: w.agentName,
@@ -634,6 +614,12 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   restampQueuedUserBlock(w.agentName, p.turnId, p.userBlockId);
   w.turnId = p.turnId;
   w.turnStart = Date.now();
+  // FRI-58: reset lastBlockStop so the turn-stall watchdog measures from the
+  // start of this turn, not the end of the previous one. Without this, any
+  // idle period >30min leaves lastBlockStop stale and the next watchdog tick
+  // (9s later) sees stalledMs > threshold and SIGTERMs the worker.
+  w.lastBlockStop = Date.now();
+  w.activePrompt = p;
   w.abortRequested = false;
   // FRI-61 wedge detector: a fresh turn starts with no observed blocks.
   // Today's IPC chain serialises events so this is a no-op (turn-complete
@@ -641,17 +627,13 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   // against future re-orderings.
   w.blocksThisTurn = 0;
   setWorkerStatus(w, "working", "sendPrompt");
-  // Fire-and-forget: registry.setStatus is async under Postgres (ADR-023);
-  // sendPrompt is sync because it's called from the IPC dispatcher and the
-  // setTimeout-driven abortDeadline. Errors are surfaced via the existing
-  // log channel rather than blocking the prompt dispatch.
-  void registry.setStatus(w.agentName, "working").catch((err: unknown) => {
-    logger.log("warn", "registry.set-status.error", {
-      agent: w.agentName,
-      status: "working",
-      message: err instanceof Error ? err.message : String(err),
-    });
-  });
+  // Intentionally no registry.setStatus("working") here. The worker emits
+  // a status-change:working IPC when runQuery starts; the handleEvent handler
+  // awaits that write (see the status-change case below). A fire-and-forget
+  // write here would race with turn-complete's await setStatus("idle"),
+  // resolving late and leaving the agent stuck on "working" between turns.
+  // spawnTurn (fresh worker spawns) still does an awaited setStatus("working")
+  // before forking, which is race-free because no IPC pipeline exists yet.
   eventBus.publish({
     v: 1,
     type: "turn_started",
@@ -716,11 +698,7 @@ export function abortTurn(agentName: string): boolean {
   // catch arm's `flushInflightBlocks("aborted")` + emits
   // `turn-complete` cleanly.
   const workerPid = w.child.pid ?? 0;
-  const descendantsKilled = killPgrpDescendants(
-    w.pgid,
-    workerPid,
-    "SIGTERM",
-  );
+  const descendantsKilled = killPgrpDescendants(w.pgid, workerPid, "SIGTERM");
   logger.log("info", "worker.abort.descendants-killed", {
     agent: w.agentName,
     turnId: w.turnId,
@@ -816,28 +794,27 @@ async function forceKillStuckWorker(
             "message will spawn a fresh worker.",
         }
       : reason === "wedge"
-      ? {
-          code: "worker_wedged",
-          headline:
-            "Agent looped without producing output — restarted",
-          rawMessage:
-            "Wedge detected: the worker produced N consecutive turns with " +
-            "zero content blocks. Likely cause: SDK could not resume the " +
-            "prior session (transcript missing from the encoded-cwd " +
-            "project dir), or the model emitted nothing for N turns in a " +
-            "row. The agent has been killed; the next message will spawn " +
-            "a fresh worker.",
-        }
-      : {
-          code: "stopped_forced",
-          headline: "Stop forced — SDK did not honor abort, worker restarted",
-          rawMessage:
-            "Cooperative abort failed: the SDK iterator stayed wedged after 500ms " +
-            "(descendants already SIGTERMed at T+0; daemonFetch signal propagated " +
-            "to in-flight MCP handlers). The agent has been killed; the next message " +
-            "will spawn a fresh worker. Healthy turns clean up via the SDK's own " +
-            "abortController and never reach this path.",
-        };
+        ? {
+            code: "worker_wedged",
+            headline: "Agent looped without producing output — restarted",
+            rawMessage:
+              "Wedge detected: the worker produced N consecutive turns with " +
+              "zero content blocks. Likely cause: SDK could not resume the " +
+              "prior session (transcript missing from the encoded-cwd " +
+              "project dir), or the model emitted nothing for N turns in a " +
+              "row. The agent has been killed; the next message will spawn " +
+              "a fresh worker.",
+          }
+        : {
+            code: "stopped_forced",
+            headline: "Stop forced — SDK did not honor abort, worker restarted",
+            rawMessage:
+              "Cooperative abort failed: the SDK iterator stayed wedged after 500ms " +
+              "(descendants already SIGTERMed at T+0; daemonFetch signal propagated " +
+              "to in-flight MCP handlers). The agent has been killed; the next message " +
+              "will spawn a fresh worker. Healthy turns clean up via the SDK's own " +
+              "abortController and never reach this path.",
+          };
   // Wedge and stale-turn both ride `error` status; only an explicit abort
   // synthesizes `abort_reason: "forced"`.
   const ridesError = reason === "stale" || reason === "wedge";
@@ -855,8 +832,8 @@ async function forceKillStuckWorker(
       reason === "stale"
         ? "Turn timed out — stale-turn ceiling exceeded"
         : reason === "wedge"
-        ? "Wedge detected — agent looped without producing output"
-        : "Stop forced — worker unresponsive",
+          ? "Wedge detected — agent looped without producing output"
+          : "Stop forced — worker unresponsive",
     recoverable: true,
   });
   eventBus.publish({
@@ -879,6 +856,7 @@ async function forceKillStuckWorker(
   // `w.forceKilled` short-circuit (or a future read site that doesn't
   // check the flag) would otherwise see a stale timestamp.
   w.turnStart = undefined;
+  w.activePrompt = undefined;
   await registry.setStatus(w.agentName, "idle").catch((err: unknown) => {
     logger.log("warn", "registry.set-status.error", {
       agent: w.agentName,
@@ -927,10 +905,13 @@ export function findAgentByTurnId(turnId: string): string | null {
  * effects (live-map delete, optional registry archive, optional ticket
  * close) BEFORE invoking — see `archiveAgent` and `forceWorkerRefork`.
  */
-async function drainLiveWorker(
-  w: LiveWorker,
-): Promise<WorkerPromptCommand[]> {
-  const drainedPrompts: WorkerPromptCommand[] = [...w.nextPrompts];
+async function drainLiveWorker(w: LiveWorker): Promise<WorkerPromptCommand[]> {
+  // FRI-58: prepend the in-flight prompt (already dispatched, not in nextPrompts)
+  // so the refork path redelivers it along with any queued prompts.
+  const drainedPrompts: WorkerPromptCommand[] = [
+    ...(w.activePrompt ? [w.activePrompt] : []),
+    ...w.nextPrompts,
+  ];
 
   // Ask the worker to stop gracefully, then wait for the actual exit
   // event. SIGTERM-on-pgrp backstop at 5s catches descendants the worker
@@ -986,13 +967,12 @@ export async function archiveAgent(
   // future refactor that nulls the row's fields on archive. The closer
   // reads from this captured value, not from the registry.
   const agentRow = await registry.getAgent(agentName);
-  const ticketId =
-    agentRow && "ticketId" in agentRow ? agentRow.ticketId ?? null : null;
+  const ticketId = agentRow && "ticketId" in agentRow ? (agentRow.ticketId ?? null) : null;
   // Synchronous side-effects: drop from the live map so subsequent
   // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
   // before the child has fully exited.
   if (w) live.delete(agentName);
-  await registry.archiveAgent(agentName);
+  await registry.archiveAgent(agentName, { reason: opts.reason });
   // Phase 5: `agent_lifecycle:archive` SSE retired — Zero replicates
   // the agents.status='archived' UPDATE; the dashboard sidebar drops
   // the row via the reactive query.
@@ -1023,9 +1003,7 @@ export async function archiveAgent(
  * forced refork is honestly `idle` (or `working`, once the replacement
  * worker's first turn lands).
  */
-export async function forceWorkerRefork(
-  agentName: string,
-): Promise<WorkerPromptCommand[]> {
+export async function forceWorkerRefork(agentName: string): Promise<WorkerPromptCommand[]> {
   const w = live.get(agentName);
   if (w) {
     // Block the exit handler's fire-and-forget setStatus('idle'). We
@@ -1162,9 +1140,7 @@ export function checkStalledWorkers(
  */
 export function startTurnStallWatchdog(): void {
   if (stallInterval) return;
-  const threshold = Number(
-    process.env.FRIDAY_TURN_STALL_MS ?? DEFAULT_TURN_STALL_MS,
-  );
+  const threshold = Number(process.env.FRIDAY_TURN_STALL_MS ?? DEFAULT_TURN_STALL_MS);
   stallInterval = setInterval(() => {
     checkStalledWorkers(live.values(), Date.now(), threshold, killPgrp);
   }, TURN_STALL_CHECK_MS);
@@ -1240,10 +1216,7 @@ export function peekLiveWorker(agentName: string): {
  * dashboard). Returns null when no live worker for this agent, or when no
  * queued entry matches.
  */
-export function removeQueuedPrompt(
-  agentName: string,
-  turnId: string,
-): WorkerPromptCommand | null {
+export function removeQueuedPrompt(agentName: string, turnId: string): WorkerPromptCommand | null {
   const w = live.get(agentName);
   if (!w) return null;
   const idx = w.nextPrompts.findIndex((p) => p.turnId === turnId);
@@ -1265,10 +1238,7 @@ export function removeQueuedPrompt(
  * Exported so the unit test can exercise the boundary directly without
  * spawning a real child process.
  */
-export async function safeHandleEvent(
-  w: LiveWorker,
-  raw: unknown,
-): Promise<void> {
+export async function safeHandleEvent(w: LiveWorker, raw: unknown): Promise<void> {
   const ev = raw as WorkerEvent;
   try {
     await handleEvent(w, ev);
@@ -1281,10 +1251,7 @@ export async function safeHandleEvent(
   }
 }
 
-export async function handleEvent(
-  w: LiveWorker,
-  e: WorkerEvent,
-): Promise<void> {
+export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> {
   // FRI-33: stale-turn ceiling. Any inbound IPC — heartbeat or otherwise —
   // gives us a chance to notice that the worker has been on the same turn
   // longer than is plausible. Reap before downstream handlers run their own
@@ -1352,11 +1319,7 @@ export async function handleEvent(
       // orphan rows from prior turns into the current SDK session,
       // pulling yesterday's user prompts into today's context.
       try {
-        const swept = await claimPendingSession(
-          w.agentName,
-          w.turnId,
-          e.sessionId,
-        );
+        const swept = await claimPendingSession(w.agentName, w.turnId, e.sessionId);
         if (swept > 0) {
           logger.log("info", "session-update.pending-swept", {
             agent: w.agentName,
@@ -1479,6 +1442,15 @@ export async function handleEvent(
             errorCode: e.code,
           });
           if (w.zeroBlockTurnStreak >= wedgeThreshold()) {
+            // FRI-116: hoist the FRI-110 turnStart clear BEFORE the
+            // force-kill early-return so this branch's post-condition
+            // matches the happy path below. `forceKillStuckWorker`
+            // does also clear `w.turnStart` (defense-in-depth at its
+            // own exit handler), but relying on the chain is the
+            // exact "trust the trail" anti-pattern FRI-117's lint
+            // story is meant to catch at authoring time.
+            w.turnStart = undefined;
+            w.activePrompt = undefined;
             await forceKillStuckWorker(w, {
               reason: "wedge",
               zeroBlockTurnStreak: w.zeroBlockTurnStreak,
@@ -1502,6 +1474,7 @@ export async function handleEvent(
       // time. The `sendPrompt(w, next)` below will restamp if a queued
       // prompt drains.
       w.turnStart = undefined;
+      w.activePrompt = undefined;
       w.completedAtLeastOnce = true;
       await registry.setStatus(w.agentName, "idle");
       // Phase 5: `agent_status` SSE retired — Zero replicates the
@@ -1519,9 +1492,22 @@ export async function handleEvent(
       // would otherwise leave the safety net armed and force-kill an
       // already-cooperative worker.
       if (e.status === "idle") clearAbortDeadline(w);
-      // Phase 5: `agent_status` SSE retired — Zero replicates the
-      // setWorkerStatus → registry UPDATE reactively. The internal
-      // `setWorkerStatus` log line preserves diagnostic visibility.
+      // Mirror the worker's in-process status into the DB so Zero replicates
+      // it to the dashboard. The sendPrompt/spawnTurn paths write "working"
+      // for dispatcher-initiated turns; this covers the mail-triggered path
+      // where the worker discovers mail in its own inbox and starts a turn
+      // without the parent calling sendPrompt — in that case no one else
+      // updates the registry and the agent's dot stays grey the entire turn.
+      // Same-status writes (e.g., working→working when a dispatcher-initiated
+      // turn fires this after sendPrompt already wrote the DB) are legal
+      // no-ops per the FSM and just bump updated_at.
+      await registry.setStatus(w.agentName, e.status).catch((err: unknown) => {
+        logger.log("warn", "registry.set-status.error", {
+          agent: w.agentName,
+          status: e.status,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
       break;
     case "turn-complete": {
       // FRI-12: same cancellation as the error path. If the worker raced
@@ -1603,6 +1589,13 @@ export async function handleEvent(
             source: "turn-complete",
           });
           if (w.zeroBlockTurnStreak >= wedgeThreshold()) {
+            // FRI-116: hoist the FRI-110 turnStart clear BEFORE the
+            // force-kill early-return so this branch's post-condition
+            // matches the happy path below. See the symmetric
+            // restructure in the `error` case above for the
+            // "trust the trail" rationale.
+            w.turnStart = undefined;
+            w.activePrompt = undefined;
             await forceKillStuckWorker(w, {
               reason: "wedge",
               zeroBlockTurnStreak: w.zeroBlockTurnStreak,
@@ -1629,6 +1622,7 @@ export async function handleEvent(
       // hours between turns; the next `sendPrompt` (line 604) or the
       // queued-prompt drain below will restamp it when a new turn starts.
       w.turnStart = undefined;
+      w.activePrompt = undefined;
       w.completedAtLeastOnce = true;
       w.lastExitStatus = w.abortRequested ? "aborted" : "complete";
       await registry.setStatus(w.agentName, "idle");
@@ -1646,7 +1640,7 @@ export async function handleEvent(
         const an = w.agentName;
         setImmediate(() => {
           try {
-            recoverFromJsonl([
+            void recoverFromJsonl([
               { agentName: an, sessionId: sessionForRecovery, workingDirectory: wd },
             ]);
           } catch (err) {
@@ -1841,12 +1835,7 @@ async function handleBlockDelta(
   e: { clientBlockId: string; delta: { text?: string; partial_json?: string } },
 ): Promise<void> {
   const nextSeq = eventBus.currentSeq() + 1;
-  const live = liveTurns.appendDelta(
-    w.turnId,
-    e.clientBlockId,
-    e.delta,
-    nextSeq,
-  );
+  const live = liveTurns.appendDelta(w.turnId, e.clientBlockId, e.delta, nextSeq);
   if (!live) return;
   // Phase 5 (plan §212): no per-delta row write. The accumulated text
   // lives in `liveTurns` until block_complete; the canonical row is
@@ -1863,10 +1852,7 @@ async function handleBlockDelta(
   });
 }
 
-async function handleBlockCancel(
-  w: LiveWorker,
-  e: { clientBlockId: string },
-): Promise<void> {
+async function handleBlockCancel(w: LiveWorker, e: { clientBlockId: string }): Promise<void> {
   // Peek the upcoming seq so the live-turns finish call and the SSE event
   // stamp the same number — mirrors the handleBlockStop pattern.
   const peekSeq = eventBus.currentSeq() + 1;
@@ -2223,9 +2209,7 @@ export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
   const ts = Date.now();
   const status = input.status ?? "complete";
   const attachments =
-    input.attachments && input.attachments.length > 0
-      ? { attachments: input.attachments }
-      : {};
+    input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {};
   const content =
     input.source === "mail" && input.fromAgent
       ? {

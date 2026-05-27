@@ -15,14 +15,7 @@
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
-import {
-  type Manifest,
-  appDir,
-  getDb,
-  loadManifest,
-  nextRun,
-  schema,
-} from "@friday/shared";
+import { type Manifest, appDir, getDb, loadManifest, nextRun, schema } from "@friday/shared";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import * as registry from "../agent/registry.js";
@@ -97,9 +90,7 @@ export async function installApp(
   const dispositions = new Map<string, Dispo>();
   for (const agent of manifest.agents) {
     const existing = await registry.getAgent(agent.name);
-    const existingAppId = existing
-      ? await registry.getAppId(agent.name)
-      : null;
+    const existingAppId = existing ? await registry.getAppId(agent.name) : null;
     if (!existing) {
       dispositions.set(agent.name, { kind: "create" });
       continue;
@@ -302,9 +293,7 @@ export async function installApp(
         .where(eq(schema.schedules.appId, manifest.id));
       for (const row of ourSchedules) {
         if (!declaredScheduleNames.has(row.name)) {
-          await tx
-            .delete(schema.schedules)
-            .where(eq(schema.schedules.name, row.name));
+          await tx.delete(schema.schedules).where(eq(schema.schedules.name, row.name));
         }
       }
     }
@@ -351,11 +340,7 @@ export async function uninstallApp(
 ): Promise<UninstallResult> {
   const folderDisposition = opts.folderDisposition ?? "archive";
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.apps)
-    .where(eq(schema.apps.id, id))
-    .limit(1);
+  const rows = await db.select().from(schema.apps).where(eq(schema.apps.id, id)).limit(1);
   const row = rows[0];
   if (!row) {
     throw new AppInstallError(`app "${id}" is not installed`, "not_installed");
@@ -377,9 +362,7 @@ export async function uninstallApp(
   }
 
   await db.transaction(async (tx) => {
-    await tx
-      .delete(schema.schedules)
-      .where(eq(schema.schedules.appId, id));
+    await tx.delete(schema.schedules).where(eq(schema.schedules.appId, id));
     await tx.delete(schema.apps).where(eq(schema.apps.id, id));
   });
 
@@ -434,24 +417,15 @@ export async function uninstallApp(
  * Does NOT auto-archive agents removed from the manifest — that's
  * destructive; explicit uninstall is required for archival.
  */
-export async function reloadApp(
-  id: string,
-): Promise<{ id: string; changed: boolean }> {
+export async function reloadApp(id: string): Promise<{ id: string; changed: boolean }> {
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.apps)
-    .where(eq(schema.apps.id, id))
-    .limit(1);
+  const rows = await db.select().from(schema.apps).where(eq(schema.apps.id, id)).limit(1);
   const row = rows[0];
   if (!row) {
     throw new AppInstallError(`app "${id}" is not installed`, "not_installed");
   }
   if (!existsSync(row.folderPath)) {
-    await db
-      .update(schema.apps)
-      .set({ status: "orphaned" })
-      .where(eq(schema.apps.id, id));
+    await db.update(schema.apps).set({ status: "orphaned" }).where(eq(schema.apps.id, id));
     eventBus.publish({
       v: 1,
       type: "app_lifecycle",
@@ -551,15 +525,10 @@ export async function reloadApp(
         });
       }
     }
-    const ours = await tx
-      .select()
-      .from(schema.schedules)
-      .where(eq(schema.schedules.appId, id));
+    const ours = await tx.select().from(schema.schedules).where(eq(schema.schedules.appId, id));
     for (const r of ours) {
       if (!declared.has(r.name)) {
-        await tx
-          .delete(schema.schedules)
-          .where(eq(schema.schedules.name, r.name));
+        await tx.delete(schema.schedules).where(eq(schema.schedules.name, r.name));
       }
     }
   });
@@ -606,18 +575,11 @@ export interface AppInspection extends AppListing {
 
 export async function inspectApp(id: string): Promise<AppInspection | null> {
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.apps)
-    .where(eq(schema.apps.id, id))
-    .limit(1);
+  const rows = await db.select().from(schema.apps).where(eq(schema.apps.id, id)).limit(1);
   const row = rows[0];
   if (!row) return null;
   const manifest = row.manifestJson as Manifest;
-  const agentRows = await db
-    .select()
-    .from(schema.agents)
-    .where(eq(schema.agents.appId, id));
+  const agentRows = await db.select().from(schema.agents).where(eq(schema.agents.appId, id));
   const agents = agentRows.map((a) => ({
     name: a.name,
     type: a.type,
@@ -645,9 +607,7 @@ export async function inspectApp(id: string): Promise<AppInspection | null> {
 /** Resolve the app folder for a worker spawn. Null when the agent has
  *  no `app_id` set. Pure DB lookup; used by the worker spawn site so
  *  there's no need to round-trip through the manifest cache. */
-export async function appFolderForAgent(
-  agentName: string,
-): Promise<string | null> {
+export async function appFolderForAgent(agentName: string): Promise<string | null> {
   const id = await registry.getAppId(agentName);
   if (!id) return null;
   return appDir(id);
@@ -667,17 +627,11 @@ export interface AppContextForWorker {
  * to an empty `envFile` rather than throwing — a worker should still
  * boot even if the secrets file is malformed.
  */
-export async function appContextForAgent(
-  agentName: string,
-): Promise<AppContextForWorker | null> {
+export async function appContextForAgent(agentName: string): Promise<AppContextForWorker | null> {
   const appId = await registry.getAppId(agentName);
   if (!appId) return null;
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.apps)
-    .where(eq(schema.apps.id, appId))
-    .limit(1);
+  const rows = await db.select().from(schema.apps).where(eq(schema.apps.id, appId)).limit(1);
   const row = rows[0];
   if (!row || row.status !== "installed") return null;
   let manifest: Manifest;

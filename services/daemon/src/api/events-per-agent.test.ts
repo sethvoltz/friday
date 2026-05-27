@@ -12,28 +12,20 @@
  */
 
 import type { Server } from "node:http";
-import {
-  afterAll,
-  beforeAll,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
 let server: Server;
 let port: number;
-let eventBus: typeof import("../events/bus.js")["eventBus"];
+let eventBus: (typeof import("../events/bus.js"))["eventBus"];
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "events_per_agent" });
   ({ eventBus } = await import("../events/bus.js"));
   const { startServer } = await import("./server.js");
   server = startServer({ port: 0 });
-  await new Promise<void>((resolve) =>
-    server.once("listening", () => resolve()),
-  );
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("no port assigned");
   port = addr.port;
@@ -50,10 +42,7 @@ afterAll(async () => {
  * `connection_established` handshake — that's per-connection
  * metadata, not a buffered event).
  */
-async function captureEvents(
-  url: string,
-  ms: number,
-): Promise<Array<Record<string, unknown>>> {
+async function captureEvents(url: string, ms: number): Promise<Array<Record<string, unknown>>> {
   const ctrl = new AbortController();
   const events: Array<Record<string, unknown>> = [];
   const res = await fetch(url, {
@@ -78,10 +67,7 @@ async function captureEvents(
         for (const line of frame.split("\n")) {
           if (line.startsWith("data: ")) {
             try {
-              const payload = JSON.parse(line.slice(6)) as Record<
-                string,
-                unknown
-              >;
+              const payload = JSON.parse(line.slice(6)) as Record<string, unknown>;
               if (payload.type === "connection_established") continue;
               events.push(payload);
             } catch {
@@ -143,14 +129,9 @@ describe("GET /api/events — Phase 5 per-agent filter", () => {
       agent: "gamma",
       block_id: "blk-c-legacy",
     });
-    const events = await captureEvents(
-      `http://127.0.0.1:${port}/api/events`,
-      400,
-    );
+    const events = await captureEvents(`http://127.0.0.1:${port}/api/events`, 400);
     const agents = new Set(
-      events
-        .filter((e) => e.type === "block_canceled")
-        .map((e) => e.agent as string),
+      events.filter((e) => e.type === "block_canceled").map((e) => e.agent as string),
     );
     expect(agents.has("alpha")).toBe(true);
     expect(agents.has("beta")).toBe(true);
@@ -182,10 +163,7 @@ describe("GET /api/events — Phase 5 per-agent filter", () => {
       agent: "gamma",
       block_id: "blk-gamma-filter",
     });
-    const events = await captureEvents(
-      `http://127.0.0.1:${port}/api/events?agent=beta`,
-      400,
-    );
+    const events = await captureEvents(`http://127.0.0.1:${port}/api/events?agent=beta`, 400);
     const cancels = events.filter((e) => e.type === "block_canceled");
     expect(cancels.length).toBeGreaterThan(0);
     const agents = new Set(cancels.map((e) => e.agent as string));
@@ -204,10 +182,7 @@ describe("GET /api/events — Phase 5 per-agent filter", () => {
       app: "test-app",
       version: "1.0.0",
     });
-    const events = await captureEvents(
-      `http://127.0.0.1:${port}/api/events?agent=beta`,
-      400,
-    );
+    const events = await captureEvents(`http://127.0.0.1:${port}/api/events?agent=beta`, 400);
     const appEvents = events.filter((e) => e.type === "app_lifecycle");
     expect(appEvents.length).toBeGreaterThan(0);
   });

@@ -18,12 +18,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createTestDb,
-  getDb,
-  schema,
-  type TestDbHandle,
-} from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 import pgPkg from "pg";
 
 let handle: TestDbHandle;
@@ -40,10 +35,7 @@ beforeEach(async () => {
   await handle.truncate();
 });
 
-async function insertBlock(
-  id: string,
-  status: string,
-): Promise<void> {
+async function insertBlock(id: string, status: string): Promise<void> {
   const db = getDb();
   await db.insert(schema.blocks).values({
     id,
@@ -101,9 +93,7 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
     await client.connect();
     try {
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_new_pending_block");
 
       await insertBlock("blk-dispatch-2", "complete");
@@ -123,9 +113,7 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
     await client.connect();
     try {
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
       await client.query("LISTEN friday_new_pending_block");
 
       await insertBlock("blk-dispatch-3", "queued");
@@ -155,14 +143,10 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
       await new Promise((r) => setTimeout(r, 250));
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
 
       const db = getDb();
-      await db
-        .update(schema.blocks)
-        .set({ status: "complete" });
+      await db.update(schema.blocks).set({ status: "complete" });
 
       // negative-space: trigger is AFTER INSERT only — UPDATEs don't fire.
       // A bounded real-time wait confirms no spurious NOTIFY arrives.
@@ -185,9 +169,7 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
       await new Promise((r) => setTimeout(r, 250));
 
       const received: Array<{ payload: string }> = [];
-      client.on("notification", (msg) =>
-        received.push({ payload: msg.payload ?? "" }),
-      );
+      client.on("notification", (msg) => received.push({ payload: msg.payload ?? "" }));
 
       const db = getDb();
       await db.update(schema.blocks).set({ status: "queued" });

@@ -8,7 +8,6 @@ export async function skillContextHook(
   const allowedTools = match.skill.allowedTools;
   return {
     appendSystemPrompt: `<skill-context name="${match.skill.name}">\n${match.skill.body}\n</skill-context>`,
-    allowedToolsOverride:
-      allowedTools && allowedTools.length > 0 ? allowedTools : undefined,
+    allowedToolsOverride: allowedTools && allowedTools.length > 0 ? allowedTools : undefined,
   };
 }

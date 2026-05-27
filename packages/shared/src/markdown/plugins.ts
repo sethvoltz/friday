@@ -25,9 +25,7 @@ export interface MarkdownPluginOptions {
  * Returns the list of `marked` extensions to install for the given options.
  * Caller must `marked.use(...exts)` exactly once.
  */
-export function getMarkedExtensions(
-  opts: MarkdownPluginOptions = {},
-): MarkedExtension[] {
+export function getMarkedExtensions(opts: MarkdownPluginOptions = {}): MarkedExtension[] {
   const exts: MarkedExtension[] = [];
 
   if (opts.katex !== false) {

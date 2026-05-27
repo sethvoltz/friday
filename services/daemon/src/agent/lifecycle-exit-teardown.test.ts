@@ -115,12 +115,7 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
       ts: 1,
       seq: 1,
     });
-    liveTurns.appendDelta(
-      "turn-exit-1",
-      "c-tu",
-      { partial_json: '{"command":"echo' },
-      3,
-    );
+    liveTurns.appendDelta("turn-exit-1", "c-tu", { partial_json: '{"command":"echo' }, 3);
 
     await finalizeStreamingBlocks(makeFakeWorker() as never, "error");
 
@@ -162,9 +157,7 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
     // the turn-complete handler must transition the DB row off
     // `streaming` before `dropTurn` wipes the liveTurns entry.
     const { finalizeStreamingBlocks } = await import("./lifecycle.js");
-    const { insertBlock, getBlockById } = await import(
-      "@friday/shared/services"
-    );
+    const { insertBlock, getBlockById } = await import("@friday/shared/services");
     const liveTurns = await import("./live-turns.js");
 
     await insertBlock({

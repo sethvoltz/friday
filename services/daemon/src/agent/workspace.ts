@@ -69,9 +69,7 @@ export function assertInsideWorkspacesRoot(
     throw new Error(`refusing to delete workspaces root itself: ${rootReal}`);
   }
   if (!candidateReal.startsWith(rootReal + "/")) {
-    throw new Error(
-      `refusing to operate on path outside ${rootReal}: ${candidateReal}`,
-    );
+    throw new Error(`refusing to operate on path outside ${rootReal}: ${candidateReal}`);
   }
   return candidateReal;
 }
@@ -80,6 +78,13 @@ export interface CreateWorkspaceOptions {
   name: string;
   baseRepo: string;
   branch: string;
+  /**
+   * Explicit base ref for "stacked PR" workflows. When provided, the
+   * worktree is rooted here and the origin/main fetch is skipped.
+   * When omitted (the default), `git fetch origin main` runs first and
+   * `origin/main` is used as the start-point so the new branch is always
+   * rooted on the latest upstream commit.
+   */
   fromRef?: string;
 }
 
@@ -105,17 +110,61 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
   if (existsSync(path)) {
     throw new Error(`workspace ${opts.name} already exists at ${path}`);
   }
-  const fromRef = opts.fromRef ?? "main";
+
+  // Stacked PR exception: if caller supplied an explicit base ref, use it
+  // as-is and skip the origin/main fetch. Otherwise, fetch origin/main first
+  // so the new branch is always rooted on the latest upstream commit, not
+  // whatever the local main ref currently points at.
+  const useOriginMain = opts.fromRef === undefined;
+  const startPoint = opts.fromRef ?? "origin/main";
+
+  if (useOriginMain) {
+    try {
+      execFileSync("git", ["fetch", "origin", "main"], {
+        cwd: opts.baseRepo,
+        stdio: "pipe",
+      });
+    } catch (err) {
+      // Non-fatal: proceed with the cached origin/main. Warn so it's visible
+      // in the logs, but don't abort workspace creation.
+      const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
+      logger.log("warn", "workspace.fetch.fail", {
+        name: opts.name,
+        message: e.message ?? String(err),
+        stderr: e.stderr ? String(e.stderr).trim() : undefined,
+        stdout: e.stdout ? String(e.stdout).trim() : undefined,
+      });
+    }
+  }
+
+  // Pre-flight: if the branch already exists locally (stale from a prior
+  // failed cleanup), delete it before git worktree add, which would otherwise
+  // fail with "branch already exists".
   try {
-    execFileSync(
-      "git",
-      ["worktree", "add", "-b", opts.branch, path, fromRef],
-      { cwd: opts.baseRepo, stdio: "inherit" },
-    );
+    execFileSync("git", ["branch", "-D", opts.branch], {
+      cwd: opts.baseRepo,
+      stdio: "pipe",
+    });
+    logger.log("info", "workspace.branch.stale-delete", {
+      name: opts.name,
+      branch: opts.branch,
+    });
+  } catch {
+    // Branch didn't exist — the expected path.
+  }
+
+  try {
+    execFileSync("git", ["worktree", "add", "-b", opts.branch, path, startPoint], {
+      cwd: opts.baseRepo,
+      stdio: "pipe",
+    });
   } catch (err) {
+    const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
     logger.log("error", "workspace.create.fail", {
       name: opts.name,
-      message: err instanceof Error ? err.message : String(err),
+      message: e.message ?? String(err),
+      stderr: e.stderr ? String(e.stderr).trim() : undefined,
+      stdout: e.stdout ? String(e.stdout).trim() : undefined,
     });
     throw err;
   }
@@ -154,12 +203,15 @@ export function archiveWorkspace(
     try {
       execFileSync("git", ["worktree", "remove", "--force", path], {
         cwd: baseRepo,
-        stdio: "inherit",
+        stdio: "pipe",
       });
     } catch (err) {
+      const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
       logger.log("warn", "workspace.destroy.fail", {
         name,
-        message: err instanceof Error ? err.message : String(err),
+        message: e.message ?? String(err),
+        stderr: e.stderr ? String(e.stderr).trim() : undefined,
+        stdout: e.stdout ? String(e.stdout).trim() : undefined,
       });
     }
     // The worktree-remove leaves the parent directory in place if anything

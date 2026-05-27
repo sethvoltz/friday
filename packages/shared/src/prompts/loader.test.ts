@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   composeSystemPrompt,
   readPromptStack,
   renderIdentityBlock,
+  renderLocalDatetime,
 } from "./loader.js";
 
 describe("renderIdentityBlock (FRI-11)", () => {
@@ -147,6 +148,66 @@ describe("default protocols by agent type", () => {
     const stack = readPromptStack("orchestrator", ["memory"]);
     const occurrences = stack.protocols.split("# Protocol: Memory").length - 1;
     expect(occurrences).toBe(1);
+  });
+});
+
+describe("renderLocalDatetime (FRI-52)", () => {
+  beforeEach(() => {
+    // Pin to a known instant: 2026-05-23 21:45:00 UTC
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-23T21:45:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns a section headed # currentDateTime", () => {
+    const block = renderLocalDatetime();
+    expect(block).toMatch(/^# currentDateTime\n/);
+  });
+
+  it("contains the label 'Current local date and time:'", () => {
+    expect(renderLocalDatetime()).toContain("Current local date and time:");
+  });
+
+  it("includes a UTC offset in the form UTC±N", () => {
+    expect(renderLocalDatetime()).toMatch(/\(UTC[+-]\d/);
+  });
+
+  it("includes an AM or PM marker", () => {
+    expect(renderLocalDatetime()).toMatch(/[AP]M/);
+  });
+
+  it("includes a timezone abbreviation before the offset", () => {
+    // Matches abbreviations like PDT, EST, UTC, IST, etc.
+    expect(renderLocalDatetime()).toMatch(/[AP]M [A-Z]{2,5} \(UTC/);
+  });
+});
+
+describe("composeSystemPrompt datetime injection (FRI-52)", () => {
+  it("does NOT include currentDateTime — injected per-turn in worker.ts runQuery, not at compose time", () => {
+    const stack = readPromptStack("orchestrator", []);
+    const composed = composeSystemPrompt(stack, {
+      agentName: "friday",
+      agentType: "orchestrator",
+    });
+    expect(composed).not.toContain("# currentDateTime");
+    expect(composed).not.toContain("Current local date and time:");
+  });
+
+  it("pinned-facts still appears after identity when datetime is absent", () => {
+    const stack = readPromptStack("orchestrator", []);
+    const pinnedFacts = "# Pinned facts\n\n- **x**: y";
+    const composed = composeSystemPrompt(
+      stack,
+      { agentName: "friday", agentType: "orchestrator" },
+      pinnedFacts,
+    );
+    const idxIdentity = composed.indexOf("# Identity");
+    const idxPinned = composed.indexOf("# Pinned facts");
+    expect(idxIdentity).toBeGreaterThanOrEqual(0);
+    expect(idxPinned).toBeGreaterThan(idxIdentity);
+    expect(composed).not.toContain("# currentDateTime");
   });
 });
 

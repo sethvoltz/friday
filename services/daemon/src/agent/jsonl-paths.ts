@@ -22,13 +22,7 @@ export function encodeProjectDir(cwd: string): string {
 
 /** Absolute path to a session's JSONL transcript on disk. */
 export function sessionFilePath(cwd: string, sessionId: string): string {
-  return join(
-    homedir(),
-    ".claude",
-    "projects",
-    encodeProjectDir(cwd),
-    `${sessionId}.jsonl`,
-  );
+  return join(homedir(), ".claude", "projects", encodeProjectDir(cwd), `${sessionId}.jsonl`);
 }
 
 /**
@@ -39,11 +33,5 @@ export function sessionFilePath(cwd: string, sessionId: string): string {
  * migration that moves a JSONL must move this dir alongside it.
  */
 export function sessionSidecarDir(cwd: string, sessionId: string): string {
-  return join(
-    homedir(),
-    ".claude",
-    "projects",
-    encodeProjectDir(cwd),
-    sessionId,
-  );
+  return join(homedir(), ".claude", "projects", encodeProjectDir(cwd), sessionId);
 }

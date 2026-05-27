@@ -4,7 +4,7 @@
  * Ported nearly verbatim from old SlackAgents Friday.
  */
 
-import type { BlastRadius, Proposal, Signal, SignalSeverity } from "./types.js";
+import type { BlastRadius, Proposal, SignalSeverity } from "./types.js";
 
 const SEVERITY_WEIGHT: Record<SignalSeverity, number> = {
   high: 40,
@@ -27,9 +27,7 @@ const BLAST_PENALTY: Record<BlastRadius, number> = {
  *   - Distinct-signals boost.
  *   - Blast-radius penalty.
  */
-export function scoreProposal(
-  p: Pick<Proposal, "signals" | "blastRadius">,
-): number {
+export function scoreProposal(p: Pick<Proposal, "signals" | "blastRadius">): number {
   if (p.signals.length === 0) return 0;
 
   let highestSeverity: SignalSeverity = "low";
@@ -58,10 +56,7 @@ export const DEFAULT_RULE: CriticalityRule = {
   criticalFrequency: 5,
 };
 
-export function isCritical(
-  p: Pick<Proposal, "score" | "signals">,
-  rule: CriticalityRule,
-): boolean {
+export function isCritical(p: Pick<Proposal, "score" | "signals">, rule: CriticalityRule): boolean {
   if (p.score < rule.criticalScore) return false;
   for (const s of p.signals) {
     if (s.severity === "high") return true;

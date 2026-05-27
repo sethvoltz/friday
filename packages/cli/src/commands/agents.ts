@@ -42,8 +42,7 @@ export const agentsCommand = defineCommand({
       // cleanup); the CLI prompts for a literal "yes" unless --force is passed.
       meta: {
         name: "archive",
-        description:
-          "Archive an agent (stop work; for builders also free the worktree)",
+        description: "Archive an agent (stop work; for builders also free the worktree)",
       },
       args: {
         name: { type: "positional", required: true },

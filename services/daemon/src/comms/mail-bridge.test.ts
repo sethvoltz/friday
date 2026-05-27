@@ -97,11 +97,7 @@ describe("mail-bridge → mail-as-block (FIX_FORWARD 2.2)", () => {
           .from(schema.blocks)
           .where(eq(schema.blocks.agentName, "unknown-recipient-2"))
           .orderBy(schema.blocks.turnId);
-        expect(rows.map((r) => r.turnId)).toEqual([
-          "mail_200",
-          "mail_201",
-          "mail_202",
-        ]);
+        expect(rows.map((r) => r.turnId)).toEqual(["mail_200", "mail_201", "mail_202"]);
       },
       { timeout: 5000, interval: 25 },
     );

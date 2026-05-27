@@ -43,9 +43,7 @@ export async function applyStreamingMermaidGate(
   container: HTMLElement,
   deps: MermaidGateDeps,
 ): Promise<HTMLElement[]> {
-  const all = Array.from(
-    container.querySelectorAll<HTMLElement>("pre.mermaid"),
-  );
+  const all = Array.from(container.querySelectorAll<HTMLElement>("pre.mermaid"));
   const candidates = all.filter((n) => !n.hasAttribute(RENDERED_ATTR));
   if (candidates.length === 0) return [];
 
@@ -61,7 +59,7 @@ export async function applyStreamingMermaidGate(
       node.setAttribute(PENDING_ATTR, "true");
       continue;
     }
-    let ok: unknown = false;
+    let ok: unknown;
     try {
       ok = await deps.parse(node.textContent ?? "");
     } catch {
@@ -100,9 +98,7 @@ export async function applyStreamingMermaidGate(
  * @returns the count of nodes that were actually invalidated.
  */
 export function invalidateRenderedMermaid(root: ParentNode): number {
-  const nodes = Array.from(
-    root.querySelectorAll<HTMLElement>(`pre.mermaid[${RENDERED_ATTR}]`),
-  );
+  const nodes = Array.from(root.querySelectorAll<HTMLElement>(`pre.mermaid[${RENDERED_ATTR}]`));
   let invalidated = 0;
   for (const node of nodes) {
     const src = node.getAttribute(SOURCE_ATTR);

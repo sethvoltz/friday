@@ -89,8 +89,7 @@ export const backupCommand = defineCommand({
   args: {
     output: {
       type: "positional",
-      description:
-        "Output path (default: ~/.friday/backups/<timestamp>.tar.gz)",
+      description: "Output path (default: ~/.friday/backups/<timestamp>.tar.gz)",
       required: false,
     },
   },
@@ -118,7 +117,9 @@ export const backupCommand = defineCommand({
         );
       }
       const dumpSha = sha256File(dumpPath);
-      console.log(pc.dim(`  postgres.dump  ${formatBytes(fileSize(dumpPath))}  ${dumpSha.slice(0, 12)}…`));
+      console.log(
+        pc.dim(`  postgres.dump  ${formatBytes(fileSize(dumpPath))}  ${dumpSha.slice(0, 12)}…`),
+      );
 
       // 2. Copy filesystem contents (each via fs walk that respects the
       //    `existsSync` skip — a fresh install may not have all dirs).
@@ -149,10 +150,7 @@ export const backupCommand = defineCommand({
         fridayVersion: readFridayVersion(),
         files: fileInventory,
       };
-      writeFileSync(
-        join(stageDir, "manifest.json"),
-        JSON.stringify(manifest, null, 2) + "\n",
-      );
+      writeFileSync(join(stageDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 
       // 4. tar+gz the staged contents into a tmp tarball next to the
       //    target path so the final rename stays on the same filesystem.
@@ -160,19 +158,15 @@ export const backupCommand = defineCommand({
       //    same `-czf -C <cwd> .` shape on both platforms.
       const tmpOutput = outputPath + ".tmp";
       if (existsSync(tmpOutput)) unlinkSync(tmpOutput);
-      const tar = spawnSync(
-        "tar",
-        ["-czf", tmpOutput, "-C", stageDir, "."],
-        { stdio: ["ignore", "inherit", "inherit"] },
-      );
+      const tar = spawnSync("tar", ["-czf", tmpOutput, "-C", stageDir, "."], {
+        stdio: ["ignore", "inherit", "inherit"],
+      });
       if (tar.status !== 0) {
         throw new Error(`tar exited with status ${tar.status}.`);
       }
       renameSync(tmpOutput, outputPath);
 
-      console.log(
-        pc.green(`✓ backup complete · ${formatBytes(fileSize(outputPath))}`),
-      );
+      console.log(pc.green(`✓ backup complete · ${formatBytes(fileSize(outputPath))}`));
       console.log(pc.dim(`  bundle ${manifest.bundleId}`));
     } finally {
       await rm(stageDir, { recursive: true, force: true }).catch(() => {});
@@ -182,11 +176,7 @@ export const backupCommand = defineCommand({
 
 function resolveOutputPath(arg: unknown): string {
   if (typeof arg === "string" && arg.length > 0) return arg;
-  const ts = new Date()
-    .toISOString()
-    .replace(/[:.]/g, "-")
-    .replace(/T/, "_")
-    .replace(/Z$/, "");
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").replace(/T/, "_").replace(/Z$/, "");
   return join(DATA_DIR, "backups", `${ts}.tar.gz`);
 }
 
@@ -232,4 +222,3 @@ function formatBytes(bytes: number): string {
   }
   return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
-

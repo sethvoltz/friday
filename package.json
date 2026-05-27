@@ -13,13 +13,23 @@
     "check": "turbo run check",
     "clean": "turbo run clean",
     "drizzle:generate": "pnpm --filter @friday/shared run drizzle:generate",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "prepare": "husky 2>/dev/null || true"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^9.1.2",
+    "globals": "^17.6.0",
     "husky": "^9.1.7",
+    "prettier": "^3.8.3",
     "turbo": "^2.5.0",
     "typescript": "^5.7.0",
+    "typescript-eslint": "^8.59.4",
     "vitest": "^4.1.5"
   },
   "packageManager": "pnpm@10.23.0",

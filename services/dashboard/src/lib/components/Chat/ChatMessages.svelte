@@ -2,7 +2,6 @@
   import { tick, untrack } from "svelte";
   import { chat, type ChatMessage } from "$lib/stores/chat.svelte";
   import { chatInputBridge } from "$lib/stores/chat-input-bridge.svelte";
-  import { sendQueue } from "$lib/stores/send-queue.svelte";
   import { clock } from "$lib/stores/clock.svelte";
   import { useZero, zeroSync } from "$lib/stores/zero.svelte";
   import { computeGroupingMeta } from "$lib/util/chat-grouping";
@@ -20,33 +19,11 @@
   import ErrorBlock from "$lib/components/Chat/ErrorBlock.svelte";
   import { X } from "lucide-svelte";
 
-  function queueEntry(queueId: string | undefined) {
-    if (!queueId) return undefined;
-    return sendQueue.items.find((q) => q.id === queueId);
-  }
-
-  async function retryQueued(queueId: string) {
-    const result = await sendQueue.retry(queueId);
-    for (const s of result.sent) {
-      chat.confirmPending(s.queueId, s.turnId);
-      // See ChatInput's submit() for the gate rationale: a queued turn
-      // must not displace the actively-streaming turn's inflight slot.
-      if (!s.queued) chat.inflightTurnId = s.turnId;
-    }
-    for (const qid of result.failed) chat.markPendingFailed(qid);
-    for (const qid of result.retrying) chat.markPendingRetrying(qid);
-  }
-
   function discardOne(queueId: string) {
-    sendQueue.remove(queueId);
     chat.discardPending(queueId);
   }
 
   function discardAll() {
-    const ids = sendQueue.discardAll();
-    for (const id of ids) chat.discardPending(id);
-    // Defensive: any pending bubble that lost its queue entry mid-flight
-    // should also be cleared.
     chat.discardAllPending();
   }
 
@@ -700,25 +677,14 @@
                 {/each}
               </div>
             {/if}
-            {#if msg.queueId}
-              {@const q = queueEntry(msg.queueId)}
-              {#if q?.status === "failed"}
-                <div class="footer-tag failed-row">
-                  <span>Failed{q.lastError ? ` — ${q.lastError}` : ""}</span>
-                  <button type="button" class="queue-action" onclick={() => retryQueued(q.id)}>Keep retrying</button>
-                  <button type="button" class="queue-action" onclick={() => discardOne(q.id)}>Discard and continue</button>
-                  <button type="button" class="queue-action" onclick={discardAll}>Discard all and continue</button>
-                </div>
-              {:else if q?.status === "retrying"}
-                <div class="footer-tag queued">Retrying… ({q.attempts}/5)</div>
-              {:else if q}
-                <div class="footer-tag queued">Queued — waiting to send</div>
-              {/if}
-              <!-- No else for the missing-entry case: a bubble can keep a
-                   stale queueId (e.g. a 200 response whose body lacked
-                   turn_id — sendQueue.remove already ran, confirmPending
-                   never did) and a pill claiming "queued" while the
-                   queue is empty is worse than no pill. FRI-6. -->
+            {#if msg.queueId && msg.failed}
+              <div class="footer-tag failed-row">
+                <span>Failed to send</span>
+                <button type="button" class="queue-action" onclick={() => msg.queueId && discardOne(msg.queueId)}>Discard</button>
+                <button type="button" class="queue-action" onclick={discardAll}>Discard all</button>
+              </div>
+            {:else if msg.queueId && msg.pending}
+              <div class="footer-tag queued">Sending…</div>
             {:else if msg.status === "queued"}
               <!-- Daemon-side queue: this message is sitting in the
                    worker's `nextPrompts` FIFO behind an in-flight turn.
@@ -759,6 +725,11 @@
       </div>
     {/if}
   {/each}
+  {#if !readonly && chat.showThinkingPlaceholder}
+    <div class="message inline">
+      <ThinkingBlock text="" status="running" />
+    </div>
+  {/if}
   <div
     bind:this={bottomSentinel}
     class="bottom-sentinel"

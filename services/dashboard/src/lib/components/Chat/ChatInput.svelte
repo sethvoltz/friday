@@ -8,7 +8,6 @@
   import { page } from "$app/stores";
   import { portal } from "$lib/actions/portal";
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
-  import { sendQueue } from "$lib/stores/send-queue.svelte";
   import { onDestroy, onMount, tick } from "svelte";
   import { Paperclip, Send, CircleStop } from "lucide-svelte";
 
@@ -19,7 +18,10 @@
 
   let text = $state("");
   let textarea: HTMLTextAreaElement | undefined = $state();
-  let busy = $derived(chat.inflightTurnId !== null);
+  // FRI-54: include DB-derived working status so the aurora animation and
+  // Stop button stay active after a page refresh or on a mail-triggered
+  // turn where no local inflightTurnId was ever set.
+  let busy = $derived(chat.inflightTurnId !== null || chat.focusedAgentIsWorking);
   // True between the user clicking Stop and the daemon emitting turn_done
   // for the stopping turn. Drives the Stop button's disabled/dimmed look
   // so a second click doesn't fire a redundant abort POST.
@@ -400,19 +402,13 @@
       }
     }
 
-    // Optimistic: enqueue first, render the user bubble with a "queued" pill,
-    // then attempt to flush. If the network is down or the daemon is
-    // unreachable, the bubble stays "queued" until a reconnect drains the
-    // queue (see +layout.svelte's flush effect).
     const attachments = ready.map((a) => ({
       sha256: a.sha256!,
       filename: a.filename,
       mime: a.mime,
     }));
     // FRI-72 instrumentation: catch the leak where chat.focusedAgent
-    // disagrees with the current route at submit time. The route is the
-    // user's intent; if the global store has drifted, log loudly so the
-    // next occurrence is captured in the console with full state.
+    // disagrees with the current route at submit time.
     try {
       const pathname = $page.url.pathname;
       const expectedAgent =
@@ -430,29 +426,17 @@
     } catch {
       /* instrumentation must not break send */
     }
-    const queueItem = sendQueue.enqueue({
-      agent: chat.focusedAgent,
-      text: t,
-      attachments: attachments.length > 0 ? attachments : undefined,
-    });
+    // Pre-mint the blockId so `queueId` on the optimistic bubble equals
+    // the Zero block's PK — `applyZeroBlocks` drops the pending bubble
+    // the moment the optimistic write lands in the local replica.
+    const blockId = crypto.randomUUID();
+    const eagerTurnId = `t_${blockId}`;
     chat.addUser(t, {
-      queueId: queueItem.id,
+      queueId: blockId,
       attachments: attachments.length > 0 ? attachments : undefined,
     });
-    // Eagerly claim the per-agent inflight slot before the Zero mutator's
-    // optimistic local write commits. `zeroSync.sendUserMessage` derives
-    // the turnId as `t_${blockId}`, so the queue item's pre-minted
-    // queueBlockId already pins the eventual turnId. Without the eager
-    // claim, this ordering creates a ~submit-to-first-block window where
-    // applyZeroBlocks fires for the new user_chat block, parseBlocks's
-    // safety net sees no inflight match, and the user sees an "Agent
-    // didn't respond" bubble that flashes for as long as it takes the
-    // model to emit its first stream_event (sometimes 20+ seconds on
-    // tool-call-heavy turns). Only claim if the slot is free — a queued
-    // send (a prior turn is still running) must not displace the running
-    // turn's slot; the SSE `turn_started` for the queued turn will own
-    // the slot when it actually dispatches.
-    const eagerTurnId = `t_${queueItem.queueBlockId}`;
+    // Eagerly claim the inflight slot before the Zero optimistic write fires
+    // applyZeroBlocks — prevents the FRI-85 "Agent didn't respond" flash.
     const claimedInflight = chat.inflightTurnId === null;
     if (claimedInflight) chat.inflightTurnId = eagerTurnId;
     // Release object URLs and clear the chip row.
@@ -462,42 +446,25 @@
     pendingAttachments = [];
     text = "";
     // Wait for the bound textarea value to actually clear before measuring.
-    // Without this, scrollHeight still reflects the multi-line draft and
-    // autoresize sizes the box to the *old* content.
     await tick();
     autoresize();
-    const result = await sendQueue.flush();
-    let dispatchedEagerTurn = false;
-    for (const s of result.sent) {
-      // FIX_FORWARD 2.6: re-key the pending bubble to its canonical
-      // turn-derived id so the daemon's `block_complete` for the user-role
-      // block overwrites this exact row instead of creating a duplicate.
-      chat.confirmPending(s.queueId, s.turnId);
-      // Only claim the per-agent inflight slot when this dispatch is the
-      // one that's actually running. A `queued` turn sits in the worker's
-      // `nextPrompts` FIFO behind a still-streaming turn — overwriting the
-      // slot with its id displaces the real in-flight turn (the eventual
-      // `turn_done` for the streaming turn no longer clears the slot, and
-      // a click on Stop targets the wrong turn id). The SSE `turn_started`
-      // event will set the slot when this turn actually dispatches.
-      if (!s.queued) chat.inflightTurnId = s.turnId;
-      if (s.turnId === eagerTurnId && !s.queued) dispatchedEagerTurn = true;
-    }
-    for (const qid of result.failed) chat.markPendingFailed(qid);
-    for (const qid of result.retrying) chat.markPendingRetrying(qid);
-    // Release the eager claim if the server didn't confirm an immediate
-    // dispatch for this turn — either the send failed outright, or the
-    // daemon queued it behind a prior turn. In both cases the slot must
-    // not stay pinned to the eager id: a failed send has no SSE pipeline
-    // to clear it later, and a queued send's eventual SSE `turn_started`
-    // is the authoritative slot owner (the dispatch may be reordered or
-    // even canceled before then).
-    if (
-      claimedInflight &&
-      !dispatchedEagerTurn &&
-      chat.inflightTurnId === eagerTurnId
-    ) {
-      chat.inflightTurnId = null;
+    const result = await zeroSync.sendUserMessage({
+      blockId,
+      agent: chat.focusedAgent,
+      text: t,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    });
+    if (!result) {
+      // Zero not yet initialized (very rare — first ~200ms of page load).
+      if (claimedInflight && chat.inflightTurnId === eagerTurnId) {
+        chat.inflightTurnId = null;
+      }
+      chat.markPendingFailed(blockId);
+    } else {
+      // Belt-and-suspenders: confirmPending re-keys the bubble if
+      // applyZeroBlocks hasn't already done it via the optimistic write.
+      chat.confirmPending(blockId, result.turnId);
+      chat.inflightTurnId = result.turnId;
     }
   }
 
@@ -624,7 +591,18 @@
   }
 
   async function stop() {
-    const id = chat.inflightTurnId;
+    let id = chat.inflightTurnId;
+    // FRI-54: on page refresh (or a mail-triggered turn), inflightTurnId is
+    // null even though the agent is actively working. Recover the turn_id
+    // from the Zero blocks snapshot — bindBlocksFor scopes zeroSync.blocks
+    // to the focused agent already, ordered ts desc, so the first user_chat
+    // row is the currently-in-flight turn.
+    if (!id && chat.focusedAgentIsWorking) {
+      const block = zeroSync.blocks.find(
+        (b) => b.role === "user" && b.source === "user_chat",
+      );
+      if (block) id = block.turn_id;
+    }
     if (!id) return;
     // Mark the bubble as stopping immediately so the UI flips out of
     // streaming-grow mode and the Stop button dims. The daemon's eventual

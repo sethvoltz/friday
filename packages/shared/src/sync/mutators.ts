@@ -23,7 +23,10 @@
 // Phase 4.1 ships `markRead`; subsequent sub-phases extend this file.
 
 import type { CustomMutatorDefs, Transaction } from "@rocicorp/zero";
+import type { ArchiveReason } from "../agents.js";
 import type { Schema } from "./schema.js";
+
+export type { ArchiveReason };
 
 /* ---------------- Phase 4.1: markRead ---------------- */
 // Per-device read cursor for unread-badge derivation. UPSERT on
@@ -216,9 +219,7 @@ export interface LinkTicketExternalArgs {
  * MutatorResult surfaces a server-side error and the caller needs
  * the id in scope to retry.
  */
-export function nextTicketIdFrom(
-  existing: ReadonlyArray<{ id: string }>,
-): string {
+export function nextTicketIdFrom(existing: ReadonlyArray<{ id: string }>): string {
   let max = 0;
   for (const t of existing) {
     const m = /^FRI-(\d+)$/.exec(t.id);
@@ -428,12 +429,8 @@ export interface ReloadAppArgs {
 // differently per reason (e.g., 'completed' marks the ticket done;
 // 'abandoned' marks it abandoned). The dashboard's `/archive <name>`
 // slash command surfaces a dropdown to pick the reason; the default is
-// 'abandoned' to match the legacy slash-command default. Forced reforks
-// (/clear, watchdog refork) go through `forceWorkerRefork` and never
-// touch the archive write path — that's why the union doesn't include
-// a 'refork' variant.
-
-export type ArchiveReason = "completed" | "abandoned" | "failed";
+// 'abandoned' to match the legacy slash-command default. See
+// `ArchiveReason` in `../agents.ts` for the canonical type.
 
 export interface ArchiveAgentArgs {
   name: string;
@@ -593,550 +590,476 @@ export interface SendUserMessageArgs {
   ts: number;
 }
 
-export const createMutators = () => ({
-  markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
-    // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
-    // here: it produces a single optimistic write on the client and a
-    // single canonical UPSERT on the server, both keyed by the table's
-    // PK (device_id, agent_name). Re-executing this mutator with the
-    // same args is a guaranteed no-op (Postgres ON CONFLICT path).
-    //
-    // The server-side run overwrites `ts` with its own clock —
-    // strictly speaking the client's `args.ts` is advisory because
-    // device clocks drift. The diagnostic value comes from the
-    // server-side ts.
-    await tx.mutate.read_cursors.upsert({
-      device_id: args.deviceId,
-      agent_name: args.agentName,
-      last_seen_block_id: args.lastSeenBlockId,
-      ts: args.ts,
-      // Item #52: reset the server-computed unread counter atomically
-      // with the cursor advance. The trigger on `blocks` INSERT
-      // increments this row; markRead resets it back to 0 the moment
-      // the user catches up.
-      unread_count: 0,
-    });
-  },
-  reportClientStats: async (
-    tx: FridayTx,
-    args: ReportClientStatsArgs,
-  ): Promise<void> => {
-    // Upsert. Touches only the columns the client owns —
-    // `last_seen_at`, `last_sync_at`, `storage_used_bytes`,
-    // `storage_quota_bytes`. The PK is `device_id`; user_id /
-    // first_seen_at are populated by `/api/sync/refresh` on first
-    // mint and stay pinned afterward. Zero's `update` (vs `upsert`)
-    // would refuse if the row didn't exist; we use `update` here
-    // because the row is guaranteed to exist by the time the client
-    // calls this (refresh creates it before the WS handshake even
-    // completes).
-    await tx.mutate.client_devices.update({
-      device_id: args.deviceId,
-      last_seen_at: args.ts,
-      last_sync_at: args.ts,
-      storage_used_bytes: args.storageUsedBytes,
-      storage_quota_bytes: args.storageQuotaBytes,
-    });
-  },
-  forgetDevice: async (
-    tx: FridayTx,
-    args: ForgetDeviceArgs,
-  ): Promise<void> => {
-    // Plan §41: soft-delete via `revoked_at` so the daemon's
-    // `/api/sync/refresh` deny-list lookup can find the tombstone and
-    // refuse to mint another JWT for this device_id. Hard DELETE used
-    // to leave no trace, so the next refresh re-upserted the row and
-    // the user's "Forget" click was effectively cosmetic.
-    //
-    // Idempotent: re-running on an already-revoked row is a Zero
-    // UPDATE with the same shape — Zero's mutator framework treats
-    // it as a no-op write. The trigger predicate on `last_seen_at`
-    // also doesn't fire here because we don't touch that column.
-    await tx.mutate.client_devices.update({
-      device_id: args.deviceId,
-      revoked_at: args.ts,
-    });
-  },
-  createTicket: async (
-    tx: FridayTx,
-    args: CreateTicketArgs,
-  ): Promise<void> => {
-    // INSERT — collides on PK if the client raced another device
-    // picking the same FRI-N. The mutator framework surfaces that
-    // collision as an application error to the caller. The id is
-    // computed client-side via `nextTicketIdFrom(zeroSync.tickets)`.
-    await tx.mutate.tickets.insert({
-      id: args.id,
-      title: args.title,
-      body: args.body,
-      status: args.status ?? "open",
-      kind: args.kind ?? "task",
-      assignee: args.assignee,
-      meta_json: args.meta,
-      created_at: args.ts,
-      updated_at: args.ts,
-    });
-  },
-  updateTicket: async (
-    tx: FridayTx,
-    args: UpdateTicketArgs,
-  ): Promise<void> => {
-    // UPDATE — omitted fields preserved via Zero's `update`
-    // semantic (not `upsert`). `updated_at` always advances on
-    // every patch.
-    const patch: {
-      id: string;
-      title?: string;
-      body?: string | null;
-      status?: "open" | "in_progress" | "done" | "blocked" | "closed";
-      kind?: "task" | "epic" | "bug" | "chore";
-      assignee?: string | null;
-      meta_json?: Record<string, unknown> | null;
-      updated_at: number;
-    } = { id: args.id, updated_at: args.ts };
-    if (args.title !== undefined) patch.title = args.title;
-    if (args.body !== undefined) patch.body = args.body;
-    if (args.status !== undefined) patch.status = args.status;
-    if (args.kind !== undefined) patch.kind = args.kind;
-    if (args.assignee !== undefined) patch.assignee = args.assignee;
-    if (args.meta !== undefined) patch.meta_json = args.meta;
-    await tx.mutate.tickets.update(patch);
-  },
-  addTicketComment: async (
-    tx: FridayTx,
-    args: AddTicketCommentArgs,
-  ): Promise<void> => {
-    // INSERT comment AND bump the parent ticket's updated_at so
-    // the list page's "sort by updated" re-orders correctly. Mirrors
-    // the legacy `addComment` service (tickets.ts:130-144).
-    await tx.mutate.ticket_comments.insert({
-      id: args.id,
-      ticket_id: args.ticketId,
-      author: args.author,
-      body: args.body,
-      ts: args.ts,
-    });
-    await tx.mutate.tickets.update({
-      id: args.ticketId,
-      updated_at: args.ts,
-    });
-  },
-  addTicketRelation: async (
-    tx: FridayTx,
-    args: AddTicketRelationArgs,
-  ): Promise<void> => {
-    // INSERT — composite PK (parent_id, child_id, kind) means a
-    // duplicate relation is a PK conflict (acceptable: the UI
-    // surfaces the error so the user knows the link already
-    // exists).
-    await tx.mutate.ticket_relations.insert({
-      parent_id: args.parentId,
-      child_id: args.childId,
-      kind: args.kind,
-    });
-  },
-  createMemoryEntry: async (
-    tx: FridayTx,
-    args: CreateMemoryEntryArgs,
-  ): Promise<void> => {
-    // INSERT with status='pending_file' — the daemon's LISTEN
-    // handler picks up the NOTIFY (fired by the trigger from
-    // migration 0004) and writes the markdown file, then flips
-    // status to 'ready'. PK conflict (e.g. two devices using the
-    // same slug) is surfaced to the caller.
-    //
-    // `file_mtime` is mandatory in the schema but we don't know it
-    // yet — the daemon writes the file and stamps mtime then.
-    // Provide `ts` as a placeholder so the column has SOMETHING
-    // until the daemon flips it.
-    await tx.mutate.memory_entries.insert({
-      id: args.id,
-      title: args.title,
-      content: args.content,
-      tags_json: args.tags,
-      created_by: args.createdBy,
-      created_at: args.ts,
-      updated_at: args.ts,
-      file_mtime: args.ts,
-      recall_count: 0,
-      last_recalled_at: null,
-      status: "pending_file",
-    });
-  },
-  updateMemoryEntry: async (
-    tx: FridayTx,
-    args: UpdateMemoryEntryArgs,
-  ): Promise<void> => {
-    // UPDATE with status='pending_file' + advanced updated_at.
-    // Omitted fields preserved (Zero's `update`). Daemon LISTEN
-    // handler rewrites the file and flips back to 'ready'.
-    const patch: {
-      id: string;
-      title?: string;
-      content?: string;
-      tags_json?: string[];
-      updated_at: number;
-      status: "pending_file";
-    } = {
-      id: args.id,
-      updated_at: args.ts,
-      status: "pending_file",
-    };
-    if (args.title !== undefined) patch.title = args.title;
-    if (args.content !== undefined) patch.content = args.content;
-    if (args.tags !== undefined) patch.tags_json = args.tags;
-    await tx.mutate.memory_entries.update(patch);
-  },
-  deleteMemoryEntry: async (
-    tx: FridayTx,
-    args: DeleteMemoryEntryArgs,
-  ): Promise<void> => {
-    // Soft-delete: set status='pending_delete' + advance
-    // updated_at. The dashboard's reactive query filters status
-    // NOT IN ('pending_delete','deleted') so the row disappears
-    // from the list immediately (optimistic). Daemon LISTEN
-    // handler moves the file to ~/.friday/memory/trash/ and flips
-    // status to 'deleted' (tombstone).
-    await tx.mutate.memory_entries.update({
-      id: args.id,
-      updated_at: args.ts,
-      status: "pending_delete",
-    });
-  },
-  createSchedule: async (
-    tx: FridayTx,
-    args: CreateScheduleArgs,
-  ): Promise<void> => {
-    // INSERT with status='pending_register'. Daemon's LISTEN
-    // handler reads the row, registers the agent stub in the
-    // `agents` registry (mail-routing target), computes nextRunAt
-    // from the cron expression, and flips status='active'.
-    //
-    // `next_run_at`, `last_run_at`, `last_run_id` left null on
-    // initial insert — the daemon's LISTEN handler computes them.
-    // PK is `name`; race-loss between devices → PK conflict.
-    await tx.mutate.schedules.insert({
-      name: args.name,
-      cron: args.cron,
-      run_at: args.runAt,
-      task_prompt: args.taskPrompt,
-      paused: args.paused ?? false,
-      next_run_at: null,
-      last_run_at: null,
-      last_run_id: null,
-      meta_json: null,
-      app_id: null,
-      status: "pending_register",
-      created_at: args.ts,
-      updated_at: args.ts,
-    });
-  },
-  updateSchedule: async (
-    tx: FridayTx,
-    args: UpdateScheduleArgs,
-  ): Promise<void> => {
-    // UPDATE with status='reload_requested' + advanced updated_at.
-    // Omitted fields preserved. Daemon LISTEN handler recomputes
-    // nextRunAt (cron may have changed → fresh window) and flips
-    // status='active'. `paused` updates flow through here too —
-    // the daemon's recompute handles the paused-during-due-window
-    // edge case (the existing `resumeSchedule` legacy path uses
-    // the same recompute semantic).
-    const patch: {
-      name: string;
-      cron?: string | null;
-      run_at?: string | null;
-      task_prompt?: string;
-      paused?: boolean;
-      updated_at: number;
-      status: "reload_requested";
-    } = {
-      name: args.name,
-      updated_at: args.ts,
-      status: "reload_requested",
-    };
-    if (args.cron !== undefined) patch.cron = args.cron;
-    if (args.runAt !== undefined) patch.run_at = args.runAt;
-    if (args.taskPrompt !== undefined) patch.task_prompt = args.taskPrompt;
-    if (args.paused !== undefined) patch.paused = args.paused;
-    await tx.mutate.schedules.update(patch);
-  },
-  deleteSchedule: async (
-    tx: FridayTx,
-    args: DeleteScheduleArgs,
-  ): Promise<void> => {
-    // Soft-delete: status='deleted' + advance updated_at. The
-    // dashboard's schedules query filters `status != 'deleted'` so
-    // the row vanishes immediately. Daemon LISTEN handler cleans
-    // up the registry agent stub if it's unused (no session, no
-    // blocks); idempotent — re-running is safe. Row stays at
-    // 'deleted' as a tombstone for cross-device convergence.
-    await tx.mutate.schedules.update({
-      name: args.name,
-      updated_at: args.ts,
-      status: "deleted",
-    });
-  },
-  pauseSchedule: async (
-    tx: FridayTx,
-    args: PauseScheduleArgs,
-  ): Promise<void> => {
-    // Pure data write. The scheduler's tick() short-circuits on
-    // `paused`, so no daemon LISTEN handler is needed — the next
-    // tick reads the new value and skips the fire.
-    await tx.mutate.schedules.update({
-      name: args.name,
-      paused: true,
-      updated_at: args.ts,
-    });
-  },
-  resumeSchedule: async (
-    tx: FridayTx,
-    args: ResumeScheduleArgs,
-  ): Promise<void> => {
-    // Flip paused=false AND request a daemon-side reload. The
-    // existing Phase 4.6 listener for status='reload_requested'
-    // recomputes next_run_at from the cron — without that recompute
-    // a schedule paused mid-due-time would fire on the next tick
-    // (its stored next_run_at is in the past from before the pause).
-    await tx.mutate.schedules.update({
-      name: args.name,
-      paused: false,
-      status: "reload_requested",
-      updated_at: args.ts,
-    });
-  },
-  triggerSchedule: async (
-    tx: FridayTx,
-    args: TriggerScheduleArgs,
-  ): Promise<void> => {
-    // Status flip the daemon's listener picks up to call
-    // fireSchedule(name) immediately, then flips back to 'active'.
-    // Migration 0014 extended the existing schedule-notify trigger
-    // predicate to include this status; migration 0013 added it to
-    // the check constraint.
-    await tx.mutate.schedules.update({
-      name: args.name,
-      status: "trigger_requested",
-      updated_at: args.ts,
-    });
-  },
-  installApp: async (
-    tx: FridayTx,
-    args: InstallAppArgs,
-  ): Promise<void> => {
-    // INSERT a stub row at status='pending_install'. NOT NULL
-    // columns (`name`, `version`, `manifest_version`,
-    // `manifest_json`) get placeholders that the daemon overwrites
-    // when it reads the manifest from disk. The dashboard's apps
-    // query filters status='pending_install' so the placeholder is
-    // never user-visible — the row appears in the list only after
-    // the daemon flips status='installed'.
-    //
-    // PK collision (re-install of the same id) → caller surfaces
-    // the error. The daemon's installer already handles
-    // "previously archived agents under this app id" via the
-    // re-attach path; users wanting to re-install should
-    // uninstallApp first.
-    await tx.mutate.apps.insert({
-      id: args.id,
-      name: "",
-      version: "0.0.0",
-      manifest_version: 0,
-      folder_path: args.folderPath,
-      manifest_json: {},
-      status: "pending_install",
-      installed_at: args.ts,
-      upgraded_at: null,
-      meta_json: null,
-    });
-  },
-  uninstallApp: async (
-    tx: FridayTx,
-    args: UninstallAppArgs,
-  ): Promise<void> => {
-    // UPDATE status='uninstall_requested'. Daemon LISTEN handler
-    // archives owned agents, drops schedules, optionally moves the
-    // folder, then DELETEs the row. The row vanishing is the
-    // user's "uninstall complete" signal across devices.
-    await tx.mutate.apps.update({
-      id: args.id,
-      status: "uninstall_requested",
-    });
-  },
-  reloadApp: async (
-    tx: FridayTx,
-    args: ReloadAppArgs,
-  ): Promise<void> => {
-    // UPDATE status='reload_requested'. Daemon LISTEN handler
-    // re-reads the manifest from disk, reconciles agent/schedule
-    // rows, and flips status='installed'. No-op when the manifest
-    // hasn't changed (the daemon's reloadApp returns
-    // {changed: false}).
-    await tx.mutate.apps.update({
-      id: args.id,
-      status: "reload_requested",
-    });
-  },
-  archiveAgent: async (
-    tx: FridayTx,
-    args: ArchiveAgentArgs,
-  ): Promise<void> => {
-    // UPDATE agents.status='archive_requested' + archive_reason.
-    // The Postgres trigger fires NOTIFY; the daemon's LISTEN
-    // handler calls the existing `archiveAgent(name, {reason})`
-    // lifecycle function which kills the worker, archives the
-    // worktree, closes linked tickets, and flips status='archived'.
-    //
-    // Idempotent: re-archiving an already-archived agent is a
-    // no-op at the lifecycle level (the worker is gone, the
-    // worktree is archived, the ticket is closed). The mutator
-    // UPDATE itself produces another archive_request write — the
-    // daemon's handler is structured to tolerate this.
-    await tx.mutate.agents.update({
-      name: args.name,
-      status: "archive_requested",
-      archive_reason: args.reason,
-      updated_at: args.ts,
-    });
-  },
-  linkTicketExternal: async (
-    tx: FridayTx,
-    args: LinkTicketExternalArgs,
-  ): Promise<void> => {
-    // INSERT — composite PK (ticket_id, system, external_id). The
-    // legacy REST path used `ON CONFLICT DO NOTHING`; the mutator's
-    // `insert` raises on conflict so the UI must check first. The
-    // ticket detail page already gates the form on
-    // `!existingLink(system, externalId)` so the conflict path is
-    // exercised only on a true race.
-    await tx.mutate.ticket_external_links.insert({
-      ticket_id: args.ticketId,
-      system: args.system,
-      external_id: args.externalId,
-      url: args.url,
-      meta_json: args.meta,
-      linked_at: args.ts,
-    });
-  },
-  unlinkTicketExternal: async (
-    tx: FridayTx,
-    args: UnlinkTicketExternalArgs,
-  ): Promise<void> => {
-    // DELETE on the composite PK. Idempotent — Postgres DELETE WHERE
-    // no-match doesn't error. Required for the /tickets/[id] detail
-    // page's "detach link" affordance once that page derives its
-    // external-link list from `zeroSync.ticketExternalLinks`; without
-    // this mutator the REST DELETE wouldn't sync to the Zero replica
-    // and the link would re-appear after the next render.
-    await tx.mutate.ticket_external_links.delete({
-      ticket_id: args.ticketId,
-      system: args.system,
-      external_id: args.externalId,
-    });
-  },
-  cancelQueued: async (
-    tx: FridayTx,
-    args: CancelQueuedArgs,
-  ): Promise<void> => {
-    // UPDATE blocks.status='cancel_requested'. The dashboard's blocks
-    // query filters this status out so the bubble disappears
-    // optimistically. The Postgres trigger fires NOTIFY
-    // `friday_block_canceled` and the daemon LISTEN handler then
-    // performs the canonical row DELETE + nextPrompts splice.
-    //
-    // Touches only `status` (+ `last_event_seq` advance for the
-    // existing SSE-block-cursor invariant). All other fields are
-    // preserved so the daemon's LISTEN handler can read the original
-    // agent_name / turn_id / content_json from the row before it
-    // performs the delete.
-    await tx.mutate.blocks.update({
-      id: args.id,
-      status: "cancel_requested",
-    });
-  },
-  sendUserMessage: async (
-    tx: FridayTx,
-    args: SendUserMessageArgs,
-  ): Promise<void> => {
-    // INSERT a user-chat block at status='pending'. The Postgres
-    // trigger fires NOTIFY `friday_new_pending_block` (channel
-    // reserved at the schema level). The daemon's LISTEN handler
-    // does the rest: agent resolution, prompt composition, skill
-    // detection, memory recall, queue-vs-dispatch decision,
-    // status flip-back to 'queued' / 'complete', and worker fork.
-    //
-    // `id` and `block_id` carry the same UUID — Phase 4.11 unified
-    // the PK and the application-level identifier. `session_id` is
-    // a sentinel; the daemon overwrites with the agent's resumed
-    // session id. `last_event_seq=0` is a placeholder the daemon
-    // updates when it publishes the block_complete SSE event.
-    const content: Record<string, unknown> = { text: args.text };
-    if (args.attachments && args.attachments.length > 0) {
-      content.attachments = args.attachments;
-    }
-    await tx.mutate.blocks.insert({
-      id: args.id,
-      block_id: args.id,
-      turn_id: args.turnId,
-      agent_name: args.agentName,
-      session_id: "__pending__",
-      message_id: undefined,
-      block_index: 0,
-      role: "user",
-      kind: "text",
-      source: "user_chat",
-      content_json: content,
-      status: "pending",
-      streaming: false,
-      origin_mutation_id: undefined,
-      ts: args.ts,
-      last_event_seq: 0,
-    });
-  },
-  abortTurn: async (
-    tx: FridayTx,
-    args: AbortTurnArgs,
-  ): Promise<void> => {
-    // UPDATE blocks.status='abort_requested'. The Postgres trigger
-    // fires NOTIFY `friday_abort_requested`; the daemon's LISTEN
-    // handler dispatches the existing `abortTurn(agentName)`
-    // lifecycle function and then flips the row back to 'complete'.
-    //
-    // Touches only `status` — agent_name / turn_id / content_json
-    // must be preserved so the daemon's LISTEN handler can read them
-    // before performing the abort + flip-back.
-    await tx.mutate.blocks.update({
-      id: args.id,
-      status: "abort_requested",
-    });
-  },
-  updateSettings: async (
-    tx: FridayTx,
-    args: UpdateSettingsArgs,
-  ): Promise<void> => {
-    // UPSERT the singleton row. Only fields the user provided are
-    // included in the patch — Zero's `update` semantics preserve
-    // omitted columns. The 0002 migration ensures the row already
-    // exists, so `update` rather than `upsert` is safe; using
-    // `update` makes the omitted-fields-preserved invariant
-    // explicit in the type signature.
-    const patch: {
-      id: string;
-      model?: string;
-      watchdog_refork?: boolean;
-      updated_at: number;
-    } = {
-      id: "singleton",
-      updated_at: args.ts,
-    };
-    if (args.model !== undefined) patch.model = args.model;
-    if (args.watchdogRefork !== undefined) {
-      patch.watchdog_refork = args.watchdogRefork;
-    }
-    await tx.mutate.settings.update(patch);
-  },
-}) satisfies CustomMutatorDefs;
+export const createMutators = () =>
+  ({
+    markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
+      // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
+      // here: it produces a single optimistic write on the client and a
+      // single canonical UPSERT on the server, both keyed by the table's
+      // PK (device_id, agent_name). Re-executing this mutator with the
+      // same args is a guaranteed no-op (Postgres ON CONFLICT path).
+      //
+      // The server-side run overwrites `ts` with its own clock —
+      // strictly speaking the client's `args.ts` is advisory because
+      // device clocks drift. The diagnostic value comes from the
+      // server-side ts.
+      await tx.mutate.read_cursors.upsert({
+        device_id: args.deviceId,
+        agent_name: args.agentName,
+        last_seen_block_id: args.lastSeenBlockId,
+        ts: args.ts,
+        // Item #52: reset the server-computed unread counter atomically
+        // with the cursor advance. The trigger on `blocks` INSERT
+        // increments this row; markRead resets it back to 0 the moment
+        // the user catches up.
+        unread_count: 0,
+      });
+    },
+    reportClientStats: async (tx: FridayTx, args: ReportClientStatsArgs): Promise<void> => {
+      // Upsert. Touches only the columns the client owns —
+      // `last_seen_at`, `last_sync_at`, `storage_used_bytes`,
+      // `storage_quota_bytes`. The PK is `device_id`; user_id /
+      // first_seen_at are populated by `/api/sync/refresh` on first
+      // mint and stay pinned afterward. Zero's `update` (vs `upsert`)
+      // would refuse if the row didn't exist; we use `update` here
+      // because the row is guaranteed to exist by the time the client
+      // calls this (refresh creates it before the WS handshake even
+      // completes).
+      await tx.mutate.client_devices.update({
+        device_id: args.deviceId,
+        last_seen_at: args.ts,
+        last_sync_at: args.ts,
+        storage_used_bytes: args.storageUsedBytes,
+        storage_quota_bytes: args.storageQuotaBytes,
+      });
+    },
+    forgetDevice: async (tx: FridayTx, args: ForgetDeviceArgs): Promise<void> => {
+      // Plan §41: soft-delete via `revoked_at` so the daemon's
+      // `/api/sync/refresh` deny-list lookup can find the tombstone and
+      // refuse to mint another JWT for this device_id. Hard DELETE used
+      // to leave no trace, so the next refresh re-upserted the row and
+      // the user's "Forget" click was effectively cosmetic.
+      //
+      // Idempotent: re-running on an already-revoked row is a Zero
+      // UPDATE with the same shape — Zero's mutator framework treats
+      // it as a no-op write. The trigger predicate on `last_seen_at`
+      // also doesn't fire here because we don't touch that column.
+      await tx.mutate.client_devices.update({
+        device_id: args.deviceId,
+        revoked_at: args.ts,
+      });
+    },
+    createTicket: async (tx: FridayTx, args: CreateTicketArgs): Promise<void> => {
+      // INSERT — collides on PK if the client raced another device
+      // picking the same FRI-N. The mutator framework surfaces that
+      // collision as an application error to the caller. The id is
+      // computed client-side via `nextTicketIdFrom(zeroSync.tickets)`.
+      await tx.mutate.tickets.insert({
+        id: args.id,
+        title: args.title,
+        body: args.body,
+        status: args.status ?? "open",
+        kind: args.kind ?? "task",
+        assignee: args.assignee,
+        meta_json: args.meta,
+        created_at: args.ts,
+        updated_at: args.ts,
+      });
+    },
+    updateTicket: async (tx: FridayTx, args: UpdateTicketArgs): Promise<void> => {
+      // UPDATE — omitted fields preserved via Zero's `update`
+      // semantic (not `upsert`). `updated_at` always advances on
+      // every patch.
+      const patch: {
+        id: string;
+        title?: string;
+        body?: string | null;
+        status?: "open" | "in_progress" | "done" | "blocked" | "closed";
+        kind?: "task" | "epic" | "bug" | "chore";
+        assignee?: string | null;
+        meta_json?: Record<string, unknown> | null;
+        updated_at: number;
+      } = { id: args.id, updated_at: args.ts };
+      if (args.title !== undefined) patch.title = args.title;
+      if (args.body !== undefined) patch.body = args.body;
+      if (args.status !== undefined) patch.status = args.status;
+      if (args.kind !== undefined) patch.kind = args.kind;
+      if (args.assignee !== undefined) patch.assignee = args.assignee;
+      if (args.meta !== undefined) patch.meta_json = args.meta;
+      await tx.mutate.tickets.update(patch);
+    },
+    addTicketComment: async (tx: FridayTx, args: AddTicketCommentArgs): Promise<void> => {
+      // INSERT comment AND bump the parent ticket's updated_at so
+      // the list page's "sort by updated" re-orders correctly. Mirrors
+      // the legacy `addComment` service (tickets.ts:130-144).
+      await tx.mutate.ticket_comments.insert({
+        id: args.id,
+        ticket_id: args.ticketId,
+        author: args.author,
+        body: args.body,
+        ts: args.ts,
+      });
+      await tx.mutate.tickets.update({
+        id: args.ticketId,
+        updated_at: args.ts,
+      });
+    },
+    addTicketRelation: async (tx: FridayTx, args: AddTicketRelationArgs): Promise<void> => {
+      // INSERT — composite PK (parent_id, child_id, kind) means a
+      // duplicate relation is a PK conflict (acceptable: the UI
+      // surfaces the error so the user knows the link already
+      // exists).
+      await tx.mutate.ticket_relations.insert({
+        parent_id: args.parentId,
+        child_id: args.childId,
+        kind: args.kind,
+      });
+    },
+    createMemoryEntry: async (tx: FridayTx, args: CreateMemoryEntryArgs): Promise<void> => {
+      // INSERT with status='pending_file' — the daemon's LISTEN
+      // handler picks up the NOTIFY (fired by the trigger from
+      // migration 0004) and writes the markdown file, then flips
+      // status to 'ready'. PK conflict (e.g. two devices using the
+      // same slug) is surfaced to the caller.
+      //
+      // `file_mtime` is mandatory in the schema but we don't know it
+      // yet — the daemon writes the file and stamps mtime then.
+      // Provide `ts` as a placeholder so the column has SOMETHING
+      // until the daemon flips it.
+      await tx.mutate.memory_entries.insert({
+        id: args.id,
+        title: args.title,
+        content: args.content,
+        tags_json: args.tags,
+        created_by: args.createdBy,
+        created_at: args.ts,
+        updated_at: args.ts,
+        file_mtime: args.ts,
+        recall_count: 0,
+        last_recalled_at: null,
+        status: "pending_file",
+      });
+    },
+    updateMemoryEntry: async (tx: FridayTx, args: UpdateMemoryEntryArgs): Promise<void> => {
+      // UPDATE with status='pending_file' + advanced updated_at.
+      // Omitted fields preserved (Zero's `update`). Daemon LISTEN
+      // handler rewrites the file and flips back to 'ready'.
+      const patch: {
+        id: string;
+        title?: string;
+        content?: string;
+        tags_json?: string[];
+        updated_at: number;
+        status: "pending_file";
+      } = {
+        id: args.id,
+        updated_at: args.ts,
+        status: "pending_file",
+      };
+      if (args.title !== undefined) patch.title = args.title;
+      if (args.content !== undefined) patch.content = args.content;
+      if (args.tags !== undefined) patch.tags_json = args.tags;
+      await tx.mutate.memory_entries.update(patch);
+    },
+    deleteMemoryEntry: async (tx: FridayTx, args: DeleteMemoryEntryArgs): Promise<void> => {
+      // Soft-delete: set status='pending_delete' + advance
+      // updated_at. The dashboard's reactive query filters status
+      // NOT IN ('pending_delete','deleted') so the row disappears
+      // from the list immediately (optimistic). Daemon LISTEN
+      // handler moves the file to ~/.friday/memory/trash/ and flips
+      // status to 'deleted' (tombstone).
+      await tx.mutate.memory_entries.update({
+        id: args.id,
+        updated_at: args.ts,
+        status: "pending_delete",
+      });
+    },
+    createSchedule: async (tx: FridayTx, args: CreateScheduleArgs): Promise<void> => {
+      // INSERT with status='pending_register'. Daemon's LISTEN
+      // handler reads the row, registers the agent stub in the
+      // `agents` registry (mail-routing target), computes nextRunAt
+      // from the cron expression, and flips status='active'.
+      //
+      // `next_run_at`, `last_run_at`, `last_run_id` left null on
+      // initial insert — the daemon's LISTEN handler computes them.
+      // PK is `name`; race-loss between devices → PK conflict.
+      await tx.mutate.schedules.insert({
+        name: args.name,
+        cron: args.cron,
+        run_at: args.runAt,
+        task_prompt: args.taskPrompt,
+        paused: args.paused ?? false,
+        next_run_at: null,
+        last_run_at: null,
+        last_run_id: null,
+        meta_json: null,
+        app_id: null,
+        status: "pending_register",
+        created_at: args.ts,
+        updated_at: args.ts,
+      });
+    },
+    updateSchedule: async (tx: FridayTx, args: UpdateScheduleArgs): Promise<void> => {
+      // UPDATE with status='reload_requested' + advanced updated_at.
+      // Omitted fields preserved. Daemon LISTEN handler recomputes
+      // nextRunAt (cron may have changed → fresh window) and flips
+      // status='active'. `paused` updates flow through here too —
+      // the daemon's recompute handles the paused-during-due-window
+      // edge case (the existing `resumeSchedule` legacy path uses
+      // the same recompute semantic).
+      const patch: {
+        name: string;
+        cron?: string | null;
+        run_at?: string | null;
+        task_prompt?: string;
+        paused?: boolean;
+        updated_at: number;
+        status: "reload_requested";
+      } = {
+        name: args.name,
+        updated_at: args.ts,
+        status: "reload_requested",
+      };
+      if (args.cron !== undefined) patch.cron = args.cron;
+      if (args.runAt !== undefined) patch.run_at = args.runAt;
+      if (args.taskPrompt !== undefined) patch.task_prompt = args.taskPrompt;
+      if (args.paused !== undefined) patch.paused = args.paused;
+      await tx.mutate.schedules.update(patch);
+    },
+    deleteSchedule: async (tx: FridayTx, args: DeleteScheduleArgs): Promise<void> => {
+      // Soft-delete: status='deleted' + advance updated_at. The
+      // dashboard's schedules query filters `status != 'deleted'` so
+      // the row vanishes immediately. Daemon LISTEN handler cleans
+      // up the registry agent stub if it's unused (no session, no
+      // blocks); idempotent — re-running is safe. Row stays at
+      // 'deleted' as a tombstone for cross-device convergence.
+      await tx.mutate.schedules.update({
+        name: args.name,
+        updated_at: args.ts,
+        status: "deleted",
+      });
+    },
+    pauseSchedule: async (tx: FridayTx, args: PauseScheduleArgs): Promise<void> => {
+      // Pure data write. The scheduler's tick() short-circuits on
+      // `paused`, so no daemon LISTEN handler is needed — the next
+      // tick reads the new value and skips the fire.
+      await tx.mutate.schedules.update({
+        name: args.name,
+        paused: true,
+        updated_at: args.ts,
+      });
+    },
+    resumeSchedule: async (tx: FridayTx, args: ResumeScheduleArgs): Promise<void> => {
+      // Flip paused=false AND request a daemon-side reload. The
+      // existing Phase 4.6 listener for status='reload_requested'
+      // recomputes next_run_at from the cron — without that recompute
+      // a schedule paused mid-due-time would fire on the next tick
+      // (its stored next_run_at is in the past from before the pause).
+      await tx.mutate.schedules.update({
+        name: args.name,
+        paused: false,
+        status: "reload_requested",
+        updated_at: args.ts,
+      });
+    },
+    triggerSchedule: async (tx: FridayTx, args: TriggerScheduleArgs): Promise<void> => {
+      // Status flip the daemon's listener picks up to call
+      // fireSchedule(name) immediately, then flips back to 'active'.
+      // Migration 0014 extended the existing schedule-notify trigger
+      // predicate to include this status; migration 0013 added it to
+      // the check constraint.
+      await tx.mutate.schedules.update({
+        name: args.name,
+        status: "trigger_requested",
+        updated_at: args.ts,
+      });
+    },
+    installApp: async (tx: FridayTx, args: InstallAppArgs): Promise<void> => {
+      // INSERT a stub row at status='pending_install'. NOT NULL
+      // columns (`name`, `version`, `manifest_version`,
+      // `manifest_json`) get placeholders that the daemon overwrites
+      // when it reads the manifest from disk. The dashboard's apps
+      // query filters status='pending_install' so the placeholder is
+      // never user-visible — the row appears in the list only after
+      // the daemon flips status='installed'.
+      //
+      // PK collision (re-install of the same id) → caller surfaces
+      // the error. The daemon's installer already handles
+      // "previously archived agents under this app id" via the
+      // re-attach path; users wanting to re-install should
+      // uninstallApp first.
+      await tx.mutate.apps.insert({
+        id: args.id,
+        name: "",
+        version: "0.0.0",
+        manifest_version: 0,
+        folder_path: args.folderPath,
+        manifest_json: {},
+        status: "pending_install",
+        installed_at: args.ts,
+        upgraded_at: null,
+        meta_json: null,
+      });
+    },
+    uninstallApp: async (tx: FridayTx, args: UninstallAppArgs): Promise<void> => {
+      // UPDATE status='uninstall_requested'. Daemon LISTEN handler
+      // archives owned agents, drops schedules, optionally moves the
+      // folder, then DELETEs the row. The row vanishing is the
+      // user's "uninstall complete" signal across devices.
+      await tx.mutate.apps.update({
+        id: args.id,
+        status: "uninstall_requested",
+      });
+    },
+    reloadApp: async (tx: FridayTx, args: ReloadAppArgs): Promise<void> => {
+      // UPDATE status='reload_requested'. Daemon LISTEN handler
+      // re-reads the manifest from disk, reconciles agent/schedule
+      // rows, and flips status='installed'. No-op when the manifest
+      // hasn't changed (the daemon's reloadApp returns
+      // {changed: false}).
+      await tx.mutate.apps.update({
+        id: args.id,
+        status: "reload_requested",
+      });
+    },
+    archiveAgent: async (tx: FridayTx, args: ArchiveAgentArgs): Promise<void> => {
+      // UPDATE agents.status='archive_requested' + archive_reason.
+      // The Postgres trigger fires NOTIFY; the daemon's LISTEN
+      // handler calls the existing `archiveAgent(name, {reason})`
+      // lifecycle function which kills the worker, archives the
+      // worktree, closes linked tickets, and flips status='archived'.
+      //
+      // Idempotent: re-archiving an already-archived agent is a
+      // no-op at the lifecycle level (the worker is gone, the
+      // worktree is archived, the ticket is closed). The mutator
+      // UPDATE itself produces another archive_request write — the
+      // daemon's handler is structured to tolerate this.
+      await tx.mutate.agents.update({
+        name: args.name,
+        status: "archive_requested",
+        archive_reason: args.reason,
+        updated_at: args.ts,
+      });
+    },
+    linkTicketExternal: async (tx: FridayTx, args: LinkTicketExternalArgs): Promise<void> => {
+      // INSERT — composite PK (ticket_id, system, external_id). The
+      // legacy REST path used `ON CONFLICT DO NOTHING`; the mutator's
+      // `insert` raises on conflict so the UI must check first. The
+      // ticket detail page already gates the form on
+      // `!existingLink(system, externalId)` so the conflict path is
+      // exercised only on a true race.
+      await tx.mutate.ticket_external_links.insert({
+        ticket_id: args.ticketId,
+        system: args.system,
+        external_id: args.externalId,
+        url: args.url,
+        meta_json: args.meta,
+        linked_at: args.ts,
+      });
+    },
+    unlinkTicketExternal: async (tx: FridayTx, args: UnlinkTicketExternalArgs): Promise<void> => {
+      // DELETE on the composite PK. Idempotent — Postgres DELETE WHERE
+      // no-match doesn't error. Required for the /tickets/[id] detail
+      // page's "detach link" affordance once that page derives its
+      // external-link list from `zeroSync.ticketExternalLinks`; without
+      // this mutator the REST DELETE wouldn't sync to the Zero replica
+      // and the link would re-appear after the next render.
+      await tx.mutate.ticket_external_links.delete({
+        ticket_id: args.ticketId,
+        system: args.system,
+        external_id: args.externalId,
+      });
+    },
+    cancelQueued: async (tx: FridayTx, args: CancelQueuedArgs): Promise<void> => {
+      // UPDATE blocks.status='cancel_requested'. The dashboard's blocks
+      // query filters this status out so the bubble disappears
+      // optimistically. The Postgres trigger fires NOTIFY
+      // `friday_block_canceled` and the daemon LISTEN handler then
+      // performs the canonical row DELETE + nextPrompts splice.
+      //
+      // Touches only `status` (+ `last_event_seq` advance for the
+      // existing SSE-block-cursor invariant). All other fields are
+      // preserved so the daemon's LISTEN handler can read the original
+      // agent_name / turn_id / content_json from the row before it
+      // performs the delete.
+      await tx.mutate.blocks.update({
+        id: args.id,
+        status: "cancel_requested",
+      });
+    },
+    sendUserMessage: async (tx: FridayTx, args: SendUserMessageArgs): Promise<void> => {
+      // INSERT a user-chat block at status='pending'. The Postgres
+      // trigger fires NOTIFY `friday_new_pending_block` (channel
+      // reserved at the schema level). The daemon's LISTEN handler
+      // does the rest: agent resolution, prompt composition, skill
+      // detection, memory recall, queue-vs-dispatch decision,
+      // status flip-back to 'queued' / 'complete', and worker fork.
+      //
+      // `id` and `block_id` carry the same UUID — Phase 4.11 unified
+      // the PK and the application-level identifier. `session_id` is
+      // a sentinel; the daemon overwrites with the agent's resumed
+      // session id. `last_event_seq=0` is a placeholder the daemon
+      // updates when it publishes the block_complete SSE event.
+      const content: Record<string, unknown> = { text: args.text };
+      if (args.attachments && args.attachments.length > 0) {
+        content.attachments = args.attachments;
+      }
+      await tx.mutate.blocks.insert({
+        id: args.id,
+        block_id: args.id,
+        turn_id: args.turnId,
+        agent_name: args.agentName,
+        session_id: "__pending__",
+        message_id: undefined,
+        block_index: 0,
+        role: "user",
+        kind: "text",
+        source: "user_chat",
+        content_json: content,
+        status: "pending",
+        streaming: false,
+        origin_mutation_id: undefined,
+        ts: args.ts,
+        last_event_seq: 0,
+      });
+    },
+    abortTurn: async (tx: FridayTx, args: AbortTurnArgs): Promise<void> => {
+      // UPDATE blocks.status='abort_requested'. The Postgres trigger
+      // fires NOTIFY `friday_abort_requested`; the daemon's LISTEN
+      // handler dispatches the existing `abortTurn(agentName)`
+      // lifecycle function and then flips the row back to 'complete'.
+      //
+      // Touches only `status` — agent_name / turn_id / content_json
+      // must be preserved so the daemon's LISTEN handler can read them
+      // before performing the abort + flip-back.
+      await tx.mutate.blocks.update({
+        id: args.id,
+        status: "abort_requested",
+      });
+    },
+    updateSettings: async (tx: FridayTx, args: UpdateSettingsArgs): Promise<void> => {
+      // UPSERT the singleton row. Only fields the user provided are
+      // included in the patch — Zero's `update` semantics preserve
+      // omitted columns. The 0002 migration ensures the row already
+      // exists, so `update` rather than `upsert` is safe; using
+      // `update` makes the omitted-fields-preserved invariant
+      // explicit in the type signature.
+      const patch: {
+        id: string;
+        model?: string;
+        watchdog_refork?: boolean;
+        updated_at: number;
+      } = {
+        id: "singleton",
+        updated_at: args.ts,
+      };
+      if (args.model !== undefined) patch.model = args.model;
+      if (args.watchdogRefork !== undefined) {
+        patch.watchdog_refork = args.watchdogRefork;
+      }
+      await tx.mutate.settings.update(patch);
+    },
+  }) satisfies CustomMutatorDefs;
 
 export type Mutators = ReturnType<typeof createMutators>;
 

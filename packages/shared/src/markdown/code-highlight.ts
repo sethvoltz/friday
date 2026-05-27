@@ -57,9 +57,7 @@ export async function applyCodeHighlight(
   container: HTMLElement,
   deps: CodeHighlightDeps,
 ): Promise<number> {
-  const all = Array.from(
-    container.querySelectorAll<HTMLElement>("pre > code"),
-  );
+  const all = Array.from(container.querySelectorAll<HTMLElement>("pre > code"));
   if (all.length === 0) return 0;
 
   // Trailing is defined among `<pre> > <code>` siblings — interleaved

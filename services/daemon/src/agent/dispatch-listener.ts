@@ -43,10 +43,7 @@ import {
 } from "@friday/shared";
 import { getBlockById } from "@friday/shared/services";
 import * as registry from "./registry.js";
-import {
-  dispatchTurn,
-  peekLiveWorker,
-} from "./lifecycle.js";
+import { dispatchTurn, peekLiveWorker } from "./lifecycle.js";
 import { renderPinnedFacts } from "./pinned-facts.js";
 import { composeDispatchPrompt } from "./compose-dispatch-prompt.js";
 import { matchSkillInvocation } from "../skills/match.js";
@@ -131,8 +128,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
     {
       agentName: agentRow.name,
       agentType: agentRow.type,
-      parentName:
-        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+      parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
     },
     pinnedFacts,
   );
@@ -165,9 +161,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
       status: willQueue ? "queued" : "complete",
       sessionId: resumeSessionId ?? "__pending__",
     })
-    .where(
-      and(eq(schema.blocks.id, row.id), eq(schema.blocks.status, "pending")),
-    );
+    .where(and(eq(schema.blocks.id, row.id), eq(schema.blocks.status, "pending")));
 
   // Dispatch the turn. The userBlockId is only passed when the prompt
   // will queue — that's the legacy contract: dispatchTurn uses it to
@@ -190,8 +184,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
       effort: modelCfg.effort,
       resumeSessionId,
       daemonPort: resolveDaemonPort(cfg),
-      parentName:
-        "parentName" in agentRow ? agentRow.parentName ?? undefined : undefined,
+      parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
       mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
       allowedToolsOverride,
     },
@@ -212,9 +205,7 @@ export async function runDispatchBootScan(): Promise<void> {
     const rows = await db
       .select({ id: schema.blocks.id })
       .from(schema.blocks)
-      .where(
-        and(eq(schema.blocks.status, "pending"), eq(schema.blocks.role, "user")),
-      );
+      .where(and(eq(schema.blocks.status, "pending"), eq(schema.blocks.role, "user")));
     for (const row of rows) {
       await processPendingBlockRow(row.id);
     }
@@ -235,48 +226,76 @@ export interface DispatchListenerHandle {
 export async function startDispatchListener(): Promise<DispatchListenerHandle> {
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ??
-    process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL must be set to start the sendUserMessage LISTEN connection.",
-    );
+    throw new Error("DATABASE_URL must be set to start the sendUserMessage LISTEN connection.");
   }
 
-  const client = new Client({ connectionString });
-  await client.connect();
+  let stopped = false;
+  let activeClient: InstanceType<typeof Client> | null = null;
 
-  client.on("notification", (msg) => {
-    if (msg.channel !== LISTEN_CHANNELS.newPendingBlock) return;
-    const id = msg.payload;
-    if (!id) return;
-    void processPendingBlockRow(id).catch((err) => {
-      logger.log("warn", "block.dispatch-listen.process.error", {
-        block_id: id,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    });
-  });
+  // FRI-121 B: reconnect loop with exponential backoff. keepAlive: true
+  // causes the OS to send TCP keepalive probes so dead connections surface
+  // via 'error' rather than hanging silently. Boot scan after each
+  // (re)connect drains NOTIFYs missed during the downtime window.
+  async function connectWithRetry(): Promise<void> {
+    let delay = 1_000;
+    while (!stopped) {
+      try {
+        const c = new Client({ connectionString, keepAlive: true });
+        activeClient = c;
+        await c.connect();
+        c.on("notification", (msg) => {
+          if (msg.channel !== LISTEN_CHANNELS.newPendingBlock) return;
+          const id = msg.payload;
+          if (!id) return;
+          void processPendingBlockRow(id).catch((err) => {
+            logger.log("warn", "block.dispatch-listen.process.error", {
+              block_id: id,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
+        });
+        c.on("error", (err) => {
+          logger.log("warn", "block.dispatch-listen.client.error", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
+        await c.query(`LISTEN ${LISTEN_CHANNELS.newPendingBlock}`);
+        logger.log("info", "block.dispatch-listen.ready", {
+          channel: LISTEN_CHANNELS.newPendingBlock,
+        });
+        await runDispatchBootScan();
+        delay = 1_000;
+        await new Promise<void>((resolve) => c.once("end", resolve));
+      } catch (err) {
+        logger.log("warn", "block.dispatch-listen.connect.error", {
+          message: err instanceof Error ? err.message : String(err),
+          retryIn: delay,
+        });
+        if (!stopped) {
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, 30_000);
+        }
+      } finally {
+        activeClient = null;
+      }
+    }
+  }
 
-  client.on("error", (err) => {
-    logger.log("warn", "block.dispatch-listen.client.error", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-  });
-
-  await client.query(`LISTEN ${LISTEN_CHANNELS.newPendingBlock}`);
-  logger.log("info", "block.dispatch-listen.ready", {
-    channel: LISTEN_CHANNELS.newPendingBlock,
-  });
+  void connectWithRetry();
 
   return {
     stop: async (): Promise<void> => {
-      try {
-        await client.query(`UNLISTEN ${LISTEN_CHANNELS.newPendingBlock}`);
-      } catch {
-        // best-effort
+      stopped = true;
+      if (activeClient) {
+        try {
+          await activeClient.query(`UNLISTEN ${LISTEN_CHANNELS.newPendingBlock}`);
+        } catch {
+          // best-effort
+        }
+        await activeClient.end().catch(() => {});
       }
-      await client.end().catch(() => {});
     },
   };
 }

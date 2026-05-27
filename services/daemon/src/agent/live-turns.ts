@@ -124,8 +124,7 @@ export function appendDelta(
   const b = lt.blocks.get(clientBlockId);
   if (!b) return null;
   if (typeof delta.text === "string") b.text += delta.text;
-  if (typeof delta.partial_json === "string")
-    b.partialJson += delta.partial_json;
+  if (typeof delta.partial_json === "string") b.partialJson += delta.partial_json;
   if (seq > lt.lastEventSeq) lt.lastEventSeq = seq;
   return b;
 }

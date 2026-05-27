@@ -7,35 +7,25 @@
  * tests `settle()` briefly after archiveAgent before reading ticket state.
  */
 
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 // Don't leak Linear API calls in tests that don't install a fetch mock.
 delete process.env.LINEAR_API_KEY;
 
 let handle: TestDbHandle;
-let createTicket: typeof import("@friday/shared/services")["createTicket"];
-let getTicket: typeof import("@friday/shared/services")["getTicket"];
-let linkExternal: typeof import("@friday/shared/services")["linkExternal"];
-let listComments: typeof import("@friday/shared/services")["listComments"];
+let createTicket: (typeof import("@friday/shared/services"))["createTicket"];
+let getTicket: (typeof import("@friday/shared/services"))["getTicket"];
+let linkExternal: (typeof import("@friday/shared/services"))["linkExternal"];
+let listComments: (typeof import("@friday/shared/services"))["listComments"];
 let registry: typeof import("./registry.js");
-let archiveAgent: typeof import("./lifecycle.js")["archiveAgent"];
-let forceWorkerRefork: typeof import("./lifecycle.js")["forceWorkerRefork"];
+let archiveAgent: (typeof import("./lifecycle.js"))["archiveAgent"];
+let forceWorkerRefork: (typeof import("./lifecycle.js"))["forceWorkerRefork"];
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "lc_ticket_close" });
-  ({ createTicket, getTicket, linkExternal, listComments } = await import(
-    "@friday/shared/services"
-  ));
+  ({ createTicket, getTicket, linkExternal, listComments } =
+    await import("@friday/shared/services"));
   registry = await import("./registry.js");
   ({ archiveAgent, forceWorkerRefork } = await import("./lifecycle.js"));
 });
@@ -52,10 +42,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function registerBuilderWithTicket(
-  name: string,
-  ticketId?: string,
-): Promise<void> {
+async function registerBuilderWithTicket(name: string, ticketId?: string): Promise<void> {
   await registry.registerAgent({
     name,
     type: "builder",
@@ -151,9 +138,7 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
   it("archive with stale ticketId (pointing at a deleted row) succeeds without throwing", async () => {
     await registerBuilderWithTicket("zeta", "FRI-stale-and-gone");
 
-    await expect(
-      archiveAgent("zeta", { reason: "completed" }),
-    ).resolves.toBeDefined();
+    await expect(archiveAgent("zeta", { reason: "completed" })).resolves.toBeDefined();
     expect((await registry.getAgent("zeta"))?.status).toBe("archived");
   });
 
@@ -163,11 +148,13 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
 
     let readBeforeArchive = false;
     const origArchive = registry.archiveAgent;
-    const archiveSpy = vi.fn(async (name: string) => {
-      const row = await registry.getAgent(name);
-      if (row && "ticketId" in row) readBeforeArchive = row.ticketId === t.id;
-      return origArchive(name);
-    });
+    const archiveSpy = vi.fn(
+      async (name: string, opts: { reason: import("@friday/shared").ArchiveReason }) => {
+        const row = await registry.getAgent(name);
+        if (row && "ticketId" in row) readBeforeArchive = row.ticketId === t.id;
+        return origArchive(name, opts);
+      },
+    );
     vi.spyOn(registry, "archiveAgent").mockImplementation(archiveSpy);
 
     await archiveAgent("eta", { reason: "completed" });
@@ -182,20 +169,22 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     expect(readBeforeArchive).toBe(true);
   });
 
-  it("orchestrator-type agent (no ticketId field on row) archives cleanly without ticket effects", async () => {
+  it("orchestrator-type agent cannot be archived; closer never runs (FRI-113 / ADR-031)", async () => {
     await registry.registerAgent({ name: "main", type: "orchestrator" });
     const t = await createTicket({ title: "unrelated", status: "in_progress" });
 
-    await archiveAgent("main", { reason: "abandoned" });
-    // Wait for the archive to land before asserting the unrelated ticket
-    // was untouched.
-    await vi.waitFor(
-      async () => {
-        expect((await registry.getAgent("main"))?.status).toBe("archived");
-      },
-      { timeout: 5000, interval: 25 },
+    // Orchestrator-not-archivable: the FSM gate rejects every edge into
+    // `archived` for `type=orchestrator`. `lifecycle.archiveAgent`
+    // wraps `registry.archiveAgent` which calls `setStatus(name,
+    // "archived", ...)`; the gate throws `IllegalTransitionError` with
+    // code `ORCHESTRATOR_NOT_ARCHIVABLE` before the closer is invoked.
+    const { IllegalTransitionError } = await import("./registry.js");
+    await expect(archiveAgent("main", { reason: "abandoned" })).rejects.toBeInstanceOf(
+      IllegalTransitionError,
     );
-    // Unrelated ticket must not be touched.
+
+    // The row must still be `idle` and the unrelated ticket untouched.
+    expect((await registry.getAgent("main"))?.status).toBe("idle");
     expect((await getTicket(t.id))?.status).toBe("in_progress");
   });
 

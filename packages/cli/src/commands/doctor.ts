@@ -46,7 +46,9 @@ export const doctorCommand = defineCommand({
     } catch {
       // db not migrated yet
     }
-    checks.push(check("primary account exists", accountOk, accountOk ? undefined : "run `friday setup`"));
+    checks.push(
+      check("primary account exists", accountOk, accountOk ? undefined : "run `friday setup`"),
+    );
 
     // launchd supervisor (homebrew.mxcl.friday). Replaces the pre-FRI-88
     // tmux check — the supervised set lives in one launchd job now, not
@@ -73,8 +75,7 @@ export const doctorCommand = defineCommand({
     // Cloudflare Tunnel — token + binary. Token-set-but-binary-missing is
     // a hard failure (user opted in); everything else is informational.
     const tunnelTokenSet = !!process.env.CLOUDFLARE_TUNNEL_TOKEN;
-    const cloudflaredOk =
-      spawnSync("which", ["cloudflared"], { encoding: "utf8" }).status === 0;
+    const cloudflaredOk = spawnSync("which", ["cloudflared"], { encoding: "utf8" }).status === 0;
     if (tunnelTokenSet) {
       checks.push(check("Cloudflare Tunnel token", true));
       checks.push(
@@ -94,12 +95,7 @@ export const doctorCommand = defineCommand({
         ),
       );
       if (!cloudflaredOk) {
-        checks.push(
-          warn(
-            "cloudflared binary",
-            "not installed — only required for public tunnel",
-          ),
-        );
+        checks.push(warn("cloudflared binary", "not installed — only required for public tunnel"));
       } else {
         checks.push(check("cloudflared binary", true));
       }
@@ -137,9 +133,7 @@ export const doctorCommand = defineCommand({
           check(
             `Postgres migrations at head (${pg.migrationsApplied}/${pg.migrationsExpected})`,
             pg.migrationsAtHead,
-            pg.migrationsAtHead
-              ? undefined
-              : "run `friday setup` to apply pending migrations",
+            pg.migrationsAtHead ? undefined : "run `friday setup` to apply pending migrations",
           ),
         );
         checks.push(
@@ -153,9 +147,7 @@ export const doctorCommand = defineCommand({
           check(
             "ZERO_AUTH_SECRET present",
             pg.zeroAuthSecretPresent,
-            pg.zeroAuthSecretPresent
-              ? undefined
-              : "run `friday setup` to generate the secret",
+            pg.zeroAuthSecretPresent ? undefined : "run `friday setup` to generate the secret",
           ),
         );
         checks.push(
@@ -170,18 +162,20 @@ export const doctorCommand = defineCommand({
       }
     } catch (err) {
       checks.push(
-        check(
-          "Postgres health probe",
-          false,
-          err instanceof Error ? err.message : String(err),
-        ),
+        check("Postgres health probe", false, err instanceof Error ? err.message : String(err)),
       );
     }
 
     // daemon reachable
     const client = new DaemonClient();
     const reachable = await client.ping();
-    checks.push(check("daemon reachable (localhost)", reachable, reachable ? undefined : "not running — `friday start`"));
+    checks.push(
+      check(
+        "daemon reachable (localhost)",
+        reachable,
+        reachable ? undefined : "not running — `friday start`",
+      ),
+    );
 
     // zero-cache reachable (Phase 2 / ADR-024). zero-cache binds
     // ws://127.0.0.1:4848 by default; treat a TCP-open as "alive". A more
@@ -220,9 +214,7 @@ export const doctorCommand = defineCommand({
 
     // 2. daemonPort / dashboardPort in config.json (now optional)
     try {
-      const cfgRaw = JSON.parse(
-        readFileSync(CONFIG_PATH, "utf8"),
-      ) as Record<string, unknown>;
+      const cfgRaw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Record<string, unknown>;
       const staleFields: string[] = [];
       if ("daemonPort" in cfgRaw) staleFields.push("daemonPort");
       if ("dashboardPort" in cfgRaw) staleFields.push("dashboardPort");
@@ -285,9 +277,7 @@ export const doctorCommand = defineCommand({
       }
     }
     console.log();
-    console.log(
-      pc.bold(`${okCount}/${checks.length} checks passed.`),
-    );
+    console.log(pc.bold(`${okCount}/${checks.length} checks passed.`));
     if (failCount > 0) process.exit(1);
   },
 });
@@ -303,11 +293,7 @@ function warn(name: string, detail?: string) {
 /** TCP-connect with timeout. Used as a cheap liveness probe for
  *  zero-cache; a full WS handshake would be more accurate but the open
  *  port is sufficient signal for the doctor's purposes. */
-async function tcpReachable(
-  host: string,
-  port: number,
-  timeoutMs: number,
-): Promise<boolean> {
+async function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
   const { Socket } = await import("node:net");
   return new Promise<boolean>((resolve) => {
     const sock = new Socket();

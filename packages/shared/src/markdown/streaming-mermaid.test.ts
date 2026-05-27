@@ -19,10 +19,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  applyStreamingMermaidGate,
-  invalidateRenderedMermaid,
-} from "./streaming-mermaid";
+import { applyStreamingMermaidGate, invalidateRenderedMermaid } from "./streaming-mermaid";
 
 function makeContainer(html: string): HTMLDivElement {
   // Reset between tests.
@@ -52,9 +49,7 @@ describe("applyStreamingMermaidGate", () => {
 
   it("non-streaming + single valid block: returns the node, parsed, no pending attr", async () => {
     parseMock.mockResolvedValue({ diagramType: "flowchart" });
-    const container = makeContainer(
-      `<pre class="mermaid">graph TD\n  A --> B</pre>`,
-    );
+    const container = makeContainer(`<pre class="mermaid">graph TD\n  A --> B</pre>`);
     const node = container.querySelector("pre.mermaid")!;
     const result = await applyStreamingMermaidGate(container, {
       streaming: false,
@@ -67,9 +62,7 @@ describe("applyStreamingMermaidGate", () => {
   });
 
   it("streaming + single block (which is trailing): pending, parse not called", async () => {
-    const container = makeContainer(
-      `<pre class="mermaid">graph TD\n  A --></pre>`,
-    );
+    const container = makeContainer(`<pre class="mermaid">graph TD\n  A --></pre>`);
     const node = container.querySelector("pre.mermaid")!;
     const result = await applyStreamingMermaidGate(container, {
       streaming: true,
@@ -87,9 +80,7 @@ describe("applyStreamingMermaidGate", () => {
       <p>middle prose</p>
       <pre class="mermaid">graph TD\n  C</pre>
     `);
-    const [first, second] = Array.from(
-      container.querySelectorAll<HTMLElement>("pre.mermaid"),
-    );
+    const [first, second] = Array.from(container.querySelectorAll<HTMLElement>("pre.mermaid"));
     const result = await applyStreamingMermaidGate(container, {
       streaming: true,
       parse: parseMock,
@@ -107,9 +98,7 @@ describe("applyStreamingMermaidGate", () => {
       <pre class="mermaid">graph TD\n  A --> B</pre>
       <pre class="mermaid">graph TD\n  C --> D</pre>
     `);
-    const all = Array.from(
-      container.querySelectorAll<HTMLElement>("pre.mermaid"),
-    );
+    const all = Array.from(container.querySelectorAll<HTMLElement>("pre.mermaid"));
     const result = await applyStreamingMermaidGate(container, {
       streaming: false,
       parse: parseMock,
@@ -120,9 +109,7 @@ describe("applyStreamingMermaidGate", () => {
 
   it("non-streaming + parse returns false: pending, not returned", async () => {
     parseMock.mockResolvedValue(false);
-    const container = makeContainer(
-      `<pre class="mermaid">not a real diagram</pre>`,
-    );
+    const container = makeContainer(`<pre class="mermaid">not a real diagram</pre>`);
     const node = container.querySelector("pre.mermaid")!;
     const result = await applyStreamingMermaidGate(container, {
       streaming: false,
@@ -134,9 +121,7 @@ describe("applyStreamingMermaidGate", () => {
 
   it("non-streaming + parse rejects: defensive-catch makes node pending", async () => {
     parseMock.mockRejectedValue(new Error("boom"));
-    const container = makeContainer(
-      `<pre class="mermaid">graph TD\n  ???</pre>`,
-    );
+    const container = makeContainer(`<pre class="mermaid">graph TD\n  ???</pre>`);
     const node = container.querySelector("pre.mermaid")!;
     const result = await applyStreamingMermaidGate(container, {
       streaming: false,
@@ -147,9 +132,7 @@ describe("applyStreamingMermaidGate", () => {
   });
 
   it("re-entry promotes a previously-pending block once its parse becomes valid", async () => {
-    const container = makeContainer(
-      `<pre class="mermaid">graph TD\n  A --</pre>`,
-    );
+    const container = makeContainer(`<pre class="mermaid">graph TD\n  A --</pre>`);
     const node = container.querySelector<HTMLElement>("pre.mermaid")!;
 
     parseMock.mockResolvedValueOnce(false);
@@ -178,9 +161,7 @@ describe("applyStreamingMermaidGate", () => {
       <pre class="mermaid" data-mermaid-rendered="true">already-mounted body</pre>
       <pre class="mermaid">graph TD\n  X --> Y</pre>
     `);
-    const fresh = Array.from(
-      container.querySelectorAll<HTMLElement>("pre.mermaid"),
-    )[1];
+    const fresh = Array.from(container.querySelectorAll<HTMLElement>("pre.mermaid"))[1];
     const result = await applyStreamingMermaidGate(container, {
       streaming: false,
       parse: parseMock,
@@ -192,9 +173,7 @@ describe("applyStreamingMermaidGate", () => {
 
   it("marks returned nodes data-mermaid-rendered before returning them", async () => {
     parseMock.mockResolvedValue({ diagramType: "flowchart" });
-    const container = makeContainer(
-      `<pre class="mermaid">graph TD\n  A --> B</pre>`,
-    );
+    const container = makeContainer(`<pre class="mermaid">graph TD\n  A --> B</pre>`);
     const node = container.querySelector<HTMLElement>("pre.mermaid")!;
     const result = await applyStreamingMermaidGate(container, {
       streaming: false,
@@ -206,9 +185,7 @@ describe("applyStreamingMermaidGate", () => {
 
   it("is idempotent: second call returns [] and does not re-parse rendered nodes", async () => {
     parseMock.mockResolvedValue({ diagramType: "flowchart" });
-    const container = makeContainer(
-      `<pre class="mermaid">graph TD\n  A --> B</pre>`,
-    );
+    const container = makeContainer(`<pre class="mermaid">graph TD\n  A --> B</pre>`);
     const node = container.querySelector<HTMLElement>("pre.mermaid")!;
     const first = await applyStreamingMermaidGate(container, {
       streaming: false,
@@ -232,9 +209,7 @@ describe("applyStreamingMermaidGate", () => {
       <pre class="mermaid">B-body</pre>
       <p>more</p>
     `);
-    const [first, second] = Array.from(
-      container.querySelectorAll<HTMLElement>("pre.mermaid"),
-    );
+    const [first, second] = Array.from(container.querySelectorAll<HTMLElement>("pre.mermaid"));
     const result = await applyStreamingMermaidGate(container, {
       streaming: true,
       parse: parseMock,
@@ -247,9 +222,7 @@ describe("applyStreamingMermaidGate", () => {
 
   it("snapshots source text into data-mermaid-source on returned nodes (so theme re-render can restore it)", async () => {
     parseMock.mockResolvedValue({ diagramType: "flowchart" });
-    const container = makeContainer(
-      `<pre class="mermaid">graph TD\n  A --> B</pre>`,
-    );
+    const container = makeContainer(`<pre class="mermaid">graph TD\n  A --> B</pre>`);
     const node = container.querySelector<HTMLElement>("pre.mermaid")!;
     await applyStreamingMermaidGate(container, {
       streaming: false,
@@ -260,9 +233,7 @@ describe("applyStreamingMermaidGate", () => {
 
   it("does NOT snapshot source on pending nodes (no value to restore, and re-entry rewrites textContent only on completion)", async () => {
     parseMock.mockResolvedValue(false);
-    const container = makeContainer(
-      `<pre class="mermaid">graph TD\n  partial</pre>`,
-    );
+    const container = makeContainer(`<pre class="mermaid">graph TD\n  partial</pre>`);
     const node = container.querySelector<HTMLElement>("pre.mermaid")!;
     await applyStreamingMermaidGate(container, {
       streaming: false,
@@ -313,9 +284,7 @@ describe("invalidateRenderedMermaid", () => {
       <pre class="mermaid" data-mermaid-pending="true">B-pending</pre>
       <pre class="mermaid" data-mermaid-rendered="true" data-mermaid-source="C-src"><svg/></pre>
     `);
-    const all = Array.from(
-      container.querySelectorAll<HTMLElement>("pre.mermaid"),
-    );
+    const all = Array.from(container.querySelectorAll<HTMLElement>("pre.mermaid"));
     const count = invalidateRenderedMermaid(container);
     expect(count).toBe(2);
     expect(all[0].textContent).toBe("A-src");
@@ -341,9 +310,7 @@ describe("invalidateRenderedMermaid", () => {
 
   it("round-trip: invalidate-then-gate re-promotes the same node back to rendered", async () => {
     parseMock.mockResolvedValue({ diagramType: "flowchart" });
-    const container = makeContainer(
-      `<pre class="mermaid">graph TD\n  A --> B</pre>`,
-    );
+    const container = makeContainer(`<pre class="mermaid">graph TD\n  A --> B</pre>`);
     const node = container.querySelector<HTMLElement>("pre.mermaid")!;
 
     // First render — sets rendered + source snapshot.

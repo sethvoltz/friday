@@ -305,16 +305,13 @@ describe("createIssue", () => {
       apiKey: "k",
       input: { teamId: "team-uuid", title: "P" },
     });
-    const input = (calls[0].variables as { input: Record<string, unknown> })
-      .input;
+    const input = (calls[0].variables as { input: Record<string, unknown> }).input;
     expect(input).not.toHaveProperty("priority");
     expect(input).toEqual({ teamId: "team-uuid", title: "P" });
   });
 
   it("throws LinearApiError when issueCreate returns success=false", async () => {
-    installFetchMock([
-      { data: { issueCreate: { success: false, issue: null } } },
-    ]);
+    installFetchMock([{ data: { issueCreate: { success: false, issue: null } } }]);
 
     await expect(
       createIssue({
@@ -325,9 +322,7 @@ describe("createIssue", () => {
   });
 
   it("throws LinearApiError when GraphQL returns errors", async () => {
-    installFetchMock([
-      { data: undefined, errors: [{ message: "team not found" }] },
-    ]);
+    installFetchMock([{ data: undefined, errors: [{ message: "team not found" }] }]);
 
     await expect(
       createIssue({
@@ -340,9 +335,7 @@ describe("createIssue", () => {
 
 describe("resolveIssueIdByIdentifier", () => {
   it("returns the issue UUID for a matching identifier", async () => {
-    const { calls } = installFetchMock([
-      { data: { issues: { nodes: [{ id: "issue-uuid-7" }] } } },
-    ]);
+    const { calls } = installFetchMock([{ data: { issues: { nodes: [{ id: "issue-uuid-7" }] } } }]);
     const id = await resolveIssueIdByIdentifier({
       apiKey: "k",
       identifier: "FRI-75",
@@ -459,17 +452,13 @@ describe("updateIssue", () => {
       id: "issue-uuid",
       input: { title: "t" },
     });
-    const input = (calls[0].variables as { input: Record<string, unknown> })
-      .input;
+    const input = (calls[0].variables as { input: Record<string, unknown> }).input;
     expect(input).not.toHaveProperty("priority");
     expect(input).toEqual({ title: "t" });
   });
 
   it("maps every named priority level to its Linear int", async () => {
-    const cases: Array<[
-      "none" | "urgent" | "high" | "medium" | "low",
-      number,
-    ]> = [
+    const cases: Array<["none" | "urgent" | "high" | "medium" | "low", number]> = [
       ["none", 0],
       ["urgent", 1],
       ["high", 2],
@@ -497,17 +486,14 @@ describe("updateIssue", () => {
         id: "issue-uuid",
         input: { priority: name },
       });
-      const input = (calls[0].variables as { input: { priority: number } })
-        .input;
+      const input = (calls[0].variables as { input: { priority: number } }).input;
       expect(input.priority).toBe(expected);
       restore();
     }
   });
 
   it("throws LinearApiError when issueUpdate returns success=false", async () => {
-    installFetchMock([
-      { data: { issueUpdate: { success: false, issue: null } } },
-    ]);
+    installFetchMock([{ data: { issueUpdate: { success: false, issue: null } } }]);
     await expect(
       updateIssue({
         apiKey: "k",
@@ -518,9 +504,7 @@ describe("updateIssue", () => {
   });
 
   it("throws LinearApiError when GraphQL returns errors", async () => {
-    installFetchMock([
-      { data: undefined, errors: [{ message: "issue not found" }] },
-    ]);
+    installFetchMock([{ data: undefined, errors: [{ message: "issue not found" }] }]);
     await expect(
       updateIssue({
         apiKey: "k",

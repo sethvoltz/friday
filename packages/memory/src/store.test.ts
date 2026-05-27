@@ -15,10 +15,7 @@ beforeEach(async () => {
   await handle.truncate();
 });
 
-async function seed(
-  id: string,
-  opts: { createdBy: string; tags: string[] },
-): Promise<void> {
+async function seed(id: string, opts: { createdBy: string; tags: string[] }): Promise<void> {
   const { saveEntry } = await import("./store.js");
   const now = new Date().toISOString();
   await saveEntry({
@@ -38,10 +35,7 @@ async function setStatus(id: string, status: string): Promise<void> {
   const { getDb, schema } = await import("@friday/shared");
   const { eq } = await import("drizzle-orm");
   const db = getDb();
-  await db
-    .update(schema.memoryEntries)
-    .set({ status })
-    .where(eq(schema.memoryEntries.id, id));
+  await db.update(schema.memoryEntries).set({ status }).where(eq(schema.memoryEntries.id, id));
 }
 
 describe("listPinnedForAgent (FRI-61)", () => {
