@@ -497,7 +497,7 @@
             error?: string;
             message?: string;
           };
-          chat.messages.push({
+          chat.pushLocal({
             id: `sys_${Date.now()}`,
             role: "assistant",
             text: `**/clear** — ${data.error ?? data.message ?? `HTTP ${r.status}`}`,
@@ -506,7 +506,7 @@
           });
         }
       } catch (err: unknown) {
-        chat.messages.push({
+        chat.pushLocal({
           id: `sys_${Date.now()}`,
           role: "assistant",
           text: `**/clear** — error: ${err instanceof Error ? err.message : String(err)}`,
@@ -535,7 +535,7 @@
         return;
       }
       const msg = data.message ?? data.error ?? JSON.stringify(data);
-      chat.messages.push({
+      chat.pushLocal({
         id: `sys_${Date.now()}`,
         role: "assistant",
         text: `**/${name}** — ${msg}`,
@@ -543,7 +543,7 @@
         ts: Date.now(),
       });
     } catch (err: unknown) {
-      chat.messages.push({
+      chat.pushLocal({
         id: `sys_${Date.now()}`,
         role: "assistant",
         text: `**/${name}** — error: ${err instanceof Error ? err.message : String(err)}`,
@@ -569,7 +569,7 @@
       const result = zeroSync.archiveAgent({ name: args });
       const sr = await result?.server;
       if (sr && sr.type === "error") {
-        chat.messages.push({
+        chat.pushLocal({
           id: `sys_${Date.now()}`,
           role: "assistant",
           text: `**/archive** — error: ${sr.error.message}`,
@@ -578,7 +578,7 @@
         });
         return;
       }
-      chat.messages.push({
+      chat.pushLocal({
         id: `sys_${Date.now()}`,
         role: "assistant",
         text: `**/archive** — requested archive of ${args}`,

@@ -1,4 +1,5 @@
 import type { WireEvent } from "@friday/shared";
+import { SvelteMap } from "svelte/reactivity";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { initialPageSize } from "../util/page-size";
 import { KEYS, loadJSON, removeKey, saveJSON } from "./persistent";
@@ -296,9 +297,258 @@ export function filterRowsToCurrentSession<
   });
 }
 
+/**
+ * Live overlay entry for an in-flight assistant / tool / thinking block.
+ *
+ * Streaming-mutable fields (`text`, `status`, `input`, `output`,
+ * `inputPartialJson`, `toolName`) are declared with `$state`. Each
+ * instance carries its own per-field reactivity, so `entry.text += delta`
+ * fires a fine-grained subscription on `entry.text` without invalidating
+ * the parent `messages` derivation — the SvelteMap holding entries
+ * tracks set/delete/clear, not value-object field mutations. This is the
+ * design property that keeps streaming-text latency at one paint frame
+ * even on a long session: per-delta work is O(1), bounded by the bubble's
+ * own text-node update.
+ *
+ * Implements `ChatMessage` so the bubble component renders entries
+ * interchangeably with canonical row-derived ChatMessage objects.
+ *
+ * `sessionId` is captured at construction from the agent's current
+ * session. The `chat.messages` derivation filters overlay entries by
+ * `entry.sessionId === currentAgentSessionId`, so a `/clear` (which
+ * nulls sessionId) naturally hides leftover in-flight entries without
+ * imperative cleanup. A `$effect` watching `agents[name].sessionId`
+ * prunes stale entries in the background.
+ */
+export class StreamingEntry implements ChatMessage {
+  readonly id: string;
+  readonly role: "assistant" | "tool" | "thinking";
+  readonly agent: string;
+  readonly ts: number;
+  readonly turnId: string;
+  readonly blockId: string;
+  readonly sessionId: string | null;
+  readonly toolId?: string;
+  readonly source?: ChatMessage["source"];
+
+  // Streaming-mutable, each field per-instance reactive.
+  text = $state("");
+  status = $state<ChatMessage["status"]>("streaming");
+  toolName = $state<string | undefined>(undefined);
+  input = $state<unknown>(undefined);
+  output = $state<string | undefined>(undefined);
+  inputPartialJson = $state<string | undefined>(undefined);
+
+  constructor(init: {
+    id: string;
+    role: "assistant" | "tool" | "thinking";
+    agent: string;
+    ts: number;
+    turnId: string;
+    blockId: string;
+    sessionId: string | null;
+    toolId?: string;
+    source?: ChatMessage["source"];
+    initialStatus?: ChatMessage["status"];
+    initialText?: string;
+    initialToolName?: string;
+  }) {
+    this.id = init.id;
+    this.role = init.role;
+    this.agent = init.agent;
+    this.ts = init.ts;
+    this.turnId = init.turnId;
+    this.blockId = init.blockId;
+    this.sessionId = init.sessionId;
+    this.toolId = init.toolId;
+    this.source = init.source;
+    if (init.initialStatus) this.status = init.initialStatus;
+    if (init.initialText) this.text = init.initialText;
+    if (init.initialToolName) this.toolName = init.initialToolName;
+  }
+}
+
+/**
+ * Optimistic overlay entry for a user bubble that hasn't yet been
+ * confirmed by the daemon's mutator path. Renders pinned to the bottom
+ * of the chat with a "queued" / "sending" affordance until the
+ * canonical row arrives via Zero (matching `userBlockIdForTurn(turnId)`
+ * or the pre-minted `queueBlockId`) and the entry is dropped from the
+ * overlay.
+ *
+ * Same reactivity contract as StreamingEntry: mutable status flags are
+ * `$state`, the SvelteMap doesn't proxy stored values, the parent
+ * derivation only re-runs on set/delete.
+ */
+export class OptimisticEntry implements ChatMessage {
+  readonly id: string;
+  readonly role = "user" as const;
+  readonly agent: string;
+  readonly ts: number;
+  readonly turnId: string;
+  readonly sessionId: string | null;
+  readonly text: string;
+  readonly source?: ChatMessage["source"];
+  readonly queueId?: string;
+  readonly attachments?: ChatMessage["attachments"];
+
+  status = $state<ChatMessage["status"]>("complete");
+  pending = $state(true);
+  failed = $state(false);
+
+  constructor(init: {
+    id: string;
+    agent: string;
+    ts: number;
+    turnId: string;
+    sessionId: string | null;
+    text: string;
+    source?: ChatMessage["source"];
+    queueId?: string;
+    attachments?: ChatMessage["attachments"];
+    initialStatus?: ChatMessage["status"];
+    initialPending?: boolean;
+  }) {
+    this.id = init.id;
+    this.agent = init.agent;
+    this.ts = init.ts;
+    this.turnId = init.turnId;
+    this.sessionId = init.sessionId;
+    this.text = init.text;
+    this.source = init.source;
+    this.queueId = init.queueId;
+    this.attachments = init.attachments;
+    if (init.initialStatus) this.status = init.initialStatus;
+    if (init.initialPending !== undefined) this.pending = init.initialPending;
+  }
+}
+
+/** Overlay-map key. Globally unique because message ids (`b_<blockId>`,
+ *  `t_<toolId>`, `th_<blockId>`, `u_queue_<qid>`, `userBlockIdForTurn(...)`)
+ *  are themselves unique within an agent. */
+export type OverlayKey = string;
+export function overlayKey(agent: string, id: string): OverlayKey {
+  return `${agent}|${id}`;
+}
+
 export class ChatState {
-  messages = $state<ChatMessage[]>([]);
+  /**
+   * Legacy bucket for canonical Zero-replicated bubbles + a handful of
+   * residual imperative writers that haven't moved to an overlay (sys_<ts>
+   * slash-command bubbles via pushLocal; the test-only startAssistantTurn
+   * / appendDelta / pushTool / pushThinking / etc. helpers; reload-mid-
+   * stream rows that landed at status='streaming' from Zero before SSE
+   * caught up — those deltas continue to route via handleBlockDelta's
+   * legacy fallback because no overlay entry exists for them yet).
+   *
+   * Lifecycle ranks: streaming / optimistic overlays own the in-flight
+   * phase (per-instance $state reactivity); legacy owns the canonical
+   * (terminal) phase. The `messages` derivation merges legacy + overlay
+   * with overlay shadowing on id collision.
+   *
+   * `set messages(v)` writes here so test fixtures (`chat.messages =
+   * [...]`) keep working.
+   */
+  #legacyMessages = $state<ChatMessage[]>([]);
   agents = $state<AgentInfo[]>([]);
+
+  /**
+   * Live overlay for in-flight assistant / tool / thinking blocks. Keyed
+   * by `overlayKey(agent, msg.id)`. Entries are added on SSE block_start,
+   * mutated in place on block_delta (field-level $state reactivity), and
+   * removed by block_canceled or by the `pruneConvergedStreamingOverlay`
+   * sweep that runs on each applyZeroBlocks once the canonical row
+   * replicates at terminal status.
+   */
+  streaming = new SvelteMap<OverlayKey, StreamingEntry>();
+
+  /**
+   * Optimistic overlay for user bubbles that haven't yet been confirmed
+   * by Zero. addUser populates it with a `pending_<uuid>` id;
+   * confirmPending drops the overlay entry and pushes the canonical
+   * bubble into legacy at `userBlockIdForTurn(turn_id)` (the canonical
+   * Zero row that lands moments later dedups by id in applyZeroBlocks's
+   * merge).
+   */
+  optimistic = new SvelteMap<OverlayKey, OptimisticEntry>();
+
+  /**
+   * Derived chat view for the focused agent: legacy + streaming overlay
+   * + optimistic overlay, merged with overlay shadowing on id collision.
+   * Overlay entries are filtered by `entry.agent === focused &&
+   * entry.sessionId === currentSessionId` so `/clear` (which nulls the
+   * agent's sessionId at the daemon) hides leftover in-flight entries
+   * with no imperative sweep. Legacy entries are filtered by agent tag —
+   * structural cross-agent isolation, replacing the broken
+   * loadAgentTurns reset.
+   *
+   * Reactivity contract: per-entry `$state` fields on StreamingEntry /
+   * OptimisticEntry fire fine-grained subscriptions on `entry.text +=
+   * delta` etc. WITHOUT re-running this derivation. The derivation
+   * re-runs only on structural changes (map set/delete, legacy bucket
+   * shape change, focusedAgent / agents flip). Hot-path streaming
+   * latency stays at one paint frame even on long sessions.
+   */
+  #derivedMessages = $derived.by<ChatMessage[]>(() => {
+    const focused = this._focusedAgent;
+    const agentRow = this.agents.find((a) => a.name === focused);
+    const sid = agentRow?.sessionId ?? null;
+
+    const overlayIds = new Set<string>();
+    const overlayEntries: ChatMessage[] = [];
+    for (const entry of this.streaming.values()) {
+      if (entry.agent !== focused) continue;
+      if (entry.sessionId !== sid) continue;
+      overlayEntries.push(entry);
+      overlayIds.add(entry.id);
+    }
+    for (const entry of this.optimistic.values()) {
+      if (entry.agent !== focused) continue;
+      if (entry.sessionId !== sid) continue;
+      overlayEntries.push(entry);
+      overlayIds.add(entry.id);
+    }
+    // Legacy filter:
+    //   - skip overlay-shadowed ids
+    //   - skip entries explicitly tagged for a different agent
+    //   - pass through untagged entries (defensive — test fixtures /
+    //     pre-migration synth bubbles whose pushLocal call now stamps
+    //     the focused agent automatically)
+    const out: ChatMessage[] = [];
+    for (const m of this.#legacyMessages) {
+      if (overlayIds.has(m.id)) continue;
+      if (m.agent && m.agent !== focused) continue;
+      out.push(m);
+    }
+    for (const e of overlayEntries) out.push(e);
+    return out;
+  });
+
+  /**
+   * Public read API: the focused agent's chat bubbles. The setter writes
+   * the legacy bucket so test fixtures (`chat.messages = [...]`) keep
+   * working; the getter returns the derived view that merges in overlay
+   * entries scoped to the focused agent + current session.
+   */
+  get messages(): ChatMessage[] {
+    return this.#derivedMessages;
+  }
+  set messages(v: ChatMessage[]) {
+    this.#legacyMessages = v;
+  }
+
+  /**
+   * Imperative append to the legacy bucket. Used by callers that need
+   * to push a transient bubble (slash-command sys_<ts> errors in
+   * ChatInput.svelte; test fixtures setting up seed state) but don't
+   * have an overlay to write to. Auto-stamps the focused agent when
+   * the caller didn't set one so the derivation's per-agent filter
+   * sees an explicit owner.
+   */
+  pushLocal(msg: ChatMessage): void {
+    this.#legacyMessages.push(msg.agent ? msg : { ...msg, agent: this._focusedAgent });
+  }
+
   /**
    * Instrumentation backing field (FRI-72). The public `focusedAgent`
    * getter/setter wraps this so every write logs prev/next + URL +
@@ -644,7 +894,19 @@ export class ChatState {
    */
   clearLocalView(agent: string): void {
     if (this.focusedAgent !== agent) return;
-    this.messages = [];
+    this.#legacyMessages = [];
+    // Wipe the focused agent's overlay entries too. The session-id stamp
+    // on each entry would also hide them (clearLocalView is paired with
+    // the agent's sessionId flipping to null at the daemon), but the
+    // imperative drop keeps the maps from accumulating dead state across
+    // repeated `/clear`s — the SvelteMap doesn't garbage-collect
+    // mismatched-session entries on its own.
+    for (const [key, entry] of this.streaming.entries()) {
+      if (entry.agent === agent) this.streaming.delete(key);
+    }
+    for (const [key, entry] of this.optimistic.entries()) {
+      if (entry.agent === agent) this.optimistic.delete(key);
+    }
     this.oldestBlockId = null;
     this.reachedOldest = false;
     this.historyError = null;
@@ -706,6 +968,15 @@ export class ChatState {
     this.upsertAgent(name, { status });
   }
 
+  /** Snapshot of the focused agent's current SDK session id. Stamped onto
+   *  StreamingEntry / OptimisticEntry constructions so the `messages`
+   *  derivation can filter overlay entries by session — /clear nulls the
+   *  agent's sessionId and stale in-flight entries become invisible
+   *  without imperative cleanup. */
+  private currentSessionFor(agent: string): string | null {
+    return this.agents.find((a) => a.name === agent)?.sessionId ?? null;
+  }
+
   addUser(
     text: string,
     opts?: {
@@ -715,81 +986,93 @@ export class ChatState {
   ): string {
     // FIX_FORWARD 2.6: mint a `pending_<uuid>` id and `pending: true` so
     // the bubble pins to the bottom of the chat until the dispatch lands.
-    // `confirmPending` re-keys to the daemon-issued turn_id once
-    // /api/chat/turn returns; the canonical user-role block carries the
-    // same id and overwrites this entry in-place.
+    // `confirmPending` drops this overlay entry and pushes a canonical
+    // bubble at `userBlockIdForTurn(turnId)` once Zero's mutator
+    // resolves; the daemon's `recordUserBlock` writes the same id and
+    // Zero replicates it next, which dedups in applyZeroBlocks's merge.
     const id = `pending_${
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? (crypto as { randomUUID: () => string }).randomUUID()
         : `${Date.now()}_${Math.random().toString(36).slice(2)}`
     }`;
-    this.messages.push({
-      id,
-      role: "user",
-      text,
-      status: "complete",
-      ts: Date.now(),
-      source: "user_chat",
-      pending: true,
-      queueId: opts?.queueId,
-      attachments: opts?.attachments,
-    });
+    const agent = this.focusedAgent;
+    this.optimistic.set(
+      overlayKey(agent, id),
+      new OptimisticEntry({
+        id,
+        agent,
+        ts: Date.now(),
+        // No real turnId yet — the pending id stands in until confirmPending
+        // lands the daemon-issued one.
+        turnId: id,
+        sessionId: this.currentSessionFor(agent),
+        text,
+        source: "user_chat",
+        queueId: opts?.queueId,
+        attachments: opts?.attachments,
+        initialStatus: "complete",
+        initialPending: true,
+      }),
+    );
     return id;
-  }
-
-  /** Clear `queueId` from the user bubble matching this queue id, if any.
-   *  Called when the send-queue successfully flushes a previously queued
-   *  message — the bubble is no longer "queued", just sent. */
-  clearQueueMarker(queueId: string): void {
-    for (const m of this.messages) {
-      if (m.queueId === queueId) m.queueId = undefined;
-    }
   }
 
   /**
    * The pending user bubble (matched by `queueId`) has been confirmed by
-   * `/api/chat/turn` returning `{turn_id}` (FIX_FORWARD 2.6). Re-key the
-   * bubble id to the daemon-issued user-block id (mirroring the canonical
-   * block id daemon's `recordUserBlock` will emit on the SSE stream), drop
-   * `pending`, drop transient send-queue state. Natural sort restores; the
-   * eventual `block_complete` SSE event finds the same id and is a no-op.
+   * Zero's mutator returning `{turn_id}`. Drop the optimistic overlay
+   * entry and push a confirmed canonical bubble into the legacy bucket
+   * at `userBlockIdForTurn(turnId)` — the same id the daemon's
+   * `recordUserBlock` will emit and the same id Zero will replicate.
+   * applyZeroBlocks's merge dedups by id, so the canonical row that
+   * lands later replaces the legacy entry without surfacing a duplicate.
    */
   confirmPending(queueId: string, turnId: string): void {
     const targetId = userBlockIdForTurn(turnId);
-    const optIdx = this.messages.findIndex((m) => m.queueId === queueId);
-    if (optIdx < 0) return;
-    // Defense in depth against an SSE-first race: if the daemon's
-    // `block_complete` SSE frame arrived *before* the POST /api/chat/turn
-    // response (and so before this confirmPending call), `handleBlockComplete`
-    // already pushed a canonical bubble with `id=userBlockIdForTurn(turnId)`.
-    // Re-keying the optimistic in place would create two messages sharing
-    // the same id, crashing the keyed `{#each}`. Drop the optimistic in
-    // that case — the SSE bubble is the canonical one.
-    //
-    // The daemon-side change in `recordUserBlock` (skipping the SSE emit
-    // for `user_chat` source) should make this path unreachable in
-    // practice, but the check stays as belt-and-braces for the `mail` /
-    // `scheduled` SSE paths where the SSE frame is the sole source.
-    const sseAlreadyHere = this.messages.some((m, i) => i !== optIdx && m.id === targetId);
-    if (sseAlreadyHere) {
-      this.messages = this.messages.filter((_, i) => i !== optIdx);
-      return;
+    const agent = this.focusedAgent;
+    let entry: OptimisticEntry | undefined;
+    let entryKey: OverlayKey | undefined;
+    for (const [k, e] of this.optimistic.entries()) {
+      if (e.queueId === queueId && e.agent === agent) {
+        entry = e;
+        entryKey = k;
+        break;
+      }
     }
-    const m = this.messages[optIdx];
-    m.id = targetId;
-    m.turnId = turnId;
-    m.pending = false;
-    m.failed = false;
-    m.queueId = undefined;
+    if (!entry || !entryKey) return;
+    // Defense in depth against an SSE-first race: if the daemon's
+    // `block_complete` SSE frame arrived *before* this confirmPending
+    // call, `handleBlockComplete` already pushed a canonical bubble at
+    // `userBlockIdForTurn(turnId)`. Pushing another one would surface
+    // two bubbles sharing the same id and crash the keyed `{#each}`.
+    // Drop the optimistic in that case — the SSE bubble is canonical.
+    const sseAlreadyHere =
+      this.#legacyMessages.some((m) => m.id === targetId) ||
+      [...this.streaming.values()].some((s) => s.id === targetId);
+    this.optimistic.delete(entryKey);
+    if (sseAlreadyHere) return;
+    this.#legacyMessages.push({
+      id: targetId,
+      role: "user",
+      text: entry.text,
+      status: "complete",
+      ts: entry.ts,
+      agent,
+      turnId,
+      source: entry.source,
+      attachments: entry.attachments,
+      pending: false,
+      failed: false,
+      queueId: undefined,
+    });
   }
 
   /** Mark the pending bubble for this queueId as failed so the UI
    *  surfaces a discard affordance. Called when Zero isn't ready at
    *  send time (very rare — only during the first ~200ms of page load). */
   markPendingFailed(queueId: string): void {
-    for (const m of this.messages) {
-      if (m.queueId !== queueId) continue;
-      m.failed = true;
+    for (const entry of this.optimistic.values()) {
+      if (entry.queueId !== queueId) continue;
+      entry.failed = true;
       return;
     }
   }
@@ -797,13 +1080,17 @@ export class ChatState {
   /** Remove the pending bubble matching `queueId` (FIX_FORWARD 2.7 — used
    *  when the user picks "Discard and continue" or "Discard all"). */
   discardPending(queueId: string): void {
-    this.messages = this.messages.filter((m) => m.queueId !== queueId);
+    for (const [key, entry] of this.optimistic.entries()) {
+      if (entry.queueId === queueId) this.optimistic.delete(key);
+    }
   }
 
   /** Remove every pending bubble in one go (FIX_FORWARD 2.7 — "Discard all
    *  and continue"). */
   discardAllPending(): void {
-    this.messages = this.messages.filter((m) => !m.pending);
+    for (const [key, entry] of this.optimistic.entries()) {
+      if (entry.pending) this.optimistic.delete(key);
+    }
   }
 
   /** Show a transient toast for `ms` (default 4000). FIX_FORWARD 6.1. */
@@ -1027,7 +1314,7 @@ export class ChatState {
     // it back to true if the user is genuinely at the bottom after the
     // jump (e.g. /jump to a very recent message).
     this.pinnedToBottom = false;
-    this.messages = [...settled, ...pending];
+    this.#legacyMessages = [...settled, ...pending];
 
     if (targetId) {
       this.scrollNonce += 1;
@@ -1048,7 +1335,7 @@ export class ChatState {
 
   startAssistantTurn(turnId: string, agent: string): void {
     this.markInflight(agent, turnId);
-    this.messages.push({
+    this.#legacyMessages.push({
       id: turnId,
       role: "assistant",
       text: "",
@@ -1097,11 +1384,12 @@ export class ChatState {
         return;
       }
     }
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "assistant",
       text: delta,
       status: "streaming",
+      agent: this.focusedAgent,
       turnId,
       ts: Date.now(),
     });
@@ -1120,7 +1408,11 @@ export class ChatState {
     // done. Assistant text bubbles use the same matching rule they always
     // have.
     const userBlockId = userBlockIdForTurn(turnId);
-    for (const m of this.messages) {
+    // Helper applied to each message regardless of which bucket it
+    // lives in (legacy or streaming overlay). In-place status / field
+    // mutations are reactive in both: $state items on the legacy
+    // $state array, and per-instance $state fields on StreamingEntry.
+    const flip = (m: ChatMessage): void => {
       // FRI-95: the user block participates in turn-level terminal-state
       // resolution. It's the always-present render surface for the Stop
       // affordance (Stopping… → Stopped / Stopped — worker had to be
@@ -1149,27 +1441,33 @@ export class ChatState {
             }
           }, settleAfterMs);
         }
-        continue;
+        return;
       }
-      if (m.id !== turnId && m.turnId !== turnId) continue;
+      if (m.id !== turnId && m.turnId !== turnId) return;
       if (m.role === "assistant") {
         if (m.status === "complete" || m.status === "aborted" || m.status === "error") {
-          continue;
+          return;
         }
         m.status = status;
-        // FRI-95: thread abort reason through to the assistant bubble too,
-        // so a streaming assistant bubble that ended on abort shows the
-        // same terminal copy distinction as the user block.
-        if (status === "aborted" && abortReason) {
-          m.abortReason = abortReason;
-        }
+        if (status === "aborted" && abortReason) m.abortReason = abortReason;
       } else if (m.role === "tool" || m.role === "thinking") {
         if (m.status === "done" || m.status === "error" || m.status === "aborted") {
-          continue;
+          return;
         }
         m.status = status === "complete" ? "done" : status;
       }
+    };
+    // Streaming overlay first (this is where SSE-driven in-flight
+    // bubbles live since commit 5). Scoped to the focused agent so a
+    // turn_done for a non-focused agent doesn't touch its overlay.
+    for (const entry of this.streaming.values()) {
+      if (entry.agent !== this.focusedAgent) continue;
+      flip(entry);
     }
+    // Legacy bucket carries the user block and any reload-mid-stream
+    // canonical entries; iterate after the overlay so id collisions
+    // (overlay shadows legacy by id) still get both copies flipped.
+    for (const m of this.#legacyMessages) flip(m);
     // Inflight-slot cleanup is delegated to `clearInflightForTurn` so
     // applyEvent's `turn_done` / `error` cases can clear the slot for
     // non-focused agents without going through the message-walking
@@ -1257,7 +1555,28 @@ export class ChatState {
     // otherwise are stale.
     if (focusedRow.status === "working") return;
     let healed = false;
-    for (const m of this.messages) {
+    // Heal the streaming overlay first — that's where SSE-driven
+    // in-flight bubbles live. Each entry's status is a $state field,
+    // so the assignment fires fine-grained reactivity on any reader.
+    for (const entry of this.streaming.values()) {
+      if (entry.agent !== focused) continue;
+      if (entry.role === "assistant" && entry.status === "streaming") {
+        entry.status = "complete";
+        healed = true;
+      } else if (
+        (entry.role === "tool" || entry.role === "thinking") &&
+        entry.status === "running"
+      ) {
+        entry.status = "done";
+        healed = true;
+      }
+    }
+    // Legacy bucket still carries streaming/running entries in two
+    // residual cases: a reload-mid-stream that landed a status='streaming'
+    // canonical Zero row before SSE caught up (the row's deltas route
+    // via the legacy fallback in handleBlockDelta), and any pre-overlay
+    // imperative pushes a test fixture might have made.
+    for (const m of this.#legacyMessages) {
       if (m.role === "assistant" && m.status === "streaming") {
         m.status = "complete";
         healed = true;
@@ -1266,9 +1585,6 @@ export class ChatState {
         healed = true;
       }
     }
-    // Clear the inflight tracker too — agent isn't working, so any
-    // value in this slot is a ghost that would mis-render the Send
-    // button as Stop on the next render frame.
     if (this.inflightTurnIdByAgent[focused] != null) {
       this.inflightTurnIdByAgent[focused] = null;
       healed = true;
@@ -1277,7 +1593,7 @@ export class ChatState {
     // that does identity-based diff (the per-message mutations above
     // are picked up by Svelte's fine-grained reactivity, but explicit
     // is cheaper than relying on it for the listener side effect).
-    if (healed) this.messages = [...this.messages];
+    if (healed) this.#legacyMessages = [...this.#legacyMessages];
   }
 
   /* ------------ FRI-12: Resend / Resume helpers ------------ */
@@ -1469,11 +1785,12 @@ export class ChatState {
   pushTool(toolId: string, toolName: string, input: unknown): void {
     const id = `t_${toolId}`;
     if (this.messages.some((m) => m.id === id)) return;
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "tool",
       text: "",
       status: "running",
+      agent: this.focusedAgent,
       toolId,
       toolName,
       input,
@@ -1492,11 +1809,12 @@ export class ChatState {
         return;
       }
     }
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "tool",
       text: "",
       status: "running",
+      agent: this.focusedAgent,
       toolId,
       input,
       ts: Date.now(),
@@ -1515,11 +1833,12 @@ export class ChatState {
         return;
       }
     }
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "tool",
       text: "",
       status: status === "ok" ? "done" : "error",
+      agent: this.focusedAgent,
       toolId,
       output,
       ts: Date.now(),
@@ -1529,11 +1848,12 @@ export class ChatState {
   pushThinking(blockId: string): void {
     const id = `th_${blockId}`;
     if (this.messages.some((m) => m.id === id)) return;
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "thinking",
       text: "",
       status: "running",
+      agent: this.focusedAgent,
       blockId,
       ts: Date.now(),
     });
@@ -1549,11 +1869,12 @@ export class ChatState {
         return;
       }
     }
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "thinking",
       text: delta,
       status: "running",
+      agent: this.focusedAgent,
       blockId,
       ts: Date.now(),
     });
@@ -1568,11 +1889,12 @@ export class ChatState {
         return;
       }
     }
-    this.messages.push({
+    this.#legacyMessages.push({
       id,
       role: "thinking",
       text: "",
       status: "done",
+      agent: this.focusedAgent,
       blockId,
       ts: Date.now(),
     });
@@ -1588,48 +1910,33 @@ export class ChatState {
     // cleared array — until the next Zero update, which may not come
     // for minutes.
     //
-    // Guard: only clear/reset state when we're genuinely switching
-    // agents OR we have nothing to preserve. Re-entry to the same
-    // agent leaves `messages` and the cursors untouched; the binder
-    // call below is still safe (it's idempotent), the cached-load
-    // path below skips itself (messages already populated), and the
-    // post-load probe still runs.
-    const switchingAgents = this.focusedAgent !== agent;
-    const haveMessages = this.messages.length > 0;
-    const isReentry = !switchingAgents && haveMessages;
-    if (!isReentry) {
-      this.messages = [];
-      this.oldestBlockId = null;
-      this.reachedOldest = false;
-      this.historyError = null;
-      this.zeroBlocksActive = false;
-      // Phase 3.7: reset the per-agent seen-blockIds tracker so a stale
-      // entry from the previous agent doesn't trip the delete heuristic
-      // here.
-      this.zeroSeenBlockIds = new Set();
-      // Phase 4.1: focus switch invalidates the markRead memo so the
-      // first Zero snapshot for the new agent will fire a fresh cursor
-      // write (even if we'd previously marked the same blockId for the
-      // PREVIOUS agent, the (device, agent) tuple is different).
-      this.lastMarkedBlockIdByAgent.delete(agent);
-      // Clear any stale loading-older flag from the previous agent. Without
-      // this, if the user scrolled up in agent A and clicked away before
-      // the load finished, A's `loadingOlder=true` would persist into B's
-      // chat and block B's first pagination request until A's stale finally
-      // fires (~350ms later). The new guards in `loadOlderTurns` ensure
-      // that stale call won't clobber B's state.
-      this.loadingOlder = false;
-      // FRI-55: reset the SSE dedup cursor for this agent whenever we clear
-      // messages. When SSE reconnects the daemon replays the entire current
-      // turn buffer from `turn_started`; events with seq <= the old cursor
-      // are dropped by `acceptEvent` before the block_start guard is ever
-      // reached, so thinking bubbles are silently lost. Clearing the cursor
-      // here lets the replay recreate them. `handleBlockStart` is already
-      // idempotent; `handleBlockDelta` gates on `status === "running"` so
-      // completed blocks in the replay don't double-accumulate text.
-      delete this.lastSeqByAgent[agent];
-      saveJSON(ChatState.LAST_SEQ_KEY, this.lastSeqByAgent);
-    }
+    // Cross-agent isolation is now structural: the `messages` derivation
+    // filters legacy entries by agent tag and overlay entries by agent
+    // + session, and applyZeroBlocks's merge drops cross-agent legacy
+    // entries during the per-snapshot rebuild. The pre-rewrite
+    // `switchingAgents` reset block here was structurally broken — the
+    // caller updates `chat.focusedAgent` BEFORE calling loadAgentTurns,
+    // so `this.focusedAgent !== agent` was always false and the previous
+    // agent's entries leaked into the new view.
+    //
+    // Per-agent state items (pagination cursor / Zero snapshot tracker
+    // / REST loading flag / SSE dedup cursor) still need to reset on
+    // every call so a stale value from the previous agent can't trip
+    // the new one. Re-entry to the same agent loses pagination position;
+    // that's the acceptable trade-off for the cross-agent leak the
+    // previous gating couldn't prevent.
+    this.oldestBlockId = null;
+    this.reachedOldest = false;
+    this.historyError = null;
+    this.zeroBlocksActive = false;
+    this.zeroSeenBlockIds = new Set();
+    this.lastMarkedBlockIdByAgent.delete(agent);
+    this.loadingOlder = false;
+    // FRI-55: reset the SSE dedup cursor for this agent so the daemon's
+    // turn-buffer replay on SSE reconnect can recreate thinking bubbles
+    // that `acceptEvent` would otherwise drop as already-seen.
+    delete this.lastSeqByAgent[agent];
+    saveJSON(ChatState.LAST_SEQ_KEY, this.lastSeqByAgent);
 
     // Last-known transcript from a previous session. Render the cached
     // blocks immediately so a slow / offline first-paint doesn't show an
@@ -1637,7 +1944,7 @@ export class ChatState {
     // bubble ids are stable across cache → fresh (parseBlocks uses
     // userBlockIdForTurn for user blocks and b_<blockId> for assistant),
     // so any in-flight SSE deltas attach cleanly.
-    const cachedRaw = isReentry ? [] : loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
+    const cachedRaw = loadJSON<BlockRow[]>(KEYS.transcript(agent), []);
     // Apply the same session filter `applyZeroBlocks` uses, so the
     // first-paint cache can't bleed prior sessions onto the screen
     // post-`/clear`. The cache pre-dates Zero (its only writer is the
@@ -1654,7 +1961,7 @@ export class ChatState {
     // the DB-backed working signal without re-scanning agents twice.
     const agentIsWorking = this.agents.find((a) => a.name === agent)?.status === "working";
     if (cached.length > 0) {
-      this.messages = [
+      this.#legacyMessages = [
         ...parseBlocks(cached, agent, {
           inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
           agentWorking: agentIsWorking,
@@ -1718,7 +2025,7 @@ export class ChatState {
         };
         if (this.focusedAgent !== agent) return;
         const blocks = payload.blocks ?? [];
-        this.messages = parseBlocks(blocks, agent, {
+        this.#legacyMessages = parseBlocks(blocks, agent, {
           inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
           agentWorking: agentIsWorking,
           noResponseGraceUntil: this.noResponseGraceUntil,
@@ -1967,7 +2274,20 @@ export class ChatState {
 
     const merged: ChatMessage[] = [];
     const seen = new Set<string>();
-    for (const m of this.messages) {
+    // Iterate the legacy bucket only — overlay entries (streaming and
+    // optimistic) render via the `messages` derivation and don't belong
+    // in legacy. The optimistic-overlay drop below mirrors the in-merge
+    // snapshotBlockIds drop, keeping the overlay map clean of entries
+    // whose canonical row just landed.
+    for (const m of this.#legacyMessages) {
+      // Structural cross-agent isolation: drop legacy entries explicitly
+      // tagged for a different agent. loadAgentTurns no longer wipes
+      // the legacy bucket on focus switch, so the previous agent's
+      // entries sit here until this snapshot replaces them. The
+      // derivation also filters by agent for the brief window before
+      // the first snapshot lands; this drop makes the persistence
+      // permanent (subsequent snapshots don't re-include them).
+      if (m.agent && m.agent !== forAgent) continue;
       const parsedMatch = parsedById.get(m.id);
       if (parsedMatch) {
         merged.push(parsedMatch);
@@ -1991,11 +2311,10 @@ export class ChatState {
       }
       // Otherwise preserve. Covers in-flight SSE streams (no
       // blockId yet, or blockId-having streaming row that Zero will
-      // deliver as `complete` on the next snapshot), queue-synth
-      // (no blockId), optimistic-pending user bubbles, and
-      // scroll-back rows older than the 50-row Zero window
-      // (blockId-having but not previously seen via Zero — they
-      // came from the REST `?before=…` fallback).
+      // deliver as `complete` on the next snapshot), optimistic-
+      // pending user bubbles, and scroll-back rows older than the
+      // 50-row Zero window (blockId-having but not previously seen
+      // via Zero — they came from the REST `?before=…` fallback).
       merged.push(m);
     }
     for (const m of parsed) {
@@ -2007,7 +2326,26 @@ export class ChatState {
     // block_ids are recognized as "seen via Zero" on the next call.
     for (const bid of snapshotBlockIds) this.zeroSeenBlockIds.add(bid);
 
-    this.messages = dropSupersededNoResponseSafetyNet(merged);
+    this.#legacyMessages = dropSupersededNoResponseSafetyNet(merged);
+    // Overlay companion to the in-merge snapshotBlockIds drop above:
+    // drop any optimistic overlay entry whose queueId just appeared as
+    // a canonical Zero row in this snapshot. Without this, the
+    // pending_<uuid> overlay entry and the canonical legacy entry
+    // would surface as two distinct ids for the same text.
+    if (snapshotBlockIds.size > 0) {
+      for (const [key, entry] of this.optimistic.entries()) {
+        if (entry.queueId && snapshotBlockIds.has(entry.queueId)) {
+          this.optimistic.delete(key);
+        }
+      }
+    }
+    // Reload-heal convergence: drop streaming overlay entries whose
+    // canonical row just landed in legacy with a terminal status. The
+    // overlay shadowed the (in-flight) legacy entry while SSE was
+    // driving deltas; now that Zero has delivered the terminal version
+    // the overlay is no longer load-bearing and would otherwise hold
+    // memory + render-state forever past the turn's end.
+    this.pruneConvergedStreamingOverlay(forAgent);
     const newOldest = oldestBlockCursor(blockRows);
     if (newOldest !== this.oldestBlockId) {
       // The Zero snapshot shifted the scroll-back cursor. Re-arm
@@ -2133,7 +2471,7 @@ export class ChatState {
       // see in DB).
       const seen = new Set(this.messages.map((m) => m.id));
       const fresh = older.filter((m) => !seen.has(m.id));
-      this.messages = [...fresh, ...this.messages];
+      this.#legacyMessages = [...fresh, ...this.#legacyMessages];
       this.oldestBlockId = oldestBlockCursor(blocks);
       opts?.onPrepended?.();
     } catch {
@@ -2254,6 +2592,45 @@ export class ChatState {
 
   /* ------------ Block-level streaming handlers (FIX_FORWARD 1.7) ------------ */
 
+  /** Reload-heal convergence: drop streaming overlay entries for `agent`
+   *  whose canonical row exists in the legacy bucket at a terminal
+   *  status. While the row was in-flight the overlay shadowed the
+   *  legacy entry; once the canonical row carries the terminal status
+   *  the overlay no longer adds anything. Called from applyZeroBlocks
+   *  on every snapshot so the overlay drains as Zero finalizes blocks
+   *  for the focused agent. */
+  private pruneConvergedStreamingOverlay(agent: string): void {
+    if (this.streaming.size === 0) return;
+    const terminalIds = new Set<string>();
+    for (const m of this.#legacyMessages) {
+      if (
+        m.status === "complete" ||
+        m.status === "aborted" ||
+        m.status === "error" ||
+        m.status === "done"
+      ) {
+        terminalIds.add(m.id);
+      }
+    }
+    if (terminalIds.size === 0) return;
+    for (const [key, entry] of this.streaming.entries()) {
+      if (entry.agent !== agent) continue;
+      if (terminalIds.has(entry.id)) this.streaming.delete(key);
+    }
+  }
+
+  /** Find the overlay tool entry matching a SSE block_id. Tool overlay
+   *  entries are keyed by `t_<toolId>` rather than `b_<blockId>` — we
+   *  need a scan-by-blockId for `input_json_delta` routing. Cost is
+   *  bounded by streaming.size (typically 1-3 entries during a turn). */
+  private findStreamingByBlockId(agent: string, blockId: string): StreamingEntry | undefined {
+    for (const entry of this.streaming.values()) {
+      if (entry.agent !== agent) continue;
+      if (entry.blockId === blockId) return entry;
+    }
+    return undefined;
+  }
+
   private handleBlockStart(event: {
     block_id: string;
     block_index: number;
@@ -2267,6 +2644,8 @@ export class ChatState {
     // daemon. We materialize the bubble on `block_complete` only — the
     // start carries no useful metadata and would push an empty placeholder.
     if (event.kind === "error") return;
+    const agent = this.focusedAgent;
+    const sid = this.currentSessionFor(agent);
     if (event.kind === "text") {
       const role = event.role === "user" ? "user" : "assistant";
       // FIX_FORWARD 2.6: user blocks key by turn_id so the local pending
@@ -2274,48 +2653,77 @@ export class ChatState {
       // daemon converge on the same row.
       const id = role === "user" ? userBlockIdForTurn(event.turn_id) : `b_${event.block_id}`;
       if (this.messages.some((m) => m.id === id)) return;
-      this.messages.push({
-        id,
-        role,
-        text: "",
-        status: role === "user" ? "complete" : "streaming",
-        agent: this.focusedAgent,
-        turnId: event.turn_id,
-        ts: event.ts,
-      });
+      if (role === "user") {
+        // User-block path stays on the legacy bucket — addUser + the
+        // optimistic overlay cover user_chat; this branch handles
+        // mail / scratch / scheduled blocks that bypass addUser.
+        this.#legacyMessages.push({
+          id,
+          role,
+          text: "",
+          status: "complete",
+          agent,
+          turnId: event.turn_id,
+          ts: event.ts,
+        });
+        return;
+      }
+      // Assistant text: streaming overlay. The StreamingEntry's per-field
+      // $state keeps subsequent block_delta `entry.text += delta`
+      // mutations fine-grained — the `messages` derivation does not
+      // re-run on text growth.
+      this.streaming.set(
+        overlayKey(agent, id),
+        new StreamingEntry({
+          id,
+          role: "assistant",
+          agent,
+          ts: event.ts,
+          turnId: event.turn_id,
+          blockId: event.block_id,
+          sessionId: sid,
+          initialStatus: "streaming",
+        }),
+      );
       return;
     }
     if (event.kind === "thinking") {
       const id = `th_${event.block_id}`;
       if (this.messages.some((m) => m.id === id)) return;
-      this.messages.push({
-        id,
-        role: "thinking",
-        text: "",
-        status: "running",
-        blockId: event.block_id,
-        turnId: event.turn_id,
-        ts: event.ts,
-      });
+      this.streaming.set(
+        overlayKey(agent, id),
+        new StreamingEntry({
+          id,
+          role: "thinking",
+          agent,
+          ts: event.ts,
+          turnId: event.turn_id,
+          blockId: event.block_id,
+          sessionId: sid,
+          initialStatus: "running",
+        }),
+      );
       return;
     }
     if (event.kind === "tool_use") {
       const toolId = event.tool?.id ?? event.block_id;
       const id = `t_${toolId}`;
       if (this.messages.some((m) => m.id === id)) return;
-      this.messages.push({
-        id,
-        role: "tool",
-        text: "",
-        status: "running",
-        toolId,
-        toolName: event.tool?.name ?? "",
-        // FRI-84: record blockId so handleBlockDelta can route
-        // input_json_delta fragments onto this bubble.
-        blockId: event.block_id,
-        turnId: event.turn_id,
-        ts: event.ts,
-      });
+      this.streaming.set(
+        overlayKey(agent, id),
+        new StreamingEntry({
+          id,
+          role: "tool",
+          agent,
+          ts: event.ts,
+          turnId: event.turn_id,
+          blockId: event.block_id,
+          sessionId: sid,
+          toolId,
+          initialStatus: "running",
+          initialToolName: event.tool?.name ?? "",
+        }),
+      );
       return;
     }
     // tool_result: created lazily on block_complete (we need content_json
@@ -2326,10 +2734,45 @@ export class ChatState {
     block_id: string;
     delta: { text?: string; partial_json?: string };
   }): void {
+    const agent = this.focusedAgent;
     const textId = `b_${event.block_id}`;
     const thinkId = `th_${event.block_id}`;
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const m = this.messages[i];
+
+    // Text deltas: prefer the streaming overlay. `entry.text += delta`
+    // fires fine-grained reactivity on `entry.text` only — the
+    // `messages` derivation does not re-run, so paint stays bounded
+    // by the bubble's own text-node update.
+    if (typeof event.delta.text === "string") {
+      const textEntry = this.streaming.get(overlayKey(agent, textId));
+      if (textEntry && textEntry.role === "assistant") {
+        if (textEntry.status === "streaming") textEntry.text += event.delta.text;
+        return;
+      }
+      const thinkEntry = this.streaming.get(overlayKey(agent, thinkId));
+      if (thinkEntry && thinkEntry.role === "thinking") {
+        if (thinkEntry.status === "running") thinkEntry.text += event.delta.text;
+        return;
+      }
+    }
+    if (typeof event.delta.partial_json === "string") {
+      const toolEntry = this.findStreamingByBlockId(agent, event.block_id);
+      if (toolEntry && toolEntry.role === "tool") {
+        if (toolEntry.status === "running") {
+          toolEntry.inputPartialJson =
+            (toolEntry.inputPartialJson ?? "") + event.delta.partial_json;
+        }
+        return;
+      }
+    }
+
+    // Legacy fallback: a delta whose block_start landed before the
+    // overlay migration (or for ids only the legacy bucket holds —
+    // tests using `chat.startAssistantTurn` / `chat.appendDelta` push
+    // directly to legacy without going through SSE; also reload-mid-
+    // stream Zero rows at status='streaming' that landed before SSE
+    // caught up).
+    for (let i = this.#legacyMessages.length - 1; i >= 0; i--) {
+      const m = this.#legacyMessages[i];
       if (m.id === textId) {
         if (typeof event.delta.text === "string" && m.status === "streaming") {
           m.text += event.delta.text;
@@ -2368,6 +2811,7 @@ export class ChatState {
     source: string | null;
     ts: number;
   }): void {
+    const agent = this.focusedAgent;
     if (event.kind === "error") {
       const errPayload = parseErrorContent(event.content_json);
       const id = `e_${event.block_id}`;
@@ -2382,13 +2826,13 @@ export class ChatState {
         existing.rawErrorMessage = errPayload.rawMessage;
         return;
       }
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role: "assistant",
         kind: "error",
         text: errPayload.headline,
         status: "error",
-        agent: this.focusedAgent,
+        agent,
         turnId: event.turn_id,
         ts: event.ts,
         errorCode: errPayload.code,
@@ -2411,11 +2855,12 @@ export class ChatState {
         // streaming bubble at `b_<id>` still satisfies D5's cleanup intent;
         // the new affordance bubble at `nr_<turnId>` is the converged shape.
         const streamingId = `b_${event.block_id}`;
-        const idx = this.messages.findIndex((m) => m.id === streamingId);
-        if (idx !== -1) this.messages.splice(idx, 1);
+        this.streaming.delete(overlayKey(this.focusedAgent, streamingId));
+        const idx = this.#legacyMessages.findIndex((m) => m.id === streamingId);
+        if (idx !== -1) this.#legacyMessages.splice(idx, 1);
         const nrId = noResponseIdForTurn(event.turn_id);
         if (!this.messages.some((m) => m.id === nrId)) {
-          this.messages.push({
+          this.#legacyMessages.push({
             id: nrId,
             role: "assistant",
             kind: "no-response",
@@ -2438,6 +2883,17 @@ export class ChatState {
             : event.status === "queued"
               ? "queued"
               : "error";
+      // Streaming overlay update first. The overlay holds the live bubble
+      // during the streaming phase; finalizing in place keeps the user's
+      // view stable until Zero replicates the canonical row (which is
+      // pruned by pruneConvergedStreamingOverlay on the next snapshot).
+      const overlayEntry =
+        event.role === "user" ? undefined : this.streaming.get(overlayKey(agent, id));
+      if (overlayEntry && overlayEntry.role === "assistant") {
+        if (typeof parsed.text === "string") overlayEntry.text = parsed.text;
+        overlayEntry.status = mappedStatus;
+        return;
+      }
       for (const m of this.messages) {
         if (m.id !== id) continue;
         if (typeof parsed.text === "string") m.text = parsed.text;
@@ -2464,14 +2920,15 @@ export class ChatState {
         return;
       }
       // Late mount: block_start was evicted from the ring (or — for mail
-      // — was never emitted in the first place).
+      // — was never emitted in the first place). Land canonical in the
+      // legacy bucket so Zero's eventual replicate dedupes on id.
       const role = event.role === "user" ? "user" : "assistant";
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role,
         text: parsed.text ?? "",
         status: mappedStatus,
-        agent: this.focusedAgent,
+        agent,
         turnId: event.turn_id,
         blockId: event.block_id,
         ts: event.ts,
@@ -2491,7 +2948,8 @@ export class ChatState {
       // user sees a "stopped" affordance.
       const hasText = typeof parsed.text === "string" && parsed.text.length > 0;
       if (!hasText && event.status === "complete") {
-        this.messages = this.messages.filter((m) => m.id !== id);
+        this.streaming.delete(overlayKey(this.focusedAgent, id));
+        this.#legacyMessages = this.#legacyMessages.filter((m) => m.id !== id);
         return;
       }
       // For thinking blocks, 'complete' (and the un-aborted retry path)
@@ -2501,17 +2959,24 @@ export class ChatState {
       // spinning.
       const status: ChatMessage["status"] =
         event.status === "aborted" ? "aborted" : event.status === "error" ? "error" : "done";
+      const thinkOverlay = this.streaming.get(overlayKey(agent, id));
+      if (thinkOverlay && thinkOverlay.role === "thinking") {
+        if (typeof parsed.text === "string") thinkOverlay.text = parsed.text;
+        thinkOverlay.status = status;
+        return;
+      }
       for (const m of this.messages) {
         if (m.id !== id) continue;
         if (typeof parsed.text === "string") m.text = parsed.text;
         m.status = status;
         return;
       }
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role: "thinking",
         text: parsed.text ?? "",
         status,
+        agent,
         blockId: event.block_id,
         turnId: event.turn_id,
         ts: event.ts,
@@ -2521,17 +2986,20 @@ export class ChatState {
     if (event.kind === "tool_use") {
       const toolId = parsed.tool_use_id ?? "";
       const id = `t_${toolId}`;
+      const toolOverlay = this.streaming.get(overlayKey(agent, id));
+      if (toolOverlay && toolOverlay.role === "tool") {
+        toolOverlay.input = parsed.input;
+        toolOverlay.inputPartialJson = undefined;
+        if (parsed.name && !toolOverlay.toolName) toolOverlay.toolName = parsed.name;
+        if (event.status === "aborted") toolOverlay.status = "aborted";
+        else if (event.status === "error") toolOverlay.status = "error";
+        return;
+      }
       for (const m of this.messages) {
         if (m.id !== id) continue;
         m.input = parsed.input;
-        // FRI-84: canonical input is now in `m.input`; drop the
-        // streaming accumulator so the renderer switches to the
-        // pretty-printed final form.
         m.inputPartialJson = undefined;
         if (parsed.name && !m.toolName) m.toolName = parsed.name;
-        // A tool_use that completes with aborted/error never gets a
-        // tool_result follow-up to flip the bubble off "running" — honor
-        // the terminal status here.
         if (event.status === "aborted") m.status = "aborted";
         else if (event.status === "error") m.status = "error";
         return;
@@ -2539,11 +3007,12 @@ export class ChatState {
       // Late mount.
       const status: ChatMessage["status"] =
         event.status === "aborted" ? "aborted" : event.status === "error" ? "error" : "running";
-      this.messages.push({
+      this.#legacyMessages.push({
         id,
         role: "tool",
         text: "",
         status,
+        agent,
         toolId,
         toolName: parsed.name ?? "",
         input: parsed.input,
@@ -2555,6 +3024,12 @@ export class ChatState {
     if (event.kind === "tool_result") {
       const toolId = parsed.tool_use_id ?? "";
       const id = `t_${toolId}`;
+      const resultOverlay = this.streaming.get(overlayKey(agent, id));
+      if (resultOverlay && resultOverlay.role === "tool") {
+        resultOverlay.status = parsed.is_error ? "error" : "done";
+        if (typeof parsed.text === "string") resultOverlay.output = parsed.text;
+        return;
+      }
       for (const m of this.messages) {
         if (m.id !== id) continue;
         m.status = parsed.is_error ? "error" : "done";
@@ -2589,7 +3064,13 @@ export class ChatState {
    * to disclose.
    */
   private handleBlockCanceled(event: { block_id: string }): void {
-    this.messages = this.messages.filter((m) => m.blockId !== event.block_id);
+    // Drop matching streaming overlay entries — the overlay key is
+    // (agent, id) and id can be `b_<bid>` / `th_<bid>` / `t_<toolId>`,
+    // so scan-by-blockId is the only correct match for the tool case.
+    for (const [key, entry] of this.streaming.entries()) {
+      if (entry.blockId === event.block_id) this.streaming.delete(key);
+    }
+    this.#legacyMessages = this.#legacyMessages.filter((m) => m.blockId !== event.block_id);
   }
 
   // Phase 5: `handleBlockMetaUpdate` removed — Zero replicates the
@@ -2616,7 +3097,9 @@ export class ChatState {
       });
       if (!r.ok) return null;
       const data = (await r.json().catch(() => ({}))) as { text?: string };
-      this.messages = this.messages.filter((m) => m.turnId !== turnId || m.role !== "user");
+      this.#legacyMessages = this.#legacyMessages.filter(
+        (m) => m.turnId !== turnId || m.role !== "user",
+      );
       return typeof data.text === "string" ? data.text : "";
     } catch {
       return null;
@@ -3297,6 +3780,18 @@ export function parseBlocks(
 
 /** Lowest block_id across an array. Used as the next `before` cursor for
  *  scroll-up pagination (FIX_FORWARD 3.7). */
+/**
+ * Test-only hook. The per-turn parseBlocks memoization (the cache itself)
+ * was on this branch via commit b3efab5 but was overwritten when the
+ * branch reconciled with main's FRI-59 architectural rewrite of the file.
+ * The export survives as a no-op so chat.test.ts's beforeEach still
+ * compiles; the memoization can be re-introduced as a focused follow-up
+ * once the merged baseline lands.
+ */
+export function __resetParseCache(): void {
+  // intentionally empty — placeholder for the per-turn parse cache.
+}
+
 export function oldestBlockCursor(blocks: BlockRow[]): string | null {
   // Compare by `(ts, id)` tuple, NOT by bare `id`. Phase 4.11 made
   // `blocks.id` a text UUID; the pre-migration rows that came in via
