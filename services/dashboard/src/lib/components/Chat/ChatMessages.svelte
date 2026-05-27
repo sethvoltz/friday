@@ -127,34 +127,41 @@
   // dropping the user at a disorienting scrollTop. 5:1 ratio gives
   // the anchor plenty of headroom.
   //
-  // Read-only past-session views are bounded by the session length
-  // and render in full — no windowing.
+  // Past-session (read-only) views use the same WINDOW_SIZE cap so a
+  // long session doesn't render thousands of DOM nodes on initial
+  // paint — the cursor below is per-component and tracks the user's
+  // scroll independently of the live `chat.chatWindowEnd` (which is
+  // per-focused-agent and irrelevant to past-session navigation).
   const WINDOW_SIZE = 100;
   const SLIDE_AMOUNT = 20;
-  // `windowEnd` derives from chat.chatWindowEnd, which is either:
-  //   - `null` ("follow live tail") → windowEnd = allMessages.length
-  //   - `{agent, end}` matching the focused agent → windowEnd = end
-  //   - `{agent, end}` for a DIFFERENT agent → falls through to live
-  //     tail (handles agent-switch: a stale window from the previous
-  //     agent has no effect on the new one; the user lands at the
-  //     newly-focused agent's latest message).
+  // Readonly past-session cursor. `null` means "follow tail" — the
+  // window starts at the last WINDOW_SIZE messages and `windowEnd`
+  // tracks `allMessages.length` as `loadOlderPast` paginates older
+  // bubbles in. Slide-up sets a concrete value; slide-down to tail
+  // (where the cursor equals the length) resets to `null`.
+  let readonlyWindowEnd = $state<number | null>(null);
+  // `windowEnd` derives from chat.chatWindowEnd (live) or the local
+  // readonly cursor (past-session view). Both have the same "null =
+  // follow tail" convention so the slice logic below is unified.
   //
-  // No init effect is needed: the derivation reactively follows
-  // allMessages.length whenever chat.chatWindowEnd is null or
-  // agent-mismatched, which is the cold-start + agent-switch +
-  // live-append case all at once. Slide handlers explicitly mutate
-  // chat.chatWindowEnd; slide-down to the tail sets it back to null
-  // so subsequent live appends auto-extend without another mutator.
-  let windowEnd = $derived(
-    chat.chatWindowEnd && chat.chatWindowEnd.agent === chat.focusedAgent
-      ? Math.min(chat.chatWindowEnd.end, allMessages.length)
-      : allMessages.length,
-  );
-  let windowStart = $derived(Math.max(0, windowEnd - WINDOW_SIZE));
-  let list = $derived.by(() => {
-    if (readonly) return allMessages;
-    return allMessages.slice(windowStart, windowEnd);
+  // For live mode: chatWindowEnd is either null ("follow live tail")
+  // or `{agent, end}` matching the focused agent. An agent-mismatch
+  // also falls through to the tail, which handles agent-switch
+  // cleanly (a stale window from the previous agent has no effect
+  // on the new one).
+  let windowEnd = $derived.by(() => {
+    if (readonly) {
+      return readonlyWindowEnd === null
+        ? allMessages.length
+        : Math.min(readonlyWindowEnd, allMessages.length);
+    }
+    if (chat.chatWindowEnd && chat.chatWindowEnd.agent === chat.focusedAgent) {
+      return Math.min(chat.chatWindowEnd.end, allMessages.length);
+    }
+    return allMessages.length;
   });
+  let windowStart = $derived(Math.max(0, windowEnd - WINDOW_SIZE));
+  let list = $derived(allMessages.slice(windowStart, windowEnd));
   // Honest "no older messages" gate: when windowStart hits 0 AND the
   // local replica is the canonical full set (Zero `resultType ===
   // 'complete'`), there is genuinely nothing older to slide to.
@@ -240,10 +247,13 @@
       direction === "up"
         ? Math.max(WINDOW_SIZE, current - SLIDE_AMOUNT)
         : Math.min(allMessages.length, current + SLIDE_AMOUNT);
-    // When a slide-down brings us back to the tail, drop the
-    // tagged state so subsequent live appends auto-extend (no
-    // need for another mutator hop on every new message).
-    if (newEnd === allMessages.length) {
+    // When a slide-down brings us back to the tail, drop the tagged
+    // state so subsequent appends auto-extend without another mutator
+    // hop. Read-only uses a component-local cursor; live shares the
+    // per-focused-agent state on the chat store.
+    if (readonly) {
+      readonlyWindowEnd = newEnd === allMessages.length ? null : newEnd;
+    } else if (newEnd === allMessages.length) {
       chat.chatWindowEnd = null;
     } else {
       chat.chatWindowEnd = { agent: chat.focusedAgent, end: newEnd };
@@ -305,6 +315,16 @@
           if (!e.isIntersecting) continue;
           // FIX_FORWARD 3.7: past-session paginates older blocks too.
           if (readonly) {
+            // Slide the window up within the already-loaded past-session
+            // array first — no need to hit the network if the older
+            // blocks are already in the messages prop. Falls through
+            // to onLoadOlderPast only when we've slid all the way to
+            // the head AND the parent says more pages remain.
+            if (windowStart > 0) {
+              const scroller = el.closest(".chat-scroll") as HTMLElement | null;
+              slideWindow(scroller, "up");
+              continue;
+            }
             if (!onLoadOlderPast || pastReachedOldest || loadingOlderPast)
               continue;
             const scroller = el.closest(".chat-scroll") as HTMLElement | null;
@@ -405,26 +425,32 @@
   });
 
   $effect(() => {
-    if (readonly) return;
     if (!bottomSentinel) return;
     const sentinel = bottomSentinel;
     const obs = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
           const atBottomOfWindow = e.isIntersecting;
-          // `pinnedToBottom` means "user is viewing the live tail of
-          // history" — at the bottom of the rendered window AND that
-          // window's end is the end of all messages. With the sliding
-          // window, "at bottom of rendered" alone is not enough: it
-          // might just mean "at the bottom of the slice we currently
-          // have mounted, with more newer messages waiting to slide in."
-          chat.pinnedToBottom =
-            atBottomOfWindow && windowEnd >= allMessages.length;
+          // `pinnedToBottom` is a live-only signal (it gates auto-scroll
+          // on streaming deltas in ChatShell). Past-session views don't
+          // have live appends, so they leave it alone.
+          if (!readonly) {
+            // "user is viewing the live tail of history" — at the bottom
+            // of the rendered window AND that window's end is the end
+            // of all messages. With the sliding window, "at bottom of
+            // rendered" alone is not enough: it might just mean "at the
+            // bottom of the slice we currently have mounted, with more
+            // newer messages waiting to slide in."
+            chat.pinnedToBottom =
+              atBottomOfWindow && windowEnd >= allMessages.length;
+          }
           // Symmetric slide-down: when the user reaches the bottom of
           // the rendered window AND there are newer messages beyond it
           // (e.g., they scrolled up earlier, were mid-history, now
           // scrolling back down), advance the window. Anchor restore
-          // keeps their viewport pinned through the mount.
+          // keeps their viewport pinned through the mount. Same trigger
+          // in both modes — the slide writes to readonlyWindowEnd or
+          // chat.chatWindowEnd depending on mode.
           if (atBottomOfWindow && windowEnd < allMessages.length) {
             const scroller =
               sentinel.closest(".chat-scroll") as HTMLElement | null;
@@ -464,17 +490,17 @@
 </script>
 
 <div class="list">
-  {#if !readonly}
-    <div bind:this={topSentinel} class="top-sentinel" aria-hidden="true">
-      {#if chat.reachedOldest && list.length > 0}
-        <span class="hint dim">Beginning of history</span>
-      {/if}
-      <!-- The transient `loadingOlder` indicator now lives in ChatShell as a
-           floating pill so it's actually visible while pagination runs;
-           inline-here got missed because it was hidden in the same scroll
-           zone the user just left. -->
-    </div>
-  {/if}
+  <div bind:this={topSentinel} class="top-sentinel" aria-hidden="true">
+    {#if !readonly && chat.reachedOldest && list.length > 0}
+      <span class="hint dim">Beginning of history</span>
+    {:else if readonly && pastReachedOldest && list.length > 0 && windowStart === 0}
+      <span class="hint dim">Beginning of session</span>
+    {/if}
+    <!-- The transient `loadingOlder` indicator now lives in ChatShell as a
+         floating pill so it's actually visible while pagination runs;
+         inline-here got missed because it was hidden in the same scroll
+         zone the user just left. -->
+  </div>
   {#if list.length === 0}
     {#if (!readonly && chat.loadingInitial) || (readonly && pastLoading)}
       <div class="skeleton-list" aria-hidden="true">
@@ -715,13 +741,11 @@
       <ThinkingBlock text="" status="running" />
     </div>
   {/if}
-  {#if !readonly}
-    <div
-      bind:this={bottomSentinel}
-      class="bottom-sentinel"
-      aria-hidden="true"
-    ></div>
-  {/if}
+  <div
+    bind:this={bottomSentinel}
+    class="bottom-sentinel"
+    aria-hidden="true"
+  ></div>
 </div>
 
 <style>

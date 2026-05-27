@@ -73,11 +73,19 @@ function makeResponse(body: unknown, init: ResponseInit = {}): Response {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   mockFetchWithTimeout.mockReset();
   mockLoadJSON.mockReset();
   mockSaveJSON.mockReset();
   mockLoadJSON.mockReturnValue([]);
+  // parseBlocks now memoizes per-turn parse output keyed by (agent,
+  // turnId, signature). The cache is module-scoped (one ChatState in
+  // production); tests reuse the module across cases, so we reset
+  // between tests to keep fixtures isolated. Without this, a prior
+  // test's parsed turn at the same agent + turnId + lastEventSeq sum
+  // hits as a stale entry.
+  const { __resetParseCache } = await import("./chat.svelte");
+  __resetParseCache();
 });
 
 afterEach(() => {
@@ -2519,7 +2527,7 @@ describe("unread badge gating (PR C)", () => {
     const chat = new ChatState();
     chat.focusedAgent = "friday";
     // Seed a prior user message so `originalUserTextForTurn` resolves.
-    chat.messages.push({
+    chat.pushLocal({
       id: userBlockIdForTurn("t-old"),
       role: "user",
       text: "earlier prompt",
@@ -2560,7 +2568,7 @@ describe("unread badge gating (PR C)", () => {
     const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    chat.messages.push({
+    chat.pushLocal({
       id: userBlockIdForTurn("t-old"),
       role: "user",
       text: "earlier",
@@ -5874,5 +5882,500 @@ describe("FRI-60: parseBlocks zeroBlockReason on synthesized no-response bubble"
     const nrB = out.find((m) => m.id === "nr_t-b");
     expect(nrA?.zeroBlockReason).toBe("abort");
     expect(nrB?.zeroBlockReason).toBeUndefined();
+  });
+});
+
+/* ============================================================================
+ * Overlay-derived chat.messages: structural cross-agent isolation, SSE
+ * interleaving convergence, /clear session-stamp filter, optimistic
+ * confirmation lifecycle.
+ *
+ * These exercise the per-PR-71 design: chat.messages is a $derived view
+ * over `#legacyMessages` (canonical / residual imperative) + per-agent
+ * `streaming` + `optimistic` overlay maps, filtered by focused agent and
+ * the agent's current sessionId. The cross-agent leak the migration was
+ * built to eliminate (kitchen-agent bubbles bleeding into friday's view)
+ * is now a structural property of these tests passing, not a sweep on
+ * focus switch.
+ * ========================================================================== */
+describe("derived chat.messages: cross-agent isolation", () => {
+  it("legacy entries tagged for a different agent do NOT render in the focused agent's view", async () => {
+    // The structural cross-agent isolation Seth's kitchen-agent
+    // screenshot needed. Push a legacy bubble explicitly tagged for
+    // kitchen, focus friday, assert friday's chat does not include it.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" },
+      { name: "kitchen", type: "orchestrator", status: "idle", sessionId: "s-kit" },
+    ];
+    chat.messages = [
+      {
+        id: "b_kitchen-1",
+        role: "assistant",
+        text: "menu plan v2",
+        status: "complete",
+        agent: "kitchen",
+        turnId: "t-kitchen",
+        blockId: "kitchen-1",
+        ts: 1_000,
+      },
+      {
+        id: "b_friday-1",
+        role: "assistant",
+        text: "ack",
+        status: "complete",
+        agent: "friday",
+        turnId: "t-friday",
+        blockId: "friday-1",
+        ts: 2_000,
+      },
+    ];
+    const visibleTexts = chat.messages.map((m) => m.text);
+    expect(visibleTexts).toContain("ack");
+    expect(visibleTexts).not.toContain("menu plan v2");
+  });
+
+  it("legacy entries with NO agent tag still pass through (defensive)", async () => {
+    // pushLocal auto-stamps the focused agent on system bubbles, but
+    // a hand-constructed test fixture (or older code path) without an
+    // agent field must not be filtered out — the agent filter only
+    // drops entries with an EXPLICIT mismatch.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" }];
+    chat.messages = [
+      {
+        id: "untagged-1",
+        role: "assistant",
+        text: "legacy fixture",
+        status: "complete",
+        ts: 1_000,
+      },
+    ];
+    expect(chat.messages.map((m) => m.id)).toContain("untagged-1");
+  });
+
+  it("pushLocal stamps the focused agent so sys_<ts> bubbles are isolated to the agent that produced them", async () => {
+    // Without the stamp, the dashboard's slash-command error bubbles
+    // would render across every agent the user focused next.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" },
+      { name: "kitchen", type: "orchestrator", status: "idle", sessionId: "s-kit" },
+    ];
+    chat.pushLocal({
+      id: "sys_1",
+      role: "assistant",
+      text: "**/help** — usage",
+      status: "complete",
+      ts: 1_000,
+    });
+    expect(chat.messages.some((m) => m.id === "sys_1")).toBe(true);
+    chat.focusedAgent = "kitchen";
+    expect(chat.messages.some((m) => m.id === "sys_1")).toBe(false);
+    chat.focusedAgent = "friday";
+    expect(chat.messages.some((m) => m.id === "sys_1")).toBe(true);
+  });
+
+  it("streaming overlay entries from a previous focus do NOT leak into the new agent's view", async () => {
+    // The kitchen → friday leak scenario, but exercised at the
+    // overlay layer: a streaming SSE bubble that was in flight on
+    // kitchen at focus-switch time must not appear on friday.
+    const { ChatState, overlayKey, StreamingEntry } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "kitchen";
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" },
+      { name: "kitchen", type: "orchestrator", status: "idle", sessionId: "s-kit" },
+    ];
+    // Hand-construct a StreamingEntry for kitchen as if SSE block_start
+    // had landed mid-streaming, then the user switched focus.
+    chat.streaming.set(
+      overlayKey("kitchen", "b_kitchen-stream"),
+      new StreamingEntry({
+        id: "b_kitchen-stream",
+        role: "assistant",
+        agent: "kitchen",
+        ts: 1_000,
+        turnId: "t-kitchen",
+        blockId: "kitchen-stream",
+        sessionId: "s-kit",
+        initialStatus: "streaming",
+        initialText: "chopping onions",
+      }),
+    );
+    expect(chat.messages.some((m) => m.text === "chopping onions")).toBe(true);
+    chat.focusedAgent = "friday";
+    expect(chat.messages.some((m) => m.text === "chopping onions")).toBe(false);
+    // And the leak doesn't manifest if we focus back either — the
+    // overlay entry is still there, just gated by current focus.
+    chat.focusedAgent = "kitchen";
+    expect(chat.messages.some((m) => m.text === "chopping onions")).toBe(true);
+  });
+
+  it("applyZeroBlocks drops legacy entries tagged for a different agent during merge", async () => {
+    // Defense-in-depth: the derivation hides cross-agent legacy
+    // entries on read; applyZeroBlocks's merge drops them on the
+    // next snapshot so they don't accumulate forever in the bucket.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" }];
+    chat.messages = [
+      {
+        id: "b_orphan",
+        role: "assistant",
+        text: "kitchen ghost",
+        status: "complete",
+        agent: "kitchen",
+        turnId: "t-kitchen",
+        blockId: "orphan",
+        ts: 500,
+      },
+    ];
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "100",
+          block_id: "friday-1",
+          turn_id: "t-friday",
+          agent_name: "friday",
+          session_id: "s-fri",
+          message_id: null,
+          block_index: 0,
+          role: "assistant",
+          kind: "text",
+          source: null,
+          content_json: { text: "friday content" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1_000,
+          last_event_seq: 1,
+        },
+      ],
+      "friday",
+      "complete",
+    );
+    // The legacy bucket was rebuilt by applyZeroBlocks's merge; the
+    // orphan kitchen entry is dropped, not just hidden.
+    expect(chat.messages.some((m) => m.text === "kitchen ghost")).toBe(false);
+    expect(chat.messages.some((m) => m.text === "friday content")).toBe(true);
+  });
+});
+
+describe("derived chat.messages: SSE-overlay interleaving convergence", () => {
+  it("SSE block_start + block_complete → applyZeroBlocks canonical: overlay entry is pruned, canonical bubble survives", async () => {
+    // The hot path. SSE materialized the overlay (streaming text);
+    // block_complete flipped it terminal; the canonical row replicates
+    // via Zero with terminal status; pruneConvergedStreamingOverlay
+    // drops the overlay so the bubble surface is the canonical (legacy)
+    // entry, not the overlay shadow forever.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" }];
+    chat.markInflight("friday", "t-1");
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      agent: "friday",
+      turn_id: "t-1",
+      block_id: "blk-1",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      ts: 1_000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      agent: "friday",
+      turn_id: "t-1",
+      block_id: "blk-1",
+      delta: { text: "hello world" },
+      ts: 1_010,
+      seq: 2,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    // After delta, overlay is the source of the bubble's text.
+    const live = chat.messages.find((m) => m.id === "b_blk-1");
+    expect(live?.text).toBe("hello world");
+    expect(chat.streaming.size).toBe(1);
+
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      agent: "friday",
+      turn_id: "t-1",
+      block_id: "blk-1",
+      kind: "text",
+      role: "assistant",
+      content_json: JSON.stringify({ text: "hello world" }),
+      status: "complete",
+      source: null,
+      ts: 1_020,
+      seq: 3,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    // Overlay still present (now terminal), bubble visible.
+    expect(chat.streaming.size).toBe(1);
+    expect(chat.messages.some((m) => m.id === "b_blk-1")).toBe(true);
+
+    // Zero replicates the canonical row. applyZeroBlocks's
+    // pruneConvergedStreamingOverlay drops the overlay entry.
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "1",
+          block_id: "blk-1",
+          turn_id: "t-1",
+          agent_name: "friday",
+          session_id: "s-fri",
+          message_id: null,
+          block_index: 0,
+          role: "assistant",
+          kind: "text",
+          source: null,
+          content_json: { text: "hello world" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1_020,
+          last_event_seq: 3,
+        },
+      ],
+      "friday",
+      "complete",
+    );
+    expect(chat.streaming.size).toBe(0);
+    const settled = chat.messages.find((m) => m.id === "b_blk-1");
+    expect(settled?.text).toBe("hello world");
+    expect(settled?.status).toBe("complete");
+  });
+
+  it("Zero canonical lands BEFORE SSE block_start: SSE handler dedups via the existing legacy entry, no duplicate overlay", async () => {
+    // Replay race: the SSE ring is paused while the user's WS catches
+    // up, but Zero already replicated the canonical row.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" }];
+    chat.markInflight("friday", "t-2");
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "1",
+          block_id: "blk-2",
+          turn_id: "t-2",
+          agent_name: "friday",
+          session_id: "s-fri",
+          message_id: null,
+          block_index: 0,
+          role: "assistant",
+          kind: "text",
+          source: null,
+          content_json: { text: "fresh from Zero" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1_000,
+          last_event_seq: 1,
+        },
+      ],
+      "friday",
+      "complete",
+    );
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      agent: "friday",
+      turn_id: "t-2",
+      block_id: "blk-2",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      ts: 1_000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.streaming.size).toBe(0);
+    expect(chat.messages.filter((m) => m.id === "b_blk-2")).toHaveLength(1);
+  });
+
+  it("block_canceled drops both the streaming overlay entry and any legacy row sharing the blockId", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" }];
+    chat.markInflight("friday", "t-3");
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      agent: "friday",
+      turn_id: "t-3",
+      block_id: "blk-3",
+      block_index: 0,
+      role: "assistant",
+      kind: "thinking",
+      ts: 1_000,
+      seq: 1,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.streaming.size).toBe(1);
+    chat.applyEvent({
+      v: 1,
+      type: "block_canceled",
+      agent: "friday",
+      turn_id: "t-3",
+      block_id: "blk-3",
+      ts: 1_010,
+      seq: 2,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.streaming.size).toBe(0);
+    expect(chat.messages.some((m) => m.id === "th_blk-3")).toBe(false);
+  });
+});
+
+describe("derived chat.messages: /clear session-id stamping", () => {
+  it("flipping the agent's sessionId to null hides every overlay entry stamped with the previous session", async () => {
+    // /clear on the daemon archives the worker and writes
+    // agents.session_id = null. Zero replicates that to chat.agents.
+    // The derivation re-runs (agents.find changes), sees sessionId =
+    // null, filters overlay entries whose stamped sessionId doesn't
+    // match (i.e., everything from the just-cleared session).
+    const { ChatState, overlayKey, StreamingEntry, OptimisticEntry } =
+      await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working", sessionId: "s-fri" }];
+    chat.streaming.set(
+      overlayKey("friday", "b_stream-1"),
+      new StreamingEntry({
+        id: "b_stream-1",
+        role: "assistant",
+        agent: "friday",
+        ts: 1_000,
+        turnId: "t-1",
+        blockId: "stream-1",
+        sessionId: "s-fri",
+        initialText: "mid-thought",
+      }),
+    );
+    chat.optimistic.set(
+      overlayKey("friday", "pending_abc"),
+      new OptimisticEntry({
+        id: "pending_abc",
+        agent: "friday",
+        ts: 1_005,
+        turnId: "pending_abc",
+        sessionId: "s-fri",
+        text: "still typing",
+        initialPending: true,
+      }),
+    );
+    expect(chat.messages.some((m) => m.id === "b_stream-1")).toBe(true);
+    expect(chat.messages.some((m) => m.id === "pending_abc")).toBe(true);
+
+    // Daemon-side /clear: agents.sessionId flips to null. Simulate
+    // the Zero-driven update.
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: undefined }];
+
+    expect(chat.messages.some((m) => m.id === "b_stream-1")).toBe(false);
+    expect(chat.messages.some((m) => m.id === "pending_abc")).toBe(false);
+    // The entries are still in the overlay map (a separate sweep would
+    // drop them; this test only pins the derivation's behavior). The
+    // important property is the user can no longer SEE them.
+    expect(chat.streaming.size).toBe(1);
+    expect(chat.optimistic.size).toBe(1);
+  });
+
+  it("clearLocalView wipes the focused agent's overlay maps even when nothing else is wired", async () => {
+    // Belt-and-braces: the session-id stamp would hide the entries
+    // anyway, but clearLocalView's explicit imperative drop keeps
+    // the SvelteMaps from accumulating dead state across repeated
+    // /clears.
+    const { ChatState, overlayKey, StreamingEntry, OptimisticEntry } =
+      await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" }];
+    chat.streaming.set(
+      overlayKey("friday", "x"),
+      new StreamingEntry({
+        id: "x",
+        role: "assistant",
+        agent: "friday",
+        ts: 1_000,
+        turnId: "t",
+        blockId: "x",
+        sessionId: "s-fri",
+      }),
+    );
+    chat.optimistic.set(
+      overlayKey("friday", "y"),
+      new OptimisticEntry({
+        id: "y",
+        agent: "friday",
+        ts: 1_005,
+        turnId: "y",
+        sessionId: "s-fri",
+        text: "hi",
+      }),
+    );
+    chat.clearLocalView("friday");
+    expect(chat.streaming.size).toBe(0);
+    expect(chat.optimistic.size).toBe(0);
+  });
+});
+
+describe("derived chat.messages: optimistic confirmation lifecycle", () => {
+  it("addUser → confirmPending → applyZeroBlocks: bubble surface stays a single ChatMessage at user_<turn> throughout", async () => {
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s-fri" }];
+    const pendingId = chat.addUser("plan dinner", { queueId: "q-1" });
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0]!.id).toBe(pendingId);
+    expect(chat.messages[0]!.pending).toBe(true);
+    expect(chat.optimistic.size).toBe(1);
+
+    chat.confirmPending("q-1", "turn-7");
+    expect(chat.optimistic.size).toBe(0);
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0]!.id).toBe(userBlockIdForTurn("turn-7"));
+    expect(chat.messages[0]!.pending).toBe(false);
+
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "1",
+          block_id: "user-block-id",
+          turn_id: "turn-7",
+          agent_name: "friday",
+          session_id: "s-fri",
+          message_id: null,
+          block_index: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          content_json: { text: "plan dinner" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 2_000,
+          last_event_seq: 1,
+        },
+      ],
+      "friday",
+      "complete",
+    );
+    // applyZeroBlocks's merge replaced the legacy entry at the same
+    // id with the canonical parsed row — id collision wins, single
+    // bubble survives, no duplicate.
+    expect(chat.messages.filter((m) => m.id === userBlockIdForTurn("turn-7"))).toHaveLength(1);
   });
 });
