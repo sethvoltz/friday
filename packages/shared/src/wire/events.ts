@@ -29,7 +29,8 @@ export type WireEvent =
   | BlockDeltaEvent
   | BlockCompleteEvent
   | BlockCanceledEvent
-  | ConnectionEstablishedEvent;
+  | ConnectionEstablishedEvent
+  | CompactionEvent;
 
 export interface BaseEvent {
   v: 1;
@@ -66,6 +67,15 @@ export interface TurnDoneEvent extends BaseEvent {
    * when status !== "aborted".
    */
   abort_reason?: "cooperative" | "forced";
+  /**
+   * FRI-60: present only when the turn produced zero content blocks.
+   * Distinguishes the cause so the dashboard can show the right copy
+   * on the "Agent didn't respond" affordance:
+   *   - "abort"              — user-requested stop raced to completion
+   *   - "compaction"         — SDK compact_boundary was seen this turn
+   *   - "sdk-resume-failure" — SDK returned empty result (e.g. missing transcript)
+   */
+  zero_block_reason?: "abort" | "compaction" | "sdk-resume-failure";
   usage?: TurnUsage;
 }
 
@@ -207,6 +217,21 @@ export interface BlockCanceledEvent extends BaseEvent {
 // the new ts automatically. Same removal applies to `block_reload`,
 // which signaled JSONL-recovery INSERTs/UPDATEs that Zero now
 // replicates without an SSE-triggered REST refetch.
+
+/**
+ * FRI-60 Phase B: fired when the SDK emits a `compact_boundary` system frame
+ * mid-turn. Lets the dashboard render a retroactive "Context compacted" inline
+ * notice in the message thread so the user knows the context window was
+ * trimmed during this turn.
+ */
+export interface CompactionEvent extends BaseEvent {
+  type: "compaction";
+  agent: string;
+  turn_id: string;
+  pre_tokens: number;
+  post_tokens?: number;
+  duration_ms?: number;
+}
 
 /**
  * First SSE event the daemon emits on every new connection (FIX_FORWARD 1.6).

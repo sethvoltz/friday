@@ -1509,6 +1509,19 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
         });
       });
       break;
+    case "compaction-boundary":
+      // FRI-60 Phase B: forward to the SSE bus so the dashboard can render
+      // an inline "Context compacted" notice in the message thread.
+      eventBus.publish({
+        v: 1,
+        type: "compaction",
+        agent: w.agentName,
+        turn_id: w.turnId,
+        pre_tokens: e.preTokens,
+        post_tokens: e.postTokens,
+        duration_ms: e.durationMs,
+      });
+      break;
     case "turn-complete": {
       // FRI-12: same cancellation as the error path. If the worker raced
       // to completion right around the abort deadline, the in-flight
@@ -1523,6 +1536,16 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // in practice — emitting NaN via `Date.now() - undefined` is the
       // observable failure mode this guards against.
       const durationMs = w.turnStart ? Date.now() - w.turnStart : 0;
+      // FRI-60: compute the zero-block reason BEFORE publishing turn_done so
+      // the dashboard knows why the turn produced no content.
+      const zeroBlockReason: "abort" | "compaction" | "sdk-resume-failure" | undefined =
+        w.blocksThisTurn === 0
+          ? w.abortRequested
+            ? "abort"
+            : e.compactionThisTurn
+              ? "compaction"
+              : "sdk-resume-failure"
+          : undefined;
       eventBus.publish({
         v: 1,
         type: "turn_done",
@@ -1532,6 +1555,8 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
         // FRI-95: worker honored the abort and ran to a clean
         // turn-complete IPC (raced to completion right around the abort).
         ...(w.abortRequested ? { abort_reason: "cooperative" as const } : {}),
+        // FRI-60: include reason only when the turn produced zero blocks.
+        ...(zeroBlockReason !== undefined ? { zero_block_reason: zeroBlockReason } : {}),
         usage: e.usage
           ? {
               input_tokens: e.usage.input_tokens,

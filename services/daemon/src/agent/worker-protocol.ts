@@ -188,6 +188,8 @@ export type WorkerEvent =
   | {
       type: "turn-complete";
       sessionId: string;
+      /** FRI-60: true when the SDK emitted a compact_boundary frame this turn. */
+      compactionThisTurn?: boolean;
       usage?: {
         input_tokens: number;
         output_tokens: number;
@@ -195,6 +197,13 @@ export type WorkerEvent =
         cache_read_tokens: number;
         cost_usd: number;
       };
+    }
+  | {
+      type: "compaction-boundary";
+      sessionId: string;
+      preTokens: number;
+      postTokens?: number;
+      durationMs?: number;
     }
   | { type: "status-change"; status: "idle" | "working" }
   | {
