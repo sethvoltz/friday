@@ -4770,7 +4770,6 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     expect(chat.messages).toEqual(before);
   });
 
-
   it("(7) superseded no-response safety-net is dropped", async () => {
     const { ChatState, noResponseIdForTurn } = await import("./chat.svelte");
     const chat = new ChatState();
