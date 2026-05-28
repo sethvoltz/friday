@@ -60,13 +60,7 @@ describe("palette catalog", () => {
   });
 
   it("the 5 leak-fix tokens are present in every palette", () => {
-    const required = [
-      "--diff-removed",
-      "--diff-added",
-      "--toggle-knob",
-      "--chart-5",
-      "--chart-6",
-    ];
+    const required = ["--diff-removed", "--diff-added", "--toggle-knob", "--chart-5", "--chart-6"];
     for (const name of Object.keys(PALETTES)) {
       const tokens = tokensFor(name);
       for (const r of required) {

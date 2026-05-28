@@ -65,9 +65,7 @@ export const DEFAULTS: Record<PaletteKind, PaletteName> = {
  *  otherwise. */
 export function shikiThemeFor(name: PaletteName): string {
   const entry = PALETTES[name];
-  return (
-    entry.shikiTheme ?? (entry.kind === "dark" ? "catppuccin-mocha" : "catppuccin-latte")
-  );
+  return entry.shikiTheme ?? (entry.kind === "dark" ? "catppuccin-mocha" : "catppuccin-latte");
 }
 
 /** Mermaid theme name for a palette — explicit override wins; kind-default

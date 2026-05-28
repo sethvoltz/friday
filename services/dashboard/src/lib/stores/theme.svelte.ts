@@ -288,7 +288,7 @@ export function bindTheme(zeroSync: ZeroSyncLike): () => void {
     if (typeof mq.removeEventListener === "function") {
       mq.removeEventListener("change", onMq);
     } else {
-        mq.removeListener(onMq);
+      mq.removeListener(onMq);
     }
   });
 
@@ -323,4 +323,3 @@ export function bindTheme(zeroSync: ZeroSyncLike): () => void {
     }
   };
 }
-

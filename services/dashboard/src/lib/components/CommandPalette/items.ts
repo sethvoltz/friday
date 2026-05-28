@@ -225,9 +225,7 @@ function buildSettingItems(
 ): PaletteItem[] {
   return themeSpecs().map((s) => {
     const isCurrent =
-      s.action.type === "sync"
-        ? themeKind === "sync"
-        : s.action.palette === activePalette;
+      s.action.type === "sync" ? themeKind === "sync" : s.action.palette === activePalette;
     return {
       kind: "setting" as const,
       id: s.id,
@@ -236,7 +234,10 @@ function buildSettingItems(
       action:
         s.action.type === "sync"
           ? onSetSync
-          : ((palette) => () => onSetPalette(palette))(s.action.palette),
+          : (
+              (palette) => () =>
+                onSetPalette(palette)
+            )(s.action.palette),
       current: isCurrent,
     };
   });
