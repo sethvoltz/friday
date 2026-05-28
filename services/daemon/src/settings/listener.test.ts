@@ -206,12 +206,23 @@ describe("FRI-124: daemon LISTEN handler ignores theme columns", () => {
       updatedAt: new Date(),
     });
 
+    // Materialize the file so we have a baseline byte stream to compare
+    // the post-sync write against. Without this priming write, the
+    // first writeConfig from inside syncConfigFromSettingsRow would
+    // create the file from nothing — making "before" and "after" both
+    // valid but incomparable.
+    writeConfig(loadConfig());
+    const before = readFileSync(CONFIG_PATH, "utf8");
+
     const changed = await syncConfigFromSettingsRow();
     expect(changed).toBe(true);
 
+    const after = readFileSync(CONFIG_PATH, "utf8");
+    expect(after).not.toBe(before);
+
     // And the written config.json picked up only the model — no theme
     // keys leaked into the file.
-    const written = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+    const written = JSON.parse(after) as Record<string, unknown>;
     expect(written.model).toBe(differentModel);
     expect("themeKind" in written).toBe(false);
     expect("themePaletteSingle" in written).toBe(false);
