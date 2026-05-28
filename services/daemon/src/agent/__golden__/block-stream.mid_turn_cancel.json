@@ -1,0 +1,54 @@
+{
+  "events": [
+    {
+      "v": 1,
+      "type": "block_start",
+      "turn_id": "turn-cancel-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1",
+      "message_id": null,
+      "block_index": 0,
+      "role": "assistant",
+      "kind": "thinking",
+      "source": null,
+      "ts": 1700000000000
+    },
+    {
+      "v": 1,
+      "type": "block_delta",
+      "turn_id": "turn-cancel-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1",
+      "delta": {
+        "text": "Hmm…"
+      }
+    },
+    {
+      "v": 1,
+      "type": "block_delta",
+      "turn_id": "turn-cancel-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1",
+      "delta": {
+        "text": " never mind."
+      }
+    },
+    {
+      "v": 1,
+      "type": "block_canceled",
+      "turn_id": "turn-cancel-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1"
+    }
+  ],
+  "rows": [],
+  "snapshotAfter": [
+    {
+      "turnId": "turn-cancel-1",
+      "agent": "test-agent",
+      "sessionId": "sess-1",
+      "startedAt": 1700000000000,
+      "inFlight": []
+    }
+  ]
+}

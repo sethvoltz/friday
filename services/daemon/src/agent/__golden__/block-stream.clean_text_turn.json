@@ -1,0 +1,89 @@
+{
+  "events": [
+    {
+      "v": 1,
+      "type": "block_start",
+      "turn_id": "turn-text-1",
+      "agent": "test-agent",
+      "block_id": "uuid-2",
+      "message_id": "msg-1",
+      "block_index": 0,
+      "role": "assistant",
+      "kind": "text",
+      "source": null,
+      "ts": 1700000000000
+    },
+    {
+      "v": 1,
+      "type": "block_delta",
+      "turn_id": "turn-text-1",
+      "agent": "test-agent",
+      "block_id": "uuid-2",
+      "delta": {
+        "text": "Hello, "
+      }
+    },
+    {
+      "v": 1,
+      "type": "block_delta",
+      "turn_id": "turn-text-1",
+      "agent": "test-agent",
+      "block_id": "uuid-2",
+      "delta": {
+        "text": "world"
+      }
+    },
+    {
+      "v": 1,
+      "type": "block_delta",
+      "turn_id": "turn-text-1",
+      "agent": "test-agent",
+      "block_id": "uuid-2",
+      "delta": {
+        "text": "!"
+      }
+    },
+    {
+      "v": 1,
+      "type": "block_complete",
+      "turn_id": "turn-text-1",
+      "agent": "test-agent",
+      "block_id": "uuid-2",
+      "message_id": "msg-1",
+      "block_index": 0,
+      "role": "assistant",
+      "kind": "text",
+      "source": null,
+      "content_json": "{\"text\":\"Hello, world!\"}",
+      "status": "complete",
+      "ts": 1700000000000
+    }
+  ],
+  "rows": [
+    {
+      "blockId": "uuid-2",
+      "turnId": "turn-text-1",
+      "agentName": "test-agent",
+      "sessionId": "sess-1",
+      "role": "assistant",
+      "kind": "text",
+      "source": null,
+      "blockIndex": 0,
+      "messageId": "msg-1",
+      "contentJson": {
+        "text": "Hello, world!"
+      },
+      "status": "complete",
+      "streaming": false
+    }
+  ],
+  "snapshotAfter": [
+    {
+      "turnId": "turn-text-1",
+      "agent": "test-agent",
+      "sessionId": "sess-1",
+      "startedAt": 1700000000000,
+      "inFlight": []
+    }
+  ]
+}
