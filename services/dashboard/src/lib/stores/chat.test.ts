@@ -470,6 +470,87 @@ describe("reload-mid-turn replay → SSE resumption", () => {
     const after = chat.messages.find((m) => m.id === "th_blk-think-live");
     expect(after?.text).toBe("thought so far more");
   });
+
+  // FRI-125 AC #8 / #13: pin the transient-reconnect dedup contract.
+  // Falsification proof from the paired-ticket reviewer overturn:
+  // `handleBlockDelta` at chat.svelte.ts:2778-2811 unconditionally
+  // does `entry.text += event.delta.text` without checking the
+  // cursor. On SSE reconnect the daemon's `replayForAgent` dumps
+  // the full in-flight turn buffer; the `streaming` overlay isn't
+  // cleared on transient reconnect (only on terminal events). The
+  // only defense against re-appending the replayed deltas is
+  // `acceptEvent` at chat.svelte.ts:~2531-2542, which drops any
+  // event whose `seq` is <= `lastSeqByAgent[bucket]`. If a future
+  // refactor re-attempts to delete the cursor (the original
+  // ADR-024 bullet at decisions.md:672 read "lastSeqByAgent ...
+  // retires" before the FRI-125 amendment), this test will fail —
+  // surfacing the regression at refactor time.
+  it("FRI-125: lastSeqByAgent cursor drops replayed events with seq <= cur (transient-reconnect dedup)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // Live stream advances the cursor: turn_started + a couple of
+    // events bring `lastSeqByAgent.friday` to the high-water mark.
+    chat.applyEvent({
+      v: 1,
+      type: "turn_started",
+      seq: 10,
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      ts: 100,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      seq: 12,
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      status: "complete",
+      ts: 200,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(chat.lastSeqByAgent.friday).toBe(12);
+
+    // Simulate SSE reconnect: the daemon's per-turn replay buffer
+    // re-emits the same frames from `turn_started` forward. The
+    // cursor must be monotonic — replayed events at seq <= 12 are
+    // dropped by `acceptEvent` so they cannot mutate any overlay
+    // state on the way through `applyEvent`.
+    chat.applyEvent({
+      v: 1,
+      type: "turn_started",
+      seq: 10, // replayed; <= cursor
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      ts: 100,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "turn_done",
+      seq: 12, // replayed; <= cursor
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      status: "complete",
+      ts: 200,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    // The cursor must not regress and must not advance (everything
+    // was a replay at <= 12).
+    expect(chat.lastSeqByAgent.friday).toBe(12);
+
+    // A genuinely new event at seq=13 must still advance the cursor —
+    // the cursor isn't sticky-broken by the replay attempt.
+    chat.applyEvent({
+      v: 1,
+      type: "turn_started",
+      seq: 13,
+      turn_id: "turn-reconnect-2",
+      agent: "friday",
+      ts: 300,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.lastSeqByAgent.friday).toBe(13);
+  });
 });
 
 describe("inflight-state probe on reload", () => {
