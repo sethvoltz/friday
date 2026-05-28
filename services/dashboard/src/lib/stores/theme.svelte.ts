@@ -280,7 +280,6 @@ export function bindTheme(zeroSync: ZeroSyncLike): () => void {
   if (typeof mq.addEventListener === "function") {
     mq.addEventListener("change", onMq);
   } else {
-    // @ts-expect-error legacy API
     mq.addListener(onMq);
   }
 
@@ -289,8 +288,7 @@ export function bindTheme(zeroSync: ZeroSyncLike): () => void {
     if (typeof mq.removeEventListener === "function") {
       mq.removeEventListener("change", onMq);
     } else {
-      // @ts-expect-error legacy API
-      mq.removeListener(onMq);
+        mq.removeListener(onMq);
     }
   });
 

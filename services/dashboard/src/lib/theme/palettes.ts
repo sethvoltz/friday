@@ -38,7 +38,7 @@ export type PaletteEntry = {
   mermaidTheme?: string;
 };
 
-export const PALETTES = {
+export const PALETTES: Record<string, PaletteEntry> = {
   dawn: {
     kind: "light",
     themeColor: "#faf6f1",
@@ -47,16 +47,19 @@ export const PALETTES = {
     kind: "dark",
     themeColor: "#0f1219",
   },
-} as const satisfies Record<string, PaletteEntry>;
+};
 
-export type PaletteName = keyof typeof PALETTES;
+/** Valid palette names. v1 ships "dawn" and "dusk"; widening to string
+ *  keeps the type permissive (the catalog can be extended at runtime).
+ *  Use `isPaletteName()` at any boundary where unknown input arrives. */
+export type PaletteName = string;
 
 /** Default palette for each slot, used when the user hasn't explicitly
  *  picked. The resolver consults these whenever a slot's pick is unset. */
-export const DEFAULTS = {
+export const DEFAULTS: Record<PaletteKind, PaletteName> = {
   light: "dawn",
   dark: "dusk",
-} as const satisfies Record<PaletteKind, PaletteName>;
+};
 
 /** Shiki theme name for a palette — explicit override wins; kind-default
  *  otherwise. */

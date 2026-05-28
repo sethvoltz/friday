@@ -150,6 +150,12 @@ export interface ZeroSettingsRow {
   id: string;
   model: string | null;
   watchdog_refork: boolean | null;
+  /** FRI-124: dashboard Appearance state. `null` for any column means
+   *  the user hasn't picked yet; the resolver falls back to a default. */
+  theme_kind: string | null;
+  theme_palette_single: string | null;
+  theme_palette_light: string | null;
+  theme_palette_dark: string | null;
   updated_at: number;
 }
 
@@ -1038,7 +1044,16 @@ class ZeroSyncStore {
    * No-op when Zero hasn't finished init (the Settings page can call
    * this from the input handler without gating on `status === 'live'`).
    */
-  updateSettings(args: { model?: string; watchdogRefork?: boolean }): void {
+  updateSettings(args: {
+    model?: string;
+    watchdogRefork?: boolean;
+    /** FRI-124: Appearance fields. Each accepts string | null (null
+     *  explicitly clears; undefined preserves the existing value). */
+    themeKind?: "single" | "sync" | null;
+    themePaletteSingle?: string | null;
+    themePaletteLight?: string | null;
+    themePaletteDark?: string | null;
+  }): void {
     if (!this.#zero) return;
     const result = this.#zero!.mutate.updateSettings({
       ...args,

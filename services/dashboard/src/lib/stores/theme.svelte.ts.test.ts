@@ -222,7 +222,6 @@ describe("ThemeStore — applyPartial (hydrate path)", () => {
     const store = new ThemeStore();
     store.applyPartial({
       picks: {
-        // @ts-expect-error — testing runtime tolerance for bad input
         single: "not-a-real-palette",
         light: null,
         dark: null,
