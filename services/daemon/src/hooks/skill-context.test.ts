@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { __resetHooksForTest, registerHook, type Skill, type SkillMatch } from "@friday/shared";
-import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
+import {
+  __resetHooksForTest,
+  registerHook,
+  runHooks,
+  type Skill,
+  type SkillMatch,
+} from "@friday/shared";
 import { skillContextHook } from "./skill-context.js";
 
 function makeSkill(overrides: Partial<Skill> = {}): Skill {
@@ -97,41 +102,48 @@ describe("skill-context hook (FRI-107)", () => {
     expect(result).toBeUndefined();
   });
 
-  it("integration: composeDispatchPrompt + skillContextHook routes skill body to systemPrompt and allowedToolsOverride", async () => {
+  // FRI-123: the original two integration tests against the prior
+  // dispatch-composer entry point are rewritten per the ticket's
+  // BLOCKED-ON-OWNER default (Option A) — assert the runHooks
+  // composition surface directly, without dragging in a test-DB.
+  // The end-to-end stitching (skill body → systemPrompt +
+  // allowedToolsOverride routing) is exercised in
+  // `prompts/build-dispatch-prompt.test.ts` golden tests.
+
+  it("runHooks(before_prompt_build, ctx) yields skillContextHook's result when ctx has a skillMatch", async () => {
     registerHook("before_prompt_build", skillContextHook);
 
-    const { body, systemPrompt, allowedToolsOverride } = await composeDispatchPrompt({
-      intentText: "args",
+    const results = await runHooks("before_prompt_build", {
+      intent: "args",
       intentTag: "user_chat",
       body: "args",
       agentType: "orchestrator",
-      baseSystemPrompt: "you are a helpful agent",
       skillMatch: {
         skill: makeSkill({ name: "deploy", body: "ship it", allowedTools: ["Bash", "Read"] }),
         userText: "args",
       },
     });
 
-    expect(body).toBe("args");
-    expect(body).not.toContain("<skill-context");
-    expect(systemPrompt).toBe(
-      'you are a helpful agent\n\n<skill-context name="deploy">\nship it\n</skill-context>',
-    );
-    expect(allowedToolsOverride).toEqual(["Bash", "Read"]);
+    expect(results).toEqual([
+      {
+        appendSystemPrompt: '<skill-context name="deploy">\nship it\n</skill-context>',
+        allowedToolsOverride: ["Bash", "Read"],
+      },
+    ]);
   });
 
-  it("integration: composeDispatchPrompt + skillContextHook leaves systemPrompt untouched when no skill match", async () => {
+  it("runHooks(before_prompt_build, ctx) skips the handler when no skillMatch is on ctx", async () => {
     registerHook("before_prompt_build", skillContextHook);
 
-    const { systemPrompt, allowedToolsOverride } = await composeDispatchPrompt({
-      intentText: "plain user query",
+    const results = await runHooks("before_prompt_build", {
+      intent: "plain user query",
       intentTag: "user_chat",
       body: "plain user query",
       agentType: "orchestrator",
-      baseSystemPrompt: "base",
     });
 
-    expect(systemPrompt).toBe("base");
-    expect(allowedToolsOverride).toBeUndefined();
+    // The handler returns void when skillMatch is absent; runHooks
+    // skips void returns, so the result array stays empty.
+    expect(results).toEqual([]);
   });
 });

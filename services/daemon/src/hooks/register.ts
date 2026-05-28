@@ -1,6 +1,6 @@
 import { registerHook, setHooksLogger } from "@friday/shared";
 import { logger } from "../log.js";
-import { memoryRecallHook } from "./memory-recall-hook.js";
+import { memoryRecallHook } from "../prompts/memory-recall-hook.js";
 import { skillContextHook } from "./skill-context.js";
 import { workspaceGuardHook } from "./workspace-guard.js";
 import { builderTrailerHook } from "./builder-trailer.js";

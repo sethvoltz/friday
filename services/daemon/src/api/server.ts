@@ -8,9 +8,7 @@ import {
   getDaemonSecret,
   isLocalHost,
   loadConfig,
-  composeSystemPrompt,
   normalizeModelConfig,
-  readPromptStack,
   resolveDaemonPort,
 } from "@friday/shared";
 import {
@@ -21,7 +19,6 @@ import {
   externalLinks,
   fetchBlocksByAgent,
   getAttachment,
-  listBlocksByTurn,
   getMail,
   getTicket,
   inbox,
@@ -48,9 +45,8 @@ import {
   type MemoryEntry,
 } from "@friday/memory";
 import { runHooks } from "@friday/shared";
-import { renderPinnedFacts } from "../agent/pinned-facts.js";
-import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
-import { matchSkillInvocation } from "../skills/match.js";
+import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
+import { buildSystemPrompt } from "../prompts/build-system-prompt.js";
 import { resolveRecipient, validateRecipient } from "../comms/recipient.js";
 import {
   DEFAULT_RULE,
@@ -112,7 +108,7 @@ import {
   recordUserBlock,
   removeQueuedPrompt,
 } from "../agent/lifecycle.js";
-import { deleteBlockById, getBlockById, getUserChatBlockByTurnId } from "@friday/shared/services";
+import { getBlockById } from "@friday/shared/services";
 import { generateScratchName } from "../agent/scratch-names.js";
 import { archiveWorkspace, createWorkspace, workspacePath } from "../agent/workspace.js";
 import { commandsApi } from "./commands.js";
@@ -130,12 +126,6 @@ import type { AgentType } from "@friday/shared";
 
 export interface StartServerOptions {
   port: number;
-}
-
-interface PostTurnBody {
-  text: string;
-  agent?: string;
-  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
 }
 
 export function startServer(opts: StartServerOptions) {
@@ -182,153 +172,17 @@ async function handle(
     return handleEvents(req, res, cfg);
   }
 
-  // --- Chat turn ---
-  if (method === "POST" && path === "/api/chat/turn") {
-    const body = await readJson<PostTurnBody>(req);
-    const agentName = body.agent ?? cfg.orchestratorName;
-    const turnId = `t_${randomUUID()}`;
-
-    // Ensure orchestrator exists.
-    if (!(await registry.getAgent(agentName))) {
-      await registry.registerAgent({ name: agentName, type: "orchestrator" });
-    }
-
-    const agentRow = (await registry.getAgent(agentName))!;
-    const resumeSessionId = agentRow.sessionId ?? undefined;
-
-    const stack = readPromptStack(agentRow.type, []);
-    const pinnedFacts = await renderPinnedFacts(agentRow.name);
-    const baseSystemPrompt = composeSystemPrompt(
-      stack,
-      {
-        agentName: agentRow.name,
-        agentType: agentRow.type,
-        parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
-      },
-      pinnedFacts,
-    );
-
-    // Skill detection: if the user typed `/<name> <args>`, the user-message
-    // body becomes the args portion. The skill-context block + per-turn
-    // allowedTools restriction are emitted by the before_prompt_build hook
-    // when composeDispatchPrompt threads skillMatch through.
-    const skillMatch = matchSkillInvocation(body.text, agentRow.type);
-    const userText = skillMatch ? skillMatch.userText : body.text;
-
-    const {
-      body: wrappedPrompt,
-      systemPrompt: dispatchSystemPrompt,
-      allowedToolsOverride,
-    } = await composeDispatchPrompt({
-      intentText: userText,
-      intentTag: "user_chat",
-      body: userText,
-      agentType: agentRow.type,
-      baseSystemPrompt,
-      skillMatch: skillMatch ?? undefined,
-    });
-
-    // Persist the user's typed prompt as a `role='user'`, `source='user_chat'`
-    // block before dispatching. Stays scoped to the user's literal input —
-    // recall-block / skill scaffolding is internal and not part of the
-    // user-visible message stream (FIX_FORWARD 1.2).
-    // Filter out any attachment entries we wouldn't be able to resolve
-    // server-side. The dashboard only sends shas that came back from
-    // POST /api/uploads, so this is defense in depth against a malformed
-    // or stale client body.
-    const attachments = (body.attachments ?? []).filter(
-      (a) => typeof a.sha256 === "string" && /^[a-f0-9]{64}$/.test(a.sha256),
-    );
-
-    // Peek the live worker to decide whether this prompt will dispatch
-    // immediately or sit in `nextPrompts` behind an in-flight turn. When
-    // queued, we record the user block as `status='queued'` and pass the
-    // resulting blockId through dispatchTurn → WorkerPromptCommand →
-    // sendPrompt; the drain path re-stamps the row on actual dispatch
-    // (`block_meta_update`) so the queued bubble unpins and sorts inline.
-    const liveBefore = peekLiveWorker(agentName);
-    const willQueue = liveBefore?.status === "working";
-    let userBlockId: string | undefined;
-    try {
-      const recorded = await recordUserBlock({
-        turnId,
-        agentName,
-        sessionId: resumeSessionId,
-        text: body.text,
-        source: "user_chat",
-        status: willQueue ? "queued" : "complete",
-        attachments: attachments.length > 0 ? attachments : undefined,
-      });
-      if (willQueue) userBlockId = recorded.blockId;
-    } catch (err) {
-      logger.log("warn", "chat.turn.user-block.error", {
-        agent: agentName,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    const modelCfg = normalizeModelConfig(cfg.model);
-    const turnCwd = await registry.workingDirectoryFor(agentRow);
-    dispatchTurn({
-      agentName,
-      options: {
-        agentName,
-        agentType: agentRow.type,
-        workingDirectory: turnCwd,
-        systemPrompt: dispatchSystemPrompt,
-        prompt: wrappedPrompt,
-        attachments: attachments.length > 0 ? attachments : undefined,
-        turnId,
-        model: modelCfg.name,
-        thinking: modelCfg.thinking,
-        effort: modelCfg.effort,
-        resumeSessionId,
-        daemonPort: resolveDaemonPort(cfg),
-        parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
-        mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
-        allowedToolsOverride,
-      },
-      userBlockId,
-    });
-    return json(res, 200, { turn_id: turnId, queued: willQueue });
-  }
-
-  // Cancel a queued user-chat turn before the worker dispatches it. The
-  // block row is deleted (the message never reached the LLM) and the
-  // entry is yanked from the worker's `nextPrompts`. Returns the prompt
-  // text so the dashboard can stuff it back into the input bar.
-  if (method === "DELETE" && path.startsWith("/api/chat/turn/") && path.endsWith("/queued")) {
-    const turnId = path.split("/")[4];
-    const block = await getUserChatBlockByTurnId(turnId);
-    if (!block) {
-      return json(res, 404, { error: "turn_not_found", turn_id: turnId });
-    }
-    if (block.status !== "queued") {
-      return json(res, 409, {
-        error: "not_queued",
-        turn_id: turnId,
-        status: block.status,
-        message: "Turn has already dispatched; use abort instead",
-      });
-    }
-    removeQueuedPrompt(block.agentName, turnId);
-    let recoveredText = "";
-    try {
-      const parsed = JSON.parse(block.contentJson) as { text?: unknown };
-      if (typeof parsed.text === "string") recoveredText = parsed.text;
-    } catch {
-      // Malformed content_json — return empty text; the user gets to retype.
-    }
-    // Phase 5: `block_meta_update` SSE retired — Zero replicates
-    // the DELETE on the blocks slice; other dashboard tabs see the
-    // bubble vanish via the reactive query without an SSE event.
-    await deleteBlockById(block.blockId);
-    return json(res, 200, {
-      ok: true,
-      turn_id: turnId,
-      text: recoveredText,
-    });
-  }
+  // --- Chat turn (FRI-123 — all ADR-024 retired routes deleted) ---
+  // The legacy `POST /api/chat/turn`, `DELETE .../<id>/queued`,
+  // `POST .../<id>/abort`, and `POST .../<id>/resume` REST routes
+  // (ADR-024 retirement set) all retired in this PR. Live paths:
+  //   - send: `sendUserMessage` Zero mutator → dispatch-listener.
+  //   - cancel queued: `cancelQueued` Zero mutator → cancel-listener
+  //     + the internal `/api/internal/cancel-queued` fast-path
+  //     (below).
+  //   - abort: `abortTurn` Zero mutator → abort-listener + the
+  //     internal `/api/internal/abort-turn` fast-path (below).
+  //   - resume: `resumeTurn` Zero mutator → resume-listener.
 
   // Phase 4.9 fast-path: synchronous in-memory splice of the worker's
   // `nextPrompts` deque. Called by the dashboard's `cancelQueued`
@@ -381,17 +235,6 @@ async function handle(
     });
   }
 
-  if (method === "POST" && path.startsWith("/api/chat/turn/") && path.endsWith("/abort")) {
-    const turnId = path.split("/")[4];
-    // Stop targets only the agent whose current turn matches `turnId`. The
-    // previous loop-every-agent behavior tore down unrelated turns running
-    // in parallel — pressing Stop on agent A while B and C were also
-    // mid-turn aborted all three.
-    const agent = findAgentByTurnId(turnId);
-    const aborted = agent ? abortTurn(agent) : false;
-    return json(res, 200, { aborted, turn_id: turnId, agent });
-  }
-
   // Phase 4.10 fast-path: synchronously dispatch the lifecycle
   // `abortTurn(agent)` so the worker's `AbortController` fires before
   // the next SDK step lands. Called by the dashboard's `abortTurn`
@@ -409,108 +252,9 @@ async function handle(
     const agent = findAgentByTurnId(turnId);
     const aborted = agent ? abortTurn(agent) : false;
     // `aborted=false` means no live worker matched the turn (either
-    // it already finished or the legacy abort path already tore it
-    // down). The dashboard treats both as success; the response shape
-    // matches the legacy `/api/chat/turn/<id>/abort` endpoint so
-    // callers can share the same JSON parser.
+    // it already finished or the abort-listener LISTEN-path already
+    // tore it down). The dashboard treats both as success.
     return json(res, 200, { ok: true, aborted, turn_id: turnId, agent });
-  }
-
-  if (method === "POST" && path.startsWith("/api/chat/turn/") && path.endsWith("/resume")) {
-    // FRI-12: "Resume" CTA on an error bubble. Re-dispatch the original
-    // user prompt under the SAME turn_id so the retry's content blocks
-    // visually group with the error bubble in the chat. The SDK session
-    // is already past that point — this is a fresh prompt; it just
-    // shares the turn label.
-    const turnId = path.split("/")[4];
-    const blocks = await listBlocksByTurn(turnId);
-    if (blocks.length === 0) {
-      return json(res, 404, { error: "turn_not_found", turn_id: turnId });
-    }
-    const userBlock = blocks.find((b) => b.role === "user" && b.kind === "text");
-    if (!userBlock) {
-      return json(res, 422, {
-        error: "no_user_prompt",
-        turn_id: turnId,
-        message: "Cannot resume — original user prompt not found in turn",
-      });
-    }
-    const agentName = userBlock.agentName;
-    if (findAgentByTurnId(turnId)) {
-      return json(res, 409, {
-        error: "turn_in_flight",
-        turn_id: turnId,
-        message: "A turn is already in flight for this agent",
-      });
-    }
-    const agentRow = await registry.getAgent(agentName);
-    if (!agentRow) {
-      return json(res, 404, { error: "agent_not_found", agent: agentName });
-    }
-    const live = peekLiveWorker(agentName);
-    if (live && live.status === "working") {
-      return json(res, 409, {
-        error: "agent_busy",
-        agent: agentName,
-        message: "Agent is currently busy with another turn",
-      });
-    }
-
-    let parsedText = "";
-    try {
-      const parsed = JSON.parse(userBlock.contentJson) as { text?: unknown };
-      if (typeof parsed.text === "string") parsedText = parsed.text;
-    } catch {
-      return json(res, 422, {
-        error: "user_block_corrupt",
-        turn_id: turnId,
-      });
-    }
-    if (!parsedText.trim()) {
-      return json(res, 422, { error: "empty_user_prompt", turn_id: turnId });
-    }
-
-    const stack = readPromptStack(agentRow.type, []);
-    const pinnedFacts = await renderPinnedFacts(agentRow.name);
-    const baseSystemPrompt = composeSystemPrompt(
-      stack,
-      {
-        agentName: agentRow.name,
-        agentType: agentRow.type,
-        parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
-      },
-      pinnedFacts,
-    );
-    const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } = await composeDispatchPrompt(
-      {
-        intentText: parsedText,
-        intentTag: "user_chat",
-        body: parsedText,
-        agentType: agentRow.type,
-        baseSystemPrompt,
-      },
-    );
-    const modelCfg = normalizeModelConfig(cfg.model);
-    const resumeCwd = await registry.workingDirectoryFor(agentRow);
-    dispatchTurn({
-      agentName,
-      options: {
-        agentName,
-        agentType: agentRow.type,
-        workingDirectory: resumeCwd,
-        systemPrompt: dispatchSystemPrompt,
-        prompt: wrappedPrompt,
-        turnId, // <-- reuse the failed turn's id
-        model: modelCfg.name,
-        thinking: modelCfg.thinking,
-        effort: modelCfg.effort,
-        resumeSessionId: agentRow.sessionId ?? undefined,
-        daemonPort: resolveDaemonPort(cfg),
-        parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
-        mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
-      },
-    });
-    return json(res, 200, { turn_id: turnId, agent: agentName });
   }
 
   // --- Agents ---
@@ -648,17 +392,11 @@ async function handle(
     }
 
     const turnId = `t_${randomUUID()}`;
-    const stack = readPromptStack(body.type, []);
-    const pinnedFacts = await renderPinnedFacts(body.name);
-    const baseSystemPrompt = composeSystemPrompt(
-      stack,
-      {
-        agentName: body.name,
-        agentType: body.type,
-        parentName: body.parentName,
-      },
-      pinnedFacts,
-    );
+    const { systemPrompt: baseSystemPrompt } = await buildSystemPrompt({
+      name: body.name,
+      type: body.type,
+      parentName: body.parentName,
+    });
     const bootstrapResults = await runHooks("agent:bootstrap", {
       agentName: body.name,
       agentType: body.type,
@@ -668,19 +406,19 @@ async function handle(
     const bootstrapAppends = bootstrapResults
       .map((r) => r?.appendSystemPrompt)
       .filter((s): s is string => typeof s === "string" && s.length > 0);
-    const systemPrompt =
+    const bootstrapAugmentedBase =
       bootstrapAppends.length > 0
         ? `${baseSystemPrompt}\n\n---\n\n${bootstrapAppends.join("\n\n")}`
         : baseSystemPrompt;
     const modelCfg = normalizeModelConfig(cfg.model);
-    const { body: wrappedSpawnPrompt, systemPrompt: spawnSystemPrompt } =
-      await composeDispatchPrompt({
-        intentText: body.prompt,
-        intentTag: "agent_spawn",
-        body: body.prompt,
-        agentType: body.type,
-        baseSystemPrompt: systemPrompt,
-      });
+    const { body: wrappedSpawnPrompt, systemPrompt: spawnSystemPrompt } = await buildDispatchPrompt(
+      { name: body.name, type: body.type, parentName: body.parentName },
+      {
+        kind: "agent_spawn",
+        userText: body.prompt,
+        baseSystemPromptOverride: bootstrapAugmentedBase,
+      },
+    );
     // FRI-71: persist the spawn-time prompt as a user block so the very first
     // turn renders with the originating user bubble (not just an orphan
     // assistant reply). The session id isn't known yet — `recordUserBlock`
@@ -1843,25 +1581,11 @@ async function handleSystemCommand(
       // not a `/<skill>` invocation).
       if (topic) {
         const seedTurnId = `t_${randomUUID()}`;
-        const stack = readPromptStack("bare", []);
-        const seedPinnedFacts = await renderPinnedFacts(name);
-        const systemPrompt = composeSystemPrompt(
-          stack,
-          {
-            agentName: name,
-            agentType: "bare",
-          },
-          seedPinnedFacts,
-        );
         const modelCfg = normalizeModelConfig(cfg.model);
-        const { body: wrappedTopic, systemPrompt: scratchSystemPrompt } =
-          await composeDispatchPrompt({
-            intentText: topic,
-            intentTag: "scratch",
-            body: topic,
-            agentType: "bare",
-            baseSystemPrompt: systemPrompt,
-          });
+        const { body: wrappedTopic, systemPrompt: scratchSystemPrompt } = await buildDispatchPrompt(
+          { name, type: "bare" },
+          { kind: "scratch", userText: topic },
+        );
         // FRI-71: persist the seed topic as a user block so the bare agent's
         // first turn renders with the originating user bubble.
         try {
