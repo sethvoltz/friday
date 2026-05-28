@@ -1,10 +1,15 @@
 <!doctype html>
-<html lang="en" class="dark">
+<!-- FRI-124: boot defaults to Dusk (Friday's default dark-kind palette).
+     The pre-paint FOUC script in <svelte:head> (lib/theme/foucScript.ts)
+     overwrites this class list + theme-color from the user's saved
+     Theme before first paint. Without JS, the page still renders as
+     Dusk via the .palette-dusk + .dark token blocks. -->
+<html lang="en" class="palette-dusk dark">
   <head>
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#1e1e2e" />
+    <meta name="theme-color" content="#0f1219" />
     <link rel="manifest" href="%sveltekit.assets%/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="%sveltekit.assets%/icon-192.png" />
     %sveltekit.head%
