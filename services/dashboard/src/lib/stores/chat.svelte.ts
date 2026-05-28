@@ -3149,7 +3149,7 @@ function parseBlockContent(contentJson: string): ParsedBlockContent {
 }
 
 /** Parsed shape of a `kind="error"` block's content_json. Mirrors the
- *  daemon-side `ErrorBlockPayload` (services/daemon/src/agent/lifecycle.ts).
+ *  daemon-side `ErrorBlockPayload` (services/daemon/src/agent/block-stream.ts).
  *  Defensive defaults so a malformed/legacy row still renders something. */
 export interface ParsedErrorContent {
   code: string;

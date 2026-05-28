@@ -41,7 +41,25 @@ import type {
   WorkerBlockStop,
   WorkerBlockCancel,
 } from "./worker-protocol.js";
-import type { ErrorBlockPayload, LiveWorker } from "./lifecycle.js";
+import type { LiveWorker } from "./lifecycle.js";
+
+/* ---------------- Absorbed-from-lifecycle types ----------------
+ *
+ * FRI-125: `ErrorBlockPayload` was defined alongside `insertErrorBlock`
+ * in lifecycle.ts. Both moved here under the C2 absorption; the payload
+ * type follows the function that consumes it. Exported so worker-error
+ * paths in lifecycle.ts can construct one without round-tripping
+ * through a defunct re-export.
+ */
+
+export interface ErrorBlockPayload {
+  code: string;
+  headline: string;
+  httpStatus?: number;
+  retryAfterSeconds?: number;
+  requestId?: string;
+  rawMessage: string;
+}
 
 /* ---------------- Absorbed live-turns types ---------------- */
 
