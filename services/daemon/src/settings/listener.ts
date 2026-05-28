@@ -57,7 +57,7 @@ const SINGLETON_KEY = "singleton";
  * structural fields (ports, mcpServers, base URLs) are preserved
  * because they're not in the settings table.
  */
-async function syncConfigFromSettingsRow(): Promise<boolean> {
+export async function syncConfigFromSettingsRow(): Promise<boolean> {
   const db = getDb();
   const rows = await db
     .select()

@@ -927,15 +927,15 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    border: 1px solid var(--status-error, #d44);
-    background: color-mix(in srgb, var(--status-error, #d44) 10%, transparent);
+    border: 1px solid var(--status-error);
+    background: color-mix(in srgb, var(--status-error) 10%, transparent);
     border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: 0.85rem;
   }
   .error-msg { flex: 1; }
   .retry-btn {
-    background: var(--status-error, #d44);
+    background: var(--status-error);
     color: var(--bg-primary);
     border: none;
     padding: 0.35rem 0.85rem;

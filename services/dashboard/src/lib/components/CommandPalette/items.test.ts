@@ -41,9 +41,11 @@ function baseOpts() {
     isChat: false,
     query: "",
     recents: [] as RecentEntry[],
-    userMode: "dark" as const,
+    themeKind: "sync" as const,
+    activePalette: "dusk",
     currentPath: "/dashboard",
-    onSetMode: noop,
+    onSetSync: noop,
+    onSetPalette: noop,
   };
 }
 
@@ -115,27 +117,54 @@ describe("assembleSections — current-item flag", () => {
     expect(agentsSec.items.find((i) => i.id === "friday")!.current).toBe(false);
   });
 
-  it("flags the matching theme setting based on userMode", () => {
+  it("flags the active palette entry as current when themeKind is single", () => {
     const sections = assembleSections({
       ...baseOpts(),
-      userMode: "light",
+      themeKind: "single",
+      activePalette: "dawn",
     });
     const settings = sections.find((s) => s.id === "settings")!;
-    const light = settings.items.find((i) => i.id === "theme.light")!;
-    const dark = settings.items.find((i) => i.id === "theme.dark")!;
-    const system = settings.items.find((i) => i.id === "theme.system")!;
-    expect(light.current).toBe(true);
-    expect(dark.current).toBe(false);
-    expect(system.current).toBe(false);
+    const sync = settings.items.find((i) => i.id === "theme.sync")!;
+    const dawn = settings.items.find((i) => i.id === "theme.palette.dawn")!;
+    const dusk = settings.items.find((i) => i.id === "theme.palette.dusk")!;
+    expect(sync.current).toBe(false);
+    expect(dawn.current).toBe(true);
+    expect(dusk.current).toBe(false);
   });
 
-  it("flags 'Follow system' as current when userMode is 'system'", () => {
+  it("flags 'Sync with system' as current when themeKind is sync", () => {
     const sections = assembleSections({
       ...baseOpts(),
-      userMode: "system",
+      themeKind: "sync",
+      activePalette: "dawn",
     });
     const settings = sections.find((s) => s.id === "settings")!;
-    expect(settings.items.find((i) => i.id === "theme.system")!.current).toBe(true);
+    const sync = settings.items.find((i) => i.id === "theme.sync")!;
+    expect(sync.current).toBe(true);
+    // The currently active palette entry is ALSO marked current — both
+    // surfaces are simultaneously true under Sync mode (Sync says "I'm
+    // tracking system", the palette entry says "you're currently seeing
+    // this palette"). Picking either is a no-op for the active palette.
+    const dawn = settings.items.find((i) => i.id === "theme.palette.dawn")!;
+    expect(dawn.current).toBe(true);
+  });
+
+  it("⌘K Theme entries are exactly Sync + one per palette in catalog order", () => {
+    // AC #26: the flat list shape is load-bearing for the Playwright
+    // test that asserts the visible Theme entries match a specific
+    // labels array.
+    const sections = assembleSections({
+      ...baseOpts(),
+      // The settings section is hidden under a query in some tests;
+      // empty query keeps it visible.
+      query: "",
+    });
+    const settings = sections.find((s) => s.id === "settings")!;
+    expect(settings.items.map((i) => i.label)).toEqual([
+      "Theme: Sync with system",
+      "Theme: Dawn",
+      "Theme: Dusk",
+    ]);
   });
 });
 

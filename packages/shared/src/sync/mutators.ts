@@ -137,6 +137,19 @@ export interface UpdateSettingsArgs {
   /** Partial — omitted fields preserve their existing values. */
   model?: string;
   watchdogRefork?: boolean;
+  /** FRI-124: dashboard Appearance config. Each field follows the same
+   *  three-state convention as Zero's `update` semantics:
+   *  - omitted (undefined): preserve the existing value
+   *  - `null`: explicitly clear the column (resolver falls back to default)
+   *  - non-null value: set the column
+   *  The mutator does NOT validate palette names — the dashboard's
+   *  resolver tolerates unknown names and falls back to a default,
+   *  so a future palette removal doesn't crash older clients holding a
+   *  stale name in the column. */
+  themeKind?: "single" | "sync" | null;
+  themePaletteSingle?: string | null;
+  themePaletteLight?: string | null;
+  themePaletteDark?: string | null;
   /** Client-side wall clock for diagnostics; server overwrites. */
   ts: number;
 }
@@ -1109,6 +1122,10 @@ export const createMutators = () =>
         id: string;
         model?: string;
         watchdog_refork?: boolean;
+        theme_kind?: "single" | "sync" | null;
+        theme_palette_single?: string | null;
+        theme_palette_light?: string | null;
+        theme_palette_dark?: string | null;
         updated_at: number;
       } = {
         id: "singleton",
@@ -1117,6 +1134,19 @@ export const createMutators = () =>
       if (args.model !== undefined) patch.model = args.model;
       if (args.watchdogRefork !== undefined) {
         patch.watchdog_refork = args.watchdogRefork;
+      }
+      // Theme fields: `undefined` = preserve; `null` = explicit clear;
+      // value = set. The `!== undefined` gate keeps omitted fields out
+      // of the patch entirely so Zero's `update` leaves them alone.
+      if (args.themeKind !== undefined) patch.theme_kind = args.themeKind;
+      if (args.themePaletteSingle !== undefined) {
+        patch.theme_palette_single = args.themePaletteSingle;
+      }
+      if (args.themePaletteLight !== undefined) {
+        patch.theme_palette_light = args.themePaletteLight;
+      }
+      if (args.themePaletteDark !== undefined) {
+        patch.theme_palette_dark = args.themePaletteDark;
       }
       await tx.mutate.settings.update(patch);
     },

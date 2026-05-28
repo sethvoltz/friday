@@ -89,7 +89,7 @@
 
   :global(button.confirm-danger) {
     background: var(--status-error);
-    color: var(--text-inverse, #fff);
+    color: var(--text-inverse);
   }
   :global(button.confirm-danger:hover) {
     background: var(--status-error);

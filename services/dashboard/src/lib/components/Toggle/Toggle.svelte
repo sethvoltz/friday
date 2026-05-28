@@ -82,7 +82,7 @@
     width: 13px;
     height: 13px;
     border-radius: 50%;
-    background: #fff;
+    background: var(--toggle-knob);
     transition: transform var(--transition-fast);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
   }

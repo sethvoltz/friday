@@ -1,6 +1,8 @@
 <script lang="ts">
   import { diffLines } from "diff";
   import type { Change } from "diff";
+  import { theme } from "$lib/stores/theme.svelte";
+  import { shikiThemeFor } from "$lib/theme/palettes";
 
   interface Props {
     toolName: "Write" | "Edit";
@@ -29,21 +31,32 @@
     return map[ext] ?? "text";
   }
 
-  // Shiki lazy-load, same pattern as Markdown.svelte
+  // Shiki lazy-load, same pattern as Markdown.svelte. FRI-124: single-
+  // theme per active palette; the dual-theme defaultColor:false trick
+  // is gone. Re-highlights on palette change by clearing
+  // `highlightedHtml`.
   type ShikiApi = {
-    codeToHtml: (code: string, opts: {
-      lang: string;
-      themes: { light: string; dark: string };
-      defaultColor: false;
-    }) => Promise<string>;
+    codeToHtml: (code: string, opts: { lang: string; theme: string }) => Promise<string>;
   };
   let shikiApi: ShikiApi | null = null;
   let highlightedHtml = $state<string | null>(null);
+  // svelte-ignore state_referenced_locally
+  let lastPalette = $state<string>(theme.activePalette);
+
+  $effect(() => {
+    // Reset the cached highlight when the palette changes so the next
+    // render goes through the new shikiTheme.
+    if (theme.activePalette !== lastPalette) {
+      lastPalette = theme.activePalette;
+      highlightedHtml = null;
+    }
+  });
 
   $effect(() => {
     if (!open || toolName !== "Write" || !content) return;
     if (highlightedHtml !== null) return;
     const lang = langFromPath(filePath);
+    const shikiTheme = shikiThemeFor(theme.activePalette);
     void (async () => {
       if (!shikiApi) {
         const mod = await import("shiki");
@@ -51,8 +64,7 @@
       }
       const out = await shikiApi.codeToHtml(content ?? "", {
         lang,
-        themes: { light: "catppuccin-latte", dark: "catppuccin-mocha" },
-        defaultColor: false,
+        theme: shikiTheme,
       });
       const tmp = document.createElement("div");
       tmp.innerHTML = out;
@@ -236,13 +248,11 @@
     padding: 0;
     white-space: pre;
   }
-  /* Shiki dual-theme variables */
-  :global([data-theme="light"]) .shiki-wrap :global(.shiki) {
-    color: var(--shiki-light);
-  }
-  :global([data-theme="dark"]) .shiki-wrap :global(.shiki) {
-    color: var(--shiki-dark);
-  }
+  /* FRI-124: Shiki is single-theme now. Token spans carry their own
+     inline color from the active palette's shikiTheme; the previous
+     [data-theme="light/dark"] swap is gone. The wrapper's --text-
+     secondary fallback still drives unhighlighted code (lang === "text"
+     or pre-Shiki render). */
 
   /* Edit: diff views */
   .no-diff {
@@ -303,12 +313,12 @@
     min-height: 1.5em;
   }
   .diff-row.diff-removed {
-    background: color-mix(in srgb, #ef4444 15%, transparent);
-    color: #ef4444;
+    background: color-mix(in srgb, var(--diff-removed) 15%, transparent);
+    color: var(--diff-removed);
   }
   .diff-row.diff-added {
-    background: color-mix(in srgb, #22c55e 15%, transparent);
-    color: #22c55e;
+    background: color-mix(in srgb, var(--diff-added) 15%, transparent);
+    color: var(--diff-added);
   }
   .diff-row.diff-unchanged {
     background: var(--bg-code);

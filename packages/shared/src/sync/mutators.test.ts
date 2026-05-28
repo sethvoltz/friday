@@ -592,6 +592,86 @@ describe("updateSettings", () => {
     await mutators.updateSettings(tx, { watchdogRefork: false, ts: 2 });
     expect(settingsUpdates.map((c) => c.id)).toEqual(["singleton", "singleton"]);
   });
+
+  /* ---------------- FRI-124: theme fields ---------------- */
+  // The dashboard's Appearance card writes the user's Theme selection
+  // through this mutator. Each field is independent (themeKind controls
+  // Single/Sync; the three palette fields hold per-slot picks). The
+  // mutator must preserve omitted fields (Zero's `update` semantics) and
+  // must distinguish `undefined` (preserve) from `null` (explicit clear)
+  // because the resolver treats `null` as "unset, use default."
+
+  it("UPDATEs themeKind alone when provided", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { themeKind: "single", ts: 10 });
+    expect(settingsUpdates).toEqual([
+      {
+        id: "singleton",
+        theme_kind: "single",
+        updated_at: 10,
+      },
+    ]);
+  });
+
+  it("UPDATEs all four theme fields together in a single patch", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, {
+      themeKind: "sync",
+      themePaletteSingle: "dusk",
+      themePaletteLight: "dawn",
+      themePaletteDark: "dusk",
+      ts: 42,
+    });
+    expect(settingsUpdates[0]).toEqual({
+      id: "singleton",
+      theme_kind: "sync",
+      theme_palette_single: "dusk",
+      theme_palette_light: "dawn",
+      theme_palette_dark: "dusk",
+      updated_at: 42,
+    });
+  });
+
+  it("explicit null on each theme field produces a patch with the key set to null (not omitted)", async () => {
+    // The resolver treats `null` as "unset; fall back to default."
+    // `undefined` would preserve the existing value; the mutator must
+    // not collapse `null` into `undefined`.
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, {
+      themeKind: null,
+      themePaletteSingle: null,
+      themePaletteLight: null,
+      themePaletteDark: null,
+      ts: 7,
+    });
+    const patch = settingsUpdates[0] ?? {};
+    expect(patch.theme_kind).toBeNull();
+    expect(patch.theme_palette_single).toBeNull();
+    expect(patch.theme_palette_light).toBeNull();
+    expect(patch.theme_palette_dark).toBeNull();
+    // And the keys MUST be present (the null is the value, not the absence)
+    expect("theme_kind" in patch).toBe(true);
+    expect("theme_palette_single" in patch).toBe(true);
+    expect("theme_palette_light" in patch).toBe(true);
+    expect("theme_palette_dark" in patch).toBe(true);
+  });
+
+  it("omitting theme fields leaves them absent from the patch object (no clobber)", async () => {
+    // Mirror of the existing model/watchdogRefork preserve-omitted test
+    // for the new theme columns. Writing only `model` must NOT touch
+    // any theme column.
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { model: "claude-haiku-4-5", ts: 1 });
+    const patch = settingsUpdates[0] ?? {};
+    expect("theme_kind" in patch).toBe(false);
+    expect("theme_palette_single" in patch).toBe(false);
+    expect("theme_palette_light" in patch).toBe(false);
+    expect("theme_palette_dark" in patch).toBe(false);
+  });
 });
 
 describe("forgetDevice (plan §41 — JWT revocation tombstone)", () => {

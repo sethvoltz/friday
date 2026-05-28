@@ -2,11 +2,12 @@
   import type { PageData } from "./$types";
   import { invalidateAll } from "$app/navigation";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
-  import { Sun, Moon, MonitorCog } from "lucide-svelte";
-  import { setMode, userPrefersMode } from "mode-watcher";
+  import { Monitor } from "lucide-svelte";
   import { useZero, zeroSync } from "$lib/stores/zero.svelte";
+  import { theme, type ThemeKind } from "$lib/stores/theme.svelte";
+  import { DEFAULTS, PALETTES, type PaletteName } from "$lib/theme/palettes";
+  import PalettePreview from "$lib/components/Appearance/PalettePreview.svelte";
 
-  type Mode = "light" | "dark" | "system";
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import {
     wakeLockSettings,
@@ -57,11 +58,28 @@
     }
   });
 
-  // Theme selection is owned by mode-watcher (localStorage
-  // `mode-watcher-mode`). The header `⌘K` palette exposes the same three
-  // modes; this card is the discoverable surface for users who haven't
-  // learned the palette yet.
-  const selectedMode = $derived<Mode>(userPrefersMode.current ?? "system");
+  // FRI-124: Appearance card — Single/Sync + per-slot palette picks.
+  // Reads from the runtime theme store (zero-synced); writes through
+  // zeroSync.updateSettings so the canonical state in Postgres updates
+  // and other devices/tabs pick it up via Zero replication.
+  const PALETTE_NAMES = Object.keys(PALETTES) as PaletteName[];
+  // Names look better capitalized in the UI than as token-strings.
+  function displayName(name: PaletteName): string {
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  }
+  function setThemeKind(kind: ThemeKind): void {
+    theme.setKind(kind);
+    zeroSync.updateSettings({ themeKind: kind });
+  }
+  function setSinglePick(name: PaletteName): void {
+    theme.setSinglePick(name);
+    zeroSync.updateSettings({ themePaletteSingle: name });
+  }
+  function setSlotPick(slot: "light" | "dark", name: PaletteName): void {
+    theme.setSlotPick(slot, name);
+    if (slot === "light") zeroSync.updateSettings({ themePaletteLight: name });
+    else zeroSync.updateSettings({ themePaletteDark: name });
+  }
 
   // FIX_FORWARD 6.3 + Phase 4.3: configurable Friday settings (model +
   // watchdog). Under Zero (`useZero()`), the live values come from the
@@ -380,48 +398,97 @@
     </div>
   </div>
 
-  <div class="card">
-    <div class="card-header"><h2>Theme</h2></div>
+  <div class="card appearance-card">
+    <div class="card-header"><h2>Appearance</h2></div>
     <p class="row-value">
-      Friday ships a warm sunrise palette and a cool moody night palette.
-      Pick one, or follow your operating system. The choice is remembered
-      across sessions and reachable from <kbd>⌘K</kbd> → Settings.
+      Pick one palette for all conditions, or sync with your system's
+      light/dark mode.
     </p>
-    <div class="theme-picker" role="radiogroup" aria-label="Theme">
+    <div class="appearance-mode" role="radiogroup" aria-label="Appearance mode">
       <button
         type="button"
-        class="theme-option"
-        class:selected={selectedMode === "light"}
-        aria-pressed={selectedMode === "light"}
-        onclick={() => setMode("light")}>
-        <span class="theme-icon" aria-hidden="true">
-          <Sun size={16} strokeWidth={2} />
-        </span>
-        Light
+        class="appearance-mode-option"
+        class:selected={theme.kind === "single"}
+        aria-pressed={theme.kind === "single"}
+        onclick={() => setThemeKind("single")}>
+        Single theme
       </button>
       <button
         type="button"
-        class="theme-option"
-        class:selected={selectedMode === "dark"}
-        aria-pressed={selectedMode === "dark"}
-        onclick={() => setMode("dark")}>
-        <span class="theme-icon" aria-hidden="true">
-          <Moon size={16} strokeWidth={2} />
+        class="appearance-mode-option"
+        class:selected={theme.kind === "sync"}
+        aria-pressed={theme.kind === "sync"}
+        onclick={() => setThemeKind("sync")}>
+        <span class="appearance-mode-icon" aria-hidden="true">
+          <Monitor size={14} strokeWidth={2} />
         </span>
-        Dark
-      </button>
-      <button
-        type="button"
-        class="theme-option"
-        class:selected={selectedMode === "system"}
-        aria-pressed={selectedMode === "system"}
-        onclick={() => setMode("system")}>
-        <span class="theme-icon" aria-hidden="true">
-          <MonitorCog size={16} strokeWidth={2} />
-        </span>
-        System
+        Sync with system
       </button>
     </div>
+
+    {#if theme.kind === "single"}
+      <div class="palette-section">
+        <div class="section-label">Palette</div>
+        <div class="palette-grid" role="radiogroup" aria-label="Single palette">
+          {#each PALETTE_NAMES as p (p)}
+            <button
+              type="button"
+              class="palette-card palette-{p}"
+              class:selected={theme.config.picks.single === p}
+              aria-pressed={theme.config.picks.single === p}
+              onclick={() => setSinglePick(p)}>
+              <PalettePreview palette={p} label={displayName(p)} />
+            </button>
+          {/each}
+        </div>
+        {#if !theme.config.picks.single}
+          <p class="palette-default-note">
+            Using default: {displayName(DEFAULTS[theme.systemMode])}
+          </p>
+        {/if}
+      </div>
+    {:else}
+      <div class="palette-section">
+        <div class="section-label">Light slot</div>
+        <div class="palette-grid" role="radiogroup" aria-label="Light slot palette">
+          {#each PALETTE_NAMES as p (p)}
+            <button
+              type="button"
+              class="palette-card palette-{p}"
+              class:selected={theme.config.picks.light === p}
+              aria-pressed={theme.config.picks.light === p}
+              onclick={() => setSlotPick("light", p)}>
+              <PalettePreview palette={p} label={displayName(p)} />
+            </button>
+          {/each}
+        </div>
+        {#if !theme.config.picks.light}
+          <p class="palette-default-note">
+            Using default: {displayName(DEFAULTS.light)}
+          </p>
+        {/if}
+      </div>
+      <div class="palette-section">
+        <div class="section-label">Dark slot</div>
+        <div class="palette-grid" role="radiogroup" aria-label="Dark slot palette">
+          {#each PALETTE_NAMES as p (p)}
+            <button
+              type="button"
+              class="palette-card palette-{p}"
+              class:selected={theme.config.picks.dark === p}
+              aria-pressed={theme.config.picks.dark === p}
+              onclick={() => setSlotPick("dark", p)}>
+              <PalettePreview palette={p} label={displayName(p)} />
+            </button>
+          {/each}
+        </div>
+        {#if !theme.config.picks.dark}
+          <p class="palette-default-note">
+            Using default: {displayName(DEFAULTS.dark)}
+          </p>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <div class="card">
@@ -654,36 +721,80 @@
   }
   .config-card { grid-column: 1 / -1; }
   .sessions-card { grid-column: 1 / -1; }
+  .appearance-card { grid-column: 1 / -1; }
   .storage-usage { color: var(--text-primary); }
 
-  .theme-picker {
+  /* FRI-124 Appearance card --------------------------------------- */
+  .appearance-mode {
     display: flex;
     gap: 0.5rem;
     margin-top: 0.75rem;
   }
-  .theme-option {
+  .appearance-mode-option {
     display: inline-flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.5rem 0.8rem;
+    padding: 0.5rem 0.9rem;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     background: var(--bg-secondary);
     color: var(--text-primary);
     cursor: pointer;
     font-size: 0.85rem;
+    transition: all var(--transition-fast);
   }
-  .theme-option.selected {
+  .appearance-mode-option.selected {
     border-color: var(--accent-primary);
     background: var(--accent-glow);
   }
-  .theme-icon {
+  .appearance-mode-icon {
     display: inline-flex;
     align-items: center;
     color: var(--text-secondary);
   }
-  .theme-option.selected .theme-icon {
+  .appearance-mode-option.selected .appearance-mode-icon {
     color: var(--accent-primary);
+  }
+
+  .palette-section {
+    margin-top: 1.25rem;
+  }
+  .palette-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+  }
+  .palette-card {
+    /* Each card wraps its preview in its own .palette-<name> class so
+       the preview computes colors from THIS palette's tokens, not the
+       currently-active one. AC #25. */
+    appearance: none;
+    border: 2px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+    padding: 0;
+    cursor: pointer;
+    overflow: hidden;
+    transition:
+      border-color var(--transition-fast),
+      box-shadow var(--transition-fast);
+    text-align: left;
+    font: inherit;
+  }
+  .palette-card:hover {
+    border-color: var(--border-primary);
+    box-shadow: var(--shadow-sm);
+  }
+  .palette-card.selected {
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 1px var(--accent-primary);
+  }
+  .palette-default-note {
+    margin-top: 0.5rem;
+    font-size: 0.78rem;
+    color: var(--text-tertiary);
+    font-style: italic;
   }
 
   .model-select {

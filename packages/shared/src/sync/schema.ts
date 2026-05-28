@@ -245,11 +245,21 @@ const apps = table("apps")
 // reads from this table via Zero so multiple browser tabs converge
 // within a second of any mutation.
 
+// FRI-124: theme_* columns mirror the Drizzle schema additions. Zero
+// would otherwise silently drop them from its SELECT projection and
+// the dashboard's runtime store would always read `undefined` for
+// theme_kind / theme_palette_*, breaking AC #27 cross-tab sync. Each
+// column is `.optional()` because the DB column is NULLable (an unset
+// pick falls back to the resolver's default at runtime).
 const settings = table("settings")
   .columns({
     id: string(),
     model: string().optional(),
     watchdog_refork: boolean().optional(),
+    theme_kind: string().optional(),
+    theme_palette_single: string().optional(),
+    theme_palette_light: string().optional(),
+    theme_palette_dark: string().optional(),
     updated_at: number(),
   })
   .primaryKey("id");

@@ -14,8 +14,18 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
+import { readFileSync } from "node:fs";
+import {
+  CONFIG_PATH,
+  createTestDb,
+  getDb,
+  loadConfig,
+  schema,
+  writeConfig,
+  type TestDbHandle,
+} from "@friday/shared";
 import pgPkg from "pg";
+import { syncConfigFromSettingsRow } from "./listener.js";
 
 let handle: TestDbHandle;
 
@@ -135,5 +145,88 @@ describe("singleton row idempotency", () => {
         updatedAt: new Date(),
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe("FRI-124: daemon LISTEN handler ignores theme columns", () => {
+  it("syncConfigFromSettingsRow does not write config.json when only theme columns change", async () => {
+    // Theme state is dashboard-only — the daemon's config.json mirror
+    // covers `model` and `watchdog.refork`, nothing else. A settings row
+    // where every theme column is set to a non-default value but model
+    // and watchdogRefork remain at their defaults MUST NOT cause the
+    // daemon to rewrite config.json (which would advance mtime and
+    // potentially trigger downstream reload paths). Bytes-identical
+    // before/after is the contract.
+    const db = getDb();
+    // Prime the row with non-null theme columns + null model/watchdog.
+    // The mutator would produce this state when the dashboard user
+    // configures their Appearance without touching the model/watchdog
+    // controls.
+    await db.update(schema.settings).set({
+      themeKind: "single",
+      themePaletteSingle: "dusk",
+      themePaletteLight: "dawn",
+      themePaletteDark: "dusk",
+      updatedAt: new Date(),
+    });
+
+    // Materialize config.json on disk so we can compare bytes. The
+    // vitest-setup forces FRIDAY_DATA_DIR into a tmpdir; loadConfig
+    // returns DEFAULT_CONFIG in memory if the file doesn't exist but
+    // does NOT create it, so we writeConfig once to commit defaults
+    // to disk as the baseline.
+    writeConfig(loadConfig());
+    const before = readFileSync(CONFIG_PATH, "utf8");
+
+    const changed = await syncConfigFromSettingsRow();
+    expect(changed).toBe(false);
+
+    const after = readFileSync(CONFIG_PATH, "utf8");
+    expect(after).toBe(before);
+  });
+
+  it("syncConfigFromSettingsRow still writes when model changes alongside theme columns", async () => {
+    // Defensive — proving the negative isn't enough. A mixed update
+    // (theme + model) must still cause a write because model is the
+    // load-bearing field. This guards against a future refactor that
+    // accidentally skips writes whenever any theme column is set.
+    //
+    // Pick a model value that differs from DEFAULT_CONFIG.model so the
+    // "row.model !== cfg.model" branch fires regardless of what default
+    // ships. Reading cfg first lets the test stay correct if the default
+    // ever changes.
+    const cfg = loadConfig();
+    const differentModel =
+      cfg.model === "claude-opus-4-7" ? "claude-sonnet-4-6" : "claude-opus-4-7";
+    const db = getDb();
+    await db.update(schema.settings).set({
+      model: differentModel,
+      themeKind: "sync",
+      themePaletteLight: "dawn",
+      updatedAt: new Date(),
+    });
+
+    // Materialize the file so we have a baseline byte stream to compare
+    // the post-sync write against. Without this priming write, the
+    // first writeConfig from inside syncConfigFromSettingsRow would
+    // create the file from nothing — making "before" and "after" both
+    // valid but incomparable.
+    writeConfig(loadConfig());
+    const before = readFileSync(CONFIG_PATH, "utf8");
+
+    const changed = await syncConfigFromSettingsRow();
+    expect(changed).toBe(true);
+
+    const after = readFileSync(CONFIG_PATH, "utf8");
+    expect(after).not.toBe(before);
+
+    // And the written config.json picked up only the model — no theme
+    // keys leaked into the file.
+    const written = JSON.parse(after) as Record<string, unknown>;
+    expect(written.model).toBe(differentModel);
+    expect("themeKind" in written).toBe(false);
+    expect("themePaletteSingle" in written).toBe(false);
+    expect("themePaletteLight" in written).toBe(false);
+    expect("themePaletteDark" in written).toBe(false);
   });
 });

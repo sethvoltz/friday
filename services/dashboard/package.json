@@ -29,7 +29,6 @@
     "lucide-svelte": "^1.0.1",
     "marked": "^18.0.2",
     "mermaid": "^11.4.0",
-    "mode-watcher": "^1.1.0",
     "sharp": "^0.33.0",
     "shiki": "^1.24.0"
   },

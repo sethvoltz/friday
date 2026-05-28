@@ -272,9 +272,6 @@ importers:
       mermaid:
         specifier: ^11.4.0
         version: 11.14.0
-      mode-watcher:
-        specifier: ^1.1.0
-        version: 1.1.0(svelte@5.55.5(@typescript-eslint/types@8.59.4))
       sharp:
         specifier: ^0.33.0
         version: 0.33.5
@@ -4292,11 +4289,6 @@ packages:
   mnemonist@0.40.0:
     resolution: {integrity: sha512-kdd8AFNig2AD5Rkih7EPCXhu/iMvwevQFX/uEiGhZyPZi7fHqOoF4V4kHLpCfysxXMgQ4B52kdPMCwARshKvEg==}
 
-  mode-watcher@1.1.0:
-    resolution: {integrity: sha512-mUT9RRGPDYenk59qJauN1rhsIMKBmWA3xMF+uRwE8MW/tjhaDSCCARqkSuDTq8vr4/2KcAxIGVjACxTjdk5C3g==}
-    peerDependencies:
-      svelte: ^5.27.0
-
   module-details-from-path@1.0.4:
     resolution: {integrity: sha512-EGWKgxALGMgzvxYF1UyGTy0HXX/2vHLkw6+NvDKW2jypWbHpjQuj4UMcqQWXHERJhVGKikolT06G3bcKe4fi7w==}
 
@@ -4701,16 +4693,6 @@ packages:
   rrweb-cssom@0.8.0:
     resolution: {integrity: sha512-guoltQEx+9aMf2gDZ0s62EcV8lsXR+0w8915TC3ITdn2YueuNjdAYh/levpU9nFaoChh9RUS5ZdQMrKfVEN9tw==}
 
-  runed@0.23.4:
-    resolution: {integrity: sha512-9q8oUiBYeXIDLWNK5DfCWlkL0EW3oGbk845VdKlPeia28l751VpfesaB/+7pI6rnbx1I6rqoZ2fZxptOJLxILA==}
-    peerDependencies:
-      svelte: ^5.7.0
-
-  runed@0.25.0:
-    resolution: {integrity: sha512-7+ma4AG9FT2sWQEA0Egf6mb7PBT2vHyuHail1ie8ropfSjvZGtEAx8YTmUjv/APCsdRRxEVvArNjALk9zFSOrg==}
-    peerDependencies:
-      svelte: ^5.7.0
-
   runed@0.35.1:
     resolution: {integrity: sha512-2F4Q/FZzbeJTFdIS/PuOoPRSm92sA2LhzTnv6FXhCoENb3huf5+fDuNOg1LNvGOouy3u/225qxmuJvcV3IZK5Q==}
     peerDependencies:
@@ -4928,12 +4910,6 @@ packages:
     engines: {node: '>=18', pnpm: '>=8.7.0'}
     peerDependencies:
       svelte: ^5.30.2
-
-  svelte-toolbelt@0.7.1:
-    resolution: {integrity: sha512-HcBOcR17Vx9bjaOceUvxkY3nGmbBmCBBbuWLLEWO6jtmWH8f/QoWmbyUfQZrpDINH39en1b8mptfPQT9VKQ1xQ==}
-    engines: {node: '>=18', pnpm: '>=8.7.0'}
-    peerDependencies:
-      svelte: ^5.0.0
 
   svelte@5.55.5:
     resolution: {integrity: sha512-2uCs/LZ9us+AktdzYJM8OcxQ8qnPS1kpaO7syGT/MgO+6Qr1Ybl+TqPq+97u7PHqmmMlye5ZkoyXONy5mjjAbw==}
@@ -9319,12 +9295,6 @@ snapshots:
     dependencies:
       obliterator: 2.0.5
 
-  mode-watcher@1.1.0(svelte@5.55.5(@typescript-eslint/types@8.59.4)):
-    dependencies:
-      runed: 0.25.0(svelte@5.55.5(@typescript-eslint/types@8.59.4))
-      svelte: 5.55.5(@typescript-eslint/types@8.59.4)
-      svelte-toolbelt: 0.7.1(svelte@5.55.5(@typescript-eslint/types@8.59.4))
-
   module-details-from-path@1.0.4: {}
 
   mri@1.2.0: {}
@@ -9765,16 +9735,6 @@ snapshots:
 
   rrweb-cssom@0.8.0: {}
 
-  runed@0.23.4(svelte@5.55.5(@typescript-eslint/types@8.59.4)):
-    dependencies:
-      esm-env: 1.2.2
-      svelte: 5.55.5(@typescript-eslint/types@8.59.4)
-
-  runed@0.25.0(svelte@5.55.5(@typescript-eslint/types@8.59.4)):
-    dependencies:
-      esm-env: 1.2.2
-      svelte: 5.55.5(@typescript-eslint/types@8.59.4)
-
   runed@0.35.1(@sveltejs/kit@2.59.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@7.1.1(svelte@5.55.5(@typescript-eslint/types@8.59.4))(vite@8.0.10(@types/node@25.6.0)(esbuild@0.27.7)(terser@5.47.1)(tsx@4.21.0)))(svelte@5.55.5(@typescript-eslint/types@8.59.4))(typescript@5.9.3)(vite@8.0.10(@types/node@25.6.0)(esbuild@0.27.7)(terser@5.47.1)(tsx@4.21.0)))(svelte@5.55.5(@typescript-eslint/types@8.59.4)):
     dependencies:
       dequal: 2.0.3
@@ -10037,13 +9997,6 @@ snapshots:
       svelte: 5.55.5(@typescript-eslint/types@8.59.4)
     transitivePeerDependencies:
       - '@sveltejs/kit'
-
-  svelte-toolbelt@0.7.1(svelte@5.55.5(@typescript-eslint/types@8.59.4)):
-    dependencies:
-      clsx: 2.1.1
-      runed: 0.23.4(svelte@5.55.5(@typescript-eslint/types@8.59.4))
-      style-to-object: 1.0.14
-      svelte: 5.55.5(@typescript-eslint/types@8.59.4)
 
   svelte@5.55.5(@typescript-eslint/types@8.59.4):
     dependencies:

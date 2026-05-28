@@ -606,10 +606,18 @@ export const systemBanners = pgTable(
 // `updated_at` is server-stamped (the mutator's clock-of-record) so
 // the daemon's LISTEN handler can dedup duplicate notifications.
 
+// FRI-124: theme columns are NULLable; the dashboard's resolver treats
+// NULL as "user hasn't picked for this slot yet" and falls back to a
+// built-in default. The daemon's LISTEN handler ignores these columns —
+// theme state is dashboard-only and is not synced into config.json.
 export const settings = pgTable("settings", {
   id: text("id").primaryKey(),
   model: text("model"),
   watchdogRefork: boolean("watchdog_refork"),
+  themeKind: text("theme_kind"),
+  themePaletteSingle: text("theme_palette_single"),
+  themePaletteLight: text("theme_palette_light"),
+  themePaletteDark: text("theme_palette_dark"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
 

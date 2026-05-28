@@ -11,14 +11,15 @@ import {
   Settings,
   Sun,
   Moon,
-  MonitorCog,
+  Monitor,
 } from "lucide-svelte";
 import type { AgentInfo } from "$lib/stores/chat.svelte";
 import { agentIconFor } from "$lib/util/agent-icon";
+import { PALETTES, type PaletteName } from "$lib/theme/palettes";
+import type { ThemeKind } from "$lib/stores/theme.svelte";
 import type { RecentEntry } from "./store.svelte";
 
 type Icon = typeof Sun;
-export type Mode = "light" | "dark" | "system";
 
 export interface PaletteItem {
   kind: "page" | "agent" | "setting";
@@ -74,23 +75,47 @@ const NAV_SPECS: readonly NavSpec[] = [
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
-interface SettingSpec {
+/** FRI-124: ⌘K Theme entries are a flat list — one "Sync with system"
+ *  toggle + one entry per palette. Picking the toggle sets the user
+ *  back to Sync mode preserving slot picks; picking a palette switches
+ *  to Single mode + that palette. Each palette's icon comes from its
+ *  intrinsic kind (Sun for light-kind palettes; Moon for dark-kind). */
+type ThemePaletteAction = { type: "palette"; palette: PaletteName };
+type ThemeSyncAction = { type: "sync" };
+type ThemeAction = ThemePaletteAction | ThemeSyncAction;
+
+interface ThemeSpec {
   id: string;
   label: string;
   icon: Icon;
-  mode: Mode;
+  action: ThemeAction;
 }
 
-const SETTING_SPECS: readonly SettingSpec[] = [
-  { id: "theme.light", label: "Theme: Light", icon: Sun, mode: "light" },
-  { id: "theme.dark", label: "Theme: Dark", icon: Moon, mode: "dark" },
-  {
-    id: "theme.system",
-    label: "Theme: Follow system",
-    icon: MonitorCog,
-    mode: "system",
-  },
-];
+function iconForPalette(name: PaletteName): Icon {
+  return PALETTES[name]?.kind === "dark" ? Moon : Sun;
+}
+
+function displayPaletteName(name: PaletteName): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function themeSpecs(): readonly ThemeSpec[] {
+  const palettes = Object.keys(PALETTES) as PaletteName[];
+  return [
+    {
+      id: "theme.sync",
+      label: "Theme: Sync with system",
+      icon: Monitor,
+      action: { type: "sync" },
+    },
+    ...palettes.map<ThemeSpec>((name) => ({
+      id: `theme.palette.${name}`,
+      label: `Theme: ${displayPaletteName(name)}`,
+      icon: iconForPalette(name),
+      action: { type: "palette", palette: name },
+    })),
+  ];
+}
 
 function ageMs(a: AgentInfo): number {
   const t = a.updatedAt ?? a.createdAt;
@@ -192,15 +217,30 @@ function buildAgentItems(agents: readonly AgentInfo[], currentPath: string): Pal
   });
 }
 
-function buildSettingItems(userMode: Mode, onSetMode: (m: Mode) => void): PaletteItem[] {
-  return SETTING_SPECS.map((s) => ({
-    kind: "setting" as const,
-    id: s.id,
-    label: s.label,
-    icon: s.icon,
-    action: () => onSetMode(s.mode),
-    current: s.mode === userMode,
-  }));
+function buildSettingItems(
+  themeKind: ThemeKind,
+  activePalette: PaletteName,
+  onSetSync: () => void,
+  onSetPalette: (name: PaletteName) => void,
+): PaletteItem[] {
+  return themeSpecs().map((s) => {
+    const isCurrent =
+      s.action.type === "sync" ? themeKind === "sync" : s.action.palette === activePalette;
+    return {
+      kind: "setting" as const,
+      id: s.id,
+      label: s.label,
+      icon: s.icon,
+      action:
+        s.action.type === "sync"
+          ? onSetSync
+          : (
+              (palette) => () =>
+                onSetPalette(palette)
+            )(s.action.palette),
+      current: isCurrent,
+    };
+  });
 }
 
 function buildHighlight(
@@ -283,17 +323,29 @@ export interface AssembleOpts {
   isChat: boolean;
   query: string;
   recents: readonly RecentEntry[];
-  userMode: Mode;
+  themeKind: ThemeKind;
+  activePalette: PaletteName;
   currentPath: string;
-  onSetMode: (m: Mode) => void;
+  onSetSync: () => void;
+  onSetPalette: (name: PaletteName) => void;
 }
 
 export function assembleSections(opts: AssembleOpts): PaletteSection[] {
-  const { agents, isChat, query, recents, userMode, currentPath, onSetMode } = opts;
+  const {
+    agents,
+    isChat,
+    query,
+    recents,
+    themeKind,
+    activePalette,
+    currentPath,
+    onSetSync,
+    onSetPalette,
+  } = opts;
 
   const navItems = buildNavItems(currentPath);
   const agentItems = buildAgentItems(agents, currentPath);
-  const settingItems = buildSettingItems(userMode, onSetMode);
+  const settingItems = buildSettingItems(themeKind, activePalette, onSetSync, onSetPalette);
 
   const trimmed = query.trim();
   const out: PaletteSection[] = [];
