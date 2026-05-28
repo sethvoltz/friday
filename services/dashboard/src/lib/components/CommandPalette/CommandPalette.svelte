@@ -3,14 +3,11 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { chat } from "$lib/stores/chat.svelte";
-  import { mode, userPrefersMode, setMode } from "mode-watcher";
+  import { theme } from "$lib/stores/theme.svelte";
+  import type { PaletteName } from "$lib/theme/palettes";
+  import { zeroSync } from "$lib/stores/zero.svelte";
   import { commandPalette } from "./store.svelte";
-  import {
-    assembleSections,
-    flattenSections,
-    type Mode,
-    type PaletteItem,
-  } from "./items";
+  import { assembleSections, flattenSections, type PaletteItem } from "./items";
 
   let inputEl: HTMLInputElement | undefined = $state();
   let listEl: HTMLDivElement | undefined = $state();
@@ -21,7 +18,15 @@
     currentPath === "/" || /^\/sessions\/[^/]+(\/[^/]+)?\/?$/.test(currentPath),
   );
 
-  const userMode = $derived<Mode>(userPrefersMode.current ?? "system");
+  function setSync(): void {
+    theme.setKind("sync");
+    zeroSync.updateSettings({ themeKind: "sync" });
+  }
+  function setPalette(name: PaletteName): void {
+    theme.setKind("single");
+    theme.setSinglePick(name);
+    zeroSync.updateSettings({ themeKind: "single", themePaletteSingle: name });
+  }
 
   const sections = $derived(
     assembleSections({
@@ -29,9 +34,11 @@
       isChat,
       query: commandPalette.query,
       recents: commandPalette.recents,
-      userMode,
+      themeKind: theme.kind,
+      activePalette: theme.activePalette,
       currentPath,
-      onSetMode: (m) => setMode(m),
+      onSetSync: setSync,
+      onSetPalette: setPalette,
     }),
   );
 
@@ -111,11 +118,6 @@
           : "var(--text-tertiary)";
   }
 
-  // Mode-watcher's `mode` getter is a $state proxy; surface it for the
-  // input's keyboard hint so the palette's chrome reads the resolved
-  // theme even when "Follow system" is selected.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _resolvedMode = $derived(mode.current);
 </script>
 
 {#if commandPalette.open}
