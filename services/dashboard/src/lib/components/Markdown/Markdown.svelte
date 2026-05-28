@@ -9,6 +9,7 @@
   } from "@friday/shared/markdown/streaming-mermaid";
   import { applyCodeHighlight } from "@friday/shared/markdown/code-highlight";
   import { theme } from "$lib/stores/theme.svelte";
+  import { mermaidThemeFor, shikiThemeFor } from "$lib/theme/palettes";
   import "katex/dist/katex.min.css";
 
   let {
@@ -74,21 +75,41 @@
   };
   let mermaidApi: MermaidApi | null = null;
 
-  // Shiki is dual-themed (Catppuccin Latte + Mocha) with defaultColor:false
-  // so every span carries both `--shiki-light` and `--shiki-dark` CSS
-  // variables. Theme switching is then pure CSS — no re-highlight on
-  // toggle, unlike mermaid which bakes colors into the SVG.
+  // FRI-124: Shiki is now single-theme per active palette. The previous
+  // dual-theme mechanism (`themes: { light, dark }, defaultColor: false`)
+  // emitted both --shiki-light and --shiki-dark CSS vars per token span
+  // and swapped via a `:global(.dark .markdown … span)` rule, giving
+  // zero re-highlight cost on toggle. That only worked for the binary
+  // light↔dark pair; the moment a palette wants its own shikiTheme
+  // (e.g. a future Nord palette), the dual mechanism breaks. Trade the
+  // optimization for uniform per-palette behavior: render once per
+  // palette change, ~30-80ms per Markdown bubble — acceptable since
+  // palette change is rare (sunset auto-switch in Sync mode, or a
+  // manual ⌘K pick).
   type ShikiApi = {
     codeToHtml: (
       code: string,
-      opts: {
-        lang: string;
-        themes: { light: string; dark: string };
-        defaultColor?: false;
-      },
+      opts: { lang: string; theme: string },
     ) => Promise<string>;
   };
   let shikiApi: ShikiApi | null = null;
+
+  /** Strip `data-shiki-rendered` markers + flatten innerHTML back to
+   *  source text so applyCodeHighlight re-tokenizes against the new
+   *  theme. Parallels invalidateRenderedMermaid for the code-block
+   *  path. */
+  function invalidateRenderedShiki(root: HTMLElement): number {
+    const nodes = root.querySelectorAll<HTMLElement>("code[data-shiki-rendered]");
+    for (const node of nodes) {
+      // `textContent` of a node containing token spans is the
+      // concatenated text — i.e., the source code. Reassigning it
+      // replaces all descendants with a single text node, so the next
+      // pass tokenizes the source text, not the existing token spans.
+      node.textContent = node.textContent;
+      node.removeAttribute("data-shiki-rendered");
+    }
+    return nodes.length;
+  }
 
   async function highlightCode() {
     if (!container) return;
@@ -100,13 +121,13 @@
       const mod = await import("shiki");
       shikiApi = mod as unknown as ShikiApi;
     }
+    const shikiTheme = shikiThemeFor(theme.activePalette);
     await applyCodeHighlight(container, {
       streaming,
       highlight: async (code, lang) => {
         const out = await shikiApi!.codeToHtml(code, {
           lang,
-          themes: { light: "catppuccin-latte", dark: "catppuccin-mocha" },
-          defaultColor: false,
+          theme: shikiTheme,
         });
         // Shiki returns a full <pre class="shiki"><code>…</code></pre>;
         // we only want the inner token spans so they slot into our own
@@ -156,7 +177,7 @@
     mermaidApi.initialize({
       startOnLoad: false,
       securityLevel: "strict",
-      theme: theme.current === "dark" ? "dark" : "default",
+      theme: mermaidThemeFor(theme.activePalette),
     });
     const toRun = await applyStreamingMermaidGate(container, {
       streaming,
@@ -173,25 +194,32 @@
     }
   }
 
-  // Track the theme-version this component has rendered against, so the
-  // effect can tell a "theme actually changed" tick apart from a normal
-  // re-render tick (html / streaming change). Only the former needs to
-  // invalidate existing diagrams; the latter would needlessly thrash.
-  let lastThemeVersion = -1;
+  // Track the active palette this component has rendered against, so
+  // the effect can tell a "palette actually changed" tick apart from a
+  // normal re-render tick (html / streaming change). Only the former
+  // needs to invalidate existing renders; the latter would needlessly
+  // thrash. FRI-124: the palette name (a string) replaces the previous
+  // numeric `theme.version`; equality compare still works as the
+  // change-detection signal.
+  let lastPalette = "";
 
   $effect(() => {
-    // Re-fire on html change, streaming flip, OR theme toggle. Microtask
-    // defer so `{@html}` has flushed before we walk the DOM. Streaming →
-    // complete transitions retry any block that was pending purely on
-    // the trailing gate. Theme toggles invalidate all rendered diagrams
-    // so the next renderMermaid pass re-runs them against the new theme.
+    // Re-fire on html change, streaming flip, OR palette change.
+    // Microtask defer so `{@html}` has flushed before we walk the DOM.
+    // Streaming → complete transitions retry any block that was
+    // pending purely on the trailing gate. Palette changes invalidate
+    // both rendered diagrams AND rendered code blocks so the next pass
+    // re-runs them against the new palette's mermaid + shiki themes.
     void html;
     void streaming;
-    const tv = theme.version;
-    const themeChanged = tv !== lastThemeVersion && lastThemeVersion !== -1;
-    lastThemeVersion = tv;
+    const palette = theme.activePalette;
+    const paletteChanged = palette !== lastPalette && lastPalette !== "";
+    lastPalette = palette;
     queueMicrotask(() => {
-      if (themeChanged && container) invalidateRenderedMermaid(container);
+      if (paletteChanged && container) {
+        invalidateRenderedMermaid(container);
+        invalidateRenderedShiki(container);
+      }
       void renderMermaid();
       void highlightCode();
       processLinks();
@@ -369,17 +397,10 @@
     white-space: pre;
     color: var(--text-primary);
   }
-  /* Shiki dual-theme: every token span carries both --shiki-light and
-     --shiki-dark CSS variables (via defaultColor:false). We pick which
-     one to use based on the dashboard theme attribute on <html>. No
-     re-highlight is needed on theme toggle. */
-  :global(.markdown .code-block pre > code span) {
-    color: var(--shiki-light);
-  }
-  :global(.dark .markdown .code-block pre > code span) {
-    color: var(--shiki-dark);
-  }
-
+  /* FRI-124: Shiki is single-theme now. Each token span carries its
+     own inline color from the active palette's shikiTheme; no CSS swap
+     needed. The dual-theme `:global(.dark .markdown … span)` rule
+     retired with this change. */
 
   /* Mermaid renders SVG into the pre.mermaid block; let it breathe. */
   :global(.markdown pre.mermaid) {

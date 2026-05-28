@@ -182,28 +182,6 @@ export class ThemeStore {
     this.#systemDark = dark;
   }
 
-  /* ---------------- Legacy shims (deprecated) ---------------- *
-   * The pre-FRI-124 store exposed `theme.current` (binary `'light' |
-   * 'dark'`) and `theme.version` (a counter that bumped on each
-   * `<html>` class mutation). A handful of consumers (Markdown.svelte's
-   * mermaid mount path, CommandPalette) still read these. The new
-   * store maps them as:
-   *   - `current` → `activeKind` (still binary; still useful for any
-   *      consumer that switches sub-themes on light/dark).
-   *   - `version` → `activePalette` (the bump-counter semantics
-   *      generalize to "anything that changes when the rendered
-   *      palette changes"; the palette name is monotonically
-   *      reactive). Type widens from `number` to `string`; existing
-   *      `!=` equality checks still work.
-   * Delete these once every consumer reads `activePalette` /
-   * `activeKind` directly. */
-  get current(): PaletteKind {
-    return this.activeKind;
-  }
-  get version(): string {
-    return this.activePalette;
-  }
-
   /** Bulk-apply a partial theme — used by both the localStorage hydrate
    *  and the Zero-row reconcile. Tolerates malformed values silently. */
   applyPartial(partial: Partial<Theme> | null): void {
