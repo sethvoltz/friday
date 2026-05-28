@@ -611,20 +611,13 @@
     // synchronously but the actual SDK unwind happens asynchronously, so
     // there's nothing useful to await here.
     chat.requestStop(id);
-    if (useZero()) {
-      // Phase 4.10: Zero-path uses the abortTurn mutator + fast-path
-      // for synchronous worker abort + durable cross-device signal.
-      // Fire-and-forget because the wrapper internally awaits both
-      // legs; we want the UI to flip immediately without blocking.
-      void zeroSync.abortTurn(id).catch(() => {
-        /* swallow — turn_done reconciles */
-      });
-      return;
-    }
-    void fetch(`/api/chat/turn/${id}/abort`, { method: "POST" }).catch(() => {
-      /* network errors are tolerable — the next turn_done will reconcile.
-         If it never lands, the user can refresh; we don't want a thrown
-         promise spamming the console. */
+    // FRI-123: legacy `useZero()`-false REST fallback was dead in
+    // browser (`useZero()` returns `browser`, always true client-side)
+    // — collapsed along with the retired
+    // `POST /api/chat/turn/<id>/abort` REST route. The abortTurn
+    // mutator + `/api/internal/abort-turn` fast-path is the only path.
+    void zeroSync.abortTurn(id).catch(() => {
+      /* swallow — turn_done reconciles */
     });
   }
 

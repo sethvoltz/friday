@@ -1468,6 +1468,41 @@ class ZeroSyncStore {
     return recoveredText;
   }
 
+  /**
+   * FRI-123: Resume an errored turn. Replaces the retired
+   * `POST /api/chat/turn/<id>/resume` REST path (ADR-024 retirement
+   * set). Looks up the user block for `turnId` in the local Zero
+   * snapshot, then dispatches the `resumeTurn` mutator which
+   * UPDATEs the row's status to 'resume_requested'. A Postgres
+   * trigger fires `NOTIFY friday_resume_requested`; the daemon's
+   * resume-listener reads the block, rebuilds the dispatch prompt,
+   * and dispatches under the SAME turnId (FRI-12 visual-grouping
+   * contract — the retry's content blocks group with the error
+   * bubble).
+   *
+   * No fast-path: the worker is idle by definition (the original
+   * turn errored out), so the NOTIFY round-trip is acceptable.
+   * Returns `true` if the mutator was dispatched, `false` if no
+   * matching user block was found in the local snapshot.
+   */
+  async resumeTurn(turnId: string): Promise<boolean> {
+    if (!this.#zero) return false;
+    const row = this.blocks.find(
+      (b) => b.turn_id === turnId && b.role === "user" && b.kind === "text",
+    );
+    if (!row) return false;
+    const result = this.#zero.mutate.resumeTurn({
+      id: row.id,
+      ts: Date.now(),
+    });
+    const outcome = await awaitMutatorServer(result);
+    if (typeof outcome === "object" && outcome.kind !== "success") {
+      console.warn(`resumeTurn mutator error: ${outcome.message}`);
+      return false;
+    }
+    return true;
+  }
+
   destroy(): void {
     if (this.#statsInterval) {
       clearInterval(this.#statsInterval);
@@ -1591,6 +1626,9 @@ if (browser) {
     // pattern as the binder: chat doesn't import zero.
     chat.setMarkReadFn((agent, blockId) => zeroSync.markRead(agent, blockId));
     chat.setSendMessageFn((args) => zeroSync.sendUserMessage(args));
+    // FRI-123: resumeTurn mutator wire-up (replaces the retired
+    // `POST /api/chat/turn/<id>/resume` REST path).
+    chat.setResumeTurnFn((turnId) => zeroSync.resumeTurn(turnId));
   });
 
   // Global error/rejection reporters — when a PWA on a phone can't

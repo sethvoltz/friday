@@ -3323,42 +3323,11 @@ describe("queued user blocks (pending-message feature)", () => {
   // for the daemon-side coverage; the dashboard rendering path is
   // covered by the existing Zero blocks tests in `zero.test.ts`.
 
-  it("cancelQueued POSTs DELETE and stuffs recovered text back via the chat-input bridge", async () => {
-    mockFetchWithTimeout.mockResolvedValueOnce(
-      makeResponse({ ok: true, turn_id: "turn-q4", text: "the draft" }),
-    );
-    const { ChatState } = await import("./chat.svelte");
-    const chat = new ChatState();
-    chat.focusedAgent = "friday";
-
-    // Seed a queued bubble locally.
-    chat.applyEvent({
-      v: 1,
-      type: "block_complete",
-      turn_id: "turn-q4",
-      agent: "friday",
-      block_id: "blk-q4",
-      message_id: null,
-      block_index: 0,
-      role: "user",
-      kind: "text",
-      source: "user_chat",
-      content_json: '{"text":"the draft"}',
-      status: "queued",
-      ts: 1000,
-      seq: 1,
-    } as Parameters<typeof chat.applyEvent>[0]);
-
-    const recovered = await chat.cancelQueued("turn-q4");
-    expect(recovered).toBe("the draft");
-    // Bubble is removed locally on success.
-    expect(chat.messages.find((m) => m.id === "user_turn-q4")).toBeUndefined();
-    // Endpoint shape: DELETE /api/chat/turn/<id>/queued
-    const call = mockFetchWithTimeout.mock.calls.find((c) =>
-      c[0].includes("/api/chat/turn/turn-q4/queued"),
-    );
-    expect(call).toBeDefined();
-  });
+  // FRI-123: the legacy `chat.cancelQueued()` REST-fallback method
+  // was deleted along with the retired `DELETE
+  // /api/chat/turn/<id>/queued` route. The Zero-path
+  // (`zeroSync.cancelQueued`) is the only path; coverage lives in
+  // dashboard zero.test.ts + the daemon's cancel-listener tests.
 
   it("reload-mid-queue: blocks with status='queued' from /blocks come back as status='queued' bubbles", async () => {
     mockFetchWithTimeout.mockResolvedValueOnce(
