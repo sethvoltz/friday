@@ -1,82 +1,19 @@
-/* === Friday Dashboard Theme === */
-
-/* Palette token blocks — one `.palette-<name>` block per entry in
- * `lib/theme/palettes.ts`. The active palette class on `<html>` is
- * stamped by the runtime store + the pre-paint FOUC script. Until the
- * runtime store rewrite lands (FRI-124 in progress), the legacy
- * `:root` + `.dark` blocks below remain authoritative; they are
- * deleted at the end of this work stream. */
+/* === Friday Dashboard styles ===
+ *
+ * Theming has two layers under FRI-124:
+ *   - `lib/theme/palettes.css` — per-palette token blocks
+ *     (`.palette-<name> { ... }`). The runtime store + FOUC script stamp
+ *     the active palette class on `<html>`; that class scopes the
+ *     ~49 color/shadow tokens (--bg-*, --text-*, --accent-*, --status-*,
+ *     --agent-*, --chart-*, --grid-*, --shadow-*, --chat-aurora-*,
+ *     --diff-*, --toggle-knob).
+ *   - This file — palette-independent design tokens (radii, fonts,
+ *     transitions) at `:root`, plus the dashboard's reset, layout
+ *     utilities, and component primitives. NO color tokens live here.
+ */
 @import "./lib/theme/palettes.css";
 
 :root {
-  /* Light mode — warm sunrise tones */
-  --bg-primary: #faf6f1;
-  --bg-secondary: #f3ece3;
-  --bg-tertiary: #ebe2d6;
-  --bg-card: #ffffff;
-  --bg-card-hover: #fffcf8;
-  --bg-code: #f7f0e8;
-  --bg-input: #ffffff;
-  --header-float-bg: rgba(255, 251, 245, 0.55);
-
-  --text-primary: #2c2418;
-  --text-secondary: #6b5d4f;
-  --text-tertiary: #9c8b7a;
-  --text-inverse: #faf6f1;
-
-  --border-primary: #e0d5c7;
-  --border-subtle: #ece4d8;
-  --border-focus: #c4956a;
-
-  --accent-primary: #c4956a;
-  --accent-secondary: #d4a87a;
-  --accent-muted: #e8d5c0;
-  --accent-glow: rgba(196, 149, 106, 0.15);
-
-  --status-ok: #5a8a5e;
-  --status-ok-bg: #e8f2e9;
-  --status-warn: #b8860b;
-  --status-warn-bg: #fef8e7;
-  --status-error: #b54a4a;
-  --status-error-bg: #fbe9e9;
-
-  /* Friday "thinking" palette — drives the aurora animation around the
-     chat input while a turn is in flight. Light/dark are the same hues,
-     re-saturated so each mode reads against its own background without
-     overwhelming the surrounding chrome. */
-  --friday-blue: #6b8ee3;
-  --friday-purple: #9d6bd6;
-  --friday-pink: #d96b9d;
-
-  /* Per-agent-type tint. Drives the sidebar's Lucide glyph color so each
-     agent type reads as a distinct family at a glance. Orchestrator reuses
-     the warm amber that the original DraftingCompass landed on. */
-  --agent-orchestrator: #b45309;
-  --agent-helper: #0d9488;
-  --agent-builder: #2563eb;
-  --agent-scheduled: #7c3aed;
-  --agent-bare: #be185d;
-
-  --chart-1: #c4956a;
-  --chart-2: #8b6e4e;
-  --chart-3: #d4a87a;
-  --chart-4: #a67c52;
-  --chart-cache: #5a8a5e;
-  --chart-input: #8b6e4e;
-  --chart-input-cached: #c4a888;
-  --chart-output: #b8860b;
-
-  /* Activity grid levels — warm amber scale */
-  --grid-empty: #e0d5c7;
-  --grid-l1: #e0c9a8;
-  --grid-l2: #d4a87a;
-  --grid-l3: #b07840;
-  --grid-l4: #8b5e2e;
-
-  --shadow-sm: 0 1px 3px rgba(44, 36, 24, 0.06);
-  --shadow-md: 0 4px 12px rgba(44, 36, 24, 0.08);
-  --shadow-lg: 0 8px 24px rgba(44, 36, 24, 0.1);
-
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 16px;
@@ -86,73 +23,6 @@
 
   --transition-fast: 150ms ease;
   --transition-normal: 250ms ease;
-}
-
-.dark {
-  /* Dark mode — cool moody night */
-  --bg-primary: #0f1219;
-  --bg-secondary: #161b24;
-  --bg-tertiary: #1d2330;
-  --bg-card: #1a1f2b;
-  --bg-card-hover: #1f2536;
-  --bg-code: #141820;
-  --bg-input: #161b24;
-  --header-float-bg: rgba(20, 25, 35, 0.5);
-
-  --text-primary: #e2e6ef;
-  --text-secondary: #8b93a7;
-  --text-tertiary: #5c6478;
-  --text-inverse: #0f1219;
-
-  --border-primary: #2a3142;
-  --border-subtle: #222838;
-  --border-focus: #5b8edd;
-
-  --accent-primary: #5b8edd;
-  --accent-secondary: #4a7acc;
-  --accent-muted: #253652;
-  --accent-glow: rgba(91, 142, 221, 0.12);
-
-  --status-ok: #4eae58;
-  --status-ok-bg: #1a2e1d;
-  --status-warn: #e0a82e;
-  --status-warn-bg: #2e2610;
-  --status-error: #e05555;
-  --status-error-bg: #2e1515;
-
-  /* Brighter Friday hues for dark mode so the aurora is visible against
-     the deep blue background — same conceptual palette as light. */
-  --friday-blue: #7eb0ff;
-  --friday-purple: #b890ff;
-  --friday-pink: #ff8eb4;
-
-  /* Dark-mode agent-type tints — brighter so glyphs read against the deep
-     blue background. Same hue families as light mode. */
-  --agent-orchestrator: #fcd34d;
-  --agent-helper: #5eead4;
-  --agent-builder: #93c5fd;
-  --agent-scheduled: #c4b5fd;
-  --agent-bare: #f9a8d4;
-
-  --chart-1: #5b8edd;
-  --chart-2: #7ba4e8;
-  --chart-3: #4a7acc;
-  --chart-4: #3d6ab8;
-  --chart-cache: #4eae58;
-  --chart-input: #818cf8;
-  --chart-input-cached: #a5b4fc;
-  --chart-output: #f59e0b;
-
-  /* Activity grid levels — cool blue scale, high contrast */
-  --grid-empty: #1d2330;
-  --grid-l1: #0e3460;
-  --grid-l2: #1a60b0;
-  --grid-l3: #3b8edd;
-  --grid-l4: #7bb8f0;
-
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.3);
 }
 
 /* === Page shell utilities === */

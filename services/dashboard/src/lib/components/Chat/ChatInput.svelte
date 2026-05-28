@@ -1103,13 +1103,13 @@
     will-change: transform;
     background: conic-gradient(
       from var(--friday-rotate-outer),
-      var(--friday-blue) 0deg,
+      var(--chat-aurora-1) 0deg,
       transparent 80deg,
-      var(--friday-purple) 130deg,
+      var(--chat-aurora-2) 130deg,
       transparent 220deg,
-      var(--friday-pink) 260deg,
+      var(--chat-aurora-3) 260deg,
       transparent 330deg,
-      var(--friday-blue) 360deg
+      var(--chat-aurora-1) 360deg
     );
     animation: friday-rotate-outer 9s linear infinite;
   }
@@ -1124,8 +1124,8 @@
       animation: friday-pulse 2.4s ease-in-out infinite;
     }
     @keyframes friday-pulse {
-      0%, 100% { box-shadow: 0 0 0 1px var(--friday-blue); }
-      50% { box-shadow: 0 0 0 2px var(--friday-purple); }
+      0%, 100% { box-shadow: 0 0 0 1px var(--chat-aurora-1); }
+      50% { box-shadow: 0 0 0 2px var(--chat-aurora-2); }
     }
   }
   .drop-overlay {
