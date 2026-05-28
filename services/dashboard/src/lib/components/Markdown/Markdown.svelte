@@ -419,7 +419,7 @@
   }
 
   :global(.markdown a) {
-    color: var(--accent, #60a5fa);
+    color: var(--accent-primary);
     text-decoration: underline;
     text-underline-offset: 2px;
   }

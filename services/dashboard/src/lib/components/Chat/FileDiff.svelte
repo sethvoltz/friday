@@ -303,12 +303,12 @@
     min-height: 1.5em;
   }
   .diff-row.diff-removed {
-    background: color-mix(in srgb, #ef4444 15%, transparent);
-    color: #ef4444;
+    background: color-mix(in srgb, var(--diff-removed) 15%, transparent);
+    color: var(--diff-removed);
   }
   .diff-row.diff-added {
-    background: color-mix(in srgb, #22c55e 15%, transparent);
-    color: #22c55e;
+    background: color-mix(in srgb, var(--diff-added) 15%, transparent);
+    color: var(--diff-added);
   }
   .diff-row.diff-unchanged {
     background: var(--bg-code);

@@ -79,7 +79,7 @@
     position: fixed;
     inset: 0;
     z-index: 500;
-    background: rgba(8, 12, 20, 0.62);
+    background: rgba(0, 0, 0, 0.55);
     backdrop-filter: blur(12px) saturate(140%);
     display: flex;
     align-items: center;

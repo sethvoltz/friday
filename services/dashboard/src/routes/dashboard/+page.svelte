@@ -76,14 +76,20 @@
 
   const dailyCost = $derived(data.dailyCost);
   const models = $derived(data.models);
+  // FRI-124: categorical chart series — six per-palette hue-distinct
+  // slots, used to color the stacked cost bars by model. Previously this
+  // mixed --chart-1, --chart-cache (semantic, not categorical), and
+  // four hardcoded hexes; now consumes --chart-1..6 from palettes.css
+  // cleanly. --chart-cache stays in the catalog for `.cache-bar-read`
+  // (line 1071 of this file) — kept per reviewer correction.
   const modelColors = $derived.by(() => {
     const palette = [
-      "var(--chart-1, #60a5fa)",
-      "var(--chart-cache, #34d399)",
-      "#f472b6",
-      "#fbbf24",
-      "#a78bfa",
-      "#fb923c",
+      "var(--chart-1)",
+      "var(--chart-2)",
+      "var(--chart-3)",
+      "var(--chart-4)",
+      "var(--chart-5)",
+      "var(--chart-6)",
     ];
     const out: Record<string, string> = {};
     models.forEach((m, i) => {
@@ -372,7 +378,7 @@
         <span class="legend-item">
           <span
             class="legend-swatch"
-            style="background: var(--chart-input, #818cf8)"
+            style="background: var(--chart-input)"
           ></span>
           input
         </span>
@@ -380,7 +386,7 @@
           <span class="legend-item">
             <span
               class="legend-swatch"
-              style="background: var(--chart-input-cached, #a5b4fc)"
+              style="background: var(--chart-input-cached)"
             ></span>
             cached
           </span>
@@ -388,7 +394,7 @@
         <span class="legend-item">
           <span
             class="legend-swatch"
-            style="background: var(--chart-output, #f59e0b)"
+            style="background: var(--chart-output)"
           ></span>
           output
         </span>
@@ -433,7 +439,7 @@
                         (showCachedTokens
                           ? maxDailyTokens
                           : maxDailyTokensNoCached)) *
-                        100}%; background: var(--chart-input, #818cf8)"
+                        100}%; background: var(--chart-input)"
                     />
                     <Tooltip.Portal>
                       <Tooltip.Content class="segment-tooltip" sideOffset={6}>
@@ -450,7 +456,7 @@
                     <Tooltip.Trigger
                       class="bar-fill-segment"
                       style="width: {(day.inputCached / maxDailyTokens) *
-                        100}%; background: var(--chart-input-cached, #a5b4fc)"
+                        100}%; background: var(--chart-input-cached)"
                     />
                     <Tooltip.Portal>
                       <Tooltip.Content class="segment-tooltip" sideOffset={6}>
@@ -470,7 +476,7 @@
                         (showCachedTokens
                           ? maxDailyTokens
                           : maxDailyTokensNoCached)) *
-                        100}%; background: var(--chart-output, #f59e0b)"
+                        100}%; background: var(--chart-output)"
                     />
                     <Tooltip.Portal>
                       <Tooltip.Content class="segment-tooltip" sideOffset={6}>
@@ -875,7 +881,7 @@
     padding: 0.35rem 0.5rem;
     white-space: nowrap;
     z-index: 50;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-md);
   }
 
   :global(.segment-tooltip-label) {
