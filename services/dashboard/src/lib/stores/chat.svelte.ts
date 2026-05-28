@@ -3122,7 +3122,6 @@ export class ChatState {
   // queued → complete UPDATEs (and aborted DELETEs) on the blocks
   // table; `applyZeroBlocks` re-derives the message list via
   // `parseBlocks` which re-sorts by ts.
-
 }
 
 export const chat = new ChatState();

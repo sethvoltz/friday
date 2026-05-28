@@ -257,16 +257,16 @@ See ADR-016 for the original block-model rationale; ADR-024 for the in-memory-ac
 
 Two channels: **Zero WS** for settled state, **per-agent SSE** for live-turn deltas. Plus mutator HTTP for client-originated writes. See ADR-023 (sync) and ADR-024 (SSE narrowing).
 
-| Endpoint                           | Method  | Purpose                                                                                                                                                                   |
-| ---------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WS /zero`                         | WS      | Zero WebSocket, auth-gated by dashboard, reverse-proxied to `zero-cache`. Carries reactive query subscriptions, mutator submissions, and the bidirectional sync protocol. |
-| `POST /api/mutators`               | POST    | Zero `push-url`. Dashboard executes the named mutator (writes Postgres + optional sideband to daemon fast-path). Idempotent on Zero's `mutation_id`.                      |
-| `GET /api/events?agent=<name>`     | SSE     | Per-agent live-turn delta stream. Daemon replays the current in-flight turn from `turn_started` on (re)connect.                                                           |
-| `POST /api/internal/abort`         | POST    | Localhost-only fast-path for abort. Daemon sideband; dashboard mutator additionally writes `abort_requested` row.                                                         |
-| `POST /api/internal/mail-wakeup`   | POST    | Localhost-only fast-path for mail-bridge wake. Daemon-internal + dashboard sideband.                                                                                      |
-| `POST /api/internal/cancel-queued` | POST    | Localhost-only fast-path to splice `nextPrompts`. Dashboard sideband; durable mutator deletes the row.                                                                    |
-| `GET /api/agents/:name/blocks`     | GET     | Lazy fallback for blocks outside the client's sync window (>90 days, or agents archived >24h ago not yet fetched). Cursors: `before`/`after`/`around_ts`.                 |
-| `GET /api/health`                  | GET     | Daemon health probe for the connectivity widget.                                                                                                                          |
+| Endpoint                           | Method | Purpose                                                                                                                                                                   |
+| ---------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WS /zero`                         | WS     | Zero WebSocket, auth-gated by dashboard, reverse-proxied to `zero-cache`. Carries reactive query subscriptions, mutator submissions, and the bidirectional sync protocol. |
+| `POST /api/mutators`               | POST   | Zero `push-url`. Dashboard executes the named mutator (writes Postgres + optional sideband to daemon fast-path). Idempotent on Zero's `mutation_id`.                      |
+| `GET /api/events?agent=<name>`     | SSE    | Per-agent live-turn delta stream. Daemon replays the current in-flight turn from `turn_started` on (re)connect.                                                           |
+| `POST /api/internal/abort`         | POST   | Localhost-only fast-path for abort. Daemon sideband; dashboard mutator additionally writes `abort_requested` row.                                                         |
+| `POST /api/internal/mail-wakeup`   | POST   | Localhost-only fast-path for mail-bridge wake. Daemon-internal + dashboard sideband.                                                                                      |
+| `POST /api/internal/cancel-queued` | POST   | Localhost-only fast-path to splice `nextPrompts`. Dashboard sideband; durable mutator deletes the row.                                                                    |
+| `GET /api/agents/:name/blocks`     | GET    | Lazy fallback for blocks outside the client's sync window (>90 days, or agents archived >24h ago not yet fetched). Cursors: `before`/`after`/`around_ts`.                 |
+| `GET /api/health`                  | GET    | Daemon health probe for the connectivity widget.                                                                                                                          |
 
 The pre-sync `POST /api/chat/turn`, `POST /api/chat/turn/<id>/abort`, `DELETE /api/chat/turn/<id>/queued`, and `POST /api/chat/turn/<id>/resume` REST routes are fully retired (FRI-123 completed the ADR-024 retirement set). Clients call the equivalent mutators (`sendUserMessage`, `abortTurn`, `cancelQueued`, `resumeTurn`) via Zero; the daemon's LISTEN handlers dispatch.
 

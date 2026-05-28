@@ -12,12 +12,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import {
-  loadConfig,
-  normalizeModelConfig,
-  resolveDaemonPort,
-  schema,
-} from "@friday/shared";
+import { loadConfig, normalizeModelConfig, resolveDaemonPort, schema } from "@friday/shared";
 import { logger } from "../log.js";
 import { dispatchTurn, recordUserBlock } from "../agent/lifecycle.js";
 import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";

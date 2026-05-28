@@ -17,11 +17,7 @@
  * + the `DispatchIntent` union lives in `intent.ts`.
  */
 
-import {
-  composeSystemPrompt,
-  readPromptStack,
-  type AgentBaseKey,
-} from "@friday/shared";
+import { composeSystemPrompt, readPromptStack, type AgentBaseKey } from "@friday/shared";
 import { listPinnedForAgent } from "@friday/memory";
 
 /**

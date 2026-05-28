@@ -454,10 +454,10 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
       await deleteBlockById(block.blockId);
       continue;
     }
-    const { body: dispatchBody, systemPrompt: finalSystemPrompt } = await buildDispatchPrompt(
-      a,
-      { kind: "user_chat", userText: text },
-    );
+    const { body: dispatchBody, systemPrompt: finalSystemPrompt } = await buildDispatchPrompt(a, {
+      kind: "user_chat",
+      userText: text,
+    });
     const queuedCwd = await registry.workingDirectoryFor(a);
     try {
       dispatchTurn({
