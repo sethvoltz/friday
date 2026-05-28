@@ -1,5 +1,13 @@
 /* === Friday Dashboard Theme === */
 
+/* Palette token blocks — one `.palette-<name>` block per entry in
+ * `lib/theme/palettes.ts`. The active palette class on `<html>` is
+ * stamped by the runtime store + the pre-paint FOUC script. Until the
+ * runtime store rewrite lands (FRI-124 in progress), the legacy
+ * `:root` + `.dark` blocks below remain authoritative; they are
+ * deleted at the end of this work stream. */
+@import "./lib/theme/palettes.css";
+
 :root {
   /* Light mode — warm sunrise tones */
   --bg-primary: #faf6f1;
