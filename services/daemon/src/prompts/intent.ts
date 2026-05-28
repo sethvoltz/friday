@@ -34,7 +34,6 @@ export type DispatchIntent =
       kind: "user_chat";
       userText: string;
       skillMatch?: import("@friday/shared").SkillMatch;
-      attachments?: Array<{ sha256: string; filename: string; mime: string }>;
     }
   | { kind: "mail"; body: string; intentText: string }
   | { kind: "scheduled"; body: string; intentText: string }

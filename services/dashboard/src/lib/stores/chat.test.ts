@@ -6348,3 +6348,44 @@ describe("derived chat.messages: optimistic confirmation lifecycle", () => {
     expect(chat.messages.filter((m) => m.id === userBlockIdForTurn("turn-7"))).toHaveLength(1);
   });
 });
+
+describe("chat.resumeTurn (FRI-123)", () => {
+  it("calls the wired resumeTurnFn with the turnId and shows no toast on success", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    const fn = vi.fn(async () => true);
+    chat.setResumeTurnFn(fn);
+    const setToast = vi.spyOn(chat, "setToast");
+
+    await chat.resumeTurn("turn-resume-1");
+
+    expect(fn).toHaveBeenCalledWith("turn-resume-1");
+    expect(setToast).not.toHaveBeenCalled();
+  });
+
+  it("shows a 'Resume failed' toast when the resumeTurnFn returns false", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    const fn = vi.fn(async () => false);
+    chat.setResumeTurnFn(fn);
+    const setToast = vi.spyOn(chat, "setToast");
+
+    await chat.resumeTurn("turn-resume-2");
+
+    expect(fn).toHaveBeenCalledWith("turn-resume-2");
+    expect(setToast).toHaveBeenCalledWith("Resume failed.", "warn");
+  });
+
+  it("shows a 'Resume failed (Zero not ready)' toast when no resumeTurnFn is wired", async () => {
+    // Page-load race: user clicks Resume before zero.svelte.ts
+    // initialization has wired the callback. Surface the failure
+    // rather than silently no-op so the user knows to retry.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    const setToast = vi.spyOn(chat, "setToast");
+
+    await chat.resumeTurn("turn-resume-3");
+
+    expect(setToast).toHaveBeenCalledWith("Resume failed (Zero not ready).", "warn");
+  });
+});

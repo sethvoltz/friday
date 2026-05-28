@@ -98,7 +98,7 @@ auto_invoke: true # default true; built-ins set false
 
 - Send is **always visible**; it does not get replaced by Stop during in-flight turns. The daemon serializes prompts per agent (`nextPrompts` FIFO in `services/daemon/src/agent/lifecycle.ts`), so the user can type and queue a follow-up without waiting for the current turn to finish. Slash commands like `/restart` and `/scratch` ride a separate endpoint (`/api/commands`) and are never gated by an in-flight turn.
 - Stop appears **alongside Send, to the right of it**, only while a turn is in flight. Sequence: paperclip · textarea · Send · Stop.
-- `POST /api/chat/turn/<id>/abort` → daemon `AbortController.abort()`.
+- `zeroSync.abortTurn(turnId)` → `abortTurn` Zero mutator + the localhost `/api/internal/abort-turn` fast-path → daemon's `AbortController.abort()`. The legacy `POST /api/chat/turn/<id>/abort` REST route retired in FRI-123 (ADR-024 retirement set).
 - Aborts at next SDK iteration. Tool calls already in flight finish; no next step. Honest UI copy: _Stop prevents future steps. It can't undo a step already started._
 - Stop only cancels the running turn — anything sitting in `nextPrompts` after it stays queued and dispatches on the next idle window.
 
@@ -132,10 +132,10 @@ User messages render optimistically the moment Send fires. There are two distinc
 
 States:
 
-- `pending` — POSTed to `/api/chat/turn`, not yet acked. Optimistic bubble, sub-second window. Pinned to the bottom regardless of natural ts sort.
-- `failed` — POST returned 4xx; a retry / discard affordance appears next to the bubble (per-bubble retry, "discard one", "discard all").
-- `retrying` — POST returned 5xx / network failure and the send-queue is scheduling a backoff retry (up to 5 attempts).
-- `queued` — POST acked, daemon recorded the user block at `status='queued'` because the worker was mid-turn at the time. The bubble stays pinned to the bottom and shows an **X cancel affordance**: clicking X yanks the prompt out of `nextPrompts` (DELETE `/api/chat/turn/<id>/queued`), deletes the row, and prepends the recovered text back into the input bar with the caret parked at the end of the recovered text (separated from any in-progress draft by `\n\n`).
+- `pending` — `sendUserMessage` mutator dispatched; the daemon's `dispatch-listener` hasn't run yet (sub-second window). The block is at `status='pending'` in Postgres; Zero replicates it locally and the bubble renders optimistically. Pinned to the bottom regardless of natural ts sort.
+- `failed` — mutator returned an error; a retry / discard affordance appears next to the bubble (per-bubble retry, "discard one", "discard all").
+- `retrying` — mutator dispatch network failure; the Zero outbox is scheduling a backoff retry.
+- `queued` — `dispatch-listener` picked the row up but the worker was mid-turn, so the daemon UPDATEd the block to `status='queued'`. The bubble stays pinned to the bottom and shows an **X cancel affordance**: clicking X dispatches the `cancelQueued` Zero mutator (plus the localhost `/api/internal/cancel-queued` fast-path that splices `nextPrompts` synchronously), the cancel-listener deletes the row, and the recovered text is prepended into the input bar with the caret parked at the end of the recovered text (separated from any in-progress draft by `\n\n`). The legacy `DELETE /api/chat/turn/<id>/queued` REST route retired in FRI-123.
 - (dispatched) — the worker finally drains this prompt from `nextPrompts`. The daemon `UPDATE`s the block to `status='complete'` with a fresh `ts` (dispatch time) and emits a `block_meta_update` SSE event. The dashboard unpins the bubble and re-sorts it inline.
 
 The re-stamp is what makes the "natural timestamp" sort work: the POST-time `ts` would otherwise place the queued bubble above the still-streaming assistant blocks of the in-flight turn, which looks wrong.
