@@ -10,6 +10,11 @@
 packages/shared/drizzle/**
 pnpm-lock.yaml
 
+# Test golden fixtures — byte-exact snapshots produced by the test
+# itself (`JSON.stringify(t, null, 2)`). Prettier reformatting breaks
+# the round-trip; the tests pin formatting through the serializer.
+**/__golden__/**
+
 # SvelteKit-generated client artifacts
 services/dashboard/.svelte-kit/**
 services/dashboard/build/**
