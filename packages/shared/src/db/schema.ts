@@ -173,7 +173,7 @@ export const blocks = pgTable(
     kind: text("kind").notNull(), // text|thinking|tool_use|tool_result|error
     source: text("source"), // user_chat|mail|queue_inject|sdk|scratch|agent_spawn|schedule|refork_notice|dashboard-mutator
     contentJson: jsonb("content_json").notNull(),
-    status: text("status").notNull(), // pending|streaming|complete|aborted|error|queued|abort_requested|dispatched|cancel_requested
+    status: text("status").notNull(), // pending|streaming|complete|aborted|error|queued|abort_requested|dispatched|cancel_requested|resume_requested
     streaming: boolean("streaming").notNull().default(false),
     // ADR-023 mutator origin (for Zero idempotency cross-check + diagnostics).
     originMutationId: text("origin_mutation_id"),
@@ -196,7 +196,7 @@ export const blocks = pgTable(
     ),
     statusCheck: check(
       "blocks_status_check",
-      sql`${t.status} IN ('pending','streaming','complete','aborted','error','queued','abort_requested','dispatched','cancel_requested')`,
+      sql`${t.status} IN ('pending','streaming','complete','aborted','error','queued','abort_requested','dispatched','cancel_requested','resume_requested')`,
     ),
   }),
 );
@@ -706,6 +706,12 @@ export const LISTEN_CHANNELS = {
    *  nextPrompts synchronously; LISTEN-path performs the canonical
    *  row delete. */
   blockCancelRequested: "friday_block_canceled",
+  /** Blocks row UPDATEd to status='resume_requested' — the dashboard
+   *  resumeTurn mutator's signal that an errored turn's original user
+   *  prompt should be re-dispatched under the SAME turn_id (FRI-12
+   *  visual-grouping contract). The daemon's resume-listener reads the
+   *  block, validates, rebuilds the dispatch prompt, and dispatches. */
+  resumeRequested: "friday_resume_requested",
 } as const;
 
 export type ListenChannel = (typeof LISTEN_CHANNELS)[keyof typeof LISTEN_CHANNELS];

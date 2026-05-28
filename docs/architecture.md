@@ -257,23 +257,24 @@ See ADR-016 for the original block-model rationale; ADR-024 for the in-memory-ac
 
 Two channels: **Zero WS** for settled state, **per-agent SSE** for live-turn deltas. Plus mutator HTTP for client-originated writes. See ADR-023 (sync) and ADR-024 (SSE narrowing).
 
-| Endpoint                           | Method  | Purpose                                                                                                                                                                   |
-| ---------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WS /zero`                         | WS      | Zero WebSocket, auth-gated by dashboard, reverse-proxied to `zero-cache`. Carries reactive query subscriptions, mutator submissions, and the bidirectional sync protocol. |
-| `POST /api/mutators`               | POST    | Zero `push-url`. Dashboard executes the named mutator (writes Postgres + optional sideband to daemon fast-path). Idempotent on Zero's `mutation_id`.                      |
-| `GET /api/events?agent=<name>`     | SSE     | Per-agent live-turn delta stream. Daemon replays the current in-flight turn from `turn_started` on (re)connect.                                                           |
-| `POST /api/internal/abort`         | POST    | Localhost-only fast-path for abort. Daemon sideband; dashboard mutator additionally writes `abort_requested` row.                                                         |
-| `POST /api/internal/mail-wakeup`   | POST    | Localhost-only fast-path for mail-bridge wake. Daemon-internal + dashboard sideband.                                                                                      |
-| `POST /api/internal/cancel-queued` | POST    | Localhost-only fast-path to splice `nextPrompts`. Dashboard sideband; durable mutator deletes the row.                                                                    |
-| `GET /api/agents/:name/blocks`     | GET     | Lazy fallback for blocks outside the client's sync window (>90 days, or agents archived >24h ago not yet fetched). Cursors: `before`/`after`/`around_ts`.                 |
-| `GET /api/health`                  | GET     | Daemon health probe for the connectivity widget.                                                                                                                          |
-| Legacy REST                        | retired | The pre-sync `POST /api/chat/turn`, `POST /api/chat/turn/<id>/abort`, ticket/memory/schedule CRUD endpoints retire — clients call the equivalent mutators via Zero.       |
+| Endpoint                           | Method | Purpose                                                                                                                                                                   |
+| ---------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WS /zero`                         | WS     | Zero WebSocket, auth-gated by dashboard, reverse-proxied to `zero-cache`. Carries reactive query subscriptions, mutator submissions, and the bidirectional sync protocol. |
+| `POST /api/mutators`               | POST   | Zero `push-url`. Dashboard executes the named mutator (writes Postgres + optional sideband to daemon fast-path). Idempotent on Zero's `mutation_id`.                      |
+| `GET /api/events?agent=<name>`     | SSE    | Per-agent live-turn delta stream. Daemon replays the current in-flight turn from `turn_started` on (re)connect.                                                           |
+| `POST /api/internal/abort`         | POST   | Localhost-only fast-path for abort. Daemon sideband; dashboard mutator additionally writes `abort_requested` row.                                                         |
+| `POST /api/internal/mail-wakeup`   | POST   | Localhost-only fast-path for mail-bridge wake. Daemon-internal + dashboard sideband.                                                                                      |
+| `POST /api/internal/cancel-queued` | POST   | Localhost-only fast-path to splice `nextPrompts`. Dashboard sideband; durable mutator deletes the row.                                                                    |
+| `GET /api/agents/:name/blocks`     | GET    | Lazy fallback for blocks outside the client's sync window (>90 days, or agents archived >24h ago not yet fetched). Cursors: `before`/`after`/`around_ts`.                 |
+| `GET /api/health`                  | GET    | Daemon health probe for the connectivity widget.                                                                                                                          |
+
+The pre-sync `POST /api/chat/turn`, `POST /api/chat/turn/<id>/abort`, `DELETE /api/chat/turn/<id>/queued`, and `POST /api/chat/turn/<id>/resume` REST routes are fully retired (FRI-123 completed the ADR-024 retirement set). Clients call the equivalent mutators (`sendUserMessage`, `abortTurn`, `cancelQueued`, `resumeTurn`) via Zero; the daemon's LISTEN handlers dispatch.
 
 ### Mutator catalog (initial)
 
 Defined in `packages/shared/src/sync/mutators.ts` (new). Each is implemented in the dashboard's `/api/mutators` handler and runs against Postgres with the user's auth context. Detailed table in ADR-023.
 
-Side-effect-bearing mutators (daemon LISTENs and dispatches): `sendUserMessage`, `abortTurn`, `cancelQueued`, `archiveAgent`, `createMemoryEntry`, `updateMemoryEntry`, `deleteMemoryEntry`, `createSchedule`, `updateSchedule`, `deleteSchedule`, `installApp`, `uninstallApp`, `reloadApp`, `forgetDevice`.
+Side-effect-bearing mutators (daemon LISTENs and dispatches): `sendUserMessage`, `abortTurn`, `cancelQueued`, `resumeTurn`, `archiveAgent`, `createMemoryEntry`, `updateMemoryEntry`, `deleteMemoryEntry`, `createSchedule`, `updateSchedule`, `deleteSchedule`, `installApp`, `uninstallApp`, `reloadApp`, `forgetDevice`.
 
 Pure-data mutators (no daemon side effect): `createTicket`, `updateTicket`, `addTicketComment`, `addTicketRelation`, `linkTicketExternal`, `markRead`, `reportClientStats`, `updateSettings`.
 
@@ -339,11 +340,16 @@ Then per turn:
 
 See ADR-005 for the full rationale.
 
-### Universal auto-recall wrapping (FIX_FORWARD 2.5)
+### Prompt assembly entry points (FRI-123)
 
-`wrapWithRecall(intentText, body, intent)` from `services/daemon/src/agent/recall.ts` is the single chokepoint for `<memory-context>` injection. Every dispatch site prepends the block: `/api/chat/turn`, mail-bridge dispatch, scheduler spawn, scratch seeding, `/api/agents` POST, recoverAgents mail drain. Recall is best-effort — a memory-store error never blocks the turn.
+`services/daemon/src/prompts/` owns dispatch-prompt assembly behind two narrow entry points:
 
-The `intent` arg (`user_chat | mail | scheduled | scratch | agent_spawn`) is presently unused by the recall builder: every caller produces a uniform `<memory-context>` block. It's captured as a forward-compat hook for an eventual memory MCP that filters by intent (e.g. a mail-derived turn pulls recall tagged for cross-agent context, a scheduled fire pulls recall tagged for the schedule's purpose). The wire shape of `<memory-context>` stays uniform across that change — the filter happens upstream of block construction.
+- `buildSystemPrompt(agentRow)` — base system prompt only. Reads the prompt stack, renders pinned facts, and threads both through `composeSystemPrompt` from `@friday/shared`. Used by the watchdog refork notice path (no intent → no hooks fire).
+- `buildDispatchPrompt(agentRow, intent: DispatchIntent)` — full pipeline. Wraps `buildSystemPrompt` (or accepts a `baseSystemPromptOverride` for the `agent_spawn` path, where the `agent:bootstrap` hook augments the base) then runs `runHooks("before_prompt_build", ctx)` over the result. Two hooks subscribe: `memoryRecallHook` (in `prompts/`) appends the `<memory-context>` block; `skillContextHook` (in `hooks/`, skill concern) appends the `<skill-context>` block and emits `allowedToolsOverride`.
+
+The `DispatchIntent` discriminated union (`kind: user_chat | mail | scheduled | scratch | agent_spawn`) is the single shape callers pass — replacing the wide positional-arg seam (`intentText`, `intentTag`, `body`, `agentType`, `baseSystemPrompt`, `skillMatch`) that was duplicated across 10 call sites. Callers pre-format wrapper strings (mail headers, schedule state-stitching); the prompts module does not import mail/scheduler schemas.
+
+Memory recall is best-effort — a memory-store error never blocks the turn (`safeRecall` returns `""` on any error, including the 3-second listener-readiness timeout). The intent tag is captured as a forward-compat hook for an eventual memory MCP that filters recall by intent.
 
 ## Agent lifecycle
 
@@ -366,7 +372,7 @@ Pre-FRI-61 the non-builder, non-app branch fell through to `process.cwd()`. That
 
 ### Pinned-memory injection in the prompt stack (FRI-61)
 
-Any agent can own pinned memories: `composeSystemPrompt(stack, identity?, pinnedFacts?)` accepts an optional `pinnedFacts` string and renders it as a `# Pinned facts` section between Identity and `agents/<type>.md`. The daemon's `renderPinnedFacts(agentName)` queries `listPinnedForAgent(agentName)` (owner-filtered + tag-filtered + `status='ready'`) and assembles the block. Threaded into every `composeSystemPrompt` call site so every agent sees its own pins on every turn.
+Any agent can own pinned memories: `composeSystemPrompt(stack, identity?, pinnedFacts?)` accepts an optional `pinnedFacts` string and renders it as a `# Pinned facts` section between Identity and `agents/<type>.md`. The renderer lives at `services/daemon/src/prompts/build-system-prompt.ts` (FRI-123 folded the previous standalone `agent/pinned-facts.ts` into the system-prompt builder); it queries `listPinnedForAgent(agentName)` (owner-filtered + tag-filtered + `status='ready'`) and assembles the block. `buildSystemPrompt` is the single chokepoint, called once per dispatch via `buildDispatchPrompt`.
 
 The agent-friday repo path is a memory owned by `friday` with tag `pinned` (and a secondary `repo` tag for human filtering). Builders that need repo awareness use the same primitive — a memory owned by the builder, tagged `pinned` for always-inject, or with searchable name tokens for FTS recall. No daemon-side special-case per fact-type.
 

@@ -12,18 +12,10 @@
  */
 
 import { randomUUID } from "node:crypto";
-import {
-  composeSystemPrompt,
-  loadConfig,
-  normalizeModelConfig,
-  readPromptStack,
-  resolveDaemonPort,
-  schema,
-} from "@friday/shared";
+import { loadConfig, normalizeModelConfig, resolveDaemonPort, schema } from "@friday/shared";
 import { logger } from "../log.js";
 import { dispatchTurn, recordUserBlock } from "../agent/lifecycle.js";
-import { renderPinnedFacts } from "../agent/pinned-facts.js";
-import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
+import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
 import * as registry from "../agent/registry.js";
 import {
   buildFirstTurnWithState,
@@ -47,16 +39,6 @@ export async function spawnScheduledRun(
     });
   }
 
-  const stack = readPromptStack("scheduled", []);
-  const pinnedFacts = await renderPinnedFacts(scheduleRow.name);
-  const systemPrompt = composeSystemPrompt(
-    stack,
-    {
-      agentName: scheduleRow.name,
-      agentType: "scheduled",
-    },
-    pinnedFacts,
-  );
   const modelCfg = normalizeModelConfig(cfg.model);
 
   // Use the raw task prompt as recall intent — the first-turn template
@@ -66,13 +48,10 @@ export async function spawnScheduledRun(
     scheduleName: scheduleRow.name,
     taskPrompt: scheduleRow.taskPrompt,
   });
-  const { body: prompt, systemPrompt: dispatchSystemPrompt } = await composeDispatchPrompt({
-    intentText: scheduleRow.taskPrompt,
-    intentTag: "scheduled",
-    body: promptBody,
-    agentType: "scheduled",
-    baseSystemPrompt: systemPrompt,
-  });
+  const { body: prompt, systemPrompt: dispatchSystemPrompt } = await buildDispatchPrompt(
+    { name: scheduleRow.name, type: "scheduled" },
+    { kind: "scheduled", body: promptBody, intentText: scheduleRow.taskPrompt },
+  );
 
   const turnId = `t_${randomUUID()}`;
 

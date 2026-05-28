@@ -13,16 +13,14 @@
  */
 
 import {
-  composeSystemPrompt,
   loadConfig,
   normalizeModelConfig,
-  readPromptStack,
   resolveDaemonPort,
   watchdogThresholdMs,
 } from "@friday/shared";
 import { randomUUID } from "node:crypto";
 import { logger } from "../log.js";
-import { renderPinnedFacts } from "./pinned-facts.js";
+import { buildSystemPrompt } from "../prompts/build-system-prompt.js";
 import * as registry from "./registry.js";
 import {
   dispatchTurn,
@@ -131,17 +129,7 @@ async function refork(agentName: string): Promise<void> {
   const drained = await forceWorkerRefork(agentName);
 
   const cfg = loadConfig();
-  const stack = readPromptStack(a.type, []);
-  const pinnedFacts = await renderPinnedFacts(agentName);
-  const systemPrompt = composeSystemPrompt(
-    stack,
-    {
-      agentName,
-      agentType: a.type,
-      parentName: "parentName" in a ? (a.parentName ?? undefined) : undefined,
-    },
-    pinnedFacts,
-  );
+  const { systemPrompt } = await buildSystemPrompt(a);
   const modelCfg = normalizeModelConfig(cfg.model);
 
   // Empty prompt — the worker will idle and drain mail on its own (the long-

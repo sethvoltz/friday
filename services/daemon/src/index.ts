@@ -30,9 +30,8 @@ import {
 import { sandboxExecAvailable } from "./agent/sandbox-profile.js";
 import { startInvariantAuditor, stopInvariantAuditor } from "./agent/invariants.js";
 import { startMailPruner, stopMailPruner } from "./services/mail-prune.js";
-import { composeDispatchPrompt } from "./agent/compose-dispatch-prompt.js";
+import { buildDispatchPrompt } from "./prompts/build-dispatch-prompt.js";
 import "./hooks/register.js";
-import { renderPinnedFacts } from "./agent/pinned-facts.js";
 import { agentCwdPinV1 } from "./state-migrations/agent-cwd-pin-v1.js";
 import { runStateMigrations } from "./state-migrations/runner.js";
 import { closeTicketForArchive } from "./services/ticket-close.js";
@@ -44,7 +43,7 @@ import { runArchiveBootScan, startArchiveListener } from "./agent/archive-listen
 import { runCancelBootScan, startCancelListener } from "./agent/cancel-listener.js";
 import { runAbortBootScan, startAbortListener } from "./agent/abort-listener.js";
 import { runDispatchBootScan, startDispatchListener } from "./agent/dispatch-listener.js";
-import { composeSystemPrompt, readPromptStack } from "@friday/shared";
+import { runResumeBootScan, startResumeListener } from "./agent/resume-listener.js";
 import { deleteBlockById, inbox as mailInbox, listQueuedUserBlocks } from "@friday/shared/services";
 import { buildMailPrompt } from "./comms/mail-prompt.js";
 import { randomUUID } from "node:crypto";
@@ -155,6 +154,16 @@ async function main(): Promise<void> {
   await runDispatchBootScan();
   const dispatchListener = await startDispatchListener();
 
+  // FRI-123: open the long-lived LISTEN connection for
+  // `friday_resume_requested`. Boot-recovery scan picks up any
+  // resume-requested rows that landed during daemon downtime, then
+  // re-dispatches the failed turn under its original turn_id (FRI-12
+  // visual-grouping contract). Runs BEFORE `recoverQueuedTurns()`
+  // so a resume that landed mid-shutdown re-fires on the existing
+  // turnId before queue replay.
+  await runResumeBootScan();
+  const resumeListener = await startResumeListener();
+
   // Boot recovery
   startMailBridge(); // subscribe before replayPending so recovered mail fires through the bridge
   await replayPending();
@@ -258,6 +267,9 @@ async function main(): Promise<void> {
     void dispatchListener.stop().catch(() => {
       /* shutdown best-effort; the process is about to exit */
     });
+    void resumeListener.stop().catch(() => {
+      /* shutdown best-effort; the process is about to exit */
+    });
     clearHealth();
     flushDb();
     server.close(() => process.exit(0));
@@ -337,17 +349,6 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
     if (a.type !== "scheduled" && a.status !== "archived") {
       const pending = await mailInbox(a.name);
       if (pending.length > 0) {
-        const stack = readPromptStack(a.type, []);
-        const pinnedFacts = await renderPinnedFacts(a.name);
-        const systemPrompt = composeSystemPrompt(
-          stack,
-          {
-            agentName: a.name,
-            agentType: a.type,
-            parentName: "parentName" in a ? (a.parentName ?? undefined) : undefined,
-          },
-          pinnedFacts,
-        );
         const modelCfg = normalizeModelConfig(cfg.model);
         const turnId = `t_${randomUUID()}`;
         logger.log("info", "agent.recovery.drain-mail", {
@@ -357,14 +358,10 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
         try {
           const intent = pending.map((m) => m.body).join("\n\n");
           const mailPrompt = buildMailPrompt(a.name, pending);
-          const { body: dispatchBody, systemPrompt: finalSystemPrompt } =
-            await composeDispatchPrompt({
-              intentText: intent,
-              intentTag: "mail",
-              body: mailPrompt,
-              agentType: a.type,
-              baseSystemPrompt: systemPrompt,
-            });
+          const { body: dispatchBody, systemPrompt: finalSystemPrompt } = await buildDispatchPrompt(
+            a,
+            { kind: "mail", body: mailPrompt, intentText: intent },
+          );
           dispatchTurn({
             agentName: a.name,
             options: {
@@ -457,23 +454,9 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
       await deleteBlockById(block.blockId);
       continue;
     }
-    const stack = readPromptStack(a.type, []);
-    const pinnedFacts = await renderPinnedFacts(a.name);
-    const systemPrompt = composeSystemPrompt(
-      stack,
-      {
-        agentName: a.name,
-        agentType: a.type,
-        parentName: "parentName" in a ? (a.parentName ?? undefined) : undefined,
-      },
-      pinnedFacts,
-    );
-    const { body: dispatchBody, systemPrompt: finalSystemPrompt } = await composeDispatchPrompt({
-      intentText: text,
-      intentTag: "user_chat",
-      body: text,
-      agentType: a.type,
-      baseSystemPrompt: systemPrompt,
+    const { body: dispatchBody, systemPrompt: finalSystemPrompt } = await buildDispatchPrompt(a, {
+      kind: "user_chat",
+      userText: text,
     });
     const queuedCwd = await registry.workingDirectoryFor(a);
     try {

@@ -1,6 +1,14 @@
+/**
+ * FRI-123: tests for `memoryRecallHook` + `safeRecall` (moved from
+ * `services/daemon/src/agent/recall.test.ts`). The middle
+ * dispatch-composer integration describe block from the old file
+ * is rewritten to call `runHooks("before_prompt_build", ctx)`
+ * directly — those tests pin the hook composition surface and
+ * shouldn't drag in a test-DB.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { __resetHooksForTest, registerHook } from "@friday/shared";
-import { composeDispatchPrompt } from "./compose-dispatch-prompt.js";
+import { __resetHooksForTest, registerHook, runHooks } from "@friday/shared";
 
 beforeEach(() => {
   __resetHooksForTest();
@@ -17,7 +25,7 @@ describe("memory recall hook (FRI-89)", () => {
     vi.doMock("@friday/memory", () => ({
       buildAutoRecallBlock: async () => "",
     }));
-    const { memoryRecallHook } = await import("../hooks/memory-recall-hook.js");
+    const { memoryRecallHook } = await import("./memory-recall-hook.js");
 
     const result = await memoryRecallHook({
       intent: "query",
@@ -34,7 +42,7 @@ describe("memory recall hook (FRI-89)", () => {
     vi.doMock("@friday/memory", () => ({
       buildAutoRecallBlock: async () => "<memory-context>\nrelevant fact\n</memory-context>",
     }));
-    const { memoryRecallHook } = await import("../hooks/memory-recall-hook.js");
+    const { memoryRecallHook } = await import("./memory-recall-hook.js");
 
     const result = await memoryRecallHook({
       intent: "query",
@@ -55,7 +63,7 @@ describe("memory recall hook (FRI-89)", () => {
         throw new Error("memory backend down");
       },
     }));
-    const { memoryRecallHook } = await import("../hooks/memory-recall-hook.js");
+    const { memoryRecallHook } = await import("./memory-recall-hook.js");
 
     const result = await memoryRecallHook({
       intent: "query",
@@ -66,41 +74,43 @@ describe("memory recall hook (FRI-89)", () => {
 
     expect(result).toBeUndefined();
   });
+});
 
-  it("composeDispatchPrompt routes appendSystemPrompt into systemPrompt and leaves body untouched", async () => {
+describe("before_prompt_build hook composition surface (FRI-123)", () => {
+  // Rewritten per the FRI-123 ticket's BLOCKED-ON-OWNER default
+  // (Option A): assert the `runHooks` composition surface directly
+  // — the entry point that USES this composition lives in
+  // `prompts/build-dispatch-prompt.ts` and its golden tests cover
+  // the end-to-end stitching.
+
+  it("runHooks returns the appendSystemPrompt payload that handlers produce", async () => {
     registerHook("before_prompt_build", async () => ({
       appendSystemPrompt: "<memory-context>\nrelevant fact\n</memory-context>",
     }));
 
-    const { body, systemPrompt } = await composeDispatchPrompt({
-      intentText: "user query",
+    const results = await runHooks("before_prompt_build", {
+      intent: "user query",
       intentTag: "user_chat",
       body: "actual user body",
       agentType: "orchestrator",
-      baseSystemPrompt: "you are a helpful agent",
     });
 
-    expect(body).toBe("actual user body");
-    expect(body).not.toContain("<memory-context>");
-    expect(systemPrompt).toBe(
-      "you are a helpful agent\n\n<memory-context>\nrelevant fact\n</memory-context>",
-    );
+    expect(results).toEqual([
+      { appendSystemPrompt: "<memory-context>\nrelevant fact\n</memory-context>" },
+    ]);
   });
 
-  it("composeDispatchPrompt leaves body and systemPrompt unchanged when no handlers are registered", async () => {
-    const { body, systemPrompt } = await composeDispatchPrompt({
-      intentText: "x",
+  it("runHooks returns [] when no handlers are registered", async () => {
+    const results = await runHooks("before_prompt_build", {
+      intent: "x",
       intentTag: "scheduled",
       body: "body",
       agentType: "scheduled",
-      baseSystemPrompt: "base",
     });
-
-    expect(body).toBe("body");
-    expect(systemPrompt).toBe("base");
+    expect(results).toEqual([]);
   });
 
-  it("composeDispatchPrompt threads skillMatch through hook ctx", async () => {
+  it("threads skillMatch through ctx to the handler", async () => {
     let seenName: string | undefined;
     let seenUserText: string | undefined;
     registerHook("before_prompt_build", async (ctx) => {
@@ -108,12 +118,11 @@ describe("memory recall hook (FRI-89)", () => {
       seenUserText = ctx.skillMatch?.userText;
     });
 
-    await composeDispatchPrompt({
-      intentText: "args",
+    await runHooks("before_prompt_build", {
+      intent: "args",
       intentTag: "user_chat",
       body: "args",
       agentType: "orchestrator",
-      baseSystemPrompt: "base",
       skillMatch: {
         skill: {
           name: "skill-foo",
@@ -133,20 +142,19 @@ describe("memory recall hook (FRI-89)", () => {
     expect(seenUserText).toBe("args");
   });
 
-  it("composeDispatchPrompt propagates allowedToolsOverride from handler results", async () => {
+  it("propagates allowedToolsOverride in handler results", async () => {
     registerHook("before_prompt_build", async () => ({
       allowedToolsOverride: ["Read", "Grep"],
     }));
 
-    const { allowedToolsOverride } = await composeDispatchPrompt({
-      intentText: "x",
+    const results = await runHooks("before_prompt_build", {
+      intent: "x",
       intentTag: "user_chat",
       body: "x",
       agentType: "orchestrator",
-      baseSystemPrompt: "base",
     });
 
-    expect(allowedToolsOverride).toEqual(["Read", "Grep"]);
+    expect(results).toEqual([{ allowedToolsOverride: ["Read", "Grep"] }]);
   });
 });
 
@@ -166,7 +174,7 @@ describe("safeRecall listener-ready gate (33sq)", () => {
     const logMock = vi.fn();
     vi.doMock("../log.js", () => ({ logger: { log: logMock } }));
 
-    const { safeRecall } = await import("./recall.js");
+    const { safeRecall } = await import("./memory-recall-hook.js");
 
     const resultPromise = safeRecall("test query", "user_chat");
     await vi.advanceTimersByTimeAsync(3_001);
@@ -187,7 +195,7 @@ describe("safeRecall listener-ready gate (33sq)", () => {
       buildAutoRecallBlock: async () => "<memory-context>test</memory-context>",
     }));
 
-    const { safeRecall } = await import("./recall.js");
+    const { safeRecall } = await import("./memory-recall-hook.js");
     const result = await safeRecall("test query", "user_chat");
 
     expect(result).toBe("<memory-context>test</memory-context>");
@@ -205,7 +213,7 @@ describe("safeRecall listener-ready gate (33sq)", () => {
     const logMock = vi.fn();
     vi.doMock("../log.js", () => ({ logger: { log: logMock } }));
 
-    const { safeRecall } = await import("./recall.js");
+    const { safeRecall } = await import("./memory-recall-hook.js");
     const result = await safeRecall("test query", "mail");
 
     expect(result).toBe("");

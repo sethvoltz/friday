@@ -530,6 +530,52 @@ export interface AbortTurnArgs {
   ts: number;
 }
 
+/* ---------------- FRI-123: resumeTurn ---------------- */
+// Mirror of `abortTurn` for the "Resume" CTA on an error bubble
+// (FRI-12). Replaces the retired `POST /api/chat/turn/<id>/resume`
+// REST path (ADR-024 retirement set). UPDATEs the user block's
+// status from 'complete' to 'resume_requested'; the Postgres trigger
+// (migration 0023) fires `NOTIFY friday_resume_requested`; the
+// daemon's resume-listener handler:
+//   1. Reads the user block by id and validates (agent exists; no
+//      live turn for this agent; user block content_json parses).
+//   2. Calls `buildDispatchPrompt(agentRow, {kind:'user_chat',
+//      userText})` to rebuild the prompt under the FRI-12
+//      visual-grouping contract.
+//   3. Calls `dispatchTurn` re-using the existing `turnId` so the
+//      retry's content blocks visually group with the original
+//      error bubble in the chat.
+//   4. UPDATEs the row back to status='complete' (the natural
+//      terminal state for a user block) so the trigger doesn't
+//      re-fire on subsequent unrelated UPDATEs.
+//
+// Row-state pre/post:
+//   - Pre: blocks WHERE id = args.id AND status='complete' (user
+//     block, written by `sendUserMessage` at status='complete').
+//   - Post (mutator): status='resume_requested'.
+//   - Post (daemon flip-back): status='complete'.
+//
+// Idempotency contract:
+//   - Mutator: re-running on a row already at 'resume_requested' is
+//     a no-op (UPDATE with same value); re-running on a row at
+//     'complete' (handler-flipped-back) is a fresh signal that
+//     fires the trigger again — the resume-listener bails when a
+//     turn is already in flight for the agent, so the eventual
+//     side effect is at most one re-dispatch.
+//
+// Unlike `abortTurn` there is NO fast-path: resume is not a
+// real-time interruption (the worker is already idle by definition,
+// since the original turn errored out), so the NOTIFY round-trip
+// is acceptable.
+
+export interface ResumeTurnArgs {
+  /** Text-UUID PK of the user block whose errored turn is being
+   *  resumed. The dashboard reads this from its Zero cache before
+   *  calling the mutator. */
+  id: string;
+  ts: number;
+}
+
 /* ---------------- Phase 4.11: sendUserMessage ---------------- */
 // The largest mutator. INSERTs a new user-chat block at
 // status='pending'; the Postgres trigger fires NOTIFY
@@ -1035,6 +1081,21 @@ export const createMutators = () =>
       await tx.mutate.blocks.update({
         id: args.id,
         status: "abort_requested",
+      });
+    },
+    resumeTurn: async (tx: FridayTx, args: ResumeTurnArgs): Promise<void> => {
+      // FRI-123: UPDATE blocks.status='resume_requested'. The Postgres
+      // trigger (migration 0023) fires NOTIFY `friday_resume_requested`;
+      // the daemon's resume-listener reads the user block, rebuilds the
+      // dispatch prompt, calls `dispatchTurn` re-using the existing
+      // turnId (FRI-12 visual-grouping contract), and flips the row
+      // back to 'complete'.
+      //
+      // Touches only `status` — agent_name / turn_id / content_json
+      // must be preserved so the listener can read them.
+      await tx.mutate.blocks.update({
+        id: args.id,
+        status: "resume_requested",
       });
     },
     updateSettings: async (tx: FridayTx, args: UpdateSettingsArgs): Promise<void> => {

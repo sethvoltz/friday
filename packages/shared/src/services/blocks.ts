@@ -209,23 +209,6 @@ export async function listQueuedUserBlocks(): Promise<BlockRow[]> {
   return rows.map(rowFromDb);
 }
 
-/** Look up a user block (role='user', source='user_chat') by its turn id. */
-export async function getUserChatBlockByTurnId(turnId: string): Promise<BlockRow | null> {
-  const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.blocks)
-    .where(
-      and(
-        eq(schema.blocks.turnId, turnId),
-        eq(schema.blocks.role, "user"),
-        eq(schema.blocks.source, "user_chat"),
-      ),
-    )
-    .limit(1);
-  return rows[0] ? rowFromDb(rows[0]) : null;
-}
-
 /**
  * Look up a text or thinking block by its natural key
  * `(session_id, message_id, kind)`. See the long comment on the previous
@@ -352,17 +335,6 @@ export async function listBlocks(opts: ListBlocksOpts = {}): Promise<BlockRow[]>
           .from(schema.blocks)
           .orderBy(...order)
           .limit(limit);
-  return rows.map(rowFromDb);
-}
-
-/** All blocks belonging to a given turn, chronologically (ts, id). */
-export async function listBlocksByTurn(turnId: string): Promise<BlockRow[]> {
-  const db = getDb();
-  const rows = await db
-    .select()
-    .from(schema.blocks)
-    .where(eq(schema.blocks.turnId, turnId))
-    .orderBy(asc(schema.blocks.ts), asc(schema.blocks.id));
   return rows.map(rowFromDb);
 }
 

@@ -799,6 +799,14 @@ export class ChatState {
   ): void {
     this.sendMessageFn = fn;
   }
+  /** FRI-123: wired from `zero.svelte.ts` to avoid a circular import.
+   *  Calls `zeroSync.resumeTurn(turnId)` which dispatches the
+   *  resumeTurn mutator (replaces the retired
+   *  `POST /api/chat/turn/<id>/resume` REST path). */
+  private resumeTurnFn: ((turnId: string) => Promise<boolean>) | null = null;
+  setResumeTurnFn(fn: (turnId: string) => Promise<boolean>): void {
+    this.resumeTurnFn = fn;
+  }
   /**
    * Per-agent memo of the latest block_id we've already passed to
    * `markRead`. Suppresses the redundant write that would otherwise
@@ -1699,34 +1707,27 @@ export class ChatState {
   }
 
   /**
-   * Re-dispatch the original prompt under the SAME turn_id so the retry's
-   * blocks visually group with the error bubble. Hits the dedicated
-   * `/api/chat/turn/:turnId/resume` endpoint; the daemon looks up the
-   * original user block server-side (so we don't have to send the text
-   * back over the wire) and reuses dispatchTurn.
+   * FRI-123: re-dispatch the original prompt under the SAME turn_id
+   * so the retry's blocks visually group with the error bubble.
+   * Dispatches the `resumeTurn` Zero mutator (via the wired
+   * `resumeTurnFn` from `zero.svelte.ts`); the daemon's
+   * resume-listener reads the user block, rebuilds the prompt, and
+   * re-dispatches under the same turnId.
+   *
+   * Replaces the retired
+   * `POST /api/chat/turn/<id>/resume` REST path (ADR-024 retirement set).
    */
   async resumeTurn(turnId: string): Promise<void> {
-    try {
-      const r = await fetchWithTimeout(`/api/chat/turn/${encodeURIComponent(turnId)}/resume`, {
-        method: "POST",
-        timeoutMs: 10_000,
-      });
-      if (!r.ok) {
-        let msg = `Resume failed (${r.status})`;
-        try {
-          const body = (await r.json()) as { message?: string; error?: string };
-          if (body.message) msg = `Resume failed: ${body.message}`;
-          else if (body.error) msg = `Resume failed: ${body.error}`;
-        } catch {
-          // ignore — keep the generic message
-        }
-        this.setToast(msg, "warn");
-      }
-      // Success path: the daemon's `turn_started` SSE will arrive next
-      // and populate inflightTurnId. Nothing else to do here.
-    } catch {
-      this.setToast("Resume failed (network).", "warn");
+    if (!this.resumeTurnFn) {
+      this.setToast("Resume failed (Zero not ready).", "warn");
+      return;
     }
+    const ok = await this.resumeTurnFn(turnId);
+    if (!ok) {
+      this.setToast("Resume failed.", "warn");
+    }
+    // Success path: the daemon's `turn_started` SSE will arrive next
+    // and populate inflightTurnId. Nothing else to do here.
   }
 
   /**
@@ -3121,34 +3122,6 @@ export class ChatState {
   // queued → complete UPDATEs (and aborted DELETEs) on the blocks
   // table; `applyZeroBlocks` re-derives the message list via
   // `parseBlocks` which re-sorts by ts.
-
-  /**
-   * Yank a queued user-chat turn out of the daemon's `nextPrompts` FIFO
-   * before the worker dispatches it. Returns the recovered prompt text so
-   * the caller (ChatInput's cancel-X handler) can stuff it back into the
-   * textarea. Removes the bubble locally on success; on failure leaves it
-   * in place so the user can try again or wait for the dispatch.
-   *
-   * 409 means the worker drained the queue between bubble render and
-   * click — treat that as "too late" and leave the bubble; the next
-   * turn_started event will flip it to streaming anyway.
-   */
-  async cancelQueued(turnId: string): Promise<string | null> {
-    try {
-      const r = await fetchWithTimeout(`/api/chat/turn/${turnId}/queued`, {
-        method: "DELETE",
-        timeoutMs: 5_000,
-      });
-      if (!r.ok) return null;
-      const data = (await r.json().catch(() => ({}))) as { text?: string };
-      this.#legacyMessages = this.#legacyMessages.filter(
-        (m) => m.turnId !== turnId || m.role !== "user",
-      );
-      return typeof data.text === "string" ? data.text : "";
-    } catch {
-      return null;
-    }
-  }
 }
 
 export const chat = new ChatState();

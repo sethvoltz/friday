@@ -3,7 +3,7 @@
   import { chat, type ChatMessage } from "$lib/stores/chat.svelte";
   import { chatInputBridge } from "$lib/stores/chat-input-bridge.svelte";
   import { clock } from "$lib/stores/clock.svelte";
-  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
+  import { zeroSync } from "$lib/stores/zero.svelte";
   import { computeGroupingMeta } from "$lib/util/chat-grouping";
   import {
     formatAbsoluteTooltip,
@@ -41,14 +41,13 @@
    */
   async function cancelDaemonQueued(turnId: string | undefined) {
     if (!turnId) return;
-    // Phase 4.9: Zero-path dispatches the cancelQueued mutator alongside
-    // the daemon fast-path so the cancel propagates across devices. The
-    // wrapper handles fallback to the local Zero snapshot for the
-    // recovered text when the daemon is unreachable. Legacy REST path
-    // stays in place for sessions where useZero() is false.
-    const recovered = useZero()
-      ? await zeroSync.cancelQueued(turnId)
-      : await chat.cancelQueued(turnId);
+    // FRI-123: legacy REST fallback (`chat.cancelQueued`) deleted
+    // along with the retired `DELETE /api/chat/turn/<id>/queued`
+    // route — the fallback only fired when `useZero()` returned
+    // false, which is never true in the browser. The cancelQueued
+    // mutator + `/api/internal/cancel-queued` fast-path is the only
+    // path.
+    const recovered = await zeroSync.cancelQueued(turnId);
     if (recovered === null) return;
     if (recovered) chatInputBridge.prepend(recovered);
   }

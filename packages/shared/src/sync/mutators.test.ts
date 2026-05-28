@@ -35,6 +35,7 @@ import {
   type ReloadAppArgs,
   type ReportClientStatsArgs,
   type ResumeScheduleArgs,
+  type ResumeTurnArgs,
   type SendUserMessageArgs,
   type TriggerScheduleArgs,
   type UninstallAppArgs,
@@ -1495,6 +1496,46 @@ describe("abortTurn", () => {
     const mutators = createMutators();
     const { tx, blocksUpdates } = makeMockTx();
     await mutators.abortTurn(tx, { id: "blk-abort-keep", ts: 9_999_999_999_999 });
+    const u = blocksUpdates[0] as Record<string, unknown>;
+    expect(u.ts).toBeUndefined();
+  });
+});
+
+describe("resumeTurn (FRI-123)", () => {
+  it("UPDATEs blocks.status to 'resume_requested' keyed by the user block id", async () => {
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    const args: ResumeTurnArgs = { id: "blk-resume-7777", ts: 1_700_000_000_000 };
+    await mutators.resumeTurn(tx, args);
+    expect(blocksUpdates).toEqual([{ id: "blk-resume-7777", status: "resume_requested" }]);
+  });
+
+  it("is idempotent — re-running with same args produces identical writes", async () => {
+    // The daemon's resume-listener may have flipped the row back to
+    // 'complete' between Zero outbox retries — re-running the mutator
+    // re-fires the trigger but the listener's no-in-flight-turn guard
+    // bails when the previous re-dispatch is still running.
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    const args: ResumeTurnArgs = { id: "blk-resume-id", ts: 1 };
+    await mutators.resumeTurn(tx, args);
+    await mutators.resumeTurn(tx, args);
+    expect(blocksUpdates).toHaveLength(2);
+    expect(blocksUpdates[0]).toEqual(blocksUpdates[1]);
+  });
+
+  it("touches only id + status — content_json / turn_id / agent_name preserved for the listener to read", async () => {
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    await mutators.resumeTurn(tx, { id: "blk-resume-99", ts: 1 });
+    const u = blocksUpdates[0] as Record<string, unknown>;
+    expect(Object.keys(u).sort()).toEqual(["id", "status"].sort());
+  });
+
+  it("does not write args.ts — the user block's ts is daemon-owned", async () => {
+    const mutators = createMutators();
+    const { tx, blocksUpdates } = makeMockTx();
+    await mutators.resumeTurn(tx, { id: "blk-resume-keep", ts: 9_999_999_999_999 });
     const u = blocksUpdates[0] as Record<string, unknown>;
     expect(u.ts).toBeUndefined();
   });

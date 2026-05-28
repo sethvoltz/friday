@@ -15,13 +15,7 @@
  *  driven by the cron tick, and unknown recipients are simply logged.
  */
 
-import {
-  composeSystemPrompt,
-  loadConfig,
-  normalizeModelConfig,
-  readPromptStack,
-  resolveDaemonPort,
-} from "@friday/shared";
+import { loadConfig, normalizeModelConfig, resolveDaemonPort } from "@friday/shared";
 import { inbox, mailBus, type MailRow } from "@friday/shared/services";
 import { logger } from "../log.js";
 import {
@@ -31,8 +25,7 @@ import {
   wakeAgent,
   wakeAgentCritical,
 } from "../agent/lifecycle.js";
-import { composeDispatchPrompt } from "../agent/compose-dispatch-prompt.js";
-import { renderPinnedFacts } from "../agent/pinned-facts.js";
+import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
 import * as registry from "../agent/registry.js";
 import { randomUUID } from "node:crypto";
 import { buildMailPrompt } from "./mail-prompt.js";
@@ -117,17 +110,6 @@ async function maybeSpawnFromMail(agentName: string): Promise<void> {
   if (pending.length === 0) return;
 
   const cfg = loadConfig();
-  const stack = readPromptStack(agentRow.type, []);
-  const pinnedFacts = await renderPinnedFacts(agentRow.name);
-  const systemPrompt = composeSystemPrompt(
-    stack,
-    {
-      agentName: agentRow.name,
-      agentType: agentRow.type,
-      parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
-    },
-    pinnedFacts,
-  );
   const modelCfg = normalizeModelConfig(cfg.model);
   const turnId = `t_${randomUUID()}`;
 
@@ -136,13 +118,10 @@ async function maybeSpawnFromMail(agentName: string): Promise<void> {
   // surrounding mail-listing prose.
   const intent = pending.map((m) => m.body).join("\n\n");
   const mailPrompt = buildMailPrompt(agentName, pending);
-  const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } = await composeDispatchPrompt({
-    intentText: intent,
-    intentTag: "mail",
-    body: mailPrompt,
-    agentType: agentRow.type,
-    baseSystemPrompt: systemPrompt,
-  });
+  const { body: wrappedPrompt, systemPrompt: dispatchSystemPrompt } = await buildDispatchPrompt(
+    agentRow,
+    { kind: "mail", body: mailPrompt, intentText: intent },
+  );
   const workingDirectory = await registry.workingDirectoryFor(agentRow);
   dispatchTurn({
     agentName,

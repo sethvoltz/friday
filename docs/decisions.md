@@ -680,6 +680,17 @@ The today's per-device localStorage-only badge state is retired; cross-device ba
 - **Should the in-memory accumulator survive a daemon refork?** Today the worker fork can be relaunched; the parent's `liveTurns` registry holds enough state to resume. With per-turn SSE replay, the answer might be "no — let the JSONL recovery + Zero sync do the rebuild." Leaving as an implementation discovery.
 - **Per-device vs. global read cursors.** Mirrored from ADR-023's open question. Same default (per-device for v1).
 
+### Consequences (FRI-123, 2026-05-28)
+
+The four "Legacy REST" routes enumerated for retirement under this ADR are now all deleted:
+
+- `POST /api/chat/turn` — replaced by the `sendUserMessage` mutator + the daemon's `dispatch-listener`.
+- `POST /api/chat/turn/<id>/abort` — replaced by the `abortTurn` mutator + the daemon's `abort-listener` (plus the localhost `/api/internal/abort-turn` fast-path for synchronous worker-side cancel).
+- `DELETE /api/chat/turn/<id>/queued` — replaced by the `cancelQueued` mutator + the daemon's `cancel-listener` (plus the localhost `/api/internal/cancel-queued` fast-path for synchronous `nextPrompts` splice).
+- `POST /api/chat/turn/<id>/resume` — replaced by the `resumeTurn` mutator + the new daemon `resume-listener` (FRI-123). Mirrors the `abortTurn` row-as-intent pattern: the mutator UPDATEs the user block to `status='resume_requested'`, a Postgres trigger (`0023_block_resume_notify_trigger.sql`) fires `NOTIFY friday_resume_requested`, and the listener rebuilds the dispatch prompt via `buildDispatchPrompt(kind:'user_chat')` and re-dispatches under the same turnId (FRI-12 visual-grouping contract).
+
+After this change there are five LISTEN-handler files (`dispatch-`, `abort-`, `cancel-`, `archive-`, `resume-listener.ts`) sharing near-identical reconnect-loop + boot-scan boilerplate. Candidate 01 of the `/improve-codebase-architecture` review tracks consolidation as a follow-up; explicitly out of scope for FRI-123. The dashboard's `services/dashboard/src/routes/api/chat/turn/` proxy tree is gone entirely.
+
 ## ADR-025 — Memory full-text search stays REST while Zero lacks generated-column replication
 
 **Status:** Accepted, 2026-05-20.
@@ -850,13 +861,13 @@ The orchestrator + non-builder agents ran with the daemon's `process.cwd()`. The
 
 - `listPinnedForAgent(agentName, tag = "pinned")` returns memory entries owned by `agentName` (filter on `created_by`), tagged with `tag` (jsonb `?` operator), `status='ready'`. Ordered by id for byte-stable prompt assembly.
 - `composeSystemPrompt(stack, identity?, pinnedFacts?)` accepts an optional `pinnedFacts` string and renders it as a `# Pinned facts` section between Identity and `agents/<type>.md`.
-- The daemon's `renderPinnedFacts(agentName)` queries `listPinnedForAgent` and renders the section. Threaded into every `composeSystemPrompt` call site so every agent sees its own pins on every turn.
+- The daemon's `buildSystemPrompt(agentRow)` (FRI-123, in `services/daemon/src/prompts/`) queries `listPinnedForAgent` internally and renders the section. It is the single chokepoint — `composeSystemPrompt` is no longer called directly from daemon code; it is reached only via `buildSystemPrompt` / `buildDispatchPrompt`.
 
 That's the entire mechanism. No daemon-side seeder per fact-type, no CLI subcommand per fact-type, no config field per fact-type. The agent-friday repo path is a memory owned by `friday` with tag `pinned` (and a secondary `repo` tag for human filtering). Any other always-inject fact uses the same shape — a builder's target-repo URL, a Linear team UUID, a kitchen-app manifest pointer — all are memories tagged `pinned`, owned by the relevant agent.
 
 Builders that need _contextual_ (FTS-recalled) repo awareness use the same memory store, just without the `pinned` tag — auto-recall (`packages/memory/src/auto-recall.ts`) surfaces them when the user message tokens match. Same store. Same query. Same code path.
 
-Architectural rule (checkable in review): any code touching `composeSystemPrompt`, `listPinnedForAgent`, or memory writes that's specific to a single fact-type is a violation.
+Architectural rule (checkable in review): any code touching `buildSystemPrompt`, `composeSystemPrompt`, `listPinnedForAgent`, or memory writes that's specific to a single fact-type is a violation.
 
 3. **State-migrations table.** New `_friday_state_migrations` table (`id TEXT PK`, `applied_at TIMESTAMPTZ`, `meta_json JSONB`) tracks imperative one-shot data/filesystem migrations, distinct from Drizzle's schema migrations. Runner uses a Postgres advisory lock; first consumer `agent-cwd-pin-v1` renames SDK JSONLs (and their `<sessionId>/tool-results/` sidecar dirs) from old encoded-cwd locations to the new per-agent-home encoded locations, EXDEV-falling-back to copy + unlink. Boot order: Drizzle migrations → state migrations → everything else. Versioned re-runs ship a new id (`*-v2`).
 

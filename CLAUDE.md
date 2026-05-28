@@ -50,6 +50,7 @@ packages/evolve              — Self-improvement pipeline
 packages/integrations/linear — Linear API integration (optional)
 services/daemon              — Headless API tier; owns Claude SDK + agent registry
   src/apps/                  — Friday Apps installer + boot reconcile (ADR-021)
+  src/prompts/               — Dispatch-prompt assembly (FRI-123): buildSystemPrompt / buildDispatchPrompt + DispatchIntent union + memoryRecallHook
 services/dashboard           — SvelteKit + Svelte 5; auth-gated public surface
 docs/                        — Documentation
 ```

@@ -31,21 +31,18 @@
 import { and, eq } from "drizzle-orm";
 import pgPkg from "pg";
 import {
-  composeSystemPrompt,
   getDb,
   getPool,
   LISTEN_CHANNELS,
   loadConfig,
   normalizeModelConfig,
-  readPromptStack,
   resolveDaemonPort,
   schema,
 } from "@friday/shared";
 import { getBlockById } from "@friday/shared/services";
 import * as registry from "./registry.js";
 import { dispatchTurn, peekLiveWorker } from "./lifecycle.js";
-import { renderPinnedFacts } from "./pinned-facts.js";
-import { composeDispatchPrompt } from "./compose-dispatch-prompt.js";
+import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
 import { matchSkillInvocation } from "../skills/match.js";
 import { logger } from "../log.js";
 
@@ -121,29 +118,15 @@ async function processPendingBlockRow(id: string): Promise<void> {
   const resumeSessionId = agentRow.sessionId ?? undefined;
 
   // Compose system prompt + skill detection + memory recall.
-  const stack = readPromptStack(agentRow.type, []);
-  const pinnedFacts = await renderPinnedFacts(agentRow.name);
-  const baseSystemPrompt = composeSystemPrompt(
-    stack,
-    {
-      agentName: agentRow.name,
-      agentType: agentRow.type,
-      parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
-    },
-    pinnedFacts,
-  );
   const skillMatch = matchSkillInvocation(userText, agentRow.type);
   const promptText = skillMatch ? skillMatch.userText : userText;
   const {
     body: wrappedPrompt,
     systemPrompt: dispatchSystemPrompt,
     allowedToolsOverride,
-  } = await composeDispatchPrompt({
-    intentText: promptText,
-    intentTag: "user_chat",
-    body: promptText,
-    agentType: agentRow.type,
-    baseSystemPrompt,
+  } = await buildDispatchPrompt(agentRow, {
+    kind: "user_chat",
+    userText: promptText,
     skillMatch: skillMatch ?? undefined,
   });
 
