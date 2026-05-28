@@ -80,7 +80,6 @@ async function insertUserBlock(blockId: string, status: string = "complete"): Pr
     streaming: false,
     originMutationId: null,
     ts: new Date(),
-    lastEventSeq: 0,
   });
 }
 
@@ -105,7 +104,6 @@ async function insertErrorBlock(forUserBlockId: string): Promise<void> {
     streaming: false,
     originMutationId: null,
     ts: new Date(),
-    lastEventSeq: 0,
   });
 }
 
@@ -130,7 +128,6 @@ async function insertUserBlockWithContent(
     streaming: false,
     originMutationId: null,
     ts: new Date(),
-    lastEventSeq: 0,
   });
 }
 
@@ -202,7 +199,6 @@ describe("Postgres trigger: friday_block_resume_notify_trigger", () => {
       await client.query("LISTEN friday_resume_requested");
 
       const db = getDb();
-      await db.update(schema.blocks).set({ lastEventSeq: 42 });
       await db.update(schema.blocks).set({ blockIndex: 1 });
 
       await new Promise((r) => setTimeout(r, 250));

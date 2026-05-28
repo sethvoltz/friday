@@ -176,6 +176,13 @@
 			"when": 1780010332028,
 			"tag": "0024_multi_palette_theming",
 			"breakpoints": true
+		},
+		{
+			"idx": 25,
+			"version": "7",
+			"when": 1780011660865,
+			"tag": "0025_drop_blocks_last_event_seq",
+			"breakpoints": true
 		}
 	]
 }

@@ -53,7 +53,6 @@ async function insertBlock(id: string, status: string): Promise<void> {
     streaming: false,
     originMutationId: null,
     ts: new Date(),
-    lastEventSeq: 0,
   });
 }
 

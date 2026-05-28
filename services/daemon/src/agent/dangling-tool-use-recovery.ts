@@ -180,7 +180,6 @@ export async function recoverDanglingToolUses(): Promise<void> {
           }),
           status: "complete",
           ts: tsBase + 1,
-          lastEventSeq: 0,
         });
         healedBlocks++;
       } catch (err) {

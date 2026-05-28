@@ -81,7 +81,6 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(evt!.source).toBe("user_chat");
     // FRI-125: ADR-004's row.last_event_seq peek-and-stamp dance
     // retired. The column is the sentinel `0` until C3 drops it.
-    expect(row!.lastEventSeq).toBe(0);
   });
 
   it("mail source publishes SSE and the row's seq matches the event seq", async () => {
@@ -126,7 +125,6 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     // retired; column drops in C3). seq is still meaningful — it
     // comes from the eventBus's published frame.
     expect(seq).toBeGreaterThan(0);
-    expect(row!.lastEventSeq).toBe(0);
   });
 
   it("mail-derived blocks include from_agent in content_json", async () => {
@@ -242,7 +240,6 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
       // retired the row.last_event_seq peek-and-stamp dance, so the
       // row's column is now the sentinel `0` until C3 drops it.
       expect(seq).toBeGreaterThan(0);
-      expect(row!.lastEventSeq).toBe(0);
       const evt = captured.find((e) => e.block_id === blockId);
       expect(evt?.type).toBe("block_complete");
     },
@@ -273,7 +270,5 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(r2.seq).toBeGreaterThan(r1.seq);
     // FRI-125: the row's last_event_seq column is the sentinel `0` (peek
     // dance retired; column drops in C3).
-    expect((await getBlockById(r1.blockId))!.lastEventSeq).toBe(0);
-    expect((await getBlockById(r2.blockId))!.lastEventSeq).toBe(0);
   });
 });

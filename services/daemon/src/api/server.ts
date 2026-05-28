@@ -550,7 +550,6 @@ async function handle(
       });
       return json(res, 200, {
         blocks: result.blocks,
-        last_event_seq: result.lastEventSeq,
       });
     } catch (err) {
       // FTS5 MATCH expressions can throw on syntactically invalid queries

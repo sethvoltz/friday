@@ -55,7 +55,6 @@ export interface BlockRow {
   status: string;
   /** Milliseconds since epoch. */
   ts: number;
-  lastEventSeq: number;
 }
 
 export interface InsertBlockInput {
@@ -73,7 +72,6 @@ export interface InsertBlockInput {
   status: BlockStatus;
   /** Milliseconds since epoch. */
   ts: number;
-  lastEventSeq: number;
 }
 
 function rowFromDb(r: typeof schema.blocks.$inferSelect): BlockRow {
@@ -92,7 +90,6 @@ function rowFromDb(r: typeof schema.blocks.$inferSelect): BlockRow {
       typeof r.contentJson === "string" ? r.contentJson : JSON.stringify(r.contentJson ?? null),
     status: r.status,
     ts: r.ts.getTime(),
-    lastEventSeq: r.lastEventSeq,
   };
 }
 
@@ -124,7 +121,6 @@ export async function insertBlock(input: InsertBlockInput): Promise<BlockRow> {
       contentJson: parsed,
       status: input.status,
       ts: new Date(input.ts),
-      lastEventSeq: input.lastEventSeq,
     })
     .returning();
   return rowFromDb(insertedRows[0]);
@@ -133,7 +129,6 @@ export async function insertBlock(input: InsertBlockInput): Promise<BlockRow> {
 export interface UpdateBlockPatch {
   contentJson?: string;
   status?: BlockStatus;
-  lastEventSeq?: number;
   /** Milliseconds since epoch. */
   ts?: number;
   /** Optional new index — defaults to leaving it unchanged. */
@@ -165,7 +160,6 @@ export async function updateBlock(
     }
   }
   if (patch.status !== undefined) updates.status = patch.status;
-  if (patch.lastEventSeq !== undefined) updates.lastEventSeq = patch.lastEventSeq;
   if (patch.ts !== undefined) updates.ts = new Date(patch.ts);
   if (patch.blockIndex !== undefined) updates.blockIndex = patch.blockIndex;
   if (Object.keys(updates).length === 0) return rowFromDb(existing);
@@ -338,18 +332,6 @@ export async function listBlocks(opts: ListBlocksOpts = {}): Promise<BlockRow[]>
   return rows.map(rowFromDb);
 }
 
-/** Most-recent block per agent — used by the per-agent cursor (FIX_FORWARD 1.7). */
-export async function maxSeqByAgent(agentName: string): Promise<number> {
-  const db = getDb();
-  const rows = await db
-    .select({
-      maxSeq: sql<number>`COALESCE(MAX(${schema.blocks.lastEventSeq}), 0)`.as("maxSeq"),
-    })
-    .from(schema.blocks)
-    .where(eq(schema.blocks.agentName, agentName));
-  return rows[0]?.maxSeq ?? 0;
-}
-
 /* ---------------- Block-fetch API helpers (FIX_FORWARD 1.8) ---------------- */
 
 export interface FetchBlocksOpts {
@@ -372,7 +354,6 @@ export interface FetchBlocksOpts {
 
 export interface FetchBlocksResult {
   blocks: BlockRow[];
-  lastEventSeq: number;
 }
 
 const DEFAULT_LIMIT = 25;
@@ -383,12 +364,6 @@ function clampLimit(n: number | undefined, fallback = DEFAULT_LIMIT): number {
   return Math.min(Math.floor(n as number), MAX_LIMIT);
 }
 
-function maxSeq(rows: BlockRow[]): number {
-  let m = 0;
-  for (const r of rows) if (r.lastEventSeq > m) m = r.lastEventSeq;
-  return m;
-}
-
 export async function fetchBlocksByAgent(opts: FetchBlocksOpts): Promise<FetchBlocksResult> {
   if (opts.match) {
     const rows = await matchBlocks({
@@ -397,25 +372,25 @@ export async function fetchBlocksByAgent(opts: FetchBlocksOpts): Promise<FetchBl
       limit: clampLimit(opts.limit, 20),
     });
     const filtered = opts.sessionId ? rows.filter((r) => r.sessionId === opts.sessionId) : rows;
-    return { blocks: filtered, lastEventSeq: maxSeq(filtered) };
+    return { blocks: filtered };
   }
   if (typeof opts.aroundTs === "number") {
     return fetchAroundTs(opts);
   }
   if (opts.beforeBlockId) {
     const anchor = await getBlockById(opts.beforeBlockId);
-    if (!anchor) return { blocks: [], lastEventSeq: 0 };
+    if (!anchor) return { blocks: [] };
     const rows = await listBlocks({
       agentName: opts.agentName,
       sessionId: opts.sessionId,
       beforeAnchor: { ts: anchor.ts, id: anchor.id },
       limit: clampLimit(opts.limit),
     });
-    return { blocks: rows, lastEventSeq: maxSeq(rows) };
+    return { blocks: rows };
   }
   if (opts.afterBlockId) {
     const anchor = await getBlockById(opts.afterBlockId);
-    if (!anchor) return { blocks: [], lastEventSeq: 0 };
+    if (!anchor) return { blocks: [] };
     const rows = await listBlocks({
       agentName: opts.agentName,
       sessionId: opts.sessionId,
@@ -423,14 +398,14 @@ export async function fetchBlocksByAgent(opts: FetchBlocksOpts): Promise<FetchBl
       limit: clampLimit(opts.limit),
       ascending: true,
     });
-    return { blocks: rows, lastEventSeq: maxSeq(rows) };
+    return { blocks: rows };
   }
   const rows = await listBlocks({
     agentName: opts.agentName,
     sessionId: opts.sessionId,
     limit: clampLimit(opts.limit),
   });
-  return { blocks: rows, lastEventSeq: maxSeq(rows) };
+  return { blocks: rows };
 }
 
 async function fetchAroundTs(opts: FetchBlocksOpts): Promise<FetchBlocksResult> {
@@ -465,7 +440,7 @@ async function fetchAroundTs(opts: FetchBlocksOpts): Promise<FetchBlocksResult> 
     .limit(afterLimit);
   // Merge in chronological order; before-rows came back DESC.
   const merged = [...beforeRows.reverse().map(rowFromDb), ...afterRows.map(rowFromDb)];
-  return { blocks: merged, lastEventSeq: maxSeq(merged) };
+  return { blocks: merged };
 }
 
 export interface MatchBlocksOpts {

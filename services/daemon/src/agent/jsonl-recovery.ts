@@ -323,7 +323,6 @@ async function reconcileBlock(out: ReconcileResult, input: ReconcileInput): Prom
       contentJson: input.contentJson,
       status: "complete",
       ts: input.ts,
-      lastEventSeq: seq,
     });
     out.inserted += 1;
     out.blockIds.push(blockId);
@@ -338,7 +337,6 @@ async function reconcileBlock(out: ReconcileResult, input: ReconcileInput): Prom
     contentJson: input.contentJson,
     status: "complete",
     ts: input.ts,
-    lastEventSeq: seq,
   });
   out.updated += 1;
   out.blockIds.push(existing.blockId);
@@ -385,7 +383,6 @@ async function reconcileToolUse(out: ReconcileResult, input: ReconcileToolUseInp
       contentJson: input.contentJson,
       status: "complete",
       ts: input.ts,
-      lastEventSeq: seq,
     });
     out.inserted += 1;
     out.blockIds.push(blockId);
@@ -400,7 +397,6 @@ async function reconcileToolUse(out: ReconcileResult, input: ReconcileToolUseInp
     contentJson: input.contentJson,
     status: "complete",
     ts: input.ts,
-    lastEventSeq: seq,
   });
   out.updated += 1;
   out.blockIds.push(existing.blockId);
@@ -443,7 +439,6 @@ async function reconcileToolResult(
       contentJson: input.contentJson,
       status: "complete",
       ts: input.ts,
-      lastEventSeq: seq,
     });
     out.inserted += 1;
     out.blockIds.push(blockId);
@@ -458,7 +453,6 @@ async function reconcileToolResult(
     contentJson: input.contentJson,
     status: "complete",
     ts: input.ts,
-    lastEventSeq: seq,
   });
   out.updated += 1;
   out.blockIds.push(existing.blockId);

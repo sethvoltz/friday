@@ -145,9 +145,6 @@ export const agents = pgTable(
 // block_complete* with `streaming=false`. Zero replicates rows scoped to
 // `WHERE streaming=false`. In-flight bytes live in the daemon's `liveTurns`
 // in-memory accumulator and ride per-agent SSE.
-//
-// `last_event_seq` is retained narrowly for the live-turn-delta SSE path
-// (ADR-024 amendment to ADR-004) — it's no longer the cross-restart cursor.
 
 export const blocks = pgTable(
   "blocks",
@@ -178,7 +175,6 @@ export const blocks = pgTable(
     // ADR-023 mutator origin (for Zero idempotency cross-check + diagnostics).
     originMutationId: text("origin_mutation_id"),
     ts: timestamp("ts", { withTimezone: true }).notNull(),
-    lastEventSeq: integer("last_event_seq").notNull().default(0),
   },
   (t) => ({
     agentTsIdx: index("blocks_agent_ts").on(t.agentName, t.ts),

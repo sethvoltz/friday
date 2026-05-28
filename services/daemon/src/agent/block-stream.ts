@@ -277,7 +277,6 @@ export async function close(w: LiveWorker, e: WorkerBlockStop): Promise<void> {
       contentJson: e.contentJson,
       status: e.status,
       ts,
-      lastEventSeq: 0,
     });
   } catch (err) {
     logger.log("warn", "blocks.insert.error", {
@@ -364,7 +363,6 @@ export async function recordError(
       contentJson,
       status: "complete",
       ts,
-      lastEventSeq: 0,
     });
   } catch (err) {
     logger.log("warn", "blocks.error.insert.fail", {
@@ -433,7 +431,6 @@ export async function finalize(w: LiveWorker, status: "error" | "aborted"): Prom
         contentJson,
         status,
         ts,
-        lastEventSeq: 0,
       });
     } catch (err) {
       logger.log("warn", "block-stream.finalize.error", {

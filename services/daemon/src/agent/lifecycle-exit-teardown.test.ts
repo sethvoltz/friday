@@ -72,7 +72,6 @@ describe("blockStream.finalize (F4-A; FRI-125 migration)", () => {
       contentJson: "",
       status: "streaming",
       ts: 1,
-      lastEventSeq: 0,
     });
     await insertBlock({
       blockId: "tu-blk",
@@ -86,7 +85,6 @@ describe("blockStream.finalize (F4-A; FRI-125 migration)", () => {
       contentJson: "",
       status: "streaming",
       ts: 1,
-      lastEventSeq: 0,
     });
 
     __seedForTest({
@@ -181,7 +179,6 @@ describe("blockStream.finalize (F4-A; FRI-125 migration)", () => {
       contentJson: "",
       status: "streaming",
       ts: 1,
-      lastEventSeq: 0,
     });
     __seedForTest({
       turnId: "turn-exit-1",

@@ -582,12 +582,11 @@ function restampQueuedUserBlock(
   const dispatchTs = Date.now();
   // Phase 5: the legacy `block_meta_update` SSE event is retired —
   // Zero replicates the row UPDATE to the dashboard's blocks slice
-  // reactively. We still bump `last_event_seq` to keep the column's
-  // monotonic invariant intact for any legacy reader.
+  // reactively. (FRI-125 retired the per-row `last_event_seq` bump
+  // alongside the column itself.)
   void updateBlock(userBlockId, {
     status: "complete",
     ts: dispatchTs,
-    lastEventSeq: eventBus.currentSeq() + 1,
   }).catch((err: unknown) => {
     logger.log("warn", "queued-block.meta-update.error", {
       agent: agentName,
@@ -1868,7 +1867,6 @@ export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
     contentJson,
     status,
     ts,
-    lastEventSeq: 0,
   });
   const { seq } = eventBus.publish({
     v: 1,

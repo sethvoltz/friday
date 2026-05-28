@@ -2050,7 +2050,6 @@ export class ChatState {
         }
         const payload = (await r.json()) as {
           blocks: BlockRow[];
-          lastEventSeq?: number;
         };
         if (this.focusedAgent !== agent) return;
         const blocks = payload.blocks ?? [];
@@ -2061,19 +2060,12 @@ export class ChatState {
           zeroBlockReasonByTurn: this.zeroBlockReasonByTurn,
         });
         this.oldestBlockId = oldestBlockCursor(blocks);
-        // Seed the per-agent SSE cursor from the snapshot's high-water
-        // mark. The daemon updates `last_event_seq` on every block_delta
-        // (so the row's content_json reflects deltas up to that seq);
-        // by advancing the cursor to match, replayed deltas with
-        // `seq <= cursor` are dropped by `acceptEvent` and we don't
-        // double-append the partial text that's already in the row.
-        // Without this seeding, a mid-turn reload would render the
-        // partial text from /blocks and then re-append the same deltas
-        // when SSE replays them — corrupt markdown, duplicate content.
-        const seqHwm = payload.lastEventSeq ?? 0;
-        if (seqHwm > 0) {
-          this.lastSeqByAgent[agent] = Math.max(this.lastSeqByAgent[agent] ?? 0, seqHwm);
-        }
+        // FRI-125: the REST-payload `lastEventSeq` seed of
+        // `lastSeqByAgent` retired alongside the row's last_event_seq
+        // column. The cursor is now seeded exclusively from SSE event
+        // seqs at apply time (see `acceptEvent`), which is still
+        // load-bearing for the transient-reconnect dedup case (see
+        // ADR-024 amendment).
         if (blocks.length === 0) {
           this.reachedOldest = true;
         } else {
@@ -2391,13 +2383,10 @@ export class ChatState {
     }
     this.oldestBlockId = newOldest;
 
-    let maxSeq = 0;
-    for (const r of rows) {
-      if (r.last_event_seq > maxSeq) maxSeq = r.last_event_seq;
-    }
-    if (maxSeq > 0) {
-      this.lastSeqByAgent[forAgent] = Math.max(this.lastSeqByAgent[forAgent] ?? 0, maxSeq);
-    }
+    // FRI-125: the Zero-row `last_event_seq` aggregator seed for
+    // `lastSeqByAgent` retired alongside the column. The cursor is
+    // now seeded exclusively from SSE event seqs at apply time
+    // (`acceptEvent` — still load-bearing for transient-reconnect dedup).
 
     // Phase 4.1: advance the per-device read cursor for this agent to
     // the newest block in the snapshot. While the user is focused on
@@ -3229,7 +3218,6 @@ export interface BlockRow {
   contentJson: string;
   status: string;
   ts: number;
-  lastEventSeq: number;
 }
 
 /** Phase 3.7: snake_case Zero row shape mirrors the Postgres `blocks`
@@ -3254,7 +3242,6 @@ export interface ZeroBlocksRow {
   streaming: boolean;
   origin_mutation_id: string | null;
   ts: number;
-  last_event_seq: number;
 }
 
 /** Convert a Zero row (snake_case, jsonb columns auto-parsed) to the
@@ -3279,7 +3266,6 @@ export function zeroBlockRowToBlockRow(r: ZeroBlocksRow): BlockRow {
       typeof r.content_json === "string" ? r.content_json : JSON.stringify(r.content_json ?? null),
     status: r.status,
     ts: r.ts,
-    lastEventSeq: r.last_event_seq,
   };
 }
 

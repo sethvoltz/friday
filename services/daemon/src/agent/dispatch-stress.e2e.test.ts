@@ -89,11 +89,9 @@ async function runSimClient(
       await c.query(
         `INSERT INTO blocks
            (id, block_id, turn_id, agent_name, session_id, block_index,
-            role, kind, source, content_json, status, streaming, ts,
-            last_event_seq)
+            role, kind, source, content_json, status, streaming, ts)
          VALUES ($1, $1, $2, $3, '__pending__', 0,
-                 'user', 'text', 'user_chat', $4, 'pending', false,
-                 $5, 0)`,
+                 'user', 'text', 'user_chat', $4, 'pending', false, $5)`,
         [s.id, s.turnId, s.agentName, JSON.stringify({ text: s.text }), new Date()],
       );
     }
