@@ -68,7 +68,6 @@ import {
   insertBlock,
   updateBlock,
 } from "@friday/shared/services";
-import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import { stringifyToolResult } from "@friday/shared";
 
@@ -306,7 +305,6 @@ async function reconcileBlock(out: ReconcileResult, input: ReconcileInput): Prom
   const existing = await getBlockByNaturalKey(input.sessionId, input.messageId, input.kind);
   if (!existing) {
     const blockId = randomUUID();
-    const seq = eventBus.currentSeq() + 1;
     await insertBlock({
       blockId,
       // turnId is unknown for recovered rows (the original turn_id lived in
@@ -332,7 +330,6 @@ async function reconcileBlock(out: ReconcileResult, input: ReconcileInput): Prom
     out.skipped += 1;
     return;
   }
-  const seq = eventBus.currentSeq() + 1;
   await updateBlock(existing.blockId, {
     contentJson: input.contentJson,
     status: "complete",
@@ -369,7 +366,6 @@ async function reconcileToolUse(out: ReconcileResult, input: ReconcileToolUseInp
   const existing = await getToolUseByToolUseId(input.sessionId, input.toolUseId);
   if (!existing) {
     const blockId = randomUUID();
-    const seq = eventBus.currentSeq() + 1;
     await insertBlock({
       blockId,
       turnId: `recover_${input.sessionId}`,
@@ -392,7 +388,6 @@ async function reconcileToolUse(out: ReconcileResult, input: ReconcileToolUseInp
     out.skipped += 1;
     return;
   }
-  const seq = eventBus.currentSeq() + 1;
   await updateBlock(existing.blockId, {
     contentJson: input.contentJson,
     status: "complete",
@@ -425,7 +420,6 @@ async function reconcileToolResult(
   const existing = await getToolResultByToolUseId(input.sessionId, input.toolUseId);
   if (!existing) {
     const blockId = randomUUID();
-    const seq = eventBus.currentSeq() + 1;
     await insertBlock({
       blockId,
       turnId: `recover_${input.sessionId}`,
@@ -448,7 +442,6 @@ async function reconcileToolResult(
     out.skipped += 1;
     return;
   }
-  const seq = eventBus.currentSeq() + 1;
   await updateBlock(existing.blockId, {
     contentJson: input.contentJson,
     status: "complete",
