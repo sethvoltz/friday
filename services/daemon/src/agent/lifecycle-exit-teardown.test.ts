@@ -4,9 +4,10 @@ import { createTestDb, type TestDbHandle } from "@friday/shared";
 // F4-A regression: when the worker process exits without going through
 // `runQuery`'s try/catch (SIGTERM from the stall watchdog, SIGKILL, OOM,
 // crash), no `block-stop` IPC ever fires for the in-flight blocks. Before
-// this fix the rows stayed at `status='streaming'` and the dashboard
-// rendered tool/thinking bubbles as `running` forever. The exit handler
-// now finalizes them via `finalizeStreamingBlocks`.
+// the original fix the rows stayed at `status='streaming'` and the
+// dashboard rendered tool/thinking bubbles as `running` forever. The
+// exit handler now finalizes them via `blockStream.finalize` (FRI-125
+// migrated this path from `finalizeStreamingBlocks`).
 
 let handle: TestDbHandle;
 
@@ -20,8 +21,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await handle.truncate();
-  const liveTurns = await import("./live-turns.js");
-  liveTurns.__resetForTest();
+  const { __resetForTest } = await import("./block-stream.js");
+  __resetForTest();
 });
 
 function makeFakeWorker(): unknown {
@@ -44,18 +45,21 @@ function makeFakeWorker(): unknown {
     mode: "long-lived",
     lastExitStatus: "complete",
     completedAtLeastOnce: false,
+    blocksThisTurn: 0,
   };
 }
 
-describe("finalizeStreamingBlocks (F4-A)", () => {
+describe("blockStream.finalize (F4-A; FRI-125 migration)", () => {
   it("flips streaming thinking + tool_use rows to error on worker exit", async () => {
-    const { finalizeStreamingBlocks } = await import("./lifecycle.js");
+    const { finalize, __seedForTest } = await import("./block-stream.js");
     const { insertBlock, getBlockById } = await import("@friday/shared/services");
-    const liveTurns = await import("./live-turns.js");
 
-    // Mirror what handleBlockStart would have done: insert a streaming
-    // DB row AND register the block with liveTurns so the exit handler
-    // has the live state to finalize from.
+    // Seed the streaming DB rows the way the legacy "INSERT at
+    // block_start" path used to leave them. Post-ADR-024 the daemon
+    // doesn't INSERT until block_complete, so in production these rows
+    // only exist via error-block insertion or migration artefacts —
+    // but `finalize` still has to flip them off `streaming` correctly,
+    // which is exactly what this test pins.
     await insertBlock({
       blockId: "th-blk",
       turnId: "turn-exit-1",
@@ -68,24 +72,8 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
       contentJson: "",
       status: "streaming",
       ts: 1,
-      lastEventSeq: 1,
+      lastEventSeq: 0,
     });
-    liveTurns.startBlock({
-      turnId: "turn-exit-1",
-      agentName: "exit-agent",
-      sessionId: "sess-exit-1",
-      clientBlockId: "c-th",
-      blockId: "th-blk",
-      messageId: "msg-1",
-      blockIndex: 0,
-      role: "assistant",
-      kind: "thinking",
-      source: null,
-      ts: 1,
-      seq: 1,
-    });
-    liveTurns.appendDelta("turn-exit-1", "c-th", { text: "partial thought" }, 2);
-
     await insertBlock({
       blockId: "tu-blk",
       turnId: "turn-exit-1",
@@ -98,26 +86,50 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
       contentJson: "",
       status: "streaming",
       ts: 1,
-      lastEventSeq: 1,
+      lastEventSeq: 0,
     });
-    liveTurns.startBlock({
-      turnId: "turn-exit-1",
-      agentName: "exit-agent",
-      sessionId: "sess-exit-1",
-      clientBlockId: "c-tu",
-      blockId: "tu-blk",
-      messageId: "msg-1",
-      blockIndex: 1,
-      role: "assistant",
-      kind: "tool_use",
-      source: null,
-      tool: { id: "toolu_FOO", name: "Bash" },
-      ts: 1,
-      seq: 1,
-    });
-    liveTurns.appendDelta("turn-exit-1", "c-tu", { partial_json: '{"command":"echo' }, 3);
 
-    await finalizeStreamingBlocks(makeFakeWorker() as never, "error");
+    __seedForTest({
+      turnId: "turn-exit-1",
+      agent: "exit-agent",
+      sessionId: "sess-exit-1",
+      blocks: [
+        {
+          blockId: "th-blk",
+          clientBlockId: "c-th",
+          turnId: "turn-exit-1",
+          agentName: "exit-agent",
+          sessionId: "sess-exit-1",
+          messageId: "msg-1",
+          blockIndex: 0,
+          role: "assistant",
+          kind: "thinking",
+          source: null,
+          text: "partial thought",
+          partialJson: "",
+          startedAt: 1,
+        },
+        {
+          blockId: "tu-blk",
+          clientBlockId: "c-tu",
+          turnId: "turn-exit-1",
+          agentName: "exit-agent",
+          sessionId: "sess-exit-1",
+          messageId: "msg-1",
+          blockIndex: 1,
+          role: "assistant",
+          kind: "tool_use",
+          source: null,
+          tool: { id: "toolu_FOO", name: "Bash" },
+          text: "",
+          partialJson: '{"command":"echo',
+          startedAt: 1,
+        },
+      ],
+      startedAt: 1,
+    });
+
+    await finalize(makeFakeWorker() as never, "error");
 
     const thinking = await getBlockById("th-blk");
     expect(thinking?.status).toBe("error");
@@ -141,12 +153,10 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
   });
 
   it("is a no-op when the worker exited cleanly (no live turn)", async () => {
-    const { finalizeStreamingBlocks } = await import("./lifecycle.js");
-    // No liveTurns entry for `turn-exit-1`. Must not throw, must not
+    const { finalize } = await import("./block-stream.js");
+    // No in-flight entry for `turn-exit-1`. Must not throw, must not
     // touch the DB.
-    await expect(
-      finalizeStreamingBlocks(makeFakeWorker() as never, "error"),
-    ).resolves.toBeUndefined();
+    await expect(finalize(makeFakeWorker() as never, "error")).resolves.toBeUndefined();
   });
 
   it("FRI-4 #2 (Layer B): marks orphan blocks 'aborted' on turn-rotation", async () => {
@@ -155,10 +165,9 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
     // worker's pre-break flush is the primary defense; this test pins
     // the daemon-side belt-and-braces — even if the worker missed it,
     // the turn-complete handler must transition the DB row off
-    // `streaming` before `dropTurn` wipes the liveTurns entry.
-    const { finalizeStreamingBlocks } = await import("./lifecycle.js");
+    // `streaming` before `endTurn` wipes the live entry.
+    const { finalize, __seedForTest } = await import("./block-stream.js");
     const { insertBlock, getBlockById } = await import("@friday/shared/services");
-    const liveTurns = await import("./live-turns.js");
 
     await insertBlock({
       blockId: "th-orphan",
@@ -172,24 +181,33 @@ describe("finalizeStreamingBlocks (F4-A)", () => {
       contentJson: "",
       status: "streaming",
       ts: 1,
-      lastEventSeq: 1,
+      lastEventSeq: 0,
     });
-    liveTurns.startBlock({
+    __seedForTest({
       turnId: "turn-exit-1",
-      agentName: "exit-agent",
+      agent: "exit-agent",
       sessionId: "sess-exit-1",
-      clientBlockId: "c-th-orphan",
-      blockId: "th-orphan",
-      messageId: "msg-orphan",
-      blockIndex: 0,
-      role: "assistant",
-      kind: "thinking",
-      source: null,
-      ts: 1,
-      seq: 1,
+      blocks: [
+        {
+          blockId: "th-orphan",
+          clientBlockId: "c-th-orphan",
+          turnId: "turn-exit-1",
+          agentName: "exit-agent",
+          sessionId: "sess-exit-1",
+          messageId: "msg-orphan",
+          blockIndex: 0,
+          role: "assistant",
+          kind: "thinking",
+          source: null,
+          text: "",
+          partialJson: "",
+          startedAt: 1,
+        },
+      ],
+      startedAt: 1,
     });
 
-    await finalizeStreamingBlocks(makeFakeWorker() as never, "aborted");
+    await finalize(makeFakeWorker() as never, "aborted");
 
     const row = await getBlockById("th-orphan");
     expect(row?.status).toBe("aborted");

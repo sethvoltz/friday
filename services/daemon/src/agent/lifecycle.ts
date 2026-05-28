@@ -33,7 +33,15 @@ import { logger } from "../log.js";
 import { type ArchiveReason } from "@friday/shared";
 import { closeTicketForArchive } from "../services/ticket-close.js";
 import * as registry from "./registry.js";
-import * as liveTurns from "./live-turns.js";
+import {
+  open as bsOpen,
+  append as bsAppend,
+  close as bsClose,
+  cancel as bsCancel,
+  recordError as bsRecordError,
+  finalize as bsFinalize,
+  endTurn as bsEndTurn,
+} from "./block-stream.js";
 import { appContextForAgent } from "../apps/installer.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
 import {
@@ -412,11 +420,11 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     // Fire-and-forget — the exit handler is sync, but finalizeStreamingBlocks
     // is async (ADR-023). Errors are logged via the lifecycle.streaming-
     // finalize.error channel.
-    void finalizeStreamingBlocks(w, "error").catch(() => {});
+    void bsFinalize(w, "error").catch(() => {});
     // If the worker died mid-turn the in-flight registry entry would leak —
     // drop it here so the daemon doesn't hold accumulator state for a turn
     // that can no longer make progress.
-    liveTurns.dropTurn(w.turnId);
+    bsEndTurn(w.turnId);
     live.delete(input.agentName);
     // F1-A: preserve terminal statuses. If the worker just exited because
     // `archiveAgent` asked it to stop, the row is already "archived" — we
@@ -818,8 +826,8 @@ async function forceKillStuckWorker(
   // Wedge and stale-turn both ride `error` status; only an explicit abort
   // synthesizes `abort_reason: "forced"`.
   const ridesError = reason === "stale" || reason === "wedge";
-  await insertErrorBlock(w, errorPayload);
-  await finalizeStreamingBlocks(w, ridesError ? "error" : "aborted");
+  await bsRecordError(w, errorPayload);
+  await bsFinalize(w, ridesError ? "error" : "aborted");
   // Emit the in-band TurnErrorEvent so any consumers still listening for
   // it know a force-kill happened (vs. a clean abort).
   eventBus.publish({
@@ -847,7 +855,7 @@ async function forceKillStuckWorker(
   // Drop the live-turn entry now so the upcoming child.exit handler's
   // safety-net `finalizeStreamingBlocks` is a no-op (would otherwise
   // double-publish block_complete for the same blocks).
-  liveTurns.dropTurn(w.turnId);
+  bsEndTurn(w.turnId);
   w.lastExitStatus = ridesError ? "error" : "aborted";
   setWorkerStatus(w, "idle", "forceKillStuckWorker");
   // FRI-110: keep the `turnStart` invariant universally true. After
@@ -1348,11 +1356,11 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // turn-complete handler below).
       break;
     case "block-start": {
-      await handleBlockStart(w, e);
+      await bsOpen(w, e);
       break;
     }
     case "block-delta": {
-      await handleBlockDelta(w, e);
+      await bsAppend(w, e);
       break;
     }
     case "block-stop": {
@@ -1360,15 +1368,16 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // the turn-stall watchdog. Heartbeats don't count — a hung SDK still
       // emits them, but no block ever lands.
       w.lastBlockStop = Date.now();
-      await handleBlockStop(w, e);
+      await bsClose(w, e);
       break;
     }
     case "block-cancel": {
-      // FRI-78 follow-up: the SDK started a content block (block-start
-      // already fired and the row exists at status='streaming') and the
-      // worker exited the for-await before any deltas accumulated. Drop
-      // the row and tell live clients to remove the bubble.
-      await handleBlockCancel(w, e);
+      // FRI-78 follow-up: the SDK started a content block and the
+      // worker exited the for-await before any deltas accumulated. The
+      // block was never persisted (Phase 5: no INSERT until close);
+      // block-stream's cancel just publishes `block_canceled` so live
+      // clients drop the bubble.
+      await bsCancel(w, e);
       break;
     }
     case "error": {
@@ -1389,7 +1398,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // the bubble is already visible via the user's Stop click and the
       // assistant text bubble flips to "aborted" via finishTurn below.
       if (!wasAbort) {
-        await insertErrorBlock(w, {
+        await bsRecordError(w, {
           code: e.code ?? "worker_error",
           headline: e.headline ?? e.message,
           httpStatus: e.httpStatus,
@@ -1401,7 +1410,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // Close any blocks left at status='streaming' so their dashboard
       // bubbles transition off "running". finalizeStreamingBlocks is
       // idempotent — safe to call even when the inflight set is empty.
-      await finalizeStreamingBlocks(w, wasAbort ? "aborted" : "error");
+      await bsFinalize(w, wasAbort ? "aborted" : "error");
       // Publish the canonical TurnErrorEvent (kept for any consumer that
       // listens for it) BEFORE the synthesized turn_done — clients route
       // both, but ordering means the error metadata is in hand by the time
@@ -1466,7 +1475,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // process keeps running (long-lived agents stay alive across
       // failures); reset its bookkeeping so the next prompt dispatches
       // cleanly.
-      liveTurns.dropTurn(w.turnId);
+      bsEndTurn(w.turnId);
       setWorkerStatus(w, "idle", "handleEvent.error");
       // FRI-110: same reasoning as the `turn-complete` clear — the turn is
       // over (error-terminated rather than completed) and any subsequent
@@ -1598,7 +1607,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // `status='streaming'`. Finalize as `aborted` first so the row
       // transitions cleanly off `streaming` and the dashboard's bubble
       // moves off `running`.
-      await finalizeStreamingBlocks(w, "aborted");
+      await bsFinalize(w, "aborted");
       // FRI-61 wedge detector: count consecutive turn-completes that
       // produced zero content blocks. Skip when the user-requested
       // abort raced the turn-complete (the model genuinely produced
@@ -1635,7 +1644,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // The in-flight registry holds per-turn block accumulators (FIX_FORWARD
       // 1.4). Drop the entry once the turn completes; canonical block content
       // already lives in the `blocks` table.
-      liveTurns.dropTurn(w.turnId);
+      bsEndTurn(w.turnId);
       // Long-lived worker: flush queued prompt if any. Don't send `stop` — the
       // worker manages its own lifecycle.
       setWorkerStatus(w, "idle", "handleEvent.turn-complete");
@@ -1750,434 +1759,6 @@ function maybeEmitAgentMessage(opts: {
   });
 }
 
-/* ---------------- DB-before-SSE atomic helper (FIX_FORWARD 1.10 / ADR-023) ---------------- */
-// Pins ADR-004 at block granularity: every SSE event tied to a `blocks` row
-// is preceded by a DB write that stamps the row's `last_event_seq` with the
-// same value the SSE event will carry. Under Postgres + Drizzle the dbWrite
-// is async, so we capture `currentSeq() + 1` synchronously, await dbWrite,
-// then publish — the per-worker IPC chain in `spawnWorker` serializes events
-// so the captured seq matches what `publish()` assigns. Cross-worker
-// interleaving can still skew; the warning below flags such skew without
-// blocking the publish.
-
-type PublishableEvent = Parameters<typeof eventBus.publish>[0];
-
-async function writeAndPublish<E extends PublishableEvent>(
-  event: E,
-  dbWrite: (seq: number) => unknown,
-): Promise<{ seq: number }> {
-  const seq = eventBus.currentSeq() + 1;
-  // ADR-004 invariant: the row write must complete before the SSE event
-  // emits. Under the Postgres + Drizzle async model (ADR-023) the dbWrite
-  // callback typically returns a Promise; await it before publishing so
-  // clients that fetch the canonical block on `block_start` see a row
-  // whose `last_event_seq` already matches the event seq.
-  await dbWrite(seq);
-  const full = eventBus.publish(event);
-  if (full.seq !== seq) {
-    logger.log("warn", "block.seq-skew", {
-      expected: seq,
-      actual: full.seq,
-      type: full.type,
-    });
-  }
-  return { seq: full.seq };
-}
-
-/* ---------------- Block IPC handlers (FIX_FORWARD 1.2) ---------------- */
-
-/**
- * INSERT a blocks row (status='streaming'), then publish the SSE block_start.
- * The DB write strictly precedes the SSE emit so any client that fetches the
- * canonical block on `block_start` sees a row whose `last_event_seq` already
- * matches the event seq.
- */
-async function handleBlockStart(
-  w: LiveWorker,
-  e: {
-    clientBlockId: string;
-    kind: BlockKind;
-    blockIndex: number;
-    messageId?: string;
-    tool?: { id: string; name: string };
-  },
-): Promise<void> {
-  // FRI-61 wedge detector: count every block-start (text, thinking,
-  // tool_use, tool_result). The detector at turn-complete/error reads
-  // this to decide whether the turn produced any model output at all.
-  w.blocksThisTurn++;
-
-  const sessionId = w.sessionId ?? "__pending__";
-  const blockId = randomUUID();
-  const ts = Date.now();
-  // Tool_result arrives in a `user` SDK message but its block is the agent's
-  // tool output, so we treat it as role='assistant' — chat persistence keeps
-  // tool calls and their results grouped under the assistant's turn.
-  const role = "assistant";
-  const source: BlockSource = null;
-
-  // Phase 5 (plan §212): the blocks row is NOT INSERTed at block_start
-  // anymore. Live streaming bytes accumulate in `liveTurns` only; the
-  // canonical row INSERTs at block_complete with `streaming=false`.
-  // Mid-stream reload reconstructs the in-flight bubble from the
-  // per-turn SSE replay buffer (the daemon replays from turn start on
-  // every per-agent connect), not from the DB row.
-  const assignedSeq = eventBus.currentSeq() + 1;
-  eventBus.publish({
-    v: 1,
-    type: "block_start",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    block_id: blockId,
-    message_id: e.messageId ?? null,
-    block_index: e.blockIndex,
-    role,
-    kind: e.kind,
-    source,
-    tool: e.tool,
-    ts,
-  });
-
-  liveTurns.startBlock({
-    turnId: w.turnId,
-    agentName: w.agentName,
-    sessionId,
-    clientBlockId: e.clientBlockId,
-    blockId,
-    messageId: e.messageId ?? null,
-    blockIndex: e.blockIndex,
-    role,
-    kind: e.kind,
-    source,
-    tool: e.tool,
-    ts,
-    seq: assignedSeq,
-  });
-}
-
-async function handleBlockDelta(
-  w: LiveWorker,
-  e: { clientBlockId: string; delta: { text?: string; partial_json?: string } },
-): Promise<void> {
-  const nextSeq = eventBus.currentSeq() + 1;
-  const live = liveTurns.appendDelta(w.turnId, e.clientBlockId, e.delta, nextSeq);
-  if (!live) return;
-  // Phase 5 (plan §212): no per-delta row write. The accumulated text
-  // lives in `liveTurns` until block_complete; the canonical row is
-  // INSERTed once at that terminal point with `streaming=false`. Mid-
-  // stream reloads rebuild the in-flight accumulator from the per-turn
-  // SSE replay buffer instead of reading the row.
-  eventBus.publish({
-    v: 1,
-    type: "block_delta",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    block_id: live.blockId,
-    delta: e.delta,
-  });
-}
-
-async function handleBlockCancel(w: LiveWorker, e: { clientBlockId: string }): Promise<void> {
-  // Peek the upcoming seq so the live-turns finish call and the SSE event
-  // stamp the same number — mirrors the handleBlockStop pattern.
-  const peekSeq = eventBus.currentSeq() + 1;
-  const live = liveTurns.finishBlock(w.turnId, e.clientBlockId, peekSeq);
-  if (!live) return;
-  // Phase 5 (plan §212): block_start no longer INSERTs the row, so a
-  // cancel has no row to DELETE — just emit the SSE so any live
-  // dashboard drops the in-flight bubble it built from the streaming
-  // delta replay. liveTurns.finishBlock above already cleared the
-  // accumulator.
-  eventBus.publish({
-    v: 1,
-    type: "block_canceled",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    block_id: live.blockId,
-  });
-}
-
-async function handleBlockStop(
-  w: LiveWorker,
-  e: {
-    clientBlockId: string;
-    contentJson: string;
-    status: "complete" | "aborted" | "error";
-  },
-): Promise<void> {
-  const ts = Date.now();
-  // Peek at the upcoming seq so live-turns sees the same value we'll stamp
-  // onto the row + SSE event. `writeAndPublish` validates this binding
-  // holds at publish time.
-  const peekSeq = eventBus.currentSeq() + 1;
-  const live = liveTurns.finishBlock(w.turnId, e.clientBlockId, peekSeq);
-  if (!live) return;
-  // Phase 5 (plan §212): the canonical blocks row is INSERTed here at
-  // block_complete with the final content_json + status + streaming=false
-  // (the schema default). Prior phases INSERTed at block_start; the new
-  // contract is "rows only exist for closed blocks." Mid-stream reload
-  // sees no row for an in-flight block; the dashboard reconstructs the
-  // bubble from the per-turn SSE replay buffer instead.
-  await writeAndPublish(
-    {
-      v: 1,
-      type: "block_complete",
-      turn_id: w.turnId,
-      agent: w.agentName,
-      block_id: live.blockId,
-      message_id: live.messageId,
-      block_index: live.blockIndex,
-      role: live.role,
-      kind: live.kind,
-      source: live.source,
-      content_json: e.contentJson,
-      status: e.status,
-      ts,
-    },
-    async (seq) => {
-      try {
-        await insertBlock({
-          blockId: live.blockId,
-          turnId: w.turnId,
-          agentName: w.agentName,
-          sessionId: live.sessionId,
-          messageId: live.messageId,
-          blockIndex: live.blockIndex,
-          role: live.role,
-          kind: live.kind,
-          source: live.source,
-          contentJson: e.contentJson,
-          status: e.status,
-          ts,
-          lastEventSeq: seq,
-        });
-      } catch (err) {
-        logger.log("warn", "blocks.insert.error", {
-          agent: w.agentName,
-          blockId: live.blockId,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    },
-  );
-  // FIX_FORWARD 2.8: badge the agent when the block is user-visible chat
-  // content. Tool/thinking blocks don't fire this.
-  maybeEmitAgentMessage({
-    agent: w.agentName,
-    turnId: w.turnId,
-    blockId: live.blockId,
-    role: live.role,
-    kind: live.kind,
-    source: live.source,
-    status: e.status,
-    contentJson: e.contentJson,
-  });
-}
-
-/* ---------------- Error block insertion (FRI-12) ---------------- */
-
-export interface ErrorBlockPayload {
-  code: string;
-  headline: string;
-  httpStatus?: number;
-  retryAfterSeconds?: number;
-  requestId?: string;
-  rawMessage: string;
-}
-
-/**
- * Persist a synthetic `kind="error"` block for the current turn and publish
- * the matching `block_start` + `block_complete` SSE pair so the dashboard
- * materializes it as an error bubble. Used by the worker `error` IPC path
- * (SDK throws — 529, 429, 401, …) and by the stop force-kill safety net
- * (worker unresponsive after 2s of abort). Idempotent at the row level via
- * the unique `block_id`; callers should not re-invoke for the same failure.
- *
- * The block_index is computed as `max(existing) + 1` from `liveTurns` when
- * available, falling back to `9999` after `dropTurn` has cleared the entry.
- * The exact value doesn't matter for ordering — the dashboard sorts by
- * `ts` / `block_id` — but we keep it monotonic so DB scans look sane.
- */
-export async function insertErrorBlock(
-  w: LiveWorker,
-  payload: ErrorBlockPayload,
-): Promise<{ blockId: string } | null> {
-  const sessionId = w.sessionId ?? "__pending__";
-  const blockId = randomUUID();
-  const ts = Date.now();
-  const lt = liveTurns.getLiveTurn(w.turnId);
-  let blockIndex = 9999;
-  if (lt) {
-    let max = -1;
-    for (const live of lt.blocks.values()) {
-      if (live.blockIndex > max) max = live.blockIndex;
-    }
-    if (max >= 0) blockIndex = max + 1;
-  }
-  const contentJson = JSON.stringify(payload);
-  try {
-    await writeAndPublish(
-      {
-        v: 1,
-        type: "block_start",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        block_id: blockId,
-        message_id: null,
-        block_index: blockIndex,
-        role: "assistant",
-        kind: "error",
-        source: null,
-        ts,
-      },
-      (seq) =>
-        insertBlock({
-          blockId,
-          turnId: w.turnId,
-          agentName: w.agentName,
-          sessionId,
-          messageId: null,
-          blockIndex,
-          role: "assistant",
-          kind: "error",
-          source: null,
-          contentJson,
-          status: "complete",
-          ts,
-          lastEventSeq: seq,
-        }),
-    );
-    await writeAndPublish(
-      {
-        v: 1,
-        type: "block_complete",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        block_id: blockId,
-        message_id: null,
-        block_index: blockIndex,
-        role: "assistant",
-        kind: "error",
-        source: null,
-        content_json: contentJson,
-        status: "complete",
-        ts,
-      },
-      (seq) => updateBlock(blockId, { lastEventSeq: seq }),
-    );
-    return { blockId };
-  } catch (err) {
-    logger.log("warn", "blocks.error.insert.fail", {
-      agent: w.agentName,
-      turnId: w.turnId,
-      blockId,
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-}
-
-/* ---------------- In-flight block teardown (F4-A + FRI-4 #2) ---------------- */
-
-/**
- * Finalize any blocks still in flight on a turn — i.e., the daemon emitted
- * `block_start` (DB row at `status='streaming'`, entry in `liveTurns`) but
- * never received a matching `block-stop` IPC. Walks `liveTurns` for
- * `w.turnId` and uses the existing `writeAndPublish` atomic helper to UPDATE
- * the row + publish `block_complete` so the dashboard's bubble transitions
- * off `running`.
- *
- * Called from two sites:
- *
- *   - `child.on("exit")` with status `'error'`: covers SIGTERM (stall
- *     watchdog), SIGKILL, OOM, crash — anything that bypasses
- *     `runQuery`'s try/catch so the worker can't tear down its own
- *     in-flight blocks.
- *
- *   - `case "turn-complete"` with status `'aborted'` (FRI-4 #2,
- *     Layer B): defensive belt-and-braces for the case where the SDK
- *     abandoned a content block mid-stream (no `content_block_stop`
- *     emitted) and the worker's own pre-break flush
- *     (`flushInflightBlocks`) missed it for any reason. Without this,
- *     `dropTurn` wipes the liveTurns entry and `handleBlockStop` would
- *     no-op on any late stop, leaving the row at `status='streaming'`.
- */
-export async function finalizeStreamingBlocks(
-  w: LiveWorker,
-  status: "error" | "aborted",
-): Promise<void> {
-  const lt = liveTurns.getLiveTurn(w.turnId);
-  if (!lt) return;
-  for (const live of lt.blocks.values()) {
-    const ts = Date.now();
-    const contentJson = finalizeLiveBlockContent(live);
-    try {
-      await writeAndPublish(
-        {
-          v: 1,
-          type: "block_complete",
-          turn_id: w.turnId,
-          agent: w.agentName,
-          block_id: live.blockId,
-          message_id: live.messageId,
-          block_index: live.blockIndex,
-          role: live.role,
-          kind: live.kind,
-          source: live.source,
-          content_json: contentJson,
-          status,
-          ts,
-        },
-        (seq) =>
-          updateBlock(live.blockId, {
-            contentJson,
-            status,
-            ts,
-            lastEventSeq: seq,
-          }),
-      );
-    } catch (err) {
-      logger.log("warn", "lifecycle.streaming-finalize.error", {
-        agent: w.agentName,
-        blockId: live.blockId,
-        status,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-}
-
-/**
- * Assemble a content_json payload from a `LiveBlockState` whose worker
- * died without sending `block-stop`. Best-effort: text and thinking get
- * whatever delta text accumulated; tool_use input may be incomplete JSON.
- */
-function finalizeLiveBlockContent(live: liveTurns.LiveBlockState): string {
-  if (live.kind === "text" || live.kind === "thinking") {
-    return JSON.stringify({ text: live.text });
-  }
-  if (live.kind === "tool_use") {
-    let input: unknown = {};
-    if (live.partialJson && live.partialJson.length > 0) {
-      try {
-        input = JSON.parse(live.partialJson);
-      } catch {
-        input = { _raw: live.partialJson };
-      }
-    }
-    return JSON.stringify({
-      tool_use_id: live.tool?.id ?? "",
-      name: live.tool?.name ?? "",
-      input,
-    });
-  }
-  // tool_result blocks are emitted block-start + block-stop in the same
-  // tick by worker.ts's user-message handler, so they almost never sit in
-  // liveTurns at exit time. If one does, emit an empty payload — the
-  // dashboard will render the bubble as errored without output.
-  return JSON.stringify({ tool_use_id: live.tool?.id ?? "", text: "", is_error: true });
-}
-
 /* ---------------- User-typed block insertion (FIX_FORWARD 1.2) ---------------- */
 
 export interface RecordUserBlockInput {
@@ -2270,39 +1851,40 @@ export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
   // via the natural `handleBlockComplete` id-match: the optimistic was
   // re-keyed to `user_<turnId>` in `confirmPending`, and the
   // subsequent SSE finds the same id and updates in place.
-  const { seq } = await writeAndPublish(
-    {
-      v: 1,
-      type: "block_complete",
-      turn_id: input.turnId,
-      agent: input.agentName,
-      block_id: blockId,
-      message_id: null,
-      block_index: 0,
-      role: "user",
-      kind: "text",
-      source: input.source,
-      content_json: contentJson,
-      status,
-      ts,
-    },
-    (assignedSeq) =>
-      insertBlock({
-        blockId,
-        turnId: input.turnId,
-        agentName: input.agentName,
-        sessionId: input.sessionId ?? "__pending__",
-        messageId: null,
-        blockIndex: 0,
-        role: "user",
-        kind: "text",
-        source: input.source,
-        contentJson,
-        status,
-        ts,
-        lastEventSeq: assignedSeq,
-      }),
-  );
+  // FRI-125: writeAndPublish + seq-dance retires. INSERT then publish in
+  // order; the row's `lastEventSeq` sentinel (0) is dead data until C3
+  // drops the column. The `seq` returned to callers is the eventBus's
+  // own per-event sequence number, stamped at publish time.
+  await insertBlock({
+    blockId,
+    turnId: input.turnId,
+    agentName: input.agentName,
+    sessionId: input.sessionId ?? "__pending__",
+    messageId: null,
+    blockIndex: 0,
+    role: "user",
+    kind: "text",
+    source: input.source,
+    contentJson,
+    status,
+    ts,
+    lastEventSeq: 0,
+  });
+  const { seq } = eventBus.publish({
+    v: 1,
+    type: "block_complete",
+    turn_id: input.turnId,
+    agent: input.agentName,
+    block_id: blockId,
+    message_id: null,
+    block_index: 0,
+    role: "user",
+    kind: "text",
+    source: input.source,
+    content_json: contentJson,
+    status,
+    ts,
+  });
   // FIX_FORWARD 2.8: mail-derived user blocks badge the recipient agent
   // (a piece of user-visible content just landed in their chat).
   // user_chat / queue_inject blocks are typed by the user themselves and

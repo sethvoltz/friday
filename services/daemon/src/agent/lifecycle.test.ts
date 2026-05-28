@@ -79,8 +79,9 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(evt!.role).toBe("user");
     expect(evt!.status).toBe("complete");
     expect(evt!.source).toBe("user_chat");
-    // ADR-004: the DB row's last_event_seq must match the event seq.
-    expect(row!.lastEventSeq).toBe(seq);
+    // FRI-125: ADR-004's row.last_event_seq peek-and-stamp dance
+    // retired. The column is the sentinel `0` until C3 drops it.
+    expect(row!.lastEventSeq).toBe(0);
   });
 
   it("mail source publishes SSE and the row's seq matches the event seq", async () => {
@@ -121,7 +122,11 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(evt!.seq).toBe(seq);
 
     const row = await getBlockById(blockId);
-    expect(row!.lastEventSeq).toBe(seq);
+    // FRI-125: row.last_event_seq is the sentinel `0` (peek dance
+    // retired; column drops in C3). seq is still meaningful — it
+    // comes from the eventBus's published frame.
+    expect(seq).toBeGreaterThan(0);
+    expect(row!.lastEventSeq).toBe(0);
   });
 
   it("mail-derived blocks include from_agent in content_json", async () => {
@@ -232,10 +237,12 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
       expect(row!.status).toBe("complete");
       expect(JSON.parse(row!.contentJson)).toEqual({ text });
       // SSE block_complete must have fired (the dashboard has no
-      // optimistic bubble for these system-originated prompts) and the
-      // row's last_event_seq must match the returned seq.
+      // optimistic bubble for these system-originated prompts). The
+      // seq is the eventBus's published sequence number; FRI-125
+      // retired the row.last_event_seq peek-and-stamp dance, so the
+      // row's column is now the sentinel `0` until C3 drops it.
       expect(seq).toBeGreaterThan(0);
-      expect(row!.lastEventSeq).toBe(seq);
+      expect(row!.lastEventSeq).toBe(0);
       const evt = captured.find((e) => e.block_id === blockId);
       expect(evt?.type).toBe("block_complete");
     },
@@ -264,7 +271,9 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     // event between the two block_completes for mail-derived blocks, so the
     // gap isn't necessarily exactly 1.
     expect(r2.seq).toBeGreaterThan(r1.seq);
-    expect((await getBlockById(r1.blockId))!.lastEventSeq).toBe(r1.seq);
-    expect((await getBlockById(r2.blockId))!.lastEventSeq).toBe(r2.seq);
+    // FRI-125: the row's last_event_seq column is the sentinel `0` (peek
+    // dance retired; column drops in C3).
+    expect((await getBlockById(r1.blockId))!.lastEventSeq).toBe(0);
+    expect((await getBlockById(r2.blockId))!.lastEventSeq).toBe(0);
   });
 });
