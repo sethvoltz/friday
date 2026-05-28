@@ -70,7 +70,11 @@ async function openDashboard(page: Page, env: EnvSnapshot, path = "/"): Promise<
   await page.evaluate(() => {
     try {
       localStorage.clear();
-    } catch {}
+    } catch {
+      // SecurityError in sandboxed contexts — non-fatal; the FOUC
+      // script tolerates missing localStorage and falls back to
+      // defaults.
+    }
   });
   if (path !== "/") await page.goto(env.dashboardURL + path);
   else await page.goto(env.dashboardURL + "/");
