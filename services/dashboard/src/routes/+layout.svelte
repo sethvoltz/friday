@@ -17,17 +17,22 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
   import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
-  import { ModeWatcher, setMode } from "mode-watcher";
+  import { bindTheme } from "$lib/stores/theme.svelte";
+  import { zeroSync } from "$lib/stores/zero.svelte";
+  import { FOUC_SCRIPT } from "$lib/theme/foucScript";
   import type { LayoutData } from "./$types";
   import type { Snippet } from "svelte";
 
   let { data, children }: { data: LayoutData; children: Snippet } = $props();
 
-  // mode-watcher owns the authoritative theme state. Its pre-paint head
-  // script (injected via <ModeWatcher />) adds the `dark` class to <html>
-  // synchronously before first paint, so app.css's `.dark { ... }` block
-  // and Markdown.svelte's `:global(.dark …)` rules light up immediately
-  // without a flash of the light palette.
+  // FRI-124: Friday's theming runtime is in-tree. FOUC_SCRIPT (injected
+  // via <svelte:head> below) reads localStorage['friday:theme'] and
+  // stamps the resolved .palette-<name> + .dark classes on <html>
+  // synchronously before first paint. bindTheme(zeroSync) wires the
+  // runtime store to Zero's canonical settings row, the system's
+  // prefers-color-scheme signal, and DOM side effects (palette class,
+  // colorScheme, theme-color meta, localStorage write-through). See
+  // lib/stores/theme.svelte.ts and lib/theme/foucScript.ts.
 
   let menuOpen = $state(false);
   function closeMenu() {
@@ -44,20 +49,12 @@
   // Live uptime ticker + global SSE connection (one EventSource for all pages)
   let uptimeMs = $state(0);
   onMount(() => {
-    // One-time migration: the dashboard used to persist its theme under
-    // `friday:theme`. mode-watcher uses `mode-watcher-mode`. If the user
-    // has a stored preference from before, seed mode-watcher with it and
-    // drop the legacy key so future toggles round-trip through one place.
-    try {
-      const legacy = localStorage.getItem("friday:theme");
-      const newKey = localStorage.getItem("mode-watcher-mode");
-      if (legacy && !newKey && (legacy === "light" || legacy === "dark")) {
-        setMode(legacy);
-      }
-      if (legacy) localStorage.removeItem("friday:theme");
-    } catch {
-      // localStorage unavailable / SecurityError — ignore.
-    }
+    // FRI-124: bind the runtime theme store to Zero + matchMedia + DOM.
+    // The FOUC script has already stamped a palette class on <html> by
+    // the time we reach this point; the binder reconciles with the
+    // canonical Zero row once it hydrates and re-applies side effects
+    // on every Theme change thereafter.
+    const unbindTheme = bindTheme(zeroSync);
 
     // One-time migration: remove the old localStorage send queue. Zero's
     // IDB outbox now owns durability; the localStorage key is dead weight.
@@ -140,6 +137,7 @@
       clearInterval(i);
       stopSSE();
       stopWakeLock();
+      unbindTheme();
       window.removeEventListener("keydown", onKey);
       if (vv && vvUpdate) {
         vv.removeEventListener("resize", vvUpdate);
@@ -165,6 +163,12 @@
 </script>
 
 <svelte:head>
+  <!-- FRI-124: pre-paint FOUC-killer. Runs synchronously in <head>
+       before <body> parses. Reads localStorage['friday:theme'] and
+       stamps .palette-<name> + .dark (if kind=dark) on <html>, plus
+       style.colorScheme and <meta name="theme-color">. See
+       lib/theme/foucScript.ts. -->
+  {@html `<script>${FOUC_SCRIPT}</script>`}
   <link rel="icon" href={favicon} />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link
@@ -176,7 +180,6 @@
     rel="stylesheet" />
 </svelte:head>
 
-<ModeWatcher />
 {#if signedIn && !isLogin}
   <SyncOverlay />
 {/if}
