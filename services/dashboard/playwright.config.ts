@@ -12,6 +12,15 @@
  * @sveltejs/kit's bundle output, which the Svelte test suite already
  * covers; we're testing Friday-specific behavior (the auth-cookie
  * gate + Zero round-trip), not browser compatibility.
+ *
+ * Two chromium projects: the baseline desktop `chromium` and a
+ * touch-emulating `chromium-touch` (Pixel 5 descriptor → `hasTouch:
+ * true`, `isMobile: true`). The sidebar click-bleed suite (FRI-126)
+ * needs the touch project to exercise the `@media (hover: none)`
+ * always-opaque +/- slot — the platform where the bug bit hardest;
+ * `devices["Desktop Chrome"]` does not set `hasTouch`, so the desktop
+ * project never enters that code path. Both projects share `globalSetup`
+ * so the sync-env boot is paid once, not per-project.
  */
 
 import { defineConfig, devices } from "@playwright/test";
@@ -43,6 +52,20 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      // Pixel 5 sets isMobile + hasTouch, which is what flips the
+      // sidebar's `@media (hover: none)` slot to always-opaque and
+      // routes taps through the touch synthetic-click path FRI-126
+      // depends on. Scoped to the sidebar-click-targets suite only: the
+      // appearance + live-typing suites assume the desktop viewport
+      // (the sidebar collapses to a mobile dropdown under 768px), so
+      // re-running them under a 393px Pixel 5 would test a different
+      // layout than they were written for. The FRI-126 suite is the one
+      // that actually needs `@media (hover: none)`.
+      name: "chromium-touch",
+      use: { ...devices["Pixel 5"] },
+      testMatch: /sidebar-click-targets\.spec\.ts/,
     },
   ],
 });
