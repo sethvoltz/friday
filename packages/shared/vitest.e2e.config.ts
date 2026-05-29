@@ -26,6 +26,12 @@ export default defineConfig({
     // longer timeouts via the third arg to `it(...)`. This is the
     // default ceiling.
     testTimeout: 60_000,
-    hookTimeout: 120_000,
+    // 180s: daemon/dashboard boot ceilings rose to 90s (matching
+    // zero-cache) and waitForBoot retries once, so the serialized boot
+    // chain in beforeAll can legitimately run long under load. Keep the
+    // default hook ceiling above that so a slow-but-succeeding boot isn't
+    // aborted before it completes. Files that set their own
+    // `beforeAll(fn, HARNESS_BOOT_MS)` override this per-call.
+    hookTimeout: 180_000,
   },
 });

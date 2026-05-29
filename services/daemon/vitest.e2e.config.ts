@@ -14,6 +14,8 @@ export default defineConfig({
     setupFiles: ["../../packages/shared/src/test/vitest-setup.ts"],
     fileParallelism: false,
     testTimeout: 60_000,
-    hookTimeout: 120_000,
+    // 180s — see packages/shared/vitest.e2e.config.ts (boot ceilings rose
+    // to 90s + waitForBoot retries once).
+    hookTimeout: 180_000,
   },
 });
