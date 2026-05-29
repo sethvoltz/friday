@@ -158,6 +158,34 @@ async function tapExpandGlyph(page: Page, name: string): Promise<void> {
 }
 
 /**
+ * Coordinate-based tap in the expand-slot's *fade band* — the part of the
+ * 4rem slot that lies to the LEFT of the inner 1.85rem glyph button. THIS
+ * is the exact region the click-bleed bug lived in: before the fix the
+ * slot carried `pointer-events: none`, so a tap here fell through to
+ * `.row-main` underneath and re-focused the agent instead of toggling its
+ * history. Tapping the glyph *centre* (tapExpandGlyph) never reproduced
+ * the bug because the inner button always had `pointer-events: auto`.
+ *
+ * Targets a point 6px inside the slot's left edge (safely within the fade
+ * band; the button starts ~27px further right at this width) and asserts
+ * up-front that the chosen point is genuinely outside the button box so
+ * the test fails loudly if the layout ever shrinks the band to nothing.
+ */
+async function tapExpandSlotFadeBand(page: Page, name: string): Promise<void> {
+  const slot = await page.locator(`${rowSel(name)} .expand-slot`).boundingBox();
+  const btn = await page.locator(`${rowSel(name)} .expand-btn`).boundingBox();
+  if (!slot) throw new Error(`no bounding box for ${name} .expand-slot`);
+  if (!btn) throw new Error(`no bounding box for ${name} .expand-btn`);
+  const x = slot.x + 6;
+  const y = slot.y + slot.height / 2;
+  expect(
+    x,
+    `fade-band tap x (${x}) must be strictly left of the glyph button (starts at ${btn.x}) — otherwise this isn't testing the bleed-through region`,
+  ).toBeLessThan(btn.x);
+  await page.mouse.click(x, y);
+}
+
+/**
  * Drive N alternating focus switches between two rows via coordinate
  * clicks on each row's label region, waiting on the visible URL between
  * each (the route is not synchronously observable from Playwright; the
@@ -183,30 +211,17 @@ async function gotoSidebar(page: Page, env: EnvSnapshot): Promise<void> {
   // Wait for the Zero-replicated rows to hydrate. All three seeded rows
   // must be present before we start clicking — they carry the +/- button.
   //
-  // Known harness gap (see the FRI-126 PR body / blockers): the scratch
-  // Playwright sync env's zero-cache acknowledges the sidebar `agents`
-  // query (the WS poke carries `gotQueriesPatch` for it) but serves an
-  // empty result set, so seeded `agents` rows never materialize on the
-  // client even though they are present in Postgres and the replication
-  // slot advances past their LSN. No existing e2e spec depends on agent
-  // rows rendering in the browser, so the gap was previously unexercised;
-  // closing it is a `packages/shared` sync-harness/zero-cache change,
-  // out of scope for this dashboard-only ticket. When a row does not
-  // appear within the bound, skip with a loud annotation rather than
-  // hard-fail — the geometry assertions below are exact and will execute
-  // the moment the harness delivers rows.
-  const appeared = await page
-    .locator(rowSel(agA.name))
-    .waitFor({ state: "visible", timeout: 25_000 })
-    .then(() => true)
-    .catch(() => false);
-  test.skip(
-    !appeared,
-    "Zero did not deliver seeded agent rows to the browser client in this scratch harness (known infra gap; rows present in Postgres but zero-cache serves the sidebar agents query empty). See FRI-126 blockers.",
-  );
-
+  // Before FRI-129 the scratch sync harness booted zero-cache without
+  // running `zero-deploy-permissions`, so Zero's deny-all default served
+  // the sidebar `agents` query empty even though the seeded rows were in
+  // Postgres and the replication slot had advanced past their LSN — the
+  // rows never materialized on the client and this suite was inert behind
+  // a `test.skip`. FRI-129 (#108) now deploys permissions before spawning
+  // zero-cache (mirroring production's supervisor `preStart`), so the
+  // seeded rows DO reach the browser. The skip guard is gone: a row that
+  // fails to appear is now a hard failure, not a skip.
   for (const ag of SEEDED) {
-    await expect(page.locator(rowSel(ag.name))).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator(rowSel(ag.name))).toBeVisible({ timeout: 25_000 });
     await expect(page.locator(`${rowSel(ag.name)} .expand-btn`)).toBeAttached({
       timeout: 20_000,
     });
@@ -219,6 +234,44 @@ test.beforeAll(async () => {
 });
 
 test.describe("sidebar click targets after focus switches (FRI-126)", () => {
+  test("AC1 (Prong A): a tap in the slot's fade band toggles history — NOT focus (the bleed-through region)", async ({
+    browser,
+  }) => {
+    // The load-bearing case. Tapping the part of the 4rem slot to the LEFT
+    // of the glyph button is what bled through to `.row-main` before the
+    // fix. No focus switches needed: Prong A is a pure-geometry bug — the
+    // slot was `pointer-events: none`, so a tap in the fade band hit the
+    // row underneath on the very first interaction. With the fix the whole
+    // slot is a `toggleHistory` hit target; without it this tap navigates.
+    const env = loadEnv();
+    const context = await browser.newContext();
+    await context.addCookies(parseCookiesForPlaywright(env.cookie, env.dashboardURL));
+    const page = await context.newPage();
+    await gotoSidebar(page, env);
+
+    // Start on the orchestrator route so a stray focus would visibly change
+    // the URL to /sessions/<agC>. agC starts collapsed.
+    await expect(page).toHaveURL(/\/$|\/sessions\/friday/);
+    await expect(page.locator(`${rowSel(agC.name)} .expand-btn`)).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+
+    await tapExpandSlotFadeBand(page, agC.name);
+
+    // Must toggle agC's history and must NOT navigate to agC. Pre-fix, the
+    // fade-band tap fell through to `.row-main` → focusAgent → goto(agC):
+    // the URL would become /sessions/<agC> and aria-expanded would stay
+    // "false". Both assertions therefore fail without the Prong-A fix.
+    await expect(page.locator(`${rowSel(agC.name)} .expand-btn`)).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    await expect(page).not.toHaveURL(new RegExp("/sessions/" + agC.name + "(/.*)?$"));
+
+    await context.close();
+  });
+
   test("AC2: after 10 alternating focus switches, an expand-glyph tap toggles history — not focus", async ({
     browser,
   }) => {
@@ -237,9 +290,12 @@ test.describe("sidebar click targets after focus switches (FRI-126)", () => {
     await alternateFocus(page, agA.name, agB.name, 10);
     await expect(page).toHaveURL(new RegExp("/sessions/" + agB.name + "(/.*)?$"));
 
-    // Coordinate-based tap on agC's +/- glyph. Must toggle agC's history
-    // (aria-expanded → true) and must NOT navigate to agC.
-    await tapExpandGlyph(page, agC.name);
+    // Coordinate-based tap in agC's slot fade band (left of the glyph) —
+    // the bleed-through region, exercised here AFTER 10 focus switches so
+    // the slot's interactivity is still correct once the rows have churned.
+    // Must toggle agC's history (aria-expanded → true) and must NOT
+    // navigate to agC (the URL stays on agB).
+    await tapExpandSlotFadeBand(page, agC.name);
 
     await expect(page).toHaveURL(new RegExp("/sessions/" + agB.name + "(/.*)?$"));
     await expect(page.locator(`${rowSel(agC.name)} .expand-btn`)).toHaveAttribute(
@@ -283,7 +339,7 @@ test.describe("sidebar click targets after focus switches (FRI-126)", () => {
     await context.close();
   });
 
-  test("AC4: elementFromPoint at each glyph centre resolves inside .expand-btn", async ({
+  test("AC4: elementFromPoint resolves inside the toggle target — at the glyph centre AND in the fade band — never .row-main", async ({
     browser,
   }) => {
     const env = loadEnv();
@@ -295,6 +351,9 @@ test.describe("sidebar click targets after focus switches (FRI-126)", () => {
     await alternateFocus(page, agA.name, agB.name, 10);
 
     for (const ag of SEEDED) {
+      // (a) The glyph centre resolves inside the inner button. This holds
+      // even pre-fix (the button always had pointer-events: auto), so on
+      // its own it does NOT guard the bug — it's the baseline sanity check.
       const { x, y } = await centreOf(page, `${rowSel(ag.name)} .expand-btn`);
       const resolvesInsideBtn = await page.evaluate(
         ({ px, py }) => {
@@ -307,6 +366,37 @@ test.describe("sidebar click targets after focus switches (FRI-126)", () => {
         resolvesInsideBtn,
         `elementFromPoint at ${ag.name}'s glyph centre should resolve inside .expand-btn`,
       ).toBe(true);
+
+      // (b) The LOAD-BEARING check: a point in the slot's fade band (left
+      // of the button) must resolve inside the .expand-slot toggle target
+      // and must NOT resolve to .row-main underneath. Pre-fix the slot was
+      // `pointer-events: none`, so elementFromPoint here returned the
+      // `.row-main` button beneath — the bleed-through. The recorded box
+      // for the slot and button confirm a real band exists to sample.
+      const slot = await page.locator(`${rowSel(ag.name)} .expand-slot`).boundingBox();
+      const btn = await page.locator(`${rowSel(ag.name)} .expand-btn`).boundingBox();
+      if (!slot) throw new Error(`no bounding box for ${ag.name} .expand-slot`);
+      if (!btn) throw new Error(`no bounding box for ${ag.name} .expand-btn`);
+      const fadeX = slot.x + 6;
+      const fadeY = slot.y + slot.height / 2;
+      expect(
+        fadeX,
+        `fade-band sample x (${fadeX}) must be left of the glyph button (starts at ${btn.x})`,
+      ).toBeLessThan(btn.x);
+      const resolution = await page.evaluate(
+        ({ px, py }) => {
+          const el = document.elementFromPoint(px, py);
+          if (!el) return "null";
+          if ((el as Element).closest(".expand-slot")) return "expand-slot";
+          if ((el as Element).closest(".row-main")) return "row-main";
+          return (el as Element).className || (el as Element).tagName;
+        },
+        { px: fadeX, py: fadeY },
+      );
+      expect(
+        resolution,
+        `elementFromPoint in ${ag.name}'s slot fade band must hit the .expand-slot toggle target, not .row-main (the bleed-through)`,
+      ).toBe("expand-slot");
     }
 
     await context.close();
