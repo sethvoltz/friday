@@ -101,7 +101,6 @@ async function insertBlock(opts: {
       contentJson: { text: "" },
       status: "complete",
       ts: new Date(),
-      lastEventSeq: 0,
     });
 }
 

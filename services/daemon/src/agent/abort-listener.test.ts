@@ -116,8 +116,8 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
   });
 
   it("does NOT fire NOTIFY on common lifecycle transitions (complete → complete via other-field UPDATEs)", async () => {
-    // Other field UPDATEs (e.g. `last_event_seq` advances on the
-    // user block) must not spam the abort channel.
+    // Other field UPDATEs (e.g. content_json edits, ts re-stamps) must
+    // not spam the abort channel — only status='abort_requested' should.
     const { Client } = pgPkg;
     const client = new Client({ connectionString: handle.databaseUrl });
     await client.connect();
