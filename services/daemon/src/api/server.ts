@@ -105,9 +105,9 @@ import {
   findAgentByTurnId,
   forceWorkerRefork,
   peekLiveWorker,
-  recordUserBlock,
   removeQueuedPrompt,
 } from "../agent/lifecycle.js";
+import { recordUserBlock } from "../agent/block-stream.js";
 import { getBlockById } from "@friday/shared/services";
 import { generateScratchName } from "../agent/scratch-names.js";
 import { archiveWorkspace, createWorkspace, workspacePath } from "../agent/workspace.js";
