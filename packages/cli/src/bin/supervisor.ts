@@ -134,16 +134,18 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
       args: ["exec", "zero-cache"],
       cwd: join(repoRoot, "services", "dashboard"),
       env: {
+        // System default for the single-user local instance: zero-cache otherwise
+        // auto-sizes sync workers to ~1-per-core (availableParallelism() - 1), each
+        // holding ~5 Postgres connections (~42 on a 10-core Mac). Pinning to 2 keeps
+        // realtime sync parallelism while cutting connections ~65%. Placed BEFORE the
+        // process.env spread so it is a DEFAULT the user can override via
+        // ZERO_NUM_SYNC_WORKERS in ~/.friday/.env. Takes effect on next zero-cache restart.
+        ZERO_NUM_SYNC_WORKERS: "2",
         ...process.env,
         ZERO_LOG_FORMAT: "json",
         // FRI-83 follow-up: the spawn-time export of ZERO_MUTATE_URL
         // is the source of truth, beating any stale value in .env.
         ZERO_MUTATE_URL: `http://localhost:${dashboardPort}/api/mutators`,
-        // Single-user local instance: zero-cache otherwise auto-sizes its
-        // sync workers to ~1-per-core (availableParallelism() - 1), and each
-        // worker holds ~5 Postgres connections — ~42 on a 10-core Mac. Pinning
-        // to 2 keeps realtime sync parallelism while cutting connections ~65%.
-        ZERO_NUM_SYNC_WORKERS: "2",
       },
       // Zero exits 14 on AutoResetSignal (replica schema-version drift
       // vs upstream Postgres); restart immediately, no backoff.
