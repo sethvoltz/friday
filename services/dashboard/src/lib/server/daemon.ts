@@ -10,7 +10,17 @@ import {
 } from "@friday/shared";
 
 const cfg = loadConfig();
-const BASE = `http://localhost:${resolveDaemonPort(cfg)}`;
+// Bind to 127.0.0.1 explicitly, NOT `localhost`. The daemon listens on
+// `127.0.0.1` only (`server.listen(port, "127.0.0.1")` in
+// services/daemon/src/api/server.ts). On a dual-stack host `localhost`
+// resolves to `::1` (IPv6) first, where the daemon is NOT listening — so
+// every daemon-proxy call lands on whatever else happens to hold that
+// port on `::1` (in the test sync-harness, a Fastify service that
+// answers `404 Route … not found`) or fails outright. Matching the
+// daemon's exact bind address keeps the proxy on the IPv4 loopback the
+// daemon actually serves. Surfaced by FRI-126's now-executable AC8
+// (history-row navigation), which proxies `/api/agents/<a>/sessions`.
+const BASE = `http://127.0.0.1:${resolveDaemonPort(cfg)}`;
 /**
  * Single default timeout for every non-streaming daemon-proxy fetch
  * (FIX_FORWARD 3.4). The previous 2s was an arbitrary "feels snappy"
