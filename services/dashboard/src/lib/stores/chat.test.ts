@@ -800,6 +800,131 @@ describe("inflight-state probe on reload", () => {
   });
 });
 
+describe("aurora/dot agreement (FRI-128)", () => {
+  // The chat-input aurora glow (ChatInput.svelte `busy`) and the sidebar
+  // status dot (Sidebar.svelte:407-411 agent-row, :506-511 mobile-trigger)
+  // are meant to be ONE signal after FRI-54. Before FRI-128, aurora derived
+  // from `chat.inflightTurnId !== null || chat.focusedAgentIsWorking`; the
+  // local-inflight arm lit the aurora while the dot — gated solely on
+  // `agents.status === "working"` — stayed dark, producing the divergence
+  // the user reported. FRI-128 collapses aurora to `chat.focusedAgentIsWorking`
+  // alone so both indicators read the same `status === "working"` gate.
+  //
+  // These tests exercise the real `ChatState` $state/getters. Mutations are
+  // visible synchronously to subsequent getter reads (Svelte 5 runes), so no
+  // flush is needed. They do NOT drive the DOM `class:pulse` binding (a Svelte
+  // runtime concern, out of scope for vitest); the cross-product test bridges
+  // that gap by evaluating the dot's literal JSX gating expression against the
+  // same `chat.agents` snapshot the getter reads.
+
+  // The aurora derivation, mirrored from ChatInput.svelte:24 verbatim.
+  const auroraBusy = (chat: import("./chat.svelte").ChatState): boolean =>
+    chat.focusedAgentIsWorking;
+  // The sidebar dot's literal gating expression, mirrored from
+  // Sidebar.svelte:407-411 / :506-511. `focused` is
+  // `chat.agents.find((a) => a.name === chat.focusedAgent)` (Sidebar.svelte:275-277)
+  // and the dot's `class:pulse` is `focused.status === "working"`. We evaluate
+  // it against the SAME `chat.agents` snapshot — NOT by calling
+  // focusedAgentIsWorking a second time, which would be tautological.
+  const dotPulse = (chat: import("./chat.svelte").ChatState): boolean =>
+    chat.agents.find((a) => a.name === chat.focusedAgent)?.status === "working";
+
+  it("invariant: aurora === dot === (status === 'working') across all 8 cells of {slot} × {status}", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const slots: Array<string | null> = [null, "t-x"];
+    const statuses = ["idle", "working", "stalled", "error"] as const;
+    for (const slot of slots) {
+      for (const status of statuses) {
+        const chat = new ChatState();
+        chat.focusedAgent = "friday";
+        chat.agents = [{ name: "friday", type: "orchestrator", status }];
+        // Populate the focused agent's local inflight slot to whatever this
+        // cell dictates. Under FRI-128 the aurora must ignore it entirely.
+        chat.markInflight("friday", slot);
+
+        const expected = status === "working";
+        const aurora = auroraBusy(chat);
+        const dot = dotPulse(chat);
+
+        // The whole point: the local slot must NOT move the aurora. So for a
+        // given status, aurora is identical whether slot is null or "t-x".
+        const label = `slot=${slot ?? "null"} status=${status}`;
+        expect(chat.inflightTurnId, label).toBe(slot);
+        expect(aurora, `aurora ${label}`).toBe(expected);
+        expect(dot, `dot ${label}`).toBe(expected);
+        // Aurora and dot agree with each OTHER, by construction.
+        expect(aurora, `aurora===dot ${label}`).toBe(dot);
+      }
+    }
+  });
+
+  it("repro path 3 (send-path lead window): eager slot set + status still 'idle' → aurora OFF, slot populated (DOCUMENTED regression)", async () => {
+    // Simulates ChatInput's eager `chat.inflightTurnId = eagerTurnId` write on
+    // send, before the daemon's `setStatus('working')` round-trips back via
+    // Postgres → zero-cache. Under FRI-128 the aurora intentionally does NOT
+    // light yet — it waits for `agents.status === "working"`, exactly like the
+    // dot already does. This test is the explicit acceptance of that regression.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Set the focused agent row FIRST so the getter has a row to find.
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle" }];
+    chat.markInflight("friday", "t-eager");
+
+    // Both gates are observable and disagree, as expected during the lead window.
+    expect(chat.inflightTurnId).toBe("t-eager");
+    expect(chat.focusedAgentIsWorking).toBe(false);
+    expect(auroraBusy(chat)).toBe(false);
+    expect(dotPulse(chat)).toBe(false);
+    // The two indicators still AGREE with each other — both off.
+    expect(auroraBusy(chat)).toBe(dotPulse(chat));
+  });
+
+  it("repro path 2 (SSE turn_done dropped): stale slot persists but aurora stays OFF when status is 'idle'", async () => {
+    // Path 2: a dropped/seq-skipped SSE turn_done leaves the inflight slot
+    // populated for a turn whose agent is already idle in Zero. FRI-128 does
+    // NOT heal the slot (Option B was rejected) — it only stops the aurora
+    // from reading it, so the divergence is gone without touching slot state.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "helper";
+    chat.agents = [{ name: "helper", type: "helper", status: "idle" }];
+    chat.markInflight("helper", "t-leaked");
+
+    // Slot is NOT healed — still carries the leaked turn id.
+    expect(chat.inflightTurnId).toBe("t-leaked");
+    // But aurora is OFF (dot off → aurora off), matching the dot.
+    expect(chat.focusedAgentIsWorking).toBe(false);
+    expect(auroraBusy(chat)).toBe(false);
+    expect(dotPulse(chat)).toBe(false);
+  });
+
+  it("repro path 1 (cross-agent focus switch with stale slot): switching focus to an idle agent with a stale slot → aurora OFF", async () => {
+    // Path 1 is the path the user actually reported: helper got a stale slot
+    // (e.g. mail-triggered turn_started while non-focused, turn_done delayed),
+    // the user switches focus to helper before turn_done lands. helper is idle
+    // in Zero. Pre-FRI-128 the aurora lit (slot stale); now it stays dark to
+    // match the dot.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "idle" },
+      { name: "helper", type: "helper", status: "idle" },
+    ];
+    chat.markInflight("helper", "t-stale");
+
+    // Switch focus to helper (the cross-agent switch the user performed).
+    chat.focusedAgent = "helper";
+
+    // helper's slot is stale, but its status is idle → aurora must be OFF.
+    expect(chat.inflightTurnId).toBe("t-stale");
+    expect(chat.focusedAgentIsWorking).toBe(false);
+    expect(auroraBusy(chat)).toBe(false);
+    expect(dotPulse(chat)).toBe(false);
+  });
+});
+
 describe("jumpTo (/jump <date|term>)", () => {
   // jumpTo uses the raw `fetch` (not fetchWithTimeout) so we stub the
   // global. The mock is reinstalled per test so a stray vi.fn carry-over
