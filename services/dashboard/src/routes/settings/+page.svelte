@@ -398,99 +398,6 @@
     </div>
   </div>
 
-  <div class="card appearance-card">
-    <div class="card-header"><h2>Appearance</h2></div>
-    <p class="row-value">
-      Pick one palette for all conditions, or sync with your system's
-      light/dark mode.
-    </p>
-    <div class="appearance-mode" role="radiogroup" aria-label="Appearance mode">
-      <button
-        type="button"
-        class="appearance-mode-option"
-        class:selected={theme.kind === "single"}
-        aria-pressed={theme.kind === "single"}
-        onclick={() => setThemeKind("single")}>
-        Single theme
-      </button>
-      <button
-        type="button"
-        class="appearance-mode-option"
-        class:selected={theme.kind === "sync"}
-        aria-pressed={theme.kind === "sync"}
-        onclick={() => setThemeKind("sync")}>
-        <span class="appearance-mode-icon" aria-hidden="true">
-          <Monitor size={14} strokeWidth={2} />
-        </span>
-        Sync with system
-      </button>
-    </div>
-
-    {#if theme.kind === "single"}
-      <div class="palette-section">
-        <div class="section-label">Palette</div>
-        <div class="palette-grid" role="radiogroup" aria-label="Single palette">
-          {#each PALETTE_NAMES as p (p)}
-            <button
-              type="button"
-              class="palette-card palette-{p}"
-              class:selected={theme.config.picks.single === p}
-              aria-pressed={theme.config.picks.single === p}
-              onclick={() => setSinglePick(p)}>
-              <PalettePreview palette={p} label={displayName(p)} />
-            </button>
-          {/each}
-        </div>
-        {#if !theme.config.picks.single}
-          <p class="palette-default-note">
-            Using default: {displayName(DEFAULTS[theme.systemMode])}
-          </p>
-        {/if}
-      </div>
-    {:else}
-      <div class="palette-section">
-        <div class="section-label">Light slot</div>
-        <div class="palette-grid" role="radiogroup" aria-label="Light slot palette">
-          {#each PALETTE_NAMES as p (p)}
-            <button
-              type="button"
-              class="palette-card palette-{p}"
-              class:selected={theme.config.picks.light === p}
-              aria-pressed={theme.config.picks.light === p}
-              onclick={() => setSlotPick("light", p)}>
-              <PalettePreview palette={p} label={displayName(p)} />
-            </button>
-          {/each}
-        </div>
-        {#if !theme.config.picks.light}
-          <p class="palette-default-note">
-            Using default: {displayName(DEFAULTS.light)}
-          </p>
-        {/if}
-      </div>
-      <div class="palette-section">
-        <div class="section-label">Dark slot</div>
-        <div class="palette-grid" role="radiogroup" aria-label="Dark slot palette">
-          {#each PALETTE_NAMES as p (p)}
-            <button
-              type="button"
-              class="palette-card palette-{p}"
-              class:selected={theme.config.picks.dark === p}
-              aria-pressed={theme.config.picks.dark === p}
-              onclick={() => setSlotPick("dark", p)}>
-              <PalettePreview palette={p} label={displayName(p)} />
-            </button>
-          {/each}
-        </div>
-        {#if !theme.config.picks.dark}
-          <p class="palette-default-note">
-            Using default: {displayName(DEFAULTS.dark)}
-          </p>
-        {/if}
-      </div>
-    {/if}
-  </div>
-
   <div class="card">
     <div class="card-header"><h2>Model</h2></div>
     <p class="row-value">
@@ -607,6 +514,99 @@
         Reset auth rate-limits
       </button>
     </div>
+  </div>
+
+  <div class="card appearance-card">
+    <div class="card-header"><h2>Appearance</h2></div>
+    <p class="row-value">
+      Pick one palette for all conditions, or sync with your system's
+      light/dark mode.
+    </p>
+    <div class="appearance-mode" role="radiogroup" aria-label="Appearance mode">
+      <button
+        type="button"
+        class="appearance-mode-option"
+        class:selected={theme.kind === "single"}
+        aria-pressed={theme.kind === "single"}
+        onclick={() => setThemeKind("single")}>
+        Single theme
+      </button>
+      <button
+        type="button"
+        class="appearance-mode-option"
+        class:selected={theme.kind === "sync"}
+        aria-pressed={theme.kind === "sync"}
+        onclick={() => setThemeKind("sync")}>
+        <span class="appearance-mode-icon" aria-hidden="true">
+          <Monitor size={14} strokeWidth={2} />
+        </span>
+        Sync with system
+      </button>
+    </div>
+
+    {#if theme.kind === "single"}
+      <div class="palette-section">
+        <div class="section-label">Palette</div>
+        <div class="palette-grid" role="radiogroup" aria-label="Single palette">
+          {#each PALETTE_NAMES as p (p)}
+            <button
+              type="button"
+              class="palette-card palette-{p}"
+              class:selected={theme.config.picks.single === p}
+              aria-pressed={theme.config.picks.single === p}
+              onclick={() => setSinglePick(p)}>
+              <PalettePreview palette={p} label={displayName(p)} />
+            </button>
+          {/each}
+        </div>
+        {#if !theme.config.picks.single}
+          <p class="palette-default-note">
+            Using default: {displayName(DEFAULTS[theme.systemMode])}
+          </p>
+        {/if}
+      </div>
+    {:else}
+      <div class="palette-section">
+        <div class="section-label">Light slot</div>
+        <div class="palette-grid" role="radiogroup" aria-label="Light slot palette">
+          {#each PALETTE_NAMES as p (p)}
+            <button
+              type="button"
+              class="palette-card palette-{p}"
+              class:selected={theme.config.picks.light === p}
+              aria-pressed={theme.config.picks.light === p}
+              onclick={() => setSlotPick("light", p)}>
+              <PalettePreview palette={p} label={displayName(p)} />
+            </button>
+          {/each}
+        </div>
+        {#if !theme.config.picks.light}
+          <p class="palette-default-note">
+            Using default: {displayName(DEFAULTS.light)}
+          </p>
+        {/if}
+      </div>
+      <div class="palette-section">
+        <div class="section-label">Dark slot</div>
+        <div class="palette-grid" role="radiogroup" aria-label="Dark slot palette">
+          {#each PALETTE_NAMES as p (p)}
+            <button
+              type="button"
+              class="palette-card palette-{p}"
+              class:selected={theme.config.picks.dark === p}
+              aria-pressed={theme.config.picks.dark === p}
+              onclick={() => setSlotPick("dark", p)}>
+              <PalettePreview palette={p} label={displayName(p)} />
+            </button>
+          {/each}
+        </div>
+        {#if !theme.config.picks.dark}
+          <p class="palette-default-note">
+            Using default: {displayName(DEFAULTS.dark)}
+          </p>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <div class="card sessions-card">
