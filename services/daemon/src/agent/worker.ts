@@ -28,6 +28,7 @@ import type {
 } from "./worker-protocol.js";
 import { extractUsageFromResult, type FinalUsage } from "./usage-capture.js";
 import { classifySdkError } from "./sdk-error.js";
+import { healDanglingToolUseInJsonl } from "./sdk-jsonl-heal.js";
 import { buildMcpServers } from "../mcp/builder.js";
 import { buildMailPrompt } from "../comms/mail-prompt.js";
 import { daemonFetch } from "../mcp/http.js";
@@ -631,6 +632,36 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       const captured = extractUsageFromResult(m);
       if (captured) {
         finalUsage = captured;
+        // FRI-127 §7: the SDK delivered `result` while we were still
+        // deferring a pending-injection break for an outstanding
+        // `tool_use` (breakAtNextUser was set at the assistant boundary
+        // but the matching synthetic `user(tool_result)` never arrived
+        // before `result`). A tool that interrupts/errors/completes after
+        // the assistant boundary can produce this ordering, leaving the
+        // SDK session JSONL with a dangling `tool_use`. The next resume
+        // would reject with "Stream closed". Heal mid-session by appending
+        // a synthetic tool_result for each unresolved tool_use BEFORE
+        // flushBoundaryBlocks() clears the map. The heal is idempotent
+        // (hasMatchingToolResult skips the write if a result already
+        // exists) and best-effort — boot-time recoverDanglingToolUses is
+        // still the backstop on any path that throws here.
+        if (breakAtNextUser && blocks.size > 0 && sessionId) {
+          for (const block of blocks.values()) {
+            if (block.kind === "tool_use" && block.toolId) {
+              try {
+                healDanglingToolUseInJsonl({
+                  cwd: opts.workingDirectory,
+                  sessionId,
+                  toolUseId: block.toolId,
+                  healMarker: "[Tool call interrupted by mid-turn break; session continues.]",
+                });
+              } catch {
+                // Best-effort; boot-time recovery still heals on restart.
+              }
+            }
+          }
+          breakAtNextUser = false;
+        }
         // The SDK protocol says `result` is the FINAL message of a
         // turn. Continuing the for-await past it and waiting for the
         // iterator to close on its own is a latent stall: if the CLI
