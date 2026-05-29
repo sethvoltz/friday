@@ -2147,3 +2147,179 @@ describe("FRI-121 A3: 5-second watchdog nudges connect() after a recent send", (
     }
   });
 });
+
+describe("JWT self-heal: proactive refresh + reactive re-auth", () => {
+  // Falsification proof: zero-cache disconnects the WS with `needs-auth`
+  // when the JWT's `exp` passes. Before this suite landed, the connection
+  // subscriber only mapped that to status='error' and stopped — leaving
+  // the widget red until the user reloaded. These tests pin the heal:
+  //   1. Proactive timer re-mints ~60s before exp so the WS never trips
+  //      under steady-state operation.
+  //   2. Reactive recovery re-mints + reconnects on `needs-auth` with
+  //      bounded exponential backoff, so the WS heals from clock skew /
+  //      sleep-wake-past-expiry / bfcache without user action.
+  //
+  // Note: these tests use `vi.advanceTimersByTimeAsync` rather than
+  // `vi.runAllTimersAsync()`. The proactive rotation reschedules itself
+  // on success (recursive setTimeout), which is correct production
+  // behavior but trips `runAllTimers`' nested-timer flush into an
+  // unbounded loop. Precise-window advance avoids that.
+
+  function refreshCalls(fetchSpy: ReturnType<typeof vi.fn>): readonly unknown[][] {
+    return fetchSpy.mock.calls.filter((c) => c[0] === "/api/sync/refresh");
+  }
+
+  it("schedules a proactive refresh 60s before expiresAt and calls connect({auth}) with the fresh token", async () => {
+    vi.useFakeTimers();
+    try {
+      const { zeroSync } = await importStore();
+      // Boot init: fetch resolves, Zero ctor runs, schedulers arm.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(instances.length).toBeGreaterThan(0);
+      const z = instances[instances.length - 1]!;
+
+      const fetchSpy = global.fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchSpy.mockClear();
+      z.connection.connect.mockClear();
+
+      // Mock fetch returns expiresAt = Date.now() + 900_000 (15 min).
+      // The proactive timer should fire at 15min - 60s = 14min.
+      // Advance to 1ms before the boundary first — no fire expected.
+      await vi.advanceTimersByTimeAsync(14 * 60_000 - 200);
+      expect(refreshCalls(fetchSpy)).toHaveLength(0);
+      // Cross the boundary; the rotation fires + reschedules.
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(refreshCalls(fetchSpy)).toHaveLength(1);
+      expect(z.connection.connect).toHaveBeenCalledTimes(1);
+      expect(z.connection.connect.mock.calls[0][0]).toEqual({ auth: "test-token-123" });
+      zeroSync.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-mints + reconnects on `needs-auth` (the actual bug Seth caught)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { zeroSync } = await importStore();
+      await vi.advanceTimersByTimeAsync(100);
+      const z = instances[instances.length - 1]!;
+
+      const fetchSpy = global.fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchSpy.mockClear();
+      z.connection.connect.mockClear();
+
+      // Simulate the JWT expiring mid-session — zero-cache rejects the WS.
+      z.__emitConnState({ name: "needs-auth" });
+      expect(zeroSync.status).toBe("error");
+      // Reactive timer fires after 500ms (attempt 0). Before that, no
+      // refresh call yet.
+      await vi.advanceTimersByTimeAsync(499);
+      expect(refreshCalls(fetchSpy)).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(2);
+
+      expect(refreshCalls(fetchSpy)).toHaveLength(1);
+      expect(z.connection.connect).toHaveBeenCalledTimes(1);
+      expect(z.connection.connect.mock.calls[0][0]).toEqual({ auth: "test-token-123" });
+
+      // When the rotation succeeds and zero-cache transitions to
+      // 'connected', the reactive backoff counter resets so the next
+      // expiry isn't penalized.
+      z.__emitConnState({ name: "connected" });
+      expect(zeroSync.status).toBe("live");
+
+      zeroSync.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("backs off exponentially when refresh keeps failing on `needs-auth` (500ms → 1s → 2s)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { zeroSync } = await importStore();
+      await vi.advanceTimersByTimeAsync(100);
+      const z = instances[instances.length - 1]!;
+
+      // Refresh endpoint always 500s — BetterAuth session dead.
+      const fetchSpy = global.fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchSpy.mockImplementation((url: string) =>
+        Promise.resolve(
+          url === "/api/sync/refresh"
+            ? new Response("server error", { status: 500 })
+            : new Response("", { status: 200 }),
+        ),
+      );
+      fetchSpy.mockClear();
+      z.connection.connect.mockClear();
+
+      // Three failed needs-auth cycles. Test re-emits after each window
+      // to simulate zero-cache's own retry tick re-asserting needs-auth.
+      const expectedDelays = [500, 1000, 2000];
+      for (const [i, delay] of expectedDelays.entries()) {
+        z.__emitConnState({ name: "needs-auth" });
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        expect(refreshCalls(fetchSpy)).toHaveLength(i);
+        await vi.advanceTimersByTimeAsync(2);
+        expect(refreshCalls(fetchSpy)).toHaveLength(i + 1);
+        // connect() never called because rotation failed.
+        expect(z.connection.connect).not.toHaveBeenCalled();
+      }
+      zeroSync.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops scheduling reactive retries after MAX_REACTIVE_ATTEMPTS (6)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { zeroSync } = await importStore();
+      await vi.advanceTimersByTimeAsync(100);
+      const z = instances[instances.length - 1]!;
+
+      const fetchSpy = global.fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchSpy.mockImplementation(() =>
+        Promise.resolve(new Response("server error", { status: 500 })),
+      );
+      fetchSpy.mockClear();
+
+      // Six attempts at delays 500, 1000, 2000, 4000, 8000, 16000.
+      const delays = [500, 1000, 2000, 4000, 8000, 16000];
+      for (const [i, delay] of delays.entries()) {
+        z.__emitConnState({ name: "needs-auth" });
+        await vi.advanceTimersByTimeAsync(delay + 1);
+        expect(refreshCalls(fetchSpy)).toHaveLength(i + 1);
+      }
+
+      // The 7th needs-auth must not schedule a new attempt — counter capped.
+      z.__emitConnState({ name: "needs-auth" });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(refreshCalls(fetchSpy)).toHaveLength(6);
+      zeroSync.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels both timers on destroy() so no rotations fire after teardown", async () => {
+    vi.useFakeTimers();
+    try {
+      const { zeroSync } = await importStore();
+      await vi.advanceTimersByTimeAsync(100);
+      const z = instances[instances.length - 1]!;
+
+      // Arm reactive timer, then destroy before it fires.
+      z.__emitConnState({ name: "needs-auth" });
+      const fetchSpy = global.fetch as unknown as ReturnType<typeof vi.fn>;
+      fetchSpy.mockClear();
+      zeroSync.destroy();
+
+      await vi.advanceTimersByTimeAsync(60 * 60_000); // 1 hour
+      expect(refreshCalls(fetchSpy)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

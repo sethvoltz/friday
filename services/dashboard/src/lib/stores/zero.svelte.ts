@@ -339,6 +339,20 @@ class ZeroSyncStore {
    *  terminal-state recovery (needs-auth / error). */
   #lastSendAt: number = 0;
 
+  /** Self-healing JWT rotation. The store mints a 15-minute JWT on init;
+   *  zero-cache disconnects the WS with `needs-auth` once the token's
+   *  `exp` passes. Two recovery paths:
+   *    - Proactive: a timer fires ~60s before `expiresAt`, fetches a
+   *      fresh token, and calls `connect({auth})`. Keeps the WS up
+   *      across long sessions without ever showing red.
+   *    - Reactive: if the WS does land in `needs-auth` (clock skew,
+   *      suspend/resume past expiry, page restored from bfcache with a
+   *      dead token), trigger an immediate re-mint with bounded
+   *      exponential backoff. Counter resets on `connected`. */
+  #proactiveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  #reactiveReauthTimer: ReturnType<typeof setTimeout> | null = null;
+  #reactiveReauthAttempts: number = 0;
+
   /**
    * When `bindBlocksFor` is called before `#init` resolves (the typical
    * cold-load race — the chat shell mounts the moment SvelteKit hands
@@ -369,7 +383,7 @@ class ZeroSyncStore {
         this.status = "error";
         return;
       }
-      const { token, userId, deviceId } = (await r.json()) as RefreshResponse;
+      const { token, userId, deviceId, expiresAt } = (await r.json()) as RefreshResponse;
       this.#deviceId = deviceId;
       // Zero 1.5: `auth` is a JWT string, not a callback. Token
       // rotation happens via `zero.connection.connect({auth})` when
@@ -404,11 +418,24 @@ class ZeroSyncStore {
       // reflects the actual WS health rather than being set once on init.
       // Mapping: connected → 'live', error/closed/needs-auth → 'error',
       // connecting/disconnected → 'pending' (shows orange in widget).
+      //
+      // Recovery-side effects also live here so the WS heals without
+      // user intervention:
+      //   - 'connected' resets the reactive-reauth backoff counter and
+      //     cancels any pending retry (we're healthy again).
+      //   - 'needs-auth' triggers an immediate JWT re-mint + reconnect
+      //     with bounded backoff. Without this, the widget sits red
+      //     until the user reloads (FRI-???: the bug Seth caught).
       const connUnsub = this.#zero.connection.state.subscribe(
         (s: { name: string; reason?: unknown }) => {
           if (s.name === "connected") {
             this.status = "live";
             this.errorMessage = null;
+            this.#reactiveReauthAttempts = 0;
+            if (this.#reactiveReauthTimer) {
+              clearTimeout(this.#reactiveReauthTimer);
+              this.#reactiveReauthTimer = null;
+            }
           } else if (s.name === "error" || s.name === "closed" || s.name === "needs-auth") {
             this.status = "error";
             this.errorMessage = s.reason
@@ -416,6 +443,9 @@ class ZeroSyncStore {
                 ? s.reason
                 : JSON.stringify(s.reason)
               : null;
+            if (s.name === "needs-auth") {
+              this.#triggerReactiveReauth();
+            }
           } else {
             // 'connecting' | 'disconnected' — transient; self-heals via
             // Zero's own run loop. Show as pending so widget goes orange.
@@ -424,6 +454,13 @@ class ZeroSyncStore {
         },
       );
       this.#unsubscribers.push(connUnsub);
+
+      // Proactive JWT rotation. The fresh `expiresAt` from /api/sync/refresh
+      // schedules a re-mint ~60s before the token would land us in
+      // 'needs-auth'. Each successful rotation reschedules with the new
+      // expiry; a failed fetch falls back to the reactive path the next
+      // time the WS actually trips.
+      this.#scheduleProactiveRefresh(expiresAt);
 
       // FRI-121 A2: visibilitychange handler for terminal-state recovery.
       // connection.connect() is a no-op in 'disconnected' (Zero self-heals
@@ -1523,12 +1560,101 @@ class ZeroSyncStore {
       clearInterval(this.#statsInterval);
       this.#statsInterval = null;
     }
+    if (this.#proactiveRefreshTimer) {
+      clearTimeout(this.#proactiveRefreshTimer);
+      this.#proactiveRefreshTimer = null;
+    }
+    if (this.#reactiveReauthTimer) {
+      clearTimeout(this.#reactiveReauthTimer);
+      this.#reactiveReauthTimer = null;
+    }
     for (const unsub of this.#unsubscribers) unsub();
     this.#unsubscribers = [];
     this.unbindBlocks();
     this.#blocksListeners.clear();
     void this.#zero?.close();
     this.#zero = null;
+  }
+
+  /**
+   * Re-mint the Zero JWT and reconnect the WS with the fresh token.
+   * Returns the new `expiresAt` on success so the caller can schedule
+   * the next proactive rotation; returns `null` on any failure (network
+   * error, non-200 response). Caller decides whether to retry.
+   */
+  async #rotateZeroJwt(): Promise<number | null> {
+    if (!this.#zero) return null;
+    try {
+      const r = await fetch("/api/sync/refresh", { method: "POST" });
+      if (!r.ok) return null;
+      const { token: freshToken, expiresAt } = (await r.json()) as RefreshResponse;
+      // connect({auth}) replaces the WS's auth payload; Zero immediately
+      // re-handshakes against zero-cache. If the previous state was
+      // 'needs-auth' the connection.state subscriber will transition to
+      // 'connected' on success, which resets our reactive backoff.
+      void this.#zero.connection.connect({ auth: freshToken });
+      return expiresAt;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Schedule a proactive token rotation just before `expiresAtMs`. The
+   * 60s headroom + 5s floor cover wall-clock skew and the edge case
+   * where the page restored a token that's already in the danger zone.
+   * Each rotation reschedules with its own fresh expiry, so the loop
+   * is self-sustaining as long as `/api/sync/refresh` keeps succeeding.
+   */
+  #scheduleProactiveRefresh(expiresAtMs: number): void {
+    if (this.#proactiveRefreshTimer) clearTimeout(this.#proactiveRefreshTimer);
+    // 60s before expiry, with a 5s minimum so a token issued already-
+    // near-expiry still gets one short delay rather than firing inline.
+    const delayMs = Math.max(expiresAtMs - Date.now() - 60_000, 5_000);
+    this.#proactiveRefreshTimer = setTimeout(() => {
+      void (async () => {
+        const nextExpiresAt = await this.#rotateZeroJwt();
+        if (nextExpiresAt !== null) {
+          this.#scheduleProactiveRefresh(nextExpiresAt);
+        }
+        // On failure, leave the timer empty — the reactive path will
+        // pick up when the WS actually trips to 'needs-auth'. We
+        // don't proactively retry because a failing /api/sync/refresh
+        // typically means BetterAuth session is also dead (different
+        // layer); spinning here would just burn the endpoint.
+      })();
+    }, delayMs);
+  }
+
+  /**
+   * Reactive re-auth: kick off a token rotation when the WS lands in
+   * `needs-auth`. Bounded exponential backoff (500ms → 30s, capped at
+   * 6 attempts) so a broken refresh endpoint doesn't loop forever.
+   * The counter resets to 0 the moment the connection.state subscriber
+   * sees a `connected` event.
+   */
+  #triggerReactiveReauth(): void {
+    const MAX_REACTIVE_ATTEMPTS = 6;
+    if (this.#reactiveReauthAttempts >= MAX_REACTIVE_ATTEMPTS) return;
+    if (this.#reactiveReauthTimer) clearTimeout(this.#reactiveReauthTimer);
+    const attempt = this.#reactiveReauthAttempts++;
+    // 0 → 500ms, 1 → 1s, 2 → 2s, 3 → 4s, 4 → 8s, 5 → 16s. Cap at 30s.
+    const delayMs = Math.min(500 * 2 ** attempt, 30_000);
+    this.#reactiveReauthTimer = setTimeout(() => {
+      this.#reactiveReauthTimer = null;
+      void (async () => {
+        const nextExpiresAt = await this.#rotateZeroJwt();
+        if (nextExpiresAt !== null) {
+          // Rotation succeeded — re-prime the proactive timer for the
+          // new expiry. The 'connected' subscriber will reset the
+          // reactive counter once the WS handshake actually lands.
+          this.#scheduleProactiveRefresh(nextExpiresAt);
+        }
+        // On failure, do nothing. If the WS is still 'needs-auth' Zero
+        // will re-emit that state on its own retry tick and this
+        // method will be called again with the incremented counter.
+      })();
+    }, delayMs);
   }
 }
 
