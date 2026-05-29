@@ -214,6 +214,69 @@ export function assistantMessageHasToolUses(assistantMsg: unknown): boolean {
   return content.some((b) => (b as { type?: string })?.type === "tool_use");
 }
 
+/**
+ * Resolve which session id a drained prompt should resume.
+ *
+ * Extracted from the inline `runQuery` expression so the precedence can be
+ * unit-tested without forking a worker. Behaviour is unchanged: prefer the
+ * parent-provided `p.resumeSessionId` (captured at POST/NOTIFY time), falling
+ * back to the worker's own observed `lastSessionId`. Exported for testability.
+ */
+export function resolveSessionId(
+  p: { resumeSessionId?: string },
+  lastSessionId: string | undefined,
+): string | undefined {
+  return p.resumeSessionId ?? lastSessionId;
+}
+
+type QueryOptions = NonNullable<Parameters<typeof query>[0]["options"]>;
+
+/**
+ * Build the SDK `query()` options object for a turn. Extracted as a pure
+ * function so the options assembly can be asserted without forking a worker.
+ * Behaviour is identical to the previous inline object literal.
+ */
+export function buildQueryOptions(
+  opts: WorkerSpawnOptions,
+  _p: WorkerPromptCommand,
+  sessionId: string | undefined,
+  allowedTools: string[] | undefined,
+  builderGuardHooks: QueryOptions["hooks"] | undefined,
+  thinking: QueryOptions["thinking"] | undefined,
+  mcpServers: QueryOptions["mcpServers"],
+  abortController: AbortController | undefined,
+): QueryOptions {
+  return {
+    cwd: opts.workingDirectory,
+    model: opts.model,
+    permissionMode: "bypassPermissions",
+    includePartialMessages: true,
+    mcpServers,
+    // Friday owns memory via friday-memory MCP. Disabling the SDK's
+    // project-scoped auto-memory prevents the model from silently
+    // falling back to writes under ~/.claude/projects/<cwd>/memory/.
+    // `autoMemoryEnabled` lives on Settings, passed through the
+    // top-level `settings` Options field.
+    settings: { autoMemoryEnabled: false },
+    // FRI-78: thread the worker's abortController through the SDK so
+    // `stop`/`abort` IPCs propagate cleanly to the CLI subprocess
+    // (tool-execution streams shut down deterministically instead of
+    // closing on iterator return). Without this, the SDK only learns
+    // the consumer is gone when the for-await iterator returns.
+    ...(abortController ? { abortController } : {}),
+    ...(builderGuardHooks ? { hooks: builderGuardHooks } : {}),
+    ...(allowedTools ? { allowedTools } : {}),
+    ...(thinking ? { thinking } : {}),
+    ...(opts.effort ? { effort: opts.effort } : {}),
+    systemPrompt: {
+      type: "preset",
+      preset: "claude_code",
+      append: (opts.systemPrompt ? opts.systemPrompt + "\n\n" : "") + renderLocalDatetime(),
+    },
+    ...(sessionId ? { resume: sessionId } : {}),
+  };
+}
+
 /** MIME types Anthropic's vision API will accept as `image` content
  *  blocks. `image/jpg` is folded into `image/jpeg`. Anything outside this
  *  set (and outside `application/pdf`, handled as a document block) is
@@ -339,7 +402,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   }, 10_000);
   hbInterval.unref();
 
-  let sessionId = p.resumeSessionId ?? lastSessionId;
+  let sessionId = resolveSessionId(p, lastSessionId);
   let sessionAnnounced = false;
   let currentMessageId = "";
   let finalUsage: FinalUsage | undefined;
@@ -485,35 +548,16 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   try {
     for await (const msg of query({
       prompt: promptInput,
-      options: {
-        cwd: opts.workingDirectory,
-        model: opts.model,
-        permissionMode: "bypassPermissions",
-        includePartialMessages: true,
+      options: buildQueryOptions(
+        opts,
+        p,
+        sessionId,
+        allowedTools,
+        builderGuardHooks,
+        thinking,
         mcpServers,
-        // Friday owns memory via friday-memory MCP. Disabling the SDK's
-        // project-scoped auto-memory prevents the model from silently
-        // falling back to writes under ~/.claude/projects/<cwd>/memory/.
-        // `autoMemoryEnabled` lives on Settings, passed through the
-        // top-level `settings` Options field.
-        settings: { autoMemoryEnabled: false },
-        // FRI-78: thread the worker's abortController through the SDK so
-        // `stop`/`abort` IPCs propagate cleanly to the CLI subprocess
-        // (tool-execution streams shut down deterministically instead of
-        // closing on iterator return). Without this, the SDK only learns
-        // the consumer is gone when the for-await iterator returns.
-        ...(abortController ? { abortController } : {}),
-        ...(builderGuardHooks ? { hooks: builderGuardHooks } : {}),
-        ...(allowedTools ? { allowedTools } : {}),
-        ...(thinking ? { thinking } : {}),
-        ...(opts.effort ? { effort: opts.effort } : {}),
-        systemPrompt: {
-          type: "preset",
-          preset: "claude_code",
-          append: (opts.systemPrompt ? opts.systemPrompt + "\n\n" : "") + renderLocalDatetime(),
-        },
-        ...(sessionId ? { resume: sessionId } : {}),
-      },
+        abortController,
+      ),
     })) {
       const m = msg as Record<string, unknown>;
 
