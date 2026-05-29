@@ -233,8 +233,17 @@ type QueryOptions = NonNullable<Parameters<typeof query>[0]["options"]>;
 
 /**
  * Build the SDK `query()` options object for a turn. Extracted as a pure
- * function so the options assembly can be asserted without forking a worker.
- * Behaviour is identical to the previous inline object literal.
+ * function (FRI-127 §2/AC#3) so the `disallowedTools: ["Task"]` invariant —
+ * and the rest of the options assembly — can be asserted without forking a
+ * worker.
+ *
+ * `disallowedTools: ["Task"]` removes Anthropic's built-in `Task` sub-agent
+ * tool from the model's context for EVERY agent type. All five Friday agent
+ * types already carry a textual "do not use the built-in Task tool"
+ * instruction; hardening at the SDK layer makes the rule structural. Per the
+ * SDK docs `disallowedTools` "removes [tools] from the model's context …
+ * even if they would otherwise be allowed", so it cannot conflict with the
+ * `allowedTools` auto-approval list threaded from a skill's `allowed_tools`.
  */
 export function buildQueryOptions(
   opts: WorkerSpawnOptions,
@@ -252,6 +261,10 @@ export function buildQueryOptions(
     permissionMode: "bypassPermissions",
     includePartialMessages: true,
     mcpServers,
+    // Drop Anthropic's built-in `Task` sub-agent tool from the catalog for
+    // every agent type. Friday farms work out via `agent_create` + mail, not
+    // SDK Task. See the doc-comment above.
+    disallowedTools: ["Task"],
     // Friday owns memory via friday-memory MCP. Disabling the SDK's
     // project-scoped auto-memory prevents the model from silently
     // falling back to writes under ~/.claude/projects/<cwd>/memory/.
