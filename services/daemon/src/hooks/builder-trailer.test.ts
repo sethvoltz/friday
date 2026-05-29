@@ -61,4 +61,39 @@ describe("builder-trailer hook (FRI-109)", () => {
 
     expect(results).toEqual([]);
   });
+
+  it("carries task scope + parent name + mail-back trailer for builders (FRI-127 §4)", async () => {
+    const result = await builderTrailerHook({
+      agentName: "b1",
+      agentType: "builder",
+      workingDirectory: "/tmp/wt",
+      branch: "friday/x",
+      parentName: "friday",
+      spawnPrompt: "build the thing",
+    });
+
+    expect(result).not.toBeUndefined();
+    const append = (result as { appendSystemPrompt: string }).appendSystemPrompt;
+    expect(append).toContain("/tmp/wt");
+    expect(append).toContain("friday/x");
+    // The verbatim spawn prompt is recorded so a mail-woken builder retains
+    // its original mission (closes the FRI-71 gap).
+    expect(append).toContain("build the thing");
+    // The mail-back reminder names the parent.
+    expect(append).toContain('mail_send({to: "friday"');
+  });
+
+  it("non-builder agent types still return void even with parentName + spawnPrompt", async () => {
+    for (const agentType of ["helper", "bare", "scheduled", "orchestrator"] as const) {
+      const result = await builderTrailerHook({
+        agentName: "a",
+        agentType,
+        workingDirectory: "/tmp/wt",
+        branch: "friday/x",
+        parentName: "friday",
+        spawnPrompt: "build the thing",
+      });
+      expect(result).toBeUndefined();
+    }
+  });
 });

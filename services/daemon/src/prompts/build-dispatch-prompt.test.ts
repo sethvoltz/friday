@@ -150,4 +150,45 @@ describe("buildDispatchPrompt (FRI-123)", () => {
     expect(out.systemPrompt).toContain("Your parent agent is named `orch`");
     expect(out.body).toBe("do the thing");
   });
+
+  it("agent_spawn: wraps the body with a parent-named mail-back trailer (FRI-127 §4)", async () => {
+    const { buildDispatchPrompt } = await import("./build-dispatch-prompt.js");
+
+    const out = await buildDispatchPrompt(
+      { name: "h1", type: "helper", parentName: "friday" },
+      { kind: "agent_spawn", userText: "do thing", parentName: "friday" },
+    );
+
+    expect(out.body.startsWith("do thing")).toBe(true);
+    expect(out.body).toBe(
+      'do thing\n\n---\n\n**When you finish, mail your parent `friday` with the result (`mail_send({to: "friday", body: …})`). Without that mail your parent never learns you\'re done.**',
+    );
+  });
+
+  it("agent_spawn: orphan (no parentName) leaves the body unwrapped (FRI-127 §4)", async () => {
+    const { buildDispatchPrompt } = await import("./build-dispatch-prompt.js");
+
+    const out = await buildDispatchPrompt(
+      { name: "scratch-1", type: "bare" },
+      { kind: "agent_spawn", userText: "do thing" },
+    );
+
+    expect(out.body).toBe("do thing");
+  });
+});
+
+describe("resolveIntent agent_spawn recall payload (FRI-127 §4)", () => {
+  it("keeps intentText as the raw userText even when the body is wrapped", async () => {
+    const { resolveIntent } = await import("./build-dispatch-prompt.js");
+    const resolved = resolveIntent({
+      kind: "agent_spawn",
+      userText: "do thing",
+      parentName: "friday",
+    });
+    // The body carries the wrapper; the recall payload stays verbatim so
+    // memory recall queries the actual task, not the trailer.
+    expect(resolved.intentText).toBe("do thing");
+    expect(resolved.body.startsWith("do thing")).toBe(true);
+    expect(resolved.body).toContain('mail_send({to: "friday"');
+  });
 });

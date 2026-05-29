@@ -17,6 +17,13 @@ export interface HookContextMap {
     agentType: string;
     workingDirectory: string;
     branch?: string;
+    /** FRI-127 §4: the spawning agent's name, threaded so the builder
+     *  bootstrap trailer can tell the builder who to mail back. */
+    parentName?: string;
+    /** FRI-127 §4: the verbatim first-turn prompt the parent spawned this
+     *  agent with, so a mail-woken builder retains its original mission
+     *  (closes the FRI-71 gap). */
+    spawnPrompt?: string;
   };
   before_prompt_build: {
     intent: string;

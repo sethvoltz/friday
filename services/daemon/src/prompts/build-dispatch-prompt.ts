@@ -41,7 +41,7 @@ interface ResolvedIntent {
   skillMatch?: SkillMatch;
 }
 
-function resolveIntent(intent: DispatchIntent): ResolvedIntent {
+export function resolveIntent(intent: DispatchIntent): ResolvedIntent {
   switch (intent.kind) {
     case "user_chat": {
       // Skill-detected variants already pre-stripped userText to the
@@ -79,12 +79,21 @@ function resolveIntent(intent: DispatchIntent): ResolvedIntent {
         intentText: intent.userText,
         body: intent.userText,
       };
-    case "agent_spawn":
+    case "agent_spawn": {
+      // FRI-127 §4: wrap the spawn body with a mail-back trailer naming the
+      // parent so the child closes the loop. The recall payload (intentText)
+      // stays the raw task text — the wrapper would otherwise noise the
+      // memory query. The orphan case (no parentName) keeps the body
+      // unchanged.
+      const wrapped = intent.parentName
+        ? `${intent.userText}\n\n---\n\n**When you finish, mail your parent \`${intent.parentName}\` with the result (\`mail_send({to: "${intent.parentName}", body: …})\`). Without that mail your parent never learns you're done.**`
+        : intent.userText;
       return {
         intentTag: "agent_spawn",
         intentText: intent.userText,
-        body: intent.userText,
+        body: wrapped,
       };
+    }
   }
 }
 
