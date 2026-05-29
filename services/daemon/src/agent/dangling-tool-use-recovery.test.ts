@@ -102,7 +102,6 @@ async function seed(turn: SeedTurn): Promise<void> {
       }),
       status: "complete",
       ts: ts++,
-      lastEventSeq: 0,
     });
     if (tu.resolvedBy) {
       await insertBlock({
@@ -120,7 +119,6 @@ async function seed(turn: SeedTurn): Promise<void> {
         }),
         status: "complete",
         ts: ts++,
-        lastEventSeq: 0,
       });
     }
   }
@@ -432,7 +430,6 @@ describe("recoverDanglingToolUses", () => {
       }),
       status: "complete",
       ts: Date.now(),
-      lastEventSeq: 0,
     });
 
     expect(await countDanglingFor("old-archived")).toBe(1);

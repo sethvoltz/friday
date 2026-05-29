@@ -213,7 +213,6 @@ interface MockBlocksInsertCall {
   streaming: boolean;
   origin_mutation_id?: string;
   ts: number;
-  last_event_seq: number;
 }
 
 function makeMockTx(): {
@@ -1646,7 +1645,6 @@ describe("sendUserMessage", () => {
     expect(row.streaming).toBe(false);
     expect(row.session_id).toBe("__pending__");
     expect(row.block_index).toBe(0);
-    expect(row.last_event_seq).toBe(0);
     expect(row.ts).toBe(1_700_000_000_000);
     expect(row.content_json).toEqual({ text: "hello daemon" });
   });

@@ -136,10 +136,15 @@ export interface AppLifecycleEvent extends BaseEvent {
 }
 
 /* ---------------- Block-level streaming events (FIX_FORWARD WS-1) ---------------- */
-// Per-content-block lifecycle: start → delta(s) → complete. The daemon writes
-// the canonical `blocks` row before each `block_start` / `block_complete` so
-// the row's `last_event_seq` always advances strictly before the matching SSE
-// event lands (ADR-004 at block granularity, FIX_FORWARD 1.10).
+// Per-content-block lifecycle: start → delta(s) → complete. Phase 5 / ADR-024:
+// the canonical `blocks` row is written only on `block_complete` with
+// `streaming=false`; deltas live in the daemon's in-memory accumulator
+// (`block-stream.ts`) and ride per-agent SSE only. The dashboard's
+// `lastSeqByAgent` cursor dedupes replayed events at apply time using the
+// `seq` field stamped onto each frame by `eventBus.publish`. FRI-125 retired
+// the row-level `last_event_seq` column and the seq-stamping dance that used
+// to keep the row and the SSE event in sync; the SSE `seq` is the only
+// sequence anyone reads now.
 
 export type BlockKind = "text" | "thinking" | "tool_use" | "tool_result" | "error";
 

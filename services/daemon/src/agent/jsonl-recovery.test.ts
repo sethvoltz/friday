@@ -240,7 +240,6 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
       contentJson: JSON.stringify({ text: "partial only" }),
       status: "streaming",
       ts: 1,
-      lastEventSeq: 1,
     });
 
     writeSessionJsonl(cwd, sessionId, [
@@ -452,7 +451,6 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
       }),
       status: "complete",
       ts: 50,
-      lastEventSeq: 1,
     });
 
     // JSONL has the tool_use as a standalone entry at content index 0.
@@ -513,7 +511,6 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
       contentJson: JSON.stringify({ text: "hello world" }),
       status: "complete",
       ts: 50,
-      lastEventSeq: 1,
     });
 
     // JSONL has the text as its own assistant entry, content[0] = text.

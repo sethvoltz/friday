@@ -72,11 +72,9 @@ async function insertPendingBlock(databaseUrl: string): Promise<PendingBlock> {
     await c.query(
       `INSERT INTO blocks
          (id, block_id, turn_id, agent_name, session_id, block_index,
-          role, kind, source, content_json, status, streaming, ts,
-          last_event_seq)
+          role, kind, source, content_json, status, streaming, ts)
        VALUES ($1, $1, $2, $3, '__pending__', 0,
-               'user', 'text', 'user_chat', $4, 'pending', false, $5,
-               0)`,
+               'user', 'text', 'user_chat', $4, 'pending', false, $5)`,
       [id, turnId, agentName, JSON.stringify({ text }), new Date()],
     );
   } finally {

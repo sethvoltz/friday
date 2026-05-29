@@ -132,7 +132,6 @@ describe("loadAgentTurns", () => {
             messageId: null,
             blockIndex: 0,
             source: null,
-            lastEventSeq: 3,
           },
           {
             id: "1",
@@ -148,7 +147,6 @@ describe("loadAgentTurns", () => {
             messageId: null,
             blockIndex: 0,
             source: null,
-            lastEventSeq: 1,
           },
           {
             id: "2",
@@ -164,10 +162,8 @@ describe("loadAgentTurns", () => {
             messageId: null,
             blockIndex: 0,
             source: null,
-            lastEventSeq: 2,
           },
         ],
-        lastEventSeq: 3,
       }),
     );
     const { ChatState } = await import("./chat.svelte");
@@ -220,7 +216,6 @@ describe("loadAgentTurns", () => {
           streaming: false,
           origin_mutation_id: null,
           ts: 100,
-          last_event_seq: 1,
         } as Parameters<typeof chat.applyZeroBlocks>[0][number],
       ],
       "friday",
@@ -258,10 +253,8 @@ describe("loadOlderTurns", () => {
               messageId: null,
               blockIndex: 0,
               source: null,
-              lastEventSeq: 5,
             },
           ],
-          lastEventSeq: 5,
         }),
       )
       .mockResolvedValueOnce(
@@ -302,10 +295,8 @@ describe("loadOlderTurns", () => {
               messageId: null,
               blockIndex: 0,
               source: null,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }))
@@ -401,10 +392,8 @@ describe("reload-mid-turn replay → SSE resumption", () => {
               messageId: null,
               blockIndex: 0,
               source: null,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "working" }));
@@ -436,74 +425,6 @@ describe("reload-mid-turn replay → SSE resumption", () => {
     expect(after?.text).toBe("partial continuation");
   });
 
-  it("seeds the per-agent SSE cursor from payload.lastEventSeq so replayed deltas don't double-append", async () => {
-    // The companion to the daemon-side fix where `handleBlockDelta`
-    // persists the accumulated text + advances the row's
-    // `last_event_seq` on every delta. The cursor seed here is what
-    // makes that fix safe: without it, the SSE replay would re-emit
-    // every delta with seq <= row.lastEventSeq and `applyEvent` would
-    // re-append the text — producing a duplicated message or
-    // corrupted markdown.
-    mockFetchWithTimeout
-      .mockResolvedValueOnce(
-        makeResponse({
-          blocks: [
-            {
-              id: "1",
-              blockId: "blk-1",
-              turnId: "t-1",
-              role: "assistant",
-              kind: "text",
-              contentJson: '{"text":"partial "}',
-              status: "streaming",
-              ts: 100,
-              agentName: "friday",
-              sessionId: "s",
-              messageId: null,
-              blockIndex: 0,
-              source: null,
-              lastEventSeq: 42,
-            },
-          ],
-          lastEventSeq: 42,
-        }),
-      )
-      .mockResolvedValueOnce(makeResponse({ status: "working" }));
-    const { ChatState } = await import("./chat.svelte");
-    const chat = new ChatState();
-    chat.focusedAgent = "friday";
-    await chat.loadAgentTurns("friday");
-
-    expect(chat.lastSeqByAgent["friday"]).toBe(42);
-
-    // A replayed delta at seq=30 (older than the cursor) must be
-    // dropped — its text is already in the row's content_json.
-    chat.applyEvent({
-      v: 1,
-      type: "block_delta",
-      block_id: "blk-1",
-      turn_id: "t-1",
-      agent: "friday",
-      delta: { text: "REPLAY" },
-      seq: 30,
-      ts: 110,
-    } as Parameters<typeof chat.applyEvent>[0]);
-    expect(chat.messages[0]?.text, "replayed delta must not append").toBe("partial ");
-
-    // A live delta at seq=50 (newer than cursor) applies normally.
-    chat.applyEvent({
-      v: 1,
-      type: "block_delta",
-      block_id: "blk-1",
-      turn_id: "t-1",
-      agent: "friday",
-      delta: { text: "live" },
-      seq: 50,
-      ts: 120,
-    } as Parameters<typeof chat.applyEvent>[0]);
-    expect(chat.messages[0]?.text).toBe("partial live");
-  });
-
   it("preserves running status on thinking blocks so block_delta keeps appending", async () => {
     mockFetchWithTimeout
       .mockResolvedValueOnce(
@@ -523,10 +444,8 @@ describe("reload-mid-turn replay → SSE resumption", () => {
               messageId: null,
               blockIndex: 0,
               source: null,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "working" }));
@@ -551,6 +470,132 @@ describe("reload-mid-turn replay → SSE resumption", () => {
     const after = chat.messages.find((m) => m.id === "th_blk-think-live");
     expect(after?.text).toBe("thought so far more");
   });
+
+  // FRI-125 AC #8 / #13: pin the transient-reconnect dedup contract.
+  // Falsification proof from the paired-ticket reviewer overturn:
+  // `handleBlockDelta` at chat.svelte.ts:2778-2811 unconditionally
+  // does `entry.text += event.delta.text` without checking the
+  // cursor. On SSE reconnect the daemon's `replayForAgent` dumps
+  // the full in-flight turn buffer; the `streaming` overlay isn't
+  // cleared on transient reconnect (only on terminal events). The
+  // only defense against re-appending the replayed deltas is
+  // `acceptEvent` at chat.svelte.ts:~2531-2542, which drops any
+  // event whose `seq` is <= `lastSeqByAgent[bucket]`. If a future
+  // refactor re-attempts to delete the cursor (the original
+  // ADR-024 bullet at decisions.md:672 read "lastSeqByAgent ...
+  // retires" before the FRI-125 amendment), this test will fail —
+  // surfacing the regression at refactor time.
+  it("FRI-125: SSE reconnect replays do NOT double-append block_delta text (transient-reconnect dedup)", async () => {
+    const { ChatState, overlayKey } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // Open a streaming assistant text block — block_start populates
+    // `chat.streaming` keyed by overlayKey(agent, `b_${block_id}`).
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      seq: 10,
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      block_id: "blk-reconnect-1",
+      message_id: "msg-1",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      source: null,
+      ts: 100,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    const key = overlayKey("friday", "b_blk-reconnect-1");
+    const entry = chat.streaming.get(key);
+    expect(entry).toBeDefined();
+    expect(entry!.text).toBe("");
+
+    // Live deltas append to the overlay's text.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      seq: 11,
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      block_id: "blk-reconnect-1",
+      delta: { text: "Hello " },
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      seq: 12,
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      block_id: "blk-reconnect-1",
+      delta: { text: "world" },
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(chat.streaming.get(key)!.text).toBe("Hello world");
+    expect(chat.lastSeqByAgent.friday).toBe(12);
+
+    // Simulate SSE reconnect: the daemon's per-turn replay buffer
+    // re-emits every frame from turn_started forward. The `streaming`
+    // overlay is NOT cleared on transient reconnect (only on terminal
+    // events — turn_done / agent_lifecycle), and `handleBlockDelta`
+    // unconditionally appends without a per-block cursor. The only
+    // defense against doubled text is `acceptEvent` at apply time
+    // dropping any event whose `seq` is <= `lastSeqByAgent`.
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      seq: 10, // replayed
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      block_id: "blk-reconnect-1",
+      message_id: "msg-1",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      source: null,
+      ts: 100,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      seq: 11, // replayed
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      block_id: "blk-reconnect-1",
+      delta: { text: "Hello " },
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      seq: 12, // replayed
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      block_id: "blk-reconnect-1",
+      delta: { text: "world" },
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    // The overlay text MUST remain "Hello world". If a future refactor
+    // deletes `acceptEvent` (or relaxes it for `block_delta`), this
+    // assertion fails immediately — the replay would have appended a
+    // second "Hello world" producing "Hello worldHello world".
+    expect(chat.streaming.get(key)!.text).toBe("Hello world");
+    expect(chat.lastSeqByAgent.friday).toBe(12);
+
+    // A genuinely new delta at seq=13 still appends — the cursor isn't
+    // sticky-broken by the replay attempt.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      seq: 13,
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      block_id: "blk-reconnect-1",
+      delta: { text: "!" },
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.streaming.get(key)!.text).toBe("Hello world!");
+    expect(chat.lastSeqByAgent.friday).toBe(13);
+  });
 });
 
 describe("inflight-state probe on reload", () => {
@@ -573,7 +618,6 @@ describe("inflight-state probe on reload", () => {
               messageId: null,
               blockIndex: 0,
               source: null,
-              lastEventSeq: 1,
             },
             {
               id: "2",
@@ -589,10 +633,8 @@ describe("inflight-state probe on reload", () => {
               messageId: null,
               blockIndex: 1,
               source: null,
-              lastEventSeq: 2,
             },
           ],
-          lastEventSeq: 2,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "working" }));
@@ -622,10 +664,8 @@ describe("inflight-state probe on reload", () => {
               messageId: null,
               blockIndex: 0,
               source: null,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -661,10 +701,8 @@ describe("inflight-state probe on reload", () => {
               messageId: null,
               blockIndex: 0,
               source: "mail",
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "working" }));
@@ -698,7 +736,6 @@ describe("inflight-state probe on reload", () => {
               messageId: null,
               blockIndex: 0,
               source: "mail",
-              lastEventSeq: 1,
             },
             {
               id: "2",
@@ -714,10 +751,8 @@ describe("inflight-state probe on reload", () => {
               messageId: null,
               blockIndex: 1,
               source: null,
-              lastEventSeq: 2,
             },
           ],
-          lastEventSeq: 2,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "working" }));
@@ -752,10 +787,8 @@ describe("inflight-state probe on reload", () => {
               messageId: null,
               blockIndex: 0,
               source: "user_chat",
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "working" }));
@@ -812,7 +845,6 @@ describe("jumpTo (/jump <date|term>)", () => {
       contentJson: JSON.stringify({ text: overrides.text ?? `body-${id}` }),
       status: overrides.status ?? "complete",
       ts: overrides.ts ?? idNum * 100,
-      lastEventSeq: idNum,
     };
   }
 
@@ -1436,10 +1468,8 @@ describe("mail block rendering", () => {
               contentJson: '{"text":"reload body","from_agent":"scope-sanity-2"}',
               status: "complete",
               ts: 100,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -1481,10 +1511,8 @@ describe("mail block rendering", () => {
               }),
               status: "complete",
               ts: 100,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -1614,7 +1642,6 @@ describe("mail block rendering", () => {
       contentJson: JSON.stringify({ text: "reasoning before abort" }),
       status: "aborted",
       ts: 1000,
-      lastEventSeq: 100,
     };
     const completeThink = {
       id: "101", // live retry thinking
@@ -1630,7 +1657,6 @@ describe("mail block rendering", () => {
       contentJson: JSON.stringify({ text: "reasoning after retry" }),
       status: "complete",
       ts: 3000,
-      lastEventSeq: 101,
     };
     const liveToolUse = {
       id: "102", // live retry tool_use
@@ -1650,7 +1676,6 @@ describe("mail block rendering", () => {
       }),
       status: "complete",
       ts: 3001,
-      lastEventSeq: 102,
     };
     const liveToolResult = {
       id: "103", // live retry tool_result
@@ -1670,7 +1695,6 @@ describe("mail block rendering", () => {
       }),
       status: "complete",
       ts: 3002,
-      lastEventSeq: 103,
     };
     // Recovery rows: greater autoincrement ids, but EARLIER ts than the
     // live retry — they came from the same session's JSONL after a
@@ -1693,7 +1717,6 @@ describe("mail block rendering", () => {
       }),
       status: "complete",
       ts: 1001,
-      lastEventSeq: 200,
     };
     const recoverToolResult = {
       id: "201",
@@ -1713,7 +1736,6 @@ describe("mail block rendering", () => {
       }),
       status: "complete",
       ts: 1002,
-      lastEventSeq: 201,
     };
     mockFetchWithTimeout
       .mockResolvedValueOnce(
@@ -1726,7 +1748,6 @@ describe("mail block rendering", () => {
             recoverToolUse,
             recoverToolResult,
           ],
-          lastEventSeq: 201,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -1921,7 +1942,6 @@ describe("unread badge gating (PR C)", () => {
               contentJson: '{"text":"hello"}',
               status: "complete",
               ts: 100,
-              lastEventSeq: 1,
             },
             {
               id: "2",
@@ -1937,10 +1957,8 @@ describe("unread badge gating (PR C)", () => {
               contentJson: '{"text":"No response requested."}',
               status: "complete",
               ts: 200,
-              lastEventSeq: 2,
             },
           ],
-          lastEventSeq: 2,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -2069,7 +2087,6 @@ describe("unread badge gating (PR C)", () => {
           contentJson: sentinelJson,
           status: "complete",
           ts: 600,
-          lastEventSeq: 2,
         } as Parameters<typeof parseBlocks>[0][number],
       ],
       "friday",
@@ -2110,7 +2127,6 @@ describe("unread badge gating (PR C)", () => {
           contentJson: '{"text":"hey"}',
           status: "complete",
           ts: 100,
-          lastEventSeq: 1,
         } as Parameters<typeof parseBlocks>[0][number],
       ],
       "friday",
@@ -2149,7 +2165,6 @@ describe("unread badge gating (PR C)", () => {
         contentJson: '{"text":"hey"}',
         status: "complete",
         ts: 100,
-        lastEventSeq: 1,
       } as Parameters<typeof parseBlocks>[0][number],
     ];
     // Without grace: synth fires (the existing safety-net contract).
@@ -2207,7 +2222,6 @@ describe("unread badge gating (PR C)", () => {
           contentJson: '{"text":"hey"}',
           status: "complete",
           ts: 100,
-          lastEventSeq: 1,
         } as Parameters<typeof parseBlocks>[0][number],
       ],
       "friday",
@@ -2247,7 +2261,6 @@ describe("unread badge gating (PR C)", () => {
           contentJson: '{"text":"fyi","from_agent":"helper"}',
           status: "complete",
           ts: 100,
-          lastEventSeq: 1,
         } as Parameters<typeof parseBlocks>[0][number],
       ],
       "friday",
@@ -2275,7 +2288,6 @@ describe("unread badge gating (PR C)", () => {
           contentJson: '{"text":"hi"}',
           status: "complete",
           ts: 100,
-          lastEventSeq: 1,
         } as Parameters<typeof parseBlocks>[0][number],
         {
           id: "2",
@@ -2291,7 +2303,6 @@ describe("unread badge gating (PR C)", () => {
           contentJson: '{"text":"hm"}',
           status: "complete",
           ts: 110,
-          lastEventSeq: 2,
         } as Parameters<typeof parseBlocks>[0][number],
       ],
       "friday",
@@ -2322,7 +2333,6 @@ describe("unread badge gating (PR C)", () => {
         contentJson: '{"text":"hey"}',
         status: "complete",
         ts: 100,
-        lastEventSeq: 1,
       } as Parameters<typeof parseBlocks>[0][number],
     ];
     // With zeroResultIncomplete=true: synth must NOT fire. Output is
@@ -2383,7 +2393,6 @@ describe("unread badge gating (PR C)", () => {
           streaming: false,
           origin_mutation_id: null,
           ts: 1_000,
-          last_event_seq: 3,
         } as Parameters<typeof chat.applyZeroBlocks>[0][number],
       ],
       "friday",
@@ -2429,7 +2438,6 @@ describe("unread badge gating (PR C)", () => {
       streaming: false,
       origin_mutation_id: null,
       ts: 1_000,
-      last_event_seq: 3,
     } as Parameters<typeof chat.applyZeroBlocks>[0][number];
 
     chat.applyZeroBlocks([userBlockRow], "friday", "unknown");
@@ -2501,7 +2509,6 @@ describe("unread badge gating (PR C)", () => {
           streaming: false,
           origin_mutation_id: null,
           ts: 1_000,
-          last_event_seq: 0,
         } as Parameters<typeof chat.applyZeroBlocks>[0][number],
       ],
       "friday",
@@ -3135,7 +3142,6 @@ describe("FRI-12: error block materialization", () => {
       }),
       status: "complete",
       ts: 100,
-      lastEventSeq: 1,
     };
     mockFetchWithTimeout
       .mockResolvedValueOnce(makeResponse({ blocks: [errBlock], lastEventSeq: 1 }))
@@ -3347,10 +3353,8 @@ describe("queued user blocks (pending-message feature)", () => {
             messageId: null,
             blockIndex: 0,
             source: "user_chat",
-            lastEventSeq: 1,
           },
         ],
-        lastEventSeq: 1,
       }),
     );
     const { ChatState } = await import("./chat.svelte");
@@ -3405,7 +3409,6 @@ describe("FRI-81 D1: tool_use sorted after tool_result still resolves its name",
               }),
               status: "complete",
               ts: 100,
-              lastEventSeq: 11,
             },
             {
               id: "12",
@@ -3425,10 +3428,8 @@ describe("FRI-81 D1: tool_use sorted after tool_result still resolves its name",
               }),
               status: "complete",
               ts: 200, // bumped past tool_result by finalizeStreamingBlocks
-              lastEventSeq: 12,
             },
           ],
-          lastEventSeq: 12,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -3526,7 +3527,6 @@ describe("FRI-81 D1: tool_use sorted after tool_result still resolves its name",
           }),
           status: "complete",
           ts: 100,
-          lastEventSeq: 11,
         },
         {
           id: "12",
@@ -3546,7 +3546,6 @@ describe("FRI-81 D1: tool_use sorted after tool_result still resolves its name",
           }),
           status: "complete",
           ts: 200,
-          lastEventSeq: 12,
         },
       ],
       "friday",
@@ -3592,7 +3591,6 @@ describe("window-cut orphan tool_result is dropped, not rendered as (unknown)", 
           }),
           status: "complete",
           ts: 500,
-          lastEventSeq: 20,
         },
         // A regular text block in the same batch so the function isn't
         // returning early on empty input.
@@ -3610,7 +3608,6 @@ describe("window-cut orphan tool_result is dropped, not rendered as (unknown)", 
           contentJson: JSON.stringify({ text: "OK, mail handled." }),
           status: "complete",
           ts: 600,
-          lastEventSeq: 21,
         },
       ],
       "friday",
@@ -3796,7 +3793,6 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               contentJson: JSON.stringify({ text: "partial reasoning" }),
               status: "streaming",
               ts: 100,
-              lastEventSeq: 1,
             },
             {
               id: "2",
@@ -3812,10 +3808,8 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               contentJson: JSON.stringify({ text: "all done" }),
               status: "complete",
               ts: 200,
-              lastEventSeq: 2,
             },
           ],
-          lastEventSeq: 2,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -3852,7 +3846,6 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               }),
               status: "streaming",
               ts: 100,
-              lastEventSeq: 1,
             },
             {
               id: "2",
@@ -3868,10 +3861,8 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               contentJson: JSON.stringify({ text: "moved on" }),
               status: "complete",
               ts: 200,
-              lastEventSeq: 2,
             },
           ],
-          lastEventSeq: 2,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -3907,10 +3898,8 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               contentJson: JSON.stringify({ text: "stuck reasoning" }),
               status: "streaming",
               ts: 100,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -3945,10 +3934,8 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               contentJson: JSON.stringify({ text: "thinking " }),
               status: "streaming",
               ts: 100,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "working" }));
@@ -4000,10 +3987,8 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               contentJson: JSON.stringify({ text: "thinking " }),
               status: "streaming",
               ts: 100,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       // Probe responds with 404 (archived agent or routing miss).
@@ -4038,7 +4023,6 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               contentJson: JSON.stringify({ text: "live " }),
               status: "streaming",
               ts: 200,
-              lastEventSeq: 2,
             },
             // Orphan from a prior dead turn — must be healed.
             {
@@ -4055,10 +4039,8 @@ describe("FRI-81 D2/D3: orphan streaming blocks are healed on reload", () => {
               contentJson: JSON.stringify({ text: "stuck " }),
               status: "streaming",
               ts: 100,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 2,
         }),
       )
       .mockRejectedValueOnce(new Error("network down"));
@@ -4145,7 +4127,6 @@ describe("FRI-81 D4: empty-content thinking ghost is filtered on both paths", ()
               contentJson: JSON.stringify({ text: "" }),
               status: "complete",
               ts: 100,
-              lastEventSeq: 1,
             },
             {
               id: "2",
@@ -4161,10 +4142,8 @@ describe("FRI-81 D4: empty-content thinking ghost is filtered on both paths", ()
               contentJson: JSON.stringify({ text: "hi" }),
               status: "complete",
               ts: 101,
-              lastEventSeq: 2,
             },
           ],
-          lastEventSeq: 2,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -4198,10 +4177,8 @@ describe("FRI-81 D4: empty-content thinking ghost is filtered on both paths", ()
               contentJson: JSON.stringify({ text: "" }),
               status: "aborted",
               ts: 100,
-              lastEventSeq: 1,
             },
           ],
-          lastEventSeq: 1,
         }),
       )
       .mockResolvedValueOnce(makeResponse({ status: "idle" }));
@@ -4475,7 +4452,6 @@ describe("FRI-84: tool-call input/output rendering", () => {
           contentJson,
           status: "complete",
           ts: 1001,
-          lastEventSeq: 2,
         } as Parameters<typeof parseBlocks>[0][number],
         {
           id: "2",
@@ -4491,7 +4467,6 @@ describe("FRI-84: tool-call input/output rendering", () => {
           contentJson: resultJson,
           status: "complete",
           ts: 1002,
-          lastEventSeq: 3,
         } as Parameters<typeof parseBlocks>[0][number],
       ],
       "friday",
@@ -4558,7 +4533,6 @@ describe("FRI-84: tool-call input/output rendering", () => {
           }),
           status: "streaming",
           ts: 500,
-          lastEventSeq: 1,
         } as Parameters<typeof parseBlocks>[0][number],
       ],
       "friday",
@@ -4620,7 +4594,6 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
       streaming: boolean;
       origin_mutation_id: string | null;
       ts: number;
-      last_event_seq: number;
     }>,
   ): import("./chat.svelte").ZeroBlocksRow {
     return {
@@ -4639,7 +4612,6 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
       streaming: false,
       origin_mutation_id: null,
       ts: 1_000,
-      last_event_seq: 5,
       ...overrides,
     };
   }
@@ -4658,7 +4630,6 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
         kind: "text",
         content_json: { text: "hello" },
         ts: 1_000,
-        last_event_seq: 3,
       }),
       makeZeroBlocksRow({
         id: "2",
@@ -4668,7 +4639,6 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
         kind: "text",
         content_json: { text: "hi there" },
         ts: 1_100,
-        last_event_seq: 5,
       }),
     ];
     chat.applyZeroBlocks(rows, "friday");
@@ -4680,7 +4650,6 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
     expect(chat.zeroBlocksActive).toBe(true);
     expect(chat.loadingInitial).toBe(false);
     expect(chat.oldestBlockId).toBe("b1");
-    expect(chat.lastSeqByAgent.friday).toBe(5);
   });
 
   it("(2) reactive update appends a new Zero row as a bubble", async () => {
@@ -4844,28 +4813,6 @@ describe("Phase 3.7: applyZeroBlocks (Zero blocks slice merge)", () => {
       "friday",
     );
     expect(chat.messages).toEqual(before);
-  });
-
-  it("(6) lastEventSeq seeds the dedup cursor with the snapshot's max", async () => {
-    const { ChatState } = await import("./chat.svelte");
-    const chat = new ChatState();
-    chat.focusedAgent = "friday";
-    chat.lastSeqByAgent.friday = 100; // pre-existing higher cursor
-    chat.applyZeroBlocks(
-      [
-        makeZeroBlocksRow({ id: "1", block_id: "b1", last_event_seq: 7 }),
-        makeZeroBlocksRow({
-          id: "2",
-          block_id: "b2",
-          last_event_seq: 12,
-          ts: 1_100,
-        }),
-      ],
-      "friday",
-    );
-    // Max(snapshot) = 12, but existing cursor = 100; cursor must NOT
-    // regress (replay dedup invariant).
-    expect(chat.lastSeqByAgent.friday).toBe(100);
   });
 
   it("(7) superseded no-response safety-net is dropped", async () => {
@@ -5090,7 +5037,6 @@ describe("Phase 3.7: zeroBlockRowToBlockRow / dropSupersededNoResponseSafetyNet"
       streaming: false,
       origin_mutation_id: null,
       ts: 12_345,
-      last_event_seq: 9,
     });
     expect(out.id).toBe("7");
     expect(out.blockId).toBe("bx");
@@ -5099,7 +5045,6 @@ describe("Phase 3.7: zeroBlockRowToBlockRow / dropSupersededNoResponseSafetyNet"
     expect(out.sessionId).toBe("sx");
     expect(out.messageId).toBe("mx");
     expect(out.blockIndex).toBe(3);
-    expect(out.lastEventSeq).toBe(9);
     expect(typeof out.contentJson).toBe("string");
     expect(JSON.parse(out.contentJson)).toEqual({ text: "round-trip me" });
   });
@@ -5207,7 +5152,6 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
       streaming: boolean;
       origin_mutation_id: string | null;
       ts: number;
-      last_event_seq: number;
     }>,
   ): import("./chat.svelte").ZeroBlocksRow {
     return {
@@ -5226,7 +5170,6 @@ describe("Phase 4.1: markRead-on-Zero-snapshot integration", () => {
       streaming: false,
       origin_mutation_id: null,
       ts: 1_000,
-      last_event_seq: 0,
       ...overrides,
     };
   }
@@ -5380,7 +5323,6 @@ describe("FRI-103: applyZeroBlocks snapshotBlockIds dedup drops optimistic pendi
       streaming: false,
       origin_mutation_id: null,
       ts: 1_747_000_000_000,
-      last_event_seq: 1,
       ...overrides,
     };
   }
@@ -5494,7 +5436,6 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
       streaming: false,
       origin_mutation_id: null,
       ts: 1_000,
-      last_event_seq: 1,
       ...overrides,
     };
   }
@@ -5692,7 +5633,6 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
           streaming: false,
           origin_mutation_id: null,
           ts: 1_000,
-          last_event_seq: 1,
         } as import("./chat.svelte").ZeroBlocksRow,
       ],
       "friday",
@@ -5747,7 +5687,6 @@ describe("/clear: applyZeroBlocks session filter + clearLocalView", () => {
       contentJson: JSON.stringify({ text: "from a past life" }),
       status: "complete",
       ts: 1_000,
-      lastEventSeq: 0,
     };
     const currentSessionBlock = {
       ...priorSessionBlock,
@@ -5800,7 +5739,6 @@ describe("FRI-60: parseBlocks zeroBlockReason on synthesized no-response bubble"
     contentJson: '{"text":"hello"}',
     status: "complete",
     ts: 100,
-    lastEventSeq: 1,
   });
 
   it('synthesized bubble carries zeroBlockReason "abort" when supplied', async () => {
@@ -6025,7 +5963,6 @@ describe("derived chat.messages: cross-agent isolation", () => {
           streaming: false,
           origin_mutation_id: null,
           ts: 1_000,
-          last_event_seq: 1,
         },
       ],
       "friday",
@@ -6115,7 +6052,6 @@ describe("derived chat.messages: SSE-overlay interleaving convergence", () => {
           streaming: false,
           origin_mutation_id: null,
           ts: 1_020,
-          last_event_seq: 3,
         },
       ],
       "friday",
@@ -6153,7 +6089,6 @@ describe("derived chat.messages: SSE-overlay interleaving convergence", () => {
           streaming: false,
           origin_mutation_id: null,
           ts: 1_000,
-          last_event_seq: 1,
         },
       ],
       "friday",
@@ -6336,7 +6271,6 @@ describe("derived chat.messages: optimistic confirmation lifecycle", () => {
           streaming: false,
           origin_mutation_id: null,
           ts: 2_000,
-          last_event_seq: 1,
         },
       ],
       "friday",

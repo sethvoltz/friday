@@ -21,8 +21,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await handle.truncate();
-  const liveTurns = await import("./live-turns.js");
-  liveTurns.__resetForTest();
+  const { __resetForTest } = await import("./block-stream.js");
+  __resetForTest();
 });
 
 function makeFakeWorker(): unknown {

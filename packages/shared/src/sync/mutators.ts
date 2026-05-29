@@ -628,8 +628,6 @@ export interface ResumeTurnArgs {
 // defaults):
 //   - `session_id` starts as the sentinel `__pending__`; daemon
 //     fills in the agent's resumed session id during dispatch.
-//   - `last_event_seq` starts at 0; daemon publishes a block_complete
-//     SSE event and may update this to the assigned seq.
 //   - `streaming` always false (user blocks never stream).
 
 export interface SendUserMessageArgs {
@@ -1036,9 +1034,8 @@ export const createMutators = () =>
       // `friday_block_canceled` and the daemon LISTEN handler then
       // performs the canonical row DELETE + nextPrompts splice.
       //
-      // Touches only `status` (+ `last_event_seq` advance for the
-      // existing SSE-block-cursor invariant). All other fields are
-      // preserved so the daemon's LISTEN handler can read the original
+      // Touches only `status`. All other fields are preserved so the
+      // daemon's LISTEN handler can read the original
       // agent_name / turn_id / content_json from the row before it
       // performs the delete.
       await tx.mutate.blocks.update({
@@ -1057,8 +1054,9 @@ export const createMutators = () =>
       // `id` and `block_id` carry the same UUID — Phase 4.11 unified
       // the PK and the application-level identifier. `session_id` is
       // a sentinel; the daemon overwrites with the agent's resumed
-      // session id. `last_event_seq=0` is a placeholder the daemon
-      // updates when it publishes the block_complete SSE event.
+      // session id. (FRI-125: the `last_event_seq` placeholder retired
+      // alongside the column itself; the SSE event's own seq is the
+      // only sequence anything reads.)
       const content: Record<string, unknown> = { text: args.text };
       if (args.attachments && args.attachments.length > 0) {
         content.attachments = args.attachments;
@@ -1079,7 +1077,6 @@ export const createMutators = () =>
         streaming: false,
         origin_mutation_id: undefined,
         ts: args.ts,
-        last_event_seq: 0,
       });
     },
     abortTurn: async (tx: FridayTx, args: AbortTurnArgs): Promise<void> => {

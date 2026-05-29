@@ -666,7 +666,6 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
       streaming: false,
       origin_mutation_id: null,
       ts: 1_000,
-      last_event_seq: 1,
     };
     z.materialize = vi.fn(() => {
       materializeCount++;
@@ -722,7 +721,6 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
           streaming: false,
           origin_mutation_id: null,
           ts: 1_000,
-          last_event_seq: 1,
         },
       ],
       addListener: vi.fn(() => () => {}),

@@ -22,7 +22,9 @@ Single SDK runtime keeps long-lived sessions, agent registry, fork pool, file wa
 
 ## ADR-004 — DB write before SSE emit, with `last_event_seq` cursor
 
-**Status:** superseded for settled-state events by ADR-024 (2026-05-18); narrows for live-turn events. Original rationale below preserved for context.
+**Status:** superseded for settled-state events by ADR-024 (2026-05-18); narrows for live-turn events. The per-row `last_event_seq` column itself retires in FRI-125 (2026-05-28) — see Consequences below. Original rationale preserved for context.
+
+**Consequences (FRI-125, 2026-05-28).** The `blocks.last_event_seq` column is dropped. The daemon's `writeAndPublish` helper retires, taking the `eventBus.currentSeq()+1` peek-and-stamp dance + `block.seq-skew` warning with it. The narrowed live-turn-delta invariant — "in-memory accumulator updated before SSE emit" — is now owned at one seam by `services/daemon/src/agent/block-stream.ts` (the six-method module that absorbed `live-turns.ts`, `writeAndPublish`, `insertErrorBlock`, and `finalizeStreamingBlocks`). The SSE event's own `seq` field (stamped by `eventBus.publish`) remains load-bearing; only the row-side column retires. The dashboard's `lastSeqByAgent` cursor STAYS — see the ADR-024 consequences stanza for why.
 
 **Amendment (ADR-024, 2026-05-18):** Under the Postgres + Zero sync architecture, settled-state convergence is handled by Postgres logical replication via zero-cache — the per-block `last_event_seq` cursor + boot*id invalidation pattern retires. The invariant **narrows** to the live-turn delta path: the daemon's in-memory accumulator for the in-flight block is updated \_before* the corresponding SSE `block_delta` is emitted; on `block_complete` the Postgres row is written with `streaming=0` (which is what Zero replicates). Per-turn SSE replay buffer remains the safety net for refresh-mid-stream.
 
@@ -669,7 +671,7 @@ The today's per-device localStorage-only badge state is retired; cross-device ba
 ### Consequences
 
 - **SSE wire schema** in `packages/shared/src/wire/events.ts` shrinks to the live-turn subset above.
-- **The `lastSeqByAgent` cursor** in `services/dashboard/src/lib/stores/sse.svelte.ts` retires; per-turn replay is the default.
+- **The `lastSeqByAgent` cursor — amended by FRI-125 (2026-05-28).** The original bullet read "the `lastSeqByAgent` cursor … retires; per-turn replay is the default." That was over-broad. The cursor is **RETAINED** in `services/dashboard/src/lib/stores/chat.svelte.ts` and its `acceptEvent` check is load-bearing for the transient-reconnect-on-same-focused-agent dedup case: on SSE reconnect the daemon's `replayForAgent` dumps the full in-flight turn buffer, the `streaming` overlay isn't cleared on transient reconnect (only on terminal events), and `handleBlockDelta` unconditionally appends. Without `acceptEvent` dropping `seq <= cur`, every replayed delta re-appends → user-visible doubled text. What actually retires is the **REST/Zero seeding** of the cursor (the row's `last_event_seq` column + the REST payload's `lastEventSeq` field + the Zero-row max aggregator), now folded into FRI-125. The cursor itself seeds exclusively from SSE event seqs at apply time + the `localStorage` rehydrate on focus switch.
 - **`block_reload`, `block_meta_update`, `agent_status`, `agent_lifecycle`, `mail_delivered`** SSE event handlers are removed from the client; their effects are observed via Zero reactive query updates instead.
 - **Boot_id cursor invalidation** retires from the SSE layer; Zero handles cross-restart correctness.
 - **The ring buffer's 5000-event size** (ADR-003) shrinks to a per-turn buffer (bounded by max turn length; expect ~100–500 frames typical, <2000 worst-case).
@@ -677,7 +679,7 @@ The today's per-device localStorage-only badge state is retired; cross-device ba
 
 ### Open questions
 
-- **Should the in-memory accumulator survive a daemon refork?** Today the worker fork can be relaunched; the parent's `liveTurns` registry holds enough state to resume. With per-turn SSE replay, the answer might be "no — let the JSONL recovery + Zero sync do the rebuild." Leaving as an implementation discovery.
+- **Should the in-memory accumulator survive a daemon refork?** Today the worker fork can be relaunched; the parent's `blockStream` accumulator holds enough state to resume. With per-turn SSE replay, the answer might be "no — let the JSONL recovery + Zero sync do the rebuild." Leaving as an implementation discovery.
 - **Per-device vs. global read cursors.** Mirrored from ADR-023's open question. Same default (per-device for v1).
 
 ### Consequences (FRI-123, 2026-05-28)
@@ -690,6 +692,12 @@ The four "Legacy REST" routes enumerated for retirement under this ADR are now a
 - `POST /api/chat/turn/<id>/resume` — replaced by the `resumeTurn` mutator + the new daemon `resume-listener` (FRI-123). Mirrors the `abortTurn` row-as-intent pattern: the mutator UPDATEs the user block to `status='resume_requested'`, a Postgres trigger (`0023_block_resume_notify_trigger.sql`) fires `NOTIFY friday_resume_requested`, and the listener rebuilds the dispatch prompt via `buildDispatchPrompt(kind:'user_chat')` and re-dispatches under the same turnId (FRI-12 visual-grouping contract).
 
 After this change there are five LISTEN-handler files (`dispatch-`, `abort-`, `cancel-`, `archive-`, `resume-listener.ts`) sharing near-identical reconnect-loop + boot-scan boilerplate. Candidate 01 of the `/improve-codebase-architecture` review tracks consolidation as a follow-up; explicitly out of scope for FRI-123. The dashboard's `services/dashboard/src/routes/api/chat/turn/` proxy tree is gone entirely.
+
+### Consequences (FRI-125, 2026-05-28)
+
+The `blocks.last_event_seq` column retires via Drizzle migration `0025_drop_blocks_last_event_seq.sql`. The seq-stamping fragility this ADR's Phase 5 amendment narrowed (peek `eventBus.currentSeq()+1` → stamp into the in-memory accumulator → `writeAndPublish` re-captures → emit `block.seq-skew` warning on mismatch) is gone. The narrowed live-turn-delta invariant — "in-memory accumulator updated before SSE emit" — is now enforced at one seam by `services/daemon/src/agent/block-stream.ts`, which absorbed `live-turns.ts`, `writeAndPublish`, `insertErrorBlock`, `finalizeStreamingBlocks`, and `recordUserBlock`. The seven exported write paths (`open` / `append` / `close` / `cancel` / `recordError` / `finalize` / `recordUserBlock`) plus `endTurn` cover every block-row-write path.
+
+The dashboard cursor amendment above is the load-bearing carve-out: a previous reading of this ADR's "lastSeqByAgent cursor retires" bullet concluded the cursor was dead code, but a falsification proof during the FRI-125 paired review showed the transient-reconnect dedup case still depends on it. The cursor stays; only its REST/Zero seeding retires. Any future review must not re-attempt the deletion without first walking the reconnect-while-streaming flow against `handleBlockDelta` at HEAD.
 
 ## ADR-025 — Memory full-text search stays REST while Zero lacks generated-column replication
 

@@ -1,0 +1,1 @@
+ALTER TABLE "blocks" DROP COLUMN "last_event_seq";

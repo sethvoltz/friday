@@ -53,7 +53,6 @@ async function insertQueuedBlock(blockId: string): Promise<void> {
     streaming: false,
     originMutationId: null,
     ts: new Date(),
-    lastEventSeq: 0,
   });
 }
 
@@ -176,7 +175,6 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
         streaming: false,
         originMutationId: null,
         ts: new Date(),
-        lastEventSeq: 0,
       });
 
       // negative-space: trigger is AFTER UPDATE only — INSERTs don't fire.
@@ -210,7 +208,6 @@ describe("blocks status enum + cancel_requested", () => {
       streaming: false,
       originMutationId: null,
       ts: new Date(),
-      lastEventSeq: 0,
     });
     const rows = await db.select({ status: schema.blocks.status }).from(schema.blocks);
     expect(rows).toHaveLength(1);

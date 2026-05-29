@@ -1,0 +1,97 @@
+{
+  "events": [
+    {
+      "v": 1,
+      "type": "block_start",
+      "turn_id": "turn-tu-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1",
+      "message_id": "msg-tu-1",
+      "block_index": 0,
+      "role": "assistant",
+      "kind": "tool_use",
+      "source": null,
+      "tool": {
+        "id": "toolu_abc",
+        "name": "Bash"
+      },
+      "ts": 1700000000000
+    },
+    {
+      "v": 1,
+      "type": "block_delta",
+      "turn_id": "turn-tu-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1",
+      "delta": {
+        "partial_json": "{\"command\":"
+      }
+    },
+    {
+      "v": 1,
+      "type": "block_delta",
+      "turn_id": "turn-tu-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1",
+      "delta": {
+        "partial_json": "\"ls -la\""
+      }
+    },
+    {
+      "v": 1,
+      "type": "block_delta",
+      "turn_id": "turn-tu-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1",
+      "delta": {
+        "partial_json": "}"
+      }
+    },
+    {
+      "v": 1,
+      "type": "block_complete",
+      "turn_id": "turn-tu-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1",
+      "message_id": "msg-tu-1",
+      "block_index": 0,
+      "role": "assistant",
+      "kind": "tool_use",
+      "source": null,
+      "content_json": "{\"tool_use_id\":\"toolu_abc\",\"name\":\"Bash\",\"input\":{\"command\":\"ls -la\"}}",
+      "status": "complete",
+      "ts": 1700000000000
+    }
+  ],
+  "rows": [
+    {
+      "blockId": "uuid-1",
+      "turnId": "turn-tu-1",
+      "agentName": "test-agent",
+      "sessionId": "sess-1",
+      "role": "assistant",
+      "kind": "tool_use",
+      "source": null,
+      "blockIndex": 0,
+      "messageId": "msg-tu-1",
+      "contentJson": {
+        "name": "Bash",
+        "input": {
+          "command": "ls -la"
+        },
+        "tool_use_id": "toolu_abc"
+      },
+      "status": "complete",
+      "streaming": false
+    }
+  ],
+  "snapshotAfter": [
+    {
+      "turnId": "turn-tu-1",
+      "agent": "test-agent",
+      "sessionId": "sess-1",
+      "startedAt": 1700000000000,
+      "inFlight": []
+    }
+  ]
+}

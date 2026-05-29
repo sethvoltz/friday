@@ -22,13 +22,8 @@ import { randomUUID } from "node:crypto";
 import { logger } from "../log.js";
 import { buildSystemPrompt } from "../prompts/build-system-prompt.js";
 import * as registry from "./registry.js";
-import {
-  dispatchTurn,
-  forceWorkerRefork,
-  liveAgentNames,
-  peekLiveWorker,
-  recordUserBlock,
-} from "./lifecycle.js";
+import { dispatchTurn, forceWorkerRefork, liveAgentNames, peekLiveWorker } from "./lifecycle.js";
+import { recordUserBlock } from "./block-stream.js";
 
 const TICK_INTERVAL_MS = 30_000;
 // Per-agent-type stall thresholds live on `config.watchdog.thresholdsMs`

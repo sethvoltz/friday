@@ -1,0 +1,55 @@
+{
+  "events": [
+    {
+      "v": 1,
+      "type": "block_start",
+      "turn_id": "turn-err-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1",
+      "message_id": null,
+      "block_index": 9999,
+      "role": "assistant",
+      "kind": "error",
+      "source": null,
+      "ts": 1700000000000
+    },
+    {
+      "v": 1,
+      "type": "block_complete",
+      "turn_id": "turn-err-1",
+      "agent": "test-agent",
+      "block_id": "uuid-1",
+      "message_id": null,
+      "block_index": 9999,
+      "role": "assistant",
+      "kind": "error",
+      "source": null,
+      "content_json": "{\"code\":\"overloaded\",\"headline\":\"Anthropic temporarily overloaded — usually clears in a moment\",\"httpStatus\":529,\"requestId\":\"req_xyz\",\"rawMessage\":\"529 {\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"overloaded_error\\\"}}\"}",
+      "status": "complete",
+      "ts": 1700000000000
+    }
+  ],
+  "rows": [
+    {
+      "blockId": "uuid-1",
+      "turnId": "turn-err-1",
+      "agentName": "test-agent",
+      "sessionId": "sess-1",
+      "role": "assistant",
+      "kind": "error",
+      "source": null,
+      "blockIndex": 9999,
+      "messageId": null,
+      "contentJson": {
+        "code": "overloaded",
+        "headline": "Anthropic temporarily overloaded — usually clears in a moment",
+        "requestId": "req_xyz",
+        "httpStatus": 529,
+        "rawMessage": "529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}"
+      },
+      "status": "complete",
+      "streaming": false
+    }
+  ],
+  "snapshotAfter": []
+}

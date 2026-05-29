@@ -65,7 +65,6 @@ async function insertQueuedBlock(blockId: string, text: string): Promise<void> {
     streaming: false,
     originMutationId: null,
     ts: new Date(),
-    lastEventSeq: 0,
   });
 }
 
@@ -147,7 +146,6 @@ describe("POST /api/internal/cancel-queued (Phase 4.9 fast-path)", () => {
       streaming: false,
       originMutationId: null,
       ts: new Date(),
-      lastEventSeq: 0,
     });
     const res = await fetch(url(), {
       method: "POST",
@@ -182,7 +180,6 @@ describe("POST /api/internal/cancel-queued (Phase 4.9 fast-path)", () => {
       streaming: false,
       originMutationId: null,
       ts: new Date(),
-      lastEventSeq: 0,
     });
     const res = await fetch(url(), {
       method: "POST",

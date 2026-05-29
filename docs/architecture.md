@@ -201,7 +201,7 @@ Schema reference: see [`packages/shared/src/db/schema.ts`](../packages/shared/sr
 - `zero-cache` runs as a sidecar on `127.0.0.1:4848`, tailing Postgres logical replication. Apache-2 licensed (no licensing wrinkles for self-hosted).
 - Dashboard reverse-proxies `/zero` (WS) → zero-cache; auth via short-lived JWT minted from the BetterAuth session.
 - Client subscribes to reactive queries against the synced schema. Phase 1 bootstrap is the orchestrator's last 50 blocks + non-archived agents/tickets/schedules/apps/settings (target <2s broadband). Phase 2 fills full history for active agents and the last 24h of archives. Phase 3 is lazy on demand for very old data.
-- **Streaming rows excluded from sync.** Block rows for the in-flight turn live only in the daemon's in-memory `liveTurns` accumulator; they're written to Postgres only on `block_complete` with `streaming=0`. Clients' reactive queries are scoped to `WHERE streaming=0`. See ADR-024.
+- **Streaming rows excluded from sync.** Block rows for the in-flight turn live only in the daemon's in-memory `blockStream` accumulator; they're written to Postgres only on `block_complete` with `streaming=0`. Clients' reactive queries are scoped to `WHERE streaming=0`. See ADR-024.
 - **Read cursors are synced** (`read_cursors` table, per `device_id`). Unread badges become cross-device-correct by construction; today's localStorage-only badge state retires.
 - **Client retention**: blocks for agents archived >30 days ago are expunged from the client cache; blocks older than 90 days are expunged regardless. Memory/tickets/agents/schedules/apps are never expunged (small). Server data is never deleted by this — retention is a client-cache property only.
 
@@ -212,7 +212,7 @@ Full layout reference lives in [`docs/running.md#data-location`](running.md#data
 ### Block model and in-flight state
 
 - The chat is modeled as a **`blocks` table** — one row per content block, not per turn. Block kinds are `text`, `thinking`, `tool_use`, `tool_result`, `user`, and `mail`. Each row has a stable UUID `block_id`, a parent `turn_id`, a `seq` cursor, a `streaming` boolean, and a `source` enum (`worker` for live streaming, `jsonl` for boot recovery, `dashboard-mutator` for client-originated user blocks). Full-text search lives on the content column via Postgres `tsvector` + GIN (port of the SQLite FTS5 design).
-- **In-flight bytes live in memory only.** During streaming, the daemon's in-memory `liveTurns` registry holds partial bytes, half-assembled tool-use args, and the working buffer for the next delta. The block row is **written to Postgres only on `block_complete`** with `streaming=0`. This is the change from ADR-016's original "write partial bytes to the row continuously" model — it's necessary because Zero replicates Postgres row changes, and replicating 5–50 Hz partial-byte updates per active block would degrade live-typing fidelity and exceed Zero's designed envelope. See ADR-024.
+- **In-flight bytes live in memory only.** During streaming, the daemon's in-memory `blockStream` registry holds partial bytes, half-assembled tool-use args, and the working buffer for the next delta. The block row is **written to Postgres only on `block_complete`** with `streaming=0`. This is the change from ADR-016's original "write partial bytes to the row continuously" model — it's necessary because Zero replicates Postgres row changes, and replicating 5–50 Hz partial-byte updates per active block would degrade live-typing fidelity and exceed Zero's designed envelope. See ADR-024.
 - **Live deltas ride per-agent SSE.** Clients open `GET /api/events?agent=<name>` when focusing an agent's chat. The daemon maintains a small per-turn replay buffer (~100–500 frames typical) so reconnect-mid-turn replays from `turn_started` — preserves the "refresh during stream returns identical bytes" property. Settled blocks (those with `streaming=0`) are delivered via Zero, not SSE.
 - **JSONL is boot-recovery only** (ADR-012, revised): on daemon restart, `services/daemon/src/agent/jsonl-recovery.ts` walks each session's `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` once and back-fills any blocks that should exist but don't (worker crashed before `block_complete` DB write, or daemon crashed mid-stream). Idempotent on `block_id`.
 - **Pagination falls back** to `GET /api/agents/:name/blocks?before=...` for blocks older than the client's sync window (>90 days, or for agents archived >24h ago that the client hasn't yet pulled). Cursors: `before` / `after` / `around_ts`.
@@ -231,7 +231,7 @@ See ADR-016 for the original block-model rationale; ADR-024 for the in-memory-ac
 ### Daemon
 
 - Single Node process, binds `127.0.0.1` on a single port (ADR-011) handling both HTTP and SSE.
-- Owns Claude SDK, agent registry, MCP servers, in-memory `liveTurns` accumulator, per-turn SSE replay buffer (replaces today's 5000-event ring; small per-agent channels).
+- Owns Claude SDK, agent registry, MCP servers, in-memory `blockStream` accumulator, per-turn SSE replay buffer (replaces today's 5000-event ring; small per-agent channels).
 - Forks one worker per active agent via `child_process.fork()`. See `docs/chat-ux.md` for the agent lifecycle and worker model.
 - **LISTENs on Postgres NOTIFY** for row-as-intent dispatch from dashboard mutators: new user blocks → fork/dispatch worker; abort_requested → fire `AbortController.abort()`; archive_requested → archive worker; new_mail → mail-bridge IPC wakeup. Same handlers run from boot-recovery scans, so live and recovery paths are the same code.
 - **Localhost-only `/api/internal/*` fast-path endpoints** for ops where row→LISTEN latency matters (abort, critical-mail-wakeup, cancel-queued). Dashboard mutators sideband-call these in addition to writing the durable row; daemon handlers are idempotent against both paths.
@@ -307,7 +307,7 @@ Schema in `packages/shared/src/wire/events.ts`. Only live-turn events remain:
 
 ### Live-turn rendering (ADR-024)
 
-The daemon's contract narrows to the live-turn path: **in-memory accumulator updated before SSE emit.** The `liveTurns` registry's per-block buffer reflects the delta _before_ the corresponding `block_delta` SSE frame ships. On `block_complete`, the daemon writes the canonical row to Postgres (`streaming=0`); Zero replicates it to all clients via the sync WS.
+The daemon's contract narrows to the live-turn path: **in-memory accumulator updated before SSE emit.** The `blockStream` registry's per-block buffer reflects the delta _before_ the corresponding `block_delta` SSE frame ships. On `block_complete`, the daemon writes the canonical row to Postgres (`streaming=0`); Zero replicates it to all clients via the sync WS.
 
 Browser focus-switch flow:
 
@@ -394,11 +394,11 @@ spawnTurn() / dispatchTurn()
   → parent may send { type: "mail-wakeup" } when mail-bridge sees normal mail for this agent
   → parent may send { type: "mail-wakeup-critical" } for priority='critical' mail (mid-turn break)
   → worker emits block-start, block-delta, block-stop (per content block), heartbeat, turn-complete
-  → parent writes block rows + bumps last_event_seq, then publishes the SSE frame
+  → parent writes block rows via blockStream.close, then publishes the SSE frame
   → worker exits on stop / abort / fatal error / one-shot completion
 ```
 
-Parent-side queue ensures multiple `prompt` IPCs don't race in-flight events with stale `turn_id`s. The queue is mirrored in `liveTurns` (in-memory) so a refork survives — the new worker sees the same pending prompts on `start`.
+Parent-side queue ensures multiple `prompt` IPCs don't race in-flight events with stale `turn_id`s. The queue is mirrored in `blockStream` (in-memory) so a refork survives — the new worker sees the same pending prompts on `start`.
 
 ### Agent status semantics
 
@@ -539,7 +539,7 @@ See [`packages/shared/src/db/schema.ts`](../packages/shared/src/db/schema.ts) fo
 | --------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Postgres                    | host `brew services postgresql`, database `friday` | accounts/sessions/users (BetterAuth), blocks (only with `streaming=0`), mail, tickets, ticket_relations, ticket_external_links, ticket_comments, attachments (metadata only), agents, schedules, memory_entries, db_meta, apps, client_devices, read_cursors, system_banners, schedule_runs, evolve_proposals. tsvector + GIN indexes on blocks + memory bodies. |
 | Filesystem                  | `~/.friday/`                                       | SOUL.md, skills/_.md, uploads/<sha-bucket>/<sha>.<ext> (attachment bytes), memory/entries/_.md, evolve/proposals/_.md, schedules/<name>/{state,last-run}.md, workspaces/<name>/, logs/_.jsonl, apps/<id>/                                                                                                                                                        |
-| Memory (daemon process)     | daemon                                             | `liveTurns` accumulator for in-flight blocks, per-agent SSE replay buffer (~1 turn), `lifecycle.live` worker map, in-process `mailBus` EventEmitter (fast path).                                                                                                                                                                                                 |
+| Memory (daemon process)     | daemon                                             | `blockStream` accumulator for in-flight blocks, per-agent SSE replay buffer (~1 turn), `lifecycle.live` worker map, in-process `mailBus` EventEmitter (fast path).                                                                                                                                                                                               |
 | Memory (zero-cache process) | zero-cache                                         | Logical replication tail state, per-client subscription state.                                                                                                                                                                                                                                                                                                   |
 | Memory (client)             | browser / PWA                                      | Zero reactive cache (IndexedDB-backed); in-memory render state for the live-turn accumulator built from per-agent SSE.                                                                                                                                                                                                                                           |
 

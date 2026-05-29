@@ -52,7 +52,6 @@ async function insertUserBlock(blockId: string, status: string = "complete"): Pr
     streaming: false,
     originMutationId: null,
     ts: new Date(),
-    lastEventSeq: 0,
   });
 }
 
@@ -130,7 +129,6 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
       await client.query("LISTEN friday_abort_requested");
 
       const db = getDb();
-      await db.update(schema.blocks).set({ lastEventSeq: 42 });
       await db.update(schema.blocks).set({ blockIndex: 1 });
 
       // negative-space: trigger predicate fires only on transitions to

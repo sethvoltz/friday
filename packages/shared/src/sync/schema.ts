@@ -373,7 +373,6 @@ const blocks = table("blocks")
     streaming: boolean(),
     origin_mutation_id: string().optional(),
     ts: number(),
-    last_event_seq: number(),
   })
   .primaryKey("id");
 

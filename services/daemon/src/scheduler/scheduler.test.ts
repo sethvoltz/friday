@@ -132,7 +132,6 @@ describe("deleteSchedule (FRI-76 cleanup)", () => {
       contentJson: {},
       status: "complete",
       ts: new Date(),
-      lastEventSeq: 0,
     });
     expect(await deleteSchedule("had-blocks")).toBe(true);
     expect(await registry.getAgent("had-blocks")).not.toBeNull();
