@@ -24,8 +24,12 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Client } from "pg";
-import { spawnTestSyncEnv, zeroDeployInvocations, type SyncEnv } from "./sync-harness.js";
+import {
+  newTestClient,
+  spawnTestSyncEnv,
+  zeroDeployInvocations,
+  type SyncEnv,
+} from "./sync-harness.js";
 
 const TEST_TIMEOUT_MS = 90_000;
 
@@ -49,7 +53,7 @@ describe("FRI-129: sync-harness deploys Zero permissions", () => {
   it(
     "AC#2: deploys the full permissions set to zero.permissions (non-NULL, agents key, 14 tables)",
     async () => {
-      const c = new Client({ connectionString: env.databaseUrl });
+      const c = newTestClient({ connectionString: env.databaseUrl });
       await c.connect();
       try {
         const notNull = await c.query<{ not_null: boolean }>(

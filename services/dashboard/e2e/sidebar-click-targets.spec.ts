@@ -127,6 +127,13 @@ async function seedAgent(
 
 async function seedAll(databaseUrl: string): Promise<void> {
   const c = new Client({ connectionString: databaseUrl });
+  // Swallow late socket FATALs (57P01 from the harness's teardown
+  // pg_terminate_backend) that can arrive after end() while the TCP
+  // socket is still closing. Without an error listener Node turns that
+  // into an unhandled exception and aborts the process. Mirrors the
+  // shared `newTestClient` guard; `@friday/shared`'s test-pg factory
+  // isn't imported into the Playwright tier, so inline the same no-op.
+  c.on("error", () => {});
   await c.connect();
   try {
     for (const ag of SEEDED) await seedAgent(c, ag);
