@@ -139,6 +139,11 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         // FRI-83 follow-up: the spawn-time export of ZERO_MUTATE_URL
         // is the source of truth, beating any stale value in .env.
         ZERO_MUTATE_URL: `http://localhost:${dashboardPort}/api/mutators`,
+        // Single-user local instance: zero-cache otherwise auto-sizes its
+        // sync workers to ~1-per-core (availableParallelism() - 1), and each
+        // worker holds ~5 Postgres connections — ~42 on a 10-core Mac. Pinning
+        // to 2 keeps realtime sync parallelism while cutting connections ~65%.
+        ZERO_NUM_SYNC_WORKERS: "2",
       },
       // Zero exits 14 on AutoResetSignal (replica schema-version drift
       // vs upstream Postgres); restart immediately, no backoff.
@@ -487,8 +492,10 @@ if (invokedAsScript) {
 
 // Test-facing exports. Not part of the public CLI surface; the binary
 // itself is the only intended consumer. Marked here so `supervisor.test.ts`
-// can drive `killChildGroup` against subprocess fixtures.
+// can drive `killChildGroup` against subprocess fixtures and assert the
+// child specs' env (e.g. the zero-cache sync-worker pin).
 export {
+  buildSpecs,
   killChildGroup,
   CRASH_LOOP_WINDOW_MS,
   CRASH_LOOP_MAX,
@@ -496,4 +503,4 @@ export {
   BACKOFF_CAP_MS,
   CASCADE_STOP_DEADLINE_MS,
 };
-export type { ChildState };
+export type { ChildSpec, ChildState };
