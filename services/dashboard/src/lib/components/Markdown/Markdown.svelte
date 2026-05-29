@@ -447,6 +447,11 @@
   :global(.markdown a:hover) { text-decoration: none; }
 
   :global(.markdown table) {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x;
     border-collapse: collapse;
     margin: 0.5rem 0;
     font-size: 0.8rem;
