@@ -31,6 +31,35 @@ import { FTS_SETUP_SQL } from "./schema.js";
 
 const { Client } = pgPkg;
 
+/**
+ * Construct a raw `pg.Client` with a baseline no-op `error` listener
+ * already attached. Every test-side client MUST go through this.
+ *
+ * Why: `dropTestDb` (and the harness's walsender teardown) calls
+ * `pg_terminate_backend()` against every session on a scratch DB. When
+ * that lands on a `pg.Client` whose `client.end()` has returned but whose
+ * TCP socket is still in the FIN handshake, the backend ships a 57P01
+ * FATAL ("terminating connection due to administrator command"). A raw
+ * `Client` with no `error` listener turns that socket-level FATAL into an
+ * **unhandled exception** — Node aborts the whole process and Vitest
+ * exits 1 even though every test passed. Under the unit `Tests` job each
+ * file owns its own scratch DB; File A's terminate can race File B's
+ * still-closing socket, so the crash shows up as a teardown flake far
+ * from the file that "caused" it. The pool path is already guarded
+ * (`client.ts` `pool.on("connect")`); this is the same guard for the raw
+ * `Client` path. The handler is intentionally a no-op: these are
+ * teardown-time socket FATALs after the query path has already resolved.
+ */
+export function newTestClient(config: pgPkg.ClientConfig): pgPkg.Client {
+  const client = new Client(config);
+  client.on("error", () => {
+    // Intentionally swallowed — see doc comment. A late socket FATAL
+    // (57P01 from pg_terminate_backend) after end()/query resolution
+    // must not become an unhandled process-level exception.
+  });
+  return client;
+}
+
 export interface TestDbHandle {
   /** Connection string for the scratch DB. Already exported into
    *  process.env.DATABASE_URL when this handle was created. */
@@ -92,7 +121,7 @@ export async function createTestDb(opts?: {
   const label = (opts?.label ?? "scratch").replace(/[^a-z0-9_]/g, "_");
   const dbName = `friday_test_${label}_${suffix}`.toLowerCase();
 
-  const admin = new Client({ connectionString: adminUrl() });
+  const admin = newTestClient({ connectionString: adminUrl() });
   await admin.connect();
   try {
     await admin.query(`CREATE DATABASE ${dbName}`);
@@ -126,8 +155,7 @@ async function applyMigrationsToScratch(url: string): Promise<void> {
   // FTS setup is idempotent and runs inside runMigrations(), but a
   // brand-new DB needs it to land before any test query reaches
   // content_tsv. Belt-and-braces.
-  const pgPkgRetry = await import("pg");
-  const c = new pgPkgRetry.default.Client({ connectionString: url });
+  const c = newTestClient({ connectionString: url });
   await c.connect();
   try {
     await c.query(FTS_SETUP_SQL);
@@ -159,7 +187,7 @@ async function dropTestDb(dbName: string): Promise<void> {
   }
   _resetClientForTests();
 
-  const admin = new Client({ connectionString: adminUrl() });
+  const admin = newTestClient({ connectionString: adminUrl() });
   await admin.connect();
   try {
     // Kill all other sessions on this DB so the DROP succeeds. This
@@ -171,19 +199,68 @@ async function dropTestDb(dbName: string): Promise<void> {
       [dbName],
     );
     // Drop replication slots now that their consumers are terminated.
-    await admin.query(
-      `SELECT pg_drop_replication_slot(slot_name)
-       FROM pg_replication_slots WHERE database = $1`,
-      [dbName],
-    );
+    // A slot can still report active=true for a brief window after its
+    // walsender backend is terminated (the backend exits asynchronously),
+    // and pg_drop_replication_slot raises 55006 ("replication slot is
+    // active for PID …") against an active slot. That 55006 used to throw
+    // straight out of afterAll and leak the scratch DB. Re-terminate the
+    // walsender + retry the slot-drop with backoff until it lands or the
+    // slot is gone.
+    await dropReplicationSlotsWithRetry(admin, dbName);
     await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
   } finally {
     await admin.end();
   }
 }
 
+/**
+ * Drop every logical-replication slot bound to `dbName`, retrying on
+ * 55006 ("replication slot is active for PID …"). zero-cache's walsender
+ * backend can outlive the OS-level SIGKILL by a short window; during that
+ * window the slot reports `active=true` and a naive drop throws. Each
+ * attempt re-terminates the active walsender PID before retrying the drop.
+ */
+async function dropReplicationSlotsWithRetry(
+  admin: pgPkg.Client,
+  dbName: string,
+  attempts = 10,
+): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await admin.query(
+        `SELECT pg_drop_replication_slot(slot_name)
+         FROM pg_replication_slots WHERE database = $1`,
+        [dbName],
+      );
+      return; // all slots dropped (or none existed)
+    } catch (err) {
+      const code = (err as { code?: string } | undefined)?.code;
+      if (code !== "55006") throw err; // not the active-slot race — surface it
+      // Slot still active — re-terminate its walsender and back off.
+      try {
+        await admin.query(
+          `SELECT pg_terminate_backend(active_pid)
+             FROM pg_replication_slots
+             WHERE database = $1 AND active_pid IS NOT NULL`,
+          [dbName],
+        );
+      } catch {
+        /* walsender already gone — next loop's drop should succeed */
+      }
+      await new Promise((r) => setTimeout(r, 100 * (i + 1)));
+    }
+  }
+  // Final attempt — if the slot is STILL active, let the error propagate
+  // so DROP DATABASE's own failure isn't masked by a silently-skipped slot.
+  await admin.query(
+    `SELECT pg_drop_replication_slot(slot_name)
+     FROM pg_replication_slots WHERE database = $1`,
+    [dbName],
+  );
+}
+
 async function truncateAllTables(url: string): Promise<void> {
-  const c = new Client({ connectionString: url });
+  const c = newTestClient({ connectionString: url });
   await c.connect();
   try {
     // Enumerate user tables (skip drizzle.__drizzle_migrations and

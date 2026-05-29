@@ -12,8 +12,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
-import pgPkg from "pg";
+import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
 
 let handle: TestDbHandle;
 
@@ -31,8 +30,7 @@ beforeEach(async () => {
 
 describe("Postgres trigger: friday_archive_notify_trigger", () => {
   it("fires NOTIFY when status transitions to 'archive_requested'", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();
@@ -72,8 +70,7 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
     // `registry.archiveAgent` sets status='archived'. The trigger
     // predicate (NEW.status = 'archive_requested') excludes this
     // — if it didn't, the handler would loop.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();
@@ -107,8 +104,7 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
   });
 
   it("does NOT fire NOTIFY on common idle → working transitions", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();
@@ -143,8 +139,7 @@ describe("Postgres trigger: friday_archive_notify_trigger", () => {
     // INSERTs at status='idle', and the legacy direct-archive
     // path UPDATEs straight to 'archived' (skipping
     // 'archive_requested' entirely).
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const received: Array<{ payload: string }> = [];

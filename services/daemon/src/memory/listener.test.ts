@@ -22,8 +22,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
-import pgPkg from "pg";
+import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
 
 let handle: TestDbHandle;
 let scratchHome: string;
@@ -48,8 +47,7 @@ beforeEach(async () => {
 
 describe("Postgres trigger: friday_memory_notify_trigger", () => {
   it("fires NOTIFY friday_memory_file_changed on INSERT with pending_file", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const received: Array<{ channel: string; payload: string }> = [];
@@ -87,8 +85,7 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
   });
 
   it("fires NOTIFY on UPDATE that transitions to pending_file", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();
@@ -127,8 +124,7 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
   });
 
   it("fires NOTIFY on UPDATE that transitions to pending_delete", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();
@@ -167,8 +163,7 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
   });
 
   it("does NOT fire NOTIFY on UPDATE that stays at 'ready'", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();
@@ -208,8 +203,7 @@ describe("Postgres trigger: friday_memory_notify_trigger", () => {
     // UPDATE itself fires the trigger... but the trigger predicate
     // (`status IN ('pending_file', 'pending_delete')`) means it
     // sees the row already at 'ready' and skips. Verify.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();

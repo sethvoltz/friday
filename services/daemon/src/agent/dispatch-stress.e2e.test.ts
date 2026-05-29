@@ -29,15 +29,23 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { Client } from "pg";
-import { spawnTestSyncEnv, type SyncEnv } from "@friday/shared/test/sync-harness";
+import { spawnTestSyncEnv, type SyncEnv, newTestClient } from "@friday/shared/test/sync-harness";
 
-const HARNESS_BOOT_MS = 120_000;
-const TEST_TIMEOUT_MS = 60_000;
+const HARNESS_BOOT_MS = 180_000;
+const TEST_TIMEOUT_MS = 90_000;
 const ROW_COUNT = 100;
 const CLIENT_COUNT = 5;
 const PER_CLIENT_ROWS = ROW_COUNT / CLIENT_COUNT;
-const CONVERGE_DEADLINE_MS = 20_000;
+// Raised from 20s. On a loaded CI runner the LISTEN drain + 100 per-row
+// log writes legitimately need more than 20s of wall time even when the
+// daemon is behaving correctly — the old ceiling produced false-positive
+// "expected 100 to be 0" convergence flakes (prior flakes clustered at
+// 88–99/100, i.e. *almost* drained, which is the signature of slowness,
+// not a lost NOTIFY). A comfortable 45s margin removes the infra noise.
+// If convergence still times out on a QUIET host at this ceiling, that is
+// a genuine LISTEN/NOTIFY drain bug (NOTIFY coalescing under burst) and
+// must be ticketed separately — do NOT paper over it with a bigger number.
+const CONVERGE_DEADLINE_MS = 45_000;
 
 let env: SyncEnv;
 
@@ -80,7 +88,7 @@ async function runSimClient(
   count: number,
   specs: PendingSpec[],
 ): Promise<void> {
-  const c = new Client({ connectionString: databaseUrl });
+  const c = newTestClient({ connectionString: databaseUrl });
   await c.connect();
   try {
     for (let i = 0; i < count; i++) {
@@ -101,7 +109,7 @@ async function runSimClient(
 }
 
 async function countPending(databaseUrl: string): Promise<number> {
-  const c = new Client({ connectionString: databaseUrl });
+  const c = newTestClient({ connectionString: databaseUrl });
   await c.connect();
   try {
     const r = await c.query<{ count: string }>(

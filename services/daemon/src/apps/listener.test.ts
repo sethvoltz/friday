@@ -8,8 +8,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
-import pgPkg from "pg";
+import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
 
 let handle: TestDbHandle;
 
@@ -27,8 +26,7 @@ beforeEach(async () => {
 
 describe("Postgres trigger: friday_app_notify_trigger", () => {
   it("fires NOTIFY on INSERT with status='pending_install'", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const received: Array<{ channel: string; payload: string }> = [];
@@ -65,8 +63,7 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
   });
 
   it("fires NOTIFY on UPDATE to status='uninstall_requested'", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();
@@ -102,8 +99,7 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
   });
 
   it("fires NOTIFY on UPDATE to status='reload_requested'", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();
@@ -142,8 +138,7 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
     // The daemon's own flip-back UPDATE (pending_install → installed)
     // shouldn't re-enter the handler. Trigger predicate excludes
     // 'installed' precisely to prevent this loop.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();
@@ -180,8 +175,7 @@ describe("Postgres trigger: friday_app_notify_trigger", () => {
   it("does NOT fire NOTIFY when daemon flips pending_install → installed", async () => {
     // Handler-reentry safety: the LISTEN handler's terminal flip
     // (status='installed') must not re-fire the trigger.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const db = getDb();

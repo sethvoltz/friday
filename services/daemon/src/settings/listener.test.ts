@@ -23,8 +23,8 @@ import {
   schema,
   writeConfig,
   type TestDbHandle,
+  newTestClient,
 } from "@friday/shared";
-import pgPkg from "pg";
 import { syncConfigFromSettingsRow } from "./listener.js";
 
 let handle: TestDbHandle;
@@ -52,8 +52,7 @@ describe("Postgres trigger: friday_settings_notify_trigger", () => {
     // Open a raw LISTEN client (separate from the daemon's
     // listener.ts — this is the test exercising the trigger
     // directly, not the daemon's handler).
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const received: Array<{ channel: string; payload: string }> = [];
@@ -92,8 +91,7 @@ describe("Postgres trigger: friday_settings_notify_trigger", () => {
     // INSERT comes from the migration's seed, and re-inserting
     // would be an error (PK conflict). Verify INSERTs don't
     // generate spurious notifications.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       // Truncate + re-insert to get a fresh INSERT visible to the

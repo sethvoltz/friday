@@ -31,16 +31,20 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { Client } from "pg";
 import {
   spawnTestSyncEnv,
   spawnDaemonForTest,
   type DaemonHandle,
   type SyncEnv,
+  newTestClient,
 } from "@friday/shared/test/sync-harness";
 
-const HARNESS_BOOT_MS = 120_000;
-const TEST_TIMEOUT_MS = 60_000;
+// 180s: boot ceilings rose to 90s + waitForBoot retries once. This suite
+// also re-spawns a daemon mid-test (the restart contract), so the per-test
+// budget must clear a slow-but-succeeding re-boot, not just the initial
+// beforeAll boot — bump TEST_TIMEOUT_MS in lockstep with HARNESS_BOOT_MS.
+const HARNESS_BOOT_MS = 180_000;
+const TEST_TIMEOUT_MS = 120_000;
 const STATUS_POLL_INTERVAL_MS = 100;
 
 let env: SyncEnv;
@@ -66,7 +70,7 @@ async function insertPendingBlock(databaseUrl: string): Promise<PendingBlock> {
   const turnId = `t_${randomUUID()}`;
   const agentName = "friday";
   const text = `daemon-down e2e ${id}`;
-  const c = new Client({ connectionString: databaseUrl });
+  const c = newTestClient({ connectionString: databaseUrl });
   await c.connect();
   try {
     await c.query(
@@ -84,7 +88,7 @@ async function insertPendingBlock(databaseUrl: string): Promise<PendingBlock> {
 }
 
 async function readBlockStatus(databaseUrl: string, id: string): Promise<string | null> {
-  const c = new Client({ connectionString: databaseUrl });
+  const c = newTestClient({ connectionString: databaseUrl });
   await c.connect();
   try {
     const r = await c.query<{ status: string }>(`SELECT status FROM blocks WHERE id = $1`, [id]);

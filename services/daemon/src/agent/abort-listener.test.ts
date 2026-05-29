@@ -18,8 +18,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
-import pgPkg from "pg";
+import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
 
 let handle: TestDbHandle;
 
@@ -57,8 +56,7 @@ async function insertUserBlock(blockId: string, status: string = "complete"): Pr
 
 describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
   it("fires NOTIFY when status transitions to 'abort_requested' and carries block_id as payload", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertUserBlock("blk-abort-1");
@@ -90,8 +88,7 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
     // WHERE block_id=...`. If the trigger fired on that flip-back too,
     // we'd loop forever (notify → handler → flip → notify → ...). The
     // trigger predicate (NEW.status='abort_requested') excludes this.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertUserBlock("blk-abort-2", "abort_requested");
@@ -118,8 +115,7 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
   it("does NOT fire NOTIFY on common lifecycle transitions (complete → complete via other-field UPDATEs)", async () => {
     // Other field UPDATEs (e.g. content_json edits, ts re-stamps) must
     // not spam the abort channel — only status='abort_requested' should.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertUserBlock("blk-abort-3");
@@ -145,8 +141,7 @@ describe("Postgres trigger: friday_block_abort_notify_trigger", () => {
     // The mutator UPDATEs an existing row. INSERTs at this status
     // shouldn't happen in practice but pinning the AFTER UPDATE
     // semantic guards against accidental future code paths.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const received: Array<{ payload: string }> = [];
