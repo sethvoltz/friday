@@ -72,6 +72,38 @@
     void goto(hrefFor(name, type));
   }
 
+  // Prong B (Cause 2): defer focus clicks past goto-induced reflow.
+  //
+  // `goto(...)` from a prior focusAgent is async — the route (and the
+  // history-block mount/unmount it drives via isExpanded) settles a
+  // microtask later, after all matched load() functions resolve. A
+  // `pointerdown` aimed at row B's .row-main that fires before that
+  // settles can have its `click` resolve on a *different* row after the
+  // rows shift vertically underneath the thumb (iOS Safari coalesces the
+  // synthetic click onto the pointerup element). We pin the row the
+  // pointer went down on and swallow the click if it surfaces on a row
+  // it didn't start on — no coordinate math, no elementFromPoint on the
+  // hot path.
+  let pointerDownRow: string | null = null;
+  function recordRowPointerDown(name: string) {
+    pointerDownRow = name;
+  }
+  function focusAgentGuarded(e: MouseEvent, name: string, type: string) {
+    // A genuine click on this row's .row-main started its gesture on the
+    // same row. If the recorded pointerdown row differs, the rows shifted
+    // mid-gesture and the click was retargeted — swallow it rather than
+    // navigate the user somewhere they never aimed at. (A keyboard-driven
+    // click has no preceding pointerdown — detail === 0 — and is always
+    // honored.)
+    if (e.detail !== 0 && pointerDownRow !== null && pointerDownRow !== name) {
+      e.preventDefault();
+      pointerDownRow = null;
+      return;
+    }
+    pointerDownRow = null;
+    focusAgent(name, type);
+  }
+
   // Filters — persisted across reloads so the user's preference survives.
   // Initialize to defaults at SSR; rehydrate from localStorage inside
   // onMount so the server-rendered HTML matches the first client render
@@ -397,12 +429,14 @@
 {#snippet agentRow(a: AgentInfo, isPinned: boolean)}
   <div
     class="row"
+    data-agent={a.name}
     class:pinned={isPinned}
     class:active={a.name === activeAgent}>
     <button
       class="row-main"
       title={isPinned ? "Friday" : `${a.type} · ${a.name}`}
-      onclick={() => focusAgent(a.name, a.type)}>
+      onpointerdown={() => recordRowPointerDown(a.name)}
+      onclick={(e) => focusAgentGuarded(e, a.name, a.type)}>
       <span
         class="dot"
         class:pulse={a.status === "working"}
@@ -430,13 +464,27 @@
       {/if}
     </button>
     {#if (a.sessionCount ?? 0) > 1 || (a.sessionCount === 1 && !a.sessionId)}
-      <div class="expand-slot" class:open={isExpanded(a.name)} aria-hidden="true">
+      <!-- The slot is the unambiguous +/- hit target: the whole 4rem box
+           routes to toggleHistory, so a tap landing in the gradient-fade
+           band (left of the glyph) or the right-edge padding no longer
+           falls through to .row-main underneath. The inner button keeps
+           its own onclick + aria-expanded for screen readers and remains
+           the single keyboard tab stop; it stops propagation so a direct
+           glyph click toggles exactly once (otherwise the click would
+           bubble button → slot and fire toggleHistory twice). -->
+      <div
+        class="expand-slot"
+        class:open={isExpanded(a.name)}
+        role="presentation"
+        tabindex="-1"
+        aria-hidden="true"
+        onclick={() => toggleHistory(a.name)}>
         <button
           type="button"
           class="expand-btn"
           aria-label={isExpanded(a.name) ? "Hide history" : "Show history"}
           aria-expanded={isExpanded(a.name) ? true : false}
-          onclick={() => toggleHistory(a.name)}>
+          onclick={(e) => { e.stopPropagation(); void toggleHistory(a.name); }}>
           {isExpanded(a.name) ? "−" : "+"}
         </button>
       </div>
@@ -623,6 +671,10 @@
     font-size: 0.85rem;
     cursor: pointer;
     font-family: inherit;
+    /* Disable the legacy 300ms double-tap-zoom delay so a focus tap
+       doesn't linger long enough for a goto-driven reflow to retarget
+       the synthetic click (FRI-126, Cause 2). */
+    touch-action: manipulation;
   }
   .row.pinned .row-main { font-weight: 600; }
   .row.pinned .name { font-family: var(--font-sans); }
@@ -642,12 +694,13 @@
     outline: none;
   }
 
-  /* Slot owns the gradient fade and the reveal opacity; pointer-events
-     are off so clicks in the empty fade zone fall through to .row-main
-     (i.e. clicking near the glyph still navigates to the agent). The
-     glyph button inside re-enables pointer events and is the only
-     tabbable / clickable target — its focus ring hugs just the glyph,
-     not the whole 3rem fade area. */
+  /* Slot owns the gradient fade and the reveal opacity. The whole 4rem
+     slot is the +/- click target (it forwards to toggleHistory) so a tap
+     landing in the gradient-fade band or the right-edge padding toggles
+     history instead of falling through to .row-main underneath — the
+     fix for the click-bleed bug (FRI-126). The inner glyph button is
+     still the only tabbable target; its focus ring hugs just the glyph,
+     not the whole 4rem slot. */
   .expand-slot {
     position: absolute;
     top: 50%;
@@ -664,7 +717,7 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    pointer-events: none;
+    cursor: pointer;
     background:
       linear-gradient(
         to right,
@@ -675,15 +728,34 @@
     opacity: 0;
     transition: opacity var(--transition-fast);
   }
+  /* Interactivity tracks visibility. The slot now forwards clicks to
+     toggleHistory (FRI-126), so when it's invisible (opacity: 0, the
+     desktop non-hover state) it must NOT swallow clicks — otherwise the
+     right 4rem of every un-hovered row would silently toggle history
+     over an invisible target. Gate pointer-events to the exact reveal
+     conditions below so the hit target only exists when the glyph is
+     actually shown. Declared on a companion selector (not the base
+     `.expand-slot` block) so the base block stays free of the
+     `pointer-events: none` that caused the original bleed-through. */
+  .expand-slot:not(.open) {
+    pointer-events: none;
+  }
   .row:hover .expand-slot,
   .row:focus-within .expand-slot,
   .expand-slot.open {
     opacity: 1;
+    pointer-events: auto;
   }
-  /* Always-visible on touch devices — slot reveals; button is the click
-     target as usual. */
+  /* Always-visible on touch devices — slot reveals and is interactive;
+     this is the platform where the click-bleed bug bit hardest. The
+     `.row` qualifier lifts this to the same specificity as the
+     `.expand-slot:not(.open)` hidden-default above so source order wins
+     and the slot stays a live hit target even before any reveal. */
   @media (hover: none) {
-    .expand-slot { opacity: 1; }
+    .row .expand-slot {
+      opacity: 1;
+      pointer-events: auto;
+    }
   }
 
   .expand-btn {
@@ -702,6 +774,8 @@
     align-items: center;
     justify-content: center;
     transition: background var(--transition-fast);
+    /* Same double-tap-zoom-delay suppression as .row-main (FRI-126). */
+    touch-action: manipulation;
   }
   /* Button-itself affordance: a small solid plate over the slot bg so
      the glyph reads as its own click target. Same plate fires on mouse
