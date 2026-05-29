@@ -19,8 +19,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
-import pgPkg from "pg";
+import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
 
 let handle: TestDbHandle;
 
@@ -58,8 +57,7 @@ async function insertQueuedBlock(blockId: string): Promise<void> {
 
 describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
   it("fires NOTIFY when status transitions to 'cancel_requested' and carries block_id as payload", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertQueuedBlock("blk-cancel-1");
@@ -94,8 +92,7 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
     // here by flipping to 'cancel_requested' (which fires once), then
     // DELETING the row and observing that no additional notification
     // arrives.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertQueuedBlock("blk-cancel-2");
@@ -123,8 +120,7 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
   it("does NOT fire NOTIFY on queued → dispatched / complete transitions", async () => {
     // Normal worker lifecycle UPDATEs to a queued block (dispatch +
     // completion) must not spam the cancel channel.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertQueuedBlock("blk-cancel-3");
@@ -151,8 +147,7 @@ describe("Postgres trigger: friday_block_cancel_notify_trigger", () => {
     // The mutator UPDATEs an existing row (the queued user block was
     // INSERTed earlier by `recordUserBlock`); it never INSERTs at
     // cancel_requested directly. Pin AFTER UPDATE semantics here.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const received: Array<{ payload: string }> = [];

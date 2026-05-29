@@ -23,10 +23,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { Client } from "pg";
-import { spawnTestSyncEnv, type SyncEnv } from "@friday/shared/test/sync-harness";
+import { spawnTestSyncEnv, type SyncEnv, newTestClient } from "@friday/shared/test/sync-harness";
 
-const HARNESS_BOOT_MS = 120_000;
+// 180s: boot ceilings rose to 90s + waitForBoot retries once, so keep the
+// beforeAll wrapper above waitForBoot's own ceiling (see other e2e files).
+const HARNESS_BOOT_MS = 180_000;
 const TEST_TIMEOUT_MS = 180_000;
 const ROUNDTRIP_DEADLINE_MS = 150_000;
 
@@ -72,7 +73,7 @@ describe.skipIf(!hasKey)("helper mail-loop round-trip (FRI-127 AC#12)", () => {
   it(
     "orchestrator delegates to a helper that mails back, and the loop closes",
     async () => {
-      const c = new Client({ connectionString: env.databaseUrl });
+      const c = newTestClient({ connectionString: env.databaseUrl });
       await c.connect();
       try {
         const turnId = `t_${randomUUID()}`;

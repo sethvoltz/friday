@@ -18,8 +18,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
-import pgPkg from "pg";
+import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
 
 let handle: TestDbHandle;
 
@@ -58,8 +57,7 @@ async function insertBlock(id: string, status: string): Promise<void> {
 
 describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
   it("fires NOTIFY on INSERT at status='pending' with the row id as payload", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const received: Array<{ channel: string; payload: string }> = [];
@@ -87,8 +85,7 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
     // The legacy `POST /api/chat/turn` writes 'complete' (or
     // 'queued') directly via `recordUserBlock`; those rows must
     // not re-enter the LISTEN handler.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const received: Array<{ payload: string }> = [];
@@ -107,8 +104,7 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
   });
 
   it("does NOT fire on INSERT at status='queued' (legacy queued path)", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const received: Array<{ payload: string }> = [];
@@ -131,8 +127,7 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
     // status='complete'`. If the trigger fired on UPDATEs too,
     // we'd loop (notify → handler → flip → notify → ...). The
     // trigger is AFTER INSERT only.
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertBlock("blk-dispatch-4", "pending");
@@ -157,8 +152,7 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
   });
 
   it("does NOT fire on UPDATE pending → queued (worker-mid-turn path)", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertBlock("blk-dispatch-5", "pending");

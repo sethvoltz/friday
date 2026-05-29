@@ -24,9 +24,8 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
+import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
 import { eq } from "drizzle-orm";
-import pgPkg from "pg";
 
 vi.mock("./registry.js", () => ({
   getAgent: vi.fn(),
@@ -133,8 +132,7 @@ async function insertUserBlockWithContent(
 
 describe("Postgres trigger: friday_block_resume_notify_trigger", () => {
   it("fires NOTIFY when status transitions to 'resume_requested' and carries block_id as payload", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertUserBlock("blk-resume-1");
@@ -162,8 +160,7 @@ describe("Postgres trigger: friday_block_resume_notify_trigger", () => {
   });
 
   it("does NOT fire NOTIFY when the daemon flips the row back to 'complete' (handler-reentry safety)", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertUserBlock("blk-resume-2", "resume_requested");
@@ -188,8 +185,7 @@ describe("Postgres trigger: friday_block_resume_notify_trigger", () => {
   });
 
   it("does NOT fire NOTIFY on common lifecycle transitions (other-field UPDATEs)", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       await insertUserBlock("blk-resume-3");
@@ -209,8 +205,7 @@ describe("Postgres trigger: friday_block_resume_notify_trigger", () => {
   });
 
   it("AFTER UPDATE only — INSERT at status='resume_requested' doesn't fire", async () => {
-    const { Client } = pgPkg;
-    const client = new Client({ connectionString: handle.databaseUrl });
+    const client = newTestClient({ connectionString: handle.databaseUrl });
     await client.connect();
     try {
       const received: Array<{ payload: string }> = [];

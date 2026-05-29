@@ -20,24 +20,20 @@ jobs:
     # @friday/shared use `createTestDb()` from `@friday/shared`'s
     # `test-pg.ts` to spin up a scratch DB per file. That helper calls
     # `pg_isready` and refuses to start without a reachable Postgres.
-    # Service container exposes `postgres:18` on the standard port; the
-    # helper builds its admin URL as `postgresql://${USER}@localhost:5432/postgres`
-    # so we set POSTGRES_USER to `runner` (GHA's default user) and use
-    # trust auth (no password) to match the local peer-auth setup.
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: runner
-          POSTGRES_DB: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    # The helper builds its admin URL as
+    # `postgresql://${USER}@localhost:5432/postgres` so we set
+    # POSTGRES_USER to `runner` (GHA's default user) and use trust auth
+    # (no password) to match the local peer-auth setup.
+    #
+    # NB: started via `docker run` rather than a `services:` block so we
+    # can pass the same connection-ceiling flags the e2e / playwright jobs
+    # use (`max_connections=200`, sender/slot=20). A `services:` block
+    # can't override the container CMD, so it inherited Postgres's DEFAULT
+    # `max_connections=100`. Under the unit suite's per-file scratch DBs
+    # (each opens a pool + raw LISTEN clients) that 100-connection ceiling
+    # was the amplifier behind the 57P01 teardown flakes and the boot
+    # timeouts — File A exhausting connections starved File B's spawn.
+    # Matching the e2e job's 200/20/20 removes that pressure.
 
     strategy:
       matrix:
@@ -53,10 +49,27 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
 
-      # The Postgres service container is reachable on TCP but the
-      # `pg_isready` binary that `test-pg.ts:assertPgReady()` shells
-      # out to lives on the runner host, not the container. Install
-      # the lightweight client-only package so the assertion finds it.
+      - name: Start Postgres (raised connection ceiling)
+        run: |
+          docker run -d --name postgres \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            -e POSTGRES_USER=runner \
+            -e POSTGRES_DB=postgres \
+            -p 5432:5432 \
+            postgres:18 \
+            postgres \
+              -c max_wal_senders=20 \
+              -c max_replication_slots=20 \
+              -c max_connections=200
+          # Wait for Postgres to accept connections.
+          for i in $(seq 1 30); do
+            if docker exec postgres pg_isready -U runner; then break; fi
+            sleep 1
+          done
+
+      # `pg_isready` (which `test-pg.ts:assertPgReady()` shells out to)
+      # lives on the runner host, not the container. Install the
+      # lightweight client-only package so the assertion finds it.
       - name: Install postgres client (for pg_isready)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
 

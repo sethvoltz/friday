@@ -35,7 +35,7 @@
 
 import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
-import { Client } from "pg";
+import { newTestClient } from "@friday/shared/test/sync-harness";
 import { envPath } from "./global-setup";
 
 interface EnvSnapshot {
@@ -96,7 +96,7 @@ async function readBlocksForUser(
 ): Promise<
   Array<{ block_id: string; agent_name: string; status: string; content: { text?: string } }>
 > {
-  const c = new Client({ connectionString: databaseUrl });
+  const c = newTestClient({ connectionString: databaseUrl });
   await c.connect();
   try {
     // `content_json` is a JSONB column — node-postgres auto-parses
@@ -201,10 +201,10 @@ test.describe("user-visible round-trip (item #50 — plan §4 step 4e)", () => {
     if (rows.length === 0) {
       // Surface diagnostic info before the assertion fires so test
       // failures don't reduce to "expected 1 received 0."
-      const all = await new Client({ connectionString: env.databaseUrl })
+      const all = await newTestClient({ connectionString: env.databaseUrl })
         .connect()
         .then(async (_v): Promise<unknown> => {
-          const c = new Client({ connectionString: env.databaseUrl });
+          const c = newTestClient({ connectionString: env.databaseUrl });
           await c.connect();
           try {
             const r = await c.query<{

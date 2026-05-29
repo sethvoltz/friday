@@ -37,7 +37,12 @@ import {
   type TestSessionCookie,
 } from "@friday/shared/test/sync-harness";
 
-const HARNESS_BOOT_MS = 120_000;
+// 180s: the daemon/dashboard boot ceilings rose to 90s (matching
+// zero-cache) and waitForBoot retries once, so the serialized boot chain
+// can legitimately run long under load. Keep the beforeAll wrapper above
+// waitForBoot's own ceiling so a slow-but-succeeding boot isn't aborted
+// by the wrapper before its retry lands.
+const HARNESS_BOOT_MS = 180_000;
 const TEST_TIMEOUT_MS = 60_000;
 const READY_DEADLINE_MS = 15_000;
 

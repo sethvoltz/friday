@@ -26,7 +26,7 @@ export {
   type PgHealth,
   type ProvisionResult,
 } from "./db/pg-provision.js";
-export { createTestDb, withTestDb, type TestDbHandle } from "./db/test-pg.js";
+export { createTestDb, newTestClient, withTestDb, type TestDbHandle } from "./db/test-pg.js";
 // Item #50 scaffold. Subprocess-spawning extensions are TODO; the
 // current export gives every e2e test a per-test scratch Postgres
 // with migrations applied + a single shared cleanup hook.

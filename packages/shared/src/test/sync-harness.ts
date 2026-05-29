@@ -80,8 +80,12 @@ import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Client } from "pg";
-import { createTestDb, type TestDbHandle } from "../db/test-pg.js";
+import type { Client } from "pg";
+import { createTestDb, newTestClient, type TestDbHandle } from "../db/test-pg.js";
+
+// Re-export so e2e suites that already import from this module can grab
+// the error-guarded raw-client factory without a second import path.
+export { newTestClient } from "../db/test-pg.js";
 
 // ─────────────────────────────────────────────────────────────────────
 // Repo-root resolution. The harness lives at
@@ -163,6 +167,79 @@ export async function waitForTcp(
 // child hasn't died.
 // ─────────────────────────────────────────────────────────────────────
 
+// Boot ceiling for the daemon + dashboard subprocesses. Bumped from 15s
+// to match zero-cache's 90s: under a loaded CI runner + connection
+// ceiling, a 15s ceiling was much tighter than the actual cold-boot
+// latency (migrations, BetterAuth init, adapter-node listen) and was the
+// likely victim in the `did not accept connections within …ms` flakes.
+const BOOT_TIMEOUT_MS = 90_000;
+
+/**
+ * Attach stdout/stderr handlers to a spawned child that ALWAYS retain a
+ * rolling tail of its output (the last ~16KB), and additionally mirror it
+ * to the test runner's stderr when `FRIDAY_TEST_DEBUG=1`. The retained
+ * tail is surfaced in boot-timeout errors so a CI failure is diagnosable
+ * without re-running with the debug flag set. Returns a getter for the
+ * captured tail.
+ */
+function captureChildOutput(child: ChildProcess, tag: string): () => string {
+  const debug = process.env.FRIDAY_TEST_DEBUG === "1";
+  let buf = "";
+  const MAX = 16_384;
+  const append = (stream: "stdout" | "stderr", d: string) => {
+    buf += d;
+    if (buf.length > MAX) buf = buf.slice(buf.length - MAX);
+    if (debug) process.stderr.write(`[${tag} ${stream}] ${d}`);
+  };
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (d: string) => append("stdout", d));
+  child.stderr?.on("data", (d: string) => append("stderr", d));
+  return () => buf;
+}
+
+/**
+ * Wait for `port` to accept connections, surfacing the child's captured
+ * output (and exit code, if it died) on timeout so a boot failure is
+ * self-explaining in CI. Retries the whole wait once on the first
+ * timeout — boot is occasionally just slow on a busy runner, and a cheap
+ * second wait against the same already-spawned child avoids a beforeAll
+ * throw. If the child has already exited, fails fast (no point waiting).
+ */
+async function waitForBoot(
+  port: number,
+  child: ChildProcess,
+  getOutput: () => string,
+  tag: string,
+): Promise<void> {
+  const attempt = () => waitForTcp(port, { timeoutMs: BOOT_TIMEOUT_MS });
+  try {
+    await attempt();
+    return;
+  } catch (err) {
+    if (child.exitCode !== null) {
+      throw new Error(
+        `${tag} subprocess exited (code=${child.exitCode}) before binding :${port}.\n` +
+          `--- ${tag} output (tail) ---\n${getOutput()}`,
+        { cause: err },
+      );
+    }
+    // One cheap retry — boot can simply be slow under load.
+    try {
+      await attempt();
+      return;
+    } catch (retryErr) {
+      throw new Error(
+        `${tag} did not accept connections on :${port} within ${BOOT_TIMEOUT_MS}ms (after retry).\n` +
+          `child exitCode=${child.exitCode}\n` +
+          `--- ${tag} output (tail) ---\n${getOutput()}\n` +
+          `(original: ${(err as Error).message})`,
+        { cause: retryErr },
+      );
+    }
+  }
+}
+
 /**
  * SIGTERM the process group; SIGKILL it if not gone in `ms` ms.
  *
@@ -191,16 +268,62 @@ async function sigtermThenSigkill(child: ChildProcess, ms = 1_500): Promise<void
       }
     }
   };
+  // Resolve only on a CONFIRMED `exit`. The previous version raced the
+  // exit against a timer that resolved as soon as it FIRED SIGKILL — not
+  // when the process actually died. zero-cache's walsender backend in
+  // Postgres outlives the OS-level SIGKILL by a window, so returning on
+  // the timer let the caller proceed to `pg_drop_replication_slot` while
+  // the slot was still `active=true` → 55006 thrown out of afterAll +
+  // leaked scratch DB. Here the SIGKILL is fired on the timer but we
+  // keep awaiting `exit`; a second hard-deadline guards against a wedged
+  // child that never reports exit (so cleanup can't hang forever).
+  const exited = new Promise<void>((res) => child.once("exit", () => res()));
   sigGroup("SIGTERM");
-  await Promise.race([
-    new Promise<void>((res) => child.once("exit", () => res())),
-    new Promise<void>((res) =>
-      setTimeout(() => {
-        sigGroup("SIGKILL");
-        res();
-      }, ms),
-    ),
-  ]);
+  const killTimer = setTimeout(() => sigGroup("SIGKILL"), ms);
+  const hardDeadline = new Promise<void>((res) => setTimeout(res, ms + 8_000));
+  try {
+    await Promise.race([exited, hardDeadline]);
+  } finally {
+    clearTimeout(killTimer);
+  }
+}
+
+/**
+ * Poll the current DB's replication slots until none is `active`, firing
+ * `pg_terminate_backend` at any still-attached walsender each iteration.
+ * zero-cache's walsender backend exits asynchronously after the process
+ * SIGKILL, so the slot can read `active=true` for a brief window during
+ * which `pg_drop_replication_slot` would raise 55006. Replaces the old
+ * fixed 200ms sleep, which was too short under load and produced the
+ * 55006 afterAll throws + scratch-DB leak. `admin` is connected to the
+ * scratch DB itself (so `current_database()` scopes the slots).
+ */
+async function terminateWalsenderUntilInactive(admin: Client, attempts = 30): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    const r = await admin.query<{ n: string }>(
+      `SELECT count(*)::text AS n
+         FROM pg_replication_slots
+         WHERE database = current_database() AND active`,
+    );
+    if (Number(r.rows[0]?.n ?? "0") === 0) return; // no active slot — safe to drop
+    await admin.query(
+      `SELECT pg_terminate_backend(active_pid)
+         FROM pg_replication_slots
+         WHERE database = current_database() AND active_pid IS NOT NULL`,
+    );
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  // Best-effort: fall through and let the drop attempt surface a residual
+  // 55006 to the caller's catch, which defers to db.drop()'s own retry.
+}
+
+/** Drop every replication slot on the current DB (post-inactive). */
+async function dropReplicationSlotsHere(admin: Client): Promise<void> {
+  await admin.query(
+    `SELECT pg_drop_replication_slot(slot_name)
+       FROM pg_replication_slots
+       WHERE database = current_database()`,
+  );
 }
 
 export interface ZeroCacheHandle {
@@ -257,15 +380,7 @@ export async function spawnZeroCacheForTest(opts: SpawnZeroCacheOpts): Promise<Z
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stdout?.setEncoding("utf8");
-  child.stderr?.setEncoding("utf8");
-  if (process.env.FRIDAY_TEST_DEBUG === "1") {
-    child.stdout?.on("data", (d) => process.stderr.write(`[zero stdout] ${d}`));
-    child.stderr?.on("data", (d) => process.stderr.write(`[zero stderr] ${d}`));
-  } else {
-    child.stdout?.on("data", () => {});
-    child.stderr?.on("data", () => {});
-  }
+  const getOutput = captureChildOutput(child, "zero");
   // Open TCP isn't enough: zero-cache binds early but rejects the WS
   // upgrade until its syncer workers finish their initial CVR install
   // (~10-60s on a cold tmp filesystem). Probe with the actual Zero
@@ -302,7 +417,10 @@ export async function spawnZeroCacheForTest(opts: SpawnZeroCacheOpts): Promise<Z
       if (ok) return;
       await new Promise((r) => setTimeout(r, 250));
     }
-    throw new Error(`zero-cache WS upgrade on :${port} didn't succeed within 90s`);
+    throw new Error(
+      `zero-cache WS upgrade on :${port} didn't succeed within 90s ` +
+        `(child exitCode=${child.exitCode}).\n--- zero output (tail) ---\n${getOutput()}`,
+    );
   })();
   return { port, child, replicaFile, ready };
 }
@@ -364,16 +482,8 @@ export async function spawnDaemonForTest(opts: SpawnDaemonOpts): Promise<DaemonH
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stdout?.setEncoding("utf8");
-  child.stderr?.setEncoding("utf8");
-  if (process.env.FRIDAY_TEST_DEBUG === "1") {
-    child.stdout?.on("data", (d) => process.stderr.write(`[daemon stdout] ${d}`));
-    child.stderr?.on("data", (d) => process.stderr.write(`[daemon stderr] ${d}`));
-  } else {
-    child.stdout?.on("data", () => {});
-    child.stderr?.on("data", () => {});
-  }
-  const ready = waitForTcp(port, { timeoutMs: 15_000 });
+  const getOutput = captureChildOutput(child, "daemon");
+  const ready = waitForBoot(port, child, getOutput, "daemon");
   return { port, child, dataDir, ready };
 }
 
@@ -419,19 +529,11 @@ export async function spawnDashboardForTest(opts: SpawnDashboardOpts): Promise<D
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stdout?.setEncoding("utf8");
-  child.stderr?.setEncoding("utf8");
-  // FRIDAY_TEST_DEBUG=1 surfaces subprocess output to the test runner's
-  // stderr so debugging spawner / dashboard boot issues doesn't require
-  // editing the harness. Default silent so e2e log noise stays low.
-  if (process.env.FRIDAY_TEST_DEBUG === "1") {
-    child.stdout?.on("data", (d) => process.stderr.write(`[dash stdout] ${d}`));
-    child.stderr?.on("data", (d) => process.stderr.write(`[dash stderr] ${d}`));
-  } else {
-    child.stdout?.on("data", () => {});
-    child.stderr?.on("data", () => {});
-  }
-  const ready = waitForTcp(port, { timeoutMs: 15_000 });
+  // captureChildOutput retains a rolling tail of dashboard output (and
+  // mirrors it when FRIDAY_TEST_DEBUG=1) so a boot timeout surfaces the
+  // dashboard's stderr in the thrown error instead of swallowing it.
+  const getOutput = captureChildOutput(child, "dash");
+  const ready = waitForBoot(port, child, getOutput, "dash");
   return { port, child, ready };
 }
 
@@ -497,7 +599,7 @@ export async function mintTestSessionCookie(opts: MintTestSessionOpts): Promise<
   // addresses (`foo@local`), so use a fully-qualified test address.
   const email = opts.email ?? "e2e-test@example.com";
   const name = opts.name ?? "E2E Test";
-  const c = new Client({ connectionString: opts.databaseUrl });
+  const c = newTestClient({ connectionString: opts.databaseUrl });
   await c.connect();
   let persistedUserId: string;
   try {
@@ -699,7 +801,7 @@ export async function spawnTestSyncEnv(opts: SpawnEnvOpts = {}): Promise<SyncEnv
   // user (which CREATE'd the DB and is its owner). Skipped when the
   // caller opts out of zero-cache (e.g., pure SQL trigger tests).
   if (!opts.skipZeroCache) {
-    const admin = new Client({ connectionString: databaseUrl });
+    const admin = newTestClient({ connectionString: databaseUrl });
     await admin.connect();
     try {
       await admin.query("CREATE PUBLICATION friday_pub FOR ALL TABLES");
@@ -865,32 +967,24 @@ export async function spawnTestSyncEnv(opts: SpawnEnvOpts = {}): Promise<SyncEnv
         // that DB. The slot can also remain `active=true` for a brief
         // window after zero-cache's SIGKILL while the walsender
         // backend finishes draining — `pg_drop_replication_slot`
-        // refuses to drop an active slot. Force-disconnect the
-        // walsender first, then drop the slot, then `db.drop()`.
-        // Without this every e2e run leaks its scratch DB and
-        // `friday_test_*` accumulates in pg_database.
+        // refuses to drop an active slot (55006). Poll until every slot
+        // reports `active=false` (re-terminating the walsender each
+        // iteration), then drop. Without this every e2e run leaked its
+        // scratch DB and `friday_test_*` accumulated in pg_database — the
+        // 200ms fixed grace was simply too short under load.
         try {
-          const admin = new Client({ connectionString: databaseUrl });
+          const admin = newTestClient({ connectionString: databaseUrl });
           await admin.connect();
           try {
-            await admin.query(
-              `SELECT pg_terminate_backend(active_pid)
-                 FROM pg_replication_slots
-                 WHERE database = current_database()
-                   AND active_pid IS NOT NULL`,
-            );
-            // Small grace for the terminated walsender to release.
-            await new Promise((r) => setTimeout(r, 200));
-            await admin.query(
-              `SELECT pg_drop_replication_slot(slot_name)
-                 FROM pg_replication_slots
-                 WHERE database = current_database()`,
-            );
+            await terminateWalsenderUntilInactive(admin);
+            await dropReplicationSlotsHere(admin);
           } finally {
             await admin.end();
           }
         } catch {
-          /* slot gone or DB unreachable — DROP DATABASE will tell us */
+          /* slot gone or DB unreachable — db.drop()'s own slot-drop
+             retry (dropTestDb → dropReplicationSlotsWithRetry) is the
+             backstop; DROP DATABASE will surface any residual. */
         }
       }
       await db.drop();
