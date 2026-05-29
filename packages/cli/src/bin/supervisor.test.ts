@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  buildSpecs,
   CRASH_LOOP_MAX,
   CRASH_LOOP_WINDOW_MS,
   killChildGroup,
@@ -234,6 +235,77 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
 
     // Should not throw; ESRCH from the kernel is swallowed by the helper.
     expect(() => killChildGroup(state, "SIGTERM")).not.toThrow();
+  });
+});
+
+// ---- zero-cache child-spec env --------------------------------------
+
+describe("buildSpecs — zero-cache env", () => {
+  /**
+   * The zero-cache spec must default `ZERO_NUM_SYNC_WORKERS` to "2". Left
+   * unset, zero-cache auto-sizes its sync-worker pool to ~1-per-core
+   * (`availableParallelism() - 1`); on a 10-core host that's 9 workers
+   * holding ~5 Postgres connections each (~42 total) for a single-user
+   * box. Pinning to 2 keeps realtime sync parallelism while cutting
+   * connection count ~65%.
+   *
+   * The default is placed BEFORE the `...process.env` spread in the spec's
+   * env, so a user's `ZERO_NUM_SYNC_WORKERS` in `~/.friday/.env` (loaded
+   * into `process.env`) overrides it — system-default-in-code,
+   * .env-override-only. The two tests below pin both halves of that
+   * contract: default "2" when unset, and the user's "4" when set.
+   *
+   * buildSpecs reads only config (defaults under the test tmpdir), so it
+   * runs in isolation with no subprocesses.
+   */
+  it("defaults ZERO_NUM_SYNC_WORKERS to 2 on the zero-cache spec when ambient env is unset", () => {
+    // The default lives before the process.env spread; clear any ambient
+    // value so the assertion exercises the default, not an inherited one.
+    const prior = process.env.ZERO_NUM_SYNC_WORKERS;
+    delete process.env.ZERO_NUM_SYNC_WORKERS;
+    try {
+      const specs = buildSpecs("/tmp/friday-repo-root-fixture");
+      const zero = specs.find((s) => s.name === "zero-cache");
+      expect(zero, "zero-cache spec should exist").toBeDefined();
+      expect(zero!.env.ZERO_NUM_SYNC_WORKERS).toBe("2");
+    } finally {
+      if (prior !== undefined) process.env.ZERO_NUM_SYNC_WORKERS = prior;
+    }
+  });
+
+  it("lets a user's ZERO_NUM_SYNC_WORKERS override the default (user value wins)", () => {
+    // `~/.friday/.env` is loaded into process.env before buildSpecs runs.
+    // Because the "2" default is placed BEFORE the `...process.env` spread,
+    // a user-supplied value must win. Pin "4" and assert it survives.
+    const prior = process.env.ZERO_NUM_SYNC_WORKERS;
+    process.env.ZERO_NUM_SYNC_WORKERS = "4";
+    try {
+      const specs = buildSpecs("/tmp/friday-repo-root-fixture");
+      const zero = specs.find((s) => s.name === "zero-cache");
+      expect(zero, "zero-cache spec should exist").toBeDefined();
+      expect(zero!.env.ZERO_NUM_SYNC_WORKERS).toBe("4");
+    } finally {
+      if (prior === undefined) delete process.env.ZERO_NUM_SYNC_WORKERS;
+      else process.env.ZERO_NUM_SYNC_WORKERS = prior;
+    }
+  });
+
+  it("does not pin ZERO_NUM_SYNC_WORKERS on the daemon or dashboard specs", () => {
+    // The sync-worker cap is zero-cache-specific; it must not leak onto
+    // the other children's env. Both specs spread `process.env`, so clear
+    // any ambient value first to keep the negative assertion robust.
+    const prior = process.env.ZERO_NUM_SYNC_WORKERS;
+    delete process.env.ZERO_NUM_SYNC_WORKERS;
+    try {
+      const specs = buildSpecs("/tmp/friday-repo-root-fixture");
+      for (const name of ["daemon", "dashboard"] as const) {
+        const spec = specs.find((s) => s.name === name);
+        expect(spec, `${name} spec should exist`).toBeDefined();
+        expect(spec!.env.ZERO_NUM_SYNC_WORKERS).toBeUndefined();
+      }
+    } finally {
+      if (prior !== undefined) process.env.ZERO_NUM_SYNC_WORKERS = prior;
+    }
   });
 });
 

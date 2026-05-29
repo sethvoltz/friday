@@ -134,6 +134,13 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
       args: ["exec", "zero-cache"],
       cwd: join(repoRoot, "services", "dashboard"),
       env: {
+        // System default for the single-user local instance: zero-cache otherwise
+        // auto-sizes sync workers to ~1-per-core (availableParallelism() - 1), each
+        // holding ~5 Postgres connections (~42 on a 10-core Mac). Pinning to 2 keeps
+        // realtime sync parallelism while cutting connections ~65%. Placed BEFORE the
+        // process.env spread so it is a DEFAULT the user can override via
+        // ZERO_NUM_SYNC_WORKERS in ~/.friday/.env. Takes effect on next zero-cache restart.
+        ZERO_NUM_SYNC_WORKERS: "2",
         ...process.env,
         ZERO_LOG_FORMAT: "json",
         // FRI-83 follow-up: the spawn-time export of ZERO_MUTATE_URL
@@ -487,8 +494,10 @@ if (invokedAsScript) {
 
 // Test-facing exports. Not part of the public CLI surface; the binary
 // itself is the only intended consumer. Marked here so `supervisor.test.ts`
-// can drive `killChildGroup` against subprocess fixtures.
+// can drive `killChildGroup` against subprocess fixtures and assert the
+// child specs' env (e.g. the zero-cache sync-worker pin).
 export {
+  buildSpecs,
   killChildGroup,
   CRASH_LOOP_WINDOW_MS,
   CRASH_LOOP_MAX,
@@ -496,4 +505,4 @@ export {
   BACKOFF_CAP_MS,
   CASCADE_STOP_DEADLINE_MS,
 };
-export type { ChildState };
+export type { ChildSpec, ChildState };
