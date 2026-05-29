@@ -38,4 +38,17 @@ export type DispatchIntent =
   | { kind: "mail"; body: string; intentText: string }
   | { kind: "scheduled"; body: string; intentText: string }
   | { kind: "scratch"; userText: string }
-  | { kind: "agent_spawn"; userText: string; baseSystemPromptOverride?: string };
+  | {
+      kind: "agent_spawn";
+      userText: string;
+      baseSystemPromptOverride?: string;
+      /**
+       * FRI-127 §4: the spawning agent's name. When present, the dispatch
+       * body is wrapped with a mail-back trailer naming this parent so the
+       * child knows where to report its result. The recall payload
+       * (`intentText`) stays the raw `userText` so memory recall queries the
+       * actual task, not the wrapper. Absent for the orphan case (an
+       * orchestrator spawned with no parent), where the body is unchanged.
+       */
+      parentName?: string;
+    };

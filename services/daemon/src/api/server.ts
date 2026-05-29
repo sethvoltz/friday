@@ -402,6 +402,8 @@ async function handle(
       agentType: body.type,
       workingDirectory: worktreePath ?? workingDirectory,
       branch,
+      parentName: body.parentName,
+      spawnPrompt: body.prompt,
     });
     const bootstrapAppends = bootstrapResults
       .map((r) => r?.appendSystemPrompt)
@@ -417,6 +419,7 @@ async function handle(
         kind: "agent_spawn",
         userText: body.prompt,
         baseSystemPromptOverride: bootstrapAugmentedBase,
+        parentName: body.parentName,
       },
     );
     // FRI-71: persist the spawn-time prompt as a user block so the very first

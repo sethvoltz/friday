@@ -28,6 +28,7 @@ import type {
 } from "./worker-protocol.js";
 import { extractUsageFromResult, type FinalUsage } from "./usage-capture.js";
 import { classifySdkError } from "./sdk-error.js";
+import { healDanglingToolUseInJsonl } from "./sdk-jsonl-heal.js";
 import { buildMcpServers } from "../mcp/builder.js";
 import { buildMailPrompt } from "../comms/mail-prompt.js";
 import { daemonFetch } from "../mcp/http.js";
@@ -214,6 +215,87 @@ export function assistantMessageHasToolUses(assistantMsg: unknown): boolean {
   return content.some((b) => (b as { type?: string })?.type === "tool_use");
 }
 
+/**
+ * Resolve which session id a drained prompt should resume (FRI-127 §6/§9).
+ *
+ * The worker's own `lastSessionId` — the most recent session id it observed
+ * from the SDK's `session_id` field — is the freshest signal. A queued
+ * prompt's `p.resumeSessionId` was captured at POST/NOTIFY time and may be
+ * stale by the time the prompt drains (the just-finished turn moved the
+ * session on). Prefer the live value; only fall back to the parent-provided
+ * value when the worker has no observed session yet — i.e. the first turn
+ * after a fresh spawn, where `lastSessionId` is `undefined` and the SDK
+ * should start a brand-new session from `p.resumeSessionId` (typically also
+ * `undefined`). Exported for testability.
+ */
+export function resolveSessionId(
+  p: { resumeSessionId?: string },
+  lastSessionId: string | undefined,
+): string | undefined {
+  return lastSessionId ?? p.resumeSessionId;
+}
+
+type QueryOptions = NonNullable<Parameters<typeof query>[0]["options"]>;
+
+/**
+ * Build the SDK `query()` options object for a turn. Extracted as a pure
+ * function (FRI-127 §2/AC#3) so the `disallowedTools: ["Task"]` invariant —
+ * and the rest of the options assembly — can be asserted without forking a
+ * worker.
+ *
+ * `disallowedTools: ["Task"]` removes Anthropic's built-in `Task` sub-agent
+ * tool from the model's context for EVERY agent type. All five Friday agent
+ * types already carry a textual "do not use the built-in Task tool"
+ * instruction; hardening at the SDK layer makes the rule structural. Per the
+ * SDK docs `disallowedTools` "removes [tools] from the model's context …
+ * even if they would otherwise be allowed", so it cannot conflict with the
+ * `allowedTools` auto-approval list threaded from a skill's `allowed_tools`.
+ */
+export function buildQueryOptions(
+  opts: WorkerSpawnOptions,
+  _p: WorkerPromptCommand,
+  sessionId: string | undefined,
+  allowedTools: string[] | undefined,
+  builderGuardHooks: QueryOptions["hooks"] | undefined,
+  thinking: QueryOptions["thinking"] | undefined,
+  mcpServers: QueryOptions["mcpServers"],
+  abortController: AbortController | undefined,
+): QueryOptions {
+  return {
+    cwd: opts.workingDirectory,
+    model: opts.model,
+    permissionMode: "bypassPermissions",
+    includePartialMessages: true,
+    mcpServers,
+    // Drop Anthropic's built-in `Task` sub-agent tool from the catalog for
+    // every agent type. Friday farms work out via `agent_create` + mail, not
+    // SDK Task. See the doc-comment above.
+    disallowedTools: ["Task"],
+    // Friday owns memory via friday-memory MCP. Disabling the SDK's
+    // project-scoped auto-memory prevents the model from silently
+    // falling back to writes under ~/.claude/projects/<cwd>/memory/.
+    // `autoMemoryEnabled` lives on Settings, passed through the
+    // top-level `settings` Options field.
+    settings: { autoMemoryEnabled: false },
+    // FRI-78: thread the worker's abortController through the SDK so
+    // `stop`/`abort` IPCs propagate cleanly to the CLI subprocess
+    // (tool-execution streams shut down deterministically instead of
+    // closing on iterator return). Without this, the SDK only learns
+    // the consumer is gone when the for-await iterator returns.
+    ...(abortController ? { abortController } : {}),
+    ...(builderGuardHooks ? { hooks: builderGuardHooks } : {}),
+    ...(allowedTools ? { allowedTools } : {}),
+    ...(thinking ? { thinking } : {}),
+    ...(opts.effort ? { effort: opts.effort } : {}),
+    systemPrompt: {
+      type: "preset",
+      preset: "claude_code",
+      append: (opts.systemPrompt ? opts.systemPrompt + "\n\n" : "") + renderLocalDatetime(),
+    },
+    ...(sessionId ? { resume: sessionId } : {}),
+  };
+}
+
 /** MIME types Anthropic's vision API will accept as `image` content
  *  blocks. `image/jpg` is folded into `image/jpeg`. Anything outside this
  *  set (and outside `application/pdf`, handled as a document block) is
@@ -339,7 +421,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   }, 10_000);
   hbInterval.unref();
 
-  let sessionId = p.resumeSessionId ?? lastSessionId;
+  let sessionId = resolveSessionId(p, lastSessionId);
   let sessionAnnounced = false;
   let currentMessageId = "";
   let finalUsage: FinalUsage | undefined;
@@ -485,35 +567,16 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   try {
     for await (const msg of query({
       prompt: promptInput,
-      options: {
-        cwd: opts.workingDirectory,
-        model: opts.model,
-        permissionMode: "bypassPermissions",
-        includePartialMessages: true,
+      options: buildQueryOptions(
+        opts,
+        p,
+        sessionId,
+        allowedTools,
+        builderGuardHooks,
+        thinking,
         mcpServers,
-        // Friday owns memory via friday-memory MCP. Disabling the SDK's
-        // project-scoped auto-memory prevents the model from silently
-        // falling back to writes under ~/.claude/projects/<cwd>/memory/.
-        // `autoMemoryEnabled` lives on Settings, passed through the
-        // top-level `settings` Options field.
-        settings: { autoMemoryEnabled: false },
-        // FRI-78: thread the worker's abortController through the SDK so
-        // `stop`/`abort` IPCs propagate cleanly to the CLI subprocess
-        // (tool-execution streams shut down deterministically instead of
-        // closing on iterator return). Without this, the SDK only learns
-        // the consumer is gone when the for-await iterator returns.
-        ...(abortController ? { abortController } : {}),
-        ...(builderGuardHooks ? { hooks: builderGuardHooks } : {}),
-        ...(allowedTools ? { allowedTools } : {}),
-        ...(thinking ? { thinking } : {}),
-        ...(opts.effort ? { effort: opts.effort } : {}),
-        systemPrompt: {
-          type: "preset",
-          preset: "claude_code",
-          append: (opts.systemPrompt ? opts.systemPrompt + "\n\n" : "") + renderLocalDatetime(),
-        },
-        ...(sessionId ? { resume: sessionId } : {}),
-      },
+        abortController,
+      ),
     })) {
       const m = msg as Record<string, unknown>;
 
@@ -569,6 +632,36 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       const captured = extractUsageFromResult(m);
       if (captured) {
         finalUsage = captured;
+        // FRI-127 §7: the SDK delivered `result` while we were still
+        // deferring a pending-injection break for an outstanding
+        // `tool_use` (breakAtNextUser was set at the assistant boundary
+        // but the matching synthetic `user(tool_result)` never arrived
+        // before `result`). A tool that interrupts/errors/completes after
+        // the assistant boundary can produce this ordering, leaving the
+        // SDK session JSONL with a dangling `tool_use`. The next resume
+        // would reject with "Stream closed". Heal mid-session by appending
+        // a synthetic tool_result for each unresolved tool_use BEFORE
+        // flushBoundaryBlocks() clears the map. The heal is idempotent
+        // (hasMatchingToolResult skips the write if a result already
+        // exists) and best-effort — boot-time recoverDanglingToolUses is
+        // still the backstop on any path that throws here.
+        if (breakAtNextUser && blocks.size > 0 && sessionId) {
+          for (const block of blocks.values()) {
+            if (block.kind === "tool_use" && block.toolId) {
+              try {
+                healDanglingToolUseInJsonl({
+                  cwd: opts.workingDirectory,
+                  sessionId,
+                  toolUseId: block.toolId,
+                  healMarker: "[Tool call interrupted by mid-turn break; session continues.]",
+                });
+              } catch {
+                // Best-effort; boot-time recovery still heals on restart.
+              }
+            }
+          }
+          breakAtNextUser = false;
+        }
         // The SDK protocol says `result` is the FINAL message of a
         // turn. Continuing the for-await past it and waiting for the
         // iterator to close on its own is a latent stall: if the CLI

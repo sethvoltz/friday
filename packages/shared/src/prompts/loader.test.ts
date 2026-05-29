@@ -71,6 +71,33 @@ describe("composeSystemPrompt with identity", () => {
   });
 });
 
+describe("SOUL is identity-neutral; orchestrator owns 'You are Friday' (FRI-127)", () => {
+  const ORCH_FRAMING = "You are Friday: the user's personal AI orchestrator";
+
+  it.each(["helper", "builder", "bare", "scheduled"] as const)(
+    "%s composed prompt does NOT carry the orchestrator framing",
+    (agentType) => {
+      const stack = readPromptStack(agentType, []);
+      const composed = composeSystemPrompt(stack, {
+        agentName: "child-1",
+        agentType,
+        parentName: "friday",
+      });
+      expect(composed.includes(ORCH_FRAMING)).toBe(false);
+    },
+  );
+
+  it("orchestrator composed prompt carries the framing exactly once", () => {
+    const stack = readPromptStack("orchestrator", []);
+    const composed = composeSystemPrompt(stack, {
+      agentName: "friday",
+      agentType: "orchestrator",
+    });
+    const occurrences = composed.split(ORCH_FRAMING).length - 1;
+    expect(occurrences).toBe(1);
+  });
+});
+
 describe("composeSystemPrompt pinned facts (FRI-61)", () => {
   it("includes the pinned-facts block verbatim between Identity and agentBase", () => {
     const stack = readPromptStack("orchestrator", []);

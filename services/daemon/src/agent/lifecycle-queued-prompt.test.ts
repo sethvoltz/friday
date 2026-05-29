@@ -302,6 +302,59 @@ describe("lifecycle: queued user-block dispatch", () => {
     expect(child.send).toHaveBeenCalledWith(expect.objectContaining({ type: "prompt" }));
   });
 
+  it("queued prompt drains with the LIVE w.sessionId, not the POST-time resumeSessionId (FRI-127 §6)", async () => {
+    const { dispatchTurn, handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+
+    // The worker has already moved its session on to "sess-NEW" (a prior turn
+    // resolved + the session-update IPC updated w.sessionId).
+    const { worker, child } = makeFakeWorker({ sessionId: "sess-NEW", status: "working" });
+    __putLiveWorkerForTest("queued-agent", worker as never);
+
+    // A new turn is POSTed while the worker is mid-turn. The dispatch captures
+    // the now-stale "sess-OLD" as its resumeSessionId.
+    dispatchTurn({
+      agentName: "queued-agent",
+      options: {
+        agentName: "queued-agent",
+        agentType: "orchestrator",
+        workingDirectory: "/tmp/fake",
+        systemPrompt: "sys",
+        prompt: "queued while busy",
+        turnId: "t_qsess",
+        model: "claude-opus-4-7",
+        daemonPort: 8765,
+        resumeSessionId: "sess-OLD",
+        mode: "long-lived",
+      },
+      userBlockId: "block-qsess",
+    });
+
+    // It parked in nextPrompts (worker was working). It must NOT carry sess-OLD
+    // verbatim — the choke-point at dispatchTurn prefers existing.sessionId.
+    const w = worker as { nextPrompts: Array<{ resumeSessionId?: string }> };
+    expect(w.nextPrompts).toHaveLength(1);
+    expect(w.nextPrompts[0].resumeSessionId).toBe("sess-NEW");
+
+    // Drive the drain via turn-complete (no usage; orchestrator → no backstop).
+    await handleEvent(
+      worker as never,
+      { type: "turn-complete", sessionId: "sess-NEW", usage: undefined } as never,
+    );
+
+    // The IPC the worker actually received resumes the live session.
+    const sentIpc = child.send.mock.calls
+      .map((c) => c[0] as { type?: string; options?: { resumeSessionId?: string } })
+      .find((m) => m.type === "prompt");
+    expect(sentIpc).toBeDefined();
+    expect(sentIpc).toMatchObject({
+      type: "prompt",
+      options: { resumeSessionId: "sess-NEW" },
+    });
+
+    __deleteLiveWorkerForTest("queued-agent");
+  });
+
   it("listQueuedUserBlocks returns queued rows in ts order (oldest first)", async () => {
     const { recordUserBlock } = await import("./block-stream.js");
     const { listQueuedUserBlocks } = await import("@friday/shared/services");

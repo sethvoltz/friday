@@ -16,6 +16,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentType } from "@friday/shared";
@@ -72,6 +73,10 @@ export interface LiveWorker {
   agentName: string;
   agentType: AgentType;
   model: string;
+  /** Parent agent's name (helper/builder/bare spawned by another agent).
+   *  Undefined for the orchestrator. FRI-127 §5: drives the mail-back
+   *  backstop's "did this turn mail the parent" detection. */
+  parentName?: string;
   /** Active turn id; updated on each prompt dispatch. */
   turnId: string;
   sessionId?: string;
@@ -147,6 +152,21 @@ export interface LiveWorker {
    *  `FRIDAY_WEDGE_THRESHOLD` (default 10), force-kill with
    *  `reason: "wedge"`. */
   zeroBlockTurnStreak: number;
+  /** FRI-127 §5 mail-back backstop. Count of `mail_send` tool_use blocks
+   *  targeting this worker's parent observed on the current turn. Incremented
+   *  at block-stop (where the tool_use input — and thus `to` — is finalized,
+   *  still well before `turn-complete`, closing the in-flight-mail race).
+   *  Reset to 0 at the start of every turn. */
+  mailSendToParentThisTurn: number;
+  /** FRI-127 §5: set when this turn's no-mail-back miss triggered an
+   *  Option-B re-dispatch (single-fire guard). A SECOND consecutive
+   *  no-mail-back turn-complete falls through to Option C (structured warning
+   *  + SSE + log streak) instead of looping. Reset to false on any turn that
+   *  DID mail the parent. */
+  noMailBackNudgedThisTurn: boolean;
+  /** FRI-127 §5: count of consecutive no-mail-back turn-completes. Surfaces
+   *  on the Option-C `worker.no-mail-back-streak` log + SSE event. */
+  noMailBackStreak: number;
 }
 
 const live = new Map<string, LiveWorker>();
@@ -358,6 +378,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     agentName: input.agentName,
     agentType: input.options.agentType,
     model: input.options.model,
+    parentName: input.options.parentName,
     turnId: input.options.turnId,
     workingDirectory: input.options.workingDirectory,
     abortRequested: false,
@@ -380,6 +401,9 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     onExit: input.onExit,
     blocksThisTurn: 0,
     zeroBlockTurnStreak: 0,
+    mailSendToParentThisTurn: 0,
+    noMailBackNudgedThisTurn: false,
+    noMailBackStreak: 0,
   };
   live.set(input.agentName, w);
 
@@ -529,7 +553,15 @@ export function dispatchTurn(input: SpawnTurnInput): void {
     prompt: input.options.prompt,
     attachments: input.options.attachments,
     turnId: input.options.turnId,
-    resumeSessionId: input.options.resumeSessionId ?? existing.sessionId ?? undefined,
+    // FRI-127 §6: prefer the LIVE worker's session id over the POST/NOTIFY-time
+    // capture. `input.options.resumeSessionId` was read synchronously when the
+    // dispatch was queued; by the time a mid-turn-queued prompt drains, the
+    // just-finished turn has moved the session on (the `session-update` IPC
+    // updates `existing.sessionId`). Resuming the stale value drops the queued
+    // prompt into an obsolete session JSONL and surfaces as "Agent didn't
+    // respond". Only fall back to the parent-provided value on first-turn-after-
+    // spawn, where `existing.sessionId` is undefined.
+    resumeSessionId: existing.sessionId ?? input.options.resumeSessionId ?? undefined,
     allowedToolsOverride: input.options.allowedToolsOverride,
     userBlockId: input.userBlockId,
   };
@@ -610,7 +642,92 @@ function setWorkerStatus(w: LiveWorker, next: "idle" | "working", source: string
   w.status = next;
 }
 
+/**
+ * FRI-127 §5 mail-back backstop. Called at turn-complete for a helper/builder
+ * that has a parent. Detects "this turn produced content but never mailed the
+ * parent" and recovers:
+ *
+ *   - Option B (default, single-fire): re-dispatch one nudge turn telling the
+ *     child to mail its result now. Guarded by `noMailBackNudgedThisTurn` so it
+ *     fires at most once per consecutive-miss run.
+ *   - Option C (fallthrough on the SECOND consecutive miss): no re-dispatch;
+ *     emit a structured warning log (`worker.no-mail-back-streak`) and a
+ *     `worker.no-mail-back` SSE event so the dashboard can surface a manual
+ *     "Nudge" affordance. Honest about persistent failure instead of looping.
+ *
+ * A turn that DID mail the parent resets the guard + streak (handled by the
+ * caller before this runs).
+ *
+ * Returns `true` when it re-dispatched a nudge turn — the caller then skips the
+ * normal queue-drain so the nudge isn't immediately clobbered by `sendPrompt`.
+ *
+ * `completedBlocks` / `completedMailBacks` are the just-finished turn's counts,
+ * captured by the caller before the per-turn resets.
+ */
+function maybeNudgeForMailBack(
+  w: LiveWorker,
+  completedBlocks: number,
+  completedMailBacks: number,
+): boolean {
+  const isChild = w.agentType === "helper" || w.agentType === "builder";
+  if (!isChild || !w.parentName) return false;
+
+  if (completedMailBacks > 0) {
+    // The child reported home this turn. Clear the backstop state so a future
+    // miss starts fresh (single-fire nudge per consecutive-miss run).
+    w.noMailBackNudgedThisTurn = false;
+    w.noMailBackStreak = 0;
+    return false;
+  }
+
+  // Only a turn that actually produced content but skipped the mail-back is a
+  // miss. A zero-block turn is a different failure (the wedge detector owns it).
+  if (completedBlocks === 0) return false;
+
+  w.noMailBackStreak++;
+
+  if (!w.noMailBackNudgedThisTurn) {
+    // Option B: single-fire re-dispatch.
+    w.noMailBackNudgedThisTurn = true;
+    const nudge: WorkerPromptCommand = {
+      prompt: `You finished your turn without reporting back. Mail your parent \`${w.parentName}\` with your result now via \`mail_send({to: "${w.parentName}", body: …})\` so your parent learns you're done.`,
+      turnId: `t_${randomUUID()}`,
+    };
+    logger.log("info", "worker.no-mail-back-nudge", {
+      agent: w.agentName,
+      parent: w.parentName,
+      turnId: nudge.turnId,
+      streak: w.noMailBackStreak,
+    });
+    sendPrompt(w, nudge);
+    return true;
+  }
+
+  // Option C: second consecutive miss — warn + SSE, no re-dispatch.
+  logger.log("warn", "worker.no-mail-back-streak", {
+    agent: w.agentName,
+    parent: w.parentName,
+    turnId: w.turnId,
+    streak: w.noMailBackStreak,
+  });
+  eventBus.publish({
+    v: 1,
+    type: "worker.no-mail-back",
+    agent: w.agentName,
+    turn_id: w.turnId,
+    streak: w.noMailBackStreak,
+  });
+  return false;
+}
+
 function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
+  // FRI-127 §6: defensively re-resolve the resume session id at the moment we
+  // actually drain the prompt. The queue-drain path (`nextPrompts.shift()`)
+  // hands us a `WorkerPromptCommand` built at queue time with a possibly-stale
+  // value; the live worker's `w.sessionId` (updated by the `session-update`
+  // IPC) is the freshest signal. Only keep the queued value if the worker has
+  // no observed session yet.
+  p.resumeSessionId = w.sessionId ?? p.resumeSessionId;
   restampQueuedUserBlock(w.agentName, p.turnId, p.userBlockId);
   w.turnId = p.turnId;
   w.turnStart = Date.now();
@@ -626,6 +743,9 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   // already reset the counter before this), but pinning it here protects
   // against future re-orderings.
   w.blocksThisTurn = 0;
+  // FRI-127 §5: a fresh turn starts with no observed mail-back. Same
+  // defense-in-depth as blocksThisTurn.
+  w.mailSendToParentThisTurn = 0;
   setWorkerStatus(w, "working", "sendPrompt");
   // Intentionally no registry.setStatus("working") here. The worker emits
   // a status-change:working IPC when runQuery starts; the handleEvent handler
@@ -1360,6 +1480,29 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // the turn-stall watchdog. Heartbeats don't count — a hung SDK still
       // emits them, but no block ever lands.
       w.lastBlockStop = Date.now();
+      // FRI-127 §5: count `mail_send` tool_use blocks that target this
+      // worker's parent. The tool_use input (and thus `to`) is finalized in
+      // the block-stop `contentJson` (`{tool_use_id, name, input}`), which
+      // lands during streaming — well before `turn-complete` — so the
+      // mail-back backstop reads an accurate count with no race against an
+      // in-flight mail_send. `mail_send` resolves the symbolic `parent`/`self`
+      // recipients, so accept either the literal parent name or `parent`.
+      if (w.parentName) {
+        try {
+          const parsed = JSON.parse(e.contentJson) as {
+            name?: string;
+            input?: { to?: string };
+          };
+          if (
+            parsed.name === "mail_send" &&
+            (parsed.input?.to === w.parentName || parsed.input?.to === "parent")
+          ) {
+            w.mailSendToParentThisTurn++;
+          }
+        } catch {
+          // Non-tool_use or unparseable payload — leave the counter untouched.
+        }
+      }
       await bsClose(w, e);
       break;
     }
@@ -1633,6 +1776,12 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
           w.zeroBlockTurnStreak = 0;
         }
       }
+      // FRI-127 §5: capture the just-completed turn's block + mail-back
+      // counts BEFORE the resets below; the mail-back backstop (run after the
+      // worker is flipped idle) reads them to decide whether the child
+      // reported home.
+      const completedBlocks = w.blocksThisTurn;
+      const completedMailBacks = w.mailSendToParentThisTurn;
       w.blocksThisTurn = 0;
       // The in-flight registry holds per-turn block accumulators (FIX_FORWARD
       // 1.4). Drop the entry once the turn completes; canonical block content
@@ -1679,6 +1828,13 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
           }
         });
       }
+      // FRI-127 §5: mail-back backstop. A helper/builder that produced
+      // content but never mailed its parent gets one re-dispatch nudge
+      // (Option B); a second consecutive miss falls through to a structured
+      // warning + SSE event (Option C). When the backstop re-dispatches, it
+      // owns the worker's next turn — skip the normal queue-drain so the
+      // nudge isn't immediately clobbered by a queued prompt's sendPrompt.
+      if (maybeNudgeForMailBack(w, completedBlocks, completedMailBacks)) break;
       const next = w.nextPrompts.shift();
       if (next) sendPrompt(w, next);
       break;

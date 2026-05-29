@@ -30,7 +30,8 @@ export type WireEvent =
   | BlockCompleteEvent
   | BlockCanceledEvent
   | ConnectionEstablishedEvent
-  | CompactionEvent;
+  | CompactionEvent
+  | WorkerNoMailBackEvent;
 
 export interface BaseEvent {
   v: 1;
@@ -236,6 +237,21 @@ export interface CompactionEvent extends BaseEvent {
   pre_tokens: number;
   post_tokens?: number;
   duration_ms?: number;
+}
+
+/**
+ * FRI-127 §5 (mail-back backstop, Option C). Fired when a helper/builder
+ * completes a turn without mailing its parent for the SECOND consecutive
+ * turn — i.e. the single-fire Option-B nudge already ran and the child still
+ * didn't report back. The dashboard surfaces this as a "child finished
+ * without mailing" affordance with a manual Nudge action. `streak` is the
+ * count of consecutive no-mail-back turn-completes (≥2 when this fires).
+ */
+export interface WorkerNoMailBackEvent extends BaseEvent {
+  type: "worker.no-mail-back";
+  agent: string;
+  turn_id: string;
+  streak: number;
 }
 
 /**
