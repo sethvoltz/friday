@@ -327,6 +327,41 @@ describe("buildSpecs — zero-cache env", () => {
     }
   });
 
+  it("defaults ZERO_APP_PUBLICATIONS to friday_pub on the zero-cache spec when ambient env is unset", () => {
+    // The publication name moved from a `friday setup`-written `.env` entry
+    // to a code default on the zero-cache spec, placed BEFORE the
+    // `...process.env` spread. zero-cache must target Friday's
+    // logical-replication publication; "friday_pub" is the name created by
+    // `ensurePublication` in pg-provision. Clear any ambient value so the
+    // assertion exercises the default, not an inherited one.
+    const prior = process.env.ZERO_APP_PUBLICATIONS;
+    delete process.env.ZERO_APP_PUBLICATIONS;
+    try {
+      const specs = buildSpecs("/tmp/friday-repo-root-fixture");
+      const zero = specs.find((s) => s.name === "zero-cache");
+      expect(zero, "zero-cache spec should exist").toBeDefined();
+      expect(zero!.env.ZERO_APP_PUBLICATIONS).toBe("friday_pub");
+    } finally {
+      if (prior !== undefined) process.env.ZERO_APP_PUBLICATIONS = prior;
+    }
+  });
+
+  it("lets a user's ZERO_APP_PUBLICATIONS override the default (user value wins)", () => {
+    // Because the default is placed BEFORE the `...process.env` spread, a
+    // value loaded from `~/.friday/.env` into process.env must win.
+    const prior = process.env.ZERO_APP_PUBLICATIONS;
+    process.env.ZERO_APP_PUBLICATIONS = "custom_pub";
+    try {
+      const specs = buildSpecs("/tmp/friday-repo-root-fixture");
+      const zero = specs.find((s) => s.name === "zero-cache");
+      expect(zero, "zero-cache spec should exist").toBeDefined();
+      expect(zero!.env.ZERO_APP_PUBLICATIONS).toBe("custom_pub");
+    } finally {
+      if (prior === undefined) delete process.env.ZERO_APP_PUBLICATIONS;
+      else process.env.ZERO_APP_PUBLICATIONS = prior;
+    }
+  });
+
   it("does not pin ZERO_NUM_SYNC_WORKERS on the daemon or dashboard specs", () => {
     // The sync-worker cap is zero-cache-specific; it must not leak onto
     // the other children's env. Both specs spread `process.env`, so clear
