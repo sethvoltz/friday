@@ -6,56 +6,7 @@
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import { fmtTokensCompact } from "$lib/util/format";
   import { agentIconFor } from "$lib/util/agent-icon";
-  import { useZero, zeroSync } from "$lib/stores/zero.svelte";
   import type { PageData } from "./$types";
-
-  const zeroOn = useZero();
-
-  /** Phase 6 (plan §223): the dashboard card on `/` surfaces the
-   *  current tab's storage state + the heaviest cache among synced
-   *  devices. Derives reactively from `zeroSync.clientDevices` so
-   *  cross-tab and cross-device updates land within ~5 min (the
-   *  reportClientStats cadence). */
-  const currentDevice = $derived.by(() => {
-    if (!zeroOn) return null;
-    const id = zeroSync.currentDeviceId;
-    if (!id) return null;
-    return zeroSync.clientDevices.find((d) => d.device_id === id) ?? null;
-  });
-
-  const heaviestCache = $derived.by(() => {
-    if (!zeroOn) return null;
-    let max: (typeof zeroSync.clientDevices)[number] | null = null;
-    for (const d of zeroSync.clientDevices) {
-      const used = d.storage_used_bytes ?? 0;
-      if (!max || used > (max.storage_used_bytes ?? 0)) max = d;
-    }
-    return max;
-  });
-
-  function fmtBytes(bytes: number | null | undefined): string {
-    if (!Number.isFinite(bytes ?? NaN) || (bytes ?? 0) <= 0) return "—";
-    const b = bytes as number;
-    const gb = b / 1024 ** 3;
-    if (gb >= 0.5) return `${gb.toFixed(2)} GB`;
-    const mb = b / 1024 ** 2;
-    if (mb >= 1) return `${mb.toFixed(1)} MB`;
-    return `${(b / 1024).toFixed(1)} KB`;
-  }
-
-  function deviceLabel(
-    d: { label: string | null; user_agent: string | null } | null,
-  ): string {
-    if (!d) return "—";
-    if (d.label) return d.label;
-    const ua = d.user_agent ?? "";
-    // Coarse user-agent shortener — matches the Settings page heuristic.
-    if (/Firefox/.test(ua)) return "Firefox";
-    if (/Edg\//.test(ua)) return "Edge";
-    if (/Chrome/.test(ua)) return "Chrome";
-    if (/Safari/.test(ua)) return "Safari";
-    return ua.slice(0, 24) || "Unknown";
-  }
 
   let { data }: { data: PageData } = $props();
 
@@ -290,39 +241,6 @@
       </div>
     </div>
   </div>
-
-  <!-- Phase 6 (plan §223): per-device storage snapshot. Surfaces the
-       current tab's usage + the heaviest cache across all synced
-       devices; the Settings → Devices card has the full table. -->
-  {#if zeroOn && currentDevice !== null}
-    <div class="card devices-overview-card">
-      <div class="card-header">
-        <h2>Devices</h2>
-        <a class="card-action" href="/settings#devices">Manage in Settings →</a>
-      </div>
-      <div class="devices-overview">
-        <div class="device-summary">
-          <span class="device-summary-label">This device</span>
-          <span class="device-summary-name">{deviceLabel(currentDevice)}</span>
-          <span class="device-summary-detail">
-            {fmtBytes(currentDevice.storage_used_bytes)}
-            {#if currentDevice.storage_quota_bytes}
-              · quota {fmtBytes(currentDevice.storage_quota_bytes)}
-            {/if}
-          </span>
-        </div>
-        {#if heaviestCache && heaviestCache.device_id !== currentDevice.device_id}
-          <div class="device-summary heaviest">
-            <span class="device-summary-label">Heaviest cache</span>
-            <span class="device-summary-name">{deviceLabel(heaviestCache)}</span>
-            <span class="device-summary-detail">
-              {fmtBytes(heaviestCache.storage_used_bytes)}
-            </span>
-          </div>
-        {/if}
-      </div>
-    </div>
-  {/if}
 
   <!-- Activity Grid -->
   <div class="card activity-card">
@@ -698,51 +616,6 @@
 
   .activity-card {
     padding: 1rem 1.25rem;
-  }
-
-  .devices-overview-card {
-    padding: 1rem 1.25rem;
-  }
-  .devices-overview {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1rem;
-    margin-top: 0.75rem;
-  }
-  .device-summary {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    padding: 0.75rem 1rem;
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-sm);
-    background: var(--bg-secondary);
-  }
-  .device-summary-label {
-    font-size: 0.7rem;
-    color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: 600;
-  }
-  .device-summary-name {
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-  .device-summary-detail {
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-    font-family: var(--font-mono);
-  }
-  .card-action {
-    font-size: 0.8rem;
-    color: var(--accent-primary);
-    text-decoration: none;
-  }
-  .card-action:hover { text-decoration: underline; }
-  @media (max-width: 640px) {
-    .devices-overview { grid-template-columns: 1fr; }
   }
 
   .main-grid {
