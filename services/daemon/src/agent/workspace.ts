@@ -227,6 +227,22 @@ export function archiveWorkspace(
         });
       }
     }
+  } else {
+    // Directory is already gone (manual cleanup, partial prior run). The git
+    // worktree registration may still be present, which prevents branch
+    // deletion. Prune removes all stale entries whose directories no longer
+    // exist.
+    try {
+      execFileSync("git", ["worktree", "prune"], {
+        cwd: baseRepo,
+        stdio: "pipe",
+      });
+    } catch (err) {
+      logger.log("warn", "workspace.prune.fail", {
+        name,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
   // Delete the branch from the parent repo. "Destroy means destroy" — by the
   // time the user (or orchestrator) destroys a workspace the work has either
