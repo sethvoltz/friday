@@ -16,18 +16,11 @@
  */
 
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentType, BlockKind } from "@friday/shared";
+import type { AgentType } from "@friday/shared";
 import { loadConfig } from "@friday/shared";
-import {
-  claimPendingSession,
-  insertBlock,
-  insertUsage,
-  updateBlock,
-  type BlockSource,
-} from "@friday/shared/services";
+import { claimPendingSession, insertUsage, updateBlock } from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import { type ArchiveReason } from "@friday/shared";
