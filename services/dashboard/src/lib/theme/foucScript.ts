@@ -39,7 +39,7 @@
  */
 export const FOUC_SCRIPT = `(function(){
   try {
-    var P = {"dawn":{"kind":"light","themeColor":"#faf6f1"},"dusk":{"kind":"dark","themeColor":"#0f1219"}};
+    var P = {"dawn":{"kind":"light","themeColor":"#faf6f1"},"dusk":{"kind":"dark","themeColor":"#0f1219"},"phosphor":{"kind":"dark","themeColor":"#000000"}};
     var D = {"light":"dawn","dark":"dusk"};
     var KEY = "friday:theme";
     var stored = null;

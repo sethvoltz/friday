@@ -12,13 +12,28 @@
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   let scrollEl: HTMLElement | undefined = $state();
 
+  // Stick-to-bottom: each poll snapshots whether the user was within
+  // STICK_PX of the bottom BEFORE the new lines land — if they were, the
+  // tail keeps following; if they'd scrolled up to read history, the
+  // scroll position is left alone. Threshold is a few lines so users
+  // who land just short of the absolute bottom still get carried along.
+  // `forceStickNext` overrides on tab switch (the prior tab's scroll
+  // position is irrelevant once you ask for a different service).
+  const STICK_PX = 32;
+  let forceStickNext = true;
+
   async function poll() {
     try {
       const r = await fetch(`/api/logs/${active}?n=200`);
       if (r.ok) {
+        const stick =
+          forceStickNext ||
+          !scrollEl ||
+          scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < STICK_PX;
         lines = (await r.json()) as string[];
         queueMicrotask(() => {
-          if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+          if (stick && scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+          forceStickNext = false;
         });
       }
     } catch {
@@ -36,6 +51,7 @@
 
   $effect(() => {
     active;
+    forceStickNext = true;
     void poll();
   });
 

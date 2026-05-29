@@ -47,11 +47,21 @@ export const PALETTES: Record<string, PaletteEntry> = {
     kind: "dark",
     themeColor: "#0f1219",
   },
+  phosphor: {
+    kind: "dark",
+    themeColor: "#000000",
+    // Darkest bundled Shiki theme — true-black bg keeps code blocks
+    // visually continuous with Phosphor's bg-code (#030803). Not green,
+    // but the only built-in that doesn't lift code blocks off the
+    // surrounding black field.
+    shikiTheme: "vitesse-black",
+  },
 };
 
-/** Valid palette names. v1 ships "dawn" and "dusk"; widening to string
- *  keeps the type permissive (the catalog can be extended at runtime).
- *  Use `isPaletteName()` at any boundary where unknown input arrives. */
+/** Valid palette names. Catalog currently ships "dawn", "dusk", and
+ *  "phosphor"; widening to string keeps the type permissive (the
+ *  catalog can be extended at runtime). Use `isPaletteName()` at any
+ *  boundary where unknown input arrives. */
 export type PaletteName = string;
 
 /** Default palette for each slot, used when the user hasn't explicitly

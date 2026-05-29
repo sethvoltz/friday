@@ -144,7 +144,10 @@
 
 <style>
   .tool-block {
-    border-left: 2px solid var(--status-warn);
+    /* Accent (not status-warn) — the rail is decorative, not a running-
+       state indicator. The status badge below still uses status-warn for
+       actually-running tools. */
+    border-left: 2px solid var(--accent-primary);
     padding: 0.25rem 0;
     font-size: 0.85rem;
   }
@@ -168,7 +171,7 @@
   .tool-icon {
     display: inline-flex;
     align-items: center;
-    color: var(--status-warn);
+    color: var(--accent-primary);
   }
   .tool-name {
     color: var(--accent-primary);

@@ -23,6 +23,22 @@
 
   --transition-fast: 150ms ease;
   --transition-normal: 250ms ease;
+
+  /* Tints native form controls (checkbox check, radio dot, range track,
+     progress bar) to the active palette's accent. Resolves against the
+     palette tokens scoped onto <html> by the runtime store. */
+  accent-color: var(--accent-primary);
+}
+
+/* Theme `<input>` / `<textarea>` placeholder text across the app. Without
+   this, browsers fall back to a UA-default gray that reads as un-themed
+   against palettes whose --text-* tokens are far from gray (Phosphor's
+   green-on-black being the loudest case). opacity: 1 overrides Firefox's
+   default 0.54 multiplier so the chosen tone is what actually renders. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-tertiary);
+  opacity: 1;
 }
 
 /* === Page shell utilities === */

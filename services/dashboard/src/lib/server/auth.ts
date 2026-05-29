@@ -1,5 +1,6 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { dev } from "$app/environment";
 import {
   ensureFridayEnv,
   getDb,
@@ -67,7 +68,18 @@ for (const [source, url] of PUBLIC_BASE_URL_SOURCES) {
 // redirects). When a tunnel is configured, prefer the public HTTPS URL —
 // otherwise BetterAuth would emit `http://localhost` URLs that browsers
 // reject as mixed content on the secure page.
-const baseURL = process.env.BETTER_AUTH_URL ?? cfg.publicUrl ?? localUrl;
+//
+// Vite dev exception: BetterAuth derives the session cookie's `Secure`
+// flag and `__Secure-` name prefix from `baseURL.startsWith("https://")`
+// (see `better-auth/dist/cookies/index.mjs`). If we hand it the public
+// HTTPS URL while serving on http://localhost:5173, every Set-Cookie
+// comes back as `__Secure-…; Secure`, which browsers silently drop on
+// http origins — sign-in returns 200 but the cookie never lands. In
+// dev, pin baseURL to the dev dashboard's own http origin so cookies
+// are issued without the secure prefix and the localhost login flow
+// works end-to-end.
+const baseURL =
+  process.env.BETTER_AUTH_URL ?? (dev ? DEV_DASHBOARD_LOCAL : (cfg.publicUrl ?? localUrl));
 
 export const auth = betterAuth({
   // Our schema exports keys with plural names (`users`, `sessions`,
