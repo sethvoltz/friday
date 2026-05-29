@@ -30,6 +30,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ensureFridayEnv,
+  FRIDAY_PG_CONSTANTS,
   getLogPath,
   LOGS_DIR,
   loadConfig,
@@ -141,6 +142,11 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         // process.env spread so it is a DEFAULT the user can override via
         // ZERO_NUM_SYNC_WORKERS in ~/.friday/.env. Takes effect on next zero-cache restart.
         ZERO_NUM_SYNC_WORKERS: "2",
+        // System default placed BEFORE the process.env spread so ~/.friday/.env
+        // overrides it. zero-cache must target Friday's logical-replication
+        // publication (created by `ensurePublication` in pg-provision); supplying
+        // the name here means `friday setup` needn't persist it to .env.
+        ZERO_APP_PUBLICATIONS: FRIDAY_PG_CONSTANTS.FRIDAY_PUBLICATION,
         ...process.env,
         ZERO_LOG_FORMAT: "json",
         // FRI-83 follow-up: the spawn-time export of ZERO_MUTATE_URL
