@@ -11,11 +11,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  spawnTestSyncEnv,
-  zeroDeployInvocations,
-  type SyncEnv,
-} from "./sync-harness.js";
+import { spawnTestSyncEnv, zeroDeployInvocations, type SyncEnv } from "./sync-harness.js";
 
 const TEST_TIMEOUT_MS = 90_000;
 
