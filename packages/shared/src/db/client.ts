@@ -36,6 +36,30 @@ export function getPool(): FridayPool {
   return getDbAndPool().pool;
 }
 
+/**
+ * True when `err` is a Postgres admin-driven connection-teardown FATAL —
+ * the backend was deliberately terminated or is shutting down. These are
+ * expected and benign on the scratch-DB teardown path (a test file's
+ * `pg_terminate_backend()` lands on an idle pooled connection of a still-
+ * open pool). We match by SQLSTATE and, as a belt-and-braces fallback for
+ * the (already-disconnected) cases where the driver doesn't surface a
+ * code, by the canonical message text.
+ *
+ *   57P01 — admin_shutdown ("terminating connection due to administrator command")
+ *   57P02 — crash_shutdown
+ *   57P03 — cannot_connect_now
+ */
+const TEARDOWN_CLASS_CODES = new Set(["57P01", "57P02", "57P03"]);
+function isTeardownClassError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  if (typeof code === "string" && TEARDOWN_CLASS_CODES.has(code)) return true;
+  const message = (err as { message?: unknown } | null | undefined)?.message;
+  return (
+    typeof message === "string" &&
+    /terminating connection due to administrator command/i.test(message)
+  );
+}
+
 function getDbAndPool(): { db: FridayDb; pool: FridayPool } {
   if (cached) return cached;
   const connectionString = process.env.DATABASE_URL;
@@ -65,6 +89,30 @@ function getDbAndPool(): { db: FridayDb; pool: FridayPool } {
     client.on("error", () => {
       // Intentionally swallowed. See comment above.
     });
+  });
+  // Pool-level guard for the *idle pooled client* FATAL path. The
+  // `pool.on("connect")` listener above guards the client socket while a
+  // query is in flight, but it does NOT cover an idle client sitting in
+  // the pool: when `pg_terminate_backend()` lands on an already-released
+  // (idle) connection, node-postgres' own idle-error handler removes the
+  // client AND RE-EMITS the error on the *Pool* (`pool.emit("error", err,
+  // client)`). With no `error` listener on the Pool, Node turns that into
+  // an unhandled exception and aborts the process — Vitest reports it as a
+  // job-level "Unhandled Error" with `Test Files … passed` (the pooled
+  // client carries `_poolUseCount`/`release`, and `_events.error` is
+  // already 2 because the client-level guard fired but couldn't stop the
+  // Pool re-emit). This is the residual of the RC-1 teardown-race class
+  // that the #109/#111 raw-Client and `pool.on("remove")` guards did not
+  // cover, because it lives on the Pool object, not the socket.
+  //
+  // We swallow ONLY teardown-class admin FATALs (57P01 terminate, 57P02
+  // crash-shutdown, 57P03 cannot-connect-now) — every one of these means
+  // "the backend went away," which during the scratch-DB teardown path is
+  // expected and benign. Any other pool error is a real fault and is
+  // re-thrown so it still surfaces.
+  pool.on("error", (err) => {
+    if (isTeardownClassError(err)) return;
+    throw err;
   });
   const db = drizzle(pool, { schema });
   cached = { db, pool };
