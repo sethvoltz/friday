@@ -362,6 +362,81 @@ describe("buildSpecs — zero-cache env", () => {
     }
   });
 
+  /**
+   * The zero-cache spec must also default the cluster-wide syncer-connection
+   * caps `ZERO_UPSTREAM_MAX_CONNS` ("4") and `ZERO_CVR_MAX_CONNS` ("6"). These
+   * are the real lever for total connection count — zero-cache divides each cap
+   * evenly across sync workers — distinct from the worker count itself. With
+   * ZERO_NUM_SYNC_WORKERS=2 they divide to ~2 upstream + ~3 CVR per worker; the
+   * per-worker floor must stay ≥ the worker count or zero-cache throws at
+   * startup, so 4 and 6 are the safe minimum for 2 workers. Both defaults sit
+   * BEFORE the `...process.env` spread, so a user's `~/.friday/.env` value wins.
+   * The four tests below pin both halves of that contract for each var.
+   */
+  it("defaults ZERO_UPSTREAM_MAX_CONNS to 4 on the zero-cache spec when ambient env is unset", () => {
+    // The default lives before the process.env spread; clear any ambient
+    // value so the assertion exercises the default, not an inherited one.
+    const prior = process.env.ZERO_UPSTREAM_MAX_CONNS;
+    delete process.env.ZERO_UPSTREAM_MAX_CONNS;
+    try {
+      const specs = buildSpecs("/tmp/friday-repo-root-fixture");
+      const zero = specs.find((s) => s.name === "zero-cache");
+      expect(zero, "zero-cache spec should exist").toBeDefined();
+      expect(zero!.env.ZERO_UPSTREAM_MAX_CONNS).toBe("4");
+    } finally {
+      if (prior !== undefined) process.env.ZERO_UPSTREAM_MAX_CONNS = prior;
+    }
+  });
+
+  it("lets a user's ZERO_UPSTREAM_MAX_CONNS override the default (user value wins)", () => {
+    // `~/.friday/.env` is loaded into process.env before buildSpecs runs.
+    // Because the "4" default is placed BEFORE the `...process.env` spread,
+    // a user-supplied value must win. Pin "8" and assert it survives.
+    const prior = process.env.ZERO_UPSTREAM_MAX_CONNS;
+    process.env.ZERO_UPSTREAM_MAX_CONNS = "8";
+    try {
+      const specs = buildSpecs("/tmp/friday-repo-root-fixture");
+      const zero = specs.find((s) => s.name === "zero-cache");
+      expect(zero, "zero-cache spec should exist").toBeDefined();
+      expect(zero!.env.ZERO_UPSTREAM_MAX_CONNS).toBe("8");
+    } finally {
+      if (prior === undefined) delete process.env.ZERO_UPSTREAM_MAX_CONNS;
+      else process.env.ZERO_UPSTREAM_MAX_CONNS = prior;
+    }
+  });
+
+  it("defaults ZERO_CVR_MAX_CONNS to 6 on the zero-cache spec when ambient env is unset", () => {
+    // The default lives before the process.env spread; clear any ambient
+    // value so the assertion exercises the default, not an inherited one.
+    const prior = process.env.ZERO_CVR_MAX_CONNS;
+    delete process.env.ZERO_CVR_MAX_CONNS;
+    try {
+      const specs = buildSpecs("/tmp/friday-repo-root-fixture");
+      const zero = specs.find((s) => s.name === "zero-cache");
+      expect(zero, "zero-cache spec should exist").toBeDefined();
+      expect(zero!.env.ZERO_CVR_MAX_CONNS).toBe("6");
+    } finally {
+      if (prior !== undefined) process.env.ZERO_CVR_MAX_CONNS = prior;
+    }
+  });
+
+  it("lets a user's ZERO_CVR_MAX_CONNS override the default (user value wins)", () => {
+    // `~/.friday/.env` is loaded into process.env before buildSpecs runs.
+    // Because the "6" default is placed BEFORE the `...process.env` spread,
+    // a user-supplied value must win. Pin "12" and assert it survives.
+    const prior = process.env.ZERO_CVR_MAX_CONNS;
+    process.env.ZERO_CVR_MAX_CONNS = "12";
+    try {
+      const specs = buildSpecs("/tmp/friday-repo-root-fixture");
+      const zero = specs.find((s) => s.name === "zero-cache");
+      expect(zero, "zero-cache spec should exist").toBeDefined();
+      expect(zero!.env.ZERO_CVR_MAX_CONNS).toBe("12");
+    } finally {
+      if (prior === undefined) delete process.env.ZERO_CVR_MAX_CONNS;
+      else process.env.ZERO_CVR_MAX_CONNS = prior;
+    }
+  });
+
   it("does not pin ZERO_NUM_SYNC_WORKERS on the daemon or dashboard specs", () => {
     // The sync-worker cap is zero-cache-specific; it must not leak onto
     // the other children's env. Both specs spread `process.env`, so clear

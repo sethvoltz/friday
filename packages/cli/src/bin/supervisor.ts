@@ -147,6 +147,16 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         // publication (created by `ensurePublication` in pg-provision); supplying
         // the name here means `friday setup` needn't persist it to .env.
         ZERO_APP_PUBLICATIONS: FRIDAY_PG_CONSTANTS.FRIDAY_PUBLICATION,
+        // System defaults for the single-user local instance. zero-cache bounds
+        // total syncer connections by these CLUSTER-WIDE caps — the real lever for
+        // connection count, distinct from the worker count — divided across sync
+        // workers. With ZERO_NUM_SYNC_WORKERS=2 these divide to ~2 upstream + ~3
+        // CVR per worker (the per-worker floor must stay ≥ the worker count or
+        // zero-cache throws at startup, so 4 and 6 are the safe minimum for 2
+        // workers). Placed BEFORE the process.env spread so ~/.friday/.env can
+        // override them. Takes effect on next zero-cache restart.
+        ZERO_UPSTREAM_MAX_CONNS: "4",
+        ZERO_CVR_MAX_CONNS: "6",
         ...process.env,
         ZERO_LOG_FORMAT: "json",
         // FRI-83 follow-up: the spawn-time export of ZERO_MUTATE_URL
