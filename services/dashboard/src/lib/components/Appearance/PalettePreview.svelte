@@ -83,31 +83,39 @@
     box-shadow: 0 0 0 3px var(--accent-glow);
   }
 
-  /* Chat mock: an AI-style transparent text-line bubble + a user-style
-     accent bubble. Mirrors ChatMessages.svelte's layout (assistant
-     transparent, user solid accent). */
+  /* Chat mock: an AI-style ghost bubble + a user-style accent bubble.
+     The real chat (ChatMessages.svelte:803) renders assistant content
+     chromeless, but in a tiny preview an invisible AI bubble means the
+     card reads as "user only." We give the AI side a ghost envelope
+     (subtle bg + hairline border) so both sides of the conversation
+     register at a glance. Bubble widths are explicit because the
+     percentage-width `bubble-line` children would otherwise collapse
+     the bubble to ~0 in a flex-column with no intrinsic width. */
   .preview-chat {
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 0.4rem;
     min-height: 0;
     justify-content: center;
   }
   .bubble {
     display: flex;
     flex-direction: column;
-    gap: 0.2rem;
-    padding: 0.35rem 0.5rem;
+    gap: 0.25rem;
+    padding: 0.4rem 0.55rem;
     border-radius: var(--radius-sm);
-    max-width: 88%;
+    box-sizing: border-box;
   }
   .bubble-ai {
-    background: transparent;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
     align-self: flex-start;
+    width: 72%;
   }
   .bubble-user {
     background: var(--accent-primary);
     align-self: flex-end;
+    width: 62%;
   }
   .bubble-line {
     display: block;
