@@ -18,10 +18,21 @@
 
   let text = $state("");
   let textarea: HTMLTextAreaElement | undefined = $state();
-  // FRI-54: include DB-derived working status so the aurora animation and
-  // Stop button stay active after a page refresh or on a mail-triggered
-  // turn where no local inflightTurnId was ever set.
-  let busy = $derived(chat.inflightTurnId !== null || chat.focusedAgentIsWorking);
+  // FRI-128: aurora lights iff `agents.status === 'working'`, so it agrees
+  // with the sidebar dot (Sidebar.svelte:407-411 / :506-511, both gated on
+  // the same `status === "working"`) by construction — one source of truth
+  // across both indicators. FRI-54's mail-triggered/reload fix is preserved:
+  // `focusedAgentIsWorking` reads the DB-derived status, so mail-triggered
+  // turns and post-refresh turns (where no local inflightTurnId was ever set)
+  // still light the aurora. The local `chat.inflightTurnId` slot is
+  // intentionally NOT in this derivation — it remains load-bearing for
+  // isStopping, canResend/canResumeTurn, stop() recovery, and the queued-
+  // bubble flows, but reading it here is what produced the aurora-on-while-
+  // dot-off divergence (a stale or eagerly-set slot lit the aurora before /
+  // after the dot). Accepting the send-path lead window (Send→Stop flip lags
+  // ~<500ms behind the click on the reused-worker path) is the cost; the dot
+  // already has that exact lag, so this brings the input bar into agreement.
+  let busy = $derived(chat.focusedAgentIsWorking);
   // True between the user clicking Stop and the daemon emitting turn_done
   // for the stopping turn. Drives the Stop button's disabled/dimmed look
   // so a second click doesn't fire a redundant abort POST.
