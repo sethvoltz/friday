@@ -86,6 +86,41 @@ async function waitFor(pred: () => boolean, deadlineMs: number, stepMs = 50): Pr
   return pred();
 }
 
+/**
+ * Poll until the fixture's pid file exists AND contains a complete,
+ * parseable array of `expectedCount` PIDs, then return it.
+ *
+ * `fs.writeFileSync` is not atomic: the file can exist (created/truncated
+ * to zero bytes) for an instant before the JSON payload lands. Gating on
+ * `existsSync` alone races that window — under parallel load the read can
+ * observe an empty or half-written file and `JSON.parse("")` throws
+ * `Unexpected end of JSON input`. Waiting on the parsed shape — not just
+ * the inode — closes the race deterministically. Returns null on timeout
+ * so the caller's assertion can describe what it saw.
+ */
+async function readPidsWhenReady(
+  pidFile: string,
+  expectedCount: number,
+  deadlineMs = 5_000,
+  stepMs = 50,
+): Promise<number[] | null> {
+  const end = Date.now() + deadlineMs;
+  let last: number[] | null = null;
+  while (Date.now() < end) {
+    if (existsSync(pidFile)) {
+      try {
+        const parsed = JSON.parse(readFileSync(pidFile, "utf8")) as number[];
+        if (Array.isArray(parsed) && parsed.length === expectedCount) return parsed;
+        last = Array.isArray(parsed) ? parsed : last;
+      } catch {
+        // Empty / partially-written file mid-`writeFileSync`; keep polling.
+      }
+    }
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+  return last;
+}
+
 // ---- cascade-stop end-to-end ----------------------------------------
 
 describe("killChildGroup — cascade SIGTERM to a child's process group", () => {
@@ -132,10 +167,12 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
       detached: true,
     });
 
-    // Wait for the fixture to fork its grandchildren and write the pid file.
-    const wrote = await waitFor(() => existsSync(pidFile), 5_000);
-    expect(wrote).toBe(true);
-    pids = JSON.parse(readFileSync(pidFile, "utf8")) as number[];
+    // Wait for the fixture to fork its grandchildren and finish writing a
+    // complete pid file — gating on the parsed shape, not the bare inode,
+    // so we never read a zero-byte file mid-`writeFileSync`.
+    const read = await readPidsWhenReady(pidFile, GRANDCHILD_COUNT + 1, 5_000);
+    expect(read, "fixture pid file should hold child + N grandchildren").not.toBeNull();
+    pids = read!;
     expect(pids.length).toBe(GRANDCHILD_COUNT + 1); // child + N grandchildren
     expect(pids[0]).toBe(proc.pid);
 
@@ -183,9 +220,9 @@ describe("killChildGroup — cascade SIGTERM to a child's process group", () => 
       stdio: "ignore",
       detached: true,
     });
-    const wrote = await waitFor(() => existsSync(pidFile), 5_000);
-    expect(wrote).toBe(true);
-    pids = JSON.parse(readFileSync(pidFile, "utf8")) as number[];
+    const read = await readPidsWhenReady(pidFile, GRANDCHILD_COUNT + 1, 5_000);
+    expect(read, "fixture pid file should hold child + N grandchildren").not.toBeNull();
+    pids = read!;
     expect(pids.length).toBe(GRANDCHILD_COUNT + 1);
 
     // Pre-condition: all alive.
