@@ -18,13 +18,8 @@
 import { loadConfig, normalizeModelConfig, resolveDaemonPort } from "@friday/shared";
 import { inbox, mailBus, type MailRow } from "@friday/shared/services";
 import { logger } from "../log.js";
-import {
-  dispatchTurn,
-  isAgentLive,
-  recordUserBlock,
-  wakeAgent,
-  wakeAgentCritical,
-} from "../agent/lifecycle.js";
+import { dispatchTurn, isAgentLive, wakeAgent, wakeAgentCritical } from "../agent/lifecycle.js";
+import { recordUserBlock } from "../agent/block-stream.js";
 import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
 import * as registry from "../agent/registry.js";
 import { randomUUID } from "node:crypto";

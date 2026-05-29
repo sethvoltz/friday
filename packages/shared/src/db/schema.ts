@@ -143,7 +143,7 @@ export const agents = pgTable(
 //
 // ADR-024 change from the SQLite era: rows are written *only on
 // block_complete* with `streaming=false`. Zero replicates rows scoped to
-// `WHERE streaming=false`. In-flight bytes live in the daemon's `liveTurns`
+// `WHERE streaming=false`. In-flight bytes live in the daemon's `blockStream`
 // in-memory accumulator and ride per-agent SSE.
 
 export const blocks = pgTable(

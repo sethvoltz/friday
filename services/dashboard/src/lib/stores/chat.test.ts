@@ -485,70 +485,115 @@ describe("reload-mid-turn replay → SSE resumption", () => {
   // ADR-024 bullet at decisions.md:672 read "lastSeqByAgent ...
   // retires" before the FRI-125 amendment), this test will fail —
   // surfacing the regression at refactor time.
-  it("FRI-125: lastSeqByAgent cursor drops replayed events with seq <= cur (transient-reconnect dedup)", async () => {
-    const { ChatState } = await import("./chat.svelte");
+  it("FRI-125: SSE reconnect replays do NOT double-append block_delta text (transient-reconnect dedup)", async () => {
+    const { ChatState, overlayKey } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
 
-    // Live stream advances the cursor: turn_started + a couple of
-    // events bring `lastSeqByAgent.friday` to the high-water mark.
+    // Open a streaming assistant text block — block_start populates
+    // `chat.streaming` keyed by overlayKey(agent, `b_${block_id}`).
     chat.applyEvent({
       v: 1,
-      type: "turn_started",
+      type: "block_start",
       seq: 10,
       turn_id: "turn-reconnect-1",
       agent: "friday",
+      block_id: "blk-reconnect-1",
+      message_id: "msg-1",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      source: null,
       ts: 100,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    const key = overlayKey("friday", "b_blk-reconnect-1");
+    const entry = chat.streaming.get(key);
+    expect(entry).toBeDefined();
+    expect(entry!.text).toBe("");
+
+    // Live deltas append to the overlay's text.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      seq: 11,
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      block_id: "blk-reconnect-1",
+      delta: { text: "Hello " },
     } as Parameters<typeof chat.applyEvent>[0]);
     chat.applyEvent({
       v: 1,
-      type: "turn_done",
+      type: "block_delta",
       seq: 12,
       turn_id: "turn-reconnect-1",
       agent: "friday",
-      status: "complete",
-      ts: 200,
+      block_id: "blk-reconnect-1",
+      delta: { text: "world" },
     } as Parameters<typeof chat.applyEvent>[0]);
 
+    expect(chat.streaming.get(key)!.text).toBe("Hello world");
     expect(chat.lastSeqByAgent.friday).toBe(12);
 
     // Simulate SSE reconnect: the daemon's per-turn replay buffer
-    // re-emits the same frames from `turn_started` forward. The
-    // cursor must be monotonic — replayed events at seq <= 12 are
-    // dropped by `acceptEvent` so they cannot mutate any overlay
-    // state on the way through `applyEvent`.
+    // re-emits every frame from turn_started forward. The `streaming`
+    // overlay is NOT cleared on transient reconnect (only on terminal
+    // events — turn_done / agent_lifecycle), and `handleBlockDelta`
+    // unconditionally appends without a per-block cursor. The only
+    // defense against doubled text is `acceptEvent` at apply time
+    // dropping any event whose `seq` is <= `lastSeqByAgent`.
     chat.applyEvent({
       v: 1,
-      type: "turn_started",
-      seq: 10, // replayed; <= cursor
+      type: "block_start",
+      seq: 10, // replayed
       turn_id: "turn-reconnect-1",
       agent: "friday",
+      block_id: "blk-reconnect-1",
+      message_id: "msg-1",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      source: null,
       ts: 100,
     } as Parameters<typeof chat.applyEvent>[0]);
     chat.applyEvent({
       v: 1,
-      type: "turn_done",
-      seq: 12, // replayed; <= cursor
+      type: "block_delta",
+      seq: 11, // replayed
       turn_id: "turn-reconnect-1",
       agent: "friday",
-      status: "complete",
-      ts: 200,
+      block_id: "blk-reconnect-1",
+      delta: { text: "Hello " },
     } as Parameters<typeof chat.applyEvent>[0]);
-
-    // The cursor must not regress and must not advance (everything
-    // was a replay at <= 12).
-    expect(chat.lastSeqByAgent.friday).toBe(12);
-
-    // A genuinely new event at seq=13 must still advance the cursor —
-    // the cursor isn't sticky-broken by the replay attempt.
     chat.applyEvent({
       v: 1,
-      type: "turn_started",
-      seq: 13,
-      turn_id: "turn-reconnect-2",
+      type: "block_delta",
+      seq: 12, // replayed
+      turn_id: "turn-reconnect-1",
       agent: "friday",
-      ts: 300,
+      block_id: "blk-reconnect-1",
+      delta: { text: "world" },
     } as Parameters<typeof chat.applyEvent>[0]);
+
+    // The overlay text MUST remain "Hello world". If a future refactor
+    // deletes `acceptEvent` (or relaxes it for `block_delta`), this
+    // assertion fails immediately — the replay would have appended a
+    // second "Hello world" producing "Hello worldHello world".
+    expect(chat.streaming.get(key)!.text).toBe("Hello world");
+    expect(chat.lastSeqByAgent.friday).toBe(12);
+
+    // A genuinely new delta at seq=13 still appends — the cursor isn't
+    // sticky-broken by the replay attempt.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      seq: 13,
+      turn_id: "turn-reconnect-1",
+      agent: "friday",
+      block_id: "blk-reconnect-1",
+      delta: { text: "!" },
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.streaming.get(key)!.text).toBe("Hello world!");
     expect(chat.lastSeqByAgent.friday).toBe(13);
   });
 });

@@ -14,7 +14,8 @@
 import { randomUUID } from "node:crypto";
 import { loadConfig, normalizeModelConfig, resolveDaemonPort, schema } from "@friday/shared";
 import { logger } from "../log.js";
-import { dispatchTurn, recordUserBlock } from "../agent/lifecycle.js";
+import { dispatchTurn } from "../agent/lifecycle.js";
+import { recordUserBlock } from "../agent/block-stream.js";
 import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
 import * as registry from "../agent/registry.js";
 import {

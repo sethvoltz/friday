@@ -679,7 +679,7 @@ The today's per-device localStorage-only badge state is retired; cross-device ba
 
 ### Open questions
 
-- **Should the in-memory accumulator survive a daemon refork?** Today the worker fork can be relaunched; the parent's `liveTurns` registry holds enough state to resume. With per-turn SSE replay, the answer might be "no — let the JSONL recovery + Zero sync do the rebuild." Leaving as an implementation discovery.
+- **Should the in-memory accumulator survive a daemon refork?** Today the worker fork can be relaunched; the parent's `blockStream` accumulator holds enough state to resume. With per-turn SSE replay, the answer might be "no — let the JSONL recovery + Zero sync do the rebuild." Leaving as an implementation discovery.
 - **Per-device vs. global read cursors.** Mirrored from ADR-023's open question. Same default (per-device for v1).
 
 ### Consequences (FRI-123, 2026-05-28)
@@ -695,7 +695,7 @@ After this change there are five LISTEN-handler files (`dispatch-`, `abort-`, `c
 
 ### Consequences (FRI-125, 2026-05-28)
 
-The `blocks.last_event_seq` column retires via Drizzle migration `0024_drop_blocks_last_event_seq.sql`. The seq-stamping fragility this ADR's Phase 5 amendment narrowed (peek `eventBus.currentSeq()+1` → stamp into liveTurns → `writeAndPublish` re-captures → emit `block.seq-skew` warning on mismatch) is gone. The narrowed live-turn-delta invariant — "in-memory accumulator updated before SSE emit" — is now enforced at one seam by `services/daemon/src/agent/block-stream.ts`, which absorbed `live-turns.ts`, `writeAndPublish`, `insertErrorBlock`, and `finalizeStreamingBlocks`. The six methods (`open`/`append`/`close`/`cancel`/`recordError`/`finalize`) cover every block-row-write path.
+The `blocks.last_event_seq` column retires via Drizzle migration `0025_drop_blocks_last_event_seq.sql`. The seq-stamping fragility this ADR's Phase 5 amendment narrowed (peek `eventBus.currentSeq()+1` → stamp into the in-memory accumulator → `writeAndPublish` re-captures → emit `block.seq-skew` warning on mismatch) is gone. The narrowed live-turn-delta invariant — "in-memory accumulator updated before SSE emit" — is now enforced at one seam by `services/daemon/src/agent/block-stream.ts`, which absorbed `live-turns.ts`, `writeAndPublish`, `insertErrorBlock`, `finalizeStreamingBlocks`, and `recordUserBlock`. The seven exported write paths (`open` / `append` / `close` / `cancel` / `recordError` / `finalize` / `recordUserBlock`) plus `endTurn` cover every block-row-write path.
 
 The dashboard cursor amendment above is the load-bearing carve-out: a previous reading of this ADR's "lastSeqByAgent cursor retires" bullet concluded the cursor was dead code, but a falsification proof during the FRI-125 paired review showed the transient-reconnect dedup case still depends on it. The cursor stays; only its REST/Zero seeding retires. Any future review must not re-attempt the deletion without first walking the reconnect-while-streaming flow against `handleBlockDelta` at HEAD.
 

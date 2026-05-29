@@ -30,7 +30,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     // block_complete arrived first"). Suppressing the publish here
     // would deny the message to every *other* connected client (browser
     // B, mobile, etc.).
-    const { recordUserBlock } = await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
     const { eventBus } = await import("../events/bus.js");
     const { getBlockById } = await import("@friday/shared/services");
 
@@ -87,7 +87,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     // Non-user_chat paths have no upstream optimistic bubble, so the SSE
     // emit is the canonical materialization signal. The row's
     // last_event_seq must match the published event's seq (ADR-004).
-    const { recordUserBlock } = await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
     const { eventBus } = await import("../events/bus.js");
     const { getBlockById } = await import("@friday/shared/services");
 
@@ -128,7 +128,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
   });
 
   it("mail-derived blocks include from_agent in content_json", async () => {
-    const { recordUserBlock } = await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
     const { getBlockById } = await import("@friday/shared/services");
 
     const { blockId } = await recordUserBlock({
@@ -149,7 +149,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
   });
 
   it("user_chat attachments land verbatim in content_json (FRI-6)", async () => {
-    const { recordUserBlock } = await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
     const { getBlockById } = await import("@friday/shared/services");
 
     const atts = [
@@ -184,7 +184,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     // `attachments: []` key — the dashboard's parseBlockContent has no
     // reason to interpret one and downstream cache keys would differ
     // gratuitously.
-    const { recordUserBlock } = await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
     const { getBlockById } = await import("@friday/shared/services");
 
     const { blockId } = await recordUserBlock({
@@ -210,7 +210,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
   ] as const)(
     "%s source persists the row and emits SSE with the prompt text",
     async (source, text) => {
-      const { recordUserBlock } = await import("./lifecycle.js");
+      const { recordUserBlock } = await import("./block-stream.js");
       const { eventBus } = await import("../events/bus.js");
       const { getBlockById } = await import("@friday/shared/services");
 
@@ -246,7 +246,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
   );
 
   it("two back-to-back mail recordUserBlock calls produce strictly monotonic seqs", async () => {
-    const { recordUserBlock } = await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
     const { getBlockById } = await import("@friday/shared/services");
 
     const r1 = await recordUserBlock({

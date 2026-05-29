@@ -2195,8 +2195,12 @@ export class ChatState {
    *     and never dropped.
    *   - Update `oldestBlockId` to the lowest Zero row's blockId for
    *     REST scroll-back continuation.
-   *   - Seed `lastSeqByAgent` from the max `last_event_seq` so SSE replay
-   *     dedups partial-content deltas already reflected in canonical rows.
+   *
+   * `lastSeqByAgent` is no longer seeded from Zero rows (FRI-125: the
+   * row's `last_event_seq` column retired). The cursor is fed
+   * exclusively from SSE event seqs at apply time in `acceptEvent`,
+   * which is still load-bearing for the transient-reconnect dedup case
+   * — see ADR-024's amended cursor-retires bullet.
    *
    * The `streaming=true` rows are pre-filtered by the Zero query
    * (`bindBlocksFor` adds `where('status', '!=', 'streaming')`), so any
@@ -3348,11 +3352,11 @@ export function dropSupersededNoResponseSafetyNet(messages: ChatMessage[]): Chat
  *
  * Known race (PR #22 review N1): rule (b) compares `ts` values. The
  * daemon's `block_complete` write bumps the row's `ts` to `Date.now()`
- * via `writeAndPublish`'s atomic helper; if a sibling block in the same
- * turn has already completed AND its ts is later than this still-
- * streaming block's `ts`, this block is classified as orphan even
- * though it might still be receiving deltas. The window is bounded —
- * the next SSE `block_complete` event flips the bubble to a real
+ * when `block-stream.close()` INSERTs the canonical row; if a sibling
+ * block in the same turn has already completed AND its ts is later
+ * than this still-streaming block's `ts`, this block is classified as
+ * orphan even though it might still be receiving deltas. The window
+ * is bounded — the next SSE `block_complete` event flips the bubble to a real
  * terminal status and overrides the misclassification — but the user
  * sees a brief "Stopped" affordance on a block that wasn't stopped.
  * Acceptable for now; a full fix would require tracking the daemon's

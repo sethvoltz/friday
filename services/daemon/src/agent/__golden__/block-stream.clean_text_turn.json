@@ -57,6 +57,15 @@
       "content_json": "{\"text\":\"Hello, world!\"}",
       "status": "complete",
       "ts": 1700000000000
+    },
+    {
+      "v": 1,
+      "type": "agent_message",
+      "agent": "test-agent",
+      "turn_id": "turn-text-1",
+      "block_id": "uuid-2",
+      "kind": "block_complete",
+      "preview": "Hello, world!"
     }
   ],
   "rows": [

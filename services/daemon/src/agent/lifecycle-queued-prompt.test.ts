@@ -73,7 +73,7 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
 
 describe("lifecycle: queued user-block dispatch", () => {
   it("recordUserBlock(status='queued') persists status='queued' on the row", async () => {
-    const { recordUserBlock } = await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
     const { getBlockById } = await import("@friday/shared/services");
 
     const { blockId } = await recordUserBlock({
@@ -95,7 +95,7 @@ describe("lifecycle: queued user-block dispatch", () => {
   });
 
   it("emits block_complete with status='queued' on SSE (so the dashboard pins it)", async () => {
-    const { recordUserBlock } = await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
     const { eventBus } = await import("../events/bus.js");
 
     const captured: CapturedEvent[] = [];
@@ -125,7 +125,7 @@ describe("lifecycle: queued user-block dispatch", () => {
     // suppression denied the message to other connected clients (browser
     // B, mobile, etc.). The sending browser dedupes via
     // `chat.svelte.ts:confirmPending` instead.
-    const { recordUserBlock } = await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
     const { eventBus } = await import("../events/bus.js");
 
     const captured: CapturedEvent[] = [];
@@ -229,8 +229,8 @@ describe("lifecycle: queued user-block dispatch", () => {
     // The test asserts the canonical DB state (status='complete' + a
     // fresh ts strictly greater than the original POST ts) AND that
     // no SSE event of that type fires.
-    const { recordUserBlock, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
-      await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
+    const { __putLiveWorkerForTest, __deleteLiveWorkerForTest } = await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
     const { getBlockById } = await import("@friday/shared/services");
 
@@ -303,7 +303,7 @@ describe("lifecycle: queued user-block dispatch", () => {
   });
 
   it("listQueuedUserBlocks returns queued rows in ts order (oldest first)", async () => {
-    const { recordUserBlock } = await import("./lifecycle.js");
+    const { recordUserBlock } = await import("./block-stream.js");
     const { listQueuedUserBlocks } = await import("@friday/shared/services");
 
     const before = Date.now();

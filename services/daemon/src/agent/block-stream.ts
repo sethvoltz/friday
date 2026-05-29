@@ -319,6 +319,19 @@ export async function close(w: LiveWorker, e: WorkerBlockStop): Promise<void> {
     status: e.status,
     ts,
   });
+  // FIX_FORWARD 2.8: badge the agent when the block is user-visible chat
+  // content (assistant + text + status=complete). The helper filters tool
+  // and thinking blocks itself.
+  maybeEmitAgentMessage({
+    agent: w.agentName,
+    turnId: w.turnId,
+    blockId: live.blockId,
+    role: live.role,
+    kind: live.kind,
+    source: live.source,
+    status: e.status,
+    contentJson: e.contentJson,
+  });
 }
 
 /**
@@ -483,6 +496,206 @@ export async function finalize(w: LiveWorker, status: "error" | "aborted"): Prom
  */
 export function endTurn(turnId: string): void {
   turns.delete(turnId);
+}
+
+/* ---------------- User-typed block insertion (FIX_FORWARD 1.2) ---------------- */
+
+export interface RecordUserBlockInput {
+  turnId: string;
+  agentName: string;
+  /** Falls back to '__pending__' if the agent doesn't yet have a session. */
+  sessionId?: string;
+  text: string;
+  source:
+    | "user_chat"
+    | "mail"
+    | "queue_inject"
+    | "scratch"
+    | "agent_spawn"
+    | "schedule"
+    | "refork_notice";
+  /** `complete` for the common path (block is final the moment it's
+   *  written). `queued` for user_chat POSTs that arrived while the agent
+   *  was mid-turn — the row is parked until the worker drains it from
+   *  `nextPrompts`, at which point `dispatchQueuedPrompt` flips it to
+   *  `complete` + new `ts` via `block_meta_update`. Defaults to `complete`. */
+  status?: "complete" | "queued";
+  /** Mail-derived blocks carry sender metadata inside content_json. */
+  fromAgent?: string;
+  /** Mail-derived blocks: extra MailRow metadata serialized into
+   *  content_json so the dashboard can render rich detail (id, subject,
+   *  type, priority, threadId, ts) on the collapsed `MailBlock` without
+   *  a separate fetch. */
+  mailMeta?: {
+    id: number;
+    subject: string | null;
+    type: string;
+    priority: string;
+    threadId: string | null;
+    ts: number;
+  };
+  /** Attachments referenced by this user block (user_chat path). Persisted
+   *  into `content_json.attachments` so reload-from-DB rehydrates the chip
+   *  row in the dashboard. The bytes live on disk under `~/.friday/uploads`
+   *  and are fetched via `GET /api/uploads/<sha>`. */
+  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+}
+
+/**
+ * Persist a user-role block ahead of (or alongside) a dispatched turn. The
+ * row lands with `status='complete'` immediately — there's no streaming
+ * lifecycle for user-typed or mail-derived content.
+ *
+ * FRI-125: absorbed from lifecycle.ts under the C2 deepening; the
+ * inlined INSERT + publish replaces the prior `writeAndPublish`
+ * helper. Returned `seq` is the eventBus's per-event sequence number,
+ * stamped at publish time.
+ */
+export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
+  blockId: string;
+  seq: number;
+}> {
+  const blockId = randomUUID();
+  const ts = Date.now();
+  const status = input.status ?? "complete";
+  const attachments =
+    input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {};
+  const content =
+    input.source === "mail" && input.fromAgent
+      ? {
+          text: input.text,
+          from_agent: input.fromAgent,
+          ...(input.mailMeta
+            ? {
+                mail_id: input.mailMeta.id,
+                mail_subject: input.mailMeta.subject,
+                mail_type: input.mailMeta.type,
+                mail_priority: input.mailMeta.priority,
+                mail_thread_id: input.mailMeta.threadId,
+                mail_ts: input.mailMeta.ts,
+              }
+            : {}),
+          ...attachments,
+        }
+      : { text: input.text, ...attachments };
+  const contentJson = JSON.stringify(content);
+  // FRI-78 follow-up: always publish the canonical `block_complete` SSE
+  // frame, including for `user_chat` + `status='complete'`. Prior to this
+  // the publish was skipped to avoid racing the POST /api/chat/turn
+  // response and double-mounting the optimistic bubble on the sending
+  // browser — but that suppression also denied the message to every
+  // *other* connected client (browser B, mobile, etc.), so they had to
+  // refresh to see the user's own message.
+  //
+  // The dashboard already has the dedup for the SSE-first ordering:
+  // `confirmPending` in chat.svelte.ts collapses a duplicate user
+  // bubble when the SSE arrived before the POST response. Pinned by
+  // chat.test.ts "drops the optimistic bubble when the SSE
+  // block_complete arrived first". The POST-first ordering converges
+  // via the natural `handleBlockComplete` id-match: the optimistic was
+  // re-keyed to `user_<turnId>` in `confirmPending`, and the
+  // subsequent SSE finds the same id and updates in place.
+  await insertBlock({
+    blockId,
+    turnId: input.turnId,
+    agentName: input.agentName,
+    sessionId: input.sessionId ?? "__pending__",
+    messageId: null,
+    blockIndex: 0,
+    role: "user",
+    kind: "text",
+    source: input.source,
+    contentJson,
+    status,
+    ts,
+  });
+  const { seq } = eventBus.publish({
+    v: 1,
+    type: "block_complete",
+    turn_id: input.turnId,
+    agent: input.agentName,
+    block_id: blockId,
+    message_id: null,
+    block_index: 0,
+    role: "user",
+    kind: "text",
+    source: input.source,
+    content_json: contentJson,
+    status,
+    ts,
+  });
+  // FIX_FORWARD 2.8: mail-derived user blocks badge the recipient agent
+  // (a piece of user-visible content just landed in their chat).
+  // user_chat / queue_inject blocks are typed by the user themselves and
+  // need no notification.
+  maybeEmitAgentMessage({
+    agent: input.agentName,
+    turnId: input.turnId,
+    blockId,
+    role: "user",
+    kind: "text",
+    source: input.source,
+    status,
+    contentJson,
+  });
+  return { blockId, seq };
+}
+
+/* ---------------- Agent-message notification (FIX_FORWARD 2.8) ---------------- */
+
+/**
+ * Publish an `agent_message` SSE event when a user-visible chat content
+ * block lands. Filters: assistant + text + status='complete'. Tool /
+ * thinking blocks and mail-role-user blocks are skipped (those are
+ * mechanism or recipient-visible noise; the assistant's reply is the
+ * user-relevant signal).
+ *
+ * FRI-125: absorbed from lifecycle.ts under the C2 deepening — every
+ * block-row-write path that lands user-visible content (close,
+ * recordUserBlock) calls this helper after the publish.
+ */
+function maybeEmitAgentMessage(opts: {
+  agent: string;
+  turnId: string;
+  blockId: string;
+  role: string;
+  kind: BlockKind | string;
+  source: BlockSource;
+  status: string;
+  contentJson: string;
+}): void {
+  if (opts.kind !== "text") return;
+  if (opts.status !== "complete") return;
+  // F3-A (PR C): badge only on assistant text. Mail blocks (role=user
+  // source=mail) are visible in the recipient's chat scroller, but the
+  // orchestrator's *response* to the mail is the user-relevant signal —
+  // badging both produced phantom counts (mail-block + later assistant
+  // reply → two badges per logical event). The assistant reply that
+  // follows mail still triggers exactly one badge.
+  if (opts.role !== "assistant") return;
+  let text = "";
+  try {
+    const parsed = JSON.parse(opts.contentJson) as { text?: string };
+    if (typeof parsed.text === "string") text = parsed.text;
+  } catch {
+    // Malformed content_json — leave preview undefined.
+  }
+  const trimmed = text.trim();
+  const preview =
+    trimmed.length === 0
+      ? undefined
+      : trimmed.length > 240
+        ? trimmed.slice(0, 240).trim() + "…"
+        : trimmed;
+  eventBus.publish({
+    v: 1,
+    type: "agent_message",
+    agent: opts.agent,
+    turn_id: opts.turnId,
+    block_id: opts.blockId,
+    kind: "block_complete",
+    preview,
+  });
 }
 
 /* ---------------- Public read surface ---------------- */
