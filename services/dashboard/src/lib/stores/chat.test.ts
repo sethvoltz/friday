@@ -90,6 +90,10 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.useRealTimers();
+  // Restore any per-test spies (vi.spyOn) so they can't leak a stubbed
+  // implementation into a later test in the same worker. The module-level
+  // vi.fn() mocks are reset in beforeEach; this is the belt for spies.
+  vi.restoreAllMocks();
 });
 
 describe("loadAgentTurns", () => {
