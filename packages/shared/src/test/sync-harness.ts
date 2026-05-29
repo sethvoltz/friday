@@ -73,9 +73,9 @@
  * harness, which is what actually matters for Friday's reliability.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -95,6 +95,11 @@ const REPO_ROOT = resolve(__dirname_local, "..", "..", "..", "..");
 const DAEMON_ENTRY = join(REPO_ROOT, "services/daemon/dist/index.js");
 const DASHBOARD_DIR = join(REPO_ROOT, "services/dashboard");
 const DASHBOARD_ENTRY = join(DASHBOARD_DIR, "server-entry.mjs");
+// The built Zero schema artifact `zero-deploy-permissions` reads to
+// derive the permissions JSON. Mirrors the path the production
+// supervisor uses (`packages/cli/src/bin/supervisor.ts:146-156`). This
+// is a *built* file — `pnpm --filter @friday/shared build` must have run.
+const SCHEMA_DIST_PATH = join(REPO_ROOT, "packages", "shared", "dist", "sync", "schema.js");
 
 // ─────────────────────────────────────────────────────────────────────
 // Free-port allocation. listen(0) → kernel picks an unused port; close
@@ -613,6 +618,74 @@ export interface SpawnEnvOpts {
   skipZeroCache?: boolean;
 }
 
+/**
+ * Test-only invocation counter for `deployZeroPermissionsForTest`.
+ *
+ * AC #5 (FRI-129): the deploy must run exactly once per non-skip
+ * `spawnTestSyncEnv` boot and zero times for `skipZeroCache: true`.
+ * A test reads this counter to pin the exact count (`=== 1` / `=== 0`)
+ * rather than asserting "at least once". Reset it before the boot you
+ * want to measure.
+ */
+export const zeroDeployInvocations = { count: 0 };
+
+/**
+ * Deploy Zero's row-level `permissions` to the scratch upstream DB,
+ * mirroring production's zero-cache `preStart`
+ * (`packages/cli/src/bin/supervisor.ts:146-156`).
+ *
+ * Zero 1.5 defaults every table to deny-all when no permissions row is
+ * deployed: zero-cache acknowledges each query but serves an empty
+ * result set, so seeded rows replicate to Postgres yet the browser
+ * client's `agents` query returns zero rows. Running this once, BEFORE
+ * `spawnZeroCacheForTest` snapshots its SQLite replica, makes the
+ * `zero.permissions` row non-NULL so zero-cache enforces the deployed
+ * (ANYONE_CAN select) rules and serves rows.
+ *
+ * `zero-deploy-permissions` reads the upstream DB from `ZERO_UPSTREAM_DB`
+ * and self-creates `zero.permissions` — it does NOT require zero-cache
+ * to be running, and is idempotent on re-run.
+ *
+ * @param databaseUrl scratch-DB connection string; set explicitly as
+ *   `ZERO_UPSTREAM_DB` so the deploy targets the per-test database, not
+ *   whatever ambient env var might be present.
+ */
+export function deployZeroPermissionsForTest(databaseUrl: string): void {
+  // AC #7a: the schema-path points at a *built* artifact. On the bare
+  // `pnpm test:playwright` path (no turbo `^build` dependency — see
+  // turbo.json / root package.json), `dist/sync/schema.js` can be stale
+  // or missing, which would make the deploy throw a cryptic
+  // MODULE_NOT_FOUND deep inside zero-deploy-permissions. Assert it
+  // exists first and throw an actionable error naming the remedy.
+  if (!existsSync(SCHEMA_DIST_PATH)) {
+    throw new Error(
+      `sync-harness: cannot deploy Zero permissions — built schema not found at ` +
+        `${SCHEMA_DIST_PATH}. Run \`pnpm --filter @friday/shared build\` first ` +
+        `(the dashboard \`test:playwright\` path does not build it for you).`,
+    );
+  }
+  zeroDeployInvocations.count += 1;
+  // Capture stdout/stderr (encoding: "utf8") rather than inheriting, so
+  // a non-zero exit surfaces the deploy diagnostics in the thrown error
+  // and the harness boot fails loudly instead of silently leaving
+  // deny-all in place.
+  const r = spawnSync(
+    "pnpm",
+    ["exec", "zero-deploy-permissions", "--schema-path", SCHEMA_DIST_PATH],
+    {
+      cwd: DASHBOARD_DIR,
+      encoding: "utf8",
+      env: { ...process.env, ZERO_UPSTREAM_DB: databaseUrl },
+    },
+  );
+  if (r.status !== 0) {
+    throw new Error(
+      `sync-harness: zero-deploy-permissions exited ${r.status}\n` +
+        `--- stdout ---\n${r.stdout ?? ""}\n--- stderr ---\n${r.stderr ?? ""}`,
+    );
+  }
+}
+
 export async function spawnTestSyncEnv(opts: SpawnEnvOpts = {}): Promise<SyncEnv> {
   const db = await createTestDb({ label: opts.label ?? "sync_env" });
   const databaseUrl = db.databaseUrl;
@@ -660,6 +733,12 @@ export async function spawnTestSyncEnv(opts: SpawnEnvOpts = {}): Promise<SyncEnv
     // (zero-cache → daemon → dashboard, each fully ready before the
     // next starts) eliminates that race.
     if (!opts.skipZeroCache) {
+      // Deploy Zero permissions BEFORE zero-cache spawns, mirroring
+      // production's preStart. Without this, Zero 1.5's deny-all default
+      // makes every browser query return 0 rows even though seeded rows
+      // replicate to Postgres. The deploy runs against the scratch DB,
+      // does not need zero-cache running, and is idempotent. (FRI-129)
+      deployZeroPermissionsForTest(databaseUrl);
       zeroCache = await spawnZeroCacheForTest({
         databaseUrl,
         authSecret: zeroAuthSecret,
