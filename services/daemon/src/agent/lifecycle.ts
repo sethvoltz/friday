@@ -553,7 +553,15 @@ export function dispatchTurn(input: SpawnTurnInput): void {
     prompt: input.options.prompt,
     attachments: input.options.attachments,
     turnId: input.options.turnId,
-    resumeSessionId: input.options.resumeSessionId ?? existing.sessionId ?? undefined,
+    // FRI-127 §6: prefer the LIVE worker's session id over the POST/NOTIFY-time
+    // capture. `input.options.resumeSessionId` was read synchronously when the
+    // dispatch was queued; by the time a mid-turn-queued prompt drains, the
+    // just-finished turn has moved the session on (the `session-update` IPC
+    // updates `existing.sessionId`). Resuming the stale value drops the queued
+    // prompt into an obsolete session JSONL and surfaces as "Agent didn't
+    // respond". Only fall back to the parent-provided value on first-turn-after-
+    // spawn, where `existing.sessionId` is undefined.
+    resumeSessionId: existing.sessionId ?? input.options.resumeSessionId ?? undefined,
     allowedToolsOverride: input.options.allowedToolsOverride,
     userBlockId: input.userBlockId,
   };
@@ -713,6 +721,13 @@ function maybeNudgeForMailBack(
 }
 
 function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
+  // FRI-127 §6: defensively re-resolve the resume session id at the moment we
+  // actually drain the prompt. The queue-drain path (`nextPrompts.shift()`)
+  // hands us a `WorkerPromptCommand` built at queue time with a possibly-stale
+  // value; the live worker's `w.sessionId` (updated by the `session-update`
+  // IPC) is the freshest signal. Only keep the queued value if the worker has
+  // no observed session yet.
+  p.resumeSessionId = w.sessionId ?? p.resumeSessionId;
   restampQueuedUserBlock(w.agentName, p.turnId, p.userBlockId);
   w.turnId = p.turnId;
   w.turnStart = Date.now();

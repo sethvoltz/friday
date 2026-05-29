@@ -215,18 +215,23 @@ export function assistantMessageHasToolUses(assistantMsg: unknown): boolean {
 }
 
 /**
- * Resolve which session id a drained prompt should resume.
+ * Resolve which session id a drained prompt should resume (FRI-127 §6/§9).
  *
- * Extracted from the inline `runQuery` expression so the precedence can be
- * unit-tested without forking a worker. Behaviour is unchanged: prefer the
- * parent-provided `p.resumeSessionId` (captured at POST/NOTIFY time), falling
- * back to the worker's own observed `lastSessionId`. Exported for testability.
+ * The worker's own `lastSessionId` — the most recent session id it observed
+ * from the SDK's `session_id` field — is the freshest signal. A queued
+ * prompt's `p.resumeSessionId` was captured at POST/NOTIFY time and may be
+ * stale by the time the prompt drains (the just-finished turn moved the
+ * session on). Prefer the live value; only fall back to the parent-provided
+ * value when the worker has no observed session yet — i.e. the first turn
+ * after a fresh spawn, where `lastSessionId` is `undefined` and the SDK
+ * should start a brand-new session from `p.resumeSessionId` (typically also
+ * `undefined`). Exported for testability.
  */
 export function resolveSessionId(
   p: { resumeSessionId?: string },
   lastSessionId: string | undefined,
 ): string | undefined {
-  return p.resumeSessionId ?? lastSessionId;
+  return lastSessionId ?? p.resumeSessionId;
 }
 
 type QueryOptions = NonNullable<Parameters<typeof query>[0]["options"]>;
