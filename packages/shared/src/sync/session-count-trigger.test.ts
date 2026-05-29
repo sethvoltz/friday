@@ -74,7 +74,6 @@ async function insertBlock(opts: { agentName: string; sessionId: string }): Prom
       contentJson: { text: "" },
       status: "complete",
       ts: new Date(),
-      lastEventSeq: 0,
     });
 }
 

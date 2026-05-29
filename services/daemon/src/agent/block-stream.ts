@@ -17,7 +17,7 @@
  *   recordError                          — synthetic error block (was insertErrorBlock)
  *   finalize                             — exit-time teardown (was finalizeStreamingBlocks)
  *   endTurn                              — turn-end teardown (was liveTurns.dropTurn)
- *   snapshot / getLiveTurn               — read surface for watchdog + tests
+ *   snapshot                             — read surface for watchdog + tests
  *   __resetForTest / __seedForTest       — test seam
  *
  * The in-memory `Map<turnId, LiveTurn>` is module-private; callers
@@ -707,11 +707,6 @@ function maybeEmitAgentMessage(opts: {
  */
 export function snapshot(): LiveTurn[] {
   return [...turns.values()];
-}
-
-/** Read-only lookup by turnId. */
-export function getLiveTurn(turnId: string): LiveTurn | null {
-  return turns.get(turnId) ?? null;
 }
 
 /* ---------------- Test seam ---------------- */

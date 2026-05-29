@@ -1,10 +1,14 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
-// FIX_FORWARD 1.10: DB-before-SSE invariant. Every block-tied SSE event must
-// be preceded by a `blocks` row write at the same `last_event_seq` it
-// carries. We drive `recordUserBlock` end-to-end against a real DB and
-// confirm the row matches the published event.
+// FIX_FORWARD 1.10 + FRI-125: DB-before-SSE invariant. Every block-tied SSE
+// event must be preceded by a `blocks` row write. The original ADR-004
+// stamped the row with `last_event_seq` matching the published event's seq;
+// FRI-125 retired the column and the peek-and-stamp dance, so the invariant
+// is now just "row INSERT, then publish, in order" (enforced inside
+// block-stream.ts's writeAndPublish helper). We drive `recordUserBlock`
+// end-to-end against a real DB and confirm the row exists when the event
+// fires.
 
 let handle: TestDbHandle;
 
@@ -79,14 +83,13 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(evt!.role).toBe("user");
     expect(evt!.status).toBe("complete");
     expect(evt!.source).toBe("user_chat");
-    // FRI-125: ADR-004's row.last_event_seq peek-and-stamp dance
-    // retired. The column is the sentinel `0` until C3 drops it.
   });
 
-  it("mail source publishes SSE and the row's seq matches the event seq", async () => {
+  it("mail source publishes SSE for the recipient", async () => {
     // Non-user_chat paths have no upstream optimistic bubble, so the SSE
-    // emit is the canonical materialization signal. The row's
-    // last_event_seq must match the published event's seq (ADR-004).
+    // emit is the canonical materialization signal. FRI-125 retired the
+    // row.last_event_seq peek-and-stamp dance; ordering is now enforced
+    // by block-stream's writeAndPublish (INSERT, then publish).
     const { recordUserBlock } = await import("./block-stream.js");
     const { eventBus } = await import("../events/bus.js");
     const { getBlockById } = await import("@friday/shared/services");
@@ -121,9 +124,9 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     expect(evt!.seq).toBe(seq);
 
     const row = await getBlockById(blockId);
-    // FRI-125: row.last_event_seq is the sentinel `0` (peek dance
-    // retired; column drops in C3). seq is still meaningful — it
-    // comes from the eventBus's published frame.
+    expect(row).not.toBeNull();
+    // FRI-125: row.last_event_seq retired (column dropped). seq is
+    // still meaningful — it comes from the eventBus's published frame.
     expect(seq).toBeGreaterThan(0);
   });
 
@@ -237,8 +240,7 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
       // SSE block_complete must have fired (the dashboard has no
       // optimistic bubble for these system-originated prompts). The
       // seq is the eventBus's published sequence number; FRI-125
-      // retired the row.last_event_seq peek-and-stamp dance, so the
-      // row's column is now the sentinel `0` until C3 drops it.
+      // retired the row.last_event_seq peek-and-stamp dance.
       expect(seq).toBeGreaterThan(0);
       const evt = captured.find((e) => e.block_id === blockId);
       expect(evt?.type).toBe("block_complete");
@@ -268,7 +270,5 @@ describe("ADR-004 ordering at block level (FIX_FORWARD 1.10)", () => {
     // event between the two block_completes for mail-derived blocks, so the
     // gap isn't necessarily exactly 1.
     expect(r2.seq).toBeGreaterThan(r1.seq);
-    // FRI-125: the row's last_event_seq column is the sentinel `0` (peek
-    // dance retired; column drops in C3).
   });
 });

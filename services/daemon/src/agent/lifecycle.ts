@@ -384,9 +384,9 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   live.set(input.agentName, w);
 
   // Per-worker async chain: serialize IPC events so block start→delta→stop
-  // writes land in order even though each writeAndPublish is async. Node's
-  // `on("message")` callback is sync; we chain promises so the next event
-  // doesn't dispatch until the previous one's DB writes commit.
+  // writes land in order even though each block-stream handler is async.
+  // Node's `on("message")` callback is sync; we chain promises so the next
+  // event doesn't dispatch until the previous one's DB writes commit.
   let ipcChain: Promise<void> = Promise.resolve();
   child.on("message", (raw: unknown) => {
     ipcChain = ipcChain.then(() => safeHandleEvent(w, raw));
@@ -407,11 +407,11 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     // runs, so no `error` IPC event, no DB transition, and the
     // dashboard's tool/thinking bubbles stay `running` forever. Walk the
     // live registry here and finalize anything still streaming as
-    // `status='error'`. The normal IPC-driven `handleBlockStop` path
-    // would have already emptied the map for clean exits; this is
-    // strictly the SIGTERM / SIGKILL / OOM / crash safety net.
-    // Fire-and-forget — the exit handler is sync, but finalizeStreamingBlocks
-    // is async (ADR-023). Errors are logged via the lifecycle.streaming-
+    // `status='error'`. The normal IPC-driven `block-stop` path would have
+    // already emptied the map for clean exits; this is strictly the
+    // SIGTERM / SIGKILL / OOM / crash safety net.
+    // Fire-and-forget — the exit handler is sync, but `bsFinalize` is
+    // async (ADR-023). Errors are logged via the lifecycle.streaming-
     // finalize.error channel.
     void bsFinalize(w, "error").catch(() => {});
     // If the worker died mid-turn the in-flight registry entry would leak —
@@ -559,8 +559,8 @@ export function dispatchTurn(input: SpawnTurnInput): void {
 /**
  * Flip a queued user block to `status='complete'` with a fresh `ts` and
  * announce it on SSE so the dashboard unpins the bubble and re-sorts it
- * inline. ADR-004 ordering: writeAndPublish stamps the row's
- * last_event_seq with the same value the SSE event will carry.
+ * inline. ADR-004 ordering: the row UPDATE commits before the SSE event
+ * is published (the column-level seq matching dance retired in FRI-125).
  *
  * Called from both `sendPrompt` (queue-drain → existing live worker) and
  * `spawnTurn` (rehydrated queue or POST against an offline worker forces
@@ -845,8 +845,8 @@ async function forceKillStuckWorker(
     ...(reason === "abort" ? { abort_reason: "forced" as const } : {}),
   });
   // Drop the live-turn entry now so the upcoming child.exit handler's
-  // safety-net `finalizeStreamingBlocks` is a no-op (would otherwise
-  // double-publish block_complete for the same blocks).
+  // safety-net `bsFinalize` is a no-op (would otherwise double-publish
+  // block_complete for the same blocks).
   bsEndTurn(w.turnId);
   w.lastExitStatus = ridesError ? "error" : "aborted";
   setWorkerStatus(w, "idle", "forceKillStuckWorker");
@@ -1400,8 +1400,8 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
         });
       }
       // Close any blocks left at status='streaming' so their dashboard
-      // bubbles transition off "running". finalizeStreamingBlocks is
-      // idempotent — safe to call even when the inflight set is empty.
+      // bubbles transition off "running". `bsFinalize` is idempotent —
+      // safe to call even when the inflight set is empty.
       await bsFinalize(w, wasAbort ? "aborted" : "error");
       // Publish the canonical TurnErrorEvent (kept for any consumer that
       // listens for it) BEFORE the synthesized turn_done — clients route

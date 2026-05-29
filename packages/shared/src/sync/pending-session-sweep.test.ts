@@ -84,7 +84,6 @@ async function insertBlock(opts: {
       contentJson: { text: "hi" },
       status: "complete",
       ts: opts.ts ?? new Date(),
-      lastEventSeq: 0,
     });
   return blockId;
 }
