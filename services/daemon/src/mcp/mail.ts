@@ -9,6 +9,23 @@ import { daemonFetch, signalFrom } from "./http.js";
 
 export const MAIL_SERVER_NAME = "friday-mail";
 
+/**
+ * FRI-127 §3: name the return-path obligation BEFORE the priority-semantics
+ * paragraph. The prior wording described the mechanism ("Send mail … for
+ * asynchronous coordination") but never told a Helper/Builder that mailing
+ * the parent back is REQUIRED when a delegated task finishes — that obligation
+ * lived only in the agent prompts, a weak signal. Leading with the obligation
+ * closes the loop's second failure mode (child completes silently). Exported
+ * so the contract can be asserted without booting the MCP server.
+ */
+export const MAIL_SEND_DESCRIPTION = [
+  "Send mail to another agent — including back to your parent. REQUIRED when you finish a delegated task: when your parent spawned you with agent_create, your final action must be mail_send to that parent with the result. Without it, your parent never learns you're done.",
+  "",
+  "Priority semantics:",
+  "  - `normal` (default): recipient picks this up at the next turn boundary — i.e. after their current turn finishes. Use for non-urgent coordination, status updates, completed work hand-offs.",
+  "  - `critical`: recipient picks this up at the next SDK iteration boundary inside their current turn (mid-turn injection). Use sparingly. The orchestrator may use `critical` freely for time-sensitive reroutes; helpers/builders should reserve `critical` for sub-agent-return-style replies to a parent that is mid-turn waiting for your result.",
+].join("\n");
+
 export interface BuildMailServerOptions {
   callerName: string;
   callerType: string;
@@ -27,13 +44,7 @@ export function buildMailServer(opts: BuildMailServerOptions) {
     tools: [
       tool(
         "mail_send",
-        [
-          "Send mail to another agent. Use for asynchronous coordination — the recipient drains its inbox via mail_inbox.",
-          "",
-          "Priority semantics:",
-          "  - `normal` (default): recipient picks this up at the next turn boundary — i.e. after their current turn finishes. Use for non-urgent coordination, status updates, completed work hand-offs.",
-          "  - `critical`: recipient picks this up at the next SDK iteration boundary inside their current turn (mid-turn injection). Use sparingly. The orchestrator may use `critical` freely for time-sensitive reroutes; helpers/builders should reserve `critical` for sub-agent-return-style replies to a parent that is mid-turn waiting for your result.",
-        ].join("\n"),
+        MAIL_SEND_DESCRIPTION,
         {
           to: z
             .string()

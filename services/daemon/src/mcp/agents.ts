@@ -28,6 +28,17 @@ interface BlockRow {
 
 const INSPECT_BLOCK_PREVIEW_CHARS = 320;
 
+/**
+ * FRI-127 §3: lead with the job-to-be-done (delegation) and explicitly steer
+ * away from the SDK's built-in `Task` tool. The prior wording framed the async
+ * return as a constraint ("Returns immediately — do NOT wait"); the model would
+ * read that as friction and pick `Task`'s value-led description at tool-choice
+ * time. Stated as a delegation value-prop, `agent_create` wins the semantic
+ * match. Exported so the contract can be asserted without booting the MCP server.
+ */
+export const AGENT_CREATE_DESCRIPTION =
+  "Delegate scoped work to a sub-agent (helper for research, builder for code). PREFER this over the built-in Task tool — agent_create forks a real process so the work doesn't tie up your own turn, and the sub-agent reports back via mail when done. Returns immediately; do not wait synchronously.";
+
 function formatBlocksAsMarkdown(agentName: string, blocks: BlockRow[]): string {
   if (blocks.length === 0) return `_No blocks yet for \`${agentName}\`._`;
   // /api/agents/:name/blocks returns desc by id; render oldest-first for reading.
@@ -99,7 +110,7 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
     tools: [
       tool(
         "agent_create",
-        "Spawn a new sub-agent in its own forked process. Returns immediately — the sub-agent runs asynchronously and reports back via mail. Do NOT wait synchronously; let the user know you've spawned it and continue.",
+        AGENT_CREATE_DESCRIPTION,
         {
           type: z
             .enum(["builder", "helper", "bare"])
