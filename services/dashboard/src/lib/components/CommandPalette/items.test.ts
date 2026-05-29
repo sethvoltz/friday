@@ -164,6 +164,7 @@ describe("assembleSections — current-item flag", () => {
       "Theme: Sync with system",
       "Theme: Dawn",
       "Theme: Dusk",
+      "Theme: Phosphor",
     ]);
   });
 });

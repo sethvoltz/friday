@@ -24,8 +24,8 @@ function tokensFor(palette: string): Set<string> {
 }
 
 describe("palette catalog", () => {
-  it("PALETTES contains exactly ['dawn', 'dusk']", () => {
-    expect(Object.keys(PALETTES).sort()).toEqual(["dawn", "dusk"]);
+  it("PALETTES contains exactly ['dawn', 'dusk', 'phosphor']", () => {
+    expect(Object.keys(PALETTES).sort()).toEqual(["dawn", "dusk", "phosphor"]);
   });
 
   it("every palette name in PALETTES has a matching .palette-<name> CSS block", () => {
@@ -44,10 +44,13 @@ describe("palette catalog", () => {
     expect([...blockNames].sort()).toEqual(Object.keys(PALETTES).sort());
   });
 
-  it("dawn and dusk declare the same set of tokens (strict contract)", () => {
-    const dawn = tokensFor("dawn");
-    const dusk = tokensFor("dusk");
-    expect([...dawn].sort()).toEqual([...dusk].sort());
+  it("every palette declares the same set of tokens (strict contract)", () => {
+    const names = Object.keys(PALETTES);
+    expect(names.length).toBeGreaterThanOrEqual(2);
+    const reference = [...tokensFor(names[0])].sort();
+    for (const name of names.slice(1)) {
+      expect([...tokensFor(name)].sort()).toEqual(reference);
+    }
   });
 
   it("each palette declares exactly 54 tokens", () => {

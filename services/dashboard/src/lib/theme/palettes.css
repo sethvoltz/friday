@@ -163,3 +163,91 @@
 
   --toggle-knob: #ffffff;
 }
+
+/* === Phosphor — P1 green-on-black CRT palette. Unapologetically green;
+   other hues bleed through the lens as desaturated phosphor-warm tones
+   (amber warn, red error, color-shifted agent tints + chart ramp) so
+   the dashboard stays readable. === */
+.palette-phosphor {
+  --bg-primary: #000000;
+  --bg-secondary: #050c05;
+  --bg-tertiary: #0a1a0a;
+  --bg-card: #060f06;
+  --bg-card-hover: #0c1d0c;
+  --bg-code: #030803;
+  --bg-input: #050c05;
+  --header-float-bg: rgba(5, 15, 5, 0.55);
+
+  --text-primary: #33ff33;
+  --text-secondary: #1ea81e;
+  --text-tertiary: #146614;
+  --text-inverse: #000000;
+
+  --border-primary: #1a3a1a;
+  --border-subtle: #0f1f0f;
+  --border-focus: #33ff33;
+
+  /* accent-primary is the filled-button / user-bubble / focus-ring hue.
+     Dialed back from full P1 (#33ff33) so large filled surfaces don't
+     retina-burn; text-primary stays at #33ff33 so body text keeps its
+     hero phosphor brightness. */
+  --accent-primary: #2dd62d;
+  --accent-secondary: #1ea81e;
+  --accent-muted: #1a3a1a;
+  --accent-glow: rgba(45, 214, 45, 0.18);
+
+  --status-ok: #33ff33;
+  --status-ok-bg: #0a200a;
+  --status-warn: #f5c542;
+  --status-warn-bg: #1f1808;
+  /* Sodium-flame red — warmed away from cool/pink #ff5252 so destructive
+     buttons read as red against the green field rather than as pink. */
+  --status-error: #ff6e4d;
+  --status-error-bg: #1f1008;
+
+  /* Aurora — three distinct shades of green: teal-leaning phosphor,
+     pure P1, then chartreuse-leaning phosphor. Sweeps across the green
+     family the way Dawn/Dusk sweep blue → purple → pink, without
+     letting any non-green hue into the strip. */
+  --chat-aurora-1: #33ffcc;
+  --chat-aurora-2: #33ff33;
+  --chat-aurora-3: #aaff33;
+
+  /* Per-agent tints — distinct hues that have leaked through the green
+     lens. Each is desaturated toward yellow-green so the family still
+     reads as one palette. */
+  --agent-orchestrator: #ffd24d;
+  --agent-helper: #5eeac0;
+  --agent-builder: #88d4ff;
+  --agent-scheduled: #c8f070;
+  --agent-bare: #ff9ec0;
+
+  --chart-1: #33ff33;
+  --chart-2: #88ff88;
+  --chart-3: #1ea81e;
+  --chart-4: #5cff5c;
+  --chart-5: #aaff55;
+  --chart-6: #ffaa55;
+  --chart-cache: #33ff33;
+  --chart-input: #5cff5c;
+  --chart-input-cached: #88ff88;
+  --chart-output: #f5c542;
+
+  /* Activity grid — pure phosphor ramp from cold off-pixel to glowing. */
+  --grid-empty: #0a140a;
+  --grid-l1: #14601a;
+  --grid-l2: #1ea81e;
+  --grid-l3: #2dd62d;
+  --grid-l4: #33ff33;
+
+  /* Phosphor glow shadows — green halo instead of a black drop. This is
+     the palette's tell. */
+  --shadow-sm: 0 1px 3px rgba(51, 255, 51, 0.10);
+  --shadow-md: 0 4px 14px rgba(51, 255, 51, 0.14);
+  --shadow-lg: 0 8px 28px rgba(51, 255, 51, 0.18);
+
+  --diff-removed: #ff6e4d;
+  --diff-added: #33ff33;
+
+  --toggle-knob: #ffffff;
+}
