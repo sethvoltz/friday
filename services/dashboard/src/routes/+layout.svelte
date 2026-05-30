@@ -123,6 +123,17 @@
           tag === "TEXTAREA" ||
           (active instanceof HTMLElement && active.isContentEditable);
         setOffset(isTextField ? vv.offsetTop : 0);
+        // Soft-keyboard detection: iOS doesn't zero env(safe-area-inset-bottom)
+        // when the keyboard opens, so the floating chat input sits awkwardly
+        // above the keyboard with the home-indicator gap as dead space. The
+        // visualViewport height shrinks by the keyboard's height; a >100px
+        // delta from window.innerHeight is a reliable signal across iOS,
+        // Android, and Chrome's on-screen keyboard. The `.keyboard-open`
+        // class flips --kb-safe-bottom to 0 (see app.css), collapsing the
+        // safe-area portion so the input hugs the keyboard. No-op on
+        // desktop, where the delta never crosses the threshold.
+        const kbOpen = window.innerHeight - vv.height > 100;
+        document.documentElement.classList.toggle("keyboard-open", kbOpen);
       };
       vvUpdate();
       vv.addEventListener("resize", vvUpdate);
@@ -144,6 +155,7 @@
         vv.removeEventListener("scroll", vvUpdate);
         document.removeEventListener("focusin", vvUpdate);
         document.removeEventListener("focusout", vvUpdate);
+        document.documentElement.classList.remove("keyboard-open");
       }
     };
   });

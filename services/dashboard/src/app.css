@@ -28,6 +28,18 @@
      progress bar) to the active palette's accent. Resolves against the
      palette tokens scoped onto <html> by the runtime store. */
   accent-color: var(--accent-primary);
+
+  /* iOS PWA safe-area inset that the floating chat input + scroll padding
+     both consume. iOS does NOT collapse env(safe-area-inset-bottom) when
+     the soft keyboard appears (it reflects the home-indicator zone, not
+     the keyboard), so the `.keyboard-open` override below zeroes it while
+     a visualViewport listener in +layout.svelte detects keyboard presence
+     via window.innerHeight - visualViewport.height. */
+  --kb-safe-bottom: env(safe-area-inset-bottom);
+}
+
+:root.keyboard-open {
+  --kb-safe-bottom: 0px;
 }
 
 /* Theme `<input>` / `<textarea>` placeholder text across the app. Without
