@@ -98,6 +98,29 @@ describe("synthesizeHeadline — built-ins", () => {
       "Searching tools: select:Read",
     );
   });
+
+  it("MultiEdit reports the aliased path and the edit count (FRI-134 AC#7)", () => {
+    const out = synthesizeHeadline("MultiEdit", { file_path: "/a/b.ts", edits: [{}, {}] }, {});
+    expect(out).toBeDefined();
+    expect(out).toContain("/a/b.ts");
+    expect(out).toContain("2");
+    // Full shape pin (no aliasing without home/dataDir).
+    expect(out).toBe("Editing /a/b.ts (2 edits)");
+  });
+
+  it("MultiEdit aliases the path like Edit does", () => {
+    expect(
+      synthesizeHeadline(
+        "MultiEdit",
+        { file_path: "/Users/seth/a/b.ts", edits: [{}, {}, {}] },
+        { homeDir: HOME },
+      ),
+    ).toBe("Editing ~/a/b.ts (3 edits)");
+  });
+
+  it("MultiEdit returns undefined when file_path is missing", () => {
+    expect(synthesizeHeadline("MultiEdit", { edits: [{}] })).toBeUndefined();
+  });
 });
 
 describe("synthesizeHeadline — Friday MCP tools", () => {

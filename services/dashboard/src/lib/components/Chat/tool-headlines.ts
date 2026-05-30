@@ -120,6 +120,12 @@ export function synthesizeHeadline(
         const p = asString(inp.file_path) ?? asString(inp.path);
         return p ? `Writing ${alias(p)}` : undefined;
       }
+      case "MultiEdit": {
+        const p = asString(inp.file_path) ?? asString(inp.path);
+        if (!p) return undefined;
+        const n = Array.isArray(inp.edits) ? inp.edits.length : undefined;
+        return n !== undefined ? `Editing ${alias(p)} (${n} edits)` : `Editing ${alias(p)}`;
+      }
       case "NotebookEdit": {
         const p = asString(inp.notebook_path) ?? asString(inp.file_path);
         return p ? `Editing ${alias(p)}` : undefined;

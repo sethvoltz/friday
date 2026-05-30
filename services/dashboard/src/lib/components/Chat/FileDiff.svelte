@@ -6,13 +6,47 @@
   import CollapsibleSection from "./CollapsibleSection.svelte";
 
   interface Props {
-    toolName: "Write" | "Edit";
+    toolName: "Write" | "Edit" | "MultiEdit" | "NotebookEdit";
     filePath?: string;
     content?: string;
     oldString?: string;
     newString?: string;
+    /** MultiEdit: K hunks, rendered as K stacked diff groups (FRI-134). */
+    edits?: Array<{ oldString: string; newString: string }>;
+    /** NotebookEdit cell type — Shiki lang hint + display (FRI-134). */
+    cellType?: "code" | "markdown";
+    /** NotebookEdit edit mode — `delete` shows a "cell deleted" notice (FRI-134). */
+    editMode?: "replace" | "insert" | "delete";
   }
-  let { toolName, filePath, content, oldString, newString }: Props = $props();
+  let {
+    toolName,
+    filePath,
+    content,
+    oldString,
+    newString,
+    edits,
+    cellType,
+    editMode,
+  }: Props = $props();
+
+  // Render mode (FRI-134). Promotion + coverage widened FileDiff from the
+  // original Write/Edit pair to four tools that share `diffLines` + Shiki:
+  //   - "content": a one-sided code view (Write; NotebookEdit replace/insert).
+  //   - "diff": a single two-sided hunk (Edit).
+  //   - "multi": K two-sided hunks (MultiEdit).
+  //   - "deleted": a "cell deleted" notice (NotebookEdit edit_mode="delete").
+  let mode = $derived.by((): "content" | "diff" | "multi" | "deleted" => {
+    if (toolName === "Write") return "content";
+    if (toolName === "Edit") return "diff";
+    if (toolName === "MultiEdit") return "multi";
+    // NotebookEdit: no old-source in the payload, so this is a content view
+    // (or a deletion notice), never a two-sided diff.
+    return editMode === "delete" ? "deleted" : "content";
+  });
+
+  // Shiki language: file extension for Write/NotebookEdit-code; markdown for
+  // a NotebookEdit markdown cell.
+  let contentLang = $derived(cellType === "markdown" ? "markdown" : langFromPath(filePath));
 
   // Expansion state is owned by CollapsibleSection (FRI-130) and bound back
   // here so the shiki `$effect` gate below can lazy-load the highlighter
@@ -58,9 +92,11 @@
   });
 
   $effect(() => {
-    if (!expanded || toolName !== "Write" || !content) return;
+    // Content view (Write, or NotebookEdit replace/insert) lazy-loads Shiki
+    // only when revealed. MultiEdit/Edit use the diffLines path, not Shiki.
+    if (!expanded || mode !== "content" || !content) return;
     if (highlightedHtml !== null) return;
-    const lang = langFromPath(filePath);
+    const lang = contentLang;
     const shikiTheme = shikiThemeFor(theme.activePalette);
     void (async () => {
       if (!shikiApi) {
@@ -78,10 +114,14 @@
   });
 
   type DiffLine = { kind: "added" | "removed" | "unchanged"; text: string };
+  // For side-by-side: pair up removed/added lines
+  type SideBySidePair = { left: DiffLine | null; right: DiffLine | null };
+  // One diff group. Edit produces exactly one; MultiEdit produces K (one per
+  // `edits[]` entry) — each via the same `diffLines(old,new)` engine (FRI-134).
+  type Hunk = { lines: DiffLine[]; pairs: SideBySidePair[] };
 
-  let diffLines_ = $derived.by((): DiffLine[] => {
-    if (toolName !== "Edit" || !oldString || !newString) return [];
-    const changes: Change[] = diffLines(oldString, newString);
+  function computeDiffLines(oldStr: string, newStr: string): DiffLine[] {
+    const changes: Change[] = diffLines(oldStr, newStr);
     const result: DiffLine[] = [];
     for (const c of changes) {
       const lines = c.value.split("\n");
@@ -95,22 +135,19 @@
       }
     }
     return result;
-  });
+  }
 
-  // For side-by-side: pair up removed/added lines
-  type SideBySidePair = { left: DiffLine | null; right: DiffLine | null };
-
-  let sideBySide = $derived.by((): SideBySidePair[] => {
+  function pairSideBySide(lines: DiffLine[]): SideBySidePair[] {
     const pairs: SideBySidePair[] = [];
     let i = 0;
-    while (i < diffLines_.length) {
-      const cur = diffLines_[i];
+    while (i < lines.length) {
+      const cur = lines[i];
       if (cur.kind === "unchanged") {
         pairs.push({ left: cur, right: cur });
         i++;
       } else if (cur.kind === "removed") {
         // Peek at next for a matching added line
-        const next = diffLines_[i + 1];
+        const next = lines[i + 1];
         if (next?.kind === "added") {
           pairs.push({ left: cur, right: next });
           i += 2;
@@ -125,65 +162,102 @@
       }
     }
     return pairs;
+  }
+
+  // K hunks: one for Edit (single old/new pair), K for MultiEdit (one per
+  // edit). All hunks share the single CollapsibleSection cap, so a large
+  // MultiEdit scrolls within the cap rather than blowing out the message.
+  let hunks = $derived.by((): Hunk[] => {
+    if (toolName === "Edit") {
+      if (!oldString || !newString) return [];
+      const lines = computeDiffLines(oldString, newString);
+      return [{ lines, pairs: pairSideBySide(lines) }];
+    }
+    if (toolName === "MultiEdit") {
+      const out: Hunk[] = [];
+      for (const e of edits ?? []) {
+        if (!e.oldString || !e.newString) continue;
+        const lines = computeDiffLines(e.oldString, e.newString);
+        out.push({ lines, pairs: pairSideBySide(lines) });
+      }
+      return out;
+    }
+    return [];
   });
 </script>
 
+{#snippet diffHunk(hunk: Hunk)}
+  <!-- Side-by-side: ≥768px -->
+  <div class="diff-side-by-side" aria-label="File diff side by side">
+    <div class="diff-column diff-column-old">
+      {#each hunk.pairs as pair}
+        <div
+          class="diff-row"
+          class:diff-removed={pair.left?.kind === "removed"}
+          class:diff-unchanged={pair.left?.kind === "unchanged"}
+          class:diff-empty={pair.left === null}>
+          {#if pair.left}
+            <span class="diff-prefix" aria-hidden="true">{pair.left.kind === "removed" ? "−" : " "}</span><span class="diff-text">{pair.left.text}</span>
+          {/if}
+        </div>
+      {/each}
+    </div>
+    <div class="diff-column diff-column-new">
+      {#each hunk.pairs as pair}
+        <div
+          class="diff-row"
+          class:diff-added={pair.right?.kind === "added"}
+          class:diff-unchanged={pair.right?.kind === "unchanged"}
+          class:diff-empty={pair.right === null}>
+          {#if pair.right}
+            <span class="diff-prefix" aria-hidden="true">{pair.right.kind === "added" ? "+" : " "}</span><span class="diff-text">{pair.right.text}</span>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  </div>
+
+  <!-- Unified: <768px -->
+  <div class="diff-unified" aria-label="File diff unified">
+    {#each hunk.lines as line}
+      <div
+        class="diff-row"
+        class:diff-removed={line.kind === "removed"}
+        class:diff-added={line.kind === "added"}
+        class:diff-unchanged={line.kind === "unchanged"}>
+        <span class="diff-prefix" aria-hidden="true">{line.kind === "removed" ? "−" : line.kind === "added" ? "+" : " "}</span><span class="diff-text">{line.text}</span>
+      </div>
+    {/each}
+  </div>
+{/snippet}
+
 <div class="file-diff">
   <CollapsibleSection
-    label={toolName === "Write" ? "View content" : "View diff"}
+    label={mode === "content" || mode === "deleted" ? "View content" : "View diff"}
     collapsedMaxHeight={400}
     startOpen={true}
     bind:open={expanded}>
-    {#if toolName === "Write"}
+    {#if mode === "content"}
       <div class="code-block">
-        <pre class="block-pre"><code class="shiki-wrap" data-lang={langFromPath(filePath)}>{#if highlightedHtml !== null}{@html highlightedHtml}{:else}{content ?? ""}{/if}</code></pre>
+        <pre class="block-pre"><code class="shiki-wrap" data-lang={contentLang}>{#if highlightedHtml !== null}{@html highlightedHtml}{:else}{content ?? ""}{/if}</code></pre>
       </div>
-    {:else if toolName === "Edit"}
-      {#if diffLines_.length === 0}
+    {:else if mode === "deleted"}
+      <div class="cell-deleted">Cell deleted</div>
+    {:else if mode === "diff"}
+      {#if hunks.length === 0 || hunks[0].lines.length === 0}
         <div class="no-diff">No diff available</div>
       {:else}
-        <!-- Side-by-side: ≥768px -->
-        <div class="diff-side-by-side" aria-label="File diff side by side">
-          <div class="diff-column diff-column-old">
-            {#each sideBySide as pair}
-              <div
-                class="diff-row"
-                class:diff-removed={pair.left?.kind === "removed"}
-                class:diff-unchanged={pair.left?.kind === "unchanged"}
-                class:diff-empty={pair.left === null}>
-                {#if pair.left}
-                  <span class="diff-prefix" aria-hidden="true">{pair.left.kind === "removed" ? "−" : " "}</span><span class="diff-text">{pair.left.text}</span>
-                {/if}
-              </div>
-            {/each}
+        {@render diffHunk(hunks[0])}
+      {/if}
+    {:else if mode === "multi"}
+      {#if hunks.length === 0}
+        <div class="no-diff">No diff available</div>
+      {:else}
+        {#each hunks as hunk, i}
+          <div class="diff-hunk" class:diff-hunk-rule={i > 0} aria-label="Edit {i + 1} of {hunks.length}">
+            {@render diffHunk(hunk)}
           </div>
-          <div class="diff-column diff-column-new">
-            {#each sideBySide as pair}
-              <div
-                class="diff-row"
-                class:diff-added={pair.right?.kind === "added"}
-                class:diff-unchanged={pair.right?.kind === "unchanged"}
-                class:diff-empty={pair.right === null}>
-                {#if pair.right}
-                  <span class="diff-prefix" aria-hidden="true">{pair.right.kind === "added" ? "+" : " "}</span><span class="diff-text">{pair.right.text}</span>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        </div>
-
-        <!-- Unified: <768px -->
-        <div class="diff-unified" aria-label="File diff unified">
-          {#each diffLines_ as line}
-            <div
-              class="diff-row"
-              class:diff-removed={line.kind === "removed"}
-              class:diff-added={line.kind === "added"}
-              class:diff-unchanged={line.kind === "unchanged"}>
-              <span class="diff-prefix" aria-hidden="true">{line.kind === "removed" ? "−" : line.kind === "added" ? "+" : " "}</span><span class="diff-text">{line.text}</span>
-            </div>
-          {/each}
-        </div>
+        {/each}
       {/if}
     {/if}
   </CollapsibleSection>
@@ -228,6 +302,22 @@
     color: var(--text-tertiary);
     padding: 0.35rem 0;
     font-style: italic;
+  }
+
+  /* NotebookEdit edit_mode="delete": no source to show. */
+  .cell-deleted {
+    font-size: 0.78rem;
+    color: var(--text-tertiary);
+    padding: 0.35rem 0;
+    font-style: italic;
+  }
+
+  /* MultiEdit: K stacked hunks, separated by a thin rule. Each shares the
+     single CollapsibleSection cap (no per-hunk scroll container). */
+  .diff-hunk-rule {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border-subtle);
   }
 
   /* Base — mobile defaults */
