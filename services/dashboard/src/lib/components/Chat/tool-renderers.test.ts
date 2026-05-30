@@ -31,17 +31,18 @@ describe("resolveToolRenderer", () => {
     expect(resolveToolRenderer("ZZZ_unregistered")).toBe(undefined);
   });
 
-  it("ships an empty registry by default (no foundation renderers)", () => {
-    expect(Object.keys(TOOL_RENDERERS)).toEqual([]);
+  it("ships the TodoWrite renderer registered by default (FRI-133)", () => {
+    // FRI-130 shipped this map empty; FRI-133 (renderer A) registers the
+    // first real entry on the literal built-in key "TodoWrite".
+    expect(Object.keys(TOOL_RENDERERS)).toEqual(["TodoWrite"]);
   });
 
   it("resolves a built-in tool by its literal name once registered", () => {
-    TOOL_RENDERERS["TodoWrite"] = todoStub;
-    expect(resolveToolRenderer("TodoWrite")).toBe(todoStub);
+    TOOL_RENDERERS["ExampleTool"] = todoStub;
+    expect(resolveToolRenderer("ExampleTool")).toBe(todoStub);
   });
 
   it("does not resolve an unregistered built-in (Read)", () => {
-    TOOL_RENDERERS["TodoWrite"] = todoStub;
     expect(resolveToolRenderer("Read")).toBe(undefined);
   });
 
