@@ -192,6 +192,26 @@ export async function deleteBlockById(blockId: string): Promise<boolean> {
   return (res.rowCount ?? 0) > 0;
 }
 
+/**
+ * User-prompt turns for a session, oldest first — `(turn_id, ts-ms)`. Used by
+ * jsonl-recovery to attribute a recovered assistant block to the turn whose
+ * user prompt most-recently precedes it IN FILE ORDER (the SDK JSONL is
+ * appended causally even when an out-of-band reply carries a late flush
+ * timestamp, so a ts-only lookup would mis-bind). `role='user'` selects typed
+ * prompts; tool_result rows are stored `role='assistant'` and are excluded.
+ */
+export async function listUserTurnsForSession(
+  sessionId: string,
+): Promise<Array<{ turnId: string; ts: number }>> {
+  const db = getDb();
+  const rows = await db
+    .select({ turnId: schema.blocks.turnId, ts: schema.blocks.ts })
+    .from(schema.blocks)
+    .where(and(eq(schema.blocks.sessionId, sessionId), eq(schema.blocks.role, "user")))
+    .orderBy(asc(schema.blocks.ts));
+  return rows.map((r) => ({ turnId: r.turnId, ts: r.ts.getTime() }));
+}
+
 /** Return all blocks currently in `status='queued'`, oldest first. */
 export async function listQueuedUserBlocks(): Promise<BlockRow[]> {
   const db = getDb();

@@ -236,6 +236,30 @@ export function assistantMessageHasToolUses(assistantMsg: unknown): boolean {
 }
 
 /**
+ * Whether an SDK `assistant`-typed message has produced its REPLY yet — a
+ * `text` content block (tool_use is handled separately by the breakAtNextUser
+ * deferral above). Extended-thinking turns surface an assistant-message
+ * boundary for the THINKING block *before* the reply text streams: the SDK
+ * emits a partial assistant message whose `content` is `['thinking']`, then a
+ * later boundary once the text arrives. A mid-turn prompts-pending /
+ * critical-mail break that fires at the thinking-only boundary cancels the
+ * (empty) thinking block via flushBoundaryBlocks and ends the turn with ZERO
+ * captured blocks; the model's real reply then streams out-of-band into the
+ * session JSONL after the worker has moved on to the queued turn, and post-turn
+ * recovery orphans it under a synthetic `recover_<session>` turn with a late
+ * timestamp — the "Agent didn't respond" + reordered-conversation bug. Gating
+ * the break on reply-content-present keeps the break at a boundary where the
+ * reply has been streamed and captured under THIS turn. Verified against the
+ * live SDK frame ordering (the thinking-only boundary reports
+ * `m.message.content === ['thinking']`). Exported for testing.
+ */
+export function assistantMessageHasText(assistantMsg: unknown): boolean {
+  const content = (assistantMsg as { content?: unknown })?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((b) => (b as { type?: string })?.type === "text");
+}
+
+/**
  * Resolve which session id a drained prompt should resume (FRI-127 §6/§9).
  *
  * The worker's own `lastSessionId` — the most recent session id it observed
@@ -937,6 +961,18 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
           // Discriminate on whether content actually accumulated: present
           // content ⇒ `complete` (the model's intent is whole); empty ⇒
           // `aborted` (the SDK truly cut it short).
+          //
+          // But first: with extended thinking, the SDK surfaces this
+          // assistant boundary for the THINKING block before the reply text
+          // streams (`m.message.content === ['thinking']`). Breaking here
+          // would cancel the empty thinking block and end the turn with zero
+          // captured blocks, orphaning the reply that streams afterward (see
+          // assistantMessageHasText). Keep consuming until the reply's text
+          // boundary so it is captured under THIS turn; only then honor the
+          // pending-injection break. tool_use turns already deferred above.
+          if (!assistantMessageHasText(m.message)) {
+            continue;
+          }
           flushBoundaryBlocks();
           promptsPending = false;
           pendingCriticalMail = false;

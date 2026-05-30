@@ -66,6 +66,7 @@ import {
   getToolResultByToolUseId,
   getToolUseByToolUseId,
   insertBlock,
+  listUserTurnsForSession,
   updateBlock,
 } from "@friday/shared/services";
 import { logger } from "../log.js";
@@ -160,13 +161,37 @@ async function reconcileSession(
   // is rarely larger than tens of MB even for long-running orchestrators.
   if (!statSync(filePath).isFile()) return out;
   const raw = readFileSync(filePath, "utf8");
+
+  // Attribute recovered assistant blocks to the turn whose USER PROMPT most
+  // recently precedes them IN FILE ORDER. The JSONL is appended causally
+  // (a turn's reply lands before the next turn's user entry) even when an
+  // out-of-band reply carries a late flush timestamp — so a ts-only lookup
+  // would mis-bind a late-flushed reply to the *following* turn. We walk the
+  // DB's user turns (ts-ordered, which equals file order) in lockstep with the
+  // user-prompt entries we encounter while scanning. Without this, every
+  // recovered block lands under a synthetic `recover_<session>` turn with the
+  // flush timestamp — orphaning the reply ("Agent didn't respond") and
+  // reordering the conversation (FRI-XXX secondary defect).
+  const userTurns = await listUserTurnsForSession(sessionId);
+  let turnIdx = -1;
+
   for (const entry of parseEntries(raw)) {
     if ((entry as { isSidechain?: boolean }).isSidechain === true) continue;
     const type = (entry.type ?? "") as string;
+    if (type === "user" && userEntryHasText(entry)) {
+      // A typed user prompt — advance to the next DB user turn. Prompts are
+      // already persisted (dispatch / mail bridge), so nothing to reconcile
+      // here; we only use it to keep `turnIdx` aligned with file order.
+      turnIdx += 1;
+      continue;
+    }
+    const turn = turnIdx >= 0 && turnIdx < userTurns.length ? userTurns[turnIdx] : undefined;
+    const turnId = turn ? turn.turnId : `recover_${sessionId}`;
+    const nextTurnTs = turnIdx + 1 < userTurns.length ? userTurns[turnIdx + 1]!.ts : undefined;
     if (type === "assistant") {
-      await processAssistantEntry(out, agentName, sessionId, entry);
+      await processAssistantEntry(out, agentName, sessionId, entry, turnId, nextTurnTs);
     } else if (type === "user") {
-      await processUserEntry(out, agentName, sessionId, entry);
+      await processUserEntry(out, agentName, sessionId, entry, turnId, nextTurnTs);
     }
     // Other entry types (system, summary, queue-operation, …) carry no
     // chat-visible blocks and are intentionally skipped.
@@ -174,11 +199,36 @@ async function reconcileSession(
   return out;
 }
 
+/** Whether a `user`-typed JSONL entry is a typed prompt (carries a `text`
+ *  content block) rather than a tool_result delivery. */
+function userEntryHasText(entry: RawEntry): boolean {
+  const content = (entry.message as { content?: unknown } | undefined)?.content;
+  if (typeof content === "string") return content.length > 0;
+  if (!Array.isArray(content)) return false;
+  return content.some((b) => (b as { type?: string })?.type === "text");
+}
+
+/**
+ * Anchor a recovered block's timestamp so it sorts within its originating
+ * turn. In the normal case the JSONL flush ts already orders correctly, so we
+ * keep it. Only when an out-of-band (late-flushed) reply's ts would sort it
+ * AT OR AFTER the next turn's user prompt do we clamp it to just before that
+ * boundary — keeping the reply inside its own turn. `recover_<session>`
+ * fallbacks (no resolved turn) keep the raw ts.
+ */
+function anchorRecoveredTs(rawTs: number, turnId: string, nextTurnTs: number | undefined): number {
+  if (turnId.startsWith("recover_")) return rawTs;
+  if (nextTurnTs !== undefined && rawTs >= nextTurnTs) return nextTurnTs - 1;
+  return rawTs;
+}
+
 async function processAssistantEntry(
   out: ReconcileResult,
   agentName: string,
   sessionId: string,
   entry: RawEntry,
+  turnId: string,
+  nextTurnTs: number | undefined,
 ): Promise<void> {
   const msg = entry.message as { id?: string; content?: unknown[] } | undefined;
   const messageId = msg?.id;
@@ -186,7 +236,7 @@ async function processAssistantEntry(
     out.skipped += 1;
     return;
   }
-  const ts = entryTs(entry);
+  const ts = anchorRecoveredTs(entryTs(entry), turnId, nextTurnTs);
   // Sequential — same `(messageId, kind)` natural key could otherwise
   // race itself between the existence check and the insert in
   // reconcileBlock.
@@ -203,6 +253,7 @@ async function processAssistantEntry(
       await reconcileBlock(out, {
         agentName,
         sessionId,
+        turnId,
         messageId,
         blockIndex: idx,
         role: "assistant",
@@ -215,6 +266,7 @@ async function processAssistantEntry(
       await reconcileBlock(out, {
         agentName,
         sessionId,
+        turnId,
         messageId,
         blockIndex: idx,
         role: "assistant",
@@ -228,6 +280,7 @@ async function processAssistantEntry(
       await reconcileToolUse(out, {
         agentName,
         sessionId,
+        turnId,
         messageId,
         blockIndex: idx,
         toolUseId,
@@ -247,6 +300,8 @@ async function processUserEntry(
   agentName: string,
   sessionId: string,
   entry: RawEntry,
+  turnId: string,
+  nextTurnTs: number | undefined,
 ): Promise<void> {
   // Only reconcile tool_result blocks from user entries — the user's typed
   // prompts are already persisted via /api/chat/turn (and mail user-blocks
@@ -264,7 +319,7 @@ async function processUserEntry(
     out.skipped += 1;
     return;
   }
-  const ts = entryTs(entry);
+  const ts = anchorRecoveredTs(entryTs(entry), turnId, nextTurnTs);
   for (let idx = 0; idx < msg.content.length; idx++) {
     const b = msg.content[idx] as {
       type?: string;
@@ -276,6 +331,7 @@ async function processUserEntry(
     await reconcileToolResult(out, {
       agentName,
       sessionId,
+      turnId,
       messageId: msg?.id ?? null,
       blockIndex: idx,
       toolUseId: b.tool_use_id,
@@ -292,6 +348,7 @@ async function processUserEntry(
 interface ReconcileInput {
   agentName: string;
   sessionId: string;
+  turnId: string;
   messageId: string;
   blockIndex: number;
   role: string;
@@ -307,10 +364,10 @@ async function reconcileBlock(out: ReconcileResult, input: ReconcileInput): Prom
     const blockId = randomUUID();
     await insertBlock({
       blockId,
-      // turnId is unknown for recovered rows (the original turn_id lived in
-      // worker memory at write time). Use a recovery-tagged id so callers can
-      // tell these rows apart from live-written ones.
-      turnId: `recover_${input.sessionId}`,
+      // turnId resolved from the user prompt that precedes this block in file
+      // order (reconcileSession); falls back to `recover_<session>` only when
+      // no originating user turn could be matched.
+      turnId: input.turnId,
       agentName: input.agentName,
       sessionId: input.sessionId,
       messageId: input.messageId,
@@ -342,6 +399,7 @@ async function reconcileBlock(out: ReconcileResult, input: ReconcileInput): Prom
 interface ReconcileToolUseInput {
   agentName: string;
   sessionId: string;
+  turnId: string;
   messageId: string;
   /** Block index from the JSONL entry's `content` array (usually 0 because
    *  the SDK splits a multi-block message into per-block entries). The
@@ -368,7 +426,7 @@ async function reconcileToolUse(out: ReconcileResult, input: ReconcileToolUseInp
     const blockId = randomUUID();
     await insertBlock({
       blockId,
-      turnId: `recover_${input.sessionId}`,
+      turnId: input.turnId,
       agentName: input.agentName,
       sessionId: input.sessionId,
       messageId: input.messageId,
@@ -400,6 +458,7 @@ async function reconcileToolUse(out: ReconcileResult, input: ReconcileToolUseInp
 interface ReconcileToolResultInput {
   agentName: string;
   sessionId: string;
+  turnId: string;
   /** Almost always null in practice — see processUserEntry's comment. */
   messageId: string | null;
   blockIndex: number;
@@ -422,7 +481,7 @@ async function reconcileToolResult(
     const blockId = randomUUID();
     await insertBlock({
       blockId,
-      turnId: `recover_${input.sessionId}`,
+      turnId: input.turnId,
       agentName: input.agentName,
       sessionId: input.sessionId,
       messageId: input.messageId,
