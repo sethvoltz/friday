@@ -129,9 +129,21 @@ async function mainLoop(): Promise<void> {
         continue;
       }
 
-      // Long-lived path: check inbox before idling.
-      const inbox = await fetchInboxQuiet(workerOpts.agentName, workerOpts.daemonPort);
-      if (inbox.length > 0) {
+      // Long-lived path: poll the inbox before idling. A `prompt` IPC can land
+      // during the poll (the daemon drains its queue immediately on
+      // turn-complete and sends the next prompt ~25ms later); `wakeIdle()` is a
+      // no-op while we're awaiting here, so the post-poll read inside
+      // `resolveBetweenTurnsStep` is what catches it. See that function's
+      // doc-comment for the failure mode (a dropped queued message, surfacing
+      // as "Agent didn't respond").
+      const { agentName, daemonPort } = workerOpts;
+      const { action, inbox } = await resolveBetweenTurnsStep({
+        isPromptPending: () => pendingPrompt !== null,
+        isStopped: () => stopped,
+        fetchInbox: () => fetchInboxQuiet(agentName, daemonPort),
+      });
+      if (action === "loop") continue;
+      if (action === "mail") {
         pendingPrompt = {
           prompt: buildMailPrompt(workerOpts.agentName, inbox),
           turnId: `t_${randomUUID()}`,
@@ -144,6 +156,14 @@ async function mainLoop(): Promise<void> {
       // re-checks the inbox as a backstop in case the IPC was missed).
       emit({ type: "status-change", status: "idle" });
       await new Promise<void>((resolve) => {
+        // Lost-wakeup guard: if a `prompt`/`stop` landed since the checks
+        // above (no await sits between them and here today, but keep the
+        // invariant local so a future refactor that adds one can't reopen the
+        // race), resolve immediately rather than parking for 60s.
+        if (pendingPrompt !== null || stopped) {
+          resolve();
+          return;
+        }
         idleResolve = resolve;
         setTimeout(() => {
           if (idleResolve === resolve) {
@@ -233,6 +253,70 @@ export function resolveSessionId(
   lastSessionId: string | undefined,
 ): string | undefined {
   return lastSessionId ?? p.resumeSessionId;
+}
+
+/**
+ * What the between-turns loop should do after polling the mail inbox.
+ *
+ *  - "loop": re-enter the loop immediately — either a `prompt` IPC landed
+ *    while we were polling (service it at the loop top) or `stop` arrived
+ *    (let the `while (!stopped)` guard exit). Never park in this case.
+ *  - "mail": no user prompt pending but the inbox has mail; build a
+ *    mail-driven turn.
+ *  - "park": genuinely idle — emit `status-change: idle` and await the next
+ *    wakeup (mail-wakeup / prompt / stop / 60s timeout).
+ *
+ * Extracted as a pure function (mirroring {@link resolveSessionId}) so the
+ * lost-wakeup invariant can be asserted without forking a worker or stubbing
+ * the SDK. THE INVARIANT: a `prompt` IPC that arrives during the inbox poll
+ * MUST win over both parking and draining mail. `wakeIdle()` is a no-op while
+ * we're inside `await fetchInboxQuiet()` (idleResolve isn't set yet), so the
+ * wakeup is lost; if the loop then parks (or clobbers `pendingPrompt` with a
+ * mail prompt) the queued message is never serviced. In practice the user
+ * re-sends, the re-send overwrites `pendingPrompt`, and the original turn ends
+ * with zero assistant blocks — the dashboard's "Agent didn't respond" with the
+ * queued message missing from context. Re-checking `pendingPrompt` after the
+ * poll closes the window. (Follow-up to the FRI-127 queue-drain work; that fix
+ * addressed stale `resumeSessionId`, not this scheduler race.)
+ */
+export type BetweenTurnsAction = "loop" | "mail" | "park";
+
+export function nextBetweenTurnsAction(state: {
+  hasPendingPrompt: boolean;
+  stopped: boolean;
+  inboxCount: number;
+}): BetweenTurnsAction {
+  if (state.hasPendingPrompt || state.stopped) return "loop";
+  if (state.inboxCount > 0) return "mail";
+  return "park";
+}
+
+/**
+ * Poll the inbox, then decide what the between-turns loop should do — reading
+ * the pending/stopped flags AFTER the poll resolves.
+ *
+ * The post-await read is the entire fix, not an incidental detail: a `prompt`
+ * (or `stop`) IPC that lands *during* `fetchInbox()` has already lost its
+ * `wakeIdle()` (idleResolve is unset while we're awaiting here), so this read
+ * is the only thing that observes it. Snapshotting `isPromptPending()` /
+ * `isStopped()` *before* the await reopens the dropped-queued-message race.
+ * Keeping the fetch and the read together in one awaitable unit lets a test
+ * flip the pending flag from inside the injected `fetchInbox` and assert the
+ * loop services the prompt rather than parking — coverage the pure
+ * {@link nextBetweenTurnsAction} table cannot give (it never sees the ordering).
+ */
+export async function resolveBetweenTurnsStep<T extends { length: number }>(deps: {
+  isPromptPending: () => boolean;
+  isStopped: () => boolean;
+  fetchInbox: () => Promise<T>;
+}): Promise<{ action: BetweenTurnsAction; inbox: T }> {
+  const inbox = await deps.fetchInbox();
+  const action = nextBetweenTurnsAction({
+    hasPendingPrompt: deps.isPromptPending(),
+    stopped: deps.isStopped(),
+    inboxCount: inbox.length,
+  });
+  return { action, inbox };
 }
 
 type QueryOptions = NonNullable<Parameters<typeof query>[0]["options"]>;
