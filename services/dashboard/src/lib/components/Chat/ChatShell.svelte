@@ -436,7 +436,7 @@
 
   .chat-input-floating {
     position: fixed;
-    bottom: 1rem;
+    bottom: calc(1rem + env(safe-area-inset-bottom));
     left: var(--content-left);
     right: var(--page-gutter);
     background: var(--header-float-bg);
@@ -576,6 +576,6 @@
   }
 
   @media (max-width: 640px) {
-    .chat-input-floating { bottom: 0.5rem; }
+    .chat-input-floating { bottom: calc(0.5rem + env(safe-area-inset-bottom)); }
   }
 </style>
