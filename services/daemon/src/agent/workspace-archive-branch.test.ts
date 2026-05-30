@@ -178,4 +178,27 @@ describe("archiveWorkspace + branch deletion", () => {
     expect(listWorktrees()).toContain(workspacePath(name));
     archiveWorkspace(name, baseRepo, { branch });
   });
+
+  it("prunes stale git worktree registration when directory was already removed (FRI-61)", () => {
+    // Simulate the scenario that caused FRI-61: the workspace directory was
+    // removed by something outside of git (e.g. the daemon's rm -rf path),
+    // leaving a dangling worktree registration that blocks branch deletion.
+    const name = "iota";
+    const branch = "friday/iota";
+    createWorkspace({ name, baseRepo, branch });
+
+    const wt = workspacePath(name);
+    expect(listWorktrees()).toContain(wt);
+
+    // Remove the directory without telling git — this creates the stale registration.
+    rmSync(wt, { recursive: true, force: true });
+    // Git still sees it as registered.
+    expect(listWorktrees()).toContain(wt);
+
+    // archiveWorkspace must prune the stale entry even though the dir is gone.
+    archiveWorkspace(name, baseRepo, { branch });
+
+    expect(listWorktrees()).not.toContain(wt);
+    expect(listBranches()).not.toContain(branch);
+  });
 });
