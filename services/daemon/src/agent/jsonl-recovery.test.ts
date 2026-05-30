@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { asc } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 
 let handle: TestDbHandle;
@@ -576,5 +576,97 @@ describe("jsonl-recovery (FIX_FORWARD 1.3)", () => {
 
     const rows = await rawBlocks();
     expect(rows.length).toBe(1);
+  });
+});
+
+describe("jsonl-recovery file-order turn attribution", () => {
+  it("attributes a late-flushed reply to its originating turn (not recover_) and clamps its ts before the next turn", async () => {
+    // Regression for the mid-turn-injection secondary defect: a reply that the
+    // live pipeline missed and that flushed to JSONL AFTER the next user turn
+    // must still be attributed to ITS turn (by file order, not flush ts) and
+    // ordered within it — otherwise it orphans under recover_<session> with a
+    // late ts ("Agent didn't respond" + reordered conversation).
+    const cwd = "/tmp/agent-cwd-fileorder";
+    const sessionId = "sess-fileorder";
+    const T1 = new Date("2026-05-12T10:00:00.000Z");
+    const T2 = new Date("2026-05-12T10:00:02.000Z");
+
+    // The two persisted user prompts (as the dispatch path writes them).
+    await getDb()
+      .insert(schema.blocks)
+      .values([
+        {
+          blockId: "u1",
+          turnId: "t_one",
+          agentName: "alpha",
+          sessionId,
+          messageId: null,
+          blockIndex: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          contentJson: { text: "first prompt" },
+          status: "complete",
+          ts: T1,
+        },
+        {
+          blockId: "u2",
+          turnId: "t_two",
+          agentName: "alpha",
+          sessionId,
+          messageId: null,
+          blockIndex: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          contentJson: { text: "second prompt" },
+          status: "complete",
+          ts: T2,
+        },
+      ]);
+
+    // Causal file order, but reply1's flush ts (10:00:05) lands AFTER prompt2
+    // (10:00:02) — the exact late-flush shape the bug produced.
+    writeSessionJsonl(cwd, sessionId, [
+      {
+        type: "user",
+        timestamp: T1.toISOString(),
+        message: { id: "mu1", content: [{ type: "text", text: "first prompt" }] },
+      },
+      {
+        type: "assistant",
+        timestamp: "2026-05-12T10:00:05.000Z",
+        message: { id: "ma1", content: [{ type: "text", text: "reply to first" }] },
+      },
+      {
+        type: "user",
+        timestamp: T2.toISOString(),
+        message: { id: "mu2", content: [{ type: "text", text: "second prompt" }] },
+      },
+      {
+        type: "assistant",
+        timestamp: "2026-05-12T10:00:06.000Z",
+        message: { id: "ma2", content: [{ type: "text", text: "reply to second" }] },
+      },
+    ]);
+
+    const { recoverFromJsonl } = await import("./jsonl-recovery.js");
+    await recoverFromJsonl([{ agentName: "alpha", sessionId, workingDirectory: cwd }]);
+
+    const rows = await getDb()
+      .select()
+      .from(schema.blocks)
+      .where(eq(schema.blocks.role, "assistant"))
+      .orderBy(asc(schema.blocks.ts));
+    const r1 = rows.find((r) => r.messageId === "ma1")!;
+    const r2 = rows.find((r) => r.messageId === "ma2")!;
+
+    // reply1 → turn one, reply2 → turn two; NOTHING orphaned under recover_.
+    expect(r1.turnId).toBe("t_one");
+    expect(r2.turnId).toBe("t_two");
+    expect(rows.some((r) => r.turnId.startsWith("recover_"))).toBe(false);
+    // reply1's late flush ts is clamped to sort after prompt1 and before prompt2.
+    expect(r1.ts.getTime()).toBeGreaterThanOrEqual(T1.getTime());
+    expect(r1.ts.getTime()).toBeLessThan(T2.getTime());
   });
 });
