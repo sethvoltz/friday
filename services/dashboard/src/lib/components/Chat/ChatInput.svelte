@@ -955,8 +955,6 @@
       rows="1"
       autocomplete="off"
       autocapitalize="sentences"
-      spellcheck="false"
-      {...{ autocorrect: "off" }}
     ></textarea>
     <button
       type="button"
