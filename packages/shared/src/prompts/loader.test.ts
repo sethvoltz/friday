@@ -178,6 +178,57 @@ describe("default protocols by agent type", () => {
   });
 });
 
+describe("pr-links protocol (FRI-131, Option A — unconditional)", () => {
+  const PR_LINKS_HEADER = "# Protocol: PR & Issue Links";
+
+  // AC#2 — fragment loads for every agent type, with NO env precondition.
+  it.each(["orchestrator", "builder", "helper", "scheduled", "bare"] as const)(
+    "%s stack auto-includes the pr-links protocol",
+    (agentType) => {
+      const stack = readPromptStack(agentType, []);
+      expect(stack.protocols).toContain(PR_LINKS_HEADER);
+    },
+  );
+
+  // AC#3 — unconditional (no GitHub env) AND the builder-excludes-memory
+  // invariant is untouched.
+  it("loads for builder with no GitHub-related env, and does not regress the builder-excludes-memory invariant", () => {
+    const hadGhToken = process.env.GH_TOKEN;
+    const hadGithubToken = process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    try {
+      const stack = readPromptStack("builder", []);
+      // Unconditional: present even with no GitHub signal in the environment.
+      expect(stack.protocols).toContain(PR_LINKS_HEADER);
+      // Untouched invariant (loader.test.ts:164-169): builders never carry memory.
+      expect(stack.protocols).not.toContain("# Protocol: Memory");
+    } finally {
+      if (hadGhToken === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = hadGhToken;
+      if (hadGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = hadGithubToken;
+    }
+  });
+
+  // AC#4 — fragment reaches the composed prompt, positioned last (after agentBase).
+  it("reaches the composed prompt and sits after the identity block (protocols are last)", () => {
+    const composed = composeSystemPrompt(readPromptStack("orchestrator", []), {
+      agentName: "friday",
+      agentType: "orchestrator",
+    });
+    expect(composed).toContain(PR_LINKS_HEADER);
+    expect(composed.indexOf(PR_LINKS_HEADER)).toBeGreaterThan(composed.indexOf("# Identity"));
+  });
+
+  // AC#5 — no duplication when the caller also requests it explicitly.
+  it("does not duplicate the pr-links protocol when caller passes it explicitly", () => {
+    const stack = readPromptStack("orchestrator", ["pr-links"]);
+    const occurrences = stack.protocols.split(PR_LINKS_HEADER).length - 1;
+    expect(occurrences).toBe(1);
+  });
+});
+
 describe("renderLocalDatetime (FRI-52)", () => {
   beforeEach(() => {
     // Pin to a known instant: 2026-05-23 21:45:00 UTC
