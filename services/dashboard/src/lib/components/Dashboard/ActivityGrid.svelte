@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { Tooltip } from "bits-ui";
 
   interface Props {
@@ -6,6 +7,14 @@
   }
 
   let { activityByDate }: Props = $props();
+
+  let scroller: HTMLDivElement;
+
+  onMount(() => {
+    if (scroller && scroller.scrollWidth > scroller.clientWidth) {
+      scroller.scrollLeft = scroller.scrollWidth - scroller.clientWidth;
+    }
+  });
 
   const CELL = 10;
   const GAP = 3;
@@ -139,7 +148,7 @@
 </script>
 
 <Tooltip.Provider delayDuration={100}>
-  <div class="ag-wrap">
+  <div class="ag-wrap" bind:this={scroller}>
     <svg
       width={DAY_LABEL_W + gridW}
       height={18 + gridH}
