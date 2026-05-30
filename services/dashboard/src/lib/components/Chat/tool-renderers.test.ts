@@ -7,6 +7,7 @@ import {
   type ToolRendererProps,
 } from "./tool-renderers";
 import FileEditRenderer from "./FileEditRenderer.svelte";
+import MailToolBlock from "./MailToolBlock.svelte";
 
 // Sentinel renderers. We assert *identity* of the resolved object, never a
 // mount — mounting a real `.svelte` component would need the vite-svelte
@@ -19,11 +20,19 @@ const mailStub: ToolRenderer = {
   component: { __sentinel: "mail" } as unknown as Component<ToolRendererProps>,
 };
 
-// Keep the shared mutable map clean between tests.
-const originalKeys = Object.keys(TOOL_RENDERERS);
+// Snapshot the registry's module-load state (TodoWrite from FRI-133, the
+// file-edit family from FRI-134, and the four FRI-135 mail entries) so tests
+// that mutate it can restore exactly — both newly-added keys AND overwritten
+// pre-existing keys (e.g. a test that re-points `mail_send` at a stub must not
+// leak that stub into the next test).
+const originalEntries = { ...TOOL_RENDERERS };
+const originalKeys = Object.keys(originalEntries);
 afterEach(() => {
   for (const k of Object.keys(TOOL_RENDERERS)) {
     if (!originalKeys.includes(k)) delete TOOL_RENDERERS[k];
+  }
+  for (const k of originalKeys) {
+    TOOL_RENDERERS[k] = originalEntries[k]!;
   }
 });
 
@@ -40,12 +49,23 @@ describe("resolveToolRenderer", () => {
     expect(originalKeys).toContain("TodoWrite");
   });
 
-  it("registers exactly the renderer tickets' keys by default (FRI-133 + FRI-134)", () => {
-    // FRI-130 shipped the registry empty; FRI-133 (renderer A) adds TodoWrite
-    // and FRI-134 (ticket B) adds the file-edit family. With both renderer
-    // tickets landed, these five are the complete default key set.
+  it("registers exactly the renderer tickets' keys by default (FRI-133 + FRI-134 + FRI-135)", () => {
+    // FRI-130 shipped the registry empty; FRI-133 (renderer A) adds TodoWrite,
+    // FRI-134 (ticket B) adds the file-edit family, and FRI-135 (ticket C) adds
+    // the four friday-mail short names. With all three renderer tickets landed,
+    // these nine are the complete default key set.
     expect(new Set(originalKeys)).toEqual(
-      new Set(["TodoWrite", "Write", "Edit", "MultiEdit", "NotebookEdit"]),
+      new Set([
+        "TodoWrite",
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "mail_send",
+        "mail_inbox",
+        "mail_read",
+        "mail_close",
+      ]),
     );
   });
 
@@ -59,23 +79,22 @@ describe("resolveToolRenderer", () => {
   });
 
   it("maps a friday MCP tool to its short-segment key regardless of <server>", () => {
-    TOOL_RENDERERS["mail_send"] = mailStub;
+    TOOL_RENDERERS["agent_status"] = mailStub;
     // The variable `<server>` segment must not affect the key: both resolve
     // to the same short-key stub.
-    expect(resolveToolRenderer("mcp__friday-mail__mail_send")).toBe(mailStub);
-    expect(resolveToolRenderer("mcp__friday-anything__mail_send")).toBe(mailStub);
+    expect(resolveToolRenderer("mcp__friday-agents__agent_status")).toBe(mailStub);
+    expect(resolveToolRenderer("mcp__friday-anything__agent_status")).toBe(mailStub);
   });
 
-  it("does not false-positive an unregistered MCP short (mail_inbox)", () => {
-    TOOL_RENDERERS["mail_send"] = mailStub;
-    expect(resolveToolRenderer("mcp__friday-mail__mail_inbox")).toBe(undefined);
+  it("does not false-positive an unregistered MCP short", () => {
+    TOOL_RENDERERS["agent_status"] = mailStub;
+    expect(resolveToolRenderer("mcp__friday-agents__agent_inspect")).toBe(undefined);
   });
 
   it("prefers a literal raw-name registration over the MCP short segment", () => {
     // A raw name that is itself MCP-shaped resolves to its raw-name entry
     // first (raw-name-first precedence).
     TOOL_RENDERERS["mcp__friday-mail__mail_send"] = todoStub;
-    TOOL_RENDERERS["mail_send"] = mailStub;
     expect(resolveToolRenderer("mcp__friday-mail__mail_send")).toBe(todoStub);
   });
 });
@@ -101,5 +120,55 @@ describe("file-edit renderer registration (FRI-134 AC#2)", () => {
 
   it("leaves Read on the generic ToolBlock (no renderer registered)", () => {
     expect(resolveToolRenderer("Read")).toBe(undefined);
+  });
+});
+
+describe("friday-mail renderer registration (FRI-135)", () => {
+  // AC3: all four `mcp__friday-mail__mail_*` names resolve to a defined
+  // renderer whose `.component` is the SAME registered MailToolBlock
+  // reference — proving one component fronts all four tools.
+  it("resolves all four mail tools to the same MailToolBlock component", () => {
+    const send = resolveToolRenderer("mcp__friday-mail__mail_send");
+    const inbox = resolveToolRenderer("mcp__friday-mail__mail_inbox");
+    const read = resolveToolRenderer("mcp__friday-mail__mail_read");
+    const close = resolveToolRenderer("mcp__friday-mail__mail_close");
+
+    expect(send).toBeDefined();
+    expect(inbox).toBeDefined();
+    expect(read).toBeDefined();
+    expect(close).toBeDefined();
+
+    expect(send!.component).toBe(MailToolBlock);
+    expect(inbox!.component).toBe(MailToolBlock);
+    expect(read!.component).toBe(MailToolBlock);
+    expect(close!.component).toBe(MailToolBlock);
+
+    // All four point at the SAME registered reference (one component, four
+    // entries) — not four distinct components.
+    expect(inbox!.component).toBe(send!.component);
+    expect(read!.component).toBe(send!.component);
+    expect(close!.component).toBe(send!.component);
+  });
+
+  // AC4: server-segment collapsing pinned by exact value — a different
+  // `<server>` segment resolves to the SAME registered renderer (proving
+  // the `/^mcp__[^_]+__(.+)$/` short-segment key, NOT the raw namespaced
+  // name), and an unregistered built-in (`Read`) still falls back (undefined).
+  it("collapses the <server> segment and falls back for unregistered built-ins", () => {
+    const canonical = resolveToolRenderer("mcp__friday-mail__mail_send");
+    const variableServer = resolveToolRenderer("mcp__friday-anything__mail_send");
+    expect(variableServer).toBeDefined();
+    expect(variableServer!.component).toBe(MailToolBlock);
+    // Same registered reference regardless of the server segment.
+    expect(variableServer).toBe(canonical);
+
+    // An unregistered built-in still falls back to ToolBlock (undefined).
+    expect(resolveToolRenderer("Read")).toBe(undefined);
+  });
+
+  it("registers exactly the four mail short names at module load", () => {
+    for (const k of ["mail_send", "mail_inbox", "mail_read", "mail_close"]) {
+      expect(TOOL_RENDERERS[k]?.component).toBe(MailToolBlock);
+    }
   });
 });

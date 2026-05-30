@@ -174,6 +174,7 @@ The re-stamp is what makes the "natural timestamp" sort work: the POST-time `ts`
 - The registry (`TOOL_RENDERERS`) is populated one line per renderer. Registered renderers are mounted via the Svelte 5 runes-mode dynamic form (`{@const R = r.component}<R … />`), never the deprecated `<svelte:component>`. Currently registered:
   - `TodoWrite` → `TodoList.svelte` (FRI-133): renders the agent's task list directly — one row per todo in input order, with a per-status state indicator (completed = checked + `line-through`, in_progress = active marker, pending = empty) — wrapped in `CollapsibleSection` (`startOpen`, height-capped) so a long list is visible at a glance but clamped. The row label is the present-continuous `activeForm` for `in_progress` rows and the imperative `content` for `pending`/`completed`, each falling back to the other field when empty so a row never renders blank. Parsing + label/marker selection live in the pure sibling module `todo-render.ts` (unit-tested in the node pool; the rendered DOM is pinned by `e2e/todo-renderer.spec.ts`). The tool_result confirmation string is ignored — `input.todos` is the canonical state.
   - `Write` / `Edit` / `MultiEdit` / `NotebookEdit` → `FileEditRenderer.svelte` (FRI-134): the file-edit family, promoted so the diff renders directly under the tool row (see [File-edit diff renderer](#file-edit-diff-renderer-fileeditrenderer--filediff) below).
+  - `mail_send` / `mail_inbox` / `mail_read` / `mail_close` → `MailToolBlock.svelte` (FRI-135): the four friday-mail tool calls, rendered as message previews / summaries instead of the raw-JSON card (see [friday-mail renderer](#friday-mail-renderer-mailtoolblocksvelte) below).
 - Every renderer accepts the same six-prop contract (`ToolRendererProps`: `toolName`, `friendlyName?`, `status`, `input?`, `inputPartialJson?`, `output?`), spread identically into either the renderer or `ToolBlock`.
 - Do **not** key the registry on `friendlyToolName` output: it returns human labels (e.g. `"Create agent"`) for mapped friday tools, which are useless registry keys. Key on the literal name or the MCP short segment.
 
@@ -186,6 +187,16 @@ The re-stamp is what makes the "natural timestamp" sort work: the POST-time `ts`
 - **`MultiEdit`** (`edits: [{ old_string, new_string }]`) renders **K stacked hunks** — one diff group per edit, separated by a thin rule, all sharing the one cap.
 - The adapter tolerates the daemon's `{ _raw: <partialJson> }` streaming-fallback input (no `file_path`/`old_string`): the mapping yields empty props and `FileDiff` shows a placeholder rather than crashing.
 - `Read` is **not** promoted (no diff to show) — it stays on the generic `ToolBlock`. `ToolBlock` no longer mounts `FileDiff`; its old `showFileDiff` branch is removed.
+
+### friday-mail renderer (`MailToolBlock.svelte`)
+
+The four friday-mail tool **calls** — `mail_send`, `mail_inbox`, `mail_read`, `mail_close` — render through one `MailToolBlock` component (four `TOOL_RENDERERS` entries under the bare short names, branching internally on the short segment) instead of the generic raw-JSON card. It works entirely from the block data the dashboard already holds — `input` (the parsed tool-use object) and `output` (the tool-result string) — and never fetches the `mail` table.
+
+- `mail_send` → a message preview (`<dl>` of to / subject / type / priority + the body in a `CollapsibleSection`); the priority is tinted `--status-error` when `critical`, mirroring `MailBlock`. Never dumps the raw send input as JSON.
+- `mail_read` / `mail_inbox` → `JSON.parse(output)` to a `MailRow` / `MailRow[]` for a compact summary (from / subject / body, or a per-row inbox list; an empty inbox reads "Inbox empty"). Tolerates `subject === null` (renders nothing, never the literal `"null"`). On parse failure, falls back to the raw `output` text inside a `CollapsibleSection`.
+- `mail_close` → a one-line "mail #id closed" confirmation.
+- Header headline reuses `synthesizeHeadline(toolName, input)`; mid-stream (status `running`, `input` not yet populated) it falls back to a per-tool default ("Sending mail", "Checking mail inbox", …) plus the status badge, and never throws on `undefined` input/output.
+- **Out of scope:** incoming mail (`role==="user"`, `source==="mail"`) still renders via `MailBlock.svelte` — that is the agent's inbox, not its outgoing tool calls.
 
 ## Height-capped collapsible primitive
 
