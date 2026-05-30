@@ -3790,6 +3790,18 @@ export function parseBlocks(
   if (synthesized) {
     out.sort((a, b) => a.ts - b.ts);
   }
+  // Cross-agent isolation depends on every bubble carrying its owning
+  // agent: `#derivedMessages` (`if (m.agent && m.agent !== focused)`) and
+  // `applyZeroBlocks`'s merge (`if (m.agent && m.agent !== forAgent)`) only
+  // drop a legacy bubble when its `agent` tag is truthy AND mismatched.
+  // Most push sites above (text/thinking/tool/tool_result/user) omit the
+  // tag, so without this stamp those bubbles are untagged and leak into
+  // EVERY agent's chat — e.g. a builder's tool calls surface in Friday's
+  // thread even though their canonical rows are correctly attributed in
+  // the DB. parseBlocks always parses exactly one agent's rows (`agent`),
+  // so tagging the whole batch here is unambiguous and idempotent (the
+  // error / no-response synths already set the same value).
+  for (const m of out) m.agent = agent;
   return out;
 }
 

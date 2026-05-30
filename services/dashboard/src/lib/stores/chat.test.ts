@@ -1503,6 +1503,153 @@ describe("jumpTo (/jump <date|term>)", () => {
   });
 });
 
+describe("cross-agent isolation (parseBlocks agent tag)", () => {
+  // Production bug: a builder agent ("kitchen") edits its app files and
+  // those tool-call bubbles surface in a DIFFERENT agent's chat ("friday")
+  // — even though the canonical blocks rows are correctly attributed
+  // (agent_name='kitchen') in the DB. The leak is purely client-side:
+  // `#derivedMessages` and `applyZeroBlocks`'s merge both isolate agents
+  // with `if (m.agent && m.agent !== <focused>) ...`, which is a no-op
+  // unless every bubble actually carries its `agent`. parseBlocks omitted
+  // the tag on text/thinking/tool_use/tool_result/user bubbles, so they
+  // passed the falsy-agent branch and rendered for whatever agent was
+  // focused. These tests pin that every bubble kind is tagged and that the
+  // isolation guards therefore drop a foreign agent's bubbles.
+
+  function kitchenBlocks(): Parameters<typeof import("./chat.svelte").parseBlocks>[0] {
+    const base = {
+      sessionId: "sess-kitchen",
+      agentName: "kitchen",
+      turnId: "t_kitchen",
+      status: "complete" as const,
+    };
+    return [
+      {
+        ...base,
+        id: "1",
+        blockId: "k-text",
+        messageId: "m1",
+        blockIndex: 0,
+        role: "assistant",
+        kind: "text",
+        source: null,
+        contentJson: '{"text":"Editing the templates"}',
+        ts: 100,
+      },
+      {
+        ...base,
+        id: "2",
+        blockId: "k-think",
+        messageId: "m1",
+        blockIndex: 1,
+        role: "assistant",
+        kind: "thinking",
+        source: null,
+        contentJson: '{"text":"plan"}',
+        ts: 101,
+      },
+      {
+        ...base,
+        id: "3",
+        blockId: "k-tool",
+        messageId: "m1",
+        blockIndex: 2,
+        role: "assistant",
+        kind: "tool_use",
+        source: null,
+        contentJson: '{"tool_use_id":"tu1","name":"Edit","input":{"file_path":"full.html"}}',
+        ts: 102,
+      },
+      {
+        ...base,
+        id: "4",
+        blockId: "k-result",
+        messageId: null,
+        blockIndex: 3,
+        role: "assistant",
+        kind: "tool_result",
+        source: null,
+        contentJson: '{"tool_use_id":"tu1","text":"ok","is_error":false}',
+        ts: 103,
+      },
+      {
+        ...base,
+        id: "5",
+        blockId: "k-err",
+        messageId: null,
+        blockIndex: 4,
+        role: "assistant",
+        kind: "error",
+        source: null,
+        contentJson: '{"code":"x","headline":"boom","rawMessage":"boom"}',
+        ts: 104,
+      },
+    ] as Parameters<typeof import("./chat.svelte").parseBlocks>[0];
+  }
+
+  it("stamps `agent` on every bubble kind it emits", async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks(kitchenBlocks(), "kitchen");
+    // text, thinking, tool (use+result folded into one card), error.
+    expect(out.length).toBeGreaterThanOrEqual(4);
+    for (const m of out) {
+      expect(m.agent, `bubble ${m.id} (${m.role}/${m.kind ?? ""}) must carry its agent`).toBe(
+        "kitchen",
+      );
+    }
+  });
+
+  it("derivation hides a foreign agent's bubbles from the focused chat", async () => {
+    const { ChatState, parseBlocks } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    // Simulate the in-session contamination: switching kitchen → friday
+    // leaves kitchen's parsed bubbles in the legacy bucket (loadAgentTurns
+    // no longer wipes it). They must NOT render under friday.
+    chat.messages = parseBlocks(kitchenBlocks(), "kitchen");
+    expect(chat.messages, "kitchen bubbles must not leak into friday's derived view").toHaveLength(
+      0,
+    );
+  });
+
+  it("applyZeroBlocks merge drops a foreign agent's legacy bubble", async () => {
+    const { ChatState, parseBlocks } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "sess-friday");
+    // Pre-seed the legacy bucket with kitchen's bubbles (the cross-agent
+    // residue), then deliver a friday Zero snapshot. The merge must keep
+    // only friday's bubble.
+    chat.messages = parseBlocks(kitchenBlocks(), "kitchen");
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "f1",
+          block_id: "f-text",
+          turn_id: "t_friday",
+          agent_name: "friday",
+          session_id: "sess-friday",
+          message_id: "mf",
+          block_index: 0,
+          role: "assistant",
+          kind: "text",
+          source: null,
+          content_json: { text: "Friday reply" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 200,
+        } as Parameters<typeof chat.applyZeroBlocks>[0][number],
+      ],
+      "friday",
+      "complete",
+    );
+    expect(chat.messages.every((m) => m.agent === "friday")).toBe(true);
+    expect(chat.messages.some((m) => m.blockId === "f-text")).toBe(true);
+    expect(chat.messages.some((m) => m.text === "Editing the templates")).toBe(false);
+  });
+});
+
 describe("parseJumpDate", () => {
   it("today returns midnight, not noon — earliest block first", async () => {
     const { parseJumpDate } = await import("./chat.svelte");
