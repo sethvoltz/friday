@@ -13,6 +13,7 @@
   import Markdown from "$lib/components/Markdown/Markdown.svelte";
   import ToolBlock from "$lib/components/Chat/ToolBlock.svelte";
   import { friendlyToolName } from "$lib/components/Chat/tool-headlines";
+  import { resolveToolRenderer } from "$lib/components/Chat/tool-renderers";
   import { stopFooter } from "$lib/components/Chat/stop-footer";
   import ThinkingBlock from "$lib/components/Chat/ThinkingBlock.svelte";
   import MailBlock from "$lib/components/Chat/MailBlock.svelte";
@@ -610,14 +611,31 @@
           onResume={() => msg.turnId && chat.resumeTurn(msg.turnId)} />
       </div>
     {:else if msg.role === "tool"}
+      <!-- FRI-130: route through the per-tool renderer registry. A
+           registered renderer (TodoWrite/file-edit/mail — tickets A/B/C) is
+           mounted via the runes-mode dynamic form; every unregistered tool
+           falls back to the generic ToolBlock (today's behavior). The
+           registry ships empty, so this `{:else}` is the only live path. -->
+      {@const toolRenderer = resolveToolRenderer(msg.toolName ?? "")}
       <div class="message inline">
-        <ToolBlock
-          toolName={msg.toolName ?? ""}
-          friendlyName={friendlyToolName(msg.toolName ?? "")}
-          status={(msg.status === "done" || msg.status === "error" || msg.status === "aborted" ? msg.status : "running") as "running" | "done" | "error" | "aborted"}
-          input={msg.input}
-          inputPartialJson={msg.inputPartialJson}
-          output={msg.output} />
+        {#if toolRenderer}
+          {@const ToolRenderer = toolRenderer.component}
+          <ToolRenderer
+            toolName={msg.toolName ?? ""}
+            friendlyName={friendlyToolName(msg.toolName ?? "")}
+            status={(msg.status === "done" || msg.status === "error" || msg.status === "aborted" ? msg.status : "running") as "running" | "done" | "error" | "aborted"}
+            input={msg.input}
+            inputPartialJson={msg.inputPartialJson}
+            output={msg.output} />
+        {:else}
+          <ToolBlock
+            toolName={msg.toolName ?? ""}
+            friendlyName={friendlyToolName(msg.toolName ?? "")}
+            status={(msg.status === "done" || msg.status === "error" || msg.status === "aborted" ? msg.status : "running") as "running" | "done" | "error" | "aborted"}
+            input={msg.input}
+            inputPartialJson={msg.inputPartialJson}
+            output={msg.output} />
+        {/if}
       </div>
     {:else if msg.role === "thinking"}
       <div class="message inline">
