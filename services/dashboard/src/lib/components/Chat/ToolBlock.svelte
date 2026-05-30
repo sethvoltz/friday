@@ -2,7 +2,6 @@
   import { File, Wrench } from "lucide-svelte";
   import { page } from "$app/stores";
   import { synthesizeHeadline } from "./tool-headlines";
-  import FileDiff from "./FileDiff.svelte";
   import CollapsibleSection from "./CollapsibleSection.svelte";
 
   interface Props {
@@ -66,20 +65,13 @@
   // derived above falls back to `inputPartialJson`, so a running tool
   // with partial input is now expandable (it previously wasn't, because
   // canonical `input` only landed at block_complete).
+  // FRI-134: Write/Edit/MultiEdit/NotebookEdit are now promoted to the
+  // shown-directly FileEditRenderer via the tool-renderer registry, so they
+  // never reach ToolBlock. `isFileOp` stays — it still drives the File icon
+  // for `Read` and any future unregistered file-ish tool.
   let isFileOp = $derived(toolName === "Read" || toolName === "Write" || toolName === "Edit");
   let open = $state(false);
-  let showFileDiff = $derived(
-    open &&
-    (toolName === "Write" || toolName === "Edit") &&
-    input !== undefined && input !== null,
-  );
   let canExpand = $derived(hasInput || hasOutput);
-
-  function inputField(key: string): string | undefined {
-    if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
-    const v = (input as Record<string, unknown>)[key];
-    return typeof v === "string" ? v : undefined;
-  }
 
   function badgeClass(s: string): string {
     if (s === "done") return "ok";
@@ -120,16 +112,7 @@
       <span class="expand-toggle" aria-hidden="true">{open ? "−" : "+"}</span>
     {/if}
   </button>
-  {#if showFileDiff}
-    <div class="block-section">
-      <FileDiff
-        toolName={toolName as "Write" | "Edit"}
-        filePath={inputField("file_path") ?? inputField("path")}
-        content={inputField("content")}
-        oldString={inputField("old_string")}
-        newString={inputField("new_string")} />
-    </div>
-  {:else if open && hasInput}
+  {#if open && hasInput}
     <div class="block-section">
       <div class="block-label">Input</div>
       <CollapsibleSection collapsedMaxHeight={300}>
