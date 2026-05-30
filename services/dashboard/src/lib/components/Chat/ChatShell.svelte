@@ -406,7 +406,12 @@
        promotion isn't the right tool for that bug. */
     overflow-anchor: none;
     padding-top: var(--chat-top);
-    padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset));
+    /* Mirrors the floating input's bottom offset (1rem inset + safe-area)
+       PLUS the input's own height so the last message can scroll fully
+       above the input. --kb-safe-bottom is `env(safe-area-inset-bottom)`
+       normally and 0 while the soft keyboard is open (see app.css +
+       +layout.svelte visualViewport hook). */
+    padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px));
     padding-left: var(--content-left);
     padding-right: var(--page-gutter);
     background: var(--bg-primary);
@@ -436,7 +441,7 @@
 
   .chat-input-floating {
     position: fixed;
-    bottom: calc(1rem + env(safe-area-inset-bottom));
+    bottom: calc(1rem + var(--kb-safe-bottom, 0px));
     left: var(--content-left);
     right: var(--page-gutter);
     background: var(--header-float-bg);
@@ -465,7 +470,7 @@
      scrolls / receives clicks for the chat itself. */
   .jump-to-bottom-wrap {
     position: fixed;
-    bottom: calc(var(--chat-input-h, 6rem) + 3rem);
+    bottom: calc(var(--chat-input-h, 6rem) + 3rem + var(--kb-safe-bottom, 0px));
     left: var(--content-left);
     right: var(--page-gutter);
     display: flex;
@@ -576,6 +581,6 @@
   }
 
   @media (max-width: 640px) {
-    .chat-input-floating { bottom: calc(0.5rem + env(safe-area-inset-bottom)); }
+    .chat-input-floating { bottom: calc(0.5rem + var(--kb-safe-bottom, 0px)); }
   }
 </style>
