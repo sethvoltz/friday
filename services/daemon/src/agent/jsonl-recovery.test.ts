@@ -628,10 +628,26 @@ describe("jsonl-recovery file-order turn attribution", () => {
     // Causal file order, but reply1's flush ts (10:00:05) lands AFTER prompt2
     // (10:00:02) — the exact late-flush shape the bug produced.
     writeSessionJsonl(cwd, sessionId, [
-      { type: "user", timestamp: T1.toISOString(), message: { id: "mu1", content: [{ type: "text", text: "first prompt" }] } },
-      { type: "assistant", timestamp: "2026-05-12T10:00:05.000Z", message: { id: "ma1", content: [{ type: "text", text: "reply to first" }] } },
-      { type: "user", timestamp: T2.toISOString(), message: { id: "mu2", content: [{ type: "text", text: "second prompt" }] } },
-      { type: "assistant", timestamp: "2026-05-12T10:00:06.000Z", message: { id: "ma2", content: [{ type: "text", text: "reply to second" }] } },
+      {
+        type: "user",
+        timestamp: T1.toISOString(),
+        message: { id: "mu1", content: [{ type: "text", text: "first prompt" }] },
+      },
+      {
+        type: "assistant",
+        timestamp: "2026-05-12T10:00:05.000Z",
+        message: { id: "ma1", content: [{ type: "text", text: "reply to first" }] },
+      },
+      {
+        type: "user",
+        timestamp: T2.toISOString(),
+        message: { id: "mu2", content: [{ type: "text", text: "second prompt" }] },
+      },
+      {
+        type: "assistant",
+        timestamp: "2026-05-12T10:00:06.000Z",
+        message: { id: "ma2", content: [{ type: "text", text: "reply to second" }] },
+      },
     ]);
 
     const { recoverFromJsonl } = await import("./jsonl-recovery.js");
