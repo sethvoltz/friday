@@ -123,17 +123,6 @@
           tag === "TEXTAREA" ||
           (active instanceof HTMLElement && active.isContentEditable);
         setOffset(isTextField ? vv.offsetTop : 0);
-        // Soft-keyboard detection: iOS doesn't zero env(safe-area-inset-bottom)
-        // when the keyboard opens, so the floating chat input sits awkwardly
-        // above the keyboard with the home-indicator gap as dead space. The
-        // visualViewport height shrinks by the keyboard's height; a >100px
-        // delta from window.innerHeight is a reliable signal across iOS,
-        // Android, and Chrome's on-screen keyboard. The `.keyboard-open`
-        // class flips --kb-safe-bottom to 0 (see app.css), collapsing the
-        // safe-area portion so the input hugs the keyboard. No-op on
-        // desktop, where the delta never crosses the threshold.
-        const kbOpen = window.innerHeight - vv.height > 100;
-        document.documentElement.classList.toggle("keyboard-open", kbOpen);
       };
       vvUpdate();
       vv.addEventListener("resize", vvUpdate);
@@ -143,6 +132,47 @@
       document.addEventListener("focusin", vvUpdate);
       document.addEventListener("focusout", vvUpdate);
     }
+
+    // Soft-keyboard suppression — focus-based.
+    //
+    // The original height-delta detection (window.innerHeight - vv.height > 100)
+    // doesn't fire on iOS PWA standalone: innerHeight shrinks together with
+    // visualViewport.height when the keyboard opens, so the delta stays at 0
+    // and `.keyboard-open` was never applied. Bug shown by screenshot Seth
+    // sent — input pinned near the top with ~350px of dead space below it
+    // (the home-indicator inset was still active above the form-accessory
+    // bar + keyboard).
+    //
+    // Focus-based detection sidesteps the viewport math entirely: the soft
+    // keyboard is open iff a text-entry field has focus. focusout is debounced
+    // ~100ms so focus-to-focus transitions (textarea → another input without
+    // the keyboard ever dismissing) don't briefly drop the class and flash
+    // the layout.
+    const isField = (el: Element | null): boolean => {
+      if (!(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable;
+    };
+    let blurTimeout: ReturnType<typeof setTimeout> | undefined;
+    const onFocusIn = (e: FocusEvent) => {
+      if (!isField(e.target as Element | null)) return;
+      if (blurTimeout !== undefined) {
+        clearTimeout(blurTimeout);
+        blurTimeout = undefined;
+      }
+      document.documentElement.classList.add("keyboard-open");
+    };
+    const onFocusOut = () => {
+      if (blurTimeout !== undefined) clearTimeout(blurTimeout);
+      blurTimeout = setTimeout(() => {
+        blurTimeout = undefined;
+        if (!isField(document.activeElement)) {
+          document.documentElement.classList.remove("keyboard-open");
+        }
+      }, 100);
+    };
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
 
     return () => {
       clearInterval(i);
@@ -155,8 +185,11 @@
         vv.removeEventListener("scroll", vvUpdate);
         document.removeEventListener("focusin", vvUpdate);
         document.removeEventListener("focusout", vvUpdate);
-        document.documentElement.classList.remove("keyboard-open");
       }
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+      if (blurTimeout !== undefined) clearTimeout(blurTimeout);
+      document.documentElement.classList.remove("keyboard-open");
     };
   });
   // The "Daemon unreachable — retrying" banner used to live here, gated

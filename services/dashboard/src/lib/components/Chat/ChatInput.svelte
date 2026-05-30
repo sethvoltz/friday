@@ -917,7 +917,18 @@
     </div>
   {/if}
 
-  <form class="input" onsubmit={(e) => { e.preventDefault(); void submit(); }}>
+  <!--
+    No <form> ancestor on purpose. iOS shows its form-accessory bar
+    (up/down nav + Done) above the keyboard whenever a text field sits
+    inside a form alongside other focusable fields; stripping the form
+    leaves the textarea standalone, which on iOS Safari standalone (the
+    PWA case we're targeting) lets the keyboard surface without the
+    extra ~50px bar. Submission was never form-driven: hardware Enter
+    is intercepted in onKeydown above, the touch send button below now
+    fires submit() via onclick, and the textarea is not inside any
+    other form ancestor (the page shell uses <main>/<section>).
+  -->
+  <div class="input">
     <input
       bind:this={fileInput}
       type="file"
@@ -946,8 +957,9 @@
       autocapitalize="sentences"
     ></textarea>
     <button
-      type="submit"
+      type="button"
       class="icon-btn send"
+      onclick={() => void submit()}
       aria-label="Send"
       title="Send"
       disabled={(!text.trim() && pendingAttachments.filter((a) => a.status === "done").length === 0) || pendingAttachments.some((a) => a.status === "uploading")}>
@@ -965,7 +977,7 @@
         <CircleStop size={18} aria-hidden="true" />
       </button>
     {/if}
-  </form>
+  </div>
 </div>
 
 {#if confirmingCommand && confirmSummary}
