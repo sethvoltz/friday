@@ -1,4 +1,5 @@
 import type { Component } from "svelte";
+import TodoList from "./TodoList.svelte";
 
 /**
  * Per-tool render dispatch for chat tool-use blocks (FRI-130 foundation).
@@ -76,6 +77,12 @@ export type ToolRenderer = {
  * resolver immediately.
  */
 export const TOOL_RENDERERS: Record<string, ToolRenderer> = {};
+
+// FRI-133 (renderer A): TodoWrite is a built-in tool (no `mcp__` prefix), so
+// it resolves at step (1) of `resolveToolRenderer` on its literal name — the
+// registry key stays `"TodoWrite"`. Renders the task list directly instead of
+// the generic collapsed JSON card.
+TOOL_RENDERERS["TodoWrite"] = { component: TodoList };
 
 const MCP_TOOL_RE = /^mcp__[^_]+__(.+)$/;
 
