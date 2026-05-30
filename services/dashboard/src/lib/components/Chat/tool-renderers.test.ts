@@ -6,6 +6,7 @@ import {
   type ToolRenderer,
   type ToolRendererProps,
 } from "./tool-renderers";
+import FileEditRenderer from "./FileEditRenderer.svelte";
 
 // Sentinel renderers. We assert *identity* of the resolved object, never a
 // mount — mounting a real `.svelte` component would need the vite-svelte
@@ -32,9 +33,20 @@ describe("resolveToolRenderer", () => {
   });
 
   it("ships the TodoWrite renderer registered by default (FRI-133)", () => {
-    // FRI-130 shipped this map empty; FRI-133 (renderer A) registers the
-    // first real entry on the literal built-in key "TodoWrite".
-    expect(Object.keys(TOOL_RENDERERS)).toEqual(["TodoWrite"]);
+    // FRI-130 shipped this map empty; FRI-133 (renderer A) registers an entry
+    // on the literal built-in key "TodoWrite". After FRI-134 (ticket B) the
+    // registry also carries the file-edit family, so assert membership of the
+    // TodoWrite key rather than the whole key set.
+    expect(originalKeys).toContain("TodoWrite");
+  });
+
+  it("registers exactly the renderer tickets' keys by default (FRI-133 + FRI-134)", () => {
+    // FRI-130 shipped the registry empty; FRI-133 (renderer A) adds TodoWrite
+    // and FRI-134 (ticket B) adds the file-edit family. With both renderer
+    // tickets landed, these five are the complete default key set.
+    expect(new Set(originalKeys)).toEqual(
+      new Set(["TodoWrite", "Write", "Edit", "MultiEdit", "NotebookEdit"]),
+    );
   });
 
   it("resolves a built-in tool by its literal name once registered", () => {
@@ -65,5 +77,29 @@ describe("resolveToolRenderer", () => {
     TOOL_RENDERERS["mcp__friday-mail__mail_send"] = todoStub;
     TOOL_RENDERERS["mail_send"] = mailStub;
     expect(resolveToolRenderer("mcp__friday-mail__mail_send")).toBe(todoStub);
+  });
+});
+
+describe("file-edit renderer registration (FRI-134 AC#2)", () => {
+  it("resolves all four file-edit tools to the SAME FileEditRenderer entry", () => {
+    const write = resolveToolRenderer("Write");
+    const edit = resolveToolRenderer("Edit");
+    const multi = resolveToolRenderer("MultiEdit");
+    const notebook = resolveToolRenderer("NotebookEdit");
+
+    // Object identity — one shared ToolRenderer instance backs all four keys.
+    expect(write).toBeDefined();
+    expect(edit).toBe(write);
+    expect(multi).toBe(write);
+    expect(notebook).toBe(write);
+
+    // The component is the real FileEditRenderer (not a stub, not ToolBlock).
+    expect(write!.component).toBe(FileEditRenderer);
+    // Marked shown-directly.
+    expect(write!.direct).toBe(true);
+  });
+
+  it("leaves Read on the generic ToolBlock (no renderer registered)", () => {
+    expect(resolveToolRenderer("Read")).toBe(undefined);
   });
 });
