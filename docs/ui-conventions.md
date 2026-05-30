@@ -20,6 +20,13 @@ history submenus, the mobile sidebar trigger, evolve proposal rows.
 - Chevrons remain fine for **direction-of-travel** indicators (next page,
   breadcrumb separators) — those aren't disclosure.
 
+The chat surface bakes this convention into a reusable primitive,
+`CollapsibleSection.svelte` (see `docs/chat-ux.md`): it renders the `+` / `−`
+glyph with `aria-hidden="true"`, carries `aria-expanded` on the button, and
+caps collapsed content to a `collapsedMaxHeight` prop. New chat renderers
+should wrap their directly-shown body in it rather than re-deriving the toggle
+plus a magic max-height.
+
 ## Agent-type glyphs (sidebar)
 
 The Sidebar renders each agent's type as a Lucide glyph, color-tinted

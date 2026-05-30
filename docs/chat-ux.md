@@ -165,6 +165,19 @@ The re-stamp is what makes the "natural timestamp" sort work: the POST-time `ts`
 - Plugin slots in `packages/shared/src/markdown/plugins.ts` for future KaTeX + Mermaid (see `docs/roadmap.md`).
 - Server sends raw markdown text; client renders + sanitizes. One sanitization layer.
 
+## Tool-block rendering dispatch
+
+`ChatMessages.svelte` routes every `role === "tool"` block through a per-tool renderer registry (`$lib/components/Chat/tool-renderers.ts`) instead of a growing inline `toolName === …` chain.
+
+- `resolveToolRenderer(toolName)` looks up a purpose-built renderer: first by the raw `toolName` (built-in literal, e.g. `TodoWrite` / `Write` / `Edit`), then by the MCP **short segment** captured from `/^mcp__[^_]+__(.+)$/` (e.g. `mail_send` for `mcp__friday-<server>__mail_send`, for any `<server>`). It returns `undefined` when nothing is registered, and the dispatch site falls back to the generic `ToolBlock` — so unregistered tools render exactly as before.
+- The registry (`TOOL_RENDERERS`) ships **empty**; downstream renderer tickets register one line each. Registered renderers are mounted via the Svelte 5 runes-mode dynamic form (`{@const R = r.component}<R … />`), never the deprecated `<svelte:component>`.
+- Every renderer accepts the same six-prop contract (`ToolRendererProps`: `toolName`, `friendlyName?`, `status`, `input?`, `inputPartialJson?`, `output?`), spread identically into either the renderer or `ToolBlock`.
+- Do **not** key the registry on `friendlyToolName` output: it returns human labels (e.g. `"Create agent"`) for mapped friday tools, which are useless registry keys. Key on the literal name or the MCP short segment.
+
+## Height-capped collapsible primitive
+
+`CollapsibleSection.svelte` is the shared "shown-directly, height-capped, expand-for-more" primitive. Content renders directly (not buried behind a separate disclosure click); when collapsed it is clamped to `collapsedMaxHeight` px (default 320) with `overflow-y: auto`, and a `+` / `−` control toggles to full height. It encodes the [disclosure-glyph convention](ui-conventions.md) (`aria-hidden` glyph, `aria-expanded` button, no chevrons) and exposes `open` as `$bindable` so a renderer can read/drive expansion. `FileDiff` (400px) and `ToolBlock` input/output bodies (300px) are refactored onto it; `ThinkingBlock` and `MailBlock` still hand-roll their own toggles until a renderer needs them.
+
 ## Sub-agent reference rendering
 
 When `agent_lifecycle event="spawn"` arrives during an in-flight orchestrator turn, the chat appends a markdown blockquote with the spawned agent's name + a clickable affordance. The Sidebar separately picks up the new agent via the registry; click-to-focus switches the chat pane.

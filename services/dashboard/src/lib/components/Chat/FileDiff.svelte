@@ -3,6 +3,7 @@
   import type { Change } from "diff";
   import { theme } from "$lib/stores/theme.svelte";
   import { shikiThemeFor } from "$lib/theme/palettes";
+  import CollapsibleSection from "./CollapsibleSection.svelte";
 
   interface Props {
     toolName: "Write" | "Edit";
@@ -13,7 +14,11 @@
   }
   let { toolName, filePath, content, oldString, newString }: Props = $props();
 
-  let open = $state(true);
+  // Expansion state is owned by CollapsibleSection (FRI-130) and bound back
+  // here so the shiki `$effect` gate below can lazy-load the highlighter
+  // only when the content is actually revealed. Defaults expanded to match
+  // FileDiff's prior `open = $state(true)` behavior.
+  let expanded = $state(true);
 
   function langFromPath(p: string | undefined): string {
     if (!p) return "text";
@@ -53,7 +58,7 @@
   });
 
   $effect(() => {
-    if (!open || toolName !== "Write" || !content) return;
+    if (!expanded || toolName !== "Write" || !content) return;
     if (highlightedHtml !== null) return;
     const lang = langFromPath(filePath);
     const shikiTheme = shikiThemeFor(theme.activePalette);
@@ -124,18 +129,11 @@
 </script>
 
 <div class="file-diff">
-  <button
-    type="button"
-    class="diff-toggle"
-    onclick={() => (open = !open)}
-    aria-expanded={open}>
-    <span class="glyph" aria-hidden="true">{open ? "−" : "+"}</span>
-    <span class="diff-label">
-      {toolName === "Write" ? "View content" : "View diff"}
-    </span>
-  </button>
-
-  {#if open}
+  <CollapsibleSection
+    label={toolName === "Write" ? "View content" : "View diff"}
+    collapsedMaxHeight={400}
+    startOpen={true}
+    bind:open={expanded}>
     {#if toolName === "Write"}
       <div class="code-block">
         <pre class="block-pre"><code class="shiki-wrap" data-lang={langFromPath(filePath)}>{#if highlightedHtml !== null}{@html highlightedHtml}{:else}{content ?? ""}{/if}</code></pre>
@@ -188,45 +186,17 @@
         </div>
       {/if}
     {/if}
-  {/if}
+  </CollapsibleSection>
 </div>
 
 <style>
   .file-diff {
     margin-top: 0.25rem;
   }
-  .diff-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    background: transparent;
-    border: none;
-    color: var(--text-tertiary);
-    font: inherit;
-    font-size: 0.75rem;
-    cursor: pointer;
-    padding: 0.15rem 0.4rem;
-    border-radius: var(--radius-sm);
-  }
-  .diff-toggle:hover {
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-  }
-  .glyph {
-    font-family: var(--font-mono);
-    font-size: 1rem;
-    line-height: 1;
-    width: 1rem;
-    text-align: center;
-  }
-  .diff-label {
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: 600;
-  }
 
-  /* Write: code block */
+  /* Write: code block. The vertical height cap + scroll is owned by the
+     wrapping CollapsibleSection (FRI-130, collapsedMaxHeight=400); this pre
+     only needs horizontal scroll. */
   .code-block {
     margin-top: 0.35rem;
   }
@@ -236,8 +206,6 @@
     background: var(--bg-code);
     border-radius: var(--radius-sm);
     overflow-x: auto;
-    max-height: 400px;
-    overflow-y: auto;
   }
   .shiki-wrap {
     font-family: var(--font-mono);
@@ -272,8 +240,6 @@
     margin-top: 0.35rem;
     border-radius: var(--radius-sm);
     overflow: hidden;
-    max-height: 400px;
-    overflow-y: auto;
     font-family: var(--font-mono);
     font-size: 0.78rem;
   }
@@ -285,8 +251,6 @@
       margin-top: 0.35rem;
       border-radius: var(--radius-sm);
       overflow: hidden;
-      max-height: 400px;
-      overflow-y: auto;
       font-family: var(--font-mono);
       font-size: 0.78rem;
     }

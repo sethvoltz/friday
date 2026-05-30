@@ -3,6 +3,7 @@
   import { page } from "$app/stores";
   import { synthesizeHeadline } from "./tool-headlines";
   import FileDiff from "./FileDiff.svelte";
+  import CollapsibleSection from "./CollapsibleSection.svelte";
 
   interface Props {
     toolName: string;
@@ -131,13 +132,17 @@
   {:else if open && hasInput}
     <div class="block-section">
       <div class="block-label">Input</div>
-      <pre class="block-pre"><code>{inputText}</code></pre>
+      <CollapsibleSection collapsedMaxHeight={300}>
+        <pre class="block-pre"><code>{inputText}</code></pre>
+      </CollapsibleSection>
     </div>
   {/if}
   {#if open && hasOutput}
     <div class="block-section">
       <div class="block-label">Output</div>
-      <pre class="block-pre"><code>{output}</code></pre>
+      <CollapsibleSection collapsedMaxHeight={300}>
+        <pre class="block-pre"><code>{output}</code></pre>
+      </CollapsibleSection>
     </div>
   {/if}
 </div>
@@ -230,13 +235,14 @@
     margin-bottom: 0.25rem;
   }
   .block-pre {
+    /* Vertical height cap + scroll is owned by the wrapping
+       CollapsibleSection (FRI-130, collapsedMaxHeight=300); this pre only
+       needs horizontal scroll. */
     margin: 0;
     padding: 0.5rem 0.6rem;
     background: var(--bg-code);
     border-radius: var(--radius-sm);
     overflow-x: auto;
-    max-height: 300px;
-    overflow-y: auto;
   }
   .block-pre code {
     font-family: var(--font-mono);
