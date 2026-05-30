@@ -10,6 +10,7 @@
   import { applyCodeHighlight } from "@friday/shared/markdown/code-highlight";
   import { theme } from "$lib/stores/theme.svelte";
   import { mermaidThemeFor, shikiThemeFor } from "$lib/theme/palettes";
+  import { linkTargetAttrs } from "./link-target";
   import "katex/dist/katex.min.css";
 
   let {
@@ -140,19 +141,21 @@
   }
 
   // Absolute URLs (scheme: or protocol-relative //) open in a new tab so the
-  // dashboard isn't replaced when the user clicks an external reference.
+  // dashboard isn't replaced when the user clicks an external reference (e.g. a
+  // GitHub PR link an agent emitted via the pr-links protocol — FRI-131).
   // Relative paths (`/foo`, `./foo`, `#hash`) stay in the same tab so internal
-  // SvelteKit navigation keeps working.
-  const ABSOLUTE_HREF = /^([a-z][a-z0-9+.\-]*:|\/\/)/i;
+  // SvelteKit navigation keeps working. The absolute-vs-relative decision lives
+  // in `linkTargetAttrs` (./link-target) so it is unit-testable without a DOM.
   function processLinks() {
     if (!container) return;
     const anchors = container.querySelectorAll<HTMLAnchorElement>("a[href]");
     for (const a of anchors) {
       if (a.dataset.linkProcessed) continue;
       const href = a.getAttribute("href") ?? "";
-      if (ABSOLUTE_HREF.test(href)) {
-        a.setAttribute("target", "_blank");
-        a.setAttribute("rel", "noopener noreferrer");
+      const attrs = linkTargetAttrs(href);
+      if (attrs) {
+        a.setAttribute("target", attrs.target);
+        a.setAttribute("rel", attrs.rel);
       }
       a.dataset.linkProcessed = "1";
     }

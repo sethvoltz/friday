@@ -164,6 +164,7 @@ The re-stamp is what makes the "natural timestamp" sort work: the POST-time `ts`
 - `<memory-context>`, `<skill-context>`, `<attachment>` blocks are stripped from rendered display.
 - Plugin slots in `packages/shared/src/markdown/plugins.ts` for future KaTeX + Mermaid (see `docs/roadmap.md`).
 - Server sends raw markdown text; client renders + sanitizes. One sanitization layer.
+- Links: a post-render pass (`processLinks` in `Markdown.svelte`) opens **absolute** hrefs (`scheme:` or protocol-relative `//`) in a new tab with `target="_blank" rel="noopener noreferrer"`; relative/internal paths (`/foo`, `#hash`) stay in the same tab so SvelteKit navigation keeps working. The absolute-vs-relative decision is the pure `linkTargetAttrs` helper (`link-target.ts`), unit-tested without a DOM. Agents emit GitHub PR/issue references as full markdown links (`[#123](https://github.com/owner/repo/pull/123)`) via the `pr-links` protocol (FRI-131), so a `#123` mention renders clickable; bare `#123` is **not** auto-linked.
 
 ## Tool-block rendering dispatch
 

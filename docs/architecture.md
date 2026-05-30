@@ -137,7 +137,7 @@ agent-friday/
         prompts/
           CONSTITUTION.md
           agents/{orchestrator,builder,helper,scheduled,bare}.md
-          protocols/linear.md
+          protocols/{memory.md, linear.md, pr-links.md}
           fragments/{soul.default.md, auto-recall-header.md}
           skills/                   # built-in skills (empty in v1)
         services/                   # mail, tickets, attachments, turns, usage
@@ -330,7 +330,13 @@ Every agent's system prompt is composed in this order:
 1. `CONSTITUTION.md` — inviolate rules, source-only.
 2. `SOUL.md` — identity, user-overridable at `~/.friday/SOUL.md`.
 3. `agents/<type>.md` — role-specific behavior.
-4. `protocols/*.md` — situational integration protocols.
+4. `protocols/*.md` — situational integration protocols (the final element).
+
+`readPromptStack` (in `@friday/shared`) selects protocols per agent type from three sources, deduped in order: `DEFAULT_PROTOCOLS_BY_TYPE` (type-defaults), `envGatedProtocols()` (loaded only when a backing integration is configured), and any caller-requested names. Current fragments:
+
+- `protocols/memory.md` — type-default for `orchestrator`/`scheduled`/`bare` (the save-side memory framework; builders/helpers are read-only and skip it).
+- `protocols/linear.md` — env-gated: loads for **every** type when `LINEAR_API_KEY` is set.
+- `protocols/pr-links.md` (FRI-131) — type-default for **all five** types, unconditional. Teaches agents to emit GitHub PR/issue references as clickable markdown links (`[#123](https://github.com/owner/repo/pull/123)`) rather than bare `#123` text, resolving the repo URL from their own worktree via `gh`/`git remote`. It is intentionally not env-gated (Friday reads no `GH_TOKEN`/`GITHUB_TOKEN`); the fragment self-guards by telling the agent to fall back to bare text when no GitHub remote exists. The dashboard markdown renderer needs no change — `marked` + DOMPurify already pass the link through, and `processLinks` opens absolute hrefs in a new tab.
 
 Then per turn:
 

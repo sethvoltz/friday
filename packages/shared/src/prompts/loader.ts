@@ -34,13 +34,23 @@ export type AgentBaseKey = "orchestrator" | "builder" | "helper" | "scheduled" |
  * framework. Builders are read-only and helpers are scoped, so they pick up
  * memory recall behavior from their own agent prompts without the full
  * save-side guidance.
+ *
+ * `pr-links` loads unconditionally for every type (FRI-131): any agent whose
+ * output can reach a human through the dashboard markdown renderer should emit
+ * GitHub PR/issue references as clickable markdown links rather than bare
+ * `#123` text. It is intentionally NOT env-gated — Friday has no daemon-level
+ * "GitHub is in use" signal (no `GH_TOKEN`/`GITHUB_TOKEN` is read anywhere), so
+ * gating on a never-set var would mean the fragment never loads. The fragment
+ * self-guards instead: it tells the agent to fall back to bare `#123` when
+ * `gh`/`git remote` fails (no GitHub remote), so it is harmless to carry for an
+ * agent on a repo with no GitHub origin.
  */
 const DEFAULT_PROTOCOLS_BY_TYPE: Record<AgentBaseKey, readonly string[]> = {
-  orchestrator: ["memory"],
-  scheduled: ["memory"],
-  builder: [],
-  helper: [],
-  bare: ["memory"],
+  orchestrator: ["memory", "pr-links"],
+  scheduled: ["memory", "pr-links"],
+  builder: ["pr-links"],
+  helper: ["pr-links"],
+  bare: ["memory", "pr-links"],
 };
 
 /**
