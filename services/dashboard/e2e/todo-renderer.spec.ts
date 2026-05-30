@@ -17,6 +17,16 @@
  * message, and `ChatMessages` routes it through `resolveToolRenderer`
  * ("TodoWrite" hits step 1 on its literal key) → the TodoList renderer.
  *
+ * Session match is load-bearing: the chat view binds the Zero `blocks`
+ * slice by `agent_name` alone (zero.svelte.ts `bindBlocksFor`), then
+ * `filterRowsToCurrentSession` (chat.svelte.ts) drops every row whose
+ * `session_id` differs from the focused agent's `agents.session_id`. So
+ * `seedTodoBlock` pins the block's `session_id` to the same value it writes
+ * onto the `friday` agent's `session_id` (and UPSERTs that agent row with
+ * DO UPDATE). Seeding a block on a session the agent isn't on renders
+ * nothing — the row replicates fine but the client filters it out, which is
+ * what made the first cut of this spec time out at 0 rows.
+ *
  * Asserts:
  *   - N items → N rows: the 5-item fixture renders exactly 5
  *     `[data-todo-status]` rows (3 one-per-status + 2 blank-field);
@@ -81,14 +91,24 @@ async function seedTodoBlock(databaseUrl: string): Promise<void> {
   await c.connect();
   try {
     const now = new Date();
-    // Idempotent agent row — `friday` is the default focused agent.
-    await c.query(
-      `INSERT INTO agents (name, type, status, created_at, updated_at)
-         VALUES ('friday', 'orchestrator', 'idle', $1, $1)
-         ON CONFLICT (name) DO NOTHING`,
-      [now],
-    );
     const blockId = `fri133-todo-${Date.now()}`;
+    // The block's session MUST equal the focused agent's current
+    // `agents.session_id`: the chat view binds the Zero `blocks` slice by
+    // `agent_name` only, then `filterRowsToCurrentSession` (chat.svelte.ts)
+    // drops every row whose `session_id !== agents.session_id`. A block on a
+    // session the agent isn't currently on renders NOTHING — which is why the
+    // first cut of this spec (random per-block session, agent session left
+    // NULL) timed out at 0 rows even with healthy Zero sync. So we pin both to
+    // the same id and UPSERT the agent's `session_id` (DO UPDATE, not DO
+    // NOTHING — a pre-existing `friday` row from another suite would otherwise
+    // keep its own/NULL session and re-orphan the block).
+    const sessionId = `sess-${blockId}`;
+    await c.query(
+      `INSERT INTO agents (name, type, status, session_id, created_at, updated_at)
+         VALUES ('friday', 'orchestrator', 'idle', $2, $1, $1)
+         ON CONFLICT (name) DO UPDATE SET session_id = $2, updated_at = $1`,
+      [now, sessionId],
+    );
     const content = {
       name: "TodoWrite",
       input: { todos: TODOS },
@@ -103,7 +123,7 @@ async function seedTodoBlock(databaseUrl: string): Promise<void> {
        VALUES
          ($1, $1, $2, 'friday', $3, 0,
           'assistant', 'tool_use', 'sdk', $4, 'complete', false, $5)`,
-      [blockId, `turn-${blockId}`, `sess-${blockId}`, JSON.stringify(content), now],
+      [blockId, `turn-${blockId}`, sessionId, JSON.stringify(content), now],
     );
   } finally {
     await c.end();
