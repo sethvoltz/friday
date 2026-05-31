@@ -12,6 +12,7 @@
  * the install.
  */
 
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
@@ -20,6 +21,25 @@ import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import * as registry from "../agent/registry.js";
 import { archiveAgent as lifecycleArchiveAgent } from "../agent/lifecycle.js";
+
+type PackageManager = "pnpm" | "yarn" | "npm";
+
+/** Hard ceiling for a dependency install. SIGTERM at the deadline, SIGKILL 5s after. */
+const DEP_INSTALL_TIMEOUT_MS = 5 * 60_000;
+/** Cap stdout/stderr captured in the install result so a noisy install doesn't blow up the HTTP response. */
+const DEP_INSTALL_OUTPUT_TAIL_BYTES = 4_000;
+
+export type DependencyInstallOutcome =
+  | { ran: false }
+  | {
+      ran: true;
+      packageManager: PackageManager;
+      exitCode: number;
+      stdout: string;
+      stderr: string;
+      durationMs: number;
+      warning?: string;
+    };
 
 export class AppInstallError extends Error {
   constructor(
@@ -49,6 +69,7 @@ export interface InstallResult {
   agents: { name: string; type: "bare" | "scheduled" }[];
   schedules: { name: string; cron: string }[];
   mcpServers: { name: string }[];
+  dependencies: DependencyInstallOutcome;
 }
 
 /**
@@ -306,6 +327,7 @@ export async function installApp(
 
   // Post-commit: best-effort side effects. None of these may unwind.
   ensureGitignore(folderPath);
+  const dependencies = await installAppDependencies(folderPath, manifest.id);
   eventBus.publish({
     v: 1,
     type: "app_lifecycle",
@@ -318,6 +340,8 @@ export async function installApp(
     version: manifest.version,
     reinstall: isReinstall,
     adopt: opts.adopt ?? false,
+    depsRan: dependencies.ran,
+    depsWarning: dependencies.ran ? (dependencies.warning ?? null) : null,
   });
 
   return {
@@ -328,7 +352,136 @@ export async function installApp(
     agents: manifest.agents.map((a) => ({ name: a.name, type: a.type })),
     schedules: manifest.schedules.map((s) => ({ name: s.name, cron: s.cron })),
     mcpServers: manifest.mcpServers.map((m) => ({ name: m.name })),
+    dependencies,
   };
+}
+
+/**
+ * Run `<pkg-mgr> install` inside the app folder when it ships a `package.json`.
+ *
+ * Lock-file detection picks the manager: pnpm-lock.yaml → pnpm, yarn.lock → yarn,
+ * package-lock.json → npm, no lockfile → npm fallback. Failures (non-zero exit,
+ * timeout, ENOENT) warn-and-continue: the app row is already committed, so we
+ * surface the warning in the result rather than tear down state we can't safely
+ * roll back. App `package.json` lifecycle scripts (postinstall etc.) DO run —
+ * the user trusted the folder by installing it.
+ */
+async function installAppDependencies(
+  folderPath: string,
+  appId: string,
+): Promise<DependencyInstallOutcome> {
+  if (!existsSync(join(folderPath, "package.json"))) return { ran: false };
+  const manager = detectPackageManager(folderPath);
+  const startedAt = Date.now();
+  const outcome = await runInstallProcess(manager, folderPath);
+  const durationMs = Date.now() - startedAt;
+  const result: DependencyInstallOutcome = {
+    ran: true,
+    packageManager: manager,
+    exitCode: outcome.exitCode,
+    stdout: tailOutput(outcome.stdout),
+    stderr: tailOutput(outcome.stderr),
+    durationMs,
+    warning: outcome.warning,
+  };
+  if (outcome.warning) {
+    logger.log("warn", "apps.install.deps.error", {
+      id: appId,
+      folderPath,
+      packageManager: manager,
+      exitCode: outcome.exitCode,
+      durationMs,
+      message: outcome.warning,
+    });
+  } else {
+    logger.log("info", "apps.install.deps", {
+      id: appId,
+      folderPath,
+      packageManager: manager,
+      durationMs,
+    });
+  }
+  return result;
+}
+
+function detectPackageManager(folderPath: string): PackageManager {
+  if (existsSync(join(folderPath, "pnpm-lock.yaml"))) return "pnpm";
+  if (existsSync(join(folderPath, "yarn.lock"))) return "yarn";
+  if (existsSync(join(folderPath, "package-lock.json"))) return "npm";
+  return "npm";
+}
+
+interface RawInstallOutcome {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  warning?: string;
+}
+
+function runInstallProcess(manager: PackageManager, cwd: string): Promise<RawInstallOutcome> {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    const settle = (outcome: RawInstallOutcome) => {
+      if (settled) return;
+      settled = true;
+      resolve(outcome);
+    };
+
+    const child = spawn(manager, ["install"], {
+      cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      // Grace period before SIGKILL so the manager can flush cache state.
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // already dead
+        }
+      }, 5_000).unref();
+    }, DEP_INSTALL_TIMEOUT_MS);
+    timer.unref();
+
+    child.stdout?.on("data", (b: Buffer) => {
+      stdout += b.toString("utf8");
+    });
+    child.stderr?.on("data", (b: Buffer) => {
+      stderr += b.toString("utf8");
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      settle({
+        exitCode: -1,
+        stdout,
+        stderr: stderr ? `${stderr}\nspawn error: ${err.message}` : `spawn error: ${err.message}`,
+        warning: `failed to spawn ${manager}: ${err.message}`,
+      });
+    });
+    child.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      const exitCode = code ?? (signal ? -1 : 0);
+      const ok = !timedOut && code === 0;
+      const warning = timedOut
+        ? `dependency install timed out after ${DEP_INSTALL_TIMEOUT_MS / 1000}s; killed`
+        : ok
+          ? undefined
+          : `${manager} install exited with code ${exitCode}${signal ? ` (signal ${signal})` : ""}`;
+      settle({ exitCode, stdout, stderr, warning });
+    });
+  });
+}
+
+function tailOutput(s: string): string {
+  if (s.length <= DEP_INSTALL_OUTPUT_TAIL_BYTES) return s;
+  return `…[truncated ${s.length - DEP_INSTALL_OUTPUT_TAIL_BYTES} bytes]…\n${s.slice(-DEP_INSTALL_OUTPUT_TAIL_BYTES)}`;
 }
 
 export type FolderDisposition = "archive" | "keep" | "delete";
