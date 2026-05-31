@@ -5,8 +5,8 @@ Friday is mobile-first, not mobile-responsive-as-an-afterthought. Every page is 
 ## Layout primitives
 
 - **Fixed header** on all viewports. No bottom tab bar.
-- **Mobile (≤ 768px):** hamburger collapse menu. Sidebar collapses behind a sheet/drawer triggered from the chat header. Friday 👑 always at the top of the drawer.
-- **Desktop:** **priority+ navigation** on the right of the header. `ResizeObserver` measures item widths and splits visible / overflow buckets on every resize tick. `More` only mounts when the overflow bucket is non-empty.
+- **Header nav — one unified priority+ mechanism at every width.** Links live in `.header-right` and overflow **one at a time** into a `More` menu as the header narrows; on a phone every link ends up in `More` (which reads as the hamburger), so there is no separate breakpoint that dumps the whole nav at once. The `More` button only mounts when the overflow bucket is non-empty. Sidebar collapses behind a sheet/drawer triggered from the chat header. Friday 👑 always at the top of the drawer.
+  - **Bounce-free by construction.** An off-screen ghost copy of the links supplies intrinsic widths; the available-width signal is `.header-right`'s box width — the flex _leftover_ after the content-stable `header-left`, which does **not** change when a link moves between the visible row and `More`. That severs the classic priority+ feedback loop (hide a link → container widens → link reappears → oscillate), so the visible count is a pure, monotonic function of the measured width. See `services/dashboard/src/routes/+layout.svelte`.
 
 ## List pages
 
