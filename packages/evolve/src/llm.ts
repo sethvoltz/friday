@@ -160,28 +160,39 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
 }
 
 /**
- * Extract a JSON object from a chat reply. Strips ```json fences and tolerates
+ * Extract a JSON object from a chat reply. Tolerates ```json fences and
  * surrounding prose. Throws with the raw text on failure.
+ *
+ * Strategy (FRI-64): direct `JSON.parse` happy path, then a string-/escape-
+ * aware bracket-balanced walk over the raw text. A previous non-greedy
+ * `/```(?:json)?\s*([\s\S]*?)```/` capture truncated replies whenever the
+ * JSON body contained an inner markdown code fence (LLM-emitted "Suggested
+ * change" sections routinely do): the regex closed on the first inner ```
+ * instead of the outer one, the truncated candidate failed `JSON.parse`, and
+ * the bracket-balance fallback then walked the same truncated text and never
+ * found a matching `}`. The bracket-balance walk is robust enough on its own
+ * — fence prefixes are skipped because we start at the first `{`, and inner
+ * backticks live inside JSON strings where `inString=true` ignores them.
  */
 export function extractJson<T>(text: string): T {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const candidate = (fenced ? fenced[1] : text).trim();
+  const trimmed = text.trim();
 
+  // Happy path: the trimmed reply IS the JSON object.
   try {
-    return JSON.parse(candidate) as T;
+    return JSON.parse(trimmed) as T;
   } catch {
-    // Fall through to bracket-balanced extraction.
+    // Fall through to bracket-balanced extraction on the raw text.
   }
 
-  const start = candidate.indexOf("{");
+  const start = trimmed.indexOf("{");
   if (start === -1) {
     throw new Error(`No JSON object found in LLM reply:\n${text}`);
   }
   let depth = 0;
   let inString = false;
   let escape = false;
-  for (let i = start; i < candidate.length; i++) {
-    const ch = candidate[i];
+  for (let i = start; i < trimmed.length; i++) {
+    const ch = trimmed[i];
     if (escape) {
       escape = false;
       continue;
@@ -199,7 +210,7 @@ export function extractJson<T>(text: string): T {
     else if (ch === "}") {
       depth--;
       if (depth === 0) {
-        const slice = candidate.slice(start, i + 1);
+        const slice = trimmed.slice(start, i + 1);
         try {
           return JSON.parse(slice) as T;
         } catch (err) {
