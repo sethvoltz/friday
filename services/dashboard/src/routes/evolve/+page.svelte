@@ -9,11 +9,14 @@
   } from "@friday/evolve";
   import { invalidateAll } from "$app/navigation";
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
+  import Toggle from "$lib/components/Toggle/Toggle.svelte";
+  import { KEYS, loadJSON, saveJSON } from "$lib/stores/persistent";
   import {
     useZero,
     zeroSync,
     type ZeroEvolveProposalRow,
   } from "$lib/stores/zero.svelte";
+  import { countActionable, filterProposals } from "./filter.js";
 
   let { data }: { data: PageData } = $props();
 
@@ -61,6 +64,18 @@
   let expanded = $state<Set<string>>(new Set());
   let busy = $state<string | null>(null);
   let toast = $state<{ msg: string; kind: "info" | "ok" | "err" } | null>(null);
+
+  // View pref: when off (default), terminal-status proposals (applied,
+  // rejected, superseded) are hidden so the list shows only actionable
+  // work. Persisted to localStorage; an effect mirrors changes back.
+  let showCompleted = $state<boolean>(
+    loadJSON<boolean>(KEYS.evolveShowCompleted, false),
+  );
+  $effect(() => {
+    saveJSON(KEYS.evolveShowCompleted, showCompleted);
+  });
+  const visibleProposals = $derived(filterProposals(proposals, showCompleted));
+  const actionableCount = $derived(countActionable(proposals));
 
   function showToast(msg: string, kind: "info" | "ok" | "err" = "ok") {
     toast = { msg, kind };
@@ -342,7 +357,17 @@
 <div class="card">
   <div class="card-header">
     <h2>Proposals</h2>
-    <span class="stat-detail">{proposals.length} total</span>
+    <div class="header-controls">
+      <span class="stat-detail">
+        {proposals.length} total{#if !showCompleted && actionableCount !== proposals.length}
+          <span class="muted"> ({actionableCount} actionable)</span>
+        {/if}
+      </span>
+      <Toggle
+        bind:checked={showCompleted}
+        label="Show completed"
+        title="Show applied, rejected, and superseded proposals" />
+    </div>
   </div>
 
   {#if selected.size > 0}
@@ -368,6 +393,11 @@
       usage table, and transcripts for patterns worth improving. You can also
       trigger a scan on demand with the button above.
     </p>
+  {:else if visibleProposals.length === 0}
+    <p class="empty-state">
+      All {proposals.length} proposal{proposals.length === 1 ? " is" : "s are"} in a
+      terminal state. Flip "Show completed" to view them.
+    </p>
   {:else}
     <div class="table-scroll-wrapper">
     <table class="data-table">
@@ -377,8 +407,8 @@
             <input
               type="checkbox"
               aria-label="Select all"
-              checked={allSelected(proposals)}
-              onchange={() => toggleSelectAll(proposals)} />
+              checked={allSelected(visibleProposals)}
+              onchange={() => toggleSelectAll(visibleProposals)} />
           </th>
           <th>Title</th>
           <th>Type</th>
@@ -389,7 +419,7 @@
         </tr>
       </thead>
       <tbody>
-        {#each proposals as p (p.id)}
+        {#each visibleProposals as p (p.id)}
           <tr class:expanded={expanded.has(p.id)}>
             <td class="col-check">
               <input
@@ -505,6 +535,13 @@
     gap: 0.5rem;
     margin-top: 0.75rem;
     flex-wrap: wrap;
+  }
+  .header-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
   .col-check {
     width: 1.5rem;
