@@ -84,9 +84,9 @@ describe("assertInsideWorkspacesRoot", () => {
 
 describe("classifyGitArchiveStderr", () => {
   it("recognizes the worktree-already-removed race", () => {
-    expect(
-      classifyGitArchiveStderr("fatal: '/foo/bar' is not a working tree"),
-    ).toBe("worktree-gone");
+    expect(classifyGitArchiveStderr("fatal: '/foo/bar' is not a working tree")).toBe(
+      "worktree-gone",
+    );
   });
 
   it("recognizes the branch-already-deleted race", () => {
@@ -152,8 +152,7 @@ describe("archiveWorkspace catch-block logging", () => {
     archiveWorkspace("never-existed", "/fake-repo", { branch: "fix/bar" });
 
     const branchCalls = loggerLogMock.mock.calls.filter(
-      (c) =>
-        c[1] === "workspace.branch.delete.skip" || c[1] === "workspace.branch.delete.fail",
+      (c) => c[1] === "workspace.branch.delete.skip" || c[1] === "workspace.branch.delete.fail",
     );
     expect(branchCalls).toHaveLength(1);
     expect(branchCalls[0]?.[0]).toBe("debug");
@@ -201,8 +200,7 @@ describe("archiveWorkspace catch-block logging", () => {
     archiveWorkspace("branch-failure", "/fake-repo", { branch: "fix/baz" });
 
     const branchCalls = loggerLogMock.mock.calls.filter(
-      (c) =>
-        c[1] === "workspace.branch.delete.skip" || c[1] === "workspace.branch.delete.fail",
+      (c) => c[1] === "workspace.branch.delete.skip" || c[1] === "workspace.branch.delete.fail",
     );
     expect(branchCalls).toHaveLength(1);
     expect(branchCalls[0]?.[0]).toBe("warn");
@@ -226,8 +224,7 @@ describe("archiveWorkspace catch-block logging", () => {
     archiveWorkspace("no-stderr-failure", "/fake-repo", { branch: "fix/qux" });
 
     const branchCalls = loggerLogMock.mock.calls.filter(
-      (c) =>
-        c[1] === "workspace.branch.delete.skip" || c[1] === "workspace.branch.delete.fail",
+      (c) => c[1] === "workspace.branch.delete.skip" || c[1] === "workspace.branch.delete.fail",
     );
     expect(branchCalls).toHaveLength(1);
     expect(branchCalls[0]?.[0]).toBe("warn");
