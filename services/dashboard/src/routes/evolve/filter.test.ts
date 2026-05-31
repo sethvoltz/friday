@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Proposal, ProposalStatus } from "@friday/evolve";
-import {
-  TERMINAL_STATUSES,
-  countActionable,
-  filterProposals,
-  isTerminal,
-} from "./filter.js";
+import { TERMINAL_STATUSES, countActionable, filterProposals, isTerminal } from "./filter.js";
 
 function p(id: string, status: ProposalStatus): Proposal {
   return {
