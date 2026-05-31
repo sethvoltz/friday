@@ -8,6 +8,7 @@
     zeroBlockRowToBlockRow,
   } from "$lib/stores/chat.svelte";
   import { zeroSync } from "$lib/stores/zero.svelte";
+  import { chaseScrollBottom, type ResyncChaseHandle } from "$lib/components/Chat/resync-scroll";
   import { tick, untrack } from "svelte";
 
   interface Props {
@@ -113,6 +114,33 @@
     if (!readonly) chat.pinnedToBottom = true;
   }
 
+  // Handle for the in-flight post-resync bottom-chase loop. Agent /
+  // session switches abort the previous chase before starting the
+  // next; the loop also self-aborts on direct user scroll input
+  // (wheel / touchmove / keydown — see `chaseScrollBottom`).
+  let activeChase: ResyncChaseHandle | null = null;
+
+  /**
+   * Kick off the post-resync bottom chase. See `resync-scroll.ts` for
+   * the full rationale: the symptom without this is the last turn
+   * landing roughly half a bubble below the fold because the canonical
+   * Zero blocks snapshot grows the list AFTER the initial scrollTop
+   * write. One-shot, not sticky.
+   */
+  function startResyncChase(): void {
+    if (!scrollEl) return;
+    activeChase?.abort();
+    activeChase = chaseScrollBottom(scrollEl, {
+      now: () => performance.now(),
+      raf: (cb) => requestAnimationFrame(cb),
+      cancelRaf: (h) => cancelAnimationFrame(h),
+      onEnd: () => {
+        activeChase = null;
+      },
+    });
+    if (!readonly) chat.pinnedToBottom = true;
+  }
+
   // Active mode: keep focusedAgent in sync with the current route, reload
   // turns whenever the agent changes, and pin to the bottom of the new
   // agent's chat. Each agent is a separate conversation; carrying over
@@ -140,6 +168,7 @@
         if (scrollEl) {
           scrollEl.scrollTop = scrollEl.scrollHeight;
           chat.pinnedToBottom = true;
+          startResyncChase();
         }
       });
     });
@@ -157,6 +186,38 @@
     untrack(() => {
       zeroSync.bindBlocksFor(a);
     });
+  });
+
+  // Past-session view: when the first non-empty Zero snapshot lands
+  // (or the user navigates to a different past session), kick off the
+  // same bottom-chase loop. Same root cause as the live path —
+  // pastMessages is async and grows the rendered list below the
+  // initial scroll position. Keyed on (agent, sessionId) so each
+  // distinct past session gets exactly one chase.
+  let readonlyChaseKey: string | null = null;
+  $effect(() => {
+    if (!readonly) return;
+    const key = `${agent}::${sessionId ?? ""}`;
+    const hasMessages = pastMessages.length > 0;
+    untrack(() => {
+      if (hasMessages && readonlyChaseKey !== key) {
+        readonlyChaseKey = key;
+        startResyncChase();
+      } else if (!hasMessages && readonlyChaseKey !== null) {
+        // Session changed away or data hasn't landed yet — re-arm so
+        // the next non-empty snapshot fires a fresh chase.
+        readonlyChaseKey = null;
+      }
+    });
+  });
+
+  // Abort any in-flight chase on unmount so the rAF loop doesn't
+  // dereference a torn-down scroller.
+  $effect(() => {
+    return () => {
+      activeChase?.abort();
+      activeChase = null;
+    };
   });
 
   // Initial scroll-to-bottom + scroll-pin while streaming.
