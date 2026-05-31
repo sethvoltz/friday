@@ -188,7 +188,16 @@ const SESSIONS = {
   running: "s-running",
   inboxEmpty: "s-inbox-empty",
   readGarbage: "s-read-garbage",
+  // FRI-137 AC6: a long mail body that overflows the 200px CollapsibleSection
+  // cap, to assert the smart toggle appears for overflowing mail and is
+  // absent for the short bodies the other sessions seed.
+  sendLong: "s-send-long",
 };
+
+// ~60 lines, comfortably past the 200px mail-body cap.
+const LONG_MAIL_BODY = Array.from({ length: 60 }, (_, i) => `line ${i} of a very long body`).join(
+  "\n",
+);
 
 test.beforeAll(async () => {
   const env = loadEnv();
@@ -305,6 +314,23 @@ test.beforeAll(async () => {
       "mcp__friday-mail__mail_read",
       { id: 9 },
       "not json at all <<<",
+    );
+
+    // FRI-137 AC6: a mail_send with a very long body (overflows the 200px
+    // body cap) so the smart toggle MUST appear.
+    await seedToolPair(
+      c,
+      SESSIONS.sendLong,
+      "tu_send_long",
+      "mcp__friday-mail__mail_send",
+      {
+        to: "builder-z",
+        subject: "Long",
+        type: "message",
+        priority: "normal",
+        body: LONG_MAIL_BODY,
+      },
+      "mail sent (id=44)",
     );
   } finally {
     await c.end();
@@ -474,5 +500,39 @@ test.describe("friday-mail tool-call renderer (FRI-135)", () => {
     await expect(card).toContainText("not json at all <<<");
 
     await context.close();
+  });
+
+  test("FRI-137 AC6: a short mail body has NO toggle; a long one keeps a working toggle", async ({
+    browser,
+  }) => {
+    const env = loadEnv();
+
+    // Short body (SESSIONS.send: "the work is finished") fits the 200px cap →
+    // the CollapsibleSection renders no disclosure control.
+    {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      await openSession(page, env, SESSIONS.send);
+      const card = page.locator(".mail-tool-block").first();
+      await expect(card).toContainText("the work is finished");
+      await expect(card.locator("[aria-expanded]")).toHaveCount(0);
+      await context.close();
+    }
+
+    // Long body overflows the cap → exactly one working +/− toggle.
+    {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      await openSession(page, env, SESSIONS.sendLong);
+      const card = page.locator(".mail-tool-block").first();
+      const toggle = card.locator("button.collapsible-toggle").first();
+      await expect(toggle).toHaveAttribute("aria-expanded", /true|false/);
+      const glyph = (await toggle.locator(".glyph").textContent())?.trim();
+      expect(["+", "−"]).toContain(glyph);
+      const before = await toggle.getAttribute("aria-expanded");
+      await toggle.click();
+      await expect(toggle).not.toHaveAttribute("aria-expanded", before ?? "");
+      await context.close();
+    }
   });
 });

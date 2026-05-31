@@ -1,12 +1,19 @@
 <script lang="ts">
+  import { File } from "lucide-svelte";
   import { diffLines } from "diff";
   import type { Change } from "diff";
   import { theme } from "$lib/stores/theme.svelte";
   import { shikiThemeFor } from "$lib/theme/palettes";
   import CollapsibleSection from "./CollapsibleSection.svelte";
+  import { badgeClass, statusLabel } from "./tool-status";
 
   interface Props {
     toolName: "Write" | "Edit" | "MultiEdit" | "NotebookEdit";
+    /** Aliased filename headline for the card header (FRI-137), e.g.
+     *  "Editing ~/a/b.ts" — produced by the caller via `synthesizeHeadline`. */
+    headline?: string;
+    /** Tool status, surfaced as the header badge (FRI-137). */
+    status?: "running" | "done" | "error" | "aborted";
     filePath?: string;
     content?: string;
     oldString?: string;
@@ -20,6 +27,8 @@
   }
   let {
     toolName,
+    headline,
+    status = "done",
     filePath,
     content,
     oldString,
@@ -28,6 +37,11 @@
     cellType,
     editMode,
   }: Props = $props();
+
+  // Status badge (FRI-137) — `badgeClass`/`statusLabel` are the shared pure
+  // mapping from `tool-status.ts`, the identical visual vocabulary ToolBlock /
+  // MailToolBlock use so the file-edit card matches the rest of chat. The
+  // `.badge` class itself is globally styled in app.css.
 
   // Render mode (FRI-134). Promotion + coverage widened FileDiff from the
   // original Write/Edit pair to four tools that share `diffLines` + Shiki:
@@ -232,11 +246,27 @@
 {/snippet}
 
 <div class="file-diff">
-  <CollapsibleSection
-    label={mode === "content" || mode === "deleted" ? "View content" : "View diff"}
-    collapsedMaxHeight={400}
-    startOpen={true}
-    bind:open={expanded}>
+  <CollapsibleSection collapsedMaxHeight={400} startOpen={true} bind:open={expanded}>
+    {#snippet header({ open, toggle, showToggle })}
+      <!-- FRI-137: the header row IS the disclosure control. When the diff
+           overflows the cap it is a <button> (aria-expanded + `+`/`−` glyph);
+           when it fits it is a plain non-interactive row (no toggle). The old
+           standalone "VIEW DIFF" / "VIEW CONTENT" label line is gone. -->
+      {#if showToggle}
+        <button type="button" class="file-diff-head" onclick={toggle} aria-expanded={open}>
+          <span class="file-diff-icon" aria-hidden="true"><File size={16} /></span>
+          <span class="file-diff-name" title={filePath}>{headline}</span>
+          <span class="badge {badgeClass(status)}">{statusLabel(status)}</span>
+          <span class="file-diff-glyph" aria-hidden="true">{open ? "−" : "+"}</span>
+        </button>
+      {:else}
+        <div class="file-diff-head file-diff-head-static">
+          <span class="file-diff-icon" aria-hidden="true"><File size={16} /></span>
+          <span class="file-diff-name" title={filePath}>{headline}</span>
+          <span class="badge {badgeClass(status)}">{statusLabel(status)}</span>
+        </div>
+      {/if}
+    {/snippet}
     {#if mode === "content"}
       <div class="code-block">
         <pre class="block-pre"><code class="shiki-wrap" data-lang={contentLang}>{#if highlightedHtml !== null}{@html highlightedHtml}{:else}{content ?? ""}{/if}</code></pre>
@@ -264,8 +294,76 @@
 </div>
 
 <style>
+  /* FRI-137: contained card matching the chat-block vocabulary
+     (`.tool-block` / `.mail-tool-block` use the same accent left-rail). The
+     card restores the containment + header the old ToolBlock provided before
+     FRI-134 promoted these tools to render directly. */
   .file-diff {
     margin-top: 0.25rem;
+    border-left: 2px solid var(--accent-primary);
+    padding: 0.25rem 0;
+    font-size: 0.85rem;
+  }
+
+  /* Header row = filename + status badge + (when overflowing) the `+`/`−`
+     disclosure glyph. As a <button> it is the expand/collapse control; as a
+     <div class="file-diff-head-static"> it is a non-interactive label. */
+  .file-diff-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.25rem 0.75rem;
+    background: transparent;
+    border: none;
+    color: inherit;
+    font: inherit;
+    font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+  }
+  .file-diff-head-static {
+    cursor: default;
+  }
+  .file-diff-icon {
+    display: inline-flex;
+    align-items: center;
+    color: var(--accent-primary);
+    flex-shrink: 0;
+  }
+  .file-diff-name {
+    flex: 1;
+    color: var(--text-primary);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .file-diff-glyph {
+    margin-left: 0.1rem;
+    width: 1.4rem;
+    height: 1.4rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    line-height: 1;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+  .file-diff-head:hover .file-diff-glyph {
+    background: var(--bg-card);
+    color: var(--text-secondary);
+  }
+
+  /* The diff body lives in the CollapsibleSection that wraps everything; pad
+     it to align under the header (mirrors ToolBlock's .block-section inset). */
+  .file-diff :global(.collapsible-body) {
+    padding: 0 0.75rem;
   }
 
   /* Write: code block. The vertical height cap + scroll is owned by the

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Mail } from "lucide-svelte";
   import { synthesizeHeadline } from "./tool-headlines";
+  import { badgeClass, statusLabel } from "./tool-status";
   import CollapsibleSection from "./CollapsibleSection.svelte";
 
   // Purpose-built renderer for the four friday-mail tool CALLS
@@ -70,19 +71,6 @@
     return "Mail";
   }
   let headline = $derived(synthesizeHeadline(toolName, input) ?? defaultHeadline(short));
-
-  function badgeClass(s: string): string {
-    if (s === "done") return "ok";
-    if (s === "error") return "error";
-    if (s === "aborted") return "muted";
-    return "warn"; // running
-  }
-  function statusLabel(s: string): string {
-    if (s === "running") return "running…";
-    if (s === "done") return "done";
-    if (s === "aborted") return "stopped";
-    return s;
-  }
 
   function asObj(v: unknown): Record<string, unknown> | undefined {
     if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;

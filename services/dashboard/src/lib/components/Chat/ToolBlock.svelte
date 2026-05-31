@@ -2,6 +2,7 @@
   import { File, Wrench } from "lucide-svelte";
   import { page } from "$app/stores";
   import { synthesizeHeadline } from "./tool-headlines";
+  import { badgeClass, statusLabel } from "./tool-status";
   import CollapsibleSection from "./CollapsibleSection.svelte";
 
   interface Props {
@@ -72,19 +73,6 @@
   let isFileOp = $derived(toolName === "Read" || toolName === "Write" || toolName === "Edit");
   let open = $state(false);
   let canExpand = $derived(hasInput || hasOutput);
-
-  function badgeClass(s: string): string {
-    if (s === "done") return "ok";
-    if (s === "error") return "error";
-    if (s === "aborted") return "muted";
-    return "warn"; // running
-  }
-  function statusLabel(s: string): string {
-    if (s === "running") return "running…";
-    if (s === "done") return "done";
-    if (s === "aborted") return "stopped";
-    return s;
-  }
 </script>
 
 <div class="tool-block">

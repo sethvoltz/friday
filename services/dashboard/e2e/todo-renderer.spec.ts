@@ -86,7 +86,10 @@ const TODOS = [
   { content: "Do it", activeForm: "", status: "pending" },
 ];
 
-async function seedTodoBlock(databaseUrl: string): Promise<void> {
+async function seedTodoBlock(
+  databaseUrl: string,
+  todos: Array<{ content: string; activeForm: string; status: string }> = TODOS,
+): Promise<void> {
   const c = newTestClient({ connectionString: databaseUrl });
   await c.connect();
   try {
@@ -111,7 +114,7 @@ async function seedTodoBlock(databaseUrl: string): Promise<void> {
     );
     const content = {
       name: "TodoWrite",
-      input: { todos: TODOS },
+      input: { todos },
       tool_use_id: `tu_${blockId}`,
     };
     // Canonical tool_use block: streaming=false + status='complete' so the
@@ -177,15 +180,49 @@ test.describe("FRI-133 — TodoWrite renderer (visual)", () => {
     // JSON `<pre>` containing the todos array text.
     await expect(page.locator("pre", { hasText: "activeForm" })).toHaveCount(0);
 
-    // AC#9: the CollapsibleSection wrapper carries the +/− disclosure glyph
-    // and aria-expanded; no chevron/triangle glyph appears in the rendered
-    // todo block.
-    const toggle = page.locator(".todo-block button.collapsible-toggle").first();
-    await expect(toggle).toHaveAttribute("aria-expanded", /true|false/);
-    const glyph = await toggle.locator(".glyph").textContent();
-    expect(["+", "−"]).toContain(glyph?.trim());
+    // FRI-137 (AC6 — no toggle-regression): the 5-row fixture fits within the
+    // 320px cap, so the CollapsibleSection renders NO interactive disclosure
+    // control — zero `[aria-expanded]` buttons in the todo block. (Pre-FRI-137
+    // the toggle was always present; the smart-toggle change removes the
+    // useless affordance when content fits.)
+    await expect(page.locator(".todo-block [aria-expanded]")).toHaveCount(0);
+    await expect(page.locator(".todo-block button.collapsible-toggle")).toHaveCount(0);
+    // And, as always, NO chevron/triangle glyph appears.
     const blockText = (await page.locator(".todo-block").first().textContent()) ?? "";
     expect(blockText).not.toMatch(/[▸▾▴►◄‣⌄⌃]/);
+
+    await context.close();
+  });
+
+  test("FRI-137 AC6 — a long todo list keeps a working +/- toggle in its header", async ({
+    browser,
+  }) => {
+    const env = loadEnv();
+    // ~40 rows comfortably exceeds the 320px cap → the toggle must appear.
+    const many = Array.from({ length: 40 }, (_, i) => ({
+      content: `Task number ${i}`,
+      activeForm: `Doing task number ${i}`,
+      status: i === 0 ? "in_progress" : "pending",
+    }));
+    await seedTodoBlock(env.databaseUrl, many);
+
+    const context = await browser.newContext();
+    await context.addCookies(parseCookiesForPlaywright(env.cookie, env.dashboardURL));
+    const page = await context.newPage();
+    await page.goto(env.dashboardURL, { waitUntil: "domcontentloaded" });
+    await expect(page).not.toHaveURL(/\/login/);
+
+    await expect(page.locator("[data-todo-status]")).toHaveCount(40, { timeout: 20_000 });
+
+    // Overflowing list → exactly one interactive disclosure control carrying
+    // the +/− glyph + aria-expanded, and it toggles on click.
+    const toggle = page.locator(".todo-block button.collapsible-toggle").first();
+    await expect(toggle).toHaveAttribute("aria-expanded", /true|false/);
+    const glyph = (await toggle.locator(".glyph").textContent())?.trim();
+    expect(["+", "−"]).toContain(glyph);
+    const before = await toggle.getAttribute("aria-expanded");
+    await toggle.click();
+    await expect(toggle).not.toHaveAttribute("aria-expanded", before ?? "");
 
     await context.close();
   });
