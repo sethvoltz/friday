@@ -14,6 +14,7 @@ import {
   externalLinksBySystem,
   getTicket,
   linkExternal,
+  updateTicket,
   type Ticket,
 } from "@friday/shared/services";
 import { loadConfig } from "@friday/shared";
@@ -149,6 +150,13 @@ export interface ReconcileResult {
   orphans: LinearIssue[];
   /** Friday tickets linked to Linear issues that are no longer in the active set. */
   staleLinks: Array<{ ticketId: string; identifier: string }>;
+  /**
+   * Friday ticket ids that this reconcile pass transitioned to a terminal
+   * status (`done`/`closed`) because their linked Linear issue is now in a
+   * terminal state (`completed`/`canceled`). Callers cascade further sync
+   * (e.g. flip the originating evolve proposal to `applied`) from this set.
+   */
+  closedTicketIds: string[];
   /** All linked external IDs we saw (for diagnostics). */
   linkedCount: number;
 }
@@ -161,6 +169,7 @@ export async function reconcile(): Promise<ReconcileResult> {
       reason: "LINEAR_API_KEY not set",
       orphans: [],
       staleLinks: [],
+      closedTicketIds: [],
       linkedCount: 0,
     };
   }
@@ -176,10 +185,42 @@ export async function reconcile(): Promise<ReconcileResult> {
     .filter((l) => !activeById.has(l.externalId))
     .map((l) => ({ ticketId: l.ticketId, identifier: l.externalId }));
 
+  // FRI-66: Linear → Friday back-propagation. The PR-merge → Linear-close
+  // path (Linear's GitHub integration parses `Closes FRI-N` in PR bodies
+  // and moves the issue to `completed`) used to terminate at Linear — the
+  // Friday ticket and any originating evolve proposal stayed `open`.
+  // Drive the Friday side from Linear's authoritative terminal state for
+  // each stale link whose local ticket isn't already terminal.
+  const closedTicketIds: string[] = [];
+  for (const stale of staleLinks) {
+    const local = await getTicket(stale.ticketId);
+    if (!local) continue;
+    if (local.status === "done" || local.status === "closed") continue;
+
+    const issue = await getIssueByIdentifier({
+      apiKey: cfg.apiKey,
+      identifier: stale.identifier,
+    });
+    if (!issue) continue;
+
+    // Only back-propagate Linear's terminal states. Non-terminal (someone
+    // bounced the issue back to backlog/triage/unstarted) leaves Friday
+    // untouched — Friday is authoritative for "in progress" per ADR-006.
+    if (issue.state.type !== "completed" && issue.state.type !== "canceled") {
+      continue;
+    }
+    const nextStatus = mapState(issue.state.type);
+    if (nextStatus !== "done" && nextStatus !== "closed") continue;
+
+    await updateTicket(stale.ticketId, { status: nextStatus });
+    closedTicketIds.push(stale.ticketId);
+  }
+
   return {
     ran: true,
     orphans,
     staleLinks,
+    closedTicketIds,
     linkedCount: links.length,
   };
 }

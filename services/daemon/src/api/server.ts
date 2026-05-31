@@ -69,6 +69,7 @@ import {
   type UpdateProposalInput,
 } from "@friday/evolve";
 import { deleteProposalFromPg, syncProposalToPg } from "../evolve/projector.js";
+import { syncProposalsForClosedTickets } from "../services/proposal-sync.js";
 import {
   createIssueWithConfiguredTeam as linearCreateIssue,
   getStateIdByType as linearGetStateIdByType,
@@ -1106,6 +1107,11 @@ async function handle(
   if (method === "POST" && path === "/api/integrations/linear/reconcile") {
     try {
       const result = await linearReconcile();
+      // FRI-66: tickets reconcile just back-propagated to terminal need
+      // their originating evolve proposals flipped to `applied`.
+      if (result.closedTicketIds.length > 0) {
+        await syncProposalsForClosedTickets(result.closedTicketIds);
+      }
       return json(res, 200, result);
     } catch (err) {
       return json(res, 500, {
