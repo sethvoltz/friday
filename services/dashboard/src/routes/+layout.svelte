@@ -685,7 +685,8 @@
   .hamburger-btn:hover span { background: var(--accent-primary); }
 
   @media (max-width: 640px) {
-    .app-header { border-radius: var(--radius-lg); }
+    .app-header { border-radius: var(--radius-lg); padding: 0.75rem 0.4rem; }
     .app-main { padding: 1rem; padding-top: 5rem; }
+    .logo span { display: none; }
   }
 </style>
