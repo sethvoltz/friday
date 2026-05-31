@@ -517,9 +517,7 @@ Each app's manifest declares zero or more stdio MCP servers (`command: "node"`, 
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const APP_DIR =
-  process.env.FRIDAY_APP_DIR ??
-  dirname(dirname(fileURLToPath(import.meta.url))); // <app>/mcp/<server>.js → <app>
+const APP_DIR = process.env.FRIDAY_APP_DIR ?? dirname(dirname(fileURLToPath(import.meta.url))); // <app>/mcp/<server>.js → <app>
 ```
 
 The variable is **only** set on app-declared MCP servers — built-in stdio (`playwright`) and user-configured stdio MCPs (`~/.friday/config.json`) do not receive it.

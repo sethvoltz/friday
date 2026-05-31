@@ -12,8 +12,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 // with an import.meta.url walk as defense-in-depth. Never trust process.cwd()
 // from inside an app MCP server — the SDK drops any cwd we set, so the
 // spawned process inherits the daemon's cwd.
-const APP_DIR =
-  process.env.FRIDAY_APP_DIR ?? dirname(dirname(fileURLToPath(import.meta.url)));
+const APP_DIR = process.env.FRIDAY_APP_DIR ?? dirname(dirname(fileURLToPath(import.meta.url)));
 
 const server = new Server(
   { name: "example-echo", version: "0.1.0" },
