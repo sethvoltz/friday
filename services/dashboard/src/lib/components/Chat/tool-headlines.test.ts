@@ -180,6 +180,45 @@ describe("synthesizeHeadline — Friday MCP tools", () => {
   });
 });
 
+// FRI-137: the file-edit card header (FileEditRenderer → FileDiff) is the
+// EXACT output of these existing helpers — `aliasPath` (or `synthesizeHeadline`
+// which calls it), NOT a new abbreviation scheme. These pins lock the header
+// strings the renderer relies on so a regression in the alias output surfaces
+// here rather than only in Playwright.
+describe("FRI-137 file-edit header — aliased filename (exact strings)", () => {
+  it("aliasPath compresses an apps path to @apps/<topic>/...", () => {
+    expect(aliasPath("/Users/seth/.friday/apps/foo/index.html", HOME, DATA)).toBe(
+      "@apps/foo/index.html",
+    );
+  });
+
+  it("Write header for an apps file reads 'Writing @apps/<topic>/...'", () => {
+    expect(
+      synthesizeHeadline(
+        "Write",
+        { file_path: "/Users/seth/.friday/apps/foo/index.html" },
+        { homeDir: HOME, dataDir: DATA },
+      ),
+    ).toBe("Writing @apps/foo/index.html");
+  });
+
+  it("Edit header for a home file reads 'Editing ~/a/b.ts'", () => {
+    expect(synthesizeHeadline("Edit", { file_path: "/Users/seth/a/b.ts" }, { homeDir: HOME })).toBe(
+      "Editing ~/a/b.ts",
+    );
+  });
+
+  it("NotebookEdit header aliases notebook_path like the other file ops", () => {
+    expect(
+      synthesizeHeadline(
+        "NotebookEdit",
+        { notebook_path: "/Users/seth/.friday/apps/foo/nb.ipynb" },
+        { homeDir: HOME, dataDir: DATA },
+      ),
+    ).toBe("Editing @apps/foo/nb.ipynb");
+  });
+});
+
 describe("synthesizeHeadline — fallback", () => {
   it("returns undefined for unknown tools", () => {
     expect(synthesizeHeadline("RandomTool", { foo: 1 })).toBeUndefined();

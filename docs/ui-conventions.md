@@ -27,6 +27,17 @@ caps collapsed content to a `collapsedMaxHeight` prop. New chat renderers
 should wrap their directly-shown body in it rather than re-deriving the toggle
 plus a magic max-height.
 
+- **No toggle when it fits.** The disclosure control (and the height clamp)
+  appear **only when the content actually exceeds `collapsedMaxHeight`** —
+  measured from the body's `scrollHeight`. A section whose content already
+  fits shows in full with no `+` / `−` affordance and no clamp (a one-line
+  file edit or a three-row todo list never gets a toggle that toggles
+  nothing). A renderer can still supply its own clickable header as the
+  disclosure control via the `header` snippet (it receives
+  `{ open, toggle, showToggle }`); `showToggle === false` means the header
+  must render non-interactively, no glyph, no `aria-expanded`. The pure
+  derivation lives in `collapsible-toggle.ts:shouldShowToggle`.
+
 ## Agent-type glyphs (sidebar)
 
 The Sidebar renders each agent's type as a Lucide glyph, color-tinted
