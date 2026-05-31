@@ -146,12 +146,42 @@ describe("searchMemories scoring", () => {
   it("FRI-34: tag filter returns all tagged entries even when query token is absent", async () => {
     const { searchMemories } = await import("./search.js");
     entries = [
-      mkEntry({ id: "bucket-a", title: "alpha entry", content: "body about apples", tags: ["test:bucket"] }),
-      mkEntry({ id: "bucket-b", title: "bravo entry", content: "body about bananas", tags: ["test:bucket"] }),
-      mkEntry({ id: "bucket-c", title: "charlie entry", content: "body about cherries", tags: ["test:bucket"] }),
-      mkEntry({ id: "bucket-d", title: "delta entry", content: "body about dates", tags: ["test:bucket"] }),
-      mkEntry({ id: "bucket-e", title: "echo entry", content: "body about eggplant", tags: ["test:bucket"] }),
-      mkEntry({ id: "noise", title: "unrelated", content: "no bucket here", tags: ["other:bucket"] }),
+      mkEntry({
+        id: "bucket-a",
+        title: "alpha entry",
+        content: "body about apples",
+        tags: ["test:bucket"],
+      }),
+      mkEntry({
+        id: "bucket-b",
+        title: "bravo entry",
+        content: "body about bananas",
+        tags: ["test:bucket"],
+      }),
+      mkEntry({
+        id: "bucket-c",
+        title: "charlie entry",
+        content: "body about cherries",
+        tags: ["test:bucket"],
+      }),
+      mkEntry({
+        id: "bucket-d",
+        title: "delta entry",
+        content: "body about dates",
+        tags: ["test:bucket"],
+      }),
+      mkEntry({
+        id: "bucket-e",
+        title: "echo entry",
+        content: "body about eggplant",
+        tags: ["test:bucket"],
+      }),
+      mkEntry({
+        id: "noise",
+        title: "unrelated",
+        content: "no bucket here",
+        tags: ["other:bucket"],
+      }),
     ];
 
     const results = await searchMemories({ query: "foo", tags: ["test:bucket"] });
@@ -169,11 +199,36 @@ describe("searchMemories scoring", () => {
   it("FRI-34: without tag filter, same query returns zero (AND-gate still applies)", async () => {
     const { searchMemories } = await import("./search.js");
     entries = [
-      mkEntry({ id: "bucket-a", title: "alpha entry", content: "body about apples", tags: ["test:bucket"] }),
-      mkEntry({ id: "bucket-b", title: "bravo entry", content: "body about bananas", tags: ["test:bucket"] }),
-      mkEntry({ id: "bucket-c", title: "charlie entry", content: "body about cherries", tags: ["test:bucket"] }),
-      mkEntry({ id: "bucket-d", title: "delta entry", content: "body about dates", tags: ["test:bucket"] }),
-      mkEntry({ id: "bucket-e", title: "echo entry", content: "body about eggplant", tags: ["test:bucket"] }),
+      mkEntry({
+        id: "bucket-a",
+        title: "alpha entry",
+        content: "body about apples",
+        tags: ["test:bucket"],
+      }),
+      mkEntry({
+        id: "bucket-b",
+        title: "bravo entry",
+        content: "body about bananas",
+        tags: ["test:bucket"],
+      }),
+      mkEntry({
+        id: "bucket-c",
+        title: "charlie entry",
+        content: "body about cherries",
+        tags: ["test:bucket"],
+      }),
+      mkEntry({
+        id: "bucket-d",
+        title: "delta entry",
+        content: "body about dates",
+        tags: ["test:bucket"],
+      }),
+      mkEntry({
+        id: "bucket-e",
+        title: "echo entry",
+        content: "body about eggplant",
+        tags: ["test:bucket"],
+      }),
     ];
 
     const results = await searchMemories({ query: "foo" });
@@ -206,7 +261,11 @@ describe("searchMemories scoring", () => {
     const results = await searchMemories({ query: "foo", tags: ["test:bucket"] });
     // All three return; title-match (+3) outranks content-match (+1) which
     // outranks tag-only (score 0). Order: title-and-tag, content-and-tag, tag-only.
-    expect(results.map((r) => r.entry.id)).toEqual(["title-and-tag", "content-and-tag", "tag-only"]);
+    expect(results.map((r) => r.entry.id)).toEqual([
+      "title-and-tag",
+      "content-and-tag",
+      "tag-only",
+    ]);
     expect(results[0].matchedOn).toContain("title");
     expect(results[1].matchedOn).toContain("content");
     expect(results[2].matchedOn).toEqual([]);
