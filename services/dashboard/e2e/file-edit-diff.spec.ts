@@ -68,12 +68,27 @@ interface SeedBlock {
 }
 
 /**
- * Upsert the default `friday` agent pinned to a known session, then insert
+ * Insert a dedicated `bare` agent pinned to a known session, then insert
  * a tool_use block per descriptor for that session. Canonical tool_use rows
  * carry `{ name, input, tool_use_id }` in content_json — the exact shape the
  * dashboard's reload path (`parseBlockContent`) reads to build a
  * `role === "tool"` message. Each seed uses a unique agent + session so the
  * tests don't cross-contaminate.
+ *
+ * IMPORTANT: seed a per-test throwaway agent, NEVER the shared `friday`
+ * orchestrator. The earlier cut of this spec seeded `friday` (so the chat
+ * landed on it at `/`), upserting `type='bare'` over the live orchestrator
+ * and repointing its `session_id` at a fake session. A later test in the
+ * same serial run (`live-typing`) then sent a real message to `friday`; the
+ * daemon forked a `bare` worker that resumed the bogus session, which never
+ * returned assistant text (a "zero-block turn") and stayed long-lived,
+ * heartbeating for 60s+. zero-cache's change-streamer queued the resulting
+ * write churn until it OOM-crashed (~300MB / 3k+ queued changes), after
+ * which NO direct-DB-seeded row could replicate to any browser client —
+ * failing todo-renderer (FRI-133), zero-permissions (FRI-129), and every
+ * sidebar test (FRI-126) downstream with empty result sets. The cure is to
+ * keep the shared `friday` agent pristine and drive these specs off a
+ * dedicated agent via `/sessions/<agent>`.
  */
 async function seedToolBlocks(
   databaseUrl: string,
@@ -113,10 +128,17 @@ async function seedToolBlocks(
   }
 }
 
-/** Open the dashboard authenticated; `friday` is the default focused agent. */
-async function openFridayChat(page: Page, env: EnvSnapshot): Promise<void> {
+/**
+ * Open the dashboard authenticated and focus a SPECIFIC seeded agent via
+ * `/sessions/<agent>` — never the shared `friday` orchestrator (see
+ * `seedToolBlocks`). `/sessions/[agent]` mounts the same `ChatShell` as the
+ * root view, so the seeded agent's current-session blocks render through the
+ * identical reload path; this just keeps `friday` pristine for the rest of
+ * the serial suite.
+ */
+async function openAgentChat(page: Page, env: EnvSnapshot, agentName: string): Promise<void> {
   await page.context().addCookies(parseCookiesForPlaywright(env.cookie, env.dashboardURL));
-  await page.goto(env.dashboardURL, { waitUntil: "domcontentloaded" });
+  await page.goto(`${env.dashboardURL}/sessions/${agentName}`, { waitUntil: "domcontentloaded" });
   await expect(page).not.toHaveURL(/\/login/);
   // Chat input hydrated → store is live → Zero subscription open.
   await expect(page.getByPlaceholder(/Message Friday/)).toBeVisible({ timeout: 15_000 });
@@ -127,8 +149,9 @@ test.describe("FRI-134: file-edit diff promotion", () => {
     browser,
   }) => {
     const env = loadEnv();
+    const agent = `fed-edit-${Date.now()}`;
     const session = `s_edit_${Date.now()}`;
-    await seedToolBlocks(env.databaseUrl, "friday", session, [
+    await seedToolBlocks(env.databaseUrl, agent, session, [
       {
         blockId: `te_${Date.now()}`,
         toolName: "Edit",
@@ -145,7 +168,7 @@ test.describe("FRI-134: file-edit diff promotion", () => {
 
     const context = await browser.newContext();
     const page = await context.newPage();
-    await openFridayChat(page, env);
+    await openAgentChat(page, env, agent);
 
     // The file-edit renderer mounts FileDiff directly. Scope to it.
     const fileDiff = page.locator(".file-diff").first();
@@ -190,8 +213,9 @@ test.describe("FRI-134: file-edit diff promotion", () => {
 
   test("AC#4 — a 3-edit MultiEdit renders exactly 3 diff hunk groups", async ({ browser }) => {
     const env = loadEnv();
+    const agent = `fed-multi-${Date.now()}`;
     const session = `s_multi_${Date.now()}`;
-    await seedToolBlocks(env.databaseUrl, "friday", session, [
+    await seedToolBlocks(env.databaseUrl, agent, session, [
       {
         blockId: `tm_${Date.now()}`,
         toolName: "MultiEdit",
@@ -209,7 +233,7 @@ test.describe("FRI-134: file-edit diff promotion", () => {
 
     const context = await browser.newContext();
     const page = await context.newPage();
-    await openFridayChat(page, env);
+    await openAgentChat(page, env, agent);
 
     const fileDiff = page.locator(".file-diff").first();
     await expect(fileDiff).toBeVisible({ timeout: 20_000 });
@@ -227,8 +251,9 @@ test.describe("FRI-134: file-edit diff promotion", () => {
     browser,
   }) => {
     const env = loadEnv();
+    const agent = `fed-nb-${Date.now()}`;
     const session = `s_nb_${Date.now()}`;
-    await seedToolBlocks(env.databaseUrl, "friday", session, [
+    await seedToolBlocks(env.databaseUrl, agent, session, [
       {
         blockId: `tnb_replace_${Date.now()}`,
         toolName: "NotebookEdit",
@@ -254,7 +279,7 @@ test.describe("FRI-134: file-edit diff promotion", () => {
 
     const context = await browser.newContext();
     const page = await context.newPage();
-    await openFridayChat(page, env);
+    await openAgentChat(page, env, agent);
 
     const diffs = page.locator(".file-diff");
     await expect(diffs).toHaveCount(2, { timeout: 20_000 });

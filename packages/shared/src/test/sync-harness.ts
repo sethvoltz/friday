@@ -82,6 +82,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Client } from "pg";
 import { createTestDb, newTestClient, type TestDbHandle } from "../db/test-pg.js";
+import { SYNC_TABLES } from "../db/pg-provision.js";
 
 // Re-export so e2e suites that already import from this module can grab
 // the error-guarded raw-client factory without a second import path.
@@ -796,15 +797,44 @@ export async function spawnTestSyncEnv(opts: SpawnEnvOpts = {}): Promise<SyncEnv
   const daemonSecret = randomBytes(32).toString("hex");
   // Set this so the friday_pub publication exists for zero-cache to
   // bind to. createTestDb ran migrations but didn't create the
-  // publication. CREATE PUBLICATION FOR ALL TABLES requires superuser;
-  // the friday role doesn't have it locally, so use the test runner's
-  // user (which CREATE'd the DB and is its owner). Skipped when the
-  // caller opts out of zero-cache (e.g., pure SQL trigger tests).
+  // publication. Skipped when the caller opts out of zero-cache (e.g.,
+  // pure SQL trigger tests).
+  //
+  // Scope the publication to the app's SYNC_TABLES — EXACTLY as
+  // production's `ensurePublication` (pg-provision.ts) does — never
+  // `FOR ALL TABLES`. `FOR ALL TABLES` silently enrolls zero-cache's OWN
+  // internal CDC/CVR bookkeeping tables (the `<app>/cdc` changeLog and
+  // `<app>/cvr` schemas it creates at boot) into the logical-replication
+  // stream. Every CVR/CDC row zero-cache writes — one per browser client,
+  // per query, per test — then gets re-published back INTO zero-cache's
+  // own change stream, a self-amplifying feedback loop. Under a long
+  // serial Playwright run (many browser contexts × queries) the
+  // change-streamer's in-memory queue grows past its heap-proportional
+  // back-pressure threshold (~300 MB) faster than the replicator can drain
+  // the (tmpfs-backed, occasionally slow) SQLite replica, and the
+  // change-streamer worker OOM-crashes. Once it dies every WS upgrade gets
+  // ECONNREFUSED and NO directly-seeded row can replicate to any client —
+  // which surfaced as the cross-spec "seeded rows never appear" failures
+  // (todo-renderer / zero-permissions / sidebar) the moment FRI-134's three
+  // extra specs pushed the run past the threshold. Mirroring production's
+  // narrow `FOR TABLE` list keeps zero's internals out of the stream and
+  // removes the feedback loop entirely.
   if (!opts.skipZeroCache) {
     const admin = newTestClient({ connectionString: databaseUrl });
     await admin.connect();
     try {
-      await admin.query("CREATE PUBLICATION friday_pub FOR ALL TABLES");
+      const present = await admin.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables
+           WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
+        [Array.from(SYNC_TABLES)],
+      );
+      const tableList = present.rows.map((r) => `"${r.tablename}"`).join(", ");
+      if (tableList.length === 0) {
+        throw new Error(
+          "sync-harness: no SYNC_TABLES present in scratch DB — migrations did not run?",
+        );
+      }
+      await admin.query(`CREATE PUBLICATION friday_pub FOR TABLE ${tableList}`);
     } finally {
       await admin.end();
     }
