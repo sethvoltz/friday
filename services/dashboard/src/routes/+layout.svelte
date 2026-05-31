@@ -13,7 +13,7 @@
   } from "$lib/stores/wake-lock.svelte";
   import ConnectivityWidget from "$lib/components/Connectivity/ConnectivityWidget.svelte";
   import SyncOverlay from "$lib/components/SyncOverlay/SyncOverlay.svelte";
-  import { Coffee } from "lucide-svelte";
+  import { Coffee, MessagesSquare } from "lucide-svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
   import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
@@ -38,6 +38,175 @@
   function closeMenu() {
     menuOpen = false;
   }
+
+  // Priority+ header navigation. Links overflow one-by-one into a "More"
+  // menu as the header narrows, replacing the old all-or-nothing CSS
+  // breakpoint that dumped every link into the hamburger at 1100px.
+  //
+  // Stability (the hard part): the available-width measurement observes
+  // `.header-right`, whose box width is the flex *leftover* after the
+  // content-stable `header-left`. It does NOT depend on how many links are
+  // currently visible — moving a link into More doesn't change it. That
+  // severs the classic priority+ feedback loop (hide a link → container
+  // grows → link reappears → bounce), so `visibleCount` is a pure function
+  // of a measurement that never moves when links shuffle buckets.
+  interface NavLink {
+    href: string;
+    label: string;
+    match: (p: string) => boolean;
+  }
+  const navLinks: NavLink[] = [
+    {
+      href: "/",
+      label: "Chat",
+      match: (p) => p === "/" || p.startsWith("/sessions"),
+    },
+    {
+      href: "/dashboard",
+      label: "Dashboard",
+      match: (p) => p.startsWith("/dashboard"),
+    },
+    { href: "/tickets", label: "Tickets", match: (p) => p.startsWith("/tickets") },
+    {
+      href: "/schedules",
+      label: "Schedules",
+      match: (p) => p.startsWith("/schedules"),
+    },
+    { href: "/memory", label: "Memory", match: (p) => p.startsWith("/memory") },
+    { href: "/evolve", label: "Evolve", match: (p) => p.startsWith("/evolve") },
+    { href: "/skills", label: "Skills", match: (p) => p.startsWith("/skills") },
+    { href: "/logs", label: "Logs", match: (p) => p.startsWith("/logs") },
+    {
+      href: "/settings",
+      label: "Settings",
+      match: (p) => p.startsWith("/settings"),
+    },
+  ];
+
+  // Gaps mirror the CSS: `.header-nav` uses 0.25rem between links, and
+  // `.header-right` uses 0.75rem between the nav, the ⌘K chip, and More.
+  const NAV_GAP = 4;
+  const CLUSTER_GAP = 12;
+
+  let headerRightRef: HTMLElement | undefined = $state();
+  let ghostNavRef: HTMLElement | undefined = $state();
+  let cmdkRef: HTMLElement | undefined = $state();
+  let navMoreRef: HTMLElement | undefined = $state();
+
+  let availWidth = $state(0); // header-right content width (overflow-invariant)
+  let linkWidths = $state<number[]>([]); // per-link intrinsic widths (ghost-measured)
+  let moreWidth = $state(0); // intrinsic width of the More button
+  let cmdkWidth = $state(0); // live width of the ⌘K chip (0 when hidden)
+
+  // Read every measurement and the available width, writing each `$state`
+  // ONLY when its value actually changed. The change-guards matter: an
+  // unconditional `linkWidths = [...]` allocates a fresh array every tick,
+  // which re-renders the nav even when nothing moved — exactly the kind of
+  // redundant churn that makes a ResizeObserver re-fire and trips the
+  // browser's "loop completed with undelivered notifications" heuristic.
+  function syncNav() {
+    const ghost = ghostNavRef;
+    if (ghost) {
+      const links = ghost.querySelectorAll<HTMLElement>("[data-ghost-link]");
+      const next = [...links].map((el) => el.offsetWidth);
+      if (
+        next.length !== linkWidths.length ||
+        next.some((w, i) => w !== linkWidths[i])
+      ) {
+        linkWidths = next;
+      }
+      const more = ghost.querySelector<HTMLElement>("[data-ghost-more]");
+      const mw = more ? more.offsetWidth : 0;
+      if (mw !== moreWidth) moreWidth = mw;
+    }
+    const cw = cmdkRef?.offsetWidth ?? 0;
+    if (cw !== cmdkWidth) cmdkWidth = cw;
+    const aw = headerRightRef?.clientWidth ?? 0;
+    if (aw !== availWidth) availWidth = aw;
+  }
+
+  // How many links fit before we must start overflowing into More. Pure
+  // function of `availWidth` + cached widths → no resize feedback loop.
+  let visibleCount = $derived.by(() => {
+    if (availWidth === 0 || linkWidths.length !== navLinks.length) {
+      return navLinks.length;
+    }
+    const cmdkCost = cmdkWidth > 0 ? cmdkWidth + CLUSTER_GAP : 0;
+    const budget = availWidth - cmdkCost;
+
+    // Everything fits with no More button? Show it all (no reserve needed).
+    let sumAll = 0;
+    for (let i = 0; i < navLinks.length; i++) {
+      sumAll += linkWidths[i] + (i > 0 ? NAV_GAP : 0);
+    }
+    if (sumAll <= budget) return navLinks.length;
+
+    // Otherwise a More button is guaranteed — permanently reserve its width
+    // and greedily fit links to its left. Reserving unconditionally here is
+    // what keeps the 0↔1 overflow boundary from oscillating.
+    const moreCost = moreWidth + CLUSTER_GAP;
+    let used = 0;
+    for (let i = 0; i < navLinks.length; i++) {
+      const cost = linkWidths[i] + (i > 0 ? NAV_GAP : 0);
+      if (used + cost + moreCost > budget) return i;
+      used += cost;
+    }
+    return navLinks.length;
+  });
+
+  let visibleLinks = $derived(navLinks.slice(0, visibleCount));
+  let overflowLinks = $derived(navLinks.slice(visibleCount));
+
+  // Wire the measurement once the signed-in header (and its ghost) mount.
+  $effect(() => {
+    const hr = headerRightRef;
+    const ghost = ghostNavRef;
+    if (!hr || !ghost) return;
+
+    syncNav();
+
+    // One observer over both targets (the flex track `.header-right` and the
+    // measuring ghost, which re-lays-out when the webfont swaps in), coalesced
+    // into a single rAF. Deferring the state write out of the RO delivery
+    // cycle — plus the change-guards in syncNav — keeps the benign
+    // "ResizeObserver loop" warning from firing during layout settling.
+    let rafId = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(syncNav);
+    });
+    ro.observe(hr);
+    ro.observe(ghost);
+
+    // The ⌘K chip is hidden below 640px; that toggle doesn't resize
+    // header-right (its box is flex leftover), so re-measure on the change.
+    const narrow = window.matchMedia("(max-width: 640px)");
+    const onNarrow = () => syncNav();
+    narrow.addEventListener("change", onNarrow);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      ro.disconnect();
+      narrow.removeEventListener("change", onNarrow);
+    };
+  });
+
+  // Close the More menu on outside-click / Escape.
+  $effect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (navMoreRef && !navMoreRef.contains(e.target as Node)) menuOpen = false;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") menuOpen = false;
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  });
 
   let isLogin = $derived($page.url.pathname.startsWith("/login"));
   let isChat = $derived(
@@ -250,34 +419,69 @@
           </span>
         {/if}
       </div>
-      <div class="header-right">
-        <nav class="header-nav" class:open={menuOpen}>
-          <a
-            href="/"
-            class:active={$page.url.pathname === "/" ||
-              $page.url.pathname.startsWith("/sessions")}
-            onclick={closeMenu}>Chat</a>
-          <a href="/dashboard" class:active={$page.url.pathname.startsWith("/dashboard")} onclick={closeMenu}>Dashboard</a>
-          <a href="/tickets" class:active={$page.url.pathname.startsWith("/tickets")} onclick={closeMenu}>Tickets</a>
-          <a href="/schedules" class:active={$page.url.pathname.startsWith("/schedules")} onclick={closeMenu}>Schedules</a>
-          <a href="/memory" class:active={$page.url.pathname.startsWith("/memory")} onclick={closeMenu}>Memory</a>
-          <a href="/evolve" class:active={$page.url.pathname.startsWith("/evolve")} onclick={closeMenu}>Evolve</a>
-          <a href="/skills" class:active={$page.url.pathname.startsWith("/skills")} onclick={closeMenu}>Skills</a>
-          <a href="/logs" class:active={$page.url.pathname.startsWith("/logs")} onclick={closeMenu}>Logs</a>
-          <a href="/settings" class:active={$page.url.pathname.startsWith("/settings")} onclick={closeMenu}>Settings</a>
+      <div class="header-right" bind:this={headerRightRef}>
+        <nav class="header-nav">
+          {#each visibleLinks as link (link.href)}
+            {@const chatIcon = visibleLinks.length === 1 && link.href === "/"}
+            <a
+              href={link.href}
+              class:active={link.match($page.url.pathname)}
+              class:icon-link={chatIcon}
+              aria-label={link.label}
+              title={chatIcon ? link.label : undefined}
+              onclick={closeMenu}>
+              {#if chatIcon}
+                <MessagesSquare size={16} strokeWidth={2} aria-hidden="true" />
+              {:else}
+                {link.label}
+              {/if}
+            </a>
+          {/each}
         </nav>
         <button
           type="button"
           class="cmd-k-chip"
+          bind:this={cmdkRef}
           onclick={() => commandPalette.openPalette()}
           title="Open command palette (⌘K)"
           aria-label="Open command palette"
           aria-keyshortcuts="Meta+K Control+K">
           ⌘K
         </button>
-        <button class="hamburger-btn" onclick={() => (menuOpen = !menuOpen)} aria-label="Toggle navigation">
-          <span></span><span></span><span></span>
-        </button>
+        {#if overflowLinks.length > 0}
+          <div class="nav-more" bind:this={navMoreRef}>
+            <button
+              class="hamburger-btn"
+              aria-haspopup="true"
+              aria-expanded={menuOpen}
+              aria-label="More navigation"
+              onclick={() => (menuOpen = !menuOpen)}>
+              <span></span><span></span><span></span>
+            </button>
+            {#if menuOpen}
+              <nav class="nav-more-panel">
+                {#each overflowLinks as link (link.href)}
+                  <a
+                    href={link.href}
+                    class:active={link.match($page.url.pathname)}
+                    onclick={closeMenu}>{link.label}</a>
+                {/each}
+              </nav>
+            {/if}
+          </div>
+        {/if}
+
+        <!-- Off-screen ghost: a full-strength copy of every link (plus a
+             More button) used to measure intrinsic widths. Absolutely
+             positioned + visibility:hidden so it never affects layout. -->
+        <nav class="header-nav nav-ghost" bind:this={ghostNavRef} aria-hidden="true">
+          {#each navLinks as link (link.href)}
+            <a data-ghost-link href={link.href} tabindex="-1">{link.label}</a>
+          {/each}
+          <span class="hamburger-btn" data-ghost-more>
+            <span></span><span></span><span></span>
+          </span>
+        </nav>
       </div>
     </header>
   {/if}
@@ -325,7 +529,19 @@
   }
 
   .header-left { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
-  .header-right { display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; position: relative; }
+  /* header-right claims the flex leftover after header-left and right-aligns
+     its cluster. Because its box width is the leftover (not its content), it
+     stays constant as nav links move in/out of the More menu — that's what
+     makes the priority+ split in +layout.svelte's script bounce-free. */
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex: 1 1 auto;
+    min-width: 0;
+    justify-content: flex-end;
+    position: relative;
+  }
 
   .header-sep { width: 1px; height: 1.2rem; background: var(--border-primary); flex-shrink: 0; }
   .wake-lock-indicator {
@@ -346,14 +562,62 @@
   .logo:hover { opacity: 0.8; }
   .logo-icon { width: 1.7rem; height: 1.7rem; border-radius: var(--radius-sm); object-fit: cover; flex-shrink: 0; }
 
-  .header-nav { display: flex; gap: 0.25rem; }
+  /* The visible-links row. min-width:0 + overflow:hidden lets it clip
+     (rather than push the cluster wider) during the first paint before the
+     ghost has been measured; once measured, visibleLinks always fits. */
+  .header-nav {
+    display: flex;
+    gap: 0.25rem;
+    min-width: 0;
+    overflow: hidden;
+    flex-wrap: nowrap;
+  }
   .header-nav a {
     padding: 0.35rem 0.75rem; font-size: 0.8rem; font-weight: 500;
     color: var(--text-secondary); text-decoration: none;
     border-radius: var(--radius-sm); transition: all var(--transition-fast);
+    white-space: nowrap;
   }
   .header-nav a:hover { color: var(--text-primary); background: var(--bg-tertiary); }
   .header-nav a.active { color: var(--accent-primary); background: var(--accent-glow); }
+  /* When only "Chat" survives the overflow it collapses to its icon. */
+  .header-nav a.icon-link { display: inline-flex; align-items: center; }
+
+  /* Off-screen measuring ghost — out of flow, never visible. */
+  .nav-ghost {
+    position: absolute;
+    left: 0;
+    top: 0;
+    visibility: hidden;
+    pointer-events: none;
+    overflow: visible;
+    white-space: nowrap;
+  }
+
+  /* Priority+ overflow ("More") menu. */
+  .nav-more { position: relative; display: flex; align-items: center; flex-shrink: 0; }
+  .nav-more-panel {
+    position: absolute;
+    top: calc(100% + 0.5rem);
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    min-width: 11rem;
+    padding: 0.375rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    z-index: 200;
+  }
+  .nav-more-panel a {
+    padding: 0.6rem 1rem; font-size: 0.875rem; font-weight: 500;
+    color: var(--text-secondary); text-decoration: none;
+    border-radius: var(--radius-sm); white-space: nowrap;
+    transition: all var(--transition-fast);
+  }
+  .nav-more-panel a:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+  .nav-more-panel a.active { color: var(--accent-primary); background: var(--accent-glow); }
 
   .app-main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; padding-top: 5.5rem; }
   .app-main.no-header { padding-top: 1.5rem; max-width: none; padding: 0; }
@@ -384,7 +648,7 @@
   }
 
   .hamburger-btn {
-    display: none;
+    display: flex;
     flex-direction: column;
     justify-content: center;
     align-items: center;
@@ -419,19 +683,6 @@
     border-radius: 2px; transition: background var(--transition-fast);
   }
   .hamburger-btn:hover span { background: var(--accent-primary); }
-
-  @media (max-width: 1100px) {
-    .header-nav {
-      display: none;
-      position: absolute; top: calc(100% + 0.5rem); right: 0;
-      background: var(--bg-secondary); border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md); box-shadow: var(--shadow-lg);
-      padding: 0.375rem; flex-direction: column; min-width: 11rem; z-index: 200;
-    }
-    .header-nav.open { display: flex; }
-    .header-nav a { padding: 0.6rem 1rem; font-size: 0.875rem; border-radius: var(--radius-sm); }
-    .hamburger-btn { display: flex; }
-  }
 
   @media (max-width: 640px) {
     .app-header { border-radius: var(--radius-lg); }
