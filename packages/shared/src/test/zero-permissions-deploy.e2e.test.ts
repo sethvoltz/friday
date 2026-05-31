@@ -33,6 +33,14 @@ import {
 
 const TEST_TIMEOUT_MS = 90_000;
 
+// The boot hooks must clear the harness's worst-case internal boot ceiling
+// (daemon + dashboard 90s each with one waitForBoot retry; zero-cache 90s TCP
+// + 90s WS poll), not the lighter per-`it()` budget. A per-call third arg
+// OVERRIDES the config-level hookTimeout (180s), so a 90s hook arg can
+// guillotine a slow-but-succeeding cold boot before the harness surfaces its
+// stderr-tail diagnostic. Match the sibling e2e files' 180s convention.
+const HARNESS_BOOT_MS = 180_000;
+
 let env: SyncEnv;
 // Count of deploy invocations attributable to the non-skip boot below.
 let nonSkipBootInvocations = 0;
@@ -43,11 +51,13 @@ beforeAll(async () => {
   zeroDeployInvocations.count = 0;
   env = await spawnTestSyncEnv({ label: "zero_perms_deploy" });
   nonSkipBootInvocations = zeroDeployInvocations.count;
-}, TEST_TIMEOUT_MS);
+}, HARNESS_BOOT_MS);
 
 afterAll(async () => {
-  await env.cleanup();
-}, TEST_TIMEOUT_MS);
+  // Guard with optional chaining so a failed/killed boot surfaces its real
+  // error instead of a masking `reading 'cleanup'` TypeError on undefined env.
+  await env?.cleanup();
+}, HARNESS_BOOT_MS);
 
 describe("FRI-129: sync-harness deploys Zero permissions", () => {
   it(
