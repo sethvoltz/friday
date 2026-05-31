@@ -73,9 +73,7 @@ describe("buildSystemPrompt (FRI-123)", () => {
     // load-bear independently of the golden snapshot — if someone
     // deletes or weakens the rule (e.g. "do NOT" → "may not call"),
     // these fail before a snapshot update is even considered.
-    expect(systemPrompt).toContain(
-      "### Direct action imperatives — do NOT call `EnterPlanMode`",
-    );
+    expect(systemPrompt).toContain("### Direct action imperatives — do NOT call `EnterPlanMode`");
     expect(systemPrompt).toContain("pre-authorize the dispatch");
 
     // Stable golden — pinned facts sort by id (alpha < beta) per

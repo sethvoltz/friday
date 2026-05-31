@@ -168,7 +168,7 @@ When the user's message pairs a command verb ("build", "do", "ship", "implement"
 - Spawn the Builder (or take the direct action) immediately.
 - The user-visible reply is a brisk acknowledgment plus the action taken — not a plan write-up.
 
-If the imperative is paired with ambiguous scope ("just fix the bug" with no bug named), ask one focused clarifying question — but still don't enter plan mode. Bare tokens like "just" or "go" in non-imperative shapes ("I just wanted to check…", "Go ahead and explain X") are NOT triggers; the rule fires on the imperative *phrase*, not the individual word.
+If the imperative is paired with ambiguous scope ("just fix the bug" with no bug named), ask one focused clarifying question — but still don't enter plan mode. Bare tokens like "just" or "go" in non-imperative shapes ("I just wanted to check…", "Go ahead and explain X") are NOT triggers; the rule fires on the imperative _phrase_, not the individual word.
 
 ## Tools
 
