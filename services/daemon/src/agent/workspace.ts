@@ -187,6 +187,28 @@ export interface ArchiveWorkspaceOptions {
   branch?: string;
 }
 
+/**
+ * Recognize stderr from `git worktree remove` / `git branch -D` that indicates
+ * the target was already gone — a fully anticipated race because the Claude
+ * Agent SDK auto-removes worktrees + branches when a builder makes no file
+ * changes, before Friday's own archive cleanup runs.
+ *
+ * Locale matters: git localizes these messages, so callers must force
+ * `LC_ALL=C` on the subprocess for substring matching to be stable. Any
+ * unrecognized stderr (or empty / missing stderr) returns null so the caller
+ * stays on the warn path and a genuine failure isn't masked.
+ */
+export function classifyGitArchiveStderr(
+  stderr: string | undefined | null,
+): "worktree-gone" | "branch-gone" | null {
+  if (!stderr) return null;
+  if (stderr.includes("is not a working tree")) return "worktree-gone";
+  if (stderr.includes("not found")) return "branch-gone";
+  return null;
+}
+
+const C_LOCALE_ENV = { ...process.env, LC_ALL: "C", LANG: "C" };
+
 export function archiveWorkspace(
   name: string,
   baseRepo: string,
@@ -204,15 +226,26 @@ export function archiveWorkspace(
       execFileSync("git", ["worktree", "remove", "--force", path], {
         cwd: baseRepo,
         stdio: "pipe",
+        env: C_LOCALE_ENV,
       });
     } catch (err) {
       const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
-      logger.log("warn", "workspace.destroy.fail", {
-        name,
-        message: e.message ?? String(err),
-        stderr: e.stderr ? String(e.stderr).trim() : undefined,
-        stdout: e.stdout ? String(e.stdout).trim() : undefined,
-      });
+      const stderr = e.stderr ? String(e.stderr).trim() : undefined;
+      const race = classifyGitArchiveStderr(stderr);
+      if (race === "worktree-gone") {
+        logger.log("debug", "workspace.destroy.skip", {
+          name,
+          reason: race,
+          stderr,
+        });
+      } else {
+        logger.log("warn", "workspace.destroy.fail", {
+          name,
+          message: e.message ?? String(err),
+          stderr,
+          stdout: e.stdout ? String(e.stdout).trim() : undefined,
+        });
+      }
     }
     // The worktree-remove leaves the parent directory in place if anything
     // non-tracked accumulated there (logs, build artifacts). Wipe whatever
@@ -258,13 +291,27 @@ export function archiveWorkspace(
       execFileSync("git", ["branch", "-D", opts.branch], {
         cwd: baseRepo,
         stdio: "pipe",
+        env: C_LOCALE_ENV,
       });
     } catch (err) {
-      logger.log("warn", "workspace.branch.delete.fail", {
-        name,
-        branch: opts.branch,
-        message: err instanceof Error ? err.message : String(err),
-      });
+      const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
+      const stderr = e.stderr ? String(e.stderr).trim() : undefined;
+      const race = classifyGitArchiveStderr(stderr);
+      if (race === "branch-gone") {
+        logger.log("debug", "workspace.branch.delete.skip", {
+          name,
+          branch: opts.branch,
+          reason: race,
+          stderr,
+        });
+      } else {
+        logger.log("warn", "workspace.branch.delete.fail", {
+          name,
+          branch: opts.branch,
+          message: e.message ?? String(err),
+          stderr,
+        });
+      }
     }
   }
 }
