@@ -2,12 +2,13 @@
   /**
    * Three-stage connectivity widget (FIX_FORWARD 3.10).
    *
-   *   (●) 🌐  ⋯▸  (●) 📡  ⋯▸  (●) 🖥  · up 6h 10m
+   *   🌐  ⋯▸  📡  ⋯▸  🖥  · up 6h 10m
    *
-   * Each (dot, icon) pair is a hoverable / tappable unit with a tooltip
-   * via `title`. Informational only — no buttons. The uptime tail is
-   * hidden on mobile to keep the header compact; tapping stage 3 there
-   * shows the uptime in its tooltip.
+   * Each icon is a hoverable / tappable unit with a tooltip via `title`.
+   * Status reads off the icon's own color, with a pulsing halo behind it
+   * when the stage is active (green) or reconnecting (orange). Down (red)
+   * and unknown (grey) stay static. Informational only — no buttons. The
+   * uptime tail shows at every width (it also lives in stage 3's tooltip).
    */
   import {
     formatUptime,
@@ -27,22 +28,20 @@
     class={statusClass(view.internet.status)}
     title={view.internet.tooltip}
     aria-label={view.internet.tooltip}>
-    <span class="dot"></span>
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <circle cx="12" cy="12" r="10" />
       <line x1="2" y1="12" x2="22" y2="12" />
       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
     </svg>
   </span>
-  <svg class="sep" viewBox="0 0 20 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <line x1="1" y1="7" x2="13" y2="7" stroke-dasharray="2 3" />
-    <polyline points="12,4 16,7 12,10" />
+  <svg class="sep" viewBox="0 0 15 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <line x1="1" y1="7" x2="8" y2="7" stroke-dasharray="2 3" />
+    <polyline points="7,4 11,7 7,10" />
   </svg>
   <span
     class={statusClass(view.sync.status)}
     title={view.sync.tooltip}
     aria-label={view.sync.tooltip}>
-    <span class="dot"></span>
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <!-- Satellite-dish glyph. Phase 6a rewired the middle stage from
            SSE → Sync semantics but the dish icon reads more clearly as
@@ -54,15 +53,14 @@
       <path d="M21 13A10 10 0 0 0 11 3" />
     </svg>
   </span>
-  <svg class="sep" viewBox="0 0 20 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <line x1="1" y1="7" x2="13" y2="7" stroke-dasharray="2 3" />
-    <polyline points="12,4 16,7 12,10" />
+  <svg class="sep" viewBox="0 0 15 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <line x1="1" y1="7" x2="8" y2="7" stroke-dasharray="2 3" />
+    <polyline points="7,4 11,7 7,10" />
   </svg>
   <span
     class={statusClass(view.daemon.status)}
     title={view.daemon.tooltip}
     aria-label={view.daemon.tooltip}>
-    <span class="dot"></span>
     <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <rect x="4" y="4" width="16" height="16" rx="2" />
       <rect x="9" y="9" width="6" height="6" />
@@ -77,7 +75,7 @@
     </svg>
   </span>
   {#if view.uptimeMs !== null && view.daemon.status === "live"}
-    <span class="uptime desktop-only" aria-label={`Daemon uptime ${formatUptime(view.uptimeMs)}`}>
+    <span class="uptime" aria-label={`Daemon uptime ${formatUptime(view.uptimeMs)}`}>
       · up {formatUptime(view.uptimeMs)}
     </span>
   {/if}
@@ -102,9 +100,9 @@
     font-family: var(--font-mono);
   }
   .stage {
+    position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 0.3rem;
     padding: 0.15rem 0.3rem;
     border-radius: var(--radius-sm);
     color: var(--stage-color);
@@ -115,56 +113,58 @@
     background: var(--bg-tertiary);
   }
   .sep {
-    width: 20px;
+    width: 15px;
     height: 14px;
     color: var(--text-tertiary);
     flex-shrink: 0;
   }
   .icon {
-    width: 14px;
-    height: 14px;
+    position: relative;
+    z-index: 1;
+    width: 16px;
+    height: 16px;
     color: var(--stage-color);
     transition: color 200ms ease;
   }
-  .dot {
-    width: 8px;
-    height: 8px;
+  /* The pulse halo now lives on a pseudo-element centered behind the
+     icon (the standalone dot is gone). It runs on `.stage-live` (green,
+     "active") and `.stage-reconnecting` (orange, "trying to reconnect").
+     `.stage-down` (red) and `.stage-unknown` (grey) stay static because
+     there's nothing happening to communicate. The timeline lives on the
+     element itself rather than a per-state rule so the green↔orange
+     transition keeps a single continuous timeline instead of restarting
+     the keyframe at 0%. `color-mix` re-resolves each frame so the halo
+     follows the icon's current color. */
+  .stage::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 0;
+    width: 6px;
+    height: 6px;
+    margin: -3px 0 0 -3px;
     border-radius: 50%;
-    flex-shrink: 0;
-    background: var(--stage-color);
-    /* The animation runs on `.stage-live` and `.stage-reconnecting`
-       dots — pulsing means "active" (green) or "trying to reconnect"
-       (yellow). `.stage-down` (red) and `.stage-unknown` (grey) stay
-       static because there's nothing happening to communicate. The
-       animation timeline lives on the dot itself rather than on a
-       per-state rule so the green↔yellow transition (e.g. brief
-       reconnect blip during a Zero auth refresh) keeps a single
-       continuous timeline instead of restarting the keyframe at 0%.
-       `color-mix` re-resolves each frame so the halo follows the
-       dot's current color. */
+    pointer-events: none;
     animation: stage-pulse 1.6s ease-out infinite;
-    transition: background-color 200ms ease;
   }
-  .stage-down .dot,
-  .stage-unknown .dot {
+  .stage-down::before,
+  .stage-unknown::before {
     animation: none;
     box-shadow: none;
   }
   @keyframes stage-pulse {
     0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--stage-color) 65%, transparent); }
-    70%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--stage-color) 0%, transparent); }
+    70%  { box-shadow: 0 0 0 9px color-mix(in srgb, var(--stage-color) 0%, transparent); }
     100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--stage-color) 0%, transparent); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .dot { animation: none; }
+    .stage::before { animation: none; }
   }
 
   .uptime {
     color: var(--text-tertiary);
     margin-left: 0.15rem;
-  }
-  /* Hide uptime on mobile — daemon stage tooltip carries it instead. */
-  @media (max-width: 768px) {
-    .desktop-only { display: none; }
+    white-space: nowrap;
   }
 </style>
