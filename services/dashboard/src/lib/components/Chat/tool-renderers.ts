@@ -1,6 +1,7 @@
 import type { Component } from "svelte";
 import TodoList from "./TodoList.svelte";
 import FileEditRenderer from "./FileEditRenderer.svelte";
+import MailToolBlock from "./MailToolBlock.svelte";
 
 /**
  * Per-tool render dispatch for chat tool-use blocks (FRI-130 foundation).
@@ -117,3 +118,15 @@ export function resolveToolRenderer(toolName: string): ToolRenderer | undefined 
   if (mcp) return TOOL_RENDERERS[mcp[1]];
   return undefined;
 }
+
+/* ---------------- Registered renderers ---------------- */
+
+// FRI-135 (ticket C): one MailToolBlock component renders all four
+// friday-mail tool CALLS, branching internally on the short name. Keyed on
+// the bare MCP short segments — which is what `resolveToolRenderer`'s
+// `/^mcp__[^_]+__(.+)$/` capture resolves every `mcp__friday-<server>__mail_*`
+// raw name to (the `<server>` segment is intentionally not part of the key).
+TOOL_RENDERERS["mail_send"] = { component: MailToolBlock };
+TOOL_RENDERERS["mail_inbox"] = { component: MailToolBlock };
+TOOL_RENDERERS["mail_read"] = { component: MailToolBlock };
+TOOL_RENDERERS["mail_close"] = { component: MailToolBlock };
