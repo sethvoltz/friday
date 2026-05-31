@@ -69,6 +69,13 @@ describe("buildSystemPrompt (FRI-123)", () => {
     expect(systemPrompt).toContain("- **fact alpha**: value alpha");
     expect(systemPrompt).toContain("- **fact beta**: value beta");
 
+    // FRI-64: plan-mode bypass for direct action imperatives. These
+    // load-bear independently of the golden snapshot — if someone
+    // deletes or weakens the rule (e.g. "do NOT" → "may not call"),
+    // these fail before a snapshot update is even considered.
+    expect(systemPrompt).toContain("### Direct action imperatives — do NOT call `EnterPlanMode`");
+    expect(systemPrompt).toContain("pre-authorize the dispatch");
+
     // Stable golden — pinned facts sort by id (alpha < beta) per
     // listPinnedForAgent's order; the prompt-stack files are pinned
     // content at HEAD; no hooks registered → no recall / skill-context
