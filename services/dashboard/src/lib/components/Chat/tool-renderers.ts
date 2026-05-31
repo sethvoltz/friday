@@ -1,5 +1,6 @@
 import type { Component } from "svelte";
 import TodoList from "./TodoList.svelte";
+import FileEditRenderer from "./FileEditRenderer.svelte";
 
 /**
  * Per-tool render dispatch for chat tool-use blocks (FRI-130 foundation).
@@ -83,6 +84,20 @@ export const TOOL_RENDERERS: Record<string, ToolRenderer> = {};
 // registry key stays `"TodoWrite"`. Renders the task list directly instead of
 // the generic collapsed JSON card.
 TOOL_RENDERERS["TodoWrite"] = { component: TodoList };
+
+// FRI-134 (ticket B): promote the file-edit diff to a shown-directly,
+// height-capped block. All four file-edit tools share one thin adapter
+// (`FileEditRenderer`) that maps the raw input to FileDiff's props and mounts
+// FileDiff directly — no collapsed tool card. All four are built-in literal
+// names (no `mcp__` prefix), so they resolve at step (1) of
+// `resolveToolRenderer` (raw-name match). `direct: true` marks them
+// shown-directly. `Read` is intentionally NOT registered (no diff to show) —
+// it stays on the generic ToolBlock.
+const fileEditRenderer: ToolRenderer = { component: FileEditRenderer, direct: true };
+TOOL_RENDERERS["Write"] = fileEditRenderer;
+TOOL_RENDERERS["Edit"] = fileEditRenderer;
+TOOL_RENDERERS["MultiEdit"] = fileEditRenderer;
+TOOL_RENDERERS["NotebookEdit"] = fileEditRenderer;
 
 const MCP_TOOL_RE = /^mcp__[^_]+__(.+)$/;
 
