@@ -19,34 +19,44 @@ export async function searchMemories(opts: SearchOptions): Promise<SearchResult[
   const q = opts.query.trim();
   if (!q) return [];
 
-  // Postgres FTS: use the `content_tsv` generated column populated by
-  // schema.ts FTS_SETUP_SQL. plainto_tsquery is forgiving on user input
-  // (handles missing operators, stop words, etc.).
-  const pool = getPool();
-  let candidateIds: string[] = [];
-  try {
-    const ftsRows = await pool.query<{ id: string }>(
-      `SELECT id
-         FROM memory_entries
-        WHERE content_tsv @@ plainto_tsquery('english', $1)
-        ORDER BY ts_rank(content_tsv, plainto_tsquery('english', $1)) DESC
-        LIMIT 100`,
-      [q],
-    );
-    candidateIds = ftsRows.rows.map((r) => r.id);
-  } catch {
-    candidateIds = [];
-  }
-
+  const tags = opts.tags ?? [];
   const allEntries = await listEntries();
-  const candidatePool =
-    candidateIds.length > 0 ? allEntries.filter((e) => candidateIds.includes(e.id)) : allEntries; // FTS fallback: scan all
+
+  // When a tag filter is supplied, the caller is asking "give me everything
+  // tagged X, ranked by relevance to query" — tags are the authoritative
+  // selector and FTS would wrongly exclude tag-matched entries whose body
+  // doesn't literally contain query tokens. Skip the FTS narrow and let
+  // the loop's tag-membership check be the only gate.
+  let candidatePool: MemoryEntry[];
+  if (tags.length > 0) {
+    candidatePool = allEntries;
+  } else {
+    // Postgres FTS: use the `content_tsv` generated column populated by
+    // schema.ts FTS_SETUP_SQL. plainto_tsquery is forgiving on user input
+    // (handles missing operators, stop words, etc.).
+    const pool = getPool();
+    let candidateIds: string[] = [];
+    try {
+      const ftsRows = await pool.query<{ id: string }>(
+        `SELECT id
+           FROM memory_entries
+          WHERE content_tsv @@ plainto_tsquery('english', $1)
+          ORDER BY ts_rank(content_tsv, plainto_tsquery('english', $1)) DESC
+          LIMIT 100`,
+        [q],
+      );
+      candidateIds = ftsRows.rows.map((r) => r.id);
+    } catch {
+      candidateIds = [];
+    }
+    candidatePool =
+      candidateIds.length > 0 ? allEntries.filter((e) => candidateIds.includes(e.id)) : allEntries; // FTS fallback: scan all
+  }
 
   const tokens = q
     .toLowerCase()
     .split(/\s+/)
     .filter((t) => t.length > 0);
-  const tags = opts.tags ?? [];
   const results: SearchResult[] = [];
 
   for (const entry of candidatePool) {
@@ -76,15 +86,24 @@ export async function searchMemories(opts: SearchOptions): Promise<SearchResult[
           score += 5;
           matchedOn.add(`tag:${entry.tags[i]}`);
           tokenMatched = true;
+        } else if (tagsLc[i].includes(tok)) {
+          // Partial tag match earns less than exact (+5) and slots between
+          // content (+1) and title (+3). Handles namespaced tags like
+          // `meal:library` matching a `library` token without double-counting
+          // exact-eq hits (the `else if` chain).
+          score += 2;
+          matchedOn.add(`tag~:${entry.tags[i]}`);
+          tokenMatched = true;
         }
       }
-      if (!tokenMatched) {
-        allTokensMatch = false;
-        break;
-      }
+      if (!tokenMatched) allTokensMatch = false;
     }
 
-    if (allTokensMatch && score > 0) {
+    // Tag filter is authoritative when present: include all tag-matched
+    // entries regardless of token match. Tag-less search retains the AND-gate
+    // so unrelated entries don't leak in.
+    const include = tags.length > 0 || (allTokensMatch && score > 0);
+    if (include) {
       score += Math.log2(entry.recallCount + 1);
       results.push({ entry, score, matchedOn: [...matchedOn] });
     }
