@@ -687,5 +687,6 @@
   @media (max-width: 640px) {
     .app-header { border-radius: var(--radius-lg); }
     .app-main { padding: 1rem; padding-top: 5rem; }
+    .logo span { display: none; }
   }
 </style>
