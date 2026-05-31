@@ -8,7 +8,15 @@
  * observe.
  */
 
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -215,6 +223,99 @@ describe("installApp", () => {
       .where(eq(schema.agents.name, "example-owner"));
     expect(liveB[0]!.archiveReason).toBeNull();
   });
+
+  it("runs npm install when the app folder ships a package.json", async () => {
+    // Synthesize an app fixture with a package.json referencing a local
+    // file: dependency, so the test stays offline + deterministic. No
+    // lockfile → the installer falls back to npm.
+    const folder = appDir("deps-app");
+    if (existsSync(folder)) rmSync(folder, { recursive: true, force: true });
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(
+      join(folder, "manifest.json"),
+      JSON.stringify({
+        manifestVersion: 1,
+        id: "deps-app",
+        name: "Deps App",
+        version: "0.1.0",
+        summary: "fixture",
+        agents: [{ name: "deps-app-owner", type: "bare" }],
+        schedules: [],
+        mcpServers: [],
+      }),
+    );
+    mkdirSync(join(folder, "vendor", "noop-dep"), { recursive: true });
+    writeFileSync(
+      join(folder, "vendor", "noop-dep", "package.json"),
+      JSON.stringify({ name: "noop-dep", version: "1.0.0" }),
+    );
+    writeFileSync(
+      join(folder, "package.json"),
+      JSON.stringify({
+        name: "deps-app",
+        version: "0.1.0",
+        dependencies: { "noop-dep": "file:./vendor/noop-dep" },
+      }),
+    );
+
+    const result = await installApp(folder);
+
+    expect(result.dependencies.ran).toBe(true);
+    if (!result.dependencies.ran) throw new Error("unreachable");
+    expect(result.dependencies.packageManager).toBe("npm");
+    expect(result.dependencies.exitCode).toBe(0);
+    expect(result.dependencies.warning).toBeUndefined();
+
+    // node_modules/noop-dep/package.json proves the install actually ran.
+    const installedPkg = join(folder, "node_modules", "noop-dep", "package.json");
+    expect(existsSync(installedPkg)).toBe(true);
+    const installedMeta = JSON.parse(readFileSync(installedPkg, "utf8"));
+    expect(installedMeta.name).toBe("noop-dep");
+  }, 60_000);
+
+  it("returns ran:false for apps without a package.json", async () => {
+    const folder = freshFixture();
+    const result = await installApp(folder);
+    expect(result.dependencies).toEqual({ ran: false });
+    expect(existsSync(join(folder, "node_modules"))).toBe(false);
+  });
+
+  it("surfaces a warning when the install exits non-zero", async () => {
+    // A preinstall script that exits 1 forces npm to fail. Verifies
+    // that a non-zero install is captured as a warning on the result
+    // rather than thrown (app row still committed).
+    const folder = appDir("bad-deps-app");
+    if (existsSync(folder)) rmSync(folder, { recursive: true, force: true });
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(
+      join(folder, "manifest.json"),
+      JSON.stringify({
+        manifestVersion: 1,
+        id: "bad-deps-app",
+        name: "Bad Deps App",
+        version: "0.1.0",
+        summary: "fixture",
+        agents: [{ name: "bad-deps-owner", type: "bare" }],
+        schedules: [],
+        mcpServers: [],
+      }),
+    );
+    writeFileSync(
+      join(folder, "package.json"),
+      JSON.stringify({
+        name: "bad-deps-app",
+        version: "0.1.0",
+        scripts: { preinstall: "exit 1" },
+      }),
+    );
+
+    const result = await installApp(folder);
+    expect(result.status).toBe("installed"); // app row still committed
+    expect(result.dependencies.ran).toBe(true);
+    if (!result.dependencies.ran) throw new Error("unreachable");
+    expect(result.dependencies.exitCode).not.toBe(0);
+    expect(result.dependencies.warning).toBeTruthy();
+  }, 60_000);
 
   it("rejects manifests whose mcpServer name collides across apps", async () => {
     const folderA = freshFixture("app-a");
