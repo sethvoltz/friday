@@ -51,7 +51,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     } catch {
       /* ignore */
     }
-    await env.cleanup();
+    // Guard with optional chaining to match the vitest e2e files: keep the
+    // teardown robust to a partially-initialized env so a real boot error
+    // surfaces instead of a masking `reading 'cleanup'` TypeError.
+    await env?.cleanup();
 
     console.log("[playwright globalTeardown] env down");
   };
