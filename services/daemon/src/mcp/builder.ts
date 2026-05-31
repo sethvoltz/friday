@@ -202,11 +202,20 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
       const resolvedArgs = srv.args.map((a) =>
         isLikelyAppPath(a) && !isAbsolute(a) ? join(folderPath, a) : a,
       );
+      // FRI-36: the SDK's `McpStdioServerConfig` type doesn't declare `cwd`,
+      // so any value we set is silently dropped and the spawned MCP inherits
+      // the daemon's cwd. Apps must read their folder from `FRIDAY_APP_DIR`
+      // (injected after manifest substitution so a manifest can't shadow it).
+      // The `cwd` field below is kept as a forward-compatible hint in case
+      // the SDK ever grows the field; it is a no-op today.
       servers[srv.name] = {
         type: "stdio",
         command: srv.command,
         args: resolvedArgs,
-        env: substituteEnv(srv.env ?? {}, envFile ?? {}),
+        env: {
+          ...substituteEnv(srv.env ?? {}, envFile ?? {}),
+          FRIDAY_APP_DIR: folderPath,
+        },
         cwd: folderPath,
       } as McpStdioServerConfig;
     }

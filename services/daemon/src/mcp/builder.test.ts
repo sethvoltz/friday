@@ -42,9 +42,59 @@ describe("buildMcpServers: per-app MCP (FRI-78)", () => {
       type: "stdio",
       command: "node",
       args: ["/tmp/demo-app/mcp/echo.js", "--flag"],
-      env: { TOKEN: "shhh", LIT: "literal" },
+      env: { TOKEN: "shhh", LIT: "literal", FRIDAY_APP_DIR: "/tmp/demo-app" },
       cwd: "/tmp/demo-app",
     });
+  });
+
+  it("FRI-36: injects FRIDAY_APP_DIR into every app MCP server's env", () => {
+    const servers = buildMcpServers({
+      ...baseOpts("bare"),
+      appContext: appCtx,
+    });
+    const entry = servers["demo-echo"] as { env: Record<string, string> };
+    expect(entry.env.FRIDAY_APP_DIR).toBe("/tmp/demo-app");
+  });
+
+  it("FRI-36: daemon-injected FRIDAY_APP_DIR wins over a manifest-declared one", () => {
+    const servers = buildMcpServers({
+      ...baseOpts("bare"),
+      appContext: {
+        ...appCtx,
+        mcpServers: [
+          {
+            name: "demo-echo",
+            command: "node",
+            args: ["mcp/echo.js"],
+            // Manifest tries to shadow the platform-injected value.
+            env: { FRIDAY_APP_DIR: "/somewhere/else" },
+          },
+        ],
+      },
+    });
+    const entry = servers["demo-echo"] as { env: Record<string, string> };
+    expect(entry.env.FRIDAY_APP_DIR).toBe("/tmp/demo-app");
+  });
+
+  it("FRI-36: built-in stdio (playwright) does NOT receive FRIDAY_APP_DIR", () => {
+    const servers = buildMcpServers({
+      ...baseOpts("bare"),
+      appContext: appCtx,
+    });
+    const pw = servers.playwright as { env: Record<string, string> };
+    expect(pw.env).toEqual({});
+    expect(pw.env.FRIDAY_APP_DIR).toBeUndefined();
+  });
+
+  it("FRI-36: user-config stdio MCPs do NOT receive FRIDAY_APP_DIR", () => {
+    const servers = buildMcpServers({
+      ...baseOpts("bare"),
+      userMcpServers: [{ name: "gcal", command: "gcal-mcp" }],
+      appContext: appCtx,
+    });
+    const gcal = servers.gcal as { env: Record<string, string> };
+    expect(gcal.env).toEqual({});
+    expect(gcal.env.FRIDAY_APP_DIR).toBeUndefined();
   });
 
   it("orchestrator never sees per-app servers (no appContext is set there)", () => {

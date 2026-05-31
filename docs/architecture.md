@@ -511,6 +511,19 @@ Earlier directions explored per-app memory namespacing or a recall ranker; the d
 
 Each app's manifest declares zero or more stdio MCP servers (`command: "node"`, args resolved relative to the app folder, env values substituted from the app's own `.env`). When the daemon forks a worker for an agent that has `app_id` set, `spawnTurn` auto-populates `appContext` on the worker's options. The worker's `buildMcpServers` then appends those servers — only to the app's own agents. The orchestrator has no `app_id`, so it has no `appContext`, so it never sees per-app MCP servers. That's the structural containment that makes the model work.
 
+**App folder discovery — `FRIDAY_APP_DIR` (FRI-36).** The Claude Agent SDK's `McpStdioServerConfig` type has no `cwd` field, so any cwd the daemon sets on a stdio MCP entry is silently dropped and the spawned MCP inherits the daemon's cwd. To compensate, the daemon injects `FRIDAY_APP_DIR=<app folder>` into every app MCP server's env (after manifest `${VAR}` substitution, so a manifest can't shadow it). **App MCP servers must read their folder from `process.env.FRIDAY_APP_DIR`, never from `process.cwd()`.** A robust pattern, with `fileURLToPath(import.meta.url)` walk as a defense-in-depth fallback for the conventional `<folder>/mcp/<server>.js` layout:
+
+```js
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const APP_DIR =
+  process.env.FRIDAY_APP_DIR ??
+  dirname(dirname(fileURLToPath(import.meta.url))); // <app>/mcp/<server>.js → <app>
+```
+
+The variable is **only** set on app-declared MCP servers — built-in stdio (`playwright`) and user-configured stdio MCPs (`~/.friday/config.json`) do not receive it.
+
 ### Install / uninstall / reload lifecycle
 
 `services/daemon/src/apps/installer.ts` is the transactional heart. All collision checks + writes happen in one Postgres transaction; post-commit side effects (drop default `.gitignore`, SSE publish, folder rename) are best-effort and log a warning on failure rather than unwind.
