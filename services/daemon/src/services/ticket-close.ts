@@ -22,6 +22,7 @@ import {
   updateTicket,
 } from "@friday/shared/services";
 import { logger } from "../log.js";
+import { syncProposalForClosedTicket } from "./proposal-sync.js";
 
 interface CloseInput {
   ticketId: string | null | undefined;
@@ -87,6 +88,10 @@ export async function closeTicketForArchive(input: CloseInput): Promise<void> {
         });
       }
     }
+
+    // FRI-66: cascade to the originating evolve proposal (if any).
+    // Best-effort — proposal-sync swallows its own failures.
+    await syncProposalForClosedTicket(ticketId);
 
     await propagateExternal({ ticketId, status, agentName });
   } catch (err) {

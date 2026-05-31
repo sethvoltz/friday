@@ -35,6 +35,7 @@ import "./hooks/register.js";
 import { agentCwdPinV1 } from "./state-migrations/agent-cwd-pin-v1.js";
 import { runStateMigrations } from "./state-migrations/runner.js";
 import { closeTicketForArchive } from "./services/ticket-close.js";
+import { syncProposalsForClosedTickets } from "./services/proposal-sync.js";
 import { runSettingsBootScan, startSettingsListener } from "./settings/listener.js";
 import { runMemoryBootScan, startMemoryListener } from "./memory/listener.js";
 import { runScheduleBootScan, startScheduleListener } from "./scheduler/listener.js";
@@ -183,7 +184,7 @@ async function main(): Promise<void> {
   startInvariantAuditor();
   startMailPruner();
   void reconcileLinear()
-    .then((result) => {
+    .then(async (result) => {
       if (!result.ran) {
         logger.log("debug", "linear.reconcile.skip", { reason: result.reason });
         return;
@@ -196,13 +197,21 @@ async function main(): Promise<void> {
         logger.log("info", "linear.reconcile.orphans", {
           count: result.orphans.length,
           stale: result.staleLinks.length,
+          closed: result.closedTicketIds.length,
           linked: result.linkedCount,
         });
       } else {
         logger.log("info", "linear.reconcile.clean", {
           linked: result.linkedCount,
           stale: result.staleLinks.length,
+          closed: result.closedTicketIds.length,
         });
+      }
+      // FRI-66: tickets that reconcile just transitioned to terminal
+      // because Linear's GitHub integration closed them on PR merge.
+      // Cascade to any originating evolve proposals.
+      if (result.closedTicketIds.length > 0) {
+        await syncProposalsForClosedTickets(result.closedTicketIds);
       }
     })
     .catch((err) =>
