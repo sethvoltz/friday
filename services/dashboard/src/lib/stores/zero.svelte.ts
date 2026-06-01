@@ -28,8 +28,10 @@ import { Zero } from "@rocicorp/zero";
 import type { PromiseWithServerResult as MutatorResult } from "@rocicorp/zero";
 import { createMutators, schema, type Mutators, type Schema } from "@friday/shared/sync";
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
-import { awaitMutatorServer } from "./mutator-result";
+import { awaitMutatorServer, type SendUserMessageOutcome } from "./mutator-result";
 import { reconcileWakeLock } from "./wake-lock.svelte";
+
+export type { SendUserMessageOutcome };
 
 /** Row shape mirrors the `agents` Zero table definition. Kept narrow:
  *  Phase 2 only reads the columns the sidebar needs. Phase 6's
@@ -1359,8 +1361,8 @@ class ZeroSyncStore {
     agent: string;
     text: string;
     attachments?: Array<{ sha256: string; filename: string; mime: string }>;
-  }): Promise<{ blockId: string; turnId: string } | null> {
-    if (!this.#zero) return null;
+  }): Promise<SendUserMessageOutcome> {
+    if (!this.#zero) return { kind: "no-zero" };
     this.#lastSendAt = Date.now(); // FRI-121 A3: watchdog tracks last send
     const blockId = args.blockId;
     const turnId = `t_${blockId}`;
@@ -1373,21 +1375,28 @@ class ZeroSyncStore {
       ts: Date.now(),
     });
     const outcome = await awaitMutatorServer(result);
-    if (outcome === "no-zero") return null;
-    if (outcome.kind === "success") return { blockId, turnId };
+    if (outcome === "no-zero") return { kind: "no-zero" };
+    if (outcome.kind === "success") return { kind: "ok", blockId, turnId };
     if (outcome.kind === "app-error" && outcome.pkCollision) {
-      // PK collision on the canonical `blocks.id` is the dedup success
-      // path — the original push committed; this retry is idempotent
-      // (FRI-103 invariant). Return the success shape so sendQueue
-      // clears the entry instead of looping on the same id forever.
-      return { blockId, turnId };
+      // PK collision on `blocks.id` is the idempotent-dedup success
+      // path — the original push committed; this retry is a no-op
+      // (FRI-103 invariant).
+      return { kind: "ok", blockId, turnId };
     }
-    // Genuine app-error (non-PK) OR transport `zero-error`. Returning
-    // `null` lets sendQueue's existing retry path (`send-queue.svelte.ts:247-263`)
-    // increment `attempts`, set `lastError = "zero_not_ready"`, and
-    // surface the failed-row UI via the standard `MAX_ATTEMPTS` fence.
-    // The queue entry IS preserved — FRI-103 data-safety invariant.
-    return null;
+    if (outcome.kind === "app-error") {
+      // Server-side mutator rejected the write. Caller should surface
+      // the failed-send UI immediately — there's no canonical row coming.
+      return { kind: "app-error", message: outcome.message };
+    }
+    // FRI-139: transport-level zero-error. The push HTTP relay
+    // (`/api/mutators`) may have succeeded server-side even though the
+    // ack didn't make it back over the WS — Zero's persistent outbox
+    // (`kvStore:"idb"`) retries on reconnect, and the canonical row
+    // typically lands via `applyZeroBlocks` within seconds of the WS
+    // recovering. Caller keeps the optimistic bubble in `pending` and
+    // arms a long-window fallback timer instead of flashing
+    // FAILED-TO-SEND on every restart-window send.
+    return { kind: "transport-error", message: outcome.message };
   }
 
   /**
@@ -1465,6 +1474,70 @@ class ZeroSyncStore {
     }
 
     return fastPathOk || row !== undefined;
+  }
+
+  /**
+   * FRI-139 review-2: cancel the underlying mutation for an in-flight
+   * user send when the user clicks DISCARD on a transport-error-armed
+   * bubble. The plain `discardPending` only removed the optimistic
+   * overlay — if the `/api/mutators` push actually committed and the
+   * daemon picked it up, the worker would still process the message
+   * and the user would see a "ghost" turn arrive after they thought
+   * they'd cancelled it.
+   *
+   * Strategy is best-effort + idempotent on every leg:
+   *
+   *   1. POST the daemon's fast-path `/api/internal/cancel-queued`
+   *      with `block_id` so a daemon that already has the row queued
+   *      drops it from the worker's `nextPrompts` deque synchronously.
+   *      The daemon's handler returns 200 with `already_canceled=true`
+   *      if the LISTEN-path or a prior cancel already deleted the row,
+   *      so calling against an absent / complete / pending row is safe.
+   *
+   *   2. If the row is in the local Zero snapshot, dispatch the
+   *      `cancelQueued` mutator (UPDATE status='cancel_requested').
+   *      This rides Zero's outbox for cross-device durability and
+   *      kicks the Postgres trigger that re-fires the daemon's
+   *      LISTEN-path. The mutator dispatch is skipped when the row
+   *      hasn't replicated yet — that's the transport-error path's
+   *      whole point — but the fast-path POST has already done the
+   *      daemon-side work.
+   *
+   * What this does NOT handle (limit of the surface Zero exposes):
+   * pulling an already-committed-but-not-yet-replicated row out of
+   * zero-cache's WAL stream before it reaches the local replica.
+   * Acceptable: the daemon-side cancel-queued endpoint is the
+   * authoritative cancellation point; once the worker picks up the
+   * row it's too late by definition, and the user would see the
+   * resulting bubble land normally rather than vanish from under them.
+   * Fire-and-forget — caller doesn't await network round-trips.
+   */
+  async cancelByBlockIdOnDiscard(blockId: string): Promise<void> {
+    if (!this.#zero) return;
+    try {
+      await fetch("/api/internal/cancel-queued", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ block_id: blockId }),
+      });
+    } catch {
+      // Daemon unreachable / network down — the mutator dispatch below
+      // is the durable backstop. Zero's outbox re-pushes on reconnect.
+    }
+    const row = this.blocks.find((b) => b.id === blockId);
+    if (!row) return;
+    const result = this.#zero!.mutate.cancelQueued({
+      id: row.id,
+      ts: Date.now(),
+    });
+    const outcome = await awaitMutatorServer(result);
+    if (typeof outcome === "object" && outcome.kind !== "success") {
+      // Mutator server-side failure (already deleted by the fast-path
+      // POST above winning the race, or a transport-level Zero error).
+      // User-visible state is already correct — the bubble was removed
+      // by `discardPending` synchronously. Log to console only.
+      console.warn(`cancelByBlockIdOnDiscard mutator error (block=${blockId}): ${outcome.message}`);
+    }
   }
 
   async cancelQueued(turnId: string): Promise<string | null> {
@@ -1770,6 +1843,14 @@ if (browser) {
     // FRI-123: resumeTurn mutator wire-up (replaces the retired
     // `POST /api/chat/turn/<id>/resume` REST path).
     chat.setResumeTurnFn((turnId) => zeroSync.resumeTurn(turnId));
+    // FRI-139 review-2: discard-cancel hook. discardPending /
+    // discardAllPending in the chat store call into this so the
+    // underlying mutation gets cancelled (daemon fast-path + Zero
+    // mutator for cross-device durability) instead of leaving a
+    // silent ghost turn the worker still processes.
+    chat.setDiscardCancelFn((blockId) => {
+      void zeroSync.cancelByBlockIdOnDiscard(blockId);
+    });
   });
 
   // Global error/rejection reporters — when a PWA on a phone can't

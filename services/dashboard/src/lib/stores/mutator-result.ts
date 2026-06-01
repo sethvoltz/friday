@@ -34,6 +34,29 @@ export type MutatorOutcome =
   | { kind: "zero-error"; message: string };
 
 /**
+ * FRI-139: discriminated outcome of `zeroSync.sendUserMessage`. Lives
+ * here (not in `zero.svelte.ts`) so the chat store can reference it
+ * without re-introducing the chat → zero circular import the
+ * setBlocksBinder / setSendMessageFn dance was built to avoid.
+ *
+ * See {@link MutatorOutcome} for the underlying Zero-side classification;
+ * `SendUserMessageOutcome` is the caller-facing shape that:
+ *   - merges `success` + PK-collision-on-retry into `ok` (idempotent
+ *     dedup per FRI-103);
+ *   - splits the prior collapsed `null` return back into the three
+ *     causally-distinct failure modes (`app-error`, `transport-error`,
+ *     `no-zero`) so callers can do the right thing on each:
+ *       * `app-error`      → mark FAILED-TO-SEND immediately
+ *       * `transport-error`→ keep optimistic pending; arm fallback timer
+ *       * `no-zero`        → mark FAILED-TO-SEND immediately
+ */
+export type SendUserMessageOutcome =
+  | { kind: "ok"; blockId: string; turnId: string }
+  | { kind: "app-error"; message: string }
+  | { kind: "transport-error"; message: string }
+  | { kind: "no-zero" };
+
+/**
  * Heuristic: Postgres `unique_violation` (SQLSTATE 23505) surfaces in the
  * application-error message as the English-locale substring
  * `duplicate key value violates unique constraint` (lc_messages=C). The

@@ -459,23 +459,35 @@
     // Wait for the bound textarea value to actually clear before measuring.
     await tick();
     autoresize();
-    const result = await zeroSync.sendUserMessage({
+    const outcome = await zeroSync.sendUserMessage({
       blockId,
       agent: chat.focusedAgent,
       text: t,
       attachments: attachments.length > 0 ? attachments : undefined,
     });
-    if (!result) {
-      // Zero not yet initialized (very rare — first ~200ms of page load).
+    if (outcome.kind === "ok") {
+      // Belt-and-suspenders: confirmPending re-keys the bubble if
+      // applyZeroBlocks hasn't already done it via the optimistic write.
+      chat.confirmPending(blockId, outcome.turnId);
+      chat.inflightTurnId = outcome.turnId;
+    } else if (outcome.kind === "transport-error") {
+      // FRI-139: Zero WS hiccup mid-send. The `/api/mutators` push may
+      // have committed at the server even though the ack didn't reach
+      // the client — flipping FAILED-TO-SEND here is the wrong UI for
+      // every restart-window send. Keep the bubble pending; Zero's
+      // outbox retries, applyZeroBlocks drops the optimistic when the
+      // canonical row lands, and the long-window fallback timer only
+      // fires if 30s pass with no row.
+      chat.scheduleTransportFailureFallback(blockId);
+    } else {
+      // app-error (server explicitly rejected the write — the row is
+      // NOT in the DB) or no-zero (Zero never initialised — very rare,
+      // only the first ~200ms of page load). Both warrant immediate
+      // FAILED-TO-SEND chrome.
       if (claimedInflight && chat.inflightTurnId === eagerTurnId) {
         chat.inflightTurnId = null;
       }
       chat.markPendingFailed(blockId);
-    } else {
-      // Belt-and-suspenders: confirmPending re-keys the bubble if
-      // applyZeroBlocks hasn't already done it via the optimistic write.
-      chat.confirmPending(blockId, result.turnId);
-      chat.inflightTurnId = result.turnId;
     }
   }
 

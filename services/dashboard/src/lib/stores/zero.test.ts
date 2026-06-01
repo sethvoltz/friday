@@ -1774,9 +1774,8 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
       agent: "friday",
       text: "hello agent",
     });
-    expect(out).not.toBeNull();
-    expect(out!.blockId).toBe(blockId);
-    expect(out!.turnId).toBe(`t_${blockId}`);
+    // FRI-139: discriminated outcome shape.
+    expect(out).toEqual({ kind: "ok", blockId, turnId: `t_${blockId}` });
 
     expect(z.mutate.sendUserMessage).toHaveBeenCalledTimes(1);
     const args = z.mutate.sendUserMessage.mock.calls[0][0] as {
@@ -1810,11 +1809,11 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
     expect(args.attachments).toEqual(attachments);
   });
 
-  it("sendUserMessage returns {blockId, turnId} when server resolves to {type:'error', error:{type:'app'}} that matches a blocks_pkey PK collision (idempotent retry)", async () => {
+  it("sendUserMessage returns {kind:'ok',blockId,turnId} when server resolves to {type:'error', error:{type:'app'}} that matches a blocks_pkey PK collision (idempotent retry)", async () => {
     // FRI-104: the dashboard treats a PK violation on `blocks.id` as a
     // dedup success — the original push committed, this retry is
-    // idempotent (FRI-103 invariant). Return the success shape so
-    // sendQueue clears the entry instead of looping on the same id.
+    // idempotent (FRI-103 invariant). FRI-139: returns the `ok` variant
+    // so callers route through the confirmPending happy path.
     const { zeroSync, z } = await bootedZero();
     z.mutate.sendUserMessage = vi.fn(() => ({
       client: Promise.resolve({ type: "success" }),
@@ -1833,17 +1832,17 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
       text: "boom",
     });
     expect(out).toEqual({
+      kind: "ok",
       blockId: "22222222-3333-4444-5555-666666666666",
       turnId: "t_22222222-3333-4444-5555-666666666666",
     });
   });
 
-  it("sendUserMessage returns null when server resolves to {type:'error', error:{type:'app'}} that is NOT a PK collision (real failure, sendQueue retries)", async () => {
+  it("sendUserMessage returns {kind:'app-error',message} when server resolves to {type:'error', error:{type:'app'}} that is NOT a PK collision (real failure)", async () => {
     // FRI-104: a genuine app-error must NOT be treated as success.
-    // Returning `null` lets sendQueue increment attempts and surface
-    // the failed-row UI via the existing MAX_ATTEMPTS fence. The
-    // sendQueue entry stays alive (FRI-103 data-safety invariant —
-    // pinned by the cross-boundary test in send-queue.test.ts).
+    // FRI-139: the wrapper now surfaces the app-error message so the
+    // caller can immediately flip the optimistic to FAILED-TO-SEND
+    // (the DB row does not exist; nothing to wait for).
     const { zeroSync, z } = await bootedZero();
     z.mutate.sendUserMessage = vi.fn(() => ({
       client: Promise.resolve({ type: "success" }),
@@ -1861,17 +1860,17 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
       agent: "ghost",
       text: "lost",
     });
-    expect(out).toBeNull();
+    expect(out).toEqual({ kind: "app-error", message: "agent not found" });
   });
 
-  it("sendUserMessage returns null when server resolves to {type:'error', error:{type:'zero'}} (transport — Zero outbox will re-push)", async () => {
-    // FRI-104: transport-level `zero-error` is transient — Replicache's
-    // persistent memdag has already enqueued the mutation and will
-    // re-push when the connection comes back. The wrapper returns
-    // `null` so sendQueue's existing retry path increments attempts;
-    // either Zero's outbox lands the canonical row first (clearing
-    // the entry via `ackByBlockId`) or MAX_ATTEMPTS surfaces the
-    // failed-row UI.
+  it("sendUserMessage returns {kind:'transport-error',message} when server resolves to {type:'error', error:{type:'zero'}} (transport — Zero outbox will re-push)", async () => {
+    // FRI-104: transport-level `zero-error` is transient — Zero's
+    // persistent outbox has already enqueued the mutation and will
+    // re-push when the connection comes back.
+    // FRI-139: the wrapper now surfaces the transport-error variant
+    // separately from app-error so callers can distinguish "server
+    // rejected the write" (mark failed) from "WS hiccup" (keep the
+    // optimistic in pending; arm the long-window fallback).
     const { zeroSync, z } = await bootedZero();
     z.mutate.sendUserMessage = vi.fn(() => ({
       client: Promise.resolve({ type: "success" }),
@@ -1885,10 +1884,10 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
       agent: "friday",
       text: "transient",
     });
-    expect(out).toBeNull();
+    expect(out).toEqual({ kind: "transport-error", message: "Offline" });
   });
 
-  it("returns null before Zero has finished initializing", async () => {
+  it("returns {kind:'no-zero'} before Zero has finished initializing", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() => new Promise(() => {})),
@@ -1900,7 +1899,138 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
         agent: "friday",
         text: "x",
       }),
-    ).resolves.toBeNull();
+    ).resolves.toEqual({ kind: "no-zero" });
+  });
+});
+
+describe("FRI-139 review-2: cancelByBlockIdOnDiscard wrapper", () => {
+  // The DISCARD path's underlying-mutation cleanup. Used when
+  // discardPending fires for a queueId whose `/api/mutators` push may
+  // have committed (transport-error case). Two legs:
+  //   - daemon fast-path POST /api/internal/cancel-queued (idempotent
+  //     — daemon returns already_canceled if the LISTEN-path raced it).
+  //   - cancelQueued Zero mutator dispatch IF the row is in the local
+  //     snapshot (durable cross-device).
+  async function bootedZero() {
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  function seedRow(zeroSync: {
+    blocks: Array<{
+      id: string;
+      block_id: string;
+      turn_id: string;
+      agent_name: string;
+      role: string;
+      source: string | null;
+      status: string;
+      content_json: unknown;
+    }>;
+  }) {
+    zeroSync.blocks = [
+      {
+        id: "fri139-discard-block-id",
+        block_id: "fri139-discard-block-id",
+        turn_id: "t_fri139-discard-block-id",
+        agent_name: "friday",
+        role: "user",
+        source: "user_chat",
+        status: "queued",
+        content_json: { text: "ghost mutation" },
+      },
+    ];
+  }
+
+  it("POSTs the daemon fast-path with the block_id (always — independent of local snapshot state)", async () => {
+    const { zeroSync } = await bootedZero();
+    const spy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify({ ok: true, already_canceled: false }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", spy);
+    // No row seeded — fast-path still fires unconditionally.
+    await zeroSync.cancelByBlockIdOnDiscard("fri139-discard-block-id");
+    const first = spy.mock.calls[0];
+    expect(first?.[0]).toBe("/api/internal/cancel-queued");
+    const init = first?.[1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({
+      block_id: "fri139-discard-block-id",
+    });
+  });
+
+  it("ALSO dispatches the cancelQueued mutator when the row is in the local Zero snapshot (durable cross-device)", async () => {
+    const { zeroSync, z } = await bootedZero();
+    seedRow(zeroSync as never);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    await zeroSync.cancelByBlockIdOnDiscard("fri139-discard-block-id");
+    expect(z.mutate.cancelQueued).toHaveBeenCalledTimes(1);
+    const args = z.mutate.cancelQueued.mock.calls[0][0] as {
+      id: string;
+      ts: number;
+    };
+    expect(args.id).toBe("fri139-discard-block-id");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("does NOT dispatch the cancelQueued mutator when the row is absent from the local snapshot (transport-error has not replicated yet)", async () => {
+    // The transport-error path's whole point: the row may not have
+    // landed in the local replica when the user discards. Daemon
+    // fast-path POST is the only cancel leg in this case; the mutator
+    // skip is the correct behavior, not a regression.
+    const { zeroSync, z } = await bootedZero();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    await zeroSync.cancelByBlockIdOnDiscard("no-row-yet");
+    expect(z.mutate.cancelQueued).not.toHaveBeenCalled();
+  });
+
+  it("still dispatches the mutator when the daemon fast-path fetch throws (network down)", async () => {
+    // Daemon-down resilience: the durable Zero-mutator path is the
+    // backstop; the daemon's LISTEN handler picks up the
+    // `cancel_requested` row on next reconnect.
+    const { zeroSync, z } = await bootedZero();
+    seedRow(zeroSync as never);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    );
+    await zeroSync.cancelByBlockIdOnDiscard("fri139-discard-block-id");
+    expect(z.mutate.cancelQueued).toHaveBeenCalledTimes(1);
+  });
+
+  it("is silent before Zero has finished initialising", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
+    const { zeroSync } = await importStore();
+    // Returns void; assert it doesn't throw and doesn't dispatch.
+    await zeroSync.cancelByBlockIdOnDiscard("any-id");
   });
 });
 
