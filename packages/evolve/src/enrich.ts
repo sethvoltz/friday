@@ -199,7 +199,7 @@ const SYSTEM_PROMPT = [
   "         medium = config or scoped code change. high = broad code change.",
   "",
   "**JSON escaping is mandatory and load-bearing.** The `body` field is a",
-  "JSON string. Every literal double-quote inside it MUST be escaped as `\\\"`.",
+  'JSON string. Every literal double-quote inside it MUST be escaped as `\\"`.',
   "Newlines inside the body MUST be `\\n`, not raw line breaks. Backslashes",
   "must be `\\\\`. A single missed escape on an inline-quoted user phrase",
   "fails the entire parse — there is no forgiving parser on the reading side.",
