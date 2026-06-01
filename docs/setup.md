@@ -143,6 +143,25 @@ Edit `~/.friday/config.json` to:
 
 Edit `~/.friday/SOUL.md` to customize Friday's voice and identity. Source upgrades never overwrite this file.
 
+### Analytics (optional)
+
+Friday ships first-class [PostHog](https://posthog.com) instrumentation, off by default. Add your PostHog project key to `~/.friday/.env` to turn it on across the stack:
+
+```
+POSTHOG_API_KEY=phc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# Optional — defaults to https://us.i.posthog.com. Set for EU cloud or self-hosted:
+# POSTHOG_HOST=https://eu.i.posthog.com
+```
+
+On the next `friday start`:
+
+- **Daemon** (`posthog-node`) emits business events (`agent_registered`, `chat_turn_dispatched`, `turn_completed`/`turn_errored`, `schedule_*`, `app_installed`) plus exception autocapture.
+- **Dashboard** (`posthog-js`, the official SvelteKit integration) captures pageviews, autocapture, **session replay**, client + server error tracking, and product events (`message_sent`, `slash_command_invoked`, `agent_focused`), identifying the signed-in user.
+
+With no key set, both clients construct with an empty key and silently no-op — nothing is sent. See the env-var table in `docs/running.md`. Session replay must also be enabled in your PostHog project settings (it is on by default for new projects).
+
+The dashboard routes all PostHog traffic through a **first-party reverse proxy** at `/ingest` (`src/routes/ingest/[...path]/+server.ts`) rather than calling `us.i.posthog.com` directly. This is what keeps content/ad blockers — common on the mobile Safari clients that reach Friday over the Cloudflare Tunnel — from silently blocking ingestion and session replay. `posthog-js` is pointed at `api_host: '/ingest'`; the proxy forwards to `POSTHOG_HOST` (and its `-assets` host) server-side. No configuration needed; it follows `POSTHOG_HOST` automatically.
+
 ### Installing apps
 
 Friday Apps (ADR-021, FRI-78) are folders that bundle agents, schedules, and stdio MCP servers. Install with one command:

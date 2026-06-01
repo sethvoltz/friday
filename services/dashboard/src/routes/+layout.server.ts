@@ -26,5 +26,13 @@ export const load: LayoutServerLoad = async ({ locals }) => {
     homeDir: process.env.HOME ?? null,
     dataDir:
       process.env.FRIDAY_DATA_DIR ?? (process.env.HOME ? `${process.env.HOME}/.friday` : null),
+    // PostHog analytics config (FRI / posthog branch). The project key is
+    // the public `phc_…` token — safe to ship to the browser — so we reuse
+    // the same `POSTHOG_API_KEY` / `POSTHOG_HOST` the daemon reads from
+    // `~/.friday/.env` (loaded into process.env by ensureFridayEnv, invoked
+    // at module load in $lib/server/auth). When unset, the client load
+    // below skips init and posthog-js stays dormant — analytics are opt-in.
+    posthogKey: process.env.POSTHOG_API_KEY || null,
+    posthogHost: process.env.POSTHOG_HOST || "https://us.i.posthog.com",
   };
 };

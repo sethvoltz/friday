@@ -24,6 +24,7 @@ import { loadConfig } from "@friday/shared";
 import { claimPendingSession, insertUsage, updateBlock } from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
+import { posthog, DISTINCT_ID } from "../posthog.js";
 import { type ArchiveReason } from "@friday/shared";
 import { closeTicketForArchive } from "../services/ticket-close.js";
 import * as registry from "./registry.js";
@@ -1571,6 +1572,21 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
         // runs because the worker's for-await closed and emitted error IPC).
         ...(wasAbort ? { abort_reason: "cooperative" as const } : {}),
       });
+      if (!wasAbort) {
+        posthog.capture({
+          distinctId: DISTINCT_ID,
+          event: "turn_errored",
+          properties: {
+            agent_name: w.agentName,
+            agent_type: w.agentType,
+            model: w.model,
+            turn_id: w.turnId,
+            error_code: e.code ?? null,
+            error_message: e.message,
+            recoverable: e.recoverable,
+          },
+        });
+      }
       // FRI-61 wedge detector: count consecutive turn-error events that
       // produced zero blocks. Skip when the user requested the abort
       // (that's not a wedge, it's cooperative). When the streak reaches
@@ -1734,6 +1750,24 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
           });
         });
       }
+      posthog.capture({
+        distinctId: DISTINCT_ID,
+        event: "turn_completed",
+        properties: {
+          agent_name: w.agentName,
+          agent_type: w.agentType,
+          model: w.model,
+          turn_id: w.turnId,
+          aborted: w.abortRequested,
+          duration_ms: durationMs,
+          input_tokens: e.usage?.input_tokens ?? null,
+          output_tokens: e.usage?.output_tokens ?? null,
+          cache_creation_tokens: e.usage?.cache_creation_tokens ?? null,
+          cache_read_tokens: e.usage?.cache_read_tokens ?? null,
+          cost_usd: e.usage?.cost_usd ?? null,
+          zero_block_reason: zeroBlockReason ?? null,
+        },
+      });
       // FRI-4 #2 (Layer B): if the SDK abandoned a content block
       // mid-stream and the worker's pre-break flush missed it, the
       // blockStream accumulator still has it. `endTurn` below would

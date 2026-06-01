@@ -19,6 +19,7 @@
   import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
   import { bindTheme } from "$lib/stores/theme.svelte";
   import { zeroSync } from "$lib/stores/zero.svelte";
+  import posthog from "posthog-js";
   import { FOUC_SCRIPT } from "$lib/theme/foucScript";
   import {
     handleExternalLinkClick,
@@ -219,6 +220,44 @@
       /^\/sessions\/[^/]+(\/[^/]+)?\/?$/.test($page.url.pathname),
   );
   let signedIn = $derived(!!data.user);
+
+  // PostHog identity: associate captured events + session replays with the
+  // signed-in user once posthog-js has initialized (see +layout.ts). Runs
+  // client-side only ($effect never fires during SSR). `identify` is
+  // idempotent for the same id; `reset` on logout starts a fresh anonymous
+  // session so a shared device doesn't leak the prior user's identity.
+  let lastIdentified: string | null = null;
+  $effect(() => {
+    if (!posthog.__loaded) return;
+    const u = data.user;
+    if (u) {
+      if (lastIdentified !== u.id) {
+        posthog.identify(u.id, { email: u.email, name: u.name });
+        lastIdentified = u.id;
+      }
+    } else if (lastIdentified !== null) {
+      posthog.reset();
+      lastIdentified = null;
+    }
+  });
+
+  // Tag every event/replay/error with Friday's own device identity, so the
+  // same person (Seth) splits into "Seth on Phone" vs "Seth on Desktop" by
+  // the user-editable `client_devices.label` — not just PostHog's generic
+  // $device_type. `register` writes super-properties (persisted, attached to
+  // all subsequent captures). PostHog's `defaults` autocapture already adds
+  // $device_type / $os / $browser, so this layers Friday's named device on
+  // top. Reactive: re-registers if the device row or its label changes.
+  $effect(() => {
+    if (!posthog.__loaded) return;
+    const deviceId = zeroSync.currentDeviceId;
+    if (!deviceId) return;
+    const row = zeroSync.clientDevices.find((d) => d.device_id === deviceId);
+    posthog.register({
+      friday_device_id: deviceId,
+      friday_device_label: row?.label ?? null,
+    });
+  });
 
   // Live uptime ticker + global SSE connection (one EventSource for all pages)
   let uptimeMs = $state(0);

@@ -49,6 +49,7 @@ import { deleteBlockById, inbox as mailInbox, listQueuedUserBlocks } from "@frid
 import { buildMailPrompt } from "./comms/mail-prompt.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { posthog, DISTINCT_ID } from "./posthog.js";
 
 async function main(): Promise<void> {
   ensureDirs();
@@ -281,6 +282,7 @@ async function main(): Promise<void> {
     });
     clearHealth();
     flushDb();
+    void posthog.shutdown().catch(() => {});
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
   };
@@ -534,18 +536,21 @@ process.on("unhandledRejection", (reason, promise) => {
     stack: err.stack,
     promise: String(promise),
   });
+  posthog.captureException(err, DISTINCT_ID, { source: "unhandledRejection" });
 });
 process.on("uncaughtException", (err) => {
   logger.log("error", "daemon.uncaught-exception", {
     message: err.message,
     stack: err.stack,
   });
+  posthog.captureException(err, DISTINCT_ID, { source: "uncaughtException" });
   process.exit(1);
 });
 
 main().catch((err: unknown) => {
-  logger.log("error", "daemon.fatal", {
-    message: err instanceof Error ? err.message : String(err),
-  });
+  const error = err instanceof Error ? err : new Error(String(err));
+  logger.log("error", "daemon.fatal", { message: error.message });
+  posthog.captureException(error, DISTINCT_ID, { source: "main" });
+  void posthog.shutdown().catch(() => {});
   process.exit(1);
 });

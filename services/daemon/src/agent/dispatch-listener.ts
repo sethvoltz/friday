@@ -45,6 +45,7 @@ import { dispatchTurn, peekLiveWorker } from "./lifecycle.js";
 import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
 import { matchSkillInvocation } from "../skills/match.js";
 import { logger } from "../log.js";
+import { posthog, DISTINCT_ID } from "../posthog.js";
 
 const { Client } = pgPkg;
 
@@ -174,6 +175,18 @@ async function processPendingBlockRow(id: string): Promise<void> {
     userBlockId: willQueue ? row.blockId : undefined,
   });
 
+  posthog.capture({
+    distinctId: DISTINCT_ID,
+    event: "chat_turn_dispatched",
+    properties: {
+      agent_name: agentName,
+      agent_type: agentRow.type,
+      turn_id: row.turnId,
+      queued: willQueue,
+      has_attachments: !!(attachments && attachments.length > 0),
+      skill_invoked: skillMatch ? skillMatch.skill.name : null,
+    },
+  });
   logger.log("info", "block.dispatch.applied", {
     block_id: row.blockId,
     agent: agentName,

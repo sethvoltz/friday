@@ -40,6 +40,7 @@
   import { onMount } from "svelte";
   import { DraftingCompass } from "lucide-svelte";
   import { agentIconFor } from "$lib/util/agent-icon";
+  import posthog from "posthog-js";
 
   // The route is the authoritative source for which sidebar row is
   // active and how deep the menu should be expanded. `/` → orchestrator
@@ -69,6 +70,10 @@
   function focusAgent(name: string, type: string) {
     open = false;
     chat.clearUnread(name);
+    // Product analytics: which agents users switch focus to. agent_type is
+    // low-cardinality (orchestrator/builder/helper/scheduled/bare); the name
+    // is a Friday agent handle, not PII. No-op without a configured key.
+    posthog.capture("agent_focused", { agent: name, agent_type: type });
     void goto(hrefFor(name, type));
   }
 
