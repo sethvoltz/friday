@@ -20,6 +20,11 @@
   import { bindTheme } from "$lib/stores/theme.svelte";
   import { zeroSync } from "$lib/stores/zero.svelte";
   import { FOUC_SCRIPT } from "$lib/theme/foucScript";
+  import {
+    handleExternalLinkClick,
+    isIOSStandalonePWA,
+    openInSystemBrowser,
+  } from "$lib/util/pwa-platform";
   import type { LayoutData } from "./$types";
   import type { Snippet } from "svelte";
 
@@ -343,6 +348,27 @@
     document.addEventListener("focusin", onFocusIn);
     document.addEventListener("focusout", onFocusOut);
 
+    // iOS PWA external-link override. In iOS 16.4+, `target="_blank"` and
+    // out-of-scope navigations from an installed standalone PWA route
+    // through an in-app Safari overlay sheet instead of native Safari,
+    // cutting users off from their tabs / bookmarks / login state. Detect
+    // iOS-standalone once at mount and, when matched, intercept clicks on
+    // cross-origin anchors and hand the URL to `window.open(_, "_system")`
+    // — Safari treats that as a system-browser hint and opens the URL in
+    // the real Safari app while the PWA stays running in its own task.
+    // Pure decision lives in `$lib/util/pwa-platform`; tests there.
+    const iosStandalone = isIOSStandalonePWA();
+    const onAnchorClick = (e: MouseEvent) => {
+      handleExternalLinkClick(e, {
+        pageOrigin: window.location.origin,
+        iosStandalone,
+        open: openInSystemBrowser,
+      });
+    };
+    if (iosStandalone) {
+      document.addEventListener("click", onAnchorClick);
+    }
+
     return () => {
       clearInterval(i);
       stopSSE();
@@ -357,6 +383,9 @@
       }
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onFocusOut);
+      if (iosStandalone) {
+        document.removeEventListener("click", onAnchorClick);
+      }
       if (blurTimeout !== undefined) clearTimeout(blurTimeout);
       document.documentElement.classList.remove("keyboard-open");
     };
