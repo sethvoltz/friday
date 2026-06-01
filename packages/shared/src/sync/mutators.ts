@@ -647,7 +647,13 @@ export interface SendUserMessageArgs {
   ts: number;
 }
 
-export const createMutators = () =>
+// `userId` is the verified BetterAuth user id of the caller, supplied by the
+// server push path (`/api/mutators`, which verifies the forwarded JWT). The
+// client constructs mutators without it — the optimistic write is local and
+// never reaches Postgres, so only the server-canonical write needs to stamp
+// authorship. Currently only `sendUserMessage` consumes it; other mutators
+// ignore it. NULL/undefined → no human author recorded.
+export const createMutators = (userId?: string | null) =>
   ({
     markRead: async (tx: FridayTx, args: MarkReadArgs): Promise<void> => {
       // Zero's `tx.mutate.<table>.upsert` is the load-bearing primitive
@@ -1072,6 +1078,11 @@ export const createMutators = () =>
         role: "user",
         kind: "text",
         source: "user_chat",
+        // Authorship: the verified caller (server push path). The optimistic
+        // client write omits it (userId undefined → null); the canonical
+        // server write stamps it, and that's the row the daemon reads from
+        // Postgres to attribute the turn's PostHog events to this user.
+        user_id: userId ?? undefined,
         content_json: content,
         status: "pending",
         streaming: false,

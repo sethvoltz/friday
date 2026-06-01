@@ -3,7 +3,7 @@ import { getDb, isValidCron, nextRun, schema } from "@friday/shared";
 import { logger } from "../log.js";
 import { isAgentLive } from "../agent/lifecycle.js";
 import * as registry from "../agent/registry.js";
-import { posthog, DISTINCT_ID } from "../posthog.js";
+import { captureFor } from "../posthog.js";
 import { spawnScheduledRun } from "./spawn.js";
 
 /**
@@ -73,15 +73,11 @@ export async function upsertSchedule(spec: ScheduleSpec): Promise<void> {
       createdAt: now,
       updatedAt: now,
     });
-    posthog.capture({
-      distinctId: DISTINCT_ID,
-      event: "schedule_created",
-      properties: {
-        schedule_name: spec.name,
-        has_cron: !!spec.cron,
-        has_run_at: !!spec.runAt,
-        paused: spec.paused ?? false,
-      },
+    captureFor(null, "schedule_created", {
+      schedule_name: spec.name,
+      has_cron: !!spec.cron,
+      has_run_at: !!spec.runAt,
+      paused: spec.paused ?? false,
     });
   }
   // Ensure the registry stub exists. Idempotent: if the agent has already
@@ -141,14 +137,10 @@ export async function deleteSchedule(name: string): Promise<boolean> {
   if (!r) return false;
   const db = getDb();
   await db.delete(schema.schedules).where(eq(schema.schedules.name, name));
-  posthog.capture({
-    distinctId: DISTINCT_ID,
-    event: "schedule_deleted",
-    properties: {
-      schedule_name: name,
-      had_cron: !!r.cron,
-      had_run_at: !!r.runAt,
-    },
+  captureFor(null, "schedule_deleted", {
+    schedule_name: name,
+    had_cron: !!r.cron,
+    had_run_at: !!r.runAt,
   });
   // FRI-76: if the registry stub was never used (no session, no blocks),
   // remove it too. Once the agent has fired, the row holds audit history
@@ -226,14 +218,11 @@ async function tick(): Promise<void> {
 export async function fireSchedule(r: typeof schema.schedules.$inferSelect): Promise<string> {
   const runId = `r_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   logger.log("info", "schedule.fire", { name: r.name, runId });
-  posthog.capture({
-    distinctId: DISTINCT_ID,
-    event: "schedule_fired",
-    properties: {
-      schedule_name: r.name,
-      run_id: runId,
-      has_cron: !!r.cron,
-    },
+  // Autonomous: a cron tick has no human at fire time → service actor.
+  captureFor(null, "schedule_fired", {
+    schedule_name: r.name,
+    run_id: runId,
+    has_cron: !!r.cron,
   });
   // Phase 5: `schedule_fired` SSE retired — Zero replicates the
   // `schedules` slice (and the `schedule_runs` history table) so
