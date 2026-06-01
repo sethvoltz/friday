@@ -77,7 +77,7 @@ interface CapturedEvent {
 
 describe("lifecycle: wedge detector (FRI-61)", () => {
   it("force-kills after 10 consecutive turn-completes with zero blocks", async () => {
-    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+    const { handleEvent, isAgentLive, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
     const { logger } = await import("../log.js");
@@ -98,7 +98,11 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
           sessionId: "sess-wedge-1",
         } as never,
       );
-      expect((worker as { forceKilled?: boolean }).forceKilled).toBeUndefined();
+      // FRI-145 M2: the wedge worker has NOT been force-killed yet, so it is
+      // still the current Generation in the live map (force-kill is what
+      // demotes it via `live.delete`). This replaces the deleted per-worker
+      // re-entry flag the old assertion checked.
+      expect(isAgentLive("wedge-agent")).toBe(true);
     }
     expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(9);
 
@@ -112,7 +116,9 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
     );
     unsub();
 
-    expect((worker as { forceKilled?: boolean }).forceKilled).toBe(true);
+    // FRI-145 M2: the wedge force-kill demoted this Generation — the live map
+    // no longer holds it (`live.delete` inside `forceKillStuckWorker`).
+    expect(isAgentLive("wedge-agent")).toBe(false);
 
     const killLog = logSpy.mock.calls.find(([, event]) => event === "worker.wedge.force-kill");
     expect(killLog).toBeDefined();
@@ -135,7 +141,7 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
   });
 
   it("force-kills after 10 consecutive error events (non-abort) with zero blocks", async () => {
-    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+    const { handleEvent, isAgentLive, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
 
@@ -161,7 +167,8 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
     }
     unsub();
 
-    expect((worker as { forceKilled?: boolean }).forceKilled).toBe(true);
+    // FRI-145 M2: force-kill demoted the Generation (live entry deleted).
+    expect(isAgentLive("wedge-err-agent")).toBe(false);
     expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(10);
     const wedgeError = captured.find((e) => e.type === "error" && e.code === "worker_wedged");
     expect(wedgeError).toBeDefined();
@@ -170,7 +177,7 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
   });
 
   it("does not force-kill when each turn produces at least one block", async () => {
-    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+    const { handleEvent, isAgentLive, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
 
     const { worker } = makeFakeWorker({
@@ -195,7 +202,9 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
       );
     }
 
-    expect((worker as { forceKilled?: boolean }).forceKilled).toBeUndefined();
+    // FRI-145 M2: a healthy worker is never force-killed, so it stays the
+    // current Generation in the live map throughout.
+    expect(isAgentLive("wedge-healthy-agent")).toBe(true);
     expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(0);
 
     __deleteLiveWorkerForTest("wedge-healthy-agent");
@@ -205,7 +214,7 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
     const prev = process.env.FRIDAY_WEDGE_THRESHOLD;
     process.env.FRIDAY_WEDGE_THRESHOLD = "3";
     try {
-      const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      const { handleEvent, isAgentLive, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
         await import("./lifecycle.js");
 
       const { worker } = makeFakeWorker({
@@ -225,7 +234,9 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
         );
       }
 
-      expect((worker as { forceKilled?: boolean }).forceKilled).toBe(true);
+      // FRI-145 M2: the override threshold tripped a force-kill, demoting the
+      // Generation (live entry deleted).
+      expect(isAgentLive("wedge-env-agent")).toBe(false);
       expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(3);
 
       __deleteLiveWorkerForTest("wedge-env-agent");
@@ -236,7 +247,7 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
   });
 
   it("does not count a user-initiated abort toward the streak", async () => {
-    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+    const { handleEvent, isAgentLive, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
 
     const { worker } = makeFakeWorker({
@@ -261,7 +272,9 @@ describe("lifecycle: wedge detector (FRI-61)", () => {
       (worker as { abortRequested: boolean }).abortRequested = true;
     }
 
-    expect((worker as { forceKilled?: boolean }).forceKilled).toBeUndefined();
+    // FRI-145 M2: a user abort is cooperative, not a wedge, so no force-kill
+    // fires and the worker stays the current Generation.
+    expect(isAgentLive("wedge-abort-agent")).toBe(true);
     expect((worker as { zeroBlockTurnStreak: number }).zeroBlockTurnStreak).toBe(0);
 
     __deleteLiveWorkerForTest("wedge-abort-agent");

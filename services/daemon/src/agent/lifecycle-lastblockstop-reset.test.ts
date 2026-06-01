@@ -112,58 +112,92 @@ describe("FRI-58: activePrompt cleared on every turn-end exit", () => {
     };
   }
 
+  // FRI-145 M2: handleEvent's error / turn-complete cases now gate on the
+  // Generation rule (`isCurrentGeneration(w)`), so the worker must be the live
+  // map's current entry for its turn-end to be processed. Register it (the
+  // realistic state — IPC only arrives for a live worker).
   it("happy turn-complete clears activePrompt", async () => {
     if (!handle) return;
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const worker = makeFakeWorker({ blocksThisTurn: 1, zeroBlockTurnStreak: 0 });
-    await handleEvent(worker as never, { type: "turn-complete", sessionId: "sess-lbs-1" } as never);
-    expect(worker["activePrompt"]).toBeUndefined();
+    __putLiveWorkerForTest(worker["agentName"] as string, worker as never);
+    try {
+      await handleEvent(
+        worker as never,
+        { type: "turn-complete", sessionId: "sess-lbs-1" } as never,
+      );
+      expect(worker["activePrompt"]).toBeUndefined();
+    } finally {
+      __deleteLiveWorkerForTest(worker["agentName"] as string);
+    }
   });
 
   it("error event clears activePrompt", async () => {
     if (!handle) return;
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const worker = makeFakeWorker({ blocksThisTurn: 1, zeroBlockTurnStreak: 0 });
-    await handleEvent(
-      worker as never,
-      {
-        type: "error",
-        message: "SDK error",
-        recoverable: true,
-        code: "test_error",
-        headline: "test error",
-        rawMessage: "test",
-      } as never,
-    );
-    expect(worker["activePrompt"]).toBeUndefined();
+    __putLiveWorkerForTest(worker["agentName"] as string, worker as never);
+    try {
+      await handleEvent(
+        worker as never,
+        {
+          type: "error",
+          message: "SDK error",
+          recoverable: true,
+          code: "test_error",
+          headline: "test error",
+          rawMessage: "test",
+        } as never,
+      );
+      expect(worker["activePrompt"]).toBeUndefined();
+    } finally {
+      __deleteLiveWorkerForTest(worker["agentName"] as string);
+    }
   });
 
   it("wedge force-kill via turn-complete clears activePrompt (hoisted clear)", async () => {
     if (!handle) return;
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const worker = makeFakeWorker({
       blocksThisTurn: 0,
       zeroBlockTurnStreak: 9, // one more zero-block turn trips the default threshold of 10
     });
-    await handleEvent(worker as never, { type: "turn-complete", sessionId: "sess-lbs-1" } as never);
-    expect(worker["activePrompt"]).toBeUndefined();
+    __putLiveWorkerForTest(worker["agentName"] as string, worker as never);
+    try {
+      await handleEvent(
+        worker as never,
+        { type: "turn-complete", sessionId: "sess-lbs-1" } as never,
+      );
+      expect(worker["activePrompt"]).toBeUndefined();
+    } finally {
+      __deleteLiveWorkerForTest(worker["agentName"] as string);
+    }
   });
 
   it("wedge force-kill via error clears activePrompt (hoisted clear)", async () => {
     if (!handle) return;
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const worker = makeFakeWorker({ blocksThisTurn: 0, zeroBlockTurnStreak: 9 });
-    await handleEvent(
-      worker as never,
-      {
-        type: "error",
-        message: "SDK error",
-        recoverable: true,
-        code: "wedge_error",
-        headline: "wedge error",
-        rawMessage: "test",
-      } as never,
-    );
-    expect(worker["activePrompt"]).toBeUndefined();
+    __putLiveWorkerForTest(worker["agentName"] as string, worker as never);
+    try {
+      await handleEvent(
+        worker as never,
+        {
+          type: "error",
+          message: "SDK error",
+          recoverable: true,
+          code: "wedge_error",
+          headline: "wedge error",
+          rawMessage: "test",
+        } as never,
+      );
+      expect(worker["activePrompt"]).toBeUndefined();
+    } finally {
+      __deleteLiveWorkerForTest(worker["agentName"] as string);
+    }
   });
 });

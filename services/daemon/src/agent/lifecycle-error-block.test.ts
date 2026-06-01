@@ -63,13 +63,19 @@ interface CapturedEvent {
 
 describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
   it("persists an error block + emits block_start/complete/turn_done for an SDK 529", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
 
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    const worker = makeFakeWorker() as { status: string };
+    const worker = makeFakeWorker() as { status: string; agentName: string };
+    // FRI-145 M2: register the worker in the live map — handleEvent's error
+    // case now begins with a Generation guard (`isCurrentGeneration(w)`), so a
+    // worker must be the live entry for its turn-end to be processed (the
+    // realistic state: IPC only arrives for a live worker).
+    __putLiveWorkerForTest(worker.agentName, worker as never);
     // Await handleEvent — it runs `await registry.setStatus(agent, 'idle')`
     // AFTER publishing turn_done. Without the await, that pool UPDATE
     // can still be in flight when afterAll's dropTestDb fires
@@ -134,6 +140,8 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     expect(doneEvent!.status).toBe("error");
     expect(doneEvent!.agent).toBe("test-agent");
 
+    __deleteLiveWorkerForTest(worker.agentName);
+
     // Ordering: block_complete strictly before turn_done so a client
     // applying events in seq order materializes the bubble before the
     // turn flips terminal.
@@ -153,17 +161,24 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
   });
 
   it("aborted branch emits turn_done(aborted) but does NOT insert an error block", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
 
     const captured: CapturedEvent[] = [];
     const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
 
-    await handleEvent(makeFakeWorker({ turnId: "turn-abort-1", abortRequested: true }) as never, {
+    // FRI-145 M2: register so the Generation guard lets the error case run.
+    const worker = makeFakeWorker({ turnId: "turn-abort-1", abortRequested: true }) as {
+      agentName: string;
+    };
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+    await handleEvent(worker as never, {
       type: "error",
       message: "aborted",
       recoverable: true,
     });
+    __deleteLiveWorkerForTest(worker.agentName);
     // The aborted branch skips insertErrorBlock entirely — wait on the
     // observable signal that the error path ran (turn_done aborted).
     await vi.waitFor(
@@ -190,9 +205,12 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
   });
 
   it("preserves the rate-limit retry hint through to the persisted block", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
 
-    await handleEvent(makeFakeWorker({ turnId: "turn-rl-1" }) as never, {
+    const worker = makeFakeWorker({ turnId: "turn-rl-1" }) as { agentName: string };
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+    await handleEvent(worker as never, {
       type: "error",
       message: "Rate limited",
       recoverable: false,
@@ -202,6 +220,7 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
       retryAfterSeconds: 30,
       rawMessage: `429 {"error":{"message":"slow down"}}`,
     });
+    __deleteLiveWorkerForTest(worker.agentName);
     await vi.waitFor(
       async () => {
         const rows = await getDb()
@@ -221,13 +240,17 @@ describe("lifecycle.handleEvent on `error` IPC (FRI-12)", () => {
     // Defensive: an old worker (or the one-shot scheduled-agent path that
     // hasn't been updated to call classifySdkError) might emit an error
     // IPC without the structured fields. We still persist the bubble.
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
 
-    await handleEvent(makeFakeWorker({ turnId: "turn-bare-1" }) as never, {
+    const worker = makeFakeWorker({ turnId: "turn-bare-1" }) as { agentName: string };
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+    await handleEvent(worker as never, {
       type: "error",
       message: "something blew up",
       recoverable: false,
     });
+    __deleteLiveWorkerForTest(worker.agentName);
     await vi.waitFor(
       async () => {
         const rows = await getDb()

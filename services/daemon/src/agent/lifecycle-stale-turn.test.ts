@@ -86,7 +86,7 @@ interface CapturedEvent {
 
 describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
   it("force-kills worker when an inbound IPC reports msSinceTurnStart > 4h, emits structured log", async () => {
-    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+    const { handleEvent, isAgentLive, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
     const { logger } = await import("../log.js");
@@ -134,14 +134,17 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     expect(done).toBeDefined();
     expect(done!.status).toBe("error");
 
-    // Worker is now marked force-killed so subsequent IPC is ignored.
-    expect((worker as { forceKilled?: boolean }).forceKilled).toBe(true);
+    // FRI-145 M2: the stale-turn force-kill demoted this Generation — the live
+    // map no longer holds it, so a subsequent IPC for this `worker` is a
+    // Generation no-op (`live.get(name) !== worker`). This replaces the deleted
+    // per-worker re-entry flag the dying worker's late IPC used to check.
+    expect(isAgentLive("stale-agent")).toBe(false);
 
     __deleteLiveWorkerForTest("stale-agent");
   });
 
   it("does NOT force-kill when msSinceTurnStart is well under the ceiling, and the event is still processed", async () => {
-    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+    const { handleEvent, isAgentLive, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
     const { logger } = await import("../log.js");
 
@@ -163,7 +166,9 @@ describe("lifecycle: stale-turn ceiling (FRI-33)", () => {
     expect(
       logSpy.mock.calls.find(([, event]) => event === "worker.turn.stale-killed"),
     ).toBeUndefined();
-    expect((worker as { forceKilled?: boolean }).forceKilled).toBeFalsy();
+    // FRI-145 M2: no force-kill fired, so the worker is still the current
+    // Generation in the live map (force-kill is what demotes it).
+    expect(isAgentLive("stale-agent")).toBe(true);
     // Proves handleEvent actually executed past the ceiling check.
     expect((worker as { lastHeartbeat: number }).lastHeartbeat).toBeGreaterThan(ANCIENT);
 
@@ -305,7 +310,7 @@ describe("lifecycle: turn-end clears w.turnStart (FRI-110)", () => {
   // grows a new read site that misses the new invariant.
 
   it("does not force-kill when worker has been idle (status=idle, turnStart cleared) for 5h after a completed turn", async () => {
-    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+    const { handleEvent, isAgentLive, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
     const { logger } = await import("../log.js");
 
@@ -327,7 +332,9 @@ describe("lifecycle: turn-end clears w.turnStart (FRI-110)", () => {
 
     // The bug-site assertion: watchdog did NOT force-kill.
     expect(logSpy.mock.calls.find(([, ev]) => ev === "worker.turn.stale-killed")).toBeUndefined();
-    expect((worker as { forceKilled?: boolean }).forceKilled).toBeFalsy();
+    // FRI-145 M2: no force-kill fired, so the worker remains the current
+    // Generation in the live map.
+    expect(isAgentLive("stale-agent")).toBe(true);
 
     // Diagnostic log emitted with `msSinceTurnStart: null` — this is the
     // ternary fallback at the diagnostic site that already gates on

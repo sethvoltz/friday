@@ -44,9 +44,15 @@ function makeFakeWorker(): unknown {
 
 describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
   it("inserts a usage row whose columns map the SDK→protocol field names", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
 
-    void handleEvent(makeFakeWorker() as never, {
+    // FRI-145 M2: the turn-complete case gates on the Generation rule, so the
+    // worker must be the live entry for its turn-end (incl. usage insertion)
+    // to run. Register it (the realistic state — IPC only for a live worker).
+    const worker = makeFakeWorker() as { agentName: string };
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+    void handleEvent(worker as never, {
       type: "turn-complete",
       sessionId: "sess-1",
       usage: {
@@ -72,12 +78,16 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
       },
       { timeout: 5000, interval: 25 },
     );
+    __deleteLiveWorkerForTest(worker.agentName);
   });
 
   it("inserts nothing when turn-complete carries no usage payload", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
 
-    void handleEvent(makeFakeWorker() as never, {
+    const worker = makeFakeWorker() as { agentName: string };
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+    void handleEvent(worker as never, {
       type: "turn-complete",
       sessionId: "sess-1",
     });
@@ -89,13 +99,16 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
 
     const rows = await getDb().select().from(schema.usage);
     expect(rows.length).toBe(0);
+    __deleteLiveWorkerForTest(worker.agentName);
   });
 
   it("inserts nothing when there is no session id (neither worker nor event)", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
 
     const w = makeFakeWorker() as Record<string, unknown>;
     w.sessionId = undefined;
+    __putLiveWorkerForTest(w.agentName as string, w as never);
 
     void handleEvent(w as never, {
       type: "turn-complete",
@@ -115,5 +128,6 @@ describe("lifecycle.handleEvent on turn-complete (cross-boundary)", () => {
 
     const rows = await getDb().select().from(schema.usage);
     expect(rows.length).toBe(0);
+    __deleteLiveWorkerForTest(w.agentName as string);
   });
 });
