@@ -1903,6 +1903,137 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
   });
 });
 
+describe("FRI-139 review-2: cancelByBlockIdOnDiscard wrapper", () => {
+  // The DISCARD path's underlying-mutation cleanup. Used when
+  // discardPending fires for a queueId whose `/api/mutators` push may
+  // have committed (transport-error case). Two legs:
+  //   - daemon fast-path POST /api/internal/cancel-queued (idempotent
+  //     — daemon returns already_canceled if the LISTEN-path raced it).
+  //   - cancelQueued Zero mutator dispatch IF the row is in the local
+  //     snapshot (durable cross-device).
+  async function bootedZero() {
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    return { zeroSync, z: instances[0]! };
+  }
+
+  function seedRow(zeroSync: {
+    blocks: Array<{
+      id: string;
+      block_id: string;
+      turn_id: string;
+      agent_name: string;
+      role: string;
+      source: string | null;
+      status: string;
+      content_json: unknown;
+    }>;
+  }) {
+    zeroSync.blocks = [
+      {
+        id: "fri139-discard-block-id",
+        block_id: "fri139-discard-block-id",
+        turn_id: "t_fri139-discard-block-id",
+        agent_name: "friday",
+        role: "user",
+        source: "user_chat",
+        status: "queued",
+        content_json: { text: "ghost mutation" },
+      },
+    ];
+  }
+
+  it("POSTs the daemon fast-path with the block_id (always — independent of local snapshot state)", async () => {
+    const { zeroSync } = await bootedZero();
+    const spy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify({ ok: true, already_canceled: false }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", spy);
+    // No row seeded — fast-path still fires unconditionally.
+    await zeroSync.cancelByBlockIdOnDiscard("fri139-discard-block-id");
+    const first = spy.mock.calls[0];
+    expect(first?.[0]).toBe("/api/internal/cancel-queued");
+    const init = first?.[1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({
+      block_id: "fri139-discard-block-id",
+    });
+  });
+
+  it("ALSO dispatches the cancelQueued mutator when the row is in the local Zero snapshot (durable cross-device)", async () => {
+    const { zeroSync, z } = await bootedZero();
+    seedRow(zeroSync as never);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    await zeroSync.cancelByBlockIdOnDiscard("fri139-discard-block-id");
+    expect(z.mutate.cancelQueued).toHaveBeenCalledTimes(1);
+    const args = z.mutate.cancelQueued.mock.calls[0][0] as {
+      id: string;
+      ts: number;
+    };
+    expect(args.id).toBe("fri139-discard-block-id");
+    expect(typeof args.ts).toBe("number");
+  });
+
+  it("does NOT dispatch the cancelQueued mutator when the row is absent from the local snapshot (transport-error has not replicated yet)", async () => {
+    // The transport-error path's whole point: the row may not have
+    // landed in the local replica when the user discards. Daemon
+    // fast-path POST is the only cancel leg in this case; the mutator
+    // skip is the correct behavior, not a regression.
+    const { zeroSync, z } = await bootedZero();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    await zeroSync.cancelByBlockIdOnDiscard("no-row-yet");
+    expect(z.mutate.cancelQueued).not.toHaveBeenCalled();
+  });
+
+  it("still dispatches the mutator when the daemon fast-path fetch throws (network down)", async () => {
+    // Daemon-down resilience: the durable Zero-mutator path is the
+    // backstop; the daemon's LISTEN handler picks up the
+    // `cancel_requested` row on next reconnect.
+    const { zeroSync, z } = await bootedZero();
+    seedRow(zeroSync as never);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    );
+    await zeroSync.cancelByBlockIdOnDiscard("fri139-discard-block-id");
+    expect(z.mutate.cancelQueued).toHaveBeenCalledTimes(1);
+  });
+
+  it("is silent before Zero has finished initialising", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
+    const { zeroSync } = await importStore();
+    // Returns void; assert it doesn't throw and doesn't dispatch.
+    await zeroSync.cancelByBlockIdOnDiscard("any-id");
+  });
+});
+
 describe("FRI-121 A1: connection.state → status transitions", () => {
   async function bootedZero() {
     const { zeroSync } = await importStore();

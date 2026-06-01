@@ -225,6 +225,40 @@ export function noResponseIdForTurn(turnId: string): string {
 export const PENDING_SESSION_SENTINEL = "__pending__";
 
 /**
+ * FRI-139 review-6: lifecycle event for transport-failure fallback
+ * timers. Structured `console.debug` so dashboard log capture / browser
+ * devtools can grep `[chat.transport-failure]` and reconstruct
+ * arm/fire/cancel cadence across a session. The reviewer asked for
+ * this so the 30s threshold can be tuned from real data; surfacing
+ * the cadence into `~/.friday/logs/dashboard-*.jsonl` would require a
+ * dedicated diag endpoint, which is out of scope for this PR — for now
+ * the events are visible in devtools and forwarded by the
+ * `window.error` / `unhandledrejection` plumbing only for the
+ * mark-failed leg (where they typically matter).
+ *
+ * Event vocabulary:
+ *   - `arm`         — fallback timer scheduled; payload includes `delayMs`.
+ *   - `cancel`      — `clearTransportFailureTimer` ran and removed the timer.
+ *   - `fire`        — timer expired AND the optimistic entry still
+ *                     exists (about to flip failed).
+ *   - `fire-stale`  — timer expired but the optimistic was already gone
+ *                     (canonical row landed in the window — the
+ *                     happy-path-after-WS-hiccup case).
+ *   - `mark-failed` — `markPendingFailed` flipped `failed:true` for
+ *                     the entry. Fired either by app-error/no-zero
+ *                     (immediate) or by the timer routing through it.
+ */
+function transportFailureLog(
+  event: "arm" | "cancel" | "fire" | "fire-stale" | "mark-failed",
+  queueId: string,
+  extra?: Record<string, unknown>,
+): void {
+  if (typeof console === "undefined") return;
+  const payload = { event, queueId, ts: Date.now(), ...(extra ?? {}) };
+  console.debug("[chat.transport-failure]", payload);
+}
+
+/**
  * Drop rows whose session id doesn't match the focused agent's current
  * SDK session. Used at the two ingest points where multi-session
  * agent-scoped data shows up in the live transcript:
@@ -811,6 +845,16 @@ export class ChatState {
   setResumeTurnFn(fn: (turnId: string) => Promise<boolean>): void {
     this.resumeTurnFn = fn;
   }
+  /** FRI-139 review-2: wired from `zero.svelte.ts`. Called from
+   *  `discardPending` / `discardAllPending` for each discarded queueId
+   *  so the underlying mutation is cancelled at the daemon (and via
+   *  the cancelQueued mutator for cross-device durability) instead of
+   *  silently persisting after the optimistic UI bubble is dropped.
+   *  Fire-and-forget — the caller doesn't await. */
+  private discardCancelFn: ((blockId: string) => void) | null = null;
+  setDiscardCancelFn(fn: (blockId: string) => void): void {
+    this.discardCancelFn = fn;
+  }
   /**
    * Per-agent memo of the latest block_id we've already passed to
    * `markRead`. Suppresses the redundant write that would otherwise
@@ -1096,12 +1140,28 @@ export class ChatState {
    *  definitively does not exist. Transport-class signals (zero-error)
    *  go through {@link scheduleTransportFailureFallback} instead, so a
    *  WS hiccup mid-send doesn't flash FAILED-TO-SEND on every restart-
-   *  window message even when the server-side push committed. */
+   *  window message even when the server-side push committed.
+   *
+   *  FRI-139 review-1: also releases the eager inflight slot for this
+   *  send. ChatInput's submit path stamps `inflightTurnIdByAgent[agent]
+   *  = \`t_${blockId}\`` synchronously when the user hits send; the
+   *  transport-failure fallback timer ends up here when the bubble
+   *  flips to FAILED. Without this release, the input bar would show
+   *  the Stop affordance (busy state survives off the eager claim)
+   *  while the bubble says "Failed to send" — affordances disagreeing
+   *  is the worst kind of UI bug. The eager pattern is fixed
+   *  (`t_<queueId>`), so we can release without storing the eagerTurnId
+   *  separately. */
   markPendingFailed(queueId: string): void {
     this.clearTransportFailureTimer(queueId);
+    transportFailureLog("mark-failed", queueId);
     for (const entry of this.optimistic.values()) {
       if (entry.queueId !== queueId) continue;
       entry.failed = true;
+      const eagerTurnId = `t_${queueId}`;
+      if (this.inflightTurnIdByAgent[entry.agent] === eagerTurnId) {
+        this.markInflight(entry.agent, null);
+      }
       return;
     }
   }
@@ -1129,6 +1189,21 @@ export class ChatState {
    * push retry + WS ack round-trip on a degraded link. SSE keepalive
    * declares-dead at 40s; this fires earlier so the affordance shows
    * before the user reaches for refresh.
+   *
+   * FRI-139 review-5: caveat for iOS PWA. When the tab is backgrounded,
+   * Safari throttles `setTimeout` to ~1Hz, so a 30s deadline can fire
+   * meaningfully late on resume. Mitigation in practice: when the tab
+   * wakes, `applyZeroBlocks` typically delivers the canonical row
+   * before the throttled timer drains, which cancels via
+   * {@link clearTransportFailureTimer}. The visibility-driven Zero
+   * reconnect (`zero.svelte.ts` `visibilitychange` handler) fires
+   * sooner than the timer either way. Worst case the user sees a
+   * delayed FAILED-TO-SEND chrome on tab resume — acceptable trade.
+   *
+   * FRI-139 review-6: structured logging at arm / fire / cancel goes
+   * through {@link transportFailureLog} so production telemetry can
+   * tune this threshold from real fire-vs-cancel cadence rather than
+   * the desk-side guess.
    */
   static readonly TRANSPORT_FAILURE_FALLBACK_MS = 30_000;
 
@@ -1151,18 +1226,23 @@ export class ChatState {
       }
     }
     if (!entryStillExists) return;
+    transportFailureLog("arm", queueId, { delayMs });
     const t = setTimeout(() => {
       this.pendingFailureTimers.delete(queueId);
       // Only flip if the optimistic still exists at fire time —
       // canonical row delivery via `applyZeroBlocks` would have already
       // dropped it, and we'd be lighting up failed state for a bubble
-      // that no longer renders.
+      // that no longer renders. Route through `markPendingFailed` so
+      // the inflight slot release (FRI-139 review-1) is consistent
+      // across timer-fire and direct-call paths.
       for (const entry of this.optimistic.values()) {
         if (entry.queueId === queueId) {
-          entry.failed = true;
+          transportFailureLog("fire", queueId);
+          this.markPendingFailed(queueId);
           return;
         }
       }
+      transportFailureLog("fire-stale", queueId);
     }, delayMs);
     this.pendingFailureTimers.set(queueId, t);
   }
@@ -1175,26 +1255,48 @@ export class ChatState {
     if (t !== undefined) {
       clearTimeout(t);
       this.pendingFailureTimers.delete(queueId);
+      transportFailureLog("cancel", queueId);
     }
   }
 
   /** Remove the pending bubble matching `queueId` (FIX_FORWARD 2.7 — used
-   *  when the user picks "Discard and continue" or "Discard all"). */
+   *  when the user picks "Discard and continue" or "Discard all").
+   *
+   *  FRI-139 review-2: also fires the wired `discardCancelFn` so the
+   *  underlying mutation is cancelled at the daemon if it actually
+   *  committed (the transport-error case where the WS ack got lost but
+   *  the push landed). Without this, DISCARD silently created duplicate
+   *  turns on retry. */
   discardPending(queueId: string): void {
     this.clearTransportFailureTimer(queueId);
+    let dropped = false;
     for (const [key, entry] of this.optimistic.entries()) {
-      if (entry.queueId === queueId) this.optimistic.delete(key);
+      if (entry.queueId === queueId) {
+        this.optimistic.delete(key);
+        dropped = true;
+      }
     }
+    if (dropped) this.discardCancelFn?.(queueId);
   }
 
   /** Remove every pending bubble in one go (FIX_FORWARD 2.7 — "Discard all
-   *  and continue"). */
+   *  and continue").
+   *
+   *  FRI-139 review-2: fans the cancel-mutation hook across every
+   *  discarded entry. */
   discardAllPending(): void {
+    const cancels: string[] = [];
     for (const [key, entry] of this.optimistic.entries()) {
       if (entry.pending) {
-        if (entry.queueId) this.clearTransportFailureTimer(entry.queueId);
+        if (entry.queueId) {
+          this.clearTransportFailureTimer(entry.queueId);
+          cancels.push(entry.queueId);
+        }
         this.optimistic.delete(key);
       }
+    }
+    if (this.discardCancelFn) {
+      for (const blockId of cancels) this.discardCancelFn(blockId);
     }
   }
 

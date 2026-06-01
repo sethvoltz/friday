@@ -6687,12 +6687,18 @@ describe("FRI-139: transport-error fallback decouples FAILED-TO-SEND from WS hic
     expect(stillSurvivor!.failed).not.toBe(true);
   });
 
-  it("transport-error with no canonical row arriving: fallback timer fires at 30s and flips failed:true", async () => {
+  it("transport-error with no canonical row arriving: fallback timer fires at 30s, flips failed:true, AND releases the eager inflight slot", async () => {
     // The genuine "WS dropped and nothing recovered" case. The user
     // shouldn't be stuck with a spinner forever — at 30s, the bubble
     // surfaces the discard affordance so they can retry.
+    //
+    // FRI-139 review-1: the timer must ALSO release the eager inflight
+    // slot ChatInput stamped synchronously at submit time. Without that,
+    // the input bar would show Stop (busy off the eager claim) while
+    // the bubble shows "Failed to send" — affordances disagreeing.
     vi.useFakeTimers();
     const blockId = "fri139-block-eeee-ffff-0000-1111";
+    const eagerTurnId = `t_${blockId}`;
 
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
@@ -6700,21 +6706,62 @@ describe("FRI-139: transport-error fallback decouples FAILED-TO-SEND from WS hic
     attachSession(chat, "friday", "s1");
 
     chat.addUser("orphan send", { queueId: blockId });
+    // Mirror ChatInput.svelte's eager inflight stamp before the await.
+    chat.inflightTurnId = eagerTurnId;
     chat.scheduleTransportFailureFallback(blockId);
 
-    // Before the deadline: still pending, not failed.
+    // Before the deadline: still pending, not failed, inflight retained.
     vi.advanceTimersByTime(29_999);
     const before = chat.messages.find((m) => m.queueId === blockId);
     expect(before!.failed).not.toBe(true);
     expect(before!.pending).toBe(true);
+    expect(chat.inflightTurnId).toBe(eagerTurnId);
 
-    // At the deadline: failed:true, still pending (the optimistic
-    // overlay doesn't morph into anything else; `markPendingFailed`
-    // adds the failed flag on top).
+    // At the deadline: failed:true, still pending, inflight RELEASED.
     vi.advanceTimersByTime(1);
     const after = chat.messages.find((m) => m.queueId === blockId);
     expect(after!.failed).toBe(true);
     expect(after!.pending).toBe(true);
+    expect(chat.inflightTurnId).toBeNull();
+  });
+
+  it("markPendingFailed (called directly, e.g. app-error path) releases the eager inflight slot too", async () => {
+    // FRI-139 review-1: the inflight-release logic is in
+    // `markPendingFailed` so the timer-fire path and the direct
+    // app-error / no-zero paths converge on the same cleanup.
+    const blockId = "fri139-block-direct-mark-failed";
+    const eagerTurnId = `t_${blockId}`;
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.addUser("rejected by server", { queueId: blockId });
+    chat.inflightTurnId = eagerTurnId;
+    chat.markPendingFailed(blockId);
+
+    const entry = chat.messages.find((m) => m.queueId === blockId);
+    expect(entry!.failed).toBe(true);
+    expect(chat.inflightTurnId).toBeNull();
+  });
+
+  it("markPendingFailed does NOT release an inflight slot pointing at a different (real) turn", async () => {
+    // Defensive: only release when the inflight slot still equals the
+    // eager turnId for THIS queueId. A confirmed real turnId on the
+    // slot (because another sendUserMessage already resolved `ok`)
+    // must survive a stale markPendingFailed for an unrelated queueId.
+    const blockId = "fri139-block-stale-mark";
+    const realTurnId = "t-other-real-turn";
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.addUser("stale", { queueId: blockId });
+    chat.inflightTurnId = realTurnId;
+    chat.markPendingFailed(blockId);
+
+    expect(chat.inflightTurnId).toBe(realTurnId);
   });
 
   it("discardPending cancels an armed transport-failure timer so a late tick can't flip a non-existent entry", async () => {
@@ -6823,5 +6870,187 @@ describe("FRI-139: transport-error fallback decouples FAILED-TO-SEND from WS hic
     vi.advanceTimersByTime(60_000);
     const later = chat.messages.find((m) => m.queueId === blockId);
     expect(later!.failed).not.toBe(true);
+  });
+
+  it("discardPending dispatches the wired discardCancelFn so the underlying mutation is cancelled (review-2)", async () => {
+    // Without this hook DISCARD only removed the optimistic UI record —
+    // a transport-error-armed bubble whose `/api/mutators` push had
+    // actually committed would leave a ghost turn the daemon still
+    // processed. The new hook fires the wired cancel function with the
+    // queueId so the daemon's fast-path + the cancelQueued mutator
+    // tear down the in-flight mutation.
+    const blockId = "fri139-block-discard-cancel-1";
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    const cancelFn = vi.fn();
+    chat.setDiscardCancelFn(cancelFn);
+
+    chat.addUser("transport-error bubble", { queueId: blockId });
+    chat.discardPending(blockId);
+
+    expect(cancelFn).toHaveBeenCalledTimes(1);
+    expect(cancelFn).toHaveBeenCalledWith(blockId);
+  });
+
+  it("discardPending does NOT dispatch the cancel hook when no matching entry was found (no ghost mutation to cancel)", async () => {
+    // Defensive: if the entry was already gone (e.g. applyZeroBlocks
+    // dropped it before the user's tap registered), the cancel hook
+    // doesn't fire — the canonical row is the truth and we don't want
+    // to issue a cancel against a now-legitimate row.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    const cancelFn = vi.fn();
+    chat.setDiscardCancelFn(cancelFn);
+
+    chat.discardPending("nonexistent-queue-id");
+
+    expect(cancelFn).not.toHaveBeenCalled();
+  });
+
+  it("discardAllPending dispatches the cancel hook once per pending entry it removed", async () => {
+    // FRI-139 review-2 fan-out for the "Discard all" affordance. Two
+    // pending bubbles with different queueIds → cancel hook fires
+    // twice with each queueId.
+    const blockIdA = "fri139-block-discardall-a";
+    const blockIdB = "fri139-block-discardall-b";
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    const cancelFn = vi.fn();
+    chat.setDiscardCancelFn(cancelFn);
+
+    chat.addUser("first", { queueId: blockIdA });
+    chat.addUser("second", { queueId: blockIdB });
+    chat.discardAllPending();
+
+    expect(cancelFn).toHaveBeenCalledTimes(2);
+    const calls = cancelFn.mock.calls.map((c) => c[0]).sort();
+    expect(calls).toEqual([blockIdA, blockIdB].sort());
+  });
+
+  it("resendUserText routes transport-error through scheduleTransportFailureFallback and preserves the eager inflight slot (review-3)", async () => {
+    // The boundary between the wrapper's outcome and the chat-store's
+    // branching was untested in the original PR. This exercises the
+    // production path: setSendMessageFn → resendUserText → outcome
+    // is `transport-error` → fallback timer armed AND inflight stays
+    // claimed → 30s passes → failed flipped AND inflight released.
+    vi.useFakeTimers();
+
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // Seed a prior turn so `originalUserTextForTurn` resolves.
+    chat.pushLocal({
+      id: userBlockIdForTurn("t-prev"),
+      role: "user",
+      text: "earlier prompt",
+      status: "complete",
+      ts: 1,
+      turnId: "t-prev",
+      source: "user_chat",
+    });
+
+    // Mock the wrapper to resolve as a transport-error.
+    let capturedBlockId: string | null = null;
+    const mockSendMsg = vi.fn(async (args: { blockId: string }) => {
+      capturedBlockId = args.blockId;
+      return { kind: "transport-error" as const, message: "WS dropped" };
+    });
+    chat.setSendMessageFn(mockSendMsg);
+
+    chat.resendUserText("t-prev");
+
+    // Sync: eager inflight stamped before the async send resolved.
+    expect(chat.inflightTurnId).not.toBeNull();
+    const eagerTurnId = chat.inflightTurnId!;
+
+    // Yield to the microtask queue so the .then() branch runs.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Wrapper got called with the pre-minted blockId — without it the
+    // store can't key the fallback timer.
+    expect(capturedBlockId).not.toBeNull();
+    const blockId = capturedBlockId!;
+
+    // The bubble's queueId matches.
+    const optimistic = chat.messages.find((m) => m.queueId === blockId);
+    expect(optimistic).toBeDefined();
+    expect(optimistic!.pending).toBe(true);
+    expect(optimistic!.failed).not.toBe(true);
+
+    // Inflight slot stays claimed during the window (Zero's outbox
+    // retry may yet succeed — releasing now would flash the input bar
+    // back to Send and then immediately to Stop when the row lands).
+    expect(chat.inflightTurnId).toBe(eagerTurnId);
+
+    // Advance past 30s — failed flips, inflight releases.
+    vi.advanceTimersByTime(30_000);
+    const after = chat.messages.find((m) => m.queueId === blockId);
+    expect(after!.failed).toBe(true);
+    expect(chat.inflightTurnId).toBeNull();
+  });
+
+  it("clearLocalView cancels armed transport-failure timers for the cleared agent (review-4)", async () => {
+    // /clear archives the worker; any in-flight optimistic bubbles
+    // for that agent are no longer meaningful, and a late timer firing
+    // after the wipe would mark `failed:true` on an entry that no
+    // longer renders. Verify the cleanup runs.
+    vi.useFakeTimers();
+    const blockId = "fri139-block-clearlocal-1";
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.addUser("about to clear", { queueId: blockId });
+    chat.scheduleTransportFailureFallback(blockId);
+    chat.clearLocalView("friday");
+    expect(chat.optimistic.size).toBe(0);
+
+    // Re-seed the same queueId post-clear; the original timer must not
+    // resurrect a `failed` flag on the new entry.
+    chat.addUser("fresh post-clear", { queueId: blockId });
+    vi.advanceTimersByTime(60_000);
+    const fresh = chat.messages.find((m) => m.queueId === blockId);
+    expect(fresh!.failed).not.toBe(true);
+  });
+
+  it("discardAllPending cancels armed transport-failure timers across every removed entry (review-4)", async () => {
+    // Two pending bubbles with timers armed → discardAllPending wipes
+    // both → 30s passes → no late `failed:true` resurrection on
+    // recycled queueIds.
+    vi.useFakeTimers();
+    const blockIdA = "fri139-block-discardall-clear-a";
+    const blockIdB = "fri139-block-discardall-clear-b";
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.addUser("first", { queueId: blockIdA });
+    chat.scheduleTransportFailureFallback(blockIdA);
+    chat.addUser("second", { queueId: blockIdB });
+    chat.scheduleTransportFailureFallback(blockIdB);
+
+    chat.discardAllPending();
+    expect(chat.optimistic.size).toBe(0);
+
+    // Re-seed both queueIds; original timers must not fire.
+    chat.addUser("fresh A", { queueId: blockIdA });
+    chat.addUser("fresh B", { queueId: blockIdB });
+    vi.advanceTimersByTime(60_000);
+    const freshA = chat.messages.find((m) => m.queueId === blockIdA);
+    const freshB = chat.messages.find((m) => m.queueId === blockIdB);
+    expect(freshA!.failed).not.toBe(true);
+    expect(freshB!.failed).not.toBe(true);
   });
 });
