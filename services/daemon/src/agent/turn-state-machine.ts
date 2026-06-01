@@ -34,7 +34,7 @@
  * Generation.
  */
 
-import type { AgentType } from "@friday/shared";
+import type { AgentType, ArchiveReason } from "@friday/shared";
 import type { ErrorBlockPayload } from "./block-stream.js";
 import type { WorkerPromptCommand } from "./worker-protocol.js";
 
@@ -119,6 +119,42 @@ export type Transition =
   | { kind: "abort" };
 
 /**
+ * Administrative Transitions (FRI-145 M4). These route the three non-turn-
+ * boundary channels — archive, boot-recovery, auditor — through the same
+ * single-writer machine. They operate on an agent NAME, not a live worker
+ * (the agent may have no live worker at all: a boot-recovery reset, an orphan
+ * archive, an auditor heal). They carry no turn-boundary bookkeeping; their
+ * whole job is to decide ONE Status projection and emit the ordered intents
+ * that write it. The pure {@link applyAdmin} is their `apply`.
+ *
+ *   - `archive`  — terminal `archived` projection. Emits `close-ticket` BEFORE
+ *                  the `archive` intent so the linked Friday/Linear ticket is
+ *                  closed strictly before the row goes terminal (AC #6). The
+ *                  `archive` intent reaches `registry.archiveAgent` (the DB
+ *                  door), which runs the FSM gate — an orchestrator-archive or
+ *                  any illegal edge throws `IllegalTransitionError`, surfaced
+ *                  to the awaiting caller via the result-bearing enqueue.
+ *   - `heal`     — the auditor's force-set. Bypasses the FSM gate via the
+ *                  privileged `_auditorHealStatusUnchecked` (the machine's
+ *                  internal force-set; ADR-031). Used only for illegal RESTING
+ *                  states the gate cannot reach (e.g. orchestrator stuck at
+ *                  `archived`).
+ *   - `set-projection` — a gated `registry.setStatus` write for the channels
+ *                  that legitimately move an agent to a resting projection
+ *                  (boot `working→idle`, auditor zombie-demote `→idle`).
+ */
+export type AdminTransition =
+  | { kind: "archive"; reason: ArchiveReason; ticketId: string | null }
+  | { kind: "heal"; target: StatusProjection; clearArchiveReason: boolean }
+  | { kind: "set-projection"; status: StatusProjection };
+
+/** The Status projection an {@link AdminTransition} writes. */
+export interface AdminResult {
+  projection: StatusProjection;
+  intents: Intent[];
+}
+
+/**
  * Side-effect descriptions. The machine returns these; the caller executes
  * them against the ports bag in order. Each is a plain serializable object so
  * tests can `toEqual` them.
@@ -126,6 +162,24 @@ export type Transition =
 export type Intent =
   /** Write the agents.status projection through registry.setStatus (the DB door). */
   | { kind: "set-status"; name: string; status: StatusProjection }
+  /**
+   * Close the agent's linked Friday/Linear ticket (closeTicketForArchive). The
+   * archive Transition emits this BEFORE its `archive` intent so the ticket is
+   * closed strictly before the agents row goes terminal (FRI-145 AC #6). A
+   * `null` ticketId is a no-op in the executor.
+   */
+  | { kind: "close-ticket"; name: string; ticketId: string | null; reason: ArchiveReason }
+  /**
+   * Archive the agent via registry.archiveAgent (the DB door). Runs the FSM
+   * gate; an illegal edge (orchestrator-archive) throws and the executor
+   * propagates it to the awaiting caller.
+   */
+  | { kind: "archive"; name: string; reason: ArchiveReason }
+  /**
+   * Auditor force-set (registry._auditorHealStatusUnchecked). Bypasses the FSM
+   * gate — the machine's internal heal path for illegal resting states (ADR-031).
+   */
+  | { kind: "heal"; name: string; status: StatusProjection; clearArchiveReason: boolean }
   /** Record a synthetic error block (bsRecordError). */
   | { kind: "record-error-block"; payload: ErrorBlockPayload }
   /** Finalize any streaming blocks for this turn (bsFinalize). */
@@ -630,4 +684,53 @@ function applyAbort(_w: TurnContext): ApplyResult {
     mutations: {},
     intents: [],
   };
+}
+
+/**
+ * The pure Transition function for the administrative channels (FRI-145 M4):
+ * archive, boot-recovery, auditor. Like {@link apply}, it performs NO I/O — it
+ * reads the agent NAME + the transition params and returns the Status
+ * projection + ordered intents the caller executes against the ports bag. This
+ * is what makes the single-writer invariant testable: archive/heal/boot all
+ * funnel the SAME machine, so the projection decision lives in exactly one
+ * place and the unit tests assert the intents, not a mock.
+ *
+ * Ordering pin (AC #6): the `archive` transition emits `close-ticket` BEFORE
+ * `archive`, so the executor closes the linked ticket strictly before the
+ * agents row goes terminal — replacing the old fire-and-forget close that
+ * raced the archive write.
+ */
+export function applyAdmin(name: string, transition: AdminTransition): AdminResult {
+  switch (transition.kind) {
+    case "archive":
+      return {
+        projection: "archived",
+        intents: [
+          {
+            kind: "close-ticket",
+            name,
+            ticketId: transition.ticketId,
+            reason: transition.reason,
+          },
+          { kind: "archive", name, reason: transition.reason },
+        ],
+      };
+    case "heal":
+      return {
+        projection: transition.target,
+        intents: [
+          {
+            kind: "heal",
+            name,
+            status: transition.target,
+            clearArchiveReason: transition.clearArchiveReason,
+          },
+        ],
+      };
+    case "set-projection":
+      return {
+        projection: transition.status,
+        intents: [{ kind: "set-status", name, status: transition.status }],
+      };
+  }
 }

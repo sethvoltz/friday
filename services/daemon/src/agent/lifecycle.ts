@@ -39,10 +39,13 @@ import {
 } from "./block-stream.js";
 import { appContextForAgent } from "../apps/installer.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
-import { enqueueTransition } from "./transition-queue.js";
+import { enqueueTransition, enqueueTransitionResult } from "./transition-queue.js";
 import {
   apply as applyTransition,
+  applyAdmin,
   projectStatus,
+  type AdminTransition,
+  type StatusProjection,
   type Transition,
   type TurnContext,
   type TurnState,
@@ -730,6 +733,13 @@ function setWorkerStatus(w: LiveWorker, next: TurnState, source: string): void {
 function makeProdPorts(): TurnStatePorts<LiveWorker> {
   return {
     setStatus: (name, status) => registry.setStatus(name, status),
+    archive: (name, opts) => registry.archiveAgent(name, opts),
+    heal: (name, status, opts) =>
+      registry._auditorHealStatusUnchecked(name, status, {
+        auditorHeal: true,
+        clearArchiveReason: opts.clearArchiveReason,
+      }),
+    closeTicket: (opts) => closeTicketForArchive(opts),
     publish: (event) => eventBus.publish(event),
     blockStream: {
       recordError: (w, payload) => bsRecordError(w, payload),
@@ -832,6 +842,128 @@ async function runTransition(
   }
 
   await executeIntents(w, result.intents, ports);
+}
+
+/**
+ * FRI-145 M4: run one ADMINISTRATIVE Transition through the machine. The three
+ * non-turn-boundary channels — archive, boot-recovery, auditor — route their
+ * `agents.status` writes here so the Turn-state machine stays the single
+ * application-level writer (the inviolate single-writer invariant). The pure
+ * {@link applyAdmin} decides the Status projection + ordered intents; the
+ * executor runs them against the ports bag (the same `set-status` /
+ * `close-ticket` / `archive` / `heal` DB doors prod wires in {@link prodPorts}).
+ *
+ * Admin intents operate on an agent NAME, never on a live worker, so we pass a
+ * name-only {@link PortWorker} stub — the block-stream / sendPrompt ports are
+ * never reached by an admin transition's intents.
+ *
+ * If a live worker exists for this name it gets its in-memory Status projection
+ * mirrored too (so a racing `peekLiveWorker` / watchdog sees the new resting
+ * state), but the durable write is always the intent.
+ */
+async function runAdminTransition(
+  name: string,
+  transition: AdminTransition,
+  ports: TurnStatePorts<LiveWorker> = prodPorts,
+): Promise<void> {
+  const result = applyAdmin(name, transition);
+  // Mirror the projection onto a live worker if one is still resident. Archive
+  // demotes the worker up front (live.delete before enqueue), so this only
+  // fires for set-projection / heal on a still-live agent.
+  const w = live.get(name);
+  if (w && (result.projection === "idle" || result.projection === "working")) {
+    setWorkerStatus(w, result.projection, `machine.admin.${transition.kind}`);
+  }
+  // The admin intents never touch the block-stream / sendPrompt ports, so a
+  // name-only stub is sufficient as the executor's worker target.
+  const stub = (w ?? { agentName: name, turnId: "" }) as LiveWorker;
+  await executeIntents(stub, result.intents, ports);
+}
+
+/**
+ * FRI-145 M4 archive channel. Every `archiveAgent` caller (REST endpoint,
+ * archive LISTEN handler, apps uninstall, boot orphan sweep, auditor Rule 1)
+ * funnels here so the terminal `archived` write is a Transition on the
+ * agent-keyed queue — never a direct `registry.archiveAgent` outside the
+ * machine.
+ *
+ * The non-status work sequences AROUND the Transition, preserving the original
+ * structural ordering:
+ *   1. Read `ticketId` from the row BEFORE the archive (so the closer reads the
+ *      captured value, not a row a future refactor might null on archive). This
+ *      ordering is pinned by `lifecycle-ticket-close.test.ts`.
+ *   2. Demote the live worker's Generation (`live.delete`) up front so any
+ *      racing IPC / exit / abort-deadline Transition is a Generation no-op and
+ *      cannot write `idle` over the incoming `archived` (AC #17).
+ *   3. Enqueue the archive Transition (result-bearing) and AWAIT it: the
+ *      machine emits `close-ticket` THEN `archive`, so the ticket closes
+ *      happens-before the terminal write (AC #6). The await surfaces the FSM
+ *      gate's `IllegalTransitionError` (orchestrator-not-archivable) to the
+ *      caller exactly as the pre-M4 direct call did.
+ *   4. AFTER the Transition resolves, drain + tear down the worker (off the
+ *      status-write critical section; V3 — never await a same-key enqueue from
+ *      inside a Transition).
+ */
+export async function archiveAgent(
+  agentName: string,
+  opts: { reason: ArchiveReason },
+): Promise<WorkerPromptCommand[]> {
+  const w = live.get(agentName);
+  // Capture ticketId BEFORE the archive Transition — defensive against a
+  // future refactor that nulls the row's fields on archive. The closer reads
+  // this captured value (pinned by lifecycle-ticket-close.test.ts).
+  const agentRow = await registry.getAgent(agentName);
+  const ticketId = agentRow && "ticketId" in agentRow ? (agentRow.ticketId ?? null) : null;
+  // Demote this Generation up front so a racing IPC / exit / abort-deadline
+  // Transition sees `live.get(name) !== w` and no-ops, and cannot write `idle`
+  // over the `archived` projection this Transition is about to write.
+  if (w) live.delete(agentName);
+  // The archive Transition: close-ticket (happens-before) → archived write.
+  // Result-bearing so the FSM gate's rejection reaches this awaiting caller.
+  await enqueueTransitionResult(agentName, () =>
+    runAdminTransition(agentName, { kind: "archive", reason: opts.reason, ticketId }),
+  );
+  // Worker teardown sequences AFTER the status Transition resolves — off the
+  // single-writer critical section (V3).
+  if (!w) return [];
+  return drainLiveWorker(w);
+}
+
+/**
+ * FRI-145 M4 auditor heal channel. The invariants auditor's Rule 3 routes its
+ * privileged force-set through the machine instead of calling
+ * `registry._auditorHealStatusUnchecked` directly, so the auditor is no longer
+ * an independent writer of `agents.status`. `registry._auditorHealStatusUnchecked`
+ * stays for genuinely-out-of-band psql edits, but no in-process caller reaches
+ * it except via this Transition.
+ */
+export async function healAgentStatus(
+  agentName: string,
+  target: StatusProjection,
+  opts: { clearArchiveReason: boolean },
+): Promise<void> {
+  await enqueueTransition(agentName, () =>
+    runAdminTransition(agentName, {
+      kind: "heal",
+      target,
+      clearArchiveReason: opts.clearArchiveReason,
+    }),
+  );
+}
+
+/**
+ * FRI-145 M4 projection channel for boot-recovery + auditor zombie-demote. A
+ * gated `registry.setStatus` write that moves an agent to a resting projection
+ * (`working→idle` on boot, zombie-demote `→idle`). Routed through the machine
+ * so these channels are not independent `registry.setStatus` callers.
+ */
+export async function setAgentProjection(
+  agentName: string,
+  status: StatusProjection,
+): Promise<void> {
+  await enqueueTransition(agentName, () =>
+    runAdminTransition(agentName, { kind: "set-projection", status }),
+  );
 }
 
 function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
@@ -1209,43 +1341,6 @@ async function drainLiveWorker(w: LiveWorker): Promise<WorkerPromptCommand[]> {
       setTimeout(() => killPgrp(w.pgid, "SIGKILL"), 2_000).unref();
     }, 5_000).unref();
   });
-}
-
-/**
- * Tear down a live worker and archive its registry row. The archive write
- * makes the row terminal; `opts.reason` documents intent and drives the
- * linked-ticket close behavior (see `services/ticket-close.ts`). Fire-and-
- * forget callers (REST archive endpoints, system commands) can ignore the
- * returned drained-prompts queue — the side effects (registry archive,
- * live-map remove, ticket close) happen synchronously up front.
- */
-export async function archiveAgent(
-  agentName: string,
-  opts: { reason: ArchiveReason },
-): Promise<WorkerPromptCommand[]> {
-  const w = live.get(agentName);
-  // Capture ticketId BEFORE registry.archiveAgent — defensive against a
-  // future refactor that nulls the row's fields on archive. The closer
-  // reads from this captured value, not from the registry.
-  const agentRow = await registry.getAgent(agentName);
-  const ticketId = agentRow && "ticketId" in agentRow ? (agentRow.ticketId ?? null) : null;
-  // Synchronous side-effects: drop from the live map so subsequent
-  // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
-  // before the child has fully exited.
-  if (w) live.delete(agentName);
-  await registry.archiveAgent(agentName, { reason: opts.reason });
-  // Phase 5: `agent_lifecycle:archive` SSE retired — Zero replicates
-  // the agents.status='archived' UPDATE; the dashboard sidebar drops
-  // the row via the reactive query.
-  // Fire-and-forget: the closer owns its error handling and must never
-  // bubble back into the worker-teardown path.
-  void closeTicketForArchive({
-    ticketId,
-    reason: opts.reason,
-    agentName,
-  });
-  if (!w) return [];
-  return drainLiveWorker(w);
 }
 
 /**

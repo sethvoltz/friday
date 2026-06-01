@@ -85,6 +85,68 @@ export function enqueueTransition(
 }
 
 /**
+ * Result-bearing enqueue (FRI-145 M4). Same strict-serialization +
+ * non-wedging chain as {@link enqueueTransition}, but the RETURNED promise
+ * resolves/rejects with `transition`'s actual outcome — so an awaiting caller
+ * sees a real value or a real error.
+ *
+ * The chain TAIL (what the next enqueue serializes behind) still swallows the
+ * error, exactly as `enqueueTransition` does, so one rejecting Transition can
+ * never wedge the queue for its key. The caller's view (the returned promise)
+ * and the chain's view (the resident tail) are deliberately decoupled.
+ *
+ * Used by the archive channel: `lifecycle.archiveAgent` awaits this so the
+ * orchestrator-not-archivable `IllegalTransitionError` propagates to the REST
+ * endpoint exactly as the pre-M4 direct `registry.archiveAgent` call did, while
+ * a concurrent archive of a DIFFERENT agent still proceeds independently and a
+ * failed archive doesn't poison this agent's later Transitions.
+ *
+ * Deadlock note (V3): like `enqueueTransition`, NEVER `await` this from inside
+ * a Transition already running on the SAME key — only external callers (the
+ * REST handler, the LISTEN handler, boot recovery, the auditor, the installer)
+ * await it, none of which run on the per-agent chain.
+ */
+export function enqueueTransitionResult<T>(
+  name: string,
+  transition: () => T | Promise<T>,
+): Promise<T> {
+  const prev = transitionQueues.get(name) ?? Promise.resolve();
+  // The caller's result is captured from THIS run; the chain tail derives from
+  // the same run but swallows the error so the queue never wedges.
+  let settle: (value: T | PromiseLike<T>) => void;
+  let reject: (reason: unknown) => void;
+  const result = new Promise<T>((res, rej) => {
+    settle = res;
+    reject = rej;
+  });
+  const next = prev.then(() =>
+    Promise.resolve()
+      .then(transition)
+      .then(
+        (value) => {
+          settle(value);
+        },
+        (err: unknown) => {
+          // Surface the real error to the awaiting caller, but keep the chain
+          // tail resolved so later Transitions for this key still run.
+          reject(err);
+          logger.log("error", "transition-queue.transition.error", {
+            agent: name,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        },
+      ),
+  );
+  transitionQueues.set(name, next);
+  void next.then(() => {
+    if (transitionQueues.get(name) === next) {
+      transitionQueues.delete(name);
+    }
+  });
+  return result;
+}
+
+/**
  * Test-only reset hook. Clears all chains so one test file's pending tails
  * don't bleed into the next. Production code never calls this.
  */

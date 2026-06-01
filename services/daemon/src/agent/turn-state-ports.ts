@@ -13,7 +13,7 @@
  * decides HOW, and the ports bag is the only place real side effects live.
  */
 
-import type { AgentType } from "@friday/shared";
+import type { AgentType, ArchiveReason } from "@friday/shared";
 import type { WireEvent } from "@friday/shared";
 import type { ErrorBlockPayload } from "./block-stream.js";
 import type { WorkerPromptCommand } from "./worker-protocol.js";
@@ -46,6 +46,32 @@ export interface PortWorker {
 export interface TurnStatePorts<W extends PortWorker = PortWorker> {
   /** registry.setStatus — the ONLY DB door for agents.status (ADR-031). */
   setStatus: (name: string, status: StatusProjection) => Promise<void>;
+  /**
+   * registry.archiveAgent — the gated terminal write (FRI-145 M4 archive
+   * channel). Runs the FSM gate; an illegal edge throws and the executor
+   * propagates it so an awaiting caller (the REST archive endpoint, the
+   * orchestrator-not-archivable test) sees the rejection.
+   */
+  archive: (name: string, opts: { reason: ArchiveReason }) => Promise<void>;
+  /**
+   * registry._auditorHealStatusUnchecked — the privileged force-set (FRI-145
+   * M4 auditor channel). Bypasses the FSM gate for illegal resting states.
+   */
+  heal: (
+    name: string,
+    status: StatusProjection,
+    opts: { clearArchiveReason: boolean },
+  ) => Promise<void>;
+  /**
+   * closeTicketForArchive — close the agent's linked Friday/Linear ticket.
+   * Awaited so the close happens-before the `archive` intent's terminal write
+   * (AC #6). The closer swallows its own errors; a `null` ticketId is a no-op.
+   */
+  closeTicket: (opts: {
+    ticketId: string | null;
+    reason: ArchiveReason;
+    agentName: string;
+  }) => Promise<void>;
   /** eventBus.publish — wire-event fan-out. */
   publish: (event: WireEventInput) => void;
   /** Block-stream pipeline (record-error / finalize / end-turn). */
@@ -118,6 +144,44 @@ export async function executeIntents<W extends PortWorker>(
             message: err instanceof Error ? err.message : String(err),
           });
         });
+        break;
+      case "close-ticket":
+        // Close the linked ticket BEFORE the `archive` intent's terminal write
+        // (AC #6). Awaited so the happens-before is structural, not a race.
+        // The closer swallows its own errors internally; we still guard so a
+        // surprise throw can't abort the archive write that must follow.
+        await ports
+          .closeTicket({
+            ticketId: intent.ticketId,
+            reason: intent.reason,
+            agentName: intent.name,
+          })
+          .catch((err: unknown) => {
+            ports.logWarn("ticket.close.error", {
+              agent: intent.name,
+              ticketId: intent.ticketId,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
+        break;
+      case "archive":
+        // The gated terminal write. NOT wrapped in a catch: an illegal-edge
+        // rejection (orchestrator-archive, MISSING_ARCHIVE_REASON) MUST
+        // propagate so the awaiting caller (REST endpoint, lifecycle.archiveAgent
+        // wrapper) sees the IllegalTransitionError exactly as the pre-M4 direct
+        // call did.
+        await ports.archive(intent.name, { reason: intent.reason });
+        break;
+      case "heal":
+        await ports
+          .heal(intent.name, intent.status, { clearArchiveReason: intent.clearArchiveReason })
+          .catch((err: unknown) => {
+            ports.logWarn("registry.heal.error", {
+              agent: intent.name,
+              status: intent.status,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
         break;
       case "record-error-block":
         await ports.blockStream.recordError(w, intent.payload);

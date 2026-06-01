@@ -22,8 +22,10 @@ import { reconcileAppsOnBoot } from "./apps/reconcile.js";
 import { runEvolveBootSync } from "./evolve/projector.js";
 import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
 import {
+  archiveAgent,
   dispatchTurn,
   reapAllLiveWorkers,
+  setAgentProjection,
   startTurnStallWatchdog,
   stopTurnStallWatchdog,
 } from "./agent/lifecycle.js";
@@ -34,7 +36,6 @@ import { buildDispatchPrompt } from "./prompts/build-dispatch-prompt.js";
 import "./hooks/register.js";
 import { agentCwdPinV1 } from "./state-migrations/agent-cwd-pin-v1.js";
 import { runStateMigrations } from "./state-migrations/runner.js";
-import { closeTicketForArchive } from "./services/ticket-close.js";
 import { syncProposalsForClosedTickets } from "./services/proposal-sync.js";
 import { runSettingsBootScan, startSettingsListener } from "./settings/listener.js";
 import { runMemoryBootScan, startMemoryListener } from "./memory/listener.js";
@@ -326,27 +327,21 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
         agent: a.name,
         worktreePath: a.worktreePath,
       });
-      // Capture ticketId before archive — the closer fires after the
-      // registry row is flipped but reads from this captured value.
-      const ticketId = a.ticketId ?? null;
-      await registry.archiveAgent(a.name, { reason: "abandoned" });
-      // Phase 5: `agent_lifecycle` SSE retired — Zero's `agents`
-      // slice replicates the status transition reactively to the
-      // dashboard sidebar.
-      // Newly-discovered orphan whose worktree is gone — work definitely
-      // did not complete. Mark the linked ticket abandoned. Not a backfill
-      // sweep of pre-existing in_progress rows; only orphans we observe
-      // at boot get this treatment.
-      void closeTicketForArchive({
-        ticketId,
-        reason: "abandoned",
-        agentName: a.name,
-      });
+      // FRI-145 M4: route through the machine's archive Transition (the single
+      // writer of `agents.status`). `lifecycle.archiveAgent` reads the ticketId
+      // from the row, closes the linked ticket (happens-before the terminal
+      // write — AC #6: "agent archived: abandoned" closes the orphan's ticket),
+      // then writes `archived` via a Transition on the agent-keyed queue. No
+      // direct `registry.archiveAgent` + fire-and-forget closeTicketForArchive
+      // here anymore — both are folded into the one Transition.
+      await archiveAgent(a.name, { reason: "abandoned" });
       continue;
     }
     if (a.status === "working") {
       logger.log("info", "agent.recovery.reset-working", { agent: a.name });
-      await registry.setStatus(a.name, "idle");
+      // FRI-145 M4: route the working→idle reset through the machine's
+      // projection Transition rather than calling registry.setStatus directly.
+      await setAgentProjection(a.name, "idle");
     }
     const cwd = await registry.workingDirectoryFor(a);
     if (a.sessionId) {

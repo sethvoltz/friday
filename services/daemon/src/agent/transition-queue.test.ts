@@ -26,6 +26,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   enqueueTransition,
+  enqueueTransitionResult,
   transitionQueues,
   _resetTransitionQueuesForTest,
 } from "./transition-queue.js";
@@ -155,6 +156,60 @@ describe("transition-queue (FRI-145 M1)", () => {
     await Promise.resolve();
 
     expect(transitionQueues.has(name)).toBe(false);
+  });
+
+  it("FRI-145 M4: enqueueTransitionResult resolves with the transition's real value", async () => {
+    const name = "result-ok";
+    const value = await enqueueTransitionResult(name, async () => {
+      await delay(5);
+      return 42;
+    });
+    expect(value).toBe(42);
+  });
+
+  it("FRI-145 M4: enqueueTransitionResult REJECTS with the real error (caller sees the FSM throw)", async () => {
+    const name = "result-throws";
+    const order: string[] = [];
+
+    // The archive channel relies on this: an orchestrator-not-archivable
+    // IllegalTransitionError must propagate to the awaiting caller, NOT be
+    // swallowed like the fire-and-forget enqueueTransition does.
+    const failing = enqueueTransitionResult(name, async () => {
+      order.push("failing");
+      throw new Error("ORCHESTRATOR_NOT_ARCHIVABLE");
+    });
+    await expect(failing).rejects.toThrow(/ORCHESTRATOR_NOT_ARCHIVABLE/);
+
+    // …and the rejection does NOT wedge the chain: a later Transition for the
+    // same key still runs serialized after the failing one.
+    const survivor = enqueueTransitionResult(name, async () => {
+      order.push("survivor");
+      return "ok";
+    });
+    await expect(survivor).resolves.toBe("ok");
+    expect(order).toEqual(["failing", "survivor"]);
+  });
+
+  it("FRI-145 M4: enqueueTransitionResult serializes behind a prior enqueueTransition for the same key", async () => {
+    const name = "result-serialize";
+    const order: string[] = [];
+
+    // A fire-and-forget enqueueTransition (slow) then a result-bearing enqueue
+    // (fast) for the SAME key: the result-bearing one must wait — proving the
+    // two enqueue variants share one chain per key.
+    const first = enqueueTransition(name, async () => {
+      await delay(30);
+      order.push("first");
+    });
+    const second = enqueueTransitionResult(name, async () => {
+      await delay(0);
+      order.push("second");
+      return "done";
+    });
+
+    const [, secondVal] = await Promise.all([first, second]);
+    expect(secondVal).toBe("done");
+    expect(order).toEqual(["first", "second"]);
   });
 
   it("does NOT prune a name whose chain has a later pending Transition", async () => {
