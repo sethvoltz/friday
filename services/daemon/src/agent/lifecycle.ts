@@ -41,6 +41,14 @@ import { appContextForAgent } from "../apps/installer.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
 import { enqueueTransition } from "./transition-queue.js";
 import {
+  apply as applyTransition,
+  projectStatus,
+  type Transition,
+  type TurnContext,
+  type TurnState,
+} from "./turn-state-machine.js";
+import { executeIntents, type TurnStatePorts } from "./turn-state-ports.js";
+import {
   profileInputsFor,
   removeProfile,
   sandboxExecAvailable,
@@ -103,7 +111,23 @@ export interface LiveWorker {
    * this as the "model is making progress" signal — heartbeats don't count
    * because a stuck SDK still emits them. */
   lastBlockStop: number;
-  /** Idle vs working, mirrored from worker `status-change` events. */
+  /**
+   * FRI-145 M3: the authoritative Turn state (CONTEXT.md → "Agent turn
+   * lifecycle"). `idle | working | aborting | force-killed`. The
+   * Turn-state machine is the only writer (via `setWorkerStatus`). `status`
+   * below is a DERIVED Status projection of this field — never authored
+   * independently, so the old "`w.status` and `w.turnStart` are parallel
+   * sources of the same truth" drift hazard is closed.
+   */
+  turnState: TurnState;
+  /**
+   * DERIVED Status projection (`idle | working`). Always equals
+   * `projectStatus(w.turnState)` — written only by `setWorkerStatus`
+   * alongside `turnState`, never on its own. Read by the watchdog stall
+   * check, `abortTurn`'s working-gate, `dispatchTurn`'s idle/busy branch,
+   * and `peekLiveWorker`. (M5 adds the `stalled` Status projection on the
+   * agents row; the in-memory Turn state has no resting `stalled` value.)
+   */
   status: "idle" | "working";
   /**
    * FIFO of prompts that arrived while a previous turn was in flight. Drained
@@ -411,6 +435,9 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     turnStart: undefined,
     spawnedAt: Date.now(),
     lastBlockStop: Date.now(),
+    // FRI-145 M3: `turnState` is authoritative; `status` is its derived
+    // projection. A freshly-forked worker is about to run its first turn.
+    turnState: "working",
     status: "working",
     nextPrompts: [],
     mode: input.options.mode,
@@ -660,101 +687,151 @@ function restampQueuedUserBlock(
 }
 
 /**
- * FRI-72 instrumentation: every `w.status` transition flows through here so
- * the daemon log captures who changed it and why. The "queued for a fraction"
- * symptom (daemon thinks the worker is still working long after its last
- * turn) points at a missing or out-of-order status update; this trace makes
- * the misordering visible without changing behavior.
+ * FRI-145 M3: the single writer of the authoritative Turn state. Sets
+ * `w.turnState` and derives `w.status` from it via `projectStatus` — `status`
+ * is never authored independently, so it can no longer drift from the Turn
+ * state (or, transitively, from `w.turnStart`). Accepts either a full
+ * {@link TurnState} (the machine's vocabulary: `aborting` / `force-killed`) or
+ * a resting projection (`idle` / `working`) at call sites that predate the
+ * machine.
+ *
+ * FRI-72 instrumentation: every transition flows through here so the daemon log
+ * captures who changed it and why. The "queued for a fraction" symptom (daemon
+ * thinks the worker is still working long after its last turn) points at a
+ * missing or out-of-order status update; this trace makes the misordering
+ * visible.
  */
-function setWorkerStatus(w: LiveWorker, next: "idle" | "working", source: string): void {
-  if (w.status !== next) {
+function setWorkerStatus(w: LiveWorker, next: TurnState, source: string): void {
+  const projected = projectStatus(next);
+  if (w.turnState !== next || w.status !== projected) {
     logger.log("info", "worker.status.transition", {
       agent: w.agentName,
-      prev: w.status,
+      prev: w.turnState,
       next,
+      projected,
       source,
       turnId: w.turnId,
     });
   }
-  w.status = next;
+  w.turnState = next;
+  w.status = projected;
 }
 
 /**
- * FRI-127 §5 mail-back backstop. Called at turn-complete for a helper/builder
- * that has a parent. Detects "this turn produced content but never mailed the
- * parent" and recovers:
+ * FRI-145 M3: build the production ports bag for the Turn-state machine. The
+ * machine (`turn-state-machine.ts`) returns intents; `executeIntents`
+ * (`turn-state-ports.ts`) runs them against THESE collaborators. Unit tests
+ * pass fakes instead — the machine itself does no I/O.
  *
- *   - Option B (default, single-fire): re-dispatch one nudge turn telling the
- *     child to mail its result now. Guarded by `noMailBackNudgedThisTurn` so it
- *     fires at most once per consecutive-miss run.
- *   - Option C (fallthrough on the SECOND consecutive miss): no re-dispatch;
- *     emit a structured warning log (`worker.no-mail-back-streak`) and a
- *     `worker.no-mail-back` SSE event so the dashboard can surface a manual
- *     "Nudge" affordance. Honest about persistent failure instead of looping.
- *
- * A turn that DID mail the parent resets the guard + streak (handled by the
- * caller before this runs).
- *
- * Returns `true` when it re-dispatched a nudge turn — the caller then skips the
- * normal queue-drain so the nudge isn't immediately clobbered by `sendPrompt`.
- *
- * `completedBlocks` / `completedMailBacks` are the just-finished turn's counts,
- * captured by the caller before the per-turn resets.
+ * `registry.setStatus` stays the only DB door (ADR-031); it is reached only via
+ * a `set-status` intent executed here. `forceKill` is the wedge escalation —
+ * the machine signals it, the prod port invokes `forceKillStuckWorker`.
  */
-function maybeNudgeForMailBack(
-  w: LiveWorker,
-  completedBlocks: number,
-  completedMailBacks: number,
-): boolean {
-  const isChild = w.agentType === "helper" || w.agentType === "builder";
-  if (!isChild || !w.parentName) return false;
+function makeProdPorts(): TurnStatePorts<LiveWorker> {
+  return {
+    setStatus: (name, status) => registry.setStatus(name, status),
+    publish: (event) => eventBus.publish(event),
+    blockStream: {
+      recordError: (w, payload) => bsRecordError(w, payload),
+      finalize: (w, status) => bsFinalize(w, status),
+      endTurn: (turnId) => bsEndTurn(turnId),
+    },
+    recoverFromJsonl: (inputs) => recoverFromJsonl(inputs),
+    insertUsage: (row) => insertUsage(row),
+    posthog,
+    distinctId: DISTINCT_ID,
+    sendPrompt: (w, p) => sendPrompt(w, p),
+    forceKill: (w, opts) => forceKillStuckWorker(w, opts),
+    logWarn: (event, payload) => logger.log("warn", event, payload),
+    logInfo: (event, payload) => logger.log("info", event, payload),
+  };
+}
 
-  if (completedMailBacks > 0) {
-    // The child reported home this turn. Clear the backstop state so a future
-    // miss starts fresh (single-fire nudge per consecutive-miss run).
-    w.noMailBackNudgedThisTurn = false;
-    w.noMailBackStreak = 0;
-    return false;
-  }
+const prodPorts = makeProdPorts();
 
-  // Only a turn that actually produced content but skipped the mail-back is a
-  // miss. A zero-block turn is a different failure (the wedge detector owns it).
-  if (completedBlocks === 0) return false;
-
-  w.noMailBackStreak++;
-
-  if (!w.noMailBackNudgedThisTurn) {
-    // Option B: single-fire re-dispatch.
-    w.noMailBackNudgedThisTurn = true;
-    const nudge: WorkerPromptCommand = {
-      prompt: `You finished your turn without reporting back. Mail your parent \`${w.parentName}\` with your result now via \`mail_send({to: "${w.parentName}", body: …})\` so your parent learns you're done.`,
-      turnId: `t_${randomUUID()}`,
-    };
-    logger.log("info", "worker.no-mail-back-nudge", {
-      agent: w.agentName,
-      parent: w.parentName,
-      turnId: nudge.turnId,
-      streak: w.noMailBackStreak,
-    });
-    sendPrompt(w, nudge);
-    return true;
-  }
-
-  // Option C: second consecutive miss — warn + SSE, no re-dispatch.
-  logger.log("warn", "worker.no-mail-back-streak", {
-    agent: w.agentName,
-    parent: w.parentName,
+/**
+ * Project a {@link LiveWorker} onto the read-only {@link TurnContext} the pure
+ * machine consumes. The machine never sees the full LiveWorker bag — only the
+ * turn-boundary-relevant fields — so it can't reach for state it has no
+ * business reading.
+ */
+function toTurnContext(w: LiveWorker): TurnContext {
+  return {
+    agentName: w.agentName,
+    agentType: w.agentType,
+    model: w.model,
+    parentName: w.parentName,
     turnId: w.turnId,
-    streak: w.noMailBackStreak,
-  });
-  eventBus.publish({
-    v: 1,
-    type: "worker.no-mail-back",
-    agent: w.agentName,
-    turn_id: w.turnId,
-    streak: w.noMailBackStreak,
-  });
-  return false;
+    sessionId: w.sessionId,
+    workingDirectory: w.workingDirectory,
+    abortRequested: w.abortRequested,
+    turnStart: w.turnStart,
+    blocksThisTurn: w.blocksThisTurn,
+    zeroBlockTurnStreak: w.zeroBlockTurnStreak,
+    mailSendToParentThisTurn: w.mailSendToParentThisTurn,
+    noMailBackNudgedThisTurn: w.noMailBackNudgedThisTurn,
+    noMailBackStreak: w.noMailBackStreak,
+    nextPrompts: w.nextPrompts,
+  };
+}
+
+/** The dependency bag for one machine `apply` — captured at call time so the
+ *  wedge threshold honors a live `FRIDAY_WEDGE_THRESHOLD` override and the
+ *  clock/uuid are the real ones. (`wedgeThreshold` is a hoisted function
+ *  declaration defined in the watchdog section below.) */
+function MACHINE_DEPS(): { wedgeThreshold: number; now: number; uuid: () => string } {
+  return { wedgeThreshold: wedgeThreshold(), now: Date.now(), uuid: randomUUID };
+}
+
+/**
+ * Drive one Transition through the machine: apply the pure function, write the
+ * machine's in-memory mutations + derived Status projection onto the live
+ * worker, pop the queue for a `send-next`/`mailback-nudge` (so the dispatched
+ * prompt is removed from `nextPrompts` exactly as the old `.shift()` did), then
+ * execute the intents against the ports bag.
+ *
+ * The Turn-state machine is the only application-level writer of
+ * `agents.status` — the `set-status` intent inside `intents` is the single DB
+ * door. Returns nothing; the caller awaits it inside the on-chain handler.
+ */
+async function runTransition(
+  w: LiveWorker,
+  transition: Transition,
+  ports: TurnStatePorts<LiveWorker> = prodPorts,
+): Promise<void> {
+  const result = applyTransition(toTurnContext(w), transition, MACHINE_DEPS());
+
+  // Apply the in-memory mutations the machine decided (its own bookkeeping —
+  // per-turn resets, streak bumps, lastExitStatus). These are not external
+  // side effects; the `set-status` projection write is an INTENT.
+  const m = result.mutations;
+  if ("turnStart" in m) w.turnStart = m.turnStart;
+  if ("activePrompt" in m) w.activePrompt = m.activePrompt;
+  if (m.blocksThisTurn !== undefined) w.blocksThisTurn = m.blocksThisTurn;
+  if (m.zeroBlockTurnStreak !== undefined) w.zeroBlockTurnStreak = m.zeroBlockTurnStreak;
+  if (m.mailSendToParentThisTurn !== undefined)
+    w.mailSendToParentThisTurn = m.mailSendToParentThisTurn;
+  if (m.noMailBackNudgedThisTurn !== undefined)
+    w.noMailBackNudgedThisTurn = m.noMailBackNudgedThisTurn;
+  if (m.noMailBackStreak !== undefined) w.noMailBackStreak = m.noMailBackStreak;
+  if (m.lastExitStatus !== undefined) w.lastExitStatus = m.lastExitStatus;
+  if (m.completedAtLeastOnce !== undefined) w.completedAtLeastOnce = m.completedAtLeastOnce;
+
+  // Project the derived Status onto the in-memory worker via the single writer.
+  // (The DURABLE agents.status write is the `set-status` intent below.)
+  setWorkerStatus(w, result.state, `machine.${transition.kind}`);
+
+  // The machine's `send-next` / `mailback-nudge` intent carries the prompt it
+  // chose; remove it from the queue so `sendPrompt` (run inside the intent)
+  // dispatches it exactly once. `send-next` uses `nextPrompts[0]`; the nudge is
+  // a synthetic prompt not in the queue.
+  for (const intent of result.intents) {
+    if (intent.kind === "send-next") {
+      w.nextPrompts.shift();
+    }
+  }
+
+  await executeIntents(w, result.intents, ports);
 }
 
 function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
@@ -843,6 +920,17 @@ export function abortTurn(agentName: string): boolean {
     workerStatus: w.status,
   });
   send(w.child, { type: "abort" });
+  // FRI-145 M3: project the `aborting` Turn state via the machine. The abort
+  // Transition returns no intents and writes no durable Status projection (the
+  // agents row stays `working` until the cooperative turn-complete/error or the
+  // force-kill deadline heals it to `idle`); it only pins the in-memory Turn
+  // state so a racing second `abortTurn` sees the working-gate as
+  // already-not-working and no-ops, and the watchdog's stall check (which keys
+  // on the derived `w.status`) stops counting progress against a worker that is
+  // tearing down. Synchronous: the abort Transition is intent-free, so we apply
+  // its state without going through the async intent executor.
+  const abortResult = applyTransition(toTurnContext(w), { kind: "abort" }, MACHINE_DEPS());
+  setWorkerStatus(w, abortResult.state, "abortTurn");
   // T+0 destructive-tool kill: SIGTERM every process in the worker's
   // pgrp EXCEPT the worker itself. This kills the SDK CLI subprocess
   // and any in-flight tool subprocesses (Bash, Read, WebFetch, …) the
@@ -1583,122 +1671,26 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // error IPC before the kernel reaps it; ignore it so we don't double-
       // publish turn_done over an already-finalized turn.
       if (!isCurrentGeneration(w)) break;
-      const wasAbort = w.abortRequested;
-      w.lastExitStatus = wasAbort ? "aborted" : "error";
-      // Materialize the failure as a chat-visible error block so the user
-      // sees what happened (was previously silent — the worker emitted an
-      // IPC error but no DB row was written, leaving the bubble in
-      // "running" until reconcile-on-restart). Skipped for plain aborts:
-      // the bubble is already visible via the user's Stop click and the
-      // assistant text bubble flips to "aborted" via finishTurn below.
-      if (!wasAbort) {
-        await bsRecordError(w, {
-          code: e.code ?? "worker_error",
-          headline: e.headline ?? e.message,
+      // FRI-145 M3: the error tail is now ONE Transition. The Turn-state
+      // machine decides everything (record-error block, finalize streaming
+      // blocks, publish error + turn_done, posthog, the FRI-61 wedge streak +
+      // escalation, the FRI-110 turnStart clear, the idle Status projection,
+      // and the queue-drain) and returns intents; `runTransition` applies its
+      // in-memory mutations + the single `set-status` DB-door intent. The
+      // machine is the only writer of `agents.status`.
+      await runTransition(w, {
+        kind: "fail",
+        payload: {
+          message: e.message,
+          recoverable: e.recoverable,
+          code: e.code,
+          headline: e.headline,
           httpStatus: e.httpStatus,
           retryAfterSeconds: e.retryAfterSeconds,
           requestId: e.requestId,
-          rawMessage: e.rawMessage ?? e.message,
-        });
-      }
-      // Close any blocks left at status='streaming' so their dashboard
-      // bubbles transition off "running". `bsFinalize` is idempotent —
-      // safe to call even when the inflight set is empty.
-      await bsFinalize(w, wasAbort ? "aborted" : "error");
-      // Publish the canonical TurnErrorEvent (kept for any consumer that
-      // listens for it) BEFORE the synthesized turn_done — clients route
-      // both, but ordering means the error metadata is in hand by the time
-      // the turn flips terminal.
-      eventBus.publish({
-        v: 1,
-        type: "error",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        code: wasAbort ? "aborted" : (e.code ?? "worker_error"),
-        message: e.message,
-        recoverable: e.recoverable,
+          rawMessage: e.rawMessage,
+        },
       });
-      // The missing event that caused the wedge: without turn_done, the
-      // dashboard's inflightTurnId stays pinned to this turn forever.
-      eventBus.publish({
-        v: 1,
-        type: "turn_done",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        status: wasAbort ? "aborted" : "error",
-        // FRI-95: worker cooperatively honored the abort (this code path
-        // runs because the worker's for-await closed and emitted error IPC).
-        ...(wasAbort ? { abort_reason: "cooperative" as const } : {}),
-      });
-      if (!wasAbort) {
-        posthog.capture({
-          distinctId: DISTINCT_ID,
-          event: "turn_errored",
-          properties: {
-            agent_name: w.agentName,
-            agent_type: w.agentType,
-            model: w.model,
-            turn_id: w.turnId,
-            error_code: e.code ?? null,
-            error_message: e.message,
-            recoverable: e.recoverable,
-          },
-        });
-      }
-      // FRI-61 wedge detector: count consecutive turn-error events that
-      // produced zero blocks. Skip when the user requested the abort
-      // (that's not a wedge, it's cooperative). When the streak reaches
-      // FRIDAY_WEDGE_THRESHOLD, force-kill.
-      if (!wasAbort) {
-        if (w.blocksThisTurn === 0) {
-          w.zeroBlockTurnStreak++;
-          logger.log("warn", "worker.zero-block-turn", {
-            agent: w.agentName,
-            turnId: w.turnId,
-            streak: w.zeroBlockTurnStreak,
-            source: "error",
-            errorCode: e.code,
-          });
-          if (w.zeroBlockTurnStreak >= wedgeThreshold()) {
-            // FRI-116: hoist the FRI-110 turnStart clear BEFORE the
-            // force-kill early-return so this branch's post-condition
-            // matches the happy path below. `forceKillStuckWorker`
-            // does also clear `w.turnStart` (defense-in-depth at its
-            // own exit handler), but relying on the chain is the
-            // exact "trust the trail" anti-pattern FRI-117's lint
-            // story is meant to catch at authoring time.
-            w.turnStart = undefined;
-            w.activePrompt = undefined;
-            await forceKillStuckWorker(w, {
-              reason: "wedge",
-              zeroBlockTurnStreak: w.zeroBlockTurnStreak,
-            });
-            return;
-          }
-        } else {
-          w.zeroBlockTurnStreak = 0;
-        }
-      }
-      w.blocksThisTurn = 0;
-      // Clean up live state the way turn-complete would. The worker
-      // process keeps running (long-lived agents stay alive across
-      // failures); reset its bookkeeping so the next prompt dispatches
-      // cleanly.
-      bsEndTurn(w.turnId);
-      setWorkerStatus(w, "idle", "handleEvent.error");
-      // FRI-110: same reasoning as the `turn-complete` clear — the turn is
-      // over (error-terminated rather than completed) and any subsequent
-      // between-turns IPC must not arithmetic against this turn's start
-      // time. The `sendPrompt(w, next)` below will restamp if a queued
-      // prompt drains.
-      w.turnStart = undefined;
-      w.activePrompt = undefined;
-      w.completedAtLeastOnce = true;
-      await registry.setStatus(w.agentName, "idle");
-      // Phase 5: `agent_status` SSE retired — Zero replicates the
-      // agents.status UPDATE reactively.
-      const next = w.nextPrompts.shift();
-      if (next) sendPrompt(w, next);
       break;
     }
     case "status-change":
@@ -1758,188 +1750,24 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // (its turn was already finalized by force-kill / archive / refork)
       // must not re-publish turn_done.
       if (!isCurrentGeneration(w)) break;
-      // FRI-110: `w.turnStart` is non-undefined in the normal flow (a
-      // turn-complete IPC by definition implies a turn ran), but the type
-      // is `number | undefined` so the typechecker needs a narrowing.
-      // Pinned form: ternary fallback to 0. The 0 sentinel is unreachable
-      // in practice — emitting NaN via `Date.now() - undefined` is the
-      // observable failure mode this guards against.
-      const durationMs = w.turnStart ? Date.now() - w.turnStart : 0;
-      // FRI-60: compute the zero-block reason BEFORE publishing turn_done so
-      // the dashboard knows why the turn produced no content.
-      const zeroBlockReason: "abort" | "compaction" | "sdk-resume-failure" | undefined =
-        w.blocksThisTurn === 0
-          ? w.abortRequested
-            ? "abort"
-            : e.compactionThisTurn
-              ? "compaction"
-              : "sdk-resume-failure"
-          : undefined;
-      eventBus.publish({
-        v: 1,
-        type: "turn_done",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        status: w.abortRequested ? "aborted" : "complete",
-        // FRI-95: worker honored the abort and ran to a clean
-        // turn-complete IPC (raced to completion right around the abort).
-        ...(w.abortRequested ? { abort_reason: "cooperative" as const } : {}),
-        // FRI-60: include reason only when the turn produced zero blocks.
-        ...(zeroBlockReason !== undefined ? { zero_block_reason: zeroBlockReason } : {}),
-        usage: e.usage
-          ? {
-              input_tokens: e.usage.input_tokens,
-              output_tokens: e.usage.output_tokens,
-              cache_creation_tokens: e.usage.cache_creation_tokens,
-              cache_read_tokens: e.usage.cache_read_tokens,
-              cost_usd: e.usage.cost_usd,
-            }
-          : undefined,
-      });
-      if (e.usage && (w.sessionId || e.sessionId)) {
-        // insertUsage is async (ADR-023); fire-and-forget from this sync
-        // handler. We surface errors via the existing log channel rather
-        // than ignoring them.
-        void insertUsage({
-          timestamp: new Date().toISOString(),
-          sessionId: w.sessionId ?? e.sessionId,
-          agentName: w.agentName,
-          agentType: w.agentType,
-          model: w.model,
-          costUsd: e.usage.cost_usd,
-          inputTokens: e.usage.input_tokens,
-          outputTokens: e.usage.output_tokens,
-          cacheCreationTokens: e.usage.cache_creation_tokens,
-          cacheReadTokens: e.usage.cache_read_tokens,
-          durationMs,
-        }).catch((err: unknown) => {
-          logger.log("warn", "usage.insert.error", {
-            agent: w.agentName,
-            message: err instanceof Error ? err.message : String(err),
-          });
-        });
-      }
-      posthog.capture({
-        distinctId: DISTINCT_ID,
-        event: "turn_completed",
-        properties: {
-          agent_name: w.agentName,
-          agent_type: w.agentType,
-          model: w.model,
-          turn_id: w.turnId,
-          aborted: w.abortRequested,
-          duration_ms: durationMs,
-          input_tokens: e.usage?.input_tokens ?? null,
-          output_tokens: e.usage?.output_tokens ?? null,
-          cache_creation_tokens: e.usage?.cache_creation_tokens ?? null,
-          cache_read_tokens: e.usage?.cache_read_tokens ?? null,
-          cost_usd: e.usage?.cost_usd ?? null,
-          zero_block_reason: zeroBlockReason ?? null,
+      // FRI-145 M3: the turn-complete tail is now ONE Transition. The
+      // Turn-state machine decides the turn_done payload (incl. the FRI-60
+      // zero-block reason + FRI-95 abort metadata), the usage insert, the
+      // posthog event, the FRI-4 streaming-block finalize, the FRI-61 wedge
+      // streak + escalation, the FRI-110 turnStart clear, the idle Status
+      // projection, the per-turn JSONL recovery sweep, the FRI-127 §5
+      // mail-back backstop (Option B nudge / Option C warn), and the
+      // queue-drain — and returns intents. `runTransition` applies the
+      // in-memory mutations + the single `set-status` DB-door write. The
+      // machine is the sole writer of `agents.status`.
+      await runTransition(w, {
+        kind: "complete",
+        payload: {
+          sessionId: e.sessionId,
+          compactionThisTurn: e.compactionThisTurn,
+          usage: e.usage,
         },
       });
-      // FRI-4 #2 (Layer B): if the SDK abandoned a content block
-      // mid-stream and the worker's pre-break flush missed it, the
-      // blockStream accumulator still has it. `endTurn` below would
-      // wipe it and any late `block-stop` would no-op via
-      // `blockStream.close`'s null-check on the absorbed accumulator,
-      // leaving the DB row at `status='streaming'`. Finalize as
-      // `aborted` first so the row
-      // transitions cleanly off `streaming` and the dashboard's bubble
-      // moves off `running`.
-      await bsFinalize(w, "aborted");
-      // FRI-61 wedge detector: count consecutive turn-completes that
-      // produced zero content blocks. Skip when the user-requested
-      // abort raced the turn-complete (the model genuinely produced
-      // nothing because we asked it to stop).
-      if (!w.abortRequested) {
-        if (w.blocksThisTurn === 0) {
-          w.zeroBlockTurnStreak++;
-          logger.log("warn", "worker.zero-block-turn", {
-            agent: w.agentName,
-            turnId: w.turnId,
-            sessionId: e.sessionId,
-            streak: w.zeroBlockTurnStreak,
-            source: "turn-complete",
-          });
-          if (w.zeroBlockTurnStreak >= wedgeThreshold()) {
-            // FRI-116: hoist the FRI-110 turnStart clear BEFORE the
-            // force-kill early-return so this branch's post-condition
-            // matches the happy path below. See the symmetric
-            // restructure in the `error` case above for the
-            // "trust the trail" rationale.
-            w.turnStart = undefined;
-            w.activePrompt = undefined;
-            await forceKillStuckWorker(w, {
-              reason: "wedge",
-              zeroBlockTurnStreak: w.zeroBlockTurnStreak,
-            });
-            return;
-          }
-        } else {
-          w.zeroBlockTurnStreak = 0;
-        }
-      }
-      // FRI-127 §5: capture the just-completed turn's block + mail-back
-      // counts BEFORE the resets below; the mail-back backstop (run after the
-      // worker is flipped idle) reads them to decide whether the child
-      // reported home.
-      const completedBlocks = w.blocksThisTurn;
-      const completedMailBacks = w.mailSendToParentThisTurn;
-      w.blocksThisTurn = 0;
-      // The in-flight registry holds per-turn block accumulators (FIX_FORWARD
-      // 1.4). Drop the entry once the turn completes; canonical block content
-      // already lives in the `blocks` table.
-      bsEndTurn(w.turnId);
-      // Long-lived worker: flush queued prompt if any. Don't send `stop` — the
-      // worker manages its own lifecycle.
-      setWorkerStatus(w, "idle", "handleEvent.turn-complete");
-      // FRI-110: the turn is over. Clear `turnStart` so the stale-turn
-      // watchdog (handleEvent prologue at ~1214) and the diagnostic log
-      // (~1239) — both of which already gate on truthy `w.turnStart` —
-      // see "no turn live" rather than arithmetic-ing against a
-      // long-completed turn's start time. The worker may sit idle for
-      // hours between turns; the next `sendPrompt` (line 604) or the
-      // queued-prompt drain below will restamp it when a new turn starts.
-      w.turnStart = undefined;
-      w.activePrompt = undefined;
-      w.completedAtLeastOnce = true;
-      w.lastExitStatus = w.abortRequested ? "aborted" : "complete";
-      await registry.setStatus(w.agentName, "idle");
-      // Per-turn recovery sweep: catches any block the live IPC pipeline
-      // dropped this turn — most notably tool_result blocks from a mid-
-      // turn iterator break (FIX_FORWARD 2.4), where the worker exits the
-      // SDK loop at the assistant message boundary before the SDK yields
-      // the subsequent user message containing tool_results. The JSONL
-      // has them either way (SDK writes JSONL synchronously); recovery
-      // backfills into DB. Idempotent + cheap (sub-second on multi-MB
-      // JSONLs); fire-and-forget so the IPC handler stays responsive.
-      const sessionForRecovery = w.sessionId ?? e.sessionId;
-      if (sessionForRecovery) {
-        const wd = w.workingDirectory;
-        const an = w.agentName;
-        setImmediate(() => {
-          try {
-            void recoverFromJsonl([
-              { agentName: an, sessionId: sessionForRecovery, workingDirectory: wd },
-            ]);
-          } catch (err) {
-            logger.log("warn", "jsonl-recovery.post-turn.error", {
-              agent: an,
-              session: sessionForRecovery,
-              message: err instanceof Error ? err.message : String(err),
-            });
-          }
-        });
-      }
-      // FRI-127 §5: mail-back backstop. A helper/builder that produced
-      // content but never mailed its parent gets one re-dispatch nudge
-      // (Option B); a second consecutive miss falls through to a structured
-      // warning + SSE event (Option C). When the backstop re-dispatches, it
-      // owns the worker's next turn — skip the normal queue-drain so the
-      // nudge isn't immediately clobbered by a queued prompt's sendPrompt.
-      if (maybeNudgeForMailBack(w, completedBlocks, completedMailBacks)) break;
-      const next = w.nextPrompts.shift();
-      if (next) sendPrompt(w, next);
       break;
     }
     case "heartbeat":
