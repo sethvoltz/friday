@@ -2,6 +2,7 @@ import type { WireEvent } from "@friday/shared";
 import { SvelteMap } from "svelte/reactivity";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { initialPageSize } from "../util/page-size";
+import type { SendUserMessageOutcome } from "./mutator-result";
 import { KEYS, loadJSON, removeKey, saveJSON } from "./persistent";
 
 export interface ChatMessage {
@@ -780,14 +781,17 @@ export class ChatState {
     this.markReadFn = fn;
   }
   /** Wired from `zero.svelte.ts` to avoid a circular import.
-   *  Calls `zeroSync.sendUserMessage` with a pre-minted blockId. */
+   *  Calls `zeroSync.sendUserMessage` with a pre-minted blockId.
+   *  FRI-139: returns a discriminated outcome instead of `result|null`
+   *  so callers can distinguish app-error (mark failed now) from
+   *  transport-error (keep optimistic; arm fallback timer). */
   private sendMessageFn:
     | ((args: {
         blockId: string;
         agent: string;
         text: string;
         attachments?: Array<{ sha256: string; filename: string; mime: string }>;
-      }) => Promise<{ blockId: string; turnId: string } | null>)
+      }) => Promise<SendUserMessageOutcome>)
     | null = null;
   setSendMessageFn(
     fn: (args: {
@@ -795,7 +799,7 @@ export class ChatState {
       agent: string;
       text: string;
       attachments?: Array<{ sha256: string; filename: string; mime: string }>;
-    }) => Promise<{ blockId: string; turnId: string } | null>,
+    }) => Promise<SendUserMessageOutcome>,
   ): void {
     this.sendMessageFn = fn;
   }
@@ -916,7 +920,13 @@ export class ChatState {
       if (entry.agent === agent) this.streaming.delete(key);
     }
     for (const [key, entry] of this.optimistic.entries()) {
-      if (entry.agent === agent) this.optimistic.delete(key);
+      if (entry.agent === agent) {
+        // FRI-139: drop any armed transport-failure fallback along
+        // with the bubble it would flip. `/clear` wipes the worker's
+        // session; the bubble's `queueId` is moot from here.
+        if (entry.queueId) this.clearTransportFailureTimer(entry.queueId);
+        this.optimistic.delete(key);
+      }
     }
     this.oldestBlockId = null;
     this.reachedOldest = false;
@@ -1038,6 +1048,7 @@ export class ChatState {
    * lands later replaces the legacy entry without surfacing a duplicate.
    */
   confirmPending(queueId: string, turnId: string): void {
+    this.clearTransportFailureTimer(queueId);
     const targetId = userBlockIdForTurn(turnId);
     const agent = this.focusedAgent;
     let entry: OptimisticEntry | undefined;
@@ -1078,9 +1089,16 @@ export class ChatState {
   }
 
   /** Mark the pending bubble for this queueId as failed so the UI
-   *  surfaces a discard affordance. Called when Zero isn't ready at
-   *  send time (very rare — only during the first ~200ms of page load). */
+   *  surfaces a discard affordance.
+   *
+   *  FRI-139: fire on app-error (server rejected the write) and on
+   *  no-zero (Zero never initialised) — the cases where the DB row
+   *  definitively does not exist. Transport-class signals (zero-error)
+   *  go through {@link scheduleTransportFailureFallback} instead, so a
+   *  WS hiccup mid-send doesn't flash FAILED-TO-SEND on every restart-
+   *  window message even when the server-side push committed. */
   markPendingFailed(queueId: string): void {
+    this.clearTransportFailureTimer(queueId);
     for (const entry of this.optimistic.values()) {
       if (entry.queueId !== queueId) continue;
       entry.failed = true;
@@ -1088,9 +1106,82 @@ export class ChatState {
     }
   }
 
+  /**
+   * FRI-139: open transport-failure fallback timers, keyed by queueId.
+   *
+   * When `zeroSync.sendUserMessage` resolves to `transport-error`, the
+   * caller arms one of these instead of marking failed. If the canonical
+   * row arrives via `applyZeroBlocks` (or the user discards / the
+   * mutator's eventual ack comes through via `confirmPending`) before
+   * the timer fires, we clear it and the bubble heals invisibly. If
+   * 30s pass with no canonical row, the timer flips `failed:true` as a
+   * last-resort affordance so the user isn't stuck with an
+   * indefinitely-spinning "Sending…".
+   *
+   * Keying by queueId (= pre-minted blockId) matches the lifetime of
+   * the optimistic entry, so cleanup paths can look it up without
+   * holding a separate reference to the entry.
+   */
+  private pendingFailureTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * FRI-139: default 30s window covers cellular reconnect + zero-cache
+   * push retry + WS ack round-trip on a degraded link. SSE keepalive
+   * declares-dead at 40s; this fires earlier so the affordance shows
+   * before the user reaches for refresh.
+   */
+  static readonly TRANSPORT_FAILURE_FALLBACK_MS = 30_000;
+
+  /**
+   * FRI-139: arm the long-window fallback for a transport-error send.
+   * Idempotent — re-arming for the same queueId clears the prior timer.
+   * If the bubble already vanished (canonical row replaced it before
+   * the wrapper resolved), nothing is scheduled.
+   */
+  scheduleTransportFailureFallback(
+    queueId: string,
+    delayMs: number = ChatState.TRANSPORT_FAILURE_FALLBACK_MS,
+  ): void {
+    this.clearTransportFailureTimer(queueId);
+    let entryStillExists = false;
+    for (const entry of this.optimistic.values()) {
+      if (entry.queueId === queueId) {
+        entryStillExists = true;
+        break;
+      }
+    }
+    if (!entryStillExists) return;
+    const t = setTimeout(() => {
+      this.pendingFailureTimers.delete(queueId);
+      // Only flip if the optimistic still exists at fire time —
+      // canonical row delivery via `applyZeroBlocks` would have already
+      // dropped it, and we'd be lighting up failed state for a bubble
+      // that no longer renders.
+      for (const entry of this.optimistic.values()) {
+        if (entry.queueId === queueId) {
+          entry.failed = true;
+          return;
+        }
+      }
+    }, delayMs);
+    this.pendingFailureTimers.set(queueId, t);
+  }
+
+  /** FRI-139: cancel a queued transport-failure fallback. Called when
+   *  the canonical row lands (confirmPending / applyZeroBlocks drop),
+   *  when the user discards manually, or before re-arming. */
+  clearTransportFailureTimer(queueId: string): void {
+    const t = this.pendingFailureTimers.get(queueId);
+    if (t !== undefined) {
+      clearTimeout(t);
+      this.pendingFailureTimers.delete(queueId);
+    }
+  }
+
   /** Remove the pending bubble matching `queueId` (FIX_FORWARD 2.7 — used
    *  when the user picks "Discard and continue" or "Discard all"). */
   discardPending(queueId: string): void {
+    this.clearTransportFailureTimer(queueId);
     for (const [key, entry] of this.optimistic.entries()) {
       if (entry.queueId === queueId) this.optimistic.delete(key);
     }
@@ -1100,7 +1191,10 @@ export class ChatState {
    *  and continue"). */
   discardAllPending(): void {
     for (const [key, entry] of this.optimistic.entries()) {
-      if (entry.pending) this.optimistic.delete(key);
+      if (entry.pending) {
+        if (entry.queueId) this.clearTransportFailureTimer(entry.queueId);
+        this.optimistic.delete(key);
+      }
     }
   }
 
@@ -1691,19 +1785,30 @@ export class ChatState {
     this.addUser(text, { queueId: blockId });
     const claimedInflight = this.inflightTurnIdByAgent[agent] == null;
     if (claimedInflight) this.markInflight(agent, newTurnId);
-    void (this.sendMessageFn?.({ blockId, agent, text }) ?? Promise.resolve(null)).then(
-      (result) => {
-        if (!result) {
-          if (claimedInflight && this.inflightTurnIdByAgent[agent] === newTurnId) {
-            this.markInflight(agent, null);
-          }
-          this.markPendingFailed(blockId);
-          return;
-        }
-        this.confirmPending(blockId, result.turnId);
-        this.markInflight(agent, result.turnId);
-      },
-    );
+    const sendPromise: Promise<SendUserMessageOutcome> =
+      this.sendMessageFn?.({ blockId, agent, text }) ?? Promise.resolve({ kind: "no-zero" });
+    void sendPromise.then((outcome) => {
+      if (outcome.kind === "ok") {
+        this.confirmPending(blockId, outcome.turnId);
+        this.markInflight(agent, outcome.turnId);
+        return;
+      }
+      if (outcome.kind === "transport-error") {
+        // FRI-139: keep the bubble pending; armed timer surfaces failure
+        // only if the canonical row doesn't land in the 30s window.
+        // Don't clear inflight — Zero's outbox retry is in flight, and
+        // a stale inflight slot is preferable to a flash of "Send" UI
+        // that immediately flips back to Stop when the row lands.
+        this.scheduleTransportFailureFallback(blockId);
+        return;
+      }
+      // app-error (server rejected — DB row absent) or no-zero (Zero
+      // never initialised). Mark failed immediately.
+      if (claimedInflight && this.inflightTurnIdByAgent[agent] === newTurnId) {
+        this.markInflight(agent, null);
+      }
+      this.markPendingFailed(blockId);
+    });
   }
 
   /**
@@ -2364,6 +2469,11 @@ export class ChatState {
     if (snapshotBlockIds.size > 0) {
       for (const [key, entry] of this.optimistic.entries()) {
         if (entry.queueId && snapshotBlockIds.has(entry.queueId)) {
+          // FRI-139: cancel any armed transport-failure fallback for
+          // this queueId — the canonical row arrived, the bubble is
+          // about to disappear, and a stale timer firing later would
+          // flip a non-existent entry's `failed` flag.
+          this.clearTransportFailureTimer(entry.queueId);
           this.optimistic.delete(key);
         }
       }

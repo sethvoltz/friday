@@ -2822,10 +2822,11 @@ describe("unread badge gating (PR C)", () => {
 
     // sendMessageFn stays pending — proves the eager claim doesn't
     // depend on the round-trip resolving.
-    let resolveSend: ((v: { blockId: string; turnId: string } | null) => void) | null = null;
+    type SendOutcome = import("./mutator-result").SendUserMessageOutcome;
+    let resolveSend: ((v: SendOutcome) => void) | null = null;
     const mockSendMsg = vi.fn(
       () =>
-        new Promise<{ blockId: string; turnId: string } | null>((r) => {
+        new Promise<SendOutcome>((r) => {
           resolveSend = r;
         }),
     );
@@ -2836,9 +2837,13 @@ describe("unread badge gating (PR C)", () => {
     expect(chat.inflightTurnId).not.toBeNull();
     expect(chat.inflightTurnId?.startsWith("t_")).toBe(true);
 
-    // Now let the send resolve with null (simulating failure). The eager
-    // claim should release because the server never confirmed a dispatch.
-    resolveSend!(null);
+    // Now let the send resolve with no-zero (simulating Zero-never-init
+    // failure — semantically equivalent to the prior `null` return). The
+    // eager claim should release because the server never confirmed a
+    // dispatch. FRI-139: app-error / no-zero are the failure-fast paths;
+    // transport-error keeps the inflight claim and arms a fallback timer
+    // instead (covered in a separate test below).
+    resolveSend!({ kind: "no-zero" });
     await Promise.resolve();
     await Promise.resolve();
     expect(chat.inflightTurnId).toBeNull();
@@ -2862,7 +2867,7 @@ describe("unread badge gating (PR C)", () => {
     });
     chat.markInflight("friday", "t-running");
 
-    const mockSendMsg = vi.fn().mockResolvedValue(null);
+    const mockSendMsg = vi.fn().mockResolvedValue({ kind: "no-zero" });
     chat.setSendMessageFn(mockSendMsg);
 
     chat.resendUserText("t-old");
@@ -6597,5 +6602,226 @@ describe("chat.resumeTurn (FRI-123)", () => {
     await chat.resumeTurn("turn-resume-3");
 
     expect(setToast).toHaveBeenCalledWith("Resume failed (Zero not ready).", "warn");
+  });
+});
+
+describe("FRI-139: transport-error fallback decouples FAILED-TO-SEND from WS hiccups", () => {
+  // Cross-boundary contract pinned here:
+  //   - The bug: every chat send shows FAILED-TO-SEND post-services-restart
+  //     even though `/api/mutators` returns 200, because Zero resolves
+  //     pending mutators with `{type:"error",error:{type:"zero"}}` while
+  //     its WS is mid-handshake. The old wrapper collapsed that into a
+  //     `null` return; `markPendingFailed` flipped the bubble.
+  //   - The fix: the wrapper now surfaces a discriminated
+  //     `SendUserMessageOutcome`. ChatInput / resendUserText branch on
+  //     it; transport-error keeps the bubble pending and arms a
+  //     long-window fallback. The canonical row arriving via
+  //     `applyZeroBlocks` cancels the timer and drops the optimistic
+  //     cleanly; if 30s pass with no row, the timer flips `failed:true`.
+
+  function makeUserRow(
+    overrides: Partial<{
+      block_id: string;
+      turn_id: string;
+      content: { text: string };
+      ts: number;
+    }> = {},
+  ): import("./chat.svelte").ZeroBlocksRow {
+    return {
+      id: "1",
+      block_id: "fri139-block-aaaa-bbbb-cccc-dddd",
+      turn_id: "t_fri139-block-aaaa-bbbb-cccc-dddd",
+      agent_name: "friday",
+      session_id: "s1",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: overrides.content ?? { text: "hello" },
+      status: "complete",
+      streaming: false,
+      origin_mutation_id: null,
+      ts: overrides.ts ?? 1_747_000_000_000,
+      ...overrides,
+    };
+  }
+
+  it("optimistic bubble + canonical row delivered within the fallback window: bubble drops cleanly without ever flipping to failed", async () => {
+    // The exact happy-path-after-WS-hiccup race the fix is built to
+    // preserve. addUser arms the optimistic; the send wrapper returns
+    // transport-error (WS dropped mid-mutator); scheduleTransportFailureFallback
+    // arms the 30s timer; Zero's outbox eventually pushes successfully
+    // and the canonical row lands in the next snapshot. The fallback
+    // must NEVER fire; the bubble must NEVER show `failed:true`.
+    vi.useFakeTimers();
+    const blockId = "fri139-block-aaaa-bbbb-cccc-dddd";
+    const turnId = `t_${blockId}`;
+
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    chat.addUser("hello", { queueId: blockId });
+    chat.scheduleTransportFailureFallback(blockId);
+
+    // 25s in — still under the 30s threshold. Canonical row arrives.
+    vi.advanceTimersByTime(25_000);
+    expect(chat.messages[0]!.failed).not.toBe(true);
+    expect(chat.messages[0]!.pending).toBe(true);
+
+    chat.applyZeroBlocks([makeUserRow({ ts: Date.now() })], "friday", "complete");
+
+    // Optimistic dropped; canonical bubble survives at the stable id.
+    expect(chat.optimistic.size).toBe(0);
+    const survivor = chat.messages.find((m) => m.id === userBlockIdForTurn(turnId));
+    expect(survivor).toBeDefined();
+    expect(survivor!.failed).not.toBe(true);
+
+    // Push the clock past the original 30s deadline — the timer was
+    // cleared, no late mark.
+    vi.advanceTimersByTime(10_000);
+    const stillSurvivor = chat.messages.find((m) => m.id === userBlockIdForTurn(turnId));
+    expect(stillSurvivor).toBeDefined();
+    expect(stillSurvivor!.failed).not.toBe(true);
+  });
+
+  it("transport-error with no canonical row arriving: fallback timer fires at 30s and flips failed:true", async () => {
+    // The genuine "WS dropped and nothing recovered" case. The user
+    // shouldn't be stuck with a spinner forever — at 30s, the bubble
+    // surfaces the discard affordance so they can retry.
+    vi.useFakeTimers();
+    const blockId = "fri139-block-eeee-ffff-0000-1111";
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    chat.addUser("orphan send", { queueId: blockId });
+    chat.scheduleTransportFailureFallback(blockId);
+
+    // Before the deadline: still pending, not failed.
+    vi.advanceTimersByTime(29_999);
+    const before = chat.messages.find((m) => m.queueId === blockId);
+    expect(before!.failed).not.toBe(true);
+    expect(before!.pending).toBe(true);
+
+    // At the deadline: failed:true, still pending (the optimistic
+    // overlay doesn't morph into anything else; `markPendingFailed`
+    // adds the failed flag on top).
+    vi.advanceTimersByTime(1);
+    const after = chat.messages.find((m) => m.queueId === blockId);
+    expect(after!.failed).toBe(true);
+    expect(after!.pending).toBe(true);
+  });
+
+  it("discardPending cancels an armed transport-failure timer so a late tick can't flip a non-existent entry", async () => {
+    // The discard path runs the cleanup that prevents a late timer from
+    // re-resurrecting `failed:true` on a queueId that no longer has an
+    // entry (and would harmlessly no-op today, but could fire on a
+    // recycled queueId in the future).
+    vi.useFakeTimers();
+    const blockId = "fri139-block-2222-3333-4444-5555";
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.addUser("about to discard", { queueId: blockId });
+    chat.scheduleTransportFailureFallback(blockId);
+    expect(chat.optimistic.size).toBe(1);
+
+    chat.discardPending(blockId);
+    expect(chat.optimistic.size).toBe(0);
+
+    // Re-seed an entry at the same queueId and run the clock past the
+    // ORIGINAL deadline. The cancelled timer must not fire and flip
+    // this new entry's `failed` flag.
+    chat.addUser("fresh send same id", { queueId: blockId });
+    vi.advanceTimersByTime(60_000);
+    const fresh = chat.messages.find((m) => m.queueId === blockId);
+    expect(fresh!.failed).not.toBe(true);
+  });
+
+  it("confirmPending cancels an armed transport-failure timer so the canonical handoff is fully clean", async () => {
+    // The confirmPending path is the secondary cleanup hook — even
+    // though applyZeroBlocks's queueId-match drop is the primary
+    // mechanism, the wrapper's resolved-success branch also clears the
+    // timer so a late tick can't flip the canonical bubble's flag.
+    vi.useFakeTimers();
+    const blockId = "fri139-block-6666-7777-8888-9999";
+    const turnId = `t_${blockId}`;
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.addUser("hello", { queueId: blockId });
+    chat.scheduleTransportFailureFallback(blockId);
+    chat.confirmPending(blockId, turnId);
+
+    // Optimistic gone, canonical landed in legacy.
+    expect(chat.optimistic.size).toBe(0);
+
+    // Push past the 30s deadline. No legacy entry should sprout `failed`.
+    vi.advanceTimersByTime(60_000);
+    const canonical = chat.messages.find((m) => m.turnId === turnId);
+    expect(canonical).toBeDefined();
+    expect(canonical!.failed).not.toBe(true);
+  });
+
+  it("markPendingFailed (app-error path) also clears the transport-failure timer so a late tick can't double-fire", async () => {
+    // Defensive cleanup: in the rare case both an app-error mark and a
+    // prior transport-error arm coexist for the same queueId (e.g.,
+    // re-send path where the first call armed and a later resolve-as-
+    // app-error overrides), markPendingFailed must clear the timer.
+    vi.useFakeTimers();
+    const blockId = "fri139-block-aaaa-eeee-iiii-oooo";
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.addUser("app-rejected", { queueId: blockId });
+    chat.scheduleTransportFailureFallback(blockId);
+    chat.markPendingFailed(blockId);
+
+    const failedNow = chat.messages.find((m) => m.queueId === blockId);
+    expect(failedNow!.failed).toBe(true);
+
+    // The pendingFailureTimers map should be empty at this point.
+    // Indirect assert: discardPending + a fresh send re-uses the
+    // queueId; the canceled timer doesn't double-mark.
+    chat.discardPending(blockId);
+    chat.addUser("fresh", { queueId: blockId });
+    vi.advanceTimersByTime(60_000);
+    const fresh = chat.messages.find((m) => m.queueId === blockId);
+    expect(fresh!.failed).not.toBe(true);
+  });
+
+  it("scheduleTransportFailureFallback no-ops when the optimistic entry is already gone (raced applyZeroBlocks)", async () => {
+    // The "Zero pushed the canonical row before the wrapper's await
+    // returned" race. The transport-error branch armed the fallback,
+    // but applyZeroBlocks already dropped the optimistic. There's
+    // nothing to flip; the scheduler must not register a timer that
+    // could fire and accidentally mark a recycled queueId.
+    vi.useFakeTimers();
+    const blockId = "fri139-block-zzzz-yyyy-xxxx-wwww";
+
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // No addUser — entry never existed.
+    chat.scheduleTransportFailureFallback(blockId);
+
+    // Reuse the same queueId on a later send. The 30s clock past the
+    // original schedule call must not flip its `failed` flag.
+    chat.addUser("later message", { queueId: blockId });
+    vi.advanceTimersByTime(60_000);
+    const later = chat.messages.find((m) => m.queueId === blockId);
+    expect(later!.failed).not.toBe(true);
   });
 });

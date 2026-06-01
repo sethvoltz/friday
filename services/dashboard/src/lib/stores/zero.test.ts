@@ -1774,9 +1774,8 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
       agent: "friday",
       text: "hello agent",
     });
-    expect(out).not.toBeNull();
-    expect(out!.blockId).toBe(blockId);
-    expect(out!.turnId).toBe(`t_${blockId}`);
+    // FRI-139: discriminated outcome shape.
+    expect(out).toEqual({ kind: "ok", blockId, turnId: `t_${blockId}` });
 
     expect(z.mutate.sendUserMessage).toHaveBeenCalledTimes(1);
     const args = z.mutate.sendUserMessage.mock.calls[0][0] as {
@@ -1810,11 +1809,11 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
     expect(args.attachments).toEqual(attachments);
   });
 
-  it("sendUserMessage returns {blockId, turnId} when server resolves to {type:'error', error:{type:'app'}} that matches a blocks_pkey PK collision (idempotent retry)", async () => {
+  it("sendUserMessage returns {kind:'ok',blockId,turnId} when server resolves to {type:'error', error:{type:'app'}} that matches a blocks_pkey PK collision (idempotent retry)", async () => {
     // FRI-104: the dashboard treats a PK violation on `blocks.id` as a
     // dedup success — the original push committed, this retry is
-    // idempotent (FRI-103 invariant). Return the success shape so
-    // sendQueue clears the entry instead of looping on the same id.
+    // idempotent (FRI-103 invariant). FRI-139: returns the `ok` variant
+    // so callers route through the confirmPending happy path.
     const { zeroSync, z } = await bootedZero();
     z.mutate.sendUserMessage = vi.fn(() => ({
       client: Promise.resolve({ type: "success" }),
@@ -1833,17 +1832,17 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
       text: "boom",
     });
     expect(out).toEqual({
+      kind: "ok",
       blockId: "22222222-3333-4444-5555-666666666666",
       turnId: "t_22222222-3333-4444-5555-666666666666",
     });
   });
 
-  it("sendUserMessage returns null when server resolves to {type:'error', error:{type:'app'}} that is NOT a PK collision (real failure, sendQueue retries)", async () => {
+  it("sendUserMessage returns {kind:'app-error',message} when server resolves to {type:'error', error:{type:'app'}} that is NOT a PK collision (real failure)", async () => {
     // FRI-104: a genuine app-error must NOT be treated as success.
-    // Returning `null` lets sendQueue increment attempts and surface
-    // the failed-row UI via the existing MAX_ATTEMPTS fence. The
-    // sendQueue entry stays alive (FRI-103 data-safety invariant —
-    // pinned by the cross-boundary test in send-queue.test.ts).
+    // FRI-139: the wrapper now surfaces the app-error message so the
+    // caller can immediately flip the optimistic to FAILED-TO-SEND
+    // (the DB row does not exist; nothing to wait for).
     const { zeroSync, z } = await bootedZero();
     z.mutate.sendUserMessage = vi.fn(() => ({
       client: Promise.resolve({ type: "success" }),
@@ -1861,17 +1860,17 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
       agent: "ghost",
       text: "lost",
     });
-    expect(out).toBeNull();
+    expect(out).toEqual({ kind: "app-error", message: "agent not found" });
   });
 
-  it("sendUserMessage returns null when server resolves to {type:'error', error:{type:'zero'}} (transport — Zero outbox will re-push)", async () => {
-    // FRI-104: transport-level `zero-error` is transient — Replicache's
-    // persistent memdag has already enqueued the mutation and will
-    // re-push when the connection comes back. The wrapper returns
-    // `null` so sendQueue's existing retry path increments attempts;
-    // either Zero's outbox lands the canonical row first (clearing
-    // the entry via `ackByBlockId`) or MAX_ATTEMPTS surfaces the
-    // failed-row UI.
+  it("sendUserMessage returns {kind:'transport-error',message} when server resolves to {type:'error', error:{type:'zero'}} (transport — Zero outbox will re-push)", async () => {
+    // FRI-104: transport-level `zero-error` is transient — Zero's
+    // persistent outbox has already enqueued the mutation and will
+    // re-push when the connection comes back.
+    // FRI-139: the wrapper now surfaces the transport-error variant
+    // separately from app-error so callers can distinguish "server
+    // rejected the write" (mark failed) from "WS hiccup" (keep the
+    // optimistic in pending; arm the long-window fallback).
     const { zeroSync, z } = await bootedZero();
     z.mutate.sendUserMessage = vi.fn(() => ({
       client: Promise.resolve({ type: "success" }),
@@ -1885,10 +1884,10 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
       agent: "friday",
       text: "transient",
     });
-    expect(out).toBeNull();
+    expect(out).toEqual({ kind: "transport-error", message: "Offline" });
   });
 
-  it("returns null before Zero has finished initializing", async () => {
+  it("returns {kind:'no-zero'} before Zero has finished initializing", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() => new Promise(() => {})),
@@ -1900,7 +1899,7 @@ describe("Phase 4.11b: sendUserMessage wrapper", () => {
         agent: "friday",
         text: "x",
       }),
-    ).resolves.toBeNull();
+    ).resolves.toEqual({ kind: "no-zero" });
   });
 });
 

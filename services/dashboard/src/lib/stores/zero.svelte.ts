@@ -28,8 +28,10 @@ import { Zero } from "@rocicorp/zero";
 import type { PromiseWithServerResult as MutatorResult } from "@rocicorp/zero";
 import { createMutators, schema, type Mutators, type Schema } from "@friday/shared/sync";
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
-import { awaitMutatorServer } from "./mutator-result";
+import { awaitMutatorServer, type SendUserMessageOutcome } from "./mutator-result";
 import { reconcileWakeLock } from "./wake-lock.svelte";
+
+export type { SendUserMessageOutcome };
 
 /** Row shape mirrors the `agents` Zero table definition. Kept narrow:
  *  Phase 2 only reads the columns the sidebar needs. Phase 6's
@@ -1359,8 +1361,8 @@ class ZeroSyncStore {
     agent: string;
     text: string;
     attachments?: Array<{ sha256: string; filename: string; mime: string }>;
-  }): Promise<{ blockId: string; turnId: string } | null> {
-    if (!this.#zero) return null;
+  }): Promise<SendUserMessageOutcome> {
+    if (!this.#zero) return { kind: "no-zero" };
     this.#lastSendAt = Date.now(); // FRI-121 A3: watchdog tracks last send
     const blockId = args.blockId;
     const turnId = `t_${blockId}`;
@@ -1373,21 +1375,28 @@ class ZeroSyncStore {
       ts: Date.now(),
     });
     const outcome = await awaitMutatorServer(result);
-    if (outcome === "no-zero") return null;
-    if (outcome.kind === "success") return { blockId, turnId };
+    if (outcome === "no-zero") return { kind: "no-zero" };
+    if (outcome.kind === "success") return { kind: "ok", blockId, turnId };
     if (outcome.kind === "app-error" && outcome.pkCollision) {
-      // PK collision on the canonical `blocks.id` is the dedup success
-      // path — the original push committed; this retry is idempotent
-      // (FRI-103 invariant). Return the success shape so sendQueue
-      // clears the entry instead of looping on the same id forever.
-      return { blockId, turnId };
+      // PK collision on `blocks.id` is the idempotent-dedup success
+      // path — the original push committed; this retry is a no-op
+      // (FRI-103 invariant).
+      return { kind: "ok", blockId, turnId };
     }
-    // Genuine app-error (non-PK) OR transport `zero-error`. Returning
-    // `null` lets sendQueue's existing retry path (`send-queue.svelte.ts:247-263`)
-    // increment `attempts`, set `lastError = "zero_not_ready"`, and
-    // surface the failed-row UI via the standard `MAX_ATTEMPTS` fence.
-    // The queue entry IS preserved — FRI-103 data-safety invariant.
-    return null;
+    if (outcome.kind === "app-error") {
+      // Server-side mutator rejected the write. Caller should surface
+      // the failed-send UI immediately — there's no canonical row coming.
+      return { kind: "app-error", message: outcome.message };
+    }
+    // FRI-139: transport-level zero-error. The push HTTP relay
+    // (`/api/mutators`) may have succeeded server-side even though the
+    // ack didn't make it back over the WS — Zero's persistent outbox
+    // (`kvStore:"idb"`) retries on reconnect, and the canonical row
+    // typically lands via `applyZeroBlocks` within seconds of the WS
+    // recovering. Caller keeps the optimistic bubble in `pending` and
+    // arms a long-window fallback timer instead of flashing
+    // FAILED-TO-SEND on every restart-window send.
+    return { kind: "transport-error", message: outcome.message };
   }
 
   /**
