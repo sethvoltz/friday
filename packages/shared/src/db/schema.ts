@@ -471,6 +471,11 @@ export const evolveProposals = pgTable(
       withTimezone: true,
     }),
     appliedTicketId: text("applied_ticket_id"),
+    // Set when the proposal was auto-resolved at creation because a sibling
+    // proposal with the same signal-family key (event name) was applied
+    // within the family-resolution window. References that sibling's id.
+    // See `@friday/evolve` `findRecentlyAppliedByFamilyKey`.
+    familyResolvedBy: text("family_resolved_by"),
   },
   (t) => ({
     statusIdx: index("evolve_proposals_status_updated").on(t.status, t.updatedAt),

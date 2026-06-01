@@ -57,6 +57,7 @@
         ? new Date(r.last_enrich_failed_at).toISOString()
         : null,
       appliedTicketId: r.applied_ticket_id,
+      familyResolvedBy: r.family_resolved_by ?? null,
     };
   }
 

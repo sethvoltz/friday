@@ -134,6 +134,7 @@ export interface ZeroEvolveProposalRow {
   last_enrich_error: string | null;
   last_enrich_failed_at: number | null;
   applied_ticket_id: string | null;
+  family_resolved_by: string | null;
 }
 
 /** Row shape mirrors the `read_cursors` Zero table definition (Phase 4.1).
