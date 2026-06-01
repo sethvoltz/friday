@@ -39,6 +39,7 @@ import {
 } from "./block-stream.js";
 import { appContextForAgent } from "../apps/installer.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
+import { enqueueTransition } from "./transition-queue.js";
 import {
   profileInputsFor,
   removeProfile,
@@ -408,13 +409,17 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   };
   live.set(input.agentName, w);
 
-  // Per-worker async chain: serialize IPC events so block start→delta→stop
-  // writes land in order even though each block-stream handler is async.
-  // Node's `on("message")` callback is sync; we chain promises so the next
-  // event doesn't dispatch until the previous one's DB writes commit.
-  let ipcChain: Promise<void> = Promise.resolve();
+  // Agent-keyed Transition queue (FRI-145 M1): serialize IPC events so block
+  // start→delta→stop writes land in order even though each block-stream handler
+  // is async. Node's `on("message")` callback is sync; the queue chains promises
+  // so the next Transition doesn't dispatch until the previous one's DB writes
+  // commit. Keying by agent NAME (not this worker instance, as the old
+  // closure-local `ipcChain` did) means a stale generation's exit Transition and
+  // the next generation's spawn/IPC Transitions for the same name still apply in
+  // strict arrival order. Fire-and-forget: the queue swallows + logs Transition
+  // errors so one bad event can't wedge the chain.
   child.on("message", (raw: unknown) => {
-    ipcChain = ipcChain.then(() => safeHandleEvent(w, raw));
+    void enqueueTransition(input.agentName, () => safeHandleEvent(w, raw));
   });
   child.on("exit", (code, signal) => {
     logger.log("info", "worker.exit", {

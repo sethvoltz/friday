@@ -56,6 +56,45 @@ animation around the chat input. Defined per-palette as
 `--chat-aurora-1|2|3`. Each **Palette** picks its own three hues — these
 aren't fixed brand colors; they're a per-palette aesthetic choice.
 
+### Agent turn lifecycle
+
+**Turn state**:
+The authoritative in-daemon record of where an agent's worker sits in its
+turn — `idle | working | aborting | force-killed` — together with its
+current **Generation**. Lives in daemon memory; it is the source of truth.
+_Avoid_: status (reserve that for the projection), worker state.
+
+**Turn-state machine**:
+The single module that owns an agent's **Turn state** and is the only
+writer of it. Applies **Transition**s and emits intents
+(`send-next`, `force-kill`, `recover`).
+_Avoid_: lifecycle handler, worker manager, dispatcher.
+
+**Transition**:
+One state-affecting input applied to the **Turn-state machine** — a worker
+IPC event, an abort, a force-kill, a refork, a spawn, or a worker exit.
+_Avoid_: event (too broad), message.
+
+**Transition queue**:
+The per-agent-name serialized queue every **Transition** funnels through,
+so transitions for one agent apply in strict arrival order with no
+interleaving. The agent-keyed successor to the per-worker `ipcChain`.
+_Avoid_: ipcChain (its narrower predecessor), mailbox.
+
+**Generation**:
+A worker instance's standing as the current owner of its agent name
+(`live.get(name) === w`). A **Transition** arriving from a superseded
+**Generation** is a structural no-op. Identity-as-epoch — promoted to a
+monotonic counter only if cross-gap ordering is ever needed.
+_Avoid_: epoch (unless promoted), version.
+
+**Status projection**:
+A read-optimized mirror of **Turn state**, written only inside a
+**Transition** and never mutated independently — `w.status` (in-memory,
+`idle | working`) and `agents.status` (durable, written through the
+ADR-031 `registry.setStatus` gate, replicated to clients by Zero).
+_Avoid_: status (when you mean the authoritative **Turn state**).
+
 ## Relationships
 
 - A **Theme** is either **Single** (one **Palette**) or **Sync** (a pair
@@ -97,3 +136,9 @@ domain vocabulary (Mode/Palette/Theme/Kind) out of the user-facing UI.
 - The Settings card titled "Theme" today is really a **Mode** picker; it
   is being renamed to **Appearance** and grown to expose the full **Theme**
   (Single/Sync + **Palette** picks).
+- "status" was used for both the authoritative in-daemon state and the
+  `agents.status` DB column — resolved: the authoritative concept is
+  **Turn state**; `agents.status` and `w.status` are **Status projection**s
+  of it. The pre-refactor `suppressIdleReset` / `forceKilled` flags were
+  hand-rolled guards against a superseded **Generation** writing a
+  projection; the **Generation** no-op rule replaces both.
