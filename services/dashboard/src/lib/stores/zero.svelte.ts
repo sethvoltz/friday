@@ -226,7 +226,25 @@ const STATS_REPORT_INTERVAL_MS = (() => {
  *  the IndexedDB replica stays bounded. Server keeps everything
  *  (ADR-023 "preserve over delete"); blocks older than this stay
  *  reachable via the jump-to-message search path. */
-const BLOCKS_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+export const BLOCKS_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+export const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Day-quantized lower bound for the `blocks` `where("ts", ">", …)` filter.
+ *  Zero keys a query by its exact literals, so a raw
+ *  `Date.now() - BLOCKS_RETENTION_MS` bound changes on every page load —
+ *  a brand-new query each refresh that can reuse neither the client's
+ *  IndexedDB replica nor the server-side CVR, forcing a full re-stream of
+ *  the (multi-thousand-row) blocks view group every time (observed as
+ *  "QueryManager: Slow query materialization" 5–12s on each reload).
+ *  Flooring to a UTC-day boundary makes the literal stable across
+ *  refreshes within the same day, so warm reloads hit the cache (and two
+ *  devices on the same day share one server CVR). ±1 day of slack on a
+ *  90-day window is immaterial — the server keeps everything (ADR-023)
+ *  and older blocks stay reachable via jump-to-message. */
+export function blocksRetentionCutoff(): number {
+  return Math.floor((Date.now() - BLOCKS_RETENTION_MS) / DAY_MS) * DAY_MS;
+}
 
 class ZeroSyncStore {
   /** Live agent rows from Zero, filtered server-side to non-archived. */
@@ -924,7 +942,7 @@ class ZeroSyncStore {
     }
     this.unbindBlocks();
     this.blocksAgent = agentName;
-    const cutoff = Date.now() - BLOCKS_RETENTION_MS;
+    const cutoff = blocksRetentionCutoff();
     const query = this.#zero!.query.blocks.where("agent_name", "=", agentName)
       .where("status", "!=", "streaming")
       .where("status", "!=", "cancel_requested")
@@ -959,7 +977,7 @@ class ZeroSyncStore {
    */
   #bindAllBlocksBackground(): void {
     if (!this.#zero) return;
-    const cutoff = Date.now() - BLOCKS_RETENTION_MS;
+    const cutoff = blocksRetentionCutoff();
     const query = this.#zero!.query.blocks.where("status", "!=", "streaming")
       .where("status", "!=", "cancel_requested")
       .where("ts", ">", cutoff);
