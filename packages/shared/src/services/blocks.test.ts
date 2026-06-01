@@ -119,3 +119,85 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
     expect(limited[0].blockId).toBe("blk-alpha-2");
   });
 });
+
+describe("getTurnAuthorUserId (PostHog per-originator attribution)", () => {
+  // This is the daemon's read side of block authorship: turn_completed /
+  // turn_errored fire long after the request context is gone, so the daemon
+  // recovers the originating user from the turn's user block's `user_id`.
+  it("returns the authoring user id from the turn's user block", async () => {
+    const { insertBlock, getTurnAuthorUserId } = await import("./blocks.js");
+    await insertBlock({
+      blockId: "blk-turn-user",
+      turnId: "t_authored",
+      agentName: "friday",
+      sessionId: "sess-a",
+      blockIndex: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      userId: "RccSi68oUrZw4eTVmRllOtoJRsriJv4D",
+      contentJson: '{"text":"hi"}',
+      status: "complete",
+      ts: 1000,
+    });
+    expect(await getTurnAuthorUserId("t_authored")).toBe("RccSi68oUrZw4eTVmRllOtoJRsriJv4D");
+  });
+
+  it("returns null for an autonomous turn (no user block carries a user_id)", async () => {
+    // mail-/schedule-triggered turns: the triggering block has source≠user_chat
+    // and no user_id, so the turn attributes to the service actor downstream.
+    const { insertBlock, getTurnAuthorUserId } = await import("./blocks.js");
+    await insertBlock({
+      blockId: "blk-turn-auto",
+      turnId: "t_autonomous",
+      agentName: "friday",
+      sessionId: "sess-b",
+      blockIndex: 0,
+      role: "user",
+      kind: "text",
+      source: "schedule",
+      contentJson: '{"text":"cron task"}',
+      status: "complete",
+      ts: 1000,
+    });
+    expect(await getTurnAuthorUserId("t_autonomous")).toBeNull();
+  });
+
+  it("returns null when the turn has no blocks", async () => {
+    const { getTurnAuthorUserId } = await import("./blocks.js");
+    expect(await getTurnAuthorUserId("t_missing")).toBeNull();
+  });
+
+  it("picks the earliest authoring user block when several share the turn", async () => {
+    const { insertBlock, getTurnAuthorUserId } = await import("./blocks.js");
+    await insertBlock({
+      blockId: "blk-late",
+      turnId: "t_multi",
+      agentName: "friday",
+      sessionId: "sess-c",
+      blockIndex: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      userId: "user-late",
+      contentJson: '{"text":"second"}',
+      status: "complete",
+      ts: 2000,
+    });
+    await insertBlock({
+      blockId: "blk-early",
+      turnId: "t_multi",
+      agentName: "friday",
+      sessionId: "sess-c",
+      blockIndex: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      userId: "user-early",
+      contentJson: '{"text":"first"}',
+      status: "complete",
+      ts: 1000,
+    });
+    expect(await getTurnAuthorUserId("t_multi")).toBe("user-early");
+  });
+});

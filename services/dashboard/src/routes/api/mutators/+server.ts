@@ -33,6 +33,7 @@ import type { RequestHandler } from "@sveltejs/kit";
 import { PushProcessor } from "@rocicorp/zero/server";
 import { zeroNodePg } from "@rocicorp/zero/server/adapters/pg";
 import { createMutators, schema } from "@friday/shared/sync";
+import { verifyZeroJwt } from "@friday/shared/sync/jwt";
 import { getPool } from "@friday/shared";
 
 // Memoize the PushProcessor instance across requests. It holds a
@@ -52,8 +53,32 @@ function getProcessor(): NonNullable<typeof processor> {
   return processor;
 }
 
+/**
+ * The verified BetterAuth user behind this push. zero-cache verifies the
+ * client's JWT before forwarding the run here and passes it through as the
+ * `Authorization: Bearer <jwt>` header; we re-verify it with the same
+ * `ZERO_AUTH_SECRET` (cheap HS256 check, and `/api/mutators` is loopback-only
+ * so only zero-cache can reach it) and read `userId`. This is the trusted
+ * identity `sendUserMessage` stamps onto `blocks.user_id` — so the daemon,
+ * which only sees the canonical Postgres row, can attribute the turn's
+ * PostHog events to the originating user. Header absent/invalid → null →
+ * no author recorded (the event attributes to the `friday-daemon` service
+ * actor downstream). Only headers are read, so `process()` still gets the
+ * request body intact.
+ */
+function verifiedUserId(request: Request): string | null {
+  const header = request.headers.get("authorization");
+  if (!header) return null;
+  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : header;
+  const secret = process.env.ZERO_AUTH_SECRET;
+  if (!secret) return null;
+  const claims = verifyZeroJwt(token, secret, Math.floor(Date.now() / 1000));
+  return claims?.userId ?? null;
+}
+
 export const POST: RequestHandler = async ({ request }) => {
-  const result = await getProcessor().process(createMutators(), request);
+  const userId = verifiedUserId(request);
+  const result = await getProcessor().process(createMutators(userId), request);
   return new Response(JSON.stringify(result), {
     status: 200,
     headers: { "content-type": "application/json" },
