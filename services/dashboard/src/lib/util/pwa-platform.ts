@@ -107,11 +107,7 @@ export function handleExternalLinkClick(
   if (!anchor) return false;
   const href = anchor.getAttribute("href");
   if (!href) return false;
-  const interceptHref = decideExternalLinkIntercept(
-    href,
-    opts.pageOrigin,
-    opts.iosStandalone,
-  );
+  const interceptHref = decideExternalLinkIntercept(href, opts.pageOrigin, opts.iosStandalone);
   if (interceptHref === null) return false;
   event.preventDefault();
   opts.open(interceptHref);

@@ -10,24 +10,19 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import {
-  decideExternalLinkIntercept,
-  handleExternalLinkClick,
-} from "./pwa-platform";
+import { decideExternalLinkIntercept, handleExternalLinkClick } from "./pwa-platform";
 
 const ORIGIN = "https://friday.example";
 
 describe("decideExternalLinkIntercept", () => {
   it("returns null outside iOS standalone PWA (desktop / Android / browser tab)", () => {
-    expect(
-      decideExternalLinkIntercept("https://github.com/o/r/pull/1", ORIGIN, false),
-    ).toBeNull();
+    expect(decideExternalLinkIntercept("https://github.com/o/r/pull/1", ORIGIN, false)).toBeNull();
   });
 
   it("intercepts cross-origin absolute https links in iOS standalone", () => {
-    expect(
-      decideExternalLinkIntercept("https://github.com/o/r/pull/1", ORIGIN, true),
-    ).toBe("https://github.com/o/r/pull/1");
+    expect(decideExternalLinkIntercept("https://github.com/o/r/pull/1", ORIGIN, true)).toBe(
+      "https://github.com/o/r/pull/1",
+    );
   });
 
   it("intercepts protocol-relative // hrefs (resolved against the page origin's protocol)", () => {
@@ -38,11 +33,7 @@ describe("decideExternalLinkIntercept", () => {
 
   it("does NOT intercept same-origin absolute hrefs (internal links stay in the PWA)", () => {
     expect(
-      decideExternalLinkIntercept(
-        "https://friday.example/tickets/123",
-        ORIGIN,
-        true,
-      ),
+      decideExternalLinkIntercept("https://friday.example/tickets/123", ORIGIN, true),
     ).toBeNull();
   });
 
@@ -61,9 +52,7 @@ describe("decideExternalLinkIntercept", () => {
     expect(decideExternalLinkIntercept("mailto:x@example.com", ORIGIN, true)).toBe(
       "mailto:x@example.com",
     );
-    expect(decideExternalLinkIntercept("tel:+15551234", ORIGIN, true)).toBe(
-      "tel:+15551234",
-    );
+    expect(decideExternalLinkIntercept("tel:+15551234", ORIGIN, true)).toBe("tel:+15551234");
   });
 
   it("returns null for malformed hrefs (defensive — never throws)", () => {
