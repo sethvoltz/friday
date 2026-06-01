@@ -61,4 +61,5 @@ export const KEYS = {
   pinned: (agent: string) => `pinned:${agent}`,
   transcript: (agent: string) => `transcript:${agent}`,
   paletteRecent: "palette:recent",
+  evolveShowCompleted: "evolve:showCompleted",
 };
