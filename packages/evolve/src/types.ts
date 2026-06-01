@@ -78,4 +78,14 @@ export interface Proposal {
    * dashboard link a closed proposal to its trackable work.
    */
   appliedTicketId: string | null;
+  /**
+   * When set, this proposal was auto-resolved at creation because a sibling
+   * proposal with the same `signal.key` (event family — e.g. `usage_token_spike`)
+   * was already `applied` within the family-resolution window. The value is
+   * the resolving sibling's id. Such proposals are created with
+   * `status="applied"` and inherit the sibling's `appliedTicketId` so the
+   * audit trail (proposal → ticket → PR) survives. This keeps a new variant
+   * out of the daily/critical surface while preserving the evidence.
+   */
+  familyResolvedBy: string | null;
 }

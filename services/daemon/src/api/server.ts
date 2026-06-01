@@ -916,6 +916,8 @@ async function handle(
         promotedToCritical: propose.promotedToCritical.length,
         reranked: reranked.reranked.length,
         promotedFromRerank: reranked.promoted.length,
+        familyResolved: propose.familyResolved.length,
+        familyRejected: propose.familyRejected.length,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

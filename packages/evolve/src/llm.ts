@@ -214,8 +214,12 @@ export function extractJson<T>(text: string): T {
         try {
           return JSON.parse(slice) as T;
         } catch (err) {
+          const errMsg = (err as Error).message;
+          const snippet = snippetAroundParseError(slice, errMsg);
           throw new Error(
-            `Failed to parse JSON from LLM reply: ${(err as Error).message}\nRaw:\n${text}`,
+            `Failed to parse JSON from LLM reply: ${errMsg}` +
+              (snippet ? `\nFailure snippet (±40 chars around position): ${snippet}` : "") +
+              `\nRaw:\n${text}`,
             { cause: err },
           );
         }
@@ -223,4 +227,31 @@ export function extractJson<T>(text: string): T {
     }
   }
   throw new Error(`Unterminated JSON object in LLM reply:\n${text}`);
+}
+
+/**
+ * Pull a ±40-char window around the position that a JSON.parse `SyntaxError`
+ * named in its message, wrapped in [brackets] at the exact failure char.
+ *
+ * V8's JSON.parse error message looks like `Unexpected token X in JSON at
+ * position N` or `... (line L column C)`. We pull the first `position N`
+ * we see and slice around it. Returns null if no position can be parsed —
+ * caller falls back to the full `Raw:` block.
+ *
+ * Why: enrich failures are persisted in proposal frontmatter as text, and
+ * proposal markdown can be looked at without database access. A position-
+ * anchored snippet means a future diagnosis doesn't need a full 2KB body
+ * grep — the offending byte is highlighted in the error itself.
+ */
+function snippetAroundParseError(slice: string, errMsg: string): string | null {
+  const m = errMsg.match(/position\s+(\d+)/);
+  if (!m) return null;
+  const pos = Number(m[1]);
+  if (!Number.isFinite(pos) || pos < 0 || pos > slice.length) return null;
+  const winStart = Math.max(0, pos - 40);
+  const winEnd = Math.min(slice.length, pos + 40);
+  const before = slice.slice(winStart, pos);
+  const at = slice[pos] ?? "";
+  const after = slice.slice(pos + 1, winEnd);
+  return JSON.stringify(before) + "[" + JSON.stringify(at) + "]" + JSON.stringify(after);
 }

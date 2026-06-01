@@ -69,6 +69,7 @@ export function parseProposal(id: string, raw: string): Proposal {
     lastEnrichFailedAt:
       typeof fields.lastEnrichFailedAt === "string" ? fields.lastEnrichFailedAt : null,
     appliedTicketId: typeof fields.appliedTicketId === "string" ? fields.appliedTicketId : null,
+    familyResolvedBy: typeof fields.familyResolvedBy === "string" ? fields.familyResolvedBy : null,
   };
 }
 
@@ -92,6 +93,7 @@ export function serializeProposal(p: Proposal): string {
     `lastEnrichError: ${p.lastEnrichError ? JSON.stringify(p.lastEnrichError) : "null"}`,
     `lastEnrichFailedAt: ${p.lastEnrichFailedAt ? JSON.stringify(p.lastEnrichFailedAt) : "null"}`,
     `appliedTicketId: ${p.appliedTicketId ? JSON.stringify(p.appliedTicketId) : "null"}`,
+    `familyResolvedBy: ${p.familyResolvedBy ? JSON.stringify(p.familyResolvedBy) : "null"}`,
     `signals: ${JSON.stringify(p.signals)}`,
     "---",
     "",
@@ -117,6 +119,17 @@ export interface SaveProposalInput {
   score?: number;
   status?: ProposalStatus;
   clusterId?: string | null;
+  /**
+   * If set at create-time, the proposal is auto-resolved as `applied`
+   * because a sibling proposal with the same `signal.key` was applied
+   * within the family-resolution window. Caller is responsible for also
+   * passing matching `status="applied"` + `appliedAt` / `appliedBy` /
+   * `appliedTicketId` fields.
+   */
+  familyResolvedBy?: string | null;
+  appliedAt?: string | null;
+  appliedBy?: string | null;
+  appliedTicketId?: string | null;
 }
 
 export function saveProposal(input: SaveProposalInput): Proposal {
@@ -138,13 +151,14 @@ export function saveProposal(input: SaveProposalInput): Proposal {
     createdBy: input.createdBy,
     createdAt: now,
     updatedAt: now,
-    appliedAt: null,
-    appliedBy: null,
+    appliedAt: input.appliedAt ?? null,
+    appliedBy: input.appliedBy ?? null,
     enrichedAt: null,
     enrichedBy: null,
     lastEnrichError: null,
     lastEnrichFailedAt: null,
-    appliedTicketId: null,
+    appliedTicketId: input.appliedTicketId ?? null,
+    familyResolvedBy: input.familyResolvedBy ?? null,
   };
 
   writeFileSync(filePath(id), serializeProposal(proposal));
@@ -174,6 +188,7 @@ export interface UpdateProposalInput {
   lastEnrichError?: string | null;
   lastEnrichFailedAt?: string | null;
   appliedTicketId?: string | null;
+  familyResolvedBy?: string | null;
   /**
    * Override the auto-assigned `updatedAt`. Pass when a write needs
    * `enrichedAt` and `updatedAt` to share a timestamp so idempotency checks
@@ -230,6 +245,80 @@ export function findProposalBySignalHash(hash: string): Proposal | null {
     if (p.signals.some((s) => s.hash === hash)) return p;
   }
   return null;
+}
+
+/**
+ * Find the most-recently-applied proposal whose signals include `key` (the
+ * signal family — event name, not the hash), applied within `windowDays` of
+ * `now`. Used by the propose pipeline to auto-resolve new variants of a
+ * family that already has a shipped fix on the books (e.g. ejku applied for
+ * `usage_token_spike` on `friday` → kyvl, 6gnh, z79r etc. created later get
+ * marked applied at birth with `familyResolvedBy=ejku.id`).
+ *
+ * Window default 14 days: long enough to absorb a daily-scan cadence, short
+ * enough that a recurrence months after a fix re-surfaces as a fresh open
+ * proposal (which IS what we want — a fix that decays warrants attention).
+ */
+export function findRecentlyAppliedByFamilyKey(
+  key: string,
+  opts: { windowDays?: number; now?: Date } = {},
+): Proposal | null {
+  const windowDays = opts.windowDays ?? 14;
+  const nowMs = (opts.now ?? new Date()).getTime();
+  const windowMs = windowDays * 24 * 60 * 60 * 1000;
+
+  let best: Proposal | null = null;
+  let bestAppliedMs = 0;
+
+  for (const p of listProposals()) {
+    if (p.status !== "applied") continue;
+    if (!p.appliedAt) continue;
+    if (!p.signals.some((s) => s.key === key)) continue;
+    const appliedMs = Date.parse(p.appliedAt);
+    if (!Number.isFinite(appliedMs)) continue;
+    if (nowMs - appliedMs > windowMs) continue;
+    if (appliedMs > bestAppliedMs) {
+      best = p;
+      bestAppliedMs = appliedMs;
+    }
+  }
+  return best;
+}
+
+/**
+ * Find the most-recently-rejected proposal whose signals include `key`,
+ * rejected within `windowDays`. Used by the propose pipeline to honor the
+ * user's prior reject: if they said "not a real issue" recently, don't
+ * spawn another variant immediately. Outside the window the family is
+ * eligible for a fresh proposal again (the rejection isn't permanent —
+ * conditions can change).
+ *
+ * "Rejected" timestamps live on `updatedAt` (no dedicated `rejectedAt`
+ * field), so the window check uses `updatedAt` for status=rejected rows.
+ */
+export function findRecentlyRejectedByFamilyKey(
+  key: string,
+  opts: { windowDays?: number; now?: Date } = {},
+): Proposal | null {
+  const windowDays = opts.windowDays ?? 14;
+  const nowMs = (opts.now ?? new Date()).getTime();
+  const windowMs = windowDays * 24 * 60 * 60 * 1000;
+
+  let best: Proposal | null = null;
+  let bestMs = 0;
+
+  for (const p of listProposals()) {
+    if (p.status !== "rejected") continue;
+    if (!p.signals.some((s) => s.key === key)) continue;
+    const ms = Date.parse(p.updatedAt);
+    if (!Number.isFinite(ms)) continue;
+    if (nowMs - ms > windowMs) continue;
+    if (ms > bestMs) {
+      best = p;
+      bestMs = ms;
+    }
+  }
+  return best;
 }
 
 function filePath(id: string): string {

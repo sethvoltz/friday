@@ -139,4 +139,23 @@ describe("extractJson", () => {
     const input = '{"body": "no closing brace';
     expect(() => extractJson(input)).toThrowError(/Unterminated JSON object/);
   });
+
+  it("includes a ±40-char failure snippet in the parse-error message", () => {
+    // When braces balance but the inner JSON is malformed, the thrown error
+    // must include both the raw text AND a snippet windowed on the parse
+    // position. Future failures triage from the snippet alone instead of
+    // needing to scroll the full Raw: dump.
+    const pad = "x".repeat(60);
+    const input = `{"key":"${pad}",MALFORMED_HERE"key2":"v"}`;
+    try {
+      extractJson(input);
+      throw new Error("extractJson should have thrown");
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).toMatch(/Failed to parse JSON/);
+      expect(msg).toMatch(/Failure snippet/);
+      // The window must reference the actual offending region.
+      expect(msg).toContain("MALFORMED_HERE");
+    }
+  });
 });

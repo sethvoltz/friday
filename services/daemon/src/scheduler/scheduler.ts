@@ -278,8 +278,9 @@ const META_DAILY_PROMPT = [
   "3. Call `evolve_cluster({})` to group near-duplicate proposals.",
   "4. Call `evolve_list({ status: 'critical' })` and compare against the last run's `state.md` (auto-injected above).",
   "5. For any new `critical` proposals — or proposals that gained signals since yesterday — mail the orchestrator with a short summary (`mail_send({ to: 'friday', type: 'notification', body: ... })`). Include proposal ids so the orchestrator can `evolve_get` them.",
-  "6. Update `state.md` with the run's proposal counts + critical ids you saw, so tomorrow knows what's new.",
-  "7. Be quiet by default. Skip the mail if nothing actionable changed.",
+  "6. Family-resolution: the `evolve_scan` response carries `familyResolved` and `familyRejected` counts. These represent variants auto-suppressed because a sibling proposal in the same `signal.key` family was applied or rejected within the last 14 days. Skip such proposals in your daily mail — they're already covered. Only call them out if `familyResolved >= 3` in a single scan (a fix that keeps re-triggering deserves a re-look at the underlying detector or the original fix).",
+  "7. Update `state.md` with the run's proposal counts + critical ids you saw, so tomorrow knows what's new.",
+  "8. Be quiet by default. Skip the mail if nothing actionable changed.",
   "",
   "Do NOT auto-apply or dismiss proposals — that is the orchestrator's call.",
 ].join("\n");
