@@ -55,6 +55,7 @@ function makeProposal(id: string): Proposal {
     lastEnrichError: null,
     lastEnrichFailedAt: null,
     appliedTicketId: null,
+    familyResolvedBy: null,
   };
 }
 

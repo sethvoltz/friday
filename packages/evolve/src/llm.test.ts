@@ -139,4 +139,62 @@ describe("extractJson", () => {
     const input = '{"body": "no closing brace';
     expect(() => extractJson(input)).toThrowError(/Unterminated JSON object/);
   });
+
+  it("includes a ±40-char failure snippet in the parse-error message", () => {
+    // When braces balance but the inner JSON is malformed, the thrown error
+    // must include both the raw text AND a snippet windowed on the parse
+    // position. Future failures triage from the snippet alone instead of
+    // needing to scroll the full Raw: dump.
+    const pad = "x".repeat(60);
+    const input = `{"key":"${pad}",MALFORMED_HERE"key2":"v"}`;
+    try {
+      extractJson(input);
+      throw new Error("extractJson should have thrown");
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).toMatch(/Failed to parse JSON/);
+      expect(msg).toMatch(/Failure snippet/);
+      // The window must reference the actual offending region.
+      expect(msg).toContain("MALFORMED_HERE");
+    }
+  });
+
+  it("rejects unescaped inner quotes (FRI-64 day-23 hrw2 regression — the actual byte shape)", () => {
+    // Day-23 hrw2 enrich produced JSON where the LLM mid-sentence-quoted
+    // the user without escaping: the body field's value contained a raw
+    // `"Nah just go straight into building everything,"` inside what should
+    // have been a single JSON string. JSON.parse legitimately closes the
+    // outer string at the first inner `"` and then errors on the `N` of
+    // `Nah` — this is malformed JSON, not something the walker can salvage.
+    //
+    // What we DO test:
+    //   1. extractJson throws "Failed to parse JSON".
+    //   2. The thrown error includes a position-anchored snippet that
+    //      surfaces the offending region so a future recurrence is
+    //      triageable from `lastEnrichError` alone (no DB or log access).
+    //
+    // The systemic fix is in `enrich.ts`'s SYSTEM_PROMPT: explicit instruction
+    // with a worked example showing the LLM how to escape mid-sentence quotes.
+    // Longer-term harden via a forgiving parser (JSON5/HJSON) is a separate
+    // call — see PR #142 body for the decision context.
+    const input = [
+      "```json",
+      "{",
+      '  "body": "**Signal summary**\\n11 events. Real behavioral signal: one message, "Nah just go straight into building everything," overriding a plan gate.\\n\\n**Root cause**\\nNo bypass heuristic for direct imperatives.",',
+      '  "type": "prompt",',
+      '  "blastRadius": "low"',
+      "}",
+      "```",
+    ].join("\n");
+    try {
+      extractJson(input);
+      throw new Error("extractJson should have thrown on unescaped inner quote");
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).toMatch(/Failed to parse JSON/);
+      expect(msg).toMatch(/Failure snippet/);
+      // The diagnostic snippet must point at the unescaped-quote region.
+      expect(msg).toContain("Nah just go straight");
+    }
+  });
 });

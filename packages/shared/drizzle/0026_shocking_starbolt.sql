@@ -1,0 +1,1 @@
+ALTER TABLE "evolve_proposals" ADD COLUMN "family_resolved_by" text;

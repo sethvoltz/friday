@@ -96,6 +96,8 @@ export const evolveCommand = defineCommand({
               promotedToCritical: propose.promotedToCritical.length,
               reranked: reranked.reranked.length,
               promotedFromRerank: reranked.promoted.length,
+              familyResolved: propose.familyResolved.length,
+              familyRejected: propose.familyRejected.length,
             },
             null,
             2,

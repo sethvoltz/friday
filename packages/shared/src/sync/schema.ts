@@ -59,6 +59,7 @@ const evolveProposals = table("evolve_proposals")
     last_enrich_error: string().optional(),
     last_enrich_failed_at: number().optional(),
     applied_ticket_id: string().optional(),
+    family_resolved_by: string().optional(),
   })
   .primaryKey("id");
 

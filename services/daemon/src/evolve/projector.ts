@@ -53,6 +53,7 @@ function proposalToRow(p: Proposal): EvolveProposalInsert {
     lastEnrichError: p.lastEnrichError,
     lastEnrichFailedAt: p.lastEnrichFailedAt ? new Date(p.lastEnrichFailedAt) : null,
     appliedTicketId: p.appliedTicketId,
+    familyResolvedBy: p.familyResolvedBy,
   };
 }
 
@@ -97,6 +98,7 @@ export async function runEvolveBootSync(): Promise<void> {
             lastEnrichError: row.lastEnrichError,
             lastEnrichFailedAt: row.lastEnrichFailedAt,
             appliedTicketId: row.appliedTicketId,
+            familyResolvedBy: row.familyResolvedBy,
           },
         });
     }
