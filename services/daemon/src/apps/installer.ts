@@ -21,6 +21,7 @@ import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import * as registry from "../agent/registry.js";
 import { archiveAgent as lifecycleArchiveAgent } from "../agent/lifecycle.js";
+import { posthog, DISTINCT_ID } from "../posthog.js";
 
 type PackageManager = "pnpm" | "yarn" | "npm";
 
@@ -344,7 +345,7 @@ export async function installApp(
     depsWarning: dependencies.ran ? (dependencies.warning ?? null) : null,
   });
 
-  return {
+  const result: InstallResult = {
     id: manifest.id,
     name: manifest.name,
     version: manifest.version,
@@ -354,6 +355,21 @@ export async function installApp(
     mcpServers: manifest.mcpServers.map((m) => ({ name: m.name })),
     dependencies,
   };
+  posthog.capture({
+    distinctId: DISTINCT_ID,
+    event: "app_installed",
+    properties: {
+      app_id: manifest.id,
+      app_name: manifest.name,
+      app_version: manifest.version,
+      is_reinstall: isReinstall,
+      agent_count: manifest.agents.length,
+      schedule_count: manifest.schedules.length,
+      mcp_server_count: manifest.mcpServers.length,
+      deps_installed: dependencies.ran,
+    },
+  });
+  return result;
 }
 
 /**

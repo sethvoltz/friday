@@ -19,6 +19,7 @@
     "@friday/shared": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "pg": "^8.13.0",
+    "posthog-node": "^5.35.9",
     "shell-quote": "^1.8.3",
     "zod": "^4.0.0"
   },

@@ -81,6 +81,7 @@ The daemon binds to `127.0.0.1`. zero-cache binds to `127.0.0.1`. The dashboard 
 - **Two-phase bootstrap, generous client cache.** First-time device load fetches the orchestrator's recent chat and active-state metadata in ~2s; background Phase 2 fills the full history for active agents, tickets, memory, and recent mail. Blocks for agents archived >30 days expunge from the client cache; the server keeps everything.
 - **Boot recovery.** `~/.claude/projects/.../sessionId.jsonl` is walked once on startup to back-fill any blocks lost between worker `block-complete` and the Postgres write. Idempotent on `(session_id, message_id, kind)` for text/thinking and `(session_id, tool_use_id)` for tool blocks.
 - **Continuous invariant auditor.** Every 60s the daemon checks builder-worktree presence and `status=working ⇒ live worker map` against the canonical source. Self-heals quietly; loud only when it has to be.
+- **Optional PostHog analytics.** Set `POSTHOG_API_KEY` in `~/.friday/.env` to light up instrumentation across the stack — daemon business + exception events (`posthog-node`) and dashboard product analytics, autocapture, session replay, and client/server error tracking (`posthog-js`). Off by default; silent no-op with no key set. See `docs/setup.md` § Analytics.
 
 ## Quick start
 

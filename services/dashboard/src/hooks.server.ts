@@ -1,9 +1,15 @@
-import { redirect, type Handle } from "@sveltejs/kit";
+import { redirect, type Handle, type HandleServerError } from "@sveltejs/kit";
 import { auth } from "$lib/server/auth";
 import { logger } from "$lib/server/log";
+import { posthog, DISTINCT_ID } from "$lib/server/posthog";
 import { consumeRateLimit, resetRateLimit } from "@friday/shared/services";
 
-const PUBLIC_PATHS = new Set(["/login", "/api/auth"]);
+// `/ingest` is the first-party PostHog reverse proxy (src/routes/ingest):
+// it must be reachable anonymously because pageviews/replay fire on the
+// public /login page before a session exists, and because routing PostHog
+// through our own origin is what defeats content blockers that block
+// us.i.posthog.com outright. It forwards only to PostHog hosts.
+const PUBLIC_PATHS = new Set(["/login", "/api/auth", "/ingest"]);
 
 /**
  * Localhost-only loopback paths exempt from the session-redirect gate.
@@ -142,4 +148,28 @@ export const handle: Handle = async ({ event, resolve }) => {
     userId: event.locals.user?.id,
   });
   return response;
+};
+
+// Server-side error tracking. SvelteKit funnels uncaught errors in load
+// functions, endpoints, and rendering through `handleError`. We keep the
+// existing structured log and additionally forward to PostHog (no-op when
+// no key is configured), distinct-keyed to the signed-in user when known so
+// server errors join the same person timeline as client events + replays.
+export const handleError: HandleServerError = ({ error, event, status, message }) => {
+  const err = error instanceof Error ? error : new Error(String(error));
+  logger.log("error", "unhandled-error", {
+    message: err.message,
+    stack: err.stack,
+    path: event.url.pathname,
+    status,
+    userId: event.locals.user?.id,
+  });
+  if (status !== 404) {
+    posthog.captureException(err, event.locals.user?.id ?? DISTINCT_ID, {
+      source: "sveltekit.handleError",
+      path: event.url.pathname,
+      status,
+    });
+  }
+  return { message };
 };

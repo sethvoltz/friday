@@ -9,6 +9,12 @@ const config = {
     alias: {
       $lib: "./src/lib",
     },
+    // PostHog session replay rewrites asset URLs when reconstructing the
+    // DOM; relative paths break that reconstruction. PostHog's SvelteKit
+    // guide requires absolute asset paths (https://posthog.com/docs/libraries/svelte).
+    paths: {
+      relative: false,
+    },
   },
 };
 

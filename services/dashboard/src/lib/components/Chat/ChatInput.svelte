@@ -10,6 +10,7 @@
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
   import { onDestroy, onMount, tick } from "svelte";
   import { Paperclip, Send, CircleStop } from "lucide-svelte";
+  import posthog from "posthog-js";
 
   interface CommandsResponse {
     system: Array<{ name: string; description: string; destructive?: boolean }>;
@@ -397,6 +398,11 @@
       // the matched window. Intercepted before the system-command lookup
       // so the daemon never sees it.
       if (name === "jump") {
+        posthog.capture("slash_command_invoked", {
+          command: "jump",
+          has_args: args.trim().length > 0,
+          client_only: true,
+        });
         text = "";
         await chat.jumpTo(chat.focusedAgent, args);
         return;
@@ -470,6 +476,15 @@
       // applyZeroBlocks hasn't already done it via the optimistic write.
       chat.confirmPending(blockId, outcome.turnId);
       chat.inflightTurnId = outcome.turnId;
+      // Product analytics: a user message that the server accepted. Capture
+      // shape, not content — never the message text. No-op without a key.
+      posthog.capture("message_sent", {
+        agent: chat.focusedAgent,
+        turn_id: outcome.turnId,
+        text_length: t.length,
+        has_attachments: attachments.length > 0,
+        attachment_count: attachments.length,
+      });
     } else if (outcome.kind === "transport-error") {
       // FRI-139: Zero WS hiccup mid-send. The `/api/mutators` push may
       // have committed at the server even though the ack didn't reach
@@ -492,6 +507,14 @@
   }
 
   async function dispatchSystem(name: string, args: string): Promise<void> {
+    // Product analytics: which system/skill slash commands users reach for.
+    // Capture the command name + whether args were passed, never the args
+    // themselves. No-op without a configured key.
+    posthog.capture("slash_command_invoked", {
+      command: name,
+      has_args: args.trim().length > 0,
+      client_only: false,
+    });
     // `/clear`: the daemon archives the worker and nulls the agent's
     // session_id. The user-facing confirmation is the empty chat view,
     // NOT a synthetic chat bubble — `sys_<ts>` messages aren't backed
