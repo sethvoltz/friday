@@ -524,8 +524,55 @@ describe("#bindAgents query (FRI-101 regression): no status filter", () => {
   });
 });
 
+describe("blocksRetentionCutoff (Zero query-cache stability)", () => {
+  // The blocks `where("ts", ">", …)` lower bound must be STABLE across page
+  // refreshes within a day. A raw `Date.now() - 90d` changes every load, so
+  // Zero sees a new query literal each time and re-streams the entire blocks
+  // view group from the server (the "Slow query materialization" 5–12s on
+  // every refresh). Day-quantization is the fix; these pin it.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns an identical cutoff for two loads within the same UTC day (cache reuse)", async () => {
+    vi.useFakeTimers();
+    const { blocksRetentionCutoff } = await importStore();
+    vi.setSystemTime(new Date("2026-06-01T00:07:00.000Z"));
+    const earlyInDay = blocksRetentionCutoff();
+    vi.setSystemTime(new Date("2026-06-01T23:51:00.000Z"));
+    const lateInDay = blocksRetentionCutoff();
+    expect(lateInDay).toBe(earlyInDay);
+  });
+
+  it("is floored to a UTC-day boundary", async () => {
+    vi.useFakeTimers();
+    const { blocksRetentionCutoff, DAY_MS } = await importStore();
+    vi.setSystemTime(new Date("2026-06-01T13:22:47.123Z"));
+    expect(blocksRetentionCutoff() % DAY_MS).toBe(0);
+  });
+
+  it("advances by exactly one day across a day boundary", async () => {
+    vi.useFakeTimers();
+    const { blocksRetentionCutoff, DAY_MS } = await importStore();
+    vi.setSystemTime(new Date("2026-06-01T12:00:00.000Z"));
+    const day1 = blocksRetentionCutoff();
+    vi.setSystemTime(new Date("2026-06-02T12:00:00.000Z"));
+    const day2 = blocksRetentionCutoff();
+    expect(day2 - day1).toBe(DAY_MS);
+  });
+
+  it("stays within the 90-day retention window (never older than 91 days)", async () => {
+    vi.useFakeTimers();
+    const { blocksRetentionCutoff, BLOCKS_RETENTION_MS, DAY_MS } = await importStore();
+    vi.setSystemTime(new Date("2026-06-01T12:00:00.000Z"));
+    const age = Date.now() - blocksRetentionCutoff();
+    expect(age).toBeGreaterThanOrEqual(BLOCKS_RETENTION_MS);
+    expect(age).toBeLessThan(BLOCKS_RETENTION_MS + DAY_MS);
+  });
+});
+
 describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
-  it("bindBlocksFor materializes a per-agent query with status filter + 90d retention bound + ts ordering (no row limit — plan §39 local-first)", async () => {
+  it("bindBlocksFor materializes a per-agent query with status filter + day-quantized 90d retention bound + ts ordering (no row limit — plan §39 local-first)", async () => {
     const { zeroSync } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     expect(instances).toHaveLength(1);
@@ -570,8 +617,17 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
     expect((fgCalls[3].args as unknown[]).slice(0, 2)).toEqual(["ts", ">"]);
     const cutoff = (fgCalls[3].args as unknown[])[2] as number;
     const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
-    expect(cutoff).toBeGreaterThanOrEqual(before - ninetyDaysMs - 5000);
-    expect(cutoff).toBeLessThanOrEqual(Date.now() - ninetyDaysMs + 5);
+    const dayMs = 24 * 60 * 60 * 1000;
+    // The bound is day-quantized (floored to a UTC-day boundary) so the
+    // query literal is stable across refreshes within a day — otherwise a
+    // raw `now - 90d` changes every load and Zero can't reuse the client
+    // replica or server CVR, re-streaming the whole blocks view group each
+    // time. Day-alignment is the load-bearing assertion that catches a
+    // revert to the raw bound.
+    expect(cutoff % dayMs).toBe(0);
+    // Flooring drops the bound by up to one day below `now - 90d`.
+    expect(cutoff).toBeGreaterThanOrEqual(before - ninetyDaysMs - dayMs);
+    expect(cutoff).toBeLessThanOrEqual(Date.now() - ninetyDaysMs);
     expect(fgCalls[4]).toEqual({
       method: "orderBy",
       args: ["ts", "desc"],
