@@ -477,3 +477,79 @@ describe("turn-state-machine: (AC #4) both abort interleavings produce exactly o
     expect(fr.state).toBe("idle");
   });
 });
+
+describe("turn-state-machine: stall (FRI-145 M5 — stalled projection)", () => {
+  it("projects `stalled` via a single set-status intent; Turn state stays working", () => {
+    const w = ctx({ agentName: "stuck-agent", turnId: "turn-stuck" });
+    const r = apply(w, { kind: "stall" }, DEPS);
+
+    // `stalled` is a Status PROJECTION with no resting Turn state (V1) — the
+    // worker is still `working`, just not progressing.
+    expect(r.state).toBe("working");
+    expect(r.projection).toBe("stalled");
+    // Exactly one intent: the durable `stalled` write through the DB door.
+    expect(r.intents).toEqual<Intent[]>([
+      { kind: "set-status", name: "stuck-agent", status: "stalled" },
+    ]);
+    // No turn-boundary bookkeeping — a stall doesn't end the turn.
+    expect(r.mutations).toEqual({});
+  });
+});
+
+describe("turn-state-machine: hard-exit (FRI-145 M5 — self-heal, Bug #2)", () => {
+  it("a turn-in-flight hard exit publishes turn_done(error) + finalizes + heals to idle", () => {
+    // turnStart is set → no terminal turn-complete/error was processed.
+    const w = ctx({
+      agentName: "dead-agent",
+      turnId: "turn-dead",
+      turnStart: 4_000,
+    });
+    const r = apply(w, { kind: "hard-exit" }, DEPS);
+
+    expect(r.state).toBe("idle");
+    expect(r.projection).toBe("idle");
+    // Exact ordered intent list: finalize → end-turn → error → turn_done →
+    // set-status(idle). The turn_done(error) is Bug #2's missing event.
+    expect(r.intents).toEqual<Intent[]>([
+      { kind: "finalize-blocks", status: "error" },
+      { kind: "end-turn", turnId: "turn-dead" },
+      {
+        kind: "publish-error",
+        turnId: "turn-dead",
+        agent: "dead-agent",
+        code: "worker_exited",
+        message: "Worker process exited mid-turn before reporting completion",
+        recoverable: true,
+      },
+      {
+        kind: "publish-turn-done",
+        turnId: "turn-dead",
+        agent: "dead-agent",
+        status: "error",
+      },
+      { kind: "set-status", name: "dead-agent", status: "idle" },
+    ]);
+    // Per-turn bookkeeping cleared so the next dispatch starts fresh.
+    expect(r.mutations).toEqual({
+      turnStart: undefined,
+      activePrompt: undefined,
+      blocksThisTurn: 0,
+      lastExitStatus: "error",
+    });
+  });
+
+  it("a between-turns hard exit (turnStart undefined) heals to idle WITHOUT a turn_done", () => {
+    // turnStart undefined → the turn already reached a terminal event (or the
+    // worker was idle between turns). No phantom turn_done.
+    const w = ctx({ agentName: "idle-agent", turnStart: undefined });
+    const r = apply(w, { kind: "hard-exit" }, DEPS);
+
+    expect(r.state).toBe("idle");
+    expect(r.projection).toBe("idle");
+    // Only the idle heal — no finalize, no error, no turn_done.
+    expect(r.intents).toEqual<Intent[]>([
+      { kind: "set-status", name: "idle-agent", status: "idle" },
+    ]);
+    expect(r.intents.some((i) => i.kind === "publish-turn-done")).toBe(false);
+  });
+});

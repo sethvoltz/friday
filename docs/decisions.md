@@ -965,15 +965,16 @@ The grill on 2026-05-22 lifted ADR-020's "path forward" into scope as FRI-113.
 
 2. **Transition matrix** (compiled into `services/daemon/src/agent/registry.ts`):
 
-   | from \ to  | idle    | working | stalled | error   | archived                   |
-   | ---------- | ------- | ------- | ------- | ------- | -------------------------- |
-   | `idle`     | (no-op) | ✅      | ✅      | ✅      | ✅ (non-orchestrator only) |
-   | `working`  | ✅      | (no-op) | ✅      | ✅      | ✅ (non-orchestrator only) |
-   | `stalled`  | ✅      | ✅      | (no-op) | ✅      | ✅ (non-orchestrator only) |
-   | `error`    | ✅      | ❌      | ❌      | (no-op) | ✅ (non-orchestrator only) |
-   | `archived` | ❌\*    | ❌      | ❌      | ❌      | (no-op)                    |
+   | from \ to  | idle    | working | stalled | archived                   |
+   | ---------- | ------- | ------- | ------- | -------------------------- |
+   | `idle`     | (no-op) | ✅      | ✅      | ✅ (non-orchestrator only) |
+   | `working`  | ✅      | (no-op) | ✅      | ✅ (non-orchestrator only) |
+   | `stalled`  | ✅      | ✅      | (no-op) | ✅ (non-orchestrator only) |
+   | `archived` | ❌\*    | ❌      | ❌      | (no-op)                    |
 
    \* `archived → idle` is reachable only via `unarchiveAgent` (the apps installer's re-adopt path), which uses the privileged unchecked write helper.
+
+   The agent-status `error` value was removed in FRI-145 M5: a worker that exits mid-turn self-heals to `idle` via the Turn-state machine's `hard-exit` Transition rather than parking the row at a sticky `error`, so the matrix no longer carries an `error` row or column. `stalled` gained its producer (the watchdog `stall` Transition) in the same change. (The transient `archive_requested` the Zero mutator path writes — `* → archive_requested → archived` for non-orchestrators — is in the DB CHECK but elided from this table.)
 
 3. **`archive_reason` is a required arg on the archived transition.** `setStatus(name, "archived", {archiveReason})` validates the reason is present and writes both columns atomically. `archiveAgent(name, {reason})` is the thin convenience wrapper.
 

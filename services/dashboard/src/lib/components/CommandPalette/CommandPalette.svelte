@@ -6,6 +6,7 @@
   import { theme } from "$lib/stores/theme.svelte";
   import type { PaletteName } from "$lib/theme/palettes";
   import { zeroSync } from "$lib/stores/zero.svelte";
+  import { agentStatusDot } from "$lib/util/agent-status-dot";
   import { commandPalette } from "./store.svelte";
   import { assembleSections, flattenSections, type PaletteItem } from "./items";
 
@@ -108,15 +109,7 @@
     }
   }
 
-  function statusDotColor(status: string | undefined): string {
-    return status === "working"
-      ? "var(--status-ok)"
-      : status === "stalled"
-        ? "var(--status-warn)"
-        : status === "error"
-          ? "var(--status-error)"
-          : "var(--text-tertiary)";
-  }
+  const statusDotColor = agentStatusDot;
 
 </script>
 

@@ -73,7 +73,7 @@ const agents = table("agents")
   .columns({
     name: string(),
     type: string<"orchestrator" | "builder" | "helper" | "scheduled" | "bare">(),
-    status: string<"idle" | "working" | "stalled" | "error" | "archived" | "archive_requested">(),
+    status: string<"idle" | "working" | "stalled" | "archived" | "archive_requested">(),
     session_id: string().optional(),
     parent_name: string().optional(),
     worktree_path: string().optional(),

@@ -160,7 +160,10 @@ describe("registry FSM gate (ADR-031)", () => {
     // widen the orchestrator's allowed transitions.
     const { isLegalTransition } = registry;
     expect(isLegalTransition("orchestrator", "idle", "archived")).toBe(false);
-    expect(isLegalTransition("orchestrator", "error", "archived")).toBe(false);
+    // FRI-145 M5: agent-status `error` was pruned; `stalled` is the remaining
+    // non-idle/working state and likewise can't reach `archived` for an
+    // orchestrator (orchestrator-not-archivable from ANY state).
+    expect(isLegalTransition("orchestrator", "stalled", "archived")).toBe(false);
     expect(isLegalTransition("orchestrator", "working", "archived")).toBe(false);
     expect(isLegalTransition("builder", "idle", "archived")).toBe(true);
     expect(isLegalTransition("builder", "working", "archived")).toBe(true);

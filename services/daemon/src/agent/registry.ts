@@ -37,10 +37,9 @@ import { posthog, DISTINCT_ID } from "../posthog.js";
 type StatusTransitionTable = Readonly<Record<AgentStatus, ReadonlyArray<AgentStatus>>>;
 
 const COMMON_TRANSITIONS: StatusTransitionTable = {
-  idle: ["working", "stalled", "error", "archived", "archive_requested"],
-  working: ["idle", "stalled", "error", "archived", "archive_requested"],
-  stalled: ["idle", "working", "error", "archived", "archive_requested"],
-  error: ["idle", "archived", "archive_requested"],
+  idle: ["working", "stalled", "archived", "archive_requested"],
+  working: ["idle", "stalled", "archived", "archive_requested"],
+  stalled: ["idle", "working", "archived", "archive_requested"],
   // Transient state written by the Zero mutator path; the listener
   // immediately flips to `archived`. The only legal next state.
   archive_requested: ["archived"],
@@ -50,10 +49,9 @@ const COMMON_TRANSITIONS: StatusTransitionTable = {
 };
 
 const ORCHESTRATOR_TRANSITIONS: StatusTransitionTable = {
-  idle: ["working", "stalled", "error"],
-  working: ["idle", "stalled", "error"],
-  stalled: ["idle", "working", "error"],
-  error: ["idle"],
+  idle: ["working", "stalled"],
+  working: ["idle", "stalled"],
+  stalled: ["idle", "working"],
   // The orchestrator-not-archivable invariant: no edge into `archived`
   // OR `archive_requested` from anywhere. If a row ever lands at
   // either, the auditor's rule #3 heals it back to `idle` via the

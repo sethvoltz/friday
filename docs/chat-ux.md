@@ -17,7 +17,7 @@ The dashboard's home `/` is a single persistent chat with Friday. This doc captu
 - Below: all other non-archived sessions (active + idle builders, helpers, bare, scheduled-mid-run) with status dots (idle / working / stalled / error) and unread badges (`agent_message` count).
 - Click any entry → chat pane switches focus to that agent's transcript.
 - Archived agents are hidden by default; toggle "Show archived" to surface them. Sessions persist in perpetuity — archive just stops the agent from receiving work and (for builders) frees the worktree.
-- "Show inactive" surfaces the transient-error bucket: agents in `stalled` or `error` status. ("Show archived" handles the terminal bucket; `idle` and `working` always show.) The focused row is always pinned, regardless of either toggle, so the chat you're reading never falls off the sidebar when its agent flips state.
+- "Show inactive" surfaces the transient-stall bucket: agents in `stalled` status (the watchdog flagged the worker for missing its heartbeat budget). ("Show archived" handles the terminal bucket; `idle` and `working` always show.) The focused row is always pinned, regardless of either toggle, so the chat you're reading never falls off the sidebar when its agent flips state. (The agent-status `error` value was removed in FRI-145 M5 — a worker that dies mid-turn self-heals to `idle`.)
 
 ## Multi-agent focus model
 

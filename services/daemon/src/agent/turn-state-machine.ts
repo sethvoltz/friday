@@ -116,7 +116,9 @@ export interface FailPayload {
 export type Transition =
   | { kind: "complete"; payload: CompletePayload }
   | { kind: "fail"; payload: FailPayload }
-  | { kind: "abort" };
+  | { kind: "abort" }
+  | { kind: "stall" }
+  | { kind: "hard-exit" };
 
 /**
  * Administrative Transitions (FRI-145 M4). These route the three non-turn-
@@ -405,6 +407,10 @@ export function apply(w: TurnContext, transition: Transition, deps: ApplyDeps): 
       return applyFail(w, transition.payload, deps);
     case "abort":
       return applyAbort(w);
+    case "stall":
+      return applyStall(w);
+    case "hard-exit":
+      return applyHardExit(w);
   }
 }
 
@@ -683,6 +689,100 @@ function applyAbort(_w: TurnContext): ApplyResult {
     projection: null,
     mutations: {},
     intents: [],
+  };
+}
+
+/**
+ * The `stall` Transition (FRI-145 M5) projects `agents.status="stalled"` — the
+ * dashboard's warn-colored dot. The watchdog enqueues it fire-and-forget when a
+ * working worker blows past its heartbeat budget (V3: never awaited inside the
+ * watchdog tick, so one stalled agent can't head-of-line-block the others).
+ *
+ * `stalled` is a Status PROJECTION with no resting Turn state (V1): the worker
+ * is still `working` from the machine's point of view — it just hasn't made
+ * progress — so the Turn state stays `working` and only the durable projection
+ * moves to `stalled`. The in-memory `w.status` therefore stays `working` (the
+ * watchdog keeps counting against it; a refork or a recovered heartbeat is what
+ * clears the flag), while the DB row reflects `stalled` for the dashboard.
+ *
+ * Single intent, no mutations: the `set-status` write through the ports
+ * `setStatus` keeps the Turn-state machine the sole `agents.status` writer.
+ */
+function applyStall(w: TurnContext): ApplyResult {
+  return {
+    state: "working",
+    projection: "stalled",
+    mutations: {},
+    intents: [{ kind: "set-status", name: w.agentName, status: "stalled" }],
+  };
+}
+
+/**
+ * The `hard-exit` Transition (FRI-145 M5) is the self-heal for a worker process
+ * that died mid-turn with NO terminal turn-complete/error ever processed
+ * (SIGTERM from the stall watchdog, SIGKILL, OOM, crash). Bug #2 was that the
+ * old exit handler finalized streaming blocks and reset the row to `idle` but
+ * never published `turn_done` — so the dashboard's inflight turn pin stayed up
+ * forever and the agent looked stuck despite being dispatchable.
+ *
+ * "No terminal turn" is exactly `w.turnStart !== undefined`: every cooperative
+ * turn-end (`complete`/`fail`/force-kill) clears `turnStart` as part of its
+ * mutations, so a still-set `turnStart` at exit means the turn never reached a
+ * terminal event. When a turn WAS in flight we:
+ *   - finalize any streaming blocks as `error` (they never got a block-stop),
+ *   - publish the canonical in-band `error` event, then
+ *   - publish the missing `turn_done{status:"error"}` so the dashboard unpins.
+ *
+ * Either way we project `idle` (dispatchable — no sticky dead state; no daemon
+ * restart needed) and clear the per-turn bookkeeping. There is no queue-drain:
+ * the worker process is gone, so the next dispatch forks a fresh worker.
+ */
+function applyHardExit(w: TurnContext): ApplyResult {
+  const intents: Intent[] = [];
+  const turnWasLive = w.turnStart !== undefined;
+
+  if (turnWasLive) {
+    // Streaming blocks for the dead turn never got their own block-stop —
+    // flip them off `streaming` so the dashboard's tool/thinking bubbles
+    // don't render `running` forever.
+    intents.push({ kind: "finalize-blocks", status: "error" });
+    intents.push({ kind: "end-turn", turnId: w.turnId });
+    // Canonical in-band error so any consumer still listening knows the turn
+    // died (vs. a clean exit between turns).
+    intents.push({
+      kind: "publish-error",
+      turnId: w.turnId,
+      agent: w.agentName,
+      code: "worker_exited",
+      message: "Worker process exited mid-turn before reporting completion",
+      recoverable: true,
+    });
+    // Bug #2 fix: the missing terminal event. The dashboard pins/unpins the
+    // inflight turn on this; without it the turn stayed pinned forever.
+    intents.push({
+      kind: "publish-turn-done",
+      turnId: w.turnId,
+      agent: w.agentName,
+      status: "error",
+    });
+  }
+
+  // Heal to idle so the agent is dispatchable. The caller is responsible for
+  // the archived-terminal guard (a worker that exited because archiveAgent
+  // asked it to stop is a superseded Generation and never reaches this
+  // Transition) — the machine always heals a live-Generation hard exit.
+  intents.push({ kind: "set-status", name: w.agentName, status: "idle" });
+
+  return {
+    state: "idle",
+    projection: "idle",
+    mutations: {
+      turnStart: undefined,
+      activePrompt: undefined,
+      blocksThisTurn: 0,
+      lastExitStatus: "error",
+    },
+    intents,
   };
 }
 

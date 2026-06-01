@@ -491,48 +491,20 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     // `onExit` (below) still runs either way: one-shot bookkeeping is
     // per-process, not per-Generation.
     if (isCurrentGeneration(w)) {
-      // F4-A: any in-flight blocks for the current turn never got their own
-      // `block-stop` because the worker died without going through
-      // `runQuery`'s try/catch. Common path: stall watchdog SIGTERM at 30
-      // min — the kernel reaps the process before any user-space cleanup
-      // runs, so no `error` IPC event, no DB transition, and the
-      // dashboard's tool/thinking bubbles stay `running` forever. Walk the
-      // live registry here and finalize anything still streaming as
-      // `status='error'`. The normal IPC-driven `block-stop` path would have
-      // already emptied the map for clean exits; this is strictly the
-      // SIGTERM / SIGKILL / OOM / crash safety net.
-      // Fire-and-forget — the exit handler is sync, but `bsFinalize` is
-      // async (ADR-023). Errors are logged via the lifecycle.streaming-
-      // finalize.error channel.
-      void bsFinalize(w, "error").catch(() => {});
-      // If the worker died mid-turn the in-flight registry entry would leak —
-      // drop it here so the daemon doesn't hold accumulator state for a turn
-      // that can no longer make progress.
-      bsEndTurn(w.turnId);
+      // FRI-145 M5: demote this Generation up front so any racing IPC / abort-
+      // deadline / archive Transition sees `live.get(name) !== w` and no-ops,
+      // then drive the self-heal through the Turn-state machine's `hard-exit`
+      // Transition (fire-and-forget — the exit handler is sync but the machine
+      // is async under ADR-023). The machine finalizes any streaming blocks as
+      // `error`, publishes the previously-MISSING `turn_done{status:"error"}`
+      // (Bug #2: a SIGTERM/OOM/crash mid-turn used to finalize blocks + reset
+      // the row but never publish the terminal event, so the dashboard's
+      // inflight pin stayed up forever despite the agent being dispatchable),
+      // and heals the row to `idle`. The forced-refork case is handled by the
+      // Generation guard above: `forceWorkerRefork` `live.delete`s before the
+      // drain so this exit fires for a superseded Generation and skips here.
       live.delete(input.agentName);
-      // F1-A: preserve terminal statuses. If the worker just exited because
-      // `archiveAgent` asked it to stop, the row is already "archived" — we
-      // must not overwrite it back to "idle" or the workspace-cleanup half
-      // of an archive call would race the wrong status. Same for "error":
-      // a crash-marked row stays crashed. The lookup is async now (ADR-023);
-      // do it inside a fire-and-forget so the exit handler stays sync.
-      // The forced-refork case (which an old per-worker suppress-reset flag
-      // covered) is now handled by the Generation guard above:
-      // `forceWorkerRefork` `live.delete`s before awaiting the drain, so this
-      // exit fires for a superseded Generation and never reaches this branch.
-      void (async () => {
-        try {
-          const cur = await registry.getAgent(input.agentName);
-          if (cur && cur.status !== "archived" && cur.status !== "error") {
-            await registry.setStatus(input.agentName, "idle");
-          }
-        } catch (err) {
-          logger.log("warn", "lifecycle.exit.status-reset.error", {
-            agent: input.agentName,
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-      })();
+      void finalizeHardExit(w);
     }
     // Phase 5: `agent_lifecycle` SSE retired — Zero replicates the
     // agents row UPDATE so the dashboard sees the status drop on
@@ -966,6 +938,36 @@ export async function setAgentProjection(
   );
 }
 
+/**
+ * FRI-145 M5 stall channel. The per-agent watchdog (`watchdog.ts`) calls this
+ * fire-and-forget when a working worker blows past its heartbeat budget. The
+ * `stall` Transition projects `agents.status="stalled"` (the dashboard's
+ * warn-colored dot) through the single-writer machine — restoring the producer
+ * that was lost when the `agent_status` SSE was retired (Phase 5).
+ *
+ * V3 (the only deadlock/HOL guard): the watchdog NEVER awaits this inside its
+ * tick loop. It enqueues onto the agent-keyed Transition queue and moves on, so
+ * one stalled agent's queued status write can't head-of-line-block the watchdog
+ * across every other agent. The enqueue keeps the single-writer invariant — the
+ * watchdog does NOT call `registry.setStatus` directly.
+ *
+ * No-op when the agent isn't live (the worker already exited / was reforked):
+ * there is no in-flight turn to flag and the row's resting projection is the
+ * exit handler's concern, not the stall flag's.
+ */
+export async function stallAgent(agentName: string): Promise<void> {
+  const w = live.get(agentName);
+  if (!w) return;
+  await enqueueTransition(agentName, () => {
+    // Re-check the Generation inside the queued closure: by the time this runs
+    // the worker may have been reforked / archived / completed its turn. A
+    // superseded Generation must not write the durable `stalled` projection
+    // over a live replacement's `working`/`idle` or a terminal `archived`.
+    if (!isCurrentGeneration(w)) return Promise.resolve();
+    return runTransition(w, { kind: "stall" });
+  });
+}
+
 function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   // FRI-127 §6: defensively re-resolve the resume session id at the moment we
   // actually drain the prompt. The queue-drain path (`nextPrompts.shift()`)
@@ -1268,6 +1270,58 @@ async function forceKillStuckWorker(
   setTimeout(() => {
     if (w.child.exitCode === null && !w.child.killed) killPgrp(w.pgid, "SIGKILL");
   }, 1_500).unref();
+}
+
+/**
+ * FRI-145 M5 hard-exit self-heal. A worker process exited with a turn still in
+ * flight and NO terminal turn-complete/error ever processed (SIGTERM from the
+ * stall watchdog, SIGKILL, OOM, crash). The caller (`child.on("exit")`) has
+ * already demoted this Generation (`live.delete`) so this runs exactly once for
+ * the dying worker; a concurrent archive would have demoted the Generation
+ * first and the exit handler would never have reached here.
+ *
+ * Bug #2: the old exit handler finalized streaming blocks and reset the row to
+ * `idle` but never published `turn_done`, so the dashboard's inflight turn pin
+ * stayed up forever even though the agent was dispatchable. The `hard-exit`
+ * Transition publishes the missing `turn_done{status:"error"}` (plus the
+ * in-band `error` event) when a turn was live, then heals to `idle`.
+ *
+ * F1-A archived guard: if the row is already terminal (`archived` — a row a
+ * racing archive committed), DO NOT heal it to `idle`; the archive's
+ * workspace-cleanup half would otherwise race the wrong status. Read the row
+ * first and skip the whole Transition for an archived agent. (The pre-M5 guard
+ * also checked `!== "error"`; the agent-status `error` was pruned in M5, so the
+ * archived check is the only terminal state left to preserve.)
+ *
+ * Exported so the unit test can drive the self-heal directly with a fake worker
+ * + spied collaborators, without spawning a real child process whose `exit`
+ * event can't be reliably synthesized.
+ */
+export async function finalizeHardExit(
+  w: LiveWorker,
+  ports: TurnStatePorts<LiveWorker> = prodPorts,
+): Promise<void> {
+  try {
+    const cur = await registry.getAgent(w.agentName);
+    if (cur && cur.status === "archived") {
+      // Terminal — a racing archive owns this row. Preserve it; the archive
+      // already finalized the worker's turn. Still drop the per-turn block
+      // accumulators so the daemon doesn't leak state for a dead turn.
+      bsEndTurn(w.turnId);
+      logger.log("info", "lifecycle.exit.archived-preserved", {
+        agent: w.agentName,
+        turnId: w.turnId,
+      });
+      return;
+    }
+    await runTransition(w, { kind: "hard-exit" }, ports);
+  } catch (err) {
+    logger.log("warn", "lifecycle.exit.hard-exit.error", {
+      agent: w.agentName,
+      turnId: w.turnId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
