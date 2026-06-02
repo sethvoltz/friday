@@ -63,6 +63,7 @@ import {
   scanPreferences,
   sinceHoursAgo,
   appendRun,
+  triageSpawnPlan,
   updateProposal,
   type Proposal,
   type SaveProposalInput,
@@ -289,177 +290,9 @@ async function handle(
     return json(res, 200, await listAgentSessions(agentName));
   }
   if (method === "POST" && path === "/api/agents") {
-    const body = await readJson<{
-      type: AgentType;
-      name: string;
-      parentName: string;
-      prompt: string;
-      model?: string;
-      ticketId?: string;
-      worktree?: { repo: string; branch?: string; fromRef?: string };
-      reason?: string;
-    }>(req);
-    if (!body.name || !isValidAgentName(body.name)) {
-      return json(res, 400, {
-        error: "invalid name (must be lowercase alphanumeric + dashes, up to 64 chars)",
-      });
-    }
-    if (await registry.getAgent(body.name)) {
-      return json(res, 409, { error: `agent "${body.name}" already exists` });
-    }
-    if (body.type !== "builder" && body.type !== "helper" && body.type !== "bare") {
-      return json(res, 400, {
-        error: `cannot create agent of type "${body.type}" via this endpoint`,
-      });
-    }
-
-    // ADR-022 spawn-permission gate. Resolve the caller's agent type by
-    // looking up the parent row; absent parent ⇒ implicit orchestrator
-    // (matches the implicit-create path in POST /api/chat/turn). Builder
-    // and helper callers are restricted to spawning helpers and must
-    // include a non-empty `reason`.
-    const callerRow = body.parentName ? await registry.getAgent(body.parentName) : null;
-    const callerType: CallerType = callerRow?.type ?? "orchestrator";
-    const rejection = validateSpawnPermissions(
-      { type: body.type, reason: body.reason },
-      callerType,
-    );
-    if (rejection) {
-      return json(res, rejection.status, rejection.body);
-    }
-    const persistedReason =
-      callerType === "orchestrator" ? null : (body.reason ?? "").trim() || null;
-
-    let workingDirectory = process.cwd();
-    let worktreePath: string | undefined;
-    let branch: string | undefined;
-    if (body.type === "builder") {
-      const repo = body.worktree?.repo ?? process.cwd();
-      branch = body.worktree?.branch ?? `friday/${body.name}`;
-      try {
-        const ws = createWorkspace({
-          name: body.name,
-          baseRepo: repo,
-          branch,
-          fromRef: body.worktree?.fromRef,
-        });
-        workingDirectory = ws.path;
-        worktreePath = ws.path;
-      } catch (err) {
-        return json(res, 500, {
-          error: `workspace creation failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-    }
-
-    // §9: propagate the spawning agent's `appId` to its child. Builders are
-    // exempt — workspace containment (worktree cwd) is the stronger rule,
-    // and builders can't be declared in a manifest in v1 anyway.
-    const inheritedAppId =
-      body.type !== "builder" && body.parentName ? await registry.getAppId(body.parentName) : null;
-    await registry.registerAgent({
-      name: body.name,
-      type: body.type,
-      parentName: body.parentName,
-      ticketId: body.ticketId,
-      worktreePath,
-      branch,
-      appId: inheritedAppId ?? undefined,
-      spawnReason: persistedReason,
-    });
-
-    // ADR-022 telemetry: emit one `agent.spawn` event per successful
-    // spawn. Walks the parent chain to record true `depth` (1 =
-    // orchestrator-rooted) and the orchestrator-rooted `parentChain`
-    // capped at SPAWN_PARENT_CHAIN_CAP. The evolve depth scanner
-    // (`scanAgentSpawnDepth`) feeds off these lines.
-    try {
-      const { depth, parentChain } = await computeSpawnDepth(body.parentName, registry.getAgent);
-      logger.log("info", "agent.spawn", {
-        parent: body.parentName,
-        child: body.name,
-        type: body.type,
-        depth,
-        parentChain,
-        reason: persistedReason,
-      });
-    } catch (err) {
-      // Telemetry failure must never block the spawn — the row is
-      // already persisted and the worker is about to dispatch.
-      logger.log("warn", "agent.spawn.telemetry.error", {
-        agent: body.name,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    const turnId = `t_${randomUUID()}`;
-    const { systemPrompt: baseSystemPrompt } = await buildSystemPrompt({
-      name: body.name,
-      type: body.type,
-      parentName: body.parentName,
-    });
-    const bootstrapResults = await runHooks("agent:bootstrap", {
-      agentName: body.name,
-      agentType: body.type,
-      workingDirectory: worktreePath ?? workingDirectory,
-      branch,
-      parentName: body.parentName,
-      spawnPrompt: body.prompt,
-    });
-    const bootstrapAppends = bootstrapResults
-      .map((r) => r?.appendSystemPrompt)
-      .filter((s): s is string => typeof s === "string" && s.length > 0);
-    const bootstrapAugmentedBase =
-      bootstrapAppends.length > 0
-        ? `${baseSystemPrompt}\n\n---\n\n${bootstrapAppends.join("\n\n")}`
-        : baseSystemPrompt;
-    const modelCfg = normalizeModelConfig(cfg.model);
-    const { body: wrappedSpawnPrompt, systemPrompt: spawnSystemPrompt } = await buildDispatchPrompt(
-      { name: body.name, type: body.type, parentName: body.parentName },
-      {
-        kind: "agent_spawn",
-        userText: body.prompt,
-        baseSystemPromptOverride: bootstrapAugmentedBase,
-        parentName: body.parentName,
-      },
-    );
-    // FRI-71: persist the spawn-time prompt as a user block so the very first
-    // turn renders with the originating user bubble (not just an orphan
-    // assistant reply). The session id isn't known yet — `recordUserBlock`
-    // falls back to '__pending__' and the post-turn JSONL recovery rewrites
-    // it once the SDK assigns a real id.
-    try {
-      await recordUserBlock({
-        turnId,
-        agentName: body.name,
-        text: body.prompt,
-        source: "agent_spawn",
-      });
-    } catch (err) {
-      logger.log("warn", "chat.turn.user-block.error", {
-        agent: body.name,
-        source: "agent_spawn",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-    dispatchTurn({
-      agentName: body.name,
-      options: {
-        agentName: body.name,
-        agentType: body.type,
-        workingDirectory,
-        systemPrompt: spawnSystemPrompt,
-        prompt: wrappedSpawnPrompt,
-        turnId,
-        model: body.model ?? modelCfg.name,
-        thinking: modelCfg.thinking,
-        effort: modelCfg.effort,
-        daemonPort: resolveDaemonPort(cfg),
-        parentName: body.parentName,
-        mode: "long-lived",
-      },
-    });
-    return json(res, 201, { name: body.name, turn_id: turnId });
+    const body = await readJson<CreateAgentInput>(req);
+    const r = await createAgent(body, cfg);
+    return json(res, r.status, r.body);
   }
   if (method === "GET" && /^\/api\/agents\/[^/]+$/.test(path)) {
     const name = path.split("/")[3];
@@ -909,6 +742,48 @@ async function handle(
         proposalsUpdated: propose.updated.length,
         promotedToCritical: propose.promotedToCritical.length,
       });
+      // FRI-40 Phase 1: when enabled, auto-spawn a read-only triage helper
+      // for each proposal that just promoted to critical — across BOTH
+      // promote surfaces (fresh-create + rerank). Read with a strict
+      // `=== true` so the shallow-merge `{ evolve: {} }` case stays off.
+      // Spawn failures must never alter the scan's returned summary nor
+      // throw out of the handler (AC #7); the in-process `createAgent` 409
+      // gives idempotent dedup against an already-spawned triage helper
+      // (AC #6).
+      if (cfg.evolve?.autoSpawnTriageHelpers === true) {
+        try {
+          const triage = triageSpawnPlan([...propose.promotedToCritical, ...reranked.promoted]);
+          for (const t of triage) {
+            try {
+              const r = await createAgent(
+                {
+                  type: "helper",
+                  name: t.name,
+                  parentName: "scheduled-meta-daily",
+                  prompt: t.prompt,
+                  reason: t.reason,
+                },
+                cfg,
+              );
+              if (r.status === 201)
+                logger.log("info", "evolve.triage.spawn", { name: t.name, reason: t.reason });
+              else if (r.status === 409)
+                logger.log("info", "evolve.triage.spawn.skip", { name: t.name, status: 409 });
+              else
+                logger.log("warn", "evolve.triage.spawn.error", { name: t.name, status: r.status });
+            } catch (err) {
+              logger.log("warn", "evolve.triage.spawn.error", {
+                name: t.name,
+                message: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+        } catch (err) {
+          logger.log("warn", "evolve.triage.spawn.error", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       return json(res, 200, {
         signals: signals.length,
         created: propose.created.length,
@@ -1387,6 +1262,202 @@ async function handle(
   }
 
   return json(res, 404, { error: "not found", path });
+}
+
+/** Request shape for `createAgent` — the same object `POST /api/agents` parses. */
+export interface CreateAgentInput {
+  type: AgentType;
+  name: string;
+  parentName: string;
+  prompt: string;
+  model?: string;
+  ticketId?: string;
+  worktree?: { repo: string; branch?: string; fromRef?: string };
+  reason?: string;
+}
+
+/**
+ * Core agent-creation logic, extracted from the `POST /api/agents` route so
+ * that in-process callers (the evolve auto-triage hook, FRI-40) can reuse it
+ * without an HTTP round-trip. Behavior is byte-for-byte identical to the old
+ * route body: it performs name validation (400), the duplicate-name check
+ * (409 via `registry.getAgent`), the type check (400), the ADR-022
+ * spawn-permission gate, workspace creation for builders, `registerAgent`,
+ * `agent.spawn` telemetry, prompt assembly, the spawn user-block, and
+ * `dispatchTurn`, then returns `{ status: 201, body: { name, turn_id } }`.
+ *
+ * Returning the 409 from inside this function is what gives the in-process
+ * evolve call its dedup: a second scan that re-promotes the same proposal
+ * hits the existing `triage-<id>` row and gets a 409, not a duplicate spawn.
+ */
+async function createAgent(
+  body: CreateAgentInput,
+  cfg: ReturnType<typeof loadConfig>,
+): Promise<{ status: number; body: unknown }> {
+  if (!body.name || !isValidAgentName(body.name)) {
+    return {
+      status: 400,
+      body: {
+        error: "invalid name (must be lowercase alphanumeric + dashes, up to 64 chars)",
+      },
+    };
+  }
+  if (await registry.getAgent(body.name)) {
+    return { status: 409, body: { error: `agent "${body.name}" already exists` } };
+  }
+  if (body.type !== "builder" && body.type !== "helper" && body.type !== "bare") {
+    return {
+      status: 400,
+      body: { error: `cannot create agent of type "${body.type}" via this endpoint` },
+    };
+  }
+
+  // ADR-022 spawn-permission gate. Resolve the caller's agent type by
+  // looking up the parent row; absent parent ⇒ implicit orchestrator
+  // (matches the implicit-create path in POST /api/chat/turn). Builder
+  // and helper callers are restricted to spawning helpers and must
+  // include a non-empty `reason`.
+  const callerRow = body.parentName ? await registry.getAgent(body.parentName) : null;
+  const callerType: CallerType = callerRow?.type ?? "orchestrator";
+  const rejection = validateSpawnPermissions({ type: body.type, reason: body.reason }, callerType);
+  if (rejection) {
+    return { status: rejection.status, body: rejection.body };
+  }
+  const persistedReason = callerType === "orchestrator" ? null : (body.reason ?? "").trim() || null;
+
+  let workingDirectory = process.cwd();
+  let worktreePath: string | undefined;
+  let branch: string | undefined;
+  if (body.type === "builder") {
+    const repo = body.worktree?.repo ?? process.cwd();
+    branch = body.worktree?.branch ?? `friday/${body.name}`;
+    try {
+      const ws = createWorkspace({
+        name: body.name,
+        baseRepo: repo,
+        branch,
+        fromRef: body.worktree?.fromRef,
+      });
+      workingDirectory = ws.path;
+      worktreePath = ws.path;
+    } catch (err) {
+      return {
+        status: 500,
+        body: {
+          error: `workspace creation failed: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      };
+    }
+  }
+
+  // §9: propagate the spawning agent's `appId` to its child. Builders are
+  // exempt — workspace containment (worktree cwd) is the stronger rule,
+  // and builders can't be declared in a manifest in v1 anyway.
+  const inheritedAppId =
+    body.type !== "builder" && body.parentName ? await registry.getAppId(body.parentName) : null;
+  await registry.registerAgent({
+    name: body.name,
+    type: body.type,
+    parentName: body.parentName,
+    ticketId: body.ticketId,
+    worktreePath,
+    branch,
+    appId: inheritedAppId ?? undefined,
+    spawnReason: persistedReason,
+  });
+
+  // ADR-022 telemetry: emit one `agent.spawn` event per successful
+  // spawn. Walks the parent chain to record true `depth` (1 =
+  // orchestrator-rooted) and the orchestrator-rooted `parentChain`
+  // capped at SPAWN_PARENT_CHAIN_CAP. The evolve depth scanner
+  // (`scanAgentSpawnDepth`) feeds off these lines.
+  try {
+    const { depth, parentChain } = await computeSpawnDepth(body.parentName, registry.getAgent);
+    logger.log("info", "agent.spawn", {
+      parent: body.parentName,
+      child: body.name,
+      type: body.type,
+      depth,
+      parentChain,
+      reason: persistedReason,
+    });
+  } catch (err) {
+    // Telemetry failure must never block the spawn — the row is
+    // already persisted and the worker is about to dispatch.
+    logger.log("warn", "agent.spawn.telemetry.error", {
+      agent: body.name,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const turnId = `t_${randomUUID()}`;
+  const { systemPrompt: baseSystemPrompt } = await buildSystemPrompt({
+    name: body.name,
+    type: body.type,
+    parentName: body.parentName,
+  });
+  const bootstrapResults = await runHooks("agent:bootstrap", {
+    agentName: body.name,
+    agentType: body.type,
+    workingDirectory: worktreePath ?? workingDirectory,
+    branch,
+    parentName: body.parentName,
+    spawnPrompt: body.prompt,
+  });
+  const bootstrapAppends = bootstrapResults
+    .map((r) => r?.appendSystemPrompt)
+    .filter((s): s is string => typeof s === "string" && s.length > 0);
+  const bootstrapAugmentedBase =
+    bootstrapAppends.length > 0
+      ? `${baseSystemPrompt}\n\n---\n\n${bootstrapAppends.join("\n\n")}`
+      : baseSystemPrompt;
+  const modelCfg = normalizeModelConfig(cfg.model);
+  const { body: wrappedSpawnPrompt, systemPrompt: spawnSystemPrompt } = await buildDispatchPrompt(
+    { name: body.name, type: body.type, parentName: body.parentName },
+    {
+      kind: "agent_spawn",
+      userText: body.prompt,
+      baseSystemPromptOverride: bootstrapAugmentedBase,
+      parentName: body.parentName,
+    },
+  );
+  // FRI-71: persist the spawn-time prompt as a user block so the very first
+  // turn renders with the originating user bubble (not just an orphan
+  // assistant reply). The session id isn't known yet — `recordUserBlock`
+  // falls back to '__pending__' and the post-turn JSONL recovery rewrites
+  // it once the SDK assigns a real id.
+  try {
+    await recordUserBlock({
+      turnId,
+      agentName: body.name,
+      text: body.prompt,
+      source: "agent_spawn",
+    });
+  } catch (err) {
+    logger.log("warn", "chat.turn.user-block.error", {
+      agent: body.name,
+      source: "agent_spawn",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+  dispatchTurn({
+    agentName: body.name,
+    options: {
+      agentName: body.name,
+      agentType: body.type,
+      workingDirectory,
+      systemPrompt: spawnSystemPrompt,
+      prompt: wrappedSpawnPrompt,
+      turnId,
+      model: body.model ?? modelCfg.name,
+      thinking: modelCfg.thinking,
+      effort: modelCfg.effort,
+      daemonPort: resolveDaemonPort(cfg),
+      parentName: body.parentName,
+      mode: "long-lived",
+    },
+  });
+  return { status: 201, body: { name: body.name, turn_id: turnId } };
 }
 
 function handleEvents(

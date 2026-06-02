@@ -8,8 +8,13 @@
  * edits.
  */
 
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  CONFIG_PATH,
+  DEFAULT_CONFIG,
+  loadConfig,
   PROD_DAEMON_PORT,
   PROD_DASHBOARD_PORT,
   resolveDaemonPort,
@@ -87,5 +92,43 @@ describe("resolveDashboardPort", () => {
       if (originalEnv === undefined) delete process.env.FRIDAY_DAEMON_PORT;
       else process.env.FRIDAY_DAEMON_PORT = originalEnv;
     }
+  });
+});
+
+describe("evolve.autoSpawnTriageHelpers (FRI-40)", () => {
+  // CONFIG_PATH is already bound to the scoped tmpdir FRIDAY_DATA_DIR that
+  // the package's vitest-setup forces before any @friday/shared import; the
+  // module imports above are what bound it. We write/clear config.json at
+  // that path rather than re-binding the data dir mid-process.
+  beforeEach(() => {
+    if (!existsSync(dirname(CONFIG_PATH))) mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+    rmSync(CONFIG_PATH, { force: true });
+  });
+  afterEach(() => {
+    rmSync(CONFIG_PATH, { force: true });
+  });
+
+  it("DEFAULT_CONFIG ships the flag OFF by default", () => {
+    expect(DEFAULT_CONFIG.evolve?.autoSpawnTriageHelpers).toBe(false);
+  });
+
+  it("loadConfig() with no config.json returns the default OFF flag", () => {
+    // No file written — loadConfig clones DEFAULT_CONFIG.
+    expect(loadConfig().evolve?.autoSpawnTriageHelpers).toBe(false);
+  });
+
+  it("shallow merge: a user `{ evolve: {} }` overrides the whole evolve object → flag undefined, NOT false", () => {
+    // The shallow merge in loadConfig replaces DEFAULT_CONFIG.evolve wholesale
+    // with the user's `{}`, so the nested default does NOT survive. This pins
+    // why the daemon must read the flag with a strict `=== true` check rather
+    // than relying on the default leaking through a deep merge.
+    writeFileSync(CONFIG_PATH, JSON.stringify({ evolve: {} }) + "\n");
+    expect(loadConfig().evolve?.autoSpawnTriageHelpers).toBeUndefined();
+    expect(loadConfig().evolve?.autoSpawnTriageHelpers).not.toBe(false);
+  });
+
+  it("an explicit `{ evolve: { autoSpawnTriageHelpers: true } }` loads as true", () => {
+    writeFileSync(CONFIG_PATH, JSON.stringify({ evolve: { autoSpawnTriageHelpers: true } }) + "\n");
+    expect(loadConfig().evolve?.autoSpawnTriageHelpers).toBe(true);
   });
 });

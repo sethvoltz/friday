@@ -288,14 +288,14 @@ function computeNext(spec: ScheduleSpec): Date | null {
  * near-duplicates → surface anything `critical` to the orchestrator via
  * mail. Maintains continuity across runs through `state.md`.
  */
-const META_DAILY_PROMPT = [
+export const META_DAILY_PROMPT = [
   "You are the daily evolve meta-agent. Your job for this run:",
   "",
   "1. Call `evolve_scan({ windowHours: 24 })` to walk the daemon log + usage + transcripts and create or merge proposals from any new signals.",
   "2. Call `evolve_enrich({ limit: 20 })` to replace templated proposal bodies with Sonnet-generated root-cause analysis on the highest-priority unenriched items.",
   "3. Call `evolve_cluster({})` to group near-duplicate proposals.",
   "4. Call `evolve_list({ status: 'critical' })` and compare against the last run's `state.md` (auto-injected above).",
-  "5. For any new `critical` proposals — or proposals that gained signals since yesterday — mail the orchestrator with a short summary (`mail_send({ to: 'friday', type: 'notification', body: ... })`). Include proposal ids so the orchestrator can `evolve_get` them.",
+  "5. For any new `critical` proposals — or proposals that gained signals since yesterday — mail the orchestrator with a short summary (`mail_send({ to: 'friday', type: 'notification', body: ... })`). Include proposal ids so the orchestrator can `evolve_get` them. Note: if auto-triage is enabled (`evolve.autoSpawnTriageHelpers`), a read-only **triage helper** named `triage-<proposalId>` may already be investigating each newly-critical proposal and will mail the orchestrator its own root-cause findings — so mention that a triage helper is already on it rather than asking the orchestrator to spawn one.",
   "6. Family-resolution: the `evolve_scan` response carries `familyResolved` and `familyRejected` counts. These represent variants auto-suppressed because a sibling proposal in the same `signal.key` family was applied or rejected within the last 14 days. Skip such proposals in your daily mail — they're already covered. Only call them out if `familyResolved >= 3` in a single scan (a fix that keeps re-triggering deserves a re-look at the underlying detector or the original fix).",
   "7. Update `state.md` with the run's proposal counts + critical ids you saw, so tomorrow knows what's new.",
   "8. Be quiet by default. Skip the mail if nothing actionable changed.",
