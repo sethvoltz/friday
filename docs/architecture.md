@@ -419,10 +419,25 @@ The `agents.status` column has four resting values (plus the transient
 | `stalled`  | Watchdog flagged the worker for missing its heartbeat budget (no exit yet)              | No        |
 | `archived` | Agent stopped receiving work; for builders, the worktree is gone and the branch deleted | Yes       |
 
+Every write to `agents.status` flows through a **single writer** — the
+Turn-state machine (`services/daemon/src/agent/turn-state-machine.ts`), reached
+via the per-agent-name Transition queue (`transition-queue.ts`). The turn
+lifecycle, archive, boot recovery, and the invariant auditor no longer write the
+column on their own threads; each enqueues a Transition and the machine projects
+the resulting `agents.status` through the one ADR-031 `registry.setStatus` gate
+(FRI-145, ADR-032). `agents.status` is a **Status projection** of the machine's
+authoritative in-memory **Turn state** (`idle | working | aborting |
+force-killed`), not an independent source of truth — `force-killed` and
+`aborting` are transient Turn states with no resting projection; `stalled` and
+`archived` are projections with no resting Turn state.
+
 `stalled` is produced by the per-agent watchdog (`watchdog.ts`): when a working
 worker blows past its heartbeat budget the watchdog enqueues a `stall`
 Transition that projects `agents.status="stalled"` through the Turn-state
-machine (FRI-145 M5). The dashboard paints the warn-colored sidebar dot from it.
+machine (FRI-145 M5). The watchdog enqueues fire-and-forget and never awaits the
+Transition inside its tick loop, so one stalled agent can't head-of-line-block
+the watchdog across all agents; the machine stays the sole `setStatus` caller.
+The dashboard paints the warn-colored sidebar dot from it.
 
 The agent-status `error` value was **removed** (FRI-145 M5). A worker that exits
 mid-turn with no terminal turn-complete/error no longer parks the row at a
@@ -451,7 +466,11 @@ Sidebar filter buckets reflect these semantics: "Show archived" reveals the term
 
 ### State-boundary checks (inline)
 
-Status mutations cluster around three code paths, each of which validates the invariants it owns:
+After FRI-145 (ADR-032) these are no longer three independent writers of
+`agents.status` — each is a **Transition source** that enqueues onto the agent's
+Transition queue, and the single-writer Turn-state machine performs the actual
+`registry.setStatus`. They remain the load-bearing boundaries because each still
+owns the invariant it validates before (or while) enqueuing:
 
 - **Worker exit handler** (`lifecycle.ts:child.on("exit")` → `finalizeHardExit`, FIX_FORWARD F1-A; FRI-145 M5): a current-Generation exit drives the machine's `hard-exit` Transition, which publishes the missing `turn_done{status:"error"}` for a turn that died in flight and heals the row to `idle`. It first reads the current row's status; if `archived` (a racing archive owns it) it leaves the row alone — the terminal state never gets downgraded by an exit event, which closes the race that produced the friday-e2e-probe zombie. (A superseded Generation's exit is a structural no-op before any of this.)
 - **`archiveAgent()`** (`lifecycle.ts`): sets `archived` synchronously, publishes `agent_lifecycle:archive`, then awaits the worker's actual exit. Awaiting (via the merged `POST /api/agents/:name/archive`) makes the HTTP response a strong "actually archived" signal.

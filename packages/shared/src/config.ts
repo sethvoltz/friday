@@ -134,9 +134,11 @@ export interface LinearIntegrationConfig {
 export interface WatchdogConfig {
   /**
    * When true, the watchdog refork-recovers stalled long-lived workers
-   * (kill + respawn with `resume: sessionId`) instead of only surfacing
-   * `agent_status: stalled`. Default false — flag this on once you trust
-   * the stall threshold isn't catching false positives.
+   * (kill + respawn with `resume: sessionId`) instead of only projecting
+   * `agents.status="stalled"` via the Turn-state machine's `stall`
+   * Transition (FRI-145). Default true (see `DEFAULT_CONFIG` below) — the
+   * per-agent-type stall thresholds keep it from firing on legitimate long
+   * scheduled runs; set `watchdog.refork: false` for observe-only.
    */
   refork?: boolean;
   /**
