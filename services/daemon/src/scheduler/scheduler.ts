@@ -181,18 +181,28 @@ export function startScheduler(): NodeJS.Timeout {
   }, 30_000);
 }
 
-async function tick(): Promise<void> {
-  const db = getDb();
-  const now = new Date();
-  const all = await db.select().from(schema.schedules);
-  // Phase 4.6: skip 'deleted' (tombstone — dashboard mutator
-  // soft-deleted; row stays for cross-device convergence but the
-  // schedule is logically gone) AND 'pending_register' /
-  // 'reload_requested' (the LISTEN handler hasn't completed
-  // the register/recompute yet; `nextRunAt` may be null or
-  // stale). The 'active' and 'paused' statuses are the only ones
-  // the tick should fire from.
-  const due = all.filter(
+/**
+ * The schedules the tick should fire at `now`: not paused, not a
+ * tombstone / in-flight-register status, with a set and due nextRunAt.
+ *
+ * Phase 4.6: skip 'deleted' (tombstone — dashboard mutator soft-deleted;
+ * row stays for cross-device convergence but the schedule is logically
+ * gone) AND 'pending_register' / 'reload_requested' (the LISTEN handler
+ * hasn't completed the register/recompute yet; `nextRunAt` may be null or
+ * stale). The 'active' and 'paused' statuses are the only ones the tick
+ * should fire from.
+ *
+ * Exported so tests exercise the REAL selection predicate — in particular
+ * that a fired one-shot reminder (nextRunAt nulled, FRI-143) is never
+ * re-selected — rather than a hand-rolled copy that could silently drift
+ * from production (a regression dropping `nextRunAt !== null` here would
+ * re-fire turnless one-shot reminders every tick).
+ */
+export function selectDueSchedules(
+  rows: (typeof schema.schedules.$inferSelect)[],
+  now: Date,
+): (typeof schema.schedules.$inferSelect)[] {
+  return rows.filter(
     (r) =>
       !r.paused &&
       r.status !== "deleted" &&
@@ -201,6 +211,13 @@ async function tick(): Promise<void> {
       r.nextRunAt !== null &&
       r.nextRunAt <= now,
   );
+}
+
+async function tick(): Promise<void> {
+  const db = getDb();
+  const now = new Date();
+  const all = await db.select().from(schema.schedules);
+  const due = selectDueSchedules(all, now);
   for (const r of due) {
     if (isAgentLive(r.name)) {
       // FIX_FORWARD 4.4: previous fire still running. Don't leave

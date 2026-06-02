@@ -30,13 +30,16 @@ let fireSchedule: (typeof import("./scheduler.js"))["fireSchedule"];
 let nextRunAfterFire: (typeof import("./scheduler.js"))["nextRunAfterFire"];
 let upsertSchedule: (typeof import("./scheduler.js"))["upsertSchedule"];
 let triggerSchedule: (typeof import("./scheduler.js"))["triggerSchedule"];
+let selectDueSchedules: (typeof import("./scheduler.js"))["selectDueSchedules"];
+let processPendingScheduleRow: (typeof import("./listener.js"))["processPendingScheduleRow"];
 let eventBus: (typeof import("../events/bus.js"))["eventBus"];
 let lifecycle: typeof import("../agent/lifecycle.js");
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "reminder-fire" });
-  ({ fireSchedule, nextRunAfterFire, upsertSchedule, triggerSchedule } =
+  ({ fireSchedule, nextRunAfterFire, upsertSchedule, triggerSchedule, selectDueSchedules } =
     await import("./scheduler.js"));
+  ({ processPendingScheduleRow } = await import("./listener.js"));
   ({ eventBus } = await import("../events/bus.js"));
   lifecycle = await import("../agent/lifecycle.js");
 });
@@ -65,6 +68,7 @@ async function seedRow(row: {
   taskPrompt: string;
   deliveryJson?: Record<string, unknown> | null;
   nextRunAt: Date | null;
+  status?: string;
 }): Promise<typeof schema.schedules.$inferSelect> {
   const now = new Date();
   await getDb()
@@ -75,6 +79,7 @@ async function seedRow(row: {
       runAt: row.runAt ?? null,
       taskPrompt: row.taskPrompt,
       paused: false,
+      status: row.status ?? "active",
       kind: row.kind,
       deliveryJson: row.deliveryJson ?? null,
       nextRunAt: row.nextRunAt,
@@ -239,11 +244,13 @@ describe("FRI-143 exactly-once one-shot + recurring advance (AC4)", () => {
       .limit(1);
     expect(afterFirst[0]!.nextRunAt).toBeNull();
 
-    // Second tick: re-select using the REAL tick filter (nextRunAt !== null
-    // AND nextRunAt <= now). The nulled row must not be selected.
+    // Second tick: re-select using the REAL exported tick predicate
+    // (selectDueSchedules), NOT a hand-rolled copy — so a regression dropping
+    // `nextRunAt !== null` from production's filter is actually caught here.
     const now = new Date();
     const all = await getDb().select().from(schema.schedules);
-    const due2 = all.filter((r) => r.nextRunAt !== null && r.nextRunAt <= now && !r.paused);
+    const due2 = selectDueSchedules(all, now);
+    expect(due2.some((r) => r.name === "once")).toBe(false);
     expect(due2.length).toBe(0);
     for (const r of due2) await fireSchedule(r);
 
@@ -352,6 +359,36 @@ describe("FRI-143 exactly-once one-shot + recurring advance (AC4)", () => {
       .where(eq(schema.schedules.name, "manual-once"))
       .limit(1);
     expect(after[0]!.nextRunAt).toBeNull();
+
+    const blocks = await reminderBlocks();
+    expect(blocks.length).toBe(1);
+  });
+
+  it("AC4 (gap fix, LISTEN path): a one-shot reminder fired via processPendingScheduleRow (status='trigger_requested') keeps nextRunAt null — the listener tail uses nextRunAfterFire, not computeNext", async () => {
+    // Directly exercises listener.ts's trigger_requested branch (the actual
+    // gap-fix site). triggerSchedule above covers the scheduler path; this
+    // covers the listener's separate post-fire UPDATE. Reverting that line to
+    // computeNext(row) would re-arm nextRunAt to the past runAt and fail here.
+    const runAtIso = new Date(Date.now() - 1000).toISOString();
+    await seedRow({
+      name: "listener-once",
+      kind: "reminder",
+      runAt: runAtIso,
+      taskPrompt: "listener once",
+      deliveryJson: { channel: "chat", title: "listener once" },
+      nextRunAt: new Date(runAtIso),
+      status: "trigger_requested",
+    });
+
+    await processPendingScheduleRow("listener-once");
+
+    const after = await getDb()
+      .select()
+      .from(schema.schedules)
+      .where(eq(schema.schedules.name, "listener-once"))
+      .limit(1);
+    expect(after[0]!.nextRunAt).toBeNull();
+    expect(after[0]!.status).toBe("active");
 
     const blocks = await reminderBlocks();
     expect(blocks.length).toBe(1);

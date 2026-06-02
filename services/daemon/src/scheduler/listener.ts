@@ -50,8 +50,13 @@ function computeNext(row: typeof schema.schedules.$inferSelect): Date | null {
 
 /**
  * Process a single pending schedule row. Idempotent on row state.
+ *
+ * Exported for tests: the `trigger_requested` branch is the FRI-143 gap-fix
+ * site (it must use `nextRunAfterFire`, not the local `computeNext`, so a
+ * manually-triggered one-shot reminder is not re-armed). Testing it directly
+ * pins that line rather than relying on the `triggerSchedule` (scheduler) path.
  */
-async function processPendingScheduleRow(name: string): Promise<void> {
+export async function processPendingScheduleRow(name: string): Promise<void> {
   const db = getDb();
   const rows = await db
     .select()
