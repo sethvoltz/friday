@@ -1,15 +1,15 @@
 import { defineCommand } from "citty";
 import pc from "picocolors";
-import { spawnSync } from "node:child_process";
+import * as launchd from "../lib/launchd.js";
 
 /**
- * `friday stop` — thin alias over `brew services stop friday`.
+ * `friday stop` — thin alias over `launchctl bootout` (FRI-146 / ADR-033).
  *
  * launchd + the supervisor handle cascade-stop (FRI-88 §0 design
- * constraint): SIGTERM to the supervisor signals every child's process
- * group, catching grandchildren. No more zombie zero-cache workers
- * after `friday stop` — that was the FRI-83 failure mode this entire
- * supervision rework exists to close.
+ * constraint): booting out the supervisor sends SIGTERM, which signals
+ * every child's process group, catching grandchildren. No more zombie
+ * zero-cache workers after `friday stop` — that was the FRI-83 failure
+ * mode this entire supervision rework exists to close.
  *
  * Single-service stops error out — the supervisor owns the whole stack.
  */
@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 export const stopCommand = defineCommand({
   meta: {
     name: "stop",
-    description: "Stop Friday's prod stack (delegates to `brew services stop friday`).",
+    description: "Stop Friday's prod stack (launchd bootout).",
   },
   args: {
     service: {
@@ -33,11 +33,8 @@ export const stopCommand = defineCommand({
       process.exit(1);
     }
 
-    console.log(pc.dim("stopping friday stack via brew services"));
-    const r = spawnSync("brew", ["services", "stop", "friday"], {
-      stdio: "inherit",
-    });
-    if (r.status !== 0) process.exit(r.status ?? 1);
+    console.log(pc.dim("stopping friday stack via launchd"));
+    launchd.bootout();
     // Don't auto-stop cloudflared — it's a separate user launch agent
     // (`com.cloudflare.cloudflared`) installed by `friday setup --cloudflare`.
     // Operators tear it down with `cloudflared service uninstall` when they

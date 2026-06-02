@@ -1,0 +1,71 @@
+name: Release Publish
+
+# Fires when release-please's merged Release PR cuts a GitHub Release. Builds
+# the pre-baked, ABI-matched darwin-arm64 tarball on macos-latest (the standard
+# Apple Silicon runner — free on public repos; do NOT swap for a *-xlarge billed
+# label) and uploads it as a Release asset alongside its .sha256 + VERSION.
+#
+# NO formula render, NO GitHub-App token, NO brew-tap push: Friday is
+# distributed via install.sh + `friday update` pulling these assets directly
+# (FRI-146 / ADR-033). That whole brew-formula publish tail is CUT.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Pack + upload darwin-arm64 tarball
+    # Standard Apple Silicon runner — produces the darwin-arm64 pre-baked tree
+    # with native addons ABI-matched to the pinned Node. macos-latest is free on
+    # public repos; the larger *-xlarge labels are billed and must not be used.
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      # Pinned to a full commit SHA (not the mutable @v5 tag): this job runs
+      # with `contents: write` and produces the exact assets users install via
+      # install.sh / `friday update`, so a retagged/compromised third-party
+      # action could inject into the published tarball (ADR-033). Dependabot
+      # keeps the pin current.
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Prune dev dependencies so the bundled node_modules is the prod tree the
+      # tarball ships. Runs under the EXACT pinned Node (node-version-file), so
+      # the rebuilt native addons (@oxfmt/binding, @rocicorp/zero-sqlite3,
+      # better-sqlite3, sharp) are ABI-matched to the fnm-provisioned runtime.
+      - name: Prune to prod dependencies
+        run: pnpm install --prod --frozen-lockfile
+
+      - name: Pack the pre-baked tarball
+        id: pack
+        run: node packaging/pack.mjs --out dist-pack
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "${{ steps.pack.outputs.tarball }}" \
+            "${{ steps.pack.outputs.sha256_file }}" \
+            "${{ steps.pack.outputs.version_file }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber

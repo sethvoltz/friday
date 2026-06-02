@@ -59,9 +59,7 @@ export const attachCommand = defineCommand({
     const logPath = getLogPath(target);
     if (!existsSync(logPath)) {
       console.error(pc.red(`no log at ${logPath}`));
-      console.error(
-        `  start the stack first: ${pc.cyan("friday start")} (or ${pc.cyan("brew services start friday")}).`,
-      );
+      console.error(`  start the stack first: ${pc.cyan("friday start")}.`);
       console.error(
         `  the supervisor creates the log on first child spawn — it won't exist before that.`,
       );

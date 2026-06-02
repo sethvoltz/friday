@@ -456,6 +456,67 @@ describe("buildSpecs — zero-cache env", () => {
   });
 });
 
+// ---- child-spawn command resolution (FRI-146 / AC#16) ---------------
+
+describe("buildSpecs — spawns via process.execPath, never pnpm/bare-node", () => {
+  /**
+   * FRI-146 / ADR-033: the launchd plist launches the supervisor through
+   * `fnm exec -- node …`, so `process.execPath` inside it IS the fnm-resolved
+   * pinned node. Every child must be spawned via `process.execPath` — never
+   * bare `node`/`pnpm` from PATH, never a `.bin` shim (whose baked absolute
+   * NODE_PATH doesn't survive relocation to ~/.local/share/friday/versions/).
+   * This is the load-bearing change that dissolves the FRI-138 half-stack.
+   */
+  const ROOT = "/tmp/friday-repo-root-fixture";
+
+  it("daemon, dashboard, and zero-cache all use cmd === process.execPath", () => {
+    const specs = buildSpecs(ROOT);
+    for (const name of ["daemon", "dashboard", "zero-cache"] as const) {
+      const spec = specs.find((s) => s.name === name);
+      expect(spec, `${name} spec should exist`).toBeDefined();
+      expect(spec!.cmd, `${name} must spawn via process.execPath`).toBe(process.execPath);
+    }
+  });
+
+  it("no spec spawns `node`/`pnpm` from PATH or `pnpm exec`", () => {
+    const specs = buildSpecs(ROOT);
+    for (const spec of specs) {
+      expect(spec.cmd).not.toBe("node");
+      expect(spec.cmd).not.toBe("pnpm");
+      expect(spec.args).not.toContain("exec"); // would be `pnpm exec …`
+    }
+  });
+
+  it("zero-cache spawns @rocicorp/zero's cli.js directly (not the .bin shim)", () => {
+    const specs = buildSpecs(ROOT);
+    const zero = specs.find((s) => s.name === "zero-cache");
+    expect(zero, "zero-cache spec should exist").toBeDefined();
+    expect(zero!.args).toHaveLength(1);
+    // The arg is the compiled cli.js under the dashboard's node_modules —
+    // resolved by direct path join, bypassing the pnpm `.bin` NODE_PATH shim.
+    expect(zero!.args[0]).toBe(
+      join(
+        ROOT,
+        "services",
+        "dashboard",
+        "node_modules",
+        "@rocicorp",
+        "zero",
+        "out",
+        "zero",
+        "src",
+        "cli.js",
+      ),
+    );
+  });
+
+  it("daemon and dashboard keep their entry-script args unchanged", () => {
+    const specs = buildSpecs(ROOT);
+    expect(specs.find((s) => s.name === "daemon")!.args).toEqual(["dist/index.js"]);
+    expect(specs.find((s) => s.name === "dashboard")!.args).toEqual(["server-entry.mjs"]);
+  });
+});
+
 // ---- crash-loop window arithmetic -----------------------------------
 
 describe("crash-loop guard arithmetic", () => {
