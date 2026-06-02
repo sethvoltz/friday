@@ -364,6 +364,8 @@ Hybrid worker model:
 - **Long-lived** for orchestrator, builder, helper, bare. Worker mainLoop: run `query()` → drain mail → idle on `waitForMail` (60s timeout fallback) → repeat. Driven by user input on `/api/chat/turn` or by `mail-wakeup` IPC from the daemon's mail bridge.
 - **One-shot** for scheduled. Worker fires, runs the SDK iterator, exits. State continuity across fires is handled by `<stateDir>/state.md` (agent-written) + `<stateDir>/last-run.md` (daemon-written), each capped at 64 KiB on injection.
 
+The scheduler `schedules` table carries a `kind` discriminator. `kind='agent-run'` (the default) is the path above: a fire spawns a one-shot worker via `spawnScheduledRun`. `kind='reminder'` (FRI-143) fires through the same 30s tick / LISTEN paths but runs `deliverReminder` instead — it writes a `role:'user'`, `source:'reminder'` chat block into the target (default orchestrator) chat via `recordUserBlock` and stops. No worker spawns, no turn, no tokens; the reminder is a pure notification. The cross-device unread badge is bumped by the `friday_blocks_increment_unread()` Postgres trigger, whose source allowlist includes `'reminder'` — not by an `agent_message` SSE (a `role:'user'` block deliberately emits none). One-shot reminders (`runAt`, no cron) null their `nextRunAt` on fire so the tick filter permanently drops them; recurring reminders advance via the host-TZ `computeNext` path (FRI-98 timezone support is not yet built). See ADR-035.
+
 ### Per-agent home directories (FRI-61)
 
 Each worker runs with a stable `cwd` so the Claude SDK's session-transcript layout (`~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`) doesn't shift across daemon-install changes:

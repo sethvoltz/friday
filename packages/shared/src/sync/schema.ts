@@ -173,6 +173,8 @@ const schedules = table("schedules")
     last_run_id: string().optional(),
     meta_json: json().optional(),
     app_id: string().optional(),
+    kind: string<"agent-run" | "reminder">(),
+    delivery_json: json().optional(),
     status: string<
       | "active"
       | "pending_register"

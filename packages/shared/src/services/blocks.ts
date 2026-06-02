@@ -25,6 +25,9 @@ export type BlockSource =
   | "schedule"
   /** Watchdog-injected notice when a stalled worker is reforked. */
   | "refork_notice"
+  /** FRI-143: user-facing scheduled reminder delivered as a chat block
+   *  without waking any agent. Written by `deliverReminder` on fire. */
+  | "reminder"
   /** Boot-time heal for an SDK session wedged on a dangling
    *  `tool_use` (worker died mid-tool-call). See
    *  `services/daemon/src/agent/dangling-tool-use-recovery.ts`. */

@@ -35,7 +35,7 @@ import pgPkg from "pg";
 import { getDb, getPool, nextRun, schema, LISTEN_CHANNELS } from "@friday/shared";
 import * as registry from "../agent/registry.js";
 import { logger } from "../log.js";
-import { fireSchedule } from "./scheduler.js";
+import { fireSchedule, nextRunAfterFire } from "./scheduler.js";
 
 const { Client } = pgPkg;
 
@@ -50,8 +50,13 @@ function computeNext(row: typeof schema.schedules.$inferSelect): Date | null {
 
 /**
  * Process a single pending schedule row. Idempotent on row state.
+ *
+ * Exported for tests: the `trigger_requested` branch is the FRI-143 gap-fix
+ * site (it must use `nextRunAfterFire`, not the local `computeNext`, so a
+ * manually-triggered one-shot reminder is not re-armed). Testing it directly
+ * pins that line rather than relying on the `triggerSchedule` (scheduler) path.
  */
-async function processPendingScheduleRow(name: string): Promise<void> {
+export async function processPendingScheduleRow(name: string): Promise<void> {
   const db = getDb();
   const rows = await db
     .select()
@@ -121,7 +126,13 @@ async function processPendingScheduleRow(name: string): Promise<void> {
         message: err instanceof Error ? err.message : String(err),
       });
     }
-    const next = computeNext(row);
+    // FRI-143 (the gap fix): use the shared nextRunAfterFire so a manually
+    // triggered one-shot reminder keeps nextRunAt = null. The local
+    // computeNext(row) would recompute runAt back to the (past) instant,
+    // re-arming the tick to re-deliver the reminder every 30s. The other
+    // branches (register/reload) keep the local computeNext — they recompute
+    // on spec change, not after a fire.
+    const next = nextRunAfterFire(row);
     await db
       .update(schema.schedules)
       .set({ status: "active", nextRunAt: next })

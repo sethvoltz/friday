@@ -670,7 +670,8 @@ export interface RecordUserBlockInput {
     | "scratch"
     | "agent_spawn"
     | "schedule"
-    | "refork_notice";
+    | "refork_notice"
+    | "reminder";
   /** `complete` for the common path (block is final the moment it's
    *  written). `queued` for user_chat POSTs that arrived while the agent
    *  was mid-turn — the row is parked until the worker drains it from

@@ -175,6 +175,44 @@ describe("buildMcpServers: built-in surface", () => {
   });
 });
 
+describe("buildMcpServers: friday-reminder (FRI-143, AC7)", () => {
+  // The MCP SDK keeps registered tools on `instance._registeredTools` (private
+  // but stable across the pinned SDK versions — same accessor handler-signal.test.ts uses).
+  interface ServerLike {
+    instance: { _registeredTools: Record<string, unknown> };
+  }
+  const toolNames = (server: unknown): string[] =>
+    Object.keys((server as ServerLike).instance._registeredTools);
+
+  it("is wired for every non-orchestrator caller type (reminders are user-facing; an app sub-agent must be able to set one)", () => {
+    for (const t of ["builder", "helper", "scheduled", "bare"] as const) {
+      const servers = buildMcpServers(baseOpts(t));
+      expect(servers["friday-reminder"]).toBeDefined();
+    }
+  });
+
+  it("is also wired for the orchestrator (ALL caller types)", () => {
+    const orch = buildMcpServers(baseOpts("orchestrator"));
+    expect(orch["friday-reminder"]).toBeDefined();
+  });
+
+  it("a non-orchestrator (bare) caller gets friday-reminder exposing reminder_create but does NOT get friday-schedule", () => {
+    const bare = buildMcpServers(baseOpts("bare"));
+    expect(bare["friday-reminder"]).toBeDefined();
+    expect(toolNames(bare["friday-reminder"])).toEqual(
+      expect.arrayContaining(["reminder_create", "reminder_list", "reminder_cancel"]),
+    );
+    // Contrast control: friday-schedule remains orchestrator-only.
+    expect(bare["friday-schedule"]).toBeUndefined();
+  });
+
+  it("a helper caller also gets friday-reminder but not friday-schedule", () => {
+    const helper = buildMcpServers(baseOpts("helper"));
+    expect(helper["friday-reminder"]).toBeDefined();
+    expect(helper["friday-schedule"]).toBeUndefined();
+  });
+});
+
 describe("buildMcpServers: built-in browser (playwright)", () => {
   it("is wired for helper/builder/bare/scheduled", () => {
     for (const t of ["builder", "helper", "scheduled", "bare"] as const) {

@@ -22,6 +22,7 @@ import { buildAgentsServer, AGENTS_SERVER_NAME } from "./agents.js";
 import { buildMemoryServer, MEMORY_SERVER_NAME } from "./memory.js";
 import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
 import { buildScheduleServer, SCHEDULE_SERVER_NAME } from "./schedule.js";
+import { buildReminderServer, REMINDER_SERVER_NAME } from "./reminder.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
 import { buildIntegrationsServer, INTEGRATIONS_SERVER_NAME } from "./integrations.js";
 
@@ -110,6 +111,12 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   if (opts.callerType === "orchestrator") {
     servers[SCHEDULE_SERVER_NAME] = buildScheduleServer(ctx);
   }
+
+  // friday-reminder: ALL caller types. Reminders are user-facing chat
+  // nudges that fire without waking any agent; an app sub-agent (e.g. the
+  // kitchen agent) must be able to set one. Contrast friday-schedule, which
+  // is orchestrator-only.
+  servers[REMINDER_SERVER_NAME] = buildReminderServer(ctx);
 
   // friday-evolve: orchestrator only. Sub-agents shouldn't be applying or
   // dismissing proposals — the meta-agent surfaces them via the orchestrator.
