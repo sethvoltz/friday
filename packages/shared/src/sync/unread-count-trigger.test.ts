@@ -136,6 +136,23 @@ describe("friday_blocks_increment_unread_trigger (item #52 — end-to-end PG)", 
     expect(c?.unreadCount).toBe(1);
   });
 
+  it("DOES increment on a reminder-source user block (FRI-143 — a scheduled reminder landed in the chat)", async () => {
+    await insertCursor("dev-1", "friday", "blk-init", 0);
+    await insertBlock({ agentName: "friday", role: "user", source: "reminder" });
+    const c = await getCursor("dev-1", "friday");
+    expect(c?.unreadCount).toBe(1);
+  });
+
+  it("FRI-143 source-specificity: a reminder block bumps unread while a user_chat block on the same cursor does not", async () => {
+    await insertCursor("dev-1", "friday", "blk-init", 0);
+    // user_chat: the user typed it — no badge.
+    await insertBlock({ agentName: "friday", role: "user", source: "user_chat" });
+    expect((await getCursor("dev-1", "friday"))?.unreadCount).toBe(0);
+    // reminder: agent-driven nudge — badge.
+    await insertBlock({ agentName: "friday", role: "user", source: "reminder" });
+    expect((await getCursor("dev-1", "friday"))?.unreadCount).toBe(1);
+  });
+
   it("accumulates across multiple assistant blocks until reset", async () => {
     await insertCursor("dev-1", "friday", "blk-init", 0);
     await insertBlock({ agentName: "friday", role: "assistant" });

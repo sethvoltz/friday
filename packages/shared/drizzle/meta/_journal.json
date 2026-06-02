@@ -204,6 +204,13 @@
       "when": 1780361800332,
       "tag": "0028_overrated_silver_fox",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1780429259984,
+      "tag": "0029_cheerful_vampiro",
+      "breakpoints": true
     }
   ]
 }

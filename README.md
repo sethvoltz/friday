@@ -53,6 +53,7 @@ The daemon binds to `127.0.0.1`. zero-cache binds to `127.0.0.1`. The dashboard 
 - **Builders, Helpers, Bare, Scheduled.** The orchestrator (Friday herself) spawns isolated Builder agents in their own git worktrees for project work, short-lived Helpers for delegated tasks, Bare agents for ad-hoc `/scratch` sessions, and Scheduled agents for cron / one-shot autonomous work. Builders are confined to their worktree by a PreToolUse workspace guard.
 - **Mail as the universal delivery primitive.** Every user-visible reply, every cross-agent message, every scheduled-agent escalation flows through the same `mail` table. Priority field on each row; `priority='critical'` mid-turn-injects into a live worker so an interruption actually interrupts.
 - **Scheduled agents with state continuity.** Cron and one-shot runs persist `state.md` between fires (auto-injected on the next prompt) and `last-run.md` written by the daemon. Missed runs catch up on restart; cooperative abort on shutdown.
+- **User-facing scheduled reminders.** Any agent can set a cron or one-shot reminder (e.g. "thaw the chicken at midday Thursday") that fires straight into your chat as a notification — no worker spawns, no turn, no tokens. The unread badge lights up cross-device; the reminder lands as a `mail`-like chat block without waking the orchestrator.
 
 ### Friday Apps
 

@@ -1090,6 +1090,59 @@ The agent-status `"error"` value is removed end-to-end (`AgentStatus` union, bot
 - Cross-process or cross-restart ordering of generations is ever needed — promote Generation from object identity to a monotonic counter.
 - A fifth write-semantics family for `agents.status` appears that genuinely cannot be modeled as a Transition (none is foreseen).
 
+## ADR-033 — User-facing reminders fire as a chat notification without spawning an agent
+
+**Status:** accepted (FRI-143, 2026-06-02)
+
+> **Numbering note:** FRI-146 (a separate in-flight branch, not yet on `main`) also introduces an "ADR-033". If FRI-146 merges first, renumber this ADR to **ADR-034** at rebase time and fix the back-references (`docs/architecture.md` scheduler paragraph cites "ADR-033").
+
+**Builds on the scheduler** (`schedules` table + 30s tick + LISTEN dispatch) and **ADR-017** (all user-visible deliveries surface as chat blocks via the mail surface, not a `chat_reply` tool). **Reuses ADR-024**'s observation that a `role:'user'` block emits no `agent_message` SSE. **Depends on FRI-98** (cron timezone) for correct recurring fires — unbuilt at time of writing, so recurring reminders inherit the host-TZ `nextRun` path.
+
+### Context
+
+A user wants Friday to nudge them at a time ("thaw the chicken at midday Thursday") without burning a turn or waking an agent to do it. The scheduler already has everything needed to fire at a time — a `schedules` table, a 30s tick, a LISTEN-driven manual-trigger path, and `computeNext` — but every fire today spawns a one-shot worker (`spawnScheduledRun`), which costs a process, a turn, and tokens, and lands its output through the agent lifecycle. A reminder needs none of that: it is a pure notification that should appear in the chat and bump the unread badge, full stop.
+
+### Decision
+
+**A reminder is a schedule that fires into the chat instead of into a worker.** The `schedules` table gains a `kind` discriminator (`'agent-run'` default, `'reminder'`) and a nullable `delivery_json` payload column (migration `0029`). A `kind='reminder'` row fires through the existing tick / LISTEN paths but runs `deliverReminder` instead of `spawnScheduledRun`:
+
+1. **No-spawn fire path.** `deliverReminder` writes a `role:'user'`, `source:'reminder'` chat block into the target (default orchestrator `friday`) chat via `recordUserBlock` and **stops**. It deliberately does NOT call `dispatchTurn`, `spawnScheduledRun`, `wakeAgent`, `wakeAgentCritical`, or `maybeSpawnFromMail` — not waking anything is the entire point. `fireSchedule` branches on `r.kind` to choose `deliverReminder` vs `spawnScheduledRun`.
+
+2. **Chat-block delivery reuses the mail surface.** The reminder lands as a chat block exactly the way a `mail`-kind delivery does (ADR-017), through `recordUserBlock` — but with `source:'reminder'` and **without** going through `maybeSpawnFromMail` (which is the part of the mail path that would spawn/wake a recipient). The reminder is content in the chat, not an instruction to act.
+
+3. **Unread signal via the trigger, not the SSE.** The cross-device unread badge is bumped by extending the existing `friday_blocks_increment_unread()` Postgres trigger's source allowlist to include `'reminder'` (one literal added to the `IN (...)` list; `CREATE OR REPLACE FUNCTION` swaps the body in place, trigger keeps pointing at it by name). We deliberately do **not** route the badge through `maybeEmitAgentMessage`: that helper early-returns for any `role !== 'assistant'`, so a `role:'user'` reminder block emits no `agent_message` SSE — which is correct (there is no live turn to stream), but it means the SSE cannot be the unread producer. The durable DB trigger is the right layer because it fires on the row write regardless of which device/process is connected.
+
+4. **Reuse `schedules` + `kind`, don't fork a table.** A reminder shares the scheduler's tick, manual-trigger, pause/resume, and `computeNext` machinery; only the fire action differs. A separate table would duplicate all of that. `taskPrompt` stays `NOT NULL` (it holds the reminder title as a fallback); the structured payload lives in `delivery_json` (`title`, `body`, `targetAgent`, `deepLink`, `originatingAgent`, and a `channel` field reserved for future channels — see below).
+
+5. **One-shot completion via null `nextRunAt`.** A one-shot reminder (`runAt`, no `cron`) has no busy-guard once delivered — and unlike an agent-run it spawns no worker whose lifecycle would gate re-selection. So `nextRunAfterFire(r)` returns `null` for a one-shot reminder, and the tick's `nextRunAt !== null` filter permanently drops it; without this the tick would re-deliver it every 30s forever. The same helper is used by the listener's `trigger_requested` tail (the manual-trigger path), which previously ran its own `computeNext(row)` and would have overwritten the null back to a past instant → re-fire. That tail now calls `nextRunAfterFire` too — the **listener trigger-tail gap fix**. Everything that is not a one-shot reminder (recurring reminders, all agent-runs) advances via `computeNext` as before.
+
+6. **A separate `friday-reminder` MCP server, reachable by every agent type.** Setting a reminder is user-facing and any agent — including app sub-agents like a kitchen agent — must be able to do it, so `friday-reminder` (`reminder_create`, `reminder_list`, `reminder_cancel`) is registered **unconditionally** in `buildMcpServers`. This contrasts `friday-schedule`, which is orchestrator-only because scheduling autonomous agent runs is an orchestrator concern. `reminder_create` posts to the existing `POST /api/schedules` route with `kind:'reminder'`; no new endpoint is needed. The stub-agent registration that `upsertSchedule` does for agent-runs (FRI-76, so mail-recipient validation passes before first fire) is **skipped** for reminders, which have no agent.
+
+7. **FRI-142 push as a future additive channel.** `delivery_json.channel` defaults to `'chat'` and is reserved so a future FRI-142 push-notification channel layers on as an additional delivery target, not a rewrite. `deepLink` is similarly reserved for a future deep-link back into the originating agent's context.
+
+8. **FRI-98 timezone dependency.** Recurring reminders compute their next fire through the existing host-TZ `computeNext` / `nextRun` path. FRI-98 (cron timezone) is unbuilt; **no timezone code is written here.** When FRI-98 lands, recurring reminders inherit it for free.
+
+### What this lands
+
+- `schedules.kind` (`text NOT NULL DEFAULT 'agent-run'`, CHECK `IN ('agent-run','reminder')`) + `schedules.delivery_json` (`jsonb`) — schema + Zero sync slice + migration `0029` (incl. the hand-appended `friday_blocks_increment_unread()` redefinition adding `'reminder'`).
+- `services/daemon/src/scheduler/deliver-reminder.ts` — the no-spawn fire action + the `ReminderDelivery` payload type.
+- `fireSchedule` kind-branch; `nextRunAfterFire` helper; the listener `trigger_requested` tail fix; the `upsertSchedule` stub-agent skip for reminders.
+- `services/daemon/src/mcp/reminder.ts` (`friday-reminder` server) wired unconditionally in `buildMcpServers`.
+
+### What this does NOT do
+
+- **No new fire scheduler / no new table.** Reminders ride the existing `schedules` machinery.
+- **No `maybeSpawnFromMail` / no agent wake / no turn.** A reminder never causes execution.
+- **No `agent_message` SSE for the reminder.** The unread badge comes from the DB trigger only.
+- **No timezone code (FRI-98 deferred).** Recurring reminders use the host-TZ path.
+- **No push channel yet (FRI-142).** Only the `channel:'chat'` reservation in `delivery_json`.
+
+### Bring this ADR back to the table if
+
+- FRI-142 push lands — confirm it slots in as an additive `delivery_json.channel` and `deliverReminder` fans out to it rather than being rewritten.
+- FRI-98 cron timezone lands — recurring reminders should inherit it with no reminder-specific change; verify.
+- A reminder ever needs to _act_ (not just notify) — that is no longer a reminder; it is an agent-run schedule, and the user should reach for `friday-schedule`, not a new branch in `deliverReminder`.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.

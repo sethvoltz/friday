@@ -344,6 +344,8 @@ export const schedules = pgTable(
     lastRunId: text("last_run_id"),
     metaJson: jsonb("meta_json"),
     appId: text("app_id"),
+    kind: text("kind").notNull().default("agent-run"),
+    deliveryJson: jsonb("delivery_json"),
     // ADR-023: mutator-driven status transitions for register/unregister/pause.
     // active|pending_register|reload_requested|deleted|trigger_requested
     // (trigger_requested = dashboard wants the schedule to fire NOW;
@@ -360,6 +362,7 @@ export const schedules = pgTable(
       "schedules_status_check",
       sql`${t.status} IN ('active','pending_register','reload_requested','deleted','paused','trigger_requested')`,
     ),
+    kindCheck: check("schedules_kind_check", sql`${t.kind} IN ('agent-run','reminder')`),
   }),
 );
 

@@ -35,7 +35,7 @@ import pgPkg from "pg";
 import { getDb, getPool, nextRun, schema, LISTEN_CHANNELS } from "@friday/shared";
 import * as registry from "../agent/registry.js";
 import { logger } from "../log.js";
-import { fireSchedule } from "./scheduler.js";
+import { fireSchedule, nextRunAfterFire } from "./scheduler.js";
 
 const { Client } = pgPkg;
 
@@ -121,7 +121,13 @@ async function processPendingScheduleRow(name: string): Promise<void> {
         message: err instanceof Error ? err.message : String(err),
       });
     }
-    const next = computeNext(row);
+    // FRI-143 (the gap fix): use the shared nextRunAfterFire so a manually
+    // triggered one-shot reminder keeps nextRunAt = null. The local
+    // computeNext(row) would recompute runAt back to the (past) instant,
+    // re-arming the tick to re-deliver the reminder every 30s. The other
+    // branches (register/reload) keep the local computeNext — they recompute
+    // on spec change, not after a fire.
+    const next = nextRunAfterFire(row);
     await db
       .update(schema.schedules)
       .set({ status: "active", nextRunAt: next })

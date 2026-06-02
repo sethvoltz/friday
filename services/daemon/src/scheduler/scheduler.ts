@@ -5,6 +5,7 @@ import { isAgentLive } from "../agent/lifecycle.js";
 import * as registry from "../agent/registry.js";
 import { captureFor } from "../posthog.js";
 import { spawnScheduledRun } from "./spawn.js";
+import { deliverReminder } from "./deliver-reminder.js";
 
 /**
  * Thrown by `upsertSchedule` when the schedule name collides with an existing
@@ -26,15 +27,20 @@ export interface ScheduleSpec {
   runAt?: string;
   taskPrompt: string;
   paused?: boolean;
+  kind?: "agent-run" | "reminder";
+  deliveryJson?: import("./deliver-reminder.js").ReminderDelivery | null;
 }
 
 export async function upsertSchedule(spec: ScheduleSpec): Promise<void> {
   if (spec.cron && !isValidCron(spec.cron)) {
     throw new Error(`invalid cron: ${spec.cron}`);
   }
+  const isReminder = (spec.kind ?? "agent-run") === "reminder";
   // FRI-76: eagerly register a stub agent so mail to this scheduled agent
   // passes recipient validation before the first cron fire. Reject if a
   // non-scheduled agent already owns the name — mail would be misrouted.
+  // FRI-143: a reminder has no agent (it fires as a chat block, never spawns),
+  // so skip the stub registration entirely for kind==='reminder'.
   const existingAgent = await registry.getAgent(spec.name);
   if (existingAgent && existingAgent.type !== "scheduled") {
     throw new ScheduleNameCollisionError(spec.name, existingAgent.type);
@@ -55,6 +61,8 @@ export async function upsertSchedule(spec: ScheduleSpec): Promise<void> {
         runAt: spec.runAt ?? null,
         taskPrompt: spec.taskPrompt,
         paused: spec.paused ?? false,
+        kind: spec.kind ?? "agent-run",
+        deliveryJson: spec.deliveryJson ?? null,
         nextRunAt: next,
         updatedAt: now,
       })
@@ -66,6 +74,8 @@ export async function upsertSchedule(spec: ScheduleSpec): Promise<void> {
       runAt: spec.runAt ?? null,
       taskPrompt: spec.taskPrompt,
       paused: spec.paused ?? false,
+      kind: spec.kind ?? "agent-run",
+      deliveryJson: spec.deliveryJson ?? null,
       nextRunAt: next,
       lastRunAt: null,
       lastRunId: null,
@@ -84,7 +94,9 @@ export async function upsertSchedule(spec: ScheduleSpec): Promise<void> {
   // fired, this leaves the existing row's session/status untouched beyond
   // the standard registerAgent conflict-update (status=idle), which is the
   // correct state for a scheduled agent between fires.
-  if (!existingAgent) {
+  // FRI-143: reminders never spawn an agent, so they get no stub — guard the
+  // registration on kind!=='reminder'.
+  if (!existingAgent && !isReminder) {
     await registry.registerAgent({ name: spec.name, type: "scheduled" });
   }
 }
@@ -223,6 +235,7 @@ export async function fireSchedule(r: typeof schema.schedules.$inferSelect): Pro
     schedule_name: r.name,
     run_id: runId,
     has_cron: !!r.cron,
+    kind: r.kind,
   });
   // Phase 5: `schedule_fired` SSE retired — Zero replicates the
   // `schedules` slice (and the `schedule_runs` history table) so
@@ -230,7 +243,14 @@ export async function fireSchedule(r: typeof schema.schedules.$inferSelect): Pro
   // through its reactive query.
 
   try {
-    await spawnScheduledRun(r, runId);
+    // FRI-143: a reminder fires as a user-facing chat block via
+    // deliverReminder and NEVER spawns a worker; everything else
+    // (agent-run) spawns the scheduled worker.
+    if (r.kind === "reminder") {
+      await deliverReminder(r, runId);
+    } else {
+      await spawnScheduledRun(r, runId);
+    }
   } catch (err) {
     logger.log("error", "schedule.spawn-error", {
       name: r.name,
@@ -239,12 +259,7 @@ export async function fireSchedule(r: typeof schema.schedules.$inferSelect): Pro
     });
   }
 
-  const next = computeNext({
-    name: r.name,
-    cron: r.cron ?? undefined,
-    runAt: r.runAt ?? undefined,
-    taskPrompt: r.taskPrompt,
-  });
+  const next = nextRunAfterFire(r);
   const db = getDb();
   await db
     .update(schema.schedules)
@@ -280,6 +295,23 @@ function computeNext(spec: ScheduleSpec): Date | null {
     return Number.isFinite(t) ? new Date(t) : null;
   }
   return null;
+}
+
+/**
+ * The nextRunAt to persist after a schedule fires. One-shot reminders
+ * (runAt, no cron) complete on fire — return null so the tick filter
+ * (nextRunAt !== null) permanently drops them; without this a turnless
+ * one-shot has no busy-guard and would re-deliver every 30s forever.
+ * Everything else advances via computeNext (host-TZ until FRI-98).
+ */
+export function nextRunAfterFire(r: typeof schema.schedules.$inferSelect): Date | null {
+  if (r.kind === "reminder" && r.runAt && !r.cron) return null;
+  return computeNext({
+    name: r.name,
+    cron: r.cron ?? undefined,
+    runAt: r.runAt ?? undefined,
+    taskPrompt: r.taskPrompt,
+  });
 }
 
 /**
