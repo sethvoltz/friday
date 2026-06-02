@@ -37,7 +37,7 @@ When a conversation has been running for many turns, be extra diligent about sav
 
 ## Memory types
 
-Memories fall into four categories. Tag every entry with its type so retrieval can filter and the user can audit by category. Add topical tags too (`tooling`, `frontend`, `auth`, etc.) — tags are the highest-weighted retrieval signal in the FTS ranker.
+Memories fall into five categories. Tag every entry with its type so retrieval can filter and the user can audit by category. Add topical tags too (`tooling`, `frontend`, `auth`, etc.) — tags are the highest-weighted retrieval signal in the FTS ranker.
 
 ### user
 
@@ -81,6 +81,20 @@ Pointers to where information lives in external systems — so you remember wher
   - _Pipeline bugs are tracked in Linear project "INGEST"._
   - _Oncall latency dashboard is `grafana.internal/d/api-latency` — check it when editing request-path code._
 
+### person
+
+Notes about people you interact with — durable facts, preferences, and recent interactions — so the orchestrator can reference them when a conversation is actually about that person.
+
+- **When to save:** When you learn a durable fact, preference, or recent interaction about a specific person (a coworker, a neighbor, a family member) that you'll want to recall the next time that person comes up.
+- **How to apply:** Surface only when the person is the subject of the turn (see the Recall note below) — not as ambient context in unrelated conversations.
+- **Title shape:** `<Person name> — <one-line summary>` (e.g. _Asher — neighbor, food prefs_).
+- **Tags (required):** the type tag `person` (this is the recall-suppression hinge), plus `person:<name>` (lowercase, dash-separated, e.g. `person:mike-coworker`) used for enumeration **and** the name-mention carve-out, plus 1-3 topical tags (`food`, `family`, `work`, `health`).
+- **Recall note:** person entries are **not** auto-injected into `<memory-context>` in general, **except** when the current turn mentions the person by name (e.g. you write "did Asher say…"), which surfaces that person's notes. Otherwise surface on demand with `memory_search({ tags: ["person:<name>"] })`.
+- **Privacy posture:** local-first (filesystem + local Postgres, same as every entry — no new storage). Excluded from passive recall except on a by-name mention; do not surface person facts unsolicited in unrelated contexts.
+- **Examples:**
+  - _Asher — neighbor, food prefs. Allergic to shellfish; loves spicy food. Lent us the pressure washer in May 2026. Tags: `person`, `person:asher`, `food`._
+  - _Mike (coworker) — owns the billing service; prefers async review over meetings. Out on parental leave through 2026-07. Tags: `person`, `person:mike-coworker`, `work`._
+
 ## What NOT to save
 
 These exclusions apply even when something looks worth remembering. Don't save:
@@ -99,7 +113,7 @@ Call `memory_save({ title, content, tags })`:
 
 - **`title`** — short, descriptive. The FTS ranker weights title matches `+3`, so write titles a future search would actually hit ("User prefers pnpm over npm" beats "pnpm note").
 - **`content`** — concise but complete. For `feedback` and `project` entries, follow the body structure above (rule/fact + **Why:** + **How to apply:**). For `user` and `reference` entries, free-form is fine.
-- **`tags`** — always include the type as a tag (`user`, `feedback`, `project`, `reference`), plus 1-3 topical tags (`tooling`, `auth`, `linear`, `frontend`, …). Tags weight `+5` for exact match in the FTS ranker — the strongest retrieval signal you have. Lowercase, no spaces.
+- **`tags`** — always include the type as a tag (`user`, `feedback`, `project`, `reference`, `person`), plus 1-3 topical tags (`tooling`, `auth`, `linear`, `frontend`, …). Tags weight `+5` for exact match in the FTS ranker — the strongest retrieval signal you have. Lowercase, no spaces. `person` entries are recall-exempt — they are excluded from passive `<memory-context>` recall except on a by-name mention (also tag them `person:<name>`).
 
 You may omit `id` and let the daemon slugify the title. Pass an explicit `id` only when you intend to overwrite a specific entry (rare — prefer `memory_update` for that).
 

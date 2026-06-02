@@ -18,7 +18,7 @@
  * `intentTag` already resolved by the dispatch pipeline.
  */
 
-import { buildAutoRecallBlock } from "@friday/memory";
+import { buildAutoRecallBlock, listEntries, type MemoryEntry } from "@friday/memory";
 import type { HookContextMap, HookResultMap } from "@friday/shared";
 import { logger } from "../log.js";
 import { whenMemoryListenerReady } from "../memory/listener.js";
@@ -26,6 +26,28 @@ import { whenMemoryListenerReady } from "../memory/listener.js";
 const LISTENER_READY_TIMEOUT_MS = 3_000;
 
 type IntentTag = HookContextMap["before_prompt_build"]["intentTag"];
+
+// FRI-141: name-mention carve-out. Person entries are excluded from passive
+// auto-recall by default; when the turn text mentions a known person by name
+// (natural-language match against the name part of a person:<name> tag), return
+// that person tag so the ranker re-admits ONLY their entries. Tokenises text the
+// same way the ranker does (search.ts): lowercase, split on whitespace. Matching
+// is on dash-separated name SEGMENTS, case-insensitive, EXACT token equality
+// (NOT a substring, NOT fuzzy, NOT a nickname table — out of scope).
+export function computePersonAllowTags(text: string, entries: MemoryEntry[]): string[] {
+  const turnTokens = new Set(text.toLowerCase().split(/\s+/).filter(Boolean));
+  const matched = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.tags.includes("person")) continue;
+    for (const tag of entry.tags) {
+      const m = /^person:(.+)$/.exec(tag);
+      if (!m) continue;
+      const segments = m[1].toLowerCase().split("-").filter(Boolean);
+      if (segments.some((seg) => turnTokens.has(seg))) matched.add(tag);
+    }
+  }
+  return [...matched];
+}
 
 /**
  * Returns the `<memory-context>` block as a string, or "" on any
@@ -48,7 +70,9 @@ export async function safeRecall(text: string, intent: IntentTag = "user_chat"):
       logger.log("warn", "memory.recall.listener-timeout", { intent });
       return "";
     }
-    return await buildAutoRecallBlock(text);
+    const entries = await listEntries();
+    const allowTags = computePersonAllowTags(text, entries);
+    return await buildAutoRecallBlock(text, { excludeTags: ["person"], allowTags });
   } catch (err) {
     logger.log("warn", "memory.recall.error", {
       intent,

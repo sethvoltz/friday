@@ -107,7 +107,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
 
   const saveTool = tool(
     "memory_save",
-    "Save a new memory entry. Memories persist across sessions and conversations and surface automatically in the next turn's `<memory-context>` block. Use for decisions, user preferences, project context, lessons learned, external-system pointers — anything worth remembering long-term. **Search first to avoid duplicates** — if a memory on the same topic exists, use `memory_update` to refine it instead. Tag every entry with its type (`user` / `feedback` / `project` / `reference`) plus topical tags; tags weight +5 in the FTS ranker. **Do not use the built-in Memory tool** — Friday's `autoMemoryEnabled` is disabled and the SDK's project-scoped memory directory is not Friday's store.",
+    "Save a new memory entry. Memories persist across sessions and conversations and surface automatically in the next turn's `<memory-context>` block. Use for decisions, user preferences, project context, lessons learned, external-system pointers — anything worth remembering long-term. **Search first to avoid duplicates** — if a memory on the same topic exists, use `memory_update` to refine it instead. Tag every entry with its type (`user` / `feedback` / `project` / `reference` / `person`) plus topical tags; tags weight +5 in the FTS ranker. **Do not use the built-in Memory tool** — Friday's `autoMemoryEnabled` is disabled and the SDK's project-scoped memory directory is not Friday's store.",
     {
       id: z
         .string()

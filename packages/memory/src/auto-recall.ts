@@ -7,7 +7,7 @@ import { searchMemories } from "./search.js";
  */
 export async function buildAutoRecallBlock(
   userText: string,
-  opts: { limit?: number; minScore?: number } = {},
+  opts: { limit?: number; minScore?: number; excludeTags?: string[]; allowTags?: string[] } = {},
 ): Promise<string> {
   const limit = opts.limit ?? 5;
   const minScore = opts.minScore ?? 1;
@@ -15,6 +15,8 @@ export async function buildAutoRecallBlock(
     query: userText,
     limit,
     trackRecall: true,
+    excludeTags: opts.excludeTags,
+    allowTags: opts.allowTags,
   });
   const filtered = results.filter((r) => r.score >= minScore);
   if (filtered.length === 0) return "";
