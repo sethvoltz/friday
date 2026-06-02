@@ -81,6 +81,43 @@
       "ts": 1700000000000
     }
   ],
-  "rows": [],
+  "rows": [
+    {
+      "blockId": "uuid-1",
+      "turnId": "turn-fin-1",
+      "agentName": "test-agent",
+      "sessionId": "sess-1",
+      "role": "assistant",
+      "kind": "text",
+      "source": null,
+      "blockIndex": 0,
+      "messageId": null,
+      "contentJson": {
+        "text": "partial..."
+      },
+      "status": "aborted",
+      "streaming": false
+    },
+    {
+      "blockId": "uuid-2",
+      "turnId": "turn-fin-1",
+      "agentName": "test-agent",
+      "sessionId": "sess-1",
+      "role": "assistant",
+      "kind": "tool_use",
+      "source": null,
+      "blockIndex": 1,
+      "messageId": null,
+      "contentJson": {
+        "name": "Read",
+        "input": {
+          "_raw": "{\"path\":\"/etc"
+        },
+        "tool_use_id": "toolu_def"
+      },
+      "status": "aborted",
+      "streaming": false
+    }
+  ],
   "snapshotAfter": []
 }
