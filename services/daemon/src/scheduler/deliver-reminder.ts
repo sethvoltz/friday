@@ -1,5 +1,5 @@
 import { loadConfig, schema } from "@friday/shared";
-import { recordUserBlock } from "../agent/block-stream.js";
+import { recordUserBlock } from "../agent/block-injectors.js";
 import { logger } from "../log.js";
 
 /** Payload stored in schedules.delivery_json for kind='reminder' rows. */

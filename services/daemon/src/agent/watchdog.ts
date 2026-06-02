@@ -29,7 +29,7 @@ import {
   peekLiveWorker,
   stallAgent,
 } from "./lifecycle.js";
-import { recordUserBlock } from "./block-stream.js";
+import { recordUserBlock } from "./block-injectors.js";
 
 const TICK_INTERVAL_MS = 30_000;
 // Per-agent-type stall thresholds live on `config.watchdog.thresholdsMs`

@@ -35,7 +35,7 @@
  */
 
 import type { AgentType, ArchiveReason } from "@friday/shared";
-import type { ErrorBlockPayload } from "./block-stream.js";
+import type { ErrorBlockPayload } from "./block-injectors.js";
 import type { WorkerPromptCommand } from "./worker-protocol.js";
 
 /**

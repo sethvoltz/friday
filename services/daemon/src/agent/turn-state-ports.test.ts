@@ -74,15 +74,17 @@ function makeRecorder(): Recorder {
       rec.published.push(event as Recorder["published"][number]);
     },
     blockStream: {
-      recordError: async () => {
-        rec.recordErrorCalls++;
-        return { blockId: "b" };
-      },
       finalize: async (_w, status) => {
         rec.finalizeCalls.push(status);
       },
       endTurn: (turnId) => {
         rec.endTurnCalls.push(turnId);
+      },
+    },
+    blockInjector: {
+      recordError: async () => {
+        rec.recordErrorCalls++;
+        return { blockId: "b" };
       },
     },
     recoverFromJsonl: async (inputs) => {

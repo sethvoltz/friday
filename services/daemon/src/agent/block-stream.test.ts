@@ -308,41 +308,6 @@ describe("block-stream (FRI-125)", () => {
     );
   });
 
-  it("recordError: persists error block + emits block_start/complete pair", async () => {
-    const { recordError } = await import("./block-stream.js");
-    const worker = makeFakeWorker({ turnId: "turn-err-1" });
-
-    let resultBlockId: string | undefined;
-    const trace = await captureTrace(async () => {
-      const r = await recordError(worker as never, {
-        code: "overloaded",
-        headline: "Anthropic temporarily overloaded — usually clears in a moment",
-        httpStatus: 529,
-        requestId: "req_xyz",
-        rawMessage: '529 {"type":"error","error":{"type":"overloaded_error"}}',
-      });
-      resultBlockId = r?.blockId;
-    });
-
-    expect(resultBlockId).toBe("uuid-1");
-    expect(trace.rows.length).toBe(1);
-    expect(trace.rows[0]).toMatchObject({
-      kind: "error",
-      status: "complete",
-      role: "assistant",
-    });
-    // recordError uses the post-finalize fallback block_index (9999) when
-    // there's no live turn in the accumulator — true here because the
-    // worker has no prior open() calls.
-    expect(trace.rows[0]).toMatchObject({ blockIndex: 9999 });
-    // SSE pair: block_start + block_complete, both with kind=error.
-    const eventTypes = (trace.events as { type: string; kind?: string }[]).map((e) => e.type);
-    expect(eventTypes).toEqual(["block_start", "block_complete"]);
-    await expect(serializeTrace(trace)).toMatchFileSnapshot(
-      "./__golden__/block-stream.record_error.json",
-    );
-  });
-
   it("forced finalize: open(text) + open(tool_use) → finalize('aborted') publishes 2 block_complete", async () => {
     const { open, append, finalize, endTurn } = await import("./block-stream.js");
     const worker = makeFakeWorker({ turnId: "turn-fin-1" });

@@ -1,22 +1,31 @@
 /**
- * block-stream — the deep block-write pipeline (FRI-125).
+ * block-stream — the per-block FSM core (FRI-125, refactored FRI-148 B).
  *
  * Absorbs the previous {@link ./live-turns.ts} in-memory accumulator, the
- * `writeAndPublish` helper from lifecycle.ts, the `insertErrorBlock` path,
- * and the `finalizeStreamingBlocks` path into a single module that owns
- * the ADR-004/024 invariant: in-memory accumulator updated before SSE
- * emit; on `block_complete`, the canonical row INSERTs with
- * `streaming=false`. There is no per-row `last_event_seq` peek dance
- * anymore — the column retires in the same PR and the dashboard's cursor
- * is fed by the SSE event's own `seq` field (which {@link eventBus}
- * stamps at publish time).
+ * `writeAndPublish` helper from lifecycle.ts, and the
+ * `finalizeStreamingBlocks` path into a single module that owns the
+ * ADR-004/024 invariant: in-memory accumulator updated before SSE emit;
+ * on `block_complete`, the canonical row INSERTs with `streaming=false`.
+ * There is no per-row `last_event_seq` peek dance anymore — the column
+ * retires in the same PR and the dashboard's cursor is fed by the SSE
+ * event's own `seq` field (which {@link eventBus} stamps at publish time).
  *
- * Public surface (per FRI-125 §6):
+ * FRI-148 B split: the two SYNTHETIC writers (`recordError`,
+ * `recordUserBlock`) and their `ErrorBlockPayload` / `RecordUserBlockInput`
+ * shapes moved to {@link ./block-injectors.ts}. The FSM core here owns the
+ * `start → delta* → terminal` lifecycle for the streamed-from-the-worker
+ * blocks and the exit-time finalize path. The injectors call back into
+ * this module via {@link peekNextBlockIndex} (so recordError can place its
+ * synthetic row at `max(in-flight) + 1`) and {@link maybeEmitAgentMessage}
+ * (so the user-visible-content fan-out fires on both paths).
+ *
+ * Public surface:
  *
  *   open / append / close / cancel       — the four block-IPC handlers
- *   recordError                          — synthetic error block (was insertErrorBlock)
  *   finalize                             — exit-time teardown (was finalizeStreamingBlocks)
  *   endTurn                              — turn-end teardown (was liveTurns.dropTurn)
+ *   peekNextBlockIndex                   — read accessor used by recordError
+ *   maybeEmitAgentMessage                — user-visible-content fan-out (used by injectors)
  *   snapshot                             — read surface for watchdog + tests
  *   __resetForTest / __seedForTest       — test seam
  *
@@ -99,24 +108,6 @@ export class IllegalBlockTransitionError extends Error {
     this.turnId = opts.turnId;
     this.clientBlockId = opts.clientBlockId;
   }
-}
-
-/* ---------------- Absorbed-from-lifecycle types ----------------
- *
- * FRI-125: `ErrorBlockPayload` was defined alongside `insertErrorBlock`
- * in lifecycle.ts. Both moved here under the C2 absorption; the payload
- * type follows the function that consumes it. Exported so worker-error
- * paths in lifecycle.ts can construct one without round-tripping
- * through a defunct re-export.
- */
-
-export interface ErrorBlockPayload {
-  code: string;
-  headline: string;
-  httpStatus?: number;
-  retryAfterSeconds?: number;
-  requestId?: string;
-  rawMessage: string;
 }
 
 /* ---------------- Absorbed live-turns types ---------------- */
@@ -477,87 +468,27 @@ export async function cancel(w: LiveWorker, e: WorkerBlockCancel): Promise<void>
 }
 
 /**
- * Synthesize an error block for the current turn (FRI-12 path).
- * Persists one row with `kind="error"` + `status="complete"`, then
- * publishes the matching `block_start` + `block_complete` pair so the
- * dashboard materializes the error bubble.
+ * Read accessor: where would the next block-index for `turnId` land?
  *
- * Idempotent at the row level via `block_id` uniqueness. The
- * block_index is `max(existing in-flight) + 1` when the turn is still
- * live in the accumulator, else `9999` (post-finalize fallback).
+ * Returns `{ index: max(in-flight) + 1, turnLive: true }` when the turn is
+ * still resident in the in-memory accumulator (an open()/append() has fired
+ * for the turn and `endTurn` hasn't dropped it). Returns
+ * `{ index: 0, turnLive: false }` when the turn entry is gone — the caller
+ * decides what fallback to use (the injectors module's `recordError` uses
+ * `9999` per FRI-148 §3, so a synthetic error landing on an already-
+ * finalized turn still sorts last in the canonical block table).
+ *
+ * Lives in the FSM module because the accumulator is module-private. Phase
+ * B split the only synthetic writer that needed this accessor (recordError)
+ * out into block-injectors.ts; the accessor is the read-only seam between
+ * the two modules.
  */
-export async function recordError(
-  w: LiveWorker,
-  payload: ErrorBlockPayload,
-): Promise<{ blockId: string } | null> {
-  const sessionId = w.sessionId ?? "__pending__";
-  const blockId = randomUUID();
-  const ts = Date.now();
-  const lt = turns.get(w.turnId);
-  let blockIndex = 9999;
-  if (lt) {
-    let max = -1;
-    for (const live of lt.blocks.values()) {
-      if (live.blockIndex > max) max = live.blockIndex;
-    }
-    if (max >= 0) blockIndex = max + 1;
-  }
-  const contentJson = JSON.stringify(payload);
-
-  try {
-    await insertBlock({
-      blockId,
-      turnId: w.turnId,
-      agentName: w.agentName,
-      sessionId,
-      messageId: null,
-      blockIndex,
-      role: "assistant",
-      kind: "error",
-      source: null,
-      contentJson,
-      status: "complete",
-      ts,
-    });
-  } catch (err) {
-    logger.log("warn", "blocks.error.insert.fail", {
-      agent: w.agentName,
-      turnId: w.turnId,
-      blockId,
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-
-  eventBus.publish({
-    v: 1,
-    type: "block_start",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    block_id: blockId,
-    message_id: null,
-    block_index: blockIndex,
-    role: "assistant",
-    kind: "error",
-    source: null,
-    ts,
-  });
-  eventBus.publish({
-    v: 1,
-    type: "block_complete",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    block_id: blockId,
-    message_id: null,
-    block_index: blockIndex,
-    role: "assistant",
-    kind: "error",
-    source: null,
-    content_json: contentJson,
-    status: "complete",
-    ts,
-  });
-  return { blockId };
+export function peekNextBlockIndex(turnId: string): { index: number; turnLive: boolean } {
+  const lt = turns.get(turnId);
+  if (!lt) return { index: 0, turnLive: false };
+  let max = -1;
+  for (const live of lt.blocks.values()) if (live.blockIndex > max) max = live.blockIndex;
+  return { index: max + 1, turnLive: true };
 }
 
 /**
@@ -655,150 +586,6 @@ export function endTurn(turnId: string): void {
   turns.delete(turnId);
 }
 
-/* ---------------- User-typed block insertion (FIX_FORWARD 1.2) ---------------- */
-
-export interface RecordUserBlockInput {
-  turnId: string;
-  agentName: string;
-  /** Falls back to '__pending__' if the agent doesn't yet have a session. */
-  sessionId?: string;
-  text: string;
-  source:
-    | "user_chat"
-    | "mail"
-    | "queue_inject"
-    | "scratch"
-    | "agent_spawn"
-    | "schedule"
-    | "refork_notice"
-    | "reminder";
-  /** `complete` for the common path (block is final the moment it's
-   *  written). `queued` for user_chat POSTs that arrived while the agent
-   *  was mid-turn — the row is parked until the worker drains it from
-   *  `nextPrompts`, at which point `dispatchQueuedPrompt` flips it to
-   *  `complete` + new `ts` via `block_meta_update`. Defaults to `complete`. */
-  status?: "complete" | "queued";
-  /** Mail-derived blocks carry sender metadata inside content_json. */
-  fromAgent?: string;
-  /** Mail-derived blocks: extra MailRow metadata serialized into
-   *  content_json so the dashboard can render rich detail (id, subject,
-   *  type, priority, threadId, ts) on the collapsed `MailBlock` without
-   *  a separate fetch. */
-  mailMeta?: {
-    id: number;
-    subject: string | null;
-    type: string;
-    priority: string;
-    threadId: string | null;
-    ts: number;
-  };
-  /** Attachments referenced by this user block (user_chat path). Persisted
-   *  into `content_json.attachments` so reload-from-DB rehydrates the chip
-   *  row in the dashboard. The bytes live on disk under `~/.friday/uploads`
-   *  and are fetched via `GET /api/uploads/<sha>`. */
-  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
-}
-
-/**
- * Persist a user-role block ahead of (or alongside) a dispatched turn. The
- * row lands with `status='complete'` immediately — there's no streaming
- * lifecycle for user-typed or mail-derived content.
- *
- * FRI-125: absorbed from lifecycle.ts under the C2 deepening; the
- * inlined INSERT + publish replaces the prior `writeAndPublish`
- * helper. Returned `seq` is the eventBus's per-event sequence number,
- * stamped at publish time.
- */
-export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
-  blockId: string;
-  seq: number;
-}> {
-  const blockId = randomUUID();
-  const ts = Date.now();
-  const status = input.status ?? "complete";
-  const attachments =
-    input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {};
-  const content =
-    input.source === "mail" && input.fromAgent
-      ? {
-          text: input.text,
-          from_agent: input.fromAgent,
-          ...(input.mailMeta
-            ? {
-                mail_id: input.mailMeta.id,
-                mail_subject: input.mailMeta.subject,
-                mail_type: input.mailMeta.type,
-                mail_priority: input.mailMeta.priority,
-                mail_thread_id: input.mailMeta.threadId,
-                mail_ts: input.mailMeta.ts,
-              }
-            : {}),
-          ...attachments,
-        }
-      : { text: input.text, ...attachments };
-  const contentJson = JSON.stringify(content);
-  // FRI-78 follow-up: always publish the canonical `block_complete` SSE
-  // frame, including for `user_chat` + `status='complete'`. Prior to this
-  // the publish was skipped to avoid racing the POST /api/chat/turn
-  // response and double-mounting the optimistic bubble on the sending
-  // browser — but that suppression also denied the message to every
-  // *other* connected client (browser B, mobile, etc.), so they had to
-  // refresh to see the user's own message.
-  //
-  // The dashboard already has the dedup for the SSE-first ordering:
-  // `confirmPending` in chat.svelte.ts collapses a duplicate user
-  // bubble when the SSE arrived before the POST response. Pinned by
-  // chat.test.ts "drops the optimistic bubble when the SSE
-  // block_complete arrived first". The POST-first ordering converges
-  // via the natural `handleBlockComplete` id-match: the optimistic was
-  // re-keyed to `user_<turnId>` in `confirmPending`, and the
-  // subsequent SSE finds the same id and updates in place.
-  await insertBlock({
-    blockId,
-    turnId: input.turnId,
-    agentName: input.agentName,
-    sessionId: input.sessionId ?? "__pending__",
-    messageId: null,
-    blockIndex: 0,
-    role: "user",
-    kind: "text",
-    source: input.source,
-    contentJson,
-    status,
-    ts,
-  });
-  const { seq } = eventBus.publish({
-    v: 1,
-    type: "block_complete",
-    turn_id: input.turnId,
-    agent: input.agentName,
-    block_id: blockId,
-    message_id: null,
-    block_index: 0,
-    role: "user",
-    kind: "text",
-    source: input.source,
-    content_json: contentJson,
-    status,
-    ts,
-  });
-  // FIX_FORWARD 2.8: mail-derived user blocks badge the recipient agent
-  // (a piece of user-visible content just landed in their chat).
-  // user_chat / queue_inject blocks are typed by the user themselves and
-  // need no notification.
-  maybeEmitAgentMessage({
-    agent: input.agentName,
-    turnId: input.turnId,
-    blockId,
-    role: "user",
-    kind: "text",
-    source: input.source,
-    status,
-    contentJson,
-  });
-  return { blockId, seq };
-}
-
 /* ---------------- Agent-message notification (FIX_FORWARD 2.8) ---------------- */
 
 /**
@@ -811,8 +598,13 @@ export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
  * FRI-125: absorbed from lifecycle.ts under the C2 deepening — every
  * block-row-write path that lands user-visible content (close,
  * recordUserBlock) calls this helper after the publish.
+ *
+ * FRI-148 B: exported so the injectors module (`recordUserBlock`) can
+ * call back into the FSM core's user-visible-content fan-out helper. The
+ * helper itself stays in block-stream.ts so the FSM's own `close` path
+ * doesn't need an outbound import to call it.
  */
-function maybeEmitAgentMessage(opts: {
+export function maybeEmitAgentMessage(opts: {
   agent: string;
   turnId: string;
   blockId: string;

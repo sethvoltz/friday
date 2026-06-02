@@ -59,9 +59,11 @@ function makeAdminRecorder(archiveShouldThrow?: Error): AdminRecorder {
     },
     publish: () => {},
     blockStream: {
-      recordError: async () => ({ blockId: "b" }),
       finalize: async () => {},
       endTurn: () => {},
+    },
+    blockInjector: {
+      recordError: async () => ({ blockId: "b" }),
     },
     recoverFromJsonl: async () => {},
     insertUsage: async () => {},

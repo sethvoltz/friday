@@ -38,10 +38,10 @@ import {
   append as bsAppend,
   close as bsClose,
   cancel as bsCancel,
-  recordError as bsRecordError,
   finalize as bsFinalize,
   endTurn as bsEndTurn,
 } from "./block-stream.js";
+import { recordError as bsRecordError } from "./block-injectors.js";
 import { appContextForAgent } from "../apps/installer.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
 import { enqueueTransition, enqueueTransitionResult } from "./transition-queue.js";
@@ -719,9 +719,11 @@ function makeProdPorts(): TurnStatePorts<LiveWorker> {
     closeTicket: (opts) => closeTicketForArchive(opts),
     publish: (event) => eventBus.publish(event),
     blockStream: {
-      recordError: (w, payload) => bsRecordError(w, payload),
       finalize: (w, status) => bsFinalize(w, status),
       endTurn: (turnId) => bsEndTurn(turnId),
+    },
+    blockInjector: {
+      recordError: (w, payload) => bsRecordError(w, payload),
     },
     recoverFromJsonl: (inputs) => recoverFromJsonl(inputs),
     insertUsage: (row) => insertUsage(row),
