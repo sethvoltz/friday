@@ -12,12 +12,21 @@
  * "trust the chain" pattern. FRI-116 hoists the clear into the wedge
  * branches themselves so each branch holds its own invariant locally.
  *
- * This file pins the post-condition end-to-end. The wedge tests
- * deliberately do NOT register the worker in the live map, so that the
- * `forceKillStuckWorker(...)` call inside the wedge branch is a no-op
- * (it short-circuits on `!live.has(w.agentName)`). That isolates the
- * assertion to the hoisted clear — if the hoist is reverted, these
- * tests fail.
+ * This file pins the post-condition end-to-end: after any turn-end path,
+ * `w.turnStart` is falsy.
+ *
+ * FRI-145 M2 update: `handleEvent`'s `error` / `turn-complete` cases now
+ * begin with a Generation guard (`if (!isCurrentGeneration(w)) break;`). A
+ * worker only ever receives IPC while it is the live map's current
+ * Generation (the `child.on("message")` handler closes over a worker that was
+ * `live.set`), so every test here registers the worker in the live map — the
+ * realistic state. The pre-M2 shortcut of leaving the worker out of the map
+ * (to no-op `forceKillStuckWorker`) is no longer valid: an unregistered worker
+ * is a superseded Generation and `handleEvent` would short-circuit before
+ * reaching the turn-end clear at all. The wedge tests still pin the
+ * end-to-end invariant (turnStart cleared on the wedge path); the hoisted
+ * clear runs before `forceKillStuckWorker`, and `forceKillStuckWorker` is now
+ * exercised for real (worker registered) rather than no-op'd.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -82,96 +91,118 @@ function makeFakeWorker(overrides: Record<string, unknown> = {}): {
 
 describe("lifecycle: w.turnStart cleared on every turn-end path (FRI-110, FRI-116)", () => {
   it("happy turn-complete clears w.turnStart", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const { worker } = makeFakeWorker({
       blocksThisTurn: 1, // produced a block → not wedge
       zeroBlockTurnStreak: 0,
     });
-    await handleEvent(
-      worker as never,
-      {
-        type: "turn-complete",
-        sessionId: "sess-ts-1",
-      } as never,
-    );
-    expect(worker.turnStart).toBeUndefined();
+    __putLiveWorkerForTest("ts-clear-agent", worker as never);
+    try {
+      await handleEvent(
+        worker as never,
+        {
+          type: "turn-complete",
+          sessionId: "sess-ts-1",
+        } as never,
+      );
+      expect(worker.turnStart).toBeUndefined();
+    } finally {
+      __deleteLiveWorkerForTest("ts-clear-agent");
+    }
   });
 
   it("error event clears w.turnStart", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const { worker } = makeFakeWorker({
       blocksThisTurn: 1,
       zeroBlockTurnStreak: 0,
     });
-    await handleEvent(
-      worker as never,
-      {
-        type: "error",
-        message: "SDK error",
-        recoverable: true,
-        code: "test_error",
-        headline: "test error",
-        rawMessage: "test",
-      } as never,
-    );
-    expect(worker.turnStart).toBeUndefined();
+    __putLiveWorkerForTest("ts-clear-agent", worker as never);
+    try {
+      await handleEvent(
+        worker as never,
+        {
+          type: "error",
+          message: "SDK error",
+          recoverable: true,
+          code: "test_error",
+          headline: "test error",
+          rawMessage: "test",
+        } as never,
+      );
+      expect(worker.turnStart).toBeUndefined();
+    } finally {
+      __deleteLiveWorkerForTest("ts-clear-agent");
+    }
   });
 
   it("wedge force-kill via turn-complete clears w.turnStart (hoisted clear)", async () => {
     // The hoist puts `w.turnStart = undefined` BEFORE the
-    // `forceKillStuckWorker(...)` call. We don't put the worker into the
-    // live map, so `forceKillStuckWorker` short-circuits on
-    // `!live.has(w.agentName)` and does nothing destructive — but the
-    // hoisted clear runs unconditionally before that call. If the hoist
-    // is reverted, w.turnStart remains set and this test fails.
-    const { handleEvent } = await import("./lifecycle.js");
+    // `forceKillStuckWorker(...)` call. FRI-145 M2: the worker is registered
+    // in the live map (the realistic state — handleEvent only runs for a
+    // current Generation), so the wedge branch's `forceKillStuckWorker`
+    // executes for real. The hoisted clear still runs first; the end-to-end
+    // post-condition (turnStart cleared on the wedge path) is what we pin.
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const { worker } = makeFakeWorker({
       blocksThisTurn: 0,
       zeroBlockTurnStreak: 9, // one more zero-block turn trips the default threshold of 10
     });
-    await handleEvent(
-      worker as never,
-      {
-        type: "turn-complete",
-        sessionId: "sess-ts-1",
-      } as never,
-    );
-    expect(worker.turnStart).toBeUndefined();
+    __putLiveWorkerForTest("ts-clear-agent", worker as never);
+    try {
+      await handleEvent(
+        worker as never,
+        {
+          type: "turn-complete",
+          sessionId: "sess-ts-1",
+        } as never,
+      );
+      expect(worker.turnStart).toBeUndefined();
+    } finally {
+      __deleteLiveWorkerForTest("ts-clear-agent");
+    }
   });
 
   it("wedge force-kill via error clears w.turnStart (hoisted clear)", async () => {
     // Symmetric to the turn-complete case; the error case has its own
     // independent wedge branch in lifecycle.ts. Both must hoist.
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const { worker } = makeFakeWorker({
       blocksThisTurn: 0,
       zeroBlockTurnStreak: 9,
     });
-    await handleEvent(
-      worker as never,
-      {
-        type: "error",
-        message: "SDK error",
-        recoverable: true,
-        code: "wedge_error",
-        headline: "wedge error",
-        rawMessage: "test",
-      } as never,
-    );
-    expect(worker.turnStart).toBeUndefined();
+    __putLiveWorkerForTest("ts-clear-agent", worker as never);
+    try {
+      await handleEvent(
+        worker as never,
+        {
+          type: "error",
+          message: "SDK error",
+          recoverable: true,
+          code: "wedge_error",
+          headline: "wedge error",
+          rawMessage: "test",
+        } as never,
+      );
+      expect(worker.turnStart).toBeUndefined();
+    } finally {
+      __deleteLiveWorkerForTest("ts-clear-agent");
+    }
   });
 
   it("force-kill via stale-turn ceiling clears w.turnStart", async () => {
-    // The stale-turn reaper (handleEvent prologue, ~line 1304) calls
-    // forceKillStuckWorker directly. With the worker not in the live
-    // map, forceKillStuckWorker's `!live.has` short-circuit fires —
-    // BUT the call returns before reaching its own clear at line 879,
-    // so this test exercises the prologue's reliance on the
-    // function's behavior. To distinguish: forceKillStuckWorker is
-    // idempotent on `w.forceKilled` AND short-circuits when not in
-    // live map. Either way, w.turnStart's clearing is its
-    // responsibility. We confirm post-condition by registering the
-    // worker, then driving the prologue.
+    // The stale-turn reaper (handleEvent prologue) calls forceKillStuckWorker
+    // directly. FRI-145 M2: the prologue gates on `isCurrentGeneration(w)` and
+    // forceKillStuckWorker is idempotent via the Generation no-op
+    // (`live.get(name) !== w` short-circuits re-entry). With the worker
+    // registered in the live map below, the FIRST stale heartbeat runs
+    // forceKillStuckWorker fully — it clears `w.turnStart`, then `live.delete`s
+    // to demote the Generation. We confirm the turnStart-clear post-condition
+    // by registering the worker, then driving the prologue once.
     const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
       await import("./lifecycle.js");
     const { worker } = makeFakeWorker({

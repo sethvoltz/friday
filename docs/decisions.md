@@ -965,15 +965,16 @@ The grill on 2026-05-22 lifted ADR-020's "path forward" into scope as FRI-113.
 
 2. **Transition matrix** (compiled into `services/daemon/src/agent/registry.ts`):
 
-   | from \ to  | idle    | working | stalled | error   | archived                   |
-   | ---------- | ------- | ------- | ------- | ------- | -------------------------- |
-   | `idle`     | (no-op) | ✅      | ✅      | ✅      | ✅ (non-orchestrator only) |
-   | `working`  | ✅      | (no-op) | ✅      | ✅      | ✅ (non-orchestrator only) |
-   | `stalled`  | ✅      | ✅      | (no-op) | ✅      | ✅ (non-orchestrator only) |
-   | `error`    | ✅      | ❌      | ❌      | (no-op) | ✅ (non-orchestrator only) |
-   | `archived` | ❌\*    | ❌      | ❌      | ❌      | (no-op)                    |
+   | from \ to  | idle    | working | stalled | archived                   |
+   | ---------- | ------- | ------- | ------- | -------------------------- |
+   | `idle`     | (no-op) | ✅      | ✅      | ✅ (non-orchestrator only) |
+   | `working`  | ✅      | (no-op) | ✅      | ✅ (non-orchestrator only) |
+   | `stalled`  | ✅      | ✅      | (no-op) | ✅ (non-orchestrator only) |
+   | `archived` | ❌\*    | ❌      | ❌      | (no-op)                    |
 
    \* `archived → idle` is reachable only via `unarchiveAgent` (the apps installer's re-adopt path), which uses the privileged unchecked write helper.
+
+   The agent-status `error` value was removed in FRI-145 M5: a worker that exits mid-turn self-heals to `idle` via the Turn-state machine's `hard-exit` Transition rather than parking the row at a sticky `error`, so the matrix no longer carries an `error` row or column. `stalled` gained its producer (the watchdog `stall` Transition) in the same change. (The transient `archive_requested` the Zero mutator path writes — `* → archive_requested → archived` for non-orchestrators — is in the DB CHECK but elided from this table.)
 
 3. **`archive_reason` is a required arg on the archived transition.** `setStatus(name, "archived", {archiveReason})` validates the reason is present and writes both columns atomically. `archiveAgent(name, {reason})` is the thin convenience wrapper.
 
@@ -1014,6 +1015,80 @@ No other caller may reach the unchecked path. `_setStatusUnchecked` (lowercase u
 - The privileged escape hatch list grows beyond `unarchiveAgent` + auditor heal. A third site with no orthogonal justification means the gate needs a different shape.
 - `archive_requested` becomes a state code paths read at rest (e.g. a UI hover-preview shows "archive pending…" between mutator write and LISTEN handler). At that point the TS union widens and the matrix grows an edge.
 - The 60-second auditor interval proves too slow to catch a Class A drift (a code-controlled state boundary that bypassed the inline gate). Today the gate IS the inline check; if a new direct-write path appears, the auditor's healing log lines are the canary.
+
+## ADR-032 — Single-writer Turn-state machine; the worker turn lifecycle is one serialized state machine
+
+**Status:** accepted (FRI-145, 2026-06-01)
+
+**Amends ADR-016** (live in-flight state lives in daemon memory) and **ADR-024** (the agent-status model). **Builds on ADR-031** (`registry.setStatus` is the only DB door — ADR-032 makes the Turn-state machine that gate's only caller) and **ADR-020** (the invariant auditor remains the timer-based safety net, now reaching the column through the machine rather than around it). Vocabulary is defined in `CONTEXT.md` → "Agent turn lifecycle".
+
+### Context
+
+ADR-031 made `registry.setStatus` the only door to the `agents.status` column, but it did not make the _callers_ of that door serialized. A single agent's `agents.status` was still written by four unserialized write-semantics families:
+
+1. the turn lifecycle (`services/daemon/src/agent/lifecycle.ts`),
+2. archive (`registry.archiveAgent → registry.setStatus(name, "archived")`),
+3. boot recovery (`services/daemon/src/index.ts`),
+4. the continuous invariant auditor (`services/daemon/src/agent/invariants.ts`).
+
+They were coordinated only by ad-hoc flags on the `LiveWorker` bag (`suppressIdleReset`, `forceKilled`), a read-before-write recheck in the exit handler, and a **per-worker** promise chain (`ipcChain`) that serialized only the IPC channel of one worker generation. There was no agent-wide serialization across channels or across worker generations. The 28-field `LiveWorker` carried parallel sources of the same truth (`w.status === "working"` ⇔ `w.turnStart !== undefined`), and the `handleEvent` switch (~509 lines) had near-duplicate `error` and `turn-complete` tails.
+
+Two shipped bugs lived in that gap:
+
+1. **`stalled` regression.** ADR-024 retired the `agent_status` SSE event and deleted the watchdog's `eventBus.publish({type:"agent_status", status:"stalled"})`, replacing it with only a comment. No `agents.status="stalled"` write was ever added, so the dashboard's warn-colored stalled dot had consumers but no producer.
+2. **Hard-exit silent idle.** A worker dying without a terminal turn-complete (OOM / SIGKILL / crash) was reset to `idle` by the exit handler with **no** `turn_done` published, so the dashboard's `inflightTurnId` stayed pinned to a dead turn (a permanently-spinning bubble).
+
+The most dangerous failure mode in the old design — a superseded worker generation's late IPC, exit, or abort-deadline writing `idle` over a `working`/`archived` row written by a _newer_ generation — was guarded only by the hand-rolled flags, which had to be set and cleared correctly at every teardown path. The unconditional name-keyed `live.delete(input.agentName)` in the exit handler could even drop a replacement generation's live entry.
+
+### Decision
+
+**There is exactly one application-level writer of `agents.status`: the Turn-state machine.** Every mutation is a **Transition** applied through the agent-keyed **Transition queue**, in strict arrival order. `registry.setStatus` stays the only DB door (ADR-031); the machine is its only caller. No failure mode requires `brew services restart` — the system is self-healing.
+
+1. **Two distinct namespaces, by design.**
+   - **Turn state** — the machine's authoritative in-memory state set: `idle | working | aborting | force-killed`. Lives in daemon memory; it is the source of truth.
+   - **Status projection** — the durable mirror written _only_ inside a Transition: `agents.status` (`idle | working | stalled | archived`) plus the in-memory `w.status` (`idle | working`).
+
+   These are intentionally different vocabularies. `force-killed` and `aborting` are transient Turn states with **no** resting `agents.status` value (`force-killed` projects/heals to `idle` after the kill). `stalled` and `archived` are projections with **no** resting Turn state. `archived` is the terminal sink reached via the `archive` Transition, not a fourth resting Turn-state value. (The DB CHECK additionally carries the transient `archive_requested` the Zero mutator path writes; that value is not pruned by this work and never observed at rest — the LISTEN handler flips it to `archived` immediately.)
+
+2. **The agent-keyed Transition queue** (`services/daemon/src/agent/transition-queue.ts`) replaces the per-worker `ipcChain`. Every Transition for one agent name funnels through one serialized, non-wedging promise chain, so transitions apply in strict arrival order with no interleaving — across the IPC channel, across worker generations, and across the archive / boot / auditor channels. `enqueueTransitionResult<T>` is the variant whose returned promise resolves/rejects with the Transition's real outcome (so an awaiting archive caller still sees the FSM `IllegalTransitionError`).
+
+3. **Generation = object identity.** A worker instance `w` is the _current_ **Generation** of its agent name iff `live.get(name) === w` (`isCurrentGeneration(w)` in `lifecycle.ts`). A Transition arriving from a superseded Generation — a stale worker whose name a replacement already re-`live.set`, or one already `live.delete`d by force-kill / archive / refork — is a **structural no-op**. This single rule replaces both `suppressIdleReset` and `forceKilled` (deleted), and fixes the latent name-keyed-delete clobber: teardown demotes the Generation (`live.delete`) up front, so any racing IPC / exit / abort-deadline Transition sees `live.get(name) !== w` and no-ops. Identity-as-epoch — promoted to a monotonic counter only if cross-gap ordering is ever needed. (`forceKillStuckWorker`'s late abort-deadline idle write is guarded by this rule so it can't write `idle` over a newer generation's `archived`.)
+
+4. **The machine returns intents; the caller schedules side effects after the Transition resolves.** `apply(...)` and `applyAdmin(...)` are pure-ish functions returning `{ state/projection, intents }`. An `executeIntents` runner performs side effects (the `set-status` projection write, `close-ticket`, `archive`, `heal`, `publish-turn-done`, `finalize-blocks`, `send-next`, `force-kill`, etc.) _after_ the Transition resolves. No on-chain handler re-enters the same-key queue mid-Transition — that is the one residual hazard the single-writer invariant depends on holding.
+
+5. **Archive / boot / auditor route through the machine** (replacing direct `registry.setStatus` / `registry.archiveAgent` / `_auditorHealStatusUnchecked` calls). The `AdminTransition` union (`archive` / `heal` / `set-projection`) operates on an agent _name_ (which may have no live worker), carries no turn-boundary bookkeeping, and decides one Status projection. The `archive` Transition emits `close-ticket` **before** `archive`, so the linked ticket closes strictly before the row goes terminal (replacing the old fire-and-forget close that raced the archive write).
+
+6. **The watchdog enqueues `stall` fire-and-forget.** When a working worker blows past its heartbeat budget the watchdog enqueues a `stall` Transition that projects `agents.status="stalled"` — restoring the producer lost when the `agent_status` SSE was retired. The watchdog **never awaits** the Transition inside its tick loop; awaiting would head-of-line-block the watchdog across all agents (the only deadlock / HOL condition). The watchdog never calls `setStatus` directly.
+
+7. **Hard-exit self-heals.** A worker that exits mid-turn with no terminal turn-complete drives a `hard-exit` Transition that finalizes streaming blocks as error, publishes the previously-missing `turn_done{status:"error"}` (so the dashboard's inflight pin unpins), and heals the row to `idle` — dispatchable, no daemon restart. A racing archive's terminal `archived` is preserved.
+
+### The agent-status `error` prune
+
+The agent-status `"error"` value is removed end-to-end (`AgentStatus` union, both FSM matrices, the schema CHECK constraint via drizzle-kit migration `0027`, the Zero sync union, the `mcp/agents.ts` `agent_list` enum, and the two dashboard `statusDot` branches). The `hard-exit` Transition's self-heal to `idle` is what replaces the old sticky `error` resting state — there is no longer any non-archived dead state that requires manual recovery.
+
+**Namespace boundary (do not conflate):** the **turn-wire** `turn_done{status:"error"}` and all **block/tool** `"error"` statuses are a _different_ namespace and **stay**. Only the `AgentStatus` member, the FSM matrix rows/edges, the CHECK literal, the sync union, the MCP enum, and the two dashboard agent-status dot branches were pruned. See the ADR-031 transition matrix above (already updated) — it no longer carries an `error` row or column.
+
+### What this lands
+
+- `services/daemon/src/agent/transition-queue.ts` — the agent-keyed serialized queue (`enqueueTransition` + `enqueueTransitionResult`).
+- `services/daemon/src/agent/turn-state-machine.ts` — `TurnState`, `StatusProjection`, the `Transition` and `AdminTransition` unions, the `Intent` union, and the pure `apply` / `applyAdmin` reducers.
+- `services/daemon/src/agent/turn-state-ports.ts` — the injected collaborator ports (`setStatus`, `archive`, `heal`, `closeTicket`, publish, finalize-blocks, …) and the `executeIntents` runner.
+- `isCurrentGeneration(w)` in `lifecycle.ts` replacing `suppressIdleReset` + `forceKilled` (both deleted; 0 non-test references remain).
+- `let ipcChain` removed from `lifecycle.ts`; per-worker chaining replaced by `enqueueTransition(name, …)`.
+- The watchdog `stall` producer; the exit handler `hard-exit` self-heal; the `error` prune (migration `0027`).
+
+### What this does NOT do
+
+- **No monotonic Generation counter.** Generation is same-process object identity (`live.get(name) === w`). A counter/UUID is a future tightening only if cross-process or cross-gap ordering is ever needed.
+- **No fourth `agents.status` value for the transient Turn states.** `aborting` and `force-killed` are in-memory Turn states only; they project to `idle`/`working`/`archived`, never to their own column value.
+- **No removal of `archive_requested`** from the DB CHECK. It stays transient (TS union unchanged, per ADR-031).
+- **No change to the turn-wire / block / tool `error` namespace.**
+
+### Bring this ADR back to the table if
+
+- An on-chain intent handler needs to re-enter the same agent's Transition queue mid-Transition (today none does: `send-next` is dispatched off-chain, force-kill only awaits DB writes + `killPgrp`). That would reintroduce a same-key deadlock and force the queue design to change.
+- Cross-process or cross-restart ordering of generations is ever needed — promote Generation from object identity to a monotonic counter.
+- A fifth write-semantics family for `agents.status` appears that genuinely cannot be modeled as a Transition (none is foreseen).
 
 ## Watch list
 

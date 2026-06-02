@@ -40,6 +40,7 @@
   import { onMount } from "svelte";
   import { DraftingCompass } from "lucide-svelte";
   import { agentIconFor } from "$lib/util/agent-icon";
+  import { agentStatusDot } from "$lib/util/agent-status-dot";
   import posthog from "posthog-js";
 
   // The route is the authoritative source for which sidebar row is
@@ -313,17 +314,7 @@
     chat.agents.find((a) => a.name === chat.focusedAgent) ?? pinned,
   );
 
-  function statusDot(status: string): string {
-    return status === "working"
-      ? "var(--status-ok)"
-      : status === "stalled"
-        ? "var(--status-warn)"
-        : status === "error"
-          ? "var(--status-error)"
-          : status === "archived"
-            ? "var(--text-tertiary)"
-            : "var(--text-tertiary)";
-  }
+  const statusDot = agentStatusDot;
 
   // Expand state + session cache live on the chat store so they survive
   // ChatShell re-mounts. The Sidebar is mounted inside ChatShell, which

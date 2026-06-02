@@ -172,7 +172,7 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
         "List registered agents, optionally filtered by type or status.",
         {
           type: z.enum(["orchestrator", "builder", "helper", "scheduled", "bare"]).optional(),
-          status: z.enum(["idle", "working", "stalled", "error", "archived"]).optional(),
+          status: z.enum(["idle", "working", "stalled", "archived"]).optional(),
         },
         async (args, extra) => {
           const params = new URLSearchParams();

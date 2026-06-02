@@ -31,6 +31,7 @@ import { logger } from "../log.js";
 import {
   insertBlock,
   updateBlock,
+  getBlockById,
   type BlockKind,
   type BlockSource,
 } from "@friday/shared/services";
@@ -42,6 +43,63 @@ import type {
   WorkerBlockCancel,
 } from "./worker-protocol.js";
 import type { LiveWorker } from "./lifecycle.js";
+
+/* ---------------- Per-block state machine (FRI-145 M6) ----------------
+ *
+ * Each block runs a tiny lifecycle: `start → delta* → (complete | error |
+ * finalize)`. Before M6 the handlers were forgiving — `append`/`close` on an
+ * unknown clientBlockId silently no-op'd, and a second `close` after the first
+ * either issued a dup-key INSERT (caught + warn-logged) or a zero-row UPDATE.
+ * Both swallowed a real protocol violation. M6 enforces the sequence at the
+ * interface: an illegal call throws {@link IllegalBlockTransitionError} (caught
+ * + logged by `safeHandleEvent`, never crashing the daemon) instead of
+ * fabricating a write. The INSERT-vs-UPDATE choice now lives entirely inside
+ * this module (see {@link close} / {@link finalize}).
+ *
+ * State is two-tiered per turn: the in-flight `blocks` map holds OPEN blocks
+ * (the watchdog/snapshot read surface), and a `closed` set records every block
+ * id that has reached a terminal state (complete / error / canceled /
+ * finalized). The pair lets the machine distinguish:
+ *   - `append`/`close` before `start`   → BLOCK_NOT_STARTED
+ *   - `append`/`close` after terminal   → BLOCK_ALREADY_CLOSED
+ *   - second `start` for the same id    → BLOCK_ALREADY_STARTED
+ */
+
+export type IllegalBlockTransitionCode =
+  | "BLOCK_NOT_STARTED"
+  | "BLOCK_ALREADY_STARTED"
+  | "BLOCK_ALREADY_CLOSED";
+
+/**
+ * Thrown when a block-IPC call violates the `start → delta* → terminal`
+ * sequence. Carries the offending op + clientBlockId so the
+ * `worker.ipc.error` log line (emitted by `safeHandleEvent`) is diagnosable.
+ * The message always contains the word "illegal" so a coarse caller can match
+ * on it; precise callers (and tests) read {@link code}.
+ */
+export class IllegalBlockTransitionError extends Error {
+  readonly code: IllegalBlockTransitionCode;
+  readonly op: "open" | "append" | "close" | "cancel";
+  readonly turnId: string;
+  readonly clientBlockId: string;
+
+  constructor(opts: {
+    code: IllegalBlockTransitionCode;
+    op: "open" | "append" | "close" | "cancel";
+    turnId: string;
+    clientBlockId: string;
+  }) {
+    super(
+      `IllegalBlockTransitionError[${opts.code}]: illegal block ${opts.op} ` +
+        `turn=${opts.turnId} clientBlockId=${opts.clientBlockId}`,
+    );
+    this.name = "IllegalBlockTransitionError";
+    this.code = opts.code;
+    this.op = opts.op;
+    this.turnId = opts.turnId;
+    this.clientBlockId = opts.clientBlockId;
+  }
+}
 
 /* ---------------- Absorbed-from-lifecycle types ----------------
  *
@@ -86,8 +144,16 @@ export interface LiveTurn {
   turnId: string;
   agent: string;
   sessionId: string;
-  /** Keyed by the worker's clientBlockId — natural lookup for delta/stop. */
+  /** OPEN blocks, keyed by the worker's clientBlockId — the in-flight read
+   *  surface (watchdog / snapshot). A block leaves this map the instant it
+   *  reaches a terminal state (close / cancel / finalize) and its id is
+   *  recorded in {@link closed}. */
   blocks: Map<string, LiveBlockState>;
+  /** clientBlockIds that have reached a terminal state this turn. M6 reads
+   *  this to reject a delta/close after the block already closed
+   *  (BLOCK_ALREADY_CLOSED) and to reject a second `start` for the same id
+   *  (BLOCK_ALREADY_STARTED). Cleared with the turn in {@link endTurn}. */
+  closed: Set<string>;
   startedAt: number;
 }
 
@@ -125,9 +191,29 @@ function startBlockInternal(args: StartBlockArgs): LiveBlockState {
       agent: args.agentName,
       sessionId: args.sessionId,
       blocks: new Map(),
+      closed: new Set(),
       startedAt: args.ts,
     };
     turns.set(args.turnId, lt);
+  }
+  // M6 sequence guard: a clientBlockId may only be opened once per turn.
+  // A re-open while still in-flight, or after the block already closed, is a
+  // protocol violation — reject instead of clobbering the accumulator entry.
+  if (lt.blocks.has(args.clientBlockId)) {
+    throw new IllegalBlockTransitionError({
+      code: "BLOCK_ALREADY_STARTED",
+      op: "open",
+      turnId: args.turnId,
+      clientBlockId: args.clientBlockId,
+    });
+  }
+  if (lt.closed.has(args.clientBlockId)) {
+    throw new IllegalBlockTransitionError({
+      code: "BLOCK_ALREADY_CLOSED",
+      op: "open",
+      turnId: args.turnId,
+      clientBlockId: args.clientBlockId,
+    });
   }
   const state: LiveBlockState = {
     blockId: args.blockId,
@@ -153,22 +239,50 @@ function appendDeltaInternal(
   turnId: string,
   clientBlockId: string,
   delta: { text?: string; partial_json?: string },
-): LiveBlockState | null {
+): LiveBlockState {
   const lt = turns.get(turnId);
-  if (!lt) return null;
-  const b = lt.blocks.get(clientBlockId);
-  if (!b) return null;
+  const b = lt?.blocks.get(clientBlockId);
+  if (!b) {
+    // M6 sequence guard: distinguish a delta AFTER the block closed
+    // (BLOCK_ALREADY_CLOSED) from a delta with NO matching start
+    // (BLOCK_NOT_STARTED). Both used to silently no-op.
+    throw new IllegalBlockTransitionError({
+      code: lt?.closed.has(clientBlockId) === true ? "BLOCK_ALREADY_CLOSED" : "BLOCK_NOT_STARTED",
+      op: "append",
+      turnId,
+      clientBlockId,
+    });
+  }
   if (typeof delta.text === "string") b.text += delta.text;
   if (typeof delta.partial_json === "string") b.partialJson += delta.partial_json;
   return b;
 }
 
-function finishBlockInternal(turnId: string, clientBlockId: string): LiveBlockState | null {
+/**
+ * Move an in-flight block to its terminal state, removing it from the open
+ * `blocks` map and recording its id in `closed`. Throws if the block was never
+ * started (BLOCK_NOT_STARTED) or already reached a terminal state
+ * (BLOCK_ALREADY_CLOSED) — the latter is exactly the double-close that used to
+ * silently no-op (and, pre-this-fix, could fire a dup-key INSERT). `op`
+ * distinguishes the close vs cancel path in the thrown error for diagnosis.
+ */
+function finishBlockInternal(
+  turnId: string,
+  clientBlockId: string,
+  op: "close" | "cancel",
+): LiveBlockState {
   const lt = turns.get(turnId);
-  if (!lt) return null;
-  const b = lt.blocks.get(clientBlockId);
-  if (!b) return null;
-  lt.blocks.delete(clientBlockId);
+  const b = lt?.blocks.get(clientBlockId);
+  if (!b) {
+    throw new IllegalBlockTransitionError({
+      code: lt?.closed.has(clientBlockId) === true ? "BLOCK_ALREADY_CLOSED" : "BLOCK_NOT_STARTED",
+      op,
+      turnId,
+      clientBlockId,
+    });
+  }
+  lt!.blocks.delete(clientBlockId);
+  lt!.closed.add(clientBlockId);
   return b;
 }
 
@@ -207,10 +321,6 @@ function finalizeLiveBlockContent(live: LiveBlockState): string {
  * exist for closed blocks).
  */
 export async function open(w: LiveWorker, e: WorkerBlockStart): Promise<void> {
-  // FRI-61 wedge detector: count every block-start (text, thinking,
-  // tool_use, tool_result). Caller-visible side effect on the worker.
-  w.blocksThisTurn++;
-
   const sessionId = w.sessionId ?? "__pending__";
   const blockId = randomUUID();
   const ts = Date.now();
@@ -220,6 +330,29 @@ export async function open(w: LiveWorker, e: WorkerBlockStart): Promise<void> {
   // assistant's turn.
   const role = "assistant";
   const source: BlockSource = null;
+
+  // M6: run the state-machine guard FIRST. A double-start (BLOCK_ALREADY_STARTED)
+  // or restart-after-close (BLOCK_ALREADY_CLOSED) throws here, before the wedge
+  // counter bumps and before any SSE is published — so a rejected open emits no
+  // spurious `block_start` and doesn't inflate `blocksThisTurn`.
+  startBlockInternal({
+    turnId: w.turnId,
+    agentName: w.agentName,
+    sessionId,
+    clientBlockId: e.clientBlockId,
+    blockId,
+    messageId: e.messageId ?? null,
+    blockIndex: e.blockIndex,
+    role,
+    kind: e.kind,
+    source,
+    tool: e.tool,
+    ts,
+  });
+
+  // FRI-61 wedge detector: count every block-start (text, thinking,
+  // tool_use, tool_result). Caller-visible side effect on the worker.
+  w.blocksThisTurn++;
 
   eventBus.publish({
     v: 1,
@@ -235,21 +368,6 @@ export async function open(w: LiveWorker, e: WorkerBlockStart): Promise<void> {
     tool: e.tool,
     ts,
   });
-
-  startBlockInternal({
-    turnId: w.turnId,
-    agentName: w.agentName,
-    sessionId,
-    clientBlockId: e.clientBlockId,
-    blockId,
-    messageId: e.messageId ?? null,
-    blockIndex: e.blockIndex,
-    role,
-    kind: e.kind,
-    source,
-    tool: e.tool,
-    ts,
-  });
 }
 
 /**
@@ -258,7 +376,6 @@ export async function open(w: LiveWorker, e: WorkerBlockStart): Promise<void> {
  */
 export async function append(w: LiveWorker, e: WorkerBlockDelta): Promise<void> {
   const live = appendDeltaInternal(w.turnId, e.clientBlockId, e.delta);
-  if (!live) return;
   eventBus.publish({
     v: 1,
     type: "block_delta",
@@ -278,8 +395,13 @@ export async function append(w: LiveWorker, e: WorkerBlockDelta): Promise<void> 
  */
 export async function close(w: LiveWorker, e: WorkerBlockStop): Promise<void> {
   const ts = Date.now();
-  const live = finishBlockInternal(w.turnId, e.clientBlockId);
-  if (!live) return;
+  // Throws BLOCK_ALREADY_CLOSED on a double-close and BLOCK_NOT_STARTED on a
+  // close-before-start — BEFORE any DB write, so a violation never fabricates a
+  // dup-key INSERT. A successful return guarantees this is the block's first
+  // and only close: the INSERT below is always a fresh row (ADR-024: the
+  // canonical row first exists here, at close, with the schema-default
+  // `streaming=false`).
+  const live = finishBlockInternal(w.turnId, e.clientBlockId, "close");
 
   try {
     await insertBlock({
@@ -341,8 +463,10 @@ export async function close(w: LiveWorker, e: WorkerBlockStop): Promise<void> {
  * for-await loop before producing any deltas.
  */
 export async function cancel(w: LiveWorker, e: WorkerBlockCancel): Promise<void> {
-  const live = finishBlockInternal(w.turnId, e.clientBlockId);
-  if (!live) return;
+  // Cancel is a terminal transition like close — reject a cancel-after-terminal
+  // (BLOCK_ALREADY_CLOSED) or cancel-before-start (BLOCK_NOT_STARTED) instead of
+  // silently dropping the publish.
+  const live = finishBlockInternal(w.turnId, e.clientBlockId, "cancel");
   eventBus.publish({
     v: 1,
     type: "block_canceled",
@@ -446,23 +570,56 @@ export async function recordError(
  * from whatever text/partial_json accumulated. Tool_use blocks with
  * unparseable partial JSON capture it under `_raw`.
  *
- * This walks the in-flight map and does best-effort `updateBlock` per
- * entry; the row may or may not exist (per Phase 5 / ADR-024 it doesn't
- * exist for SDK-streamed blocks, since open/append don't INSERT). The
- * caller should typically follow with {@link endTurn}.
+ * M6 INSERT-vs-UPDATE — decided INSIDE the module: an in-flight block normally
+ * has NO canonical row (ADR-024: open/append never INSERT — the row's first
+ * existence is the terminal write), so finalize INSERTs it born-closed
+ * (`streaming=false` via the schema default). But a row CAN already exist for
+ * this `blockId` (a legacy `streaming` row from the pre-ADR-024 "INSERT at
+ * block-start" path, or a migration artefact) — in that case finalize UPDATEs
+ * it off `streaming` rather than firing a dup-key INSERT. The old code did an
+ * unconditional `updateBlock`, which was a silent zero-row no-op for every
+ * normal ADR-024 block; M6 replaces that with an existence-keyed choice so
+ * neither failure mode (zero-row UPDATE / dup-key INSERT) is possible. Each
+ * finalized block transitions to the terminal `closed` set, so a late
+ * close/append after finalize is rejected rather than re-writing. The caller
+ * should typically follow with {@link endTurn}.
  */
 export async function finalize(w: LiveWorker, status: "error" | "aborted"): Promise<void> {
   const lt = turns.get(w.turnId);
   if (!lt) return;
-  for (const live of lt.blocks.values()) {
+  // Snapshot the in-flight entries before mutating the map inside the loop.
+  const inFlight = [...lt.blocks.values()];
+  for (const live of inFlight) {
     const ts = Date.now();
     const contentJson = finalizeLiveBlockContent(live);
+    // Terminal transition: drop from the open map, record in `closed`. Done
+    // before the awaited write so a concurrent close/append on the same id
+    // (extremely unlikely on the single-writer queue, but defensive) sees the
+    // terminal state immediately.
+    lt.blocks.delete(live.clientBlockId);
+    lt.closed.add(live.clientBlockId);
     try {
-      await updateBlock(live.blockId, {
-        contentJson,
-        status,
-        ts,
-      });
+      // INSERT-vs-UPDATE decided here: existing row → UPDATE off streaming;
+      // no row (the ADR-024 normal case) → INSERT born-closed.
+      const existing = await getBlockById(live.blockId);
+      if (existing) {
+        await updateBlock(live.blockId, { contentJson, status, ts });
+      } else {
+        await insertBlock({
+          blockId: live.blockId,
+          turnId: w.turnId,
+          agentName: w.agentName,
+          sessionId: live.sessionId,
+          messageId: live.messageId,
+          blockIndex: live.blockIndex,
+          role: live.role,
+          kind: live.kind,
+          source: live.source,
+          contentJson,
+          status,
+          ts,
+        });
+      }
     } catch (err) {
       logger.log("warn", "block-stream.finalize.error", {
         agent: w.agentName,
@@ -735,6 +892,7 @@ export function __seedForTest(seed: {
     agent: seed.agent,
     sessionId: seed.sessionId,
     blocks: map,
+    closed: new Set(),
     startedAt: seed.startedAt ?? Date.now(),
   });
 }

@@ -94,7 +94,7 @@ export const agents = pgTable(
   {
     name: text("name").primaryKey(),
     type: text("type").notNull(), // orchestrator|builder|helper|scheduled|bare
-    status: text("status").notNull(), // idle|working|stalled|error|archived|archive_requested
+    status: text("status").notNull(), // idle|working|stalled|archived|archive_requested
     sessionId: text("session_id"),
     parentName: text("parent_name"), // for builder/helper/bare
     worktreePath: text("worktree_path"), // for builder
@@ -130,7 +130,7 @@ export const agents = pgTable(
     ),
     statusCheck: check(
       "agents_status_check",
-      sql`${t.status} IN ('idle','working','stalled','error','archived','archive_requested')`,
+      sql`${t.status} IN ('idle','working','stalled','archived','archive_requested')`,
     ),
   }),
 );

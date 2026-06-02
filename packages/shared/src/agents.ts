@@ -12,13 +12,7 @@ export type AgentType = AgentTypeName;
  * exhaustively means new code paths that DO observe it can do so
  * via the type system instead of by stringly-typed surprise.
  */
-export type AgentStatus =
-  | "idle"
-  | "working"
-  | "stalled"
-  | "error"
-  | "archived"
-  | "archive_requested";
+export type AgentStatus = "idle" | "working" | "stalled" | "archived" | "archive_requested";
 
 /**
  * Terminal reason captured when an agent transitions to `archived`.

@@ -27,6 +27,13 @@ afterAll(async () => {
 beforeEach(async () => {
   await handle.truncate();
   vi.useRealTimers();
+  // FRI-145 M6: the block-stream accumulator (open blocks + the per-turn
+  // `closed` set) is module-global. Tests in this file reuse turnId `t_h1` +
+  // clientBlockId `b1`, so without a reset the second test's block-start hits
+  // the per-block state machine's already-started/already-closed guard. Clear
+  // it between cases.
+  const { __resetForTest } = await import("./block-stream.js");
+  __resetForTest();
 });
 
 interface FakeChild {
@@ -179,9 +186,14 @@ describe("mail-back backstop (FRI-127 §5)", () => {
     __putLiveWorkerForTest("helper-1", worker as never);
 
     // Emit a block-start then a block-stop for a mail_send tool_use targeting
-    // the parent. We drive the IPC handler directly (the block-stream DB write
-    // is a no-op for an unknown block id; the counter increment is the unit
-    // under test).
+    // the parent. FRI-145 M6: the block-stream per-block state machine rejects
+    // a block-stop with no preceding block-start (BLOCK_NOT_STARTED), so the
+    // start is required — a real worker always emits start→stop. The counter
+    // increment (at block-stop, before bsClose) is the unit under test.
+    await handleEvent(
+      worker as never,
+      { type: "block-start", clientBlockId: "b1", kind: "tool_use", blockIndex: 0 } as never,
+    );
     await handleEvent(
       worker as never,
       {
@@ -206,6 +218,11 @@ describe("mail-back backstop (FRI-127 §5)", () => {
     const { worker } = makeHelperWorker();
     __putLiveWorkerForTest("helper-1", worker as never);
 
+    // M6: block-start required before block-stop (BLOCK_NOT_STARTED otherwise).
+    await handleEvent(
+      worker as never,
+      { type: "block-start", clientBlockId: "b1", kind: "tool_use", blockIndex: 0 } as never,
+    );
     await handleEvent(
       worker as never,
       {
@@ -230,6 +247,11 @@ describe("mail-back backstop (FRI-127 §5)", () => {
     const { worker } = makeHelperWorker();
     __putLiveWorkerForTest("helper-1", worker as never);
 
+    // M6: block-start required before block-stop (BLOCK_NOT_STARTED otherwise).
+    await handleEvent(
+      worker as never,
+      { type: "block-start", clientBlockId: "b1", kind: "tool_use", blockIndex: 0 } as never,
+    );
     await handleEvent(
       worker as never,
       {

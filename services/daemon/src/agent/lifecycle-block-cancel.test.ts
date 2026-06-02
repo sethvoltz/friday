@@ -139,9 +139,16 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
     expect(cancelEvt!.seq!).toBeGreaterThan(startEvt!.seq!);
   });
 
-  it("stale block-cancel for an unknown clientBlockId is a no-op (no SSE, no throw)", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+  it("stale block-cancel for an unknown clientBlockId is rejected by the block state machine (BLOCK_NOT_STARTED), no SSE", async () => {
+    // FRI-145 M6: the per-block state machine rejects a cancel for a block that
+    // was never started (or already closed) instead of silently no-op'ing — the
+    // pre-M6 behavior masked a real protocol violation. The block-stream `cancel`
+    // throws `IllegalBlockTransitionError`; the production IPC wrapper
+    // `safeHandleEvent` catches + logs it (no crash) and no `block_canceled` SSE
+    // is published.
+    const { safeHandleEvent } = await import("./lifecycle.js");
     const { eventBus } = await import("../events/bus.js");
+    const { cancel, IllegalBlockTransitionError } = await import("./block-stream.js");
 
     const captured: Array<{ type?: string; block_id?: string }> = [];
     const unsub = eventBus.subscribe((e) =>
@@ -150,21 +157,24 @@ describe("handleBlockCancel (FRI-78 follow-up)", () => {
 
     const w = makeFakeWorker();
 
-    expect(() => {
-      void handleEvent(
-        w as never,
-        {
-          type: "block-cancel",
-          clientBlockId: "c-unknown",
-        } as never,
-      );
-    }).not.toThrow();
-    // negative-space: a stale block-cancel for an unknown clientBlockId must
-    // publish nothing. handleEvent is fire-and-forget — give the async chain
-    // a bounded real-time window to fire (so a regression would be visible)
-    // before asserting nothing was emitted. vi.waitFor would resolve on the
-    // first tick because the assertion already passes.
-    await new Promise((r) => setTimeout(r, 100));
+    // (1) At the block-stream layer: the cancel REJECTS with the typed error.
+    let thrown: unknown;
+    try {
+      await cancel(w as never, { type: "block-cancel", clientBlockId: "c-unknown" } as never);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
+      "BLOCK_NOT_STARTED",
+    );
+
+    // (2) Through the production IPC wrapper: the throw is caught + logged, the
+    // call resolves (no unhandled rejection, no daemon crash), and nothing is
+    // published to live clients.
+    await expect(
+      safeHandleEvent(w as never, { type: "block-cancel", clientBlockId: "c-unknown" } as never),
+    ).resolves.toBeUndefined();
 
     unsub();
 

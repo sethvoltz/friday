@@ -169,6 +169,45 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
     expect(readBeforeArchive).toBe(true);
   });
 
+  it("FRI-145 M4 / AC #6: closeTicketForArchive is invoked BEFORE the archived write resolves", async () => {
+    // The machine's archive Transition emits `close-ticket` then `archive`, so
+    // the linked ticket must already be at its closed status the moment
+    // `registry.archiveAgent` (the terminal write) runs. We pin the call-order
+    // by recording into a shared array from inside the archive spy + by reading
+    // the ticket's status at archive time (it must already be `done`).
+    const t = await createTicket({ title: "order-task", status: "in_progress" });
+    await registerBuilderWithTicket("kappa", t.id);
+
+    const callOrder: string[] = [];
+    let ticketStatusAtArchive: string | undefined;
+    const origArchive = registry.archiveAgent;
+    vi.spyOn(registry, "archiveAgent").mockImplementation(
+      async (name: string, opts: { reason: import("@friday/shared").ArchiveReason }) => {
+        // The close-ticket intent ran first, so the ticket is already closed.
+        ticketStatusAtArchive = (await getTicket(t.id))?.status;
+        callOrder.push("set-archived");
+        return origArchive(name, opts);
+      },
+    );
+
+    // Stamp the close step too — close-ticket runs strictly before archive.
+    const ticketClose = await import("../services/ticket-close.js");
+    const origClose = ticketClose.closeTicketForArchive;
+    vi.spyOn(ticketClose, "closeTicketForArchive").mockImplementation(async (input) => {
+      callOrder.push("close-ticket");
+      return origClose(input);
+    });
+
+    await archiveAgent("kappa", { reason: "completed" });
+    vi.restoreAllMocks();
+
+    // The ticket was already `done` BEFORE the archived write ran — close
+    // happens-before, not a fire-and-forget race.
+    expect(ticketStatusAtArchive).toBe("done");
+    expect(callOrder).toEqual(["close-ticket", "set-archived"]);
+    expect((await registry.getAgent("kappa"))?.status).toBe("archived");
+  });
+
   it("orchestrator-type agent cannot be archived; closer never runs (FRI-113 / ADR-031)", async () => {
     await registry.registerAgent({ name: "main", type: "orchestrator" });
     const t = await createTicket({ title: "unrelated", status: "in_progress" });

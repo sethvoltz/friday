@@ -18,7 +18,7 @@
 import { existsSync } from "node:fs";
 import { logger } from "../log.js";
 import * as registry from "./registry.js";
-import { isAgentLive } from "./lifecycle.js";
+import { archiveAgent, healAgentStatus, isAgentLive, setAgentProjection } from "./lifecycle.js";
 
 const AUDIT_INTERVAL_MS = 60_000;
 
@@ -105,7 +105,12 @@ export async function audit(): Promise<{
         worktreePath: a.worktreePath,
         previousStatus: a.status,
       });
-      await registry.archiveAgent(a.name, { reason: "abandoned" });
+      // FRI-145 M4: route through the machine's archive Transition (the single
+      // writer of `agents.status`) instead of calling registry.archiveAgent
+      // directly. `lifecycle.archiveAgent` closes the linked ticket
+      // happens-before the terminal `archived` write and tears down any live
+      // worker after the Transition resolves.
+      await archiveAgent(a.name, { reason: "abandoned" });
       // Phase 5: SSE retirement — Zero replicates the agent row's
       // status transition; no `agent_lifecycle` event needed.
       archived.push(a.name);
@@ -120,7 +125,10 @@ export async function audit(): Promise<{
       logger.log("warn", "invariant.demote-zombie-working", {
         agent: a.name,
       });
-      await registry.setStatus(a.name, "idle");
+      // FRI-145 M4: route the zombie-demote through the machine's projection
+      // Transition (the single writer) rather than calling registry.setStatus
+      // directly.
+      await setAgentProjection(a.name, "idle");
       // Phase 5: `agent_status` SSE retired — Zero replicates the
       // setStatus UPDATE reactively.
       demoted.push(a.name);
@@ -133,21 +141,21 @@ export async function audit(): Promise<{
     // through paths the gate cannot cover — direct psql writes,
     // pre-FSM data, future code that bypasses the registry. The
     // canonical case is `orchestrator` rows stuck at `archived` from
-    // before this ADR landed. Heals go through the privileged
-    // unchecked path because the FSM matrix forbids `archived → idle`
-    // for anyone but `unarchiveAgent`.
+    // before this ADR landed. The heal still uses the privileged
+    // unchecked path under the hood (the FSM matrix forbids
+    // `archived → idle` for anyone but `unarchiveAgent`), but FRI-145
+    // M4 routes it through the machine's `heal` Transition so the auditor
+    // is no longer an independent writer of `agents.status` — the
+    // Turn-state machine is the single writer.
     if (isIllegalRestingState(a.type, a.status)) {
-      const target: AgentStatus = "idle";
+      const target = "idle" as const;
       logger.log("warn", "invariant.heal.illegal-resting-state", {
         agent: a.name,
         type: a.type,
         from: a.status,
         to: target,
       });
-      await registry._auditorHealStatusUnchecked(a.name, target, {
-        auditorHeal: true,
-        clearArchiveReason: true,
-      });
+      await healAgentStatus(a.name, target, { clearArchiveReason: true });
       healed.push(a.name);
     }
   }

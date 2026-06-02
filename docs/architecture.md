@@ -408,15 +408,44 @@ Parent-side queue ensures multiple `prompt` IPCs don't race in-flight events wit
 
 ### Agent status semantics
 
-The `agents.status` column has five values:
+The `agents.status` column has four resting values (plus the transient
+`archive_requested` the Zero mutator path writes before the daemon flips it to
+`archived`):
 
-| Status     | Meaning                                                                                 | Terminal?   |
-| ---------- | --------------------------------------------------------------------------------------- | ----------- |
-| `idle`     | Registered, no worker in flight, can be dispatched to                                   | No          |
-| `working`  | A worker is alive and mid-turn                                                          | No          |
-| `stalled`  | Watchdog flagged the worker for missing its heartbeat budget (no exit yet)              | No          |
-| `error`    | Worker crashed or returned an unrecoverable error                                       | Effectively |
-| `archived` | Agent stopped receiving work; for builders, the worktree is gone and the branch deleted | Yes         |
+| Status     | Meaning                                                                                 | Terminal? |
+| ---------- | --------------------------------------------------------------------------------------- | --------- |
+| `idle`     | Registered, no worker in flight, can be dispatched to                                   | No        |
+| `working`  | A worker is alive and mid-turn                                                          | No        |
+| `stalled`  | Watchdog flagged the worker for missing its heartbeat budget (no exit yet)              | No        |
+| `archived` | Agent stopped receiving work; for builders, the worktree is gone and the branch deleted | Yes       |
+
+Every write to `agents.status` flows through a **single writer** — the
+Turn-state machine (`services/daemon/src/agent/turn-state-machine.ts`), reached
+via the per-agent-name Transition queue (`transition-queue.ts`). The turn
+lifecycle, archive, boot recovery, and the invariant auditor no longer write the
+column on their own threads; each enqueues a Transition and the machine projects
+the resulting `agents.status` through the one ADR-031 `registry.setStatus` gate
+(FRI-145, ADR-032). `agents.status` is a **Status projection** of the machine's
+authoritative in-memory **Turn state** (`idle | working | aborting |
+force-killed`), not an independent source of truth — `force-killed` and
+`aborting` are transient Turn states with no resting projection; `stalled` and
+`archived` are projections with no resting Turn state.
+
+`stalled` is produced by the per-agent watchdog (`watchdog.ts`): when a working
+worker blows past its heartbeat budget the watchdog enqueues a `stall`
+Transition that projects `agents.status="stalled"` through the Turn-state
+machine (FRI-145 M5). The watchdog enqueues fire-and-forget and never awaits the
+Transition inside its tick loop, so one stalled agent can't head-of-line-block
+the watchdog across all agents; the machine stays the sole `setStatus` caller.
+The dashboard paints the warn-colored sidebar dot from it.
+
+The agent-status `error` value was **removed** (FRI-145 M5). A worker that exits
+mid-turn with no terminal turn-complete/error no longer parks the row at a
+sticky `error`; instead the exit handler's `hard-exit` Transition publishes the
+missing `turn_done{status:"error"}` (the **wire/block** `error` namespace, which
+is unrelated and stays) and self-heals the agent row to `idle` — dispatchable,
+no daemon restart needed. There is no resting agent-status that requires manual
+recovery.
 
 `archived` is the **terminal** state. Once an agent is archived its session(s) remain visible in `/api/agents/:name/blocks` forever — history is history — but no new turns dispatch, no SSE events should mutate its state, and the row is never resurrected by recovery. A deliberate re-create with the same name uses `registerAgent` (status `idle`) and is conceptually a new entity sharing the namespace, not the same agent un-archived.
 
@@ -433,13 +462,17 @@ Every call to `archiveAgent(name, { reason })` requires a `reason` — there is 
 
 The closer reads the agent row's `ticketId` **before** `registry.archiveAgent` runs — a future refactor that nulls the row's fields on archive would silently break propagation otherwise, so the read order is pinned by a test (`lifecycle-ticket-close.test.ts`). Closer execution is fire-and-forget from `archiveAgent`'s perspective; failures inside the closer (DB error, Linear unreachable, etc.) are logged but never bubble back into the worker-teardown path.
 
-Sidebar filter buckets reflect these semantics: "Show archived" reveals the terminal bucket; "Show inactive" reveals the transient-error bucket (`stalled`, `error`). The focused row is always shown regardless of filter state.
+Sidebar filter buckets reflect these semantics: "Show archived" reveals the terminal bucket; "Show inactive" reveals the transient-stall bucket (`stalled`). The focused row is always shown regardless of filter state.
 
 ### State-boundary checks (inline)
 
-Status mutations cluster around three code paths, each of which validates the invariants it owns:
+After FRI-145 (ADR-032) these are no longer three independent writers of
+`agents.status` — each is a **Transition source** that enqueues onto the agent's
+Transition queue, and the single-writer Turn-state machine performs the actual
+`registry.setStatus`. They remain the load-bearing boundaries because each still
+owns the invariant it validates before (or while) enqueuing:
 
-- **Worker exit handler** (`lifecycle.ts:child.on("exit")`, FIX_FORWARD F1-A): reads the current row's status before resetting to `idle`. If status is `archived` or `error`, leaves it alone — terminal states never get downgraded by an exit event, which closes the race that produced the friday-e2e-probe zombie.
+- **Worker exit handler** (`lifecycle.ts:child.on("exit")` → `finalizeHardExit`, FIX_FORWARD F1-A; FRI-145 M5): a current-Generation exit drives the machine's `hard-exit` Transition, which publishes the missing `turn_done{status:"error"}` for a turn that died in flight and heals the row to `idle`. It first reads the current row's status; if `archived` (a racing archive owns it) it leaves the row alone — the terminal state never gets downgraded by an exit event, which closes the race that produced the friday-e2e-probe zombie. (A superseded Generation's exit is a structural no-op before any of this.)
 - **`archiveAgent()`** (`lifecycle.ts`): sets `archived` synchronously, publishes `agent_lifecycle:archive`, then awaits the worker's actual exit. Awaiting (via the merged `POST /api/agents/:name/archive`) makes the HTTP response a strong "actually archived" signal.
 - **Dashboard event apply** (`chat.svelte.ts`, PR D): `applyAgentStatus`, the `agent_lifecycle:complete` handler, and the `turn_started` handler all short-circuit when the existing row's status is `archived`. SSE ring-buffer replays for archived agents can't flip them back into the active list.
 

@@ -375,9 +375,52 @@ describe("block-stream (FRI-125)", () => {
       endTurn("turn-fin-1");
     });
 
-    // Per ADR-024 + Phase 5: open() doesn't INSERT, so updateBlock during
-    // finalize is a silent no-op on non-existent rows. No rows persist.
-    expect(trace.rows.length).toBe(0);
+    // FRI-145 M6: an in-flight block has NO canonical row yet (ADR-024:
+    // open/append never INSERT). finalize is the block's FIRST terminal write,
+    // so it INSERTs each in-flight block born-closed with `streaming=false` —
+    // it does NOT issue the old zero-row UPDATE. Two in-flight blocks → two
+    // rows, both `status='aborted'`, `streaming=false`.
+    expect(trace.rows.length).toBe(2);
+    // `getDb().select()` returns rows in unspecified order; sort by blockIndex
+    // for a deterministic pin.
+    const finalizeRows = [...(trace.rows as { blockIndex: number }[])].sort(
+      (a, b) => a.blockIndex - b.blockIndex,
+    );
+    expect(finalizeRows).toEqual([
+      {
+        blockId: "uuid-1",
+        turnId: "turn-fin-1",
+        agentName: "test-agent",
+        sessionId: "sess-1",
+        role: "assistant",
+        kind: "text",
+        source: null,
+        blockIndex: 0,
+        messageId: null,
+        contentJson: { text: "partial..." },
+        status: "aborted",
+        streaming: false,
+      },
+      {
+        blockId: "uuid-2",
+        turnId: "turn-fin-1",
+        agentName: "test-agent",
+        sessionId: "sess-1",
+        role: "assistant",
+        kind: "tool_use",
+        source: null,
+        blockIndex: 1,
+        messageId: null,
+        contentJson: {
+          tool_use_id: "toolu_def",
+          name: "Read",
+          // partial_json '{"path":"/etc' is unparseable → captured under _raw.
+          input: { _raw: '{"path":"/etc' },
+        },
+        status: "aborted",
+        streaming: false,
+      },
+    ]);
     // After endTurn, the LiveTurn entry is gone.
     expect(trace.snapshotAfter).toEqual([]);
     // Events: 2× block_start, 2× block_delta (one per block), 2×
@@ -449,5 +492,414 @@ describe("block-stream (FRI-125)", () => {
     expect(snap.length).toBe(1);
     expect(snap[0].turnId).toBe("turn-seed-1");
     expect(snap[0].blocks.size).toBe(1);
+  });
+});
+
+/* ---------------- FRI-145 M6: per-block state machine ---------------- */
+
+describe("block-stream per-block state machine (FRI-145 M6)", () => {
+  async function dbRowCount(): Promise<number> {
+    const rows = await getDb().select().from(schema.blocks);
+    return rows.length;
+  }
+
+  it("valid start → delta → close writes exactly one row with streaming=0", async () => {
+    const { open, append, close } = await import("./block-stream.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-ok" });
+
+    await open(worker as never, {
+      type: "block-start",
+      clientBlockId: "cb-1",
+      kind: "text",
+      blockIndex: 0,
+      messageId: "msg-1",
+    });
+    await append(worker as never, {
+      type: "block-delta",
+      clientBlockId: "cb-1",
+      delta: { text: "hi" },
+    });
+    await close(worker as never, {
+      type: "block-stop",
+      clientBlockId: "cb-1",
+      contentJson: JSON.stringify({ text: "hi" }),
+      status: "complete",
+    });
+
+    const rows = await getDb().select().from(schema.blocks);
+    expect(rows.length).toBe(1);
+    // ADR-024: the canonical row's first existence is at close, born with
+    // streaming=false (schema default — open/append never INSERT).
+    expect(rows[0]).toMatchObject({
+      blockId: "uuid-1",
+      turnId: "turn-m6-ok",
+      kind: "text",
+      status: "complete",
+      streaming: false,
+    });
+  });
+
+  it("double-close: the second close is rejected (BLOCK_ALREADY_CLOSED) and writes no second row", async () => {
+    const { open, close } = await import("./block-stream.js");
+    const { IllegalBlockTransitionError } = await import("./block-stream.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-dc" });
+
+    await open(worker as never, {
+      type: "block-start",
+      clientBlockId: "cb-1",
+      kind: "text",
+      blockIndex: 0,
+    });
+    const stop = {
+      type: "block-stop" as const,
+      clientBlockId: "cb-1",
+      contentJson: JSON.stringify({ text: "done" }),
+      status: "complete" as const,
+    };
+    // First close: legal — INSERTs the canonical row.
+    await close(worker as never, stop);
+    expect(await dbRowCount()).toBe(1);
+    const rowsAfterFirst = await getDb().select().from(schema.blocks);
+    const firstRow = rowsAfterFirst[0];
+
+    // Second close: a protocol violation. It must REJECT (not silently no-op,
+    // and not fire a dup-key INSERT). Assert the exact code + the loose-match
+    // pattern AC #12 names.
+    let thrown: unknown;
+    try {
+      await close(worker as never, stop);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
+      "BLOCK_ALREADY_CLOSED",
+    );
+    expect((thrown as Error).message).toMatch(/illegal|already.closed/i);
+
+    // No second INSERT, no mutation: exactly one row, byte-identical to the
+    // first close's row (proves the rejected close issued no write at all).
+    const rowsAfterSecond = await getDb().select().from(schema.blocks);
+    expect(rowsAfterSecond.length).toBe(1);
+    expect(rowsAfterSecond[0]).toEqual(firstRow);
+  });
+
+  it("delta-after-close: append is rejected (BLOCK_ALREADY_CLOSED) and issues no zero-row UPDATE", async () => {
+    const { open, append, close } = await import("./block-stream.js");
+    const { IllegalBlockTransitionError } = await import("./block-stream.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-dac" });
+
+    await open(worker as never, {
+      type: "block-start",
+      clientBlockId: "cb-1",
+      kind: "text",
+      blockIndex: 0,
+    });
+    await close(worker as never, {
+      type: "block-stop",
+      clientBlockId: "cb-1",
+      contentJson: JSON.stringify({ text: "closed" }),
+      status: "complete",
+    });
+    const rowsBefore = await getDb().select().from(schema.blocks);
+    expect(rowsBefore.length).toBe(1);
+
+    let thrown: unknown;
+    try {
+      await append(worker as never, {
+        type: "block-delta",
+        clientBlockId: "cb-1",
+        delta: { text: " late" },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
+      "BLOCK_ALREADY_CLOSED",
+    );
+
+    // The DB is untouched — no zero-row UPDATE was issued against the closed
+    // row, no new row appeared.
+    const rowsAfter = await getDb().select().from(schema.blocks);
+    expect(rowsAfter).toEqual(rowsBefore);
+  });
+
+  it("append-before-start: rejected (BLOCK_NOT_STARTED), no row written", async () => {
+    const { append } = await import("./block-stream.js");
+    const { IllegalBlockTransitionError } = await import("./block-stream.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-abs" });
+
+    let thrown: unknown;
+    try {
+      await append(worker as never, {
+        type: "block-delta",
+        clientBlockId: "cb-never-opened",
+        delta: { text: "orphan" },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
+      "BLOCK_NOT_STARTED",
+    );
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).op).toBe("append");
+    expect(await dbRowCount()).toBe(0);
+  });
+
+  it("close-before-start: rejected (BLOCK_NOT_STARTED), no row written", async () => {
+    const { close } = await import("./block-stream.js");
+    const { IllegalBlockTransitionError } = await import("./block-stream.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-cbs" });
+
+    let thrown: unknown;
+    try {
+      await close(worker as never, {
+        type: "block-stop",
+        clientBlockId: "cb-never-opened",
+        contentJson: JSON.stringify({ text: "x" }),
+        status: "complete",
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
+      "BLOCK_NOT_STARTED",
+    );
+    expect(await dbRowCount()).toBe(0);
+  });
+
+  it("double-start: re-opening an in-flight block id is rejected (BLOCK_ALREADY_STARTED), no spurious block_start SSE, no counter inflation", async () => {
+    const { open } = await import("./block-stream.js");
+    const { IllegalBlockTransitionError } = await import("./block-stream.js");
+    const { eventBus } = await import("../events/bus.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-ds", blocksThisTurn: 0 });
+
+    const startEvents: unknown[] = [];
+    const unsub = eventBus.subscribe((e) => {
+      if ((e as { type?: string }).type === "block_start") startEvents.push(e);
+    });
+
+    await open(worker as never, {
+      type: "block-start",
+      clientBlockId: "cb-1",
+      kind: "text",
+      blockIndex: 0,
+    });
+    // First open: one block_start SSE, counter at 1.
+    expect(startEvents.length).toBe(1);
+    expect((worker as { blocksThisTurn: number }).blocksThisTurn).toBe(1);
+
+    let thrown: unknown;
+    try {
+      await open(worker as never, {
+        type: "block-start",
+        clientBlockId: "cb-1",
+        kind: "text",
+        blockIndex: 1,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    unsub();
+    expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
+      "BLOCK_ALREADY_STARTED",
+    );
+    // The rejected re-open published NO additional block_start and did NOT bump
+    // the wedge counter — the guard fires before both side effects.
+    expect(startEvents.length).toBe(1);
+    expect((worker as { blocksThisTurn: number }).blocksThisTurn).toBe(1);
+    // open() never INSERTs (ADR-024), so no row regardless; the guard's job is
+    // to protect the accumulator entry from being clobbered, which we verify
+    // via the snapshot: the original (blockIndex 0) entry survives intact.
+    const { snapshot } = await import("./block-stream.js");
+    const lt = snapshot().find((t) => t.turnId === "turn-m6-ds");
+    expect(lt?.blocks.get("cb-1")?.blockIndex).toBe(0);
+    expect(await dbRowCount()).toBe(0);
+  });
+
+  it("re-start after close is rejected (BLOCK_ALREADY_CLOSED), not silently re-opened", async () => {
+    const { open, close } = await import("./block-stream.js");
+    const { IllegalBlockTransitionError } = await import("./block-stream.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-rsac" });
+
+    await open(worker as never, {
+      type: "block-start",
+      clientBlockId: "cb-1",
+      kind: "text",
+      blockIndex: 0,
+    });
+    await close(worker as never, {
+      type: "block-stop",
+      clientBlockId: "cb-1",
+      contentJson: JSON.stringify({ text: "done" }),
+      status: "complete",
+    });
+    expect(await dbRowCount()).toBe(1);
+
+    let thrown: unknown;
+    try {
+      await open(worker as never, {
+        type: "block-start",
+        clientBlockId: "cb-1",
+        kind: "text",
+        blockIndex: 0,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
+      "BLOCK_ALREADY_CLOSED",
+    );
+    // No spurious second row from the rejected re-open.
+    expect(await dbRowCount()).toBe(1);
+  });
+
+  it("double-cancel: the second cancel is rejected (BLOCK_ALREADY_CLOSED)", async () => {
+    const { open, cancel } = await import("./block-stream.js");
+    const { IllegalBlockTransitionError } = await import("./block-stream.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-dcancel" });
+
+    await open(worker as never, {
+      type: "block-start",
+      clientBlockId: "cb-1",
+      kind: "thinking",
+      blockIndex: 0,
+    });
+    await cancel(worker as never, { type: "block-cancel", clientBlockId: "cb-1" });
+    // cancel never persists a row.
+    expect(await dbRowCount()).toBe(0);
+
+    let thrown: unknown;
+    try {
+      await cancel(worker as never, { type: "block-cancel", clientBlockId: "cb-1" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
+      "BLOCK_ALREADY_CLOSED",
+    );
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).op).toBe("cancel");
+    expect(await dbRowCount()).toBe(0);
+  });
+
+  it("close after cancel is rejected (BLOCK_ALREADY_CLOSED) — cancel is terminal", async () => {
+    const { open, cancel, close } = await import("./block-stream.js");
+    const { IllegalBlockTransitionError } = await import("./block-stream.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-cac" });
+
+    await open(worker as never, {
+      type: "block-start",
+      clientBlockId: "cb-1",
+      kind: "text",
+      blockIndex: 0,
+    });
+    await cancel(worker as never, { type: "block-cancel", clientBlockId: "cb-1" });
+
+    let thrown: unknown;
+    try {
+      await close(worker as never, {
+        type: "block-stop",
+        clientBlockId: "cb-1",
+        contentJson: JSON.stringify({ text: "x" }),
+        status: "complete",
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
+      "BLOCK_ALREADY_CLOSED",
+    );
+    // cancel persisted nothing and the rejected close added nothing.
+    expect(await dbRowCount()).toBe(0);
+  });
+
+  it("close after finalize is rejected (BLOCK_ALREADY_CLOSED), no duplicate row", async () => {
+    const { open, append, finalize, close } = await import("./block-stream.js");
+    const { IllegalBlockTransitionError } = await import("./block-stream.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-caf" });
+
+    await open(worker as never, {
+      type: "block-start",
+      clientBlockId: "cb-1",
+      kind: "text",
+      blockIndex: 0,
+    });
+    await append(worker as never, {
+      type: "block-delta",
+      clientBlockId: "cb-1",
+      delta: { text: "partial" },
+    });
+    // finalize INSERTs the in-flight block born-closed (status='aborted').
+    await finalize(worker as never, "aborted");
+    expect(await dbRowCount()).toBe(1);
+    const rowsAfterFinalize = await getDb().select().from(schema.blocks);
+
+    // A late block-stop for the now-finalized block must be rejected — not a
+    // dup-key INSERT over the finalize row.
+    let thrown: unknown;
+    try {
+      await close(worker as never, {
+        type: "block-stop",
+        clientBlockId: "cb-1",
+        contentJson: JSON.stringify({ text: "too late" }),
+        status: "complete",
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
+    expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
+      "BLOCK_ALREADY_CLOSED",
+    );
+    const rowsAfter = await getDb().select().from(schema.blocks);
+    expect(rowsAfter).toEqual(rowsAfterFinalize);
+  });
+
+  it("independent block ids in the same turn are unaffected by another block's terminal state", async () => {
+    // The closed-set is keyed by clientBlockId, so closing cb-1 must NOT make
+    // cb-2's open/delta/close illegal.
+    const { open, append, close } = await import("./block-stream.js");
+    const worker = makeFakeWorker({ turnId: "turn-m6-indep" });
+
+    await open(worker as never, {
+      type: "block-start",
+      clientBlockId: "cb-1",
+      kind: "text",
+      blockIndex: 0,
+    });
+    await close(worker as never, {
+      type: "block-stop",
+      clientBlockId: "cb-1",
+      contentJson: JSON.stringify({ text: "first" }),
+      status: "complete",
+    });
+
+    // cb-2 is a different block — its full lifecycle is legal.
+    await open(worker as never, {
+      type: "block-start",
+      clientBlockId: "cb-2",
+      kind: "text",
+      blockIndex: 1,
+    });
+    await append(worker as never, {
+      type: "block-delta",
+      clientBlockId: "cb-2",
+      delta: { text: "second" },
+    });
+    await close(worker as never, {
+      type: "block-stop",
+      clientBlockId: "cb-2",
+      contentJson: JSON.stringify({ text: "second" }),
+      status: "complete",
+    });
+
+    expect(await dbRowCount()).toBe(2);
   });
 });

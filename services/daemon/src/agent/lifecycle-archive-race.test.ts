@@ -1,7 +1,7 @@
 /**
- * PR A / F1-A: when a worker exits, the exit handler must preserve
- * terminal statuses (`archived`, `error`) instead of unconditionally
- * resetting to `idle`. The race we are pinning:
+ * PR A / F1-A: when a worker exits, the exit handler must preserve the
+ * terminal `archived` status instead of unconditionally resetting to
+ * `idle`. The race we are pinning:
  *
  *   1. archiveAgent(name) → registry.archiveAgent(name) → status="archived"
  *   2. worker process exits
@@ -9,6 +9,10 @@
  *      overwrites the terminal status → next workspace-cleanup 409s
  *
  * Drives the registry directly (no real worker) and inspects the rows.
+ *
+ * FRI-145 M5: the agent-status error value was pruned (the hard-exit self-heal
+ * now projects idle, not a sticky terminal), so the old terminal-preservation
+ * case for that value is gone — it is no longer a legal status to transition to.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -54,30 +58,20 @@ describe("F1-A: archive race", () => {
     await registry.archiveAgent("beta", { reason: "abandoned" }); // → archived
     const cur = await registry.getAgent("beta");
     // Emulates the F1-A guard.
-    if (cur && cur.status !== "archived" && cur.status !== "error") {
+    if (cur && cur.status !== "archived") {
       await registry.setStatus("beta", "idle");
     }
     expect((await registry.getAgent("beta"))?.status).toBe("archived");
   });
 
-  it("terminal `error` status is also preserved", async () => {
-    await registry.registerAgent({ name: "gamma", type: "bare" });
-    await registry.setStatus("gamma", "error");
-    const cur = await registry.getAgent("gamma");
-    if (cur && cur.status !== "archived" && cur.status !== "error") {
-      await registry.setStatus("gamma", "idle");
-    }
-    expect((await registry.getAgent("gamma"))?.status).toBe("error");
-  });
-
   it("non-terminal `working` status DOES flip to idle on the same guard", async () => {
-    // Regression check: the guard only suppresses idle-reset for terminal
-    // states. A live worker that legitimately went idle still gets the
-    // reset (the guard isn't a blanket no-op).
+    // Regression check: the guard only suppresses idle-reset for the terminal
+    // `archived` state. A live worker that legitimately went idle still gets
+    // the reset (the guard isn't a blanket no-op).
     await registry.registerAgent({ name: "delta", type: "bare" });
     await registry.setStatus("delta", "working");
     const cur = await registry.getAgent("delta");
-    if (cur && cur.status !== "archived" && cur.status !== "error") {
+    if (cur && cur.status !== "archived") {
       await registry.setStatus("delta", "idle");
     }
     expect((await registry.getAgent("delta"))?.status).toBe("idle");

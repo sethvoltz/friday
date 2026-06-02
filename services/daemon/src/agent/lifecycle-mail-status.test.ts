@@ -57,14 +57,21 @@ function makeFakeWorker(agentName: string, overrides: Record<string, unknown> = 
 }
 
 describe("status-change IPC mirrors to DB for mail-triggered turns", () => {
+  // FRI-145 M2: the status-change / turn-complete cases now gate on the
+  // Generation rule (`isCurrentGeneration(w)`) before writing the durable
+  // Status projection — a superseded worker must not clobber `agents.status`.
+  // The realistic mail-wakeup state is a LIVE worker, so each test registers
+  // it in the live map; otherwise the projection write would be skipped.
   it("bare agent: status-change:working (mail path, no prior sendPrompt) transitions DB idle→working", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const registry = await import("./registry.js");
 
     await registry.registerAgent({ name: "mail-bare-1", type: "bare" });
     expect((await registry.getAgent("mail-bare-1"))?.status).toBe("idle");
 
     const worker = makeFakeWorker("mail-bare-1");
+    __putLiveWorkerForTest("mail-bare-1", worker as never);
 
     // Simulate what happens when the worker wakes from mail-wakeup and
     // starts runQuery: it emits status-change:working with no prior
@@ -72,10 +79,12 @@ describe("status-change IPC mirrors to DB for mail-triggered turns", () => {
     await handleEvent(worker as never, { type: "status-change", status: "working" });
 
     expect((await registry.getAgent("mail-bare-1"))?.status).toBe("working");
+    __deleteLiveWorkerForTest("mail-bare-1");
   });
 
   it("bare agent: turn-complete after mail-triggered turn transitions DB working→idle", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const registry = await import("./registry.js");
 
     await registry.registerAgent({ name: "mail-bare-2", type: "bare" });
@@ -87,6 +96,7 @@ describe("status-change IPC mirrors to DB for mail-triggered turns", () => {
       status: "working",
       turnStart: Date.now() - 500,
     });
+    __putLiveWorkerForTest("mail-bare-2", worker as never);
 
     await handleEvent(worker as never, {
       type: "turn-complete",
@@ -94,16 +104,19 @@ describe("status-change IPC mirrors to DB for mail-triggered turns", () => {
     });
 
     expect((await registry.getAgent("mail-bare-2"))?.status).toBe("idle");
+    __deleteLiveWorkerForTest("mail-bare-2");
   });
 
   it("full mail-triggered turn cycle: idle→working→idle mirrors to DB", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const registry = await import("./registry.js");
 
     await registry.registerAgent({ name: "mail-bare-3", type: "bare" });
     expect((await registry.getAgent("mail-bare-3"))?.status).toBe("idle");
 
     const worker = makeFakeWorker("mail-bare-3") as { status: string; turnStart?: number };
+    __putLiveWorkerForTest("mail-bare-3", worker as never);
 
     // Phase 1: worker wakes from mail-wakeup, starts runQuery.
     await handleEvent(worker as never, { type: "status-change", status: "working" });
@@ -117,10 +130,12 @@ describe("status-change IPC mirrors to DB for mail-triggered turns", () => {
       sessionId: "sess_mail-bare-3",
     });
     expect((await registry.getAgent("mail-bare-3"))?.status).toBe("idle");
+    __deleteLiveWorkerForTest("mail-bare-3");
   });
 
   it("dispatch-initiated turn: status-change:working is idempotent when DB already shows working", async () => {
-    const { handleEvent } = await import("./lifecycle.js");
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const registry = await import("./registry.js");
 
     await registry.registerAgent({ name: "mail-builder-1", type: "builder", parentName: "friday" });
@@ -132,6 +147,7 @@ describe("status-change IPC mirrors to DB for mail-triggered turns", () => {
       status: "working",
       turnStart: Date.now() - 100,
     });
+    __putLiveWorkerForTest("mail-builder-1", worker as never);
 
     // Worker emits status-change:working (from runQuery), same as it does for
     // all turns. With the fix, this calls registry.setStatus("working") again.
@@ -140,5 +156,6 @@ describe("status-change IPC mirrors to DB for mail-triggered turns", () => {
     await handleEvent(worker as never, { type: "status-change", status: "working" });
 
     expect((await registry.getAgent("mail-builder-1"))?.status).toBe("working");
+    __deleteLiveWorkerForTest("mail-builder-1");
   });
 });

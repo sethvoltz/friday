@@ -22,7 +22,13 @@ import { randomUUID } from "node:crypto";
 import { logger } from "../log.js";
 import { buildSystemPrompt } from "../prompts/build-system-prompt.js";
 import * as registry from "./registry.js";
-import { dispatchTurn, forceWorkerRefork, liveAgentNames, peekLiveWorker } from "./lifecycle.js";
+import {
+  dispatchTurn,
+  forceWorkerRefork,
+  liveAgentNames,
+  peekLiveWorker,
+  stallAgent,
+} from "./lifecycle.js";
 import { recordUserBlock } from "./block-stream.js";
 
 const TICK_INTERVAL_MS = 30_000;
@@ -73,10 +79,20 @@ function tick(): void {
         sinceHeartbeatMs: sinceHb,
         thresholdMs,
       });
-      // Phase 5: `agent_status` SSE retired. The stall is reflected
-      // by the daemon-side `watchdog.stall.detected` log entry +
-      // (when refork=true) the eventual agents.status UPDATE Zero
-      // replicates.
+      // FRI-145 M5: project `agents.status="stalled"` so the dashboard paints
+      // the warn-colored dot. This restores the producer lost when the
+      // `agent_status` SSE was retired (Phase 5) — `stalled` had consumers
+      // (Sidebar / CommandPalette dots) but no daemon writer. V3: enqueued
+      // fire-and-forget onto the agent-keyed Transition queue, NEVER awaited
+      // inside this tick loop (awaiting would head-of-line-block the watchdog
+      // across every agent). The Turn-state machine stays the sole
+      // `registry.setStatus` writer — the watchdog does not write directly.
+      void stallAgent(name).catch((err) => {
+        logger.log("warn", "watchdog.stall.project.error", {
+          agent: name,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
 
       if (cfg.watchdog?.refork) {
         // Fire-and-forget: refork awaits archiveAgent so the new fork can't
@@ -94,6 +110,19 @@ function tick(): void {
   for (const flag of [...flagged]) {
     if (!seen.has(flag)) flagged.delete(flag);
   }
+}
+
+/**
+ * Test seam (FRI-145 M5): drive a single watchdog tick synchronously and reset
+ * the per-tick `flagged` dedup set. Lets the stalled-status regression test
+ * exercise the REAL stall-detect → `stallAgent` enqueue path against a live
+ * worker without waiting on the 30s interval. Not for production use.
+ */
+export function __tickForTest(): void {
+  tick();
+}
+export function __resetFlaggedForTest(): void {
+  flagged.clear();
 }
 
 async function refork(agentName: string): Promise<void> {

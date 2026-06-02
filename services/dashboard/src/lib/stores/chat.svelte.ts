@@ -1003,7 +1003,7 @@ export class ChatState {
 
   /** Apply an agent_status event with a debounce on working→idle so brief
    * inter-turn idle pulses don't flicker the dot. Working transitions and
-   * non-binary states (stalled/error/archived) apply immediately.
+   * non-binary states (stalled/archived) apply immediately.
    *
    * Archived is terminal: an SSE ring-buffer replay on cold page load can
    * deliver stale `agent_status` events for already-archived agents (the
@@ -1781,7 +1781,7 @@ export class ChatState {
     const focusedRow = rows.find((a) => a.name === focused);
     if (!focusedRow) return;
     // 'working' is the in-flight signal — don't heal. Any other
-    // terminal-or-quiescent state ('idle', 'stalled', 'error',
+    // terminal-or-quiescent state ('idle', 'stalled',
     // 'archived', 'archive_requested') means the daemon isn't
     // actively producing output for this agent; bubbles claiming
     // otherwise are stale.

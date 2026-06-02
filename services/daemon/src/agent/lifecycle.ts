@@ -44,6 +44,18 @@ import {
 } from "./block-stream.js";
 import { appContextForAgent } from "../apps/installer.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
+import { enqueueTransition, enqueueTransitionResult } from "./transition-queue.js";
+import {
+  apply as applyTransition,
+  applyAdmin,
+  projectStatus,
+  type AdminTransition,
+  type StatusProjection,
+  type Transition,
+  type TurnContext,
+  type TurnState,
+} from "./turn-state-machine.js";
+import { executeIntents, type TurnStatePorts } from "./turn-state-ports.js";
 import {
   profileInputsFor,
   removeProfile,
@@ -96,8 +108,8 @@ export interface LiveWorker {
    *  between turns — set on prompt dispatch (sendPrompt + the first
    *  child.once("message", …) callback for the spawn-fresh path) and cleared
    *  at every turn-end exit (`turn-complete`, `error`, `forceKillStuckWorker`).
-   *  The watchdog's `if (!w.forceKilled && w.turnStart)` gate relies on this
-   *  field being falsy between turns so a 4h idle period does not get
+   *  The watchdog's `if (isCurrentGeneration(w) && w.turnStart)` gate relies on
+   *  this field being falsy between turns so a 4h idle period does not get
    *  arithmetic'd against a stale timestamp from a long-completed turn
    *  (FRI-110). */
   turnStart: number | undefined;
@@ -107,7 +119,23 @@ export interface LiveWorker {
    * this as the "model is making progress" signal — heartbeats don't count
    * because a stuck SDK still emits them. */
   lastBlockStop: number;
-  /** Idle vs working, mirrored from worker `status-change` events. */
+  /**
+   * FRI-145 M3: the authoritative Turn state (CONTEXT.md → "Agent turn
+   * lifecycle"). `idle | working | aborting | force-killed`. The
+   * Turn-state machine is the only writer (via `setWorkerStatus`). `status`
+   * below is a DERIVED Status projection of this field — never authored
+   * independently, so the old "`w.status` and `w.turnStart` are parallel
+   * sources of the same truth" drift hazard is closed.
+   */
+  turnState: TurnState;
+  /**
+   * DERIVED Status projection (`idle | working`). Always equals
+   * `projectStatus(w.turnState)` — written only by `setWorkerStatus`
+   * alongside `turnState`, never on its own. Read by the watchdog stall
+   * check, `abortTurn`'s working-gate, `dispatchTurn`'s idle/busy branch,
+   * and `peekLiveWorker`. (M5 adds the `stalled` Status projection on the
+   * agents row; the in-memory Turn state has no resting `stalled` value.)
+   */
   status: "idle" | "working";
   /**
    * FIFO of prompts that arrived while a previous turn was in flight. Drained
@@ -133,17 +161,6 @@ export interface LiveWorker {
    *  (turn-complete, error, status-change) so a worker that aborted
    *  cleanly doesn't get killed on the way out. */
   abortDeadline?: NodeJS.Timeout;
-  /** Set when `forceKillStuckWorker` has already finalized this turn and
-   *  killed the worker. Subsequent error/turn-complete IPC messages from
-   *  the dying worker are ignored so we don't double-publish turn_done. */
-  forceKilled?: boolean;
-  /** Set by `forceWorkerRefork` before the live-map delete. Tells the
-   *  `child.on("exit")` handler to skip its setStatus('idle') reset — the
-   *  refork path owns the post-teardown status write itself (awaited
-   *  before the function returns), so a fire-and-forget reset from this
-   *  dying worker would race the immediate setStatus('working') from the
-   *  replacement worker's spawnTurn and silently clobber it back to idle. */
-  suppressIdleReset?: boolean;
   /** FRI-61 wedge detector: count of `block-start` IPCs observed on the
    *  current turn. Reset on every `turn-complete`/`error` and on
    *  `sendPrompt` (defense-in-depth for future re-orderings). */
@@ -176,6 +193,33 @@ export interface LiveWorker {
 }
 
 const live = new Map<string, LiveWorker>();
+
+/**
+ * Generation check (FRI-145 M2): a worker instance `w` is the *current*
+ * Generation of its agent name iff it is still the live map's entry for that
+ * name (`live.get(name) === w`). Identity-as-epoch — same-process pointer
+ * comparison, no monotonic counter.
+ *
+ * Every teardown / Status-projection mutation gates on this. A Transition
+ * arriving from a superseded Generation (a stale worker whose name has already
+ * been re-`live.set` by a replacement, or already `live.delete`d by archive /
+ * force-kill / refork) is a structural no-op: it must not delete the
+ * replacement's entry, must not write a Status projection over the live
+ * generation's, and must not re-finalize an already-finalized turn.
+ *
+ * This single rule replaces the two old hand-rolled LiveWorker flags — one
+ * an intra-generation "already torn down, ignore late IPC" guard, the other a
+ * cross-channel "refork owns the status write" guard (both documented in
+ * CONTEXT.md → "Agent turn lifecycle"). Both were point guards against the
+ * same underlying hazard: a superseded generation writing state. The teardown
+ * paths (`forceKillStuckWorker`, `archiveAgent`, `forceWorkerRefork`)
+ * synchronously `live.delete` up front, so the very next Generation check by
+ * any racing path — re-entry, a late IPC Transition, or the `child.on("exit")`
+ * handler — sees `live.get(name) !== w` and no-ops.
+ */
+function isCurrentGeneration(w: LiveWorker): boolean {
+  return live.get(w.agentName) === w;
+}
 
 /**
  * SIGTERM (or SIGKILL) the entire process group of a worker. With
@@ -399,6 +443,9 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     turnStart: undefined,
     spawnedAt: Date.now(),
     lastBlockStop: Date.now(),
+    // FRI-145 M3: `turnState` is authoritative; `status` is its derived
+    // projection. A freshly-forked worker is about to run its first turn.
+    turnState: "working",
     status: "working",
     nextPrompts: [],
     mode: input.options.mode,
@@ -413,13 +460,17 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   };
   live.set(input.agentName, w);
 
-  // Per-worker async chain: serialize IPC events so block start→delta→stop
-  // writes land in order even though each block-stream handler is async.
-  // Node's `on("message")` callback is sync; we chain promises so the next
-  // event doesn't dispatch until the previous one's DB writes commit.
-  let ipcChain: Promise<void> = Promise.resolve();
+  // Agent-keyed Transition queue (FRI-145 M1): serialize IPC events so block
+  // start→delta→stop writes land in order even though each block-stream handler
+  // is async. Node's `on("message")` callback is sync; the queue chains promises
+  // so the next Transition doesn't dispatch until the previous one's DB writes
+  // commit. Keying by agent NAME (not this worker instance, as the old
+  // closure-local `ipcChain` did) means a stale generation's exit Transition and
+  // the next generation's spawn/IPC Transitions for the same name still apply in
+  // strict arrival order. Fire-and-forget: the queue swallows + logs Transition
+  // errors so one bad event can't wedge the chain.
   child.on("message", (raw: unknown) => {
-    ipcChain = ipcChain.then(() => safeHandleEvent(w, raw));
+    void enqueueTransition(input.agentName, () => safeHandleEvent(w, raw));
   });
   child.on("exit", (code, signal) => {
     logger.log("info", "worker.exit", {
@@ -429,50 +480,37 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     });
     // M2: clean up the per-worker SBPL profile. Best-effort; the file is
     // owner-only and idempotent so a leak is harmless beyond the disk space.
+    // Always runs — the profile file belongs to THIS worker process whether
+    // or not it is still the current Generation.
     if (profilePath) removeProfile(profilePath);
-    // F4-A: any in-flight blocks for the current turn never got their own
-    // `block-stop` because the worker died without going through
-    // `runQuery`'s try/catch. Common path: stall watchdog SIGTERM at 30
-    // min — the kernel reaps the process before any user-space cleanup
-    // runs, so no `error` IPC event, no DB transition, and the
-    // dashboard's tool/thinking bubbles stay `running` forever. Walk the
-    // live registry here and finalize anything still streaming as
-    // `status='error'`. The normal IPC-driven `block-stop` path would have
-    // already emptied the map for clean exits; this is strictly the
-    // SIGTERM / SIGKILL / OOM / crash safety net.
-    // Fire-and-forget — the exit handler is sync, but `bsFinalize` is
-    // async (ADR-023). Errors are logged via the lifecycle.streaming-
-    // finalize.error channel.
-    void bsFinalize(w, "error").catch(() => {});
-    // If the worker died mid-turn the in-flight registry entry would leak —
-    // drop it here so the daemon doesn't hold accumulator state for a turn
-    // that can no longer make progress.
-    bsEndTurn(w.turnId);
-    live.delete(input.agentName);
-    // F1-A: preserve terminal statuses. If the worker just exited because
-    // `archiveAgent` asked it to stop, the row is already "archived" — we
-    // must not overwrite it back to "idle" or the workspace-cleanup half
-    // of an archive call would race the wrong status. Same for "error":
-    // a crash-marked row stays crashed. The lookup is async now (ADR-023);
-    // do it inside a fire-and-forget so the exit handler stays sync.
-    // `suppressIdleReset` covers the forced-refork case: forceWorkerRefork
-    // owns the post-teardown status write itself, and a late fire-and-
-    // forget setStatus('idle') from here would race the replacement
-    // worker's setStatus('working').
-    void (async () => {
-      if (w.suppressIdleReset) return;
-      try {
-        const cur = await registry.getAgent(input.agentName);
-        if (cur && cur.status !== "archived" && cur.status !== "error") {
-          await registry.setStatus(input.agentName, "idle");
-        }
-      } catch (err) {
-        logger.log("warn", "lifecycle.exit.status-reset.error", {
-          agent: input.agentName,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    })();
+
+    // FRI-145 M2 Generation no-op: a superseded Generation's exit does NO
+    // teardown. If `forceKillStuckWorker` / `archiveAgent` / `forceWorkerRefork`
+    // already `live.delete`d this name (and possibly a replacement Generation
+    // already `live.set` it), then `live.get(name) !== w`: that other path
+    // already owns the finalize, the live-map delete, and the Status-projection
+    // write. Re-running them here would (a) `live.delete` the REPLACEMENT
+    // Generation's entry — the latent name-keyed-delete clobber the old
+    // unconditional `live.delete(input.agentName)` carried — and (b) double-
+    // finalize an already-closed turn. The Generation guard closes both.
+    // `onExit` (below) still runs either way: one-shot bookkeeping is
+    // per-process, not per-Generation.
+    if (isCurrentGeneration(w)) {
+      // FRI-145 M5: demote this Generation up front so any racing IPC / abort-
+      // deadline / archive Transition sees `live.get(name) !== w` and no-ops,
+      // then drive the self-heal through the Turn-state machine's `hard-exit`
+      // Transition (fire-and-forget — the exit handler is sync but the machine
+      // is async under ADR-023). The machine finalizes any streaming blocks as
+      // `error`, publishes the previously-MISSING `turn_done{status:"error"}`
+      // (Bug #2: a SIGTERM/OOM/crash mid-turn used to finalize blocks + reset
+      // the row but never publish the terminal event, so the dashboard's
+      // inflight pin stayed up forever despite the agent being dispatchable),
+      // and heals the row to `idle`. The forced-refork case is handled by the
+      // Generation guard above: `forceWorkerRefork` `live.delete`s before the
+      // drain so this exit fires for a superseded Generation and skips here.
+      live.delete(input.agentName);
+      void finalizeHardExit(w);
+    }
     // Phase 5: `agent_lifecycle` SSE retired — Zero replicates the
     // agents row UPDATE so the dashboard sees the status drop on
     // worker exit.
@@ -629,101 +667,324 @@ function restampQueuedUserBlock(
 }
 
 /**
- * FRI-72 instrumentation: every `w.status` transition flows through here so
- * the daemon log captures who changed it and why. The "queued for a fraction"
- * symptom (daemon thinks the worker is still working long after its last
- * turn) points at a missing or out-of-order status update; this trace makes
- * the misordering visible without changing behavior.
+ * FRI-145 M3: the single writer of the authoritative Turn state. Sets
+ * `w.turnState` and derives `w.status` from it via `projectStatus` — `status`
+ * is never authored independently, so it can no longer drift from the Turn
+ * state (or, transitively, from `w.turnStart`). Accepts either a full
+ * {@link TurnState} (the machine's vocabulary: `aborting` / `force-killed`) or
+ * a resting projection (`idle` / `working`) at call sites that predate the
+ * machine.
+ *
+ * FRI-72 instrumentation: every transition flows through here so the daemon log
+ * captures who changed it and why. The "queued for a fraction" symptom (daemon
+ * thinks the worker is still working long after its last turn) points at a
+ * missing or out-of-order status update; this trace makes the misordering
+ * visible.
  */
-function setWorkerStatus(w: LiveWorker, next: "idle" | "working", source: string): void {
-  if (w.status !== next) {
+function setWorkerStatus(w: LiveWorker, next: TurnState, source: string): void {
+  const projected = projectStatus(next);
+  if (w.turnState !== next || w.status !== projected) {
     logger.log("info", "worker.status.transition", {
       agent: w.agentName,
-      prev: w.status,
+      prev: w.turnState,
       next,
+      projected,
       source,
       turnId: w.turnId,
     });
   }
-  w.status = next;
+  w.turnState = next;
+  w.status = projected;
 }
 
 /**
- * FRI-127 §5 mail-back backstop. Called at turn-complete for a helper/builder
- * that has a parent. Detects "this turn produced content but never mailed the
- * parent" and recovers:
+ * FRI-145 M3: build the production ports bag for the Turn-state machine. The
+ * machine (`turn-state-machine.ts`) returns intents; `executeIntents`
+ * (`turn-state-ports.ts`) runs them against THESE collaborators. Unit tests
+ * pass fakes instead — the machine itself does no I/O.
  *
- *   - Option B (default, single-fire): re-dispatch one nudge turn telling the
- *     child to mail its result now. Guarded by `noMailBackNudgedThisTurn` so it
- *     fires at most once per consecutive-miss run.
- *   - Option C (fallthrough on the SECOND consecutive miss): no re-dispatch;
- *     emit a structured warning log (`worker.no-mail-back-streak`) and a
- *     `worker.no-mail-back` SSE event so the dashboard can surface a manual
- *     "Nudge" affordance. Honest about persistent failure instead of looping.
- *
- * A turn that DID mail the parent resets the guard + streak (handled by the
- * caller before this runs).
- *
- * Returns `true` when it re-dispatched a nudge turn — the caller then skips the
- * normal queue-drain so the nudge isn't immediately clobbered by `sendPrompt`.
- *
- * `completedBlocks` / `completedMailBacks` are the just-finished turn's counts,
- * captured by the caller before the per-turn resets.
+ * `registry.setStatus` stays the only DB door (ADR-031); it is reached only via
+ * a `set-status` intent executed here. `forceKill` is the wedge escalation —
+ * the machine signals it, the prod port invokes `forceKillStuckWorker`.
  */
-function maybeNudgeForMailBack(
-  w: LiveWorker,
-  completedBlocks: number,
-  completedMailBacks: number,
-): boolean {
-  const isChild = w.agentType === "helper" || w.agentType === "builder";
-  if (!isChild || !w.parentName) return false;
+function makeProdPorts(): TurnStatePorts<LiveWorker> {
+  return {
+    setStatus: (name, status) => registry.setStatus(name, status),
+    archive: (name, opts) => registry.archiveAgent(name, opts),
+    heal: (name, status, opts) =>
+      registry._auditorHealStatusUnchecked(name, status, {
+        auditorHeal: true,
+        clearArchiveReason: opts.clearArchiveReason,
+      }),
+    closeTicket: (opts) => closeTicketForArchive(opts),
+    publish: (event) => eventBus.publish(event),
+    blockStream: {
+      recordError: (w, payload) => bsRecordError(w, payload),
+      finalize: (w, status) => bsFinalize(w, status),
+      endTurn: (turnId) => bsEndTurn(turnId),
+    },
+    recoverFromJsonl: (inputs) => recoverFromJsonl(inputs),
+    insertUsage: (row) => insertUsage(row),
+    // PR #145: attribute the turn analytics event to the turn's author
+    // (resolved from its user block; null → service actor). The resolve is a
+    // DB read, kept here in the port so the machine stays pure. Self-guarded:
+    // an attribution failure must never break turn completion.
+    captureTurnEvent: async (turnId, event, properties) => {
+      try {
+        const author = await getTurnAuthorUserId(turnId);
+        captureFor(author, event, properties);
+      } catch (err) {
+        logger.log("warn", "posthog.attribute.error", {
+          turnId,
+          event,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    sendPrompt: (w, p) => sendPrompt(w, p),
+    forceKill: (w, opts) => forceKillStuckWorker(w, opts),
+    logWarn: (event, payload) => logger.log("warn", event, payload),
+    logInfo: (event, payload) => logger.log("info", event, payload),
+  };
+}
 
-  if (completedMailBacks > 0) {
-    // The child reported home this turn. Clear the backstop state so a future
-    // miss starts fresh (single-fire nudge per consecutive-miss run).
-    w.noMailBackNudgedThisTurn = false;
-    w.noMailBackStreak = 0;
-    return false;
-  }
+const prodPorts = makeProdPorts();
 
-  // Only a turn that actually produced content but skipped the mail-back is a
-  // miss. A zero-block turn is a different failure (the wedge detector owns it).
-  if (completedBlocks === 0) return false;
-
-  w.noMailBackStreak++;
-
-  if (!w.noMailBackNudgedThisTurn) {
-    // Option B: single-fire re-dispatch.
-    w.noMailBackNudgedThisTurn = true;
-    const nudge: WorkerPromptCommand = {
-      prompt: `You finished your turn without reporting back. Mail your parent \`${w.parentName}\` with your result now via \`mail_send({to: "${w.parentName}", body: …})\` so your parent learns you're done.`,
-      turnId: `t_${randomUUID()}`,
-    };
-    logger.log("info", "worker.no-mail-back-nudge", {
-      agent: w.agentName,
-      parent: w.parentName,
-      turnId: nudge.turnId,
-      streak: w.noMailBackStreak,
-    });
-    sendPrompt(w, nudge);
-    return true;
-  }
-
-  // Option C: second consecutive miss — warn + SSE, no re-dispatch.
-  logger.log("warn", "worker.no-mail-back-streak", {
-    agent: w.agentName,
-    parent: w.parentName,
+/**
+ * Project a {@link LiveWorker} onto the read-only {@link TurnContext} the pure
+ * machine consumes. The machine never sees the full LiveWorker bag — only the
+ * turn-boundary-relevant fields — so it can't reach for state it has no
+ * business reading.
+ */
+function toTurnContext(w: LiveWorker): TurnContext {
+  return {
+    agentName: w.agentName,
+    agentType: w.agentType,
+    model: w.model,
+    parentName: w.parentName,
     turnId: w.turnId,
-    streak: w.noMailBackStreak,
+    sessionId: w.sessionId,
+    workingDirectory: w.workingDirectory,
+    abortRequested: w.abortRequested,
+    turnStart: w.turnStart,
+    blocksThisTurn: w.blocksThisTurn,
+    zeroBlockTurnStreak: w.zeroBlockTurnStreak,
+    mailSendToParentThisTurn: w.mailSendToParentThisTurn,
+    noMailBackNudgedThisTurn: w.noMailBackNudgedThisTurn,
+    noMailBackStreak: w.noMailBackStreak,
+    nextPrompts: w.nextPrompts,
+  };
+}
+
+/** The dependency bag for one machine `apply` — captured at call time so the
+ *  wedge threshold honors a live `FRIDAY_WEDGE_THRESHOLD` override and the
+ *  clock/uuid are the real ones. (`wedgeThreshold` is a hoisted function
+ *  declaration defined in the watchdog section below.) */
+function MACHINE_DEPS(): { wedgeThreshold: number; now: number; uuid: () => string } {
+  return { wedgeThreshold: wedgeThreshold(), now: Date.now(), uuid: randomUUID };
+}
+
+/**
+ * Drive one Transition through the machine: apply the pure function, write the
+ * machine's in-memory mutations + derived Status projection onto the live
+ * worker, pop the queue for a `send-next`/`mailback-nudge` (so the dispatched
+ * prompt is removed from `nextPrompts` exactly as the old `.shift()` did), then
+ * execute the intents against the ports bag.
+ *
+ * The Turn-state machine is the only application-level writer of
+ * `agents.status` — the `set-status` intent inside `intents` is the single DB
+ * door. Returns nothing; the caller awaits it inside the on-chain handler.
+ */
+async function runTransition(
+  w: LiveWorker,
+  transition: Transition,
+  ports: TurnStatePorts<LiveWorker> = prodPorts,
+): Promise<void> {
+  const result = applyTransition(toTurnContext(w), transition, MACHINE_DEPS());
+
+  // Apply the in-memory mutations the machine decided (its own bookkeeping —
+  // per-turn resets, streak bumps, lastExitStatus). These are not external
+  // side effects; the `set-status` projection write is an INTENT.
+  const m = result.mutations;
+  if ("turnStart" in m) w.turnStart = m.turnStart;
+  if ("activePrompt" in m) w.activePrompt = m.activePrompt;
+  if (m.blocksThisTurn !== undefined) w.blocksThisTurn = m.blocksThisTurn;
+  if (m.zeroBlockTurnStreak !== undefined) w.zeroBlockTurnStreak = m.zeroBlockTurnStreak;
+  if (m.mailSendToParentThisTurn !== undefined)
+    w.mailSendToParentThisTurn = m.mailSendToParentThisTurn;
+  if (m.noMailBackNudgedThisTurn !== undefined)
+    w.noMailBackNudgedThisTurn = m.noMailBackNudgedThisTurn;
+  if (m.noMailBackStreak !== undefined) w.noMailBackStreak = m.noMailBackStreak;
+  if (m.lastExitStatus !== undefined) w.lastExitStatus = m.lastExitStatus;
+  if (m.completedAtLeastOnce !== undefined) w.completedAtLeastOnce = m.completedAtLeastOnce;
+
+  // Project the derived Status onto the in-memory worker via the single writer.
+  // (The DURABLE agents.status write is the `set-status` intent below.)
+  setWorkerStatus(w, result.state, `machine.${transition.kind}`);
+
+  // The machine's `send-next` / `mailback-nudge` intent carries the prompt it
+  // chose; remove it from the queue so `sendPrompt` (run inside the intent)
+  // dispatches it exactly once. `send-next` uses `nextPrompts[0]`; the nudge is
+  // a synthetic prompt not in the queue.
+  for (const intent of result.intents) {
+    if (intent.kind === "send-next") {
+      w.nextPrompts.shift();
+    }
+  }
+
+  await executeIntents(w, result.intents, ports);
+}
+
+/**
+ * FRI-145 M4: run one ADMINISTRATIVE Transition through the machine. The three
+ * non-turn-boundary channels — archive, boot-recovery, auditor — route their
+ * `agents.status` writes here so the Turn-state machine stays the single
+ * application-level writer (the inviolate single-writer invariant). The pure
+ * {@link applyAdmin} decides the Status projection + ordered intents; the
+ * executor runs them against the ports bag (the same `set-status` /
+ * `close-ticket` / `archive` / `heal` DB doors prod wires in {@link prodPorts}).
+ *
+ * Admin intents operate on an agent NAME, never on a live worker, so we pass a
+ * name-only {@link PortWorker} stub — the block-stream / sendPrompt ports are
+ * never reached by an admin transition's intents.
+ *
+ * If a live worker exists for this name it gets its in-memory Status projection
+ * mirrored too (so a racing `peekLiveWorker` / watchdog sees the new resting
+ * state), but the durable write is always the intent.
+ */
+async function runAdminTransition(
+  name: string,
+  transition: AdminTransition,
+  ports: TurnStatePorts<LiveWorker> = prodPorts,
+): Promise<void> {
+  const result = applyAdmin(name, transition);
+  // Mirror the projection onto a live worker if one is still resident. Archive
+  // demotes the worker up front (live.delete before enqueue), so this only
+  // fires for set-projection / heal on a still-live agent.
+  const w = live.get(name);
+  if (w && (result.projection === "idle" || result.projection === "working")) {
+    setWorkerStatus(w, result.projection, `machine.admin.${transition.kind}`);
+  }
+  // The admin intents never touch the block-stream / sendPrompt ports, so a
+  // name-only stub is sufficient as the executor's worker target.
+  const stub = (w ?? { agentName: name, turnId: "" }) as LiveWorker;
+  await executeIntents(stub, result.intents, ports);
+}
+
+/**
+ * FRI-145 M4 archive channel. Every `archiveAgent` caller (REST endpoint,
+ * archive LISTEN handler, apps uninstall, boot orphan sweep, auditor Rule 1)
+ * funnels here so the terminal `archived` write is a Transition on the
+ * agent-keyed queue — never a direct `registry.archiveAgent` outside the
+ * machine.
+ *
+ * The non-status work sequences AROUND the Transition, preserving the original
+ * structural ordering:
+ *   1. Read `ticketId` from the row BEFORE the archive (so the closer reads the
+ *      captured value, not a row a future refactor might null on archive). This
+ *      ordering is pinned by `lifecycle-ticket-close.test.ts`.
+ *   2. Demote the live worker's Generation (`live.delete`) up front so any
+ *      racing IPC / exit / abort-deadline Transition is a Generation no-op and
+ *      cannot write `idle` over the incoming `archived` (AC #17).
+ *   3. Enqueue the archive Transition (result-bearing) and AWAIT it: the
+ *      machine emits `close-ticket` THEN `archive`, so the ticket closes
+ *      happens-before the terminal write (AC #6). The await surfaces the FSM
+ *      gate's `IllegalTransitionError` (orchestrator-not-archivable) to the
+ *      caller exactly as the pre-M4 direct call did.
+ *   4. AFTER the Transition resolves, drain + tear down the worker (off the
+ *      status-write critical section; V3 — never await a same-key enqueue from
+ *      inside a Transition).
+ */
+export async function archiveAgent(
+  agentName: string,
+  opts: { reason: ArchiveReason },
+): Promise<WorkerPromptCommand[]> {
+  const w = live.get(agentName);
+  // Capture ticketId BEFORE the archive Transition — defensive against a
+  // future refactor that nulls the row's fields on archive. The closer reads
+  // this captured value (pinned by lifecycle-ticket-close.test.ts).
+  const agentRow = await registry.getAgent(agentName);
+  const ticketId = agentRow && "ticketId" in agentRow ? (agentRow.ticketId ?? null) : null;
+  // Demote this Generation up front so a racing IPC / exit / abort-deadline
+  // Transition sees `live.get(name) !== w` and no-ops, and cannot write `idle`
+  // over the `archived` projection this Transition is about to write.
+  if (w) live.delete(agentName);
+  // The archive Transition: close-ticket (happens-before) → archived write.
+  // Result-bearing so the FSM gate's rejection reaches this awaiting caller.
+  await enqueueTransitionResult(agentName, () =>
+    runAdminTransition(agentName, { kind: "archive", reason: opts.reason, ticketId }),
+  );
+  // Worker teardown sequences AFTER the status Transition resolves — off the
+  // single-writer critical section (V3).
+  if (!w) return [];
+  return drainLiveWorker(w);
+}
+
+/**
+ * FRI-145 M4 auditor heal channel. The invariants auditor's Rule 3 routes its
+ * privileged force-set through the machine instead of calling
+ * `registry._auditorHealStatusUnchecked` directly, so the auditor is no longer
+ * an independent writer of `agents.status`. `registry._auditorHealStatusUnchecked`
+ * stays for genuinely-out-of-band psql edits, but no in-process caller reaches
+ * it except via this Transition.
+ */
+export async function healAgentStatus(
+  agentName: string,
+  target: StatusProjection,
+  opts: { clearArchiveReason: boolean },
+): Promise<void> {
+  await enqueueTransition(agentName, () =>
+    runAdminTransition(agentName, {
+      kind: "heal",
+      target,
+      clearArchiveReason: opts.clearArchiveReason,
+    }),
+  );
+}
+
+/**
+ * FRI-145 M4 projection channel for boot-recovery + auditor zombie-demote. A
+ * gated `registry.setStatus` write that moves an agent to a resting projection
+ * (`working→idle` on boot, zombie-demote `→idle`). Routed through the machine
+ * so these channels are not independent `registry.setStatus` callers.
+ */
+export async function setAgentProjection(
+  agentName: string,
+  status: StatusProjection,
+): Promise<void> {
+  await enqueueTransition(agentName, () =>
+    runAdminTransition(agentName, { kind: "set-projection", status }),
+  );
+}
+
+/**
+ * FRI-145 M5 stall channel. The per-agent watchdog (`watchdog.ts`) calls this
+ * fire-and-forget when a working worker blows past its heartbeat budget. The
+ * `stall` Transition projects `agents.status="stalled"` (the dashboard's
+ * warn-colored dot) through the single-writer machine — restoring the producer
+ * that was lost when the `agent_status` SSE was retired (Phase 5).
+ *
+ * V3 (the only deadlock/HOL guard): the watchdog NEVER awaits this inside its
+ * tick loop. It enqueues onto the agent-keyed Transition queue and moves on, so
+ * one stalled agent's queued status write can't head-of-line-block the watchdog
+ * across every other agent. The enqueue keeps the single-writer invariant — the
+ * watchdog does NOT call `registry.setStatus` directly.
+ *
+ * No-op when the agent isn't live (the worker already exited / was reforked):
+ * there is no in-flight turn to flag and the row's resting projection is the
+ * exit handler's concern, not the stall flag's.
+ */
+export async function stallAgent(agentName: string): Promise<void> {
+  const w = live.get(agentName);
+  if (!w) return;
+  await enqueueTransition(agentName, () => {
+    // Re-check the Generation inside the queued closure: by the time this runs
+    // the worker may have been reforked / archived / completed its turn. A
+    // superseded Generation must not write the durable `stalled` projection
+    // over a live replacement's `working`/`idle` or a terminal `archived`.
+    if (!isCurrentGeneration(w)) return Promise.resolve();
+    return runTransition(w, { kind: "stall" });
   });
-  eventBus.publish({
-    v: 1,
-    type: "worker.no-mail-back",
-    agent: w.agentName,
-    turn_id: w.turnId,
-    streak: w.noMailBackStreak,
-  });
-  return false;
 }
 
 function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
@@ -812,6 +1073,17 @@ export function abortTurn(agentName: string): boolean {
     workerStatus: w.status,
   });
   send(w.child, { type: "abort" });
+  // FRI-145 M3: project the `aborting` Turn state via the machine. The abort
+  // Transition returns no intents and writes no durable Status projection (the
+  // agents row stays `working` until the cooperative turn-complete/error or the
+  // force-kill deadline heals it to `idle`); it only pins the in-memory Turn
+  // state so a racing second `abortTurn` sees the working-gate as
+  // already-not-working and no-ops, and the watchdog's stall check (which keys
+  // on the derived `w.status`) stops counting progress against a worker that is
+  // tearing down. Synchronous: the abort Transition is intent-free, so we apply
+  // its state without going through the async intent executor.
+  const abortResult = applyTransition(toTurnContext(w), { kind: "abort" }, MACHINE_DEPS());
+  setWorkerStatus(w, abortResult.state, "abortTurn");
   // T+0 destructive-tool kill: SIGTERM every process in the worker's
   // pgrp EXCEPT the worker itself. This kills the SDK CLI subprocess
   // and any in-flight tool subprocesses (Bash, Read, WebFetch, …) the
@@ -872,9 +1144,14 @@ function clearAbortDeadline(w: LiveWorker): void {
  * turn ourselves and tear down the process. The next user message will
  * dispatch a fresh fork via the normal `dispatchTurn → spawnTurn` path.
  *
- * Idempotent: re-entry is gated by `w.forceKilled`. The dying worker may
- * still emit a final IPC message before the kernel reaps it; the error
- * and turn-complete handlers honor `forceKilled` and bail.
+ * Idempotent via the Generation no-op (FRI-145 M2): the first call
+ * synchronously `live.delete`s this worker, so any re-entry — a second
+ * deadline, a wedge path, or a late IPC Transition from the dying worker —
+ * sees `live.get(name) !== w` and bails before re-finalizing the turn. This
+ * also closes the abort-deadline-after-archive clobber (AC #17): if an archive
+ * already `live.delete`d the name (and wrote `archived`), the leading
+ * Generation check no-ops the whole force-kill so its `setStatus(idle)` can't
+ * overwrite the terminal `archived` projection.
  */
 async function forceKillStuckWorker(
   w: LiveWorker,
@@ -884,9 +1161,17 @@ async function forceKillStuckWorker(
     zeroBlockTurnStreak?: number;
   } = {},
 ): Promise<void> {
-  if (w.forceKilled) return;
-  if (!live.has(w.agentName)) return;
-  w.forceKilled = true;
+  // FRI-145 M2: the Generation no-op replaces the old per-worker re-entry
+  // flag AND the `live.has(w.agentName)` presence check. A superseded
+  // Generation (already deleted by archive / refork / a prior force-kill, or
+  // re-`set` by a replacement) does nothing.
+  if (!isCurrentGeneration(w)) return;
+  // Synchronously demote this Generation BEFORE the first await. Now any racing
+  // path — re-entry, a late error/turn-complete IPC Transition — sees
+  // `live.get(name) !== w` and short-circuits, so this turn is finalized
+  // exactly once with no re-entry flag. The `child.on("exit")` handler's
+  // teardown is likewise a Generation no-op after this delete.
+  live.delete(w.agentName);
   w.abortDeadline = undefined;
   const reason = opts.reason ?? "abort";
 
@@ -970,17 +1255,19 @@ async function forceKillStuckWorker(
     status: ridesError ? "error" : "aborted",
     ...(reason === "abort" ? { abort_reason: "forced" as const } : {}),
   });
-  // Drop the live-turn entry now so the upcoming child.exit handler's
-  // safety-net `bsFinalize` is a no-op (would otherwise double-publish
-  // block_complete for the same blocks).
+  // The in-flight turn entry was already dropped via the up-front
+  // `live.delete`; here we drop the per-turn block accumulators so the
+  // upcoming child.exit handler's safety-net `bsFinalize` would be a no-op
+  // anyway (it is also Generation-gated now, so it never runs for this
+  // superseded `w`).
   bsEndTurn(w.turnId);
   w.lastExitStatus = ridesError ? "error" : "aborted";
   setWorkerStatus(w, "idle", "forceKillStuckWorker");
   // FRI-110: keep the `turnStart` invariant universally true. After
-  // force-kill the worker is being torn down — no further IPC arithmetic
-  // *should* run — but a late IPC that races the kill and bypasses the
-  // `w.forceKilled` short-circuit (or a future read site that doesn't
-  // check the flag) would otherwise see a stale timestamp.
+  // force-kill the worker is being torn down; a late IPC that races the kill
+  // is already a Generation no-op (`live.get(name) !== w`), but clear the
+  // timestamp anyway so any future read site can't arithmetic against a stale
+  // value.
   w.turnStart = undefined;
   w.activePrompt = undefined;
   await registry.setStatus(w.agentName, "idle").catch((err: unknown) => {
@@ -994,13 +1281,66 @@ async function forceKillStuckWorker(
   // Tear down the process group. We've already waited 2s for the worker
   // to honor the abort IPC, so skip the graceful 'stop' command and go
   // straight to SIGTERM. SIGKILL fallback at +1.5s catches anything that
-  // ignored SIGTERM. The child.on("exit") handler removes the agent from
-  // `live` and emits agent_lifecycle/complete; the next dispatchTurn
-  // forks fresh.
+  // ignored SIGTERM. The child.on("exit") handler emits onExit; the next
+  // dispatchTurn forks fresh. The live entry is already gone (deleted up
+  // front), so the SIGKILL fallback gates on the child still being alive
+  // (no exit event yet) rather than on live-map presence.
   killPgrp(w.pgid, "SIGTERM");
   setTimeout(() => {
-    if (live.has(w.agentName)) killPgrp(w.pgid, "SIGKILL");
+    if (w.child.exitCode === null && !w.child.killed) killPgrp(w.pgid, "SIGKILL");
   }, 1_500).unref();
+}
+
+/**
+ * FRI-145 M5 hard-exit self-heal. A worker process exited with a turn still in
+ * flight and NO terminal turn-complete/error ever processed (SIGTERM from the
+ * stall watchdog, SIGKILL, OOM, crash). The caller (`child.on("exit")`) has
+ * already demoted this Generation (`live.delete`) so this runs exactly once for
+ * the dying worker; a concurrent archive would have demoted the Generation
+ * first and the exit handler would never have reached here.
+ *
+ * Bug #2: the old exit handler finalized streaming blocks and reset the row to
+ * `idle` but never published `turn_done`, so the dashboard's inflight turn pin
+ * stayed up forever even though the agent was dispatchable. The `hard-exit`
+ * Transition publishes the missing `turn_done{status:"error"}` (plus the
+ * in-band `error` event) when a turn was live, then heals to `idle`.
+ *
+ * F1-A archived guard: if the row is already terminal (`archived` — a row a
+ * racing archive committed), DO NOT heal it to `idle`; the archive's
+ * workspace-cleanup half would otherwise race the wrong status. Read the row
+ * first and skip the whole Transition for an archived agent. (The pre-M5 guard
+ * also checked `!== "error"`; the agent-status `error` was pruned in M5, so the
+ * archived check is the only terminal state left to preserve.)
+ *
+ * Exported so the unit test can drive the self-heal directly with a fake worker
+ * + spied collaborators, without spawning a real child process whose `exit`
+ * event can't be reliably synthesized.
+ */
+export async function finalizeHardExit(
+  w: LiveWorker,
+  ports: TurnStatePorts<LiveWorker> = prodPorts,
+): Promise<void> {
+  try {
+    const cur = await registry.getAgent(w.agentName);
+    if (cur && cur.status === "archived") {
+      // Terminal — a racing archive owns this row. Preserve it; the archive
+      // already finalized the worker's turn. Still drop the per-turn block
+      // accumulators so the daemon doesn't leak state for a dead turn.
+      bsEndTurn(w.turnId);
+      logger.log("info", "lifecycle.exit.archived-preserved", {
+        agent: w.agentName,
+        turnId: w.turnId,
+      });
+      return;
+    }
+    await runTransition(w, { kind: "hard-exit" }, ports);
+  } catch (err) {
+    logger.log("warn", "lifecycle.exit.hard-exit.error", {
+      agent: w.agentName,
+      turnId: w.turnId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -1077,43 +1417,6 @@ async function drainLiveWorker(w: LiveWorker): Promise<WorkerPromptCommand[]> {
 }
 
 /**
- * Tear down a live worker and archive its registry row. The archive write
- * makes the row terminal; `opts.reason` documents intent and drives the
- * linked-ticket close behavior (see `services/ticket-close.ts`). Fire-and-
- * forget callers (REST archive endpoints, system commands) can ignore the
- * returned drained-prompts queue — the side effects (registry archive,
- * live-map remove, ticket close) happen synchronously up front.
- */
-export async function archiveAgent(
-  agentName: string,
-  opts: { reason: ArchiveReason },
-): Promise<WorkerPromptCommand[]> {
-  const w = live.get(agentName);
-  // Capture ticketId BEFORE registry.archiveAgent — defensive against a
-  // future refactor that nulls the row's fields on archive. The closer
-  // reads from this captured value, not from the registry.
-  const agentRow = await registry.getAgent(agentName);
-  const ticketId = agentRow && "ticketId" in agentRow ? (agentRow.ticketId ?? null) : null;
-  // Synchronous side-effects: drop from the live map so subsequent
-  // dispatchTurn / wakeAgent / etc. see a clean slate immediately, even
-  // before the child has fully exited.
-  if (w) live.delete(agentName);
-  await registry.archiveAgent(agentName, { reason: opts.reason });
-  // Phase 5: `agent_lifecycle:archive` SSE retired — Zero replicates
-  // the agents.status='archived' UPDATE; the dashboard sidebar drops
-  // the row via the reactive query.
-  // Fire-and-forget: the closer owns its error handling and must never
-  // bubble back into the worker-teardown path.
-  void closeTicketForArchive({
-    ticketId,
-    reason: opts.reason,
-    agentName,
-  });
-  if (!w) return [];
-  return drainLiveWorker(w);
-}
-
-/**
  * Tear down a live worker WITHOUT archiving its registry row. Used by
  * `/clear` and by the FRI-33 watchdog refork: the agent stays present and
  * dispatchable, just with a freshly forked process on the next turn.
@@ -1132,12 +1435,13 @@ export async function archiveAgent(
 export async function forceWorkerRefork(agentName: string): Promise<WorkerPromptCommand[]> {
   const w = live.get(agentName);
   if (w) {
-    // Block the exit handler's fire-and-forget setStatus('idle'). We
-    // own the post-teardown status write below; without this gate the
-    // exit IIFE could land on the row AFTER a watchdog replacement
-    // worker's spawnTurn has flipped it to 'working' and silently
-    // clobber it back to 'idle'.
-    w.suppressIdleReset = true;
+    // FRI-145 M2: demote this Generation by deleting the live entry. The
+    // exit handler's fire-and-forget setStatus('idle') is now Generation-
+    // gated, so once this delete lands the dying worker's exit sees
+    // `live.get(name) !== w` and skips the reset entirely — we own the
+    // post-teardown status write below. (This replaces the old per-worker
+    // suppress-reset flag, which existed only to block that exit reset
+    // from racing a watchdog replacement worker's spawnTurn 'working' write.)
     live.delete(agentName);
   }
   if (!w) {
@@ -1148,8 +1452,9 @@ export async function forceWorkerRefork(agentName: string): Promise<WorkerPrompt
   }
   const drained = await drainLiveWorker(w);
   // Explicit terminal write: the agent's row is now `idle` with no live
-  // worker. The exit handler's reset path is gated by suppressIdleReset,
-  // so this is the only writer of 'idle' on this teardown.
+  // worker. The exit handler's reset path is a Generation no-op (the live
+  // entry was deleted above before the drain), so this is the only writer of
+  // 'idle' on this teardown.
   await registry.setStatus(agentName, "idle");
   return drained;
 }
@@ -1382,8 +1687,10 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
   // gives us a chance to notice that the worker has been on the same turn
   // longer than is plausible. Reap before downstream handlers run their own
   // arithmetic on `w.turnStart` and before another hour of bills accrues.
-  // Idempotent via `forceKilled`; safe if multiple events land in the same
-  // tick.
+  // Idempotent via the Generation no-op: a superseded `w` (already torn down
+  // by a prior force-kill, an archive, or a refork) short-circuits below, and
+  // `forceKillStuckWorker` itself no-ops on a non-current Generation, so
+  // multiple events landing in the same tick reap exactly once.
   //
   // FRI-110 invariant: `w.turnStart` is non-undefined *only* when a turn is
   // live — set on prompt dispatch (sendPrompt + the spawn-fresh
@@ -1396,7 +1703,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
   // where `turnStart` survives past the turn it describes, the 4h reaper
   // resumes the original FRI-110 bug — keep the three turn-end clears in
   // sync with any new turn-end exit.
-  if (!w.forceKilled && w.turnStart) {
+  if (isCurrentGeneration(w) && w.turnStart) {
     const msSinceTurnStart = Date.now() - w.turnStart;
     if (msSinceTurnStart > staleTurnCeilingMs()) {
       await forceKillStuckWorker(w, { reason: "stale", msSinceTurnStart });
@@ -1526,126 +1833,32 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // honored; cancel the force-kill deadline so we don't redundantly
       // kill an already-cooperative worker.
       clearAbortDeadline(w);
-      // forceKillStuckWorker has already finalized this turn. The worker
-      // may still emit a final IPC message before the kernel reaps it;
-      // ignore it so we don't double-publish turn_done.
-      if (w.forceKilled) break;
-      const wasAbort = w.abortRequested;
-      w.lastExitStatus = wasAbort ? "aborted" : "error";
-      // Materialize the failure as a chat-visible error block so the user
-      // sees what happened (was previously silent — the worker emitted an
-      // IPC error but no DB row was written, leaving the bubble in
-      // "running" until reconcile-on-restart). Skipped for plain aborts:
-      // the bubble is already visible via the user's Stop click and the
-      // assistant text bubble flips to "aborted" via finishTurn below.
-      if (!wasAbort) {
-        await bsRecordError(w, {
-          code: e.code ?? "worker_error",
-          headline: e.headline ?? e.message,
+      // FRI-145 M2 Generation no-op: if this worker is no longer the current
+      // Generation, `forceKillStuckWorker` / archive / refork already deleted
+      // it (and finalized this turn). The dying worker may still emit a final
+      // error IPC before the kernel reaps it; ignore it so we don't double-
+      // publish turn_done over an already-finalized turn.
+      if (!isCurrentGeneration(w)) break;
+      // FRI-145 M3: the error tail is now ONE Transition. The Turn-state
+      // machine decides everything (record-error block, finalize streaming
+      // blocks, publish error + turn_done, posthog, the FRI-61 wedge streak +
+      // escalation, the FRI-110 turnStart clear, the idle Status projection,
+      // and the queue-drain) and returns intents; `runTransition` applies its
+      // in-memory mutations + the single `set-status` DB-door intent. The
+      // machine is the only writer of `agents.status`.
+      await runTransition(w, {
+        kind: "fail",
+        payload: {
+          message: e.message,
+          recoverable: e.recoverable,
+          code: e.code,
+          headline: e.headline,
           httpStatus: e.httpStatus,
           retryAfterSeconds: e.retryAfterSeconds,
           requestId: e.requestId,
-          rawMessage: e.rawMessage ?? e.message,
-        });
-      }
-      // Close any blocks left at status='streaming' so their dashboard
-      // bubbles transition off "running". `bsFinalize` is idempotent —
-      // safe to call even when the inflight set is empty.
-      await bsFinalize(w, wasAbort ? "aborted" : "error");
-      // Publish the canonical TurnErrorEvent (kept for any consumer that
-      // listens for it) BEFORE the synthesized turn_done — clients route
-      // both, but ordering means the error metadata is in hand by the time
-      // the turn flips terminal.
-      eventBus.publish({
-        v: 1,
-        type: "error",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        code: wasAbort ? "aborted" : (e.code ?? "worker_error"),
-        message: e.message,
-        recoverable: e.recoverable,
+          rawMessage: e.rawMessage,
+        },
       });
-      // The missing event that caused the wedge: without turn_done, the
-      // dashboard's inflightTurnId stays pinned to this turn forever.
-      eventBus.publish({
-        v: 1,
-        type: "turn_done",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        status: wasAbort ? "aborted" : "error",
-        // FRI-95: worker cooperatively honored the abort (this code path
-        // runs because the worker's for-await closed and emitted error IPC).
-        ...(wasAbort ? { abort_reason: "cooperative" as const } : {}),
-      });
-      if (!wasAbort) {
-        // Attribute to the turn's author (null for autonomous turns → service
-        // actor). Resolved from the turn's user block, since the request that
-        // authenticated the user is long gone by turn-completion time.
-        const erroredAuthor = await getTurnAuthorUserId(w.turnId);
-        captureFor(erroredAuthor, "turn_errored", {
-          agent_name: w.agentName,
-          agent_type: w.agentType,
-          model: w.model,
-          turn_id: w.turnId,
-          error_code: e.code ?? null,
-          error_message: e.message,
-          recoverable: e.recoverable,
-        });
-      }
-      // FRI-61 wedge detector: count consecutive turn-error events that
-      // produced zero blocks. Skip when the user requested the abort
-      // (that's not a wedge, it's cooperative). When the streak reaches
-      // FRIDAY_WEDGE_THRESHOLD, force-kill.
-      if (!wasAbort) {
-        if (w.blocksThisTurn === 0) {
-          w.zeroBlockTurnStreak++;
-          logger.log("warn", "worker.zero-block-turn", {
-            agent: w.agentName,
-            turnId: w.turnId,
-            streak: w.zeroBlockTurnStreak,
-            source: "error",
-            errorCode: e.code,
-          });
-          if (w.zeroBlockTurnStreak >= wedgeThreshold()) {
-            // FRI-116: hoist the FRI-110 turnStart clear BEFORE the
-            // force-kill early-return so this branch's post-condition
-            // matches the happy path below. `forceKillStuckWorker`
-            // does also clear `w.turnStart` (defense-in-depth at its
-            // own exit handler), but relying on the chain is the
-            // exact "trust the trail" anti-pattern FRI-117's lint
-            // story is meant to catch at authoring time.
-            w.turnStart = undefined;
-            w.activePrompt = undefined;
-            await forceKillStuckWorker(w, {
-              reason: "wedge",
-              zeroBlockTurnStreak: w.zeroBlockTurnStreak,
-            });
-            return;
-          }
-        } else {
-          w.zeroBlockTurnStreak = 0;
-        }
-      }
-      w.blocksThisTurn = 0;
-      // Clean up live state the way turn-complete would. The worker
-      // process keeps running (long-lived agents stay alive across
-      // failures); reset its bookkeeping so the next prompt dispatches
-      // cleanly.
-      bsEndTurn(w.turnId);
-      setWorkerStatus(w, "idle", "handleEvent.error");
-      // FRI-110: same reasoning as the `turn-complete` clear — the turn is
-      // over (error-terminated rather than completed) and any subsequent
-      // between-turns IPC must not arithmetic against this turn's start
-      // time. The `sendPrompt(w, next)` below will restamp if a queued
-      // prompt drains.
-      w.turnStart = undefined;
-      w.activePrompt = undefined;
-      w.completedAtLeastOnce = true;
-      await registry.setStatus(w.agentName, "idle");
-      // Phase 5: `agent_status` SSE retired — Zero replicates the
-      // agents.status UPDATE reactively.
-      const next = w.nextPrompts.shift();
-      if (next) sendPrompt(w, next);
       break;
     }
     case "status-change":
@@ -1657,6 +1870,14 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // would otherwise leave the safety net armed and force-kill an
       // already-cooperative worker.
       if (e.status === "idle") clearAbortDeadline(w);
+      // FRI-145 M2 Generation no-op: a superseded Generation's late
+      // status-change must NOT write the durable Status projection. If this
+      // worker was already torn down (force-kill / archive / refork) — or a
+      // replacement Generation already took the name — `live.get(name) !== w`,
+      // and writing `agents.status` here would clobber the live generation's
+      // (or a terminal `archived`) projection. The in-memory `setWorkerStatus`
+      // above only mutates this dying worker's own field and is harmless.
+      if (!isCurrentGeneration(w)) break;
       // Mirror the worker's in-process status into the DB so Zero replicates
       // it to the dashboard. The sendPrompt/spawnTurn paths write "working"
       // for dispatcher-initiated turns; this covers the mail-triggered path
@@ -1693,186 +1914,28 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // turn_done is the truthful one — don't kill the worker on top of
       // a successful (or cleanly-aborted) turn.
       clearAbortDeadline(w);
-      if (w.forceKilled) break;
-      // FRI-110: `w.turnStart` is non-undefined in the normal flow (a
-      // turn-complete IPC by definition implies a turn ran), but the type
-      // is `number | undefined` so the typechecker needs a narrowing.
-      // Pinned form: ternary fallback to 0. The 0 sentinel is unreachable
-      // in practice — emitting NaN via `Date.now() - undefined` is the
-      // observable failure mode this guards against.
-      const durationMs = w.turnStart ? Date.now() - w.turnStart : 0;
-      // FRI-60: compute the zero-block reason BEFORE publishing turn_done so
-      // the dashboard knows why the turn produced no content.
-      const zeroBlockReason: "abort" | "compaction" | "sdk-resume-failure" | undefined =
-        w.blocksThisTurn === 0
-          ? w.abortRequested
-            ? "abort"
-            : e.compactionThisTurn
-              ? "compaction"
-              : "sdk-resume-failure"
-          : undefined;
-      eventBus.publish({
-        v: 1,
-        type: "turn_done",
-        turn_id: w.turnId,
-        agent: w.agentName,
-        status: w.abortRequested ? "aborted" : "complete",
-        // FRI-95: worker honored the abort and ran to a clean
-        // turn-complete IPC (raced to completion right around the abort).
-        ...(w.abortRequested ? { abort_reason: "cooperative" as const } : {}),
-        // FRI-60: include reason only when the turn produced zero blocks.
-        ...(zeroBlockReason !== undefined ? { zero_block_reason: zeroBlockReason } : {}),
-        usage: e.usage
-          ? {
-              input_tokens: e.usage.input_tokens,
-              output_tokens: e.usage.output_tokens,
-              cache_creation_tokens: e.usage.cache_creation_tokens,
-              cache_read_tokens: e.usage.cache_read_tokens,
-              cost_usd: e.usage.cost_usd,
-            }
-          : undefined,
+      // FRI-145 M2 Generation no-op: a superseded `w`'s late turn-complete
+      // (its turn was already finalized by force-kill / archive / refork)
+      // must not re-publish turn_done.
+      if (!isCurrentGeneration(w)) break;
+      // FRI-145 M3: the turn-complete tail is now ONE Transition. The
+      // Turn-state machine decides the turn_done payload (incl. the FRI-60
+      // zero-block reason + FRI-95 abort metadata), the usage insert, the
+      // posthog event, the FRI-4 streaming-block finalize, the FRI-61 wedge
+      // streak + escalation, the FRI-110 turnStart clear, the idle Status
+      // projection, the per-turn JSONL recovery sweep, the FRI-127 §5
+      // mail-back backstop (Option B nudge / Option C warn), and the
+      // queue-drain — and returns intents. `runTransition` applies the
+      // in-memory mutations + the single `set-status` DB-door write. The
+      // machine is the sole writer of `agents.status`.
+      await runTransition(w, {
+        kind: "complete",
+        payload: {
+          sessionId: e.sessionId,
+          compactionThisTurn: e.compactionThisTurn,
+          usage: e.usage,
+        },
       });
-      if (e.usage && (w.sessionId || e.sessionId)) {
-        // insertUsage is async (ADR-023); fire-and-forget from this sync
-        // handler. We surface errors via the existing log channel rather
-        // than ignoring them.
-        void insertUsage({
-          timestamp: new Date().toISOString(),
-          sessionId: w.sessionId ?? e.sessionId,
-          agentName: w.agentName,
-          agentType: w.agentType,
-          model: w.model,
-          costUsd: e.usage.cost_usd,
-          inputTokens: e.usage.input_tokens,
-          outputTokens: e.usage.output_tokens,
-          cacheCreationTokens: e.usage.cache_creation_tokens,
-          cacheReadTokens: e.usage.cache_read_tokens,
-          durationMs,
-        }).catch((err: unknown) => {
-          logger.log("warn", "usage.insert.error", {
-            agent: w.agentName,
-            message: err instanceof Error ? err.message : String(err),
-          });
-        });
-      }
-      const completedAuthor = await getTurnAuthorUserId(w.turnId);
-      captureFor(completedAuthor, "turn_completed", {
-        agent_name: w.agentName,
-        agent_type: w.agentType,
-        model: w.model,
-        turn_id: w.turnId,
-        aborted: w.abortRequested,
-        duration_ms: durationMs,
-        input_tokens: e.usage?.input_tokens ?? null,
-        output_tokens: e.usage?.output_tokens ?? null,
-        cache_creation_tokens: e.usage?.cache_creation_tokens ?? null,
-        cache_read_tokens: e.usage?.cache_read_tokens ?? null,
-        cost_usd: e.usage?.cost_usd ?? null,
-        zero_block_reason: zeroBlockReason ?? null,
-      });
-      // FRI-4 #2 (Layer B): if the SDK abandoned a content block
-      // mid-stream and the worker's pre-break flush missed it, the
-      // blockStream accumulator still has it. `endTurn` below would
-      // wipe it and any late `block-stop` would no-op via
-      // `blockStream.close`'s null-check on the absorbed accumulator,
-      // leaving the DB row at `status='streaming'`. Finalize as
-      // `aborted` first so the row
-      // transitions cleanly off `streaming` and the dashboard's bubble
-      // moves off `running`.
-      await bsFinalize(w, "aborted");
-      // FRI-61 wedge detector: count consecutive turn-completes that
-      // produced zero content blocks. Skip when the user-requested
-      // abort raced the turn-complete (the model genuinely produced
-      // nothing because we asked it to stop).
-      if (!w.abortRequested) {
-        if (w.blocksThisTurn === 0) {
-          w.zeroBlockTurnStreak++;
-          logger.log("warn", "worker.zero-block-turn", {
-            agent: w.agentName,
-            turnId: w.turnId,
-            sessionId: e.sessionId,
-            streak: w.zeroBlockTurnStreak,
-            source: "turn-complete",
-          });
-          if (w.zeroBlockTurnStreak >= wedgeThreshold()) {
-            // FRI-116: hoist the FRI-110 turnStart clear BEFORE the
-            // force-kill early-return so this branch's post-condition
-            // matches the happy path below. See the symmetric
-            // restructure in the `error` case above for the
-            // "trust the trail" rationale.
-            w.turnStart = undefined;
-            w.activePrompt = undefined;
-            await forceKillStuckWorker(w, {
-              reason: "wedge",
-              zeroBlockTurnStreak: w.zeroBlockTurnStreak,
-            });
-            return;
-          }
-        } else {
-          w.zeroBlockTurnStreak = 0;
-        }
-      }
-      // FRI-127 §5: capture the just-completed turn's block + mail-back
-      // counts BEFORE the resets below; the mail-back backstop (run after the
-      // worker is flipped idle) reads them to decide whether the child
-      // reported home.
-      const completedBlocks = w.blocksThisTurn;
-      const completedMailBacks = w.mailSendToParentThisTurn;
-      w.blocksThisTurn = 0;
-      // The in-flight registry holds per-turn block accumulators (FIX_FORWARD
-      // 1.4). Drop the entry once the turn completes; canonical block content
-      // already lives in the `blocks` table.
-      bsEndTurn(w.turnId);
-      // Long-lived worker: flush queued prompt if any. Don't send `stop` — the
-      // worker manages its own lifecycle.
-      setWorkerStatus(w, "idle", "handleEvent.turn-complete");
-      // FRI-110: the turn is over. Clear `turnStart` so the stale-turn
-      // watchdog (handleEvent prologue at ~1214) and the diagnostic log
-      // (~1239) — both of which already gate on truthy `w.turnStart` —
-      // see "no turn live" rather than arithmetic-ing against a
-      // long-completed turn's start time. The worker may sit idle for
-      // hours between turns; the next `sendPrompt` (line 604) or the
-      // queued-prompt drain below will restamp it when a new turn starts.
-      w.turnStart = undefined;
-      w.activePrompt = undefined;
-      w.completedAtLeastOnce = true;
-      w.lastExitStatus = w.abortRequested ? "aborted" : "complete";
-      await registry.setStatus(w.agentName, "idle");
-      // Per-turn recovery sweep: catches any block the live IPC pipeline
-      // dropped this turn — most notably tool_result blocks from a mid-
-      // turn iterator break (FIX_FORWARD 2.4), where the worker exits the
-      // SDK loop at the assistant message boundary before the SDK yields
-      // the subsequent user message containing tool_results. The JSONL
-      // has them either way (SDK writes JSONL synchronously); recovery
-      // backfills into DB. Idempotent + cheap (sub-second on multi-MB
-      // JSONLs); fire-and-forget so the IPC handler stays responsive.
-      const sessionForRecovery = w.sessionId ?? e.sessionId;
-      if (sessionForRecovery) {
-        const wd = w.workingDirectory;
-        const an = w.agentName;
-        setImmediate(() => {
-          try {
-            void recoverFromJsonl([
-              { agentName: an, sessionId: sessionForRecovery, workingDirectory: wd },
-            ]);
-          } catch (err) {
-            logger.log("warn", "jsonl-recovery.post-turn.error", {
-              agent: an,
-              session: sessionForRecovery,
-              message: err instanceof Error ? err.message : String(err),
-            });
-          }
-        });
-      }
-      // FRI-127 §5: mail-back backstop. A helper/builder that produced
-      // content but never mailed its parent gets one re-dispatch nudge
-      // (Option B); a second consecutive miss falls through to a structured
-      // warning + SSE event (Option C). When the backstop re-dispatches, it
-      // owns the worker's next turn — skip the normal queue-drain so the
-      // nudge isn't immediately clobbered by a queued prompt's sendPrompt.
-      if (maybeNudgeForMailBack(w, completedBlocks, completedMailBacks)) break;
-      const next = w.nextPrompts.shift();
-      if (next) sendPrompt(w, next);
       break;
     }
     case "heartbeat":
