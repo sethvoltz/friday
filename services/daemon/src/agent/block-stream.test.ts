@@ -881,3 +881,14 @@ describe("block-stream per-block state machine (FRI-145 M6)", () => {
     expect(await dbRowCount()).toBe(2);
   });
 });
+
+describe("BoundedClosedSet", () => {
+  it("evicts FIFO at cap=1000", async () => {
+    const { __BoundedClosedSetForTest: BoundedClosedSet } = await import("./block-stream.js");
+    const s = new BoundedClosedSet();
+    for (let i = 0; i < 1001; i++) s.add(`id-${i}`);
+    expect(s.has("id-0")).toBe(false); // oldest evicted
+    expect(s.has("id-1")).toBe(true); // second-oldest survives
+    expect(s.has("id-1000")).toBe(true); // newest present
+  });
+});

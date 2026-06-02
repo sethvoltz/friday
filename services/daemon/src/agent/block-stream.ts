@@ -133,6 +133,31 @@ export interface LiveBlockState {
   startedAt: number;
 }
 
+/**
+ * FIFO-bounded id set with cap=1000. Backs {@link LiveTurn.closed} so the
+ * per-turn "already-terminated clientBlockId" memory cannot grow without
+ * bound when a pathological worker emits >1000 blocks in a single turn.
+ * Exposes only the {@link Set} subset M6 actually calls (`.has` / `.add`);
+ * once the cap is reached, the oldest id evicts to make room for the newest.
+ */
+class BoundedClosedSet {
+  private readonly cap = 1000;
+  private readonly order: string[] = [];
+  private readonly set = new Set<string>();
+  add(id: string): void {
+    if (this.set.has(id)) return;
+    this.set.add(id);
+    this.order.push(id);
+    if (this.order.length > this.cap) {
+      const evicted = this.order.shift()!;
+      this.set.delete(evicted);
+    }
+  }
+  has(id: string): boolean {
+    return this.set.has(id);
+  }
+}
+
 export interface LiveTurn {
   turnId: string;
   agent: string;
@@ -145,8 +170,9 @@ export interface LiveTurn {
   /** clientBlockIds that have reached a terminal state this turn. M6 reads
    *  this to reject a delta/close after the block already closed
    *  (BLOCK_ALREADY_CLOSED) and to reject a second `start` for the same id
-   *  (BLOCK_ALREADY_STARTED). Cleared with the turn in {@link tearDownTurn}. */
-  closed: Set<string>;
+   *  (BLOCK_ALREADY_STARTED). Cleared with the turn in {@link tearDownTurn}.
+   *  Bounded FIFO (cap=1000) — see {@link BoundedClosedSet}. */
+  closed: BoundedClosedSet;
   startedAt: number;
 }
 
@@ -184,7 +210,7 @@ function startBlockInternal(args: StartBlockArgs): LiveBlockState {
       agent: args.agentName,
       sessionId: args.sessionId,
       blocks: new Map(),
-      closed: new Set(),
+      closed: new BoundedClosedSet(),
       startedAt: args.ts,
     };
     turns.set(args.turnId, lt);
@@ -739,7 +765,14 @@ export function __seedForTest(seed: {
     agent: seed.agent,
     sessionId: seed.sessionId,
     blocks: map,
-    closed: new Set(),
+    closed: new BoundedClosedSet(),
     startedAt: seed.startedAt ?? Date.now(),
   });
 }
+
+/**
+ * Test seam: re-export {@link BoundedClosedSet} under the `__…ForTest`
+ * naming convention so the eviction unit test can construct an instance
+ * directly without leaking the class into the production surface.
+ */
+export { BoundedClosedSet as __BoundedClosedSetForTest };
