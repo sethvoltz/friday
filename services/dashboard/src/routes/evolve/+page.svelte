@@ -58,6 +58,9 @@
         : null,
       appliedTicketId: r.applied_ticket_id,
       familyResolvedBy: r.family_resolved_by ?? null,
+      // FRI-149: builder linkage lives in the file store + agent row; the Zero
+      // projection has no builder_agent column yet, so it is null in this view.
+      builderAgent: null,
     };
   }
 

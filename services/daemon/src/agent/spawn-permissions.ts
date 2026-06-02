@@ -37,6 +37,24 @@ export interface SpawnRejection {
 }
 
 /**
+ * Options for the narrow, audited FRI-149 evolve→builder carve-out. This is a
+ * SEPARATE function argument — deliberately NOT a field on
+ * `SpawnValidationInput` / `CreateAgentInput` — so it can never be set from a
+ * client request body. The public `POST /api/agents` route calls
+ * `validateSpawnPermissions(body, callerType)` with NO `opts`, so a wire client
+ * naming `parentName: "scheduled-meta-daily"` still hits the unconditional
+ * builder→403 below. Only the in-process evolve scan hook passes
+ * `{ evolveEscalation: true }`. See ADR-036.
+ */
+export interface SpawnPermissionOptions {
+  /**
+   * Set ONLY by the daemon's evolve scan hook for an auto-fixing escalation
+   * Builder. Un-forgeable from the wire because it is not a request-body field.
+   */
+  evolveEscalation?: boolean;
+}
+
+/**
  * Returns null when the spawn is permitted. Returns a rejection envelope
  * (HTTP status + body) when it isn't. The caller is responsible for
  * sending that envelope back to the client.
@@ -44,12 +62,38 @@ export interface SpawnRejection {
  * Implicit orchestrator: when no parent row exists, the daemon treats the
  * caller as the orchestrator (matches POST /api/chat/turn's implicit-
  * register path).
+ *
+ * FRI-149 carve-out: a `builder` spawn is permitted from a non-orchestrator
+ * caller ONLY when `opts.evolveEscalation === true` AND the caller is the
+ * `scheduled` evolve caller AND a non-empty trimmed `reason` is present.
+ * `callerType === "scheduled"` is forgeable over the wire (a client can name
+ * `scheduled-meta-daily` as parent), so it is defense-in-depth only — the
+ * un-forgeable boundary is `opts.evolveEscalation`, which the public route
+ * never sets. Every other builder spawn falls through to the unconditional 403.
  */
 export function validateSpawnPermissions(
   body: SpawnValidationInput,
   callerType: CallerType,
+  opts?: SpawnPermissionOptions,
 ): SpawnRejection | null {
   if (callerType === "orchestrator") return null;
+
+  // FRI-149 audited evolve→builder carve-out (ADR-036). The ONLY path by which
+  // a non-orchestrator caller may spawn a builder. Gated on the un-forgeable
+  // server-set `evolveEscalation` marker (never a request-body field), narrowed
+  // to the `scheduled` evolve caller, and requiring a non-empty reason.
+  if (body.type === "builder" && opts?.evolveEscalation === true && callerType === "scheduled") {
+    if (typeof body.reason !== "string" || body.reason.trim().length === 0) {
+      return {
+        status: 400,
+        body: {
+          error: "reason required when spawner is not the orchestrator",
+          code: "SPAWN_REASON_REQUIRED",
+        },
+      };
+    }
+    return null;
+  }
 
   // ADR-022 hard rule: builder→builder and helper→builder are forbidden.
   // Non-orchestrator callers may only spawn helpers; `bare` from a

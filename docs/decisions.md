@@ -1222,6 +1222,51 @@ A user wants Friday to nudge them at a time ("thaw the chicken at midday Thursda
 - FRI-98 cron timezone lands — recurring reminders should inherit it with no reminder-specific change; verify.
 - A reminder ever needs to _act_ (not just notify) — that is no longer a reminder; it is an agent-run schedule, and the user should reach for `friday-schedule`, not a new branch in `deliverReminder`.
 
+## ADR-036 — Evolve agency Phase 2: auto-escalate critical+code+high proposals to a Builder; the human-approval gate moves from approve-before-spawn to approve-before-MERGE (FRI-149)
+
+**Status:** accepted (FRI-149, 2026-06-02)
+
+**Amends ADR-022 and ADR-033 by reference.** ADR-022 ("only the orchestrator spawns Builders") and ADR-033 ("Phase 2 — auto-spawning Builders — is explicitly deferred") are NOT revoked: the unconditional "only the orchestrator spawns Builders" rule still stands for every caller except the single, narrow, audited evolve-escalation path defined here. ADR-033's Phase-2-deferred stance is the exact thing this ADR un-defers, on the trigger ADR-033 itself named ("a one-click promote-triage→builder affordance / gated auto-Builder is worth designing").
+
+### Context
+
+ADR-033 (FRI-40) gave evolve a read-only triage helper that investigates a newly-critical proposal and mails the orchestrator. For the narrow class of proposals whose fix is a **code change**, the human-in-the-spawn-loop is pure latency: the system already knows the problem is critical and code-shaped, yet nothing moves toward a fix until a person reads the mail and asks the orchestrator to cut a Builder. ADR-022 makes "only the orchestrator spawns Builders" the single unconditionally-enforced rule precisely because a Builder is the irreversible (worktree + branch + push) surface — and ADR-033 deferred auto-Builders for exactly that reason.
+
+### Decision
+
+When `evolve.autoSpawnBuilders` is `true` (config key in the same `evolve` object as `autoSpawnTriageHelpers`, **default off**, read with a strict `=== true`), the daemon's `POST /api/evolve/scan` handler auto-spawns one **auto-fixing Builder** per proposal that, during that scan, promoted to critical AND is `type === "code"` AND carries at least one high-severity signal. The Builder is named `builder-<FULL proposal id>`, linked to the proposal, iterates in its worktree to implement the smallest fix, drives the work to a **stable, GREEN, review-ready PR — and then STOPS. It never merges.**
+
+**The human-approval gate moves from approve-before-spawn (ADR-022 / ADR-033 / Constitution §3) to approve-before-merge.** The user reviews the green PR and merges it (or asks for minor passes). This is a deliberate, narrow, audited carve-out — not a silent bypass.
+
+**Why this shape:**
+
+1. **Trigger band: critical + code + high-severity signal.** Critical is the only promote surface the hook sees; `type === "code"` is the owner-settled "things that can be solved with code" filter (memory/prompt/config are never escalated); and the "high" reading is a **high-severity signal** — NOT blast radius "high". Blast radius "high" is a SCORE PENALTY in `rank.ts` (it lowers score, selecting less-confident proposals — wrong direction for auto-fix), whereas a high-severity signal is exactly the `isCritical` branch that most decisively trips criticality. Pure planner `builderEscalationPlan` (`packages/evolve/src/builder-escalation.ts`, IO-free, sibling of `triage-spawn.ts`) encodes the band and dedupes by id across both promote surfaces.
+
+2. **The carve-out is one audited door, gated on an un-forgeable marker.** `validateSpawnPermissions(body, callerType, opts?)` permits a builder spawn from a non-orchestrator caller ONLY when `opts.evolveEscalation === true` AND `callerType === "scheduled"` AND a non-empty `reason` is present. The load-bearing security property: **`evolveEscalation` is a SEPARATE function argument — NEVER a field on `CreateAgentInput` / the request body.** `callerType === "scheduled"` is by itself forgeable (a wire client can name `parentName: "scheduled-meta-daily"`, a daemon-seeded row), so it is defense-in-depth only. The un-forgeable boundary is `evolveEscalation`: the public `POST /api/agents` route calls `createAgent(body, cfg)` with **no third arg**, so a client request — even one that puts `evolveEscalation: true` in its JSON body — still hits the unconditional builder→403 `BUILDER_SPAWN_ORCHESTRATOR_ONLY`. Only the in-process scan hook calls `createAgent(builderInput, cfg, { evolveEscalation: true })`.
+
+3. **Safety boundary is now the merge step.** The Builder halts at a green PR and never runs `gh pr merge` (verified: no `gh pr merge` mechanism existed in daemon/shared before this change — "never merges" preserves today's reality). This is made explicit and load-bearing: the escalation Builder's first-turn prompt mandates "Do NOT run `gh pr merge`; stop at a green PR; the human merges," and `builder.md`'s Workflow gains a matching hard rule for every Builder (especially an auto-spawned one with no orchestrator turn behind it).
+
+4. **Two-way linkage, no DB migration.** The proposal gains a single nullable markdown field `builderAgent: string | null` (round-tripped through the file-backed store — proposals are markdown files, so no Drizzle migration). On a successful 201 the hook records `builderAgent: "builder-<id>"` on the proposal; the builder side carries the proposal id verbatim in `spawnReason` + `ticketId`. The branch is derivable as `friday/builder-<id>`; the PR URL arrives via the builder's mail. Recording `builderBranch` / `builderPrUrl` on the proposal is deferred (derivable / discoverable for v1).
+
+5. **Default off, failure-isolated, idempotent.** The flag is read with `cfg.evolve?.autoSpawnBuilders === true` (shallow-merge-safe). Spawn failures are caught per-request AND for the whole block — they never alter the scan's returned summary nor throw out of the handler (logged as `evolve.builder.spawn` / `.skip` / `.error`). The in-process `createAgent` 409 dedups against an already-spawned `builder-<id>`, so a re-promote on a later scan re-uses the existing builder rather than spawning a duplicate (same mechanism ADR-033 relies on; FRI-147's fast-spin guard remains out of scope).
+
+### Rejected alternative — mail-the-orchestrator
+
+Evolve could instead mail the orchestrator "proposal X is critical+code; please spawn a builder," preserving ADR-022's gate verbatim with zero `spawn-permissions.ts` change. It is genuinely safer — it removes the entire forge surface (no carve-out, no `evolveEscalation` argument to mis-thread) — at the cost of one turn of latency and the human-in-the-spawn-loop this work exists to remove. Rejected per owner decision: the audited carve-out is the chosen mechanism, with mail-to-orchestrator as the safe degradation if the "separate argument, route passes nothing" threading could not be guaranteed (it is, and it is unit- and integration-tested, including a forge-resistance case proving the wire cannot reach the carve-out). A second alternative — loosen the gate to let any `scheduled` caller spawn builders — was rejected as too broad (any future scheduled agent would inherit builder-spawn rights) and forgeable.
+
+### What this does NOT do
+
+- **No auto-merge.** The Builder never merges; it stops at a green PR. The human merges.
+- **No escalation for non-code proposals** (memory/prompt/config are filtered out).
+- **No change to FRI-40 triage-helper behavior.** Both flags can be on; a critical proposal could trigger both a triage helper and an escalation builder.
+- **No `builderBranch` / `builderPrUrl` proposal fields, no `PreToolUse gh pr merge` deny rule, no dashboard UI** (linkage data is persisted so a follow-up can render it).
+
+### Bring this ADR back to the table if
+
+- Auto-spawned builders reliably land a clean, human-rubber-stamped PR — that is the signal to consider widening the band (e.g. a score floor) or adding a one-click "open the green PR" affordance.
+- The 409-dedup proves insufficient (e.g. builders archived and immediately re-spawned each scan) — promote FRI-147's fast-spin guard.
+- A defense-in-depth `gh pr merge` PreToolUse deny rule is wanted for certainty beyond the prompt-level guard.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.

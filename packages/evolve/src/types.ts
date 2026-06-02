@@ -88,4 +88,14 @@ export interface Proposal {
    * out of the daily/critical surface while preserving the evidence.
    */
   familyResolvedBy: string | null;
+  /**
+   * Name of the auto-spawned escalation Builder linked to this proposal
+   * (FRI-149), set when a `critical` + `code` + high-severity-signal proposal
+   * is escalated to a Builder via the evolve scan hook (opt-in behind
+   * `evolve.autoSpawnBuilders`). The value is the builder agent name
+   * (`"builder-" + id`); its branch is derivable as `friday/builder-<id>` and
+   * the review-ready PR URL arrives via the builder's mail to the orchestrator.
+   * NULL until escalation. No DB migration — proposals are markdown files.
+   */
+  builderAgent: string | null;
 }

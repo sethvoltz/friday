@@ -25,6 +25,7 @@ function p(id: string, status: ProposalStatus): Proposal {
     lastEnrichFailedAt: null,
     appliedTicketId: null,
     familyResolvedBy: null,
+    builderAgent: null,
   };
 }
 

@@ -64,6 +64,7 @@ import {
   sinceHoursAgo,
   appendRun,
   triageSpawnPlan,
+  builderEscalationPlan,
   updateProposal,
   type Proposal,
   type SaveProposalInput,
@@ -784,6 +785,103 @@ async function handle(
           });
         }
       }
+      // FRI-149 Phase 2: when enabled, auto-spawn an auto-fixing Builder for
+      // each proposal that just promoted to critical AND is code-shaped AND
+      // carries a high-severity signal — across BOTH promote surfaces. The
+      // Builder iterates in its worktree, drives the fix to a GREEN review-ready
+      // PR, mails the orchestrator the PR URL, and STOPS (it never merges; the
+      // human approval gate moves to merge — ADR-036). Read with a strict
+      // `=== true` so the shallow-merge `{ evolve: {} }` case stays off. The
+      // carve-out that lets a `scheduled` caller spawn a builder is gated on the
+      // un-forgeable `evolveEscalation` arg passed ONLY here (never reachable
+      // from the wire — see validateSpawnPermissions / createAgent). Spawn
+      // failures are caught per-request AND for the whole block, so they never
+      // alter the scan's returned summary nor throw out of the handler; the
+      // in-process `createAgent` 409 gives idempotent dedup against an
+      // already-spawned `builder-<id>`.
+      if (cfg.evolve?.autoSpawnBuilders === true) {
+        try {
+          const builders = builderEscalationPlan([
+            ...propose.promotedToCritical,
+            ...reranked.promoted,
+          ]);
+          for (const b of builders) {
+            try {
+              const proposalId = b.name.slice("builder-".length);
+              const r = await createAgent(
+                {
+                  type: "builder",
+                  name: b.name,
+                  parentName: "scheduled-meta-daily",
+                  prompt: b.prompt,
+                  reason: b.reason,
+                  ticketId: proposalId,
+                  worktree: { repo: process.cwd() },
+                },
+                cfg,
+                { evolveEscalation: true },
+              );
+              if (r.status === 201) {
+                logger.log("info", "evolve.builder.spawn", {
+                  name: b.name,
+                  proposalId,
+                  reason: b.reason,
+                });
+                // Two-way linkage: record the in-flight builder on the proposal
+                // so the dashboard can connect a critical proposal to its
+                // builder. Branch is derivable as friday/builder-<id>; the PR
+                // URL arrives via the builder's mail.
+                try {
+                  updateProposal(proposalId, { builderAgent: b.name });
+                } catch (err) {
+                  logger.log("warn", "evolve.builder.linkage.error", {
+                    name: b.name,
+                    proposalId,
+                    message: err instanceof Error ? err.message : String(err),
+                  });
+                }
+                // Notify the orchestrator that an escalation builder is in
+                // flight; it surfaces this to the user, and the builder itself
+                // mails the review-ready PR URL once CI is green.
+                try {
+                  await sendMail({
+                    fromAgent: "scheduled-meta-daily",
+                    toAgent: cfg.orchestratorName,
+                    type: "notification",
+                    subject: `evolve escalation: ${proposalId}`,
+                    body:
+                      `Auto-escalated critical+code proposal \`${proposalId}\` to Builder \`${b.name}\`. ` +
+                      `It will drive a GREEN, review-ready PR (branch friday/${b.name}) and mail you the PR URL — it will NOT merge. ` +
+                      `You review and merge.`,
+                  });
+                } catch (err) {
+                  logger.log("warn", "evolve.builder.notify.error", {
+                    name: b.name,
+                    proposalId,
+                    message: err instanceof Error ? err.message : String(err),
+                  });
+                }
+              } else if (r.status === 409) {
+                logger.log("info", "evolve.builder.spawn.skip", { name: b.name, status: 409 });
+              } else {
+                logger.log("warn", "evolve.builder.spawn.error", {
+                  name: b.name,
+                  status: r.status,
+                });
+              }
+            } catch (err) {
+              logger.log("warn", "evolve.builder.spawn.error", {
+                name: b.name,
+                message: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+        } catch (err) {
+          logger.log("warn", "evolve.builder.spawn.error", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       return json(res, 200, {
         signals: signals.length,
         created: propose.created.length,
@@ -1293,6 +1391,7 @@ export interface CreateAgentInput {
 async function createAgent(
   body: CreateAgentInput,
   cfg: ReturnType<typeof loadConfig>,
+  opts?: { evolveEscalation?: boolean },
 ): Promise<{ status: number; body: unknown }> {
   if (!body.name || !isValidAgentName(body.name)) {
     return {
@@ -1319,7 +1418,14 @@ async function createAgent(
   // include a non-empty `reason`.
   const callerRow = body.parentName ? await registry.getAgent(body.parentName) : null;
   const callerType: CallerType = callerRow?.type ?? "orchestrator";
-  const rejection = validateSpawnPermissions({ type: body.type, reason: body.reason }, callerType);
+  // FRI-149: `opts.evolveEscalation` is the un-forgeable carve-out marker. It is
+  // a SEPARATE argument to this function (not a `body` / `CreateAgentInput`
+  // field), so the public `POST /api/agents` route — which calls
+  // `createAgent(body, cfg)` with no third arg — can never set it. Only the
+  // in-process evolve scan hook passes `{ evolveEscalation: true }`.
+  const rejection = validateSpawnPermissions({ type: body.type, reason: body.reason }, callerType, {
+    evolveEscalation: opts?.evolveEscalation === true,
+  });
   if (rejection) {
     return { status: rejection.status, body: rejection.body };
   }

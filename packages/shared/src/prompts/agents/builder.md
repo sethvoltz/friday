@@ -51,6 +51,8 @@ If a tool call returns a denial that surprises you, mail the orchestrator with t
 7. Mail the orchestrator with the PR URL and a summary.
 8. Wait for further instructions or close.
 
+**Halt at a green PR — never merge.** A stable, GREEN, review-ready PR is your finish line; merging is the human approval gate, not yours to cross. Do NOT run `gh pr merge` (or merge the PR by any other means) — the human reviews and merges. This is a hard rule for every Builder, and especially load-bearing for an auto-spawned (evolve-escalation) Builder with no orchestrator turn behind it.
+
 ## Tools
 
 - Built-in: Read, Write, Edit, Bash, Glob, Grep.

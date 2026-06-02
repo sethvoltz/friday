@@ -132,3 +132,41 @@ describe("evolve.autoSpawnTriageHelpers (FRI-40)", () => {
     expect(loadConfig().evolve?.autoSpawnTriageHelpers).toBe(true);
   });
 });
+
+describe("evolve.autoSpawnBuilders (FRI-149)", () => {
+  beforeEach(() => {
+    if (!existsSync(dirname(CONFIG_PATH))) mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+    rmSync(CONFIG_PATH, { force: true });
+  });
+  afterEach(() => {
+    rmSync(CONFIG_PATH, { force: true });
+  });
+
+  it("DEFAULT_CONFIG ships both evolve flags OFF in the SAME object (AC #5)", () => {
+    // Pins that autoSpawnBuilders was added to the SAME evolve object (not a
+    // sibling) and that the existing autoSpawnTriageHelpers flag is preserved.
+    expect(DEFAULT_CONFIG.evolve).toEqual({
+      autoSpawnTriageHelpers: false,
+      autoSpawnBuilders: false,
+    });
+  });
+
+  it("loadConfig() with no config.json returns the default OFF flag", () => {
+    expect(loadConfig().evolve?.autoSpawnBuilders).toBe(false);
+  });
+
+  it("shallow merge: a user `{ evolve: {} }` → flag NOT === true (strict-read hazard, AC #5)", () => {
+    // The shallow merge replaces DEFAULT_CONFIG.evolve wholesale with `{}`, so
+    // the nested default does NOT survive — exactly why the daemon must read the
+    // flag with a strict `=== true` check.
+    writeFileSync(CONFIG_PATH, JSON.stringify({ evolve: {} }) + "\n");
+    const cfg = loadConfig();
+    expect(cfg.evolve?.autoSpawnBuilders).toBeUndefined();
+    expect(cfg.evolve?.autoSpawnBuilders === true).toBe(false);
+  });
+
+  it("an explicit `{ evolve: { autoSpawnBuilders: true } }` loads as true", () => {
+    writeFileSync(CONFIG_PATH, JSON.stringify({ evolve: { autoSpawnBuilders: true } }) + "\n");
+    expect(loadConfig().evolve?.autoSpawnBuilders).toBe(true);
+  });
+});

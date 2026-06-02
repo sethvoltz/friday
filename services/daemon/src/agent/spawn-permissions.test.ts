@@ -167,6 +167,74 @@ describe("validateSpawnPermissions (ADR-022 §6 #4 #5)", () => {
       },
     });
   });
+
+  // FRI-149: the audited evolve→builder carve-out. The ONLY way a
+  // non-orchestrator caller may spawn a builder is via the server-set,
+  // un-forgeable `opts.evolveEscalation === true` marker, AND only as the
+  // `scheduled` evolve caller, AND with a non-empty reason.
+  it("scheduled → builder WITH { evolveEscalation: true } + reason is permitted (FRI-149 carve-out)", () => {
+    expect(
+      perms.validateSpawnPermissions(
+        { type: "builder", reason: "evolve escalation: proposal p-aaaa" },
+        "scheduled",
+        { evolveEscalation: true },
+      ),
+    ).toBeNull();
+  });
+
+  it("scheduled → builder with { evolveEscalation: false } is rejected 403 (carve-out NOT triggered)", () => {
+    const rej = perms.validateSpawnPermissions(
+      { type: "builder", reason: "evolve escalation: proposal p-aaaa" },
+      "scheduled",
+      { evolveEscalation: false },
+    );
+    expect(rej?.body.code).toBe("BUILDER_SPAWN_ORCHESTRATOR_ONLY");
+  });
+
+  it("scheduled → builder with the opts arg OMITTED is rejected 403 (default off — FRI-149)", () => {
+    const rej = perms.validateSpawnPermissions(
+      { type: "builder", reason: "evolve escalation: proposal p-aaaa" },
+      "scheduled",
+    );
+    expect(rej?.body.code).toBe("BUILDER_SPAWN_ORCHESTRATOR_ONLY");
+  });
+
+  it("scheduled → builder WITH evolveEscalation but EMPTY reason is rejected 400 SPAWN_REASON_REQUIRED (FRI-149)", () => {
+    const rej = perms.validateSpawnPermissions({ type: "builder", reason: "" }, "scheduled", {
+      evolveEscalation: true,
+    });
+    expect(rej).toEqual({
+      status: 400,
+      body: {
+        error: "reason required when spawner is not the orchestrator",
+        code: "SPAWN_REASON_REQUIRED",
+      },
+    });
+  });
+
+  it("helper → builder WITH { evolveEscalation: true } is still rejected 403 (carve-out is scheduled-only — FRI-149)", () => {
+    const rej = perms.validateSpawnPermissions({ type: "builder", reason: "x" }, "helper", {
+      evolveEscalation: true,
+    });
+    expect(rej?.body.code).toBe("BUILDER_SPAWN_ORCHESTRATOR_ONLY");
+  });
+
+  it("builder → builder WITH { evolveEscalation: true } is still rejected 403 (carve-out is scheduled-only — FRI-149)", () => {
+    const rej = perms.validateSpawnPermissions({ type: "builder", reason: "x" }, "builder", {
+      evolveEscalation: true,
+    });
+    expect(rej?.body.code).toBe("BUILDER_SPAWN_ORCHESTRATOR_ONLY");
+  });
+
+  it("scheduled → helper with evolveEscalation is gated identically to before (carve-out only affects builders — FRI-149)", () => {
+    // The carve-out keys on body.type === "builder"; a helper from scheduled is
+    // still just a non-orchestrator helper-with-reason — unaffected by the flag.
+    expect(
+      perms.validateSpawnPermissions({ type: "helper", reason: "investigate" }, "scheduled", {
+        evolveEscalation: true,
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("computeSpawnDepth (ADR-022 §6 #7 #30)", () => {
