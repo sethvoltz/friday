@@ -22,8 +22,9 @@
  * Public surface:
  *
  *   open / append / close / cancel       — the four block-IPC handlers
- *   finalize                             — exit-time teardown (was finalizeStreamingBlocks)
- *   endTurn                              — turn-end teardown (was liveTurns.dropTurn)
+ *   tearDownTurn                         — exit-time teardown + accumulator drop (FRI-148 A:
+ *                                          fuses the old finalize + endTurn pair)
+ *   __endTurnForArchivedHardExit         — narrow archive-only bare end-turn (FRI-148 A)
  *   peekNextBlockIndex                   — read accessor used by recordError
  *   maybeEmitAgentMessage                — user-visible-content fan-out (used by injectors)
  *   snapshot                             — read surface for watchdog + tests
@@ -143,7 +144,7 @@ export interface LiveTurn {
   /** clientBlockIds that have reached a terminal state this turn. M6 reads
    *  this to reject a delta/close after the block already closed
    *  (BLOCK_ALREADY_CLOSED) and to reject a second `start` for the same id
-   *  (BLOCK_ALREADY_STARTED). Cleared with the turn in {@link endTurn}. */
+   *  (BLOCK_ALREADY_STARTED). Cleared with the turn in {@link tearDownTurn}. */
   closed: Set<string>;
   startedAt: number;
 }
@@ -492,10 +493,11 @@ export function peekNextBlockIndex(turnId: string): { index: number; turnLive: b
 }
 
 /**
- * Worker-exit teardown: for every in-flight block in this worker's turn,
- * persist a best-effort closed row at the supplied terminal status and
- * publish `block_complete`. Called when the worker dies or is archived
- * without sending block-stop for outstanding blocks.
+ * Worker-exit per-block finalize (module-private helper used by
+ * {@link tearDownTurn}). For every in-flight block in this worker's turn,
+ * persist a best-effort closed row at the supplied terminal status and publish
+ * `block_complete`. Called when the worker dies or is archived without sending
+ * block-stop for outstanding blocks.
  *
  * Each block's content_json is assembled via {@link finalizeLiveBlockContent}
  * from whatever text/partial_json accumulated. Tool_use blocks with
@@ -512,10 +514,17 @@ export function peekNextBlockIndex(turnId: string): { index: number; turnLive: b
  * normal ADR-024 block; M6 replaces that with an existence-keyed choice so
  * neither failure mode (zero-row UPDATE / dup-key INSERT) is possible. Each
  * finalized block transitions to the terminal `closed` set, so a late
- * close/append after finalize is rejected rather than re-writing. The caller
- * should typically follow with {@link endTurn}.
+ * close/append after finalize is rejected rather than re-writing.
+ *
+ * FRI-148 A: the public entrypoint is now {@link tearDownTurn} (the fuse of
+ * the old finalize + endTurn pair). This helper stays as the inner per-block
+ * loop so the INSERT-vs-UPDATE logic + per-block `block_complete` publish lives
+ * exactly once.
  */
-export async function finalize(w: LiveWorker, status: "error" | "aborted"): Promise<void> {
+async function finalizeInFlightBlocks(
+  w: LiveWorker,
+  status: "error" | "aborted",
+): Promise<void> {
   const lt = turns.get(w.turnId);
   if (!lt) return;
   // Snapshot the in-flight entries before mutating the map inside the loop.
@@ -578,11 +587,31 @@ export async function finalize(w: LiveWorker, status: "error" | "aborted"): Prom
 }
 
 /**
- * Turn-end signal (was `liveTurns.dropTurn`). Removes the per-turn
- * accumulator entry. Called from the daemon's turn-lifecycle paths
- * (exit, error, turn-complete) after any required {@link finalize}.
+ * Worker-exit teardown for a turn (FRI-148 A: the fused finalize + endTurn).
+ * Finalizes every in-flight block at the supplied terminal status (same
+ * per-block INSERT-vs-UPDATE + `block_complete` publish as the old `finalize`),
+ * then drops the per-turn accumulator entry. Replaces the old two-call pair —
+ * the two operations are always done together at every turn-end teardown
+ * (turn-complete, error, hard-exit, force-kill), so fusing them removes the
+ * "did I remember to call endTurn?" footgun and pins the order at the boundary
+ * (writes-then-drop) inside the module.
+ *
+ * Idempotent on already-torn-down turns: a missing accumulator entry makes
+ * `finalizeInFlightBlocks` a no-op and the `turns.delete` redundant.
  */
-export function endTurn(turnId: string): void {
+export async function tearDownTurn(w: LiveWorker, status: "error" | "aborted"): Promise<void> {
+  await finalizeInFlightBlocks(w, status);
+  turns.delete(w.turnId);
+}
+
+/**
+ * Archive-only bare end-turn. The archived-preserve branch in
+ * `finalizeHardExit` has already finalized rows; this just drops the per-turn
+ * accumulator entry. Narrow export so the rest of the codebase only sees
+ * {@link tearDownTurn}, preserving the "always finalize, then drop" pairing for
+ * every non-archive teardown path.
+ */
+export function __endTurnForArchivedHardExit(turnId: string): void {
   turns.delete(turnId);
 }
 

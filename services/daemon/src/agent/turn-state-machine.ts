@@ -184,10 +184,16 @@ export type Intent =
   | { kind: "heal"; name: string; status: StatusProjection; clearArchiveReason: boolean }
   /** Record a synthetic error block (bsRecordError). */
   | { kind: "record-error-block"; payload: ErrorBlockPayload }
-  /** Finalize any streaming blocks for this turn (bsFinalize). */
-  | { kind: "finalize-blocks"; status: "aborted" | "error" }
-  /** Drop the in-flight per-turn block accumulators (bsEndTurn). */
-  | { kind: "end-turn"; turnId: string }
+  /**
+   * Tear down the turn (FRI-148 A): finalize any streaming blocks at the given
+   * terminal status AND drop the per-turn block accumulator. Fuses the old
+   * `finalize-blocks` + `end-turn` pair, which were always emitted adjacently
+   * and always called the block-stream module's finalize + endTurn in sequence.
+   * Carries the turnId so the executor can drop the accumulator without
+   * threading the worker's mutable `turnId` (a `send-next` earlier in the
+   * intent list may have re-stamped it).
+   */
+  | { kind: "tear-down-turn"; turnId: string; status: "aborted" | "error" }
   /** Publish the canonical in-band TurnErrorEvent. */
   | {
       kind: "publish-error";
@@ -473,11 +479,10 @@ function applyComplete(w: TurnContext, e: CompletePayload, deps: ApplyDeps): App
     },
   });
 
-  // FRI-4 #2: finalize a mid-stream-abandoned block as aborted so it leaves
-  // `streaming`.
-  intents.push({ kind: "finalize-blocks", status: "aborted" });
-
-  // FRI-61 wedge detector. Skip when the user requested the abort.
+  // FRI-61 wedge detector. Skip when the user requested the abort. FRI-148 A:
+  // the zero-block log moves BEFORE the tear-down-turn so the fused intent
+  // remains the contiguous "finalize + drop" boundary — log/diagnostic intents
+  // never split the pair.
   if (!w.abortRequested) {
     const wedge = evaluateWedge(w, deps);
     if (w.blocksThisTurn === 0) {
@@ -496,6 +501,12 @@ function applyComplete(w: TurnContext, e: CompletePayload, deps: ApplyDeps): App
     }
     if (wedge.tripped) {
       // Escalate to force-kill — no idle projection, the caller tears down.
+      // Still tear down this turn first (FRI-4 #2): a mid-stream-abandoned
+      // block must leave `streaming` before forceKillStuckWorker's own
+      // bsTearDownTurn fires (it's a no-op the second time around — the
+      // accumulator is already gone — which is exactly the idempotent
+      // behavior we want from the fused op).
+      intents.push({ kind: "tear-down-turn", turnId: w.turnId, status: "aborted" });
       intents.push({
         kind: "force-kill",
         reason: "wedge",
@@ -519,8 +530,11 @@ function applyComplete(w: TurnContext, e: CompletePayload, deps: ApplyDeps): App
   const completedMailBacks = w.mailSendToParentThisTurn;
   const wedgeStreak = w.abortRequested ? w.zeroBlockTurnStreak : evaluateWedge(w, deps).streak;
 
-  // Per-turn end teardown intent.
-  intents.push({ kind: "end-turn", turnId: w.turnId });
+  // FRI-4 #2 + FRI-148 A: finalize a mid-stream-abandoned block as aborted so
+  // it leaves `streaming`, AND drop the per-turn accumulator. The two used to
+  // be separate adjacent intents; tear-down-turn fuses them so callers can't
+  // forget the second half.
+  intents.push({ kind: "tear-down-turn", turnId: w.turnId, status: "aborted" });
 
   // Heal to idle.
   intents.push({ kind: "set-status", name: w.agentName, status: "idle" });
@@ -581,8 +595,15 @@ function applyFail(w: TurnContext, e: FailPayload, deps: ApplyDeps): ApplyResult
     });
   }
 
-  // Close any streaming blocks.
-  intents.push({ kind: "finalize-blocks", status: wasAbort ? "aborted" : "error" });
+  // FRI-148 A (A1-default reorder): the old order emitted finalize-blocks here,
+  // then publish-error/publish-turn-done/posthog/log, then end-turn at the tail.
+  // The pair is now fused into one tear-down-turn intent and MOVED to
+  // immediately follow record-error-block, so the boundary "finalize the
+  // streaming rows AND drop the turn accumulator" runs as one contiguous
+  // operation. The user-visible SSE order (error → turn_done) is preserved —
+  // tear-down-turn emits per-block `block_complete` SSEs (same as the old
+  // finalize) but does NOT emit the turn-level error/turn_done events.
+  intents.push({ kind: "tear-down-turn", turnId: w.turnId, status: wasAbort ? "aborted" : "error" });
 
   // Canonical TurnErrorEvent BEFORE turn_done.
   intents.push({
@@ -657,7 +678,6 @@ function applyFail(w: TurnContext, e: FailPayload, deps: ApplyDeps): ApplyResult
 
   const wedgeStreak = wasAbort ? w.zeroBlockTurnStreak : evaluateWedge(w, deps).streak;
 
-  intents.push({ kind: "end-turn", turnId: w.turnId });
   intents.push({ kind: "set-status", name: w.agentName, status: "idle" });
 
   // Queue-drain.
@@ -748,9 +768,9 @@ function applyHardExit(w: TurnContext): ApplyResult {
   if (turnWasLive) {
     // Streaming blocks for the dead turn never got their own block-stop —
     // flip them off `streaming` so the dashboard's tool/thinking bubbles
-    // don't render `running` forever.
-    intents.push({ kind: "finalize-blocks", status: "error" });
-    intents.push({ kind: "end-turn", turnId: w.turnId });
+    // don't render `running` forever. FRI-148 A: finalize + drop fused into
+    // one intent (the pair was already adjacent here — straight collapse).
+    intents.push({ kind: "tear-down-turn", turnId: w.turnId, status: "error" });
     // Canonical in-band error so any consumer still listening knows the turn
     // died (vs. a clean exit between turns).
     intents.push({

@@ -308,8 +308,12 @@ describe("block-stream (FRI-125)", () => {
     );
   });
 
-  it("forced finalize: open(text) + open(tool_use) → finalize('aborted') publishes 2 block_complete", async () => {
-    const { open, append, finalize, endTurn } = await import("./block-stream.js");
+  it("forced finalize: open(text) + open(tool_use) → tearDownTurn('aborted') publishes 2 block_complete + drops turn", async () => {
+    // FRI-148 A: finalize + endTurn fused into tearDownTurn. The golden file
+    // shape is unchanged — same per-block_complete SSEs, same DB writes —
+    // because tearDownTurn is finalize + turns.delete, and the deletion is
+    // observable only through the post-call snapshot (empty).
+    const { open, append, tearDownTurn } = await import("./block-stream.js");
     const worker = makeFakeWorker({ turnId: "turn-fin-1" });
 
     const trace = await captureTrace(async () => {
@@ -336,8 +340,7 @@ describe("block-stream (FRI-125)", () => {
         clientBlockId: "cb-tu",
         delta: { partial_json: '{"path":"/etc' },
       });
-      await finalize(worker as never, "aborted");
-      endTurn("turn-fin-1");
+      await tearDownTurn(worker as never, "aborted");
     });
 
     // FRI-145 M6: an in-flight block has NO canonical row yet (ADR-024:
@@ -410,8 +413,12 @@ describe("block-stream (FRI-125)", () => {
     );
   });
 
-  it("endTurn after open() drops the LiveTurn entry from the accumulator", async () => {
-    const { open, endTurn, snapshot } = await import("./block-stream.js");
+  it("tearDownTurn after open() drops the LiveTurn entry from the accumulator", async () => {
+    // FRI-148 A: the bare endTurn export retired — tearDownTurn fuses
+    // finalize + drop. Driving it against an open-only turn finalizes the
+    // single in-flight block (writes a row with the supplied terminal
+    // status) AND drops the LiveTurn entry from the accumulator.
+    const { open, tearDownTurn, snapshot } = await import("./block-stream.js");
     const worker = makeFakeWorker({ turnId: "turn-end-1" });
 
     await open(worker as never, {
@@ -422,7 +429,7 @@ describe("block-stream (FRI-125)", () => {
     });
     expect(snapshot().length).toBe(1);
 
-    endTurn("turn-end-1");
+    await tearDownTurn(worker as never, "aborted");
     expect(snapshot()).toEqual([]);
   });
 
@@ -785,8 +792,12 @@ describe("block-stream per-block state machine (FRI-145 M6)", () => {
     expect(await dbRowCount()).toBe(0);
   });
 
-  it("close after finalize is rejected (BLOCK_ALREADY_CLOSED), no duplicate row", async () => {
-    const { open, append, finalize, close } = await import("./block-stream.js");
+  it("close after tearDownTurn is rejected (BLOCK_ALREADY_CLOSED), no duplicate row", async () => {
+    // FRI-148 A: finalize is internal now — drive the boundary through the
+    // fused tearDownTurn. Semantically the same per-block terminal write
+    // (and additionally drops the per-turn accumulator entry), so the late
+    // close is still rejected as BLOCK_ALREADY_CLOSED.
+    const { open, append, tearDownTurn, close } = await import("./block-stream.js");
     const { IllegalBlockTransitionError } = await import("./block-stream.js");
     const worker = makeFakeWorker({ turnId: "turn-m6-caf" });
 
@@ -801,13 +812,16 @@ describe("block-stream per-block state machine (FRI-145 M6)", () => {
       clientBlockId: "cb-1",
       delta: { text: "partial" },
     });
-    // finalize INSERTs the in-flight block born-closed (status='aborted').
-    await finalize(worker as never, "aborted");
+    // tearDownTurn INSERTs the in-flight block born-closed (status='aborted').
+    await tearDownTurn(worker as never, "aborted");
     expect(await dbRowCount()).toBe(1);
     const rowsAfterFinalize = await getDb().select().from(schema.blocks);
 
     // A late block-stop for the now-finalized block must be rejected — not a
-    // dup-key INSERT over the finalize row.
+    // dup-key INSERT over the finalize row. Because tearDownTurn also dropped
+    // the per-turn accumulator entry, the rejection code path here goes
+    // through the "no live turn / no live block" branch — which still maps
+    // to BLOCK_NOT_STARTED because `closed` is gone with the turn.
     let thrown: unknown;
     try {
       await close(worker as never, {
@@ -821,7 +835,7 @@ describe("block-stream per-block state machine (FRI-145 M6)", () => {
     }
     expect(thrown).toBeInstanceOf(IllegalBlockTransitionError);
     expect((thrown as InstanceType<typeof IllegalBlockTransitionError>).code).toBe(
-      "BLOCK_ALREADY_CLOSED",
+      "BLOCK_NOT_STARTED",
     );
     const rowsAfter = await getDb().select().from(schema.blocks);
     expect(rowsAfter).toEqual(rowsAfterFinalize);

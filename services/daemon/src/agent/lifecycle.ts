@@ -38,8 +38,8 @@ import {
   append as bsAppend,
   close as bsClose,
   cancel as bsCancel,
-  finalize as bsFinalize,
-  endTurn as bsEndTurn,
+  tearDownTurn as bsTearDownTurn,
+  __endTurnForArchivedHardExit,
 } from "./block-stream.js";
 import { recordError as bsRecordError } from "./block-injectors.js";
 import { appContextForAgent } from "../apps/installer.js";
@@ -719,8 +719,7 @@ function makeProdPorts(): TurnStatePorts<LiveWorker> {
     closeTicket: (opts) => closeTicketForArchive(opts),
     publish: (event) => eventBus.publish(event),
     blockStream: {
-      finalize: (w, status) => bsFinalize(w, status),
-      endTurn: (turnId) => bsEndTurn(turnId),
+      tearDownTurn: (w, status) => bsTearDownTurn(w, status),
     },
     blockInjector: {
       recordError: (w, payload) => bsRecordError(w, payload),
@@ -1232,7 +1231,11 @@ async function forceKillStuckWorker(
   // synthesizes `abort_reason: "forced"`.
   const ridesError = reason === "stale" || reason === "wedge";
   await bsRecordError(w, errorPayload);
-  await bsFinalize(w, ridesError ? "error" : "aborted");
+  // FRI-148 A: bsFinalize + bsEndTurn fused into bsTearDownTurn. The per-turn
+  // block-accumulator drop runs as part of the same op, so the upcoming
+  // child.exit handler's safety-net teardown sees an empty turn entry (also
+  // Generation-gated, so it never runs for this superseded `w` anyway).
+  await bsTearDownTurn(w, ridesError ? "error" : "aborted");
   // Emit the in-band TurnErrorEvent so any consumers still listening for
   // it know a force-kill happened (vs. a clean abort).
   eventBus.publish({
@@ -1257,12 +1260,6 @@ async function forceKillStuckWorker(
     status: ridesError ? "error" : "aborted",
     ...(reason === "abort" ? { abort_reason: "forced" as const } : {}),
   });
-  // The in-flight turn entry was already dropped via the up-front
-  // `live.delete`; here we drop the per-turn block accumulators so the
-  // upcoming child.exit handler's safety-net `bsFinalize` would be a no-op
-  // anyway (it is also Generation-gated now, so it never runs for this
-  // superseded `w`).
-  bsEndTurn(w.turnId);
   w.lastExitStatus = ridesError ? "error" : "aborted";
   setWorkerStatus(w, "idle", "forceKillStuckWorker");
   // FRI-110: keep the `turnStart` invariant universally true. After
@@ -1328,7 +1325,11 @@ export async function finalizeHardExit(
       // Terminal — a racing archive owns this row. Preserve it; the archive
       // already finalized the worker's turn. Still drop the per-turn block
       // accumulators so the daemon doesn't leak state for a dead turn.
-      bsEndTurn(w.turnId);
+      // FRI-148 A: archive's bare end-turn (no finalize — the archive already
+      // wrote the rows) lives behind the narrow __endTurnForArchivedHardExit
+      // export so non-archive paths can't accidentally bypass the finalize
+      // half of the fused tearDownTurn.
+      __endTurnForArchivedHardExit(w.turnId);
       logger.log("info", "lifecycle.exit.archived-preserved", {
         agent: w.agentName,
         turnId: w.turnId,

@@ -74,13 +74,13 @@ export interface TurnStatePorts<W extends PortWorker = PortWorker> {
   }) => Promise<void>;
   /** eventBus.publish — wire-event fan-out. */
   publish: (event: WireEventInput) => void;
-  /** Block-stream FSM pipeline (finalize / end-turn). The synthetic
-   *  recordError writer lives on the {@link blockInjector} port — split out
-   *  in FRI-148 B so the FSM core's port surface matches the FSM module's
-   *  exports. */
+  /** Block-stream FSM pipeline. FRI-148 A fused the previous finalize +
+   *  endTurn pair into a single `tearDownTurn` op so the executor can't drive
+   *  one without the other. The synthetic recordError writer lives on the
+   *  {@link blockInjector} port — split out in FRI-148 B so the FSM core's
+   *  port surface matches the FSM module's exports. */
   blockStream: {
-    finalize: (w: W, status: "aborted" | "error") => Promise<void>;
-    endTurn: (turnId: string) => void;
+    tearDownTurn: (w: W, status: "aborted" | "error") => Promise<void>;
   };
   /** Synthetic block writers that piggyback on the FSM accumulator
    *  ({@link ./block-injectors.ts}). Currently only `recordError`; the
@@ -196,11 +196,8 @@ export async function executeIntents<W extends PortWorker>(
       case "record-error-block":
         await ports.blockInjector.recordError(w, intent.payload);
         break;
-      case "finalize-blocks":
-        await ports.blockStream.finalize(w, intent.status);
-        break;
-      case "end-turn":
-        ports.blockStream.endTurn(intent.turnId);
+      case "tear-down-turn":
+        await ports.blockStream.tearDownTurn(w, intent.status);
         break;
       case "publish-error":
         ports.publish({
