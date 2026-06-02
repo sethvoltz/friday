@@ -24,3 +24,6 @@ services/dashboard/build/**
 
 # Skip svelte files — handled by `pnpm --filter @friday/dashboard check`
 *.svelte
+
+# release-please owns CHANGELOG.md's format; do not prettier-check it
+CHANGELOG.md

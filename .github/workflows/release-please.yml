@@ -28,6 +28,19 @@ jobs:
     name: Release Please
     runs-on: ubuntu-latest
     steps:
+      # Mint a short-lived GitHub App installation token so release-please
+      # creates/updates its Release PR AS THE APP, not GITHUB_TOKEN. Events
+      # (PR open, branch push) made with GITHUB_TOKEN do NOT trigger workflows
+      # (GitHub anti-recursion), which left the Release PR with no required
+      # checks and permanently unmergeable. An app-identity event triggers CI
+      # normally. App (contents + pull-requests write) is installed on this repo.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.GHA_CLIENT_ID }}
+          private-key: ${{ secrets.GHA_PRIVATE_KEY }}
+
       - id: release
         # Pinned to a full commit SHA (not the mutable @v4 tag): this workflow
         # gates the release that release-publish.yml then packs into the exact
@@ -36,6 +49,7 @@ jobs:
         # (ADR-034). Dependabot keeps the pin current.
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
@@ -47,7 +61,7 @@ jobs:
       - name: Enable auto-merge on the Release PR
         if: ${{ steps.release.outputs.prs_created == 'true' || steps.release.outputs.pr != '' }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr || '{}').number }}
         run: |
           if [ -n "${RELEASE_PR_NUMBER}" ] && [ "${RELEASE_PR_NUMBER}" != "null" ]; then
