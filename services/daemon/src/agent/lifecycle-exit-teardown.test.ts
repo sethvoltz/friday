@@ -156,9 +156,7 @@ describe("blockStream.tearDownTurn (F4-A; FRI-125 migration; FRI-148 A fuse)", (
     // No in-flight entry for `turn-exit-1`. Must not throw, must not
     // touch the DB. FRI-148 A: tearDownTurn also drops the turn entry
     // — idempotent on a missing entry.
-    await expect(
-      tearDownTurn(makeFakeWorker() as never, "error"),
-    ).resolves.toBeUndefined();
+    await expect(tearDownTurn(makeFakeWorker() as never, "error")).resolves.toBeUndefined();
   });
 
   it("FRI-4 #2 (Layer B): marks orphan blocks 'aborted' on turn-rotation", async () => {

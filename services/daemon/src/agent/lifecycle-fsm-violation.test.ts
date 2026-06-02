@@ -117,10 +117,13 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
     // `block.transition.illegal` warn log and SUPPRESS the generic
     // `worker.ipc.error` (otherwise the Evolve allowlist double-counts).
     await expect(
-      safeHandleEvent(worker as never, {
-        type: "block-cancel",
-        clientBlockId: "c-unknown",
-      } as never),
+      safeHandleEvent(
+        worker as never,
+        {
+          type: "block-cancel",
+          clientBlockId: "c-unknown",
+        } as never,
+      ),
     ).resolves.toBeUndefined();
 
     const illegalCalls = logSpy.mock.calls.filter(([, ev]) => ev === "block.transition.illegal");
@@ -140,9 +143,7 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
     // The generic boundary log must NOT fire — that path is reserved for
     // *un*typed throws; a typed FSM violation is fully owned by the L1/L2
     // branch above.
-    expect(
-      logSpy.mock.calls.find(([, ev]) => ev === "worker.ipc.error"),
-    ).toBeUndefined();
+    expect(logSpy.mock.calls.find(([, ev]) => ev === "worker.ipc.error")).toBeUndefined();
 
     // Below the threshold → no L2 trip, no force-kill.
     expect(
@@ -169,14 +170,15 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
     const logSpy = vi.spyOn(logger, "log");
 
     // First violation: count=1, L1 only.
-    await safeHandleEvent(worker as never, {
-      type: "block-cancel",
-      clientBlockId: "c-unknown-1",
-    } as never);
+    await safeHandleEvent(
+      worker as never,
+      {
+        type: "block-cancel",
+        clientBlockId: "c-unknown-1",
+      } as never,
+    );
     expect(worker.illegalTransitionsThisTurn).toBe(1);
-    expect(
-      logSpy.mock.calls.filter(([, ev]) => ev === "block.transition.illegal"),
-    ).toHaveLength(1);
+    expect(logSpy.mock.calls.filter(([, ev]) => ev === "block.transition.illegal")).toHaveLength(1);
     expect(
       logSpy.mock.calls.find(([, ev]) => ev === "block.transition.illegal.threshold"),
     ).toBeUndefined();
@@ -184,24 +186,28 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
     expect(isAgentLive("fsm-agent")).toBe(true);
 
     // Second violation: count=2, still L1 only.
-    await safeHandleEvent(worker as never, {
-      type: "block-cancel",
-      clientBlockId: "c-unknown-2",
-    } as never);
+    await safeHandleEvent(
+      worker as never,
+      {
+        type: "block-cancel",
+        clientBlockId: "c-unknown-2",
+      } as never,
+    );
     expect(worker.illegalTransitionsThisTurn).toBe(2);
-    expect(
-      logSpy.mock.calls.filter(([, ev]) => ev === "block.transition.illegal"),
-    ).toHaveLength(2);
+    expect(logSpy.mock.calls.filter(([, ev]) => ev === "block.transition.illegal")).toHaveLength(2);
     expect(
       logSpy.mock.calls.find(([, ev]) => ev === "block.transition.illegal.threshold"),
     ).toBeUndefined();
     expect(isAgentLive("fsm-agent")).toBe(true);
 
     // Third violation: count=3 → trip.
-    await safeHandleEvent(worker as never, {
-      type: "block-cancel",
-      clientBlockId: "c-unknown-3",
-    } as never);
+    await safeHandleEvent(
+      worker as never,
+      {
+        type: "block-cancel",
+        clientBlockId: "c-unknown-3",
+      } as never,
+    );
     expect(worker.illegalTransitionsThisTurn).toBe(3);
 
     // L1 STILL fires on the threshold trip — the count increment and the
@@ -248,15 +254,9 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
 
     // Sibling force-kill reason logs MUST NOT fire — fsm-violation is its
     // own branch, not aliased onto wedge/abort/stale.
-    expect(
-      logSpy.mock.calls.find(([, ev]) => ev === "worker.wedge.force-kill"),
-    ).toBeUndefined();
-    expect(
-      logSpy.mock.calls.find(([, ev]) => ev === "worker.abort.force-kill"),
-    ).toBeUndefined();
-    expect(
-      logSpy.mock.calls.find(([, ev]) => ev === "worker.turn.stale-killed"),
-    ).toBeUndefined();
+    expect(logSpy.mock.calls.find(([, ev]) => ev === "worker.wedge.force-kill")).toBeUndefined();
+    expect(logSpy.mock.calls.find(([, ev]) => ev === "worker.abort.force-kill")).toBeUndefined();
+    expect(logSpy.mock.calls.find(([, ev]) => ev === "worker.turn.stale-killed")).toBeUndefined();
 
     // Generation already demoted; explicit delete is a defensive no-op.
     __deleteLiveWorkerForTest("fsm-agent");
@@ -283,10 +283,7 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
       // Read from disk rather than the compiled `dist/` so the assertion
       // tracks the editable source.
       const __filename = fileURLToPath(import.meta.url);
-      const lifecycleSrc = readFileSync(
-        join(dirname(__filename), "lifecycle.ts"),
-        "utf-8",
-      );
+      const lifecycleSrc = readFileSync(join(dirname(__filename), "lifecycle.ts"), "utf-8");
 
       // Locate the `child.once("message", () => {` block and confirm both
       // the turnStart write AND the illegalTransitionsThisTurn reset live
@@ -318,10 +315,13 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
       __putLiveWorkerForTest("fsm-agent", worker as never);
 
       // (1) Pre-reset: one illegal transition lands on the in-flight turn.
-      await safeHandleEvent(worker as never, {
-        type: "block-cancel",
-        clientBlockId: "c-pre-reset",
-      } as never);
+      await safeHandleEvent(
+        worker as never,
+        {
+          type: "block-cancel",
+          clientBlockId: "c-pre-reset",
+        } as never,
+      );
       expect(worker.illegalTransitionsThisTurn).toBe(1);
 
       // (2) Boundary: a new prompt arrives, dispatchTurn takes the
@@ -352,10 +352,13 @@ describe("lifecycle: FSM violation heal (FRI-148 §5.C)", () => {
       // (3) Post-reset: another illegal transition lands on the new turn.
       // The counter starts from 0, so it lands at 1 — NOT 2 (which would
       // be the regression if sendPrompt forgot to reset).
-      await safeHandleEvent(worker as never, {
-        type: "block-cancel",
-        clientBlockId: "c-post-reset",
-      } as never);
+      await safeHandleEvent(
+        worker as never,
+        {
+          type: "block-cancel",
+          clientBlockId: "c-post-reset",
+        } as never,
+      );
       expect(worker.illegalTransitionsThisTurn).toBe(1);
 
       __deleteLiveWorkerForTest("fsm-agent");

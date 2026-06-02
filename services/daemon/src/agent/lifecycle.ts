@@ -1276,8 +1276,7 @@ async function forceKillStuckWorker(
             };
   // Wedge, stale-turn, and fsm-violation all ride `error` status; only an
   // explicit abort synthesizes `abort_reason: "forced"`.
-  const ridesError =
-    reason === "stale" || reason === "wedge" || reason === "fsm-violation";
+  const ridesError = reason === "stale" || reason === "wedge" || reason === "fsm-violation";
   await bsRecordError(w, errorPayload);
   // FRI-148 A: bsFinalize + bsEndTurn fused into bsTearDownTurn. The per-turn
   // block-accumulator drop runs as part of the same op, so the upcoming

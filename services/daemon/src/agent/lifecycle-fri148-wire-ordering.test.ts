@@ -90,10 +90,7 @@ describe("FRI-148 AC #14: A1-default reorder preserves SSE order (error → turn
     const captured: { type: string; turn_id?: string }[] = [];
     const unsub = eventBus.subscribe((e) => {
       const ev = e as { type?: string; turn_id?: string };
-      if (
-        (ev.type === "error" || ev.type === "turn_done") &&
-        ev.turn_id === "turn-wire-1"
-      ) {
+      if ((ev.type === "error" || ev.type === "turn_done") && ev.turn_id === "turn-wire-1") {
         captured.push({ type: ev.type, turn_id: ev.turn_id });
       }
     });
@@ -137,10 +134,7 @@ describe("FRI-148 AC #14: A1-default reorder preserves SSE order (error → turn
     const captured: { type: string; turn_id?: string }[] = [];
     const unsub = eventBus.subscribe((e) => {
       const ev = e as { type?: string; turn_id?: string };
-      if (
-        (ev.type === "error" || ev.type === "turn_done") &&
-        ev.turn_id === "turn-wire-2"
-      ) {
+      if ((ev.type === "error" || ev.type === "turn_done") && ev.turn_id === "turn-wire-2") {
         captured.push({ type: ev.type, turn_id: ev.turn_id });
       }
     });

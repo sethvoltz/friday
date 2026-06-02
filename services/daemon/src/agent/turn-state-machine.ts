@@ -603,7 +603,11 @@ function applyFail(w: TurnContext, e: FailPayload, deps: ApplyDeps): ApplyResult
   // operation. The user-visible SSE order (error → turn_done) is preserved —
   // tear-down-turn emits per-block `block_complete` SSEs (same as the old
   // finalize) but does NOT emit the turn-level error/turn_done events.
-  intents.push({ kind: "tear-down-turn", turnId: w.turnId, status: wasAbort ? "aborted" : "error" });
+  intents.push({
+    kind: "tear-down-turn",
+    turnId: w.turnId,
+    status: wasAbort ? "aborted" : "error",
+  });
 
   // Canonical TurnErrorEvent BEFORE turn_done.
   intents.push({

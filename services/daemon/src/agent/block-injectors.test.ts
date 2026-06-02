@@ -251,9 +251,7 @@ describe("block-injectors.recordUserBlock (FRI-148 B)", () => {
     const captured: Array<{ type?: string; block_id?: string; status?: string; role?: string }> =
       [];
     const unsub = eventBus.subscribe((e) =>
-      captured.push(
-        e as { type?: string; block_id?: string; status?: string; role?: string },
-      ),
+      captured.push(e as { type?: string; block_id?: string; status?: string; role?: string }),
     );
 
     const { blockId, seq } = await recordUserBlock({

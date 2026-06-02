@@ -548,10 +548,7 @@ export function peekNextBlockIndex(turnId: string): { index: number; turnLive: b
  * loop so the INSERT-vs-UPDATE logic + per-block `block_complete` publish lives
  * exactly once.
  */
-async function finalizeInFlightBlocks(
-  w: LiveWorker,
-  status: "error" | "aborted",
-): Promise<void> {
+async function finalizeInFlightBlocks(w: LiveWorker, status: "error" | "aborted"): Promise<void> {
   const lt = turns.get(w.turnId);
   if (!lt) return;
   // Snapshot the in-flight entries before mutating the map inside the loop.
