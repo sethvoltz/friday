@@ -10,6 +10,7 @@ import {
   resolveDashboardPort,
 } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
+import { FRIDAY_LAUNCHD_LABEL } from "../lib/launchd.js";
 
 /** A heartbeat older than this is treated as stale (heartbeat interval
  *  is 30s, so 60s gives one missed beat of grace before status falls
@@ -89,13 +90,16 @@ interface LaunchdJob {
 
 /**
  * Query launchd for a job's load + pid status. Replaces the tmux
- * session check from the pre-FRI-88 era. Brew's `service do` block
- * generates a plist named `homebrew.mxcl.<formula>` — that's the label
- * we query.
+ * session check from the pre-FRI-88 era. Friday writes its own plist
+ * directly (label `com.sethvoltz.friday`, FRI-146 / ADR-034) — that's the
+ * label we query.
  *
  * `launchctl print gui/<uid>/<label>` returns 0 when the job is
  * loaded; the textual output carries `pid = NNNN` when the job's
  * process is currently running.
+ *
+ * The helper is label-agnostic (doctor.ts queries the same way); only the
+ * caller's label argument changed.
  *
  * Exported for tests.
  */
@@ -126,18 +130,16 @@ export const statusCommand = defineCommand({
 
     console.log(pc.bold("Friday status"));
 
-    // Supervisor (launchd job homebrew.mxcl.friday)
-    const fridayJob = launchdJobStatus("homebrew.mxcl.friday");
+    // Supervisor (launchd job com.sethvoltz.friday)
+    const fridayJob = launchdJobStatus(FRIDAY_LAUNCHD_LABEL);
     if (fridayJob.loaded) {
       const detail =
         fridayJob.pid !== undefined
           ? `pid=${fridayJob.pid}`
           : "(loaded; no current pid — restarting?)";
-      console.log(`  supervisor  ${pc.green("up")}  ${detail}  (launchd: homebrew.mxcl.friday)`);
+      console.log(`  supervisor  ${pc.green("up")}  ${detail}  (launchd: ${FRIDAY_LAUNCHD_LABEL})`);
     } else {
-      console.log(
-        `  supervisor  ${pc.dim("down")}  (run ${pc.cyan("friday start")} or ${pc.cyan("brew services start friday")})`,
-      );
+      console.log(`  supervisor  ${pc.dim("down")}  (run ${pc.cyan("friday start")})`);
     }
 
     // cloudflared (its own user launch agent installed by

@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Friday CLI shim — invokes the built CLI in packages/cli/dist/.
+# Friday CLI shim — invokes the built CLI in packages/cli/dist/ through fnm
+# so it runs under the pinned Node (.node-version) with no baked node path.
 # Add this directory to your PATH (e.g. in .zshrc / .bashrc):
 #   export PATH="$HOME/Development/Seth/Friday/agent-friday/bin:$PATH"
-exec node "$(dirname "$0")/../packages/cli/dist/index.js" "$@"
+#
+# fnm resolves .node-version from the CWD (it does NOT walk up parent dirs),
+# so we cd into the repo root — which holds .node-version — before exec'ing.
+# Without this, invoking the shim from any other dir (the normal case) fails
+# with "Can't find version in dotfiles".
+DIR="$(dirname "$0")"
+cd "$DIR/.." || exit 1
+exec "$(brew --prefix)/bin/fnm" exec -- node "packages/cli/dist/index.js" "$@"

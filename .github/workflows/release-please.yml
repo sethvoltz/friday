@@ -1,0 +1,58 @@
+name: Release Please
+
+# release-please watches pushes to main, parses Conventional Commit types
+# (feat: / fix: / BREAKING CHANGE) to compute the next semver, and keeps a
+# single "Release PR" open that rolls up the pending changelog + bumps all 8
+# version sites in lockstep (root via release-type:node, the 7 workspace
+# package.json via extra-files). Merging that PR cuts the tag + GitHub Release,
+# which in turn triggers release-publish.yml to pack + upload the tarball.
+#
+# Pre-1.0: bump-minor-pre-major:true (set in release-please-config.json) makes
+# a `feat:` bump the MINOR and a `BREAKING CHANGE` bump the MINOR too (NOT a
+# major) until the owner-gated flip to 1.0.0.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    steps:
+      - id: release
+        # Pinned to a full commit SHA (not the mutable @v4 tag): this workflow
+        # gates the release that release-publish.yml then packs into the exact
+        # tarball users `curl | bash` / `friday update`, so a retagged or
+        # compromised third-party action is a supply-chain injection point
+        # (ADR-034). Dependabot keeps the pin current.
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Auto-merge ONLY release-please's own PR. The `pr` output is set solely
+      # for the release PR this run created/updated, so this step is a no-op on
+      # every other push — feature PRs are never touched. `--auto` lets GitHub
+      # merge it once branch-protection's required checks (Validate) go green;
+      # `--squash` keeps the release commit a single Conventional Commit.
+      - name: Enable auto-merge on the Release PR
+        if: ${{ steps.release.outputs.prs_created == 'true' || steps.release.outputs.pr != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr || '{}').number }}
+        run: |
+          if [ -n "${RELEASE_PR_NUMBER}" ] && [ "${RELEASE_PR_NUMBER}" != "null" ]; then
+            gh pr merge --auto --squash "${RELEASE_PR_NUMBER}" \
+              --repo "${GITHUB_REPOSITORY}"
+          else
+            echo "No release PR to auto-merge on this run."
+          fi

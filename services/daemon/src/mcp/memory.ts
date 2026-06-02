@@ -19,6 +19,15 @@ import { daemonFetch, signalFrom } from "./http.js";
 export const MEMORY_SERVER_NAME = "friday-memory";
 
 /**
+ * `memory_save` tool description. Extracted to a named export so a unit test can
+ * pin that it enumerates every memory type tag (incl. `person`, FRI-141) — the
+ * doc (`protocols/memory.md`) and this string must stay in lockstep, and a
+ * silent drop of a type from the enumeration should fail a test, not ship.
+ */
+export const MEMORY_SAVE_DESCRIPTION =
+  "Save a new memory entry. Memories persist across sessions and conversations and surface automatically in the next turn's `<memory-context>` block. Use for decisions, user preferences, project context, lessons learned, external-system pointers — anything worth remembering long-term. **Search first to avoid duplicates** — if a memory on the same topic exists, use `memory_update` to refine it instead. Tag every entry with its type (`user` / `feedback` / `project` / `reference` / `person`) plus topical tags; tags weight +5 in the FTS ranker. **Do not use the built-in Memory tool** — Friday's `autoMemoryEnabled` is disabled and the SDK's project-scoped memory directory is not Friday's store.";
+
+/**
  * Catch tool-call serialization mishaps where the SDK harness folded a
  * parameter's XML wrapper into a sibling string. Seen in the wild: the model
  * emitted a `tags` value without its `<parameter name="tags">…</parameter>`
@@ -107,7 +116,7 @@ export function buildMemoryServer(opts: BuildMemoryServerOptions) {
 
   const saveTool = tool(
     "memory_save",
-    "Save a new memory entry. Memories persist across sessions and conversations and surface automatically in the next turn's `<memory-context>` block. Use for decisions, user preferences, project context, lessons learned, external-system pointers — anything worth remembering long-term. **Search first to avoid duplicates** — if a memory on the same topic exists, use `memory_update` to refine it instead. Tag every entry with its type (`user` / `feedback` / `project` / `reference`) plus topical tags; tags weight +5 in the FTS ranker. **Do not use the built-in Memory tool** — Friday's `autoMemoryEnabled` is disabled and the SDK's project-scoped memory directory is not Friday's store.",
+    MEMORY_SAVE_DESCRIPTION,
     {
       id: z
         .string()

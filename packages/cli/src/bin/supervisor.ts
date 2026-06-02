@@ -21,7 +21,16 @@
  *
  * Design constraints (FRI-88 §0):
  *  - No tmux. No bash respawn wrappers. `friday stop` (now
- *    `brew services stop friday`) leaves zero descendants alive.
+ *    `launchctl bootout`) leaves zero descendants alive.
+ *
+ * Child-spawn command resolution (FRI-146 / ADR-034): every child is
+ * spawned via `process.execPath` — the fnm-resolved pinned node the
+ * supervisor itself runs under (the launchd plist launches the supervisor
+ * via `fnm exec -- node …`). This bypasses pnpm and the pnpm-generated
+ * `.bin` shims (which bake a pack-time absolute `NODE_PATH` that doesn't
+ * survive relocation to `~/.local/share/friday/versions/<v>/`). zero-cache
+ * and zero-deploy-permissions are spawned via `process.execPath` directly
+ * against `@rocicorp/zero`'s `cli.js` / `deploy-permissions.js`.
  */
 
 import { ChildProcess, spawn, spawnSync, type StdioOptions } from "node:child_process";
@@ -44,8 +53,9 @@ import {
  * Repo root, derived from this script's location. The supervisor is
  * compiled to `<repo>/packages/cli/dist/bin/supervisor.js`; walk five
  * dirnames up to land on the repo root. Works identically in the dev
- * checkout and in the brew install (where the whole repo lives under
- * `libexec/`).
+ * checkout and in the curl install (where the tree lives under
+ * `~/.local/share/friday/versions/<v>/`, reached via the `current`
+ * symlink).
  */
 function findRepoRoot(): string {
   let cur = dirname(fileURLToPath(import.meta.url));
@@ -104,6 +114,45 @@ interface ChildSpec {
   fastRestartCodes?: number[];
 }
 
+/**
+ * Resolve `@rocicorp/zero`'s `cli.js` (the `zero-cache` bin) by direct path
+ * join off the dashboard's `node_modules`. `require.resolve` on the package
+ * subpath fails — `@rocicorp/zero`'s exports map doesn't export
+ * `./package.json`, so we resolve the bin's compiled entry directly. The bin
+ * map (`@rocicorp/zero` package.json) pins `zero-cache` →
+ * `./out/zero/src/cli.js`.
+ */
+function zeroCacheCli(repoRoot: string): string {
+  return join(
+    repoRoot,
+    "services",
+    "dashboard",
+    "node_modules",
+    "@rocicorp",
+    "zero",
+    "out",
+    "zero",
+    "src",
+    "cli.js",
+  );
+}
+
+/** `@rocicorp/zero`'s `zero-deploy-permissions` bin → `deploy-permissions.js`. */
+function zeroDeployPermissionsCli(repoRoot: string): string {
+  return join(
+    repoRoot,
+    "services",
+    "dashboard",
+    "node_modules",
+    "@rocicorp",
+    "zero",
+    "out",
+    "zero",
+    "src",
+    "deploy-permissions.js",
+  );
+}
+
 function buildSpecs(repoRoot: string): ChildSpec[] {
   const cfg = loadConfig();
   const daemonPort = resolveDaemonPort(cfg);
@@ -112,7 +161,9 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
   return [
     {
       name: "daemon",
-      cmd: "node",
+      // Spawn via the fnm-resolved pinned node the supervisor runs under,
+      // never bare `node` from PATH (FRI-146).
+      cmd: process.execPath,
       args: ["dist/index.js"],
       cwd: join(repoRoot, "services", "daemon"),
       env: {
@@ -131,8 +182,11 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
     },
     {
       name: "zero-cache",
-      cmd: "pnpm",
-      args: ["exec", "zero-cache"],
+      // Spawn zero-cache via `process.execPath` directly against
+      // @rocicorp/zero's cli.js — never `pnpm exec` / the `.bin` shim, whose
+      // baked absolute NODE_PATH doesn't survive relocation (FRI-146).
+      cmd: process.execPath,
+      args: [zeroCacheCli(repoRoot)],
       cwd: join(repoRoot, "services", "dashboard"),
       env: {
         // System default for the single-user local instance: zero-cache otherwise
@@ -168,9 +222,11 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
       fastRestartCodes: [14],
       async preStart(): Promise<void> {
         const schemaPath = join(repoRoot, "packages", "shared", "dist", "sync", "schema.js");
+        // Spawn zero-deploy-permissions via `process.execPath` against the
+        // bin's compiled entry — never `pnpm exec` / the `.bin` shim (FRI-146).
         const r = spawnSync(
-          "pnpm",
-          ["exec", "zero-deploy-permissions", "--schema-path", schemaPath],
+          process.execPath,
+          [zeroDeployPermissionsCli(repoRoot), "--schema-path", schemaPath],
           { cwd: join(repoRoot, "services", "dashboard"), stdio: "inherit", env: process.env },
         );
         if (r.status !== 0) {
@@ -180,7 +236,9 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
     },
     {
       name: "dashboard",
-      cmd: "node",
+      // Spawn via the fnm-resolved pinned node the supervisor runs under,
+      // never bare `node` from PATH (FRI-146).
+      cmd: process.execPath,
       args: ["server-entry.mjs"],
       cwd: join(repoRoot, "services", "dashboard"),
       env: {

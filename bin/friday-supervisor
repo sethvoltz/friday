@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 # friday-supervisor — launchd-supervised entrypoint for the Friday stack.
-# Invoked by the brew formula's plist; not normally run by users directly.
-# See ADR-028 (forthcoming with FRI-88) for the design.
-exec node "$(dirname "$0")/../packages/cli/dist/bin/supervisor.js" "$@"
+# Invoked by the launchd plist (com.sethvoltz.friday) written directly by
+# install.sh / the friday CLI; not normally run by users directly.
+# Execs through fnm so it runs under the pinned Node (.node-version) with no
+# baked node path. See ADR-028 (FRI-88) + ADR-033 (FRI-146) for the design.
+#
+# fnm resolves .node-version from the CWD (it does NOT walk up parent dirs),
+# so we cd into the install-tree root — which holds .node-version — before
+# exec'ing. The plist also sets WorkingDirectory to the tree root, but this
+# keeps the shim correct when run directly.
+DIR="$(dirname "$0")"
+cd "$DIR/.." || exit 1
+exec "$(brew --prefix)/bin/fnm" exec -- node "packages/cli/dist/bin/supervisor.js" "$@"

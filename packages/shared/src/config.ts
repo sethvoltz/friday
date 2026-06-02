@@ -115,6 +115,8 @@ export interface FridayConfig {
   publicUrl?: string;
   /** Linear integration settings. Read by `@friday/integrations-linear`. */
   linear?: LinearIntegrationConfig;
+  /** Evolve agency settings (FRI-40). */
+  evolve?: { autoSpawnTriageHelpers?: boolean };
 }
 
 export interface LinearIntegrationConfig {
@@ -258,6 +260,11 @@ export const DEFAULT_CONFIG: FridayConfig = {
   // scheduled runs. Users who want observe-only can set
   // `watchdog.refork: false` in ~/.friday/config.json.
   watchdog: { refork: true },
+  // FRI-40: auto-spawning a read-only triage helper on promote-to-critical
+  // is OFF by default. Opt in via `evolve.autoSpawnTriageHelpers: true` in
+  // ~/.friday/config.json. The flag is read with a strict `=== true` check
+  // so the shallow-merge `{ evolve: {} }` case stays disabled.
+  evolve: { autoSpawnTriageHelpers: false },
 };
 
 export function ensureDirs(): void {
