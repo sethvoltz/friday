@@ -24,6 +24,7 @@ describe("memory recall hook (FRI-89)", () => {
     vi.resetModules();
     vi.doMock("@friday/memory", () => ({
       buildAutoRecallBlock: async () => "",
+      listEntries: () => Promise.resolve([]),
     }));
     const { memoryRecallHook } = await import("./memory-recall-hook.js");
 
@@ -41,6 +42,7 @@ describe("memory recall hook (FRI-89)", () => {
     vi.resetModules();
     vi.doMock("@friday/memory", () => ({
       buildAutoRecallBlock: async () => "<memory-context>\nrelevant fact\n</memory-context>",
+      listEntries: () => Promise.resolve([]),
     }));
     const { memoryRecallHook } = await import("./memory-recall-hook.js");
 
@@ -62,6 +64,7 @@ describe("memory recall hook (FRI-89)", () => {
       buildAutoRecallBlock: () => {
         throw new Error("memory backend down");
       },
+      listEntries: () => Promise.resolve([]),
     }));
     const { memoryRecallHook } = await import("./memory-recall-hook.js");
 
@@ -170,7 +173,10 @@ describe("safeRecall listener-ready gate (33sq)", () => {
       whenMemoryListenerReady: () => new Promise<void>(() => {}), // never resolves
     }));
     const buildMock = vi.fn().mockResolvedValue("should not be reached");
-    vi.doMock("@friday/memory", () => ({ buildAutoRecallBlock: buildMock }));
+    vi.doMock("@friday/memory", () => ({
+      buildAutoRecallBlock: buildMock,
+      listEntries: () => Promise.resolve([]),
+    }));
     const logMock = vi.fn();
     vi.doMock("../log.js", () => ({ logger: { log: logMock } }));
 
@@ -193,6 +199,7 @@ describe("safeRecall listener-ready gate (33sq)", () => {
     }));
     vi.doMock("@friday/memory", () => ({
       buildAutoRecallBlock: async () => "<memory-context>test</memory-context>",
+      listEntries: () => Promise.resolve([]),
     }));
 
     const { safeRecall } = await import("./memory-recall-hook.js");
@@ -209,6 +216,7 @@ describe("safeRecall listener-ready gate (33sq)", () => {
       buildAutoRecallBlock: () => {
         throw new Error("db error");
       },
+      listEntries: () => Promise.resolve([]),
     }));
     const logMock = vi.fn();
     vi.doMock("../log.js", () => ({ logger: { log: logMock } }));
@@ -221,5 +229,139 @@ describe("safeRecall listener-ready gate (33sq)", () => {
       intent: "mail",
       message: "db error",
     });
+  });
+});
+
+describe("person name-mention carve-out wiring (FRI-141, AC#8)", () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  function mockMemoryWithPersons() {
+    const buildSpy = vi.fn().mockResolvedValue("");
+    vi.doMock("../memory/listener.js", () => ({
+      whenMemoryListenerReady: () => Promise.resolve(),
+    }));
+    vi.doMock("@friday/memory", () => ({
+      buildAutoRecallBlock: buildSpy,
+      listEntries: () =>
+        Promise.resolve([
+          {
+            id: "person-asher",
+            title: "Asher notes",
+            content: "asher facts",
+            tags: ["person", "person:asher"],
+            createdBy: "tester",
+            createdAt: "2026-05-15T00:00:00Z",
+            updatedAt: "2026-05-15T00:00:00Z",
+            recallCount: 0,
+            lastRecalledAt: null,
+          },
+          {
+            id: "person-mike",
+            title: "Mike notes",
+            content: "mike facts",
+            tags: ["person", "person:mike"],
+            createdBy: "tester",
+            createdAt: "2026-05-15T00:00:00Z",
+            updatedAt: "2026-05-15T00:00:00Z",
+            recallCount: 0,
+            lastRecalledAt: null,
+          },
+        ]),
+    }));
+    return buildSpy;
+  }
+
+  it("forwards allowTags:['person:asher'] when the turn names Asher", async () => {
+    const buildSpy = mockMemoryWithPersons();
+    const { memoryRecallHook } = await import("./memory-recall-hook.js");
+
+    await memoryRecallHook({
+      intent: "did Asher say anything about the move",
+      intentTag: "user_chat",
+      body: "did Asher say anything about the move",
+      agentType: "orchestrator",
+    });
+
+    expect(buildSpy).toHaveBeenCalledWith(
+      "did Asher say anything about the move",
+      expect.objectContaining({ excludeTags: ["person"], allowTags: ["person:asher"] }),
+    );
+  });
+
+  it("forwards an empty allowTags when the turn names no known person", async () => {
+    const buildSpy = mockMemoryWithPersons();
+    const { memoryRecallHook } = await import("./memory-recall-hook.js");
+
+    await memoryRecallHook({
+      intent: "fix the daemon worker fork race",
+      intentTag: "user_chat",
+      body: "fix the daemon worker fork race",
+      agentType: "orchestrator",
+    });
+
+    expect(buildSpy).toHaveBeenCalledWith(
+      "fix the daemon worker fork race",
+      expect.objectContaining({ excludeTags: ["person"], allowTags: [] }),
+    );
+  });
+});
+
+describe("computePersonAllowTags (FRI-141 pure helper)", () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  function mkPerson(id: string, tags: string[]) {
+    return {
+      id,
+      title: id,
+      content: "",
+      tags,
+      createdBy: "tester",
+      createdAt: "2026-05-15T00:00:00Z",
+      updatedAt: "2026-05-15T00:00:00Z",
+      recallCount: 0,
+      lastRecalledAt: null,
+    };
+  }
+
+  it("matches a name token case-insensitively against a dash-separated segment", async () => {
+    const { computePersonAllowTags } = await import("./memory-recall-hook.js");
+    const entries = [
+      mkPerson("a", ["person", "person:mike-coworker"]),
+      mkPerson("b", ["person", "person:asher"]),
+    ];
+    // "Mike" (capitalised) matches the first segment of person:mike-coworker.
+    expect(computePersonAllowTags("did Mike review the PR", entries)).toEqual([
+      "person:mike-coworker",
+    ]);
+  });
+
+  it("returns [] when no name token matches (no substring / fuzzy match)", async () => {
+    const { computePersonAllowTags } = await import("./memory-recall-hook.js");
+    const entries = [mkPerson("b", ["person", "person:asher"])];
+    // "ash" is a substring of "asher" but NOT an exact token — must not match.
+    expect(computePersonAllowTags("turn the ash into mulch", entries)).toEqual([]);
+  });
+
+  it("ignores person:<name> tags on entries lacking the bare 'person' type tag", async () => {
+    const { computePersonAllowTags } = await import("./memory-recall-hook.js");
+    const entries = [mkPerson("c", ["person:asher"])]; // no "person" tag
+    expect(computePersonAllowTags("did Asher call", entries)).toEqual([]);
+  });
+
+  it("re-admits on a non-name descriptor segment — all-segment match is intentional (FRI-141 owner decision)", async () => {
+    const { computePersonAllowTags } = await import("./memory-recall-hook.js");
+    const entries = [mkPerson("m", ["person", "person:mike-coworker"])];
+    // The carve-out matches ANY dash-separated segment, so a generic descriptor
+    // token ("coworker") re-admits the person even when no name appears in the
+    // turn. This is the documented, deliberate behaviour (see the `person`
+    // section of protocols/memory.md) — pinned here so it stays a decision, not
+    // an accident. Choosing a distinctive `person:<name>` segment narrows recall.
+    expect(computePersonAllowTags("my coworker pushed a fix", entries)).toEqual([
+      "person:mike-coworker",
+    ]);
   });
 });

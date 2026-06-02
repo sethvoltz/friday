@@ -4,8 +4,18 @@ import { listEntries, touchRecall, type MemoryEntry } from "./store.js";
 export interface SearchOptions {
   query: string;
   tags?: string[];
+  excludeTags?: string[];
+  allowTags?: string[];
   limit?: number;
   trackRecall?: boolean;
+  /**
+   * FRI-141: an already-loaded entry set to rank against instead of re-reading
+   * the store. The daemon recall hook loads `listEntries()` once to compute the
+   * name-mention carve-out, then threads the same array here so passive recall
+   * does a single full-table scan per turn rather than two. Omit it and the
+   * ranker reads the store itself (every other caller).
+   */
+  preloadedEntries?: MemoryEntry[];
 }
 
 export interface SearchResult {
@@ -20,7 +30,9 @@ export async function searchMemories(opts: SearchOptions): Promise<SearchResult[
   if (!q) return [];
 
   const tags = opts.tags ?? [];
-  const allEntries = await listEntries();
+  const excludeTags = opts.excludeTags ?? [];
+  const allowTags = opts.allowTags ?? [];
+  const allEntries = opts.preloadedEntries ?? (await listEntries());
 
   // When a tag filter is supplied, the caller is asking "give me everything
   // tagged X, ranked by relevance to query" — tags are the authoritative
@@ -61,6 +73,18 @@ export async function searchMemories(opts: SearchOptions): Promise<SearchResult[
 
   for (const entry of candidatePool) {
     if (tags.length > 0 && !tags.every((t) => entry.tags.includes(t))) continue;
+    // FRI-141: passive-recall exclusion with a name-mention carve-out. Skip an
+    // entry iff it carries an excluded tag (e.g. "person") AND is NOT on the
+    // allow-list (a matched person:<name>). When allowTags is empty this reduces
+    // to a plain total exclusion (general / no-name-match case), so the
+    // contamination guarantee is unchanged.
+    if (
+      excludeTags.length > 0 &&
+      excludeTags.some((t) => entry.tags.includes(t)) &&
+      !allowTags.some((t) => entry.tags.includes(t))
+    ) {
+      continue;
+    }
     const titleLc = entry.title.toLowerCase();
     const contentLc = entry.content.toLowerCase();
     const tagsLc = entry.tags.map((t) => t.toLowerCase());
