@@ -21,10 +21,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentType } from "@friday/shared";
 import { loadConfig } from "@friday/shared";
-import { claimPendingSession, insertUsage, updateBlock } from "@friday/shared/services";
+import {
+  claimPendingSession,
+  getTurnAuthorUserId,
+  insertUsage,
+  updateBlock,
+} from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
-import { posthog, DISTINCT_ID } from "../posthog.js";
+import { captureFor } from "../posthog.js";
 import { type ArchiveReason } from "@friday/shared";
 import { closeTicketForArchive } from "../services/ticket-close.js";
 import * as registry from "./registry.js";
@@ -720,8 +725,22 @@ function makeProdPorts(): TurnStatePorts<LiveWorker> {
     },
     recoverFromJsonl: (inputs) => recoverFromJsonl(inputs),
     insertUsage: (row) => insertUsage(row),
-    posthog,
-    distinctId: DISTINCT_ID,
+    // PR #145: attribute the turn analytics event to the turn's author
+    // (resolved from its user block; null → service actor). The resolve is a
+    // DB read, kept here in the port so the machine stays pure. Self-guarded:
+    // an attribution failure must never break turn completion.
+    captureTurnEvent: async (turnId, event, properties) => {
+      try {
+        const author = await getTurnAuthorUserId(turnId);
+        captureFor(author, event, properties);
+      } catch (err) {
+        logger.log("warn", "posthog.attribute.error", {
+          turnId,
+          event,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
     sendPrompt: (w, p) => sendPrompt(w, p),
     forceKill: (w, opts) => forceKillStuckWorker(w, opts),
     logWarn: (event, payload) => logger.log("warn", event, payload),

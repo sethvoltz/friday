@@ -217,8 +217,10 @@ export type Intent =
       usage: NonNullable<CompletePayload["usage"]>;
       durationMs: number;
     }
-  /** Capture a PostHog analytics event. */
-  | { kind: "posthog"; event: string; properties: Record<string, unknown> }
+  /** Capture a PostHog analytics event, attributed to the turn's author
+   *  (PR #145). The author-resolve is async I/O, so the port — not this pure
+   *  machine — turns `turnId` into the originating user. */
+  | { kind: "posthog"; turnId: string; event: string; properties: Record<string, unknown> }
   /** Run the post-turn JSONL recovery sweep (recoverFromJsonl). */
   | {
       kind: "recover-jsonl";
@@ -453,6 +455,7 @@ function applyComplete(w: TurnContext, e: CompletePayload, deps: ApplyDeps): App
 
   intents.push({
     kind: "posthog",
+    turnId: w.turnId,
     event: "turn_completed",
     properties: {
       agent_name: w.agentName,
@@ -602,6 +605,7 @@ function applyFail(w: TurnContext, e: FailPayload, deps: ApplyDeps): ApplyResult
   if (!wasAbort) {
     intents.push({
       kind: "posthog",
+      turnId: w.turnId,
       event: "turn_errored",
       properties: {
         agent_name: w.agentName,

@@ -91,12 +91,9 @@ function makeRecorder(): Recorder {
     insertUsage: async () => {
       rec.usageInserts++;
     },
-    posthog: {
-      capture: (e) => {
-        rec.posthogEvents.push(e.event);
-      },
+    captureTurnEvent: (_turnId, event) => {
+      rec.posthogEvents.push(event);
     },
-    distinctId: "DID",
     sendPrompt: (_w, p) => {
       rec.sendPromptCalls.push({ turnId: p.turnId });
     },

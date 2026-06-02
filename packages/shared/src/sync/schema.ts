@@ -359,6 +359,9 @@ const blocks = table("blocks")
     role: string<"user" | "assistant" | "system">(),
     kind: string<"text" | "thinking" | "tool_use" | "tool_result" | "error" | "mail">(),
     source: string().optional(),
+    // BetterAuth author id, stamped by sendUserMessage from the verified
+    // JWT (null for daemon/autonomous writes). Mirrors db/schema.ts.
+    user_id: string().optional(),
     content_json: json(),
     status: string<
       | "pending"

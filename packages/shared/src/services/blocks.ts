@@ -48,6 +48,10 @@ export interface BlockRow {
   role: string;
   kind: string;
   source: string | null;
+  /** BetterAuth author id, stamped by the `sendUserMessage` mutator from the
+   *  verified JWT. NULL for daemon/agent/autonomous writes. Used to attribute
+   *  the turn's PostHog events to the originating user. */
+  userId: string | null;
   /** Serialized as JSON text for stable API shape. Underlying column is
    *  jsonb in Postgres; we stringify on read so callers continue parsing
    *  with JSON.parse. Phase 1+ may revisit and pass the parsed object. */
@@ -67,6 +71,10 @@ export interface InsertBlockInput {
   role: string;
   kind: BlockKind | string;
   source?: BlockSource;
+  /** BetterAuth author id. Daemon-side inserts are not user-authored, so
+   *  this is normally omitted (→ NULL); the human-author path is the
+   *  `sendUserMessage` mutator. Accepted here for completeness/tests. */
+  userId?: string | null;
   /** JSON-encoded string of the block payload. */
   contentJson: string;
   status: BlockStatus;
@@ -86,6 +94,7 @@ function rowFromDb(r: typeof schema.blocks.$inferSelect): BlockRow {
     role: r.role,
     kind: r.kind,
     source: r.source,
+    userId: r.userId,
     contentJson:
       typeof r.contentJson === "string" ? r.contentJson : JSON.stringify(r.contentJson ?? null),
     status: r.status,
@@ -118,6 +127,7 @@ export async function insertBlock(input: InsertBlockInput): Promise<BlockRow> {
       role: input.role,
       kind: input.kind,
       source: input.source ?? null,
+      userId: input.userId ?? null,
       contentJson: parsed,
       status: input.status,
       ts: new Date(input.ts),
@@ -180,6 +190,32 @@ export async function getBlockById(blockId: string): Promise<BlockRow | null> {
     .where(eq(schema.blocks.blockId, blockId))
     .limit(1);
   return rows[0] ? rowFromDb(rows[0]) : null;
+}
+
+/**
+ * The BetterAuth user id that authored a turn, or null if it had no human
+ * originator (mail-/schedule-triggered and other autonomous turns carry no
+ * user block with a `user_id`). Used by the daemon to attribute a turn's
+ * PostHog events (turn_completed / turn_errored) to the originating user
+ * once the turn finishes — the request context is long gone by then, so the
+ * `user_id` stamped on the turn's user block (by the sendUserMessage mutator)
+ * is the durable carrier. Picks the earliest user block for the turn.
+ */
+export async function getTurnAuthorUserId(turnId: string): Promise<string | null> {
+  const db = getDb();
+  const rows = await db
+    .select({ userId: schema.blocks.userId })
+    .from(schema.blocks)
+    .where(
+      and(
+        eq(schema.blocks.turnId, turnId),
+        eq(schema.blocks.role, "user"),
+        sql`${schema.blocks.userId} IS NOT NULL`,
+      ),
+    )
+    .orderBy(asc(schema.blocks.ts))
+    .limit(1);
+  return rows[0]?.userId ?? null;
 }
 
 /** DELETE a block row. Used by the queued-message cancel endpoint — the

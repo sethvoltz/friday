@@ -77,6 +77,7 @@ describe("turn-state-machine: complete (AC #3 — intents + projection)", () => 
       },
       {
         kind: "posthog",
+        turnId: "turn-1",
         event: "turn_completed",
         properties: {
           agent_name: "agent-1",
@@ -136,6 +137,7 @@ describe("turn-state-machine: complete (AC #3 — intents + projection)", () => 
       },
       {
         kind: "posthog",
+        turnId: "turn-1",
         event: "turn_completed",
         properties: {
           agent_name: "agent-1",

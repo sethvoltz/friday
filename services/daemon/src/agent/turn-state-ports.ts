@@ -98,16 +98,16 @@ export interface TurnStatePorts<W extends PortWorker = PortWorker> {
     cacheReadTokens: number;
     durationMs: number;
   }) => Promise<void>;
-  /** Analytics capture. */
-  posthog: {
-    capture: (event: {
-      distinctId: string;
-      event: string;
-      properties: Record<string, unknown>;
-    }) => void;
-  };
-  /** Distinct id for posthog captures. */
-  distinctId: string;
+  /** Analytics capture, attributed to the turn's author (PR #145). The prod
+   *  wiring resolves the originating user from the turn's user block (falling
+   *  back to the service actor for autonomous turns) and captures under that
+   *  identity. The author-resolve is async I/O, so it lives here in the port,
+   *  not in the pure machine. */
+  captureTurnEvent: (
+    turnId: string,
+    event: string,
+    properties: Record<string, unknown>,
+  ) => void | Promise<void>;
   /** Dispatch the next queued / nudge prompt. */
   sendPrompt: (w: W, p: WorkerPromptCommand) => void;
   /** Escalate to force-kill (wedge). */
@@ -247,11 +247,7 @@ export async function executeIntents<W extends PortWorker>(
           });
         break;
       case "posthog":
-        ports.posthog.capture({
-          distinctId: ports.distinctId,
-          event: intent.event,
-          properties: intent.properties,
-        });
+        await ports.captureTurnEvent(intent.turnId, intent.event, intent.properties);
         break;
       case "recover-jsonl":
         // Fire-and-forget on the next tick (matches the old setImmediate path).

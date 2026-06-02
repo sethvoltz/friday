@@ -11,7 +11,7 @@ import {
   getDb,
   schema,
 } from "@friday/shared";
-import { posthog, DISTINCT_ID } from "../posthog.js";
+import { captureFor } from "../posthog.js";
 
 /**
  * FRI-113: status state machine. Every write to `agents.status` flows
@@ -165,17 +165,13 @@ export async function registerAgent(input: RegisterInput): Promise<AgentEntry> {
     });
   const got = await getAgent(input.name);
   if (!got) throw new Error(`registerAgent: row vanished after insert: ${input.name}`);
-  posthog.capture({
-    distinctId: DISTINCT_ID,
-    event: "agent_registered",
-    properties: {
-      agent_name: got.name,
-      agent_type: got.type,
-      parent_name: input.parentName ?? null,
-      has_worktree: !!input.worktreePath,
-      has_ticket: !!input.ticketId,
-      has_app: !!input.appId,
-    },
+  captureFor(null, "agent_registered", {
+    agent_name: got.name,
+    agent_type: got.type,
+    parent_name: input.parentName ?? null,
+    has_worktree: !!input.worktreePath,
+    has_ticket: !!input.ticketId,
+    has_app: !!input.appId,
   });
   return got;
 }
@@ -353,13 +349,9 @@ export async function clearSession(name: string): Promise<void> {
  */
 export async function archiveAgent(name: string, opts: { reason: ArchiveReason }): Promise<void> {
   await setStatus(name, "archived", { archiveReason: opts.reason });
-  posthog.capture({
-    distinctId: DISTINCT_ID,
-    event: "agent_archived",
-    properties: {
-      agent_name: name,
-      archive_reason: opts.reason,
-    },
+  captureFor(null, "agent_archived", {
+    agent_name: name,
+    archive_reason: opts.reason,
   });
 }
 

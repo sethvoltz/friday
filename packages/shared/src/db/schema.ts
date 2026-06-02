@@ -169,6 +169,15 @@ export const blocks = pgTable(
     role: text("role").notNull(), // user|assistant|system
     kind: text("kind").notNull(), // text|thinking|tool_use|tool_result|error
     source: text("source"), // user_chat|mail|queue_inject|sdk|scratch|agent_spawn|schedule|refork_notice|dashboard-mutator
+    // BetterAuth user id of the human who authored this block, when there is
+    // one. Stamped by the `sendUserMessage` mutator from the verified JWT
+    // (zero-cache forwards it; the dashboard verifies the token server-side),
+    // so the identity survives the process hop to the daemon, which reads it
+    // to attribute PostHog events to the originating user. NULL for
+    // daemon/agent/autonomous writes (mail, schedule, agent_spawn, …), which
+    // attribute to the `friday-daemon` service actor instead. Nullable +
+    // forward-only: existing rows stay NULL.
+    userId: text("user_id"),
     contentJson: jsonb("content_json").notNull(),
     status: text("status").notNull(), // pending|streaming|complete|aborted|error|queued|abort_requested|dispatched|cancel_requested|resume_requested
     streaming: boolean("streaming").notNull().default(false),

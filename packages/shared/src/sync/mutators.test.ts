@@ -208,6 +208,7 @@ interface MockBlocksInsertCall {
   role: string;
   kind: string;
   source: string | null;
+  user_id?: string;
   content_json: Record<string, unknown>;
   status: string;
   streaming: boolean;
@@ -1647,6 +1648,29 @@ describe("sendUserMessage", () => {
     expect(row.block_index).toBe(0);
     expect(row.ts).toBe(1_700_000_000_000);
     expect(row.content_json).toEqual({ text: "hello daemon" });
+    // No factory userId → no author recorded (the optimistic client path).
+    expect(row.user_id).toBeUndefined();
+  });
+
+  it("stamps the verified author id (createMutators(userId)) onto user_id", async () => {
+    // The server push path constructs mutators with the userId it verified
+    // from the forwarded JWT; sendUserMessage persists it so the daemon —
+    // which only sees the canonical Postgres row — can attribute the turn's
+    // PostHog events to this user. This is the trust boundary: the id comes
+    // from the server-verified factory arg, never from client-supplied args.
+    const mutators = createMutators("RccSi68oUrZw4eTVmRllOtoJRsriJv4D");
+    const { tx, blocksInserts } = makeMockTx();
+    await mutators.sendUserMessage(tx, {
+      id: "blk-authored",
+      turnId: "t_blk-authored",
+      agentName: "friday",
+      text: "who sent this?",
+      ts: 1_700_000_000_001,
+    });
+    expect(blocksInserts).toHaveLength(1);
+    expect(blocksInserts[0]!.user_id).toBe("RccSi68oUrZw4eTVmRllOtoJRsriJv4D");
+    expect(blocksInserts[0]!.role).toBe("user");
+    expect(blocksInserts[0]!.source).toBe("user_chat");
   });
 
   it("preserves attachments in content_json when supplied", async () => {

@@ -1,6 +1,6 @@
 {
-  "id": "0f96a63a-c56d-46af-afb1-b6f4d16fce43",
-  "prevId": "d2333c8a-bbc1-4547-bd9b-d0b0707f5d13",
+  "id": "7f5ff14e-eb3c-4921-8705-99436a1e46aa",
+  "prevId": "0f96a63a-c56d-46af-afb1-b6f4d16fce43",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -255,7 +255,7 @@
         },
         "agents_status_check": {
           "name": "agents_status_check",
-          "value": "\"agents\".\"status\" IN ('idle','working','stalled','error','archived','archive_requested')"
+          "value": "\"agents\".\"status\" IN ('idle','working','stalled','archived','archive_requested')"
         }
       },
       "isRLSEnabled": false
