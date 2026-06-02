@@ -1,5 +1,5 @@
 /**
- * launchd plist + argv contract (FRI-146 / ADR-033, AC#13).
+ * launchd plist + argv contract (FRI-146 / ADR-034, AC#13).
  *
  * `renderPlist()` and the `serviceTarget()`/`domainTarget()` argv builders are
  * the cross-boundary contract this codebase is most exposed to drift on: the

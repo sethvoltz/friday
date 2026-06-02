@@ -52,8 +52,8 @@ services/daemon              — Headless API tier; owns Claude SDK + agent regi
   src/apps/                  — Friday Apps installer + boot reconcile (ADR-021)
   src/prompts/               — Dispatch-prompt assembly (FRI-123): buildSystemPrompt / buildDispatchPrompt + DispatchIntent union + memoryRecallHook
 services/dashboard           — SvelteKit + Svelte 5; auth-gated public surface
-packaging/                   — pack.mjs: builds the pre-baked release tarball (ADR-033)
-install.sh                   — Curl-installable installer; writes the launchd plist directly (ADR-033)
+packaging/                   — pack.mjs: builds the pre-baked release tarball (ADR-034)
+install.sh                   — Curl-installable installer; writes the launchd plist directly (ADR-034)
 .node-version                — Pinned Node (22.21.1); single Node-pin source of truth (fnm + CI)
 docs/                        — Documentation
 ```
@@ -109,9 +109,9 @@ These rules apply to Builders and any other agent working in a worktree of this 
 
 ## Versioning
 
-A single semver version spans all 8 `package.json` files (root + 7 workspace packages), driven by **release-please** (ADR-033, FRI-146). The root is bumped natively via `release-type: node`; the 7 workspace packages are bumped in lockstep via `extra-files` in `release-please-config.json`. **Never hand-edit a `"version"` field** — release-please owns them. `friday --version` reads `packages/cli/package.json`'s `version` (a static `import … with { type: "json" }`), so it equals the cli package version, which equals the system version by lockstep construction.
+A single semver version spans all 8 `package.json` files (root + 7 workspace packages), driven by **release-please** (ADR-034, FRI-146). The root is bumped natively via `release-type: node`; the 7 workspace packages are bumped in lockstep via `extra-files` in `release-please-config.json`. **Never hand-edit a `"version"` field** — release-please owns them. `friday --version` reads `packages/cli/package.json`'s `version` (a static `import … with { type: "json" }`), so it equals the cli package version, which equals the system version by lockstep construction.
 
-Pre-1.0, `bump-minor-pre-major: true` is set (release-please's default is `false`, which would MAJOR-bump on `BREAKING CHANGE`): `feat:` → minor, `fix:` → patch, `BREAKING CHANGE` → minor. The v1.0.0 cutover playbook lives in ADR-033.
+Pre-1.0, `bump-minor-pre-major: true` is set (release-please's default is `false`, which would MAJOR-bump on `BREAKING CHANGE`): `feat:` → minor, `fix:` → patch, `BREAKING CHANGE` → minor. The v1.0.0 cutover playbook lives in ADR-034.
 
 `bootstrap-sha` in `release-please-config.json` anchors release-please's **first** run: it parses only commits landing _after_ that SHA, so the initial `0.1.0` changelog is scoped to the release window rather than the full repo history. It is pinned to the FRI-146 merge-base; if the pipeline is re-bootstrapped on a fresh fork, update it to the new anchor commit (or delete the key to scan from the start).
 

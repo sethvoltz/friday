@@ -460,7 +460,7 @@ describe("buildSpecs — zero-cache env", () => {
 
 describe("buildSpecs — spawns via process.execPath, never pnpm/bare-node", () => {
   /**
-   * FRI-146 / ADR-033: the launchd plist launches the supervisor through
+   * FRI-146 / ADR-034: the launchd plist launches the supervisor through
    * `fnm exec -- node …`, so `process.execPath` inside it IS the fnm-resolved
    * pinned node. Every child must be spawned via `process.execPath` — never
    * bare `node`/`pnpm` from PATH, never a `.bin` shim (whose baked absolute

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Friday installer (FRI-146 / ADR-033).
+# Friday installer (FRI-146 / ADR-034).
 #
 #   curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash
 #
@@ -266,7 +266,7 @@ write_shim() {
 #!/usr/bin/env bash
 # Friday CLI shim — invokes the installed CLI through fnm so it runs under
 # the pinned Node (.node-version) with no baked node path. Written by
-# install.sh (FRI-146 / ADR-033). Resolves the install tree via the
+# install.sh (FRI-146 / ADR-034). Resolves the install tree via the
 # `current` symlink so `friday update` flips take effect immediately.
 #
 # fnm resolves .node-version from the CWD (it does NOT walk up parent dirs),

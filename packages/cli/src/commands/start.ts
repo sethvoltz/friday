@@ -12,7 +12,7 @@ import { currentLink } from "../lib/install-paths.js";
 
 /**
  * `friday start` — thin alias over `launchctl bootstrap` (FRI-146 /
- * ADR-033).
+ * ADR-034).
  *
  * Supervision lives in launchd via a plist Friday writes directly
  * (label `com.sethvoltz.friday`), bootstrapped via `launchctl bootstrap`.

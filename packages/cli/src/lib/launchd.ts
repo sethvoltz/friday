@@ -1,5 +1,5 @@
 /**
- * Direct-launchd registration for Friday's supervisor (FRI-146 / ADR-033).
+ * Direct-launchd registration for Friday's supervisor (FRI-146 / ADR-034).
  *
  * Replaces the retired brew-services-based supervision. Generalizes the
  * cloudflared-plist-bypass pattern already shipped

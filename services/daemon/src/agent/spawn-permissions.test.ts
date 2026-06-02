@@ -128,6 +128,45 @@ describe("validateSpawnPermissions (ADR-022 §6 #4 #5)", () => {
     expect(rej?.status).toBe(400);
     expect(rej?.body.code).toBe("SPAWN_REASON_REQUIRED");
   });
+
+  // FRI-40: the evolve auto-triage hook spawns with parentName
+  // "scheduled-meta-daily", whose registry row resolves callerType="scheduled".
+  // The triage helper must pass the gate as a helper-with-reason WITHOUT any
+  // edit to spawn-permissions.ts (the "scheduled" caller is just a
+  // non-orchestrator caller, gated identically to builder/helper).
+  it("scheduled → helper with the auto-triage reason is allowed (FRI-40)", () => {
+    expect(
+      perms.validateSpawnPermissions(
+        {
+          type: "helper",
+          reason: "evolve auto-triage: proposal p_x-aaaa promoted to critical (signal worker.exit)",
+        },
+        "scheduled",
+      ),
+    ).toBeNull();
+  });
+
+  it("scheduled → helper with empty reason is rejected 400 SPAWN_REASON_REQUIRED (FRI-40)", () => {
+    const rej = perms.validateSpawnPermissions({ type: "helper", reason: "" }, "scheduled");
+    expect(rej).toEqual({
+      status: 400,
+      body: {
+        error: "reason required when spawner is not the orchestrator",
+        code: "SPAWN_REASON_REQUIRED",
+      },
+    });
+  });
+
+  it("scheduled → builder is rejected 403 BUILDER_SPAWN_ORCHESTRATOR_ONLY (FRI-40 Phase 2 guard)", () => {
+    const rej = perms.validateSpawnPermissions({ type: "builder", reason: "x" }, "scheduled");
+    expect(rej).toEqual({
+      status: 403,
+      body: {
+        error: "only the orchestrator can spawn builders",
+        code: "BUILDER_SPAWN_ORCHESTRATOR_ONLY",
+      },
+    });
+  });
 });
 
 describe("computeSpawnDepth (ADR-022 §6 #7 #30)", () => {

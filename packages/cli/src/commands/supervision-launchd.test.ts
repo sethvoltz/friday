@@ -1,6 +1,6 @@
 /**
  * The supervision aliases dispatch to launchctl, not brew (FRI-146 /
- * ADR-033, AC#13). `friday start` bootstraps/kickstarts, `friday stop`
+ * ADR-034, AC#13). `friday start` bootstraps/kickstarts, `friday stop`
  * boots out, `friday restart` kickstarts. The launchd helper is mocked so
  * the real launchctl never runs; we assert which helper each command calls.
  *

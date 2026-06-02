@@ -4,7 +4,7 @@ import * as launchd from "../lib/launchd.js";
 
 /**
  * `friday restart` — thin alias over `launchctl kickstart -k` (FRI-146 /
- * ADR-033).
+ * ADR-034).
  *
  * `kickstart -k` kills the running supervisor instance (which cascade-stops
  * every child's process group — FRI-88 §0), waits for the process tree to

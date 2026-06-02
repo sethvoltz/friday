@@ -23,7 +23,7 @@
  *  - No tmux. No bash respawn wrappers. `friday stop` (now
  *    `launchctl bootout`) leaves zero descendants alive.
  *
- * Child-spawn command resolution (FRI-146 / ADR-033): every child is
+ * Child-spawn command resolution (FRI-146 / ADR-034): every child is
  * spawned via `process.execPath` — the fnm-resolved pinned node the
  * supervisor itself runs under (the launchd plist launches the supervisor
  * via `fnm exec -- node …`). This bypasses pnpm and the pnpm-generated

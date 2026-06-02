@@ -3,7 +3,7 @@ import pc from "picocolors";
 import * as launchd from "../lib/launchd.js";
 
 /**
- * `friday stop` — thin alias over `launchctl bootout` (FRI-146 / ADR-033).
+ * `friday stop` — thin alias over `launchctl bootout` (FRI-146 / ADR-034).
  *
  * launchd + the supervisor handle cascade-stop (FRI-88 §0 design
  * constraint): booting out the supervisor sends SIGTERM, which signals

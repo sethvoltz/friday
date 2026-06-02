@@ -33,7 +33,7 @@ jobs:
         # gates the release that release-publish.yml then packs into the exact
         # tarball users `curl | bash` / `friday update`, so a retagged or
         # compromised third-party action is a supply-chain injection point
-        # (ADR-033). Dependabot keeps the pin current.
+        # (ADR-034). Dependabot keeps the pin current.
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
           config-file: release-please-config.json

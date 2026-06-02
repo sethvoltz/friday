@@ -1,6 +1,6 @@
 /**
  * `friday uninstall` — tear down the curl-installed Friday (FRI-146 /
- * ADR-033). Removes the supervision job + the distribution tree, but
+ * ADR-034). Removes the supervision job + the distribution tree, but
  * PRESERVES `~/.friday/` user data by default (mirrors
  * `friday app uninstall --folder=keep`).
  *

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateMemoryField } from "./memory.js";
+import { MEMORY_SAVE_DESCRIPTION, validateMemoryField } from "./memory.js";
 
 describe("validateMemoryField", () => {
   it("accepts a normal memory body", () => {
@@ -54,5 +54,17 @@ describe("validateMemoryField", () => {
     const reason = validateMemoryField("patch.title", "Bad title.</title>");
     expect(reason).not.toBeNull();
     expect(reason).toMatch(/^patch\.title /);
+  });
+});
+
+describe("MEMORY_SAVE_DESCRIPTION (FRI-141 doc/tool lockstep)", () => {
+  // The memory_save tool description and protocols/memory.md must stay in
+  // lockstep on the memory type enumeration. Pin every type tag so a silent
+  // drop of one (e.g. `person`) from the description fails here instead of
+  // shipping. The protocol doc is golden-snapshotted separately.
+  it("enumerates all five memory type tags including person", () => {
+    for (const type of ["user", "feedback", "project", "reference", "person"]) {
+      expect(MEMORY_SAVE_DESCRIPTION).toContain(`\`${type}\``);
+    }
   });
 });

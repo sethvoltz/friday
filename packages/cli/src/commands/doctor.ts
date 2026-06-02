@@ -55,7 +55,7 @@ export const doctorCommand = defineCommand({
     // launchd supervisor (com.sethvoltz.friday). Replaces the pre-FRI-88
     // tmux check — the supervised set lives in one launchd job now, not
     // a tmux session per service. Friday writes the plist directly
-    // (FRI-146 / ADR-033), not via brew.
+    // (FRI-146 / ADR-034), not via brew.
     const fridayJob = launchdJobStatus(FRIDAY_LAUNCHD_LABEL);
     checks.push(
       check(
@@ -67,7 +67,7 @@ export const doctorCommand = defineCommand({
       ),
     );
 
-    // fnm + .node-version pin + install symlink (FRI-146 / ADR-033). The
+    // fnm + .node-version pin + install symlink (FRI-146 / ADR-034). The
     // supervisor is launched via `fnm exec` reading the install tree's
     // `.node-version`; without fnm on PATH the launchd job can't resolve
     // node. The `current` symlink is the install-tree pointer.

@@ -1,6 +1,6 @@
 /**
  * `friday update` flip/rollback/check + sha256-verify logic (FRI-146 /
- * ADR-033). The network, tar-extract, fnm-install, and launchctl side
+ * ADR-034). The network, tar-extract, fnm-install, and launchctl side
  * effects are injected via the `UpdateDeps` seam so these tests exercise the
  * symlink-flip, version-resolution, and verify logic against scratch tmp
  * dirs — no network, no real launchctl, no fnm.

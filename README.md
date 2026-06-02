@@ -96,11 +96,11 @@ Installs:
 - **`postgresql@18`** — Friday's canonical store. Managed by `brew services`, lifecycle-independent of `friday start/stop`.
 - **`claude-code`** — Claude Code CLI; runs the Agent SDK against the Pro/Max subscription tied to your interactive `claude` login (no `ANTHROPIC_API_KEY` needed once signed in)
 - **`gh`** — GitHub CLI for Builders to clone and open PRs
-- **`fnm`** — Fast Node Manager; resolves the pinned Node from `.node-version` (`22.21.1`) and is how the launchd-supervised stack launches Node, ABI-matched to the pre-baked native modules (ADR-033)
+- **`fnm`** — Fast Node Manager; resolves the pinned Node from `.node-version` (`22.21.1`) and is how the launchd-supervised stack launches Node, ABI-matched to the pre-baked native modules (ADR-034)
 - **`pnpm`** — build/dev-time package manager (CI packs the release tarball, contributors build from source); not on Friday's runtime path
 - **`cloudflared`** — Cloudflare Tunnel client (optional, for public reachability)
 
-`tmux` is no longer required — Friday's prod supervision moved to launchd, with the plist written directly by the installer (see ADR-028 and ADR-033). Contributors who want it for the dev workflow can `brew install tmux` separately.
+`tmux` is no longer required — Friday's prod supervision moved to launchd, with the plist written directly by the installer (see ADR-028 and ADR-034). Contributors who want it for the dev workflow can `brew install tmux` separately.
 
 Built and tested against Node 22 and pnpm 10. Start Postgres if it isn't already running:
 
@@ -138,7 +138,7 @@ friday attach daemon     # tail ~/.friday/logs/<service>.jsonl (Ctrl-C exits)
 friday logs --follow     # tail the daemon's structured log
 ```
 
-`friday start` starts the launchd-supervised stack (daemon + dashboard + zero-cache, owned by one supervisor process — ADR-028) by writing + bootstrapping the `com.sethvoltz.friday` launchd job directly (`launchctl bootstrap`/`kickstart`, ADR-033) — no `brew services`. The supervisor's `RunAtLoad: true` means Friday comes back up automatically after Mac reboot/login; you don't have to `friday start` again.
+`friday start` starts the launchd-supervised stack (daemon + dashboard + zero-cache, owned by one supervisor process — ADR-028) by writing + bootstrapping the `com.sethvoltz.friday` launchd job directly (`launchctl bootstrap`/`kickstart`, ADR-034) — no `brew services`. The supervisor's `RunAtLoad: true` means Friday comes back up automatically after Mac reboot/login; you don't have to `friday start` again.
 
 `friday start` prints the local dashboard URL (`http://localhost:7615`) on launch — open it and sign in.
 
@@ -168,7 +168,7 @@ friday status                                  # supervisor + service state + pr
 friday attach <daemon|dashboard|zero-cache>    # `tail -F ~/.friday/logs/<service>.jsonl`
 friday logs [daemon|dashboard|zero-cache|tunnel] [--follow]
 
-# Install lifecycle (ADR-033)
+# Install lifecycle (ADR-034)
 friday update [--check] [--rollback]           # download + verify + extract latest; flip current symlink; kickstart
 friday uninstall [--data=keep|delete] [--yes]  # remove the install tree + launchd job; ~/.friday preserved by default
 
@@ -223,9 +223,9 @@ agent-friday/
 │   │                       MCP servers, EventBus, SSE, scheduler, watchdog
 │   └── dashboard/          @friday/dashboard — SvelteKit + Svelte 5 (runes),
 │                           BetterAuth, adapter-node, PWA
-├── bin/                    friday + friday-supervisor shims — exec through fnm (ADR-033)
-├── packaging/              pack.mjs — builds the pre-baked release tarball (ADR-033)
-├── install.sh              Curl-installable installer (ADR-033)
+├── bin/                    friday + friday-supervisor shims — exec through fnm (ADR-034)
+├── packaging/              pack.mjs — builds the pre-baked release tarball (ADR-034)
+├── install.sh              Curl-installable installer (ADR-034)
 ├── .node-version           Pinned Node (22.21.1) — single Node-pin source of truth
 └── docs/                   Architecture, setup, ADRs, sandbox, UX, roadmap
 ```

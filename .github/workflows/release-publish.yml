@@ -7,7 +7,7 @@ name: Release Publish
 #
 # NO formula render, NO GitHub-App token, NO brew-tap push: Friday is
 # distributed via install.sh + `friday update` pulling these assets directly
-# (FRI-146 / ADR-033). That whole brew-formula publish tail is CUT.
+# (FRI-146 / ADR-034). That whole brew-formula publish tail is CUT.
 #
 # The pre-baked tarball smoke (extract to a relocated tree → version / native
 # addon / zero-cache / supervisor-spec checks) lives HERE, gating the upload,
@@ -39,7 +39,7 @@ jobs:
       # Pinned to a full commit SHA (not the mutable @v5 tag): this job runs
       # with `contents: write` and produces the exact assets users install via
       # install.sh / `friday update`, so a retagged/compromised third-party
-      # action could inject into the published tarball (ADR-033). Dependabot
+      # action could inject into the published tarball (ADR-034). Dependabot
       # keeps the pin current.
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
 

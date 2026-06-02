@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 //
 // packaging/pack.mjs — assemble the pre-baked, per-platform Friday tarball
-// (FRI-146 / ADR-033, FRI-120 "variant 4b").
+// (FRI-146 / ADR-034, FRI-120 "variant 4b").
 //
 //   node packaging/pack.mjs [--out <dir>]
 //

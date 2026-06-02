@@ -3,13 +3,21 @@ import type { MemoryEntry } from "./store.js";
 
 let entries: MemoryEntry[] = [];
 
-// Force the FTS path to throw so the scoring logic falls back to the
-// full-scan branch. ADR-023 update: production code uses `getPool()`
-// (returns pg.Pool whose `query` is awaitable); here we return a stub
-// whose `query` rejects.
+// FTS candidate ids the mocked Postgres pool returns. `null` (the default)
+// makes `query` reject so the scoring logic falls back to the full-scan branch
+// — the mode every pre-existing test relies on. A test that wants to exercise
+// the FTS-narrow branch sets `ftsRows` to the candidate id rows it should see.
+let ftsRows: { id: string }[] | null = null;
+
+// ADR-023: production code uses `getPool()` (returns pg.Pool whose `query` is
+// awaitable). The stub rejects (→ full scan) unless `ftsRows` is set, in which
+// case it resolves with those rows (→ FTS-narrow path).
 vi.mock("@friday/shared", () => ({
   getPool: () => ({
-    query: () => Promise.reject(new Error("force fallback to full scan")),
+    query: () =>
+      ftsRows === null
+        ? Promise.reject(new Error("force fallback to full scan"))
+        : Promise.resolve({ rows: ftsRows }),
   }),
 }));
 
@@ -34,6 +42,7 @@ function mkEntry(partial: Partial<MemoryEntry> & { id: string }): MemoryEntry {
 
 beforeEach(() => {
   entries = [];
+  ftsRows = null;
 });
 
 describe("searchMemories scoring", () => {
@@ -271,6 +280,125 @@ describe("searchMemories scoring", () => {
     expect(results[2].matchedOn).toEqual([]);
   });
 
+  // FRI-141 (AC#2): excludeTags removes person entries from the tag-less
+  // (FTS-fallback) path even when they share the query token.
+  it("FRI-141: excludeTags drops person entries on the tag-less path", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({
+        id: "code-1",
+        title: "daemon worker",
+        content: "the daemon forks workers",
+        tags: ["project"],
+      }),
+      mkEntry({
+        id: "code-2",
+        title: "daemon scheduler",
+        content: "the daemon schedules jobs",
+        tags: ["project"],
+      }),
+      mkEntry({
+        id: "person-1",
+        title: "Asher the daemon fan",
+        content: "the daemon is asher's favourite topic",
+        tags: ["person", "person:asher"],
+      }),
+    ];
+
+    const results = await searchMemories({ query: "daemon", excludeTags: ["person"] });
+    const ids = results.map((r) => r.entry.id);
+    expect(ids).toEqual(["code-1", "code-2"]);
+    expect(ids).not.toContain("person-1");
+  });
+
+  // FRI-141 (AC#3): exclusion wins over inclusion for a dual-tagged entry —
+  // the tag filter admits it, then excludeTags removes it.
+  it("FRI-141: excludeTags removes a dual-tagged entry even when it satisfies the tag filter", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({
+        id: "x-and-person",
+        title: "shared topic",
+        content: "matches the query body",
+        tags: ["x", "person"],
+      }),
+      mkEntry({
+        id: "x-only",
+        title: "shared topic",
+        content: "matches the query body",
+        tags: ["x"],
+      }),
+    ];
+
+    const results = await searchMemories({
+      query: "query",
+      tags: ["x"],
+      excludeTags: ["person"],
+    });
+    const ids = results.map((r) => r.entry.id);
+    expect(ids).toEqual(["x-only"]);
+    expect(ids).not.toContain("x-and-person");
+  });
+
+  // FRI-141 (AC#4): allowTags re-admits ONLY the name-matched person at the
+  // ranker level — the matched person comes back, the other stays excluded.
+  it("FRI-141: allowTags re-admits only the name-matched person", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({
+        id: "person-asher",
+        title: "Asher notes",
+        content: "asher likes the daemon",
+        tags: ["person", "person:asher"],
+      }),
+      mkEntry({
+        id: "person-mike",
+        title: "Mike notes",
+        content: "mike likes the daemon",
+        tags: ["person", "person:mike"],
+      }),
+    ];
+
+    const results = await searchMemories({
+      query: "daemon",
+      excludeTags: ["person"],
+      allowTags: ["person:asher"],
+    });
+    const ids = results.map((r) => r.entry.id);
+    expect(ids).toContain("person-asher");
+    expect(ids).not.toContain("person-mike");
+  });
+
+  // FRI-141 (AC#5): an explicit person search (tags filter, no exclude/allow)
+  // still returns exactly the matching person entries — the exclusion only
+  // engages when excludeTags is supplied (the passive-recall path).
+  it("FRI-141: explicit tags:['person:asher'] search is unaffected by the carve-out machinery", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({
+        id: "asher-1",
+        title: "Asher food",
+        content: "asher loves the daemon talk",
+        tags: ["person", "person:asher", "food"],
+      }),
+      mkEntry({
+        id: "asher-2",
+        title: "Asher work",
+        content: "asher works on the daemon",
+        tags: ["person", "person:asher", "work"],
+      }),
+      mkEntry({
+        id: "mike-1",
+        title: "Mike work",
+        content: "mike works on the daemon",
+        tags: ["person", "person:mike", "work"],
+      }),
+    ];
+
+    const results = await searchMemories({ query: "daemon", tags: ["person:asher"] });
+    expect(results.map((r) => r.entry.id).sort()).toEqual(["asher-1", "asher-2"]);
+  });
+
   // Adjacent ranking bug noted in FRI-34: a `library` token should earn some
   // credit against an entry tagged `meal:library` even without a tag filter.
   it("FRI-34: substring tag match earns partial credit (+2), not zero", async () => {
@@ -298,5 +426,50 @@ describe("searchMemories scoring", () => {
     // partial-tag hit so callers can see why it ranked.
     const namespaced = results.find((r) => r.entry.id === "namespaced")!;
     expect(namespaced.matchedOn).toEqual(expect.arrayContaining(["content", "tag~:meal:library"]));
+  });
+
+  // FRI-141: the exclusion gate lives in the shared scan loop, so it must hold
+  // on the FTS-narrow branch too — not just the full-scan fallback every other
+  // test exercises. Drive the FTS path (ftsRows set) and confirm a person entry
+  // in the FTS candidate set is still excluded, while a matching entry NOT in
+  // the candidate set is correctly absent (proving the narrow actually applied).
+  it("FRI-141: excludeTags holds on the FTS-narrow branch (not just the full-scan fallback)", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({ id: "code-x", title: "daemon notes", content: "the daemon", tags: ["project"] }),
+      mkEntry({
+        id: "person-x",
+        title: "Asher daemon",
+        content: "asher and the daemon",
+        tags: ["person", "person:asher"],
+      }),
+      mkEntry({ id: "code-y", title: "daemon other", content: "the daemon", tags: ["project"] }),
+    ];
+    // FTS narrows to code-x + person-x only (code-y is a matching entry the FTS
+    // query did NOT return).
+    ftsRows = [{ id: "code-x" }, { id: "person-x" }];
+
+    const results = await searchMemories({ query: "daemon", excludeTags: ["person"] });
+    const ids = results.map((r) => r.entry.id);
+    expect(ids).toEqual(["code-x"]);
+    expect(ids).not.toContain("person-x"); // excluded despite being an FTS candidate
+    expect(ids).not.toContain("code-y"); // proves the FTS narrow ran (full scan would include it)
+  });
+
+  // FRI-141: preloadedEntries lets the daemon recall hook hand the ranker the
+  // entry set it already loaded (for the name-match), so passive recall does one
+  // listEntries() per turn instead of two. When supplied, the store is NOT read.
+  it("FRI-141: preloadedEntries is ranked instead of reading the store", async () => {
+    const { searchMemories } = await import("./search.js");
+    // The mocked store would return this decoy — it must NOT appear.
+    entries = [mkEntry({ id: "from-store", title: "daemon", content: "the daemon" })];
+
+    const results = await searchMemories({
+      query: "daemon",
+      preloadedEntries: [mkEntry({ id: "from-preload", title: "daemon", content: "the daemon" })],
+    });
+    const ids = results.map((r) => r.entry.id);
+    expect(ids).toEqual(["from-preload"]);
+    expect(ids).not.toContain("from-store");
   });
 });

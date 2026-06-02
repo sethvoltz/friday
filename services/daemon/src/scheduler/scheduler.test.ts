@@ -11,12 +11,14 @@ let registry: typeof import("../agent/registry.js");
 let upsertSchedule: (typeof import("./scheduler.js"))["upsertSchedule"];
 let deleteSchedule: (typeof import("./scheduler.js"))["deleteSchedule"];
 let ScheduleNameCollisionError: (typeof import("./scheduler.js"))["ScheduleNameCollisionError"];
+let META_DAILY_PROMPT: (typeof import("./scheduler.js"))["META_DAILY_PROMPT"];
 let validateRecipient: (typeof import("../comms/recipient.js"))["validateRecipient"];
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "scheduler" });
   registry = await import("../agent/registry.js");
-  ({ upsertSchedule, deleteSchedule, ScheduleNameCollisionError } = await import("./scheduler.js"));
+  ({ upsertSchedule, deleteSchedule, ScheduleNameCollisionError, META_DAILY_PROMPT } =
+    await import("./scheduler.js"));
   ({ validateRecipient } = await import("../comms/recipient.js"));
 });
 
@@ -135,5 +137,15 @@ describe("deleteSchedule (FRI-76 cleanup)", () => {
     });
     expect(await deleteSchedule("had-blocks")).toBe(true);
     expect(await registry.getAgent("had-blocks")).not.toBeNull();
+  });
+});
+
+describe("META_DAILY_PROMPT (FRI-40 auto-triage guidance)", () => {
+  it("tells the meta-agent a triage helper may already be investigating", () => {
+    // FRI-40 AC #9: when evolve.autoSpawnTriageHelpers is on, a read-only
+    // triage helper is spawned at scan time, so the daily meta-agent must
+    // mention it rather than ask the orchestrator to spawn one. Pin the exact
+    // substring so a future prompt edit can't silently drop the guidance.
+    expect(META_DAILY_PROMPT.includes("triage helper")).toBe(true);
   });
 });

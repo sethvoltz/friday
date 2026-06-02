@@ -1,6 +1,6 @@
 /**
  * `friday update` — download + verify + extract + symlink-flip + restart
- * (FRI-146 / ADR-033). The rustup-`self update` model: Friday installs into
+ * (FRI-146 / ADR-034). The rustup-`self update` model: Friday installs into
  * self-owned versioned dirs (`~/.local/share/friday/versions/<v>/`) that
  * only this command ever flips, so brew (or anything else) can never swap a
  * dir under a live process again.

@@ -1,6 +1,6 @@
 /**
  * On-device install-tree layout for the curl-installed Friday (FRI-146 /
- * ADR-033). This is the code/distribution tree — SEPARATE from `~/.friday/`
+ * ADR-034). This is the code/distribution tree — SEPARATE from `~/.friday/`
  * user data (`FRIDAY_DATA_DIR`).
  *
  *   ~/.local/share/friday/

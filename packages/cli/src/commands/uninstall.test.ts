@@ -1,5 +1,5 @@
 /**
- * `friday uninstall` preserves user data by default (FRI-146 / ADR-033 §D,
+ * `friday uninstall` preserves user data by default (FRI-146 / ADR-034 §D,
  * AC#7). The teardown removes the plist + PATH shim + install tree, but
  * leaves `~/.friday/` (or `$FRIDAY_DATA_DIR`) and its contents intact unless
  * `--data=delete`.

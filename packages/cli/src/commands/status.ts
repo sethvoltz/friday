@@ -91,7 +91,7 @@ interface LaunchdJob {
 /**
  * Query launchd for a job's load + pid status. Replaces the tmux
  * session check from the pre-FRI-88 era. Friday writes its own plist
- * directly (label `com.sethvoltz.friday`, FRI-146 / ADR-033) — that's the
+ * directly (label `com.sethvoltz.friday`, FRI-146 / ADR-034) — that's the
  * label we query.
  *
  * `launchctl print gui/<uid>/<label>` returns 0 when the job is

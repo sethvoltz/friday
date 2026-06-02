@@ -13,11 +13,11 @@ The Brewfile installs:
 
 - `claude-code` — Claude Code CLI (Anthropic's official) — required, runs the Agent SDK
 - `gh` — GitHub CLI for builders
-- `fnm` — Fast Node Manager; resolves the pinned Node from `.node-version` (`22.21.1`) and is how the launchd-supervised stack launches Node (ADR-033)
+- `fnm` — Fast Node Manager; resolves the pinned Node from `.node-version` (`22.21.1`) and is how the launchd-supervised stack launches Node (ADR-034)
 - `pnpm` — build/dev-time package manager (CI pack + contributor builds); not on Friday's runtime path
 - `cloudflared` — Cloudflare Tunnel client (optional, for public reachability)
 
-`tmux` is no longer required — Friday's prod supervision moved to launchd, with the plist written directly by the installer (ADR-028, ADR-033). Contributors who want it for the dev workflow can `brew install tmux` separately.
+`tmux` is no longer required — Friday's prod supervision moved to launchd, with the plist written directly by the installer (ADR-028, ADR-034). Contributors who want it for the dev workflow can `brew install tmux` separately.
 
 ## 2. Install Friday
 
@@ -25,7 +25,7 @@ The Brewfile installs:
 curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash
 ```
 
-Downloads the latest **pre-baked release tarball** (`friday-darwin-arm64.tar.gz`), verifies its `shasum -a 256` against the published `.sha256`, ensures the pinned Node via `fnm install` (reading `.node-version`, default `22.21.1`), extracts to `~/.local/share/friday/versions/<version>/`, flips the `~/.local/share/friday/current` symlink, writes a `~/.local/bin/friday` PATH shim, and writes + bootstraps the launchd plist (`com.sethvoltz.friday`) that supervises the prod stack — all directly, no `brew services` (ADR-033).
+Downloads the latest **pre-baked release tarball** (`friday-darwin-arm64.tar.gz`), verifies its `shasum -a 256` against the published `.sha256`, ensures the pinned Node via `fnm install` (reading `.node-version`, default `22.21.1`), extracts to `~/.local/share/friday/versions/<version>/`, flips the `~/.local/share/friday/current` symlink, writes a `~/.local/bin/friday` PATH shim, and writes + bootstraps the launchd plist (`com.sethvoltz.friday`) that supervises the prod stack — all directly, no `brew services` (ADR-034).
 
 Install finishes in seconds: there is no on-device `pnpm install`/`pnpm -r build` (the tarball ships `node_modules` pre-baked, ABI-matched to the fnm-pinned Node). Re-running the installer updates in place, as does `friday update` (`friday update --check` reports the delta, `friday update --rollback` flips back to the prior version). darwin-arm64 only in v1; Postgres + cloudflared stay brew-managed via `brew bundle`.
 
@@ -62,7 +62,7 @@ Verifies the data dir, config, db migrations, account presence, and external CLI
 friday start          # bootstrap/kickstart the launchd job (com.sethvoltz.friday)
 ```
 
-The launchd plist runs `friday-supervisor` (through `fnm exec`) which forks daemon + dashboard + zero-cache as children with proper process-group cascade-stop (ADR-028). The plist is written + bootstrapped directly by the installer / CLI (`launchctl bootstrap`/`kickstart`), not `brew services` (ADR-033). `RunAtLoad: true` means Friday comes back automatically after Mac reboot/login.
+The launchd plist runs `friday-supervisor` (through `fnm exec`) which forks daemon + dashboard + zero-cache as children with proper process-group cascade-stop (ADR-028). The plist is written + bootstrapped directly by the installer / CLI (`launchctl bootstrap`/`kickstart`), not `brew services` (ADR-034). `RunAtLoad: true` means Friday comes back automatically after Mac reboot/login.
 
 For dev hot-reload, use `pnpm dev:daemon` / `pnpm dev:dashboard` (see `docs/running.md`) — they don't touch the launchd-supervised stack.
 
