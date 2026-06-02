@@ -347,7 +347,7 @@ The hard structural rule — enforced in code at the API handler — is _only_ t
 
 **Why this shape:**
 
-1. **Containment holds for Helpers under Builders.** Helpers don't have worktrees — `services/daemon/src/api/server.ts:501` only branches on `body.type === "builder"` for `createWorkspace`; every other type starts with `workingDirectory = process.cwd()`. A Builder-spawned Helper therefore lands in the daemon's cwd, **not** in the Builder's worktree. The constitutional rule "Workspace containment for builders" is preserved by construction: the Helper has no path into the worktree, and the Builder's prompt-level "do not read, write, or modify files outside it" rule still binds the _Builder_. If a Builder passes its worktree path to a Helper as data, the Helper could read it; that's a prompt-discipline issue, not a containment break, and it's identical to the surface a Helper has today when the orchestrator hands it the same path.
+1. **Containment holds for Helpers under Builders.** Helpers don't have worktrees — `services/daemon/src/api/server.ts:1331` (inside the extracted `createAgent`) only branches on `body.type === "builder"` for `createWorkspace`; every other type starts with `workingDirectory = process.cwd()`. A Builder-spawned Helper therefore lands in the daemon's cwd, **not** in the Builder's worktree. The constitutional rule "Workspace containment for builders" is preserved by construction: the Helper has no path into the worktree, and the Builder's prompt-level "do not read, write, or modify files outside it" rule still binds the _Builder_. If a Builder passes its worktree path to a Helper as data, the Helper could read it; that's a prompt-discipline issue, not a containment break, and it's identical to the surface a Helper has today when the orchestrator hands it the same path.
 2. **Helpers spawning Helpers is justified by real workload shapes.** Parallelizing five independent investigations costs roughly 5× the API spend but converges in roughly 1× the wall-clock time _and_ keeps the parent Helper's context clean (each sub-Helper's verbose tool-call traffic stays in its own session). Forcing every helper-of-helper to route through the orchestrator just to be re-spawned by it is theater.
 3. **Builders can't be spawned by anyone but the orchestrator.** Each Builder is a worktree + branch + push-rights surface. Letting a Builder or Helper cut another worktree turns the blast radius of a single rogue task into N rogue tasks with N branches and N PRs. The orchestrator's "user approval gate before creating Builders" (Constitution §3) exists precisely because Builders are the irreversible surface; delegating that gate to another agent defeats it. This is the **only** rule the API handler enforces unconditionally.
 
@@ -1089,6 +1089,31 @@ The agent-status `"error"` value is removed end-to-end (`AgentStatus` union, bot
 - An on-chain intent handler needs to re-enter the same agent's Transition queue mid-Transition (today none does: `send-next` is dispatched off-chain, force-kill only awaits DB writes + `killPgrp`). That would reintroduce a same-key deadlock and force the queue design to change.
 - Cross-process or cross-restart ordering of generations is ever needed — promote Generation from object identity to a monotonic counter.
 - A fifth write-semantics family for `agents.status` appears that genuinely cannot be modeled as a Transition (none is foreseen).
+
+## ADR-033 — Evolve agency Phase 1: auto-spawn read-only triage helpers on promote-to-critical (FRI-40); auto-fixing Builders deferred to Phase 2
+
+**Status:** accepted (FRI-40, 2026-06-02)
+
+Until now the evolve pipeline was passive: the daily meta-agent scans, enriches, clusters, and mails the orchestrator a digest, but every investigation of a newly-critical proposal waits for a human (or the orchestrator on the next turn) to pick it up. A `critical` proposal is, by definition, the system telling us "this is failing to do its job" — the latency between promote-to-critical and someone actually reading the evidence is pure dead time.
+
+**Decision — Phase 1 (this change).** When `evolve.autoSpawnTriageHelpers` is `true` (config key, **default off**), the daemon's `POST /api/evolve/scan` handler spawns one **read-only triage helper** per proposal that promoted to critical during that scan. The helper is named `triage-<FULL proposal id>` (the full id, not a prefix slice — proposal ids are `<slug>-<4char>` so a 12-char prefix collides across siblings). Its mandate is strictly read-only: call `evolve_get`, follow the evidence pointers, investigate the referenced logs / usage / transcripts, and mail the orchestrator a concise root-cause summary. It applies nothing, dismisses nothing, edits no files.
+
+**Why this shape:**
+
+1. **Both promote surfaces feed it.** A proposal can promote to critical via fresh creation (`proposeFromSignals().promotedToCritical`) or via the end-of-scan rerank (`rerankAll().promoted`). The hook plans against the union of both and dedupes by id, so a proposal appearing in both surfaces spawns exactly one helper.
+2. **Idempotent by construction.** The hook calls the in-process `createAgent` (extracted from the `POST /api/agents` route, behavior unchanged), which returns 409 when a `triage-<id>` agent already exists. A second daily scan that re-promotes the same still-critical proposal therefore re-uses the existing helper instead of spawning a duplicate — no fast-spin guard needed for this surface.
+3. **Caller identity is `scheduled-meta-daily`.** The hook spawns with `parentName: "scheduled-meta-daily"`, whose registry row resolves `callerType="scheduled"`. That passes the ADR-022 spawn gate as a helper-with-reason without loosening `spawn-permissions.ts` — the gate already permits a non-orchestrator caller to spawn a helper given a non-empty reason.
+4. **Default off, strict read.** The flag is read with `cfg.evolve?.autoSpawnTriageHelpers === true`, so the shallow-merge `{ evolve: {} }` user-config case stays disabled rather than silently enabling the feature.
+5. **Failure-isolated.** A spawn failure (telemetry error, registry hiccup, gate rejection) is caught per-helper and logged (`evolve.triage.spawn` / `.skip` / `.error`); it never alters the scan's returned summary and never throws out of the handler.
+
+**Phase 2 — auto-spawning Builders to actually fix the issue — is explicitly deferred.** A Builder is a worktree + branch + push-rights surface, and Constitution §3 ("user approval gate before creating Builders") makes the orchestrator the only legitimate spawner of Builders. Auto-spawning a Builder off a machine-promoted signal would route around that gate — exactly the blast-radius multiplier ADR-022 §3 guards against. Triage helpers are safe to auto-spawn precisely because they are read-only: the worst case is wasted API spend on an investigation, not an unreviewed code change. Phase 2 stays a human/orchestrator decision.
+
+The fast-spin loop guard (`isIterationTooFast`) is tracked separately as FRI-147 and is out of scope here; the 409-dedup above already prevents the only loop this surface can create (re-promote → re-spawn).
+
+### Bring this ADR back to the table if
+
+- Triage helpers reliably produce a correct, low-risk fix that the orchestrator rubber-stamps every time — that's the signal that Phase 2 (gated auto-Builder, or a one-click "promote triage → builder" affordance) is worth designing.
+- The 409-dedup proves insufficient (e.g. helpers get archived and immediately re-spawned each scan) — promote FRI-147's fast-spin guard ahead of schedule.
 
 ## Watch list
 
