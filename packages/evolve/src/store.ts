@@ -70,6 +70,7 @@ export function parseProposal(id: string, raw: string): Proposal {
       typeof fields.lastEnrichFailedAt === "string" ? fields.lastEnrichFailedAt : null,
     appliedTicketId: typeof fields.appliedTicketId === "string" ? fields.appliedTicketId : null,
     familyResolvedBy: typeof fields.familyResolvedBy === "string" ? fields.familyResolvedBy : null,
+    builderAgent: typeof fields.builderAgent === "string" ? fields.builderAgent : null,
   };
 }
 
@@ -94,6 +95,7 @@ export function serializeProposal(p: Proposal): string {
     `lastEnrichFailedAt: ${p.lastEnrichFailedAt ? JSON.stringify(p.lastEnrichFailedAt) : "null"}`,
     `appliedTicketId: ${p.appliedTicketId ? JSON.stringify(p.appliedTicketId) : "null"}`,
     `familyResolvedBy: ${p.familyResolvedBy ? JSON.stringify(p.familyResolvedBy) : "null"}`,
+    `builderAgent: ${p.builderAgent ? JSON.stringify(p.builderAgent) : "null"}`,
     `signals: ${JSON.stringify(p.signals)}`,
     "---",
     "",
@@ -130,6 +132,8 @@ export interface SaveProposalInput {
   appliedAt?: string | null;
   appliedBy?: string | null;
   appliedTicketId?: string | null;
+  /** Linked escalation Builder agent name (FRI-149). Defaults to null. */
+  builderAgent?: string | null;
 }
 
 export function saveProposal(input: SaveProposalInput): Proposal {
@@ -159,6 +163,7 @@ export function saveProposal(input: SaveProposalInput): Proposal {
     lastEnrichFailedAt: null,
     appliedTicketId: input.appliedTicketId ?? null,
     familyResolvedBy: input.familyResolvedBy ?? null,
+    builderAgent: input.builderAgent ?? null,
   };
 
   writeFileSync(filePath(id), serializeProposal(proposal));
@@ -189,6 +194,8 @@ export interface UpdateProposalInput {
   lastEnrichFailedAt?: string | null;
   appliedTicketId?: string | null;
   familyResolvedBy?: string | null;
+  /** Linked escalation Builder agent name (FRI-149). */
+  builderAgent?: string | null;
   /**
    * Override the auto-assigned `updatedAt`. Pass when a write needs
    * `enrichedAt` and `updatedAt` to share a timestamp so idempotency checks

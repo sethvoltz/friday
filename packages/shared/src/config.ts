@@ -115,8 +115,8 @@ export interface FridayConfig {
   publicUrl?: string;
   /** Linear integration settings. Read by `@friday/integrations-linear`. */
   linear?: LinearIntegrationConfig;
-  /** Evolve agency settings (FRI-40). */
-  evolve?: { autoSpawnTriageHelpers?: boolean };
+  /** Evolve agency settings (FRI-40 triage helpers; FRI-149 auto-builders). */
+  evolve?: { autoSpawnTriageHelpers?: boolean; autoSpawnBuilders?: boolean };
 }
 
 export interface LinearIntegrationConfig {
@@ -260,11 +260,15 @@ export const DEFAULT_CONFIG: FridayConfig = {
   // scheduled runs. Users who want observe-only can set
   // `watchdog.refork: false` in ~/.friday/config.json.
   watchdog: { refork: true },
-  // FRI-40: auto-spawning a read-only triage helper on promote-to-critical
-  // is OFF by default. Opt in via `evolve.autoSpawnTriageHelpers: true` in
-  // ~/.friday/config.json. The flag is read with a strict `=== true` check
-  // so the shallow-merge `{ evolve: {} }` case stays disabled.
-  evolve: { autoSpawnTriageHelpers: false },
+  // FRI-40 / FRI-149: evolve agency is OFF by default. Opt in via
+  // `evolve.autoSpawnTriageHelpers: true` (read-only triage helper on
+  // promote-to-critical) and/or `evolve.autoSpawnBuilders: true`
+  // (auto-spawn a Builder for a critical+code+high-severity proposal that
+  // drives a green PR and stops at it — never auto-merges; the human merges)
+  // in ~/.friday/config.json. Both flags live in the SAME `evolve` object
+  // and are read with a strict `=== true` check so the shallow-merge
+  // `{ evolve: {} }` case stays disabled.
+  evolve: { autoSpawnTriageHelpers: false, autoSpawnBuilders: false },
 };
 
 export function ensureDirs(): void {
