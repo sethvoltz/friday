@@ -1,4 +1,5 @@
 import { searchMemories } from "./search.js";
+import type { MemoryEntry } from "./store.js";
 
 /**
  * Build the `<memory-context>` block to prepend to a user message. Strategy:
@@ -7,7 +8,13 @@ import { searchMemories } from "./search.js";
  */
 export async function buildAutoRecallBlock(
   userText: string,
-  opts: { limit?: number; minScore?: number; excludeTags?: string[]; allowTags?: string[] } = {},
+  opts: {
+    limit?: number;
+    minScore?: number;
+    excludeTags?: string[];
+    allowTags?: string[];
+    preloadedEntries?: MemoryEntry[];
+  } = {},
 ): Promise<string> {
   const limit = opts.limit ?? 5;
   const minScore = opts.minScore ?? 1;
@@ -17,6 +24,7 @@ export async function buildAutoRecallBlock(
     trackRecall: true,
     excludeTags: opts.excludeTags,
     allowTags: opts.allowTags,
+    preloadedEntries: opts.preloadedEntries,
   });
   const filtered = results.filter((r) => r.score >= minScore);
   if (filtered.length === 0) return "";

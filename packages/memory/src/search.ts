@@ -8,6 +8,14 @@ export interface SearchOptions {
   allowTags?: string[];
   limit?: number;
   trackRecall?: boolean;
+  /**
+   * FRI-141: an already-loaded entry set to rank against instead of re-reading
+   * the store. The daemon recall hook loads `listEntries()` once to compute the
+   * name-mention carve-out, then threads the same array here so passive recall
+   * does a single full-table scan per turn rather than two. Omit it and the
+   * ranker reads the store itself (every other caller).
+   */
+  preloadedEntries?: MemoryEntry[];
 }
 
 export interface SearchResult {
@@ -24,7 +32,7 @@ export async function searchMemories(opts: SearchOptions): Promise<SearchResult[
   const tags = opts.tags ?? [];
   const excludeTags = opts.excludeTags ?? [];
   const allowTags = opts.allowTags ?? [];
-  const allEntries = await listEntries();
+  const allEntries = opts.preloadedEntries ?? (await listEntries());
 
   // When a tag filter is supplied, the caller is asking "give me everything
   // tagged X, ranked by relevance to query" — tags are the authoritative

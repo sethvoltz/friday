@@ -3,13 +3,21 @@ import type { MemoryEntry } from "./store.js";
 
 let entries: MemoryEntry[] = [];
 
-// Force the FTS path to throw so the scoring logic falls back to the
-// full-scan branch. ADR-023 update: production code uses `getPool()`
-// (returns pg.Pool whose `query` is awaitable); here we return a stub
-// whose `query` rejects.
+// FTS candidate ids the mocked Postgres pool returns. `null` (the default)
+// makes `query` reject so the scoring logic falls back to the full-scan branch
+// — the mode every pre-existing test relies on. A test that wants to exercise
+// the FTS-narrow branch sets `ftsRows` to the candidate id rows it should see.
+let ftsRows: { id: string }[] | null = null;
+
+// ADR-023: production code uses `getPool()` (returns pg.Pool whose `query` is
+// awaitable). The stub rejects (→ full scan) unless `ftsRows` is set, in which
+// case it resolves with those rows (→ FTS-narrow path).
 vi.mock("@friday/shared", () => ({
   getPool: () => ({
-    query: () => Promise.reject(new Error("force fallback to full scan")),
+    query: () =>
+      ftsRows === null
+        ? Promise.reject(new Error("force fallback to full scan"))
+        : Promise.resolve({ rows: ftsRows }),
   }),
 }));
 
@@ -34,6 +42,7 @@ function mkEntry(partial: Partial<MemoryEntry> & { id: string }): MemoryEntry {
 
 beforeEach(() => {
   entries = [];
+  ftsRows = null;
 });
 
 describe("searchMemories scoring", () => {
@@ -417,5 +426,50 @@ describe("searchMemories scoring", () => {
     // partial-tag hit so callers can see why it ranked.
     const namespaced = results.find((r) => r.entry.id === "namespaced")!;
     expect(namespaced.matchedOn).toEqual(expect.arrayContaining(["content", "tag~:meal:library"]));
+  });
+
+  // FRI-141: the exclusion gate lives in the shared scan loop, so it must hold
+  // on the FTS-narrow branch too — not just the full-scan fallback every other
+  // test exercises. Drive the FTS path (ftsRows set) and confirm a person entry
+  // in the FTS candidate set is still excluded, while a matching entry NOT in
+  // the candidate set is correctly absent (proving the narrow actually applied).
+  it("FRI-141: excludeTags holds on the FTS-narrow branch (not just the full-scan fallback)", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({ id: "code-x", title: "daemon notes", content: "the daemon", tags: ["project"] }),
+      mkEntry({
+        id: "person-x",
+        title: "Asher daemon",
+        content: "asher and the daemon",
+        tags: ["person", "person:asher"],
+      }),
+      mkEntry({ id: "code-y", title: "daemon other", content: "the daemon", tags: ["project"] }),
+    ];
+    // FTS narrows to code-x + person-x only (code-y is a matching entry the FTS
+    // query did NOT return).
+    ftsRows = [{ id: "code-x" }, { id: "person-x" }];
+
+    const results = await searchMemories({ query: "daemon", excludeTags: ["person"] });
+    const ids = results.map((r) => r.entry.id);
+    expect(ids).toEqual(["code-x"]);
+    expect(ids).not.toContain("person-x"); // excluded despite being an FTS candidate
+    expect(ids).not.toContain("code-y"); // proves the FTS narrow ran (full scan would include it)
+  });
+
+  // FRI-141: preloadedEntries lets the daemon recall hook hand the ranker the
+  // entry set it already loaded (for the name-match), so passive recall does one
+  // listEntries() per turn instead of two. When supplied, the store is NOT read.
+  it("FRI-141: preloadedEntries is ranked instead of reading the store", async () => {
+    const { searchMemories } = await import("./search.js");
+    // The mocked store would return this decoy — it must NOT appear.
+    entries = [mkEntry({ id: "from-store", title: "daemon", content: "the daemon" })];
+
+    const results = await searchMemories({
+      query: "daemon",
+      preloadedEntries: [mkEntry({ id: "from-preload", title: "daemon", content: "the daemon" })],
+    });
+    const ids = results.map((r) => r.entry.id);
+    expect(ids).toEqual(["from-preload"]);
+    expect(ids).not.toContain("from-store");
   });
 });

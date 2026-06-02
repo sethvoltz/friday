@@ -70,9 +70,16 @@ export async function safeRecall(text: string, intent: IntentTag = "user_chat"):
       logger.log("warn", "memory.recall.listener-timeout", { intent });
       return "";
     }
+    // One full-table read serves both the name-match carve-out and the ranker:
+    // thread the loaded entries through as `preloadedEntries` so passive recall
+    // does a single listEntries() per turn instead of two.
     const entries = await listEntries();
     const allowTags = computePersonAllowTags(text, entries);
-    return await buildAutoRecallBlock(text, { excludeTags: ["person"], allowTags });
+    return await buildAutoRecallBlock(text, {
+      excludeTags: ["person"],
+      allowTags,
+      preloadedEntries: entries,
+    });
   } catch (err) {
     logger.log("warn", "memory.recall.error", {
       intent,

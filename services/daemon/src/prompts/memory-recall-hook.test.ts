@@ -351,4 +351,17 @@ describe("computePersonAllowTags (FRI-141 pure helper)", () => {
     const entries = [mkPerson("c", ["person:asher"])]; // no "person" tag
     expect(computePersonAllowTags("did Asher call", entries)).toEqual([]);
   });
+
+  it("re-admits on a non-name descriptor segment — all-segment match is intentional (FRI-141 owner decision)", async () => {
+    const { computePersonAllowTags } = await import("./memory-recall-hook.js");
+    const entries = [mkPerson("m", ["person", "person:mike-coworker"])];
+    // The carve-out matches ANY dash-separated segment, so a generic descriptor
+    // token ("coworker") re-admits the person even when no name appears in the
+    // turn. This is the documented, deliberate behaviour (see the `person`
+    // section of protocols/memory.md) — pinned here so it stays a decision, not
+    // an accident. Choosing a distinctive `person:<name>` segment narrows recall.
+    expect(computePersonAllowTags("my coworker pushed a fix", entries)).toEqual([
+      "person:mike-coworker",
+    ]);
+  });
 });
