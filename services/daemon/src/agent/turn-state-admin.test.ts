@@ -59,9 +59,12 @@ function makeAdminRecorder(archiveShouldThrow?: Error): AdminRecorder {
     },
     publish: () => {},
     blockStream: {
+      // FRI-148 A: the finalize + endTurn pair fused into tearDownTurn.
+      // Admin intents never touch this port — a no-op stub is sufficient.
+      tearDownTurn: async () => {},
+    },
+    blockInjector: {
       recordError: async () => ({ blockId: "b" }),
-      finalize: async () => {},
-      endTurn: () => {},
     },
     recoverFromJsonl: async () => {},
     insertUsage: async () => {},

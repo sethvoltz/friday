@@ -6,8 +6,9 @@ import { createTestDb, type TestDbHandle } from "@friday/shared";
 // crash), no `block-stop` IPC ever fires for the in-flight blocks. Before
 // the original fix the rows stayed at `status='streaming'` and the
 // dashboard rendered tool/thinking bubbles as `running` forever. The
-// exit handler now finalizes them via `blockStream.finalize` (FRI-125
-// migrated this path from `finalizeStreamingBlocks`).
+// exit handler now finalizes them via `blockStream.tearDownTurn` (FRI-148 A
+// fused the prior finalize + endTurn pair; FRI-125 migrated this path from
+// `finalizeStreamingBlocks`).
 
 let handle: TestDbHandle;
 
@@ -49,16 +50,16 @@ function makeFakeWorker(): unknown {
   };
 }
 
-describe("blockStream.finalize (F4-A; FRI-125 migration)", () => {
+describe("blockStream.tearDownTurn (F4-A; FRI-125 migration; FRI-148 A fuse)", () => {
   it("flips streaming thinking + tool_use rows to error on worker exit", async () => {
-    const { finalize, __seedForTest } = await import("./block-stream.js");
+    const { tearDownTurn, __seedForTest } = await import("./block-stream.js");
     const { insertBlock, getBlockById } = await import("@friday/shared/services");
 
     // Seed the streaming DB rows the way the legacy "INSERT at
     // block_start" path used to leave them. Post-ADR-024 the daemon
     // doesn't INSERT until block_complete, so in production these rows
     // only exist via error-block insertion or migration artefacts —
-    // but `finalize` still has to flip them off `streaming` correctly,
+    // but `tearDownTurn` still has to flip them off `streaming` correctly,
     // which is exactly what this test pins.
     await insertBlock({
       blockId: "th-blk",
@@ -127,7 +128,7 @@ describe("blockStream.finalize (F4-A; FRI-125 migration)", () => {
       startedAt: 1,
     });
 
-    await finalize(makeFakeWorker() as never, "error");
+    await tearDownTurn(makeFakeWorker() as never, "error");
 
     const thinking = await getBlockById("th-blk");
     expect(thinking?.status).toBe("error");
@@ -151,10 +152,11 @@ describe("blockStream.finalize (F4-A; FRI-125 migration)", () => {
   });
 
   it("is a no-op when the worker exited cleanly (no live turn)", async () => {
-    const { finalize } = await import("./block-stream.js");
+    const { tearDownTurn } = await import("./block-stream.js");
     // No in-flight entry for `turn-exit-1`. Must not throw, must not
-    // touch the DB.
-    await expect(finalize(makeFakeWorker() as never, "error")).resolves.toBeUndefined();
+    // touch the DB. FRI-148 A: tearDownTurn also drops the turn entry
+    // — idempotent on a missing entry.
+    await expect(tearDownTurn(makeFakeWorker() as never, "error")).resolves.toBeUndefined();
   });
 
   it("FRI-4 #2 (Layer B): marks orphan blocks 'aborted' on turn-rotation", async () => {
@@ -164,7 +166,7 @@ describe("blockStream.finalize (F4-A; FRI-125 migration)", () => {
     // the daemon-side belt-and-braces — even if the worker missed it,
     // the turn-complete handler must transition the DB row off
     // `streaming` before `endTurn` wipes the live entry.
-    const { finalize, __seedForTest } = await import("./block-stream.js");
+    const { tearDownTurn, __seedForTest } = await import("./block-stream.js");
     const { insertBlock, getBlockById } = await import("@friday/shared/services");
 
     await insertBlock({
@@ -204,7 +206,7 @@ describe("blockStream.finalize (F4-A; FRI-125 migration)", () => {
       startedAt: 1,
     });
 
-    await finalize(makeFakeWorker() as never, "aborted");
+    await tearDownTurn(makeFakeWorker() as never, "aborted");
 
     const row = await getBlockById("th-orphan");
     expect(row?.status).toBe("aborted");

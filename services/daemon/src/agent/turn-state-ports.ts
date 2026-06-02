@@ -15,7 +15,7 @@
 
 import type { AgentType, ArchiveReason } from "@friday/shared";
 import type { WireEvent } from "@friday/shared";
-import type { ErrorBlockPayload } from "./block-stream.js";
+import type { ErrorBlockPayload } from "./block-injectors.js";
 import type { WorkerPromptCommand } from "./worker-protocol.js";
 import type { Intent, StatusProjection } from "./turn-state-machine.js";
 
@@ -74,11 +74,21 @@ export interface TurnStatePorts<W extends PortWorker = PortWorker> {
   }) => Promise<void>;
   /** eventBus.publish — wire-event fan-out. */
   publish: (event: WireEventInput) => void;
-  /** Block-stream pipeline (record-error / finalize / end-turn). */
+  /** Block-stream FSM pipeline. FRI-148 A fused the previous finalize +
+   *  endTurn pair into a single `tearDownTurn` op so the executor can't drive
+   *  one without the other. The synthetic recordError writer lives on the
+   *  {@link blockInjector} port — split out in FRI-148 B so the FSM core's
+   *  port surface matches the FSM module's exports. */
   blockStream: {
+    tearDownTurn: (w: W, status: "aborted" | "error") => Promise<void>;
+  };
+  /** Synthetic block writers that piggyback on the FSM accumulator
+   *  ({@link ./block-injectors.ts}). Currently only `recordError`; the
+   *  bag is grouped so future injectors (admin-injected notice blocks,
+   *  app-installed seed blocks, etc.) extend this port rather than the
+   *  FSM port. */
+  blockInjector: {
     recordError: (w: W, payload: ErrorBlockPayload) => Promise<unknown>;
-    finalize: (w: W, status: "aborted" | "error") => Promise<void>;
-    endTurn: (turnId: string) => void;
   };
   /** Post-turn JSONL recovery sweep. */
   recoverFromJsonl: (
@@ -184,13 +194,10 @@ export async function executeIntents<W extends PortWorker>(
           });
         break;
       case "record-error-block":
-        await ports.blockStream.recordError(w, intent.payload);
+        await ports.blockInjector.recordError(w, intent.payload);
         break;
-      case "finalize-blocks":
-        await ports.blockStream.finalize(w, intent.status);
-        break;
-      case "end-turn":
-        ports.blockStream.endTurn(intent.turnId);
+      case "tear-down-turn":
+        await ports.blockStream.tearDownTurn(w, intent.status);
         break;
       case "publish-error":
         ports.publish({

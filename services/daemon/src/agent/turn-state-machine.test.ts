@@ -66,7 +66,9 @@ describe("turn-state-machine: complete (AC #3 — intents + projection)", () => 
 
     expect(r.state).toBe("idle");
     expect(r.projection).toBe("idle");
-    // Exact intent list — turn_done, posthog, finalize, end-turn, set-status.
+    // Exact intent list — turn_done, posthog, tear-down-turn, set-status.
+    // FRI-148 A: the previous finalize-blocks + end-turn pair collapsed
+    // into one tear-down-turn intent at the same position (5 → 4).
     expect(r.intents).toEqual<Intent[]>([
       {
         kind: "publish-turn-done",
@@ -94,8 +96,7 @@ describe("turn-state-machine: complete (AC #3 — intents + projection)", () => 
           zero_block_reason: null,
         },
       },
-      { kind: "finalize-blocks", status: "aborted" },
-      { kind: "end-turn", turnId: "turn-1" },
+      { kind: "tear-down-turn", turnId: "turn-1", status: "aborted" },
       { kind: "set-status", name: "agent-1", status: "idle" },
     ]);
     // Per-turn bookkeeping resets.
@@ -117,7 +118,9 @@ describe("turn-state-machine: complete (AC #3 — intents + projection)", () => 
     };
     const r = apply(ctx({ blocksThisTurn: 2 }), { kind: "complete", payload: { usage } }, DEPS);
 
-    // Pin the full ordered shape (AC #3 exact-payload).
+    // Pin the full ordered shape (AC #3 exact-payload). FRI-148 A: the
+    // finalize-blocks + end-turn pair collapsed into one tear-down-turn at
+    // the same position (7 → 6).
     expect(r.intents).toEqual<Intent[]>([
       {
         kind: "publish-turn-done",
@@ -154,8 +157,7 @@ describe("turn-state-machine: complete (AC #3 — intents + projection)", () => 
           zero_block_reason: null,
         },
       },
-      { kind: "finalize-blocks", status: "aborted" },
-      { kind: "end-turn", turnId: "turn-1" },
+      { kind: "tear-down-turn", turnId: "turn-1", status: "aborted" },
       { kind: "set-status", name: "agent-1", status: "idle" },
       {
         kind: "recover-jsonl",
@@ -217,7 +219,13 @@ describe("turn-state-machine: fail (AC #3 — turn_done status error)", () => {
       agent: "agent-1",
       status: "error",
     });
-    // Ordered prefix: record-error-block → finalize(error) → publish-error → turn_done.
+    // Ordered prefix: record-error-block → tear-down-turn(error) →
+    // publish-error → turn_done. FRI-148 A (A1-default reorder): the old
+    // end-turn intent moved up to be adjacent to finalize-blocks, then the
+    // pair collapsed into one tear-down-turn — the slice's element count
+    // stays 4 but the second element changes identity from finalize-blocks
+    // to tear-down-turn. The user-visible SSE order (error → turn_done) is
+    // preserved because tear-down-turn emits no turn-level SSE.
     expect(r.intents.slice(0, 4)).toEqual<Intent[]>([
       {
         kind: "record-error-block",
@@ -230,7 +238,7 @@ describe("turn-state-machine: fail (AC #3 — turn_done status error)", () => {
           rawMessage: "SDK exploded",
         },
       },
-      { kind: "finalize-blocks", status: "error" },
+      { kind: "tear-down-turn", turnId: "turn-1", status: "error" },
       {
         kind: "publish-error",
         turnId: "turn-1",
@@ -510,11 +518,12 @@ describe("turn-state-machine: hard-exit (FRI-145 M5 — self-heal, Bug #2)", () 
 
     expect(r.state).toBe("idle");
     expect(r.projection).toBe("idle");
-    // Exact ordered intent list: finalize → end-turn → error → turn_done →
-    // set-status(idle). The turn_done(error) is Bug #2's missing event.
+    // Exact ordered intent list: tear-down-turn → error → turn_done →
+    // set-status(idle). FRI-148 A: finalize-blocks + end-turn collapsed
+    // into one tear-down-turn (5 → 4). The turn_done(error) is Bug #2's
+    // missing event.
     expect(r.intents).toEqual<Intent[]>([
-      { kind: "finalize-blocks", status: "error" },
-      { kind: "end-turn", turnId: "turn-dead" },
+      { kind: "tear-down-turn", turnId: "turn-dead", status: "error" },
       {
         kind: "publish-error",
         turnId: "turn-dead",

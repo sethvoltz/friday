@@ -40,9 +40,11 @@ interface Recorder {
   ports: TurnStatePorts<PortWorker>;
   setStatusCalls: [string, string][];
   published: { type: string; status?: string; turn_id?: string; streak?: number }[];
-  finalizeCalls: string[];
+  // FRI-148 A: one tearDownTurn replaces the prior finalize + endTurn pair.
+  // We record { turnId, status } per call so a single field witnesses both
+  // halves of the fused op.
+  tearDownTurnCalls: { turnId: string; status: string }[];
   recordErrorCalls: number;
-  endTurnCalls: string[];
   sendPromptCalls: { turnId: string }[];
   forceKillCalls: { reason: string; zeroBlockTurnStreak: number }[];
   usageInserts: number;
@@ -57,9 +59,8 @@ function makeRecorder(): Recorder {
     ports: undefined as unknown as TurnStatePorts<PortWorker>,
     setStatusCalls: [],
     published: [],
-    finalizeCalls: [],
+    tearDownTurnCalls: [],
     recordErrorCalls: 0,
-    endTurnCalls: [],
     sendPromptCalls: [],
     forceKillCalls: [],
     usageInserts: 0,
@@ -74,15 +75,14 @@ function makeRecorder(): Recorder {
       rec.published.push(event as Recorder["published"][number]);
     },
     blockStream: {
+      tearDownTurn: async (w, status) => {
+        rec.tearDownTurnCalls.push({ turnId: w.turnId, status });
+      },
+    },
+    blockInjector: {
       recordError: async () => {
         rec.recordErrorCalls++;
         return { blockId: "b" };
-      },
-      finalize: async (_w, status) => {
-        rec.finalizeCalls.push(status);
-      },
-      endTurn: (turnId) => {
-        rec.endTurnCalls.push(turnId);
       },
     },
     recoverFromJsonl: async (inputs) => {
@@ -125,8 +125,8 @@ describe("turn-state-ports: complete → executor wires the DB door + fan-out", 
       status: "complete",
       usage: undefined,
     });
-    expect(rec.finalizeCalls).toEqual(["aborted"]);
-    expect(rec.endTurnCalls).toEqual(["turn-1"]);
+    // FRI-148 A: one tearDownTurn replaces the prior finalize + endTurn pair.
+    expect(rec.tearDownTurnCalls).toEqual([{ turnId: "turn-1", status: "aborted" }]);
     expect(rec.posthogEvents).toEqual(["turn_completed"]);
   });
 
@@ -172,7 +172,8 @@ describe("turn-state-ports: fail → executor records the error block + error tu
     await executeIntents(fakeWorker, r.intents, rec.ports);
 
     expect(rec.recordErrorCalls).toBe(1);
-    expect(rec.finalizeCalls).toEqual(["error"]);
+    // FRI-148 A: one tearDownTurn replaces the prior finalize + endTurn pair.
+    expect(rec.tearDownTurnCalls).toEqual([{ turnId: "turn-1", status: "error" }]);
     expect(rec.setStatusCalls).toEqual([["agent-1", "idle"]]);
     const done = rec.published.find((p) => p.type === "turn_done");
     expect(done?.status).toBe("error");

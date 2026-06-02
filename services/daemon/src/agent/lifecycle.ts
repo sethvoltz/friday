@@ -38,10 +38,11 @@ import {
   append as bsAppend,
   close as bsClose,
   cancel as bsCancel,
-  recordError as bsRecordError,
-  finalize as bsFinalize,
-  endTurn as bsEndTurn,
+  tearDownTurn as bsTearDownTurn,
+  __endTurnForArchivedHardExit,
+  IllegalBlockTransitionError,
 } from "./block-stream.js";
+import { recordError as bsRecordError } from "./block-injectors.js";
 import { appContextForAgent } from "../apps/installer.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
 import { enqueueTransition, enqueueTransitionResult } from "./transition-queue.js";
@@ -71,6 +72,16 @@ import type {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, "worker.js");
+
+/**
+ * FRI-148 §5.C: per-turn threshold for `IllegalBlockTransitionError`
+ * occurrences before the daemon force-kills the worker as FSM-desynced.
+ * Each violation is logged at L1 (`block.transition.illegal`); the threshold
+ * trip emits L2 (`block.transition.illegal.threshold`) and triggers
+ * `forceKillStuckWorker(reason: "fsm-violation")`. Reset at every dispatch
+ * boundary alongside `blocksThisTurn`.
+ */
+const FSM_VIOLATION_THRESHOLD = 3;
 
 export interface ExitInfo {
   sessionId?: string;
@@ -165,6 +176,14 @@ export interface LiveWorker {
    *  current turn. Reset on every `turn-complete`/`error` and on
    *  `sendPrompt` (defense-in-depth for future re-orderings). */
   blocksThisTurn: number;
+  /** FRI-148 §5.C: count of `IllegalBlockTransitionError` occurrences
+   *  observed on the current turn (caught by `safeHandleEvent`). Each
+   *  occurrence emits L1 `block.transition.illegal`; on reaching
+   *  `FSM_VIOLATION_THRESHOLD` we emit L2
+   *  `block.transition.illegal.threshold` and `forceKillStuckWorker` with
+   *  `reason: "fsm-violation"`. Reset at every dispatch boundary
+   *  (LiveWorker construction, spawn-fresh first turn, `sendPrompt`). */
+  illegalTransitionsThisTurn: number;
   /** FRI-61 wedge detector: consecutive `turn-complete`/`error` events
    *  that arrived with `blocksThisTurn === 0`. The SDK iterator only
    *  produces zero content blocks when the model emitted nothing —
@@ -453,6 +472,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     completedAtLeastOnce: false,
     onExit: input.onExit,
     blocksThisTurn: 0,
+    illegalTransitionsThisTurn: 0,
     zeroBlockTurnStreak: 0,
     mailSendToParentThisTurn: 0,
     noMailBackNudgedThisTurn: false,
@@ -548,6 +568,11 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     // (which could be milliseconds before, but conceptually is "no turn
     // is live"). Symmetric with `sendPrompt` for subsequent turns.
     w.turnStart = Date.now();
+    // FRI-148 §5.C: a fresh turn starts with no observed FSM violations.
+    // Initialization at LiveWorker construction covers the cold-start case;
+    // pinning it here keeps the three dispatch boundaries (construction,
+    // spawn-fresh first turn, sendPrompt) structurally parallel.
+    w.illegalTransitionsThisTurn = 0;
     send(child, {
       type: "start",
       options: { ...input.options, userMcpServers },
@@ -719,9 +744,10 @@ function makeProdPorts(): TurnStatePorts<LiveWorker> {
     closeTicket: (opts) => closeTicketForArchive(opts),
     publish: (event) => eventBus.publish(event),
     blockStream: {
+      tearDownTurn: (w, status) => bsTearDownTurn(w, status),
+    },
+    blockInjector: {
       recordError: (w, payload) => bsRecordError(w, payload),
-      finalize: (w, status) => bsFinalize(w, status),
-      endTurn: (turnId) => bsEndTurn(turnId),
     },
     recoverFromJsonl: (inputs) => recoverFromJsonl(inputs),
     insertUsage: (row) => insertUsage(row),
@@ -1010,6 +1036,11 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   // already reset the counter before this), but pinning it here protects
   // against future re-orderings.
   w.blocksThisTurn = 0;
+  // FRI-148 §5.C: a fresh turn starts with no observed FSM violations.
+  // The L1/L2 heal counts violations per-turn; resetting here ensures a
+  // worker that hit two violations on the previous turn doesn't carry that
+  // ledger into the next one and get force-killed on its first stumble.
+  w.illegalTransitionsThisTurn = 0;
   // FRI-127 §5: a fresh turn starts with no observed mail-back. Same
   // defense-in-depth as blocksThisTurn.
   w.mailSendToParentThisTurn = 0;
@@ -1156,7 +1187,7 @@ function clearAbortDeadline(w: LiveWorker): void {
 async function forceKillStuckWorker(
   w: LiveWorker,
   opts: {
-    reason?: "abort" | "stale" | "wedge";
+    reason?: "abort" | "stale" | "wedge" | "fsm-violation";
     msSinceTurnStart?: number;
     zeroBlockTurnStreak?: number;
   } = {},
@@ -1187,6 +1218,12 @@ async function forceKillStuckWorker(
       turnId: w.turnId,
       zeroBlockTurnStreak: opts.zeroBlockTurnStreak ?? null,
     });
+  } else if (reason === "fsm-violation") {
+    logger.log("warn", "worker.fsm-violation.force-kill", {
+      agent: w.agentName,
+      turnId: w.turnId,
+      illegalTransitionsThisTurn: w.illegalTransitionsThisTurn,
+    });
   } else {
     logger.log("warn", "worker.abort.force-kill", {
       agent: w.agentName,
@@ -1216,21 +1253,36 @@ async function forceKillStuckWorker(
               "row. The agent has been killed; the next message will spawn " +
               "a fresh worker.",
           }
-        : {
-            code: "stopped_forced",
-            headline: "Stop forced — SDK did not honor abort, worker restarted",
-            rawMessage:
-              "Cooperative abort failed: the SDK iterator stayed wedged after 500ms " +
-              "(descendants already SIGTERMed at T+0; daemonFetch signal propagated " +
-              "to in-flight MCP handlers). The agent has been killed; the next message " +
-              "will spawn a fresh worker. Healthy turns clean up via the SDK's own " +
-              "abortController and never reach this path.",
-          };
-  // Wedge and stale-turn both ride `error` status; only an explicit abort
-  // synthesizes `abort_reason: "forced"`.
-  const ridesError = reason === "stale" || reason === "wedge";
+        : reason === "fsm-violation"
+          ? {
+              code: "block_fsm_violation",
+              headline: "Agent emitted invalid block transitions — restarted",
+              rawMessage:
+                "FSM violations exceeded threshold: the worker emitted " +
+                "FSM_VIOLATION_THRESHOLD invalid block transitions in this turn " +
+                "(delta-after-close, double-open, or similar). The worker's " +
+                "block bookkeeping is desynced from the daemon's; the agent has " +
+                "been killed; the next message will spawn a fresh worker.",
+            }
+          : {
+              code: "stopped_forced",
+              headline: "Stop forced — SDK did not honor abort, worker restarted",
+              rawMessage:
+                "Cooperative abort failed: the SDK iterator stayed wedged after 500ms " +
+                "(descendants already SIGTERMed at T+0; daemonFetch signal propagated " +
+                "to in-flight MCP handlers). The agent has been killed; the next message " +
+                "will spawn a fresh worker. Healthy turns clean up via the SDK's own " +
+                "abortController and never reach this path.",
+            };
+  // Wedge, stale-turn, and fsm-violation all ride `error` status; only an
+  // explicit abort synthesizes `abort_reason: "forced"`.
+  const ridesError = reason === "stale" || reason === "wedge" || reason === "fsm-violation";
   await bsRecordError(w, errorPayload);
-  await bsFinalize(w, ridesError ? "error" : "aborted");
+  // FRI-148 A: bsFinalize + bsEndTurn fused into bsTearDownTurn. The per-turn
+  // block-accumulator drop runs as part of the same op, so the upcoming
+  // child.exit handler's safety-net teardown sees an empty turn entry (also
+  // Generation-gated, so it never runs for this superseded `w` anyway).
+  await bsTearDownTurn(w, ridesError ? "error" : "aborted");
   // Emit the in-band TurnErrorEvent so any consumers still listening for
   // it know a force-kill happened (vs. a clean abort).
   eventBus.publish({
@@ -1244,7 +1296,9 @@ async function forceKillStuckWorker(
         ? "Turn timed out — stale-turn ceiling exceeded"
         : reason === "wedge"
           ? "Wedge detected — agent looped without producing output"
-          : "Stop forced — worker unresponsive",
+          : reason === "fsm-violation"
+            ? "FSM violations exceeded threshold — block bookkeeping desynced"
+            : "Stop forced — worker unresponsive",
     recoverable: true,
   });
   eventBus.publish({
@@ -1255,12 +1309,6 @@ async function forceKillStuckWorker(
     status: ridesError ? "error" : "aborted",
     ...(reason === "abort" ? { abort_reason: "forced" as const } : {}),
   });
-  // The in-flight turn entry was already dropped via the up-front
-  // `live.delete`; here we drop the per-turn block accumulators so the
-  // upcoming child.exit handler's safety-net `bsFinalize` would be a no-op
-  // anyway (it is also Generation-gated now, so it never runs for this
-  // superseded `w`).
-  bsEndTurn(w.turnId);
   w.lastExitStatus = ridesError ? "error" : "aborted";
   setWorkerStatus(w, "idle", "forceKillStuckWorker");
   // FRI-110: keep the `turnStart` invariant universally true. After
@@ -1326,7 +1374,11 @@ export async function finalizeHardExit(
       // Terminal — a racing archive owns this row. Preserve it; the archive
       // already finalized the worker's turn. Still drop the per-turn block
       // accumulators so the daemon doesn't leak state for a dead turn.
-      bsEndTurn(w.turnId);
+      // FRI-148 A: archive's bare end-turn (no finalize — the archive already
+      // wrote the rows) lives behind the narrow __endTurnForArchivedHardExit
+      // export so non-archive paths can't accidentally bypass the finalize
+      // half of the fused tearDownTurn.
+      __endTurnForArchivedHardExit(w.turnId);
       logger.log("info", "lifecycle.exit.archived-preserved", {
         agent: w.agentName,
         turnId: w.turnId,
@@ -1674,6 +1726,43 @@ export async function safeHandleEvent(w: LiveWorker, raw: unknown): Promise<void
   try {
     await handleEvent(w, ev);
   } catch (err) {
+    if (err instanceof IllegalBlockTransitionError) {
+      // FRI-148 §5.C: real-time FSM heal.
+      //   L1 — per occurrence: emit `block.transition.illegal` with the
+      //        offending op/code and the running per-turn count. Evolve
+      //        scans this as a low-severity signal; one stray transition
+      //        is interesting but not actionable on its own.
+      //   L2 — on threshold: when the per-turn count crosses
+      //        FSM_VIOLATION_THRESHOLD, emit the dedicated
+      //        `block.transition.illegal.threshold` event (medium severity)
+      //        and force-kill the worker with reason "fsm-violation". The
+      //        worker's local block bookkeeping is desynced from the
+      //        daemon's; a fresh fork is the only safe recovery.
+      // The typed error is *not* re-thrown — this branch fully owns the
+      // outcome, so the generic `worker.ipc.error` log below stays silent
+      // for FSM violations (no double-counting in Evolve).
+      w.illegalTransitionsThisTurn++;
+      const count = w.illegalTransitionsThisTurn;
+      logger.log("warn", "block.transition.illegal", {
+        agent: w.agentName,
+        type: (ev as { type?: string })?.type ?? "unknown",
+        turnId: err.turnId,
+        clientBlockId: err.clientBlockId,
+        code: err.code,
+        op: err.op,
+        countThisTurn: count,
+      });
+      if (count >= FSM_VIOLATION_THRESHOLD) {
+        logger.log("warn", "block.transition.illegal.threshold", {
+          agent: w.agentName,
+          turnId: err.turnId,
+          countThisTurn: count,
+          threshold: FSM_VIOLATION_THRESHOLD,
+        });
+        await forceKillStuckWorker(w, { reason: "fsm-violation" });
+      }
+      return;
+    }
     logger.log("error", "worker.ipc.error", {
       agent: w.agentName,
       type: (ev as { type?: string })?.type ?? "unknown",

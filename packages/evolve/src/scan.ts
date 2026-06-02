@@ -55,11 +55,13 @@ const EVENT_SEVERITY: Record<string, SignalSeverity> = {
   "linear.reconcile.error": "medium",
   "schedule.last-run.write-error": "medium",
   "jsonl-mirror.drain.error": "medium",
+  "block.transition.illegal.threshold": "medium",
   // Low
   "jsonl-mirror.open.fail": "low",
   "usage.insert.error": "low",
   "memory.recall.error": "low",
   "workspace.destroy.fail": "low",
+  "block.transition.illegal": "low",
 };
 
 const META_AGENT_PREFIX = "scheduled-meta-";

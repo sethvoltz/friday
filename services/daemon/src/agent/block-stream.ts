@@ -1,23 +1,34 @@
 /**
- * block-stream — the deep block-write pipeline (FRI-125).
+ * block-stream — the per-block FSM core (FRI-125, refactored FRI-148 B).
  *
  * Absorbs the previous {@link ./live-turns.ts} in-memory accumulator, the
- * `writeAndPublish` helper from lifecycle.ts, the `insertErrorBlock` path,
- * and the `finalizeStreamingBlocks` path into a single module that owns
- * the ADR-004/024 invariant: in-memory accumulator updated before SSE
- * emit; on `block_complete`, the canonical row INSERTs with
- * `streaming=false`. There is no per-row `last_event_seq` peek dance
- * anymore — the column retires in the same PR and the dashboard's cursor
- * is fed by the SSE event's own `seq` field (which {@link eventBus}
- * stamps at publish time).
+ * `writeAndPublish` helper from lifecycle.ts, and the
+ * `finalizeStreamingBlocks` path into a single module that owns the
+ * ADR-004/024 invariant: in-memory accumulator updated before SSE emit;
+ * on `block_complete`, the canonical row INSERTs with `streaming=false`.
+ * There is no per-row `last_event_seq` peek dance anymore — the column
+ * retires in the same PR and the dashboard's cursor is fed by the SSE
+ * event's own `seq` field (which {@link eventBus} stamps at publish time).
  *
- * Public surface (per FRI-125 §6):
+ * FRI-148 B split: the two SYNTHETIC writers (`recordError`,
+ * `recordUserBlock`) and their `ErrorBlockPayload` / `RecordUserBlockInput`
+ * shapes moved to {@link ./block-injectors.ts}. The FSM core here owns the
+ * `start → delta* → terminal` lifecycle for the streamed-from-the-worker
+ * blocks and the exit-time finalize path. The injectors call back into
+ * this module via {@link peekNextBlockIndex} (so recordError can place its
+ * synthetic row at `max(in-flight) + 1`) and {@link maybeEmitAgentMessage}
+ * (so the user-visible-content fan-out fires on both paths).
+ *
+ * Public surface:
  *
  *   open / append / close / cancel       — the four block-IPC handlers
- *   recordError                          — synthetic error block (was insertErrorBlock)
- *   finalize                             — exit-time teardown (was finalizeStreamingBlocks)
- *   endTurn                              — turn-end teardown (was liveTurns.dropTurn)
- *   snapshot                             — read surface for watchdog + tests
+ *   tearDownTurn                         — exit-time teardown + accumulator drop (FRI-148 A:
+ *                                          fuses the old finalize + endTurn pair)
+ *   __endTurnForArchivedHardExit         — narrow archive-only bare end-turn (FRI-148 A)
+ *   peekNextBlockIndex                   — read accessor used by recordError
+ *   maybeEmitAgentMessage                — user-visible-content fan-out (used by injectors)
+ *   hasLiveTurn / peekLiveBlock          — narrow readers (FRI-148 E)
+ *   __snapshotForTest                    — full-graph read surface (test-only)
  *   __resetForTest / __seedForTest       — test seam
  *
  * The in-memory `Map<turnId, LiveTurn>` is module-private; callers
@@ -101,24 +112,6 @@ export class IllegalBlockTransitionError extends Error {
   }
 }
 
-/* ---------------- Absorbed-from-lifecycle types ----------------
- *
- * FRI-125: `ErrorBlockPayload` was defined alongside `insertErrorBlock`
- * in lifecycle.ts. Both moved here under the C2 absorption; the payload
- * type follows the function that consumes it. Exported so worker-error
- * paths in lifecycle.ts can construct one without round-tripping
- * through a defunct re-export.
- */
-
-export interface ErrorBlockPayload {
-  code: string;
-  headline: string;
-  httpStatus?: number;
-  retryAfterSeconds?: number;
-  requestId?: string;
-  rawMessage: string;
-}
-
 /* ---------------- Absorbed live-turns types ---------------- */
 
 export interface LiveBlockState {
@@ -140,6 +133,31 @@ export interface LiveBlockState {
   startedAt: number;
 }
 
+/**
+ * FIFO-bounded id set with cap=1000. Backs {@link LiveTurn.closed} so the
+ * per-turn "already-terminated clientBlockId" memory cannot grow without
+ * bound when a pathological worker emits >1000 blocks in a single turn.
+ * Exposes only the {@link Set} subset M6 actually calls (`.has` / `.add`);
+ * once the cap is reached, the oldest id evicts to make room for the newest.
+ */
+class BoundedClosedSet {
+  private readonly cap = 1000;
+  private readonly order: string[] = [];
+  private readonly set = new Set<string>();
+  add(id: string): void {
+    if (this.set.has(id)) return;
+    this.set.add(id);
+    this.order.push(id);
+    if (this.order.length > this.cap) {
+      const evicted = this.order.shift()!;
+      this.set.delete(evicted);
+    }
+  }
+  has(id: string): boolean {
+    return this.set.has(id);
+  }
+}
+
 export interface LiveTurn {
   turnId: string;
   agent: string;
@@ -152,8 +170,9 @@ export interface LiveTurn {
   /** clientBlockIds that have reached a terminal state this turn. M6 reads
    *  this to reject a delta/close after the block already closed
    *  (BLOCK_ALREADY_CLOSED) and to reject a second `start` for the same id
-   *  (BLOCK_ALREADY_STARTED). Cleared with the turn in {@link endTurn}. */
-  closed: Set<string>;
+   *  (BLOCK_ALREADY_STARTED). Cleared with the turn in {@link tearDownTurn}.
+   *  Bounded FIFO (cap=1000) — see {@link BoundedClosedSet}. */
+  closed: BoundedClosedSet;
   startedAt: number;
 }
 
@@ -191,7 +210,7 @@ function startBlockInternal(args: StartBlockArgs): LiveBlockState {
       agent: args.agentName,
       sessionId: args.sessionId,
       blocks: new Map(),
-      closed: new Set(),
+      closed: new BoundedClosedSet(),
       startedAt: args.ts,
     };
     turns.set(args.turnId, lt);
@@ -477,94 +496,35 @@ export async function cancel(w: LiveWorker, e: WorkerBlockCancel): Promise<void>
 }
 
 /**
- * Synthesize an error block for the current turn (FRI-12 path).
- * Persists one row with `kind="error"` + `status="complete"`, then
- * publishes the matching `block_start` + `block_complete` pair so the
- * dashboard materializes the error bubble.
+ * Read accessor: where would the next block-index for `turnId` land?
  *
- * Idempotent at the row level via `block_id` uniqueness. The
- * block_index is `max(existing in-flight) + 1` when the turn is still
- * live in the accumulator, else `9999` (post-finalize fallback).
+ * Returns `{ index: max(in-flight) + 1, turnLive: true }` when the turn is
+ * still resident in the in-memory accumulator (an open()/append() has fired
+ * for the turn and `endTurn` hasn't dropped it). Returns
+ * `{ index: 0, turnLive: false }` when the turn entry is gone — the caller
+ * decides what fallback to use (the injectors module's `recordError` uses
+ * `9999` per FRI-148 §3, so a synthetic error landing on an already-
+ * finalized turn still sorts last in the canonical block table).
+ *
+ * Lives in the FSM module because the accumulator is module-private. Phase
+ * B split the only synthetic writer that needed this accessor (recordError)
+ * out into block-injectors.ts; the accessor is the read-only seam between
+ * the two modules.
  */
-export async function recordError(
-  w: LiveWorker,
-  payload: ErrorBlockPayload,
-): Promise<{ blockId: string } | null> {
-  const sessionId = w.sessionId ?? "__pending__";
-  const blockId = randomUUID();
-  const ts = Date.now();
-  const lt = turns.get(w.turnId);
-  let blockIndex = 9999;
-  if (lt) {
-    let max = -1;
-    for (const live of lt.blocks.values()) {
-      if (live.blockIndex > max) max = live.blockIndex;
-    }
-    if (max >= 0) blockIndex = max + 1;
-  }
-  const contentJson = JSON.stringify(payload);
-
-  try {
-    await insertBlock({
-      blockId,
-      turnId: w.turnId,
-      agentName: w.agentName,
-      sessionId,
-      messageId: null,
-      blockIndex,
-      role: "assistant",
-      kind: "error",
-      source: null,
-      contentJson,
-      status: "complete",
-      ts,
-    });
-  } catch (err) {
-    logger.log("warn", "blocks.error.insert.fail", {
-      agent: w.agentName,
-      turnId: w.turnId,
-      blockId,
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-
-  eventBus.publish({
-    v: 1,
-    type: "block_start",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    block_id: blockId,
-    message_id: null,
-    block_index: blockIndex,
-    role: "assistant",
-    kind: "error",
-    source: null,
-    ts,
-  });
-  eventBus.publish({
-    v: 1,
-    type: "block_complete",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    block_id: blockId,
-    message_id: null,
-    block_index: blockIndex,
-    role: "assistant",
-    kind: "error",
-    source: null,
-    content_json: contentJson,
-    status: "complete",
-    ts,
-  });
-  return { blockId };
+export function peekNextBlockIndex(turnId: string): { index: number; turnLive: boolean } {
+  const lt = turns.get(turnId);
+  if (!lt) return { index: 0, turnLive: false };
+  let max = -1;
+  for (const live of lt.blocks.values()) if (live.blockIndex > max) max = live.blockIndex;
+  return { index: max + 1, turnLive: true };
 }
 
 /**
- * Worker-exit teardown: for every in-flight block in this worker's turn,
- * persist a best-effort closed row at the supplied terminal status and
- * publish `block_complete`. Called when the worker dies or is archived
- * without sending block-stop for outstanding blocks.
+ * Worker-exit per-block finalize (module-private helper used by
+ * {@link tearDownTurn}). For every in-flight block in this worker's turn,
+ * persist a best-effort closed row at the supplied terminal status and publish
+ * `block_complete`. Called when the worker dies or is archived without sending
+ * block-stop for outstanding blocks.
  *
  * Each block's content_json is assembled via {@link finalizeLiveBlockContent}
  * from whatever text/partial_json accumulated. Tool_use blocks with
@@ -581,10 +541,14 @@ export async function recordError(
  * normal ADR-024 block; M6 replaces that with an existence-keyed choice so
  * neither failure mode (zero-row UPDATE / dup-key INSERT) is possible. Each
  * finalized block transitions to the terminal `closed` set, so a late
- * close/append after finalize is rejected rather than re-writing. The caller
- * should typically follow with {@link endTurn}.
+ * close/append after finalize is rejected rather than re-writing.
+ *
+ * FRI-148 A: the public entrypoint is now {@link tearDownTurn} (the fuse of
+ * the old finalize + endTurn pair). This helper stays as the inner per-block
+ * loop so the INSERT-vs-UPDATE logic + per-block `block_complete` publish lives
+ * exactly once.
  */
-export async function finalize(w: LiveWorker, status: "error" | "aborted"): Promise<void> {
+async function finalizeInFlightBlocks(w: LiveWorker, status: "error" | "aborted"): Promise<void> {
   const lt = turns.get(w.turnId);
   if (!lt) return;
   // Snapshot the in-flight entries before mutating the map inside the loop.
@@ -647,156 +611,32 @@ export async function finalize(w: LiveWorker, status: "error" | "aborted"): Prom
 }
 
 /**
- * Turn-end signal (was `liveTurns.dropTurn`). Removes the per-turn
- * accumulator entry. Called from the daemon's turn-lifecycle paths
- * (exit, error, turn-complete) after any required {@link finalize}.
+ * Worker-exit teardown for a turn (FRI-148 A: the fused finalize + endTurn).
+ * Finalizes every in-flight block at the supplied terminal status (same
+ * per-block INSERT-vs-UPDATE + `block_complete` publish as the old `finalize`),
+ * then drops the per-turn accumulator entry. Replaces the old two-call pair —
+ * the two operations are always done together at every turn-end teardown
+ * (turn-complete, error, hard-exit, force-kill), so fusing them removes the
+ * "did I remember to call endTurn?" footgun and pins the order at the boundary
+ * (writes-then-drop) inside the module.
+ *
+ * Idempotent on already-torn-down turns: a missing accumulator entry makes
+ * `finalizeInFlightBlocks` a no-op and the `turns.delete` redundant.
  */
-export function endTurn(turnId: string): void {
-  turns.delete(turnId);
-}
-
-/* ---------------- User-typed block insertion (FIX_FORWARD 1.2) ---------------- */
-
-export interface RecordUserBlockInput {
-  turnId: string;
-  agentName: string;
-  /** Falls back to '__pending__' if the agent doesn't yet have a session. */
-  sessionId?: string;
-  text: string;
-  source:
-    | "user_chat"
-    | "mail"
-    | "queue_inject"
-    | "scratch"
-    | "agent_spawn"
-    | "schedule"
-    | "refork_notice"
-    | "reminder";
-  /** `complete` for the common path (block is final the moment it's
-   *  written). `queued` for user_chat POSTs that arrived while the agent
-   *  was mid-turn — the row is parked until the worker drains it from
-   *  `nextPrompts`, at which point `dispatchQueuedPrompt` flips it to
-   *  `complete` + new `ts` via `block_meta_update`. Defaults to `complete`. */
-  status?: "complete" | "queued";
-  /** Mail-derived blocks carry sender metadata inside content_json. */
-  fromAgent?: string;
-  /** Mail-derived blocks: extra MailRow metadata serialized into
-   *  content_json so the dashboard can render rich detail (id, subject,
-   *  type, priority, threadId, ts) on the collapsed `MailBlock` without
-   *  a separate fetch. */
-  mailMeta?: {
-    id: number;
-    subject: string | null;
-    type: string;
-    priority: string;
-    threadId: string | null;
-    ts: number;
-  };
-  /** Attachments referenced by this user block (user_chat path). Persisted
-   *  into `content_json.attachments` so reload-from-DB rehydrates the chip
-   *  row in the dashboard. The bytes live on disk under `~/.friday/uploads`
-   *  and are fetched via `GET /api/uploads/<sha>`. */
-  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+export async function tearDownTurn(w: LiveWorker, status: "error" | "aborted"): Promise<void> {
+  await finalizeInFlightBlocks(w, status);
+  turns.delete(w.turnId);
 }
 
 /**
- * Persist a user-role block ahead of (or alongside) a dispatched turn. The
- * row lands with `status='complete'` immediately — there's no streaming
- * lifecycle for user-typed or mail-derived content.
- *
- * FRI-125: absorbed from lifecycle.ts under the C2 deepening; the
- * inlined INSERT + publish replaces the prior `writeAndPublish`
- * helper. Returned `seq` is the eventBus's per-event sequence number,
- * stamped at publish time.
+ * Archive-only bare end-turn. The archived-preserve branch in
+ * `finalizeHardExit` has already finalized rows; this just drops the per-turn
+ * accumulator entry. Narrow export so the rest of the codebase only sees
+ * {@link tearDownTurn}, preserving the "always finalize, then drop" pairing for
+ * every non-archive teardown path.
  */
-export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
-  blockId: string;
-  seq: number;
-}> {
-  const blockId = randomUUID();
-  const ts = Date.now();
-  const status = input.status ?? "complete";
-  const attachments =
-    input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {};
-  const content =
-    input.source === "mail" && input.fromAgent
-      ? {
-          text: input.text,
-          from_agent: input.fromAgent,
-          ...(input.mailMeta
-            ? {
-                mail_id: input.mailMeta.id,
-                mail_subject: input.mailMeta.subject,
-                mail_type: input.mailMeta.type,
-                mail_priority: input.mailMeta.priority,
-                mail_thread_id: input.mailMeta.threadId,
-                mail_ts: input.mailMeta.ts,
-              }
-            : {}),
-          ...attachments,
-        }
-      : { text: input.text, ...attachments };
-  const contentJson = JSON.stringify(content);
-  // FRI-78 follow-up: always publish the canonical `block_complete` SSE
-  // frame, including for `user_chat` + `status='complete'`. Prior to this
-  // the publish was skipped to avoid racing the POST /api/chat/turn
-  // response and double-mounting the optimistic bubble on the sending
-  // browser — but that suppression also denied the message to every
-  // *other* connected client (browser B, mobile, etc.), so they had to
-  // refresh to see the user's own message.
-  //
-  // The dashboard already has the dedup for the SSE-first ordering:
-  // `confirmPending` in chat.svelte.ts collapses a duplicate user
-  // bubble when the SSE arrived before the POST response. Pinned by
-  // chat.test.ts "drops the optimistic bubble when the SSE
-  // block_complete arrived first". The POST-first ordering converges
-  // via the natural `handleBlockComplete` id-match: the optimistic was
-  // re-keyed to `user_<turnId>` in `confirmPending`, and the
-  // subsequent SSE finds the same id and updates in place.
-  await insertBlock({
-    blockId,
-    turnId: input.turnId,
-    agentName: input.agentName,
-    sessionId: input.sessionId ?? "__pending__",
-    messageId: null,
-    blockIndex: 0,
-    role: "user",
-    kind: "text",
-    source: input.source,
-    contentJson,
-    status,
-    ts,
-  });
-  const { seq } = eventBus.publish({
-    v: 1,
-    type: "block_complete",
-    turn_id: input.turnId,
-    agent: input.agentName,
-    block_id: blockId,
-    message_id: null,
-    block_index: 0,
-    role: "user",
-    kind: "text",
-    source: input.source,
-    content_json: contentJson,
-    status,
-    ts,
-  });
-  // FIX_FORWARD 2.8: mail-derived user blocks badge the recipient agent
-  // (a piece of user-visible content just landed in their chat).
-  // user_chat / queue_inject blocks are typed by the user themselves and
-  // need no notification.
-  maybeEmitAgentMessage({
-    agent: input.agentName,
-    turnId: input.turnId,
-    blockId,
-    role: "user",
-    kind: "text",
-    source: input.source,
-    status,
-    contentJson,
-  });
-  return { blockId, seq };
+export function __endTurnForArchivedHardExit(turnId: string): void {
+  turns.delete(turnId);
 }
 
 /* ---------------- Agent-message notification (FIX_FORWARD 2.8) ---------------- */
@@ -811,8 +651,13 @@ export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
  * FRI-125: absorbed from lifecycle.ts under the C2 deepening — every
  * block-row-write path that lands user-visible content (close,
  * recordUserBlock) calls this helper after the publish.
+ *
+ * FRI-148 B: exported so the injectors module (`recordUserBlock`) can
+ * call back into the FSM core's user-visible-content fan-out helper. The
+ * helper itself stays in block-stream.ts so the FSM's own `close` path
+ * doesn't need an outbound import to call it.
  */
-function maybeEmitAgentMessage(opts: {
+export function maybeEmitAgentMessage(opts: {
   agent: string;
   turnId: string;
   blockId: string;
@@ -859,11 +704,35 @@ function maybeEmitAgentMessage(opts: {
 /* ---------------- Public read surface ---------------- */
 
 /**
- * Snapshot of every live turn, primarily for the watchdog's stall/wedge
- * scans. Returns the actual LiveTurn references — callers should treat
- * them as read-only.
+ * Narrow reader: is `turnId` still resident in the in-memory accumulator?
+ * Replaces existence-check drills through the full snapshot — callers that
+ * only need "does this turn still have any in-flight state?" should use
+ * this, not `__snapshotForTest`.
  */
-export function snapshot(): LiveTurn[] {
+export function hasLiveTurn(turnId: string): boolean {
+  return turns.has(turnId);
+}
+
+/**
+ * Narrow reader: peek a single in-flight block by `(turnId, clientBlockId)`.
+ * Returns the LiveBlockState read-only, or `null` if the turn isn't resident
+ * or the block isn't open. Replaces single-field drills through the full
+ * snapshot for callers that already know which block they want to inspect.
+ */
+export function peekLiveBlock(
+  turnId: string,
+  clientBlockId: string,
+): Readonly<LiveBlockState> | null {
+  return turns.get(turnId)?.blocks.get(clientBlockId) ?? null;
+}
+
+/**
+ * Full-graph snapshot of every live turn. Test-only: production code uses the
+ * narrow readers ({@link hasLiveTurn}, {@link peekLiveBlock}) — they cover
+ * every observed access pattern. The `__` prefix matches the existing
+ * `__seedForTest` / `__resetForTest` convention.
+ */
+export function __snapshotForTest(): LiveTurn[] {
   return [...turns.values()];
 }
 
@@ -893,7 +762,14 @@ export function __seedForTest(seed: {
     agent: seed.agent,
     sessionId: seed.sessionId,
     blocks: map,
-    closed: new Set(),
+    closed: new BoundedClosedSet(),
     startedAt: seed.startedAt ?? Date.now(),
   });
 }
+
+/**
+ * Test seam: re-export {@link BoundedClosedSet} under the `__…ForTest`
+ * naming convention so the eviction unit test can construct an instance
+ * directly without leaking the class into the production surface.
+ */
+export { BoundedClosedSet as __BoundedClosedSetForTest };

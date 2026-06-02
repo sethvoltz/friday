@@ -109,7 +109,7 @@ import {
   peekLiveWorker,
   removeQueuedPrompt,
 } from "../agent/lifecycle.js";
-import { recordUserBlock } from "../agent/block-stream.js";
+import { recordUserBlock } from "../agent/block-injectors.js";
 import { getBlockById } from "@friday/shared/services";
 import { generateScratchName } from "../agent/scratch-names.js";
 import { archiveWorkspace, createWorkspace, workspacePath } from "../agent/workspace.js";
