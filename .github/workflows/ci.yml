@@ -35,10 +35,6 @@ jobs:
     # timeouts — File A exhausting connections starved File B's spawn.
     # Matching the e2e job's 200/20/20 removes that pressure.
 
-    strategy:
-      matrix:
-        node-version: [22]
-
     steps:
       - uses: actions/checkout@v6
 
@@ -46,7 +42,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Start Postgres (raised connection ceiling)
@@ -86,10 +82,6 @@ jobs:
     name: Checks
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        node-version: [22]
-
     steps:
       - uses: actions/checkout@v6
 
@@ -97,7 +89,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Install dependencies
@@ -119,10 +111,6 @@ jobs:
     # @typescript-eslint/no-floating-promises) that would need a
     # parserOptions.project across every package's tsconfig.
 
-    strategy:
-      matrix:
-        node-version: [22]
-
     steps:
       - uses: actions/checkout@v6
 
@@ -130,7 +118,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Install dependencies
@@ -156,10 +144,6 @@ jobs:
     # file spawns daemon + dashboard + zero-cache subprocesses (~7s per
     # file). The full suite is on the order of 30-60s; not worth running
     # on every push of every unrelated PR diff.
-    strategy:
-      matrix:
-        node-version: [22]
-
     steps:
       - uses: actions/checkout@v6
 
@@ -167,7 +151,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Start Postgres (logical replication enabled)
@@ -205,10 +189,6 @@ jobs:
     name: E2E (Playwright browser)
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        node-version: [22]
-
     steps:
       - uses: actions/checkout@v6
 
@@ -216,7 +196,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Start Postgres (logical replication enabled)

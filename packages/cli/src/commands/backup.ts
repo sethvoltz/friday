@@ -43,6 +43,7 @@ import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import pc from "picocolors";
 import { DATA_DIR } from "@friday/shared";
+import pkg from "../../package.json" with { type: "json" };
 
 /** Files / directories — relative to DATA_DIR — that go in every backup
  *  when they exist. Anything missing is silently skipped (e.g. a fresh
@@ -147,7 +148,7 @@ export const backupCommand = defineCommand({
         bundleId: randomUUID(),
         schemaVersion: 1,
         postgresDumpSha256: dumpSha,
-        fridayVersion: readFridayVersion(),
+        fridayVersion: pkg.version,
         files: fileInventory,
       };
       writeFileSync(join(stageDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
@@ -178,28 +179,6 @@ function resolveOutputPath(arg: unknown): string {
   if (typeof arg === "string" && arg.length > 0) return arg;
   const ts = new Date().toISOString().replace(/[:.]/g, "-").replace(/T/, "_").replace(/Z$/, "");
   return join(DATA_DIR, "backups", `${ts}.tar.gz`);
-}
-
-function readFridayVersion(): string {
-  // Walk up from this file to the repo root's package.json.
-  const here = new URL(".", import.meta.url).pathname;
-  let dir = here;
-  for (let i = 0; i < 8; i++) {
-    const pkg = join(dir, "package.json");
-    if (existsSync(pkg)) {
-      try {
-        const parsed = JSON.parse(readFileSync(pkg, "utf8")) as {
-          name?: string;
-          version?: string;
-        };
-        if (parsed.name === "friday" && parsed.version) return parsed.version;
-      } catch {
-        /* keep walking */
-      }
-    }
-    dir = dirname(dir);
-  }
-  return "unknown";
 }
 
 function sha256File(path: string): string {

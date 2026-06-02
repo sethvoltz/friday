@@ -18,6 +18,8 @@ import {
 import { DaemonClient } from "../lib/api.js";
 import { BANNER } from "../lib/branding.js";
 import { launchdJobStatus } from "./status.js";
+import { FRIDAY_LAUNCHD_LABEL } from "../lib/launchd.js";
+import { currentLink } from "../lib/install-paths.js";
 
 export const doctorCommand = defineCommand({
   meta: { name: "doctor", description: "Check system health" },
@@ -50,19 +52,55 @@ export const doctorCommand = defineCommand({
       check("primary account exists", accountOk, accountOk ? undefined : "run `friday setup`"),
     );
 
-    // launchd supervisor (homebrew.mxcl.friday). Replaces the pre-FRI-88
+    // launchd supervisor (com.sethvoltz.friday). Replaces the pre-FRI-88
     // tmux check — the supervised set lives in one launchd job now, not
-    // a tmux session per service.
-    const fridayJob = launchdJobStatus("homebrew.mxcl.friday");
+    // a tmux session per service. Friday writes the plist directly
+    // (FRI-146 / ADR-034), not via brew.
+    const fridayJob = launchdJobStatus(FRIDAY_LAUNCHD_LABEL);
     checks.push(
       check(
-        "friday-supervisor (launchd: homebrew.mxcl.friday)",
+        `friday-supervisor (launchd: ${FRIDAY_LAUNCHD_LABEL})`,
         fridayJob.loaded,
         fridayJob.loaded
           ? undefined
-          : "not loaded — `brew services start friday` (or `friday start`). Install via `brew install sethvoltz/friday/friday` if you haven't yet.",
+          : "not loaded — run `friday start`. Install via `curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash`, then `friday update` to upgrade.",
       ),
     );
+
+    // fnm + .node-version pin + install symlink (FRI-146 / ADR-034). The
+    // supervisor is launched via `fnm exec` reading the install tree's
+    // `.node-version`; without fnm on PATH the launchd job can't resolve
+    // node. The `current` symlink is the install-tree pointer.
+    const fnmOk = spawnSync("which", ["fnm"], { encoding: "utf8" }).status === 0;
+    checks.push(
+      check(
+        "fnm installed",
+        fnmOk,
+        fnmOk ? undefined : "node version manager missing — `brew install fnm`",
+      ),
+    );
+    const link = currentLink();
+    const installOk = existsSync(link);
+    checks.push(
+      check(
+        `install tree ${link}`,
+        installOk,
+        installOk
+          ? undefined
+          : "not installed via the curl installer — `curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash`",
+      ),
+    );
+    if (installOk) {
+      const nodeVersionFile = join(link, ".node-version");
+      const pinOk = existsSync(nodeVersionFile);
+      checks.push(
+        check(
+          ".node-version pin present",
+          pinOk,
+          pinOk ? undefined : "install tree is missing `.node-version` — re-run `friday update`",
+        ),
+      );
+    }
 
     // claude
     const claude = spawnSync("which", ["claude"], { encoding: "utf8" });

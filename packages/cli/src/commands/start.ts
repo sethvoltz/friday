@@ -1,6 +1,5 @@
 import { defineCommand } from "citty";
 import pc from "picocolors";
-import { spawnSync } from "node:child_process";
 import {
   ensureFridayEnv,
   loadConfig,
@@ -8,14 +7,18 @@ import {
   resolveDashboardPort,
   SERVICES,
 } from "@friday/shared";
+import * as launchd from "../lib/launchd.js";
+import { currentLink } from "../lib/install-paths.js";
 
 /**
- * `friday start` — thin alias over `brew services start friday`.
+ * `friday start` — thin alias over `launchctl bootstrap` (FRI-146 /
+ * ADR-034).
  *
- * Post-FRI-88, supervision lives in launchd via the Homebrew formula
- * (`sethvoltz/friday/friday`). The plist runs `friday-supervisor`,
- * which forks daemon + dashboard + zero-cache as children with proper
- * process-group cascade-stop semantics. The tmux era is over.
+ * Supervision lives in launchd via a plist Friday writes directly
+ * (label `com.sethvoltz.friday`), bootstrapped via `launchctl bootstrap`.
+ * The plist runs `friday-supervisor` through `fnm exec`, which forks
+ * daemon + dashboard + zero-cache as children with proper process-group
+ * cascade-stop semantics. The tmux era is over.
  *
  * Single-service starts (`friday start daemon`) error out — the
  * supervisor owns the whole stack atomically. Operators bounce
@@ -29,16 +32,11 @@ import {
  * it up automatically — `friday start` doesn't need to touch it.
  */
 
-function brewFridayInstalled(): boolean {
-  const r = spawnSync("brew", ["list", "friday"], { stdio: "ignore" });
-  return r.status === 0;
-}
-
 export const startCommand = defineCommand({
   meta: {
     name: "start",
     description:
-      "Start Friday's prod stack (delegates to `brew services start friday`). For dev hot-reload, use `pnpm dev:daemon` / `pnpm dev:dashboard`.",
+      "Start Friday's prod stack (launchd-supervised). For dev hot-reload, use `pnpm dev:daemon` / `pnpm dev:dashboard`.",
   },
   args: {
     service: {
@@ -52,27 +50,28 @@ export const startCommand = defineCommand({
       console.error(pc.red(`single-service operations not supported under launchd supervision.`));
       console.error(`  the supervisor owns the whole stack atomically; bounce it with:`);
       console.error(`    ${pc.cyan("friday restart")}    # whole stack`);
-      console.error(`    ${pc.cyan("brew services restart friday")}    # same thing, no alias`);
       console.error(`  per-service IPC is an explicit follow-up ticket — see ADR-028.`);
       process.exit(1);
     }
 
     ensureFridayEnv();
 
-    if (!brewFridayInstalled()) {
-      console.error(pc.red("Friday isn't installed via brew."));
-      console.error(`  install: ${pc.cyan("brew install sethvoltz/friday/friday")}`);
+    // Bootstrap (or kickstart, if already loaded) the supervisor's launchd
+    // job from the `current` install tree.
+    console.log(pc.green("starting friday stack via launchd"));
+    try {
+      if (launchd.isBootstrapped()) {
+        launchd.kickstart();
+      } else {
+        launchd.bootstrap(currentLink());
+      }
+    } catch (err) {
+      console.error(pc.red(`failed to start friday: ${err instanceof Error ? err.message : err}`));
       console.error(
-        `  this CLI delegates to ${pc.cyan("brew services start friday")} — no formula, no supervision.`,
+        `  not installed? ${pc.cyan("curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash")}`,
       );
       process.exit(1);
     }
-
-    console.log(pc.green("starting friday stack via brew services"));
-    const r = spawnSync("brew", ["services", "start", "friday"], {
-      stdio: "inherit",
-    });
-    if (r.status !== 0) process.exit(r.status ?? 1);
 
     // cloudflared is supervised independently via its own launchd job
     // (`com.cloudflare.cloudflared`), installed by `friday setup --cloudflare`.

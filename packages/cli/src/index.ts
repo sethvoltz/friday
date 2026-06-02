@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { defineCommand, runMain } from "citty";
+import pkg from "../package.json" with { type: "json" };
 import { setupCommand } from "./commands/setup.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { startCommand } from "./commands/start.js";
@@ -20,11 +21,14 @@ import { appsCommand } from "./commands/apps.js";
 import { backupCommand } from "./commands/backup.js";
 import { restoreCommand } from "./commands/restore.js";
 import { exportLegacySqliteCommand } from "./commands/export-legacy-sqlite.js";
+import { updateCommand } from "./commands/update.js";
+import { uninstallCommand } from "./commands/uninstall.js";
+import { maybePrintVersion } from "./lib/version.js";
 
 const main = defineCommand({
   meta: {
     name: "friday",
-    version: "0.0.1",
+    version: pkg.version,
     description: "Friday — local-first AI orchestrator",
   },
   subCommands: {
@@ -48,7 +52,15 @@ const main = defineCommand({
     backup: backupCommand,
     restore: restoreCommand,
     "export-legacy-sqlite": exportLegacySqliteCommand,
+    update: updateCommand,
+    uninstall: uninstallCommand,
   },
 });
+
+// `friday --version` must print a clean, parseable version on stdout; citty's
+// own version path routes through consola, which prefixes `[log] ` in CI/pipes.
+if (maybePrintVersion(process.argv.slice(2), pkg.version)) {
+  process.exit(0);
+}
 
 void runMain(main);

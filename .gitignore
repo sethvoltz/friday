@@ -11,3 +11,4 @@ build/
 .commit-msg.tmp
 .playwright-mcp/
 .claude/
+dist-pack/

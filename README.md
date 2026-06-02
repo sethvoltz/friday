@@ -96,9 +96,11 @@ Installs:
 - **`postgresql@18`** — Friday's canonical store. Managed by `brew services`, lifecycle-independent of `friday start/stop`.
 - **`claude-code`** — Claude Code CLI; runs the Agent SDK against the Pro/Max subscription tied to your interactive `claude` login (no `ANTHROPIC_API_KEY` needed once signed in)
 - **`gh`** — GitHub CLI for Builders to clone and open PRs
+- **`fnm`** — Fast Node Manager; resolves the pinned Node from `.node-version` (`22.21.1`) and is how the launchd-supervised stack launches Node, ABI-matched to the pre-baked native modules (ADR-034)
+- **`pnpm`** — build/dev-time package manager (CI packs the release tarball, contributors build from source); not on Friday's runtime path
 - **`cloudflared`** — Cloudflare Tunnel client (optional, for public reachability)
 
-`tmux` is no longer required — Friday's prod supervision moved to launchd via the Homebrew formula (see ADR-028). Contributors who want it for the dev workflow can `brew install tmux` separately.
+`tmux` is no longer required — Friday's prod supervision moved to launchd, with the plist written directly by the installer (see ADR-028 and ADR-034). Contributors who want it for the dev workflow can `brew install tmux` separately.
 
 Built and tested against Node 22 and pnpm 10. Start Postgres if it isn't already running:
 
@@ -111,12 +113,12 @@ brew services start postgresql@18
 ### 2. Install Friday
 
 ```bash
-brew install sethvoltz/friday/friday
+curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash
 ```
 
-The formula auto-taps `sethvoltz/homebrew-friday`, installs Node + pnpm + `postgresql@18` + `cloudflared` (if missing), clones Friday's source, and runs `pnpm install --prod && pnpm -r build`. First install takes 5–10 minutes; subsequent `brew upgrade friday` runs are faster.
+The installer downloads a **pre-baked release tarball** (no on-device build), verifies its `shasum -a 256`, ensures the pinned Node via `fnm install` (reading `.node-version`), extracts to `~/.local/share/friday/versions/<version>/`, flips the `~/.local/share/friday/current` symlink, drops a `~/.local/bin/friday` shim on your PATH, and writes + bootstraps the launchd plist (`com.sethvoltz.friday`) directly. It finishes in seconds — there's no `pnpm install`/`pnpm -r build` step on your machine. Re-running it updates in place; `friday update` does the same from the CLI (see [CLI](#cli)).
 
-Source-editing contributors who don't want to install via brew can clone + `pnpm install + pnpm build` from the repo — see [Developing Friday](#developing-friday) below. The dev workflow doesn't need the brew formula.
+Source-editing contributors who don't want the curl installer can clone + `pnpm install + pnpm build` from the repo — see [Developing Friday](#developing-friday) below. The dev workflow doesn't need the release tarball.
 
 ### 3. First-time setup
 
@@ -129,14 +131,14 @@ Provisions the `friday` Postgres database and role, runs initial Drizzle migrati
 ### 4. Run
 
 ```bash
-friday start             # delegates to `brew services start friday`
+friday start             # bootstrap/kickstart the launchd job (com.sethvoltz.friday)
 
 friday status            # supervisor + per-service status + probed ports
 friday attach daemon     # tail ~/.friday/logs/<service>.jsonl (Ctrl-C exits)
 friday logs --follow     # tail the daemon's structured log
 ```
 
-`friday start` starts the launchd-supervised stack (daemon + dashboard + zero-cache, owned by one supervisor process — ADR-028). The supervisor's `RunAtLoad: true` means Friday comes back up automatically after Mac reboot/login; you don't have to `friday start` again.
+`friday start` starts the launchd-supervised stack (daemon + dashboard + zero-cache, owned by one supervisor process — ADR-028) by writing + bootstrapping the `com.sethvoltz.friday` launchd job directly (`launchctl bootstrap`/`kickstart`, ADR-034) — no `brew services`. The supervisor's `RunAtLoad: true` means Friday comes back up automatically after Mac reboot/login; you don't have to `friday start` again.
 
 `friday start` prints the local dashboard URL (`http://localhost:7615`) on launch — open it and sign in.
 
@@ -159,12 +161,16 @@ The `friday` CLI manages services and inspects state. Inspection commands work r
 # Lifecycle
 friday setup [--cloudflare] [--reset-password]
 friday doctor                                  # data dir, db, account, external CLIs
-friday start                                   # `brew services start friday` (whole stack atomically)
-friday stop                                    # `brew services stop friday` (cascade-stops every child)
-friday restart                                 # `brew services restart friday`
+friday start                                   # bootstrap/kickstart the launchd job (whole stack atomically)
+friday stop                                    # bootout the launchd job (cascade-stops every child)
+friday restart                                 # launchctl kickstart -k the launchd job
 friday status                                  # supervisor + service state + probed ports
 friday attach <daemon|dashboard|zero-cache>    # `tail -F ~/.friday/logs/<service>.jsonl`
 friday logs [daemon|dashboard|zero-cache|tunnel] [--follow]
+
+# Install lifecycle (ADR-034)
+friday update [--check] [--rollback]           # download + verify + extract latest; flip current symlink; kickstart
+friday uninstall [--data=keep|delete] [--yes]  # remove the install tree + launchd job; ~/.friday preserved by default
 
 # Inspection (read-only; daemon optional)
 friday agents ls
@@ -217,7 +223,10 @@ agent-friday/
 │   │                       MCP servers, EventBus, SSE, scheduler, watchdog
 │   └── dashboard/          @friday/dashboard — SvelteKit + Svelte 5 (runes),
 │                           BetterAuth, adapter-node, PWA
-├── bin/                    Dev shim — invokes packages/cli/dist/index.js
+├── bin/                    friday + friday-supervisor shims — exec through fnm (ADR-034)
+├── packaging/              pack.mjs — builds the pre-baked release tarball (ADR-034)
+├── install.sh              Curl-installable installer (ADR-034)
+├── .node-version           Pinned Node (22.21.1) — single Node-pin source of truth
 └── docs/                   Architecture, setup, ADRs, sandbox, UX, roadmap
 ```
 
