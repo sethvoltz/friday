@@ -27,7 +27,8 @@
  *   __endTurnForArchivedHardExit         — narrow archive-only bare end-turn (FRI-148 A)
  *   peekNextBlockIndex                   — read accessor used by recordError
  *   maybeEmitAgentMessage                — user-visible-content fan-out (used by injectors)
- *   snapshot                             — read surface for watchdog + tests
+ *   hasLiveTurn / peekLiveBlock          — narrow readers (FRI-148 E)
+ *   __snapshotForTest                    — full-graph read surface (test-only)
  *   __resetForTest / __seedForTest       — test seam
  *
  * The in-memory `Map<turnId, LiveTurn>` is module-private; callers
@@ -680,11 +681,35 @@ export function maybeEmitAgentMessage(opts: {
 /* ---------------- Public read surface ---------------- */
 
 /**
- * Snapshot of every live turn, primarily for the watchdog's stall/wedge
- * scans. Returns the actual LiveTurn references — callers should treat
- * them as read-only.
+ * Narrow reader: is `turnId` still resident in the in-memory accumulator?
+ * Replaces existence-check drills through the full snapshot — callers that
+ * only need "does this turn still have any in-flight state?" should use
+ * this, not `__snapshotForTest`.
  */
-export function snapshot(): LiveTurn[] {
+export function hasLiveTurn(turnId: string): boolean {
+  return turns.has(turnId);
+}
+
+/**
+ * Narrow reader: peek a single in-flight block by `(turnId, clientBlockId)`.
+ * Returns the LiveBlockState read-only, or `null` if the turn isn't resident
+ * or the block isn't open. Replaces single-field drills through the full
+ * snapshot for callers that already know which block they want to inspect.
+ */
+export function peekLiveBlock(
+  turnId: string,
+  clientBlockId: string,
+): Readonly<LiveBlockState> | null {
+  return turns.get(turnId)?.blocks.get(clientBlockId) ?? null;
+}
+
+/**
+ * Full-graph snapshot of every live turn. Test-only: production code uses the
+ * narrow readers ({@link hasLiveTurn}, {@link peekLiveBlock}) — they cover
+ * every observed access pattern. The `__` prefix matches the existing
+ * `__seedForTest` / `__resetForTest` convention.
+ */
+export function __snapshotForTest(): LiveTurn[] {
   return [...turns.values()];
 }
 

@@ -118,7 +118,7 @@ interface CapturedTrace {
 
 async function captureTrace(action: () => Promise<void>): Promise<CapturedTrace> {
   const { eventBus } = await import("../events/bus.js");
-  const { snapshot } = await import("./block-stream.js");
+  const { __snapshotForTest } = await import("./block-stream.js");
   const captured: WireEventLike[] = [];
   const unsub = eventBus.subscribe((e) => captured.push(e as WireEventLike));
   try {
@@ -143,7 +143,7 @@ async function captureTrace(action: () => Promise<void>): Promise<CapturedTrace>
       status: r.status,
       streaming: r.streaming,
     })),
-    snapshotAfter: snapshot().map((lt) => ({
+    snapshotAfter: __snapshotForTest().map((lt) => ({
       turnId: lt.turnId,
       agent: lt.agent,
       sessionId: lt.sessionId,
@@ -418,7 +418,7 @@ describe("block-stream (FRI-125)", () => {
     // finalize + drop. Driving it against an open-only turn finalizes the
     // single in-flight block (writes a row with the supplied terminal
     // status) AND drops the LiveTurn entry from the accumulator.
-    const { open, tearDownTurn, snapshot } = await import("./block-stream.js");
+    const { open, tearDownTurn, hasLiveTurn } = await import("./block-stream.js");
     const worker = makeFakeWorker({ turnId: "turn-end-1" });
 
     await open(worker as never, {
@@ -427,14 +427,14 @@ describe("block-stream (FRI-125)", () => {
       kind: "text",
       blockIndex: 0,
     });
-    expect(snapshot().length).toBe(1);
+    expect(hasLiveTurn("turn-end-1")).toBe(true);
 
     await tearDownTurn(worker as never, "aborted");
-    expect(snapshot()).toEqual([]);
+    expect(hasLiveTurn("turn-end-1")).toBe(false);
   });
 
   it("__seedForTest seeds the accumulator without driving public IPC", async () => {
-    const { __seedForTest, snapshot } = await import("./block-stream.js");
+    const { __seedForTest, __snapshotForTest } = await import("./block-stream.js");
 
     __seedForTest({
       turnId: "turn-seed-1",
@@ -460,7 +460,7 @@ describe("block-stream (FRI-125)", () => {
       startedAt: 1_700_000_000_000,
     });
 
-    const snap = snapshot();
+    const snap = __snapshotForTest();
     expect(snap.length).toBe(1);
     expect(snap[0].turnId).toBe("turn-seed-1");
     expect(snap[0].blocks.size).toBe(1);
@@ -686,10 +686,9 @@ describe("block-stream per-block state machine (FRI-145 M6)", () => {
     expect((worker as { blocksThisTurn: number }).blocksThisTurn).toBe(1);
     // open() never INSERTs (ADR-024), so no row regardless; the guard's job is
     // to protect the accumulator entry from being clobbered, which we verify
-    // via the snapshot: the original (blockIndex 0) entry survives intact.
-    const { snapshot } = await import("./block-stream.js");
-    const lt = snapshot().find((t) => t.turnId === "turn-m6-ds");
-    expect(lt?.blocks.get("cb-1")?.blockIndex).toBe(0);
+    // via peekLiveBlock: the original (blockIndex 0) entry survives intact.
+    const { peekLiveBlock } = await import("./block-stream.js");
+    expect(peekLiveBlock("turn-m6-ds", "cb-1")?.blockIndex).toBe(0);
     expect(await dbRowCount()).toBe(0);
   });
 

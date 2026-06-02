@@ -131,7 +131,7 @@ interface CapturedTrace {
 
 async function captureTrace(action: () => Promise<void>): Promise<CapturedTrace> {
   const { eventBus } = await import("../events/bus.js");
-  const { snapshot } = await import("./block-stream.js");
+  const { __snapshotForTest } = await import("./block-stream.js");
   const captured: WireEventLike[] = [];
   const unsub = eventBus.subscribe((e) => captured.push(e as WireEventLike));
   try {
@@ -156,7 +156,7 @@ async function captureTrace(action: () => Promise<void>): Promise<CapturedTrace>
       status: r.status,
       streaming: r.streaming,
     })),
-    snapshotAfter: snapshot().map((lt) => ({
+    snapshotAfter: __snapshotForTest().map((lt) => ({
       turnId: lt.turnId,
       agent: lt.agent,
       sessionId: lt.sessionId,
@@ -243,10 +243,10 @@ describe("block-injectors.recordUserBlock (FRI-148 B)", () => {
     const { recordUserBlock } = await import("./block-injectors.js");
     const { eventBus } = await import("../events/bus.js");
     const { getBlockById } = await import("@friday/shared/services");
-    const { snapshot } = await import("./block-stream.js");
+    const { __snapshotForTest } = await import("./block-stream.js");
 
     // Sanity: no live turn in the accumulator before we call.
-    expect(snapshot()).toEqual([]);
+    expect(__snapshotForTest()).toEqual([]);
 
     const captured: Array<{ type?: string; block_id?: string; status?: string; role?: string }> =
       [];
@@ -284,6 +284,6 @@ describe("block-injectors.recordUserBlock (FRI-148 B)", () => {
 
     // recordUserBlock does NOT touch the FSM accumulator — the snapshot
     // stays empty (unlike open(), which seeds a LiveTurn entry).
-    expect(snapshot()).toEqual([]);
+    expect(__snapshotForTest()).toEqual([]);
   });
 });
