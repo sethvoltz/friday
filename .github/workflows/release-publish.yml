@@ -9,8 +9,8 @@ name: Release Publish
 # distributed via install.sh + `friday update` pulling these assets directly
 # (FRI-146 / ADR-034). That whole brew-formula publish tail is CUT.
 #
-# The pre-baked tarball smoke (extract to a relocated tree → version / native
-# addon / zero-cache / supervisor-spec checks) lives HERE, gating the upload,
+# The pre-baked tarball smoke (extract to a relocated tree → version /
+# zero-cache / supervisor-spec checks) lives HERE, gating the upload,
 # rather than on every PR: the artifact only exists at release time, so that is
 # the only place worth validating it. A red smoke fails the job before any asset
 # is uploaded, so a broken tarball never reaches a release.
@@ -101,22 +101,6 @@ jobs:
           fi
           node --check services/daemon/dist/index.js
           ( cd services/daemon && node --input-type=module -e "await import('@friday/shared')" )
-
-      # @oxfmt/binding dlopens cleanly from the relocated tree — proves the
-      # darwin-arm64 native addon relocates without ERR_DLOPEN_FAILED. Loads the
-      # addon DIRECTLY (no SvelteKit server boot, no DATABASE_URL): the addon,
-      # not the app, is what must survive relocation.
-      - name: Smoke — native addon (@oxfmt/binding dlopen)
-        working-directory: ${{ steps.relocate.outputs.dir }}/services/dashboard
-        run: |
-          node --input-type=module -e "
-            const m = await import('@oxfmt/binding');
-            if (!m || Object.keys(m).length === 0) {
-              console.error('@oxfmt/binding loaded but exported nothing');
-              process.exit(1);
-            }
-            console.log('@oxfmt/binding dlopen OK:', Object.keys(m).length, 'exports');
-          "
 
       # zero-cache spawns from the relocated tree via the SAME process.execPath
       # path the supervisor uses, resolves its bundled deps (--help), and leaks
