@@ -23,6 +23,7 @@ import { restoreCommand } from "./commands/restore.js";
 import { exportLegacySqliteCommand } from "./commands/export-legacy-sqlite.js";
 import { updateCommand } from "./commands/update.js";
 import { uninstallCommand } from "./commands/uninstall.js";
+import { maybePrintVersion } from "./lib/version.js";
 
 const main = defineCommand({
   meta: {
@@ -55,5 +56,11 @@ const main = defineCommand({
     uninstall: uninstallCommand,
   },
 });
+
+// `friday --version` must print a clean, parseable version on stdout; citty's
+// own version path routes through consola, which prefixes `[log] ` in CI/pipes.
+if (maybePrintVersion(process.argv.slice(2), pkg.version)) {
+  process.exit(0);
+}
 
 void runMain(main);
