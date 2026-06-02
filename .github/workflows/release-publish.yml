@@ -8,6 +8,12 @@ name: Release Publish
 # NO formula render, NO GitHub-App token, NO brew-tap push: Friday is
 # distributed via install.sh + `friday update` pulling these assets directly
 # (FRI-146 / ADR-033). That whole brew-formula publish tail is CUT.
+#
+# The pre-baked tarball smoke (extract to a relocated tree → version / native
+# addon / zero-cache / supervisor-spec checks) lives HERE, gating the upload,
+# rather than on every PR: the artifact only exists at release time, so that is
+# the only place worth validating it. A red smoke fails the job before any asset
+# is uploaded, so a broken tarball never reaches a release.
 
 on:
   release:
@@ -58,6 +64,102 @@ jobs:
       - name: Pack the pre-baked tarball
         id: pack
         run: node packaging/pack.mjs --out dist-pack
+
+      # macos-latest ships Homebrew but not fnm, which the bundled `bin/friday`
+      # shim execs through (it ignores setup-node's PATH and goes via
+      # `$(brew --prefix)/bin/fnm`). Needed by the version smoke below.
+      - name: Install fnm
+        run: brew install fnm
+
+      # Extract to an ABSOLUTE path DIFFERENT from the pack CWD — the relocation
+      # hazard only surfaces when the runtime tree lives somewhere other than
+      # where pnpm installed it. NO on-device pnpm install.
+      - name: Extract to a relocated tree
+        id: relocate
+        run: |
+          RELOCATED="$RUNNER_TEMP/friday-relocated"
+          mkdir -p "$RELOCATED"
+          tar -xzf "${{ steps.pack.outputs.tarball }}" -C "$RELOCATED"
+          echo "dir=$RELOCATED" >> "$GITHUB_OUTPUT"
+          ls -la "$RELOCATED"
+
+      # friday --version (via the bundled shim, through fnm) equals the root
+      # version; the daemon entry parses; @friday/shared imports from the
+      # relocated tree. The shim is invoked by ABSOLUTE path from a CWD with NO
+      # .node-version, mirroring a real user's $HOME/.local/bin/friday call.
+      - name: Smoke — version + daemon entry + shared import
+        working-directory: ${{ steps.relocate.outputs.dir }}
+        run: |
+          TREE="$(pwd)"
+          EXPECTED="$(node -e "console.log(require('./package.json').version)")"
+          fnm install || true
+          ACTUAL="$(cd "$RUNNER_TEMP" && "$TREE/bin/friday" --version)"
+          echo "friday --version (no .node-version in CWD) => $ACTUAL (expected $EXPECTED)"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::friday --version ($ACTUAL) != root version ($EXPECTED)"
+            exit 1
+          fi
+          node --check services/daemon/dist/index.js
+          ( cd services/daemon && node --input-type=module -e "await import('@friday/shared')" )
+
+      # @oxfmt/binding dlopens cleanly from the relocated tree — proves the
+      # darwin-arm64 native addon relocates without ERR_DLOPEN_FAILED. Loads the
+      # addon DIRECTLY (no SvelteKit server boot, no DATABASE_URL): the addon,
+      # not the app, is what must survive relocation.
+      - name: Smoke — native addon (@oxfmt/binding dlopen)
+        working-directory: ${{ steps.relocate.outputs.dir }}/services/dashboard
+        run: |
+          node --input-type=module -e "
+            const m = await import('@oxfmt/binding');
+            if (!m || Object.keys(m).length === 0) {
+              console.error('@oxfmt/binding loaded but exported nothing');
+              process.exit(1);
+            }
+            console.log('@oxfmt/binding dlopen OK:', Object.keys(m).length, 'exports');
+          "
+
+      # zero-cache spawns from the relocated tree via the SAME process.execPath
+      # path the supervisor uses, resolves its bundled deps (--help), and leaks
+      # NO pack-time path (NODE_PATH scrubbed so any resolution must come from
+      # the relocated node_modules).
+      - name: Smoke — zero-cache serves from the relocated tree (no NODE_PATH leak)
+        working-directory: ${{ steps.relocate.outputs.dir }}
+        env:
+          PACK_CWD: ${{ github.workspace }}
+        run: |
+          ZERO_CLI="services/dashboard/node_modules/@rocicorp/zero/out/zero/src/cli.js"
+          if [ ! -f "$ZERO_CLI" ]; then
+            echo "::error::relocated zero-cache cli.js missing at $ZERO_CLI"
+            exit 1
+          fi
+          OUT="$(env -u NODE_PATH "$(node -e 'console.log(process.execPath)')" "$ZERO_CLI" --help 2>&1)" || {
+            echo "$OUT"
+            echo "::error::zero-cache --help failed to resolve bundled deps from the relocated tree"
+            exit 1
+          }
+          echo "$OUT" | head -20
+          if printf '%s' "$OUT" | grep -qF "$PACK_CWD"; then
+            echo "::error::zero-cache output referenced the pack CWD ($PACK_CWD) — NODE_PATH leaked"
+            exit 1
+          fi
+          echo "zero-cache resolved from the relocated tree with no pack-CWD leak"
+
+      # Supervisor specs spawn children via process.execPath (never pnpm / a
+      # .bin shim) — introspect the built buildSpecs() with pnpm off PATH.
+      - name: Smoke — supervisor specs spawn via process.execPath (no pnpm)
+        working-directory: ${{ steps.relocate.outputs.dir }}
+        run: |
+          node --input-type=module -e "
+            import { buildSpecs } from './packages/cli/dist/bin/supervisor.js';
+            const specs = buildSpecs(process.cwd());
+            let bad = 0;
+            for (const s of specs) {
+              if (s.cmd !== process.execPath) { console.error('spec', s.name, 'cmd is', s.cmd); bad++; }
+              if (s.cmd === 'pnpm' || s.args.some((a) => a === 'exec')) { console.error('spec', s.name, 'routes through pnpm'); bad++; }
+            }
+            if (bad > 0) process.exit(1);
+            console.log('all supervisor child specs spawn via process.execPath');
+          "
 
       - name: Upload release assets
         env:
