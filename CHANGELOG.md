@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/sethvoltz/friday/compare/v1.1.0...v1.1.1) (2026-06-03)
+
+
+### Bug Fixes
+
+* **packaging:** relativize symlinks so the tarball relocates; drop claude-code from Brewfile ([#157](https://github.com/sethvoltz/friday/issues/157)) ([6259301](https://github.com/sethvoltz/friday/commit/6259301cf73c29ff53ce1ca207dc3eab57e16cb9))
+
 ## [1.1.0](https://github.com/sethvoltz/friday/compare/v1.0.0...v1.1.0) (2026-06-03)
 
 
