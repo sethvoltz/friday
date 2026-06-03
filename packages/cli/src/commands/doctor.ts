@@ -10,6 +10,7 @@ import {
   FRIDAY_PG_CONSTANTS,
   LOGS_DIR,
   SOUL_PATH,
+  closeDb,
   ensureFridayEnv,
   getDb,
   probePostgresHealth,
@@ -327,6 +328,11 @@ export const doctorCommand = defineCommand({
     }
     console.log();
     console.log(pc.bold(`${okCount}/${checks.length} checks passed.`));
+    // Close the pg pool so the process exits immediately. Without this, the
+    // pool's `idleTimeoutMillis` (30s) keeps idle TCP sockets alive and Node
+    // can't drain the event loop — `friday doctor` appears to hang after
+    // printing the summary.
+    await closeDb();
     if (failCount > 0) process.exit(1);
   },
 });

@@ -154,15 +154,7 @@ function relativizeSymlinks(stageDir, srcRoot) {
   let kept = 0;
 
   const walk = (dir) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch (e) {
-      // readdirSync follows symlinks for stat purposes via withFileTypes; if
-      // dir is itself a broken symlink we shouldn't reach here, but be safe.
-      throw e;
-    }
-    for (const entry of entries) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name);
       if (entry.isSymbolicLink()) {
         const target = readlinkSync(full);
