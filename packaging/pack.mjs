@@ -30,6 +30,21 @@
 // (supervisor.ts buildSpecs). We also do NOT bundle Node: fnm + `.node-version`
 // provision the ABI-matched runtime on-device.
 //
+// Symlink relativization (the v1.1.0 distribution bug): on a local dev box,
+// pnpm produces RELATIVE per-package symlinks (e.g. `services/dashboard/
+// node_modules/shiki -> ../../../node_modules/.pnpm/shiki@1.29.2/.../shiki`).
+// On GitHub Actions runners, the same install produces ABSOLUTE symlinks
+// (`-> /Users/runner/work/friday/friday/node_modules/.pnpm/...`) — likely a
+// cross-filesystem fallback in pnpm. cpSync(dereference:false) preserves
+// whatever shape pnpm wrote, so the absolute targets survived into the
+// published v1.1.0 tarball and pointed at a runner path that doesn't exist on
+// any user machine → `Cannot find package 'citty'` on every install. We post-
+// process the staged tree: every symlink whose target is absolute and points
+// inside `repoRoot` is rewritten to a path relative to its own parent dir, so
+// the entire link graph survives byte-for-byte relocation. Symlinks already
+// relative are left alone; any absolute symlink pointing OUTSIDE repoRoot
+// fails the pack (an escape would mean a missing target on the user box).
+//
 // Hard-errors before tarring if any required copy path is missing — a stale or
 // partial build must fail the pack, not ship a broken artifact.
 
@@ -39,11 +54,15 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
+  readlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -117,6 +136,56 @@ function stage(rel, stageDir, { required = true } = {}) {
   // symlinks would break; the §3 probe confirmed there are none.)
   cpSync(src, dest, { recursive: true, dereference: false });
   return true;
+}
+
+/**
+ * Walk every symlink under `stageDir`. For each one whose target is absolute
+ * and starts with `srcRoot + "/"`, rewrite it to a relative path from the
+ * symlink's parent dir to the equivalent location inside `stageDir`. Symlinks
+ * with relative targets are left as-is (they're already correct under the
+ * relocation). Absolute symlinks pointing OUTSIDE srcRoot are fatal — they
+ * would dangle on the user's box and indicate a bundling mistake.
+ *
+ * Returns `{ rewrote, kept }` counts for the pack log.
+ */
+function relativizeSymlinks(stageDir, srcRoot) {
+  const srcPrefix = srcRoot.endsWith("/") ? srcRoot : `${srcRoot}/`;
+  let rewrote = 0;
+  let kept = 0;
+
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        const target = readlinkSync(full);
+        if (target.startsWith("/")) {
+          if (target.startsWith(srcPrefix)) {
+            // Strip the srcRoot prefix to get the path relative to the pack
+            // source — that same path inside stageDir is the new target.
+            const subpath = target.slice(srcPrefix.length);
+            const newAbsTarget = join(stageDir, subpath);
+            const newRelTarget = relative(dirname(full), newAbsTarget);
+            unlinkSync(full);
+            symlinkSync(newRelTarget, full);
+            rewrote++;
+          } else {
+            fail(
+              `absolute symlink escapes pack source: ${full} -> ${target} ` +
+                `(srcRoot=${srcRoot}). Refusing to ship a tarball with a ` +
+                `target that won't exist on the user's machine.`,
+            );
+          }
+        } else {
+          kept++;
+        }
+      } else if (entry.isDirectory()) {
+        walk(full);
+      }
+    }
+  };
+
+  walk(stageDir);
+  return { rewrote, kept };
 }
 
 // ---- the copy manifest ------------------------------------------------
@@ -234,6 +303,15 @@ function main() {
 
   log("staging prod node_modules (4b bundle)");
   for (const rel of NODE_MODULES_DIRS) stage(rel, stageDir);
+
+  // Relativize absolute symlinks inside the staged tree. cpSync(dereference:
+  // false) preserves whatever pnpm wrote, so on CI runners (where pnpm emits
+  // absolute symlinks pointing at the runner workspace) the staged tree would
+  // ship targets that don't exist on any user box. See header comment for
+  // the v1.1.0 incident.
+  log("relativizing symlinks");
+  const { rewrote, kept } = relativizeSymlinks(stageDir, repoRoot);
+  log(`  rewrote ${rewrote} absolute symlinks; kept ${kept} relative ones`);
 
   // ---- tar --------------------------------------------------------------
   // Tar the staged tree at its own root so extraction yields the tree

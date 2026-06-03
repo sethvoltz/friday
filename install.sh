@@ -43,7 +43,8 @@ GITHUB_REPO="sethvoltz/friday"
 RELEASE_BASE="https://github.com/${GITHUB_REPO}/releases/latest/download"
 
 # Brewfile-tracked third-party deps (Friday itself is NOT brew-managed).
-# Postgres + cloudflared + gh + claude-code + pnpm + fnm stay brew deps.
+# Postgres + cloudflared + gh + pnpm + fnm stay brew deps. Claude Code is
+# not installed here; `friday doctor` checks for `claude` on PATH.
 BREW_DEPS="fnm pnpm postgresql@18 cloudflared gh"
 
 LAUNCHD_LABEL="com.sethvoltz.friday"
@@ -119,14 +120,10 @@ ensure_brew_deps() {
   local missing dep
   missing=""
   for dep in ${BREW_DEPS}; do
-    # claude-code is a cask; everything in BREW_DEPS here is a formula.
     if ! brew list "${dep}" >/dev/null 2>&1; then
       missing="${missing} ${dep}"
     fi
   done
-  if ! brew list --cask claude-code >/dev/null 2>&1; then
-    missing="${missing} claude-code(cask)"
-  fi
 
   if [ -n "${missing}" ]; then
     info "installing missing brew deps:${missing}"
@@ -135,9 +132,13 @@ ensure_brew_deps() {
         brew install "${dep}" || warn "brew install ${dep} failed — install it manually"
       fi
     done
-    if ! brew list --cask claude-code >/dev/null 2>&1; then
-      brew install --cask claude-code || warn "brew install --cask claude-code failed — install it manually"
-    fi
+  fi
+
+  if ! command -v claude >/dev/null 2>&1; then
+    warn "claude CLI not found on PATH"
+    info "install via Anthropic (curl -fsSL https://claude.ai/install.sh | bash)"
+    info "or brew: brew install --cask claude-code"
+    info "details: https://docs.anthropic.com/en/docs/claude-code"
   fi
 }
 

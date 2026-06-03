@@ -11,11 +11,21 @@ brew bundle --file=Brewfile
 
 The Brewfile installs:
 
-- `claude-code` — Claude Code CLI (Anthropic's official) — required, runs the Agent SDK
 - `gh` — GitHub CLI for builders
 - `fnm` — Fast Node Manager; resolves the pinned Node from `.node-version` (`22.21.1`) and is how the launchd-supervised stack launches Node (ADR-034)
 - `pnpm` — build/dev-time package manager (CI pack + contributor builds); not on Friday's runtime path
 - `cloudflared` — Cloudflare Tunnel client (optional, for public reachability)
+
+Install **Claude Code** separately — the brew cask shadows Anthropic's own installer, so the Brewfile leaves it to you:
+
+```bash
+# Anthropic's official installer
+curl -fsSL https://claude.ai/install.sh | bash
+# …or via brew
+brew install --cask claude-code
+```
+
+See [docs.anthropic.com/en/docs/claude-code](https://docs.anthropic.com/en/docs/claude-code). `friday doctor` verifies `which claude` regardless of install method.
 
 `tmux` is no longer required — Friday's prod supervision moved to launchd, with the plist written directly by the installer (ADR-028, ADR-034). Contributors who want it for the dev workflow can `brew install tmux` separately.
 

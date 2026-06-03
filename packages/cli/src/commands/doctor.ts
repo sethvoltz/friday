@@ -10,6 +10,7 @@ import {
   FRIDAY_PG_CONSTANTS,
   LOGS_DIR,
   SOUL_PATH,
+  closeDb,
   ensureFridayEnv,
   getDb,
   probePostgresHealth,
@@ -102,9 +103,20 @@ export const doctorCommand = defineCommand({
       );
     }
 
-    // claude
+    // claude — install method is the user's choice (Anthropic's installer vs
+    // brew cask); doctor just checks PATH. The brew cask shadows Anthropic's
+    // own installer, so Friday's Brewfile no longer ships it.
     const claude = spawnSync("which", ["claude"], { encoding: "utf8" });
-    checks.push(check("claude CLI installed", claude.status === 0));
+    const claudeOk = claude.status === 0;
+    checks.push(
+      check(
+        "claude CLI installed",
+        claudeOk,
+        claudeOk
+          ? undefined
+          : "install via `curl -fsSL https://claude.ai/install.sh | bash` or `brew install --cask claude-code` — see https://docs.anthropic.com/en/docs/claude-code",
+      ),
+    );
 
     // gh
     const gh = spawnSync("which", ["gh"], { encoding: "utf8" });
@@ -316,6 +328,11 @@ export const doctorCommand = defineCommand({
     }
     console.log();
     console.log(pc.bold(`${okCount}/${checks.length} checks passed.`));
+    // Close the pg pool so the process exits immediately. Without this, the
+    // pool's `idleTimeoutMillis` (30s) keeps idle TCP sockets alive and Node
+    // can't drain the event loop — `friday doctor` appears to hang after
+    // printing the summary.
+    await closeDb();
     if (failCount > 0) process.exit(1);
   },
 });
