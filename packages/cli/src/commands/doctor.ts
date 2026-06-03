@@ -2,6 +2,7 @@ import { defineCommand } from "citty";
 import pc from "picocolors";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   CONFIG_PATH,
@@ -22,358 +23,526 @@ import { launchdJobStatus } from "./status.js";
 import { FRIDAY_FNM_BIN_ENV, FRIDAY_LAUNCHD_LABEL, plistPath } from "../lib/launchd.js";
 import { currentLink } from "../lib/install-paths.js";
 
+type Section = "Dependencies" | "Configuration" | "Runtime" | "PostgreSQL";
+type Status = "ok" | "warn" | "fail";
+
+interface DoctorCheck {
+  section: Section;
+  label: string;
+  status: Status;
+  value: string;
+  hint?: string;
+}
+
+const SECTIONS: Section[] = ["Dependencies", "Configuration", "Runtime", "PostgreSQL"];
+
+// Box dimensions. 68 columns matches the docs/architecture diagrams and most
+// 80-column terminals with comfortable margin. Adjust here only; the renderer
+// derives everything else from these.
+const WIDTH = 68;
+const INNER = WIDTH - 2; // 66
+const LABEL_COL = 23;
+const VALUE_COL = INNER - 2 - 1 - 1 - LABEL_COL; // 39: 2 indent + 1 icon + 1 space + label + value = INNER
+
 export const doctorCommand = defineCommand({
   meta: { name: "doctor", description: "Check system health" },
   async run() {
     console.log(BANNER);
     if (existsSync(ENV_PATH)) ensureFridayEnv();
-    const checks: Array<{
-      name: string;
-      ok: boolean;
-      warn?: boolean;
-      detail?: string;
-    }> = [];
 
-    checks.push(check(`data dir ${DATA_DIR}`, existsSync(DATA_DIR)));
-    checks.push(check(`config ${CONFIG_PATH}`, existsSync(CONFIG_PATH)));
-    checks.push(check(`env ${ENV_PATH}`, existsSync(ENV_PATH)));
-    checks.push(check(`SOUL.md ${SOUL_PATH}`, existsSync(SOUL_PATH)));
-    checks.push(check(`logs dir ${LOGS_DIR}`, existsSync(LOGS_DIR)));
+    const checks = await collectChecks();
 
-    // Account
-    let accountOk = false;
-    try {
-      const db = getDb();
-      const users = await db.select().from(schema.users).limit(1);
-      accountOk = users.length > 0;
-    } catch {
-      // db not migrated yet
-    }
-    checks.push(
-      check("primary account exists", accountOk, accountOk ? undefined : "run `friday setup`"),
-    );
-
-    // launchd supervisor (com.sethvoltz.friday). Replaces the pre-FRI-88
-    // tmux check — the supervised set lives in one launchd job now, not
-    // a tmux session per service. Friday writes the plist directly
-    // (FRI-146 / ADR-034), not via brew.
-    const fridayJob = launchdJobStatus(FRIDAY_LAUNCHD_LABEL);
-    checks.push(
-      check(
-        `friday-supervisor (launchd: ${FRIDAY_LAUNCHD_LABEL})`,
-        fridayJob.loaded,
-        fridayJob.loaded
-          ? undefined
-          : "not loaded — run `friday start`. Install via `curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash`, then `friday update` to upgrade.",
-      ),
-    );
-
-    // Plist exec-target audit. The plist's ProgramArguments[0] is the
-    // bin/friday-supervisor shim; EnvironmentVariables.FRIDAY_FNM_BIN is
-    // the fnm absolute path baked at plist-write time (since launchd
-    // doesn't inherit user PATH). Both must point at real executables or
-    // the supervisor crash-loops without surfacing a clear cause.
-    const pp = plistPath();
-    if (existsSync(pp)) {
-      const parsed = readPlistJson(pp);
-      const programArg0 = parsed?.ProgramArguments?.[0];
-      const fnmFromPlist = parsed?.EnvironmentVariables?.[FRIDAY_FNM_BIN_ENV];
-      checks.push(
-        check(
-          `plist ProgramArguments[0] -> ${programArg0 ?? "<unset>"}`,
-          isExecutable(programArg0),
-          isExecutable(programArg0)
-            ? undefined
-            : "plist exec target is not a real executable — re-run `friday update` (or `friday start`) to rewrite the plist.",
-        ),
-      );
-      checks.push(
-        check(
-          `plist ${FRIDAY_FNM_BIN_ENV} -> ${fnmFromPlist ?? "<unset>"}`,
-          isExecutable(fnmFromPlist),
-          isExecutable(fnmFromPlist)
-            ? undefined
-            : "plist's baked fnm binary is missing — `brew install fnm` then re-run `friday update`.",
-        ),
-      );
+    for (const section of SECTIONS) {
+      const items = checks.filter((c) => c.section === section);
+      if (items.length === 0) continue;
+      for (const line of renderSection(section, items)) console.log(line);
+      console.log();
     }
 
-    // fnm + .node-version pin + install symlink (FRI-146 / ADR-034). The
-    // supervisor's shim resolves node via fnm (FRIDAY_FNM_BIN from the
-    // plist under launchd, $(brew --prefix)/bin/fnm interactively). For
-    // direct `friday …` CLI invocations we still need fnm on PATH.
-    const fnmOk = spawnSync("which", ["fnm"], { encoding: "utf8" }).status === 0;
-    checks.push(
-      check(
-        "fnm installed",
-        fnmOk,
-        fnmOk ? undefined : "node version manager missing — `brew install fnm`",
-      ),
-    );
-    const link = currentLink();
-    const installOk = existsSync(link);
-    checks.push(
-      check(
-        `install tree ${link}`,
-        installOk,
-        installOk
-          ? undefined
-          : "not installed via the curl installer — `curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash`",
-      ),
-    );
-    if (installOk) {
-      const nodeVersionFile = join(link, ".node-version");
-      const pinOk = existsSync(nodeVersionFile);
-      checks.push(
-        check(
-          ".node-version pin present",
-          pinOk,
-          pinOk ? undefined : "install tree is missing `.node-version` — re-run `friday update`",
-        ),
-      );
-    }
-
-    // claude — install method is the user's choice (Anthropic's installer vs
-    // brew cask); doctor just checks PATH. The brew cask shadows Anthropic's
-    // own installer, so Friday's Brewfile no longer ships it.
-    const claude = spawnSync("which", ["claude"], { encoding: "utf8" });
-    const claudeOk = claude.status === 0;
-    checks.push(
-      check(
-        "claude CLI installed",
-        claudeOk,
-        claudeOk
-          ? undefined
-          : "install via `curl -fsSL https://claude.ai/install.sh | bash` or `brew install --cask claude-code` — see https://docs.anthropic.com/en/docs/claude-code",
-      ),
-    );
-
-    // gh
-    const gh = spawnSync("which", ["gh"], { encoding: "utf8" });
-    checks.push(check("gh CLI installed", gh.status === 0));
-
-    // Cloudflare Tunnel — token + binary. Token-set-but-binary-missing is
-    // a hard failure (user opted in); everything else is informational.
-    const tunnelTokenSet = !!process.env.CLOUDFLARE_TUNNEL_TOKEN;
-    const cloudflaredOk = spawnSync("which", ["cloudflared"], { encoding: "utf8" }).status === 0;
-    if (tunnelTokenSet) {
-      checks.push(check("Cloudflare Tunnel token", true));
-      checks.push(
-        check(
-          "cloudflared binary",
-          cloudflaredOk,
-          cloudflaredOk
-            ? undefined
-            : "token configured but cloudflared not on PATH — `brew install cloudflared`",
-        ),
-      );
-    } else {
-      checks.push(
-        warn(
-          "Cloudflare Tunnel token",
-          "not configured — public tunnel disabled (run `friday setup --cloudflare` to enable)",
-        ),
-      );
-      if (!cloudflaredOk) {
-        checks.push(warn("cloudflared binary", "not installed — only required for public tunnel"));
-      } else {
-        checks.push(check("cloudflared binary", true));
-      }
-    }
-
-    // Postgres (ADR-023). All sub-checks roll into one health probe.
-    try {
-      const pg = await probePostgresHealth();
-      const { FRIDAY_DB, FRIDAY_ROLE, FRIDAY_PUBLICATION } = FRIDAY_PG_CONSTANTS;
-      if (!pg.reachable) {
-        checks.push(
-          check(
-            "Postgres reachable",
-            false,
-            pg.reachableReason ?? "pg_isready failed — `brew services start postgresql@18`",
-          ),
-        );
-      } else {
-        checks.push(check("Postgres reachable", true));
-        checks.push(
-          check(
-            `Postgres role ${FRIDAY_ROLE}`,
-            pg.roleExists,
-            pg.roleExists ? undefined : "run `friday setup`",
-          ),
-        );
-        checks.push(
-          check(
-            `Postgres database ${FRIDAY_DB}`,
-            pg.databaseExists,
-            pg.databaseExists ? undefined : "run `friday setup`",
-          ),
-        );
-        checks.push(
-          check(
-            `Postgres migrations at head (${pg.migrationsApplied}/${pg.migrationsExpected})`,
-            pg.migrationsAtHead,
-            pg.migrationsAtHead ? undefined : "run `friday setup` to apply pending migrations",
-          ),
-        );
-        checks.push(
-          check(
-            `Postgres publication ${FRIDAY_PUBLICATION}`,
-            pg.publicationExists,
-            pg.publicationExists ? undefined : "run `friday setup`",
-          ),
-        );
-        checks.push(
-          check(
-            "ZERO_AUTH_SECRET present",
-            pg.zeroAuthSecretPresent,
-            pg.zeroAuthSecretPresent ? undefined : "run `friday setup` to generate the secret",
-          ),
-        );
-        checks.push(
-          check(
-            `Postgres wal_level=logical (Zero replication)`,
-            pg.walLevelLogical,
-            pg.walLevelLogical
-              ? undefined
-              : `actual: ${pg.walLevelActual ?? "unknown"} — run \`friday setup\` then \`brew services restart postgresql@18\``,
-          ),
-        );
-      }
-    } catch (err) {
-      checks.push(
-        check("Postgres health probe", false, err instanceof Error ? err.message : String(err)),
-      );
-    }
-
-    // daemon reachable
-    const client = new DaemonClient();
-    const reachable = await client.ping();
-    checks.push(
-      check(
-        "daemon reachable (localhost)",
-        reachable,
-        reachable ? undefined : "not running — `friday start`",
-      ),
-    );
-
-    // zero-cache reachable (Phase 2 / ADR-024). zero-cache binds
-    // ws://127.0.0.1:4848 by default; treat a TCP-open as "alive". A more
-    // thorough health probe (replication slot caught up, etc.) lives in
-    // the zero-cache process logs.
-    const zeroReachable = await tcpReachable("127.0.0.1", 4848, 500);
-    checks.push(
-      check(
-        "zero-cache reachable (localhost:4848)",
-        zeroReachable,
-        zeroReachable ? undefined : "not running — `friday start zero-cache`",
-      ),
-    );
-
-    // Stale runtime-state warnings (FRI-88 Q11). These don't fail the
-    // doctor — they're "should-be-derived" values that an operator may
-    // have inherited from pre-FRI-83 or pre-FRI-88 setup. Each warning
-    // points at the canonical source of truth.
-
-    // 1. ZERO_MUTATE_URL in .env (now spawn-time-only via supervisor)
-    if (existsSync(ENV_PATH)) {
-      try {
-        const envText = readFileSync(ENV_PATH, "utf8");
-        if (/^ZERO_MUTATE_URL=/m.test(envText)) {
-          checks.push(
-            warn(
-              "stale ZERO_MUTATE_URL in ~/.friday/.env",
-              "remove this line — the supervisor exports it dynamically at spawn time (FRI-83 follow-up). Stale value will be ignored but is misleading.",
-            ),
-          );
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    // 2. daemonPort / dashboardPort in config.json (now optional)
-    try {
-      const cfgRaw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Record<string, unknown>;
-      const staleFields: string[] = [];
-      if ("daemonPort" in cfgRaw) staleFields.push("daemonPort");
-      if ("dashboardPort" in cfgRaw) staleFields.push("dashboardPort");
-      if ("daemonBaseUrl" in cfgRaw) staleFields.push("daemonBaseUrl");
-      if ("dashboardBaseUrl" in cfgRaw) staleFields.push("dashboardBaseUrl");
-      if (staleFields.length > 0) {
-        checks.push(
-          warn(
-            `stale field(s) in ~/.friday/config.json: ${staleFields.join(", ")}`,
-            "these fields are now optional and resolve via PROD_*_PORT constants. Remove unless you intentionally need an override.",
-          ),
-        );
-      }
-    } catch {
-      // ignore missing/malformed config (other checks cover that case)
-    }
-
-    // 3. Orphaned zero-cache replica WAL — large WAL with no live
-    // zero-cache process suggests an unclean previous shutdown that
-    // the auto-reset loop hasn't re-checkpointed. Not a hard failure;
-    // operator can `rm -rf ~/.friday/zero/` to force a fresh sync from
-    // Postgres logical replication.
-    const walPath = join(DATA_DIR, "zero", "replica.db-wal");
-    if (existsSync(walPath)) {
-      try {
-        const walSize = statSync(walPath).size;
-        if (walSize > 0 && !zeroReachable) {
-          checks.push(
-            warn(
-              `orphaned zero-cache WAL (${walSize} bytes, no live zero-cache)`,
-              "unclean previous shutdown — `rm -rf ~/.friday/zero/` to force a fresh sync from Postgres on next start.",
-            ),
-          );
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    // disk
-    try {
-      const st = statSync(DATA_DIR);
-      checks.push(check(`data dir is ${st.mode.toString(8)}`, true));
-    } catch {
-      // ignore
-    }
-
-    let okCount = 0;
-    let failCount = 0;
-    for (const c of checks) {
-      const detail = c.detail ? pc.dim(` — ${c.detail}`) : "";
-      if (c.ok) {
-        okCount++;
-        console.log(`  ${pc.green("✓")} ${c.name}`);
-      } else if (c.warn) {
-        console.log(`  ${pc.yellow("⚠")} ${c.name}${detail}`);
-      } else {
-        failCount++;
-        console.log(`  ${pc.red("✗")} ${c.name}${detail}`);
-      }
-    }
-    console.log();
-    console.log(pc.bold(`${okCount}/${checks.length} checks passed.`));
+    const failed = checks.filter((c) => c.status === "fail").length;
+    const passed = checks.filter((c) => c.status === "ok").length;
+    console.log(pc.bold(`${passed}/${checks.length} checks passed.`));
     // Close the pg pool so the process exits immediately. Without this, the
     // pool's `idleTimeoutMillis` (30s) keeps idle TCP sockets alive and Node
     // can't drain the event loop — `friday doctor` appears to hang after
     // printing the summary.
     await closeDb();
-    if (failCount > 0) process.exit(1);
+    if (failed > 0) process.exit(1);
   },
 });
 
-function check(name: string, ok: boolean, detail?: string) {
-  return { name, ok, detail };
+// ============================================================================
+// Check collection
+// ============================================================================
+
+async function collectChecks(): Promise<DoctorCheck[]> {
+  const checks: DoctorCheck[] = [];
+
+  // ---- Dependencies --------------------------------------------------------
+
+  // fnm: prefer the absolute path baked into the plist (the launchd-supervised
+  // boot path). Fall back to $PATH for the dev/CLI invocation case. Either way
+  // we assert it's a real executable, not just present-on-disk.
+  const fnmFromPlist = readFnmBinFromPlist();
+  const fnmFromPath = (() => {
+    const r = spawnSync("which", ["fnm"], { encoding: "utf8" });
+    return r.status === 0 ? r.stdout.trim() : "";
+  })();
+  const fnmAbs = fnmFromPlist ?? fnmFromPath ?? "";
+  const fnmOk = isExecutable(fnmAbs);
+  checks.push({
+    section: "Dependencies",
+    label: "fnm",
+    status: fnmOk ? "ok" : "fail",
+    value: fnmOk ? displayPath(fnmAbs) : "missing",
+    hint: fnmOk ? undefined : "install with `brew install fnm`",
+  });
+
+  // node version: .node-version pin inside the install tree
+  const link = currentLink();
+  const installOk = existsSync(link);
+  const nodeVersionFile = installOk ? join(link, ".node-version") : "";
+  const pinOk = installOk && existsSync(nodeVersionFile);
+  const pinValue = (() => {
+    if (!pinOk) return "missing";
+    try {
+      return readFileSync(nodeVersionFile, "utf8").trim();
+    } catch {
+      return "unreadable";
+    }
+  })();
+  checks.push({
+    section: "Dependencies",
+    label: "node version",
+    status: pinOk ? "ok" : "fail",
+    value: pinOk ? `pinned (${pinValue})` : "missing",
+    hint: pinOk ? undefined : "re-run `friday update` to repopulate the install tree",
+  });
+
+  // claude CLI
+  const claudeOk = spawnSync("which", ["claude"], { encoding: "utf8" }).status === 0;
+  checks.push({
+    section: "Dependencies",
+    label: "claude CLI",
+    status: claudeOk ? "ok" : "fail",
+    value: claudeOk ? "installed" : "missing",
+    hint: claudeOk
+      ? undefined
+      : "install via `curl -fsSL https://claude.ai/install.sh | bash` or `brew install --cask claude-code`",
+  });
+
+  // gh CLI
+  const ghOk = spawnSync("which", ["gh"], { encoding: "utf8" }).status === 0;
+  checks.push({
+    section: "Dependencies",
+    label: "gh CLI",
+    status: ghOk ? "ok" : "fail",
+    value: ghOk ? "installed" : "missing",
+    hint: ghOk ? undefined : "install with `brew install gh`",
+  });
+
+  // postgres: postgresql@18 is keg-only, so psql often isn't on PATH even
+  // though the formula is installed. Prefer `brew list postgresql@18` (which
+  // reports whether the keg is installed regardless of linking) and fall back
+  // to `which psql` for non-brew installs.
+  const psqlOk =
+    spawnSync("brew", ["list", "postgresql@18"], { encoding: "utf8" }).status === 0 ||
+    spawnSync("which", ["psql"], { encoding: "utf8" }).status === 0;
+  checks.push({
+    section: "Dependencies",
+    label: "postgres",
+    status: psqlOk ? "ok" : "fail",
+    value: psqlOk ? "installed" : "missing",
+    hint: psqlOk ? undefined : "install with `brew install postgresql@18`",
+  });
+
+  // cloudflared (warn if missing — only required for the public tunnel)
+  const cflOk = spawnSync("which", ["cloudflared"], { encoding: "utf8" }).status === 0;
+  checks.push({
+    section: "Dependencies",
+    label: "cloudflared",
+    status: cflOk ? "ok" : "warn",
+    value: cflOk ? "installed" : "missing",
+    hint: cflOk ? undefined : "only required for the public tunnel — `brew install cloudflared`",
+  });
+
+  // install tree
+  checks.push({
+    section: "Dependencies",
+    label: "install tree",
+    status: installOk ? "ok" : "fail",
+    value: installOk ? displayPath(link) : "missing",
+    hint: installOk
+      ? undefined
+      : "install via `curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash`",
+  });
+
+  // ---- Configuration -------------------------------------------------------
+
+  const dataDirOk = existsSync(DATA_DIR);
+  checks.push({
+    section: "Configuration",
+    label: "data dir",
+    status: dataDirOk ? "ok" : "fail",
+    value: displayPath(DATA_DIR),
+    hint: dataDirOk ? undefined : "run `friday setup` to create",
+  });
+  checks.push({
+    section: "Configuration",
+    label: "config",
+    status: existsSync(CONFIG_PATH) ? "ok" : "fail",
+    value: displayPath(CONFIG_PATH),
+  });
+  checks.push({
+    section: "Configuration",
+    label: "env",
+    status: existsSync(ENV_PATH) ? "ok" : "fail",
+    value: displayPath(ENV_PATH),
+  });
+  checks.push({
+    section: "Configuration",
+    label: "SOUL.md",
+    status: existsSync(SOUL_PATH) ? "ok" : "fail",
+    value: displayPath(SOUL_PATH),
+  });
+
+  // primary account
+  let accountOk = false;
+  try {
+    const db = getDb();
+    const users = await db.select().from(schema.users).limit(1);
+    accountOk = users.length > 0;
+  } catch {
+    // db not migrated yet — handled below by the PostgreSQL section
+  }
+  checks.push({
+    section: "Configuration",
+    label: "primary account",
+    status: accountOk ? "ok" : "fail",
+    value: accountOk ? "present" : "missing",
+    hint: accountOk ? undefined : "run `friday setup`",
+  });
+
+  // Cloudflare Tunnel token — informational; tunnel is opt-in
+  const tunnelTokenSet = !!process.env.CLOUDFLARE_TUNNEL_TOKEN;
+  checks.push({
+    section: "Configuration",
+    label: "cloudflare token",
+    status: tunnelTokenSet ? "ok" : "warn",
+    value: tunnelTokenSet ? "present" : "absent",
+    hint: tunnelTokenSet
+      ? undefined
+      : "public tunnel disabled — `friday setup --cloudflare` to enable",
+  });
+
+  // ---- Runtime -------------------------------------------------------------
+
+  checks.push({
+    section: "Runtime",
+    label: "logs dir",
+    status: existsSync(LOGS_DIR) ? "ok" : "fail",
+    value: displayPath(LOGS_DIR),
+  });
+
+  const fridayJob = launchdJobStatus(FRIDAY_LAUNCHD_LABEL);
+  checks.push({
+    section: "Runtime",
+    label: "friday-supervisor",
+    status: fridayJob.loaded ? "ok" : "fail",
+    value: `(launchd: ${FRIDAY_LAUNCHD_LABEL})`,
+    hint: fridayJob.loaded ? undefined : "run `friday start`",
+  });
+
+  // Plist exec target audit — show only when broken, so the steady-state
+  // doctor stays tight. A broken target crash-loops the supervisor without a
+  // clear cause; surfacing it here points the operator at the right fix.
+  const pp = plistPath();
+  if (existsSync(pp)) {
+    const parsed = readPlistJson(pp);
+    const programArg0 = parsed?.ProgramArguments?.[0];
+    if (!isExecutable(programArg0)) {
+      checks.push({
+        section: "Runtime",
+        label: "plist exec",
+        status: "fail",
+        value: programArg0 ?? "<unset>",
+        hint: "re-run `friday start` to rewrite the plist",
+      });
+    }
+  }
+
+  // daemon reachable (localhost)
+  const client = new DaemonClient();
+  const daemonReachable = await client.ping();
+  checks.push({
+    section: "Runtime",
+    label: "daemon",
+    status: daemonReachable ? "ok" : "fail",
+    value: daemonReachable ? "reachable (localhost)" : "unreachable",
+    hint: daemonReachable ? undefined : "run `friday start`",
+  });
+
+  // zero-cache reachable
+  const zeroReachable = await tcpReachable("127.0.0.1", 4848, 500);
+  checks.push({
+    section: "Runtime",
+    label: "zero-cache",
+    status: zeroReachable ? "ok" : "fail",
+    value: zeroReachable ? "reachable (localhost:4848)" : "unreachable",
+    hint: zeroReachable ? undefined : "run `friday start`",
+  });
+
+  // ---- PostgreSQL ----------------------------------------------------------
+
+  try {
+    const pg = await probePostgresHealth();
+    const { FRIDAY_DB, FRIDAY_ROLE, FRIDAY_PUBLICATION } = FRIDAY_PG_CONSTANTS;
+    if (!pg.reachable) {
+      checks.push({
+        section: "PostgreSQL",
+        label: "daemon",
+        status: "fail",
+        value: "unreachable",
+        hint: pg.reachableReason ?? "`brew services start postgresql@18`",
+      });
+    } else {
+      checks.push({
+        section: "PostgreSQL",
+        label: "daemon",
+        status: "ok",
+        value: "reachable (localhost)",
+      });
+      checks.push({
+        section: "PostgreSQL",
+        label: "role",
+        status: pg.roleExists ? "ok" : "fail",
+        value: pg.roleExists ? FRIDAY_ROLE : "missing",
+        hint: pg.roleExists ? undefined : "run `friday setup`",
+      });
+      checks.push({
+        section: "PostgreSQL",
+        label: "database",
+        status: pg.databaseExists ? "ok" : "fail",
+        value: pg.databaseExists ? FRIDAY_DB : "missing",
+        hint: pg.databaseExists ? undefined : "run `friday setup`",
+      });
+      checks.push({
+        section: "PostgreSQL",
+        label: "migrations",
+        status: pg.migrationsAtHead ? "ok" : "fail",
+        value: pg.migrationsAtHead
+          ? `at head (${pg.migrationsApplied}/${pg.migrationsExpected})`
+          : `${pg.migrationsApplied}/${pg.migrationsExpected} applied`,
+        hint: pg.migrationsAtHead ? undefined : "run `friday setup` to apply pending migrations",
+      });
+      checks.push({
+        section: "PostgreSQL",
+        label: "publication",
+        status: pg.publicationExists ? "ok" : "fail",
+        value: pg.publicationExists ? FRIDAY_PUBLICATION : "missing",
+        hint: pg.publicationExists ? undefined : "run `friday setup`",
+      });
+      checks.push({
+        section: "PostgreSQL",
+        label: "wal_level",
+        status: pg.walLevelLogical ? "ok" : "fail",
+        value: pg.walLevelLogical ? "logical" : (pg.walLevelActual ?? "unknown"),
+        hint: pg.walLevelLogical
+          ? undefined
+          : "run `friday setup`, then `brew services restart postgresql@18`",
+      });
+      // ZERO_AUTH_SECRET is sourced via the postgres probe but conceptually
+      // sits in Configuration; push it there.
+      checks.push({
+        section: "Configuration",
+        label: "ZERO_AUTH_SECRET",
+        status: pg.zeroAuthSecretPresent ? "ok" : "fail",
+        value: pg.zeroAuthSecretPresent ? "present" : "missing",
+        hint: pg.zeroAuthSecretPresent ? undefined : "run `friday setup` to generate the secret",
+      });
+    }
+  } catch (err) {
+    checks.push({
+      section: "PostgreSQL",
+      label: "health probe",
+      status: "fail",
+      value: "failed",
+      hint: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // ---- Stale-state warnings -----------------------------------------------
+  // These were the existing doctor's "should-be-derived" warnings; surface
+  // them as warn-status rows tied to the right section.
+
+  if (existsSync(ENV_PATH)) {
+    try {
+      const envText = readFileSync(ENV_PATH, "utf8");
+      if (/^ZERO_MUTATE_URL=/m.test(envText)) {
+        checks.push({
+          section: "Configuration",
+          label: "ZERO_MUTATE_URL",
+          status: "warn",
+          value: "stale in .env",
+          hint: "remove this line — the supervisor exports it dynamically at spawn time",
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  try {
+    const cfgRaw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Record<string, unknown>;
+    const stale: string[] = [];
+    if ("daemonPort" in cfgRaw) stale.push("daemonPort");
+    if ("dashboardPort" in cfgRaw) stale.push("dashboardPort");
+    if ("daemonBaseUrl" in cfgRaw) stale.push("daemonBaseUrl");
+    if ("dashboardBaseUrl" in cfgRaw) stale.push("dashboardBaseUrl");
+    if (stale.length > 0) {
+      checks.push({
+        section: "Configuration",
+        label: "config.json fields",
+        status: "warn",
+        value: `stale: ${stale.join(", ")}`,
+        hint: "remove from config.json — defaults resolve via PROD_*_PORT constants",
+      });
+    }
+  } catch {
+    // ignore missing/malformed config — covered by the "config" check above
+  }
+
+  // Orphaned zero-cache replica WAL — large WAL with no live zero-cache
+  // suggests an unclean previous shutdown that the auto-reset loop hasn't
+  // re-checkpointed.
+  const walPath = join(DATA_DIR, "zero", "replica.db-wal");
+  if (existsSync(walPath)) {
+    try {
+      const walSize = statSync(walPath).size;
+      if (walSize > 0 && !zeroReachable) {
+        checks.push({
+          section: "Runtime",
+          label: "zero-cache WAL",
+          status: "warn",
+          value: `orphaned (${walSize} bytes)`,
+          hint: "unclean previous shutdown — `rm -rf ~/.friday/zero/` to force a fresh sync",
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return checks;
 }
 
-function warn(name: string, detail?: string) {
-  return { name, ok: false, warn: true, detail };
+// ============================================================================
+// Rendering
+// ============================================================================
+
+function renderSection(section: Section, items: DoctorCheck[]): string[] {
+  const ok = items.filter((c) => c.status === "ok").length;
+  const lines: string[] = [];
+  lines.push(renderTopBorder(section, ok, items.length));
+  lines.push(renderBlankLine());
+  for (const item of items) {
+    lines.push(renderCheckLine(item));
+    if (item.hint) {
+      for (const wrapped of wrapText(item.hint, INNER - 6)) {
+        lines.push(renderHintLine(wrapped));
+      }
+    }
+  }
+  lines.push(renderBlankLine());
+  lines.push(renderBottomBorder());
+  return lines;
 }
+
+function renderTopBorder(title: string, ok: number, total: number): string {
+  // ╒═ <title> ( ok / total ) ═════════════════════════════════════╕
+  const titlePart = ` ${title} ( ${ok} / ${total} ) `;
+  const fillCount = WIDTH - 1 - 1 - titlePart.length - 1; // ╒ + ═ + titlePart + ═… + ╕
+  return pc.bold(`╒═${titlePart}${"═".repeat(Math.max(0, fillCount))}╕`);
+}
+
+function renderBottomBorder(): string {
+  return `└${"─".repeat(INNER)}┘`;
+}
+
+function renderBlankLine(): string {
+  return `│${" ".repeat(INNER)}│`;
+}
+
+function renderCheckLine(check: DoctorCheck): string {
+  const icon = statusIcon(check.status);
+  const labelArea = padTo(check.label, LABEL_COL);
+  const valueArea = padTo(check.value, VALUE_COL);
+  return `│  ${icon} ${labelArea}${valueArea}│`;
+}
+
+function renderHintLine(hint: string): string {
+  // │      - <hint padded to (INNER - 6)>│
+  const prefix = "    - ";
+  const body = padTo(hint, INNER - prefix.length);
+  return `│${prefix}${pc.dim(body)}│`;
+}
+
+function statusIcon(status: Status): string {
+  switch (status) {
+    case "ok":
+      return pc.green("✔");
+    case "warn":
+      return pc.yellow("⚠");
+    case "fail":
+      return pc.red("✘");
+  }
+}
+
+/** Pad `s` with spaces on the right to `width`. Truncates with an ellipsis
+ *  if `s` exceeds `width` so the box edge stays aligned. */
+function padTo(s: string, width: number): string {
+  if (s.length === width) return s;
+  if (s.length > width) {
+    if (width <= 1) return s.slice(0, width);
+    return s.slice(0, width - 1) + "…";
+  }
+  return s + " ".repeat(width - s.length);
+}
+
+/** Word-wrap to a max width. Tiny implementation — splits on whitespace,
+ *  doesn't preserve runs of spaces or break long single tokens. */
+function wrapText(text: string, width: number): string[] {
+  if (text.length <= width) return [text];
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    if (cur.length + 1 + w.length <= width || !cur) {
+      cur = cur ? `${cur} ${w}` : w;
+    } else {
+      lines.push(cur);
+      cur = w;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/** Replace `DATA_DIR/X` with `@data/X` and `HOME/X` with `~/X`. The data dir
+ *  itself stays as `~/.friday` rather than collapsing to `@data` (a bare
+ *  `@data` would be confusing as a value). */
+function displayPath(abs: string | undefined | null): string {
+  if (!abs) return "";
+  const home = homedir();
+  if (abs.startsWith(DATA_DIR + "/")) return "@data" + abs.slice(DATA_DIR.length);
+  if (abs.startsWith(home + "/")) return "~" + abs.slice(home.length);
+  if (abs === home) return "~";
+  return abs;
+}
+
+// ============================================================================
+// Plist + executable probes (used by both Dependencies and Runtime sections)
+// ============================================================================
 
 interface ParsedPlist {
   ProgramArguments?: string[];
@@ -381,8 +550,7 @@ interface ParsedPlist {
 }
 
 /** Parse a `.plist` file via macOS's stock `plutil -convert json -o - <path>`.
- *  Returns null on any failure — the caller treats that as "can't audit",
- *  which surfaces as a failing check with an "<unset>" detail line. */
+ *  Returns null on any failure — the caller treats that as "can't audit". */
 function readPlistJson(path: string): ParsedPlist | null {
   const r = spawnSync("plutil", ["-convert", "json", "-o", "-", path], { encoding: "utf8" });
   if (r.status !== 0 || !r.stdout) return null;
@@ -393,6 +561,13 @@ function readPlistJson(path: string): ParsedPlist | null {
   }
 }
 
+function readFnmBinFromPlist(): string | null {
+  const pp = plistPath();
+  if (!existsSync(pp)) return null;
+  const parsed = readPlistJson(pp);
+  return parsed?.EnvironmentVariables?.[FRIDAY_FNM_BIN_ENV] ?? null;
+}
+
 /** True if `path` is a non-empty string pointing at an existing file with
  *  any user/group/other execute bit set. */
 function isExecutable(path: string | undefined | null): boolean {
@@ -400,16 +575,15 @@ function isExecutable(path: string | undefined | null): boolean {
   try {
     const st = statSync(path);
     if (!st.isFile()) return false;
-    // 0o111 = user-x | group-x | other-x. Match if any execute bit is set.
     return (st.mode & 0o111) !== 0;
   } catch {
     return false;
   }
 }
 
-/** TCP-connect with timeout. Used as a cheap liveness probe for
- *  zero-cache; a full WS handshake would be more accurate but the open
- *  port is sufficient signal for the doctor's purposes. */
+/** TCP-connect with timeout. Used as a cheap liveness probe for zero-cache;
+ *  a full WS handshake would be more accurate but the open port is sufficient
+ *  signal for the doctor's purposes. */
 async function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
   const { Socket } = await import("node:net");
   return new Promise<boolean>((resolve) => {
