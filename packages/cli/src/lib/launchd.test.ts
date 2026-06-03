@@ -24,8 +24,14 @@ const DATA_DIR = mkdtempSync(join(tmpdir(), "friday-launchd-data-"));
 process.env.FRIDAY_DATA_DIR = DATA_DIR;
 const LOGS_DIR = join(DATA_DIR, "logs");
 
-const { renderPlist, FRIDAY_LAUNCHD_LABEL, serviceTarget, domainTarget, plistPath } =
-  await import("./launchd.js");
+const {
+  renderPlist,
+  FRIDAY_LAUNCHD_LABEL,
+  FRIDAY_FNM_BIN_ENV,
+  serviceTarget,
+  domainTarget,
+  plistPath,
+} = await import("./launchd.js");
 
 /** Pull the ordered <string> values out of the ProgramArguments <array>. */
 function programArguments(xml: string): string[] {
@@ -40,14 +46,27 @@ function valueForKey(xml: string, key: string): string | undefined {
   return m?.[1];
 }
 
+/** Pull a <string> value out of the EnvironmentVariables <dict>. */
+function envValue(xml: string, key: string): string | undefined {
+  const block = xml.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+  if (!block) return undefined;
+  const m = block[1].match(new RegExp(`<key>${key}</key>\\s*<string>([\\s\\S]*?)</string>`));
+  return m?.[1];
+}
+
 describe("renderPlist — bash-twin contract (AC#13)", () => {
   const installDir = "/Users/someone/.local/share/friday/current";
   const fnm = "/opt/homebrew/bin/fnm";
   const xml = renderPlist(installDir, fnm);
 
-  it("ProgramArguments is exactly [fnm, exec, --, node, <installDir>/.../supervisor.js]", () => {
-    const supervisorEntry = join(installDir, "packages", "cli", "dist", "bin", "supervisor.js");
-    expect(programArguments(xml)).toEqual([fnm, "exec", "--", "node", supervisorEntry]);
+  it("ProgramArguments is exactly [<installDir>/bin/friday-supervisor]", () => {
+    const shim = join(installDir, "bin", "friday-supervisor");
+    expect(programArguments(xml)).toEqual([shim]);
+  });
+
+  it("EnvironmentVariables.FRIDAY_FNM_BIN is the resolved fnm path", () => {
+    expect(envValue(xml, FRIDAY_FNM_BIN_ENV)).toBe(fnm);
+    expect(FRIDAY_FNM_BIN_ENV).toBe("FRIDAY_FNM_BIN");
   });
 
   it("Label is com.sethvoltz.friday", () => {
@@ -73,8 +92,6 @@ describe("renderPlist — bash-twin contract (AC#13)", () => {
     // The contract: fnm's internal per-version node location
     // (~/.local/share/fnm/node-versions/.../bin/node) is NEVER baked.
     expect(xml).not.toMatch(/node-versions/);
-    // node is invoked by bare name under `fnm exec`, never by absolute path.
-    expect(programArguments(xml)).toContain("node");
   });
 
   it("XML-escapes special characters in paths", () => {

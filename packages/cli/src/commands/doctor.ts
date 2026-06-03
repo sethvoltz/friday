@@ -19,7 +19,7 @@ import {
 import { DaemonClient } from "../lib/api.js";
 import { BANNER } from "../lib/branding.js";
 import { launchdJobStatus } from "./status.js";
-import { FRIDAY_LAUNCHD_LABEL } from "../lib/launchd.js";
+import { FRIDAY_FNM_BIN_ENV, FRIDAY_LAUNCHD_LABEL, plistPath } from "../lib/launchd.js";
 import { currentLink } from "../lib/install-paths.js";
 
 export const doctorCommand = defineCommand({
@@ -68,10 +68,40 @@ export const doctorCommand = defineCommand({
       ),
     );
 
+    // Plist exec-target audit. The plist's ProgramArguments[0] is the
+    // bin/friday-supervisor shim; EnvironmentVariables.FRIDAY_FNM_BIN is
+    // the fnm absolute path baked at plist-write time (since launchd
+    // doesn't inherit user PATH). Both must point at real executables or
+    // the supervisor crash-loops without surfacing a clear cause.
+    const pp = plistPath();
+    if (existsSync(pp)) {
+      const parsed = readPlistJson(pp);
+      const programArg0 = parsed?.ProgramArguments?.[0];
+      const fnmFromPlist = parsed?.EnvironmentVariables?.[FRIDAY_FNM_BIN_ENV];
+      checks.push(
+        check(
+          `plist ProgramArguments[0] -> ${programArg0 ?? "<unset>"}`,
+          isExecutable(programArg0),
+          isExecutable(programArg0)
+            ? undefined
+            : "plist exec target is not a real executable — re-run `friday update` (or `friday start`) to rewrite the plist.",
+        ),
+      );
+      checks.push(
+        check(
+          `plist ${FRIDAY_FNM_BIN_ENV} -> ${fnmFromPlist ?? "<unset>"}`,
+          isExecutable(fnmFromPlist),
+          isExecutable(fnmFromPlist)
+            ? undefined
+            : "plist's baked fnm binary is missing — `brew install fnm` then re-run `friday update`.",
+        ),
+      );
+    }
+
     // fnm + .node-version pin + install symlink (FRI-146 / ADR-034). The
-    // supervisor is launched via `fnm exec` reading the install tree's
-    // `.node-version`; without fnm on PATH the launchd job can't resolve
-    // node. The `current` symlink is the install-tree pointer.
+    // supervisor's shim resolves node via fnm (FRIDAY_FNM_BIN from the
+    // plist under launchd, $(brew --prefix)/bin/fnm interactively). For
+    // direct `friday …` CLI invocations we still need fnm on PATH.
     const fnmOk = spawnSync("which", ["fnm"], { encoding: "utf8" }).status === 0;
     checks.push(
       check(
@@ -343,6 +373,38 @@ function check(name: string, ok: boolean, detail?: string) {
 
 function warn(name: string, detail?: string) {
   return { name, ok: false, warn: true, detail };
+}
+
+interface ParsedPlist {
+  ProgramArguments?: string[];
+  EnvironmentVariables?: Record<string, string>;
+}
+
+/** Parse a `.plist` file via macOS's stock `plutil -convert json -o - <path>`.
+ *  Returns null on any failure — the caller treats that as "can't audit",
+ *  which surfaces as a failing check with an "<unset>" detail line. */
+function readPlistJson(path: string): ParsedPlist | null {
+  const r = spawnSync("plutil", ["-convert", "json", "-o", "-", path], { encoding: "utf8" });
+  if (r.status !== 0 || !r.stdout) return null;
+  try {
+    return JSON.parse(r.stdout) as ParsedPlist;
+  } catch {
+    return null;
+  }
+}
+
+/** True if `path` is a non-empty string pointing at an existing file with
+ *  any user/group/other execute bit set. */
+function isExecutable(path: string | undefined | null): boolean {
+  if (!path) return false;
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return false;
+    // 0o111 = user-x | group-x | other-x. Match if any execute bit is set.
+    return (st.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
 }
 
 /** TCP-connect with timeout. Used as a cheap liveness probe for

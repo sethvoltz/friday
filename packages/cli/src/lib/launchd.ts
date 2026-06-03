@@ -7,13 +7,28 @@
  * bootstraps its OWN launchd plist rather than letting brew generate a job
  * for it.
  *
- * The plist launches the supervisor THROUGH fnm — `fnm exec -- node …` —
- * with `WorkingDirectory` set to the install dir so fnm's default
- * `.node-version` resolution finds the pinned version. Because the
- * supervisor is launched via `fnm exec`, `process.execPath` inside it IS
- * the fnm-resolved pinned node; the supervisor spawns its children via
- * `process.execPath` (see supervisor.ts buildSpecs), so no PATH prepend is
- * needed in the plist and no fnm-internal node path is ever baked.
+ * The plist launches `bin/friday-supervisor` — a tiny bash shim that
+ * resolves the pinned Node via fnm and execs node IN PLACE (with `exec -a
+ * friday-supervisor`), so launchd's tracked process becomes node directly
+ * and advertises itself as `friday-supervisor` in `ps` / Activity Monitor /
+ * Login Items. fnm is the runtime resolver, not a long-lived wrapper (the
+ * pre-fix plist was `fnm exec -- node …` which kept fnm alive as the
+ * supervisor's parent — macOS surfaced that under Login Items & Extensions
+ * every fresh boot as "fnm can run in the background").
+ *
+ * `EnvironmentVariables.FRIDAY_FNM_BIN` hands the shim the fnm absolute
+ * path: launchd-spawned processes don't inherit user PATH, so we resolve
+ * `$(brew --prefix)/bin/fnm` here (at plist-write time, in an interactive
+ * context where brew is on PATH) and bake it into the plist. The shim
+ * reads `$FRIDAY_FNM_BIN`. `friday doctor` verifies the baked binary is a
+ * real exec.
+ *
+ * `WorkingDirectory` = install dir so fnm's default `.node-version`
+ * resolution finds the pin. Because the supervisor runs under the
+ * fnm-resolved node, `process.execPath` inside it IS that pinned node;
+ * children are spawned via `process.execPath` (see supervisor.ts
+ * buildSpecs), so no PATH prepend is needed and no fnm-internal node path
+ * is ever baked.
  *
  * The ONLY absolute Node-toolchain path written anywhere is the fnm binary
  * at `$(brew --prefix)/bin/fnm`, a stable public locator resolved at write
@@ -74,21 +89,24 @@ function escapeXml(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
+/** Env-var name through which the plist hands the shim the resolved fnm
+ *  binary. Shared with `bin/friday-supervisor` and `friday doctor`. */
+export const FRIDAY_FNM_BIN_ENV = "FRIDAY_FNM_BIN";
+
 /**
- * Render the plist XML for an install at `installDir`. The supervisor entry
- * is `<installDir>/packages/cli/dist/bin/supervisor.js`, launched through
- * `fnm exec -- node <entry>`. `WorkingDirectory` = `installDir` so fnm's
- * default `.node-version` resolution finds the pin.
+ * Render the plist XML for an install at `installDir`. ProgramArguments is
+ * the `bin/friday-supervisor` bash shim, which resolves fnm via
+ * `$FRIDAY_FNM_BIN` (set in EnvironmentVariables) and execs node in place.
+ * `WorkingDirectory` = `installDir` so fnm's `.node-version` lookup finds
+ * the pin.
  *
  * Exported so install.sh's bash re-implementation and tests can assert the
  * exact contract.
  */
 export function renderPlist(installDir: string, fnm: string): string {
-  const supervisorEntry = join(installDir, "packages", "cli", "dist", "bin", "supervisor.js");
+  const supervisorShim = join(installDir, "bin", "friday-supervisor");
   const stdoutPath = join(LOGS_DIR, "launchd.out.log");
   const stderrPath = join(LOGS_DIR, "launchd.err.log");
-  const programArgs = [fnm, "exec", "--", "node", supervisorEntry];
-  const argXml = programArgs.map((a) => `    <string>${escapeXml(a)}</string>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -97,8 +115,13 @@ export function renderPlist(installDir: string, fnm: string): string {
   <string>${escapeXml(FRIDAY_LAUNCHD_LABEL)}</string>
   <key>ProgramArguments</key>
   <array>
-${argXml}
+    <string>${escapeXml(supervisorShim)}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>${escapeXml(FRIDAY_FNM_BIN_ENV)}</key>
+    <string>${escapeXml(fnm)}</string>
+  </dict>
   <key>WorkingDirectory</key>
   <string>${escapeXml(installDir)}</string>
   <key>RunAtLoad</key>

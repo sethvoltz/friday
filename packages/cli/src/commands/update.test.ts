@@ -53,13 +53,14 @@ function plantVersion(version: string): string {
 
 /** A stub UpdateDeps whose downloadRelease writes a tarball-shaped file plus
  *  a matching `.sha256`, and whose extract plants a package.json carrying
- *  `latestVersion`. kickstart is a spy. */
+ *  `latestVersion`. bootstrap is a spy — it stands in for launchd.bootstrap,
+ *  which rewrites the plist + boots-or-kickstarts the supervisor. */
 function makeDeps(opts: {
   latestVersion: string;
   /** When true, the .sha256 won't match the tarball (tamper simulation). */
   corruptSha?: boolean;
-}): { deps: UpdateDeps; kickstart: ReturnType<typeof vi.fn> } {
-  const kickstart = vi.fn();
+}): { deps: UpdateDeps; bootstrap: ReturnType<typeof vi.fn> } {
+  const bootstrap = vi.fn();
   const deps: UpdateDeps = {
     resolveLatestVersion: async () => opts.latestVersion,
     downloadRelease: async (destDir: string) => {
@@ -83,9 +84,9 @@ function makeDeps(opts: {
       );
     },
     fnmInstall: () => {},
-    kickstart,
+    bootstrap,
   };
-  return { deps, kickstart };
+  return { deps, bootstrap };
 }
 
 describe("friday update", () => {
@@ -104,7 +105,7 @@ describe("friday update", () => {
     flipCurrent("1.0.0");
     expect(currentVersion()).toBe("1.0.0");
 
-    const { deps, kickstart } = makeDeps({ latestVersion: "1.1.0" });
+    const { deps, bootstrap } = makeDeps({ latestVersion: "1.1.0" });
     await runUpdate({}, deps);
 
     // current now → versions/1.1.0; the prior 1.0.0 dir still exists.
@@ -115,7 +116,7 @@ describe("friday update", () => {
     // The freshly-extracted tree's package.json carries the new version.
     expect(installedVersion()).toBe("1.1.0");
     // Supervisor was kicked.
-    expect(kickstart).toHaveBeenCalledTimes(1);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
   });
 
   it("rolls back to the immediately-prior version + kickstarts (AC#5)", async () => {
@@ -125,12 +126,12 @@ describe("friday update", () => {
     flipCurrent("1.1.0");
     expect(currentVersion()).toBe("1.1.0");
 
-    const { deps, kickstart } = makeDeps({ latestVersion: "1.1.0" });
+    const { deps, bootstrap } = makeDeps({ latestVersion: "1.1.0" });
     await runUpdate({ rollback: true }, deps);
 
     expect(currentVersion()).toBe("1.0.0");
     expect(basename(readlinkSync(currentLink()))).toBe("1.0.0");
-    expect(kickstart).toHaveBeenCalledTimes(1);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
   });
 
   it("rollback picks the semver-prior version regardless of plant/mtime order (AC#5)", async () => {
@@ -144,12 +145,12 @@ describe("friday update", () => {
     flipCurrent("1.10.0");
     expect(currentVersion()).toBe("1.10.0");
 
-    const { deps, kickstart } = makeDeps({ latestVersion: "1.10.0" });
+    const { deps, bootstrap } = makeDeps({ latestVersion: "1.10.0" });
     await runUpdate({ rollback: true }, deps);
 
     // Semver-prior to 1.10.0 is 1.2.0 (not 1.0.0, not a lexicographic neighbor).
     expect(currentVersion()).toBe("1.2.0");
-    expect(kickstart).toHaveBeenCalledTimes(1);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
   });
 
   it("rollback with no prior version exits non-zero naming the missing version (AC#5)", async () => {
@@ -157,14 +158,14 @@ describe("friday update", () => {
     plantVersion("1.0.0");
     flipCurrent("1.0.0");
 
-    const { deps, kickstart } = makeDeps({ latestVersion: "1.0.0" });
+    const { deps, bootstrap } = makeDeps({ latestVersion: "1.0.0" });
     const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
       throw new Error(`process.exit(${code})`);
     }) as never);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await expect(runUpdate({ rollback: true }, deps)).rejects.toThrow("process.exit(1)");
-      expect(kickstart).not.toHaveBeenCalled();
+      expect(bootstrap).not.toHaveBeenCalled();
       // The error message names the current version (the one we can't go
       // back from) — load-bearing per AC#5.
       const msg = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
@@ -179,7 +180,7 @@ describe("friday update", () => {
     plantVersion("1.0.0");
     flipCurrent("1.0.0");
 
-    const { deps, kickstart } = makeDeps({ latestVersion: "2.0.0" });
+    const { deps, bootstrap } = makeDeps({ latestVersion: "2.0.0" });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     let out: string;
     try {
@@ -195,7 +196,7 @@ describe("friday update", () => {
     expect(currentVersion()).toBe("1.0.0");
     expect(existsSync(versionDir("2.0.0"))).toBe(false);
     expect(installedVersions()).toEqual(["1.0.0"]);
-    expect(kickstart).not.toHaveBeenCalled();
+    expect(bootstrap).not.toHaveBeenCalled();
     // Both versions surfaced.
     expect(out).toContain("1.0.0");
     expect(out).toContain("2.0.0");
@@ -205,7 +206,7 @@ describe("friday update", () => {
     plantVersion("1.0.0");
     flipCurrent("1.0.0");
 
-    const { deps, kickstart } = makeDeps({ latestVersion: "1.2.0", corruptSha: true });
+    const { deps, bootstrap } = makeDeps({ latestVersion: "1.2.0", corruptSha: true });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       await expect(runUpdate({}, deps)).rejects.toThrow(/sha256 mismatch/);
@@ -216,14 +217,14 @@ describe("friday update", () => {
     // No partial install, no flip, no restart.
     expect(existsSync(versionDir("1.2.0"))).toBe(false);
     expect(currentVersion()).toBe("1.0.0");
-    expect(kickstart).not.toHaveBeenCalled();
+    expect(bootstrap).not.toHaveBeenCalled();
   });
 
   it("no-ops when already on the latest version (AC#4 idempotence)", async () => {
     plantVersion("3.0.0");
     flipCurrent("3.0.0");
 
-    const { deps, kickstart } = makeDeps({ latestVersion: "3.0.0" });
+    const { deps, bootstrap } = makeDeps({ latestVersion: "3.0.0" });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       await runUpdate({}, deps);
@@ -231,7 +232,7 @@ describe("friday update", () => {
       logSpy.mockRestore();
     }
     expect(currentVersion()).toBe("3.0.0");
-    expect(kickstart).not.toHaveBeenCalled();
+    expect(bootstrap).not.toHaveBeenCalled();
   });
 });
 
@@ -298,7 +299,7 @@ describe("friday update — rejects an untrusted resolved version before touchin
     flipCurrent("1.0.0");
 
     // A compromised/typo'd VERSION asset that would escape versions/.
-    const kickstart = vi.fn();
+    const bootstrap = vi.fn();
     const malicious: UpdateDeps = {
       resolveLatestVersion: async () => "../../../tmp/pwned",
       downloadRelease: async () => {
@@ -308,7 +309,7 @@ describe("friday update — rejects an untrusted resolved version before touchin
         throw new Error("extract must never be reached for an invalid version");
       },
       fnmInstall: () => {},
-      kickstart,
+      bootstrap,
     };
 
     await expect(runUpdate({}, malicious)).rejects.toThrow(/not a valid semver/);
@@ -318,7 +319,7 @@ describe("friday update — rejects an untrusted resolved version before touchin
     expect(currentVersion()).toBe("1.0.0");
     expect(existsSync(join(installRoot(), "..", "..", "tmp", "pwned"))).toBe(false);
     expect(existsSync(versionDir("../../../tmp/pwned"))).toBe(false);
-    expect(kickstart).not.toHaveBeenCalled();
+    expect(bootstrap).not.toHaveBeenCalled();
   });
 
   it("--check also rejects an untrusted resolved version", async () => {
@@ -329,7 +330,7 @@ describe("friday update — rejects an untrusted resolved version before touchin
       downloadRelease: async () => ({ tarball: "", sha: "" }),
       extract: () => {},
       fnmInstall: () => {},
-      kickstart: vi.fn(),
+      bootstrap: vi.fn(),
     };
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {

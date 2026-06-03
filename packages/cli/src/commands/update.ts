@@ -125,8 +125,11 @@ export interface UpdateDeps {
   /** `fnm install` reading the extracted tree's `.node-version`. No-op-safe
    *  when the version is already present. */
   fnmInstall(installDir: string): void;
-  /** `launchctl kickstart -k` the supervisor. */
-  kickstart(): void;
+  /** Rewrite the plist (picking up shape changes between releases) and
+   *  bootstrap-or-kickstart the supervisor. Always go through this rather
+   *  than a bare `kickstart` so updates that change the plist's
+   *  ProgramArguments / EnvironmentVariables reach the launchd job. */
+  bootstrap(installDir: string): void;
 }
 
 function defaultDownloadRelease(destDir: string): Promise<{ tarball: string; sha: string }> {
@@ -169,8 +172,8 @@ export const defaultUpdateDeps: UpdateDeps = {
     const r = spawnSync(fnm, ["install"], { cwd: installDir, stdio: "inherit" });
     if (r.status !== 0) throw new Error(`fnm install exited ${r.status}`);
   },
-  kickstart(): void {
-    launchd.kickstart();
+  bootstrap(installDir: string): void {
+    launchd.bootstrap(installDir);
   },
 };
 
@@ -249,7 +252,7 @@ async function doForwardUpdate(deps: UpdateDeps): Promise<void> {
     // Already extracted (interrupted prior run); just flip + restart.
     console.log(pc.dim(`  version ${latest} already extracted — flipping`));
     flipCurrent(latest);
-    deps.kickstart();
+    deps.bootstrap(currentLink());
     console.log(pc.green(`✓ updated to ${latest}`));
     return;
   }
@@ -286,7 +289,7 @@ async function doForwardUpdate(deps: UpdateDeps): Promise<void> {
   // Provision the pinned Node for the new tree, flip, restart.
   deps.fnmInstall(target);
   flipCurrent(latest);
-  deps.kickstart();
+  deps.bootstrap(currentLink());
   console.log(pc.green(`✓ updated to ${latest}`));
 }
 
@@ -322,7 +325,7 @@ function doRollback(deps: UpdateDeps): void {
   // Defensive: prior comes from on-disk version-dir basenames (validated at
   // install time), but re-assert before it becomes a symlink target.
   flipCurrent(assertValidVersion(prior));
-  deps.kickstart();
+  deps.bootstrap(currentLink());
   console.log(pc.green(`✓ rolled back to ${prior}`));
 }
 

@@ -56,15 +56,13 @@ export const startCommand = defineCommand({
 
     ensureFridayEnv();
 
-    // Bootstrap (or kickstart, if already loaded) the supervisor's launchd
-    // job from the `current` install tree.
+    // Always go through `launchd.bootstrap`: it rewrites the plist from the
+    // current installDir (picking up shape changes between releases — e.g.
+    // ProgramArguments / EnvironmentVariables tweaks) and then bootstraps or
+    // kickstarts depending on whether the job is already loaded.
     console.log(pc.green("starting friday stack via launchd"));
     try {
-      if (launchd.isBootstrapped()) {
-        launchd.kickstart();
-      } else {
-        launchd.bootstrap(currentLink());
-      }
+      launchd.bootstrap(currentLink());
     } catch (err) {
       console.error(pc.red(`failed to start friday: ${err instanceof Error ? err.message : err}`));
       console.error(
