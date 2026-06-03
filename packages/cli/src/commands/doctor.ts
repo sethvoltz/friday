@@ -102,9 +102,20 @@ export const doctorCommand = defineCommand({
       );
     }
 
-    // claude
+    // claude — install method is the user's choice (Anthropic's installer vs
+    // brew cask); doctor just checks PATH. The brew cask shadows Anthropic's
+    // own installer, so Friday's Brewfile no longer ships it.
     const claude = spawnSync("which", ["claude"], { encoding: "utf8" });
-    checks.push(check("claude CLI installed", claude.status === 0));
+    const claudeOk = claude.status === 0;
+    checks.push(
+      check(
+        "claude CLI installed",
+        claudeOk,
+        claudeOk
+          ? undefined
+          : "install via `curl -fsSL https://claude.ai/install.sh | bash` or `brew install --cask claude-code` — see https://docs.anthropic.com/en/docs/claude-code",
+      ),
+    );
 
     // gh
     const gh = spawnSync("which", ["gh"], { encoding: "utf8" });
