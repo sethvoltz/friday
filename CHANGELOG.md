@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/sethvoltz/friday/compare/v1.0.0...v1.1.0) (2026-06-03)
+
+
+### Features
+
+* **system:** evolve auto-escalates critical+high code proposals to a builder that drives a review-ready green PR (FRI-149) ([#153](https://github.com/sethvoltz/friday/issues/153)) ([4a838ce](https://github.com/sethvoltz/friday/commit/4a838ce44d3e519afa0f074506d0592951a88dcd))
+
 ## 1.0.0 (2026-06-02)
 
 
