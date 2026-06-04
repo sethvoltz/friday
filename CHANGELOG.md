@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/sethvoltz/friday/compare/v1.2.2...v1.3.0) (2026-06-04)
+
+
+### Features
+
+* **system:** Intel (darwin-x64) release builds + richer `friday update` progress ([#168](https://github.com/sethvoltz/friday/issues/168)) ([5e9cb22](https://github.com/sethvoltz/friday/commit/5e9cb22ba7b53258825a1d53f0a647d0aa7f40e1))
+
 ## [1.2.2](https://github.com/sethvoltz/friday/compare/v1.2.1...v1.2.2) (2026-06-04)
 
 
