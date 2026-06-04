@@ -190,11 +190,11 @@ export async function getUsageStats(sinceIso?: string): Promise<UsageStats> {
   const baseSql = `SELECT
         COUNT(*)::int                          AS "turns",
         COALESCE(SUM(cost_usd), 0)::float8     AS "cost",
-        COALESCE(SUM(input_tokens), 0)::int    AS "inputRaw",
-        COALESCE(SUM(output_tokens), 0)::int   AS "output",
-        COALESCE(SUM(cache_creation_tokens),0)::int AS "cacheCreation",
-        COALESCE(SUM(cache_read_tokens), 0)::int    AS "cacheRead",
-        COALESCE(SUM(duration_ms), 0)::int     AS "duration"
+        COALESCE(SUM(input_tokens), 0)::float8 AS "inputRaw",
+        COALESCE(SUM(output_tokens), 0)::float8 AS "output",
+        COALESCE(SUM(cache_creation_tokens),0)::float8 AS "cacheCreation",
+        COALESCE(SUM(cache_read_tokens), 0)::float8 AS "cacheRead",
+        COALESCE(SUM(duration_ms), 0)::float8  AS "duration"
       FROM usage`;
   const result =
     sinceIso === undefined
@@ -255,10 +255,10 @@ export async function getDailyByModel(sinceIso?: string): Promise<DailyByModelRo
   const projection = `to_char(timestamp AT TIME ZONE current_setting('TimeZone'), 'YYYY-MM-DD') AS "day",
               COALESCE(model, 'unknown')                                 AS "model",
               COALESCE(SUM(cost_usd), 0)::float8                         AS "cost",
-              COALESCE(SUM(input_tokens), 0)::int                        AS "rawInput",
-              COALESCE(SUM(cache_creation_tokens), 0)::int               AS "cacheCreation",
-              COALESCE(SUM(cache_read_tokens), 0)::int                   AS "cacheRead",
-              COALESCE(SUM(output_tokens), 0)::int                       AS "output",
+              COALESCE(SUM(input_tokens), 0)::float8                     AS "rawInput",
+              COALESCE(SUM(cache_creation_tokens), 0)::float8            AS "cacheCreation",
+              COALESCE(SUM(cache_read_tokens), 0)::float8                AS "cacheRead",
+              COALESCE(SUM(output_tokens), 0)::float8                    AS "output",
               COUNT(*)::int                                              AS "turns"`;
   if (sinceIso === undefined) {
     const result = await pool.query<DailyByModelRow>(
@@ -338,11 +338,11 @@ export async function getSessionStats(sessionId: string): Promise<SessionStats |
     `SELECT
        COUNT(*)::int                          AS turn_count,
        COALESCE(SUM(cost_usd), 0)::float8     AS total_cost,
-       COALESCE(SUM(input_tokens), 0)::int    AS total_input,
-       COALESCE(SUM(output_tokens), 0)::int   AS total_output,
-       COALESCE(SUM(cache_creation_tokens),0)::int AS total_cache_create,
-       COALESCE(SUM(cache_read_tokens), 0)::int    AS total_cache_read,
-       COALESCE(SUM(duration_ms), 0)::int     AS total_duration,
+       COALESCE(SUM(input_tokens), 0)::float8 AS total_input,
+       COALESCE(SUM(output_tokens), 0)::float8 AS total_output,
+       COALESCE(SUM(cache_creation_tokens),0)::float8 AS total_cache_create,
+       COALESCE(SUM(cache_read_tokens), 0)::float8 AS total_cache_read,
+       COALESCE(SUM(duration_ms), 0)::float8  AS total_duration,
        MIN(timestamp)                         AS first_at,
        MAX(timestamp)                         AS last_at
      FROM usage WHERE session_id = $1`,
