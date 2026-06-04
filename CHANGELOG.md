@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/sethvoltz/friday/compare/v1.2.0...v1.2.1) (2026-06-04)
+
+
+### Bug Fixes
+
+* **daemon:** shell-env capture + execPath rewrite for MCP children (FRI-150) ([#162](https://github.com/sethvoltz/friday/issues/162)) ([f6b9d2e](https://github.com/sethvoltz/friday/commit/f6b9d2e5b8c128f11b03d561891fdf1409a94061))
+
 ## [1.2.0](https://github.com/sethvoltz/friday/compare/v1.1.2...v1.2.0) (2026-06-04)
 
 
