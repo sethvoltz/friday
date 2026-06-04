@@ -22,7 +22,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import type { UpdateDeps } from "./update.js";
+import type { DownloadProgress, UpdateDeps, UpdateReporter } from "./update.js";
 
 // Repoint HOME + data dir to scratch tmp BEFORE importing anything that
 // resolves install paths or @friday/shared data-dir constants.
@@ -38,6 +38,8 @@ const {
   installedVersions,
   assertValidVersion,
   compareVersions,
+  assetTagForArch,
+  defaultUpdateDeps,
 } = await import("./update.js");
 const { installRoot, versionsDir, versionDir, currentLink } =
   await import("../lib/install-paths.js");
@@ -89,6 +91,27 @@ function makeDeps(opts: {
   return { deps, bootstrap };
 }
 
+/** A reporter that records every emitted event as a `kind:message` string so
+ *  tests can assert the user-facing flow without scraping stdout. progress
+ *  ticks are captured separately for the download-UX assertions. */
+function recordingReporter(): {
+  reporter: UpdateReporter;
+  events: string[];
+  ticks: DownloadProgress[];
+} {
+  const events: string[] = [];
+  const ticks: DownloadProgress[] = [];
+  const reporter: UpdateReporter = {
+    step: (m) => events.push(`step:${m}`),
+    note: (m) => events.push(`note:${m}`),
+    progress: (p) => ticks.push({ ...p }),
+    endProgress: () => events.push("endProgress"),
+    success: (m) => events.push(`success:${m}`),
+    warn: (m) => events.push(`warn:${m}`),
+  };
+  return { reporter, events, ticks };
+}
+
 describe("friday update", () => {
   beforeEach(() => {
     rmSync(installRoot(), { recursive: true, force: true });
@@ -106,7 +129,8 @@ describe("friday update", () => {
     expect(currentVersion()).toBe("1.0.0");
 
     const { deps, bootstrap } = makeDeps({ latestVersion: "1.1.0" });
-    await runUpdate({}, deps);
+    const { reporter, events } = recordingReporter();
+    await runUpdate({}, deps, reporter);
 
     // current now → versions/1.1.0; the prior 1.0.0 dir still exists.
     expect(basename(readlinkSync(currentLink()))).toBe("1.1.0");
@@ -117,6 +141,24 @@ describe("friday update", () => {
     expect(installedVersion()).toBe("1.1.0");
     // Supervisor was kicked.
     expect(bootstrap).toHaveBeenCalledTimes(1);
+
+    // The user-facing flow narrates every step, in order, ending in success —
+    // download is bracketed by endProgress (the live-bar finalizer), and the
+    // success line names the new version. This pins the narration the feature
+    // exists for, not just that the flip happened.
+    expect(events).toEqual([
+      "step:Checking for the latest release…",
+      expect.stringMatching(/^step:Updating 1\.0\.0 → .*1\.1\.0/),
+      "step:Downloading update…",
+      "endProgress",
+      "step:Verifying checksum…",
+      expect.stringMatching(/^note:checksum verified \(/),
+      "step:Extracting…",
+      "step:Provisioning Node runtime…",
+      "step:Activating new version…",
+      "step:Restarting Friday…",
+      expect.stringMatching(/^success:Updated to 1\.1\.0 /),
+    ]);
   });
 
   it("rolls back to the immediately-prior version + kickstarts (AC#5)", async () => {
@@ -339,6 +381,159 @@ describe("friday update — rejects an untrusted resolved version before touchin
       logSpy.mockRestore();
     }
     expect(currentVersion()).toBe("1.0.0");
+  });
+});
+
+describe("assetTagForArch — per-arch release-asset naming", () => {
+  it("maps the two shipped darwin arches to their tags", () => {
+    expect(assetTagForArch("darwin", "arm64")).toBe("darwin-arm64");
+    expect(assetTagForArch("darwin", "x64")).toBe("darwin-x64");
+  });
+
+  it("throws for arches/platforms Friday does not build (no wrong-arch self-update)", () => {
+    for (const [platform, arch] of [
+      ["darwin", "ia32"],
+      ["darwin", "ppc64"],
+      ["linux", "x64"],
+      ["linux", "arm64"],
+      ["win32", "x64"],
+    ] as const) {
+      expect(() => assetTagForArch(platform, arch)).toThrow(/unsupported platform/);
+    }
+  });
+});
+
+describe("defaultUpdateDeps.downloadRelease — per-arch asset URLs (cross-boundary wiring)", () => {
+  const ORIG_ARCH = process.arch;
+  const ORIG_PLATFORM = process.platform;
+
+  afterEach(() => {
+    Object.defineProperty(process, "arch", { value: ORIG_ARCH, configurable: true });
+    Object.defineProperty(process, "platform", { value: ORIG_PLATFORM, configurable: true });
+    vi.unstubAllGlobals();
+  });
+
+  // Pins the load-bearing URL the feature exists for: an Intel box MUST fetch
+  // friday-darwin-x64.tar.gz, not the arm64 one (the diff's whole rationale —
+  // wrong-arch addons crash-loop the supervisor). Every runUpdate test stubs
+  // downloadRelease out, so ONLY this drives the real assetNames() -> URL
+  // composition. platform is forced to darwin because the suite runs on linux
+  // CI, where assetTagForArch (correctly) throws.
+  for (const [arch, tag] of [
+    ["arm64", "darwin-arm64"],
+    ["x64", "darwin-x64"],
+  ] as const) {
+    it(`fetches friday-${tag}.tar.gz + its .sha256 when process.arch is ${arch}`, async () => {
+      Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+      Object.defineProperty(process, "arch", { value: arch, configurable: true });
+
+      const urls: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          urls.push(String(url));
+          return {
+            ok: true,
+            status: 200,
+            arrayBuffer: async () => new ArrayBuffer(8),
+          } as unknown as Response;
+        }),
+      );
+
+      const dest = mkdtempSync(join(tmpdir(), "friday-dl-"));
+      try {
+        const { tarball, sha } = await defaultUpdateDeps.downloadRelease(dest);
+        const base = "https://github.com/sethvoltz/friday/releases/latest/download";
+        // Exact URLs, in order: tarball then its .sha256 — not just a substring.
+        expect(urls).toEqual([
+          `${base}/friday-${tag}.tar.gz`,
+          `${base}/friday-${tag}.tar.gz.sha256`,
+        ]);
+        // Returned paths carry the arch-correct filenames.
+        expect(basename(tarball)).toBe(`friday-${tag}.tar.gz`);
+        expect(basename(sha)).toBe(`friday-${tag}.tar.gz.sha256`);
+      } finally {
+        rmSync(dest, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+describe("defaultUpdateDeps.downloadRelease — streaming progress (download UX)", () => {
+  const ORIG_ARCH = process.arch;
+  const ORIG_PLATFORM = process.platform;
+
+  afterEach(() => {
+    Object.defineProperty(process, "arch", { value: ORIG_ARCH, configurable: true });
+    Object.defineProperty(process, "platform", { value: ORIG_PLATFORM, configurable: true });
+    vi.unstubAllGlobals();
+  });
+
+  // The headline feature: the tarball is streamed to disk and progress ticks
+  // fire as bytes arrive (monotonic, carrying the server's Content-Length and
+  // landing exactly at total), while the full payload is written byte-for-byte.
+  // Stateful behavior → stateful test, mocking only the fetch boundary.
+  it("streams the tarball with monotonic progress and writes every byte", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+    Object.defineProperty(process, "arch", { value: "x64", configurable: true });
+
+    const chunks = [new Uint8Array([1, 2, 3, 4]), new Uint8Array([5, 6, 7, 8, 9, 10])];
+    const total = 10;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith(".sha256")) {
+          // Tiny asset: no stream, exercise the buffered fallback path.
+          const sha = new TextEncoder().encode("deadbeef  friday-darwin-x64.tar.gz\n");
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers(),
+            arrayBuffer: async () => sha.buffer,
+          } as unknown as Response;
+        }
+        // Tarball: a real web ReadableStream + Content-Length, like GitHub's CDN.
+        const body = new ReadableStream<Uint8Array>({
+          start(c) {
+            for (const ch of chunks) c.enqueue(ch);
+            c.close();
+          },
+        });
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-length": String(total) }),
+          body,
+        } as unknown as Response;
+      }),
+    );
+
+    const ticks: DownloadProgress[] = [];
+    const dest = mkdtempSync(join(tmpdir(), "friday-dl-"));
+    try {
+      const { tarball } = await defaultUpdateDeps.downloadRelease(dest, (p) =>
+        ticks.push({ ...p }),
+      );
+
+      // Progress fires only for the tarball, never the silent .sha256.
+      expect(ticks.length).toBeGreaterThan(0);
+      expect(ticks.every((t) => t.asset === "friday-darwin-x64.tar.gz")).toBe(true);
+      // Downloaded count is non-decreasing and surfaces the real total.
+      for (let i = 1; i < ticks.length; i++) {
+        expect(ticks[i].downloaded).toBeGreaterThanOrEqual(ticks[i - 1].downloaded);
+      }
+      expect(ticks.every((t) => t.total === total)).toBe(true);
+      // The final tick lands exactly at total (drives the bar to 100%).
+      expect(ticks[ticks.length - 1].downloaded).toBe(total);
+
+      // The file on disk is the full payload, byte-for-byte.
+      const written = readFileSync(tarball);
+      expect(written.length).toBe(total);
+      expect([...written]).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    } finally {
+      rmSync(dest, { recursive: true, force: true });
+    }
   });
 });
 
