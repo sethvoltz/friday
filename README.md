@@ -127,7 +127,7 @@ brew services start postgresql@18
 curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash
 ```
 
-The installer downloads a **pre-baked release tarball** (no on-device build), verifies its `shasum -a 256`, ensures the pinned Node via `fnm install` (reading `.node-version`), extracts to `~/.local/share/friday/versions/<version>/`, flips the `~/.local/share/friday/current` symlink, drops a `~/.local/bin/friday` shim on your PATH, and writes + bootstraps the launchd plist (`com.sethvoltz.friday`) directly. It finishes in seconds — there's no `pnpm install`/`pnpm -r build` step on your machine. Re-running it updates in place; `friday update` does the same from the CLI (see [CLI](#cli)).
+Friday runs on macOS — Apple Silicon (arm64) is the primary target, Intel (x64) is supported as legacy. The installer downloads the **pre-baked release tarball** for your Mac's architecture (no on-device build), verifies its `shasum -a 256`, ensures the pinned Node via `fnm install` (reading `.node-version`), extracts to `~/.local/share/friday/versions/<version>/`, flips the `~/.local/share/friday/current` symlink, drops a `~/.local/bin/friday` shim on your PATH, and writes + bootstraps the launchd plist (`com.sethvoltz.friday`) directly. It finishes in seconds — there's no `pnpm install`/`pnpm -r build` step on your machine. Re-running it updates in place; `friday update` does the same from the CLI (see [CLI](#cli)).
 
 Source-editing contributors who don't want the curl installer can clone + `pnpm install + pnpm build` from the repo — see [Developing Friday](#developing-friday) below. The dev workflow doesn't need the release tarball.
 

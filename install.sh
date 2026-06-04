@@ -22,8 +22,9 @@
 #     no associative arrays, no bulk array-reads from a file, no
 #     case-modification parameter expansion, no `&>>`. `[[ =~ ]]` +
 #     BASH_REMATCH are fine in 3.2.
-#   * darwin-arm64 only in v1; the asset-name dispatch is designed for a
-#     future Linux/x64 matrix row but only darwin-arm64 is accepted.
+#   * macOS only: darwin-arm64 (Apple Silicon, primary) + darwin-x64 (Intel,
+#     legacy). The asset-name dispatch is also shaped for a future Linux row
+#     but only the two darwin arches are accepted.
 #   * The shim + plist both invoke an in-place exec to the fnm-resolved
 #     pinned node — fnm is the runtime resolver, not a long-lived wrapper.
 #     The only absolute Node-toolchain path written anywhere is
@@ -94,15 +95,17 @@ detect_platform() {
 
   case "${uname_m}" in
     arm64|aarch64) arch="arm64" ;;
-    *) fail "unsupported architecture '${uname_m}' — Friday v1 supports Apple Silicon (arm64) only." ;;
+    x86_64) arch="x64" ;;
+    *) fail "unsupported architecture '${uname_m}' — Friday supports Apple Silicon (arm64) and Intel (x64)." ;;
   esac
 
-  # Asset-name shape is designed for a future Linux/x64 matrix row; v1 only
-  # builds + accepts darwin-arm64.
+  # Asset-name shape is also designed for a future Linux row; today Friday
+  # builds + accepts the two darwin arches (arm64 primary, x64 legacy).
   PLATFORM="${os}-${arch}"
-  if [ "${PLATFORM}" != "darwin-arm64" ]; then
-    fail "no release asset for platform '${PLATFORM}' — Friday v1 ships darwin-arm64 only."
-  fi
+  case "${PLATFORM}" in
+    darwin-arm64|darwin-x64) : ;;
+    *) fail "no release asset for platform '${PLATFORM}' — Friday ships darwin-arm64 and darwin-x64." ;;
+  esac
   TARBALL_NAME="friday-${PLATFORM}.tar.gz"
   SHA_NAME="${TARBALL_NAME}.sha256"
 }
