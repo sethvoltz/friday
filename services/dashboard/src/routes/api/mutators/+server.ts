@@ -34,7 +34,7 @@ import { PushProcessor } from "@rocicorp/zero/server";
 import { zeroNodePg } from "@rocicorp/zero/server/adapters/pg";
 import { createMutators, schema } from "@friday/shared/sync";
 import { verifyZeroJwt } from "@friday/shared/sync/jwt";
-import { getPool } from "@friday/shared";
+import { getPool, loadFridayConfig } from "@friday/shared";
 
 // Memoize the PushProcessor instance across requests. It holds a
 // reference to the pg Pool (via ZQLDatabase); constructing one per
@@ -70,7 +70,7 @@ function verifiedUserId(request: Request): string | null {
   const header = request.headers.get("authorization");
   if (!header) return null;
   const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : header;
-  const secret = process.env.ZERO_AUTH_SECRET;
+  const secret = loadFridayConfig().zeroAuthSecret;
   if (!secret) return null;
   const claims = verifyZeroJwt(token, secret, Math.floor(Date.now() / 1000));
   return claims?.userId ?? null;

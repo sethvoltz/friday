@@ -22,14 +22,10 @@ vi.mock("./log.js", () => ({
 const {
   captureShellEnv,
   getResolvedShellEnv,
-  loadResolvedShellEnvFromJson,
-  serializeShellEnv,
-  serializeShellEnvForWorker,
   isSecretKey,
   sanitizeEnv,
   sanitizedProcessEnvForChild,
   __resetForTests,
-  SHELL_ENV_ENV_VAR,
   SECRET_LIKE_KEY_RE,
   EXPLICIT_SECRET_KEYS,
 } = await import("./shell-env.js");
@@ -460,67 +456,11 @@ describe("getResolvedShellEnv — pre-capture fallback", () => {
   });
 });
 
-describe("serializeShellEnv / loadResolvedShellEnvFromJson — worker propagation", () => {
-  it("round-trips the captured singleton", async () => {
-    const child = makeChild();
-    const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
-    const promise = captureShellEnv({
-      shellOverride: "/bin/zsh",
-      spawnImpl,
-      existsImpl: () => true,
-    });
-    queueMicrotask(() => {
-      child.stdout.emit("data", markerPayload({ PATH: "/round/trip", FNM_DIR: "/x" }));
-      child.emit("exit", 0, null);
-    });
-    await promise;
-
-    const json = serializeShellEnv();
-    expect(json.length).toBeGreaterThan(0);
-
-    __resetForTests();
-    // Confirm singleton is gone — getResolvedShellEnv reports the pre-capture
-    // sentinel reason now.
-    expect(getResolvedShellEnv().fallbackReason).toBe("not-captured");
-
-    loadResolvedShellEnvFromJson(json);
-    const reseeded = getResolvedShellEnv();
-    expect(reseeded.source).toBe("shell");
-    expect(reseeded.env.PATH).toBe("/round/trip");
-    expect(reseeded.env.FNM_DIR).toBe("/x");
-  });
-
-  it("serializeShellEnv returns empty string when no capture has run", () => {
-    expect(serializeShellEnv()).toBe("");
-  });
-
-  it("loadResolvedShellEnvFromJson tolerates empty/undefined payloads as a no-op (no singleton seeded)", () => {
-    loadResolvedShellEnvFromJson("");
-    loadResolvedShellEnvFromJson(undefined);
-    expect(getResolvedShellEnv().fallbackReason).toBe("not-captured");
-  });
-
-  it("loadResolvedShellEnvFromJson logs and bails on malformed JSON", () => {
-    loadResolvedShellEnvFromJson("{not-json");
-    const evt = logMock.mock.calls.find((c) => c[1] === "daemon.shell-env.deserialize.invalid");
-    expect(evt).toBeDefined();
-    expect(evt?.[0]).toBe("warn");
-    expect(getResolvedShellEnv().fallbackReason).toBe("not-captured");
-  });
-
-  it("loadResolvedShellEnvFromJson logs and bails on shape-mismatch JSON", () => {
-    loadResolvedShellEnvFromJson(JSON.stringify({ env: null }));
-    const evt = logMock.mock.calls.find((c) => c[1] === "daemon.shell-env.deserialize.invalid");
-    expect(evt?.[2].reason).toBe("shape-mismatch");
-    expect(getResolvedShellEnv().fallbackReason).toBe("not-captured");
-  });
-});
-
-describe("SHELL_ENV_ENV_VAR — public env-var name contract", () => {
-  it("is the agreed-upon name lifecycle.ts uses for worker forwarding", () => {
-    expect(SHELL_ENV_ENV_VAR).toBe("FRIDAY_RESOLVED_SHELL_ENV_JSON");
-  });
-});
+// FRI-150 (pivot, ADR-037): the worker-fork forwarding model retired with
+// the move to per-worker capture. `serializeShellEnv`,
+// `serializeShellEnvForWorker`, `loadResolvedShellEnvFromJson`, and the
+// `SHELL_ENV_ENV_VAR` constant were removed. The round-trip /
+// deserialize / F5 ARG_MAX guard tests retire with them.
 
 describe("B1: secret-shaped key filter (sanitizeEnv / isSecretKey)", () => {
   it("matches the reviewer-named keys via the regex suffix rule", () => {
@@ -705,97 +645,9 @@ describe("B1: secret leak prevention through captureShellEnv (end-to-end)", () =
     }
   });
 
-  it("LOAD gate: loadResolvedShellEnvFromJson re-filters secrets on payload load (defends against stale serialized payloads)", () => {
-    const stale = JSON.stringify({
-      env: {
-        PATH: "/preserved",
-        BETTER_AUTH_SECRET: "stale-leak-from-old-payload",
-        LINEAR_API_KEY: "stale-leak",
-        FNM_DIR: "/x",
-      },
-      source: "shell",
-      durationMs: 100,
-    });
-    loadResolvedShellEnvFromJson(stale);
-    const loaded = getResolvedShellEnv();
-    expect(loaded.source).toBe("shell");
-    expect(loaded.env.PATH).toBe("/preserved");
-    expect(loaded.env.FNM_DIR).toBe("/x");
-    expect(loaded.env.BETTER_AUTH_SECRET).toBeUndefined();
-    expect(loaded.env.LINEAR_API_KEY).toBeUndefined();
-  });
-});
-
-describe("F5: ARG_MAX guard on serializeShellEnvForWorker", () => {
-  it("returns the serialized payload when under the cap", async () => {
-    const child = makeChild();
-    const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
-
-    const promise = captureShellEnv({
-      shellOverride: "/bin/zsh",
-      spawnImpl,
-      existsImpl: () => true,
-    });
-    queueMicrotask(() => {
-      child.stdout.emit("data", markerPayload({ PATH: "/x", FNM_DIR: "/y" }));
-      child.emit("exit", 0, null);
-    });
-    await promise;
-
-    const json = serializeShellEnvForWorker();
-    expect(json.length).toBeGreaterThan(0);
-    const parsed = JSON.parse(json) as { env: Record<string, string> };
-    expect(parsed.env.PATH).toBe("/x");
-  });
-
-  it("returns empty string when the payload exceeds FRIDAY_SHELL_ENV_WORKER_MAX_BYTES + logs daemon.shell-env.worker-payload-too-large", async () => {
-    const prevCap = process.env.FRIDAY_SHELL_ENV_WORKER_MAX_BYTES;
-    process.env.FRIDAY_SHELL_ENV_WORKER_MAX_BYTES = "64"; // tiny cap, forces truncation
-    try {
-      const child = makeChild();
-      const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
-
-      const promise = captureShellEnv({
-        shellOverride: "/bin/zsh",
-        spawnImpl,
-        existsImpl: () => true,
-      });
-      queueMicrotask(() => {
-        child.stdout.emit(
-          "data",
-          markerPayload({
-            PATH: "/lots/of/paths/to/exceed/the/tiny/cap:/a:/b:/c:/d:/e:/f",
-            FNM_DIR: "/y",
-            EXTRA: "x".repeat(200),
-          }),
-        );
-        child.emit("exit", 0, null);
-      });
-      await promise;
-      logMock.mockClear();
-
-      const json = serializeShellEnvForWorker();
-      expect(json).toBe("");
-
-      const evt = logMock.mock.calls.find(
-        (c) => c[1] === "daemon.shell-env.worker-payload-too-large",
-      );
-      expect(evt).toBeDefined();
-      expect(evt?.[0]).toBe("warn");
-      expect(evt?.[2].cap).toBe(64);
-      expect(typeof evt?.[2].bytes).toBe("number");
-      expect(evt?.[2].bytes).toBeGreaterThan(64);
-      expect(typeof evt?.[2].keyCount).toBe("number");
-    } finally {
-      if (prevCap !== undefined) {
-        process.env.FRIDAY_SHELL_ENV_WORKER_MAX_BYTES = prevCap;
-      } else {
-        delete process.env.FRIDAY_SHELL_ENV_WORKER_MAX_BYTES;
-      }
-    }
-  });
-
-  it("returns empty string when no capture has run", () => {
-    expect(serializeShellEnvForWorker()).toBe("");
-  });
+  // FRI-150 (pivot, ADR-037): the LOAD gate retired with the worker-fork
+  // forwarding model. Workers capture their own env in-process; there is
+  // no cross-process serialized payload to re-filter. The INPUT / OUTPUT
+  // / FALLBACK gates above are the load-bearing B1 fences in the new
+  // architecture.
 });

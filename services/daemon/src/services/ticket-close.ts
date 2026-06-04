@@ -13,7 +13,7 @@
  */
 
 import { setIssueStateByType } from "@friday/integrations-linear";
-import { type ArchiveReason } from "@friday/shared";
+import { loadFridayConfig, type ArchiveReason } from "@friday/shared";
 import {
   addComment,
   externalLinks,
@@ -135,7 +135,7 @@ async function propagateLinear(opts: {
   status: TicketStatus;
   agentName: string;
 }): Promise<void> {
-  const apiKey = process.env.LINEAR_API_KEY;
+  const apiKey = loadFridayConfig().linearApiKey;
   if (!apiKey) {
     logger.log("info", "ticket.close.external.linear.skip", {
       ticketId: opts.ticketId,

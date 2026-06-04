@@ -11,7 +11,16 @@
 
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import { upsertEnvVar } from "../env.js";
 import { findPgIsReady, probePostgresHealth, provisionPostgres } from "./pg-provision.js";
+
+// FRI-150 (pivot, ADR-037): production code reads ZERO_AUTH_SECRET via
+// loadFridayConfig(). Seed the tmpdir .env file once so each test's
+// `provisionPostgres()` call sees the secret. `upsertEnvVar` writes to
+// disk AND clears the loader cache.
+function ensureTestZeroSecret(): void {
+  upsertEnvVar("ZERO_AUTH_SECRET", "test-secret-end-to-end");
+}
 
 function pgReachable(): boolean {
   return spawnSync(findPgIsReady(), { encoding: "utf8" }).status === 0;
@@ -21,7 +30,7 @@ const skip = !pgReachable();
 
 describe.skipIf(skip)("provisionPostgres (end-to-end)", () => {
   it("provisions the friday role + database + migrations + publication", async () => {
-    process.env.ZERO_AUTH_SECRET ??= "test-secret-end-to-end";
+    ensureTestZeroSecret();
 
     const result = await provisionPostgres({
       log: () => {}, // quiet
@@ -42,7 +51,7 @@ describe.skipIf(skip)("provisionPostgres (end-to-end)", () => {
   });
 
   it("is idempotent across two consecutive runs", async () => {
-    process.env.ZERO_AUTH_SECRET ??= "test-secret-end-to-end";
+    ensureTestZeroSecret();
 
     const first = await provisionPostgres({ log: () => {} });
     const second = await provisionPostgres({ log: () => {} });
@@ -56,7 +65,7 @@ describe.skipIf(skip)("provisionPostgres (end-to-end)", () => {
   });
 
   it("populates blocks.content_tsv via the FTS setup", async () => {
-    process.env.ZERO_AUTH_SECRET ??= "test-secret-end-to-end";
+    ensureTestZeroSecret();
     await provisionPostgres({ log: () => {} });
 
     // Insert + verify tsvector against the live DB.

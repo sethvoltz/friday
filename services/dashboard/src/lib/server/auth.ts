@@ -2,15 +2,15 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { dev } from "$app/environment";
 import {
-  ensureFridayEnv,
   getDb,
   loadConfig,
+  loadFridayConfig,
   PROD_DASHBOARD_PORT,
   resolveDashboardPort,
   schema,
 } from "@friday/shared";
 
-ensureFridayEnv();
+const fridayEnv = loadFridayConfig();
 const cfg = loadConfig();
 
 const db = getDb();
@@ -103,5 +103,5 @@ export const auth = betterAuth({
     expiresIn: 60 * 60 * 24 * 7,
     updateAge: 60 * 60 * 24,
   },
-  secret: process.env.BETTER_AUTH_SECRET!,
+  secret: fridayEnv.betterAuthSecret,
 });

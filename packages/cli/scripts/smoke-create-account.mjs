@@ -8,7 +8,7 @@
 
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { ensureFridayEnv, getDb, schema } from "@friday/shared";
+import { getDb, loadFridayConfig, schema } from "@friday/shared";
 
 const [email, password] = process.argv.slice(2);
 if (!email || !password) {
@@ -16,7 +16,7 @@ if (!email || !password) {
   process.exit(2);
 }
 
-ensureFridayEnv();
+const fridayCfg = loadFridayConfig();
 
 const db = getDb();
 
@@ -30,7 +30,7 @@ const auth = betterAuth({
   database: drizzleAdapter(db, { provider: "pg", schema, usePlural: true }),
   baseURL: process.env.BETTER_AUTH_URL ?? "http://localhost:5173",
   emailAndPassword: { enabled: true, disableSignUp: false },
-  secret: process.env.BETTER_AUTH_SECRET,
+  secret: fridayCfg.betterAuthSecret,
 });
 
 await auth.api.signUpEmail({

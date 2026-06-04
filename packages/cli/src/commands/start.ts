@@ -1,8 +1,8 @@
 import { defineCommand } from "citty";
 import pc from "picocolors";
 import {
-  ensureFridayEnv,
   loadConfig,
+  loadFridayConfig,
   resolveDaemonPort,
   resolveDashboardPort,
   SERVICES,
@@ -54,7 +54,9 @@ export const startCommand = defineCommand({
       process.exit(1);
     }
 
-    ensureFridayEnv();
+    // FRI-150 (pivot, ADR-037): trigger file-creation + autogen via the
+    // new loader (no process.env mutation).
+    loadFridayConfig();
 
     // Always go through `launchd.bootstrap`: it rewrites the plist from the
     // current installDir (picking up shape changes between releases — e.g.
@@ -75,7 +77,7 @@ export const startCommand = defineCommand({
     // (`com.cloudflare.cloudflared`), installed by `friday setup --cloudflare`.
     // RunAtLoad + KeepAlive bring it up automatically; nothing to do here
     // beyond reminding the user when they haven't run setup yet.
-    if (!process.env.CLOUDFLARE_TUNNEL_TOKEN) {
+    if (!loadFridayConfig().cloudflareTunnelToken) {
       console.log(
         pc.dim(`  · no public tunnel — ${pc.cyan("friday setup --cloudflare")} to enable`),
       );

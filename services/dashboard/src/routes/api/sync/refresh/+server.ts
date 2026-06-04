@@ -1,5 +1,6 @@
 import { json, type RequestHandler } from "@sveltejs/kit";
 import { randomUUID } from "node:crypto";
+import { loadFridayConfig } from "@friday/shared";
 import { mintZeroJwt } from "@friday/shared/sync/jwt";
 import { getClientDevice, upsertClientDevice } from "@friday/shared/services";
 
@@ -34,9 +35,9 @@ export const POST: RequestHandler = async ({ cookies, locals, request }) => {
   if (!locals.user) {
     return new Response("unauthorized", { status: 401 });
   }
-  const secret = process.env.ZERO_AUTH_SECRET;
+  const secret = loadFridayConfig().zeroAuthSecret;
   if (!secret) {
-    // Setup invariant: ensureFridayEnv() generates ZERO_AUTH_SECRET. A
+    // Setup invariant: loadFridayConfig() generates ZERO_AUTH_SECRET. A
     // missing value at this point means the dashboard was launched
     // without going through `friday setup` — fail loudly.
     return new Response("zero-auth-secret-missing", { status: 500 });

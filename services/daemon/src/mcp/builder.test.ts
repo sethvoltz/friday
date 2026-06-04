@@ -12,6 +12,10 @@ vi.mock("../log.js", () => ({
  * captured PATH + toolchain set. Tests can override individual keys by
  * reassigning `mockShellEnv.env` before calling `buildMcpServers`.
  */
+// FRI-150 (pivot, ADR-037): the worker captures its own shell env at
+// startup; the builder's MCP env-merge reads from getResolvedShellEnv()
+// then filters through the restricted allowlist. The mock here stands
+// in for the worker's captured env.
 const mockShellEnv: {
   env: Record<string, string>;
   source: "shell" | "process";
@@ -22,6 +26,8 @@ const mockShellEnv: {
     FNM_DIR: "/Users/me/.local/share/fnm",
     HOME: "/Users/me",
     NVM_DIR: "/Users/me/.nvm",
+    LANG: "en_US.UTF-8",
+    TMPDIR: "/var/tmp",
   },
   source: "shell",
   durationMs: 42,
@@ -44,7 +50,8 @@ vi.mock("node:fs", async (importActual) => {
   };
 });
 
-const { buildMcpServers, resolveStdioCommand } = await import("./builder.js");
+const { buildMcpServers, resolveStdioCommand, restrictedMcpEnv, MCP_ENV_ALLOWLIST } =
+  await import("./builder.js");
 
 const NODE_PATH = process.execPath;
 const NPX_PATH = join(dirname(process.execPath), "npx");
@@ -60,6 +67,8 @@ beforeEach(() => {
     FNM_DIR: "/Users/me/.local/share/fnm",
     HOME: "/Users/me",
     NVM_DIR: "/Users/me/.nvm",
+    LANG: "en_US.UTF-8",
+    TMPDIR: "/var/tmp",
   };
 });
 
@@ -486,6 +495,84 @@ describe("buildMcpServers: mixed result shape", () => {
   });
 });
 
+describe("restrictedMcpEnv + MCP_ENV_ALLOWLIST (FRI-150 pivot, ADR-037)", () => {
+  it("MCP_ENV_ALLOWLIST has the load-bearing entries (regression fence — additions OK, accidental removals NOT)", () => {
+    // Per ADR-037 the allowlist is documented; this test catches accidental
+    // removal of a load-bearing entry. New additions only require ADR
+    // updates, not test changes (this assertion is `Set.has`, not equality).
+    for (const required of [
+      "PATH",
+      "HOME",
+      "USER",
+      "LOGNAME",
+      "TERM",
+      "TMPDIR",
+      "LANG",
+      "LC_ALL",
+      "NVM_DIR",
+      "FNM_DIR",
+      "PNPM_HOME",
+      "BUN_INSTALL",
+      "PYENV_ROOT",
+      "ASDF_DATA_DIR",
+      "CARGO_HOME",
+      "GOPATH",
+      "JAVA_HOME",
+    ]) {
+      expect(MCP_ENV_ALLOWLIST.has(required)).toBe(true);
+    }
+  });
+
+  it("MCP_ENV_ALLOWLIST does NOT include daemon-internal vars (FRIDAY_*) or SHELL or daemon secrets", () => {
+    for (const denied of [
+      "FRIDAY_DATA_DIR",
+      "FRIDAY_FNM_BIN",
+      "FRIDAY_DAEMON_PORT",
+      "SHELL",
+      "BETTER_AUTH_SECRET",
+      "ZERO_AUTH_SECRET",
+      "LINEAR_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "DATABASE_URL",
+    ]) {
+      expect(MCP_ENV_ALLOWLIST.has(denied)).toBe(false);
+    }
+  });
+
+  it("restrictedMcpEnv keeps allowlist keys, drops everything else", () => {
+    const captured = {
+      PATH: "/p",
+      HOME: "/h",
+      FNM_DIR: "/fnm",
+      LANG: "en_US.UTF-8",
+      // Off-allowlist hostile keys:
+      SHELL: "/bin/zsh",
+      FRIDAY_DATA_DIR: "/Users/me/.friday",
+      BETTER_AUTH_SECRET: "leaked-if-this-survives",
+      GH_TOKEN: "ghp_xxx",
+      RANDOM_USER_VAR: "x",
+    };
+    const restricted = restrictedMcpEnv(captured);
+    expect(restricted).toEqual({
+      PATH: "/p",
+      HOME: "/h",
+      FNM_DIR: "/fnm",
+      LANG: "en_US.UTF-8",
+    });
+    expect(restricted.SHELL).toBeUndefined();
+    expect(restricted.FRIDAY_DATA_DIR).toBeUndefined();
+    expect(restricted.BETTER_AUTH_SECRET).toBeUndefined();
+    expect(restricted.GH_TOKEN).toBeUndefined();
+    expect(restricted.RANDOM_USER_VAR).toBeUndefined();
+  });
+
+  it("restrictedMcpEnv handles missing allowlist keys gracefully (no undefined values written)", () => {
+    const restricted = restrictedMcpEnv({ PATH: "/p" });
+    expect(Object.keys(restricted)).toEqual(["PATH"]);
+    expect("HOME" in restricted).toBe(false);
+  });
+});
+
 describe("resolveStdioCommand (FRI-150)", () => {
   it("rewrites 'node' to process.execPath", () => {
     expect(resolveStdioCommand("node")).toBe(NODE_PATH);
@@ -569,8 +656,11 @@ describe("buildMcpServers: FRI-150 env-merge precedence", () => {
     expect(x.env.FRIDAY_APP_DIR).toBe("/tmp/x");
   });
 
-  it("when shell-env capture fell back to process.env (source === 'process'), MCP env still gets the snapshotted PATH", () => {
+  it("when shell-env capture fell back to process.env (source === 'process'), MCP env still gets the snapshotted PATH (allowlist filter applies in both modes)", () => {
     mockShellEnv.source = "process";
+    // FRI-150 (ADR-037): the allowlist filter applies regardless of source.
+    // A bespoke FALLBACK_MARKER is NOT on the allowlist → should not appear
+    // in MCP env. PATH IS on the allowlist → should pass through.
     mockShellEnv.env = { PATH: "/process-env-fallback-path", FALLBACK_MARKER: "1" };
     const servers = buildMcpServers({
       ...baseOpts("bare"),
@@ -578,7 +668,7 @@ describe("buildMcpServers: FRI-150 env-merge precedence", () => {
     });
     const fbk = servers.fbk as { env: Record<string, string> };
     expect(fbk.env.PATH).toBe("/process-env-fallback-path");
-    expect(fbk.env.FALLBACK_MARKER).toBe("1");
+    expect(fbk.env.FALLBACK_MARKER).toBeUndefined();
     // restore source for other tests
     mockShellEnv.source = "shell";
   });

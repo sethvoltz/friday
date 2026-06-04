@@ -8,6 +8,7 @@ import {
   getDaemonSecret,
   isLocalHost,
   loadConfig,
+  loadFridayConfig,
   normalizeModelConfig,
   resolveDaemonPort,
 } from "@friday/shared";
@@ -969,7 +970,7 @@ async function handle(
     if (!body.title) {
       return json(res, 400, { error: "title required" });
     }
-    if (!process.env.LINEAR_API_KEY) {
+    if (!loadFridayConfig().linearApiKey) {
       return json(res, 400, { error: "LINEAR_API_KEY not set" });
     }
     const teamOverride = body.team;
@@ -1014,7 +1015,7 @@ async function handle(
     if (!body.identifier) {
       return json(res, 400, { error: "identifier required" });
     }
-    const apiKey = process.env.LINEAR_API_KEY;
+    const apiKey = loadFridayConfig().linearApiKey;
     if (!apiKey) {
       return json(res, 400, { error: "LINEAR_API_KEY not set" });
     }

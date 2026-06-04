@@ -12,9 +12,34 @@
  * Phase 2 row-state pre/post-condition contract (plan §5).
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 import { verifyZeroJwt } from "@friday/shared/sync/jwt";
+
+// FRI-150 (pivot, ADR-037): the endpoint reads ZERO_AUTH_SECRET via
+// loadFridayConfig(). Mock the loader; tests toggle presence/absence
+// via `mockZeroAuthSecret.current`.
+const TEST_ZERO_AUTH_SECRET = "test-zero-secret";
+const mockZeroAuthSecret: { current: string | undefined } = { current: TEST_ZERO_AUTH_SECRET };
+vi.mock("@friday/shared", async (importActual) => {
+  const actual = await importActual<typeof import("@friday/shared")>();
+  return {
+    ...actual,
+    loadFridayConfig: () => ({
+      betterAuthSecret: "test-better-auth",
+      zeroAuthSecret: mockZeroAuthSecret.current,
+      zeroAdminPassword: "test-zero-admin",
+      databaseUrl: process.env.DATABASE_URL,
+      zeroUpstreamDb: undefined,
+      zeroReplicaFile: undefined,
+      linearApiKey: undefined,
+      anthropicApiKey: undefined,
+      cloudflareTunnelToken: undefined,
+      posthogApiKey: undefined,
+      posthogHost: undefined,
+    }),
+  };
+});
 
 let handle: TestDbHandle;
 let endpoint: typeof import("./+server.js");
@@ -22,9 +47,6 @@ let getClientDevice: (typeof import("@friday/shared/services"))["getClientDevice
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "sync_refresh" });
-  // ZERO_AUTH_SECRET would normally be set by ensureFridayEnv() at
-  // process start; createTestDb only handles DATABASE_URL.
-  process.env.ZERO_AUTH_SECRET ??= "test-zero-secret";
   endpoint = await import("./+server.js");
   ({ getClientDevice } = await import("@friday/shared/services"));
 });
@@ -92,8 +114,8 @@ describe("POST /api/sync/refresh", () => {
   });
 
   it("returns 500 when ZERO_AUTH_SECRET is missing", async () => {
-    const saved = process.env.ZERO_AUTH_SECRET;
-    delete process.env.ZERO_AUTH_SECRET;
+    const saved = mockZeroAuthSecret.current;
+    mockZeroAuthSecret.current = undefined;
     try {
       const { response } = await callPost({
         user: { id: "user-1", email: "u@x", name: "u" },
@@ -101,7 +123,7 @@ describe("POST /api/sync/refresh", () => {
       expect(response.status).toBe(500);
       expect(await response.text()).toBe("zero-auth-secret-missing");
     } finally {
-      process.env.ZERO_AUTH_SECRET = saved;
+      mockZeroAuthSecret.current = saved;
     }
   });
 
@@ -129,7 +151,7 @@ describe("POST /api/sync/refresh", () => {
 
     // JWT verifies with the same secret and carries the claims we
     // expect; exp is roughly now+15min.
-    const claims = verifyZeroJwt(body.token, process.env.ZERO_AUTH_SECRET!);
+    const claims = verifyZeroJwt(body.token, mockZeroAuthSecret.current!);
     expect(claims).not.toBeNull();
     expect(claims!.sub).toBe("user-happy");
     expect(claims!.userId).toBe("user-happy");

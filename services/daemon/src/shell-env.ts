@@ -1,5 +1,5 @@
 /**
- * FRI-150: shell-env capture at daemon boot.
+ * FRI-150 (pivot, ADR-037): per-agent shell-env capture.
  *
  * The MCP SDK's `StdioClientTransport` deliberately allowlists env vars at
  * the spawn boundary — only HOME/LOGNAME/PATH/SHELL/TERM/USER from
@@ -7,34 +7,40 @@
  * (`@modelcontextprotocol/sdk@1.29.0/dist/esm/client/stdio.js:8-24`). On a
  * launchd-spawned daemon, that PATH is launchd's minimal floor, and a
  * clean install (no brew-installed Node) can't resolve `node`/`npx` in any
- * spawned MCP. Baking PATH into the plist (the closed PR #161 approach)
- * doesn't help — the allowlist filter still strips everything else
- * (FNM_DIR, NVM_DIR, asdf shims, etc.).
+ * spawned MCP.
+ *
+ * The trust gradient (per ADR-037):
+ *
+ *   ~/.friday/.env         — closed config object, daemon-private secrets
+ *   process.env (daemon)   — NO secrets (loadFridayConfig replaces dotenv pollution),
+ *                            just operational vars + worker-fork inheritance
+ *   worker process         — runs `$SHELL -ilc` at startup to capture user shell env
+ *                            (no Friday secrets — they were never in process.env)
+ *   Claude Code CLI        — SDK forwards the worker's process.env verbatim → agent
+ *                            sees the captured user shell env (full)
+ *   agent's Bash calls     — inherits CLI env → user shell env (full)
+ *   MCP children           — RESTRICTED via per-server `env`: PATH + locale + toolchain
+ *                            hints + manifest env + FRIDAY_APP_DIR (not the full capture)
  *
  * Pattern adopted from VS Code's `src/vs/platform/shell/node/shellEnv.ts`:
  * cold-start spawn the user's `$SHELL` as an interactive login shell, ask
- * Node to JSON.stringify(process.env), parse, cache. Then in
- * `services/daemon/src/mcp/builder.ts` we pass the captured env as the
- * per-server `env` field — the SDK does
- * `{ ...getDefaultEnvironment(), ...config.env }`, so our captured env
- * supersets the allowlist and any manifest `env` still wins on top.
+ * Node to JSON.stringify(process.env), parse, cache.
  *
- * The capture lives at daemon boot, NOT in the supervisor shim. The shim
- * only needs to find Node (via `FRIDAY_FNM_BIN`); PATH propagation for
- * MCP children is a daemon-layer concern.
+ * Capture lives in the worker entry (`services/daemon/src/agent/worker.ts`),
+ * NOT at daemon boot — each forked worker captures its own. Per-worker-process
+ * singleton; long-lived agents amortize the cost across many turns.
  *
  * Failure mode is well-understood territory (VS Code issue #113869,
  * "Unable to resolve your shell environment in a reasonable time"): on
  * timeout, non-zero shell exit, missing markers, or unparseable JSON we
- * fall back to `process.env` and emit a structured warning. Daemon boot
- * never blocks on this.
+ * fall back to a sanitized `process.env` snapshot and emit a structured
+ * warning. The worker keeps going.
  *
- * Worker propagation: the daemon's singleton is JSON-serialized into
- * `FRIDAY_RESOLVED_SHELL_ENV_JSON` at worker fork time (lifecycle.ts);
- * the worker entry parses it on startup via `loadResolvedShellEnvFromJson`
- * to seed its own singleton. `process.env` itself is NOT mutated — we
- * keep the captured env quarantined so it can't clobber daemon-owned
- * vars (`BETTER_AUTH_SECRET`, `ZERO_AUTH_SECRET`, `FRIDAY_DATA_DIR`, …).
+ * Defense-in-depth: even though the worker's `process.env` should be free of
+ * daemon secrets (loadFridayConfig refactor), `sanitizeEnv` strips
+ * secret-shaped keys from both the input env handed to the spawned shell
+ * AND the parsed output before caching. A user's `.zshrc` doing
+ * `export GITHUB_TOKEN=...` still doesn't make it into MCP child env.
  */
 
 import { spawn } from "node:child_process";
@@ -42,21 +48,10 @@ import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { logger } from "./log.js";
 
-export const SHELL_ENV_ENV_VAR = "FRIDAY_RESOLVED_SHELL_ENV_JSON";
 export const SHELL_ENV_TIMEOUT_ENV_VAR = "FRIDAY_SHELL_ENV_TIMEOUT_MS";
 const START_MARKER = "__FRIDAY_SHELL_ENV_START__";
 const END_MARKER = "__FRIDAY_SHELL_ENV_END__";
 const DEFAULT_TIMEOUT_MS = 5000;
-/**
- * Soft-cap on `serializeShellEnvForWorker`. macOS `ARG_MAX` is ~256 KB total
- * for argv+envp passed to `execve`; a captured shell env over ~100 KB
- * starts crowding the per-worker fork. F5: skip the env-var forwarding past
- * this threshold and log; the worker hits its `not-captured` sentinel and
- * falls back to a process.env snapshot. Override via the
- * `FRIDAY_SHELL_ENV_WORKER_MAX_BYTES` env var (numeric, byte count).
- */
-const DEFAULT_WORKER_PAYLOAD_MAX_BYTES = 100 * 1024;
-const WORKER_PAYLOAD_MAX_BYTES_ENV_VAR = "FRIDAY_SHELL_ENV_WORKER_MAX_BYTES";
 
 /**
  * B1: secret-shaped keys we never let cross the daemon ↔ shell-child or
@@ -152,85 +147,12 @@ export function getResolvedShellEnv(): ShellEnvResult {
   };
 }
 
-/**
- * JSON-serialize the singleton. Returns "" when no capture has run.
- *
- * Prefer `serializeShellEnvForWorker()` for the worker-fork path — it
- * adds the F5 ARG_MAX guard. This raw serializer exists for tests that
- * need the unguarded shape.
- */
-export function serializeShellEnv(): string {
-  if (!cached) return "";
-  return JSON.stringify(cached);
-}
-
-/**
- * F5: serialize the captured singleton for worker-fork forwarding via
- * `FRIDAY_RESOLVED_SHELL_ENV_JSON`. macOS `ARG_MAX` is ~256 KB total for
- * argv+envp passed to `execve`; a captured shell env above ~100 KB
- * crowds the worker fork and risks `E2BIG`. If we exceed
- * `DEFAULT_WORKER_PAYLOAD_MAX_BYTES` (override via
- * `FRIDAY_SHELL_ENV_WORKER_MAX_BYTES`), drop the forwarding entirely and
- * log `daemon.shell-env.worker-payload-too-large`. The worker then hits
- * its `not-captured` sentinel and falls back to a process.env snapshot
- * (a still-functional degraded mode).
- *
- * Returns "" both when there's no capture AND when the payload exceeds
- * the cap — callers always treat "" as "skip the env var", so the
- * worker fork path stays uniform.
- */
-export function serializeShellEnvForWorker(): string {
-  const raw = serializeShellEnv();
-  if (!raw) return "";
-  const cap = readWorkerPayloadCap();
-  const bytes = Buffer.byteLength(raw, "utf8");
-  if (bytes > cap) {
-    logger.log("warn", "daemon.shell-env.worker-payload-too-large", {
-      bytes,
-      cap,
-      // Help future debuggers narrow it down without dumping the whole env.
-      keyCount: cached ? Object.keys(cached.env).length : 0,
-    });
-    return "";
-  }
-  return raw;
-}
-
-function readWorkerPayloadCap(): number {
-  const raw = process.env[WORKER_PAYLOAD_MAX_BYTES_ENV_VAR];
-  if (!raw) return DEFAULT_WORKER_PAYLOAD_MAX_BYTES;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_WORKER_PAYLOAD_MAX_BYTES;
-}
-
-/**
- * Worker-side counterpart of `serializeShellEnv`: parse the JSON payload
- * the daemon forwarded and seed the singleton. Empty/missing payload is
- * tolerated — the worker still gets a `process.env` fallback via
- * `getResolvedShellEnv`. Malformed payload is logged but doesn't throw.
- */
-export function loadResolvedShellEnvFromJson(json: string | undefined): void {
-  if (!json) return;
-  try {
-    const parsed = JSON.parse(json) as ShellEnvResult;
-    if (!parsed || typeof parsed !== "object" || !parsed.env || typeof parsed.env !== "object") {
-      logger.log("warn", "daemon.shell-env.deserialize.invalid", {
-        reason: "shape-mismatch",
-      });
-      return;
-    }
-    // B1 worker-side gate: even though the daemon already filtered secrets
-    // before serializing, re-filter on load. Defends against a stale env
-    // var hand-set by an operator or a future code path that forgot to
-    // sanitize before serializing.
-    parsed.env = sanitizeEnv(parsed.env);
-    cached = parsed;
-  } catch (err) {
-    logger.log("warn", "daemon.shell-env.deserialize.invalid", {
-      reason: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
+// FRI-150 (pivot, ADR-037): `serializeShellEnv` / `serializeShellEnvForWorker`
+// / `loadResolvedShellEnvFromJson` retired with the move from daemon-boot
+// capture + worker-fork forwarding to per-worker capture. Each worker
+// now calls `captureShellEnv()` directly at startup. The F5 ARG_MAX guard
+// has no use site (no env-var forwarding); the round-trip primitives
+// have no caller.
 
 export interface CaptureOptions {
   /** Override the env var-derived timeout. */

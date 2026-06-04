@@ -7,6 +7,7 @@
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import pgPkg from "pg";
+import { loadFridayConfig } from "../env.js";
 import * as schema from "./schema.js";
 
 const { Pool } = pgPkg;
@@ -62,7 +63,13 @@ function isTeardownClassError(err: unknown): boolean {
 
 function getDbAndPool(): { db: FridayDb; pool: FridayPool } {
   if (cached) return cached;
-  const connectionString = process.env.DATABASE_URL;
+  // FRI-150 (pivot, ADR-037): read DATABASE_URL from `loadFridayConfig()`
+  // instead of `process.env` so daemon-side callers don't pollute
+  // process.env via dotenv. Test fixtures that need to override the DB
+  // URL set it via `process.env.DATABASE_URL` first AND clear the
+  // loadFridayConfig cache (see test-pg.ts) — process.env still wins
+  // when it's set, to preserve the long-standing test convention.
+  const connectionString = process.env.DATABASE_URL ?? loadFridayConfig().databaseUrl;
   if (!connectionString) {
     throw new Error(
       "DATABASE_URL is not set. Run `friday setup` to provision Postgres + write the URL to ~/.friday/.env.",

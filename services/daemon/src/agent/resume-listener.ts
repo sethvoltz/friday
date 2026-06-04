@@ -61,6 +61,7 @@ import {
   getDb,
   getPool,
   loadConfig,
+  loadFridayConfig,
   normalizeModelConfig,
   resolveDaemonPort,
   schema,
@@ -306,7 +307,8 @@ export interface ResumeListenerHandle {
 export async function startResumeListener(): Promise<ResumeListenerHandle> {
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ??
+    loadFridayConfig().databaseUrl;
   if (!connectionString) {
     throw new Error("DATABASE_URL must be set to start the resumeTurn LISTEN connection.");
   }

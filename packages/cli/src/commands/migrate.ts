@@ -21,8 +21,8 @@ import {
   ENV_PATH,
   appDir,
   ensureDirs,
-  ensureFridayEnv,
   getDb,
+  loadFridayConfig,
   schema,
 } from "@friday/shared";
 
@@ -64,10 +64,10 @@ export const migrateCommand = defineCommand({
         },
       },
       async run() {
-        // Load ~/.friday/.env into process.env before any DB access; other
-        // CLI commands gate on existsSync(ENV_PATH) for fresh installs that
-        // haven't run `friday setup` yet.
-        if (existsSync(ENV_PATH)) ensureFridayEnv();
+        // FRI-150 (pivot, ADR-037): load Friday config (does NOT mutate
+        // process.env). Gated on the file existing — fresh installs
+        // before `friday setup` skip this.
+        if (existsSync(ENV_PATH)) loadFridayConfig();
         ensureDirs();
         const projectsDir = join(homedir(), ".claude", "projects");
         if (!existsSync(projectsDir)) {

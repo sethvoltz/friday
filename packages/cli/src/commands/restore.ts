@@ -28,7 +28,14 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { confirm } from "@clack/prompts";
 import pc from "picocolors";
-import { DATA_DIR, ENV_PATH, HEALTH_PATH, getPool, runMigrations } from "@friday/shared";
+import {
+  DATA_DIR,
+  HEALTH_PATH,
+  clearFridayConfigCache,
+  getPool,
+  loadFridayConfig,
+  runMigrations,
+} from "@friday/shared";
 
 const BACKUP_PATHS = [
   ".env",
@@ -249,8 +256,10 @@ export const restoreCommand = defineCommand({
         "CREATE DATABASE friday OWNER friday;",
       ]);
 
-      sourceEnvFromFile(ENV_PATH);
-      const dbUrl = process.env.DATABASE_URL;
+      // FRI-150 (pivot, ADR-037): the restored .env file is now on disk;
+      // invalidate the in-memory cache so loadFridayConfig() re-reads it.
+      clearFridayConfigCache();
+      const dbUrl = loadFridayConfig().databaseUrl;
       if (!dbUrl) {
         throw new Error(
           "DATABASE_URL is missing from ~/.friday/.env. Run `friday setup` first to provision Postgres.",
@@ -604,26 +613,7 @@ function sha256File(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-/** Parse a `KEY=value` `.env` file and inject any keys not already set
- *  in `process.env`. Mirrors the daemon's startup behavior so
- *  `runMigrations()` can find `DATABASE_URL` after a restore. */
-function sourceEnvFromFile(path: string): void {
-  if (!existsSync(path)) return;
-  const text = readFileSync(path, "utf8");
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (line.length === 0 || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    let value = line.slice(eq + 1).trim();
-    // Strip surrounding quotes.
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    if (process.env[key] === undefined) process.env[key] = value;
-  }
-}
+// FRI-150 (pivot, ADR-037): `sourceEnvFromFile` retired — the restore
+// path now invalidates the loadFridayConfig cache via
+// `clearFridayConfigCache()` and re-reads via `loadFridayConfig()`.
+// Callers no longer rely on process.env for restored secrets.

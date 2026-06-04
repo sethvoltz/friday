@@ -1,6 +1,6 @@
 import { PostHog } from "posthog-node";
 import { eq } from "drizzle-orm";
-import { getDb, schema } from "@friday/shared";
+import { getDb, loadFridayConfig, schema } from "@friday/shared";
 
 // Distinct id for events with no human originator (true daemon/service
 // actions: crashes, agent lifecycle, schedules, autonomous turns). User-
@@ -15,8 +15,9 @@ const SERVICE_DISTINCT_ID = "friday-daemon";
 // silently no-ops, so analytics are strictly opt-in.
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 
-const client = new PostHog(process.env.POSTHOG_API_KEY ?? "", {
-  host: process.env.POSTHOG_HOST ?? DEFAULT_POSTHOG_HOST,
+const phCfg = loadFridayConfig();
+const client = new PostHog(phCfg.posthogApiKey ?? "", {
+  host: phCfg.posthogHost ?? DEFAULT_POSTHOG_HOST,
   enableExceptionAutocapture: true,
 });
 

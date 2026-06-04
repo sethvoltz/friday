@@ -69,7 +69,6 @@ import type {
   WorkerPromptCommand,
   WorkerSpawnOptions,
 } from "./worker-protocol.js";
-import { SHELL_ENV_ENV_VAR, serializeShellEnvForWorker } from "../shell-env.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, "worker.js");
@@ -383,19 +382,15 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // repo-vetted native-module builds. M1's package-manager rule keeps npm /
   // yarn behind `--ignore-scripts` (those run all postinstalls by default);
   // for pnpm we trust the repo's own gating.
-  // FRI-150: forward the daemon's resolved shell env to the worker so
-  // builder.ts (running in the forked worker) can thread captured PATH +
-  // toolchain vars (FNM_DIR, NVM_DIR, …) into per-stdio-MCP `env`,
-  // overcoming the SDK's HOME/PATH/SHELL/… allowlist at the spawn
-  // boundary. `serializeShellEnvForWorker()` returns "" when no capture
-  // has run OR when the serialized payload exceeds the ARG_MAX-safety
-  // cap (F5) — worker code tolerates the empty case and falls back to
-  // a sanitized process.env snapshot.
+  // FRI-150 (pivot, ADR-037): the worker captures its own shell env at
+  // entry — no daemon-side forwarding. Workers see process.env from the
+  // daemon (post-loadFridayConfig refactor that's clean of secrets) plus
+  // CI / COREPACK_* overrides, then run `$SHELL -ilc` to layer the
+  // user's interactive shell env on top of that.
   const env = {
     ...process.env,
     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
     CI: "1",
-    [SHELL_ENV_ENV_VAR]: serializeShellEnvForWorker(),
   };
 
   // M5: ulimit wrapper for CPU + nofile. The bash prelude applies the

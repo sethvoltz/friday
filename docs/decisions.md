@@ -1267,6 +1267,108 @@ Evolve could instead mail the orchestrator "proposal X is critical+code; please 
 - The 409-dedup proves insufficient (e.g. builders archived and immediately re-spawned each scan) — promote FRI-147's fast-spin guard.
 - A defense-in-depth `gh pr merge` PreToolUse deny rule is wanted for certainty beyond the prompt-level guard.
 
+## ADR-037 — Trust gradient: daemon clean, workers get user shell, MCP children get a restricted allowlist (FRI-150)
+
+**Status:** accepted
+
+### Context
+
+The MCP SDK's `StdioClientTransport` (`@modelcontextprotocol/sdk@1.29.0/dist/esm/client/stdio.js:8-24`) deliberately allowlists env vars at the spawn boundary — only `HOME / LOGNAME / PATH / SHELL / TERM / USER` from `process.env` reach MCP children. On a launchd-spawned daemon, that PATH is launchd's minimal floor, and a clean install (no brew-installed Node coexisting with fnm) can't resolve `node`/`npx` in any spawned MCP child.
+
+Two earlier passes at the fix were either wrong-layer or right-direction-wrong-magnitude:
+
+- **Closed PR #161** baked PATH into the launchd plist. The allowlist filter still strips everything else (FNM_DIR, NVM_DIR, asdf shims), so the fix only worked when the user's PATH happened to overlap with the daemon's hard-coded entries.
+- **PR #162's first pass** captured the user's shell env at daemon boot, forwarded a JSON-serialized payload to every worker via `FRIDAY_RESOLVED_SHELL_ENV_JSON`, and threaded the full captured env into every per-stdio MCP `env`. Adversarial review surfaced a real BLOCKER (B1): `ensureFridayEnv()` mutated `process.env` with `BETTER_AUTH_SECRET` / `ZERO_AUTH_SECRET` / `LINEAR_API_KEY` / `ANTHROPIC_API_KEY` / etc., the daemon-side shell capture handed all of `process.env` to the spawned shell, and the captured payload then rode straight into every MCP child's `env` — making the shell-env pipeline a one-way exfiltration channel for daemon secrets.
+
+The second pivot lands a trust gradient inspired by OpenCode's architectural model:
+
+- **Agents** (Claude Code CLI) get the user's full interactive-login shell env, same as a terminal session would.
+- **MCP children** get a documented, restricted allowlist of toolchain-relevant vars — not the full shell env.
+- **Daemon process.env** holds no secrets. Daemon-private secrets live in an immutable `FridayEnvConfig` object loaded via `loadFridayConfig()`; callers read fields explicitly.
+
+Note: OpenCode's actual `mcp/index.ts` spreads full `process.env` to spawned MCP children — `packages/opencode/src/mcp/index.ts:connectLocal`'s `env: { ...process.env, ...mcp.environment }` shape. They achieve safety by keeping their parent process.env relatively clean; we additionally enforce a per-MCP allowlist as defense-in-depth, since our parent's `process.env` is inherited from the user's launchd / login session and is broader than a single-purpose CLI's would be.
+
+### Decision
+
+**Per-worker capture + restricted MCP allowlist + dotenv refactor.**
+
+The trust gradient, top to bottom:
+
+```
+~/.friday/.env         — closed config object, daemon-private secrets
+                         loaded via loadFridayConfig() into an immutable object
+process.env (daemon)   — NO secrets. Just operational + system vars
+                         (PATH, FRIDAY_FNM_BIN, FRIDAY_DATA_DIR, …)
+                         ↓ worker fork inherits this clean env tree
+worker process         — runs $SHELL -ilc at startup to capture user shell env
+                         (per-worker-process singleton, ~50-300ms one-time cost)
+                         ↓ SDK's CLI subprocess receives worker's process.env verbatim
+Claude Code CLI        — agent sees the captured user shell env (full)
+                         ↓ agent's Bash tool inherits CLI's env
+agent's Bash calls     — sees user shell env (full)
+                         ↓ SDK's StdioClientTransport allowlist + per-server config.env
+MCP children           — RESTRICTED: PATH + locale + toolchain hints + FRIDAY_APP_DIR + manifest env
+                         (the `MCP_ENV_ALLOWLIST` in services/daemon/src/mcp/builder.ts)
+```
+
+### The allowlist
+
+`MCP_ENV_ALLOWLIST` in `services/daemon/src/mcp/builder.ts`:
+
+- **Process basics** (SDK allowlist superset): `PATH`, `HOME`, `USER`, `LOGNAME`, `TERM`, `TMPDIR`.
+- **Locale**: `LANG`, `LC_ALL`, `LC_COLLATE`, `LC_CTYPE`, `LC_MESSAGES`, `LC_MONETARY`, `LC_NUMERIC`, `LC_TIME`.
+- **Node / JS toolchain hints**: `NVM_DIR`, `FNM_DIR`, `FNM_MULTISHELL_PATH`, `PNPM_HOME`, `BUN_INSTALL`, `DENO_INSTALL`, `VOLTA_HOME`.
+- **Python / Ruby / Rust / Go / Java / JVM / conda toolchain hints**: `PYENV_ROOT`, `ASDF_DATA_DIR`, `RBENV_ROOT`, `CARGO_HOME`, `RUSTUP_HOME`, `GOPATH`, `GOROOT`, `JAVA_HOME`, `M2_HOME`, `CONDA_PREFIX`, `SDKMAN_DIR`.
+- **Search-path hints used by build tools**: `MANPATH`, `INFOPATH`, `PKG_CONFIG_PATH`.
+
+**Criteria for additions:** the entry must be a documented toolchain or locale hint that a third-party MCP could legitimately need to find user-installed binaries / data, with no plausible secret value. Add to the set in `builder.ts` and document the rationale here. PR review fence: if a proposed addition contains values that are sensitive on any common system (auth tokens, session IDs, cookies, signing keys, URL-form connection strings, paths under `~/.ssh` or `~/.aws`), reject.
+
+### The dotenv refactor
+
+`ensureFridayEnv()` retired. Replaced by `loadFridayConfig(): FridayEnvConfig`:
+
+- Creates `~/.friday/.env` on first call if missing.
+- Auto-generates `BETTER_AUTH_SECRET` / `ZERO_AUTH_SECRET` / `ZERO_ADMIN_PASSWORD` if missing, appending each to disk.
+- Parses via `dotenv.parse(readFileSync(ENV_PATH))` — does **not** mutate `process.env`.
+- Returns a frozen object: `{ betterAuthSecret, zeroAuthSecret, zeroAdminPassword, databaseUrl, zeroUpstreamDb, zeroReplicaFile, linearApiKey, anthropicApiKey, cloudflareTunnelToken, posthogApiKey, posthogHost }`.
+- Memoized per-process. `upsertEnvVar` + `clearFridayConfigCache` invalidate the cache when the file changes out-of-band (e.g. after `friday setup` writes new fields, or `friday restore` swaps in a backup).
+
+The supervisor (`packages/cli/src/bin/supervisor.ts`) no longer pollutes its own `process.env` from the .env file. Children's env is constructed explicitly:
+
+- **daemon**: clean `process.env` + `FRIDAY_LOG_STDOUT=off` + `FRIDAY_DAEMON_PORT`. Daemon calls `loadFridayConfig()` at boot for its own secret reads.
+- **dashboard**: clean `process.env` + `PORT` + `FRIDAY_LOG_STDOUT=off`. Dashboard server code calls `loadFridayConfig()` for `betterAuthSecret`, `zeroAuthSecret`, `posthogApiKey`.
+- **zero-cache**: explicit injection of `ZERO_UPSTREAM_DB`, `ZERO_AUTH_SECRET`, `ZERO_ADMIN_PASSWORD`, `ZERO_REPLICA_FILE` from `fridayEnv`. zero-cache is an external binary that can't call our loader; the supervisor hands it the four secrets it needs.
+
+### Defense-in-depth: secret-shaped key filter at the capture layer
+
+`services/daemon/src/shell-env.ts` still applies the B1 sanitize gate to both the env passed to the spawned shell (input gate) and the parsed JSON before caching (output gate). Even though the worker's `process.env` no longer carries daemon secrets, a user's `.zshrc` could legitimately `export GITHUB_TOKEN=…` or `export AWS_SECRET_ACCESS_KEY=…`, and those shouldn't reach MCP children either. The pattern matches `(SECRET|TOKEN|API_KEY|PASSWORD|PASSWD|PASSPHRASE|PRIVATE_KEY|CREDENTIAL[S])$` plus an explicit list (`DATABASE_URL`, `ZERO_UPSTREAM_DB`).
+
+The MCP allowlist filter sits on top of this — even if a user-shell secret somehow matches a denied-but-non-allowlisted key, it can't pass the allowlist gate.
+
+### Performance
+
+Per-worker shell capture adds ~50-300ms to every worker spawn on common zsh setups. Long-lived workers (orchestrator, builders, helpers, kitchen) amortize this over hours of turns. One-shot scheduled agents pay once per fork. 5s timeout with structured fallback (override via `FRIDAY_SHELL_ENV_TIMEOUT_MS`) prevents pathological zsh init from blocking the worker indefinitely.
+
+### Consequences
+
+- 26 production files migrated from `process.env.<SECRET>` to `loadFridayConfig().<field>`.
+- 7 test files rewired from `process.env.X = "test"` patterns to mocking `loadFridayConfig` (per-file) or driving `~/.friday/.env` via `upsertEnvVar` + `clearFridayConfigCache` (when the test exercises a code path that itself reads via `loadFridayConfig`).
+- `FRIDAY_RESOLVED_SHELL_ENV_JSON` env-var forwarding retired. F5 ARG_MAX guard from PR #162 also retired (no use site).
+- The plist regression-fence (no PATH key in EnvironmentVariables) from PR #162 stays — both the TS renderer and `install.sh`'s bash twin.
+- The B1 secret filter pattern stays as defense-in-depth.
+
+### Rejected alternatives
+
+- **Daemon-boot capture + worker-fork forwarding** (PR #162 first pass). Right intuition, wrong layer. The full-spread approach made the shell capture pipeline a one-way exfiltration of daemon secrets. Required B1 belt-and-suspenders filter just to be safe.
+- **`process.env.PATH` mutation on the daemon for non-MCP subprocesses** (`gh`, `git`, `brew`). Daemon-side subprocesses don't currently need user-installed binaries; deferred to a follow-up if a future feature needs it.
+- **Hot-recapture on user re-login.** v1 captures once per worker process. If the user changes their shell profile mid-session and wants Friday to pick it up without daemon restart, that's a separate ticket.
+
+### Bring this ADR back to the table if
+
+- A toolchain widely adopted by MCP authors uses an env hint not on the allowlist (e.g. NEW_HOT_LANG_HOME). Add to the set + update this ADR.
+- An empirical case shows that worker-fork latency from shell capture is materially hurting user-visible response time. Consider a daemon-level cache with explicit invalidation, or a longer-lived per-worker cache.
+- The dotenv refactor's per-caller migration leaves edge cases where a secret quietly slips back into `process.env`. Add a daemon-boot assertion: scan `process.env` for known-secret-shaped keys + fail loudly if present.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.

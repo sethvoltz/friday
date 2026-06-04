@@ -12,8 +12,8 @@ import {
   LOGS_DIR,
   SOUL_PATH,
   closeDb,
-  ensureFridayEnv,
   getDb,
+  loadFridayConfig,
   probePostgresHealth,
   schema,
 } from "@friday/shared";
@@ -48,7 +48,7 @@ export const doctorCommand = defineCommand({
   meta: { name: "doctor", description: "Check system health" },
   async run() {
     console.log(BANNER);
-    if (existsSync(ENV_PATH)) ensureFridayEnv();
+    if (existsSync(ENV_PATH)) loadFridayConfig();
 
     const checks = await collectChecks();
 
@@ -224,7 +224,7 @@ async function collectChecks(): Promise<DoctorCheck[]> {
   });
 
   // Cloudflare Tunnel token — informational; tunnel is opt-in
-  const tunnelTokenSet = !!process.env.CLOUDFLARE_TUNNEL_TOKEN;
+  const tunnelTokenSet = !!loadFridayConfig().cloudflareTunnelToken;
   checks.push({
     section: "Configuration",
     label: "cloudflare token",

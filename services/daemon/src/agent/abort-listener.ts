@@ -31,7 +31,7 @@
 
 import { eq } from "drizzle-orm";
 import pgPkg from "pg";
-import { getDb, getPool, schema, LISTEN_CHANNELS } from "@friday/shared";
+import { getDb, getPool, loadFridayConfig, schema, LISTEN_CHANNELS } from "@friday/shared";
 import { getBlockById } from "@friday/shared/services";
 import { abortTurn } from "./lifecycle.js";
 import { logger } from "../log.js";
@@ -107,7 +107,8 @@ export interface AbortListenerHandle {
 export async function startAbortListener(): Promise<AbortListenerHandle> {
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ??
+    loadFridayConfig().databaseUrl;
   if (!connectionString) {
     throw new Error("DATABASE_URL must be set to start the abortTurn LISTEN connection.");
   }
