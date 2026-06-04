@@ -77,10 +77,7 @@ export const SECRET_LIKE_KEY_RE =
  * but which we know carry credentials in their value (e.g. Postgres URLs
  * with embedded passwords).
  */
-export const EXPLICIT_SECRET_KEYS = new Set<string>([
-  "DATABASE_URL",
-  "ZERO_UPSTREAM_DB",
-]);
+export const EXPLICIT_SECRET_KEYS = new Set<string>(["DATABASE_URL", "ZERO_UPSTREAM_DB"]);
 
 /**
  * B1: predicate the in/out gates use to decide whether a key carries a

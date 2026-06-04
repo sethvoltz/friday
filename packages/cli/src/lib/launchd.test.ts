@@ -161,15 +161,17 @@ describe("FRI-150 F1: install.sh write_plist bash-twin regression fence", () => 
   it("install.sh plist heredoc and TS renderer agree on the EnvironmentVariables key set (cross-twin drift fence)", () => {
     const body = extractHeredocBody(installSh);
     const shKeys = [
-      ...(body.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? "")
-        .matchAll(/<key>([^<]+)<\/key>/g),
+      ...(
+        body.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? ""
+      ).matchAll(/<key>([^<]+)<\/key>/g),
     ].map((m) => m[1]);
 
     const installDir = "/Users/someone/.local/share/friday/current";
     const tsXml = renderPlist(installDir, "/opt/homebrew/bin/fnm");
     const tsKeys = [
-      ...(tsXml.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? "")
-        .matchAll(/<key>([^<]+)<\/key>/g),
+      ...(
+        tsXml.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? ""
+      ).matchAll(/<key>([^<]+)<\/key>/g),
     ].map((m) => m[1]);
 
     expect(shKeys).toEqual(tsKeys);
