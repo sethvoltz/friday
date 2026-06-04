@@ -24,8 +24,14 @@ const {
   getResolvedShellEnv,
   loadResolvedShellEnvFromJson,
   serializeShellEnv,
+  serializeShellEnvForWorker,
+  isSecretKey,
+  sanitizeEnv,
+  sanitizedProcessEnvForChild,
   __resetForTests,
   SHELL_ENV_ENV_VAR,
+  SECRET_LIKE_KEY_RE,
+  EXPLICIT_SECRET_KEYS,
 } = await import("./shell-env.js");
 
 interface FakeChild extends EventEmitter {
@@ -90,8 +96,10 @@ describe("captureShellEnv — success path", () => {
       "/Users/me/.local/share/fnm/node-versions/v22.21.1/installation/bin:/usr/bin",
     );
     expect(result.env.FNM_DIR).toBe("/Users/me/.local/share/fnm");
-    expect(result.durationMs).toBeGreaterThanOrEqual(0);
     expect(result.fallbackReason).toBeUndefined();
+    // NIT-1: dropped the hollow `durationMs >= 0` assertion — replaced with a
+    // typeof check in the log-event assertion below, where it actually
+    // load-bears.
 
     // Spawn invoked with `-ilc` for zsh.
     expect(spawnImpl).toHaveBeenCalledTimes(1);
@@ -101,16 +109,19 @@ describe("captureShellEnv — success path", () => {
     expect(argvArg[1]).toContain(START);
     expect(argvArg[1]).toContain(END);
 
-    // Captured event logged with the right fields.
+    // F4: captured event logs shell, durationMs, pathLength, newKeyCount —
+    // but NOT the full `path` (the user's whole directory layout shouldn't
+    // land in launchd.out.log on every boot).
     const captured = logMock.mock.calls.find((c) => c[1] === "daemon.shell-env.captured");
     expect(captured).toBeDefined();
     expect(captured?.[0]).toBe("info");
     expect(captured?.[2]).toMatchObject({
       shell: "/bin/zsh",
       pathLength: result.env.PATH.length,
-      path: result.env.PATH,
     });
+    expect(captured?.[2]).not.toHaveProperty("path");
     expect(typeof captured?.[2].durationMs).toBe("number");
+    expect(typeof captured?.[2].newKeyCount).toBe("number");
   });
 
   it("uses -ilc flags for bash too", async () => {
@@ -168,6 +179,72 @@ describe("captureShellEnv — success path", () => {
 
     const [, argv] = (spawnImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(argv.slice(0, 2)).toEqual(["-Login", "-Command"]);
+  });
+
+  it("NIT-2: nushell gets [-i, -l, -c] as separate flags (not joined -ilc, which nu parses as a single unknown flag)", async () => {
+    const child = makeChild();
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
+
+    const promise = captureShellEnv({
+      shellOverride: "/opt/homebrew/bin/nu",
+      spawnImpl,
+      existsImpl: () => true,
+    });
+    queueMicrotask(() => {
+      child.stdout.emit("data", markerPayload({ PATH: "/usr/bin" }));
+      child.emit("exit", 0, null);
+    });
+    await promise;
+
+    const [, argv] = (spawnImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(argv.slice(0, 3)).toEqual(["-i", "-l", "-c"]);
+  });
+
+  it("NIT-2: fish gets [-i, -l, -c] as separate flags", async () => {
+    const child = makeChild();
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
+
+    const promise = captureShellEnv({
+      shellOverride: "/opt/homebrew/bin/fish",
+      spawnImpl,
+      existsImpl: () => true,
+    });
+    queueMicrotask(() => {
+      child.stdout.emit("data", markerPayload({ PATH: "/usr/bin" }));
+      child.emit("exit", 0, null);
+    });
+    await promise;
+
+    const [, argv] = (spawnImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(argv.slice(0, 3)).toEqual(["-i", "-l", "-c"]);
+  });
+
+  it("F3: parses the correct payload when rc-file output ECHOES the literal markers before the real ones (lastIndexOf wins)", async () => {
+    // Simulates a corporate rc-file that grep-logs lines containing the
+    // marker token, or a sourced helper that emits a bogus marker pair
+    // before the real `node -e` runs. The real JSON.stringify(process.env)
+    // is always the last marker pair emitted, so lastIndexOf for BOTH
+    // markers picks the real payload.
+    const child = makeChild();
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
+
+    const promise = captureShellEnv({
+      shellOverride: "/bin/zsh",
+      spawnImpl,
+      existsImpl: () => true,
+    });
+    queueMicrotask(() => {
+      const bogus = `${START}\n{"PATH":"/decoy/should/not/win","BOGUS_MARKER_PAIR":"1"}\n${END}\n`;
+      child.stdout.emit("data", bogus);
+      child.stdout.emit("data", markerPayload({ PATH: "/real/path", FNM_DIR: "/x" }));
+      child.emit("exit", 0, null);
+    });
+
+    const result = await promise;
+    expect(result.source).toBe("shell");
+    expect(result.env.PATH).toBe("/real/path");
+    expect(result.env.FNM_DIR).toBe("/x");
+    expect(result.env.BOGUS_MARKER_PAIR).toBeUndefined();
   });
 
   it("parses marker-delimited JSON even when rc-file output prepends noise", async () => {
@@ -442,5 +519,283 @@ describe("serializeShellEnv / loadResolvedShellEnvFromJson — worker propagatio
 describe("SHELL_ENV_ENV_VAR — public env-var name contract", () => {
   it("is the agreed-upon name lifecycle.ts uses for worker forwarding", () => {
     expect(SHELL_ENV_ENV_VAR).toBe("FRIDAY_RESOLVED_SHELL_ENV_JSON");
+  });
+});
+
+describe("B1: secret-shaped key filter (sanitizeEnv / isSecretKey)", () => {
+  it("matches the reviewer-named keys via the regex suffix rule", () => {
+    expect(isSecretKey("BETTER_AUTH_SECRET")).toBe(true);
+    expect(isSecretKey("ZERO_AUTH_SECRET")).toBe(true);
+    expect(isSecretKey("ZERO_ADMIN_PASSWORD")).toBe(true);
+    expect(isSecretKey("LINEAR_API_KEY")).toBe(true);
+    expect(isSecretKey("ANTHROPIC_API_KEY")).toBe(true);
+  });
+
+  it("matches common secret-shaped suffixes", () => {
+    expect(isSecretKey("GH_TOKEN")).toBe(true);
+    expect(isSecretKey("CLOUDFLARE_TUNNEL_TOKEN")).toBe(true);
+    expect(isSecretKey("MY_SERVICE_PASSWORD")).toBe(true);
+    expect(isSecretKey("APP_PASSWD")).toBe(true);
+    expect(isSecretKey("APP_PASSPHRASE")).toBe(true);
+    expect(isSecretKey("APP_PRIVATE_KEY")).toBe(true);
+    expect(isSecretKey("MY_CREDENTIAL")).toBe(true);
+    expect(isSecretKey("AWS_CREDENTIALS")).toBe(true);
+    expect(isSecretKey("POSTHOG_API_KEY")).toBe(true);
+  });
+
+  it("catches explicit URL-form secrets that don't match the suffix rule", () => {
+    expect(EXPLICIT_SECRET_KEYS.has("DATABASE_URL")).toBe(true);
+    expect(EXPLICIT_SECRET_KEYS.has("ZERO_UPSTREAM_DB")).toBe(true);
+    expect(isSecretKey("DATABASE_URL")).toBe(true);
+    expect(isSecretKey("ZERO_UPSTREAM_DB")).toBe(true);
+  });
+
+  it("does NOT match benign keys that happen to share substrings with secret words", () => {
+    // PATH, HOME, SHELL, USER, TERM, LOGNAME, FNM_DIR, NVM_DIR, NODE_PATH, etc.
+    expect(isSecretKey("PATH")).toBe(false);
+    expect(isSecretKey("HOME")).toBe(false);
+    expect(isSecretKey("SHELL")).toBe(false);
+    expect(isSecretKey("USER")).toBe(false);
+    expect(isSecretKey("FNM_DIR")).toBe(false);
+    expect(isSecretKey("NVM_DIR")).toBe(false);
+    expect(isSecretKey("NODE_PATH")).toBe(false);
+    // Watch the suffix anchor: SECRET_DETECTOR_NAME ends in "NAME", not SECRET.
+    expect(isSecretKey("SECRET_DETECTOR_NAME")).toBe(false);
+    // XPC_SERVICE_NAME ends in NAME, shouldn't match.
+    expect(isSecretKey("XPC_SERVICE_NAME")).toBe(false);
+  });
+
+  it("sanitizeEnv strips matched keys + preserves benign ones", () => {
+    const input = {
+      PATH: "/usr/bin",
+      HOME: "/Users/me",
+      BETTER_AUTH_SECRET: "leaked-if-this-survives",
+      LINEAR_API_KEY: "lin_api_xxx",
+      ANTHROPIC_API_KEY: "sk-ant-xxx",
+      DATABASE_URL: "postgresql://user:pw@host/db",
+      FNM_DIR: "/x",
+      GH_TOKEN: "ghp_xxx",
+    };
+    const sanitized = sanitizeEnv(input);
+    expect(sanitized.PATH).toBe("/usr/bin");
+    expect(sanitized.HOME).toBe("/Users/me");
+    expect(sanitized.FNM_DIR).toBe("/x");
+    expect(sanitized.BETTER_AUTH_SECRET).toBeUndefined();
+    expect(sanitized.LINEAR_API_KEY).toBeUndefined();
+    expect(sanitized.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(sanitized.DATABASE_URL).toBeUndefined();
+    expect(sanitized.GH_TOKEN).toBeUndefined();
+  });
+
+  it("SECRET_LIKE_KEY_RE is case-insensitive (defensive — most env vars are uppercase, but Windows-ish callers exist)", () => {
+    expect(SECRET_LIKE_KEY_RE.test("my_secret")).toBe(true);
+    expect(SECRET_LIKE_KEY_RE.test("My_Api_Key")).toBe(true);
+  });
+
+  it("sanitizedProcessEnvForChild strips secrets from a live process.env", () => {
+    process.env.__FRIDAY_TEST_SECRET = "should-be-stripped";
+    process.env.LINEAR_API_KEY = "should-also-be-stripped";
+    process.env.__FRIDAY_TEST_BENIGN = "should-survive";
+    try {
+      const sanitized = sanitizedProcessEnvForChild();
+      expect(sanitized.__FRIDAY_TEST_BENIGN).toBe("should-survive");
+      expect(sanitized.__FRIDAY_TEST_SECRET).toBeUndefined();
+      expect(sanitized.LINEAR_API_KEY).toBeUndefined();
+    } finally {
+      delete process.env.__FRIDAY_TEST_SECRET;
+      delete process.env.LINEAR_API_KEY;
+      delete process.env.__FRIDAY_TEST_BENIGN;
+    }
+  });
+});
+
+describe("B1: secret leak prevention through captureShellEnv (end-to-end)", () => {
+  it("INPUT gate: hands a sanitized env to the spawned shell (BETTER_AUTH_SECRET NOT in spawn's env arg)", async () => {
+    process.env.BETTER_AUTH_SECRET = "leak-marker-1";
+    process.env.LINEAR_API_KEY = "leak-marker-2";
+    process.env.ZERO_AUTH_SECRET = "leak-marker-3";
+    process.env.__FRIDAY_BENIGN = "should-pass-through";
+    try {
+      const child = makeChild();
+      const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
+
+      const promise = captureShellEnv({
+        shellOverride: "/bin/zsh",
+        spawnImpl,
+        existsImpl: () => true,
+      });
+      queueMicrotask(() => {
+        child.stdout.emit("data", markerPayload({ PATH: "/clean" }));
+        child.emit("exit", 0, null);
+      });
+      await promise;
+
+      const spawnOpts = (spawnImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
+      expect(spawnOpts.env.BETTER_AUTH_SECRET).toBeUndefined();
+      expect(spawnOpts.env.LINEAR_API_KEY).toBeUndefined();
+      expect(spawnOpts.env.ZERO_AUTH_SECRET).toBeUndefined();
+      expect(spawnOpts.env.__FRIDAY_BENIGN).toBe("should-pass-through");
+    } finally {
+      delete process.env.BETTER_AUTH_SECRET;
+      delete process.env.LINEAR_API_KEY;
+      delete process.env.ZERO_AUTH_SECRET;
+      delete process.env.__FRIDAY_BENIGN;
+    }
+  });
+
+  it("OUTPUT gate: even if the shell re-introduces a secret (rc-file `export BETTER_AUTH_SECRET=...`), it's stripped from the cached env", async () => {
+    const child = makeChild();
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
+
+    const promise = captureShellEnv({
+      shellOverride: "/bin/zsh",
+      spawnImpl,
+      existsImpl: () => true,
+    });
+    queueMicrotask(() => {
+      child.stdout.emit(
+        "data",
+        markerPayload({
+          PATH: "/clean",
+          BETTER_AUTH_SECRET: "user-rc-set-this",
+          ANTHROPIC_API_KEY: "and-this",
+          DATABASE_URL: "postgresql://x:y@h/d",
+          FNM_DIR: "/x",
+        }),
+      );
+      child.emit("exit", 0, null);
+    });
+    const result = await promise;
+
+    expect(result.source).toBe("shell");
+    expect(result.env.PATH).toBe("/clean");
+    expect(result.env.FNM_DIR).toBe("/x");
+    expect(result.env.BETTER_AUTH_SECRET).toBeUndefined();
+    expect(result.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(result.env.DATABASE_URL).toBeUndefined();
+  });
+
+  it("FALLBACK gate: secrets are stripped from the process.env snapshot too (timeout case)", async () => {
+    process.env.BETTER_AUTH_SECRET = "should-not-leak-on-fallback";
+    process.env.LINEAR_API_KEY = "should-not-leak-on-fallback";
+    process.env.__FRIDAY_BENIGN_2 = "should-survive";
+    try {
+      vi.useFakeTimers();
+      const child = makeChild();
+      const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
+
+      const promise = captureShellEnv({
+        shellOverride: "/bin/zsh",
+        timeoutMs: 100,
+        spawnImpl,
+        existsImpl: () => true,
+      });
+      vi.advanceTimersByTime(150);
+      const result = await promise;
+      vi.useRealTimers();
+
+      expect(result.source).toBe("process");
+      expect(result.env.BETTER_AUTH_SECRET).toBeUndefined();
+      expect(result.env.LINEAR_API_KEY).toBeUndefined();
+      expect(result.env.__FRIDAY_BENIGN_2).toBe("should-survive");
+    } finally {
+      delete process.env.BETTER_AUTH_SECRET;
+      delete process.env.LINEAR_API_KEY;
+      delete process.env.__FRIDAY_BENIGN_2;
+    }
+  });
+
+  it("LOAD gate: loadResolvedShellEnvFromJson re-filters secrets on payload load (defends against stale serialized payloads)", () => {
+    const stale = JSON.stringify({
+      env: {
+        PATH: "/preserved",
+        BETTER_AUTH_SECRET: "stale-leak-from-old-payload",
+        LINEAR_API_KEY: "stale-leak",
+        FNM_DIR: "/x",
+      },
+      source: "shell",
+      durationMs: 100,
+    });
+    loadResolvedShellEnvFromJson(stale);
+    const loaded = getResolvedShellEnv();
+    expect(loaded.source).toBe("shell");
+    expect(loaded.env.PATH).toBe("/preserved");
+    expect(loaded.env.FNM_DIR).toBe("/x");
+    expect(loaded.env.BETTER_AUTH_SECRET).toBeUndefined();
+    expect(loaded.env.LINEAR_API_KEY).toBeUndefined();
+  });
+});
+
+describe("F5: ARG_MAX guard on serializeShellEnvForWorker", () => {
+  it("returns the serialized payload when under the cap", async () => {
+    const child = makeChild();
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
+
+    const promise = captureShellEnv({
+      shellOverride: "/bin/zsh",
+      spawnImpl,
+      existsImpl: () => true,
+    });
+    queueMicrotask(() => {
+      child.stdout.emit("data", markerPayload({ PATH: "/x", FNM_DIR: "/y" }));
+      child.emit("exit", 0, null);
+    });
+    await promise;
+
+    const json = serializeShellEnvForWorker();
+    expect(json.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(json) as { env: Record<string, string> };
+    expect(parsed.env.PATH).toBe("/x");
+  });
+
+  it("returns empty string when the payload exceeds FRIDAY_SHELL_ENV_WORKER_MAX_BYTES + logs daemon.shell-env.worker-payload-too-large", async () => {
+    const prevCap = process.env.FRIDAY_SHELL_ENV_WORKER_MAX_BYTES;
+    process.env.FRIDAY_SHELL_ENV_WORKER_MAX_BYTES = "64"; // tiny cap, forces truncation
+    try {
+      const child = makeChild();
+      const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
+
+      const promise = captureShellEnv({
+        shellOverride: "/bin/zsh",
+        spawnImpl,
+        existsImpl: () => true,
+      });
+      queueMicrotask(() => {
+        child.stdout.emit(
+          "data",
+          markerPayload({
+            PATH: "/lots/of/paths/to/exceed/the/tiny/cap:/a:/b:/c:/d:/e:/f",
+            FNM_DIR: "/y",
+            EXTRA: "x".repeat(200),
+          }),
+        );
+        child.emit("exit", 0, null);
+      });
+      await promise;
+      logMock.mockClear();
+
+      const json = serializeShellEnvForWorker();
+      expect(json).toBe("");
+
+      const evt = logMock.mock.calls.find(
+        (c) => c[1] === "daemon.shell-env.worker-payload-too-large",
+      );
+      expect(evt).toBeDefined();
+      expect(evt?.[0]).toBe("warn");
+      expect(evt?.[2].cap).toBe(64);
+      expect(typeof evt?.[2].bytes).toBe("number");
+      expect(evt?.[2].bytes).toBeGreaterThan(64);
+      expect(typeof evt?.[2].keyCount).toBe("number");
+    } finally {
+      if (prevCap !== undefined) {
+        process.env.FRIDAY_SHELL_ENV_WORKER_MAX_BYTES = prevCap;
+      } else {
+        delete process.env.FRIDAY_SHELL_ENV_WORKER_MAX_BYTES;
+      }
+    }
+  });
+
+  it("returns empty string when no capture has run", () => {
+    expect(serializeShellEnvForWorker()).toBe("");
   });
 });

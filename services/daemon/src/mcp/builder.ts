@@ -13,7 +13,7 @@ import type {
   McpSdkServerConfigWithInstance,
   McpStdioServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
-import { existsSync } from "node:fs";
+import { accessSync, constants as fsConstants } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { logger } from "../log.js";
 import { getResolvedShellEnv } from "../shell-env.js";
@@ -284,7 +284,15 @@ export function resolveStdioCommand(command: string): string {
   if (command === "node") return process.execPath;
   if (command === "npx") {
     const sibling = join(dirname(process.execPath), "npx");
-    return existsSync(sibling) ? sibling : command;
+    // NIT-4: `existsSync` is not enough — a `.npx` placeholder file or a
+    // non-executable script would pass it and then ENOEXEC at spawn time.
+    // `accessSync(…, X_OK)` confirms the kernel will let us execute it.
+    try {
+      accessSync(sibling, fsConstants.X_OK);
+      return sibling;
+    } catch {
+      return command;
+    }
   }
   return command;
 }

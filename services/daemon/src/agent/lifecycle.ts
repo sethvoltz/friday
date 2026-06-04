@@ -69,7 +69,7 @@ import type {
   WorkerPromptCommand,
   WorkerSpawnOptions,
 } from "./worker-protocol.js";
-import { SHELL_ENV_ENV_VAR, serializeShellEnv } from "../shell-env.js";
+import { SHELL_ENV_ENV_VAR, serializeShellEnvForWorker } from "../shell-env.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, "worker.js");
@@ -387,13 +387,15 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // builder.ts (running in the forked worker) can thread captured PATH +
   // toolchain vars (FNM_DIR, NVM_DIR, …) into per-stdio-MCP `env`,
   // overcoming the SDK's HOME/PATH/SHELL/… allowlist at the spawn
-  // boundary. `serializeShellEnv()` returns "" when no capture has
-  // run — worker code tolerates the empty case.
+  // boundary. `serializeShellEnvForWorker()` returns "" when no capture
+  // has run OR when the serialized payload exceeds the ARG_MAX-safety
+  // cap (F5) — worker code tolerates the empty case and falls back to
+  // a sanitized process.env snapshot.
   const env = {
     ...process.env,
     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
     CI: "1",
-    [SHELL_ENV_ENV_VAR]: serializeShellEnv(),
+    [SHELL_ENV_ENV_VAR]: serializeShellEnvForWorker(),
   };
 
   // M5: ulimit wrapper for CPU + nofile. The bash prelude applies the

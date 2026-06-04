@@ -47,6 +47,78 @@ export const SHELL_ENV_TIMEOUT_ENV_VAR = "FRIDAY_SHELL_ENV_TIMEOUT_MS";
 const START_MARKER = "__FRIDAY_SHELL_ENV_START__";
 const END_MARKER = "__FRIDAY_SHELL_ENV_END__";
 const DEFAULT_TIMEOUT_MS = 5000;
+/**
+ * Soft-cap on `serializeShellEnvForWorker`. macOS `ARG_MAX` is ~256 KB total
+ * for argv+envp passed to `execve`; a captured shell env over ~100 KB
+ * starts crowding the per-worker fork. F5: skip the env-var forwarding past
+ * this threshold and log; the worker hits its `not-captured` sentinel and
+ * falls back to a process.env snapshot. Override via the
+ * `FRIDAY_SHELL_ENV_WORKER_MAX_BYTES` env var (numeric, byte count).
+ */
+const DEFAULT_WORKER_PAYLOAD_MAX_BYTES = 100 * 1024;
+const WORKER_PAYLOAD_MAX_BYTES_ENV_VAR = "FRIDAY_SHELL_ENV_WORKER_MAX_BYTES";
+
+/**
+ * B1: secret-shaped keys we never let cross the daemon ↔ shell-child or
+ * daemon ↔ MCP-child boundary. The pattern catches `*_SECRET`, `*_TOKEN`,
+ * `*_API_KEY`, `*_PASSWORD`, `*_PASSWD`, `*_PASSPHRASE`, `*_PRIVATE_KEY`,
+ * `*_CREDENTIAL[S]`. Reviewer-named keys (BETTER_AUTH_SECRET,
+ * ZERO_AUTH_SECRET, ZERO_ADMIN_PASSWORD, LINEAR_API_KEY, ANTHROPIC_API_KEY)
+ * are all matched by the suffix rule.
+ *
+ * Exported for use in tests + so adversarial reviewers can audit the
+ * filter shape without spelunking through the module.
+ */
+export const SECRET_LIKE_KEY_RE =
+  /(?:^|_)(SECRET|SECRETS|TOKEN|API_KEY|PASSWORD|PASSWD|PASSPHRASE|PRIVATE_KEY|CREDENTIAL|CREDENTIALS)$/i;
+
+/**
+ * B1: explicit secret-bearing keys whose name doesn't match the regex above
+ * but which we know carry credentials in their value (e.g. Postgres URLs
+ * with embedded passwords).
+ */
+export const EXPLICIT_SECRET_KEYS = new Set<string>([
+  "DATABASE_URL",
+  "ZERO_UPSTREAM_DB",
+]);
+
+/**
+ * B1: predicate the in/out gates use to decide whether a key carries a
+ * secret. Exported for tests.
+ */
+export function isSecretKey(key: string): boolean {
+  return EXPLICIT_SECRET_KEYS.has(key) || SECRET_LIKE_KEY_RE.test(key);
+}
+
+/**
+ * B1: strip secret-shaped keys from an env map. Used both as the OUTPUT
+ * gate (after parsing the captured JSON, before caching) and as the
+ * INPUT gate (when handing `process.env` to the spawned shell child).
+ * Belt-and-suspenders: either gate failing alone would have been the
+ * leak, both have to fail simultaneously for a regression to land.
+ */
+export function sanitizeEnv(env: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (!isSecretKey(k)) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * B1: NodeJS.ProcessEnv-typed variant for `child_process.spawn`'s `env`
+ * field. Filters secrets out of `process.env` before handing it to the
+ * spawned shell — the shell child never sees `BETTER_AUTH_SECRET` /
+ * `LINEAR_API_KEY` / etc., so a malicious `.zshrc` can't exfiltrate
+ * them via `JSON.stringify(process.env)` or any other mechanism.
+ */
+export function sanitizedProcessEnvForChild(): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === "string" && !isSecretKey(k)) out[k] = v;
+  }
+  return out;
+}
 
 export type ShellEnvSource = "shell" | "process";
 
@@ -84,14 +156,54 @@ export function getResolvedShellEnv(): ShellEnvResult {
 }
 
 /**
- * JSON-serialize the singleton for forwarding to a worker process via env
- * var. Returns an empty string if no capture has run, so the caller can
- * safely set `env: { ..., FRIDAY_RESOLVED_SHELL_ENV_JSON: "" }` either
- * way.
+ * JSON-serialize the singleton. Returns "" when no capture has run.
+ *
+ * Prefer `serializeShellEnvForWorker()` for the worker-fork path — it
+ * adds the F5 ARG_MAX guard. This raw serializer exists for tests that
+ * need the unguarded shape.
  */
 export function serializeShellEnv(): string {
   if (!cached) return "";
   return JSON.stringify(cached);
+}
+
+/**
+ * F5: serialize the captured singleton for worker-fork forwarding via
+ * `FRIDAY_RESOLVED_SHELL_ENV_JSON`. macOS `ARG_MAX` is ~256 KB total for
+ * argv+envp passed to `execve`; a captured shell env above ~100 KB
+ * crowds the worker fork and risks `E2BIG`. If we exceed
+ * `DEFAULT_WORKER_PAYLOAD_MAX_BYTES` (override via
+ * `FRIDAY_SHELL_ENV_WORKER_MAX_BYTES`), drop the forwarding entirely and
+ * log `daemon.shell-env.worker-payload-too-large`. The worker then hits
+ * its `not-captured` sentinel and falls back to a process.env snapshot
+ * (a still-functional degraded mode).
+ *
+ * Returns "" both when there's no capture AND when the payload exceeds
+ * the cap — callers always treat "" as "skip the env var", so the
+ * worker fork path stays uniform.
+ */
+export function serializeShellEnvForWorker(): string {
+  const raw = serializeShellEnv();
+  if (!raw) return "";
+  const cap = readWorkerPayloadCap();
+  const bytes = Buffer.byteLength(raw, "utf8");
+  if (bytes > cap) {
+    logger.log("warn", "daemon.shell-env.worker-payload-too-large", {
+      bytes,
+      cap,
+      // Help future debuggers narrow it down without dumping the whole env.
+      keyCount: cached ? Object.keys(cached.env).length : 0,
+    });
+    return "";
+  }
+  return raw;
+}
+
+function readWorkerPayloadCap(): number {
+  const raw = process.env[WORKER_PAYLOAD_MAX_BYTES_ENV_VAR];
+  if (!raw) return DEFAULT_WORKER_PAYLOAD_MAX_BYTES;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_WORKER_PAYLOAD_MAX_BYTES;
 }
 
 /**
@@ -110,6 +222,11 @@ export function loadResolvedShellEnvFromJson(json: string | undefined): void {
       });
       return;
     }
+    // B1 worker-side gate: even though the daemon already filtered secrets
+    // before serializing, re-filter on load. Defends against a stale env
+    // var hand-set by an operator or a future code path that forgot to
+    // sanitize before serializing.
+    parsed.env = sanitizeEnv(parsed.env);
     cached = parsed;
   } catch (err) {
     logger.log("warn", "daemon.shell-env.deserialize.invalid", {
@@ -154,12 +271,15 @@ export async function captureShellEnv(opts: CaptureOptions = {}): Promise<ShellE
       .filter((k) => !(k in process.env))
       .sort();
     cached = { env, source: "shell", shell, durationMs };
+    // F4: do NOT log the full PATH at info level — a user grepping their
+    // launchd.out.log shouldn't see their entire directory layout on
+    // every daemon boot. `pathLength` + `newKeyCount` + `shell` is
+    // enough breadcrumb to confirm the capture worked.
     logger.log("info", "daemon.shell-env.captured", {
       shell,
       durationMs,
       newKeyCount: newKeys.length,
       pathLength: typeof env.PATH === "string" ? env.PATH.length : 0,
-      path: env.PATH ?? null,
     });
     return cached;
   } catch (err) {
@@ -177,9 +297,13 @@ function readTimeoutFromEnv(): number | undefined {
 }
 
 function snapshotProcessEnv(): Record<string, string> {
+  // B1: the fallback path also feeds MCP-child `env`, so secrets must be
+  // stripped here too. Otherwise a shell-capture failure would still leak
+  // BETTER_AUTH_SECRET, LINEAR_API_KEY, … through `getResolvedShellEnv()`
+  // into spawned MCP children.
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (typeof v === "string") out[k] = v;
+    if (typeof v === "string" && !isSecretKey(k)) out[k] = v;
   }
   return out;
 }
@@ -241,7 +365,11 @@ function buildInvocation(shellPath: string): ShellInvocation {
     case "csh":
       return { flags: ["-ic"], script };
     case "nu":
-      return { flags: ["-ilc"], script };
+    case "fish":
+      // NIT-2: nushell + fish parse their short flags individually — `-ilc`
+      // is read as a single unknown flag and the shell errors out. VS Code's
+      // matrix passes them as separate arguments.
+      return { flags: ["-i", "-l", "-c"], script };
     case "bash":
     case "zsh":
     case "sh":
@@ -259,7 +387,12 @@ function runCapture(
     const { flags, script } = buildInvocation(shellPath);
     const child = spawnFn(shellPath, [...flags, script], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      // B1 INPUT gate: hand a sanitized env to the spawned shell so
+      // `JSON.stringify(process.env)` (or any other rc-file behavior)
+      // cannot exfiltrate Friday's secrets. Paired with the OUTPUT
+      // gate inside the parse path below — both must fail simultaneously
+      // for a secret to leak through to an MCP child.
+      env: sanitizedProcessEnvForChild(),
     });
 
     let stdout = "";
@@ -307,7 +440,12 @@ function runCapture(
         });
         return;
       }
-      const startIdx = stdout.indexOf(START_MARKER);
+      // F3: use `lastIndexOf` for BOTH markers so a noisy rc-file that
+      // happens to echo the literal marker string before the real
+      // payload (corporate startup banners, sourced log scripts, etc.)
+      // can't beat the real markers. The real `JSON.stringify(process.env)`
+      // payload is always the last marker pair emitted.
+      const startIdx = stdout.lastIndexOf(START_MARKER);
       const endIdx = stdout.lastIndexOf(END_MARKER);
       if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
         finish(() => reject(new Error("markers not found in shell output")));
@@ -316,9 +454,13 @@ function runCapture(
       const json = stdout.slice(startIdx + START_MARKER.length, endIdx).trim();
       try {
         const parsed = JSON.parse(json) as Record<string, unknown>;
+        // B1 OUTPUT gate: strip secret-shaped keys from the parsed env
+        // before resolving. Even if the spawned shell somehow re-introduces
+        // a secret (rc file exports `BETTER_AUTH_SECRET=foo` on its own),
+        // it never reaches the cache or any MCP child's `env`.
         const env: Record<string, string> = {};
         for (const [k, v] of Object.entries(parsed)) {
-          if (typeof v === "string") env[k] = v;
+          if (typeof v === "string" && !isSecretKey(k)) env[k] = v;
         }
         finish(() => resolve(env));
       } catch (err) {

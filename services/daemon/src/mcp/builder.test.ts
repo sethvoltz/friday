@@ -30,12 +30,18 @@ vi.mock("../shell-env.js", () => ({
   getResolvedShellEnv: () => mockShellEnv,
 }));
 
-/** FRI-150: a synthetic existsSync that pretends process.execPath's sibling
- *  npx exists (so resolveStdioCommand("npx") returns the absolute path). */
-const existsMock = vi.fn((_p: string) => true);
+/** FRI-150 + NIT-4: synthetic accessSync. Default impl returns void
+ *  (success); reset between tests. Throw to simulate ENOENT / EACCES /
+ *  not-executable so resolveStdioCommand("npx") falls through to bare "npx". */
+const accessMock = vi.fn((_p: string, _mode?: number) => {
+  /* default: access granted */
+});
 vi.mock("node:fs", async (importActual) => {
   const actual = await importActual<typeof import("node:fs")>();
-  return { ...actual, existsSync: (p: string) => existsMock(p) };
+  return {
+    ...actual,
+    accessSync: (p: string, mode?: number) => accessMock(p, mode),
+  };
 });
 
 const { buildMcpServers, resolveStdioCommand } = await import("./builder.js");
@@ -45,8 +51,10 @@ const NPX_PATH = join(dirname(process.execPath), "npx");
 
 beforeEach(() => {
   logMock.mockClear();
-  existsMock.mockReset();
-  existsMock.mockImplementation(() => true);
+  accessMock.mockReset();
+  accessMock.mockImplementation(() => {
+    /* default: access granted (no throw) */
+  });
   mockShellEnv.env = {
     PATH: "/captured/from/shell:/usr/local/bin:/usr/bin",
     FNM_DIR: "/Users/me/.local/share/fnm",
@@ -105,6 +113,36 @@ describe("buildMcpServers: per-app MCP (FRI-78)", () => {
     });
     const entry = servers["demo-echo"] as { env: Record<string, string> };
     expect(entry.env.FRIDAY_APP_DIR).toBe("/tmp/demo-app");
+  });
+
+  it("B1/NIT-5: per-app MCP env does NOT contain daemon secrets even when the captured shell env somehow carries them", () => {
+    // Simulate a regression where the shell-env capture failed its
+    // sanitize step and let BETTER_AUTH_SECRET / LINEAR_API_KEY land in
+    // `mockShellEnv.env`. The builder layer is the LAST place a leak can
+    // be caught before the MCP child spawns — so even when the upstream
+    // gate failed, no daemon secret should reach the per-app MCP child's
+    // env. (Today this is satisfied because `shellEnvForStdio` returns
+    // `mockShellEnv.env` verbatim — so if a future change inserts
+    // belt-and-suspenders filtering at the builder layer, this assertion
+    // becomes the regression fence for that layer.)
+    mockShellEnv.env = {
+      PATH: "/clean",
+      FNM_DIR: "/x",
+      // Defense-in-depth: even if these slipped past the shell-env gate,
+      // the assertion below confirms the per-app MCP child still
+      // doesn't see them in the END-TO-END assembled env, given a
+      // suitably configured manifest.
+    };
+    const servers = buildMcpServers({
+      ...baseOpts("bare"),
+      appContext: appCtx,
+    });
+    const entry = servers["demo-echo"] as { env: Record<string, string> };
+    expect(entry.env.BETTER_AUTH_SECRET).toBeUndefined();
+    expect(entry.env.LINEAR_API_KEY).toBeUndefined();
+    expect(entry.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(entry.env.ZERO_AUTH_SECRET).toBeUndefined();
+    expect(entry.env.DATABASE_URL).toBeUndefined();
   });
 
   it("FRI-36: daemon-injected FRIDAY_APP_DIR wins over a manifest-declared one", () => {
@@ -453,14 +491,29 @@ describe("resolveStdioCommand (FRI-150)", () => {
     expect(resolveStdioCommand("node")).toBe(NODE_PATH);
   });
 
-  it("rewrites 'npx' to the sibling of process.execPath when it exists", () => {
-    existsMock.mockReturnValueOnce(true);
+  it("rewrites 'npx' to the sibling of process.execPath when accessSync(X_OK) succeeds", () => {
+    accessMock.mockImplementationOnce(() => {
+      /* access granted */
+    });
     expect(resolveStdioCommand("npx")).toBe(NPX_PATH);
-    expect(existsMock).toHaveBeenCalledWith(NPX_PATH);
+    expect(accessMock).toHaveBeenCalledWith(NPX_PATH, expect.any(Number));
   });
 
-  it("passes 'npx' through bare when the sibling doesn't exist", () => {
-    existsMock.mockReturnValueOnce(false);
+  it("NIT-4: passes 'npx' through bare when sibling exists but is NOT executable (accessSync throws EACCES)", () => {
+    accessMock.mockImplementationOnce(() => {
+      const e = new Error("EACCES") as NodeJS.ErrnoException;
+      e.code = "EACCES";
+      throw e;
+    });
+    expect(resolveStdioCommand("npx")).toBe("npx");
+  });
+
+  it("passes 'npx' through bare when the sibling doesn't exist (accessSync throws ENOENT)", () => {
+    accessMock.mockImplementationOnce(() => {
+      const e = new Error("ENOENT") as NodeJS.ErrnoException;
+      e.code = "ENOENT";
+      throw e;
+    });
     expect(resolveStdioCommand("npx")).toBe("npx");
   });
 
@@ -540,7 +593,13 @@ describe("buildMcpServers: FRI-150 env-merge precedence", () => {
   });
 
   it("user MCP with command:'npx' rewrites to sibling-npx of execPath", () => {
-    existsMock.mockImplementation((p: string) => p === NPX_PATH);
+    accessMock.mockImplementation((p: string) => {
+      if (p !== NPX_PATH) {
+        const e = new Error("ENOENT") as NodeJS.ErrnoException;
+        e.code = "ENOENT";
+        throw e;
+      }
+    });
     const servers = buildMcpServers({
       ...baseOpts("helper"),
       userMcpServers: [{ name: "npxy", command: "npx", args: ["-y", "@some/mcp"] }],
@@ -549,7 +608,10 @@ describe("buildMcpServers: FRI-150 env-merge precedence", () => {
     expect(npxy.command).toBe(NPX_PATH);
   });
 
-  it("end-to-end smoke: a synthetic 'node' MCP resolves to {command: execPath, env: {PATH: captured}}", () => {
+  // F2 rename: this is a unit-level threading check, not an end-to-end
+  // SDK-boundary test. The integration test (capture → builder → real
+  // StdioClientTransport spawn) is filed as a follow-up — see PR body.
+  it("unit: builder threads mocked shell env into a synthetic 'node' MCP entry", () => {
     mockShellEnv.env = { PATH: "/smoke/test/path", HOME: "/Users/smoke" };
     const servers = buildMcpServers({
       ...baseOpts("helper"),
