@@ -97,8 +97,10 @@ function log(msg) {
 }
 
 /**
- * Platform tag for the artifact name. v1 builds darwin-arm64 only; the
- * naming (`friday-<os>-<arch>`) is shaped for a future Linux/x64 matrix row.
+ * Platform tag for the artifact name. Tags the tarball from the runner's own
+ * process.platform/arch — darwin-arm64 (Apple Silicon, primary) and darwin-x64
+ * (Intel, legacy) are built today, each on a runner of that arch; the naming
+ * (`friday-<os>-<arch>`) is also shaped for a future Linux row.
  */
 function platformTag() {
   const osMap = { darwin: "darwin", linux: "linux" };
@@ -106,7 +108,9 @@ function platformTag() {
   const os = osMap[process.platform];
   const arch = archMap[process.arch];
   if (!os || !arch) {
-    fail(`unsupported platform ${process.platform}-${process.arch} (v1 builds darwin-arm64)`);
+    fail(
+      `unsupported platform ${process.platform}-${process.arch} (Friday builds darwin-arm64 / darwin-x64)`,
+    );
   }
   return `${os}-${arch}`;
 }

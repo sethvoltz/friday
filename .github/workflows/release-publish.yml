@@ -1,9 +1,21 @@
 name: Release Publish
 
 # Fires when release-please's merged Release PR cuts a GitHub Release. Builds
-# the pre-baked, ABI-matched darwin-arm64 tarball on macos-latest (the standard
-# Apple Silicon runner — free on public repos; do NOT swap for a *-xlarge billed
-# label) and uploads it as a Release asset alongside its .sha256 + VERSION.
+# the pre-baked, ABI-matched tarball for BOTH darwin arches — arm64 (Apple
+# Silicon, primary) on macos-latest and x64 (Intel, legacy) on macos-13 — and
+# uploads each as a Release asset alongside its .sha256. The shared VERSION
+# asset — the "latest" pointer every installer resolves — is uploaded LAST by a
+# separate publish-version job gated on BOTH arches succeeding, so a partial
+# release never advertises a version whose tarball is missing for one arch. All
+# standard runners are free on public repos; do NOT swap for a *-xlarge label.
+#
+# Each arch MUST build on a runner of that arch: `pnpm install --prod` fetches
+# native prebuilds (@oxfmt/binding, @rocicorp/zero-sqlite3, better-sqlite3,
+# sharp) by process.arch, so there is no cross-compile — an arm64 runner can
+# only produce an arm64 tree, and vice versa. macos-13 is GitHub's last free
+# Intel macOS image; Intel hardware caps out at macOS 26, so no newer Intel
+# runner is coming and none is needed — Intel is legacy support, arm64 is the
+# permanent primary.
 #
 # NO formula render, NO GitHub-App token, NO brew-tap push: Friday is
 # distributed via install.sh + `friday update` pulling these assets directly
@@ -24,11 +36,21 @@ permissions:
 
 jobs:
   publish:
-    name: Pack + upload darwin-arm64 tarball
-    # Standard Apple Silicon runner — produces the darwin-arm64 pre-baked tree
-    # with native addons ABI-matched to the pinned Node. macos-latest is free on
-    # public repos; the larger *-xlarge labels are billed and must not be used.
-    runs-on: macos-latest
+    name: Pack + upload darwin-${{ matrix.arch }} tarball
+    # One row per shipped darwin arch, each on a runner of that arch so native
+    # addons are ABI-matched to the pinned Node. macos-latest (Apple Silicon)
+    # and macos-13 (Intel) are both free on public repos; the larger *-xlarge
+    # labels are billed and must not be used. fail-fast off so a failure on one
+    # arch still reports the other rather than cancelling it.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest # Apple Silicon — primary target
+            arch: arm64
+          - runner: macos-13 # Intel — legacy support (GitHub's last free Intel image)
+            arch: x64
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout release tag
@@ -65,9 +87,10 @@ jobs:
         id: pack
         run: node packaging/pack.mjs --out dist-pack
 
-      # macos-latest ships Homebrew but not fnm, which the bundled `bin/friday`
-      # shim execs through (it ignores setup-node's PATH and goes via
-      # `$(brew --prefix)/bin/fnm`). Needed by the version smoke below.
+      # Both macOS runners ship Homebrew but not fnm, which the bundled
+      # `bin/friday` shim execs through (it ignores setup-node's PATH and goes
+      # via `$(brew --prefix)/bin/fnm` — resolving /opt/homebrew on arm64,
+      # /usr/local on Intel). Needed by the version smoke below.
       - name: Install fnm
         run: brew install fnm
 
@@ -128,6 +151,27 @@ jobs:
           fi
           echo "zero-cache resolved from the relocated tree with no pack-CWD leak"
 
+      # sharp loads a SEPARATE native addon (@img/sharp-libvips-darwin-<arch>)
+      # from the sqlite addon the zero-cache smoke covers. The daemon requires
+      # it on the image-attachment path (@friday/shared/services → attachments →
+      # `import sharp`), and the bare `import('@friday/shared')` above does NOT
+      # reach it. A wrong/missing per-arch sharp prebuild would otherwise ship
+      # green and crash the daemon on the first image upload. Load it from the
+      # relocated tree and run a trivial transform so the native libvips binding
+      # is actually dlopen'd, not merely resolved.
+      - name: Smoke — sharp native addon loads + runs from the relocated tree
+        working-directory: ${{ steps.relocate.outputs.dir }}
+        run: |
+          ( cd packages/shared && node --input-type=module -e "
+            const sharp = (await import('sharp')).default;
+            const buf = await sharp({ create: { width: 2, height: 2, channels: 3, background: { r: 0, g: 0, b: 0 } } }).png().toBuffer();
+            if (!buf || buf.length === 0) { console.error('::error::sharp produced no output'); process.exit(1); }
+            console.log('sharp ok (' + buf.length + ' bytes png, arch ' + process.arch + ')');
+          " ) || {
+            echo '::error::sharp native addon failed to load/run from the relocated tree (per-arch prebuild missing or ABI-mismatched)'
+            exit 1
+          }
+
       # Supervisor specs spawn children via process.execPath (never pnpm / a
       # .bin shim) — introspect the built buildSpecs() with pnpm off PATH.
       - name: Smoke — supervisor specs spawn via process.execPath (no pnpm)
@@ -145,13 +189,53 @@ jobs:
             console.log('all supervisor child specs spawn via process.execPath');
           "
 
-      - name: Upload release assets
+      # Per-arch tarball + its .sha256 from every row. The shared VERSION asset
+      # is uploaded LAST, by the separate publish-version job that `needs` this
+      # whole matrix — so the "latest" pointer every installer resolves is never
+      # advertised until BOTH arch tarballs are present. See that job's comment.
+      - name: Upload per-arch release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ github.event.release.tag_name }}" \
             "${{ steps.pack.outputs.tarball }}" \
             "${{ steps.pack.outputs.sha256_file }}" \
-            "${{ steps.pack.outputs.version_file }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+  # VERSION is the single "latest" pointer every consumer resolves FIRST:
+  # install.sh:resolve_version and update.ts:resolveLatestVersion both fetch
+  # releases/latest/download/VERSION, then fetch the per-arch tarball by name.
+  # It MUST NOT appear until every shipped arch's tarball is on the release —
+  # otherwise a partial release (one arch's row failed under fail-fast:false)
+  # would advertise a version whose tarball 404s for the missing arch, hard-
+  # breaking fresh installs + self-update for that arch until the half-release
+  # is fixed. Gating VERSION on `needs: [publish]` (which requires ALL matrix
+  # legs to succeed) makes a partial release fail SAFE: no VERSION → consumers
+  # resolve "no new version yet" rather than a broken one. VERSION is the root
+  # package.json version (pack.mjs writes exactly that), so it's re-derived here
+  # from the checked-out tag rather than threaded through a matrix artifact.
+  publish-version:
+    name: Publish shared VERSION (gated on both arches)
+    needs: [publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Derive + upload VERSION
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="$(jq -r .version package.json)"
+          if [ -z "${VERSION}" ] || [ "${VERSION}" = "null" ]; then
+            echo "::error::could not read version from package.json"
+            exit 1
+          fi
+          printf '%s\n' "${VERSION}" > VERSION
+          gh release upload "${{ github.event.release.tag_name }}" \
+            VERSION \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
