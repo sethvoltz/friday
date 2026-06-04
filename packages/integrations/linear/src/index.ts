@@ -17,7 +17,7 @@ import {
   updateTicket,
   type Ticket,
 } from "@friday/shared/services";
-import { loadConfig } from "@friday/shared";
+import { loadConfig, loadFridayConfig } from "@friday/shared";
 import {
   createIssue,
   findTeamByKey,
@@ -67,8 +67,13 @@ export interface LinearConfig {
 }
 
 export function getLinearConfig(): LinearConfig | null {
-  const key = process.env.LINEAR_API_KEY;
+  const key = loadFridayConfig().linearApiKey;
   if (!key) return null;
+  // FRIDAY_LINEAR_TEAM is a runtime override path used by the daemon's
+  // POST /api/integrations/linear/create-issue handler — it temporarily
+  // overrides `process.env.FRIDAY_LINEAR_TEAM` for the duration of the
+  // call. Read it from process.env (not loadFridayConfig) so per-request
+  // overrides land. The fallback is `linear.team` in `~/.friday/config.json`.
   const team = process.env.FRIDAY_LINEAR_TEAM ?? loadConfig().linear?.team;
   return { apiKey: key, team };
 }

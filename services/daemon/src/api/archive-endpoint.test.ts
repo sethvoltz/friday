@@ -15,7 +15,28 @@ import type { Server } from "node:http";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
-delete process.env.LINEAR_API_KEY;
+// FRI-150 (pivot, ADR-037): production code reads LINEAR_API_KEY via
+// loadFridayConfig(). Mock the loader to return undefined so the archive
+// endpoint takes the no-Linear-key code path.
+vi.mock("@friday/shared", async (importActual) => {
+  const actual = await importActual<typeof import("@friday/shared")>();
+  return {
+    ...actual,
+    loadFridayConfig: () => ({
+      betterAuthSecret: "test-better-auth",
+      zeroAuthSecret: "test-zero-auth",
+      zeroAdminPassword: "test-zero-admin",
+      databaseUrl: process.env.DATABASE_URL,
+      zeroUpstreamDb: undefined,
+      zeroReplicaFile: undefined,
+      linearApiKey: undefined,
+      anthropicApiKey: undefined,
+      cloudflareTunnelToken: undefined,
+      posthogApiKey: undefined,
+      posthogHost: undefined,
+    }),
+  };
+});
 
 let handle: TestDbHandle;
 let server: Server;

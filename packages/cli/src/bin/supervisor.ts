@@ -34,15 +34,15 @@
  */
 
 import { ChildProcess, spawn, spawnSync, type StdioOptions } from "node:child_process";
-import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, createWriteStream, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ensureFridayEnv,
   FRIDAY_PG_CONSTANTS,
   getLogPath,
   LOGS_DIR,
   loadConfig,
+  loadFridayConfig,
   resolveDaemonPort,
   resolveDashboardPort,
 } from "@friday/shared";
@@ -71,32 +71,27 @@ function findRepoRoot(): string {
 // ---- .env loading -----------------------------------------------------
 
 /**
- * Parse `~/.friday/.env` and inject every assignment into `process.env`
- * before spawning children. zero-cache reads `ZERO_UPSTREAM_DB`,
- * `ZERO_AUTH_SECRET`, etc. from env at spawn time; the daemon and
- * dashboard also read `DATABASE_URL`, `BETTER_AUTH_SECRET`,
- * `LINEAR_API_KEY`, etc. This replaces the `set -a && source ~/.friday/.env`
- * pattern from the tmux-era wrapper.
+ * FRI-150 (pivot, ADR-037): the supervisor used to load `~/.friday/.env`
+ * into its own `process.env` and let children inherit secrets that way.
+ * That polluted the entire process tree (supervisor → daemon → worker →
+ * MCP) with daemon-private secrets, making the worker-fork → MCP-spawn
+ * trust gradient impossible to enforce.
  *
- * Format is the dotenv-style `KEY=value` per line, ignoring blanks and
- * `#`-prefixed comments. Values are taken verbatim (no shell expansion).
+ * The new model:
+ *   - `loadFridayConfig()` returns an immutable object; supervisor reads
+ *     it once at boot, uses it to construct each child's env explicitly.
+ *   - daemon + dashboard children inherit a CLEAN `process.env` and call
+ *     `loadFridayConfig()` themselves for secret access.
+ *   - zero-cache is an external binary that can't call our loader; its
+ *     spawn env explicitly injects the four secrets it needs
+ *     (ZERO_UPSTREAM_DB / ZERO_AUTH_SECRET / ZERO_ADMIN_PASSWORD / ZERO_REPLICA_FILE).
  */
-function loadFridayEnv(): void {
-  ensureFridayEnv();
-  const envPath = join(process.env.FRIDAY_DATA_DIR ?? join(process.env.HOME!, ".friday"), ".env");
-  if (!existsSync(envPath)) return;
-  const text = readFileSync(envPath, "utf8");
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq < 0) continue;
-    const key = line.slice(0, eq).trim();
-    const value = line.slice(eq + 1).trim();
-    // Don't clobber values that are already set in the supervisor's
-    // env (e.g. from launchd's plist environment_variables).
-    if (process.env[key] === undefined) process.env[key] = value;
-  }
+function ensureFridayEnvFileExists(): void {
+  // loadFridayConfig() creates ~/.friday/.env on first call + autogens
+  // missing load-bearing secrets. Run it eagerly so subsequent boots
+  // don't have to re-generate. The returned object is discarded here —
+  // children read it themselves.
+  loadFridayConfig();
 }
 
 // ---- Child specs ------------------------------------------------------
@@ -157,6 +152,12 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
   const cfg = loadConfig();
   const daemonPort = resolveDaemonPort(cfg);
   const dashboardPort = resolveDashboardPort(cfg);
+  // FRI-150 (pivot, ADR-037): zero-cache is an external binary that can't
+  // call `loadFridayConfig()`. The supervisor reads the secrets it needs
+  // and injects them explicitly into the zero-cache spawn env. daemon +
+  // dashboard children inherit a CLEAN process.env and call the loader
+  // themselves.
+  const fridayEnv = loadFridayConfig();
 
   return [
     {
@@ -212,6 +213,13 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         ZERO_UPSTREAM_MAX_CONNS: "4",
         ZERO_CVR_MAX_CONNS: "6",
         ...process.env,
+        // FRI-150 (pivot, ADR-037): explicit secret injection. zero-cache
+        // is an external binary; supervisor reads via loadFridayConfig()
+        // and hands the four secrets it needs to the spawn env.
+        ...(fridayEnv.zeroUpstreamDb ? { ZERO_UPSTREAM_DB: fridayEnv.zeroUpstreamDb } : {}),
+        ZERO_AUTH_SECRET: fridayEnv.zeroAuthSecret,
+        ZERO_ADMIN_PASSWORD: fridayEnv.zeroAdminPassword,
+        ...(fridayEnv.zeroReplicaFile ? { ZERO_REPLICA_FILE: fridayEnv.zeroReplicaFile } : {}),
         ZERO_LOG_FORMAT: "json",
         // FRI-83 follow-up: the spawn-time export of ZERO_MUTATE_URL
         // is the source of truth, beating any stale value in .env.
@@ -224,10 +232,21 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
         const schemaPath = join(repoRoot, "packages", "shared", "dist", "sync", "schema.js");
         // Spawn zero-deploy-permissions via `process.execPath` against the
         // bin's compiled entry — never `pnpm exec` / the `.bin` shim (FRI-146).
+        // FRI-150 (pivot, ADR-037): inject the same secrets zero-cache
+        // needs, since deploy-permissions reads the same env.
         const r = spawnSync(
           process.execPath,
           [zeroDeployPermissionsCli(repoRoot), "--schema-path", schemaPath],
-          { cwd: join(repoRoot, "services", "dashboard"), stdio: "inherit", env: process.env },
+          {
+            cwd: join(repoRoot, "services", "dashboard"),
+            stdio: "inherit",
+            env: {
+              ...process.env,
+              ...(fridayEnv.zeroUpstreamDb ? { ZERO_UPSTREAM_DB: fridayEnv.zeroUpstreamDb } : {}),
+              ZERO_AUTH_SECRET: fridayEnv.zeroAuthSecret,
+              ZERO_ADMIN_PASSWORD: fridayEnv.zeroAdminPassword,
+            },
+          },
         );
         if (r.status !== 0) {
           throw new Error(`zero-deploy-permissions exited ${r.status}`);
@@ -511,7 +530,7 @@ async function cascadeStop(exitCode = 0): Promise<void> {
 // ---- Main -------------------------------------------------------------
 
 async function main(): Promise<void> {
-  loadFridayEnv();
+  ensureFridayEnvFileExists();
   const repoRoot = findRepoRoot();
   logSupervisor("startup", { pid: process.pid, repoRoot });
 

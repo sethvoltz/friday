@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SOUL_PATH } from "../config.js";
+import { loadFridayConfig } from "../env.js";
 
 /**
  * Find the bundled prompts directory. At runtime we live at
@@ -58,10 +59,14 @@ const DEFAULT_PROTOCOLS_BY_TYPE: Record<AgentBaseKey, readonly string[]> = {
  * daemon level. Keeps the system prompt for agents on a fresh install lean —
  * if a user never sets `LINEAR_API_KEY`, they don't carry Linear lifecycle
  * guidance into every turn.
+ *
+ * FRI-150 (pivot, ADR-037): reads via `loadFridayConfig()` instead of
+ * `process.env` so the prompt stack reflects the loaded config object,
+ * not whatever happens to be in the inherited process tree.
  */
-function envGatedProtocols(env: NodeJS.ProcessEnv = process.env): string[] {
+function envGatedProtocols(): string[] {
   const protocols: string[] = [];
-  if (env.LINEAR_API_KEY) protocols.push("linear");
+  if (loadFridayConfig().linearApiKey) protocols.push("linear");
   return protocols;
 }
 

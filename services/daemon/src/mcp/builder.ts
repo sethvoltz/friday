@@ -13,8 +13,10 @@ import type {
   McpSdkServerConfigWithInstance,
   McpStdioServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
-import { isAbsolute, join } from "node:path";
+import { accessSync, constants as fsConstants } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { logger } from "../log.js";
+import { getResolvedShellEnv } from "../shell-env.js";
 import { buildAppsServer, APPS_SERVER_NAME } from "./apps.js";
 import { buildEchoServer, ECHO_SERVER_NAME } from "./echo.js";
 import { buildMailServer, MAIL_SERVER_NAME } from "./mail.js";
@@ -145,9 +147,9 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   if (opts.callerType !== "orchestrator") {
     servers[BROWSER_SERVER_NAME] = {
       type: "stdio",
-      command: "npx",
+      command: resolveStdioCommand("npx"),
       args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated"],
-      env: {},
+      env: shellEnvForStdio(),
     };
   }
 
@@ -177,9 +179,13 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
     }
     servers[s.name] = {
       type: "stdio",
-      command: s.command,
+      command: resolveStdioCommand(s.command),
       args: s.args ?? [],
-      env: s.env ?? {},
+      // FRI-150: thread the daemon's captured shell env into per-server
+      // `env`; manifest entries still win on top via spread order. The
+      // SDK then merges `{...allowlist, ...config.env}`, so the manifest
+      // and captured env both supersede the allowlist filter.
+      env: { ...shellEnvForStdio(), ...(s.env ?? {}) },
     };
   }
 
@@ -217,9 +223,15 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
       // the SDK ever grows the field; it is a no-op today.
       servers[srv.name] = {
         type: "stdio",
-        command: srv.command,
+        command: resolveStdioCommand(srv.command),
         args: resolvedArgs,
+        // FRI-150: captured shell env carries the user's PATH + toolchain
+        // (FNM_DIR, NVM_DIR, …) into the spawned MCP child. Manifest env
+        // (after ${VAR} substitution) wins via the spread order, and
+        // FRIDAY_APP_DIR is still injected last so a manifest can't
+        // shadow it (FRI-36).
         env: {
+          ...shellEnvForStdio(),
           ...substituteEnv(srv.env ?? {}, envFile ?? {}),
           FRIDAY_APP_DIR: folderPath,
         },
@@ -253,6 +265,133 @@ function substituteEnv(
     });
   }
   return out;
+}
+
+/**
+ * FRI-150: rewrite `node` / `npx` to the daemon's pinned-Node absolute
+ * paths so a clean-install MCP child (no brew Node, no globally-resolvable
+ * `npx`) still spawns. `process.execPath` is the fnm-resolved pinned Node
+ * we're running under (per FRI-146 supervisor shim); its sibling `npx`
+ * ships with the same Node install. If the sibling is missing (some
+ * exotic Node install), we pass `npx` through bare — the per-server env
+ * merge above carries the captured shell PATH, so the SDK's
+ * `cross-spawn` can still find it via PATH lookup.
+ *
+ * User-supplied absolute paths in manifests (anything not literally
+ * `node` or `npx`) are untouched.
+ */
+export function resolveStdioCommand(command: string): string {
+  if (command === "node") return process.execPath;
+  if (command === "npx") {
+    const sibling = join(dirname(process.execPath), "npx");
+    // NIT-4: `existsSync` is not enough — a `.npx` placeholder file or a
+    // non-executable script would pass it and then ENOEXEC at spawn time.
+    // `accessSync(…, X_OK)` confirms the kernel will let us execute it.
+    try {
+      accessSync(sibling, fsConstants.X_OK);
+      return sibling;
+    } catch {
+      return command;
+    }
+  }
+  return command;
+}
+
+/**
+ * FRI-150 (pivot, ADR-037): MCP children get a RESTRICTED subset of the
+ * worker's captured shell env — not the full thing. The trust gradient
+ * (agent gets shell, MCP gets restricted) is the OpenCode-flavored model
+ * documented in ADR-037; the specific allowlist below is bespoke.
+ *
+ * Rationale per category:
+ *
+ *   - Process basics (HOME, USER, LOGNAME, TERM, TMPDIR) — SDK already
+ *     allowlists most of these, but be explicit so the MCP child gets the
+ *     captured-shell values (not the launchd-stripped defaults).
+ *   - Locale (LANG, LC_*) — tools that emit dates / sort lists rely on
+ *     these and are surprising to debug when missing.
+ *   - Toolchain hint roots — node/python/ruby/rust/go/java/jvm/conda
+ *     version managers all store their install root in a hint var, and a
+ *     spawned MCP that itself shells out (e.g. an MCP written in Python
+ *     that needs the user's `pyenv` install) needs the hint.
+ *
+ * Anything NOT on this list is dropped — including FRIDAY_*, SHELL,
+ * any user secret a `.zshrc` might `export`, and the dozens of
+ * dotfile-set vars (LANG_*, COLORTERM, ITERM_*, SSH_*, etc.) that have
+ * no business being inherited by spawned MCP children.
+ *
+ * Exported so the ADR + tests can reference + assert against it.
+ */
+export const MCP_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
+  // Process basics (subset / superset of SDK's StdioClientTransport allowlist)
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "TERM",
+  "TMPDIR",
+  // Locale
+  "LANG",
+  "LC_ALL",
+  "LC_COLLATE",
+  "LC_CTYPE",
+  "LC_MESSAGES",
+  "LC_MONETARY",
+  "LC_NUMERIC",
+  "LC_TIME",
+  // Node / JS toolchain hints
+  "NVM_DIR",
+  "FNM_DIR",
+  "FNM_MULTISHELL_PATH",
+  "PNPM_HOME",
+  "BUN_INSTALL",
+  "DENO_INSTALL",
+  "VOLTA_HOME",
+  // Python / Ruby / Rust / Go / Java / JVM / conda toolchain hints
+  "PYENV_ROOT",
+  "ASDF_DATA_DIR",
+  "RBENV_ROOT",
+  "CARGO_HOME",
+  "RUSTUP_HOME",
+  "GOPATH",
+  "GOROOT",
+  "JAVA_HOME",
+  "M2_HOME",
+  "CONDA_PREFIX",
+  "SDKMAN_DIR",
+  // Search-path hints used by build tools
+  "MANPATH",
+  "INFOPATH",
+  "PKG_CONFIG_PATH",
+]);
+
+/**
+ * FRI-150 (pivot, ADR-037): filter a captured-shell env down to the
+ * `MCP_ENV_ALLOWLIST` for use as the per-server stdio `env` base. The
+ * SDK then does `{...getDefaultEnvironment(), ...config.env}`; our
+ * restricted output supersedes the SDK's HOME/PATH/SHELL/LOGNAME/TERM/
+ * USER allowlist with values from the worker's captured shell.
+ *
+ * Anything not on the allowlist is dropped — daemon-internal vars
+ * (FRIDAY_*), user-shell-set secrets (`export GITHUB_TOKEN=…` in
+ * .zshrc), and unmodeled environment-leak surfaces.
+ */
+export function restrictedMcpEnv(captured: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of MCP_ENV_ALLOWLIST) {
+    const v = captured[key];
+    if (typeof v === "string") out[key] = v;
+  }
+  return out;
+}
+
+/**
+ * Return the per-spawn restricted env base from the worker's captured
+ * shell. Called by every stdio entry point; manifest env wins on top
+ * via the caller's spread.
+ */
+function shellEnvForStdio(): Record<string, string> {
+  return restrictedMcpEnv(getResolvedShellEnv().env);
 }
 
 export const BROWSER_SERVER_NAME = "playwright";

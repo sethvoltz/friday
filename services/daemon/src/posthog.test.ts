@@ -31,6 +31,23 @@ vi.mock("@friday/shared", () => ({
       }),
     }),
   }),
+  // FRI-150 (pivot, ADR-037): posthog.ts now reads its key/host via
+  // loadFridayConfig(). The mock returns undefined for both so the
+  // PostHog client constructs with empty key + default host (the test
+  // doesn't care about the host string — the captureSpy is what asserts).
+  loadFridayConfig: () => ({
+    betterAuthSecret: "test",
+    zeroAuthSecret: "test",
+    zeroAdminPassword: "test",
+    databaseUrl: undefined,
+    zeroUpstreamDb: undefined,
+    zeroReplicaFile: undefined,
+    linearApiKey: undefined,
+    anthropicApiKey: undefined,
+    cloudflareTunnelToken: undefined,
+    posthogApiKey: undefined,
+    posthogHost: undefined,
+  }),
 }));
 
 describe("captureFor", () => {

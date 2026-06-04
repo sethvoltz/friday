@@ -382,6 +382,11 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // repo-vetted native-module builds. M1's package-manager rule keeps npm /
   // yarn behind `--ignore-scripts` (those run all postinstalls by default);
   // for pnpm we trust the repo's own gating.
+  // FRI-150 (pivot, ADR-037): the worker captures its own shell env at
+  // entry — no daemon-side forwarding. Workers see process.env from the
+  // daemon (post-loadFridayConfig refactor that's clean of secrets) plus
+  // CI / COREPACK_* overrides, then run `$SHELL -ilc` to layer the
+  // user's interactive shell env on top of that.
   const env = {
     ...process.env,
     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",

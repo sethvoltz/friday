@@ -12,7 +12,29 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
-process.env.LINEAR_API_KEY = "test-key";
+// FRI-150 (pivot, ADR-037): the production code reads LINEAR_API_KEY via
+// `loadFridayConfig()` (object), not `process.env`. Mock the loader so
+// every test sees the synthetic key without polluting the on-disk .env.
+const mockLinearApiKey: { current: string | undefined } = { current: "test-key" };
+vi.mock("@friday/shared", async (importActual) => {
+  const actual = await importActual<typeof import("@friday/shared")>();
+  return {
+    ...actual,
+    loadFridayConfig: () => ({
+      betterAuthSecret: "test-better-auth",
+      zeroAuthSecret: "test-zero-auth",
+      zeroAdminPassword: "test-zero-admin",
+      databaseUrl: process.env.DATABASE_URL,
+      zeroUpstreamDb: undefined,
+      zeroReplicaFile: undefined,
+      linearApiKey: mockLinearApiKey.current,
+      anthropicApiKey: undefined,
+      cloudflareTunnelToken: undefined,
+      posthogApiKey: undefined,
+      posthogHost: undefined,
+    }),
+  };
+});
 
 let handle: TestDbHandle;
 let createTicket: (typeof import("@friday/shared/services"))["createTicket"];
@@ -162,7 +184,7 @@ describe("closeTicketForArchive — local mapping", () => {
 
 describe("closeTicketForArchive — external propagation", () => {
   beforeEach(() => {
-    process.env.LINEAR_API_KEY = "test-key";
+    mockLinearApiKey.current = "test-key";
   });
 
   it("completed: posts issueUpdate to Linear with the 'completed' stateId", async () => {
@@ -278,7 +300,7 @@ describe("closeTicketForArchive — external propagation", () => {
   });
 
   it("LINEAR_API_KEY missing: local update still succeeds, Linear call skipped", async () => {
-    delete process.env.LINEAR_API_KEY;
+    mockLinearApiKey.current = undefined;
     const t = await createTicket({ title: "no-key", status: "in_progress" });
     await linkExternal({
       ticketId: t.id,

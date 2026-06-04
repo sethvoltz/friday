@@ -1,9 +1,9 @@
 import {
   closeDb,
   ensureDirs,
-  ensureFridayEnv,
   ensureSoul,
   loadConfig,
+  loadFridayConfig,
   normalizeModelConfig,
   resolveDaemonPort,
   runMigrations,
@@ -54,7 +54,18 @@ import { posthog, DISTINCT_ID } from "./posthog.js";
 
 async function main(): Promise<void> {
   ensureDirs();
-  ensureFridayEnv();
+  // FRI-150 (pivot, ADR-037): load Friday config into an immutable object —
+  // does NOT mutate process.env. Daemon-side callers read secrets via
+  // `loadFridayConfig().<field>`; the daemon's process.env is kept clean
+  // of secrets so the worker fork doesn't inherit them.
+  loadFridayConfig();
+  // FRI-150 (pivot, ADR-037): shell-env capture has moved from the daemon
+  // boot path to the per-worker entry point (`services/daemon/src/agent/
+  // worker.ts`). Workers capture their own user-shell env at startup; the
+  // daemon no longer holds a shared singleton and no longer forwards it
+  // via `FRIDAY_RESOLVED_SHELL_ENV_JSON`. This matches the trust gradient
+  // — daemon process has no user-shell context, workers get the full
+  // shell, MCP children get a restricted allowlist (see mcp/builder.ts).
   await runMigrations();
   // FRI-61: state migrations run AFTER schema migrations (Drizzle just
   // created the `_friday_state_migrations` table) and BEFORE any

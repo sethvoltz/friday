@@ -16,9 +16,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const DATA_DIR = mkdtempSync(join(tmpdir(), "friday-launchd-data-"));
 process.env.FRIDAY_DATA_DIR = DATA_DIR;
@@ -98,6 +99,82 @@ describe("renderPlist — bash-twin contract (AC#13)", () => {
     const tricky = renderPlist("/tmp/a&b<c>", "/opt/fnm");
     expect(tricky).toContain("/tmp/a&amp;b&lt;c&gt;");
     expect(tricky).not.toContain("/tmp/a&b<c>");
+  });
+
+  it("FRI-150 regression fence: plist EnvironmentVariables contain NO PATH key — PATH propagation lives in the daemon's shell-env layer, not the plist", () => {
+    // The closed PR #161 baked PATH into the plist as the wrong-layer fix
+    // for clean-install MCP children. The umbrella architecture moved
+    // PATH responsibility to services/daemon/src/shell-env.ts. The plist
+    // must stay minimal — only FRIDAY_FNM_BIN — so we don't regress.
+    const envBlock = xml.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+    expect(envBlock).not.toBeNull();
+    expect(envBlock![1]).not.toMatch(/<key>PATH<\/key>/);
+  });
+
+  it("FRI-150 regression fence: plist EnvironmentVariables hold only FRIDAY_FNM_BIN (single key, single value)", () => {
+    const envBlock = xml.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+    expect(envBlock).not.toBeNull();
+    const keys = [...envBlock![1].matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
+    expect(keys).toEqual(["FRIDAY_FNM_BIN"]);
+  });
+});
+
+describe("FRI-150 F1: install.sh write_plist bash-twin regression fence", () => {
+  // The TS-rendered plist is fenced inside `renderPlist — bash-twin contract`
+  // above. install.sh's `write_plist` heredoc is the parallel implementation
+  // — a JS-only fence misses bash drift. This block extracts the heredoc
+  // body from install.sh and asserts the same shape.
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  // packages/cli/src/lib → repo root is up 4 levels.
+  const repoRoot = resolve(thisDir, "..", "..", "..", "..");
+  const installSh = readFileSync(join(repoRoot, "install.sh"), "utf8");
+
+  function extractHeredocBody(sh: string): string {
+    // Pulls everything between `cat > "${PLIST_PATH}" <<PLIST` (start) and
+    // the closing `PLIST` terminator on its own line.
+    const m = sh.match(/cat\s*>\s*"\$\{PLIST_PATH\}"\s*<<PLIST\n([\s\S]*?)\nPLIST\b/);
+    return m?.[1] ?? "";
+  }
+
+  it("the heredoc is locatable in install.sh — fence test pre-condition", () => {
+    const body = extractHeredocBody(installSh);
+    expect(body.length).toBeGreaterThan(0);
+    expect(body).toContain("<plist");
+    expect(body).toContain("<key>Label</key>");
+  });
+
+  it("install.sh plist heredoc contains NO PATH key in EnvironmentVariables", () => {
+    const body = extractHeredocBody(installSh);
+    const envBlock = body.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+    expect(envBlock).not.toBeNull();
+    expect(envBlock![1]).not.toMatch(/<key>PATH<\/key>/);
+  });
+
+  it("install.sh plist heredoc EnvironmentVariables holds only FRIDAY_FNM_BIN", () => {
+    const body = extractHeredocBody(installSh);
+    const envBlock = body.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+    expect(envBlock).not.toBeNull();
+    const keys = [...envBlock![1].matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
+    expect(keys).toEqual(["FRIDAY_FNM_BIN"]);
+  });
+
+  it("install.sh plist heredoc and TS renderer agree on the EnvironmentVariables key set (cross-twin drift fence)", () => {
+    const body = extractHeredocBody(installSh);
+    const shKeys = [
+      ...(
+        body.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? ""
+      ).matchAll(/<key>([^<]+)<\/key>/g),
+    ].map((m) => m[1]);
+
+    const installDir = "/Users/someone/.local/share/friday/current";
+    const tsXml = renderPlist(installDir, "/opt/homebrew/bin/fnm");
+    const tsKeys = [
+      ...(
+        tsXml.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/)?.[1] ?? ""
+      ).matchAll(/<key>([^<]+)<\/key>/g),
+    ].map((m) => m[1]);
+
+    expect(shKeys).toEqual(tsKeys);
   });
 });
 

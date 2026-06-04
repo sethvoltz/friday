@@ -34,6 +34,32 @@ import { buildMailPrompt } from "../comms/mail-prompt.js";
 import { daemonFetch } from "../mcp/http.js";
 import { runHooks } from "@friday/shared";
 import "../hooks/register.js";
+import { captureShellEnv } from "../shell-env.js";
+
+// FRI-150 (pivot, ADR-037): per-agent shell capture. Each forked worker
+// runs `$SHELL -ilc` at startup to learn what the user's interactive
+// shell sees — PATH + toolchain hints + locale. The captured env is
+// stored on a per-worker-process module singleton in shell-env.ts; the
+// MCP builder reads from it via `getResolvedShellEnv()` and threads a
+// RESTRICTED allowlist subset into each per-server stdio `env`.
+//
+// Latency: typically 50-300ms; capped at 5s by the in-module timeout
+// (override via `FRIDAY_SHELL_ENV_TIMEOUT_MS`). On capture failure
+// (timeout, missing shell, marker parse error) the fallback is a
+// sanitized `process.env` snapshot — the worker keeps going. See
+// `services/daemon/src/shell-env.ts` for the full failure matrix.
+//
+// Capture runs ONCE per worker process and is reused across every turn
+// that worker handles. Long-lived agents (orchestrator, builders,
+// helpers, kitchen) amortize the cost easily; one-shot scheduled
+// agents pay it once and exit.
+//
+// Start the capture eagerly at module load, parallel with the worker's
+// `ready` IPC and the parent's first `start` message round-trip. The
+// promise resolves into a module-internal singleton; we `await` it at
+// the top of `mainLoop` (below) so the singleton is seeded BEFORE the
+// SDK's first `query()` builds any MCP child env.
+const shellEnvCapturePromise: Promise<unknown> = captureShellEnv();
 
 let abortController: AbortController | null = null;
 let stopped = false;
@@ -119,6 +145,14 @@ emit({ type: "ready" });
 
 async function mainLoop(): Promise<void> {
   if (!workerOpts) return;
+  // FRI-150 (ADR-037): await the in-flight shell capture before the SDK
+  // can build any MCP child env. Capture was kicked off at module load
+  // so it ran in parallel with `ready` + the first `start` round-trip;
+  // by here it's usually already settled. The 5s in-module timeout
+  // bounds this. On any failure mode `captureShellEnv` resolves with a
+  // sanitized process.env snapshot — mainLoop never throws because of
+  // shell-env issues.
+  await shellEnvCapturePromise;
   try {
     while (!stopped) {
       if (pendingPrompt) {

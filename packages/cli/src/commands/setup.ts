@@ -10,9 +10,9 @@ import {
   CONFIG_PATH,
   DEFAULT_CONFIG,
   ensureDirs,
-  ensureFridayEnv,
   ensureSoul,
   loadConfig,
+  loadFridayConfig,
   provisionPostgres,
   resolveDashboardPort,
   upsertEnvVar,
@@ -46,7 +46,11 @@ export const setupCommand = defineCommand({
     intro(pc.bold(pc.cyan("Friday — setup")));
 
     ensureDirs();
-    ensureFridayEnv(); // load + generate BETTER_AUTH_SECRET if needed
+    // FRI-150 (pivot, ADR-037): loadFridayConfig() generates
+    // BETTER_AUTH_SECRET / ZERO_AUTH_SECRET / ZERO_ADMIN_PASSWORD if
+    // missing and writes them to ~/.friday/.env. The returned object is
+    // read later when we need the secrets — `process.env` is NOT mutated.
+    loadFridayConfig();
     await runMigrations();
     ensureSoul();
 
@@ -111,7 +115,7 @@ export const setupCommand = defineCommand({
       database: drizzleAdapter(db, { provider: "pg", schema, usePlural: true }),
       baseURL: process.env.BETTER_AUTH_URL ?? `http://localhost:${resolveDashboardPort(cfg)}`,
       emailAndPassword: { enabled: true, disableSignUp: false },
-      secret: process.env.BETTER_AUTH_SECRET!,
+      secret: loadFridayConfig().betterAuthSecret,
     });
 
     const existing = await db.select().from(schema.users).limit(1);
@@ -199,7 +203,7 @@ export const setupCommand = defineCommand({
 });
 
 async function runCloudflareSetup({ force }: { force: boolean }): Promise<void> {
-  const tokenAlreadySet = !!process.env.CLOUDFLARE_TUNNEL_TOKEN;
+  const tokenAlreadySet = !!loadFridayConfig().cloudflareTunnelToken;
   const cfg = loadConfig();
   const message = tokenAlreadySet
     ? "Replace existing Cloudflare Tunnel token?"

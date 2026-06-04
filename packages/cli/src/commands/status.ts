@@ -3,9 +3,9 @@ import pc from "picocolors";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import {
-  ensureFridayEnv,
   HEALTH_PATH,
   loadConfig,
+  loadFridayConfig,
   resolveDaemonPort,
   resolveDashboardPort,
 } from "@friday/shared";
@@ -125,7 +125,7 @@ function formatUptime(sec: number): string {
 export const statusCommand = defineCommand({
   meta: { name: "status", description: "Show supervisor + daemon + dashboard + tunnel status" },
   async run() {
-    ensureFridayEnv();
+    const fridayEnv = loadFridayConfig();
     const cfg = loadConfig();
 
     console.log(pc.bold("Friday status"));
@@ -145,7 +145,7 @@ export const statusCommand = defineCommand({
     // cloudflared (its own user launch agent installed by
     // `friday setup --cloudflare` → `cloudflared service install`; only
     // checked when a token is configured).
-    if (process.env.CLOUDFLARE_TUNNEL_TOKEN) {
+    if (fridayEnv.cloudflareTunnelToken) {
       const cfJob = launchdJobStatus("com.cloudflare.cloudflared");
       if (cfJob.loaded) {
         const detail = cfJob.pid !== undefined ? `pid=${cfJob.pid}` : "(loaded)";

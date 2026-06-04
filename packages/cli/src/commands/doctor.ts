@@ -12,8 +12,8 @@ import {
   LOGS_DIR,
   SOUL_PATH,
   closeDb,
-  ensureFridayEnv,
   getDb,
+  loadFridayConfig,
   probePostgresHealth,
   schema,
 } from "@friday/shared";
@@ -58,7 +58,7 @@ export const doctorCommand = defineCommand({
   meta: { name: "doctor", description: "Check system health" },
   async run() {
     console.log(BANNER);
-    if (existsSync(ENV_PATH)) ensureFridayEnv();
+    if (existsSync(ENV_PATH)) loadFridayConfig();
 
     // Sections render one block at a time, live: each box paints its known
     // rows as pending, then flips each glyph (and the top-border count) in
@@ -348,8 +348,10 @@ async function runConfiguration(): Promise<DoctorCheck[]> {
     accountOk ? undefined : "run `friday setup`",
   );
 
-  // Cloudflare Tunnel token — informational; tunnel is opt-in
-  const tunnelTokenSet = !!process.env.CLOUDFLARE_TUNNEL_TOKEN;
+  // Cloudflare Tunnel token — informational; tunnel is opt-in.
+  // FRI-150 (ADR-037): read via loadFridayConfig() instead of process.env so
+  // a clean daemon process tree doesn't leak the token into MCP children.
+  const tunnelTokenSet = !!loadFridayConfig().cloudflareTunnelToken;
   box.resolve(
     "cloudflare token",
     tunnelTokenSet ? "ok" : "warn",
@@ -357,11 +359,11 @@ async function runConfiguration(): Promise<DoctorCheck[]> {
     tunnelTokenSet ? undefined : "public tunnel disabled — `friday setup --cloudflare` to enable",
   );
 
-  // ZERO_AUTH_SECRET is a config/env secret (loaded by ensureFridayEnv), so we
-  // check it directly here rather than threading it out of the Postgres probe.
-  // This decouples Configuration from the slow pg probe and shows the row even
-  // when Postgres is down.
-  const zeroAuthSecretPresent = !!process.env.ZERO_AUTH_SECRET;
+  // ZERO_AUTH_SECRET is a config/env secret. FRI-150 (ADR-037) — read via
+  // loadFridayConfig() instead of process.env so the daemon process tree
+  // stays clean of secrets. Decoupled from the slow pg probe so the row
+  // renders even when Postgres is down.
+  const zeroAuthSecretPresent = !!loadFridayConfig().zeroAuthSecret;
   box.resolve(
     "ZERO_AUTH_SECRET",
     zeroAuthSecretPresent ? "ok" : "fail",

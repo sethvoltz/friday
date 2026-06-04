@@ -25,7 +25,14 @@
 
 import { eq, and } from "drizzle-orm";
 import pgPkg from "pg";
-import { type ArchiveReason, getDb, getPool, schema, LISTEN_CHANNELS } from "@friday/shared";
+import {
+  type ArchiveReason,
+  getDb,
+  getPool,
+  loadFridayConfig,
+  schema,
+  LISTEN_CHANNELS,
+} from "@friday/shared";
 import { archiveAgent } from "./lifecycle.js";
 import { logger } from "../log.js";
 
@@ -100,7 +107,8 @@ export interface ArchiveListenerHandle {
 export async function startArchiveListener(): Promise<ArchiveListenerHandle> {
   const pool = getPool();
   const connectionString =
-    (pool.options as { connectionString?: string }).connectionString ?? process.env.DATABASE_URL;
+    (pool.options as { connectionString?: string }).connectionString ??
+    loadFridayConfig().databaseUrl;
   if (!connectionString) {
     throw new Error("DATABASE_URL must be set to start the archive LISTEN connection.");
   }

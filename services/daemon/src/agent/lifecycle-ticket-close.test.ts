@@ -10,8 +10,29 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
-// Don't leak Linear API calls in tests that don't install a fetch mock.
-delete process.env.LINEAR_API_KEY;
+// FRI-150 (pivot, ADR-037): Linear API key is read via loadFridayConfig().
+// Mock it to undefined per-test so the Linear propagation path is gated
+// off — preventing live API calls when no fetch mock is installed.
+const mockLinearApiKey: { current: string | undefined } = { current: undefined };
+vi.mock("@friday/shared", async (importActual) => {
+  const actual = await importActual<typeof import("@friday/shared")>();
+  return {
+    ...actual,
+    loadFridayConfig: () => ({
+      betterAuthSecret: "test-better-auth",
+      zeroAuthSecret: "test-zero-auth",
+      zeroAdminPassword: "test-zero-admin",
+      databaseUrl: process.env.DATABASE_URL,
+      zeroUpstreamDb: undefined,
+      zeroReplicaFile: undefined,
+      linearApiKey: mockLinearApiKey.current,
+      anthropicApiKey: undefined,
+      cloudflareTunnelToken: undefined,
+      posthogApiKey: undefined,
+      posthogHost: undefined,
+    }),
+  };
+});
 
 let handle: TestDbHandle;
 let createTicket: (typeof import("@friday/shared/services"))["createTicket"];
@@ -230,7 +251,7 @@ describe("archiveAgent → ticket-close cross-boundary", () => {
   it("LINEAR_API_KEY missing: local ticket close still happens; no external attempt", async () => {
     // Linked ticket with a Linear external link, but no API key set —
     // local close must still flip the ticket; Linear write is skipped.
-    delete process.env.LINEAR_API_KEY;
+    mockLinearApiKey.current = undefined;
     const t = await createTicket({
       title: "no-linear-key",
       status: "in_progress",

@@ -22,6 +22,30 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
+// FRI-150 (pivot, ADR-037): production code reads LINEAR_API_KEY via
+// `loadFridayConfig()` (object). The mock replaces the loader; tests
+// flip `mockLinearApiKey.current` to drive presence/absence.
+const mockLinearApiKey: { current: string | undefined } = { current: "test-key" };
+vi.mock("@friday/shared", async (importActual) => {
+  const actual = await importActual<typeof import("@friday/shared")>();
+  return {
+    ...actual,
+    loadFridayConfig: () => ({
+      betterAuthSecret: "test-better-auth",
+      zeroAuthSecret: "test-zero-auth",
+      zeroAdminPassword: "test-zero-admin",
+      databaseUrl: process.env.DATABASE_URL,
+      zeroUpstreamDb: undefined,
+      zeroReplicaFile: undefined,
+      linearApiKey: mockLinearApiKey.current,
+      anthropicApiKey: undefined,
+      cloudflareTunnelToken: undefined,
+      posthogApiKey: undefined,
+      posthogHost: undefined,
+    }),
+  };
+});
+
 // Vitest's shared setup file (`packages/shared/src/test/vitest-setup.ts`)
 // pinned FRIDAY_DATA_DIR to a fresh tmpdir before any module evaluated, so
 // `EVOLVE_PROPOSALS_DIR` already resolves under it. Reuse that tmpdir for
@@ -115,7 +139,7 @@ beforeEach(async () => {
   for (const p of listProposals()) {
     rmSync(join(dataDir, "evolve", "proposals", `${p.id}.md`), { force: true });
   }
-  process.env.LINEAR_API_KEY = "test-key";
+  mockLinearApiKey.current = "test-key";
 });
 
 afterEach(() => {
@@ -377,7 +401,7 @@ describe("FRI-66 full chain: PR merge → Linear close → reconcile → ticket+
   });
 
   it("closeTicketForArchive (agent-archive path) also cascades to the proposal", async () => {
-    delete process.env.LINEAR_API_KEY; // isolate from Linear propagation in this case
+    mockLinearApiKey.current = undefined; // isolate from Linear propagation in this case
     const { closeTicketForArchive } = await import("./ticket-close.js");
 
     const p = saveProposal({
@@ -404,7 +428,7 @@ describe("FRI-66 full chain: PR merge → Linear close → reconcile → ticket+
   });
 
   it("ticket update without proposal link — closeTicketForArchive regression (builder-PR scenario)", async () => {
-    delete process.env.LINEAR_API_KEY;
+    mockLinearApiKey.current = undefined;
     const { closeTicketForArchive } = await import("./ticket-close.js");
 
     const t = await createTicket({ title: "builder PR no proposal", status: "in_progress" });
