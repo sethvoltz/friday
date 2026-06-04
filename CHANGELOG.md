@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/sethvoltz/friday/compare/v1.1.1...v1.1.2) (2026-06-04)
+
+
+### Bug Fixes
+
+* **cli:** exec-in-place launchd shim labeled "friday-supervisor" ([#159](https://github.com/sethvoltz/friday/issues/159)) ([85623ec](https://github.com/sethvoltz/friday/commit/85623ec9dfc6cef0abb67be9ef73c03f3785cb79))
+
 ## [1.1.1](https://github.com/sethvoltz/friday/compare/v1.1.0...v1.1.1) (2026-06-03)
 
 
