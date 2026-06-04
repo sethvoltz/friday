@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/sethvoltz/friday/compare/v1.1.2...v1.2.0) (2026-06-04)
+
+
+### Features
+
+* **cli:** render friday doctor sections live instead of all-at-once ([#163](https://github.com/sethvoltz/friday/issues/163)) ([e5cada8](https://github.com/sethvoltz/friday/commit/e5cada81a3858f2ac5ee1e7cefa452861437cf6f))
+
 ## [1.1.2](https://github.com/sethvoltz/friday/compare/v1.1.1...v1.1.2) (2026-06-04)
 
 
