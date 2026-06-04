@@ -24,7 +24,9 @@
 #     BASH_REMATCH are fine in 3.2.
 #   * darwin-arm64 only in v1; the asset-name dispatch is designed for a
 #     future Linux/x64 matrix row but only darwin-arm64 is accepted.
-#   * The only absolute Node-toolchain path written anywhere is
+#   * The shim + plist both invoke an in-place exec to the fnm-resolved
+#     pinned node — fnm is the runtime resolver, not a long-lived wrapper.
+#     The only absolute Node-toolchain path written anywhere is
 #     `$(brew --prefix)/bin/fnm`. fnm's internal per-version node path is
 #     never written or baked.
 
@@ -259,25 +261,23 @@ flip_current() {
 
 # ---- 5. PATH shim -----------------------------------------------------
 
-# Write ~/.local/bin/friday — a shim that execs the CLI THROUGH fnm so it
-# runs under the pinned Node, with no baked node path. Mirrors bin/friday.
+# Write ~/.local/bin/friday — a shim that resolves the pinned Node via fnm
+# and execs node IN PLACE so no fnm wrapper sits on the process tree.
+# Mirrors bin/friday in the source repo.
 write_shim() {
   mkdir -p "${BIN_DIR}"
   cat > "${SHIM_PATH}" <<'SHIM'
 #!/usr/bin/env bash
-# Friday CLI shim — invokes the installed CLI through fnm so it runs under
-# the pinned Node (.node-version) with no baked node path. Written by
-# install.sh (FRI-146 / ADR-034). Resolves the install tree via the
-# `current` symlink so `friday update` flips take effect immediately.
-#
-# fnm resolves .node-version from the CWD (it does NOT walk up parent dirs),
-# so we cd into the install-tree root — which holds .node-version (packed by
-# pack.mjs) — before exec'ing. Without this, invoking `friday` from any other
-# dir (the normal case, e.g. $HOME) fails with "Can't find version in
-# dotfiles" and node never runs.
+# Friday CLI shim — written by install.sh (FRI-146 / ADR-034). Resolves the
+# install tree via the `current` symlink so `friday update` flips take
+# effect immediately. fnm reads .node-version from CWD (no parent walk), so
+# we cd into the install root — which holds .node-version (packed by
+# pack.mjs) — before exec'ing.
+set -euo pipefail
 DIR="$HOME/.local/share/friday/current"
-cd "$DIR" || exit 1
-exec "$(brew --prefix)/bin/fnm" exec -- node "packages/cli/dist/index.js" "$@"
+cd "$DIR"
+NODE_BIN="$("$(brew --prefix)/bin/fnm" exec -- command -v node)"
+exec "$NODE_BIN" "packages/cli/dist/index.js" "$@"
 SHIM
   chmod +x "${SHIM_PATH}"
 
@@ -296,14 +296,22 @@ SHIM
 
 # Write ~/Library/LaunchAgents/com.sethvoltz.friday.plist. MUST match
 # launchd.ts:renderPlist — same label, ProgramArguments shape
-# ([fnm, exec, --, node, <current>/.../supervisor.js]), WorkingDirectory
-# = the `current` symlink dir (matches start.ts passing currentLink()),
-# RunAtLoad + KeepAlive, StandardOut/ErrPath under LOGS_DIR. No PATH env:
-# launching through `fnm exec` makes process.execPath the pinned node.
+# ([<current>/bin/friday-supervisor]), WorkingDirectory = the `current`
+# symlink dir (matches start.ts passing currentLink()), RunAtLoad +
+# KeepAlive, StandardOut/ErrPath under LOGS_DIR.
+#
+# `EnvironmentVariables.FRIDAY_FNM_BIN` is resolved here at install time —
+# install.sh runs in the user's interactive shell where brew is on PATH, so
+# `$(brew --prefix)/bin/fnm` evaluates to a real absolute path and gets
+# baked into the plist. launchd-spawned processes don't inherit user PATH,
+# so we hand the supervisor shim the resolved fnm location via env rather
+# than relying on PATH lookup. The shim resolves the pinned Node via that
+# fnm and execs node IN PLACE — fnm is the runtime resolver, not a long-
+# lived wrapper. `friday doctor` verifies the baked binary is a real exec.
 write_plist() {
-  local fnm_bin supervisor_entry
+  local supervisor_shim fnm_bin
+  supervisor_shim="${CURRENT_LINK}/bin/friday-supervisor"
   fnm_bin="$(brew --prefix)/bin/fnm"
-  supervisor_entry="${CURRENT_LINK}/packages/cli/dist/bin/supervisor.js"
 
   mkdir -p "${LOGS_DIR}"
   mkdir -p "$(dirname "${PLIST_PATH}")"
@@ -317,12 +325,13 @@ write_plist() {
   <string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${fnm_bin}</string>
-    <string>exec</string>
-    <string>--</string>
-    <string>node</string>
-    <string>${supervisor_entry}</string>
+    <string>${supervisor_shim}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FRIDAY_FNM_BIN</key>
+    <string>${fnm_bin}</string>
+  </dict>
   <key>WorkingDirectory</key>
   <string>${CURRENT_LINK}</string>
   <key>RunAtLoad</key>

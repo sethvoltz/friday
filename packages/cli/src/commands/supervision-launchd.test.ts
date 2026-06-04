@@ -59,19 +59,23 @@ describe("supervision aliases → launchctl (AC#13)", () => {
     vi.restoreAllMocks();
   });
 
-  it("friday start bootstraps when not yet loaded", async () => {
+  it("friday start always goes through launchd.bootstrap (rewrites plist + boots or kickstarts)", async () => {
+    // start.ts unconditionally calls launchd.bootstrap so that updates to the
+    // plist shape between releases (ProgramArguments / EnvironmentVariables
+    // edits) reach an already-loaded job — a bare kickstart would never
+    // rewrite the plist. launchd.bootstrap internally branches on
+    // isBootstrapped: writePlist then either bootstrap or kickstart. We pin
+    // start.ts's contract here (calls bootstrap); the internal branching is
+    // covered in launchd's own tests.
     isBootstrapped.mockReturnValue(false);
     await runCmd(startCommand, {});
     expect(bootstrap).toHaveBeenCalledTimes(1);
-    expect(kickstart).not.toHaveBeenCalled();
     expect(bootout).not.toHaveBeenCalled();
-  });
-
-  it("friday start kickstarts when already loaded (idempotent)", async () => {
+    bootstrap.mockClear();
     isBootstrapped.mockReturnValue(true);
     await runCmd(startCommand, {});
-    expect(kickstart).toHaveBeenCalledTimes(1);
-    expect(bootstrap).not.toHaveBeenCalled();
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(bootout).not.toHaveBeenCalled();
   });
 
   it("friday stop boots out", async () => {

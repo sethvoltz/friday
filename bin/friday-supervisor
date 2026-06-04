@@ -1,14 +1,35 @@
 #!/usr/bin/env bash
 # friday-supervisor — launchd-supervised entrypoint for the Friday stack.
-# Invoked by the launchd plist (com.sethvoltz.friday) written directly by
-# install.sh / the friday CLI; not normally run by users directly.
-# Execs through fnm so it runs under the pinned Node (.node-version) with no
-# baked node path. See ADR-028 (FRI-88) + ADR-033 (FRI-146) for the design.
+# Invoked by the launchd plist (com.sethvoltz.friday) written by install.sh /
+# the friday CLI; not normally run by users directly.
 #
-# fnm resolves .node-version from the CWD (it does NOT walk up parent dirs),
-# so we cd into the install-tree root — which holds .node-version — before
-# exec'ing. The plist also sets WorkingDirectory to the tree root, but this
-# keeps the shim correct when run directly.
-DIR="$(dirname "$0")"
-cd "$DIR/.." || exit 1
-exec "$(brew --prefix)/bin/fnm" exec -- node "packages/cli/dist/bin/supervisor.js" "$@"
+# Resolves the pinned Node via fnm at launch time (fnm reads .node-version
+# from CWD — the plist's WorkingDirectory is the install root which holds
+# .node-version, and this script cd's there too for the directly-invoked
+# case). Then `exec`s the resolved node binary IN PLACE so the bash shim
+# process is replaced by node — no spawn-and-wait wrapper sits on the
+# launchd-tracked process for the supervisor's lifetime. The pinned Node is
+# still the runtime-resolved fnm-managed one; we just don't keep fnm alive
+# as a wrapper. See ADR-028 (FRI-88) + ADR-034 (FRI-146) for the design.
+#
+# fnm location: launchd-spawned processes don't inherit your shell's PATH,
+# so we can't `command -v fnm` under launchd unless something puts the brew
+# bin dir on PATH first. install.sh (and launchd.ts:renderPlist) resolve
+# the fnm binary at install time and bake it into the plist's
+# EnvironmentVariables.FRIDAY_FNM_BIN. This script reads that; for the
+# directly-invoked / dev workflow case it falls back to `command -v fnm`,
+# which works in interactive shells where brew is on PATH.
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$DIR"
+FNM_BIN="${FRIDAY_FNM_BIN:-$(command -v fnm || true)}"
+if [ -z "${FNM_BIN}" ] || [ ! -x "${FNM_BIN}" ]; then
+  echo "friday-supervisor: fnm not found (FRIDAY_FNM_BIN unset and not on PATH)" >&2
+  exit 1
+fi
+NODE_BIN="$("${FNM_BIN}" exec -- command -v node)"
+# `exec -a friday-supervisor` sets argv[0] on the resulting node process so
+# `ps`, Activity Monitor, and macOS's "background activity" / Login Items
+# prompt display "friday-supervisor" instead of "node" (or "fnm" under the
+# pre-FRI-* plist). The actual binary is still the fnm-resolved pinned node.
+exec -a "friday-supervisor" "${NODE_BIN}" "packages/cli/dist/bin/supervisor.js" "$@"
