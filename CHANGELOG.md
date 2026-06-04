@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/sethvoltz/friday/compare/v1.2.1...v1.2.2) (2026-06-04)
+
+
+### Bug Fixes
+
+* **shared:** cast usage-stat token SUMs to float8 to avoid int4 overflow ([#166](https://github.com/sethvoltz/friday/issues/166)) ([9824bd5](https://github.com/sethvoltz/friday/commit/9824bd53bb11254cd3a67d715fa2153fb9e2e74d))
+
 ## [1.2.1](https://github.com/sethvoltz/friday/compare/v1.2.0...v1.2.1) (2026-06-04)
 
 
