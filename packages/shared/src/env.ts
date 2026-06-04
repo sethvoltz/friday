@@ -132,18 +132,30 @@ export function loadFridayConfig(): FridayEnvConfig {
     parsed.ZERO_ADMIN_PASSWORD = secret;
   }
 
+  // FRI-150 (pivot, ADR-037): process.env wins over the on-disk file for
+  // each field. This preserves two important use cases:
+  //   1. Test harnesses that spawn child processes with explicit secret
+  //      injection (e.g. spawnTestSyncEnv in @friday/shared/test/sync-harness).
+  //   2. Operator overrides in unusual deployment shapes (Docker, CI,
+  //      shimmed environments).
+  // It does NOT undo the architectural goal — the SUPERVISOR no longer
+  // populates `process.env` with secrets from the file (see
+  // `packages/cli/src/bin/supervisor.ts`). Production daemon process.env
+  // stays clean because nothing else writes to it. Tests + dev shims
+  // are the only callers that benefit from this override path.
+  const read = (key: string): string | undefined => process.env[key] || parsed[key];
   cached = Object.freeze({
-    betterAuthSecret: parsed.BETTER_AUTH_SECRET,
-    zeroAuthSecret: parsed.ZERO_AUTH_SECRET,
-    zeroAdminPassword: parsed.ZERO_ADMIN_PASSWORD,
-    databaseUrl: parsed.DATABASE_URL,
-    zeroUpstreamDb: parsed.ZERO_UPSTREAM_DB,
-    zeroReplicaFile: parsed.ZERO_REPLICA_FILE,
-    linearApiKey: parsed.LINEAR_API_KEY,
-    anthropicApiKey: parsed.ANTHROPIC_API_KEY,
-    cloudflareTunnelToken: parsed.CLOUDFLARE_TUNNEL_TOKEN,
-    posthogApiKey: parsed.POSTHOG_API_KEY,
-    posthogHost: parsed.POSTHOG_HOST,
+    betterAuthSecret: (read("BETTER_AUTH_SECRET") ?? parsed.BETTER_AUTH_SECRET) as string,
+    zeroAuthSecret: (read("ZERO_AUTH_SECRET") ?? parsed.ZERO_AUTH_SECRET) as string,
+    zeroAdminPassword: (read("ZERO_ADMIN_PASSWORD") ?? parsed.ZERO_ADMIN_PASSWORD) as string,
+    databaseUrl: read("DATABASE_URL"),
+    zeroUpstreamDb: read("ZERO_UPSTREAM_DB"),
+    zeroReplicaFile: read("ZERO_REPLICA_FILE"),
+    linearApiKey: read("LINEAR_API_KEY"),
+    anthropicApiKey: read("ANTHROPIC_API_KEY"),
+    cloudflareTunnelToken: read("CLOUDFLARE_TUNNEL_TOKEN"),
+    posthogApiKey: read("POSTHOG_API_KEY"),
+    posthogHost: read("POSTHOG_HOST"),
   });
   return cached;
 }
