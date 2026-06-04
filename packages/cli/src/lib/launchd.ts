@@ -23,6 +23,18 @@
  * reads `$FRIDAY_FNM_BIN`. `friday doctor` verifies the baked binary is a
  * real exec.
  *
+ * `EnvironmentVariables.PATH` (FRI-150) bakes brew's `std_service_path_env`
+ * equivalent — `<brew-prefix>/bin:<brew-prefix>/sbin:/usr/bin:/bin:/usr/sbin:
+ * /sbin` — into the plist so the supervisor's children (daemon → workers →
+ * SDK → stdio MCP children) inherit a useful PATH. Without this, MCP
+ * manifests with relative commands like `"node"` / `"npx"` fail ENOENT
+ * under launchd's minimal default PATH. brew used to inject this via its
+ * `service do` block (`environment_variables PATH: std_service_path_env`);
+ * the custom-plist migration (FRI-88 / ADR-028) lost that layer. The brew
+ * prefix is derived from the resolved fnm path (`dirname(dirname(fnm))`)
+ * rather than `process.env.HOMEBREW_PREFIX`, so Intel users (`/usr/local`)
+ * and Apple-Silicon users (`/opt/homebrew`) both get the right bake.
+ *
  * `WorkingDirectory` = install dir so fnm's default `.node-version`
  * resolution finds the pin. Because the supervisor runs under the
  * fnm-resolved node, `process.execPath` inside it IS that pinned node;
@@ -68,16 +80,42 @@ export function serviceTarget(): string {
 }
 
 /**
+ * Resolve the brew prefix via `brew --prefix` (`/opt/homebrew` on Apple
+ * Silicon, `/usr/local` on Intel). Returns `null` if brew can't be located.
+ * Caller surfaces the error. Used for both the fnm location and the PATH
+ * the plist bakes (FRI-150).
+ */
+export function brewPrefix(): string | null {
+  const r = spawnSync("brew", ["--prefix"], { encoding: "utf8" });
+  if (r.status !== 0 || !r.stdout) return null;
+  const prefix = r.stdout.trim();
+  return prefix || null;
+}
+
+/**
  * Resolve the fnm binary at the brew prefix (`$(brew --prefix)/bin/fnm`).
  * This is the single absolute Node-toolchain path the plist contains.
  * Returns `null` if brew can't be located (caller surfaces the error).
  */
 export function fnmPath(): string | null {
-  const r = spawnSync("brew", ["--prefix"], { encoding: "utf8" });
-  if (r.status !== 0 || !r.stdout) return null;
-  const prefix = r.stdout.trim();
-  if (!prefix) return null;
-  return join(prefix, "bin", "fnm");
+  const prefix = brewPrefix();
+  return prefix ? join(prefix, "bin", "fnm") : null;
+}
+
+/**
+ * The PATH string the plist bakes into `EnvironmentVariables.PATH` (FRI-150).
+ * Mirrors brew's `std_service_path_env`: brew's bin + sbin in front of the
+ * stock launchd minimal path. Same literal layout as `install.sh:write_plist`.
+ */
+export function pathEnv(brewPrefix: string): string {
+  return [
+    join(brewPrefix, "bin"),
+    join(brewPrefix, "sbin"),
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ].join(":");
 }
 
 function escapeXml(s: string): string {
@@ -107,6 +145,13 @@ export function renderPlist(installDir: string, fnm: string): string {
   const supervisorShim = join(installDir, "bin", "friday-supervisor");
   const stdoutPath = join(LOGS_DIR, "launchd.out.log");
   const stderrPath = join(LOGS_DIR, "launchd.err.log");
+  // brew prefix is derivable from the fnm path by construction: `fnmPath()`
+  // and `install.sh:write_plist` both produce `<prefix>/bin/fnm`. Deriving
+  // here keeps the PATH + fnm pair in lockstep with no second `brew --prefix`
+  // call — and the install.sh twin uses `$(brew --prefix)` to land the same
+  // literal.
+  const derivedBrewPrefix = dirname(dirname(fnm));
+  const path = pathEnv(derivedBrewPrefix);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -121,6 +166,8 @@ export function renderPlist(installDir: string, fnm: string): string {
   <dict>
     <key>${escapeXml(FRIDAY_FNM_BIN_ENV)}</key>
     <string>${escapeXml(fnm)}</string>
+    <key>PATH</key>
+    <string>${escapeXml(path)}</string>
   </dict>
   <key>WorkingDirectory</key>
   <string>${escapeXml(installDir)}</string>

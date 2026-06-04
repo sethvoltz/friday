@@ -19,6 +19,16 @@
 # EnvironmentVariables.FRIDAY_FNM_BIN. This script reads that; for the
 # directly-invoked / dev workflow case it falls back to `command -v fnm`,
 # which works in interactive shells where brew is on PATH.
+#
+# PATH propagation to children (FRI-150): the plist's EnvironmentVariables
+# also bakes `PATH=<brew-prefix>/bin:<brew-prefix>/sbin:/usr/bin:/bin:
+# /usr/sbin:/sbin` (brew's `std_service_path_env` equivalent), so when this
+# script execs node and node spawns children — daemon → workers → SDK →
+# stdio MCP children — they inherit a useful PATH and `execvp("node")` /
+# `execvp("npx")` for MCP manifests with relative commands resolves
+# correctly. Without that, every launchd-supervised restart kills stdio
+# MCP children with ENOENT. brew's pre-FRI-88 `service do` block did this
+# under formula supervision; the custom-plist migration lost the layer.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DIR"

@@ -69,6 +69,37 @@ describe("renderPlist — bash-twin contract (AC#13)", () => {
     expect(FRIDAY_FNM_BIN_ENV).toBe("FRIDAY_FNM_BIN");
   });
 
+  it("EnvironmentVariables.PATH bakes brew's std_service_path_env equivalent (FRI-150)", () => {
+    // Per the bash twin: `<brew-prefix>/bin:<brew-prefix>/sbin:/usr/bin:
+    // /bin:/usr/sbin:/sbin`. The brew prefix is derived from the fnm path
+    // (fnm = `<prefix>/bin/fnm`) so this stays in lockstep with the fnm bin
+    // dir written above. Test input: fnm = /opt/homebrew/bin/fnm, so prefix
+    // = /opt/homebrew. install.sh:write_plist must write the same literal.
+    expect(envValue(xml, "PATH")).toBe(
+      "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin",
+    );
+  });
+
+  it("EnvironmentVariables.PATH adapts to a different brew prefix (Intel: /usr/local)", () => {
+    // Intel users have brew at /usr/local; the same `renderPlist` call must
+    // produce a PATH rooted at /usr/local without code change. brew --prefix
+    // is the source of truth; the derived prefix flows through to PATH.
+    const intelXml = renderPlist(installDir, "/usr/local/bin/fnm");
+    expect(envValue(intelXml, "PATH")).toBe(
+      "/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin",
+    );
+  });
+
+  it("PATH would resolve `node` / `npx` if either lives in the brew bin dir", () => {
+    // Smoke check on the contract: the brew bin dir (where brew-installed
+    // node/npx would land — and where fnm itself lives) is the FIRST entry,
+    // so an `execvp("node")` / `execvp("npx")` resolves there before falling
+    // through to /usr/bin or /bin. Pins the head-of-PATH ordering.
+    const path = envValue(xml, "PATH") ?? "";
+    expect(path.split(":")[0]).toBe("/opt/homebrew/bin");
+    expect(path.split(":")).toContain("/usr/bin");
+  });
+
   it("Label is com.sethvoltz.friday", () => {
     expect(valueForKey(xml, "Label")).toBe("com.sethvoltz.friday");
     expect(FRIDAY_LAUNCHD_LABEL).toBe("com.sethvoltz.friday");

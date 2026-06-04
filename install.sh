@@ -308,10 +308,22 @@ SHIM
 # than relying on PATH lookup. The shim resolves the pinned Node via that
 # fnm and execs node IN PLACE — fnm is the runtime resolver, not a long-
 # lived wrapper. `friday doctor` verifies the baked binary is a real exec.
+#
+# `EnvironmentVariables.PATH` (FRI-150) bakes brew's `std_service_path_env`
+# equivalent — `<brew-prefix>/bin:<brew-prefix>/sbin:/usr/bin:/bin:/usr/sbin:
+# /sbin` — so the supervisor's children (daemon → workers → SDK → stdio MCP
+# children) inherit a useful PATH. Without it, MCP manifests with relative
+# commands like `"node"` / `"npx"` fail ENOENT under launchd's minimal
+# default PATH. brew used to inject this via its `service do` block; the
+# custom-plist migration (FRI-88 / ADR-028) lost the layer. Resolving via
+# `$(brew --prefix)` keeps Intel (`/usr/local`) and Apple-Silicon
+# (`/opt/homebrew`) installs both correct.
 write_plist() {
-  local supervisor_shim fnm_bin
+  local supervisor_shim brew_prefix fnm_bin path_env
   supervisor_shim="${CURRENT_LINK}/bin/friday-supervisor"
-  fnm_bin="$(brew --prefix)/bin/fnm"
+  brew_prefix="$(brew --prefix)"
+  fnm_bin="${brew_prefix}/bin/fnm"
+  path_env="${brew_prefix}/bin:${brew_prefix}/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 
   mkdir -p "${LOGS_DIR}"
   mkdir -p "$(dirname "${PLIST_PATH}")"
@@ -331,6 +343,8 @@ write_plist() {
   <dict>
     <key>FRIDAY_FNM_BIN</key>
     <string>${fnm_bin}</string>
+    <key>PATH</key>
+    <string>${path_env}</string>
   </dict>
   <key>WorkingDirectory</key>
   <string>${CURRENT_LINK}</string>
