@@ -1,15 +1,58 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { AgentType, McpServerConfig } from "@friday/shared";
+import { dirname, join } from "node:path";
 
 const logMock = vi.fn();
 vi.mock("../log.js", () => ({
   logger: { log: logMock },
 }));
 
-const { buildMcpServers } = await import("./builder.js");
+/**
+ * FRI-150: mock the shell-env singleton so builder.ts gets a deterministic
+ * captured PATH + toolchain set. Tests can override individual keys by
+ * reassigning `mockShellEnv.env` before calling `buildMcpServers`.
+ */
+const mockShellEnv: {
+  env: Record<string, string>;
+  source: "shell" | "process";
+  durationMs: number;
+} = {
+  env: {
+    PATH: "/captured/from/shell:/usr/local/bin:/usr/bin",
+    FNM_DIR: "/Users/me/.local/share/fnm",
+    HOME: "/Users/me",
+    NVM_DIR: "/Users/me/.nvm",
+  },
+  source: "shell",
+  durationMs: 42,
+};
+vi.mock("../shell-env.js", () => ({
+  getResolvedShellEnv: () => mockShellEnv,
+}));
+
+/** FRI-150: a synthetic existsSync that pretends process.execPath's sibling
+ *  npx exists (so resolveStdioCommand("npx") returns the absolute path). */
+const existsMock = vi.fn((_p: string) => true);
+vi.mock("node:fs", async (importActual) => {
+  const actual = await importActual<typeof import("node:fs")>();
+  return { ...actual, existsSync: (p: string) => existsMock(p) };
+});
+
+const { buildMcpServers, resolveStdioCommand } = await import("./builder.js");
+
+const NODE_PATH = process.execPath;
+const NPX_PATH = join(dirname(process.execPath), "npx");
 
 beforeEach(() => {
   logMock.mockClear();
+  existsMock.mockReset();
+  existsMock.mockImplementation(() => true);
+  mockShellEnv.env = {
+    PATH: "/captured/from/shell:/usr/local/bin:/usr/bin",
+    FNM_DIR: "/Users/me/.local/share/fnm",
+    HOME: "/Users/me",
+    NVM_DIR: "/Users/me/.nvm",
+  };
 });
 
 const baseOpts = (callerType: AgentType) => ({
@@ -38,11 +81,19 @@ describe("buildMcpServers: per-app MCP (FRI-78)", () => {
       ...baseOpts("bare"),
       appContext: appCtx,
     });
-    expect(servers["demo-echo"]).toEqual({
+    expect(servers["demo-echo"]).toMatchObject({
       type: "stdio",
-      command: "node",
+      // FRI-150: `command: "node"` rewrites to process.execPath.
+      command: NODE_PATH,
       args: ["/tmp/demo-app/mcp/echo.js", "--flag"],
-      env: { TOKEN: "shhh", LIT: "literal", FRIDAY_APP_DIR: "/tmp/demo-app" },
+      env: expect.objectContaining({
+        TOKEN: "shhh",
+        LIT: "literal",
+        FRIDAY_APP_DIR: "/tmp/demo-app",
+        // FRI-150: captured shell PATH threaded through.
+        PATH: "/captured/from/shell:/usr/local/bin:/usr/bin",
+        FNM_DIR: "/Users/me/.local/share/fnm",
+      }),
       cwd: "/tmp/demo-app",
     });
   });
@@ -76,25 +127,28 @@ describe("buildMcpServers: per-app MCP (FRI-78)", () => {
     expect(entry.env.FRIDAY_APP_DIR).toBe("/tmp/demo-app");
   });
 
-  it("FRI-36: built-in stdio (playwright) does NOT receive FRIDAY_APP_DIR", () => {
+  it("FRI-36: built-in stdio (playwright) does NOT receive FRIDAY_APP_DIR (but DOES receive captured shell env)", () => {
     const servers = buildMcpServers({
       ...baseOpts("bare"),
       appContext: appCtx,
     });
     const pw = servers.playwright as { env: Record<string, string> };
-    expect(pw.env).toEqual({});
     expect(pw.env.FRIDAY_APP_DIR).toBeUndefined();
+    // FRI-150: captured shell env is the env base for stdio servers.
+    expect(pw.env.PATH).toBe("/captured/from/shell:/usr/local/bin:/usr/bin");
+    expect(pw.env.FNM_DIR).toBe("/Users/me/.local/share/fnm");
   });
 
-  it("FRI-36: user-config stdio MCPs do NOT receive FRIDAY_APP_DIR", () => {
+  it("FRI-36: user-config stdio MCPs do NOT receive FRIDAY_APP_DIR (but DO receive captured shell env)", () => {
     const servers = buildMcpServers({
       ...baseOpts("bare"),
       userMcpServers: [{ name: "gcal", command: "gcal-mcp" }],
       appContext: appCtx,
     });
     const gcal = servers.gcal as { env: Record<string, string> };
-    expect(gcal.env).toEqual({});
     expect(gcal.env.FRIDAY_APP_DIR).toBeUndefined();
+    expect(gcal.env.PATH).toBe("/captured/from/shell:/usr/local/bin:/usr/bin");
+    expect(gcal.env.FNM_DIR).toBe("/Users/me/.local/share/fnm");
   });
 
   it("orchestrator never sees per-app servers (no appContext is set there)", () => {
@@ -214,14 +268,18 @@ describe("buildMcpServers: friday-reminder (FRI-143, AC7)", () => {
 });
 
 describe("buildMcpServers: built-in browser (playwright)", () => {
-  it("is wired for helper/builder/bare/scheduled", () => {
+  it("is wired for helper/builder/bare/scheduled with npx rewritten to the sibling of process.execPath", () => {
     for (const t of ["builder", "helper", "scheduled", "bare"] as const) {
       const servers = buildMcpServers(baseOpts(t));
-      expect(servers.playwright).toEqual({
+      expect(servers.playwright).toMatchObject({
         type: "stdio",
-        command: "npx",
+        // FRI-150: npx rewrites to dirname(execPath)/npx (sibling).
+        command: NPX_PATH,
         args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated"],
-        env: {},
+        env: expect.objectContaining({
+          PATH: "/captured/from/shell:/usr/local/bin:/usr/bin",
+          FNM_DIR: "/Users/me/.local/share/fnm",
+        }),
       });
     }
   });
@@ -241,11 +299,10 @@ describe("buildMcpServers: built-in browser (playwright)", () => {
       userMcpServers: [rogue],
     });
     // Built-in still present (untouched by the rogue entry):
-    expect(servers.playwright).toEqual({
+    expect(servers.playwright).toMatchObject({
       type: "stdio",
-      command: "npx",
+      command: NPX_PATH,
       args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated"],
-      env: {},
     });
     expect(logMock).toHaveBeenCalledWith(
       "warn",
@@ -263,16 +320,18 @@ describe("buildMcpServers: user MCPs — scope", () => {
     scope: ["helper", "builder", "bare", "scheduled"],
   };
 
-  it("includes a user MCP when scope contains the caller type", () => {
+  it("includes a user MCP when scope contains the caller type (with FRI-150 npx + env rewrite)", () => {
     const servers = buildMcpServers({
       ...baseOpts("helper"),
       userMcpServers: [playwright],
     });
-    expect(servers.playwright).toEqual({
+    expect(servers.playwright).toMatchObject({
       type: "stdio",
-      command: "npx",
+      command: NPX_PATH,
       args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated"],
-      env: {},
+      env: expect.objectContaining({
+        PATH: "/captured/from/shell:/usr/local/bin:/usr/bin",
+      }),
     });
   });
 
@@ -376,13 +435,129 @@ describe("buildMcpServers: mixed result shape", () => {
     expect(memory).toBeDefined();
     expect("instance" in (memory as object)).toBe(true);
 
-    // User: stdio shape with command/args/env.
+    // User: stdio shape with command/args/env (FRI-150: npx rewritten + shell env merged).
     const pw = servers.playwright;
-    expect(pw).toEqual({
+    expect(pw).toMatchObject({
       type: "stdio",
-      command: "npx",
+      command: NPX_PATH,
       args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated"],
-      env: {},
+      env: expect.objectContaining({
+        PATH: "/captured/from/shell:/usr/local/bin:/usr/bin",
+      }),
     });
+  });
+});
+
+describe("resolveStdioCommand (FRI-150)", () => {
+  it("rewrites 'node' to process.execPath", () => {
+    expect(resolveStdioCommand("node")).toBe(NODE_PATH);
+  });
+
+  it("rewrites 'npx' to the sibling of process.execPath when it exists", () => {
+    existsMock.mockReturnValueOnce(true);
+    expect(resolveStdioCommand("npx")).toBe(NPX_PATH);
+    expect(existsMock).toHaveBeenCalledWith(NPX_PATH);
+  });
+
+  it("passes 'npx' through bare when the sibling doesn't exist", () => {
+    existsMock.mockReturnValueOnce(false);
+    expect(resolveStdioCommand("npx")).toBe("npx");
+  });
+
+  it("leaves user-supplied absolute paths alone", () => {
+    expect(resolveStdioCommand("/opt/custom/bin/my-mcp")).toBe("/opt/custom/bin/my-mcp");
+  });
+
+  it("leaves non-node/npx commands alone", () => {
+    expect(resolveStdioCommand("gcal-mcp")).toBe("gcal-mcp");
+    expect(resolveStdioCommand("python3")).toBe("python3");
+  });
+});
+
+describe("buildMcpServers: FRI-150 env-merge precedence", () => {
+  it("manifest env wins over captured shell env on key collision (user MCP)", () => {
+    mockShellEnv.env = { PATH: "/captured", FNM_DIR: "/captured-fnm" };
+    const servers = buildMcpServers({
+      ...baseOpts("helper"),
+      userMcpServers: [
+        {
+          name: "envy",
+          command: "envy-mcp",
+          env: { PATH: "/manifest-wins", TOKEN: "manifest-only" },
+        },
+      ],
+    });
+    const envy = servers.envy as { env: Record<string, string> };
+    expect(envy.env.PATH).toBe("/manifest-wins");
+    expect(envy.env.TOKEN).toBe("manifest-only");
+    expect(envy.env.FNM_DIR).toBe("/captured-fnm"); // captured key not shadowed by manifest
+  });
+
+  it("manifest env wins over captured shell env on key collision (per-app MCP)", () => {
+    mockShellEnv.env = { PATH: "/captured" };
+    const servers = buildMcpServers({
+      ...baseOpts("bare"),
+      appContext: {
+        appId: "x",
+        folderPath: "/tmp/x",
+        mcpServers: [
+          {
+            name: "x-srv",
+            command: "node",
+            args: ["mcp.js"],
+            env: { PATH: "/manifest-wins" },
+          },
+        ],
+      },
+    });
+    const x = servers["x-srv"] as { env: Record<string, string> };
+    expect(x.env.PATH).toBe("/manifest-wins");
+    // FRIDAY_APP_DIR still wins over everything (FRI-36 contract preserved).
+    expect(x.env.FRIDAY_APP_DIR).toBe("/tmp/x");
+  });
+
+  it("when shell-env capture fell back to process.env (source === 'process'), MCP env still gets the snapshotted PATH", () => {
+    mockShellEnv.source = "process";
+    mockShellEnv.env = { PATH: "/process-env-fallback-path", FALLBACK_MARKER: "1" };
+    const servers = buildMcpServers({
+      ...baseOpts("bare"),
+      userMcpServers: [{ name: "fbk", command: "fbk-mcp" }],
+    });
+    const fbk = servers.fbk as { env: Record<string, string> };
+    expect(fbk.env.PATH).toBe("/process-env-fallback-path");
+    expect(fbk.env.FALLBACK_MARKER).toBe("1");
+    // restore source for other tests
+    mockShellEnv.source = "shell";
+  });
+
+  it("user MCP with command:'node' rewrites to process.execPath", () => {
+    const servers = buildMcpServers({
+      ...baseOpts("helper"),
+      userMcpServers: [{ name: "nodey", command: "node", args: ["server.js"] }],
+    });
+    const nodey = servers.nodey as { command: string };
+    expect(nodey.command).toBe(NODE_PATH);
+  });
+
+  it("user MCP with command:'npx' rewrites to sibling-npx of execPath", () => {
+    existsMock.mockImplementation((p: string) => p === NPX_PATH);
+    const servers = buildMcpServers({
+      ...baseOpts("helper"),
+      userMcpServers: [{ name: "npxy", command: "npx", args: ["-y", "@some/mcp"] }],
+    });
+    const npxy = servers.npxy as { command: string };
+    expect(npxy.command).toBe(NPX_PATH);
+  });
+
+  it("end-to-end smoke: a synthetic 'node' MCP resolves to {command: execPath, env: {PATH: captured}}", () => {
+    mockShellEnv.env = { PATH: "/smoke/test/path", HOME: "/Users/smoke" };
+    const servers = buildMcpServers({
+      ...baseOpts("helper"),
+      userMcpServers: [{ name: "smoke", command: "node", args: ["s.js"] }],
+    });
+    const smoke = servers.smoke as { command: string; env: Record<string, string> };
+    expect(smoke.command).toBe(NODE_PATH);
+    expect(smoke.env.PATH).toBe("/smoke/test/path");
+    expect(smoke.env.HOME).toBe("/Users/smoke");
   });
 });

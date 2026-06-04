@@ -34,6 +34,13 @@ import { buildMailPrompt } from "../comms/mail-prompt.js";
 import { daemonFetch } from "../mcp/http.js";
 import { runHooks } from "@friday/shared";
 import "../hooks/register.js";
+import { SHELL_ENV_ENV_VAR, loadResolvedShellEnvFromJson } from "../shell-env.js";
+
+// FRI-150: seed the worker-side shell-env singleton from the JSON payload
+// the daemon serialized into FRIDAY_RESOLVED_SHELL_ENV_JSON at fork time.
+// Tolerates an empty / missing payload (falls back to a process.env
+// snapshot in builder.ts).
+loadResolvedShellEnvFromJson(process.env[SHELL_ENV_ENV_VAR]);
 
 let abortController: AbortController | null = null;
 let stopped = false;

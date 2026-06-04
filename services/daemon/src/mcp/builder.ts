@@ -13,8 +13,10 @@ import type {
   McpSdkServerConfigWithInstance,
   McpStdioServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
-import { isAbsolute, join } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { logger } from "../log.js";
+import { getResolvedShellEnv } from "../shell-env.js";
 import { buildAppsServer, APPS_SERVER_NAME } from "./apps.js";
 import { buildEchoServer, ECHO_SERVER_NAME } from "./echo.js";
 import { buildMailServer, MAIL_SERVER_NAME } from "./mail.js";
@@ -145,9 +147,9 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   if (opts.callerType !== "orchestrator") {
     servers[BROWSER_SERVER_NAME] = {
       type: "stdio",
-      command: "npx",
+      command: resolveStdioCommand("npx"),
       args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated"],
-      env: {},
+      env: shellEnvForStdio(),
     };
   }
 
@@ -177,9 +179,13 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
     }
     servers[s.name] = {
       type: "stdio",
-      command: s.command,
+      command: resolveStdioCommand(s.command),
       args: s.args ?? [],
-      env: s.env ?? {},
+      // FRI-150: thread the daemon's captured shell env into per-server
+      // `env`; manifest entries still win on top via spread order. The
+      // SDK then merges `{...allowlist, ...config.env}`, so the manifest
+      // and captured env both supersede the allowlist filter.
+      env: { ...shellEnvForStdio(), ...(s.env ?? {}) },
     };
   }
 
@@ -217,9 +223,15 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
       // the SDK ever grows the field; it is a no-op today.
       servers[srv.name] = {
         type: "stdio",
-        command: srv.command,
+        command: resolveStdioCommand(srv.command),
         args: resolvedArgs,
+        // FRI-150: captured shell env carries the user's PATH + toolchain
+        // (FNM_DIR, NVM_DIR, …) into the spawned MCP child. Manifest env
+        // (after ${VAR} substitution) wins via the spread order, and
+        // FRIDAY_APP_DIR is still injected last so a manifest can't
+        // shadow it (FRI-36).
         env: {
+          ...shellEnvForStdio(),
           ...substituteEnv(srv.env ?? {}, envFile ?? {}),
           FRIDAY_APP_DIR: folderPath,
         },
@@ -253,6 +265,40 @@ function substituteEnv(
     });
   }
   return out;
+}
+
+/**
+ * FRI-150: rewrite `node` / `npx` to the daemon's pinned-Node absolute
+ * paths so a clean-install MCP child (no brew Node, no globally-resolvable
+ * `npx`) still spawns. `process.execPath` is the fnm-resolved pinned Node
+ * we're running under (per FRI-146 supervisor shim); its sibling `npx`
+ * ships with the same Node install. If the sibling is missing (some
+ * exotic Node install), we pass `npx` through bare — the per-server env
+ * merge above carries the captured shell PATH, so the SDK's
+ * `cross-spawn` can still find it via PATH lookup.
+ *
+ * User-supplied absolute paths in manifests (anything not literally
+ * `node` or `npx`) are untouched.
+ */
+export function resolveStdioCommand(command: string): string {
+  if (command === "node") return process.execPath;
+  if (command === "npx") {
+    const sibling = join(dirname(process.execPath), "npx");
+    return existsSync(sibling) ? sibling : command;
+  }
+  return command;
+}
+
+/**
+ * FRI-150: return the captured shell env (PATH, FNM_DIR, NVM_DIR, …) for
+ * use as the per-server stdio `env` base. The SDK does
+ * `{...getDefaultEnvironment(), ...config.env}`, so spreading this here
+ * means our captured env wholesale supersedes the SDK's HOME/PATH/SHELL/
+ * LOGNAME/TERM/USER allowlist filter
+ * (`@modelcontextprotocol/sdk@1.29.0/dist/esm/client/stdio.js:8-24`).
+ */
+function shellEnvForStdio(): Record<string, string> {
+  return getResolvedShellEnv().env;
 }
 
 export const BROWSER_SERVER_NAME = "playwright";

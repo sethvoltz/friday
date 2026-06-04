@@ -19,6 +19,13 @@
 # EnvironmentVariables.FRIDAY_FNM_BIN. This script reads that; for the
 # directly-invoked / dev workflow case it falls back to `command -v fnm`,
 # which works in interactive shells where brew is on PATH.
+#
+# This shim's sole responsibility is finding the daemon's pinned Node. PATH
+# propagation for MCP children (so `npx`, `node`, FNM_DIR-rooted toolchains,
+# etc. resolve in spawned MCP processes) lives in the daemon's shell-env
+# layer (services/daemon/src/shell-env.ts, FRI-150). Do NOT add a richer
+# PATH here — the closed PR #161 attempted that and missed the actual
+# chokepoint (the MCP SDK's HOME/PATH/SHELL/… spawn-time allowlist).
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DIR"

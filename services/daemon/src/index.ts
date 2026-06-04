@@ -51,10 +51,22 @@ import { buildMailPrompt } from "./comms/mail-prompt.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { posthog, DISTINCT_ID } from "./posthog.js";
+import { captureShellEnv } from "./shell-env.js";
 
 async function main(): Promise<void> {
   ensureDirs();
   ensureFridayEnv();
+  // FRI-150: capture the user's interactive-login-shell env so spawned
+  // MCP children inherit a real PATH + toolchain (FNM_DIR, NVM_DIR, …).
+  // Runs once at boot, cached in a module singleton; on timeout / shell
+  // failure it falls back to `process.env` and emits a
+  // `daemon.shell-env.fallback` warn event without blocking boot. The
+  // singleton is forwarded to each forked worker via the
+  // `FRIDAY_RESOLVED_SHELL_ENV_JSON` env var (lifecycle.ts spawn block),
+  // and the MCP builder threads it into per-server stdio `env` to
+  // overcome the SDK's HOME/PATH/SHELL/… allowlist filter at the spawn
+  // boundary. See services/daemon/src/shell-env.ts for the full rationale.
+  await captureShellEnv();
   await runMigrations();
   // FRI-61: state migrations run AFTER schema migrations (Drizzle just
   // created the `_friday_state_migrations` table) and BEFORE any

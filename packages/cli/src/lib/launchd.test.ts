@@ -99,6 +99,23 @@ describe("renderPlist — bash-twin contract (AC#13)", () => {
     expect(tricky).toContain("/tmp/a&amp;b&lt;c&gt;");
     expect(tricky).not.toContain("/tmp/a&b<c>");
   });
+
+  it("FRI-150 regression fence: plist EnvironmentVariables contain NO PATH key — PATH propagation lives in the daemon's shell-env layer, not the plist", () => {
+    // The closed PR #161 baked PATH into the plist as the wrong-layer fix
+    // for clean-install MCP children. The umbrella architecture moved
+    // PATH responsibility to services/daemon/src/shell-env.ts. The plist
+    // must stay minimal — only FRIDAY_FNM_BIN — so we don't regress.
+    const envBlock = xml.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+    expect(envBlock).not.toBeNull();
+    expect(envBlock![1]).not.toMatch(/<key>PATH<\/key>/);
+  });
+
+  it("FRI-150 regression fence: plist EnvironmentVariables hold only FRIDAY_FNM_BIN (single key, single value)", () => {
+    const envBlock = xml.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+    expect(envBlock).not.toBeNull();
+    const keys = [...envBlock![1].matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
+    expect(keys).toEqual(["FRIDAY_FNM_BIN"]);
+  });
 });
 
 describe("launchctl argv targets (AC#13)", () => {
