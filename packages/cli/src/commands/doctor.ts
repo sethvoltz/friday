@@ -25,6 +25,9 @@ import { currentLink } from "../lib/install-paths.js";
 
 type Section = "Dependencies" | "Configuration" | "Runtime" | "PostgreSQL";
 type Status = "ok" | "warn" | "fail";
+/** A row is `pending` while its check is still running, then resolves to a
+ *  terminal `Status`. */
+type RowStatus = Status | "pending";
 
 interface DoctorCheck {
   section: Section;
@@ -34,15 +37,22 @@ interface DoctorCheck {
   hint?: string;
 }
 
-const SECTIONS: Section[] = ["Dependencies", "Configuration", "Runtime", "PostgreSQL"];
+interface Row {
+  label: string;
+  status: RowStatus;
+  value: string;
+  hint?: string;
+}
 
-// Box dimensions. 68 columns matches the docs/architecture diagrams and most
-// 80-column terminals with comfortable margin. Adjust here only; the renderer
-// derives everything else from these.
+// Box dimensions. 68 columns matches the ASCII banner width (67) and the
+// docs/architecture diagrams, fitting an 80-column terminal with margin.
+// Adjust here only; the renderer derives everything else from these.
 const WIDTH = 68;
 const INNER = WIDTH - 2; // 66
 const LABEL_COL = 23;
 const VALUE_COL = INNER - 2 - 1 - 1 - LABEL_COL; // 39: 2 indent + 1 icon + 1 space + label + value = INNER
+
+const ESC = "\x1b";
 
 export const doctorCommand = defineCommand({
   meta: { name: "doctor", description: "Check system health" },
@@ -50,14 +60,15 @@ export const doctorCommand = defineCommand({
     console.log(BANNER);
     if (existsSync(ENV_PATH)) ensureFridayEnv();
 
-    const checks = await collectChecks();
-
-    for (const section of SECTIONS) {
-      const items = checks.filter((c) => c.section === section);
-      if (items.length === 0) continue;
-      for (const line of renderSection(section, items)) console.log(line);
-      console.log();
-    }
+    // Sections render one block at a time, live: each box paints its known
+    // rows as pending, then flips each glyph (and the top-border count) in
+    // place as results land, growing taller when a failing row needs a hint.
+    // We move to the next block only once the current one is fully resolved.
+    const checks: DoctorCheck[] = [];
+    checks.push(...(await runDependencies()));
+    checks.push(...(await runConfiguration()));
+    checks.push(...(await runRuntime()));
+    checks.push(...(await runPostgres()));
 
     const failed = checks.filter((c) => c.status === "fail").length;
     const passed = checks.filter((c) => c.status === "ok").length;
@@ -72,13 +83,134 @@ export const doctorCommand = defineCommand({
 });
 
 // ============================================================================
-// Check collection
+// LiveBox — a section box that paints once, then redraws in place as rows
+// resolve. The top-border `( ok / total )` count and each row's glyph update
+// in realtime; the box grows when a resolved row carries a hint.
 // ============================================================================
 
-async function collectChecks(): Promise<DoctorCheck[]> {
-  const checks: DoctorCheck[] = [];
+class LiveBox {
+  private readonly rows: Row[] = [];
+  private prevLines = 0;
+  private readonly tty = process.stdout.isTTY === true;
+  private readonly out = process.stdout;
 
-  // ---- Dependencies --------------------------------------------------------
+  constructor(private readonly section: Section) {}
+
+  /** Pre-register a row in the `pending` state. Call before `draw()`. */
+  declare(label: string): void {
+    this.rows.push({ label, status: "pending", value: "" });
+  }
+
+  /** Paint the initial box (all rows pending). */
+  draw(): void {
+    this.paint();
+  }
+
+  /** Flip a previously-declared row to a terminal status and repaint. */
+  resolve(label: string, status: Status, value: string, hint?: string): void {
+    const row = this.rows.find((r) => r.label === label);
+    if (!row) throw new Error(`LiveBox(${this.section}): no declared row "${label}"`);
+    row.status = status;
+    row.value = value;
+    row.hint = hint;
+    this.paint();
+  }
+
+  /** Insert an already-resolved row that wasn't known up front (a conditional
+   *  warning). `opts.after` positions it just below an existing row. */
+  add(
+    status: Status,
+    label: string,
+    value: string,
+    hint: string | undefined,
+    opts?: { after?: string },
+  ): void {
+    const row: Row = { label, status, value, hint };
+    const at = opts?.after ? this.rows.findIndex((r) => r.label === opts.after) : -1;
+    if (at >= 0) this.rows.splice(at + 1, 0, row);
+    else this.rows.push(row);
+    this.paint();
+  }
+
+  /** Remove a declared row that turned out not to apply (box shrinks). */
+  drop(label: string): void {
+    const at = this.rows.findIndex((r) => r.label === label);
+    if (at >= 0) this.rows.splice(at, 1);
+    this.paint();
+  }
+
+  /** Finalize the block: emit the trailing blank line that separates sections.
+   *  On a non-TTY we never animated, so render the final box once here. */
+  done(): void {
+    if (this.tty) {
+      this.out.write("\n");
+    } else {
+      this.out.write(this.render().join("\n") + "\n\n");
+    }
+  }
+
+  /** The resolved rows, as `DoctorCheck`s for the final summary. */
+  toChecks(): DoctorCheck[] {
+    return this.rows
+      .filter((r) => r.status !== "pending")
+      .map((r) => ({
+        section: this.section,
+        label: r.label,
+        status: r.status as Status,
+        value: r.value,
+        hint: r.hint,
+      }));
+  }
+
+  // -- internals -------------------------------------------------------------
+
+  /** Redraw in place: move the cursor up over the previous frame, clear to the
+   *  end of the screen, then write the new (possibly taller) frame. On a
+   *  non-TTY we defer all output to `done()` so piped logs stay clean. */
+  private paint(): void {
+    if (!this.tty) return;
+    const lines = this.render();
+    let frame = "";
+    if (this.prevLines > 0) frame += `${ESC}[${this.prevLines}A\r${ESC}[0J`;
+    frame += lines.join("\n") + "\n";
+    this.out.write(frame);
+    this.prevLines = lines.length;
+  }
+
+  private render(): string[] {
+    const ok = this.rows.filter((r) => r.status === "ok").length;
+    const total = this.rows.length;
+    const lines: string[] = [renderTopBorder(this.section, ok, total), renderBlankLine()];
+    for (const row of this.rows) {
+      lines.push(renderRow(row));
+      if (row.status !== "pending" && row.hint) {
+        for (const wrapped of wrapText(row.hint, INNER - 6)) lines.push(renderHintLine(wrapped));
+      }
+    }
+    lines.push(renderBlankLine(), renderBottomBorder());
+    return lines;
+  }
+}
+
+// ============================================================================
+// Section runners — each declares its known rows, paints, then resolves them
+// one by one as the (sometimes slow) probes complete.
+// ============================================================================
+
+async function runDependencies(): Promise<DoctorCheck[]> {
+  const box = new LiveBox("Dependencies");
+  for (const label of [
+    "fnm",
+    "node version",
+    "claude CLI",
+    "gh CLI",
+    "postgres",
+    "cloudflared",
+    "install tree",
+  ]) {
+    box.declare(label);
+  }
+  box.draw();
 
   // fnm: prefer the absolute path baked into the plist (the launchd-supervised
   // boot path). Fall back to $PATH for the dev/CLI invocation case. Either way
@@ -90,13 +222,12 @@ async function collectChecks(): Promise<DoctorCheck[]> {
   })();
   const fnmAbs = fnmFromPlist ?? fnmFromPath ?? "";
   const fnmOk = isExecutable(fnmAbs);
-  checks.push({
-    section: "Dependencies",
-    label: "fnm",
-    status: fnmOk ? "ok" : "fail",
-    value: fnmOk ? displayPath(fnmAbs) : "missing",
-    hint: fnmOk ? undefined : "install with `brew install fnm`",
-  });
+  box.resolve(
+    "fnm",
+    fnmOk ? "ok" : "fail",
+    fnmOk ? displayPath(fnmAbs) : "missing",
+    fnmOk ? undefined : "install with `brew install fnm`",
+  );
 
   // node version: .node-version pin inside the install tree
   const link = currentLink();
@@ -111,35 +242,32 @@ async function collectChecks(): Promise<DoctorCheck[]> {
       return "unreadable";
     }
   })();
-  checks.push({
-    section: "Dependencies",
-    label: "node version",
-    status: pinOk ? "ok" : "fail",
-    value: pinOk ? `pinned (${pinValue})` : "missing",
-    hint: pinOk ? undefined : "re-run `friday update` to repopulate the install tree",
-  });
+  box.resolve(
+    "node version",
+    pinOk ? "ok" : "fail",
+    pinOk ? `pinned (${pinValue})` : "missing",
+    pinOk ? undefined : "re-run `friday update` to repopulate the install tree",
+  );
 
   // claude CLI
   const claudeOk = spawnSync("which", ["claude"], { encoding: "utf8" }).status === 0;
-  checks.push({
-    section: "Dependencies",
-    label: "claude CLI",
-    status: claudeOk ? "ok" : "fail",
-    value: claudeOk ? "installed" : "missing",
-    hint: claudeOk
+  box.resolve(
+    "claude CLI",
+    claudeOk ? "ok" : "fail",
+    claudeOk ? "installed" : "missing",
+    claudeOk
       ? undefined
       : "install via `curl -fsSL https://claude.ai/install.sh | bash` or `brew install --cask claude-code`",
-  });
+  );
 
   // gh CLI
   const ghOk = spawnSync("which", ["gh"], { encoding: "utf8" }).status === 0;
-  checks.push({
-    section: "Dependencies",
-    label: "gh CLI",
-    status: ghOk ? "ok" : "fail",
-    value: ghOk ? "installed" : "missing",
-    hint: ghOk ? undefined : "install with `brew install gh`",
-  });
+  box.resolve(
+    "gh CLI",
+    ghOk ? "ok" : "fail",
+    ghOk ? "installed" : "missing",
+    ghOk ? undefined : "install with `brew install gh`",
+  );
 
   // postgres: postgresql@18 is keg-only, so psql often isn't on PATH even
   // though the formula is installed. Prefer `brew list postgresql@18` (which
@@ -148,63 +276,61 @@ async function collectChecks(): Promise<DoctorCheck[]> {
   const psqlOk =
     spawnSync("brew", ["list", "postgresql@18"], { encoding: "utf8" }).status === 0 ||
     spawnSync("which", ["psql"], { encoding: "utf8" }).status === 0;
-  checks.push({
-    section: "Dependencies",
-    label: "postgres",
-    status: psqlOk ? "ok" : "fail",
-    value: psqlOk ? "installed" : "missing",
-    hint: psqlOk ? undefined : "install with `brew install postgresql@18`",
-  });
+  box.resolve(
+    "postgres",
+    psqlOk ? "ok" : "fail",
+    psqlOk ? "installed" : "missing",
+    psqlOk ? undefined : "install with `brew install postgresql@18`",
+  );
 
   // cloudflared (warn if missing — only required for the public tunnel)
   const cflOk = spawnSync("which", ["cloudflared"], { encoding: "utf8" }).status === 0;
-  checks.push({
-    section: "Dependencies",
-    label: "cloudflared",
-    status: cflOk ? "ok" : "warn",
-    value: cflOk ? "installed" : "missing",
-    hint: cflOk ? undefined : "only required for the public tunnel — `brew install cloudflared`",
-  });
+  box.resolve(
+    "cloudflared",
+    cflOk ? "ok" : "warn",
+    cflOk ? "installed" : "missing",
+    cflOk ? undefined : "only required for the public tunnel — `brew install cloudflared`",
+  );
 
   // install tree
-  checks.push({
-    section: "Dependencies",
-    label: "install tree",
-    status: installOk ? "ok" : "fail",
-    value: installOk ? displayPath(link) : "missing",
-    hint: installOk
+  box.resolve(
+    "install tree",
+    installOk ? "ok" : "fail",
+    installOk ? displayPath(link) : "missing",
+    installOk
       ? undefined
       : "install via `curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | bash`",
-  });
+  );
 
-  // ---- Configuration -------------------------------------------------------
+  box.done();
+  return box.toChecks();
+}
+
+async function runConfiguration(): Promise<DoctorCheck[]> {
+  const box = new LiveBox("Configuration");
+  for (const label of [
+    "data dir",
+    "config",
+    "env",
+    "SOUL.md",
+    "primary account",
+    "cloudflare token",
+    "ZERO_AUTH_SECRET",
+  ]) {
+    box.declare(label);
+  }
+  box.draw();
 
   const dataDirOk = existsSync(DATA_DIR);
-  checks.push({
-    section: "Configuration",
-    label: "data dir",
-    status: dataDirOk ? "ok" : "fail",
-    value: displayPath(DATA_DIR),
-    hint: dataDirOk ? undefined : "run `friday setup` to create",
-  });
-  checks.push({
-    section: "Configuration",
-    label: "config",
-    status: existsSync(CONFIG_PATH) ? "ok" : "fail",
-    value: displayPath(CONFIG_PATH),
-  });
-  checks.push({
-    section: "Configuration",
-    label: "env",
-    status: existsSync(ENV_PATH) ? "ok" : "fail",
-    value: displayPath(ENV_PATH),
-  });
-  checks.push({
-    section: "Configuration",
-    label: "SOUL.md",
-    status: existsSync(SOUL_PATH) ? "ok" : "fail",
-    value: displayPath(SOUL_PATH),
-  });
+  box.resolve(
+    "data dir",
+    dataDirOk ? "ok" : "fail",
+    displayPath(DATA_DIR),
+    dataDirOk ? undefined : "run `friday setup` to create",
+  );
+  box.resolve("config", existsSync(CONFIG_PATH) ? "ok" : "fail", displayPath(CONFIG_PATH));
+  box.resolve("env", existsSync(ENV_PATH) ? "ok" : "fail", displayPath(ENV_PATH));
+  box.resolve("SOUL.md", existsSync(SOUL_PATH) ? "ok" : "fail", displayPath(SOUL_PATH));
 
   // primary account
   let accountOk = false;
@@ -213,179 +339,48 @@ async function collectChecks(): Promise<DoctorCheck[]> {
     const users = await db.select().from(schema.users).limit(1);
     accountOk = users.length > 0;
   } catch {
-    // db not migrated yet — handled below by the PostgreSQL section
+    // db not migrated yet — handled by the PostgreSQL section
   }
-  checks.push({
-    section: "Configuration",
-    label: "primary account",
-    status: accountOk ? "ok" : "fail",
-    value: accountOk ? "present" : "missing",
-    hint: accountOk ? undefined : "run `friday setup`",
-  });
+  box.resolve(
+    "primary account",
+    accountOk ? "ok" : "fail",
+    accountOk ? "present" : "missing",
+    accountOk ? undefined : "run `friday setup`",
+  );
 
   // Cloudflare Tunnel token — informational; tunnel is opt-in
   const tunnelTokenSet = !!process.env.CLOUDFLARE_TUNNEL_TOKEN;
-  checks.push({
-    section: "Configuration",
-    label: "cloudflare token",
-    status: tunnelTokenSet ? "ok" : "warn",
-    value: tunnelTokenSet ? "present" : "absent",
-    hint: tunnelTokenSet
-      ? undefined
-      : "public tunnel disabled — `friday setup --cloudflare` to enable",
-  });
+  box.resolve(
+    "cloudflare token",
+    tunnelTokenSet ? "ok" : "warn",
+    tunnelTokenSet ? "present" : "absent",
+    tunnelTokenSet ? undefined : "public tunnel disabled — `friday setup --cloudflare` to enable",
+  );
 
-  // ---- Runtime -------------------------------------------------------------
+  // ZERO_AUTH_SECRET is a config/env secret (loaded by ensureFridayEnv), so we
+  // check it directly here rather than threading it out of the Postgres probe.
+  // This decouples Configuration from the slow pg probe and shows the row even
+  // when Postgres is down.
+  const zeroAuthSecretPresent = !!process.env.ZERO_AUTH_SECRET;
+  box.resolve(
+    "ZERO_AUTH_SECRET",
+    zeroAuthSecretPresent ? "ok" : "fail",
+    zeroAuthSecretPresent ? "present" : "missing",
+    zeroAuthSecretPresent ? undefined : "run `friday setup` to generate the secret",
+  );
 
-  checks.push({
-    section: "Runtime",
-    label: "logs dir",
-    status: existsSync(LOGS_DIR) ? "ok" : "fail",
-    value: displayPath(LOGS_DIR),
-  });
-
-  const fridayJob = launchdJobStatus(FRIDAY_LAUNCHD_LABEL);
-  checks.push({
-    section: "Runtime",
-    label: "friday-supervisor",
-    status: fridayJob.loaded ? "ok" : "fail",
-    value: `(launchd: ${FRIDAY_LAUNCHD_LABEL})`,
-    hint: fridayJob.loaded ? undefined : "run `friday start`",
-  });
-
-  // Plist exec target audit — show only when broken, so the steady-state
-  // doctor stays tight. A broken target crash-loops the supervisor without a
-  // clear cause; surfacing it here points the operator at the right fix.
-  const pp = plistPath();
-  if (existsSync(pp)) {
-    const parsed = readPlistJson(pp);
-    const programArg0 = parsed?.ProgramArguments?.[0];
-    if (!isExecutable(programArg0)) {
-      checks.push({
-        section: "Runtime",
-        label: "plist exec",
-        status: "fail",
-        value: programArg0 ?? "<unset>",
-        hint: "re-run `friday start` to rewrite the plist",
-      });
-    }
-  }
-
-  // daemon reachable (localhost)
-  const client = new DaemonClient();
-  const daemonReachable = await client.ping();
-  checks.push({
-    section: "Runtime",
-    label: "daemon",
-    status: daemonReachable ? "ok" : "fail",
-    value: daemonReachable ? "reachable (localhost)" : "unreachable",
-    hint: daemonReachable ? undefined : "run `friday start`",
-  });
-
-  // zero-cache reachable
-  const zeroReachable = await tcpReachable("127.0.0.1", 4848, 500);
-  checks.push({
-    section: "Runtime",
-    label: "zero-cache",
-    status: zeroReachable ? "ok" : "fail",
-    value: zeroReachable ? "reachable (localhost:4848)" : "unreachable",
-    hint: zeroReachable ? undefined : "run `friday start`",
-  });
-
-  // ---- PostgreSQL ----------------------------------------------------------
-
-  try {
-    const pg = await probePostgresHealth();
-    const { FRIDAY_DB, FRIDAY_ROLE, FRIDAY_PUBLICATION } = FRIDAY_PG_CONSTANTS;
-    if (!pg.reachable) {
-      checks.push({
-        section: "PostgreSQL",
-        label: "daemon",
-        status: "fail",
-        value: "unreachable",
-        hint: pg.reachableReason ?? "`brew services start postgresql@18`",
-      });
-    } else {
-      checks.push({
-        section: "PostgreSQL",
-        label: "daemon",
-        status: "ok",
-        value: "reachable (localhost)",
-      });
-      checks.push({
-        section: "PostgreSQL",
-        label: "role",
-        status: pg.roleExists ? "ok" : "fail",
-        value: pg.roleExists ? FRIDAY_ROLE : "missing",
-        hint: pg.roleExists ? undefined : "run `friday setup`",
-      });
-      checks.push({
-        section: "PostgreSQL",
-        label: "database",
-        status: pg.databaseExists ? "ok" : "fail",
-        value: pg.databaseExists ? FRIDAY_DB : "missing",
-        hint: pg.databaseExists ? undefined : "run `friday setup`",
-      });
-      checks.push({
-        section: "PostgreSQL",
-        label: "migrations",
-        status: pg.migrationsAtHead ? "ok" : "fail",
-        value: pg.migrationsAtHead
-          ? `at head (${pg.migrationsApplied}/${pg.migrationsExpected})`
-          : `${pg.migrationsApplied}/${pg.migrationsExpected} applied`,
-        hint: pg.migrationsAtHead ? undefined : "run `friday setup` to apply pending migrations",
-      });
-      checks.push({
-        section: "PostgreSQL",
-        label: "publication",
-        status: pg.publicationExists ? "ok" : "fail",
-        value: pg.publicationExists ? FRIDAY_PUBLICATION : "missing",
-        hint: pg.publicationExists ? undefined : "run `friday setup`",
-      });
-      checks.push({
-        section: "PostgreSQL",
-        label: "wal_level",
-        status: pg.walLevelLogical ? "ok" : "fail",
-        value: pg.walLevelLogical ? "logical" : (pg.walLevelActual ?? "unknown"),
-        hint: pg.walLevelLogical
-          ? undefined
-          : "run `friday setup`, then `brew services restart postgresql@18`",
-      });
-      // ZERO_AUTH_SECRET is sourced via the postgres probe but conceptually
-      // sits in Configuration; push it there.
-      checks.push({
-        section: "Configuration",
-        label: "ZERO_AUTH_SECRET",
-        status: pg.zeroAuthSecretPresent ? "ok" : "fail",
-        value: pg.zeroAuthSecretPresent ? "present" : "missing",
-        hint: pg.zeroAuthSecretPresent ? undefined : "run `friday setup` to generate the secret",
-      });
-    }
-  } catch (err) {
-    checks.push({
-      section: "PostgreSQL",
-      label: "health probe",
-      status: "fail",
-      value: "failed",
-      hint: err instanceof Error ? err.message : String(err),
-    });
-  }
-
-  // ---- Stale-state warnings -----------------------------------------------
-  // These were the existing doctor's "should-be-derived" warnings; surface
-  // them as warn-status rows tied to the right section.
+  // ---- Stale-state warnings (conditional rows; box grows if present) -------
 
   if (existsSync(ENV_PATH)) {
     try {
       const envText = readFileSync(ENV_PATH, "utf8");
       if (/^ZERO_MUTATE_URL=/m.test(envText)) {
-        checks.push({
-          section: "Configuration",
-          label: "ZERO_MUTATE_URL",
-          status: "warn",
-          value: "stale in .env",
-          hint: "remove this line — the supervisor exports it dynamically at spawn time",
-        });
+        box.add(
+          "warn",
+          "ZERO_MUTATE_URL",
+          "stale in .env",
+          "remove this line — the supervisor exports it dynamically at spawn time",
+        );
       }
     } catch {
       // ignore
@@ -400,17 +395,76 @@ async function collectChecks(): Promise<DoctorCheck[]> {
     if ("daemonBaseUrl" in cfgRaw) stale.push("daemonBaseUrl");
     if ("dashboardBaseUrl" in cfgRaw) stale.push("dashboardBaseUrl");
     if (stale.length > 0) {
-      checks.push({
-        section: "Configuration",
-        label: "config.json fields",
-        status: "warn",
-        value: `stale: ${stale.join(", ")}`,
-        hint: "remove from config.json — defaults resolve via PROD_*_PORT constants",
-      });
+      box.add(
+        "warn",
+        "config.json fields",
+        `stale: ${stale.join(", ")}`,
+        "remove from config.json — defaults resolve via PROD_*_PORT constants",
+      );
     }
   } catch {
     // ignore missing/malformed config — covered by the "config" check above
   }
+
+  box.done();
+  return box.toChecks();
+}
+
+async function runRuntime(): Promise<DoctorCheck[]> {
+  const box = new LiveBox("Runtime");
+  for (const label of ["logs dir", "friday-supervisor", "daemon", "zero-cache"]) {
+    box.declare(label);
+  }
+  box.draw();
+
+  box.resolve("logs dir", existsSync(LOGS_DIR) ? "ok" : "fail", displayPath(LOGS_DIR));
+
+  const fridayJob = launchdJobStatus(FRIDAY_LAUNCHD_LABEL);
+  box.resolve(
+    "friday-supervisor",
+    fridayJob.loaded ? "ok" : "fail",
+    `(launchd: ${FRIDAY_LAUNCHD_LABEL})`,
+    fridayJob.loaded ? undefined : "run `friday start`",
+  );
+
+  // Plist exec target audit — show only when broken, so the steady-state
+  // doctor stays tight. A broken target crash-loops the supervisor without a
+  // clear cause; surfacing it here points the operator at the right fix.
+  const pp = plistPath();
+  if (existsSync(pp)) {
+    const parsed = readPlistJson(pp);
+    const programArg0 = parsed?.ProgramArguments?.[0];
+    if (!isExecutable(programArg0)) {
+      box.add(
+        "fail",
+        "plist exec",
+        programArg0 ?? "<unset>",
+        "re-run `friday start` to rewrite the plist",
+        {
+          after: "friday-supervisor",
+        },
+      );
+    }
+  }
+
+  // daemon reachable (localhost)
+  const client = new DaemonClient();
+  const daemonReachable = await client.ping();
+  box.resolve(
+    "daemon",
+    daemonReachable ? "ok" : "fail",
+    daemonReachable ? "reachable (localhost)" : "unreachable",
+    daemonReachable ? undefined : "run `friday start`",
+  );
+
+  // zero-cache reachable
+  const zeroReachable = await tcpReachable("127.0.0.1", 4848, 500);
+  box.resolve(
+    "zero-cache",
+    zeroReachable ? "ok" : "fail",
+    zeroReachable ? "reachable (localhost:4848)" : "unreachable",
+    zeroReachable ? undefined : "run `friday start`",
+  );
 
   // Orphaned zero-cache replica WAL — large WAL with no live zero-cache
   // suggests an unclean previous shutdown that the auto-reset loop hasn't
@@ -420,43 +474,93 @@ async function collectChecks(): Promise<DoctorCheck[]> {
     try {
       const walSize = statSync(walPath).size;
       if (walSize > 0 && !zeroReachable) {
-        checks.push({
-          section: "Runtime",
-          label: "zero-cache WAL",
-          status: "warn",
-          value: `orphaned (${walSize} bytes)`,
-          hint: "unclean previous shutdown — `rm -rf ~/.friday/zero/` to force a fresh sync",
-        });
+        box.add(
+          "warn",
+          "zero-cache WAL",
+          `orphaned (${walSize} bytes)`,
+          "unclean previous shutdown — `rm -rf ~/.friday/zero/` to force a fresh sync",
+        );
       }
     } catch {
       // ignore
     }
   }
 
-  return checks;
+  box.done();
+  return box.toChecks();
 }
 
-// ============================================================================
-// Rendering
-// ============================================================================
+async function runPostgres(): Promise<DoctorCheck[]> {
+  const box = new LiveBox("PostgreSQL");
+  // Declare the happy-path rows; if Postgres is unreachable (or the probe
+  // throws) we drop the detail rows the probe can't answer.
+  const detailRows = ["role", "database", "migrations", "publication", "wal_level"];
+  box.declare("daemon");
+  for (const label of detailRows) box.declare(label);
+  box.draw();
 
-function renderSection(section: Section, items: DoctorCheck[]): string[] {
-  const ok = items.filter((c) => c.status === "ok").length;
-  const lines: string[] = [];
-  lines.push(renderTopBorder(section, ok, items.length));
-  lines.push(renderBlankLine());
-  for (const item of items) {
-    lines.push(renderCheckLine(item));
-    if (item.hint) {
-      for (const wrapped of wrapText(item.hint, INNER - 6)) {
-        lines.push(renderHintLine(wrapped));
-      }
+  try {
+    const pg = await probePostgresHealth();
+    const { FRIDAY_DB, FRIDAY_ROLE, FRIDAY_PUBLICATION } = FRIDAY_PG_CONSTANTS;
+    if (!pg.reachable) {
+      for (const label of detailRows) box.drop(label);
+      box.resolve(
+        "daemon",
+        "fail",
+        "unreachable",
+        pg.reachableReason ?? "`brew services start postgresql@18`",
+      );
+    } else {
+      box.resolve("daemon", "ok", "reachable (localhost)");
+      box.resolve(
+        "role",
+        pg.roleExists ? "ok" : "fail",
+        pg.roleExists ? FRIDAY_ROLE : "missing",
+        pg.roleExists ? undefined : "run `friday setup`",
+      );
+      box.resolve(
+        "database",
+        pg.databaseExists ? "ok" : "fail",
+        pg.databaseExists ? FRIDAY_DB : "missing",
+        pg.databaseExists ? undefined : "run `friday setup`",
+      );
+      box.resolve(
+        "migrations",
+        pg.migrationsAtHead ? "ok" : "fail",
+        pg.migrationsAtHead
+          ? `at head (${pg.migrationsApplied}/${pg.migrationsExpected})`
+          : `${pg.migrationsApplied}/${pg.migrationsExpected} applied`,
+        pg.migrationsAtHead ? undefined : "run `friday setup` to apply pending migrations",
+      );
+      box.resolve(
+        "publication",
+        pg.publicationExists ? "ok" : "fail",
+        pg.publicationExists ? FRIDAY_PUBLICATION : "missing",
+        pg.publicationExists ? undefined : "run `friday setup`",
+      );
+      box.resolve(
+        "wal_level",
+        pg.walLevelLogical ? "ok" : "fail",
+        pg.walLevelLogical ? "logical" : (pg.walLevelActual ?? "unknown"),
+        pg.walLevelLogical
+          ? undefined
+          : "run `friday setup`, then `brew services restart postgresql@18`",
+      );
     }
+  } catch (err) {
+    // Probe blew up entirely — collapse to a single health-probe failure row.
+    box.drop("daemon");
+    for (const label of detailRows) box.drop(label);
+    box.add("fail", "health probe", "failed", err instanceof Error ? err.message : String(err));
   }
-  lines.push(renderBlankLine());
-  lines.push(renderBottomBorder());
-  return lines;
+
+  box.done();
+  return box.toChecks();
 }
+
+// ============================================================================
+// Row + border rendering
+// ============================================================================
 
 function renderTopBorder(title: string, ok: number, total: number): string {
   // ╒═ <title> ( ok / total ) ═════════════════════════════════════╕
@@ -473,10 +577,11 @@ function renderBlankLine(): string {
   return `│${" ".repeat(INNER)}│`;
 }
 
-function renderCheckLine(check: DoctorCheck): string {
-  const icon = statusIcon(check.status);
-  const labelArea = padTo(check.label, LABEL_COL);
-  const valueArea = padTo(check.value, VALUE_COL);
+function renderRow(row: Row): string {
+  const icon = statusIcon(row.status);
+  const labelArea = padTo(row.label, LABEL_COL);
+  // Pending rows show no value yet — the glyph carries the "checking" signal.
+  const valueArea = padTo(row.status === "pending" ? "" : row.value, VALUE_COL);
   return `│  ${icon} ${labelArea}${valueArea}│`;
 }
 
@@ -487,7 +592,7 @@ function renderHintLine(hint: string): string {
   return `│${prefix}${pc.dim(body)}│`;
 }
 
-function statusIcon(status: Status): string {
+function statusIcon(status: RowStatus): string {
   switch (status) {
     case "ok":
       return pc.green("✔");
@@ -495,6 +600,10 @@ function statusIcon(status: Status): string {
       return pc.yellow("⚠");
     case "fail":
       return pc.red("✘");
+    case "pending":
+      // No true orange in the 16-color palette; yellow is the conventional
+      // in-progress hue. `◌` reads as "not yet filled in".
+      return pc.yellow("◌");
   }
 }
 
