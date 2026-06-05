@@ -2,6 +2,7 @@ import type { Component } from "svelte";
 import TodoList from "./TodoList.svelte";
 import FileEditRenderer from "./FileEditRenderer.svelte";
 import MailToolBlock from "./MailToolBlock.svelte";
+import AskUserQuestionPanel from "./AskUserQuestionPanel.svelte";
 
 /**
  * Per-tool render dispatch for chat tool-use blocks (FRI-130 foundation).
@@ -56,6 +57,13 @@ export type ToolRendererProps = {
   input?: unknown;
   inputPartialJson?: string;
   output?: string;
+  /** SDK tool_use_id for the block. Optional because existing renderers
+   *  (TodoWrite / FileEditRenderer / MailToolBlock) don't need it; the
+   *  AskUserQuestion renderer (FRI-152) uses it both to tag its outgoing
+   *  answer marker AND to look up its own previously-submitted answer in
+   *  `chat.messages` after reload (the lock-after-submit signal lives in
+   *  the user-message thread, not in component-local state). */
+  toolId?: string;
 };
 
 /**
@@ -130,3 +138,10 @@ TOOL_RENDERERS["mail_send"] = { component: MailToolBlock };
 TOOL_RENDERERS["mail_inbox"] = { component: MailToolBlock };
 TOOL_RENDERERS["mail_read"] = { component: MailToolBlock };
 TOOL_RENDERERS["mail_close"] = { component: MailToolBlock };
+
+// FRI-152: AskUserQuestion is a Claude Agent SDK built-in tool (no `mcp__`
+// prefix), so it resolves at step (1) of `resolveToolRenderer` on its
+// literal name — registry key stays `"AskUserQuestion"`. Renders an
+// interactive panel with clickable options instead of the generic collapsed
+// JSON card.
+TOOL_RENDERERS["AskUserQuestion"] = { component: AskUserQuestionPanel, direct: true };

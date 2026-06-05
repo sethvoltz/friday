@@ -626,7 +626,8 @@
             status={(msg.status === "done" || msg.status === "error" || msg.status === "aborted" ? msg.status : "running") as "running" | "done" | "error" | "aborted"}
             input={msg.input}
             inputPartialJson={msg.inputPartialJson}
-            output={msg.output} />
+            output={msg.output}
+            toolId={msg.toolId} />
         {:else}
           <ToolBlock
             toolName={msg.toolName ?? ""}

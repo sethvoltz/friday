@@ -4,6 +4,15 @@ import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { initialPageSize } from "../util/page-size";
 import type { SendUserMessageOutcome } from "./mutator-result";
 import { KEYS, loadJSON, removeKey, saveJSON } from "./persistent";
+import {
+  buildAnswerPayload,
+  formatAnswerMessageBody,
+  formatHumanReadableAnswer,
+  parseAnswerMessageBody,
+  type AUQAnswerPayload,
+  type AUQQuestion,
+  type AUQSelectionState,
+} from "../components/Chat/ask-user-question";
 
 export interface ChatMessage {
   /** turn_id for assistant; "u_<n>" for user; "t_<toolId>"; "th_<blockId>". */
@@ -147,6 +156,16 @@ export interface ChatMessage {
   /** FRI-60: set on no-response bubbles to convey why the turn produced
    *  zero content blocks. Drives the display copy in ChatMessages. */
   zeroBlockReason?: "abort" | "compaction" | "sdk-resume-failure";
+
+  /** FRI-152: parsed AskUserQuestion answer payload extracted from this
+   *  user message's body. Populated when the message text carries the
+   *  `@@AUQ-ANSWER@@<base64>` suffix that the AskUserQuestionPanel writes
+   *  on submit. The marker is stripped from `text` so the visible bubble
+   *  shows only the human-readable summary; the structured payload here
+   *  lets the panel renderer find its own previously-submitted answer on
+   *  reload and render the locked panel without ephemeral state outside
+   *  the message thread. Only present on user blocks; ignored elsewhere. */
+  askUserQuestionAnswer?: AUQAnswerPayload;
 }
 
 export interface AgentInfo {
@@ -429,6 +448,11 @@ export class OptimisticEntry implements ChatMessage {
   readonly source?: ChatMessage["source"];
   readonly queueId?: string;
   readonly attachments?: ChatMessage["attachments"];
+  /** FRI-152: present on optimistic bubbles produced by AskUserQuestion
+   *  panel submits. Mirrors the canonical-row shape so the panel's
+   *  lock-on-marker derivation works from the first paint, not only
+   *  after Zero replicates the row back. */
+  readonly askUserQuestionAnswer?: AUQAnswerPayload;
 
   status = $state<ChatMessage["status"]>("complete");
   pending = $state(true);
@@ -446,6 +470,7 @@ export class OptimisticEntry implements ChatMessage {
     attachments?: ChatMessage["attachments"];
     initialStatus?: ChatMessage["status"];
     initialPending?: boolean;
+    askUserQuestionAnswer?: AUQAnswerPayload;
   }) {
     this.id = init.id;
     this.agent = init.agent;
@@ -456,6 +481,7 @@ export class OptimisticEntry implements ChatMessage {
     this.source = init.source;
     this.queueId = init.queueId;
     this.attachments = init.attachments;
+    this.askUserQuestionAnswer = init.askUserQuestionAnswer;
     if (init.initialStatus) this.status = init.initialStatus;
     if (init.initialPending !== undefined) this.pending = init.initialPending;
   }
@@ -1047,6 +1073,13 @@ export class ChatState {
     opts?: {
       queueId?: string;
       attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+      /** FRI-152: parsed AskUserQuestion answer rider for optimistic
+       *  bubbles produced by AskUserQuestionPanel submits. The caller
+       *  passes the stripped display text in `text` and the parsed
+       *  payload here so the first-paint bubble already carries the
+       *  lock-state signal — no flicker between "marker visible" and
+       *  "marker stripped after parseBlocks runs". */
+      askUserQuestionAnswer?: AUQAnswerPayload;
     },
   ): string {
     // FIX_FORWARD 2.6: mint a `pending_<uuid>` id and `pending: true` so
@@ -1077,6 +1110,7 @@ export class ChatState {
         attachments: opts?.attachments,
         initialStatus: "complete",
         initialPending: true,
+        askUserQuestionAnswer: opts?.askUserQuestionAnswer,
       }),
     );
     return id;
@@ -1126,6 +1160,7 @@ export class ChatState {
       turnId,
       source: entry.source,
       attachments: entry.attachments,
+      askUserQuestionAnswer: entry.askUserQuestionAnswer,
       pending: false,
       failed: false,
       queueId: undefined,
@@ -1864,6 +1899,56 @@ export class ChatState {
     // Disable while any other turn is in flight on the focused agent.
     if (this.inflightTurnId !== null) return false;
     return true;
+  }
+
+  /**
+   * FRI-152: dispatch a user-message turn that carries the structured
+   * answer to an AskUserQuestion call. Centralizes the marker-encoding
+   * dance so AskUserQuestionPanel doesn't have to reproduce the
+   * dual-write (optimistic stripped text + wire marker-bearing text)
+   * pattern. The model receives the human-readable summary as fresh
+   * user input on its next turn; the dashboard panel re-derives the
+   * locked state from the persisted message thread on reload.
+   *
+   * Returns the optimistic blockId on success, or `null` when the
+   * panel is unrecoverable (no chat agent focused / send unavailable).
+   */
+  submitAskUserQuestionAnswer(args: {
+    toolUseId: string;
+    questions: AUQQuestion[];
+    selection: Record<string, AUQSelectionState>;
+  }): string | null {
+    const sendFn = this.sendMessageFn;
+    if (!sendFn) return null;
+    const agent = this.focusedAgent;
+    if (!agent) return null;
+    const blockId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? (crypto as { randomUUID: () => string }).randomUUID()
+        : `blk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const eagerTurnId = `t_${blockId}`;
+    const payload = buildAnswerPayload(args.toolUseId, args.questions, args.selection);
+    const displayText = formatHumanReadableAnswer(args.questions, payload);
+    const wireText = formatAnswerMessageBody(args.questions, payload);
+    this.addUser(displayText, { queueId: blockId, askUserQuestionAnswer: payload });
+    const claimedInflight = this.inflightTurnIdByAgent[agent] == null;
+    if (claimedInflight) this.markInflight(agent, eagerTurnId);
+    void sendFn({ blockId, agent, text: wireText }).then((outcome) => {
+      if (outcome.kind === "ok") {
+        this.confirmPending(blockId, outcome.turnId);
+        this.markInflight(agent, outcome.turnId);
+        return;
+      }
+      if (outcome.kind === "transport-error") {
+        this.scheduleTransportFailureFallback(blockId);
+        return;
+      }
+      if (claimedInflight && this.inflightTurnIdByAgent[agent] === eagerTurnId) {
+        this.markInflight(agent, null);
+      }
+      this.markPendingFailed(blockId);
+    });
+    return blockId;
   }
 
   /**
@@ -3144,9 +3229,20 @@ export class ChatState {
         overlayEntry.status = mappedStatus;
         return;
       }
+      // FRI-152: extract AskUserQuestion answer marker on the live
+      // user-text block_complete (covers SSE-first race with Zero
+      // replication). Same shape as the parseBlocks branch above.
+      const liveRole = event.role === "user" ? "user" : "assistant";
+      const liveAuq =
+        liveRole === "user" && typeof parsed.text === "string"
+          ? parseAnswerMessageBody(parsed.text)
+          : null;
       for (const m of this.messages) {
         if (m.id !== id) continue;
-        if (typeof parsed.text === "string") m.text = parsed.text;
+        if (typeof parsed.text === "string") {
+          m.text = liveAuq ? liveAuq.displayText : parsed.text;
+        }
+        if (liveAuq) m.askUserQuestionAnswer = liveAuq.payload;
         m.status = mappedStatus;
         // Backfill source/fromAgent if a prior block_start mounted the row
         // without them. recordUserBlock for mail emits only block_complete
@@ -3172,11 +3268,10 @@ export class ChatState {
       // Late mount: block_start was evicted from the ring (or — for mail
       // — was never emitted in the first place). Land canonical in the
       // legacy bucket so Zero's eventual replicate dedupes on id.
-      const role = event.role === "user" ? "user" : "assistant";
       this.#legacyMessages.push({
         id,
-        role,
-        text: parsed.text ?? "",
+        role: liveRole,
+        text: liveAuq ? liveAuq.displayText : (parsed.text ?? ""),
         status: mappedStatus,
         agent,
         turnId: event.turn_id,
@@ -3186,6 +3281,7 @@ export class ChatState {
         fromAgent: parsed.from_agent,
         mailMeta: extractMailMeta(parsed),
         attachments: parsed.attachments,
+        askUserQuestionAnswer: liveAuq?.payload,
       });
       return;
     }
@@ -3780,10 +3876,16 @@ export function parseBlocks(
               : b.status === "aborted"
                 ? "aborted"
                 : "error";
+      // FRI-152: extract any AskUserQuestion answer marker from a
+      // user-text block. The marker rides on the canonical user-message
+      // body so reload after submit rehydrates the locked-panel state
+      // from the message thread alone.
+      const rawText = parsed.text ?? "";
+      const auq = role === "user" ? parseAnswerMessageBody(rawText) : null;
       out.push({
         id,
         role,
-        text: parsed.text ?? "",
+        text: auq ? auq.displayText : rawText,
         status,
         agent,
         turnId: b.turnId,
@@ -3793,6 +3895,7 @@ export function parseBlocks(
         fromAgent: parsed.from_agent,
         mailMeta: extractMailMeta(parsed),
         attachments: parsed.attachments,
+        askUserQuestionAnswer: auq?.payload,
       });
     } else if (b.kind === "thinking") {
       // FRI-81 D4: an empty thinking row at status='complete' is a ghost
