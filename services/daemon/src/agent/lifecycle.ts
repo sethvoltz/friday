@@ -44,6 +44,7 @@ import {
 } from "./block-stream.js";
 import { recordError as bsRecordError } from "./block-injectors.js";
 import { appContextForAgent } from "../apps/installer.js";
+import { noteForceKillForRespawn, noteTurnComplete } from "../comms/respawn-orphan-mail.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
 import { enqueueTransition, enqueueTransitionResult } from "./transition-queue.js";
 import {
@@ -534,7 +535,29 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
       // Generation guard above: `forceWorkerRefork` `live.delete`s before the
       // drain so this exit fires for a superseded Generation and skips here.
       live.delete(input.agentName);
-      void finalizeHardExit(w);
+      void (async () => {
+        try {
+          await finalizeHardExit(w);
+        } catch {
+          // finalizeHardExit logs its own errors; swallow so the respawn
+          // check still runs.
+        }
+        // FRI-154: after the hard-exit teardown, queue a respawn if this
+        // agent still has unprocessed mail in its inbox. Anti-loop gated;
+        // dead-letters after `RESPAWN_MAX_ATTEMPTS` failed cycles.
+        await noteForceKillForRespawn(input.agentName, { code, signal });
+      })();
+    } else {
+      // FRI-154: superseded Generation — `forceKillStuckWorker` /
+      // `archiveAgent` / `forceWorkerRefork` already owned the teardown.
+      // Archive sets `agents.status='archived'`, which the respawn function
+      // skips. `forceWorkerRefork` `live.set`s a replacement before this
+      // exit fires (or `live.delete`s and the agent isn't live), so
+      // `noteForceKillForRespawn`'s `isAgentLive` early-out covers the
+      // refork case. The only path that legitimately wants a respawn here
+      // is `forceKillStuckWorker(reason: "abort"|"stale"|"wedge"|"fsm")`
+      // followed by orphan mail in the inbox.
+      void noteForceKillForRespawn(input.agentName, { code, signal });
     }
     // Phase 5: `agent_lifecycle` SSE retired — Zero replicates the
     // agents row UPDATE so the dashboard sees the status drop on
@@ -2076,6 +2099,11 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
           usage: e.usage,
         },
       });
+      // FRI-154: a successful turn-complete is the "this agent made forward
+      // progress" signal. Reset the anti-loop respawn counter so a long-lived
+      // agent that survived 2 force-kill respawns over months doesn't
+      // dead-letter on the next unrelated death.
+      noteTurnComplete(w.agentName);
       break;
     }
     case "heartbeat":

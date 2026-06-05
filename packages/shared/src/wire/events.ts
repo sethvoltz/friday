@@ -31,7 +31,8 @@ export type WireEvent =
   | BlockCanceledEvent
   | ConnectionEstablishedEvent
   | CompactionEvent
-  | WorkerNoMailBackEvent;
+  | WorkerNoMailBackEvent
+  | WorkerForceKillDeadLetterEvent;
 
 export interface BaseEvent {
   v: 1;
@@ -252,6 +253,34 @@ export interface WorkerNoMailBackEvent extends BaseEvent {
   agent: string;
   turn_id: string;
   streak: number;
+}
+
+/**
+ * FRI-154: emitted when a worker has been force-killed (SIGTERM/SIGKILL/OOM/
+ * watchdog/abort) with unprocessed mail at `delivery='pending'` more times
+ * than the anti-loop gate permits in its rolling window. The respawn timer is
+ * NOT scheduled when this fires; the affected mail rows are marked with
+ * `meta_json.dead_letter` so a future fresh-mail-arrival path (which also
+ * filters dead-lettered mail) doesn't silently re-resurrect them.
+ *
+ * Operator recovery: `agent_archive` + recreate, manual SQL to clear the
+ * sentinel, or `mail_close` on each dead-lettered row.
+ */
+export interface WorkerForceKillDeadLetterEvent extends BaseEvent {
+  type: "worker.force-kill.dead-letter";
+  agent: string;
+  /** Count of consecutive respawn attempts in the current window before
+   *  the gate tripped (== `RESPAWN_MAX_ATTEMPTS` at fire time). */
+  attempts: number;
+  /** The rolling window in milliseconds that anchored the streak. */
+  window_ms: number;
+  /** Count of pending mail rows for this agent at dead-letter time. */
+  unprocessed_mail_count: number;
+  /** Wall-clock of the agent's last observed `turn-complete`, if any.
+   *  Null when the agent has never completed a turn under this daemon
+   *  process (in-memory bookkeeping resets on restart). */
+  last_successful_turn_complete_at: number | null;
+  ts: number;
 }
 
 /**
