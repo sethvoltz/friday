@@ -321,16 +321,26 @@ describe("loadOlderTurns", () => {
 describe("submitAskUserQuestionAnswer (FRI-152)", () => {
   it("dispatches a sendMessage with the marker-bearing wire text and parsed payload on the optimistic bubble", async () => {
     const { ChatState } = await import("./chat.svelte");
-    const { AUQ_MARKER } = await import(
-      "../components/Chat/ask-user-question"
-    );
+    const { AUQ_MARKER } = await import("../components/Chat/ask-user-question");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
-    const sendFn = vi.fn(async () => ({
-      kind: "ok" as const,
-      blockId: "stub",
-      turnId: "stub",
-    }));
+    // Typed mock — `vi.fn(impl)` would infer a zero-arg signature from the
+    // impl, leaving `sendFn.mock.calls[0][0]` as `never`. Pin the parameter
+    // shape to the chat-store wire so the callArgs assertions below
+    // typecheck.
+    const sendFn =
+      vi.fn<
+        (args: {
+          blockId: string;
+          agent: string;
+          text: string;
+          attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+        }) => Promise<{ kind: "ok"; blockId: string; turnId: string }>
+      >(async (args) => ({
+        kind: "ok" as const,
+        blockId: args.blockId,
+        turnId: `t_${args.blockId}`,
+      }));
     chat.setSendMessageFn(sendFn);
 
     const questions = [
@@ -404,9 +414,8 @@ describe("submitAskUserQuestionAnswer (FRI-152)", () => {
 describe("parseBlocks: AskUserQuestion answer marker extraction (FRI-152)", () => {
   it("strips the marker from a Zero-replicated user block AND surfaces the parsed payload", async () => {
     const { ChatState } = await import("./chat.svelte");
-    const { formatAnswerMessageBody, AUQ_MARKER } = await import(
-      "../components/Chat/ask-user-question"
-    );
+    const { formatAnswerMessageBody, AUQ_MARKER } =
+      await import("../components/Chat/ask-user-question");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
     attachSession(chat, "friday", "s1");

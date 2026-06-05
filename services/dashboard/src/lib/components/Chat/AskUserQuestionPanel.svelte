@@ -257,8 +257,9 @@
                     rows="2"
                     placeholder="Optional context for this answer"
                     value={state.notes}
-                    oninput={(e) => setNotes(q, (e.currentTarget as HTMLTextAreaElement).value)}>
-                  </textarea>
+                    oninput={(e) =>
+                      setNotes(q, (e.currentTarget as HTMLTextAreaElement).value)}
+                  ></textarea>
                 {/if}
               {/if}
             </div>

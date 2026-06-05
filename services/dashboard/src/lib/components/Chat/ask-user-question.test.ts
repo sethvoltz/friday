@@ -103,11 +103,7 @@ describe("parseQuestions", () => {
           question: "Kept",
           header: "K",
           multiSelect: false,
-          options: [
-            { label: "A", description: "a" },
-            null,
-            { label: "B", description: "b" },
-          ],
+          options: [{ label: "A", description: "a" }, null, { label: "B", description: "b" }],
         },
       ],
     });
@@ -137,11 +133,9 @@ describe("parseQuestions", () => {
 
 describe("buildAnswerPayload — single-select", () => {
   it("emits answers[Q] equal to the single chosen label", () => {
-    const payload = buildAnswerPayload(
-      "tool_abc",
-      [Q_SIZE],
-      { "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "" } },
-    );
+    const payload = buildAnswerPayload("tool_abc", [Q_SIZE], {
+      "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "" },
+    });
     expect(payload).toEqual({
       toolUseId: "tool_abc",
       answers: { "Which size?": "Small" },
@@ -149,26 +143,20 @@ describe("buildAnswerPayload — single-select", () => {
   });
 
   it("omits annotations field entirely when no question carries notes", () => {
-    const payload = buildAnswerPayload(
-      "tool_abc",
-      [Q_SIZE],
-      { "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "   " } },
-    );
+    const payload = buildAnswerPayload("tool_abc", [Q_SIZE], {
+      "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "   " },
+    });
     expect(payload.annotations).toBeUndefined();
   });
 
   it("adds annotations when notes are non-empty (trimmed)", () => {
-    const payload = buildAnswerPayload(
-      "tool_abc",
-      [Q_SIZE],
-      {
-        "Which size?": {
-          selectedLabels: ["Small"],
-          otherText: "",
-          notes: "  because portability matters  ",
-        },
+    const payload = buildAnswerPayload("tool_abc", [Q_SIZE], {
+      "Which size?": {
+        selectedLabels: ["Small"],
+        otherText: "",
+        notes: "  because portability matters  ",
       },
-    );
+    });
     expect(payload.annotations).toEqual({
       "Which size?": { notes: "because portability matters" },
     });
@@ -177,79 +165,59 @@ describe("buildAnswerPayload — single-select", () => {
 
 describe("buildAnswerPayload — multi-select", () => {
   it("joins multi-select labels with comma+space in chosen order", () => {
-    const payload = buildAnswerPayload(
-      "tool_xyz",
-      [Q_FLAVORS],
-      {
-        "Which flavors?": {
-          selectedLabels: ["Vanilla", "Strawberry"],
-          otherText: "",
-          notes: "",
-        },
+    const payload = buildAnswerPayload("tool_xyz", [Q_FLAVORS], {
+      "Which flavors?": {
+        selectedLabels: ["Vanilla", "Strawberry"],
+        otherText: "",
+        notes: "",
       },
-    );
+    });
     expect(payload.answers["Which flavors?"]).toBe("Vanilla, Strawberry");
   });
 
   it("preserves the user's selection order, not the option list order", () => {
-    const payload = buildAnswerPayload(
-      "tool_xyz",
-      [Q_FLAVORS],
-      {
-        "Which flavors?": {
-          selectedLabels: ["Chocolate", "Vanilla"],
-          otherText: "",
-          notes: "",
-        },
+    const payload = buildAnswerPayload("tool_xyz", [Q_FLAVORS], {
+      "Which flavors?": {
+        selectedLabels: ["Chocolate", "Vanilla"],
+        otherText: "",
+        notes: "",
       },
-    );
+    });
     expect(payload.answers["Which flavors?"]).toBe("Chocolate, Vanilla");
   });
 });
 
 describe("buildAnswerPayload — Other path", () => {
   it("substitutes the user-typed text for the Other label (single-select)", () => {
-    const payload = buildAnswerPayload(
-      "tool_abc",
-      [Q_SIZE],
-      {
-        "Which size?": {
-          selectedLabels: [OTHER_LABEL],
-          otherText: "  Custom huge  ",
-          notes: "",
-        },
+    const payload = buildAnswerPayload("tool_abc", [Q_SIZE], {
+      "Which size?": {
+        selectedLabels: [OTHER_LABEL],
+        otherText: "  Custom huge  ",
+        notes: "",
       },
-    );
+    });
     expect(payload.answers["Which size?"]).toBe("Custom huge");
   });
 
   it("joins Other text alongside listed labels in multi-select", () => {
-    const payload = buildAnswerPayload(
-      "tool_xyz",
-      [Q_FLAVORS],
-      {
-        "Which flavors?": {
-          selectedLabels: ["Vanilla", OTHER_LABEL],
-          otherText: "Mango",
-          notes: "",
-        },
+    const payload = buildAnswerPayload("tool_xyz", [Q_FLAVORS], {
+      "Which flavors?": {
+        selectedLabels: ["Vanilla", OTHER_LABEL],
+        otherText: "Mango",
+        notes: "",
       },
-    );
+    });
     expect(payload.answers["Which flavors?"]).toBe("Vanilla, Mango");
   });
 
   it("omits Other from the joined string when otherText is empty (no quiet 'Other' literal)", () => {
-    const payload = buildAnswerPayload(
-      "tool_xyz",
-      [Q_FLAVORS],
-      {
-        "Which flavors?": {
-          selectedLabels: ["Vanilla", OTHER_LABEL],
-          otherText: "   ",
-          notes: "",
-        },
+    const payload = buildAnswerPayload("tool_xyz", [Q_FLAVORS], {
+      "Which flavors?": {
+        selectedLabels: ["Vanilla", OTHER_LABEL],
+        otherText: "   ",
+        notes: "",
       },
-    );
+    });
     // Other-with-no-text drops; only the listed label remains.
     expect(payload.answers["Which flavors?"]).toBe("Vanilla");
   });
@@ -257,38 +225,29 @@ describe("buildAnswerPayload — Other path", () => {
 
 describe("isSubmissionReady", () => {
   it("returns false when not every question has a selection", () => {
-    const ready = isSubmissionReady(
-      [Q_SIZE, Q_FLAVORS],
-      {
-        "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "" },
-        // Q_FLAVORS missing
-      },
-    );
+    const ready = isSubmissionReady([Q_SIZE, Q_FLAVORS], {
+      "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "" },
+      // Q_FLAVORS missing
+    });
     expect(ready).toBe(false);
   });
 
   it("returns false when Other is the only pick and the text is empty", () => {
-    const ready = isSubmissionReady(
-      [Q_SIZE],
-      {
-        "Which size?": { selectedLabels: [OTHER_LABEL], otherText: "  ", notes: "" },
-      },
-    );
+    const ready = isSubmissionReady([Q_SIZE], {
+      "Which size?": { selectedLabels: [OTHER_LABEL], otherText: "  ", notes: "" },
+    });
     expect(ready).toBe(false);
   });
 
   it("returns true when every question has at least one valid selection", () => {
-    const ready = isSubmissionReady(
-      [Q_SIZE, Q_FLAVORS],
-      {
-        "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "" },
-        "Which flavors?": {
-          selectedLabels: ["Vanilla", "Chocolate"],
-          otherText: "",
-          notes: "",
-        },
+    const ready = isSubmissionReady([Q_SIZE, Q_FLAVORS], {
+      "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "" },
+      "Which flavors?": {
+        selectedLabels: ["Vanilla", "Chocolate"],
+        otherText: "",
+        notes: "",
       },
-    );
+    });
     expect(ready).toBe(true);
   });
 
@@ -299,28 +258,22 @@ describe("isSubmissionReady", () => {
 
 describe("formatHumanReadableAnswer", () => {
   it("renders one bullet per question using the chip header", () => {
-    const text = formatHumanReadableAnswer(
-      [Q_SIZE, Q_FLAVORS],
-      {
-        toolUseId: "x",
-        answers: {
-          "Which size?": "Small",
-          "Which flavors?": "Vanilla, Chocolate",
-        },
+    const text = formatHumanReadableAnswer([Q_SIZE, Q_FLAVORS], {
+      toolUseId: "x",
+      answers: {
+        "Which size?": "Small",
+        "Which flavors?": "Vanilla, Chocolate",
       },
-    );
+    });
     expect(text).toBe("- Size: Small\n- Flavors: Vanilla, Chocolate");
   });
 
   it("appends notes inline when present", () => {
-    const text = formatHumanReadableAnswer(
-      [Q_SIZE],
-      {
-        toolUseId: "x",
-        answers: { "Which size?": "Small" },
-        annotations: { "Which size?": { notes: "for travel" } },
-      },
-    );
+    const text = formatHumanReadableAnswer([Q_SIZE], {
+      toolUseId: "x",
+      answers: { "Which size?": "Small" },
+      annotations: { "Which size?": { notes: "for travel" } },
+    });
     expect(text).toBe("- Size: Small — note: for travel");
   });
 });
@@ -341,10 +294,10 @@ describe("formatAnswerMessageBody / parseAnswerMessageBody — roundtrip", () =>
   });
 
   it("strips the marker AND its leading blank line from displayText", () => {
-    const body = formatAnswerMessageBody(
-      [Q_SIZE],
-      { toolUseId: "t", answers: { "Which size?": "Small" } },
-    );
+    const body = formatAnswerMessageBody([Q_SIZE], {
+      toolUseId: "t",
+      answers: { "Which size?": "Small" },
+    });
     const parsed = parseAnswerMessageBody(body);
     expect(parsed!.displayText).toBe("- Size: Small");
     expect(parsed!.displayText.endsWith("\n")).toBe(false);
@@ -381,41 +334,38 @@ describe("formatAnswerMessageBody / parseAnswerMessageBody — roundtrip", () =>
 
 describe("selectionFromPayload", () => {
   it("rehydrates single-select selection from a stored payload", () => {
-    const selection = selectionFromPayload(
-      [Q_SIZE],
-      { toolUseId: "x", answers: { "Which size?": "Small" } },
-    );
+    const selection = selectionFromPayload([Q_SIZE], {
+      toolUseId: "x",
+      answers: { "Which size?": "Small" },
+    });
     expect(selection).toEqual({
       "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "" },
     });
   });
 
   it("rehydrates multi-select selection from comma-joined string", () => {
-    const selection = selectionFromPayload(
-      [Q_FLAVORS],
-      { toolUseId: "x", answers: { "Which flavors?": "Vanilla, Strawberry" } },
-    );
+    const selection = selectionFromPayload([Q_FLAVORS], {
+      toolUseId: "x",
+      answers: { "Which flavors?": "Vanilla, Strawberry" },
+    });
     expect(selection["Which flavors?"]!.selectedLabels).toEqual(["Vanilla", "Strawberry"]);
   });
 
   it("classifies an unknown answer string as Other with the literal text", () => {
-    const selection = selectionFromPayload(
-      [Q_SIZE],
-      { toolUseId: "x", answers: { "Which size?": "Custom huge" } },
-    );
+    const selection = selectionFromPayload([Q_SIZE], {
+      toolUseId: "x",
+      answers: { "Which size?": "Custom huge" },
+    });
     expect(selection["Which size?"]!.selectedLabels).toEqual([OTHER_LABEL]);
     expect(selection["Which size?"]!.otherText).toBe("Custom huge");
   });
 
   it("rehydrates notes onto the matching question", () => {
-    const selection = selectionFromPayload(
-      [Q_SIZE],
-      {
-        toolUseId: "x",
-        answers: { "Which size?": "Small" },
-        annotations: { "Which size?": { notes: "for travel" } },
-      },
-    );
+    const selection = selectionFromPayload([Q_SIZE], {
+      toolUseId: "x",
+      answers: { "Which size?": "Small" },
+      annotations: { "Which size?": { notes: "for travel" } },
+    });
     expect(selection["Which size?"]!.notes).toBe("for travel");
   });
 });
