@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/sethvoltz/friday/compare/v1.4.0...v1.5.0) (2026-06-05)
+
+
+### Features
+
+* **dashboard:** interactive AskUserQuestion panel renderer (FRI-152) ([#173](https://github.com/sethvoltz/friday/issues/173)) ([c8a4cb7](https://github.com/sethvoltz/friday/commit/c8a4cb7f8ee1cff1709a3037fce72aae15dbea9a))
+
 ## [1.4.0](https://github.com/sethvoltz/friday/compare/v1.3.0...v1.4.0) (2026-06-05)
 
 
