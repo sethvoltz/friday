@@ -318,158 +318,15 @@ describe("loadOlderTurns", () => {
   });
 });
 
-describe("submitAskUserQuestionAnswer (FRI-152)", () => {
-  it("dispatches a sendMessage with the marker-bearing wire text and parsed payload on the optimistic bubble", async () => {
-    const { ChatState } = await import("./chat.svelte");
-    const { AUQ_MARKER } = await import("../components/Chat/ask-user-question");
-    const chat = new ChatState();
-    chat.focusedAgent = "friday";
-    // Typed mock — `vi.fn(impl)` would infer a zero-arg signature from the
-    // impl, leaving `sendFn.mock.calls[0][0]` as `never`. Pin the parameter
-    // shape to the chat-store wire so the callArgs assertions below
-    // typecheck.
-    const sendFn = vi.fn<
-      (args: {
-        blockId: string;
-        agent: string;
-        text: string;
-        attachments?: Array<{ sha256: string; filename: string; mime: string }>;
-      }) => Promise<{ kind: "ok"; blockId: string; turnId: string }>
-    >(async (args) => ({
-      kind: "ok" as const,
-      blockId: args.blockId,
-      turnId: `t_${args.blockId}`,
-    }));
-    chat.setSendMessageFn(sendFn);
-
-    const questions = [
-      {
-        question: "Size?",
-        header: "Size",
-        multiSelect: false,
-        options: [
-          { label: "S", description: "small" },
-          { label: "L", description: "large" },
-        ],
-      },
-    ];
-    const selection = {
-      "Size?": { selectedLabels: ["S"], otherText: "", notes: "for travel" },
-    };
-
-    const blockId = chat.submitAskUserQuestionAnswer({
-      toolUseId: "toolu_01",
-      questions,
-      selection,
-    });
-    expect(blockId, "submitAskUserQuestionAnswer must succeed").not.toBeNull();
-    expect(sendFn).toHaveBeenCalledTimes(1);
-    const callArgs = sendFn.mock.calls[0]![0];
-    expect(callArgs.agent).toBe("friday");
-    expect(callArgs.blockId).toBe(blockId);
-    // Wire text MUST carry the marker — that's the lock-on-reload signal.
-    expect(callArgs.text).toContain(AUQ_MARKER);
-    // …AND the human-readable summary.
-    expect(callArgs.text).toContain("- Size: S");
-    expect(callArgs.text).toContain("note: for travel");
-
-    // Optimistic bubble shows the stripped human-readable text and
-    // carries the parsed payload from the first paint (no flicker).
-    const bubble = chat.messages.find((m) => m.queueId === blockId);
-    expect(bubble, "optimistic bubble must mount").toBeDefined();
-    expect(bubble!.text).not.toContain(AUQ_MARKER);
-    expect(bubble!.text).toContain("- Size: S");
-    expect(bubble!.askUserQuestionAnswer).toBeDefined();
-    expect(bubble!.askUserQuestionAnswer!.toolUseId).toBe("toolu_01");
-    expect(bubble!.askUserQuestionAnswer!.answers).toEqual({ "Size?": "S" });
-    expect(bubble!.askUserQuestionAnswer!.annotations).toEqual({
-      "Size?": { notes: "for travel" },
-    });
-  });
-
-  it("returns null without dispatching when sendMessageFn is not wired (e.g. Zero offline)", async () => {
-    const { ChatState } = await import("./chat.svelte");
-    const chat = new ChatState();
-    chat.focusedAgent = "friday";
-    // No setSendMessageFn — wire is unset.
-    const blockId = chat.submitAskUserQuestionAnswer({
-      toolUseId: "toolu_01",
-      questions: [
-        {
-          question: "Q?",
-          header: "Q",
-          multiSelect: false,
-          options: [{ label: "A", description: "" }],
-        },
-      ],
-      selection: { "Q?": { selectedLabels: ["A"], otherText: "", notes: "" } },
-    });
-    expect(blockId).toBeNull();
-    // No optimistic bubble either — the chat store didn't take the write.
-    expect(chat.messages.length).toBe(0);
-  });
-});
-
-describe("parseBlocks: AskUserQuestion answer marker extraction (FRI-152)", () => {
-  it("strips the marker from a Zero-replicated user block AND surfaces the parsed payload", async () => {
-    const { ChatState } = await import("./chat.svelte");
-    const { formatAnswerMessageBody, AUQ_MARKER } =
-      await import("../components/Chat/ask-user-question");
-    const chat = new ChatState();
-    chat.focusedAgent = "friday";
-    attachSession(chat, "friday", "s1");
-
-    const questions = [
-      {
-        question: "Color?",
-        header: "Color",
-        multiSelect: false,
-        options: [
-          { label: "Red", description: "" },
-          { label: "Blue", description: "" },
-        ],
-      },
-    ];
-    const payload = {
-      toolUseId: "toolu_77",
-      answers: { "Color?": "Blue" },
-    };
-    const wireText = formatAnswerMessageBody(questions, payload);
-
-    chat.applyZeroBlocks(
-      [
-        {
-          id: "u1",
-          block_id: "blk-u1",
-          turn_id: "t_blk-u1",
-          agent_name: "friday",
-          session_id: "s1",
-          message_id: null,
-          block_index: 0,
-          role: "user",
-          kind: "text",
-          source: "user_chat",
-          content_json: { text: wireText },
-          status: "complete",
-          streaming: false,
-          origin_mutation_id: null,
-          ts: 1000,
-        } as Parameters<typeof chat.applyZeroBlocks>[0][number],
-      ],
-      "friday",
-      "complete",
-    );
-
-    const bubble = chat.messages.find((m) => m.role === "user");
-    expect(bubble, "user bubble must be mounted").toBeDefined();
-    expect(bubble!.text).not.toContain(AUQ_MARKER);
-    expect(bubble!.text).toBe("- Color: Blue");
-    expect(bubble!.askUserQuestionAnswer).toBeDefined();
-    expect(bubble!.askUserQuestionAnswer!.toolUseId).toBe("toolu_77");
-    expect(bubble!.askUserQuestionAnswer!.answers).toEqual({ "Color?": "Blue" });
-  });
-
-  it("leaves a normal user message (no marker) untouched", async () => {
+describe("no marker pollution on user blocks (FRI-152 reshape)", () => {
+  // After the MCP-bridge reshape the chat store does NOT introspect the
+  // user message body for AskUserQuestion answer markers. The answer
+  // ships through the daemon's `/api/elicitation/<id>/submit` endpoint
+  // and the SDK round-trips the structured payload as a normal
+  // `tool_result` block; the panel reads it off the tool message's
+  // `output` field. Pin the no-introspection invariant so a future
+  // refactor can't reintroduce the marker codec.
+  it("leaves a normal user message untouched (no marker stripping, no extra fields)", async () => {
     const { ChatState } = await import("./chat.svelte");
     const chat = new ChatState();
     chat.focusedAgent = "friday";
@@ -501,7 +358,42 @@ describe("parseBlocks: AskUserQuestion answer marker extraction (FRI-152)", () =
 
     const bubble = chat.messages.find((m) => m.role === "user");
     expect(bubble!.text).toBe("plain chat message");
-    expect(bubble!.askUserQuestionAnswer).toBeUndefined();
+    expect((bubble as unknown as Record<string, unknown>).askUserQuestionAnswer).toBeUndefined();
+  });
+
+  it("preserves user text verbatim even when it contains @@AUQ-ANSWER@@ (no legacy marker handling)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    const text = "I tested with @@AUQ-ANSWER@@xyz and it worked";
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "u3",
+          block_id: "blk-u3",
+          turn_id: "t_blk-u3",
+          agent_name: "friday",
+          session_id: "s1",
+          message_id: null,
+          block_index: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          content_json: { text },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1000,
+        } as Parameters<typeof chat.applyZeroBlocks>[0][number],
+      ],
+      "friday",
+      "complete",
+    );
+
+    const bubble = chat.messages.find((m) => m.role === "user");
+    expect(bubble!.text).toBe(text);
   });
 });
 

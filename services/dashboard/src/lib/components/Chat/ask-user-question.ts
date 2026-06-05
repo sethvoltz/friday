@@ -1,30 +1,31 @@
 /**
- * Pure logic seam for the AskUserQuestion renderer (FRI-152).
+ * Pure logic seam for the AskUserQuestion / MCP `ask_user` renderer
+ * (FRI-152).
  *
  * Everything in here is ts-only — no Svelte, no DOM. The companion
  * `AskUserQuestionPanel.svelte` calls these for input parsing, payload
- * shaping, and marker encode/decode. Keeping the logic out of the
+ * shaping, and locked-state rehydration. Keeping the logic out of the
  * component lets the node-pool vitest suite pin behavior with full
  * coverage without standing up a DOM harness (same pattern todo-render
  * uses for TodoWrite — see todo-render.ts).
  *
- * The marker convention encodes the structured answer in the user
- * message body so reload-after-submit rehydrates the locked-panel state
- * from the message thread alone (CLAUDE.md global rule:
- * "Don't store ephemeral state outside the message thread"). User
- * messages render as plain text in ChatMessages.svelte, so we encode the
- * payload as a single-line, base64-wrapped suffix that the chat-store
- * parser strips before display.
+ * The wire path is the daemon's `friday-elicitation/ask_user` MCP tool;
+ * the tool_use block (questions) and tool_result block (answer) both
+ * land in the canonical `blocks` table and replicate via Zero. Lock-
+ * state on reload derives from `msg.output` being populated — no marker
+ * codec, no ephemeral state outside the message thread.
  */
 
-/** SDK AskUserQuestion option (one of 2-4 per question). */
+/** Option in a single question (1-5 word label, description, optional
+ *  preview content). Schema mirrors `mcp__friday-elicitation__ask_user`'s
+ *  input declaration in `services/daemon/src/mcp/elicitation.ts`. */
 export interface AUQOption {
   label: string;
   description: string;
   preview?: string;
 }
 
-/** SDK AskUserQuestion question (one of 1-4 per call). */
+/** A single question in the panel (1-4 questions per `ask_user` call). */
 export interface AUQQuestion {
   question: string;
   header: string;
@@ -32,13 +33,23 @@ export interface AUQQuestion {
   options: AUQOption[];
 }
 
-/** Structured answer payload returned to the model. The SDK schema types
- *  `answers[question]` as `string`; for multi-select we join labels with
- *  a `, ` delimiter (human-readable AND parser-stable). */
+/** Per-question answer the model receives. The `kind` discriminator lets
+ *  the model distinguish 'user picked from my options' from 'user typed
+ *  something I didn't list'; the daemon-side MCP handler returns this
+ *  verbatim. For multi-select the `value` is comma+space joined in
+ *  selection order; if any of the picks came from Other (free-form),
+ *  `kind` is `"other"` for the whole answer. */
+export interface AUQAnswer {
+  kind: "option" | "other";
+  value: string;
+}
+
+/** Structured answer payload posted to `/api/elicitation/<id>/submit`.
+ *  Mirrors the daemon-side return type the MCP handler ships back to the
+ *  SDK as the `tool_result` text content. */
 export interface AUQAnswerPayload {
-  toolUseId: string;
-  answers: Record<string, string>;
-  annotations?: Record<string, { notes?: string; preview?: string }>;
+  answers: Record<string, AUQAnswer>;
+  annotations?: Record<string, { notes?: string }>;
 }
 
 /** Selection state the panel maintains in memory before submit. Keyed by
@@ -51,21 +62,17 @@ export interface AUQSelectionState {
   notes: string;
 }
 
-/** Sentinel used to separate the human-readable answer summary from the
- *  base64 payload in the user-message text body. Picked to be vanishingly
- *  unlikely to appear in organic chat content. */
-export const AUQ_MARKER = "@@AUQ-ANSWER@@";
-
-/** The synthesized "Other" option always carries this label. Lowercase
- *  variants land in `answers` as the user's free-text input verbatim; the
- *  visible label is just the affordance. */
+/** The synthesized "Other" option always carries this label. Sentinel
+ *  for the discriminator: any selection containing OTHER_LABEL with a
+ *  non-empty `otherText` flips the answer's `kind` to `"other"`. */
 export const OTHER_LABEL = "Other";
 
 /* ---------------- input parsing ---------------- */
 
-/** Defensive parse of the SDK's `tool_use.input` for AskUserQuestion.
- *  Model-controlled input — never throw. Returns `[]` for any shape that
- *  isn't `{ questions: [{ ... }] }` with at least one valid question.
+/** Defensive parse of a `tool_use.input` for `ask_user` (or the SDK
+ *  built-in `AskUserQuestion`, whose schema is structurally identical).
+ *  Model-controlled input — never throw. Returns `[]` for any shape
+ *  that isn't `{ questions: [{ ... }] }` with at least one valid question.
  *
  *  Per-row validation is structural (string types, non-empty options).
  *  We do NOT enforce the SDK's 1-4 / 2-4 limits at parse time: the model
@@ -111,50 +118,51 @@ export function parseQuestions(input: unknown): AUQQuestion[] {
 
 /* ---------------- payload shaping ---------------- */
 
-/** Build the structured `{ toolUseId, answers, annotations }` payload from
- *  the panel's in-memory selection state. Pure — no I/O.
+/** Build the `{ answers, annotations }` payload posted to the daemon's
+ *  submit endpoint. Per-question answer carries `{kind, value}`:
  *
- *  Multi-select answers join the chosen labels with `, ` (comma + space).
- *  This matches typical Anthropic conventions (human-readable, no quoting,
- *  no JSON arrays-as-strings) and keeps `answers[Q]: string` honoring the
- *  SDK schema.
+ *  - All picks are listed options (no Other, or Other with no text):
+ *    `kind: "option"`, `value` is comma-joined labels in pick order.
+ *  - Any pick is Other with non-empty text: `kind: "other"`, `value` is
+ *    comma-joined labels and free-form text in pick order (Other-with-
+ *    no-text picks drop out).
  *
- *  "Other" answers fold the user-typed text in as the literal value — no
- *  `Other: ` prefix, no quoting. The model sees exactly what the user
- *  typed in `answers[Q]`. If "Other" is also picked alongside a listed
- *  option (multi-select), the literal text is joined with the labels in
- *  selection order.
- *
- *  Annotations are omitted (the whole field, not just per-question) when
- *  no question carries a non-empty `notes`.
+ *  Annotations are emitted (the whole field, not just per-question)
+ *  only when at least one question carries a non-empty `notes`.
  */
 export function buildAnswerPayload(
-  toolUseId: string,
   questions: AUQQuestion[],
   selection: Record<string, AUQSelectionState>,
 ): AUQAnswerPayload {
-  const answers: Record<string, string> = {};
-  const annotations: Record<string, { notes?: string; preview?: string }> = {};
+  const answers: Record<string, AUQAnswer> = {};
+  const annotations: Record<string, { notes?: string }> = {};
   let annotationsHasContent = false;
   for (const q of questions) {
     const state = selection[q.question] ?? { selectedLabels: [], otherText: "", notes: "" };
     const parts: string[] = [];
+    let otherFlipped = false;
     for (const label of state.selectedLabels) {
       if (label === OTHER_LABEL) {
         const trimmed = state.otherText.trim();
-        if (trimmed.length > 0) parts.push(trimmed);
+        if (trimmed.length > 0) {
+          parts.push(trimmed);
+          otherFlipped = true;
+        }
       } else {
         parts.push(label);
       }
     }
-    answers[q.question] = parts.join(", ");
+    answers[q.question] = {
+      kind: otherFlipped ? "other" : "option",
+      value: parts.join(", "),
+    };
     const notesTrimmed = state.notes.trim();
     if (notesTrimmed.length > 0) {
       annotations[q.question] = { notes: notesTrimmed };
       annotationsHasContent = true;
     }
   }
-  const payload: AUQAnswerPayload = { toolUseId, answers };
+  const payload: AUQAnswerPayload = { answers };
   if (annotationsHasContent) payload.annotations = annotations;
   return payload;
 }
@@ -180,121 +188,53 @@ export function isSubmissionReady(
   return true;
 }
 
-/* ---------------- human-readable summary ---------------- */
+/* ---------------- locked-state helpers ---------------- */
 
-/** Compose the visible user-message text — one bullet per question, the
- *  selected label(s) and inline notes. This is what the chat bubble
- *  renders; it's also the only thing the model sees as user input on its
- *  next turn (the marker is dashboard-only metadata). */
-export function formatHumanReadableAnswer(
-  questions: AUQQuestion[],
-  payload: AUQAnswerPayload,
-): string {
-  const lines: string[] = [];
-  for (const q of questions) {
-    const answer = payload.answers[q.question] ?? "";
-    const note = payload.annotations?.[q.question]?.notes;
-    let line = `- ${q.header || q.question}: ${answer || "(no answer)"}`;
-    if (note && note.length > 0) line += ` — note: ${note}`;
-    lines.push(line);
-  }
-  return lines.join("\n");
-}
-
-/* ---------------- marker codec ---------------- */
-
-/** Base64 codec that's safe in both Node (Buffer) and browser (btoa/atob)
- *  contexts. The marker payload is small (a handful of strings) so we
- *  don't need streaming; a single round-trip suffices.
- *
- *  We base64 the JSON (not embed it raw) so a literal `@@AUQ-ANSWER@@`
- *  inside a user note can't defeat the parser, and so the suffix is one
- *  uninterrupted line for trivial endsWith / split parsing. */
-function encodeBase64(s: string): string {
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(s, "utf8").toString("base64");
-  }
-  // Browser fallback. btoa expects latin-1; encode UTF-8 first.
-  const utf8 = unescape(encodeURIComponent(s));
-  return btoa(utf8);
-}
-
-function decodeBase64(s: string): string {
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(s, "base64").toString("utf8");
-  }
-  return decodeURIComponent(escape(atob(s)));
-}
-
-/** Build the full user-message body — human-readable summary followed by
- *  the marker + base64 payload suffix on its own line. */
-export function formatAnswerMessageBody(
-  questions: AUQQuestion[],
-  payload: AUQAnswerPayload,
-): string {
-  const summary = formatHumanReadableAnswer(questions, payload);
-  const marker = `${AUQ_MARKER}${encodeBase64(JSON.stringify(payload))}`;
-  return `${summary}\n\n${marker}`;
-}
-
-/** Detect + extract the marker from a user-message text. Returns the
- *  stripped display text and the parsed payload, or `null` if the marker
- *  isn't present or is malformed (no throw — the parser is best-effort).
- *
- *  Idempotent: a text without the marker returns null and the caller
- *  uses the original text unchanged. */
-export function parseAnswerMessageBody(
-  text: string,
-): { displayText: string; payload: AUQAnswerPayload } | null {
-  if (typeof text !== "string") return null;
-  const idx = text.lastIndexOf(AUQ_MARKER);
-  if (idx === -1) return null;
-  const encoded = text.slice(idx + AUQ_MARKER.length).trim();
-  if (encoded.length === 0) return null;
-  let json: string;
-  try {
-    json = decodeBase64(encoded);
-  } catch {
-    return null;
-  }
+/** Parse the canonical `tool_result` text the MCP handler emitted. The
+ *  handler echoes the questions + answers + annotations as JSON; we
+ *  extract the answers / annotations halves to drive the locked-panel
+ *  selection rehydration. Returns null when the text isn't a parseable
+ *  echo (e.g. an error tool_result, a built-in AskUserQuestion auto-
+ *  failure string, a `{tool_use_id, text: "..."}` stub) — caller falls
+ *  back to a generic "answered" rendering with no highlighted picks.
+ */
+export function parseToolResultOutput(text: string | undefined): AUQAnswerPayload | null {
+  if (typeof text !== "string" || text.length === 0) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(json);
+    parsed = JSON.parse(text);
   } catch {
     return null;
   }
-  if (!isValidPayload(parsed)) return null;
-  // Strip the marker line AND the preceding blank line separator (if
-  // present) so the visible text doesn't end with stray whitespace.
-  let displayText = text.slice(0, idx);
-  if (displayText.endsWith("\n\n")) displayText = displayText.slice(0, -2);
-  else if (displayText.endsWith("\n")) displayText = displayText.slice(0, -1);
-  return { displayText, payload: parsed };
-}
-
-function isValidPayload(v: unknown): v is AUQAnswerPayload {
-  if (v === null || typeof v !== "object") return false;
-  const obj = v as { toolUseId?: unknown; answers?: unknown; annotations?: unknown };
-  if (typeof obj.toolUseId !== "string" || obj.toolUseId.length === 0) return false;
-  if (obj.answers === null || typeof obj.answers !== "object") return false;
+  if (parsed === null || typeof parsed !== "object") return null;
+  const obj = parsed as { answers?: unknown; annotations?: unknown };
+  if (obj.answers === null || typeof obj.answers !== "object") return null;
+  const answers: Record<string, AUQAnswer> = {};
   for (const k of Object.keys(obj.answers)) {
-    const val = (obj.answers as Record<string, unknown>)[k];
-    if (typeof val !== "string") return false;
+    const a = (obj.answers as Record<string, unknown>)[k];
+    if (a === null || typeof a !== "object") return null;
+    const ax = a as { kind?: unknown; value?: unknown };
+    if (ax.kind !== "option" && ax.kind !== "other") return null;
+    if (typeof ax.value !== "string") return null;
+    answers[k] = { kind: ax.kind, value: ax.value };
   }
-  if (obj.annotations !== undefined) {
-    if (obj.annotations === null || typeof obj.annotations !== "object") return false;
+  const payload: AUQAnswerPayload = { answers };
+  if (obj.annotations && typeof obj.annotations === "object") {
+    const annotations: Record<string, { notes?: string }> = {};
+    let any = false;
     for (const k of Object.keys(obj.annotations)) {
-      const a = (obj.annotations as Record<string, unknown>)[k];
-      if (a === null || typeof a !== "object") return false;
-      const ax = a as { notes?: unknown; preview?: unknown };
-      if (ax.notes !== undefined && typeof ax.notes !== "string") return false;
-      if (ax.preview !== undefined && typeof ax.preview !== "string") return false;
+      const v = (obj.annotations as Record<string, unknown>)[k];
+      if (v === null || typeof v !== "object") continue;
+      const vx = v as { notes?: unknown };
+      if (typeof vx.notes === "string" && vx.notes.length > 0) {
+        annotations[k] = { notes: vx.notes };
+        any = true;
+      }
     }
+    if (any) payload.annotations = annotations;
   }
-  return true;
+  return payload;
 }
-
-/* ---------------- locked-state helpers ---------------- */
 
 /** Re-hydrate panel selection state from a previously-submitted payload —
  *  used to render the locked panel after reload (or in another tab) with
@@ -305,7 +245,8 @@ export function selectionFromPayload(
 ): Record<string, AUQSelectionState> {
   const out: Record<string, AUQSelectionState> = {};
   for (const q of questions) {
-    const raw = payload.answers[q.question] ?? "";
+    const answer = payload.answers[q.question];
+    const raw = answer?.value ?? "";
     const labelSet = new Set(q.options.map((o) => o.label));
     const parts = raw.length > 0 ? raw.split(", ") : [];
     const selectedLabels: string[] = [];

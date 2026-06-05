@@ -1,21 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
-  AUQ_MARKER,
   OTHER_LABEL,
   buildAnswerPayload,
-  formatAnswerMessageBody,
-  formatHumanReadableAnswer,
   isSubmissionReady,
-  parseAnswerMessageBody,
   parseQuestions,
+  parseToolResultOutput,
   selectionFromPayload,
   type AUQQuestion,
 } from "./ask-user-question";
 
-// FRI-152 — pure-`.ts` logic-seam coverage for the AskUserQuestion
-// renderer. Same node-pool / no-DOM convention as TodoWrite's
-// `todo-render.test.ts`. The DOM-visual behaviors (radio/checkbox
-// semantics, keyboard nav) are intentionally out of scope here.
+// FRI-152 — pure-`.ts` logic-seam coverage for the AskUserQuestion /
+// `mcp__friday-elicitation__ask_user` renderer. Same node-pool / no-DOM
+// convention as TodoWrite's `todo-render.test.ts`. The DOM-visual
+// behaviors (radio/checkbox semantics, keyboard nav) are intentionally
+// out of scope here.
 
 const Q_SIZE: AUQQuestion = {
   question: "Which size?",
@@ -78,7 +76,6 @@ describe("parseQuestions", () => {
         {
           question: "Q?",
           header: "Q",
-          // truthy but not literal true
           multiSelect: "yes",
           options: [
             { label: "A", description: "" },
@@ -111,50 +108,98 @@ describe("parseQuestions", () => {
     expect(parsed[0]!.question).toBe("Kept");
     expect(parsed[0]!.options.map((o) => o.label)).toEqual(["A", "B"]);
   });
-
-  it("does not enforce SDK count limits (renders bad input rather than empty panel)", () => {
-    const parsed = parseQuestions({
-      questions: [
-        {
-          question: "Q?",
-          header: "Q",
-          multiSelect: false,
-          // 5 options — over the SDK's 4-option cap. We still render them.
-          options: Array.from({ length: 5 }, (_, i) => ({
-            label: `Opt${i}`,
-            description: "",
-          })),
-        },
-      ],
-    });
-    expect(parsed[0]!.options.length).toBe(5);
-  });
 });
 
-describe("buildAnswerPayload — single-select", () => {
-  it("emits answers[Q] equal to the single chosen label", () => {
-    const payload = buildAnswerPayload("tool_abc", [Q_SIZE], {
+describe("buildAnswerPayload — kind discriminator", () => {
+  it("emits {kind: 'option'} when every pick is a listed option (single-select)", () => {
+    const payload = buildAnswerPayload([Q_SIZE], {
       "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "" },
     });
     expect(payload).toEqual({
-      toolUseId: "tool_abc",
-      answers: { "Which size?": "Small" },
+      answers: {
+        "Which size?": { kind: "option", value: "Small" },
+      },
     });
   });
 
+  it("emits {kind: 'option'} when every pick is listed (multi-select)", () => {
+    const payload = buildAnswerPayload([Q_FLAVORS], {
+      "Which flavors?": {
+        selectedLabels: ["Vanilla", "Strawberry"],
+        otherText: "",
+        notes: "",
+      },
+    });
+    expect(payload.answers["Which flavors?"]).toEqual({
+      kind: "option",
+      value: "Vanilla, Strawberry",
+    });
+  });
+
+  it("emits {kind: 'other'} when the user typed in Other (single-select)", () => {
+    const payload = buildAnswerPayload([Q_SIZE], {
+      "Which size?": {
+        selectedLabels: [OTHER_LABEL],
+        otherText: "  Custom huge  ",
+        notes: "",
+      },
+    });
+    expect(payload.answers["Which size?"]).toEqual({
+      kind: "other",
+      value: "Custom huge",
+    });
+  });
+
+  it("emits {kind: 'other'} when Other text mixes with a listed label (multi-select)", () => {
+    const payload = buildAnswerPayload([Q_FLAVORS], {
+      "Which flavors?": {
+        selectedLabels: ["Vanilla", OTHER_LABEL],
+        otherText: "Mango",
+        notes: "",
+      },
+    });
+    expect(payload.answers["Which flavors?"]).toEqual({
+      kind: "other",
+      value: "Vanilla, Mango",
+    });
+  });
+
+  it("drops Other-with-no-text and falls back to kind: 'option'", () => {
+    const payload = buildAnswerPayload([Q_FLAVORS], {
+      "Which flavors?": {
+        selectedLabels: ["Vanilla", OTHER_LABEL],
+        otherText: "   ",
+        notes: "",
+      },
+    });
+    // Other-with-empty-text drops; only the listed label remains and the
+    // discriminator flips back to 'option'.
+    expect(payload.answers["Which flavors?"]).toEqual({
+      kind: "option",
+      value: "Vanilla",
+    });
+  });
+});
+
+describe("buildAnswerPayload — annotations", () => {
   it("omits annotations field entirely when no question carries notes", () => {
-    const payload = buildAnswerPayload("tool_abc", [Q_SIZE], {
+    const payload = buildAnswerPayload([Q_SIZE], {
       "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "   " },
     });
     expect(payload.annotations).toBeUndefined();
   });
 
-  it("adds annotations when notes are non-empty (trimmed)", () => {
-    const payload = buildAnswerPayload("tool_abc", [Q_SIZE], {
+  it("adds trimmed notes for the matching question only", () => {
+    const payload = buildAnswerPayload([Q_SIZE, Q_FLAVORS], {
       "Which size?": {
         selectedLabels: ["Small"],
         otherText: "",
         notes: "  because portability matters  ",
+      },
+      "Which flavors?": {
+        selectedLabels: ["Vanilla"],
+        otherText: "",
+        notes: "",
       },
     });
     expect(payload.annotations).toEqual({
@@ -163,71 +208,10 @@ describe("buildAnswerPayload — single-select", () => {
   });
 });
 
-describe("buildAnswerPayload — multi-select", () => {
-  it("joins multi-select labels with comma+space in chosen order", () => {
-    const payload = buildAnswerPayload("tool_xyz", [Q_FLAVORS], {
-      "Which flavors?": {
-        selectedLabels: ["Vanilla", "Strawberry"],
-        otherText: "",
-        notes: "",
-      },
-    });
-    expect(payload.answers["Which flavors?"]).toBe("Vanilla, Strawberry");
-  });
-
-  it("preserves the user's selection order, not the option list order", () => {
-    const payload = buildAnswerPayload("tool_xyz", [Q_FLAVORS], {
-      "Which flavors?": {
-        selectedLabels: ["Chocolate", "Vanilla"],
-        otherText: "",
-        notes: "",
-      },
-    });
-    expect(payload.answers["Which flavors?"]).toBe("Chocolate, Vanilla");
-  });
-});
-
-describe("buildAnswerPayload — Other path", () => {
-  it("substitutes the user-typed text for the Other label (single-select)", () => {
-    const payload = buildAnswerPayload("tool_abc", [Q_SIZE], {
-      "Which size?": {
-        selectedLabels: [OTHER_LABEL],
-        otherText: "  Custom huge  ",
-        notes: "",
-      },
-    });
-    expect(payload.answers["Which size?"]).toBe("Custom huge");
-  });
-
-  it("joins Other text alongside listed labels in multi-select", () => {
-    const payload = buildAnswerPayload("tool_xyz", [Q_FLAVORS], {
-      "Which flavors?": {
-        selectedLabels: ["Vanilla", OTHER_LABEL],
-        otherText: "Mango",
-        notes: "",
-      },
-    });
-    expect(payload.answers["Which flavors?"]).toBe("Vanilla, Mango");
-  });
-
-  it("omits Other from the joined string when otherText is empty (no quiet 'Other' literal)", () => {
-    const payload = buildAnswerPayload("tool_xyz", [Q_FLAVORS], {
-      "Which flavors?": {
-        selectedLabels: ["Vanilla", OTHER_LABEL],
-        otherText: "   ",
-        notes: "",
-      },
-    });
-    // Other-with-no-text drops; only the listed label remains.
-    expect(payload.answers["Which flavors?"]).toBe("Vanilla");
-  });
-});
-
 describe("isSubmissionReady", () => {
   it("returns false when not every question has a selection", () => {
     const ready = isSubmissionReady([Q_SIZE, Q_FLAVORS], {
       "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "" },
-      // Q_FLAVORS missing
     });
     expect(ready).toBe(false);
   });
@@ -256,87 +240,44 @@ describe("isSubmissionReady", () => {
   });
 });
 
-describe("formatHumanReadableAnswer", () => {
-  it("renders one bullet per question using the chip header", () => {
-    const text = formatHumanReadableAnswer([Q_SIZE, Q_FLAVORS], {
-      toolUseId: "x",
-      answers: {
-        "Which size?": "Small",
-        "Which flavors?": "Vanilla, Chocolate",
-      },
-    });
-    expect(text).toBe("- Size: Small\n- Flavors: Vanilla, Chocolate");
+describe("parseToolResultOutput", () => {
+  it("returns null for empty / undefined output", () => {
+    expect(parseToolResultOutput(undefined)).toBeNull();
+    expect(parseToolResultOutput("")).toBeNull();
   });
 
-  it("appends notes inline when present", () => {
-    const text = formatHumanReadableAnswer([Q_SIZE], {
-      toolUseId: "x",
-      answers: { "Which size?": "Small" },
+  it("returns null for an output that isn't JSON or lacks an answers field", () => {
+    expect(parseToolResultOutput("Error: tool denied")).toBeNull();
+    expect(parseToolResultOutput(JSON.stringify({ questions: [] }))).toBeNull();
+  });
+
+  it("parses the canonical MCP echo shape into an AUQAnswerPayload", () => {
+    const echo = {
+      questions: [Q_SIZE],
+      answers: { "Which size?": { kind: "option", value: "Small" } },
+      annotations: { "Which size?": { notes: "for travel" } },
+    };
+    const parsed = parseToolResultOutput(JSON.stringify(echo));
+    expect(parsed).toEqual({
+      answers: { "Which size?": { kind: "option", value: "Small" } },
       annotations: { "Which size?": { notes: "for travel" } },
     });
-    expect(text).toBe("- Size: Small — note: for travel");
+  });
+
+  it("rejects an answers shape that doesn't carry the {kind, value} discriminator", () => {
+    // Pre-reshape (flat string) payload — must not pass the new validator.
+    expect(parseToolResultOutput(JSON.stringify({ answers: { Q: "A" } }))).toBeNull();
+    // Invalid kind value.
+    expect(
+      parseToolResultOutput(JSON.stringify({ answers: { Q: { kind: "freeform", value: "A" } } })),
+    ).toBeNull();
   });
 });
 
-describe("formatAnswerMessageBody / parseAnswerMessageBody — roundtrip", () => {
-  it("round-trips a payload through encode + decode byte-equal", () => {
-    const payload = {
-      toolUseId: "toolu_01abc",
-      answers: { "Which size?": "Small", "Which flavors?": "Vanilla, Chocolate" },
-      annotations: { "Which size?": { notes: "for travel" } },
-    } as const;
-    const body = formatAnswerMessageBody([Q_SIZE, Q_FLAVORS], { ...payload });
-    expect(body.startsWith("- Size: Small")).toBe(true);
-    expect(body).toContain(AUQ_MARKER);
-    const parsed = parseAnswerMessageBody(body);
-    expect(parsed).not.toBeNull();
-    expect(parsed!.payload).toEqual(payload);
-  });
-
-  it("strips the marker AND its leading blank line from displayText", () => {
-    const body = formatAnswerMessageBody([Q_SIZE], {
-      toolUseId: "t",
-      answers: { "Which size?": "Small" },
-    });
-    const parsed = parseAnswerMessageBody(body);
-    expect(parsed!.displayText).toBe("- Size: Small");
-    expect(parsed!.displayText.endsWith("\n")).toBe(false);
-  });
-
-  it("returns null for a text without the marker (idempotent on plain user input)", () => {
-    expect(parseAnswerMessageBody("hello there")).toBeNull();
-    expect(parseAnswerMessageBody("")).toBeNull();
-  });
-
-  it("returns null for a malformed base64 payload (no throw)", () => {
-    expect(parseAnswerMessageBody(`prefix\n\n${AUQ_MARKER}not-base64!@#`)).toBeNull();
-  });
-
-  it("returns null for a payload whose JSON shape is wrong (no toolUseId)", () => {
-    const garbage = Buffer.from(JSON.stringify({ answers: {} }), "utf8").toString("base64");
-    expect(parseAnswerMessageBody(`prefix\n\n${AUQ_MARKER}${garbage}`)).toBeNull();
-  });
-
-  it("survives a literal AUQ_MARKER string inside a notes field (defense by base64)", () => {
-    const payload = {
-      toolUseId: "toolu_01abc",
-      answers: { "Which size?": "Small" },
-      annotations: { "Which size?": { notes: `evil ${AUQ_MARKER} payload` } },
-    } as const;
-    const body = formatAnswerMessageBody([Q_SIZE], { ...payload });
-    // lastIndexOf strategy + base64 encoding means the literal marker
-    // inside notes can't defeat the parser.
-    const parsed = parseAnswerMessageBody(body);
-    expect(parsed).not.toBeNull();
-    expect(parsed!.payload).toEqual(payload);
-  });
-});
-
-describe("selectionFromPayload", () => {
-  it("rehydrates single-select selection from a stored payload", () => {
+describe("selectionFromPayload (lock-state rehydration)", () => {
+  it("rehydrates single-select selection from a stored option payload", () => {
     const selection = selectionFromPayload([Q_SIZE], {
-      toolUseId: "x",
-      answers: { "Which size?": "Small" },
+      answers: { "Which size?": { kind: "option", value: "Small" } },
     });
     expect(selection).toEqual({
       "Which size?": { selectedLabels: ["Small"], otherText: "", notes: "" },
@@ -345,16 +286,14 @@ describe("selectionFromPayload", () => {
 
   it("rehydrates multi-select selection from comma-joined string", () => {
     const selection = selectionFromPayload([Q_FLAVORS], {
-      toolUseId: "x",
-      answers: { "Which flavors?": "Vanilla, Strawberry" },
+      answers: { "Which flavors?": { kind: "option", value: "Vanilla, Strawberry" } },
     });
     expect(selection["Which flavors?"]!.selectedLabels).toEqual(["Vanilla", "Strawberry"]);
   });
 
   it("classifies an unknown answer string as Other with the literal text", () => {
     const selection = selectionFromPayload([Q_SIZE], {
-      toolUseId: "x",
-      answers: { "Which size?": "Custom huge" },
+      answers: { "Which size?": { kind: "other", value: "Custom huge" } },
     });
     expect(selection["Which size?"]!.selectedLabels).toEqual([OTHER_LABEL]);
     expect(selection["Which size?"]!.otherText).toBe("Custom huge");
@@ -362,8 +301,7 @@ describe("selectionFromPayload", () => {
 
   it("rehydrates notes onto the matching question", () => {
     const selection = selectionFromPayload([Q_SIZE], {
-      toolUseId: "x",
-      answers: { "Which size?": "Small" },
+      answers: { "Which size?": { kind: "option", value: "Small" } },
       annotations: { "Which size?": { notes: "for travel" } },
     });
     expect(selection["Which size?"]!.notes).toBe("for travel");

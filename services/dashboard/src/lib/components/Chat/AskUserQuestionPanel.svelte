@@ -1,37 +1,38 @@
 <script lang="ts">
   import { Send, Check } from "lucide-svelte";
-  import { chat } from "$lib/stores/chat.svelte";
   import {
     OTHER_LABEL,
+    buildAnswerPayload,
     isSubmissionReady,
     parseQuestions,
+    parseToolResultOutput,
     selectionFromPayload,
     type AUQQuestion,
     type AUQSelectionState,
   } from "./ask-user-question";
   import type { ToolRendererProps } from "./tool-renderers";
 
-  // FRI-152 — interactive panel for the Claude Agent SDK's `AskUserQuestion`
-  // tool. Registered against the dispatch registry's literal key
-  // `"AskUserQuestion"` (see tool-renderers.ts). Renders the model's
-  // structured questions as clickable cards; on submit, pipes the
-  // structured answer back through the existing `sendUserMessage` mutator
-  // path — the dashboard does NOT inject a synthetic tool_result into the
-  // SDK's already-paused turn (no such hook exists in the daemon's worker;
-  // see the FRI-152 ticket's "Investigation findings" comment). The user's
-  // answer surfaces to the model as a fresh user turn carrying the
-  // human-readable summary; reload-rehydration of the locked panel uses a
-  // base64 marker rider on the persisted user-message body (no state
-  // outside the message thread).
+  // FRI-152 — interactive panel for the Friday MCP tool
+  // `friday-elicitation/ask_user` (which supersedes the SDK built-in
+  // AskUserQuestion in this headless environment; the built-in is denied
+  // at the PreToolUse layer with a redirect message to this MCP tool).
+  // Registered against the dispatch registry's MCP short key `"ask_user"`
+  // (see tool-renderers.ts).
   //
-  // Accepts ALL ToolRendererProps fields so the dispatch-site prop spread
-  // in ChatMessages.svelte typechecks. Only `input`, `status`, `output`,
-  // and `toolId` are used — `friendlyName` / `inputPartialJson` are unused
-  // here.
+  // Wire path: the worker's MCP handler long-polls
+  // `/api/elicitation/<toolUseId>/wait`; the daemon emits an
+  // `elicitation_requested` SSE event when the waiter registers. The
+  // panel renders from `msg.input` (the canonical tool_use's questions
+  // payload, already replicated via Zero); on submit, the panel POSTs
+  // `/api/elicitation/<toolUseId>/submit` with the answer payload, the
+  // daemon resolves the waiter, the MCP handler returns, and the SDK
+  // emits a normal `tool_result` block. The panel locks once `msg.output`
+  // is populated (the canonical tool_result lands via Zero). No marker
+  // codec; no state outside the message thread.
   let {
     input,
     status,
-    output: _output,
+    output,
     toolId,
     toolName: _toolName,
     friendlyName: _friendlyName,
@@ -40,35 +41,26 @@
 
   let questions: AUQQuestion[] = $derived(parseQuestions(input));
 
-  // Look for a previously-submitted answer on a downstream user message —
-  // that's the lock-state signal. We deliberately do NOT lock on the SDK's
-  // own tool_result (which in this headless context is typically an auto-
-  // failed "no UI" error, not a real answer); the user should still get to
-  // record their answer for the model's next turn even after that failure.
-  let lockedAnswer = $derived.by(() => {
-    if (!toolId) return null;
-    for (const m of chat.messages) {
-      if (m.askUserQuestionAnswer?.toolUseId === toolId) {
-        return m.askUserQuestionAnswer;
-      }
-    }
-    return null;
-  });
+  // Locked when the MCP tool's tool_result has landed (output populated)
+  // AND the output text decodes as our structured echo. An error result
+  // (PreToolUse deny for the built-in, MCP handler aborted, etc.) decodes
+  // to null — we still render the panel as locked-without-selections so
+  // the user sees their prior request didn't succeed.
+  let lockedAnswer = $derived(parseToolResultOutput(output));
+  let lockedNoAnswer = $derived(
+    !lockedAnswer && typeof output === "string" && output.length > 0,
+  );
+  let locked = $derived(!!lockedAnswer || lockedNoAnswer);
 
-  // Per-question selection state. Rehydrate from the locked answer when
-  // one is present (so the locked panel highlights what the user actually
-  // picked); otherwise start blank.
+  // Per-question selection state.
   let selection = $state<Record<string, AUQSelectionState>>({});
-  let lastInitForToolId = "";
+  let lastInitKey = "";
   $effect(() => {
-    // Re-init whenever the panel's toolId changes (a new AskUserQuestion
-    // tool_use mounted) OR a locked answer arrives. Both transitions
-    // should reset selection to the canonical state for THIS panel.
     const tid = toolId ?? "";
-    const lockedKey = lockedAnswer ? "L" : "U";
+    const lockedKey = lockedAnswer ? "L" : locked ? "E" : "U";
     const key = `${tid}|${lockedKey}`;
-    if (key === lastInitForToolId) return;
-    lastInitForToolId = key;
+    if (key === lastInitKey) return;
+    lastInitKey = key;
     if (lockedAnswer) {
       selection = selectionFromPayload(questions, lockedAnswer);
     } else {
@@ -82,8 +74,6 @@
 
   let notesOpen = $state<Record<string, boolean>>({});
   $effect(() => {
-    // Pre-open the notes disclosure on locked panels that carry a note,
-    // so the user sees what they wrote without having to click.
     if (!lockedAnswer) return;
     const next: Record<string, boolean> = {};
     for (const q of questions) {
@@ -93,7 +83,12 @@
     notesOpen = next;
   });
 
-  let canSubmit = $derived(!lockedAnswer && isSubmissionReady(questions, selection));
+  // Tracks an in-flight submit POST so the button can show progress and
+  // we don't double-fire on rapid clicks.
+  let submitting = $state(false);
+  let submitError = $state<string | null>(null);
+
+  let canSubmit = $derived(!locked && !submitting && isSubmissionReady(questions, selection));
 
   function ensureState(q: string): AUQSelectionState {
     let s = selection[q];
@@ -105,26 +100,21 @@
   }
 
   function toggleLabel(q: AUQQuestion, label: string) {
-    if (lockedAnswer) return;
+    if (locked) return;
     const s = ensureState(q.question);
     if (q.multiSelect) {
       const i = s.selectedLabels.indexOf(label);
       if (i === -1) s.selectedLabels = [...s.selectedLabels, label];
       else s.selectedLabels = s.selectedLabels.filter((_, idx) => idx !== i);
     } else {
-      // Single-select: clicking the already-selected option is a no-op,
-      // not a deselect — radio semantics.
       s.selectedLabels = [label];
     }
   }
 
   function setOtherText(q: AUQQuestion, value: string) {
-    if (lockedAnswer) return;
+    if (locked) return;
     const s = ensureState(q.question);
     s.otherText = value;
-    // First keystroke after picking Other counts as a positive selection;
-    // typing into Other when Other isn't yet selected auto-selects it
-    // (saves a click on mobile).
     if (s.otherText.length > 0 && !s.selectedLabels.includes(OTHER_LABEL)) {
       if (q.multiSelect) {
         s.selectedLabels = [...s.selectedLabels, OTHER_LABEL];
@@ -135,14 +125,37 @@
   }
 
   function setNotes(q: AUQQuestion, value: string) {
-    if (lockedAnswer) return;
+    if (locked) return;
     const s = ensureState(q.question);
     s.notes = value;
   }
 
-  function submit() {
+  async function submit() {
     if (!canSubmit || !toolId) return;
-    chat.submitAskUserQuestionAnswer({ toolUseId: toolId, questions, selection });
+    submitting = true;
+    submitError = null;
+    const payload = buildAnswerPayload(questions, selection);
+    try {
+      const res = await fetch(`/api/elicitation/${encodeURIComponent(toolId)}/submit`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => ({}))) as { error?: string };
+        submitError = errBody.error ?? `submit failed (${res.status})`;
+        submitting = false;
+        return;
+      }
+      // Success: the panel doesn't flip to locked from here — it waits for
+      // the canonical tool_result block to replicate via Zero, which then
+      // populates `msg.output` and the derived `lockedAnswer` rerenders
+      // the panel as locked. Keep the submit button disabled in the
+      // meantime so the user can't double-fire.
+    } catch (e) {
+      submitError = (e as Error).message;
+      submitting = false;
+    }
   }
 
   function isLabelSelected(q: AUQQuestion, label: string): boolean {
@@ -150,13 +163,13 @@
   }
 </script>
 
-<div class="auq-panel" data-tool-id={toolId} data-locked={lockedAnswer ? "1" : "0"}>
+<div class="auq-panel" data-tool-id={toolId} data-locked={locked ? "1" : "0"}>
   {#if questions.length === 0}
-    <div class="auq-empty">AskUserQuestion received malformed input — nothing to render.</div>
+    <div class="auq-empty">ask_user received malformed input — nothing to render.</div>
   {:else}
     <div class="auq-header">
       <span class="auq-icon" aria-hidden="true">?</span>
-      <span class="auq-title">{lockedAnswer ? "Answered" : "Friday asks"}</span>
+      <span class="auq-title">{locked ? "Answered" : "Friday asks"}</span>
       {#if status === "error" || status === "aborted"}
         <span class="auq-badge auq-badge-warn">{status}</span>
       {/if}
@@ -167,7 +180,7 @@
         {@const state = selection[q.question] ?? { selectedLabels: [], otherText: "", notes: "" }}
         {@const name = `auq-${toolId ?? "x"}-${q.question}`}
         <li class="auq-question">
-          <fieldset class="auq-fieldset" disabled={!!lockedAnswer}>
+          <fieldset class="auq-fieldset" disabled={locked || submitting}>
             <legend class="auq-legend">
               <span class="auq-header-chip" title={q.header}>{q.header}</span>
               <span class="auq-question-text">{q.question}</span>
@@ -188,7 +201,7 @@
                     {name}
                     value={opt.label}
                     {checked}
-                    disabled={!!lockedAnswer}
+                    disabled={locked || submitting}
                     onchange={() => toggleLabel(q, opt.label)}
                     aria-describedby={`${name}-${opt.label}-desc`} />
                   <span class="auq-option-body">
@@ -208,12 +221,12 @@
                 </label>
               {/each}
 
-              <!-- Synthesized "Other" affordance. Per the SDK spec the
-                   runtime auto-provides Other; in this headless context
-                   the dashboard owns the rendering, so we always include
-                   it. The selection check is inlined rather than hoisted
-                   to a `{@const}` because `{@const}` is only valid as an
-                   immediate child of a control-flow block. -->
+              <!-- Synthesized "Other" affordance. The dashboard always
+                   renders this (per the FRI-152 protocol fragment, the
+                   model is told NOT to include an Other option). The
+                   membership check is inlined rather than hoisted to a
+                   `{@const}` because `{@const}` only sits inside
+                   control-flow blocks. -->
               <label
                 class="auq-option auq-option-other"
                 class:checked={state.selectedLabels.includes(OTHER_LABEL)}
@@ -223,7 +236,7 @@
                   {name}
                   value={OTHER_LABEL}
                   checked={state.selectedLabels.includes(OTHER_LABEL)}
-                  disabled={!!lockedAnswer}
+                  disabled={locked || submitting}
                   onchange={() => toggleLabel(q, OTHER_LABEL)} />
                 <span class="auq-option-body">
                   <span class="auq-option-label">{OTHER_LABEL}</span>
@@ -232,14 +245,14 @@
                     class="auq-other-input"
                     placeholder="Type your own answer"
                     value={state.otherText}
-                    disabled={!!lockedAnswer}
+                    disabled={locked || submitting}
                     oninput={(e) => setOtherText(q, (e.currentTarget as HTMLInputElement).value)} />
                 </span>
               </label>
             </div>
 
             <div class="auq-notes-row">
-              {#if !lockedAnswer}
+              {#if !locked}
                 <button
                   type="button"
                   class="auq-notes-toggle"
@@ -248,8 +261,8 @@
                   {notesOpen[q.question] ? "−" : "+"} Add note
                 </button>
               {/if}
-              {#if notesOpen[q.question] || (lockedAnswer && state.notes.length > 0)}
-                {#if lockedAnswer}
+              {#if notesOpen[q.question] || (locked && state.notes.length > 0)}
+                {#if locked}
                   <p class="auq-notes-locked">{state.notes}</p>
                 {:else}
                   <textarea
@@ -268,20 +281,27 @@
       {/each}
     </ul>
 
-    {#if lockedAnswer}
+    {#if locked && lockedAnswer}
       <div class="auq-footer auq-footer-locked">
         <Check size={14} aria-hidden="true" />
         <span>Submitted</span>
       </div>
+    {:else if lockedNoAnswer}
+      <div class="auq-footer auq-footer-locked auq-footer-error">
+        <span>Tool result returned without a structured answer.</span>
+      </div>
     {:else}
       <div class="auq-footer">
+        {#if submitError}
+          <span class="auq-error">{submitError}</span>
+        {/if}
         <button
           type="button"
           class="auq-submit"
           disabled={!canSubmit}
           onclick={submit}>
           <Send size={14} aria-hidden="true" />
-          Submit answers
+          {submitting ? "Submitting…" : "Submit answers"}
         </button>
       </div>
     {/if}
@@ -528,7 +548,13 @@
   .auq-footer {
     margin-top: 0.75rem;
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 0.5rem;
+  }
+  .auq-error {
+    color: var(--status-error);
+    font-size: 0.75rem;
   }
   .auq-submit {
     display: inline-flex;
@@ -559,5 +585,8 @@
     align-items: center;
     gap: 0.35rem;
     margin-top: 0.5rem;
+  }
+  .auq-footer-error {
+    color: var(--status-error);
   }
 </style>

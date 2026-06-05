@@ -3,6 +3,12 @@ import { URL } from "node:url";
 import { logger } from "../log.js";
 import { eventBus, getBootId, getBootTs } from "../events/bus.js";
 import {
+  cancel as cancelElicitation,
+  register as registerElicitation,
+  resolve as resolveElicitation,
+  type ElicitationAnswer,
+} from "../elicitation/registry.js";
+import {
   type AgentEntry,
   DAEMON_SECRET_HEADER,
   getDaemonSecret,
@@ -174,6 +180,66 @@ async function handle(
   // --- SSE events ---
   if (method === "GET" && path === "/api/events") {
     return handleEvents(req, res, cfg);
+  }
+
+  // --- FRI-152 elicitation bridge ---
+  // The worker's `mcp__friday-elicitation__ask_user` handler calls:
+  //   1. POST /api/elicitation/wait { agentName, turnId, toolUseId }
+  //      — atomically register a waiter + emit SSE + block until answer.
+  // The dashboard's panel submit calls:
+  //   2. POST /api/elicitation/<id>/submit  — supply the answer.
+  // Together these implement the turn-pause property: the SDK is blocked
+  // inside the MCP handler's `await` for (1)'s response, which only
+  // returns after (2) fires the in-memory resolver.
+  if (method === "POST" && path === "/api/elicitation/wait") {
+    const body = await readJson<{
+      agentName?: string;
+      turnId?: string;
+      toolUseId?: string;
+    }>(req);
+    if (
+      typeof body.agentName !== "string" ||
+      typeof body.turnId !== "string" ||
+      typeof body.toolUseId !== "string" ||
+      body.toolUseId.length === 0
+    ) {
+      return json(res, 400, { error: "missing_fields" });
+    }
+    const promise = registerElicitation(body.toolUseId);
+    // Fire SSE AFTER registering the waiter so the dashboard's submit
+    // can't beat us to the resolver. (The submit handler returns 409
+    // if no waiter is registered; that would deadlock a fast user.)
+    eventBus.publish({
+      v: 1,
+      type: "elicitation_requested",
+      agent: body.agentName,
+      turn_id: body.turnId,
+      tool_use_id: body.toolUseId,
+      ts: Date.now(),
+    });
+    const onAbort = () => {
+      cancelElicitation(body.toolUseId!, new Error("client_aborted"));
+    };
+    req.on("close", onAbort);
+    try {
+      const answer = await promise;
+      req.off("close", onAbort);
+      return json(res, 200, answer);
+    } catch (err) {
+      req.off("close", onAbort);
+      return json(res, 499, { error: String((err as Error).message) });
+    }
+  }
+  if (method === "POST" && path.startsWith("/api/elicitation/") && path.endsWith("/submit")) {
+    const id = path.slice("/api/elicitation/".length, -"/submit".length);
+    if (id.length === 0) return json(res, 400, { error: "missing_id" });
+    const body = await readJson<ElicitationAnswer>(req);
+    if (!body || typeof body !== "object" || !body.answers) {
+      return json(res, 400, { error: "missing_answers" });
+    }
+    const resolved = resolveElicitation(id, body);
+    if (!resolved) return json(res, 409, { error: "no_waiter", id });
+    return json(res, 200, { ok: true });
   }
 
   // --- Chat turn (FRI-123 — all ADR-024 retired routes deleted) ---

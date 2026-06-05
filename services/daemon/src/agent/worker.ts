@@ -34,6 +34,7 @@ import { buildMailPrompt } from "../comms/mail-prompt.js";
 import { daemonFetch } from "../mcp/http.js";
 import { runHooks } from "@friday/shared";
 import "../hooks/register.js";
+import { denyBuiltinAskUserQuestion } from "../hooks/block-builtin-ask-user-question.js";
 import { captureShellEnv } from "../shell-env.js";
 
 // FRI-150 (pivot, ADR-037): per-agent shell capture. Each forked worker
@@ -398,7 +399,7 @@ export function buildQueryOptions(
   _p: WorkerPromptCommand,
   sessionId: string | undefined,
   allowedTools: string[] | undefined,
-  builderGuardHooks: QueryOptions["hooks"] | undefined,
+  preToolUseHooks: QueryOptions["hooks"] | undefined,
   thinking: QueryOptions["thinking"] | undefined,
   mcpServers: QueryOptions["mcpServers"],
   abortController: AbortController | undefined,
@@ -425,7 +426,7 @@ export function buildQueryOptions(
     // closing on iterator return). Without this, the SDK only learns
     // the consumer is gone when the for-await iterator returns.
     ...(abortController ? { abortController } : {}),
-    ...(builderGuardHooks ? { hooks: builderGuardHooks } : {}),
+    ...(preToolUseHooks ? { hooks: preToolUseHooks } : {}),
     ...(allowedTools ? { allowedTools } : {}),
     ...(thinking ? { thinking } : {}),
     ...(opts.effort ? { effort: opts.effort } : {}),
@@ -642,47 +643,61 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
 
   const allowedTools = p.allowedToolsOverride ?? opts.allowedToolsOverride;
 
-  // Defense-in-depth: builders run inside a git worktree. The SDK PreToolUse
-  // callback below bridges into Friday's before_tool_call hook registry; the
-  // workspace-guard handler is the registered enforcer. New tool-call gates
-  // (rate-limit, audit, etc.) compose by registering additional handlers
-  // without touching this adapter. Gating stays at the SDK-adapter layer so
-  // non-builder agents never fire the tool-call hook.
-  const builderGuardHooks =
-    opts.agentType === "builder"
-      ? {
-          PreToolUse: [
-            {
-              hooks: [
-                async (input: unknown) => {
-                  const i = input as {
-                    hook_event_name?: string;
-                    tool_name?: string;
-                    tool_input?: Record<string, unknown>;
-                  };
-                  if (i.hook_event_name !== "PreToolUse") return {};
-                  const results = await runHooks("before_tool_call", {
-                    workspacePath: opts.workingDirectory,
-                    toolName: i.tool_name,
-                    toolInput: (i.tool_input ?? {}) as Record<string, unknown>,
-                  });
-                  const denied = results.find((r) => r?.deny);
-                  if (denied?.deny) {
-                    return {
-                      hookSpecificOutput: {
-                        hookEventName: "PreToolUse" as const,
-                        permissionDecision: "deny" as const,
-                        permissionDecisionReason: denied.deny.reason,
-                      },
-                    };
-                  }
-                  return {};
+  // Defense-in-depth PreToolUse adapter. The SDK fires PreToolUse for every
+  // tool call regardless of permissionMode (bypassPermissions skips canUseTool
+  // but not hooks); we use it for two things:
+  //   1. Deny the built-in `AskUserQuestion` for every agent type that ships
+  //      `friday-elicitation/ask_user` (FRI-152). The deny message redirects
+  //      the model to the MCP variant. This fires unconditionally.
+  //   2. The workspace-guard registry's `before_tool_call` chain — still
+  //      builder-only (builders run inside a worktree). Composed below.
+  const preToolUseHooks = {
+    PreToolUse: [
+      {
+        hooks: [
+          async (input: unknown) => {
+            const i = input as {
+              hook_event_name?: string;
+              tool_name?: string;
+              tool_input?: Record<string, unknown>;
+            };
+            if (i.hook_event_name !== "PreToolUse") return {};
+            // FRI-152: built-in AskUserQuestion deny. Pure check, runs
+            // for all agent types.
+            const builtinDeny = denyBuiltinAskUserQuestion(i.tool_name ?? "");
+            if (builtinDeny) {
+              return {
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse" as const,
+                  permissionDecision: "deny" as const,
+                  permissionDecisionReason: builtinDeny,
                 },
-              ],
-            },
-          ],
-        }
-      : undefined;
+              };
+            }
+            // Workspace-guard: builder-only. Skip for other agent types
+            // so the hook-registry round-trip stays out of the hot path.
+            if (opts.agentType !== "builder") return {};
+            const results = await runHooks("before_tool_call", {
+              workspacePath: opts.workingDirectory,
+              toolName: i.tool_name,
+              toolInput: (i.tool_input ?? {}) as Record<string, unknown>,
+            });
+            const denied = results.find((r) => r?.deny);
+            if (denied?.deny) {
+              return {
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse" as const,
+                  permissionDecision: "deny" as const,
+                  permissionDecisionReason: denied.deny.reason,
+                },
+              };
+            }
+            return {};
+          },
+        ],
+      },
+    ],
+  };
 
   // When the dispatch carries attachments, the SDK's plain `prompt: string`
   // form can't represent them — image/document content blocks have to ride
@@ -714,7 +729,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         p,
         sessionId,
         allowedTools,
-        builderGuardHooks,
+        preToolUseHooks,
         thinking,
         mcpServers,
         abortController,

@@ -67,6 +67,7 @@ describe("resolveToolRenderer", () => {
         "mail_read",
         "mail_close",
         "AskUserQuestion",
+        "ask_user",
       ]),
     );
   });

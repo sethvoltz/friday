@@ -139,9 +139,13 @@ TOOL_RENDERERS["mail_inbox"] = { component: MailToolBlock };
 TOOL_RENDERERS["mail_read"] = { component: MailToolBlock };
 TOOL_RENDERERS["mail_close"] = { component: MailToolBlock };
 
-// FRI-152: AskUserQuestion is a Claude Agent SDK built-in tool (no `mcp__`
-// prefix), so it resolves at step (1) of `resolveToolRenderer` on its
-// literal name — registry key stays `"AskUserQuestion"`. Renders an
-// interactive panel with clickable options instead of the generic collapsed
-// JSON card.
+// FRI-152: `mcp__friday-elicitation__ask_user` resolves at step (2) of
+// `resolveToolRenderer` on the short segment `"ask_user"`. The SDK built-in
+// `AskUserQuestion` is denied at the daemon's PreToolUse hook (see
+// `services/daemon/src/hooks/block-builtin-ask-user-question.ts`) so it
+// never actually surfaces as a tool_use in this environment — but we keep
+// a literal-name registration too as a defensive fallback so that if the
+// built-in slips through somehow (PreToolUse misconfigured), the user
+// still sees a panel rather than raw JSON.
+TOOL_RENDERERS["ask_user"] = { component: AskUserQuestionPanel, direct: true };
 TOOL_RENDERERS["AskUserQuestion"] = { component: AskUserQuestionPanel, direct: true };

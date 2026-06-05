@@ -31,7 +31,8 @@ export type WireEvent =
   | BlockCanceledEvent
   | ConnectionEstablishedEvent
   | CompactionEvent
-  | WorkerNoMailBackEvent;
+  | WorkerNoMailBackEvent
+  | ElicitationRequestedEvent;
 
 export interface BaseEvent {
   v: 1;
@@ -252,6 +253,32 @@ export interface WorkerNoMailBackEvent extends BaseEvent {
   agent: string;
   turn_id: string;
   streak: number;
+}
+
+/**
+ * FRI-152: fired when an agent's `mcp__friday-elicitation__ask_user` tool
+ * call lands and the daemon registers an in-memory waiter for the user's
+ * answer. The dashboard already has the tool_use block (with the questions
+ * payload) via Zero — this event is the side-channel signal that the
+ * worker is currently AWAITING the answer (i.e. the panel should render
+ * with active controls, not as a stale historical tool call). Once the
+ * user submits, the resolver fires, the MCP handler returns, the SDK
+ * emits a normal `tool_result` block, and the dashboard locks the panel
+ * on `msg.output` populated — no separate "resolved" event needed.
+ *
+ * Carries no `questions` payload because the dashboard reads them off
+ * the canonical tool_use block (replicated via Zero). This event is
+ * purely a "panel is live" signal.
+ */
+export interface ElicitationRequestedEvent extends BaseEvent {
+  type: "elicitation_requested";
+  agent: string;
+  turn_id: string;
+  /** SDK tool_use_id of the `ask_user` call. Same id the daemon's
+   *  in-memory waiter map is keyed on; same id the dashboard POSTs
+   *  to `/api/elicitation/<id>/submit` to resolve. */
+  tool_use_id: string;
+  ts: number;
 }
 
 /**
