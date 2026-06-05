@@ -44,6 +44,7 @@ import {
 } from "./block-stream.js";
 import { recordError as bsRecordError } from "./block-injectors.js";
 import { appContextForAgent } from "../apps/installer.js";
+import { noteForceKillForRespawn, noteTurnComplete } from "../comms/respawn-orphan-mail.js";
 import { recoverFromJsonl } from "./jsonl-recovery.js";
 import { enqueueTransition, enqueueTransitionResult } from "./transition-queue.js";
 import {
@@ -534,7 +535,29 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
       // Generation guard above: `forceWorkerRefork` `live.delete`s before the
       // drain so this exit fires for a superseded Generation and skips here.
       live.delete(input.agentName);
-      void finalizeHardExit(w);
+      void (async () => {
+        try {
+          await finalizeHardExit(w);
+        } catch {
+          // finalizeHardExit logs its own errors; swallow so the respawn
+          // check still runs.
+        }
+        // FRI-154: after the hard-exit teardown, queue a respawn if this
+        // agent still has unprocessed mail in its inbox. Anti-loop gated;
+        // dead-letters after `RESPAWN_MAX_ATTEMPTS` failed cycles.
+        await noteForceKillForRespawn(input.agentName, { code, signal });
+      })();
+    } else {
+      // FRI-154: superseded Generation — `forceKillStuckWorker` /
+      // `archiveAgent` / `forceWorkerRefork` already owned the teardown.
+      // Archive sets `agents.status='archived'`, which the respawn function
+      // skips. `forceWorkerRefork` `live.set`s a replacement before this
+      // exit fires (or `live.delete`s and the agent isn't live), so
+      // `noteForceKillForRespawn`'s `isAgentLive` early-out covers the
+      // refork case. The only path that legitimately wants a respawn here
+      // is `forceKillStuckWorker(reason: "abort"|"stale"|"wedge"|"fsm")`
+      // followed by orphan mail in the inbox.
+      void noteForceKillForRespawn(input.agentName, { code, signal });
     }
     // Phase 5: `agent_lifecycle` SSE retired — Zero replicates the
     // agents row UPDATE so the dashboard sees the status drop on
@@ -1955,8 +1978,53 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       });
       break;
     }
-    case "status-change":
+    case "status-change": {
+      // Capture the prior in-memory status BEFORE setWorkerStatus updates it,
+      // so the FRI-151 reset below can gate on the idle→working edge rather
+      // than firing on the working→working same-status writes the
+      // sendPrompt/spawnTurn paths already produce.
+      const wasIdle = w.status === "idle";
       setWorkerStatus(w, e.status, "handleEvent.status-change");
+      // FRI-151: FRI-127 §6 introduced a worker-internal mail-fetch path
+      // (worker.ts mainLoop → buildMailPrompt → runQuery) that drives a new
+      // turn WITHOUT calling sendPrompt on the daemon side. FRI-58's
+      // lastBlockStop/turnStart reset only fires inside sendPrompt, so a
+      // worker that wakes from >30 min idle on the mail path enters `working`
+      // with lastBlockStop still pinned at the previous turn's turn-complete.
+      // The next watchdog tick (≤60s) measures `Date.now() - lastBlockStop`
+      // against the 30 min threshold and SIGTERMs the worker before any
+      // block-stop can refresh the bookkeeping. Mirror FRI-58 here so the
+      // stall check measures from this turn's start, not the previous one's
+      // end. The dispatcher path already set status=working synchronously
+      // before this IPC arrives, so wasIdle is false there and we don't
+      // double-reset.
+      if (wasIdle && e.status === "working") {
+        const prevLastBlockStop = w.lastBlockStop;
+        const prevTurnId = w.turnId;
+        const now = Date.now();
+        w.lastBlockStop = now;
+        w.turnStart = now;
+        // FRI-151 F1: the mail-fetch path mints its own turnId worker-side
+        // (worker.ts mainLoop → `t_${randomUUID()}`) and the runQuery
+        // status-change now carries it back. Without this refresh every
+        // per-turn payload that reads `w.turnId` (block-start / block-stop /
+        // usage / SSE / stall log) attributes the mail-driven turn to the
+        // PREVIOUS turn's id for its full lifetime. Optional in the IPC for
+        // backwards compatibility with workers that haven't been re-forked
+        // since the protocol change — they'll still get the bookkeeping
+        // reset, just not the id refresh.
+        if (e.turnId) w.turnId = e.turnId;
+        // FRI-151 F2: positive signal that the reset fired. If this bug ever
+        // regresses the operator sees `worker.turn.stalled` + SIGTERM in the
+        // logs with no preceding `worker.mail-wake.reset` — the absence of
+        // this breadcrumb is the diagnostic.
+        logger.log("info", "worker.mail-wake.reset", {
+          agent: w.agentName,
+          msSinceLastBlockStop: now - prevLastBlockStop,
+          prevTurnId,
+          newTurnId: w.turnId,
+        });
+      }
       // FRI-95 defense in depth: a worker that flips to idle has acknowledged
       // any in-flight abort. The turn-complete / error handlers normally
       // clear the deadline, but a status-change without one of those
@@ -1989,6 +2057,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
         });
       });
       break;
+    }
     case "compaction-boundary":
       // FRI-60 Phase B: forward to the SSE bus so the dashboard can render
       // an inline "Context compacted" notice in the message thread.
@@ -2030,6 +2099,11 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
           usage: e.usage,
         },
       });
+      // FRI-154: a successful turn-complete is the "this agent made forward
+      // progress" signal. Reset the anti-loop respawn counter so a long-lived
+      // agent that survived 2 force-kill respawns over months doesn't
+      // dead-letter on the next unrelated death.
+      noteTurnComplete(w.agentName);
       break;
     }
     case "heartbeat":

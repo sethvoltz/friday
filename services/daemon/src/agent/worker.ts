@@ -553,7 +553,12 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   const opts = workerOpts;
 
   abortController = new AbortController();
-  emit({ type: "status-change", status: "working" });
+  // FRI-151: carry the prompt's turnId so the daemon can refresh `w.turnId`
+  // on the idle→working edge. Critical for the worker-internal mail-fetch
+  // path (FRI-127) where the worker mints its own `t_${randomUUID()}` at
+  // `worker.ts` mainLoop time — without this, the daemon's view of the turn
+  // id stays pinned to the previous turn for the entire mail-driven turn.
+  emit({ type: "status-change", status: "working", turnId: p.turnId });
 
   // Periodic heartbeat so the parent's stall watchdog can distinguish a
   // mid-tool wait from a frozen worker. Every event already updates the
