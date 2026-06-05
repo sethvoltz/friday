@@ -328,19 +328,18 @@ describe("submitAskUserQuestionAnswer (FRI-152)", () => {
     // impl, leaving `sendFn.mock.calls[0][0]` as `never`. Pin the parameter
     // shape to the chat-store wire so the callArgs assertions below
     // typecheck.
-    const sendFn =
-      vi.fn<
-        (args: {
-          blockId: string;
-          agent: string;
-          text: string;
-          attachments?: Array<{ sha256: string; filename: string; mime: string }>;
-        }) => Promise<{ kind: "ok"; blockId: string; turnId: string }>
-      >(async (args) => ({
-        kind: "ok" as const,
-        blockId: args.blockId,
-        turnId: `t_${args.blockId}`,
-      }));
+    const sendFn = vi.fn<
+      (args: {
+        blockId: string;
+        agent: string;
+        text: string;
+        attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+      }) => Promise<{ kind: "ok"; blockId: string; turnId: string }>
+    >(async (args) => ({
+      kind: "ok" as const,
+      blockId: args.blockId,
+      turnId: `t_${args.blockId}`,
+    }));
     chat.setSendMessageFn(sendFn);
 
     const questions = [
