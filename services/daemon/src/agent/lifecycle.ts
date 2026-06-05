@@ -1955,8 +1955,30 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       });
       break;
     }
-    case "status-change":
+    case "status-change": {
+      // Capture the prior in-memory status BEFORE setWorkerStatus updates it,
+      // so the FRI-151 reset below can gate on the idle→working edge rather
+      // than firing on the working→working same-status writes the
+      // sendPrompt/spawnTurn paths already produce.
+      const wasIdle = w.status === "idle";
       setWorkerStatus(w, e.status, "handleEvent.status-change");
+      // FRI-151: FRI-127 §6 introduced a worker-internal mail-fetch path
+      // (worker.ts mainLoop → buildMailPrompt → runQuery) that drives a new
+      // turn WITHOUT calling sendPrompt on the daemon side. FRI-58's
+      // lastBlockStop/turnStart reset only fires inside sendPrompt, so a
+      // worker that wakes from >30 min idle on the mail path enters `working`
+      // with lastBlockStop still pinned at the previous turn's turn-complete.
+      // The next watchdog tick (≤60s) measures `Date.now() - lastBlockStop`
+      // against the 30 min threshold and SIGTERMs the worker before any
+      // block-stop can refresh the bookkeeping. Mirror FRI-58 here so the
+      // stall check measures from this turn's start, not the previous one's
+      // end. The dispatcher path already set status=working synchronously
+      // before this IPC arrives, so wasIdle is false there and we don't
+      // double-reset.
+      if (wasIdle && e.status === "working") {
+        w.lastBlockStop = Date.now();
+        w.turnStart = Date.now();
+      }
       // FRI-95 defense in depth: a worker that flips to idle has acknowledged
       // any in-flight abort. The turn-complete / error handlers normally
       // clear the deadline, but a status-change without one of those
@@ -1989,6 +2011,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
         });
       });
       break;
+    }
     case "compaction-boundary":
       // FRI-60 Phase B: forward to the SSE bus so the dashboard can render
       // an inline "Context compacted" notice in the message thread.
