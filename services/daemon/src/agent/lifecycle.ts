@@ -1955,8 +1955,53 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       });
       break;
     }
-    case "status-change":
+    case "status-change": {
+      // Capture the prior in-memory status BEFORE setWorkerStatus updates it,
+      // so the FRI-151 reset below can gate on the idle→working edge rather
+      // than firing on the working→working same-status writes the
+      // sendPrompt/spawnTurn paths already produce.
+      const wasIdle = w.status === "idle";
       setWorkerStatus(w, e.status, "handleEvent.status-change");
+      // FRI-151: FRI-127 §6 introduced a worker-internal mail-fetch path
+      // (worker.ts mainLoop → buildMailPrompt → runQuery) that drives a new
+      // turn WITHOUT calling sendPrompt on the daemon side. FRI-58's
+      // lastBlockStop/turnStart reset only fires inside sendPrompt, so a
+      // worker that wakes from >30 min idle on the mail path enters `working`
+      // with lastBlockStop still pinned at the previous turn's turn-complete.
+      // The next watchdog tick (≤60s) measures `Date.now() - lastBlockStop`
+      // against the 30 min threshold and SIGTERMs the worker before any
+      // block-stop can refresh the bookkeeping. Mirror FRI-58 here so the
+      // stall check measures from this turn's start, not the previous one's
+      // end. The dispatcher path already set status=working synchronously
+      // before this IPC arrives, so wasIdle is false there and we don't
+      // double-reset.
+      if (wasIdle && e.status === "working") {
+        const prevLastBlockStop = w.lastBlockStop;
+        const prevTurnId = w.turnId;
+        const now = Date.now();
+        w.lastBlockStop = now;
+        w.turnStart = now;
+        // FRI-151 F1: the mail-fetch path mints its own turnId worker-side
+        // (worker.ts mainLoop → `t_${randomUUID()}`) and the runQuery
+        // status-change now carries it back. Without this refresh every
+        // per-turn payload that reads `w.turnId` (block-start / block-stop /
+        // usage / SSE / stall log) attributes the mail-driven turn to the
+        // PREVIOUS turn's id for its full lifetime. Optional in the IPC for
+        // backwards compatibility with workers that haven't been re-forked
+        // since the protocol change — they'll still get the bookkeeping
+        // reset, just not the id refresh.
+        if (e.turnId) w.turnId = e.turnId;
+        // FRI-151 F2: positive signal that the reset fired. If this bug ever
+        // regresses the operator sees `worker.turn.stalled` + SIGTERM in the
+        // logs with no preceding `worker.mail-wake.reset` — the absence of
+        // this breadcrumb is the diagnostic.
+        logger.log("info", "worker.mail-wake.reset", {
+          agent: w.agentName,
+          msSinceLastBlockStop: now - prevLastBlockStop,
+          prevTurnId,
+          newTurnId: w.turnId,
+        });
+      }
       // FRI-95 defense in depth: a worker that flips to idle has acknowledged
       // any in-flight abort. The turn-complete / error handlers normally
       // clear the deadline, but a status-change without one of those
@@ -1989,6 +2034,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
         });
       });
       break;
+    }
     case "compaction-boundary":
       // FRI-60 Phase B: forward to the SSE bus so the dashboard can render
       // an inline "Context compacted" notice in the message thread.
