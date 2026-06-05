@@ -205,7 +205,22 @@ export type WorkerEvent =
       postTokens?: number;
       durationMs?: number;
     }
-  | { type: "status-change"; status: "idle" | "working" }
+  | {
+      type: "status-change";
+      status: "idle" | "working";
+      /**
+       * FRI-151: present on the `idle → working` edge (always emitted by
+       * `runQuery` at turn start) so the daemon can refresh `w.turnId` when
+       * the worker-internal mail-fetch path (FRI-127) is driving the turn.
+       * The mail path mints its own `t_${randomUUID()}` worker-side; the
+       * daemon had no way to learn the new id without it riding here, so
+       * every per-turn payload that reads `w.turnId` (block-start /
+       * block-stop / usage / SSE / stall log) attributed mail-internal turns
+       * to the *previous* turn's id. Optional / undefined for the
+       * `working → idle` emissions (no new turn boundary to attribute).
+       */
+      turnId?: string;
+    }
   | {
       type: "error";
       message: string;

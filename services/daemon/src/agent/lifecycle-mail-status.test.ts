@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
 
 /**
@@ -310,5 +310,220 @@ describe("FRI-151: idle→working from worker-internal mail path resets watchdog
     expect(worker.turnStart).toBe(SENTINEL_TURN_START);
 
     __deleteLiveWorkerForTest("mail-dispatch-1");
+  });
+});
+
+/**
+ * FRI-151 F1: the worker-internal mail-fetch path mints a fresh `turnId`
+ * worker-side (`worker.ts` mainLoop → `t_${randomUUID()}`). Before this fix the
+ * `status-change` IPC didn't carry that id, so the daemon's `w.turnId` stayed
+ * pinned to the previous turn for the entire mail-driven turn, mis-attributing
+ * every per-turn payload (block-start / block-stop / usage / SSE / stall log)
+ * to the wrong id. The IPC now carries the optional `turnId`; the daemon
+ * refreshes `w.turnId` on the idle→working edge.
+ */
+describe("FRI-151 F1: status-change idle→working refreshes w.turnId from IPC payload", () => {
+  it("mail-wake: status-change with new turnId updates w.turnId; previous id is overwritten", async () => {
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const registry = await import("./registry.js");
+
+    await registry.registerAgent({ name: "mail-turnid-1", type: "bare" });
+
+    const PREV_TURN_ID = "t_prev_turn_long_completed";
+    const NEW_TURN_ID = "t_mail_minted_by_worker";
+
+    const worker = makeFakeWorker("mail-turnid-1", {
+      status: "idle",
+      turnState: "idle",
+      turnId: PREV_TURN_ID,
+    }) as { turnId: string };
+    __putLiveWorkerForTest("mail-turnid-1", worker as never);
+
+    await handleEvent(worker as never, {
+      type: "status-change",
+      status: "working",
+      turnId: NEW_TURN_ID,
+    });
+
+    expect(worker.turnId).toBe(NEW_TURN_ID);
+
+    __deleteLiveWorkerForTest("mail-turnid-1");
+  });
+
+  it("mail-wake: status-change without a turnId leaves w.turnId untouched (back-compat with pre-protocol workers)", async () => {
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const registry = await import("./registry.js");
+
+    await registry.registerAgent({ name: "mail-turnid-2", type: "bare" });
+
+    const PREV_TURN_ID = "t_prev_no_protocol_upgrade";
+    const worker = makeFakeWorker("mail-turnid-2", {
+      status: "idle",
+      turnState: "idle",
+      turnId: PREV_TURN_ID,
+    }) as { turnId: string; lastBlockStop: number };
+    __putLiveWorkerForTest("mail-turnid-2", worker as never);
+
+    const before = Date.now();
+    await handleEvent(worker as never, { type: "status-change", status: "working" });
+
+    // turnId stays put — the optional field is the only way to refresh it.
+    expect(worker.turnId).toBe(PREV_TURN_ID);
+    // But the bookkeeping reset still fires — pre-protocol workers still get
+    // the watchdog-safety guarantee even though their stall logs misattribute.
+    expect(worker.lastBlockStop).toBeGreaterThanOrEqual(before);
+
+    __deleteLiveWorkerForTest("mail-turnid-2");
+  });
+
+  it("dispatcher path: status-change with turnId does not double-refresh (wasIdle gate covers turnId too)", async () => {
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const registry = await import("./registry.js");
+
+    await registry.registerAgent({
+      name: "mail-turnid-3",
+      type: "builder",
+      parentName: "friday",
+    });
+    await registry.setStatus("mail-turnid-3", "working");
+
+    const DISPATCHER_TURN_ID = "t_already_set_by_sendPrompt";
+    const REDUNDANT_TURN_ID = "t_redundant_from_runQuery";
+
+    const worker = makeFakeWorker("mail-turnid-3", {
+      agentType: "builder",
+      status: "working",
+      turnState: "working",
+      turnId: DISPATCHER_TURN_ID,
+      lastBlockStop: Date.now() - 1234,
+      turnStart: Date.now() - 5678,
+    }) as { turnId: string };
+    __putLiveWorkerForTest("mail-turnid-3", worker as never);
+
+    // wasIdle=false (status was already "working" from sendPrompt) → gate
+    // skips the entire reset block including the turnId refresh, so the
+    // dispatcher's id wins. Same idempotency property as lastBlockStop /
+    // turnStart in the existing dispatcher test.
+    await handleEvent(worker as never, {
+      type: "status-change",
+      status: "working",
+      turnId: REDUNDANT_TURN_ID,
+    });
+
+    expect(worker.turnId).toBe(DISPATCHER_TURN_ID);
+
+    __deleteLiveWorkerForTest("mail-turnid-3");
+  });
+});
+
+/**
+ * FRI-151 NIT-1/NIT-2: cross-boundary integration. The helper-direct tests
+ * above pin the watchdog logic in isolation; these pin the actual interleaving
+ * the production bug hit — the REAL `setInterval` watchdog firing against the
+ * REAL `live` map iterator while a real `status-change` IPC mutates the
+ * worker's bookkeeping. Fake timers drive the interval; a `process.kill` spy
+ * intercepts `killPgrp`'s underlying syscall so we observe the SIGTERM (or its
+ * absence) without nuking a real pgrp.
+ *
+ * Both tests build a worker with `lastBlockStop = now - 2h`. The pre-fix test
+ * pins the failure mode (real watchdog tick → real SIGTERM); the post-fix
+ * test pins the recovery (real `status-change` IPC → real bookkeeping reset
+ * → real watchdog tick → NO SIGTERM).
+ */
+describe("FRI-151 NIT-1/NIT-2: cross-boundary integration (real setInterval + real live map + process.kill spy)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("pre-fix sanity: real setInterval tick SIGTERMs a worker with stale lastBlockStop and status=working", async () => {
+    const {
+      __putLiveWorkerForTest,
+      __deleteLiveWorkerForTest,
+      startTurnStallWatchdog,
+      stopTurnStallWatchdog,
+    } = await import("./lifecycle.js");
+    const registry = await import("./registry.js");
+
+    await registry.registerAgent({ name: "wd-pre-1", type: "bare" });
+
+    const FAKE_PGID = 818181;
+    const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
+
+    const worker = makeFakeWorker("wd-pre-1", {
+      pgid: FAKE_PGID,
+      status: "working",
+      turnState: "working",
+      lastBlockStop: Date.now() - TWO_HOURS_MS,
+    });
+    __putLiveWorkerForTest("wd-pre-1", worker as never);
+
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    try {
+      startTurnStallWatchdog();
+      // TURN_STALL_CHECK_MS = 60_000; one tick past it fires the callback.
+      await vi.advanceTimersByTimeAsync(60_001);
+
+      const sigtermCalls = killSpy.mock.calls.filter(
+        (c) => c[0] === -FAKE_PGID && c[1] === "SIGTERM",
+      );
+      expect(sigtermCalls.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      stopTurnStallWatchdog();
+      __deleteLiveWorkerForTest("wd-pre-1");
+    }
+  });
+
+  it("post-fix: status-change idle→working reset prevents the SIGTERM the watchdog tick would have fired", async () => {
+    const {
+      handleEvent,
+      __putLiveWorkerForTest,
+      __deleteLiveWorkerForTest,
+      startTurnStallWatchdog,
+      stopTurnStallWatchdog,
+    } = await import("./lifecycle.js");
+    const registry = await import("./registry.js");
+
+    await registry.registerAgent({ name: "wd-post-1", type: "bare" });
+
+    const FAKE_PGID = 828282;
+    const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
+
+    const worker = makeFakeWorker("wd-post-1", {
+      pgid: FAKE_PGID,
+      status: "idle",
+      turnState: "idle",
+      lastBlockStop: Date.now() - TWO_HOURS_MS,
+    });
+    __putLiveWorkerForTest("wd-post-1", worker as never);
+
+    // The mail-wake fix path runs under real timers — `registry.setStatus`
+    // issues a real PG query that we don't want to interleave with the fake
+    // clock. After the IPC settles, we switch to fake timers and drive the
+    // real watchdog interval forward.
+    await handleEvent(worker as never, {
+      type: "status-change",
+      status: "working",
+      turnId: "t_wd_post_1_new",
+    });
+
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    try {
+      startTurnStallWatchdog();
+      await vi.advanceTimersByTimeAsync(60_001);
+
+      const sigtermCalls = killSpy.mock.calls.filter(
+        (c) => c[0] === -FAKE_PGID && c[1] === "SIGTERM",
+      );
+      expect(sigtermCalls).toEqual([]);
+    } finally {
+      stopTurnStallWatchdog();
+      __deleteLiveWorkerForTest("wd-post-1");
+    }
   });
 });

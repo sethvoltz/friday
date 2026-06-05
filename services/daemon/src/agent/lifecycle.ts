@@ -1976,8 +1976,31 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // before this IPC arrives, so wasIdle is false there and we don't
       // double-reset.
       if (wasIdle && e.status === "working") {
-        w.lastBlockStop = Date.now();
-        w.turnStart = Date.now();
+        const prevLastBlockStop = w.lastBlockStop;
+        const prevTurnId = w.turnId;
+        const now = Date.now();
+        w.lastBlockStop = now;
+        w.turnStart = now;
+        // FRI-151 F1: the mail-fetch path mints its own turnId worker-side
+        // (worker.ts mainLoop → `t_${randomUUID()}`) and the runQuery
+        // status-change now carries it back. Without this refresh every
+        // per-turn payload that reads `w.turnId` (block-start / block-stop /
+        // usage / SSE / stall log) attributes the mail-driven turn to the
+        // PREVIOUS turn's id for its full lifetime. Optional in the IPC for
+        // backwards compatibility with workers that haven't been re-forked
+        // since the protocol change — they'll still get the bookkeeping
+        // reset, just not the id refresh.
+        if (e.turnId) w.turnId = e.turnId;
+        // FRI-151 F2: positive signal that the reset fired. If this bug ever
+        // regresses the operator sees `worker.turn.stalled` + SIGTERM in the
+        // logs with no preceding `worker.mail-wake.reset` — the absence of
+        // this breadcrumb is the diagnostic.
+        logger.log("info", "worker.mail-wake.reset", {
+          agent: w.agentName,
+          msSinceLastBlockStop: now - prevLastBlockStop,
+          prevTurnId,
+          newTurnId: w.turnId,
+        });
       }
       // FRI-95 defense in depth: a worker that flips to idle has acknowledged
       // any in-flight abort. The turn-complete / error handlers normally
