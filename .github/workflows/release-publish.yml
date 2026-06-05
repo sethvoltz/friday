@@ -48,8 +48,12 @@ jobs:
         include:
           - runner: macos-latest # Apple Silicon — primary target
             arch: arm64
-          - runner: macos-13 # Intel — legacy support (GitHub's last free Intel image)
-            arch: x64
+          # TEMP (2026-06-04): x64 disabled — GitHub's macos-13 Intel pool queues
+          # indefinitely (v1.3.0's leg never got a runner), blocking the release.
+          # Restore by un-commenting once a self-hosted `friday-intel` runner is
+          # online. See ../HANDOFF-intel-x64-runner.md.
+          # - runner: [self-hosted, macOS, X64, friday-intel] # Intel — legacy support
+          #   arch: x64
     runs-on: ${{ matrix.runner }}
 
     steps:
