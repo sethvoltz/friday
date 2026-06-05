@@ -211,17 +211,18 @@
               <!-- Synthesized "Other" affordance. Per the SDK spec the
                    runtime auto-provides Other; in this headless context
                    the dashboard owns the rendering, so we always include
-                   it. -->
-              {@const otherChecked = state.selectedLabels.includes(OTHER_LABEL)}
+                   it. The selection check is inlined rather than hoisted
+                   to a `{@const}` because `{@const}` is only valid as an
+                   immediate child of a control-flow block. -->
               <label
                 class="auq-option auq-option-other"
-                class:checked={otherChecked}
-                data-checked={otherChecked ? "1" : "0"}>
+                class:checked={state.selectedLabels.includes(OTHER_LABEL)}
+                data-checked={state.selectedLabels.includes(OTHER_LABEL) ? "1" : "0"}>
                 <input
                   type={q.multiSelect ? "checkbox" : "radio"}
                   {name}
                   value={OTHER_LABEL}
-                  checked={otherChecked}
+                  checked={state.selectedLabels.includes(OTHER_LABEL)}
                   disabled={!!lockedAnswer}
                   onchange={() => toggleLabel(q, OTHER_LABEL)} />
                 <span class="auq-option-body">
