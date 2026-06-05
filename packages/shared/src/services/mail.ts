@@ -124,6 +124,51 @@ export async function getMail(id: number): Promise<MailRow | null> {
   return rows[0] ? rowToMail(rows[0]) : null;
 }
 
+/**
+ * FRI-154: shape of the persisted dead-letter sentinel. Lives under
+ * `mail.meta_json.dead_letter`. The respawn-on-force-kill path reads this to
+ * exclude rows that already dead-lettered from its unprocessed count, so a
+ * deterministic-crash agent doesn't loop forever just because the daemon
+ * restarted between dead-letter and the next event.
+ */
+export interface MailDeadLetterSentinel {
+  /** The agent name whose respawn streak tripped the gate. */
+  agent: string;
+  /** Wall-clock when dead-letter fired. */
+  at: number;
+  /** Streak length when the gate tripped. */
+  attempts: number;
+}
+
+/**
+ * Stamp `meta_json.dead_letter` onto a mail row without disturbing any
+ * other meta keys. Preserve-over-delete: the row stays at `delivery='pending'`
+ * so the operator can still see/triage/close it; only the auto-respawn path
+ * filters on this sentinel.
+ */
+export async function markMailDeadLetter(
+  id: number,
+  sentinel: MailDeadLetterSentinel,
+): Promise<void> {
+  const db = getDb();
+  const cur = await db
+    .select({ metaJson: schema.mail.metaJson })
+    .from(schema.mail)
+    .where(eq(schema.mail.id, id))
+    .limit(1);
+  const prev = (cur[0]?.metaJson as Record<string, unknown> | null) ?? {};
+  const next = { ...prev, dead_letter: sentinel };
+  await db.update(schema.mail).set({ metaJson: next }).where(eq(schema.mail.id, id));
+}
+
+/**
+ * True when a {@link MailRow} carries the dead-letter sentinel. Used by the
+ * respawn path to filter the inbox view.
+ */
+export function isMailDeadLettered(row: MailRow): boolean {
+  return row.meta != null && typeof row.meta === "object" && "dead_letter" in row.meta;
+}
+
 export async function pendingForAgent(toAgent: string): Promise<MailRow[]> {
   return inbox(toAgent);
 }

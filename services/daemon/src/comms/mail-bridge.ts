@@ -16,7 +16,7 @@
  */
 
 import { loadConfig, normalizeModelConfig, resolveDaemonPort } from "@friday/shared";
-import { inbox, mailBus, type MailRow } from "@friday/shared/services";
+import { inbox, isMailDeadLettered, mailBus, type MailRow } from "@friday/shared/services";
 import { logger } from "../log.js";
 import { dispatchTurn, isAgentLive, wakeAgent, wakeAgentCritical } from "../agent/lifecycle.js";
 import { recordUserBlock } from "../agent/block-injectors.js";
@@ -24,6 +24,7 @@ import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
 import * as registry from "../agent/registry.js";
 import { randomUUID } from "node:crypto";
 import { buildMailPrompt } from "./mail-prompt.js";
+import { cancelPendingRespawn } from "./respawn-orphan-mail.js";
 
 let started = false;
 
@@ -88,7 +89,29 @@ export function startMailBridge(): void {
   logger.log("info", "mail.bridge.started");
 }
 
-async function maybeSpawnFromMail(agentName: string): Promise<void> {
+/**
+ * Spawn a fresh turn for `agentName` driven by its current pending inbox.
+ *
+ * Exported (FRI-154) so the force-kill respawn path can re-enter the same
+ * spawn surface without duplicating the inbox-read + prompt-build + dispatch
+ * sequence. Idempotent against live workers (early-out via `isAgentLive` in
+ * the caller; here we additionally early-out against an empty / fully-dead-
+ * lettered inbox so a stale tracker fire is harmless).
+ */
+export async function maybeSpawnFromMail(agentName: string): Promise<void> {
+  // FRI-154: the respawn timer may have raced a fresh-mail event that
+  // already spawned a worker. The bridge's own caller checks `isAgentLive`
+  // before invoking us; the respawn-timer caller does not — re-check here so
+  // the respawn surface and the bridge surface are equally safe.
+  if (isAgentLive(agentName)) {
+    logger.log("debug", "mail.bridge.spawn.skip", { agent: agentName, reason: "agent-live" });
+    return;
+  }
+
+  // Fresh mail (or respawn) supersedes a pending in-memory respawn timer.
+  // Cancel here — if a timer was set, this code path is about to do its job.
+  cancelPendingRespawn(agentName);
+
   const agentRow = await registry.getAgent(agentName);
   if (!agentRow) {
     logger.log("debug", "mail.bridge.unknown-recipient", { agent: agentName });
@@ -101,7 +124,11 @@ async function maybeSpawnFromMail(agentName: string): Promise<void> {
     return;
   }
 
-  const pending = await inbox(agentName);
+  // FRI-154: filter dead-lettered orphans. Once the anti-loop gate has
+  // marked a row's `meta_json.dead_letter`, do NOT silently auto-resurrect
+  // it on the next mail event. The row stays at `delivery='pending'` so the
+  // operator can triage it; only the auto-spawn path skips it.
+  const pending = (await inbox(agentName)).filter((m) => !isMailDeadLettered(m));
   if (pending.length === 0) return;
 
   const cfg = loadConfig();
