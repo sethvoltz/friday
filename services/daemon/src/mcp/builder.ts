@@ -27,6 +27,7 @@ import { buildScheduleServer, SCHEDULE_SERVER_NAME } from "./schedule.js";
 import { buildReminderServer, REMINDER_SERVER_NAME } from "./reminder.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
 import { buildIntegrationsServer, INTEGRATIONS_SERVER_NAME } from "./integrations.js";
+import { buildElicitationServer, ELICITATION_SERVER_NAME } from "./elicitation.js";
 
 export interface BuildMcpServersOptions {
   callerType: AgentType;
@@ -138,6 +139,19 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // every external write through the orchestrator. Gracefully no-ops if the
   // relevant API key isn't set on the daemon.
   servers[INTEGRATIONS_SERVER_NAME] = buildIntegrationsServer(ctx);
+
+  // friday-elicitation: ask_user tool (FRI-152). Every agent that may need
+  // to surface a structured prompt to Seth — orchestrator and bare types,
+  // plus scheduled (which can dispatch back to the orchestrator for input).
+  // Builders/helpers run headless and shouldn't be prompting the user
+  // directly; mail their parent instead.
+  if (
+    opts.callerType === "orchestrator" ||
+    opts.callerType === "bare" ||
+    opts.callerType === "scheduled"
+  ) {
+    servers[ELICITATION_SERVER_NAME] = buildElicitationServer(ctx);
+  }
 
   // playwright: built-in browser automation via Microsoft's @playwright/mcp.
   // Excluded for orchestrator to keep it responsive — long-running browser

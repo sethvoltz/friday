@@ -19,15 +19,17 @@
   import { synthesizeHeadline } from "./tool-headlines";
 
   interface Props {
-    // All six ToolRendererProps fields so the dispatch-site prop spread
-    // typechecks. `friendlyName` / `inputPartialJson` / `output` are accepted
-    // but unused for rendering (a file-edit shows its diff, not a tool pill).
+    // All ToolRendererProps fields so the dispatch-site prop spread
+    // typechecks. `friendlyName` / `inputPartialJson` / `output` / `toolId`
+    // are accepted but unused for rendering (a file-edit shows its diff,
+    // not a tool pill).
     toolName: string;
     friendlyName?: string;
     status: "running" | "done" | "error" | "aborted";
     input?: unknown;
     inputPartialJson?: string;
     output?: string;
+    toolId?: string;
   }
   // `friendlyName` / `inputPartialJson` / `output` are accepted so the
   // dispatch-site prop spread typechecks against ToolRendererProps, but a

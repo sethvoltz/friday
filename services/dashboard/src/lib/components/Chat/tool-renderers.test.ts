@@ -49,11 +49,12 @@ describe("resolveToolRenderer", () => {
     expect(originalKeys).toContain("TodoWrite");
   });
 
-  it("registers exactly the renderer tickets' keys by default (FRI-133 + FRI-134 + FRI-135)", () => {
+  it("registers exactly the renderer tickets' keys by default (FRI-133 + FRI-134 + FRI-135 + FRI-152)", () => {
     // FRI-130 shipped the registry empty; FRI-133 (renderer A) adds TodoWrite,
-    // FRI-134 (ticket B) adds the file-edit family, and FRI-135 (ticket C) adds
-    // the four friday-mail short names. With all three renderer tickets landed,
-    // these nine are the complete default key set.
+    // FRI-134 (ticket B) adds the file-edit family, FRI-135 (ticket C) adds
+    // the four friday-mail short names, and FRI-152 (this ticket) adds
+    // AskUserQuestion. With all renderer tickets landed, these ten are the
+    // complete default key set.
     expect(new Set(originalKeys)).toEqual(
       new Set([
         "TodoWrite",
@@ -65,6 +66,8 @@ describe("resolveToolRenderer", () => {
         "mail_inbox",
         "mail_read",
         "mail_close",
+        "AskUserQuestion",
+        "ask_user",
       ]),
     );
   });

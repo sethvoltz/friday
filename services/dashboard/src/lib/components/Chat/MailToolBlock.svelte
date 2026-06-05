@@ -31,6 +31,7 @@
     input?: unknown;
     inputPartialJson?: string;
     output?: string;
+    toolId?: string;
   }
   let { toolName, status, input, output }: Props = $props();
 

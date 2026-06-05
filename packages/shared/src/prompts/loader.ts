@@ -47,11 +47,15 @@ export type AgentBaseKey = "orchestrator" | "builder" | "helper" | "scheduled" |
  * agent on a repo with no GitHub origin.
  */
 const DEFAULT_PROTOCOLS_BY_TYPE: Record<AgentBaseKey, readonly string[]> = {
-  orchestrator: ["memory", "pr-links"],
-  scheduled: ["memory", "pr-links"],
+  // FRI-152: `elicitation` (mcp__friday-elicitation__ask_user) loads for
+  // every type that ships the MCP server. Match `buildMcpServers` in
+  // `services/daemon/src/mcp/builder.ts`: orchestrator + scheduled +
+  // bare. Builders/helpers are headless and don't prompt the user.
+  orchestrator: ["memory", "pr-links", "elicitation"],
+  scheduled: ["memory", "pr-links", "elicitation"],
   builder: ["pr-links"],
   helper: ["pr-links"],
-  bare: ["memory", "pr-links"],
+  bare: ["memory", "pr-links", "elicitation"],
 };
 
 /**

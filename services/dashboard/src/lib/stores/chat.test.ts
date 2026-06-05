@@ -318,6 +318,85 @@ describe("loadOlderTurns", () => {
   });
 });
 
+describe("no marker pollution on user blocks (FRI-152 reshape)", () => {
+  // After the MCP-bridge reshape the chat store does NOT introspect the
+  // user message body for AskUserQuestion answer markers. The answer
+  // ships through the daemon's `/api/elicitation/<id>/submit` endpoint
+  // and the SDK round-trips the structured payload as a normal
+  // `tool_result` block; the panel reads it off the tool message's
+  // `output` field. Pin the no-introspection invariant so a future
+  // refactor can't reintroduce the marker codec.
+  it("leaves a normal user message untouched (no marker stripping, no extra fields)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "u2",
+          block_id: "blk-u2",
+          turn_id: "t_blk-u2",
+          agent_name: "friday",
+          session_id: "s1",
+          message_id: null,
+          block_index: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          content_json: { text: "plain chat message" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1000,
+        } as Parameters<typeof chat.applyZeroBlocks>[0][number],
+      ],
+      "friday",
+      "complete",
+    );
+
+    const bubble = chat.messages.find((m) => m.role === "user");
+    expect(bubble!.text).toBe("plain chat message");
+    expect((bubble as unknown as Record<string, unknown>).askUserQuestionAnswer).toBeUndefined();
+  });
+
+  it("preserves user text verbatim even when it contains @@AUQ-ANSWER@@ (no legacy marker handling)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    const text = "I tested with @@AUQ-ANSWER@@xyz and it worked";
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "u3",
+          block_id: "blk-u3",
+          turn_id: "t_blk-u3",
+          agent_name: "friday",
+          session_id: "s1",
+          message_id: null,
+          block_index: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          content_json: { text },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1000,
+        } as Parameters<typeof chat.applyZeroBlocks>[0][number],
+      ],
+      "friday",
+      "complete",
+    );
+
+    const bubble = chat.messages.find((m) => m.role === "user");
+    expect(bubble!.text).toBe(text);
+  });
+});
+
 describe("confirmPending", () => {
   it("re-keys the optimistic bubble when no SSE bubble exists yet", async () => {
     const { ChatState } = await import("./chat.svelte");

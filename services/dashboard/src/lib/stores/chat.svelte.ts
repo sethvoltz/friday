@@ -3144,6 +3144,7 @@ export class ChatState {
         overlayEntry.status = mappedStatus;
         return;
       }
+      const liveRole = event.role === "user" ? "user" : "assistant";
       for (const m of this.messages) {
         if (m.id !== id) continue;
         if (typeof parsed.text === "string") m.text = parsed.text;
@@ -3172,10 +3173,9 @@ export class ChatState {
       // Late mount: block_start was evicted from the ring (or — for mail
       // — was never emitted in the first place). Land canonical in the
       // legacy bucket so Zero's eventual replicate dedupes on id.
-      const role = event.role === "user" ? "user" : "assistant";
       this.#legacyMessages.push({
         id,
-        role,
+        role: liveRole,
         text: parsed.text ?? "",
         status: mappedStatus,
         agent,
