@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.0](https://github.com/sethvoltz/friday/compare/v1.3.0...v1.4.0) (2026-06-05)
+
+
+### Features
+
+* **daemon:** respawn worker after force-kill with unprocessed mail (FRI-154) ([#175](https://github.com/sethvoltz/friday/issues/175)) ([8daef1e](https://github.com/sethvoltz/friday/commit/8daef1e09ce70e1cf55d1548aa0e1c306ce6ca70))
+
+
+### Bug Fixes
+
+* **daemon:** reset watchdog bookkeeping on mail-driven idle→working wake ([#172](https://github.com/sethvoltz/friday/issues/172)) ([a5762b6](https://github.com/sethvoltz/friday/commit/a5762b61f8eb8b203910dc3ef332250ba1c9e1de))
+
 ## [1.3.0](https://github.com/sethvoltz/friday/compare/v1.2.2...v1.3.0) (2026-06-04)
 
 
