@@ -276,9 +276,8 @@ describe("FRI-151: idle→working from worker-internal mail path resets watchdog
     // its own; the subsequent status-change:working IPC from runQuery must
     // not stomp the dispatcher's freshly-set values. The guard is `wasIdle`,
     // and this test pins it.
-    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } = await import(
-      "./lifecycle.js"
-    );
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
     const registry = await import("./registry.js");
 
     await registry.registerAgent({
