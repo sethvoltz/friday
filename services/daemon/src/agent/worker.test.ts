@@ -20,6 +20,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Nearly every test here does `vi.resetModules()` + a fresh dynamic
+// `import("./worker.js")`, and the FIRST import in the file pays a cold
+// transform of the whole worker module graph. On a loaded CI runner that
+// alone has been observed at >5s (the vitest default per-test timeout),
+// flaking whichever test happens to run first. Raise the file's budget —
+// this is import latency, not a behavior under test.
+vi.setConfig({ testTimeout: 20_000 });
+
 // Prevent the worker's one-shot `process.exit(0)` from killing vitest.
 vi.spyOn(process, "exit").mockImplementation((_code?: number | string) => {
   return undefined as never;
