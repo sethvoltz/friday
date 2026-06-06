@@ -1,7 +1,5 @@
-import { writeFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ENV_PATH } from "../config.js";
-import { clearFridayConfigCache, upsertEnvVar } from "../env.js";
+import { clearFridayConfigCache } from "../env.js";
 import {
   composeSystemPrompt,
   readPromptStack,
@@ -329,15 +327,15 @@ describe("composeSystemPrompt datetime injection (FRI-52)", () => {
 
 describe("env-gated protocols (FRI-86)", () => {
   // FRI-150 (pivot, ADR-037): production code reads LINEAR_API_KEY via
-  // `loadFridayConfig()`. Drive presence/absence via the .env file in the
-  // test tmpdir — `upsertEnvVar` writes to disk + invalidates the loader
-  // cache so the next `readPromptStack` sees the new state.
+  // `loadFridayConfig()`. Drive presence/absence via `process.env` override
+  // + `clearFridayConfigCache()` so the next `readPromptStack` sees the new state.
   function setLinearKey(value: string | undefined): void {
     if (value === undefined) {
-      writeFileSync(ENV_PATH, "# Friday env vars\n");
+      delete process.env.LINEAR_API_KEY;
       clearFridayConfigCache();
     } else {
-      upsertEnvVar("LINEAR_API_KEY", value);
+      process.env.LINEAR_API_KEY = value;
+      clearFridayConfigCache();
     }
   }
 

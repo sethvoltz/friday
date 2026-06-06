@@ -1,5 +1,5 @@
 import { writeFileSync } from "node:fs";
-import { HEALTH_PATH, atomicWriteFile } from "@friday/shared";
+import { HEALTH_PATH, atomicWriteFile, isSecretsLocked } from "@friday/shared";
 
 const startedAt = Date.now();
 
@@ -33,6 +33,7 @@ function writeHealth(port: number): void {
     port,
     uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
     rssMb: Math.round(process.memoryUsage.rss() / 1024 / 1024),
+    secretsLocked: isSecretsLocked(),
   };
   atomicWriteFile(HEALTH_PATH, JSON.stringify(payload, null, 2));
 }

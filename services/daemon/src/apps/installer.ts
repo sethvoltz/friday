@@ -16,7 +16,16 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
-import { type Manifest, appDir, getDb, loadManifest, nextRun, schema } from "@friday/shared";
+import {
+  type Manifest,
+  appDir,
+  getDb,
+  getVaultCache,
+  loadManifest,
+  nextRun,
+  schema,
+  vaultKeyForMeta,
+} from "@friday/shared";
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
 import * as registry from "../agent/registry.js";
@@ -810,7 +819,7 @@ export async function appContextForAgent(agentName: string): Promise<AppContextF
   } catch {
     return null;
   }
-  const envFile = readAppEnv(row.folderPath);
+  const envFile = readAppEnv(appId, row.folderPath);
   return {
     appId,
     folderPath: row.folderPath,
@@ -819,9 +828,24 @@ export async function appContextForAgent(agentName: string): Promise<AppContextF
   };
 }
 
-function readAppEnv(folderPath: string): Record<string, string> | undefined {
+function readAppEnv(appId: string, folderPath: string): Record<string, string> | undefined {
+  const legacy = readLegacyAppDotEnv(folderPath);
+  const fromVault: Record<string, string> = {};
+  const cache = getVaultCache();
+  if (cache) {
+    for (const meta of cache.meta.secrets) {
+      if (meta.app !== appId || meta.mode !== "env") continue;
+      const value = cache.payload.secrets[vaultKeyForMeta(meta)]?.value;
+      if (value !== undefined) fromVault[meta.name] = value;
+    }
+  }
+  const merged = { ...legacy, ...fromVault };
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function readLegacyAppDotEnv(folderPath: string): Record<string, string> {
   const envPath = join(folderPath, ".env");
-  if (!existsSync(envPath)) return undefined;
+  if (!existsSync(envPath)) return {};
   try {
     const text = readFileSync(envPath, "utf8");
     const out: Record<string, string> = {};
@@ -846,7 +870,7 @@ function readAppEnv(folderPath: string): Record<string, string> | undefined {
       folderPath,
       message: err instanceof Error ? err.message : String(err),
     });
-    return undefined;
+    return {};
   }
 }
 

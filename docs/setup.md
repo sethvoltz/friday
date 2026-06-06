@@ -93,7 +93,7 @@ Open `http://localhost:7615` and sign in with the credentials you set in step 3.
 
 ## 6. Public access via Cloudflare Tunnel
 
-`friday setup --cloudflare` handles the persistence end-to-end: it saves the token to `~/.friday/.env` and invokes `cloudflared service install <TOKEN>`, which writes `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist` with `RunAtLoad: true` + `KeepAlive`. The tunnel comes back automatically after reboot — no separate `brew services start` step. (Brew's auto-generated `homebrew.mxcl.cloudflared.plist` runs `cloudflared` bare, which only supports config-file-based named tunnels — connector tokens have no config.yml equivalent, so we sidestep that plist entirely.)
+`friday setup --cloudflare` handles the persistence end-to-end: it saves the token to the age-encrypted secrets vault (`friday secrets` / ADR-038; auto-inits the vault on first run) and invokes `cloudflared service install <TOKEN>`, which writes `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist` with `RunAtLoad: true` + `KeepAlive`. The tunnel comes back automatically after reboot — no separate `brew services start` step. (Brew's auto-generated `homebrew.mxcl.cloudflared.plist` runs `cloudflared` bare, which only supports config-file-based named tunnels — connector tokens have no config.yml equivalent, so we sidestep that plist entirely.)
 
 ### Create the tunnel in Cloudflare
 
@@ -107,7 +107,7 @@ Open `http://localhost:7615` and sign in with the credentials you set in step 3.
 friday setup --cloudflare
 ```
 
-Paste the token and your public URL (e.g. `https://friday.example.com`). The token is written to `~/.friday/.env` as `CLOUDFLARE_TUNNEL_TOKEN`; the public URL is stored in `~/.friday/config.json` for display; the launch agent is installed and started immediately.
+Paste the token and your public URL (e.g. `https://friday.example.com`). The token is written to the vault as `CLOUDFLARE_TUNNEL_TOKEN` (`--daemon` scope); the public URL is stored in `~/.friday/config.json` for display; the launch agent is installed and started immediately.
 
 ### Run
 
@@ -122,7 +122,22 @@ cloudflared service uninstall   # tear down the launch agent
 
 `friday start` / `friday stop` no longer touch cloudflared — the launchd job manages itself.
 
-If `cloudflared` is missing from `PATH` when you run `friday setup --cloudflare`, the token is still saved to `.env` but the launch agent install is skipped with a one-line note; install `cloudflared` then re-run setup. `friday doctor` surfaces both conditions.
+If `cloudflared` is missing from `PATH` when you run `friday setup --cloudflare`, the token is still saved to the vault but the launch agent install is skipped with a one-line note; install `cloudflared` then re-run setup. `friday doctor` surfaces both conditions.
+
+## Secrets vault (ADR-038)
+
+Integration secrets (API keys, webhooks, app credentials) live in an age-encrypted vault safe to commit to your `~/.friday` git repo. Machine-local autogen secrets (`BETTER_AUTH_SECRET`, `ZERO_*`, `DATABASE_URL`) stay in gitignored `.env.local`.
+
+```bash
+friday stop
+friday secrets init
+friday secrets migrate-from-env   # moves integration keys from legacy .env → vault
+friday secrets audit --git-history
+friday start
+friday doctor
+```
+
+Operator commands: `friday secrets set/get/list/unset/edit`, `friday secrets unlock --check`, `friday secrets public-key`. Agents fetch on-demand secrets via `mcp__friday-secrets__secrets_fetch` (audited). Env-mode secrets inject into MCP stdio `env` only when referenced as `${VAR}` in manifest/config.
 
 ### Important: dashboard listens on localhost
 
@@ -161,12 +176,12 @@ Edit `~/.friday/SOUL.md` to customize Friday's voice and identity. Source upgrad
 
 ### Analytics (optional)
 
-Friday ships first-class [PostHog](https://posthog.com) instrumentation, off by default. Add your PostHog project key to `~/.friday/.env` to turn it on across the stack:
+Friday ships first-class [PostHog](https://posthog.com) instrumentation, off by default. Add your PostHog project key via the secrets vault:
 
-```
-POSTHOG_API_KEY=phc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```bash
+friday secrets set POSTHOG_API_KEY --mode env --daemon
 # Optional — defaults to https://us.i.posthog.com. Set for EU cloud or self-hosted:
-# POSTHOG_HOST=https://eu.i.posthog.com
+friday secrets set POSTHOG_HOST --mode env --daemon
 ```
 
 On the next `friday start`:

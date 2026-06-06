@@ -4,7 +4,8 @@
  *
  * Contents (per plan §232):
  *   - `pg_dump friday` → `postgres.dump` (custom format)
- *   - `~/.friday/.env`
+ *   - `~/.friday/.env.local`
+ *   - `~/.friday/secrets/` (vault.enc, meta.yaml, recipients.txt)
  *   - `~/.friday/SOUL.md`
  *   - `~/.friday/config.json`
  *   - `~/.friday/skills/`
@@ -49,7 +50,8 @@ import pkg from "../../package.json" with { type: "json" };
  *  when they exist. Anything missing is silently skipped (e.g. a fresh
  *  install with no evolve proposals yet). */
 const BACKUP_PATHS = [
-  ".env",
+  ".env.local",
+  "secrets",
   "SOUL.md",
   "config.json",
   "skills",
@@ -93,6 +95,10 @@ export const backupCommand = defineCommand({
       description: "Output path (default: ~/.friday/backups/<timestamp>.tar.gz)",
       required: false,
     },
+    "include-age-key": {
+      type: "boolean",
+      description: "Include .age-key in the bundle (off by default)",
+    },
   },
   async run({ args }) {
     const outputPath = resolveOutputPath(args.output);
@@ -125,6 +131,16 @@ export const backupCommand = defineCommand({
       // 2. Copy filesystem contents (each via fs walk that respects the
       //    `existsSync` skip — a fresh install may not have all dirs).
       const fileInventory: ManifestFileEntry[] = [];
+      if (args["include-age-key"]) {
+        const ageKey = join(DATA_DIR, ".age-key");
+        if (existsSync(ageKey)) {
+          const dest = join(stageDir, ".age-key");
+          const cp = spawnSync("cp", [ageKey, dest], { stdio: ["ignore", "inherit", "inherit"] });
+          if (cp.status !== 0) throw new Error("Failed to copy .age-key");
+          console.log(pc.yellow("  .age-key included — protect this bundle like a password"));
+        }
+      }
+
       for (const rel of BACKUP_PATHS) {
         const abs = join(DATA_DIR, rel);
         const exists = existsSync(abs);

@@ -1,6 +1,7 @@
 export * from "./config.js";
 export * from "./daemon-secret.js";
 export * from "./env.js";
+export * from "./secrets/index.js";
 export * from "./log.js";
 export * from "./agents.js";
 export * from "./usage.js";
