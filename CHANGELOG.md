@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0](https://github.com/sethvoltz/friday/compare/v1.8.0...v1.9.0) (2026-06-06)
+
+
+### Features
+
+* **daemon:** include bare agents in nightly compaction sweep ([#184](https://github.com/sethvoltz/friday/issues/184)) ([098ae37](https://github.com/sethvoltz/friday/commit/098ae379fcea4c3610a9d003b0fdc799e968e16f))
+
 ## [1.8.0](https://github.com/sethvoltz/friday/compare/v1.7.0...v1.8.0) (2026-06-06)
 
 
