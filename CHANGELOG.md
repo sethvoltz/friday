@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/sethvoltz/friday/compare/v1.5.0...v1.6.0) (2026-06-06)
+
+
+### Features
+
+* **system:** context-budget compaction policy, chat compaction UX, PreCompact memory flush (FRI-156, FRI-27) ([#177](https://github.com/sethvoltz/friday/issues/177)) ([fdb1dd2](https://github.com/sethvoltz/friday/commit/fdb1dd2613d07990b9fe56c477cfa720e687b026))
+
 ## [1.5.0](https://github.com/sethvoltz/friday/compare/v1.4.0...v1.5.0) (2026-06-05)
 
 
