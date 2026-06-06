@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.7.0](https://github.com/sethvoltz/friday/compare/v1.6.0...v1.7.0) (2026-06-06)
+
+
+### Features
+
+* **system:** configurable models by role + planner agent type (FRI-16) ([#179](https://github.com/sethvoltz/friday/issues/179)) ([fbb2a9c](https://github.com/sethvoltz/friday/commit/fbb2a9c8c297565628959abc3520e09ce59d9b33))
+
+
+### Bug Fixes
+
+* **system:** harden CI-flaky zero-proxy, sync-harness, and worker tests ([#181](https://github.com/sethvoltz/friday/issues/181)) ([52e50d0](https://github.com/sethvoltz/friday/commit/52e50d01fa4b7d2f82ebb02bfc6f1ea26dee6db8))
+
 ## [1.6.0](https://github.com/sethvoltz/friday/compare/v1.5.0...v1.6.0) (2026-06-06)
 
 
