@@ -140,6 +140,42 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Poll until `payload` shows up at the fake upstream — either in
+ * post-handshake bytes or coalesced into the first chunk (localhost
+ * TCP often merges the upgrade head + first client frame). The old
+ * test only checked `upstreamLaterBytes` after a fixed 500ms poll,
+ * which flaked on CI when coalescing or slow event-loop scheduling
+ * meant the payload never landed in a separate chunk.
+ */
+async function waitForUpstreamPayload(
+  h: Harness,
+  payload: string,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const later = Buffer.concat(h.upstreamLaterBytes).toString();
+    if (later.includes(payload)) return;
+    const first = h.upstreamFirstChunks[0]?.toString() ?? "";
+    if (first.includes(payload)) return;
+    await sleep(10);
+  }
+  throw new Error(
+    `upstream never saw ${JSON.stringify(payload)} within ${timeoutMs}ms ` +
+      `(first=${h.upstreamFirstChunks.length} later=${h.upstreamLaterBytes.length})`,
+  );
+}
+
+/** Payload bytes the fake upstream received after the upgrade head. */
+function upstreamPostHandshakePayload(h: Harness): string {
+  const later = Buffer.concat(h.upstreamLaterBytes).toString();
+  if (later.length > 0) return later;
+  const first = h.upstreamFirstChunks[0]?.toString() ?? "";
+  const headerEnd = first.indexOf("\r\n\r\n");
+  return headerEnd >= 0 ? first.slice(headerEnd + 4) : "";
+}
+
 describe("createZeroUpgradeHandler", () => {
   let h: Harness;
   beforeEach(async () => {
@@ -196,19 +232,20 @@ describe("createZeroUpgradeHandler", () => {
         "\r\n",
     );
 
-    // Wait for upstream to register the connection.
-    for (let i = 0; i < 50 && h.upstreamSockets.length === 0; i++) {
+    // Wait until the proxied upgrade head reaches upstream — only then
+    // is the bidirectional pipe established and post-handshake bytes
+    // guaranteed to flow (or coalesce) correctly.
+    for (let i = 0; i < 200 && h.upstreamFirstChunks.length === 0; i++) {
       await sleep(10);
     }
+    expect(h.upstreamFirstChunks.length).toBe(1);
     expect(h.upstreamSockets.length).toBe(1);
 
-    // Client → upstream. The fake upstream's data handler stores
-    // post-first-chunk bytes in `upstreamLaterBytes`.
+    // Client → upstream. Payload may land in `upstreamLaterBytes` or be
+    // coalesced into the first chunk on fast/localhost TCP.
     client.write("HELLO-FROM-CLIENT");
-    for (let i = 0; i < 50 && h.upstreamLaterBytes.length === 0; i++) {
-      await sleep(10);
-    }
-    expect(Buffer.concat(h.upstreamLaterBytes).toString()).toBe("HELLO-FROM-CLIENT");
+    await waitForUpstreamPayload(h, "HELLO-FROM-CLIENT");
+    expect(upstreamPostHandshakePayload(h)).toBe("HELLO-FROM-CLIENT");
 
     // Upstream → client. The fake upstream's echo path responds to
     // payloads prefixed `ECHO:` — write one and read it back through

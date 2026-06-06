@@ -161,9 +161,9 @@ afterEach(() => {
 describe("buildQueryOptions: per-agent autoCompactWindow (FRI-156 §A)", () => {
   const AGENT_TYPES = ["orchestrator", "builder", "helper", "scheduled", "bare"] as const;
 
-  for (const agentType of AGENT_TYPES) {
-    it(`sets settings.autoCompactWindow = 200_000 for ${agentType}`, async () => {
-      const { buildQueryOptions } = await import("./worker.js");
+  it("sets settings.autoCompactWindow = 200_000 for every agent type", async () => {
+    const { buildQueryOptions } = await import("./worker.js");
+    for (const agentType of AGENT_TYPES) {
       const opts = {
         agentName: "a",
         agentType,
@@ -189,8 +189,8 @@ describe("buildQueryOptions: per-agent autoCompactWindow (FRI-156 §A)", () => {
       expect(result).toMatchObject({
         settings: { autoMemoryEnabled: false, autoCompactWindow: 200_000 },
       });
-    });
-  }
+    }
+  });
 });
 
 // ---- §A: probeAutoCompactWindow runtime "takes-effect" probe ----
