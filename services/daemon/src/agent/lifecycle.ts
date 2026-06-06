@@ -2062,23 +2062,30 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       break;
     }
     case "compaction-boundary":
+      // FRI-145 M2 Generation no-op: a superseded `w` (already torn down by
+      // force-kill / archive / refork, its turn finalized) must not insert a
+      // stray durable divider or bump w.blocksThisTurn on a dead worker. The
+      // dying worker may still emit a late compaction-boundary IPC mid-teardown
+      // — drop it, mirroring the error / turn-complete cases.
+      if (!isCurrentGeneration(w)) break;
       // FRI-156 §D: persist a DURABLE compaction-marker block (kind:'compaction'
       // on this turn) instead of the old ephemeral `type:'compaction'` SSE
       // event. The durable row replicates via Zero (survives reload — the bug
-      // the ephemeral event could not fix) and the injector publishes its own
-      // block_start + block_complete pair for instant live render, so the
-      // separate event is fully redundant and is REMOVED here (its consumer
-      // side — compactionTurnIds + .compaction-notice + the CompactionEvent
-      // wire type — is deleted in the dashboard chunk; this is one coordinated
-      // add-new-path-delete-old-path migration). ADR-004 insert-before-publish
-      // ordering is inherent: recordCompactionMarker inserts the row first,
-      // then publishes. The marker also bumps w.blocksThisTurn (see the
-      // injector doc-comment) so the durable divider replaces the synthesized
-      // "Compacted — no response" bubble and a legit /compact turn doesn't
-      // advance the wedge streak. Insert unconditionally per boundary frame:
-      // multiple compactions in one long turn are legitimate, each deserves a
-      // divider. The marker insert is best-effort (returns null + logs on
-      // failure) so a CHECK/dup error can never wedge this handler.
+      // the ephemeral event could not fix) and is the SOLE divider producer:
+      // the dashboard renders it from the replicated row in parseBlocks, NOT
+      // from any live SSE frame (the old block_start/block_complete pair was a
+      // dead write — no dashboard handler for kind:'compaction' — and has been
+      // removed from recordCompactionMarker). The old event's consumer side
+      // (compactionTurnIds + .compaction-notice + the CompactionEvent wire
+      // type) is deleted in the dashboard chunk; this is one coordinated
+      // add-new-path-delete-old-path migration. The marker also bumps
+      // w.blocksThisTurn (see the injector doc-comment) so the durable divider
+      // replaces the synthesized "Compacted — no response" bubble and a legit
+      // /compact turn doesn't advance the wedge streak. Insert unconditionally
+      // per boundary frame: multiple compactions in one long turn are
+      // legitimate, each deserves a divider. The marker insert is best-effort
+      // (returns null + logs on failure) so a CHECK/dup error can never wedge
+      // this handler.
       await bsRecordCompactionMarker(w, {
         preTokens: e.preTokens,
         postTokens: e.postTokens,
@@ -2087,6 +2094,9 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       });
       break;
     case "compacting-status":
+      // Generation no-op: a superseded worker's late status frame must not
+      // publish a spinner toggle / log line over an already-finalized turn.
+      if (!isCurrentGeneration(w)) break;
       // FRI-156 §C: live compaction-in-progress signal. Surface the transient
       // `compacting` wire event so the dashboard can show a "Compacting
       // context…" spinner at 'start' and clear it at 'done'. This carries NO
@@ -2099,10 +2109,23 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
         agent: w.agentName,
         turn_id: w.turnId,
         phase: e.phase,
-        ...(e.result ? { result: e.result } : {}),
       });
+      // FRI-156 §F / AC8: log compact_result/compact_error on the closing
+      // frame. The wire CompactingEvent has no error slot, so a FAILED
+      // compaction's reason would otherwise be discarded entirely. Daemon-log
+      // only (forensic) — the spinner/divider are the user-facing surface.
+      if (e.phase === "done") {
+        logger.log(e.result === "failed" ? "warn" : "info", "worker.compact.result", {
+          agent: w.agentName,
+          turn_id: w.turnId,
+          result: e.result,
+          ...(e.error ? { error: e.error } : {}),
+        });
+      }
       break;
     case "memory-flush": {
+      // Generation no-op: drop a superseded worker's late flush log lines.
+      if (!isCurrentGeneration(w)) break;
       // FRI-27: the PreCompact memory-flush sub-query lifecycle. Logging-only —
       // there is no SSE/durable artifact (the flush's effect is the 0..n
       // memory_save rows it writes via the memory MCP). Maps the worker's

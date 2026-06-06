@@ -4,11 +4,11 @@
  * When the worker emits a `compaction-boundary` IPC (the SDK trimmed the
  * context window), lifecycle.handleEvent must INSERT a durable
  * `role='system' kind='compaction' status='complete'` block whose
- * `content_json` carries `{ pre_tokens, post_tokens, duration_ms }`, publish
- * the block_start + block_complete SSE pair, and bump `w.blocksThisTurn` so the
- * durable divider REPLACES the synthesized "Compacted — no response" bubble
- * (zero_block_reason → undefined) and a legit /compact turn doesn't advance the
- * wedge streak.
+ * `content_json` carries `{ pre_tokens, post_tokens, duration_ms }` (the
+ * divider is rendered from this Zero-replicated row only — NO SSE block pair),
+ * and bump `w.blocksThisTurn` so the durable divider REPLACES the synthesized
+ * "Compacted — no response" bubble (zero_block_reason → undefined) and a legit
+ * /compact turn doesn't advance the wedge streak.
  *
  * Harness mirrors lifecycle-error-block.test.ts: scratch PG via createTestDb,
  * handle.truncate per test, __putLiveWorkerForTest registration, getDb()/schema
@@ -22,10 +22,11 @@
  * blocksThisTurn becomes 1 and that mapping is (correctly) bypassed.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb, getDb, schema, type TestDbHandle } from "@friday/shared";
 import { insertBlock } from "@friday/shared/services";
+import { logger } from "../log.js";
 
 let handle: TestDbHandle;
 
@@ -125,12 +126,12 @@ describe("lifecycle.handleEvent on `compaction-boundary` IPC (FRI-156 §D/§E)",
     // No live turn in the accumulator → sort-last 9999 fallback (same as recordError).
     expect(row.blockIndex).toBe(9999);
 
-    // SSE pair: block_start then block_complete for this marker, kind='compaction'.
+    // The divider is Zero-replication-driven ONLY: recordCompactionMarker does
+    // NOT publish a block_start/block_complete SSE pair (the dashboard has no
+    // kind:'compaction' SSE handler — such frames would be dead writes). Assert
+    // no SSE block frame was emitted for the marker.
     const blockEvents = captured.filter((e) => e.block_id === row.blockId);
-    expect(blockEvents.map((e) => e.type)).toEqual(["block_start", "block_complete"]);
-    expect(blockEvents[1].kind).toBe("compaction");
-    expect(blockEvents[1].role).toBe("system");
-    expect(blockEvents[1].status).toBe("complete");
+    expect(blockEvents).toEqual([]);
   });
 
   it("bumps w.blocksThisTurn to 1 on a successful insert (the SECOND writer)", async () => {
@@ -310,5 +311,87 @@ describe("lifecycle.handleEvent on `compaction-boundary` IPC (FRI-156 §D/§E)",
     // Both markers bumped the counter (multiple compactions in one long turn
     // are legitimate; each deserves a divider).
     expect(worker.blocksThisTurn).toBe(2);
+  });
+});
+
+describe("lifecycle.handleEvent on `compacting-status` IPC (FRI-156 §F / AC8)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("logs worker.compact.result with result+error on a FAILED closing frame (AC8 — error not dropped)", async () => {
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const logSpy = vi.spyOn(logger, "log").mockImplementation(() => {});
+
+    const worker = makeFakeWorker({ turnId: "turn-cmp-fail" });
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+
+    await handleEvent(
+      worker as never,
+      {
+        type: "compacting-status",
+        sessionId: "sess-cmp-1",
+        phase: "done",
+        result: "failed",
+        error: "ran out of room",
+      } as never,
+    );
+
+    __deleteLiveWorkerForTest(worker.agentName);
+
+    // The cross-boundary path (worker → lifecycle → daemon.jsonl) logs the
+    // failure reason at warn — it is dropped from the wire CompactingEvent.
+    expect(logSpy).toHaveBeenCalledWith("warn", "worker.compact.result", {
+      agent: worker.agentName,
+      turn_id: worker.turnId,
+      result: "failed",
+      error: "ran out of room",
+    });
+  });
+
+  it("logs worker.compact.result at info on a SUCCESSFUL closing frame (no error field)", async () => {
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const logSpy = vi.spyOn(logger, "log").mockImplementation(() => {});
+
+    const worker = makeFakeWorker({ turnId: "turn-cmp-ok" });
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+
+    await handleEvent(
+      worker as never,
+      {
+        type: "compacting-status",
+        sessionId: "sess-cmp-1",
+        phase: "done",
+        result: "success",
+      } as never,
+    );
+
+    __deleteLiveWorkerForTest(worker.agentName);
+
+    expect(logSpy).toHaveBeenCalledWith("info", "worker.compact.result", {
+      agent: worker.agentName,
+      turn_id: worker.turnId,
+      result: "success",
+    });
+  });
+
+  it("does NOT log worker.compact.result on the 'start' frame (only the closing frame)", async () => {
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const logSpy = vi.spyOn(logger, "log").mockImplementation(() => {});
+
+    const worker = makeFakeWorker({ turnId: "turn-cmp-start" });
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+
+    await handleEvent(
+      worker as never,
+      { type: "compacting-status", sessionId: "sess-cmp-1", phase: "start" } as never,
+    );
+
+    __deleteLiveWorkerForTest(worker.agentName);
+
+    expect(logSpy.mock.calls.some((c) => c[1] === "worker.compact.result")).toBe(false);
   });
 });

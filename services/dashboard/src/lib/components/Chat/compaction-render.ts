@@ -21,18 +21,21 @@ export function compactionDividerId(blockId: string): string {
 }
 
 /**
- * Optimistic↔canonical convergence invariant for compaction dividers: a
- * given turn must render AT MOST one divider, regardless of the order in
- * which signals arrive (the live `compacting` SSE event vs. the durable
- * `kind:'compaction'` block row replicated via Zero). Returns the count of
- * distinct compaction dividers in the list, grouped by turnId.
+ * Counts distinct compaction dividers in the list, grouped by turnId.
  *
- * The live path emits NO divider (only a transient spinner keyed on the
- * compacting agent), so the only divider producer is the persisted block —
- * which `parseBlocks` keys by `cb_<blockId>`. This helper makes that
- * structural guarantee testable in both interleavings: whether the block or
- * the live status is observed first, the divider set is identical because it
- * is derived solely from the block rows.
+ * Convergence invariant (de-dupe by id): a SINGLE durable block must never
+ * render more than one divider regardless of the order in which signals arrive
+ * (the live `compacting` SSE event vs. the durable `kind:'compaction'` block
+ * row replicated via Zero). The live path emits NO divider (only a transient
+ * spinner keyed on the compacting agent), so the only divider producer is the
+ * persisted block, which `parseBlocks` keys by `cb_<blockId>`. Duplicate ids
+ * are counted once (a keyed `{#each}` would otherwise crash).
+ *
+ * NOTE: this is NOT a "one divider per turn" cap. A long turn the SDK trims
+ * more than once produces multiple DISTINCT `kind:'compaction'` rows on the
+ * same turnId (one per compact_boundary frame) — each is a legitimate divider,
+ * so such a turn correctly counts >1. The cap is per-block (by id), not
+ * per-turn.
  */
 export function compactionDividerCountByTurn(messages: ChatMessage[]): Map<string, number> {
   const seenIds = new Set<string>();
@@ -70,4 +73,34 @@ export function isViewingPreCompaction(args: {
 }): boolean {
   if (args.isIntersecting) return false;
   return args.dividerTop >= args.viewportBottom;
+}
+
+/**
+ * Pill state for an UNMOUNTED divider — when the virtualization window does NOT
+ * include the divider row, so there is no element to observe. Purely a function
+ * of the divider's index in the full message list vs. the rendered window
+ * `[windowStart, windowEnd)`:
+ *
+ *   - `dividerIdx >= windowEnd` → divider is BELOW the rendered slice → every
+ *     rendered message is OLDER than the divider → user is scrolled ABOVE it →
+ *     pill ON (pre-compaction).
+ *   - `dividerIdx < windowStart` → divider is ABOVE the rendered slice → every
+ *     rendered message is NEWER than the divider → user is necessarily BELOW it
+ *     (post-compaction tail) → pill OFF, regardless of pinned state. A wheel
+ *     scroll-up within the post-compaction tail flips `pinnedToBottom` false
+ *     before the window slides down to mount the divider; the pill must NOT
+ *     flash on for that transient (the original bug this guards).
+ *
+ * `windowStart <= dividerIdx < windowEnd` (in-window) is handled separately by
+ * the IntersectionObserver + {@link isViewingPreCompaction}; this helper is only
+ * for the two out-of-window cases and never called for the in-window one.
+ */
+export function isViewingPreCompactionUnmounted(args: {
+  dividerIdx: number;
+  windowStart: number;
+  windowEnd: number;
+}): boolean {
+  if (args.dividerIdx >= args.windowEnd) return true;
+  // dividerIdx < windowStart → divider above the slice → user is below it.
+  return false;
 }

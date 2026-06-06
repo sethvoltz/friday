@@ -261,4 +261,25 @@ describe("compaction config (FRI-156 §A/§B)", () => {
     expect(compactionSweepMinute(cfg)).toBe(15);
     expect(compactionSweepThreshold(cfg)).toBe(80_000);
   });
+
+  it("clamps hostile/buggy config values rather than driving pathological behavior", () => {
+    writeFileSync(
+      CONFIG_PATH,
+      JSON.stringify({
+        compaction: {
+          sweepHour: 25, // out of [0,23] → clamped to 23
+          sweepMinute: -1, // out of [0,59] → clamped to 0
+          sweepThresholdTokens: 0, // floored at 10_000 (no sweep-everything)
+          autoCompactWindow: { orchestrator: 1 }, // floored at 10_000 (no constant-compaction loop)
+        },
+      }) + "\n",
+    );
+    const cfg = loadConfig();
+    expect(compactionSweepHour(cfg)).toBe(23);
+    expect(compactionSweepMinute(cfg)).toBe(0);
+    expect(compactionSweepThreshold(cfg)).toBe(10_000);
+    expect(autoCompactWindowFor(cfg, "orchestrator")).toBe(10_000);
+    // Unset type still backfills its default (clamp doesn't disturb the fallback).
+    expect(autoCompactWindowFor(cfg, "helper")).toBe(200_000);
+  });
 });

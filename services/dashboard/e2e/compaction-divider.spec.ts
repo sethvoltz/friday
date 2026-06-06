@@ -110,15 +110,20 @@ async function seedCompactionTranscript(databaseUrl: string): Promise<{ dividerB
       );
     }
 
-    // The durable compaction marker block.
+    // The durable compaction marker block. Shape mirrors exactly what the
+    // daemon's recordCompactionMarker writes (block-injectors.ts): role
+    // 'system', kind 'compaction', source NULL, block_index 9999 (the
+    // post-finalize fallback). The render path keys only on kind + content_json,
+    // but seeding the daemon-faithful row keeps this visual round-trip honest
+    // rather than validating a hand-shaped row the daemon never produces.
     const dividerBlockId = `${stamp}-divider`;
     await c.query(
       `INSERT INTO blocks
          (id, block_id, turn_id, agent_name, session_id, block_index,
           role, kind, source, content_json, status, streaming, ts)
        VALUES
-         ($1, $1, $2, 'friday', $3, 0,
-          'system', 'compaction', 'sdk', $4, 'complete', false, $5)`,
+         ($1, $1, $2, 'friday', $3, 9999,
+          'system', 'compaction', NULL, $4, 'complete', false, $5)`,
       [
         dividerBlockId,
         `turn-divider-${stamp}`,

@@ -18,8 +18,11 @@
  * test convention.
  *
  * Idempotency: `lastSweepAt` is in-memory module state and `isSweepDue` dedups
- * per local day. The 60K threshold gate is the backstop against an overnight
- * daemon restart re-sweeping — a session that was just compacted sits below
+ * per local day. `isSweepDue` also bounds firing to a catch-up WINDOW after the
+ * scheduled time (`SWEEP_WINDOW_MINUTES`) so a daytime daemon restart (fresh
+ * `lastSweepAt === null`) does NOT immediately mass-compact — it waits for the
+ * next night. The 60K threshold gate is the further backstop against an
+ * overnight restart re-sweeping — a session that was just compacted sits below
  * threshold, so a same-day second pass selects nothing.
  */
 
@@ -48,10 +51,27 @@ import * as registry from "../agent/registry.js";
  *  to catch the 03:30 window soon after it opens. */
 const TICK_MS = 300_000;
 
+/** Width (minutes) of the catch-up window after the scheduled sweep time.
+ *  The sweep fires only when `now` falls within `[scheduled, scheduled +
+ *  SWEEP_WINDOW_MINUTES)`. WITHOUT this bound an `afterTime` check is open
+ *  until midnight, so a fresh process (in-memory `lastSweepAt === null`)
+ *  started any time after 03:30 — e.g. a daytime `friday update` restart at
+ *  14:00 — would immediately mass-compact every over-threshold idle agent
+ *  instead of waiting for the next 03:30. 2h tolerates a daemon that was down
+ *  at exactly 03:30 and boots shortly after, while keeping the sweep nightly. */
+const SWEEP_WINDOW_MINUTES = 120;
+
 let interval: NodeJS.Timeout | null = null;
 /** Epoch-ms of the last completed sweep pass; null until the first runs.
  *  In-memory only — see the idempotency note in the module doc-comment. */
 let lastSweepAt: number | null = null;
+/** Re-entrancy guard. `lastSweepAt` is only written at the END of a pass, after
+ *  the await-heavy listAgents → per-agent usage → dispatch loop, so a single
+ *  pass slower than the 5-min tick would let a second tick enter `runSweep` and
+ *  re-pass `isSweepDue` before the first records its timestamp — both selecting
+ *  and dispatching the same agents. This flag makes an overlapping tick a clean
+ *  no-op independent of the per-target TOCTOU re-check. */
+let sweepRunning = false;
 
 export interface SweepCandidate {
   name: string;
@@ -60,10 +80,15 @@ export interface SweepCandidate {
 }
 
 /**
- * True when `now`'s LOCAL hour:minute has reached the configured sweep time
- * AND we haven't already swept today. Pure local-clock comparison (NOT cron):
- * 03:30 daily needs no cron expressiveness, and an injected `now` makes this
- * trivially testable.
+ * True when `now`'s LOCAL time falls inside the catch-up window
+ * `[scheduled, scheduled + SWEEP_WINDOW_MINUTES)` AND we haven't already swept
+ * today. Pure local-clock comparison (NOT cron): 03:30 daily needs no cron
+ * expressiveness, and an injected `now` makes this trivially testable.
+ *
+ * The bounded window is what keeps the sweep NIGHTLY across restarts: a fresh
+ * process has `lastSweepAt === null`, so without an upper bound any daytime
+ * restart after 03:30 would fire immediately. With the window, a 14:00 restart
+ * is outside `[03:30, 05:30)` and waits for the next night.
  *
  * "Already swept today" is a same-local-day comparison of `lastSweepAt` against
  * `now` — so a sweep that ran at 03:30 won't re-fire at 03:35 on the same day,
@@ -72,9 +97,12 @@ export interface SweepCandidate {
 export function isSweepDue(now: Date, lastSweepAt: number | null, cfg: FridayConfig): boolean {
   const hour = compactionSweepHour(cfg);
   const minute = compactionSweepMinute(cfg);
-  const afterTime =
-    now.getHours() > hour || (now.getHours() === hour && now.getMinutes() >= minute);
-  if (!afterTime) return false;
+  const scheduledMinutes = hour * 60 + minute;
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const minutesSinceScheduled = nowMinutes - scheduledMinutes;
+  // Inside the window only: at/after the scheduled time, but not so far past it
+  // that a daytime restart counts as a missed nightly run.
+  if (minutesSinceScheduled < 0 || minutesSinceScheduled >= SWEEP_WINDOW_MINUTES) return false;
   if (lastSweepAt === null) return true;
   const last = new Date(lastSweepAt);
   const sameLocalDay =
@@ -156,12 +184,23 @@ async function estimateAgentContext(a: AgentEntry): Promise<number> {
  * `before_prompt_build` prependBody hook could silently break that prefix. The
  * `compact` DispatchIntent kind exists for any path that DOES go through
  * buildDispatchPrompt; the sweep deliberately does not.
+ *
+ * Returns `true` if a turn was dispatched, `false` if the agent went
+ * non-idle during the prep awaits (TOCTOU) and was skipped.
  */
-async function dispatchSweep(name: string, cfg: FridayConfig): Promise<void> {
+async function dispatchSweep(name: string, cfg: FridayConfig): Promise<boolean> {
   const a = await registry.getAgent(name);
-  if (!a) return;
+  if (!a) return false;
   const workingDirectory = await registry.workingDirectoryFor(a);
   const { systemPrompt } = await buildSystemPrompt(a);
+  // TOCTOU re-check AFTER the prep awaits (getAgent / workingDirectoryFor /
+  // buildSystemPrompt all yield the event loop). runSweep re-checked liveness
+  // before calling us, but the agent can flip idle→working during these awaits
+  // (a worker-internal mail wakeup or a queued user prompt draining). If it
+  // has, dispatchTurn would PUSH the /compact onto nextPrompts (queue behind
+  // live work) — exactly what §B says to avoid. Skip rather than queue, and
+  // do NOT record a user block for a turn we won't dispatch.
+  if (peekLiveWorker(name)?.status !== "idle") return false;
   const modelCfg = normalizeModelConfig(cfg.model);
   const turnId = `t_${randomUUID()}`;
   // Leading "/compact " is load-bearing — see the doc-comment above.
@@ -171,11 +210,17 @@ async function dispatchSweep(name: string, cfg: FridayConfig): Promise<void> {
   // assistant output renders against a user bubble instead of dangling. The
   // dedicated `compaction_sweep` source keeps this autonomous overnight turn
   // distinct in the audit trail from a user-typed /compact.
+  //
+  // The recorded bubble carries a SHORT label — not the full ~10-line persona
+  // instruction body — so the orchestrator chat doesn't accumulate a verbose
+  // "/compact You are compacting…" block next to the divider every night. The
+  // worker still receives the complete `body` below; only the rendered user
+  // bubble is abbreviated.
   await recordUserBlock({
     turnId,
     agentName: name,
     sessionId: a.sessionId ?? undefined,
-    text: body,
+    text: "/compact (nightly maintenance)",
     source: "compaction_sweep",
   });
 
@@ -197,6 +242,7 @@ async function dispatchSweep(name: string, cfg: FridayConfig): Promise<void> {
       mode: "long-lived",
     },
   });
+  return true;
 }
 
 /**
@@ -209,47 +255,64 @@ async function dispatchSweep(name: string, cfg: FridayConfig): Promise<void> {
 async function runSweep(now: Date = new Date()): Promise<void> {
   const cfg = loadConfig();
   if (!isSweepDue(now, lastSweepAt, cfg)) return;
-
-  const agents = await registry.listAgents();
-  const liveStatus = buildLiveStatus();
-  const usageByAgent = new Map<string, number>();
-  for (const a of agents) {
-    // Only the candidate types can be swept — skip the usage query for the
-    // rest so a wide registry doesn't fan out into needless reads.
-    if (a.type !== "orchestrator" && a.type !== "helper") continue;
-    usageByAgent.set(a.name, await estimateAgentContext(a));
-  }
-
-  const targets = selectSweepTargets(agents, liveStatus, usageByAgent, cfg);
-  const threshold = compactionSweepThreshold(cfg);
-  logger.log("info", "worker.compact.sweep.started", { targetCount: targets.length });
-
-  for (const t of targets) {
-    // Race re-check: an agent that began a turn since selection is no longer
-    // idle — skip it rather than queue a /compact behind live work.
-    if (peekLiveWorker(t.name)?.status !== "idle") {
-      logger.log("info", "worker.compact.sweep.skipped", {
-        agent: t.name,
-        reason: "no-longer-idle",
-      });
-      continue;
+  // Re-entrancy guard: if a prior pass is still mid-flight (its await-heavy body
+  // hasn't yet written `lastSweepAt`), a fresh tick would re-pass `isSweepDue`
+  // and re-select the same agents. Bail cleanly so overlap can't double-dispatch.
+  if (sweepRunning) return;
+  sweepRunning = true;
+  try {
+    const agents = await registry.listAgents();
+    const liveStatus = buildLiveStatus();
+    const usageByAgent = new Map<string, number>();
+    for (const a of agents) {
+      // Only the candidate types can be swept — skip the usage query for the
+      // rest so a wide registry doesn't fan out into needless reads.
+      if (a.type !== "orchestrator" && a.type !== "helper") continue;
+      usageByAgent.set(a.name, await estimateAgentContext(a));
     }
-    try {
-      await dispatchSweep(t.name, cfg);
-      logger.log("info", "worker.compact.sweep.dispatched", {
-        agent: t.name,
-        estimate: t.estimatedContext,
-        threshold,
-      });
-    } catch (err) {
-      logger.log("warn", "worker.compact.sweep.error", {
-        agent: t.name,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
 
-  lastSweepAt = Date.now();
+    const targets = selectSweepTargets(agents, liveStatus, usageByAgent, cfg);
+    const threshold = compactionSweepThreshold(cfg);
+    logger.log("info", "worker.compact.sweep.started", { targetCount: targets.length });
+
+    for (const t of targets) {
+      // Race re-check: an agent that began a turn since selection is no longer
+      // idle — skip it rather than queue a /compact behind live work.
+      if (peekLiveWorker(t.name)?.status !== "idle") {
+        logger.log("info", "worker.compact.sweep.skipped", {
+          agent: t.name,
+          reason: "no-longer-idle",
+        });
+        continue;
+      }
+      try {
+        const dispatched = await dispatchSweep(t.name, cfg);
+        if (!dispatched) {
+          // The agent went non-idle (or vanished) during dispatchSweep's prep
+          // awaits — skipped rather than queued behind live work (TOCTOU).
+          logger.log("info", "worker.compact.sweep.skipped", {
+            agent: t.name,
+            reason: "no-longer-idle",
+          });
+          continue;
+        }
+        logger.log("info", "worker.compact.sweep.dispatched", {
+          agent: t.name,
+          estimate: t.estimatedContext,
+          threshold,
+        });
+      } catch (err) {
+        logger.log("warn", "worker.compact.sweep.error", {
+          agent: t.name,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    lastSweepAt = Date.now();
+  } finally {
+    sweepRunning = false;
+  }
 }
 
 export function startCompactionSweep(): NodeJS.Timeout {
@@ -271,6 +334,7 @@ export function stopCompactionSweep(): void {
     interval = null;
   }
   lastSweepAt = null;
+  sweepRunning = false;
 }
 
 /**
@@ -285,4 +349,5 @@ export async function __runSweepForTest(now: Date): Promise<void> {
  *  a prior pass's timestamp across cases. */
 export function __resetLastSweepForTest(): void {
   lastSweepAt = null;
+  sweepRunning = false;
 }

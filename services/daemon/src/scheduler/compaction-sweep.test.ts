@@ -70,6 +70,25 @@ describe("isSweepDue (pure local-clock + per-day dedup)", () => {
     // Next day at 03:30 — re-arms.
     expect(isSweepDue(at(3, 30, 16), lastSweep, cfg)).toBe(true);
   });
+
+  it("false at a daytime restart (14:00) with null lastSweepAt — must NOT mass-compact", () => {
+    // A fresh process (in-memory lastSweepAt resets to null) booted at 14:00,
+    // e.g. a `friday update` daytime restart. Outside the [03:30, 05:30)
+    // window, so it waits for the next 03:30 rather than firing immediately.
+    expect(isSweepDue(at(14, 0), null, cfg)).toBe(false);
+  });
+
+  it("false just past the catch-up window (05:30) with null lastSweepAt", () => {
+    // 05:30 is exactly scheduled + 120min — the window is half-open, so it is
+    // out. (A daemon down through the whole window waits for the next night.)
+    expect(isSweepDue(at(5, 30), null, cfg)).toBe(false);
+  });
+
+  it("true near the end of the catch-up window (05:29) with null lastSweepAt", () => {
+    // A daemon that was down at 03:30 and boots at 05:29 still catches the
+    // nightly run (inside [03:30, 05:30)).
+    expect(isSweepDue(at(5, 29), null, cfg)).toBe(true);
+  });
 });
 
 /** Minimal AgentEntry builders for the pure selectSweepTargets cases. */
@@ -155,6 +174,20 @@ describe("selectSweepTargets (pure policy)", () => {
     const agents = [orch("no-usage")];
     const liveStatus = new Map<string, "idle" | "working" | null>([["no-usage", "idle"]]);
     const usageByAgent = new Map<string, number>(); // no entry
+    expect(selectSweepTargets(agents, liveStatus, usageByAgent, cfg)).toEqual([]);
+  });
+
+  it("ISOLATES the registry-side gate: registry 'stalled' but live 'idle' + above threshold is EXCLUDED", () => {
+    // The combined test above sets stalled-reg's liveStatus to null, so both
+    // the registry gate and the live gate independently exclude it — deleting
+    // the registry check would still pass. Here live IS idle, so ONLY the
+    // registry-status gate can exclude it: this case fails if that gate is
+    // removed.
+    const agents = [orch("stalled-but-live-idle", "stalled")];
+    const liveStatus = new Map<string, "idle" | "working" | null>([
+      ["stalled-but-live-idle", "idle"],
+    ]);
+    const usageByAgent = new Map<string, number>([["stalled-but-live-idle", 99_000]]);
     expect(selectSweepTargets(agents, liveStatus, usageByAgent, cfg)).toEqual([]);
   });
 });
@@ -291,15 +324,22 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     expect(dispatchedNames).not.toContain("offline");
     expect(dispatchedNames).not.toContain("light");
 
-    // The originating user block was recorded with the dedicated source.
+    // The originating user block was recorded with the dedicated source and a
+    // SHORT display label — NOT the full persona-instruction body. The worker
+    // still receives the complete `/compact ${COMPACT_CUSTOM_INSTRUCTIONS}`
+    // body (asserted on `dispatchArg.options.prompt` above); only the rendered
+    // user bubble is abbreviated so the chat doesn't accumulate a verbose block
+    // next to the divider every night.
     expect(recordSpy).toHaveBeenCalledTimes(1);
     const recordArg = recordSpy.mock.calls[0]![0];
     expect(recordArg).toMatchObject({
       agentName: "friday",
       sessionId: "s-friday",
       source: "compaction_sweep",
-      text: `/compact ${COMPACT_CUSTOM_INSTRUCTIONS}`,
+      text: "/compact (nightly maintenance)",
     });
+    // The recorded short label must NOT carry the full instruction body.
+    expect(recordArg.text).not.toContain(COMPACT_CUSTOM_INSTRUCTIONS);
     // The recorded block + the dispatched turn share a turn id (FRI-71).
     expect(recordArg.turnId).toBe(dispatchArg.options.turnId);
 
@@ -371,6 +411,51 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     // The sweep must read s-current (10K, below threshold) — NOT the 500K stale
     // session — so nothing dispatches.
     expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it("re-entrancy guard: an overlapping pass is a clean no-op (no second selection/dispatch) until the first finishes", async () => {
+    // `lastSweepAt` is written only at the END of a pass, so a second tick that
+    // fires while the first is parked mid-flight would re-pass `isSweepDue` and
+    // re-select/re-dispatch the same agent absent the guard. Park pass A inside
+    // its first await (`listAgents`) via a deferred promise, run pass B fully
+    // while A is suspended, then release A. The guard must make B a no-op.
+    await registry.registerAgent({ name: "friday", type: "orchestrator" });
+    await registry.setSession("friday", "s-friday");
+    await seedUsage("friday", "s-friday", 90_000);
+    fakeLiveWorker("friday", "idle");
+
+    let releaseA: (v: AgentEntry[]) => void;
+    const parkedA = new Promise<AgentEntry[]>((resolve) => {
+      releaseA = resolve;
+    });
+    const realList = registry.listAgents;
+    let listCalls = 0;
+    const listSpy = vi.spyOn(registry, "listAgents").mockImplementation(async () => {
+      listCalls += 1;
+      // First call (pass A) parks until released; any later call resolves now.
+      return listCalls === 1 ? parkedA : realList();
+    });
+    const dispatchSpy = vi.spyOn(lifecycle, "dispatchTurn").mockImplementation(() => {});
+    const recordSpy = vi.spyOn(blockInjectors, "recordUserBlock");
+
+    // Pass A: enters the guard, awaits the parked listAgents — do NOT await it.
+    const passA = __runSweepForTest(at(3, 30));
+    // Let A advance into its first await so `sweepRunning` is set.
+    await Promise.resolve();
+
+    // Pass B: fires while A is parked. The guard must bail it out BEFORE it
+    // reaches its own `listAgents` — so listAgents is still called exactly once.
+    await __runSweepForTest(at(3, 30));
+    expect(listSpy).toHaveBeenCalledTimes(1);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(recordSpy).not.toHaveBeenCalled();
+
+    // Release A and let it finish: exactly one dispatch total.
+    releaseA!(await realList());
+    await passA;
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+    expect(dispatchSpy.mock.calls[0]![0].agentName).toBe("friday");
+    expect(recordSpy).toHaveBeenCalledTimes(1);
   });
 
   it("race re-check: a target idle at selection but working at dispatch is SKIPPED (logged, not dispatched)", async () => {

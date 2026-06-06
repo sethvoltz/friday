@@ -89,15 +89,30 @@ export async function safeRecall(text: string, intent: IntentTag = "user_chat"):
   }
 }
 
+/** True for a turn whose body is a native `/compact` slash command. Recall
+ *  against the literal "/compact <persona text>" returns garbage, appends a
+ *  junk <memory-context> block, does a full listEntries() read, and bumps
+ *  recallCount — all pollution on a turn whose only job is to compact. The
+ *  `compact` intentTag covers the maintenance-dispatch path that goes through
+ *  buildDispatchPrompt with `{kind:'compact'}`; this prefix check additionally
+ *  covers a USER-TYPED `/compact` (which arrives as `intentTag:'user_chat'` via
+ *  the dispatch-listener / resume-listener — those never construct the compact
+ *  kind). `/compact` is not a registered system command, so it falls through to
+ *  a normal user_chat dispatch. Leading-whitespace tolerant; matches the bare
+ *  command or `/compact <args>`, not an unrelated word like `/compaction`. */
+function isCompactCommand(intentText: string): boolean {
+  return /^\s*\/compact(\s|$)/.test(intentText);
+}
+
 export async function memoryRecallHook(
   ctx: HookContextMap["before_prompt_build"],
 ): Promise<HookResultMap["before_prompt_build"] | void> {
   // FRI-156 §B: a `/compact …` maintenance turn exists only to compact the
-  // session. Passive recall against the literal "/compact <persona text>" body
-  // would return garbage, append a junk <memory-context> block, do a full
-  // listEntries() read, and bump recallCount — all pollution. Skip it; the
-  // /compact turn's system prompt stays the base prompt only.
-  if (ctx.intentTag === "compact") return;
+  // session. Skip recall (see isCompactCommand for the pollution rationale) —
+  // the /compact turn's system prompt stays the base prompt only. Covers both
+  // the `compact` intentTag (maintenance dispatch) and a user-typed `/compact`
+  // (arrives as user_chat).
+  if (ctx.intentTag === "compact" || isCompactCommand(ctx.intent)) return;
   const block = await safeRecall(ctx.intent, ctx.intentTag);
   if (!block) return;
   return { appendSystemPrompt: block };

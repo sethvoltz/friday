@@ -228,7 +228,7 @@ describe("probeAutoCompactWindow: confirms the SDK honors the window (FRI-156 §
       expect.objectContaining({
         takes_effect: false,
         fallback:
-          "post-turn-usage /compact dispatch (SDK autoCompactThreshold did not reflect the window)",
+          "independent nightly sweep bounds context (SDK autoCompactThreshold did not reflect the window)",
       }),
     );
   });
@@ -258,7 +258,7 @@ describe("probeAutoCompactWindow: confirms the SDK honors the window (FRI-156 §
       "worker.compact.window.probe",
       expect.objectContaining({
         takes_effect: false,
-        fallback: "post-turn-usage /compact dispatch (getContextUsage unavailable)",
+        fallback: "independent nightly sweep bounds context (getContextUsage unavailable)",
       }),
     );
   });
@@ -273,7 +273,7 @@ describe("probeAutoCompactWindow: confirms the SDK honors the window (FRI-156 §
       "worker.compact.window.probe",
       expect.objectContaining({
         takes_effect: false,
-        fallback: "post-turn-usage /compact dispatch (getContextUsage threw)",
+        fallback: "independent nightly sweep bounds context (getContextUsage threw)",
         error: "control channel closed",
       }),
     );
@@ -384,6 +384,43 @@ describe("buildFlushQueryOptions: flush invariants (FRI-27, OVERRIDES.md #1)", (
     expect(o.disallowedTools).toEqual(["Task"]);
   });
 
+  it("STRUCTURALLY restricts availability: tools:[] (built-ins off) + memory-only mcpServers", async () => {
+    const { buildFlushQueryOptions } = await import("./compact-flush.js");
+    // The worker passes its FULL mcp set; the flush must reduce it to memory-only
+    // so non-memory tools (mail/tickets/evolve/etc.) are not AVAILABLE under
+    // bypassPermissions, not merely un-auto-approved.
+    const fullSet = {
+      "friday-memory": { __server: "memory" },
+      "friday-mail": { __server: "mail" },
+      "friday-evolve": { __server: "evolve" },
+    } as never;
+    const o = buildFlushQueryOptions(baseOpts, "sess-flush-tools", fullSet);
+    // Built-in tools disabled.
+    expect(o.tools).toEqual([]);
+    // Only friday-memory survives in the MCP set.
+    expect(Object.keys(o.mcpServers ?? {})).toEqual(["friday-memory"]);
+    // bypassPermissions is paired with the explicit dangerous-skip flag.
+    expect(o.permissionMode).toBe("bypassPermissions");
+    expect(o.allowDangerouslySkipPermissions).toBe(true);
+  });
+
+  it("memory-only reduction drops everything when the memory server is absent", async () => {
+    const { buildFlushQueryOptions } = await import("./compact-flush.js");
+    const o = buildFlushQueryOptions(baseOpts, "sess-flush-nomem", {
+      "friday-mail": {},
+    } as never);
+    expect(o.mcpServers).toEqual({});
+  });
+
+  it("wires options.abortController when an AbortController is supplied (and omits it otherwise)", async () => {
+    const { buildFlushQueryOptions } = await import("./compact-flush.js");
+    const ac = new AbortController();
+    const withAc = buildFlushQueryOptions(baseOpts, "sess-flush-ac", {}, ac);
+    expect(withAc.abortController).toBe(ac);
+    const without = buildFlushQueryOptions(baseOpts, "sess-flush-ac2", {});
+    expect(without.abortController).toBeUndefined();
+  });
+
   it("uses a large autoCompactWindow so the flush itself never compacts", async () => {
     const { buildFlushQueryOptions } = await import("./compact-flush.js");
     const o = buildFlushQueryOptions(baseOpts, "sess-flush-3", {});
@@ -415,30 +452,36 @@ describe("runMemoryFlush: emits start + complete(savedCount), counts memory_save
     daemonPort: 9999,
   } as never;
 
-  it("counts exactly the memory_save tool_use frames and emits complete(savedCount)", async () => {
+  it("counts only memory_save tool_results that LANDED (non-error) and emits complete(savedCount)", async () => {
     const { runMemoryFlush } = await import("./compact-flush.js");
     mockDaemonFetch.mockResolvedValue([
       { title: "Brew dance", tags: ["ops", "ritual"] },
       { title: "Net negative", tags: [] },
     ]);
-    // Two memory_save frames + one memory_search frame (which must NOT count).
+    // Three memory_save invocations + one memory_search (must NOT count).
+    // Two saves LAND (non-error tool_result); one FAILS (is_error) so it must
+    // be excluded — the AC is "rows LAND IN POSTGRES", not invocations.
     mockQueryImpl.mockImplementation(() =>
       makeIterator([
         {
           type: "assistant",
           message: {
             content: [
-              { type: "tool_use", name: "mcp__friday-memory__memory_search" },
-              { type: "text", text: "thinking" },
+              { type: "tool_use", id: "tu_search", name: "mcp__friday-memory__memory_search" },
+              { type: "tool_use", id: "tu_save_ok1", name: "mcp__friday-memory__memory_save" },
+              { type: "tool_use", id: "tu_save_ok2", name: "mcp__friday-memory__memory_save" },
+              { type: "tool_use", id: "tu_save_fail", name: "mcp__friday-memory__memory_save" },
             ],
           },
         },
         {
-          type: "assistant",
+          type: "user",
           message: {
             content: [
-              { type: "tool_use", name: "mcp__friday-memory__memory_save" },
-              { type: "tool_use", name: "mcp__friday-memory__memory_save" },
+              { type: "tool_result", tool_use_id: "tu_search" },
+              { type: "tool_result", tool_use_id: "tu_save_ok1" },
+              { type: "tool_result", tool_use_id: "tu_save_ok2", is_error: false },
+              { type: "tool_result", tool_use_id: "tu_save_fail", is_error: true },
             ],
           },
         },
@@ -462,6 +505,7 @@ describe("runMemoryFlush: emits start + complete(savedCount), counts memory_save
       phase: "start",
       sessionId: "sess-flush-run",
     });
+    // Two landed saves; the failed save and the search are excluded.
     expect(emitted[1]).toEqual({
       type: "memory-flush",
       phase: "complete",
@@ -508,6 +552,64 @@ describe("runMemoryFlush: emits start + complete(savedCount), counts memory_save
       savedCount: 0,
     });
   });
+
+  it("forwards an abort into the flush sub-query's abortController and stops the for-await loop", async () => {
+    // The CRITICAL gap the old tests missed: they rejected the index FETCH, so
+    // the inner query() was never reached. Here the fetch RESOLVES (common
+    // case) and the signal is ALREADY aborted, so the flush query() IS reached.
+    // Assert (a) the sub-query received an abortController wired to the signal
+    // (already aborted), and (b) the for-await loop breaks immediately so a
+    // torn-down flush keeps no count even though the iterator would yield saves.
+    const { runMemoryFlush } = await import("./compact-flush.js");
+    mockDaemonFetch.mockResolvedValue([{ title: "x", tags: [] }]);
+    // The iterator WOULD count two saves if the loop didn't break on abort.
+    mockQueryImpl.mockImplementation(() =>
+      makeIterator([
+        {
+          type: "assistant",
+          message: {
+            content: [
+              { type: "tool_use", id: "s1", name: "mcp__friday-memory__memory_save" },
+              { type: "tool_use", id: "s2", name: "mcp__friday-memory__memory_save" },
+            ],
+          },
+        },
+        {
+          type: "user",
+          message: {
+            content: [
+              { type: "tool_result", tool_use_id: "s1" },
+              { type: "tool_result", tool_use_id: "s2" },
+            ],
+          },
+        },
+        RESULT_MSG,
+      ]),
+    );
+
+    const ac = new AbortController();
+    ac.abort();
+    const emitted: Record<string, unknown>[] = [];
+    await runMemoryFlush(
+      baseOpts,
+      "sess-flush-aborted",
+      {},
+      9999,
+      (e) => emitted.push(e as Record<string, unknown>),
+      ac.signal,
+    );
+
+    // The sub-query received an abortController, and it is aborted (the SDK's
+    // only abort lever — without this a stalled flush keeps running after
+    // compaction proceeds).
+    const flushOpts = mockQueryImpl.mock.calls.at(-1)?.[0]?.options as {
+      abortController?: AbortController;
+    };
+    expect(flushOpts.abortController).toBeInstanceOf(AbortController);
+    expect(flushOpts.abortController?.signal.aborted).toBe(true);
+    // The loop broke on the aborted signal, so no saves were counted.
+    expect(emitted.find((e) => e.phase === "complete")).toMatchObject({ savedCount: 0 });
+  });
 });
 
 // ---- FRI-27: PreCompact hook registration + builder gate ----
@@ -528,13 +630,16 @@ describe("worker PreCompact hook registration (FRI-27)", () => {
     expect(preCompact[0].hooks).toHaveLength(1);
   });
 
-  it("does NOT register a PreCompact hook for a builder agent", async () => {
+  it("does NOT register a PreCompact hook for a builder agent, but DOES register PostCompact", async () => {
+    // OVERRIDES.md #2 / FRI-27 AC30: PostCompact is logging-only and runs for
+    // ALL agent types (builders compact too). Only PreCompact is builder-gated
+    // (builders have read-only memory, so a flush memory_save would error).
     const { mainOptions } = await runWorker("builder", [RESULT_MSG]);
     const hooks = mainOptions.hooks as Record<string, unknown> | undefined;
     expect(hooks).toBeDefined();
     expect(hooks).toHaveProperty("PreToolUse");
     expect(hooks).not.toHaveProperty("PreCompact");
-    expect(hooks).not.toHaveProperty("PostCompact");
+    expect(hooks).toHaveProperty("PostCompact");
   });
 
   it("fires the §A autoCompactWindow runtime probe on the live turn query", async () => {
@@ -549,7 +654,7 @@ describe("worker PreCompact hook registration (FRI-27)", () => {
       agent: "test-agent",
       configured_window: 200_000,
       takes_effect: false,
-      fallback: "post-turn-usage /compact dispatch (getContextUsage unavailable)",
+      fallback: "independent nightly sweep bounds context (getContextUsage unavailable)",
     });
   });
 });
@@ -692,5 +797,95 @@ describe("worker PreCompact flush failure is isolated from the outer turn (FRI-2
 
     expect(r).toEqual({});
     expect(sawError).toBe(true);
+  });
+
+  it("a SUCCESSFUL hook-driven flush emits EXACTLY [start, complete] (no duplicate start)", async () => {
+    // Regression: the hook emitted phase:'start' AND runMemoryFlush emitted it
+    // again → two worker.compact.flush.started lines per flush. Drive the REAL
+    // PreCompact hook on a clean flush and assert the captured memory-flush
+    // events are exactly [start, complete].
+    const { mainOptions } = await runWorker("orchestrator", [RESULT_MSG]);
+    mockDaemonFetch.mockResolvedValue([{ title: "x", tags: [] }]);
+    mockQueryImpl.mockImplementation(() =>
+      makeIterator([
+        {
+          type: "assistant",
+          message: {
+            content: [{ type: "tool_use", id: "s1", name: "mcp__friday-memory__memory_save" }],
+          },
+        },
+        { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "s1" }] } },
+        RESULT_MSG,
+      ]),
+    );
+    const preCompact = hookCallback(mainOptions, "PreCompact");
+
+    const phases = await withCapturedSend(async (captured) => {
+      await preCompact({ session_id: "sess-flush-ok" }, undefined, {
+        signal: new AbortController().signal,
+      });
+      return captured.filter((m) => m.type === "memory-flush").map((m) => m.phase as string);
+    });
+
+    expect(phases).toEqual(["start", "complete"]);
+  });
+
+  it("a SECOND PreCompact for the same session while one is in flight is short-circuited (concurrency guard)", async () => {
+    // FRI-27 §4: no two flushes per session in parallel. Hold the first flush
+    // open (the index fetch never resolves) and fire a second PreCompact for the
+    // SAME session — it must short-circuit (emit nothing, run no sub-query).
+    const { mainOptions } = await runWorker("orchestrator", [RESULT_MSG]);
+    let releaseFetch: (v: unknown) => void = () => {};
+    mockDaemonFetch.mockImplementation(() => new Promise((resolve) => (releaseFetch = resolve)));
+    const preCompact = hookCallback(mainOptions, "PreCompact");
+
+    const phases = await withCapturedSend(async (captured) => {
+      // First flush: starts and parks on the never-resolving fetch.
+      const first = preCompact({ session_id: "sess-dup" }, undefined, {
+        signal: new AbortController().signal,
+      });
+      // Let the first emit its 'start' and reach the await.
+      await new Promise((r) => setTimeout(r, 10));
+      const startsAfterFirst = captured.filter(
+        (m) => m.type === "memory-flush" && m.phase === "start",
+      ).length;
+      // Second flush for the SAME session: must short-circuit, emitting nothing.
+      const r2 = await preCompact({ session_id: "sess-dup" }, undefined, {
+        signal: new AbortController().signal,
+      });
+      const startsAfterSecond = captured.filter(
+        (m) => m.type === "memory-flush" && m.phase === "start",
+      ).length;
+      // Release the first so it can finish (resolve to an empty index).
+      releaseFetch([]);
+      await first;
+      return { r2, startsAfterFirst, startsAfterSecond };
+    });
+
+    // Second call short-circuited to {} and added NO new start event.
+    expect(phases.r2).toEqual({});
+    expect(phases.startsAfterFirst).toBe(1);
+    expect(phases.startsAfterSecond).toBe(1);
+  });
+
+  it("skips the flush entirely when no session id is resolvable (resume:'' would degrade silently)", async () => {
+    const { mainOptions } = await runWorker("orchestrator", [RESULT_MSG]);
+    const preCompact = hookCallback(mainOptions, "PreCompact");
+    mockQueryImpl.mockClear();
+
+    const { r, captured } = await withCapturedSend(async (cap) => {
+      const res = await preCompact({}, undefined, { signal: new AbortController().signal });
+      return { r: res, captured: cap };
+    });
+
+    expect(r).toEqual({});
+    // No flush sub-query was issued (no resume:'' degraded run).
+    expect(mockQueryImpl).not.toHaveBeenCalled();
+    // A skip is signaled as the error arm with an empty sessionId.
+    const skip = captured.find((m) => m.type === "memory-flush" && m.phase === "error");
+    expect(skip).toMatchObject({
+      sessionId: "",
+      message: expect.stringContaining("no resolvable"),
+    });
   });
 });

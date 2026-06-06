@@ -5,6 +5,10 @@
   import { clock } from "$lib/stores/clock.svelte";
   import { zeroSync } from "$lib/stores/zero.svelte";
   import { computeGroupingMeta } from "$lib/util/chat-grouping";
+  import {
+    isViewingPreCompaction,
+    isViewingPreCompactionUnmounted,
+  } from "$lib/components/Chat/compaction-render";
   import { fmtTokensCompact } from "$lib/util/format";
   import {
     formatAbsoluteTooltip,
@@ -163,6 +167,29 @@
   });
   let windowStart = $derived(Math.max(0, windowEnd - WINDOW_SIZE));
   let list = $derived(allMessages.slice(windowStart, windowEnd));
+
+  // Resolve the `--chat-top` header band (a `calc()`, so getPropertyValue
+  // returns the literal expression) to a px number by measuring a transient
+  // probe. Used as the negative top `rootMargin` for the pre-compaction pill
+  // observer so a divider tucked under the floating header reads as out-of-view.
+  //
+  // The resolved value is effectively invariant for a session, but this helper
+  // runs inside the pill `$effect`, which re-keys on every virtualization slide
+  // and streaming block delta while a divider is in-window. Measuring a fresh
+  // probe each time forces a synchronous DOM append/reflow/remove on that hot
+  // path, so the result is memoized after the first measurement.
+  let headerTopInsetCache: number | null = null;
+  function headerTopInsetPx(): number {
+    if (headerTopInsetCache !== null) return headerTopInsetCache;
+    if (typeof document === "undefined") return 85;
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:absolute;visibility:hidden;height:var(--chat-top);";
+    document.body.appendChild(probe);
+    const h = probe.getBoundingClientRect().height;
+    probe.remove();
+    headerTopInsetCache = Number.isFinite(h) && h > 0 ? h : 85;
+    return headerTopInsetCache;
+  }
   // Honest "no older messages" gate: when windowStart hits 0 AND the
   // local replica is the canonical full set (Zero `resultType ===
   // 'complete'`), there is genuinely nothing older to slide to.
@@ -489,52 +516,90 @@
     });
   });
 
-  // FRI-156 §E: "Viewing pre-compaction history" pill detection. Observe the
-  // most-recent compaction divider element; flip chat.viewingPreCompaction
-  // true when the user is scrolled ABOVE it (the divider sits below the
-  // scroller's viewport). Re-runs when the divider id changes (a fresh
-  // compaction lands) or the list re-slices (virtualization may mount /
-  // unmount the divider). When no divider exists, the pill is forced off.
+  // FRI-156 §E: "Viewing pre-compaction history" pill detection. The pill
+  // shows when the user is scrolled ABOVE the most-recent compaction divider.
   //
-  // Detection uses the IntersectionObserver entry geometry directly rather
-  // than hand-rolled scroll math: `!isIntersecting` with the divider's
-  // `boundingClientRect.top` at or below the root's bottom edge means the
-  // element is past the bottom of the viewport — i.e. scrolled above. The
-  // symmetric case (divider above the viewport top) leaves the pill off,
-  // because the user is then looking at post-compaction (recent) history.
+  // The divider id is derived over ALL messages, but the DOM only mounts the
+  // windowed slice, so the divider can be UNMOUNTED in both directions:
+  //   - above the window (user scrolled down into recent / live-tail content)
+  //   - below the window (user scrolled up into older pre-compaction history)
+  // Treating "element absent" as "necessarily pre-compaction" was a false
+  // positive at the tail of a long, frequently-compacted session (the divider
+  // falls above windowStart while the user is pinned to the bottom). Instead
+  // we compare the divider's index in allMessages against the window:
+  //   - index >= windowEnd  → divider is below the rendered slice → every
+  //                           rendered message is OLDER → user is above it →
+  //                           pill ON.
+  //   - index <  windowStart → divider is above the slice → every rendered
+  //                           message is NEWER → user is necessarily BELOW it
+  //                           (post-compaction tail) → pill OFF, regardless of
+  //                           pinned state.
+  //   - in-window           → observe the element and use the pure geometry
+  //                           helper (`isViewingPreCompaction`).
+  //
+  // Re-keys on the divider id and the window bounds (NOT the whole `list`
+  // array, which changes identity on every block delta while a turn streams —
+  // that thrashed the observer per token). The IntersectionObserver carries a
+  // negative top `rootMargin` equal to the header height so a divider tucked
+  // UNDER the floating header (visually hidden but still geometrically
+  // intersecting) is treated as out-of-view, matching the other sentinels.
   $effect(() => {
     if (readonly) {
       chat.viewingPreCompaction = false;
       return;
     }
     const dividerId = chat.latestCompactionDividerId;
-    // Re-key on the rendered window too, so a virtualization re-slice that
-    // mounts/unmounts the divider element re-attaches the observer.
-    void list;
     if (!dividerId) {
       chat.viewingPreCompaction = false;
       return;
     }
-    const el = document.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(dividerId)}"]`);
-    if (!el) {
-      // Divider not currently mounted (scrolled far above the window):
-      // the user is necessarily viewing pre-compaction history.
-      chat.viewingPreCompaction = true;
+    // Re-key on the window bounds so a slide that mounts/unmounts the divider
+    // re-runs this effect — but NOT on `list` identity (per-token churn).
+    const start = windowStart;
+    const end = windowEnd;
+    const dividerIdx = allMessages.findIndex((m) => m.id === dividerId);
+    if (dividerIdx === -1) {
+      chat.viewingPreCompaction = false;
       return;
     }
+    if (dividerIdx >= end || dividerIdx < start) {
+      // Divider is unmounted (above or below the rendered slice). The pill state
+      // is a pure function of index-vs-window — see the helper's doc-comment:
+      //   - below the slice (>= end) → user is above it → pill ON.
+      //   - above the slice (< start) → every rendered message is NEWER than the
+      //     divider → user is necessarily BELOW it (post-compaction tail) → pill
+      //     OFF, regardless of pinned state.
+      chat.viewingPreCompaction = isViewingPreCompactionUnmounted({
+        dividerIdx,
+        windowStart: start,
+        windowEnd: end,
+      });
+      return;
+    }
+    // In-window: observe the actual element and use the shared geometry helper.
+    const el = document.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(dividerId)}"]`);
+    if (!el) {
+      // Index says in-window but the node hasn't painted yet — fall back to the
+      // not-pinned heuristic rather than a hard true.
+      chat.viewingPreCompaction = !chat.pinnedToBottom;
+      return;
+    }
+    const headerInset = headerTopInsetPx();
     const obs = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
-          if (e.isIntersecting) {
-            chat.viewingPreCompaction = false;
-            continue;
-          }
           const rootBottom = e.rootBounds?.bottom ?? window.innerHeight;
-          // Divider is below the viewport bottom → user scrolled above it.
-          chat.viewingPreCompaction = e.boundingClientRect.top >= rootBottom;
+          chat.viewingPreCompaction = isViewingPreCompaction({
+            dividerTop: e.boundingClientRect.top,
+            viewportBottom: rootBottom,
+            isIntersecting: e.isIntersecting,
+          });
         }
       },
-      { threshold: 0 },
+      // Negative top inset: the region under the floating chat header is
+      // treated as out-of-view so a divider occluded by the header still
+      // reports as not-intersecting (matching the top/bottom sentinels).
+      { threshold: 0, rootMargin: `${-headerInset}px 0px 0px 0px` },
     );
     obs.observe(el);
     return () => {

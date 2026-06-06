@@ -573,10 +573,13 @@
   /* FRI-156 §E: the pre-compaction pill sits at the top of the chat area —
      the divider it points back to is below the viewport (the user scrolled
      up into pre-compaction history), so the affordance to return to it
-     anchors under the header, mirroring the loading-older placement. */
+     anchors under the header. Offset BELOW .loading-older (which shares the
+     top band) so that if both surface at once — scrolling up above the
+     divider can also trigger older-block pagination — they stack rather than
+     render at identical coordinates and overlap. */
   .pre-compaction-wrap {
     position: fixed;
-    top: calc(var(--chat-top) + 0.5rem);
+    top: calc(var(--chat-top) + 3rem);
     left: var(--content-left);
     right: var(--page-gutter);
     display: flex;
@@ -668,9 +671,12 @@
       left: var(--page-gutter);
       right: var(--page-gutter);
     }
-    .loading-older,
-    .pre-compaction-wrap {
+    .loading-older {
       top: calc(var(--chat-top) + 3.75rem);
+    }
+    /* Stacked below .loading-older on mobile too. */
+    .pre-compaction-wrap {
+      top: calc(var(--chat-top) + 6.25rem);
     }
   }
 

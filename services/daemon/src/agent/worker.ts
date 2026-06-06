@@ -91,6 +91,26 @@ let idleResolve: (() => void) | null = null;
 let workerOpts: WorkerSpawnOptions | null = null;
 let lastSessionId: string | undefined;
 
+/**
+ * FRI-27 §4: in-flight memory-flush guard. The SDK can fire PreCompact more
+ * than once for a session (a retry, or multiple compact_boundary frames in one
+ * long turn — both legitimate), and two overlapping flushes would each
+ * fork-resume the full context and race two memory_save streams against the
+ * same store. Module-scope so it spans the worker's lifetime; the PreCompact
+ * hook short-circuits when the session is already flushing and clears the
+ * entry in a finally.
+ */
+const inFlightFlushes = new Set<string>();
+
+/**
+ * FRI-156 §A: the autoCompactWindow "takes-effect" probe fires ONCE per worker
+ * process. The configured window is a function of agent type + config, both
+ * constant for the worker's lifetime, so the SDK verdict can't change
+ * turn-to-turn — re-probing every runQuery only re-issued a getContextUsage()
+ * control round-trip to re-log an invariant.
+ */
+let probeFired = false;
+
 function emit(e: WorkerEvent): void {
   if (process.send) process.send(e);
 }
@@ -513,10 +533,12 @@ export function buildQueryOptions(
  * sufficient: the SDK has to actually honor it. The §A design mandates we
  * confirm at runtime via `Query.getContextUsage()` that the SDK's
  * `autoCompactThreshold` reflects the configured window — and, if the setting
- * does NOT flow through (older SDK, field renamed, threshold absent), log a
- * documented SDK-gap fallback so the daemon falls back to the post-turn
- * usage-check `/compact` path (the 60K nightly sweep + the auto-ceiling already
- * dispatch `/compact` at the same budget — see FRI-156 §B and the sweep).
+ * does NOT flow through (older SDK, field renamed, threshold absent), log the
+ * documented SDK gap. The probe verdict drives nothing directly; the documented
+ * fallback is the INDEPENDENT nightly sweep (FRI-156 §B), which dispatches
+ * `/compact` on its own timer at the 60K budget regardless of whether the SDK
+ * ceiling takes effect — so context is bounded even when this probe reports
+ * `takes_effect:false`.
  *
  * Best-effort and FULLY isolated: the probe is one `getContextUsage()` control
  * round-trip that never throws into the turn (any failure is swallowed and
@@ -545,7 +567,7 @@ export async function probeAutoCompactWindow(
       agent: agentName,
       configured_window: configuredWindow,
       takes_effect: false,
-      fallback: "post-turn-usage /compact dispatch (getContextUsage unavailable)",
+      fallback: "independent nightly sweep bounds context (getContextUsage unavailable)",
     });
     return { takesEffect: false };
   }
@@ -568,7 +590,7 @@ export async function probeAutoCompactWindow(
         ? {}
         : {
             fallback:
-              "post-turn-usage /compact dispatch (SDK autoCompactThreshold did not reflect the window)",
+              "independent nightly sweep bounds context (SDK autoCompactThreshold did not reflect the window)",
           }),
     });
     return { takesEffect, autoCompactThreshold: threshold };
@@ -579,7 +601,7 @@ export async function probeAutoCompactWindow(
       agent: agentName,
       configured_window: configuredWindow,
       takes_effect: false,
-      fallback: "post-turn-usage /compact dispatch (getContextUsage threw)",
+      fallback: "independent nightly sweep bounds context (getContextUsage threw)",
       error: e instanceof Error ? e.message : String(e),
     });
     return { takesEffect: false };
@@ -864,14 +886,17 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   //     on the PreToolUse hook above). Prefer the hook input's `session_id`
   //     (the authoritative about-to-compact session) over the captured one.
   //
-  //   PostCompact — logging only (OVERRIDES.md #2 / FRI-27 AC): record
+  //   PostCompact — logging only (OVERRIDES.md #2 / FRI-27 AC30): record
   //     `worker.compact.post` with the trigger + compact_summary LENGTH. The
-  //     summary CONTENT is never persisted. Runs for all non-builder types.
+  //     summary CONTENT is never persisted. Runs for ALL agent types (builders
+  //     compact too — the autoCompactWindow ceiling applies — and logging-only
+  //     PostCompact carries none of the read-only-memory risk that gates
+  //     PreCompact off builders). Only PreCompact is builder-gated.
   //
   // The closures capture `opts`, `mcpServers`, `emit`, `sessionId` — all in
   // runQuery scope. Top-level hook keys (PreToolUse vs PreCompact vs
   // PostCompact) don't collide, so we merge by spread below.
-  const compactionHooks =
+  const preCompactHooks =
     opts.agentType === "builder"
       ? {}
       : {
@@ -885,7 +910,25 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
                 ) => {
                   const i = input as { session_id?: string } | undefined;
                   const flushSession = i?.session_id ?? sessionId ?? "";
-                  emit({ type: "memory-flush", phase: "start", sessionId: flushSession });
+                  // No resolvable session → the flush can't fork-resume the
+                  // conversation (resume:'' would start a fresh, empty
+                  // session). Skip rather than silently degrade. Compaction
+                  // proceeds regardless (we always return {}).
+                  if (!flushSession) {
+                    emit({
+                      type: "memory-flush",
+                      phase: "error",
+                      sessionId: "",
+                      message: "flush skipped: no resolvable session id",
+                    });
+                    return {};
+                  }
+                  // FRI-27 §4: no two flushes per session in parallel.
+                  if (inFlightFlushes.has(flushSession)) return {};
+                  inFlightFlushes.add(flushSession);
+                  // runMemoryFlush owns the full start/complete lifecycle (the
+                  // 'start' emit lives there, not here — emitting in both would
+                  // double the worker.compact.flush.started log line).
                   try {
                     await runMemoryFlush(
                       opts,
@@ -902,6 +945,8 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
                       sessionId: flushSession,
                       message: e instanceof Error ? e.message : String(e),
                     });
+                  } finally {
+                    inFlightFlushes.delete(flushSession);
                   }
                   return {};
                 },
@@ -910,32 +955,39 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
               timeout: 30,
             },
           ],
-          PostCompact: [
-            {
-              hooks: [
-                async (input: unknown) => {
-                  const i = input as {
-                    session_id?: string;
-                    trigger?: "manual" | "auto";
-                    compact_summary?: string;
-                  };
-                  logger.log("info", "worker.compact.post", {
-                    agent: opts.agentName,
-                    session_id: i.session_id ?? sessionId ?? "",
-                    trigger: i.trigger,
-                    summary_length:
-                      typeof i.compact_summary === "string" ? i.compact_summary.length : 0,
-                  });
-                  return {};
-                },
-              ],
-            },
-          ],
         };
 
+  // PostCompact runs for ALL agent types (builders included). Logging-only,
+  // so there is no read-only-memory hazard; gating it off builders dropped the
+  // worker.compact.post forensic log for every builder compaction, violating
+  // OVERRIDES.md #2 / FRI-27 AC30.
+  const postCompactHooks = {
+    PostCompact: [
+      {
+        hooks: [
+          async (input: unknown) => {
+            const i = input as {
+              session_id?: string;
+              trigger?: "manual" | "auto";
+              compact_summary?: string;
+            };
+            logger.log("info", "worker.compact.post", {
+              agent: opts.agentName,
+              session_id: i.session_id ?? sessionId ?? "",
+              trigger: i.trigger,
+              summary_length: typeof i.compact_summary === "string" ? i.compact_summary.length : 0,
+            });
+            return {};
+          },
+        ],
+      },
+    ],
+  };
+
   // Single hooks surface for the turn's query: the PreToolUse defense-in-depth
-  // hook + the compaction hooks. Disjoint top-level keys, merged by spread.
-  const mergedHooks = { ...preToolUseHooks, ...compactionHooks };
+  // hook + PreCompact (non-builder only) + PostCompact (all types). Disjoint
+  // top-level keys, merged by spread.
+  const mergedHooks = { ...preToolUseHooks, ...preCompactHooks, ...postCompactHooks };
 
   // When the dispatch carries attachments, the SDK's plain `prompt: string`
   // form can't represent them — image/document content blocks have to ride
@@ -977,8 +1029,13 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
     // FRI-156 §A: fire-and-forget runtime probe that the SDK actually honors
     // the per-agent autoCompactWindow (or logs the documented fallback). Not
     // awaited in the hot path — a probe failure can never stall or fail the
-    // turn (probeAutoCompactWindow swallows everything internally).
-    void probeAutoCompactWindow(q, configuredWindow, opts.agentName);
+    // turn (probeAutoCompactWindow swallows everything internally). Fires once
+    // per worker process: the window is constant for the session, so the
+    // verdict is invariant turn-to-turn (see probeFired).
+    if (!probeFired) {
+      probeFired = true;
+      void probeAutoCompactWindow(q, configuredWindow, opts.agentName);
+    }
     for await (const msg of q) {
       const m = msg as Record<string, unknown>;
 

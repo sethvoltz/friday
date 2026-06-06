@@ -249,10 +249,12 @@ export interface CompactingEvent extends BaseEvent {
   type: "compacting";
   agent: string;
   turn_id: string;
-  /** 'start' when the SDK begins compacting; 'done' when it settles. */
+  /** 'start' when the SDK begins compacting; 'done' when it settles. The
+   *  dashboard only toggles the transient "Compacting context…" spinner on
+   *  phase. The closing-frame OUTCOME (success/failed) + any compact_error are
+   *  logged daemon-side under `worker.compact.result` (FRI-156 §F / AC8); they
+   *  are NOT carried on this wire event because no client consumes them. */
   phase: "start" | "done";
-  /** Outcome on the closing (`phase:'done'`) frame; omitted on 'start'. */
-  result?: "success" | "failed";
 }
 
 /**

@@ -142,12 +142,15 @@ export async function recordError(
  * FRI-156 §D: synthesize a DURABLE compaction-marker block for the current
  * turn. Persists one row with `role='system'` + `kind='compaction'` +
  * `status='complete'` whose `content_json` carries the token deltas
- * (`{ pre_tokens, post_tokens, duration_ms }`), then publishes the matching
- * `block_start` + `block_complete` SSE pair so the dashboard materializes the
- * full-width "Context compacted · 779K → 50K" divider live. The row ALSO
- * replicates via Zero, so the divider survives a reload — the bug the old
- * ephemeral `type:'compaction'` SSE event could not fix (it was lost on
- * reload). This durable row + its SSE pair fully supersede that event.
+ * (`{ pre_tokens, post_tokens, duration_ms }`). The divider is rendered SOLELY
+ * from this persisted row, replicated via Zero into the dashboard's
+ * `parseBlocks` path (keyed `cb_<blockId>`), so it survives reload — the bug
+ * the old ephemeral `type:'compaction'` SSE event could not fix (it was lost on
+ * reload). We deliberately do NOT publish a `block_start`/`block_complete` SSE
+ * pair here: the dashboard's `handleBlockStart`/`handleBlockComplete` have no
+ * `kind:'compaction'` branch (the live path is intentionally divider-free), so
+ * such frames would be dead writes — same-machine logical replication lands the
+ * row sub-second, and the separate `compacting` spinner covers that window.
  *
  * Modeled on {@link recordError}: same `peekNextBlockIndex` → `9999`
  * post-finalize fallback, same try/catch-and-return-null so a CHECK/dup
@@ -215,34 +218,8 @@ export async function recordCompactionMarker(
   // synthesized "no response" fallback should still apply).
   w.blocksThisTurn++;
 
-  eventBus.publish({
-    v: 1,
-    type: "block_start",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    block_id: blockId,
-    message_id: null,
-    block_index: blockIndex,
-    role: "system",
-    kind: "compaction",
-    source: null,
-    ts,
-  });
-  eventBus.publish({
-    v: 1,
-    type: "block_complete",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    block_id: blockId,
-    message_id: null,
-    block_index: blockIndex,
-    role: "system",
-    kind: "compaction",
-    source: null,
-    content_json: contentJson,
-    status: "complete",
-    ts,
-  });
+  // No SSE publish: the divider is Zero-replication-driven only (see the
+  // doc-comment above). The persisted row is the single divider producer.
   return { blockId };
 }
 

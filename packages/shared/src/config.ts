@@ -210,20 +210,43 @@ export const DEFAULT_COMPACTION_SWEEP = {
   sweepThresholdTokens: 60_000,
 } as const;
 
+/** Floor a user-supplied token budget at a sane minimum so a hostile/buggy
+ *  `~/.friday/config.json` value (e.g. `0` or `1`) can't drive a pathological
+ *  constant-compaction loop or sweep-everything-every-night. A non-finite
+ *  value falls back to the default. */
+function clampTokenBudget(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(10_000, Math.floor(value));
+}
+
+/** Clamp an integer config value to `[min, max]`, falling back to the default
+ *  on `undefined` / non-finite. */
+function clampInt(value: number | undefined, min: number, max: number, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
 export function autoCompactWindowFor(cfg: FridayConfig, type: AgentTypeName): number {
-  return cfg.compaction?.autoCompactWindow?.[type] ?? DEFAULT_AUTO_COMPACT_WINDOW[type];
+  return clampTokenBudget(
+    cfg.compaction?.autoCompactWindow?.[type],
+    DEFAULT_AUTO_COMPACT_WINDOW[type],
+  );
 }
 
 export function compactionSweepHour(cfg: FridayConfig): number {
-  return cfg.compaction?.sweepHour ?? DEFAULT_COMPACTION_SWEEP.sweepHour;
+  return clampInt(cfg.compaction?.sweepHour, 0, 23, DEFAULT_COMPACTION_SWEEP.sweepHour);
 }
 
 export function compactionSweepMinute(cfg: FridayConfig): number {
-  return cfg.compaction?.sweepMinute ?? DEFAULT_COMPACTION_SWEEP.sweepMinute;
+  return clampInt(cfg.compaction?.sweepMinute, 0, 59, DEFAULT_COMPACTION_SWEEP.sweepMinute);
 }
 
 export function compactionSweepThreshold(cfg: FridayConfig): number {
-  return cfg.compaction?.sweepThresholdTokens ?? DEFAULT_COMPACTION_SWEEP.sweepThresholdTokens;
+  return clampTokenBudget(
+    cfg.compaction?.sweepThresholdTokens,
+    DEFAULT_COMPACTION_SWEEP.sweepThresholdTokens,
+  );
 }
 
 /**
