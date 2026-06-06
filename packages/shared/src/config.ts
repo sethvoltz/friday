@@ -117,6 +117,9 @@ export interface FridayConfig {
   linear?: LinearIntegrationConfig;
   /** Evolve agency settings (FRI-40 triage helpers; FRI-149 auto-builders). */
   evolve?: { autoSpawnTriageHelpers?: boolean; autoSpawnBuilders?: boolean };
+  /** Context-budget compaction policy (FRI-156): per-agent-type auto-compact
+   *  window + nightly maintenance-sweep tuning. */
+  compaction?: CompactionConfig;
 }
 
 export interface LinearIntegrationConfig {
@@ -165,6 +168,85 @@ export const DEFAULT_WATCHDOG_THRESHOLDS_MS: Record<AgentTypeName, number> = {
 
 export function watchdogThresholdMs(cfg: WatchdogConfig | undefined, type: AgentTypeName): number {
   return cfg?.thresholdsMs?.[type] ?? DEFAULT_WATCHDOG_THRESHOLDS_MS[type];
+}
+
+/**
+ * Context-budget compaction policy (FRI-156). Two-number scheme: the nightly
+ * `sweep*` knobs keep long-lived idle agents' next-wake context small (~60K),
+ * while `autoCompactWindow` is the per-agent-type SDK ceiling that catches
+ * runaway days. All fields optional; every read goes through a `?? DEFAULT`
+ * resolver below (see `CONFIG SHALLOW-MERGE DROP` rationale — `loadConfig`
+ * does a shallow `{...DEFAULT_CONFIG, ...parsed}`, so a user setting one field
+ * would otherwise drop the sibling defaults).
+ */
+export interface CompactionConfig {
+  /** Local-time hour (0–23) the nightly maintenance sweep runs. */
+  sweepHour?: number;
+  /** Local-time minute (0–59) the nightly maintenance sweep runs. */
+  sweepMinute?: number;
+  /** Estimated-context token floor above which an idle agent is swept. */
+  sweepThresholdTokens?: number;
+  /** Per-agent-type SDK auto-compact window (`settings.autoCompactWindow`). */
+  autoCompactWindow?: Partial<Record<AgentTypeName, number>>;
+}
+
+/** Default per-agent-type SDK auto-compact window applied when
+ *  `CompactionConfig.autoCompactWindow` is absent or partial. 200K for every
+ *  type (FRI-156 §A) — the SDK ceiling backstop, distinct from the 60K sweep
+ *  threshold. Defaults in code (never .env), overridable via config. */
+export const DEFAULT_AUTO_COMPACT_WINDOW: Record<AgentTypeName, number> = {
+  orchestrator: 200_000,
+  helper: 200_000,
+  builder: 200_000,
+  scheduled: 200_000,
+  bare: 200_000,
+};
+
+/** Default nightly maintenance-sweep schedule + threshold (FRI-156 §B):
+ *  03:30 local, 60K-token floor. Defaults in code; config overrides per field. */
+export const DEFAULT_COMPACTION_SWEEP = {
+  sweepHour: 3,
+  sweepMinute: 30,
+  sweepThresholdTokens: 60_000,
+} as const;
+
+/** Floor a user-supplied token budget at a sane minimum so a hostile/buggy
+ *  `~/.friday/config.json` value (e.g. `0` or `1`) can't drive a pathological
+ *  constant-compaction loop or sweep-everything-every-night. A non-finite
+ *  value falls back to the default. */
+function clampTokenBudget(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(10_000, Math.floor(value));
+}
+
+/** Clamp an integer config value to `[min, max]`, falling back to the default
+ *  on `undefined` / non-finite. */
+function clampInt(value: number | undefined, min: number, max: number, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+export function autoCompactWindowFor(cfg: FridayConfig, type: AgentTypeName): number {
+  return clampTokenBudget(
+    cfg.compaction?.autoCompactWindow?.[type],
+    DEFAULT_AUTO_COMPACT_WINDOW[type],
+  );
+}
+
+export function compactionSweepHour(cfg: FridayConfig): number {
+  return clampInt(cfg.compaction?.sweepHour, 0, 23, DEFAULT_COMPACTION_SWEEP.sweepHour);
+}
+
+export function compactionSweepMinute(cfg: FridayConfig): number {
+  return clampInt(cfg.compaction?.sweepMinute, 0, 59, DEFAULT_COMPACTION_SWEEP.sweepMinute);
+}
+
+export function compactionSweepThreshold(cfg: FridayConfig): number {
+  return clampTokenBudget(
+    cfg.compaction?.sweepThresholdTokens,
+    DEFAULT_COMPACTION_SWEEP.sweepThresholdTokens,
+  );
 }
 
 /**

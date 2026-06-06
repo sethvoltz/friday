@@ -16,8 +16,14 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { renderLocalDatetime, stringifyToolResult } from "@friday/shared";
+import { query, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import {
+  autoCompactWindowFor,
+  loadConfig,
+  renderLocalDatetime,
+  stringifyToolResult,
+} from "@friday/shared";
+import { runMemoryFlush } from "./compact-flush.js";
 import { readAttachmentBytes, type MailRow } from "@friday/shared/services";
 import type {
   WorkerAttachment,
@@ -36,6 +42,7 @@ import { runHooks } from "@friday/shared";
 import "../hooks/register.js";
 import { denyBuiltinAskUserQuestion } from "../hooks/block-builtin-ask-user-question.js";
 import { captureShellEnv } from "../shell-env.js";
+import { logger } from "../log.js";
 
 // FRI-150 (pivot, ADR-037): per-agent shell capture. Each forked worker
 // runs `$SHELL -ilc` at startup to learn what the user's interactive
@@ -83,6 +90,26 @@ let promptsPending = false;
 let idleResolve: (() => void) | null = null;
 let workerOpts: WorkerSpawnOptions | null = null;
 let lastSessionId: string | undefined;
+
+/**
+ * FRI-27 §4: in-flight memory-flush guard. The SDK can fire PreCompact more
+ * than once for a session (a retry, or multiple compact_boundary frames in one
+ * long turn — both legitimate), and two overlapping flushes would each
+ * fork-resume the full context and race two memory_save streams against the
+ * same store. Module-scope so it spans the worker's lifetime; the PreCompact
+ * hook short-circuits when the session is already flushing and clears the
+ * entry in a finally.
+ */
+const inFlightFlushes = new Set<string>();
+
+/**
+ * FRI-156 §A: the autoCompactWindow "takes-effect" probe fires ONCE per worker
+ * process. The configured window is a function of agent type + config, both
+ * constant for the worker's lifetime, so the SDK verdict can't change
+ * turn-to-turn — re-probing every runQuery only re-issued a getContextUsage()
+ * control round-trip to re-log an invariant.
+ */
+let probeFired = false;
 
 function emit(e: WorkerEvent): void {
   if (process.send) process.send(e);
@@ -295,6 +322,56 @@ export function assistantMessageHasText(assistantMsg: unknown): boolean {
 }
 
 /**
+ * FRI-156 §C: classify the SDK `system/status` frame into a `compacting-status`
+ * WorkerEvent (or `null` to ignore it).
+ *
+ * The SDK shape (verified sdk.d.ts@0.2.132 SDKStatusMessage):
+ *   `{ type:'system'; subtype:'status'; status:'compacting'|'requesting'|null;
+ *      compact_result?:'success'|'failed'; compact_error?:string }`
+ *
+ * Mapping:
+ *   - `status:'compacting'`            → phase:'start' (live spinner on)
+ *   - `compact_result` present         → phase:'done' + result (+ error)
+ *   - everything else (incl.
+ *     `status:'requesting'`, which is
+ *     UNRELATED to compaction)         → null (ignored)
+ *
+ * IMPORTANT: the field is `compact_result` with values 'success'|'failed' —
+ * NOT any other shape — and `status:'requesting'` must be ignored. If a future
+ * SDK bump renames either field this branch silently stops emitting; the test
+ * pins all three live frame shapes so a regression surfaces there. Exported
+ * for testability (pure — no IPC, no I/O).
+ */
+export function classifyStatusFrame(
+  m: Record<string, unknown>,
+  sessionId: string | undefined,
+): {
+  type: "compacting-status";
+  sessionId: string;
+  phase: "start" | "done";
+  result?: "success" | "failed";
+  error?: string;
+} | null {
+  if (m.type !== "system" || m.subtype !== "status") return null;
+  if (m.status === "compacting") {
+    return { type: "compacting-status", sessionId: sessionId ?? "", phase: "start" };
+  }
+  const result = m.compact_result;
+  if (result === "success" || result === "failed") {
+    const error = typeof m.compact_error === "string" ? m.compact_error : undefined;
+    return {
+      type: "compacting-status",
+      sessionId: sessionId ?? "",
+      phase: "done",
+      result,
+      ...(error ? { error } : {}),
+    };
+  }
+  // status:'requesting' or any other status frame — unrelated to compaction.
+  return null;
+}
+
+/**
  * Resolve which session id a drained prompt should resume (FRI-127 §6/§9).
  *
  * The worker's own `lastSessionId` — the most recent session id it observed
@@ -399,7 +476,7 @@ export function buildQueryOptions(
   _p: WorkerPromptCommand,
   sessionId: string | undefined,
   allowedTools: string[] | undefined,
-  preToolUseHooks: QueryOptions["hooks"] | undefined,
+  hooks: QueryOptions["hooks"] | undefined,
   thinking: QueryOptions["thinking"] | undefined,
   mcpServers: QueryOptions["mcpServers"],
   abortController: AbortController | undefined,
@@ -419,14 +496,24 @@ export function buildQueryOptions(
     // falling back to writes under ~/.claude/projects/<cwd>/memory/.
     // `autoMemoryEnabled` lives on Settings, passed through the
     // top-level `settings` Options field.
-    settings: { autoMemoryEnabled: false },
+    //
+    // FRI-156 §A: `autoCompactWindow` is the per-agent-type SDK auto-compact
+    // ceiling (200K default for every type, config-overridable). When live
+    // context crosses it, the SDK compacts in place — the backstop above the
+    // 60K nightly sweep. Resolved field-by-field via `autoCompactWindowFor`
+    // so a partial `compaction.autoCompactWindow` config override doesn't drop
+    // the other types' defaults (the shallow-merge hazard).
+    settings: {
+      autoMemoryEnabled: false,
+      autoCompactWindow: autoCompactWindowFor(loadConfig(), opts.agentType),
+    },
     // FRI-78: thread the worker's abortController through the SDK so
     // `stop`/`abort` IPCs propagate cleanly to the CLI subprocess
     // (tool-execution streams shut down deterministically instead of
     // closing on iterator return). Without this, the SDK only learns
     // the consumer is gone when the for-await iterator returns.
     ...(abortController ? { abortController } : {}),
-    ...(preToolUseHooks ? { hooks: preToolUseHooks } : {}),
+    ...(hooks ? { hooks } : {}),
     ...(allowedTools ? { allowedTools } : {}),
     ...(thinking ? { thinking } : {}),
     ...(opts.effort ? { effort: opts.effort } : {}),
@@ -437,6 +524,88 @@ export function buildQueryOptions(
     },
     ...(sessionId ? { resume: sessionId } : {}),
   };
+}
+
+/**
+ * FRI-156 §A — runtime "takes-effect" probe for `settings.autoCompactWindow`.
+ *
+ * Setting `autoCompactWindow` in {@link buildQueryOptions} is necessary but not
+ * sufficient: the SDK has to actually honor it. The §A design mandates we
+ * confirm at runtime via `Query.getContextUsage()` that the SDK's
+ * `autoCompactThreshold` reflects the configured window — and, if the setting
+ * does NOT flow through (older SDK, field renamed, threshold absent), log the
+ * documented SDK gap. The probe verdict drives nothing directly; the documented
+ * fallback is the INDEPENDENT nightly sweep (FRI-156 §B), which dispatches
+ * `/compact` on its own timer at the 60K budget regardless of whether the SDK
+ * ceiling takes effect — so context is bounded even when this probe reports
+ * `takes_effect:false`.
+ *
+ * Best-effort and FULLY isolated: the probe is one `getContextUsage()` control
+ * round-trip that never throws into the turn (any failure is swallowed and
+ * logged as `takes_effect:false`). `getContextUsage` is absent on the mocked
+ * iterator in some unit tests, so the method-presence guard is load-bearing.
+ *
+ * "Takes effect" means the SDK reports auto-compaction ENABLED and a numeric
+ * `autoCompactThreshold` at or below the configured window — i.e. the window
+ * (or something tighter) is the live ceiling. A missing threshold, disabled
+ * auto-compaction, or a threshold larger than the window all mean the setting
+ * did not flow through and the fallback is documented.
+ *
+ * Returns the probe verdict (also logged) so the call site / tests can assert.
+ * Exported for the worker-layer runtime test.
+ */
+export async function probeAutoCompactWindow(
+  q: Pick<Query, "getContextUsage"> | { getContextUsage?: never },
+  configuredWindow: number,
+  agentName: string,
+): Promise<{ takesEffect: boolean; autoCompactThreshold?: number }> {
+  const getUsage = (q as Partial<Query>).getContextUsage;
+  if (typeof getUsage !== "function") {
+    // SDK gap: no getContextUsage on the Query (older SDK). Document the
+    // fallback to the post-turn-usage `/compact` dispatch path.
+    logger.log("info", "worker.compact.window.probe", {
+      agent: agentName,
+      configured_window: configuredWindow,
+      takes_effect: false,
+      fallback: "independent nightly sweep bounds context (getContextUsage unavailable)",
+    });
+    return { takesEffect: false };
+  }
+  try {
+    const usage = await getUsage.call(q);
+    const threshold =
+      typeof usage.autoCompactThreshold === "number" ? usage.autoCompactThreshold : undefined;
+    const takesEffect =
+      usage.isAutoCompactEnabled === true &&
+      threshold !== undefined &&
+      threshold <= configuredWindow;
+    logger.log("info", "worker.compact.window.probe", {
+      agent: agentName,
+      configured_window: configuredWindow,
+      auto_compact_threshold: threshold,
+      auto_compact_enabled: usage.isAutoCompactEnabled,
+      max_tokens: usage.maxTokens,
+      takes_effect: takesEffect,
+      ...(takesEffect
+        ? {}
+        : {
+            fallback:
+              "independent nightly sweep bounds context (SDK autoCompactThreshold did not reflect the window)",
+          }),
+    });
+    return { takesEffect, autoCompactThreshold: threshold };
+  } catch (e) {
+    // A failed control round-trip must never affect the turn — log the gap and
+    // document the same fallback.
+    logger.log("warn", "worker.compact.window.probe", {
+      agent: agentName,
+      configured_window: configuredWindow,
+      takes_effect: false,
+      fallback: "independent nightly sweep bounds context (getContextUsage threw)",
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return { takesEffect: false };
+  }
 }
 
 /** MIME types Anthropic's vision API will accept as `image` content
@@ -704,6 +873,122 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
     ],
   };
 
+  // FRI-27 + FRI-156 §C: compaction-time hooks, on the SDK's own hook channel
+  // (separate from Friday's @friday/shared registry). Two hooks:
+  //
+  //   PreCompact  — fire the isolated memory flush (runMemoryFlush). The flush
+  //     resume+forkSessions the about-to-be-compacted session so the model
+  //     sees the full conversation, saves 0..n memories, and NEVER pollutes
+  //     the user transcript or recurses (the flush query registers no hooks).
+  //     30s matcher timeout (SECONDS) bounds it; a stall is aborted by the SDK
+  //     and compaction proceeds. GATED off `builder` — builders get read-only
+  //     memory, so memory_save would error (mirrors the workspace-guard gate
+  //     on the PreToolUse hook above). Prefer the hook input's `session_id`
+  //     (the authoritative about-to-compact session) over the captured one.
+  //
+  //   PostCompact — logging only (OVERRIDES.md #2 / FRI-27 AC30): record
+  //     `worker.compact.post` with the trigger + compact_summary LENGTH. The
+  //     summary CONTENT is never persisted. Runs for ALL agent types (builders
+  //     compact too — the autoCompactWindow ceiling applies — and logging-only
+  //     PostCompact carries none of the read-only-memory risk that gates
+  //     PreCompact off builders). Only PreCompact is builder-gated.
+  //
+  // The closures capture `opts`, `mcpServers`, `emit`, `sessionId` — all in
+  // runQuery scope. Top-level hook keys (PreToolUse vs PreCompact vs
+  // PostCompact) don't collide, so we merge by spread below.
+  const preCompactHooks =
+    opts.agentType === "builder"
+      ? {}
+      : {
+          PreCompact: [
+            {
+              hooks: [
+                async (
+                  input: unknown,
+                  _toolUseId: string | undefined,
+                  { signal }: { signal: AbortSignal },
+                ) => {
+                  const i = input as { session_id?: string } | undefined;
+                  const flushSession = i?.session_id ?? sessionId ?? "";
+                  // No resolvable session → the flush can't fork-resume the
+                  // conversation (resume:'' would start a fresh, empty
+                  // session). Skip rather than silently degrade. Compaction
+                  // proceeds regardless (we always return {}).
+                  if (!flushSession) {
+                    emit({
+                      type: "memory-flush",
+                      phase: "error",
+                      sessionId: "",
+                      message: "flush skipped: no resolvable session id",
+                    });
+                    return {};
+                  }
+                  // FRI-27 §4: no two flushes per session in parallel.
+                  if (inFlightFlushes.has(flushSession)) return {};
+                  inFlightFlushes.add(flushSession);
+                  // runMemoryFlush owns the full start/complete lifecycle (the
+                  // 'start' emit lives there, not here — emitting in both would
+                  // double the worker.compact.flush.started log line).
+                  try {
+                    await runMemoryFlush(
+                      opts,
+                      flushSession,
+                      mcpServers,
+                      opts.daemonPort,
+                      emit,
+                      signal,
+                    );
+                  } catch (e) {
+                    emit({
+                      type: "memory-flush",
+                      phase: "error",
+                      sessionId: flushSession,
+                      message: e instanceof Error ? e.message : String(e),
+                    });
+                  } finally {
+                    inFlightFlushes.delete(flushSession);
+                  }
+                  return {};
+                },
+              ],
+              // SECONDS, not ms — HookCallbackMatcher.timeout is seconds.
+              timeout: 30,
+            },
+          ],
+        };
+
+  // PostCompact runs for ALL agent types (builders included). Logging-only,
+  // so there is no read-only-memory hazard; gating it off builders dropped the
+  // worker.compact.post forensic log for every builder compaction, violating
+  // OVERRIDES.md #2 / FRI-27 AC30.
+  const postCompactHooks = {
+    PostCompact: [
+      {
+        hooks: [
+          async (input: unknown) => {
+            const i = input as {
+              session_id?: string;
+              trigger?: "manual" | "auto";
+              compact_summary?: string;
+            };
+            logger.log("info", "worker.compact.post", {
+              agent: opts.agentName,
+              session_id: i.session_id ?? sessionId ?? "",
+              trigger: i.trigger,
+              summary_length: typeof i.compact_summary === "string" ? i.compact_summary.length : 0,
+            });
+            return {};
+          },
+        ],
+      },
+    ],
+  };
+
+  // Single hooks surface for the turn's query: the PreToolUse defense-in-depth
+  // hook + PreCompact (non-builder only) + PostCompact (all types). Disjoint
+  // top-level keys, merged by spread.
+  const mergedHooks = { ...preToolUseHooks, ...preCompactHooks, ...postCompactHooks };
+
   // When the dispatch carries attachments, the SDK's plain `prompt: string`
   // form can't represent them — image/document content blocks have to ride
   // on a `MessageParam` whose `content` is an array. Switch to the
@@ -726,20 +1011,32 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   // Reset to false at the top of each runQuery call (function scope).
   let compactionSeenThisTurn = false;
 
+  const configuredWindow = autoCompactWindowFor(loadConfig(), opts.agentType);
   try {
-    for await (const msg of query({
+    const q = query({
       prompt: promptInput,
       options: buildQueryOptions(
         opts,
         p,
         sessionId,
         allowedTools,
-        preToolUseHooks,
+        mergedHooks,
         thinking,
         mcpServers,
         abortController,
       ),
-    })) {
+    });
+    // FRI-156 §A: fire-and-forget runtime probe that the SDK actually honors
+    // the per-agent autoCompactWindow (or logs the documented fallback). Not
+    // awaited in the hot path — a probe failure can never stall or fail the
+    // turn (probeAutoCompactWindow swallows everything internally). Fires once
+    // per worker process: the window is constant for the session, so the
+    // verdict is invariant turn-to-turn (see probeFired).
+    if (!probeFired) {
+      probeFired = true;
+      void probeAutoCompactWindow(q, configuredWindow, opts.agentName);
+    }
+    for await (const msg of q) {
       const m = msg as Record<string, unknown>;
 
       const maybeSession = m.session_id as string | undefined;
@@ -779,7 +1076,12 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       if (m.type === "system" && m.subtype === "compact_boundary") {
         compactionSeenThisTurn = true;
         const meta = m.compact_metadata as
-          | { pre_tokens?: number; post_tokens?: number; duration_ms?: number }
+          | {
+              pre_tokens?: number;
+              post_tokens?: number;
+              duration_ms?: number;
+              trigger?: "manual" | "auto";
+            }
           | undefined;
         emit({
           type: "compaction-boundary",
@@ -787,7 +1089,22 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
           preTokens: meta?.pre_tokens ?? 0,
           postTokens: meta?.post_tokens,
           durationMs: meta?.duration_ms,
+          // FRI-156 §C: forward 'manual'|'auto' so a consumer can distinguish a
+          // user/sweep /compact from the autoCompactWindow ceiling.
+          ...(meta?.trigger ? { trigger: meta.trigger } : {}),
         });
+        continue;
+      }
+
+      // FRI-156 §C: the SDK `system/status` frame carries the live
+      // compaction-in-progress signal ('compacting' → start; compact_result →
+      // done). classifyStatusFrame filters out unrelated status frames
+      // (status:'requesting'). Surfacing it lets the dashboard show a
+      // "Compacting context…" spinner while the durable marker block (written
+      // from the compaction-boundary frame above) is the settled artifact.
+      if (m.type === "system" && m.subtype === "status") {
+        const ev = classifyStatusFrame(m, sessionId);
+        if (ev) emit(ev);
         continue;
       }
 
@@ -1086,9 +1403,12 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         continue;
       }
 
-      // FIX_FORWARD 1.5 removed the compaction_* wire events; the SDK's
-      // `compact_boundary_started/ended` system frames no longer surface as
-      // SSE traffic. Compaction stays an invisible runtime concern.
+      // Compaction is now USER-FACING (FRI-60 + FRI-156). Friday's SSE wire
+      // no longer carries the legacy token-level `compaction_*` stream events,
+      // but the SDK still emits the `compact_boundary` system frame (→ durable
+      // kind:'compaction' marker block) and `system/status` frames (→ the live
+      // `compacting` SSE signal). Both are intercepted above; nothing falls
+      // through to here.
     }
 
     lastSessionId = sessionId ?? lastSessionId;

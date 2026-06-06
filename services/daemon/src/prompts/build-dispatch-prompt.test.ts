@@ -175,6 +175,29 @@ describe("buildDispatchPrompt (FRI-123)", () => {
 
     expect(out.body).toBe("do thing");
   });
+
+  it("compact: body = `/compact <instructions>` byte-exact; systemPrompt is the base prompt (FRI-156 §B)", async () => {
+    // No hooks are registered in this suite, so the systemPrompt here is just
+    // the base buildSystemPrompt output — the golden pins that the `compact`
+    // kind doesn't mutate the system prompt. The recall-SKIP behavior (the bug
+    // this kind exists to prevent) is pinned at the hook layer in
+    // memory-recall-hook.test.ts, where memory is actually mocked with hits.
+    const { buildDispatchPrompt } = await import("./build-dispatch-prompt.js");
+    const { COMPACT_CUSTOM_INSTRUCTIONS } = await import("./compact-instructions.js");
+
+    const out = await buildDispatchPrompt(
+      { name: "orch", type: "orchestrator" },
+      { kind: "compact", instructions: COMPACT_CUSTOM_INSTRUCTIONS },
+    );
+
+    // The leading "/compact " is load-bearing (SDK native slash command).
+    expect(out.body.startsWith("/compact ")).toBe(true);
+    expect(out.body).toBe(`/compact ${COMPACT_CUSTOM_INSTRUCTIONS}`);
+    expect(out.allowedToolsOverride).toBeUndefined();
+    await expect(out.systemPrompt).toMatchFileSnapshot(
+      "./__golden__/build-dispatch-prompt.compact.txt",
+    );
+  });
 });
 
 describe("resolveIntent agent_spawn recall payload (FRI-127 §4)", () => {

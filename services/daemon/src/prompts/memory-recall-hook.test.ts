@@ -77,6 +77,82 @@ describe("memory recall hook (FRI-89)", () => {
 
     expect(result).toBeUndefined();
   });
+
+  it("FRI-156 §B: returns void for intentTag='compact' WITHOUT touching memory (no recall pollution)", async () => {
+    vi.resetModules();
+    // Both memory fns would otherwise produce a non-empty recall block — the
+    // mock returns hits so a regression that DROPS the compact early-return
+    // would surface as a non-undefined result. They must NOT be called at all.
+    const buildAutoRecallBlock = vi.fn(
+      async () => "<memory-context>\nleaked fact\n</memory-context>",
+    );
+    const listEntries = vi.fn(() => Promise.resolve([]));
+    vi.doMock("@friday/memory", () => ({ buildAutoRecallBlock, listEntries }));
+    const { memoryRecallHook } = await import("./memory-recall-hook.js");
+
+    const result = await memoryRecallHook({
+      // The literal "/compact …" body would be a garbage FTS query — the whole
+      // point of the early-return is that it never reaches recall.
+      intent: "",
+      intentTag: "compact",
+      body: "/compact <persona instructions>",
+      agentType: "orchestrator",
+    });
+
+    expect(result).toBeUndefined();
+    // No listEntries() read (recallCount pollution + full-table scan avoided)
+    // and no recall block built.
+    expect(listEntries).not.toHaveBeenCalled();
+    expect(buildAutoRecallBlock).not.toHaveBeenCalled();
+  });
+
+  it("FRI-156 §B: a USER-TYPED /compact (intentTag='user_chat') also skips recall — the real offending path", async () => {
+    vi.resetModules();
+    // A user typing `/compact` arrives as user_chat (not the `compact` kind —
+    // dispatch-listener/resume-listener never construct it), so the body
+    // prefix is what must short-circuit recall. Mocks return hits to catch a
+    // regression that lets the literal "/compact …" reach recall.
+    const buildAutoRecallBlock = vi.fn(
+      async () => "<memory-context>\nleaked fact\n</memory-context>",
+    );
+    const listEntries = vi.fn(() => Promise.resolve([]));
+    vi.doMock("@friday/memory", () => ({ buildAutoRecallBlock, listEntries }));
+    const { memoryRecallHook } = await import("./memory-recall-hook.js");
+
+    const result = await memoryRecallHook({
+      intent: "/compact preserve my persona and open commitments",
+      intentTag: "user_chat",
+      body: "/compact preserve my persona and open commitments",
+      agentType: "orchestrator",
+    });
+
+    expect(result).toBeUndefined();
+    expect(listEntries).not.toHaveBeenCalled();
+    expect(buildAutoRecallBlock).not.toHaveBeenCalled();
+  });
+
+  it("a normal user_chat that merely MENTIONS the word compaction still recalls (no over-match)", async () => {
+    vi.resetModules();
+    const buildAutoRecallBlock = vi.fn(
+      async () => "<memory-context>\nrelevant fact\n</memory-context>",
+    );
+    const listEntries = vi.fn(() => Promise.resolve([]));
+    vi.doMock("@friday/memory", () => ({ buildAutoRecallBlock, listEntries }));
+    const { memoryRecallHook } = await import("./memory-recall-hook.js");
+
+    const result = await memoryRecallHook({
+      intent: "how does compaction work?",
+      intentTag: "user_chat",
+      body: "how does compaction work?",
+      agentType: "orchestrator",
+    });
+
+    // NOT a /compact command → recall fires normally.
+    expect(result).toEqual({
+      appendSystemPrompt: "<memory-context>\nrelevant fact\n</memory-context>",
+    });
+    expect(buildAutoRecallBlock).toHaveBeenCalled();
+  });
 });
 
 describe("before_prompt_build hook composition surface (FRI-123)", () => {

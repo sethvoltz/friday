@@ -6,6 +6,11 @@
   import { zeroSync } from "$lib/stores/zero.svelte";
   import { computeGroupingMeta } from "$lib/util/chat-grouping";
   import {
+    isViewingPreCompaction,
+    isViewingPreCompactionUnmounted,
+  } from "$lib/components/Chat/compaction-render";
+  import { fmtTokensCompact } from "$lib/util/format";
+  import {
     formatAbsoluteTooltip,
     formatDaySeparator,
     formatRelativeTime,
@@ -162,6 +167,29 @@
   });
   let windowStart = $derived(Math.max(0, windowEnd - WINDOW_SIZE));
   let list = $derived(allMessages.slice(windowStart, windowEnd));
+
+  // Resolve the `--chat-top` header band (a `calc()`, so getPropertyValue
+  // returns the literal expression) to a px number by measuring a transient
+  // probe. Used as the negative top `rootMargin` for the pre-compaction pill
+  // observer so a divider tucked under the floating header reads as out-of-view.
+  //
+  // The resolved value is effectively invariant for a session, but this helper
+  // runs inside the pill `$effect`, which re-keys on every virtualization slide
+  // and streaming block delta while a divider is in-window. Measuring a fresh
+  // probe each time forces a synchronous DOM append/reflow/remove on that hot
+  // path, so the result is memoized after the first measurement.
+  let headerTopInsetCache: number | null = null;
+  function headerTopInsetPx(): number {
+    if (headerTopInsetCache !== null) return headerTopInsetCache;
+    if (typeof document === "undefined") return 85;
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:absolute;visibility:hidden;height:var(--chat-top);";
+    document.body.appendChild(probe);
+    const h = probe.getBoundingClientRect().height;
+    probe.remove();
+    headerTopInsetCache = Number.isFinite(h) && h > 0 ? h : 85;
+    return headerTopInsetCache;
+  }
   // Honest "no older messages" gate: when windowStart hits 0 AND the
   // local replica is the canonical full set (Zero `resultType ===
   // 'complete'`), there is genuinely nothing older to slide to.
@@ -487,6 +515,97 @@
       el.scrollIntoView({ behavior: "smooth", block: "center" });
     });
   });
+
+  // FRI-156 §E: "Viewing pre-compaction history" pill detection. The pill
+  // shows when the user is scrolled ABOVE the most-recent compaction divider.
+  //
+  // The divider id is derived over ALL messages, but the DOM only mounts the
+  // windowed slice, so the divider can be UNMOUNTED in both directions:
+  //   - above the window (user scrolled down into recent / live-tail content)
+  //   - below the window (user scrolled up into older pre-compaction history)
+  // Treating "element absent" as "necessarily pre-compaction" was a false
+  // positive at the tail of a long, frequently-compacted session (the divider
+  // falls above windowStart while the user is pinned to the bottom). Instead
+  // we compare the divider's index in allMessages against the window:
+  //   - index >= windowEnd  → divider is below the rendered slice → every
+  //                           rendered message is OLDER → user is above it →
+  //                           pill ON.
+  //   - index <  windowStart → divider is above the slice → every rendered
+  //                           message is NEWER → user is necessarily BELOW it
+  //                           (post-compaction tail) → pill OFF, regardless of
+  //                           pinned state.
+  //   - in-window           → observe the element and use the pure geometry
+  //                           helper (`isViewingPreCompaction`).
+  //
+  // Re-keys on the divider id and the window bounds (NOT the whole `list`
+  // array, which changes identity on every block delta while a turn streams —
+  // that thrashed the observer per token). The IntersectionObserver carries a
+  // negative top `rootMargin` equal to the header height so a divider tucked
+  // UNDER the floating header (visually hidden but still geometrically
+  // intersecting) is treated as out-of-view, matching the other sentinels.
+  $effect(() => {
+    if (readonly) {
+      chat.viewingPreCompaction = false;
+      return;
+    }
+    const dividerId = chat.latestCompactionDividerId;
+    if (!dividerId) {
+      chat.viewingPreCompaction = false;
+      return;
+    }
+    // Re-key on the window bounds so a slide that mounts/unmounts the divider
+    // re-runs this effect — but NOT on `list` identity (per-token churn).
+    const start = windowStart;
+    const end = windowEnd;
+    const dividerIdx = allMessages.findIndex((m) => m.id === dividerId);
+    if (dividerIdx === -1) {
+      chat.viewingPreCompaction = false;
+      return;
+    }
+    if (dividerIdx >= end || dividerIdx < start) {
+      // Divider is unmounted (above or below the rendered slice). The pill state
+      // is a pure function of index-vs-window — see the helper's doc-comment:
+      //   - below the slice (>= end) → user is above it → pill ON.
+      //   - above the slice (< start) → every rendered message is NEWER than the
+      //     divider → user is necessarily BELOW it (post-compaction tail) → pill
+      //     OFF, regardless of pinned state.
+      chat.viewingPreCompaction = isViewingPreCompactionUnmounted({
+        dividerIdx,
+        windowStart: start,
+        windowEnd: end,
+      });
+      return;
+    }
+    // In-window: observe the actual element and use the shared geometry helper.
+    const el = document.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(dividerId)}"]`);
+    if (!el) {
+      // Index says in-window but the node hasn't painted yet — fall back to the
+      // not-pinned heuristic rather than a hard true.
+      chat.viewingPreCompaction = !chat.pinnedToBottom;
+      return;
+    }
+    const headerInset = headerTopInsetPx();
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const rootBottom = e.rootBounds?.bottom ?? window.innerHeight;
+          chat.viewingPreCompaction = isViewingPreCompaction({
+            dividerTop: e.boundingClientRect.top,
+            viewportBottom: rootBottom,
+            isIntersecting: e.isIntersecting,
+          });
+        }
+      },
+      // Negative top inset: the region under the floating chat header is
+      // treated as out-of-view so a divider occluded by the header still
+      // reports as not-intersecting (matching the top/bottom sentinels).
+      { threshold: 0, rootMargin: `${-headerInset}px 0px 0px 0px` },
+    );
+    obs.observe(el);
+    return () => {
+      obs.disconnect();
+    };
+  });
 </script>
 
 <div class="list">
@@ -609,6 +728,31 @@
           canResume={!readonly && chat.canResumeTurn(msg.turnId, msg.errorCode)}
           onResend={() => msg.turnId && chat.resendUserText(msg.turnId)}
           onResume={() => msg.turnId && chat.resumeTurn(msg.turnId)} />
+      </div>
+    {:else if msg.kind === "compaction"}
+      <!-- FRI-156 §E: durable full-width compaction divider. Derived from a
+           persisted kind:'compaction' block (parseBlocks → cb_<blockId>), so
+           it survives reload — unlike the retired in-memory inline notice.
+           NOT gated on `!readonly`: durability is the point, so the divider
+           appears in past-session views too. `data-msg-id` lets the
+           pre-compaction pill scroll to it via chat.scrollTarget. -->
+      <div
+        class="compaction-divider"
+        role="separator"
+        data-msg-id={msg.id}
+        data-kind="compaction"
+        aria-label={msg.preTokens != null && msg.postTokens != null
+          ? `Context compacted from ${fmtTokensCompact(msg.preTokens)} to ${fmtTokensCompact(msg.postTokens)} tokens`
+          : "Context compacted"}>
+        <span class="compaction-divider-label">
+          {#if msg.preTokens != null && msg.postTokens != null}
+            Context compacted · {fmtTokensCompact(msg.preTokens)} → {fmtTokensCompact(
+              msg.postTokens,
+            )} tokens
+          {:else}
+            Context compacted
+          {/if}
+        </span>
       </div>
     {:else if msg.role === "tool"}
       <!-- FRI-130: route through the per-tool renderer registry. A
@@ -746,14 +890,21 @@
         </div>
       </div>
     {/if}
-    {#if !readonly && msg.turnId && chat.compactionTurnIds.has(msg.turnId) && list[i + 1]?.turnId !== msg.turnId}
-      <!-- FRI-60 Phase B: inline "Context compacted" notice at the turn
-           boundary where the SDK trimmed the context window. Rendered as
-           a faint italic line between the last message of the compacted
-           turn and the first message of the next turn. -->
-      <div class="compaction-notice" role="note">Context compacted</div>
-    {/if}
   {/each}
+  {#if !readonly && chat.focusedAgentIsCompacting}
+    <!-- FRI-156 §F: transient compaction-in-progress indicator. Driven by
+         the `compacting` SSE event (phase start → done) via
+         chat.focusedAgentIsCompacting. The retired FRI-60 inline
+         `.compaction-notice` (in-memory, per-turn, lost on reload) is
+         superseded by the durable divider above; this is the live spinner
+         for the moment compaction is actually running. -->
+    <div class="message inline" data-compacting="true">
+      <div class="compacting-status" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        Compacting context…
+      </div>
+    </div>
+  {/if}
   {#if !readonly && chat.showThinkingPlaceholder}
     <div class="message inline">
       <ThinkingBlock text="" status="running" />
@@ -1067,12 +1218,56 @@
     padding: 0.35rem 0.5rem;
     opacity: 0.85;
   }
-  .compaction-notice {
-    font-size: 0.75rem;
+  /* FRI-156 §E: durable full-width compaction divider. Reuses the
+     .day-separator idiom (centered pill flanked by hairlines) so it reads as
+     a structural boundary in the transcript rather than a chat bubble. */
+  .compaction-divider {
+    display: flex;
+    align-items: center;
+    margin: 1.25rem 0 0.5rem;
+    position: relative;
+  }
+  .compaction-divider::before,
+  .compaction-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border-subtle);
+  }
+  .compaction-divider-label {
+    padding: 0.15rem 0.75rem;
+    margin: 0 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    background: var(--bg-card);
+    white-space: nowrap;
+  }
+  /* FRI-156 §F: transient "Compacting context…" live indicator. */
+  .compacting-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.78rem;
     color: var(--text-tertiary);
     font-style: italic;
-    text-align: center;
-    padding: 0.25rem 0.5rem;
-    opacity: 0.7;
+    padding: 0.35rem 0.5rem;
+    opacity: 0.85;
+  }
+  .spinner {
+    width: 0.85rem;
+    height: 0.85rem;
+    border: 2px solid var(--border-subtle);
+    border-top-color: var(--accent-primary);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex: none;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>

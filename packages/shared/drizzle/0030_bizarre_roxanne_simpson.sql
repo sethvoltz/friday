@@ -1,0 +1,2 @@
+ALTER TABLE "blocks" DROP CONSTRAINT "blocks_kind_check";--> statement-breakpoint
+ALTER TABLE "blocks" ADD CONSTRAINT "blocks_kind_check" CHECK ("blocks"."kind" IN ('text','thinking','tool_use','tool_result','error','mail','compaction'));

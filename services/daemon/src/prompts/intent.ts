@@ -38,6 +38,19 @@ export type DispatchIntent =
   | { kind: "mail"; body: string; intentText: string }
   | { kind: "scheduled"; body: string; intentText: string }
   | { kind: "scratch"; userText: string }
+  /**
+   * FRI-156 §B/§C: a `/compact <instructions>` maintenance dispatch. The body
+   * is the native `/compact` slash command (the runtime-proven compaction
+   * path) prefixed onto the persona-continuity instructions, and the intent
+   * tag is `compact` so `memoryRecallHook` early-returns — a /compact turn's
+   * only job is to compact, so passive FTS recall against the literal slash
+   * string would be pure pollution (junk `<memory-context>` block + a wasted
+   * `listEntries()` read + a `recallCount` bump). The sweep itself builds the
+   * body literally and uses `buildSystemPrompt` (firing no hooks); this kind
+   * is the standardized seam for any path that DOES route through
+   * `buildDispatchPrompt`.
+   */
+  | { kind: "compact"; instructions: string }
   | {
       kind: "agent_spawn";
       userText: string;

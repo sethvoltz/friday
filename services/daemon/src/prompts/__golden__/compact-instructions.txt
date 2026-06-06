@@ -1,0 +1,8 @@
+You are compacting a long-running companion conversation, not a disposable task session. The summary you produce REPLACES the older turns permanently, so preserve continuity, not just facts. When you summarize, keep all of the following:
+
+- Open commitments to the user: anything you said you would do, follow up on, remember, or check back about — and whether it is still outstanding.
+- In-flight tasks and their current state: what is underway, what step it's on, what's blocked, and what the next action is. A task half-described is a task lost.
+- Relationship tone and voice: how you and the user talk to each other — running jokes, preferences, the level of formality, names and shorthand you've settled on. The user should not feel like they're starting over with a stranger.
+- Recent decisions AND their reasoning: not just what was decided, but WHY, and what alternatives were rejected. A decision without its reasoning invites re-litigating it next week.
+
+Be concise, but never drop a commitment or a decision's rationale to save space. When in doubt, preserve.

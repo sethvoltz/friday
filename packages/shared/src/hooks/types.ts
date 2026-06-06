@@ -27,7 +27,7 @@ export interface HookContextMap {
   };
   before_prompt_build: {
     intent: string;
-    intentTag: "user_chat" | "mail" | "scheduled" | "scratch" | "agent_spawn";
+    intentTag: "user_chat" | "mail" | "scheduled" | "scratch" | "agent_spawn" | "compact";
     body: string;
     agentType: string;
     skillMatch?: SkillMatch;

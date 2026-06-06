@@ -21,6 +21,7 @@ import { startMailBridge } from "./comms/mail-bridge.js";
 import { reconcileAppsOnBoot } from "./apps/reconcile.js";
 import { runEvolveBootSync } from "./evolve/projector.js";
 import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
+import { startCompactionSweep, stopCompactionSweep } from "./scheduler/compaction-sweep.js";
 import {
   archiveAgent,
   dispatchTurn,
@@ -193,6 +194,9 @@ async function main(): Promise<void> {
   await recoverQueuedTurns(cfg);
   const schedTick = startScheduler();
   const watchdog = startWatchdog();
+  // FRI-156 §B: the nightly maintenance compaction sweep — a daemon-internal
+  // timer (NOT a schedules-table row). Unref'd, so it never holds the loop open.
+  const compactionSweep = startCompactionSweep();
   startTurnStallWatchdog();
   startInvariantAuditor();
   startMailPruner();
@@ -261,7 +265,9 @@ async function main(): Promise<void> {
     clearInterval(heartbeat);
     clearInterval(schedTick);
     void watchdog;
+    void compactionSweep;
     stopWatchdog();
+    stopCompactionSweep();
     stopTurnStallWatchdog();
     stopInvariantAuditor();
     stopMailPruner();

@@ -2,7 +2,14 @@ import { and, asc, desc, eq, gt, lt, ne, or, sql } from "drizzle-orm";
 import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
 
-export type BlockKind = "text" | "thinking" | "tool_use" | "tool_result";
+export type BlockKind =
+  | "text"
+  | "thinking"
+  | "tool_use"
+  | "tool_result"
+  | "error"
+  | "mail"
+  | "compaction";
 export type BlockStatus =
   | "streaming"
   | "complete"

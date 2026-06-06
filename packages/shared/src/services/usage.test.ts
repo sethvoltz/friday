@@ -102,3 +102,117 @@ describe("usage stats: int4 overflow regression", () => {
     expect(rows[0].cacheRead).toBeGreaterThan(INT4_MAX);
   });
 });
+
+describe("getLatestUsageForAgent + estimateContextTokens (FRI-156 §C sweep estimate)", () => {
+  it("returns the newest-by-timestamp row for an agent", async () => {
+    const { bulkInsertUsage, getLatestUsageForAgent } = await import("./usage.js");
+    // Three rows for one agent across distinct timestamps, inserted
+    // out-of-timestamp-order so an ORDER BY timestamp DESC (not insert order)
+    // is the only thing that picks the newest.
+    await bulkInsertUsage([
+      {
+        timestamp: new Date(2026, 0, 15, 10, 0).toISOString(),
+        sessionId: "sess-A",
+        agentName: "friday",
+        costUsd: 1,
+        inputTokens: 100,
+        outputTokens: 10,
+        cacheCreationTokens: 200,
+        cacheReadTokens: 300,
+      },
+      {
+        // Newest by timestamp, but inserted in the middle of the batch.
+        timestamp: new Date(2026, 0, 15, 14, 0).toISOString(),
+        sessionId: "sess-B",
+        agentName: "friday",
+        costUsd: 1,
+        inputTokens: 111,
+        outputTokens: 22,
+        cacheCreationTokens: 222,
+        cacheReadTokens: 333,
+      },
+      {
+        timestamp: new Date(2026, 0, 15, 12, 0).toISOString(),
+        sessionId: "sess-A",
+        agentName: "friday",
+        costUsd: 1,
+        inputTokens: 105,
+        outputTokens: 15,
+        cacheCreationTokens: 205,
+        cacheReadTokens: 305,
+      },
+    ]);
+
+    const latest = await getLatestUsageForAgent("friday");
+    expect(latest).toMatchObject({
+      inputTokens: 111,
+      outputTokens: 22,
+      cacheCreationTokens: 222,
+      cacheReadTokens: 333,
+    });
+    expect(latest!.timestamp.toISOString()).toBe(new Date(2026, 0, 15, 14, 0).toISOString());
+  });
+
+  it("scopes to the supplied sessionId, ignoring newer rows on other sessions", async () => {
+    const { bulkInsertUsage, getLatestUsageForAgent } = await import("./usage.js");
+    await bulkInsertUsage([
+      {
+        // Newest overall, but session sess-OLD.
+        timestamp: new Date(2026, 0, 15, 14, 0).toISOString(),
+        sessionId: "sess-OLD",
+        agentName: "friday",
+        costUsd: 1,
+        inputTokens: 999,
+        outputTokens: 99,
+        cacheCreationTokens: 999,
+        cacheReadTokens: 999,
+      },
+      {
+        // Newest *within* sess-NEW.
+        timestamp: new Date(2026, 0, 15, 13, 0).toISOString(),
+        sessionId: "sess-NEW",
+        agentName: "friday",
+        costUsd: 1,
+        inputTokens: 50,
+        outputTokens: 5,
+        cacheCreationTokens: 60,
+        cacheReadTokens: 70,
+      },
+      {
+        timestamp: new Date(2026, 0, 15, 11, 0).toISOString(),
+        sessionId: "sess-NEW",
+        agentName: "friday",
+        costUsd: 1,
+        inputTokens: 40,
+        outputTokens: 4,
+        cacheCreationTokens: 50,
+        cacheReadTokens: 60,
+      },
+    ]);
+
+    const scoped = await getLatestUsageForAgent("friday", "sess-NEW");
+    expect(scoped).toMatchObject({
+      inputTokens: 50,
+      cacheCreationTokens: 60,
+      cacheReadTokens: 70,
+    });
+    expect(scoped!.timestamp.toISOString()).toBe(new Date(2026, 0, 15, 13, 0).toISOString());
+  });
+
+  it("returns null when the agent has no usage rows", async () => {
+    const { getLatestUsageForAgent } = await import("./usage.js");
+    expect(await getLatestUsageForAgent("nobody")).toBeNull();
+    expect(await getLatestUsageForAgent("nobody", "sess-x")).toBeNull();
+  });
+
+  it("estimateContextTokens sums input + cacheCreation + cacheRead exactly (excludes output)", async () => {
+    const { estimateContextTokens } = await import("./usage.js");
+    expect(
+      estimateContextTokens({ inputTokens: 100, cacheCreationTokens: 200, cacheReadTokens: 300 }),
+    ).toBe(600);
+    // Mirrors what the sweep actually feeds it: the latest row's three context
+    // components, with output deliberately not part of the window estimate.
+    const row = { inputTokens: 111, cacheCreationTokens: 222, cacheReadTokens: 333 };
+    expect(estimateContextTokens(row)).toBe(666);
+  });
+});

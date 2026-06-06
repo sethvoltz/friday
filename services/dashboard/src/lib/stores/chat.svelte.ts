@@ -1,5 +1,6 @@
-import type { WireEvent } from "@friday/shared";
-import { SvelteMap } from "svelte/reactivity";
+import type { BlockKind, WireEvent } from "@friday/shared";
+import { SvelteMap, SvelteSet } from "svelte/reactivity";
+import { compactionDividerId } from "../components/Chat/compaction-render";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { initialPageSize } from "../util/page-size";
 import type { SendUserMessageOutcome } from "./mutator-result";
@@ -120,8 +121,25 @@ export interface ChatMessage {
    *  Task-only response, etc.). Replaces FRI-9's silent suppression
    *  so the user is never left staring at their own message wondering
    *  whether the system swallowed the turn. Single bubble per turn
-   *  (id `nr_<turnId>`) regardless of which producer wins. */
-  kind?: "error" | "no-response";
+   *  (id `nr_<turnId>`) regardless of which producer wins.
+   *
+   *  When set to `"compaction"`, this message is the durable full-width
+   *  "Context compacted · 779K → 50K tokens" divider (FRI-156 §E). It is
+   *  derived from a persisted `kind:'compaction'` block row, so it
+   *  survives reload (unlike the retired in-memory `compactionTurnIds`
+   *  inline notice). `role` is `"assistant"` so it rides the existing
+   *  agent filter + full-width continuation grouping; `preTokens` /
+   *  `postTokens` carry the humanized token deltas. Stable id
+   *  `cb_<blockId>` so reload + live converge on a single divider. */
+  kind?: "error" | "no-response" | "compaction";
+
+  /** FRI-156 §E: pre/post context-window token counts on a
+   *  `kind:"compaction"` divider message, read from the durable
+   *  compaction block's `content_json` (`pre_tokens` / `post_tokens`).
+   *  Humanized via `fmtTokensCompact` at render time. Undefined on every
+   *  other message kind. */
+  preTokens?: number;
+  postTokens?: number;
 
   /** True when the synthetic no-response bubble was produced by the
    *  SDK sentinel specifically — distinguishes "agent deliberately
@@ -1713,10 +1731,73 @@ export class ChatState {
   zeroBlockReasonByTurn = $state<Record<string, "abort" | "compaction" | "sdk-resume-failure">>({});
 
   /**
-   * FRI-60 Phase B: set of turn_ids where the SDK emitted a compact_boundary
-   * event. Used by ChatMessages to render an inline "Context compacted" notice.
+   * FRI-156 §E: id of the most-recent durable compaction divider message
+   * (`cb_<blockId>`) currently in the focused agent's view, or null when
+   * there is none. Drives the "Viewing pre-compaction history" pill: the
+   * pill shows when the user is scrolled ABOVE this divider. ChatMessages
+   * observes the divider element and flips {@link viewingPreCompaction}.
    */
-  compactionTurnIds = $state(new Set<string>());
+  latestCompactionDividerId = $derived.by<string | null>(() => {
+    let id: string | null = null;
+    for (const m of this.messages) {
+      if (m.kind === "compaction") id = m.id;
+    }
+    return id;
+  });
+
+  /**
+   * FRI-156 §E: true when the user is scrolled above the most-recent
+   * compaction divider — i.e. they're looking at pre-compaction history.
+   * Set by ChatMessages's IntersectionObserver on the divider element;
+   * read by ChatShell to show the sticky "Viewing pre-compaction history"
+   * pill. Reset to false whenever there is no divider in view.
+   */
+  viewingPreCompaction = $state(false);
+
+  /**
+   * FRI-156 §F: set of agent names whose context is currently being
+   * compacted. An agent is added on the `compacting` SSE event's
+   * `phase:'start'` frame and removed on `phase:'done'`. A SET (not a single
+   * scalar) so the nightly sweep compacting two agents at once can't clobber
+   * one another's spinner, and a dropped `done` for one agent never masks
+   * another. Defensively cleared on the agent's terminal turn events
+   * (turn_done / error) so a worker that dies mid-compaction — emitting no
+   * `done` frame — can't wedge the "Compacting context…" indicator on. The
+   * focused-agent gate lives in {@link focusedAgentIsCompacting} so a
+   * background agent's compaction doesn't surface a spinner in the user's
+   * current chat. Reactive via SvelteSet so membership changes re-render.
+   */
+  compactingAgents = new SvelteSet<string>();
+
+  /** FRI-156 §F: true while the FOCUSED agent's context is compacting.
+   *  Drives the transient "Compacting context…" indicator in ChatMessages. */
+  get focusedAgentIsCompacting(): boolean {
+    return this.compactingAgents.has(this.focusedAgent);
+  }
+
+  /** FRI-156 §E: scroll the chat to the most-recent compaction divider.
+   *  Reuses the nonce-keyed `scrollTarget` mechanism (ChatMessages's
+   *  effect runs `scrollIntoView` on the matching `data-msg-id`). No-op
+   *  when there is no divider. Called from the pre-compaction pill.
+   *
+   *  Mirrors `#scrollLocalJump`: the divider may be older than the most
+   *  recent WINDOW_SIZE messages and thus UNMOUNTED by virtualization. Slide
+   *  `chatWindowEnd` to include it FIRST so the divider node exists when the
+   *  scrollTarget effect runs `scrollIntoView` — otherwise the click is a
+   *  silent no-op (the effect querySelectors the missing node and bails). */
+  scrollToLatestCompactionDivider(): void {
+    const id = this.latestCompactionDividerId;
+    if (!id) return;
+    const idx = this.messages.findIndex((m) => m.id === id);
+    if (idx !== -1) {
+      // Park the divider ~20 from the bottom of the rendered window (must stay
+      // strictly < WINDOW_SIZE so the divider itself lands inside the slice).
+      const end = Math.min(this.messages.length, idx + 20);
+      this.chatWindowEnd = { agent: this.focusedAgent, end };
+    }
+    this.scrollNonce += 1;
+    this.scrollTarget = { id, nonce: this.scrollNonce };
+  }
 
   /**
    * Clear any per-agent inflight slot whose value matches `turnId`.
@@ -2793,6 +2874,13 @@ export class ChatState {
         // below stays focus-gated because chat.messages only holds the
         // focused agent's bubbles.
         this.clearInflightForTurn(event.turn_id);
+        // FRI-156 §F terminal-fallback: a worker that dies / aborts / OOMs
+        // mid-compaction emits no `compacting` phase:'done' frame, so the Set
+        // entry would otherwise stick and wedge the spinner on until reload.
+        // A turn_done for the agent is the unambiguous "this turn ended"
+        // signal — clear any compaction entry for it. Global (not focus-gated)
+        // for the same reason the inflight clear is.
+        this.compactingAgents.delete(event.agent);
         if (event.agent !== this.focusedAgent) break;
         // FRI-60: store zero_block_reason so parseBlocks can attach the right
         // copy to the synthesized no-response bubble.
@@ -2804,17 +2892,31 @@ export class ChatState {
         // to be force-killed" (forced).
         this.finishTurn(event.turn_id, event.status, event.abort_reason);
         break;
-      case "compaction":
-        // FRI-60 Phase B: record the turn so ChatMessages can render an
-        // inline "Context compacted" notice.
-        if (event.agent === this.focusedAgent && event.turn_id) {
-          this.compactionTurnIds = new Set([...this.compactionTurnIds, event.turn_id]);
+      case "compacting":
+        // FRI-156 §F: transient compaction-in-progress signal. `phase:'start'`
+        // sets the live "Compacting context…" indicator; `phase:'done'`
+        // clears it (the durable divider — written as a kind:'compaction'
+        // block and replicated via Zero — is the settled artifact, handled
+        // in parseBlocks, NOT here). Tracked per-agent in a Set so two agents
+        // compacting at once (nightly sweep) don't clobber one another's
+        // spinner; the focus gate lives in `focusedAgentIsCompacting`. This
+        // replaces the retired `type:'compaction'` event + `compactionTurnIds`
+        // Set + inline `.compaction-notice` (FRI-60 Phase B), which were
+        // in-memory-only and lost on reload.
+        if (event.phase === "start") {
+          this.compactingAgents.add(event.agent);
+        } else {
+          this.compactingAgents.delete(event.agent);
         }
         break;
       case "error":
         // Same per-agent quarantine: clear the slot for this turn even
         // when the event is for a non-focused agent.
         if (event.turn_id) this.clearInflightForTurn(event.turn_id);
+        // FRI-156 §F terminal-fallback: an error ends the turn; clear any
+        // stale compaction spinner entry so a mid-compaction failure that
+        // never sent phase:'done' can't wedge it on (see turn_done above).
+        this.compactingAgents.delete(event.agent);
         if (event.agent !== this.focusedAgent) break;
         if (event.turn_id) this.finishTurn(event.turn_id, "error");
         break;
@@ -2885,7 +2987,12 @@ export class ChatState {
     block_id: string;
     block_index: number;
     role: string;
-    kind: "text" | "thinking" | "tool_use" | "tool_result" | "error";
+    // FRI-156: widened to the shared BlockKind (now includes 'mail' +
+    // 'compaction') so the SSE BlockStartEvent type assigns. The daemon
+    // never streams block_start frames for 'mail'/'compaction' (mail goes
+    // through recordUserBlock, compaction through the durable Zero block),
+    // so the kind-branching below simply falls through for them.
+    kind: BlockKind;
     turn_id: string;
     tool?: { id: string; name: string };
     ts: number;
@@ -3053,7 +3160,10 @@ export class ChatState {
 
   private handleBlockComplete(event: {
     block_id: string;
-    kind: "text" | "thinking" | "tool_use" | "tool_result" | "error";
+    // FRI-156: widened to the shared BlockKind (see handleBlockStart). The
+    // 'mail'/'compaction' kinds never arrive via SSE block_complete frames;
+    // the kind-branching below falls through for them.
+    kind: BlockKind;
     content_json: string;
     status: "complete" | "aborted" | "error" | "queued";
     turn_id: string;
@@ -3354,6 +3464,14 @@ interface ParsedBlockContent {
    *  back so the bubble's image thumb / file chip survives across page
    *  loads (FRI-6). */
   attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+  /** FRI-156 §E: durable `kind:'compaction'` marker block payload
+   *  (snake_case, written by the daemon's compaction-boundary handler).
+   *  `pre_tokens`/`post_tokens` are the context-window size before/after
+   *  compaction; `duration_ms` is unused by the divider render but kept
+   *  for parity with the daemon's `content_json` shape. */
+  pre_tokens?: number;
+  post_tokens?: number;
+  duration_ms?: number;
 }
 
 function parseBlockContent(contentJson: string): ParsedBlockContent {
@@ -3929,6 +4047,38 @@ export function parseBlocks(
       }
       // Else: window-cut orphan — drop. See `toolUseIdsInBatch`
       // pre-scan comment at the top of parseBlocks.
+    } else if (b.kind === "compaction") {
+      // FRI-156 §E: durable compaction marker block. Materialize the
+      // full-width "Context compacted · 779K → 50K tokens" divider. The
+      // row is persisted (kind:'compaction', role:'system') and replicates
+      // via Zero, so this branch fires on BOTH the live insert and every
+      // reload — the stable `cb_<blockId>` id makes the two converge on a
+      // single divider (a duplicated id would crash the keyed {#each}).
+      // role:'assistant' so the divider rides the existing focused-agent
+      // filter and the chat-grouping continuation guard treats it as a
+      // full-width continuation row (no spurious author/timestamp header).
+      // The marker is the turn's visible artifact, so count it toward
+      // assistantTurns: a user-typed `/compact` writes a user_chat block and
+      // typically emits no assistant TEXT block, so on reload the turn would
+      // otherwise be in userTurns, absent from assistantTurns, and the FRI-85
+      // net would synthesize a spurious "Agent didn't respond" bubble next to
+      // the divider. (The daemon's marker bumps blocksThisTurn so the live
+      // zeroBlockReason path already handles this — but reload rebuilds
+      // assistantTurns purely from block kinds, where blocksThisTurn has no
+      // effect, so the divider itself must register as the artifact.)
+      if (b.turnId) assistantTurns.add(b.turnId);
+      out.push({
+        id: compactionDividerId(b.blockId),
+        role: "assistant",
+        kind: "compaction",
+        text: "",
+        status: "complete",
+        agent,
+        turnId: b.turnId,
+        ts: b.ts,
+        preTokens: typeof parsed.pre_tokens === "number" ? parsed.pre_tokens : undefined,
+        postTokens: typeof parsed.post_tokens === "number" ? parsed.post_tokens : undefined,
+      });
     }
   }
   // FRI-85 safety net: for any user_chat-sourced user message whose turn

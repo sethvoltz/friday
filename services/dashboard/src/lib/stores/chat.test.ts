@@ -7133,3 +7133,457 @@ describe("FRI-139: transport-error fallback decouples FAILED-TO-SEND from WS hic
     expect(freshB!.failed).not.toBe(true);
   });
 });
+
+// ---- FRI-156 §E/§F: durable compaction divider + live "compacting" status ----
+describe("FRI-156: parseBlocks durable compaction divider", () => {
+  /** A durable kind:'compaction' marker block (role:'system'), as written by
+   *  the daemon's compaction-boundary handler and replicated via Zero. */
+  const compactionBlock = (
+    blockId = "blk-cmp",
+    turnId = "t-cmp",
+    pre = 779_000,
+    post = 50_000,
+    ts = 200,
+  ) => ({
+    id: blockId,
+    blockId,
+    turnId,
+    agentName: "friday",
+    sessionId: "s",
+    messageId: null,
+    blockIndex: 0,
+    role: "system",
+    kind: "compaction",
+    source: "sdk",
+    contentJson: JSON.stringify({ pre_tokens: pre, post_tokens: post, duration_ms: 4_200 }),
+    status: "complete",
+    ts,
+  });
+
+  const userBlock = (turnId = "t-u", blockId = "blk-u", ts = 100) => ({
+    id: blockId,
+    blockId,
+    turnId,
+    agentName: "friday",
+    sessionId: "s",
+    messageId: null,
+    blockIndex: 0,
+    role: "user",
+    kind: "text",
+    source: "user_chat",
+    contentJson: '{"text":"hello"}',
+    status: "complete",
+    ts,
+  });
+
+  const assistantBlock = (turnId = "t-u", blockId = "blk-a", ts = 150) => ({
+    id: blockId,
+    blockId,
+    turnId,
+    agentName: "friday",
+    sessionId: "s",
+    messageId: null,
+    blockIndex: 1,
+    role: "assistant",
+    kind: "text",
+    source: "sdk",
+    contentJson: '{"text":"sure"}',
+    status: "complete",
+    ts,
+  });
+
+  it("emits exactly one ChatMessage kind:'compaction' at id cb_<blockId> with pre/post tokens", async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks([compactionBlock("blk-cmp", "t-cmp", 779_000, 50_000)], "friday");
+    const dividers = out.filter((m) => m.kind === "compaction");
+    expect(dividers).toHaveLength(1);
+    expect(dividers[0]).toMatchObject({
+      id: "cb_blk-cmp",
+      kind: "compaction",
+      role: "assistant",
+      agent: "friday",
+      turnId: "t-cmp",
+      preTokens: 779_000,
+      postTokens: 50_000,
+      status: "complete",
+    });
+  });
+
+  it("RELOAD-mid-state: the divider survives a pure reload from canonical rows", async () => {
+    // The durability win over the retired in-memory compactionTurnIds: rebuild
+    // the message list purely from persisted rows (the reload path) and assert
+    // the divider is present with its token counts — no live event needed.
+    const { parseBlocks } = await import("./chat.svelte");
+    const rows = [
+      userBlock("t-u", "blk-u", 100),
+      assistantBlock("t-u", "blk-a", 150),
+      compactionBlock("blk-cmp", "t-u", 779_000, 50_000, 200),
+    ];
+    const out = parseBlocks(rows, "friday");
+    const divider = out.find((m) => m.id === "cb_blk-cmp");
+    expect(divider).toBeDefined();
+    expect(divider).toMatchObject({ kind: "compaction", preTokens: 779_000, postTokens: 50_000 });
+    // It sits chronologically after the user + assistant bubbles.
+    const ids = out.map((m) => m.id);
+    expect(ids.indexOf("cb_blk-cmp")).toBeGreaterThan(ids.indexOf("b_blk-a"));
+  });
+
+  it("missing token fields degrade to undefined (divider still renders)", async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const blk = {
+      ...compactionBlock("blk-x", "t-x"),
+      contentJson: "{}",
+    };
+    const out = parseBlocks([blk], "friday");
+    const divider = out.find((m) => m.kind === "compaction");
+    expect(divider).toBeDefined();
+    expect(divider?.preTokens).toBeUndefined();
+    expect(divider?.postTokens).toBeUndefined();
+  });
+
+  it("an unknown kind that ISN'T compaction is still silently dropped (no regression)", async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const weird = { ...compactionBlock("blk-w", "t-w"), kind: "totally-unknown-kind" };
+    const out = parseBlocks([weird], "friday");
+    expect(out.filter((m) => m.kind === "compaction")).toHaveLength(0);
+  });
+
+  it("manual /compact: a user_chat turn whose only blocks are the user block + a compaction marker shows ONE divider and ZERO no-response bubbles", async () => {
+    // A user-typed `/compact` writes a user_chat block and the /compact turn
+    // emits no assistant TEXT block — only the compaction marker. On a pure
+    // reload the FRI-85 safety net must NOT synthesize an "Agent didn't
+    // respond" bubble next to the divider: the marker counts as the turn's
+    // visible artifact (assistantTurns).
+    const { parseBlocks } = await import("./chat.svelte");
+    const compactUserBlock = {
+      ...userBlock("t-mc", "blk-mc-u", 100),
+      source: "user_chat",
+      contentJson: '{"text":"/compact preserve my persona"}',
+    };
+    const rows = [compactUserBlock, compactionBlock("blk-mc-cmp", "t-mc", 779_000, 50_000, 101)];
+    // No inflight / grace / agentWorking — a clean reload (the path the net
+    // fires on). zeroBlockReasonByTurn empty so the reason can't be read.
+    const out = parseBlocks(rows, "friday", { zeroBlockReasonByTurn: {} });
+    expect(out.filter((m) => m.kind === "compaction")).toHaveLength(1);
+    expect(out.filter((m) => m.kind === "no-response")).toHaveLength(0);
+  });
+
+  it("two compaction markers sharing a turnId render TWO distinct keyed dividers (a long turn compacted twice)", async () => {
+    // The daemon inserts one marker per compact_boundary frame; a turn the SDK
+    // trims twice produces two kind:'compaction' rows on the same turnId. Each
+    // keys on cb_<blockId>, so parseBlocks must emit two distinct dividers (a
+    // duplicate id would crash the keyed {#each}).
+    const { parseBlocks } = await import("./chat.svelte");
+    const rows = [
+      compactionBlock("blk-cmp-1", "t-twice", 700_000, 60_000, 100),
+      compactionBlock("blk-cmp-2", "t-twice", 300_000, 40_000, 200),
+    ];
+    const out = parseBlocks(rows, "friday");
+    const dividers = out.filter((m) => m.kind === "compaction");
+    expect(dividers).toHaveLength(2);
+    expect(dividers.map((d) => d.id)).toEqual(["cb_blk-cmp-1", "cb_blk-cmp-2"]);
+    // Distinct ids (keyed {#each} safety).
+    expect(new Set(dividers.map((d) => d.id)).size).toBe(2);
+  });
+});
+
+describe("FRI-156: never-reset invariant — a compaction block never clears visible history", () => {
+  it("ingesting a kind:'compaction' block leaves existing messages untouched, only appends the divider", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s" }];
+
+    // Seed two pre-existing canonical bubbles via applyZeroBlocks.
+    const userRow = {
+      id: "blk-u",
+      block_id: "blk-u",
+      turn_id: "t1",
+      agent_name: "friday",
+      session_id: "s",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: { text: "first message" },
+      status: "complete",
+      streaming: false,
+      origin_mutation_id: null,
+      ts: 100,
+    };
+    const asstRow = {
+      ...userRow,
+      id: "blk-a",
+      block_id: "blk-a",
+      block_index: 1,
+      role: "assistant",
+      source: "sdk",
+      content_json: { text: "agent reply" },
+      ts: 150,
+    };
+    chat.applyZeroBlocks([userRow, asstRow], "friday", "complete");
+    const before = chat.messages.map((m) => m.id);
+    expect(chat.messages.map((m) => m.text)).toContain("first message");
+    expect(chat.messages.map((m) => m.text)).toContain("agent reply");
+
+    // Now a compaction marker block replicates in the SAME snapshot set
+    // (Zero re-pushes the full window). The prior bubbles must all survive;
+    // only the divider is added. Compaction is NOT /clear.
+    const cmpRow = {
+      ...userRow,
+      id: "blk-cmp",
+      block_id: "blk-cmp",
+      block_index: 2,
+      role: "system",
+      kind: "compaction",
+      source: "sdk",
+      content_json: { pre_tokens: 779_000, post_tokens: 50_000, duration_ms: 4_200 },
+      ts: 200,
+    };
+    chat.applyZeroBlocks([userRow, asstRow, cmpRow], "friday", "complete");
+
+    const after = chat.messages;
+    // Every prior bubble id is still present.
+    for (const id of before) {
+      expect(after.some((m) => m.id === id)).toBe(true);
+    }
+    // Exactly one divider was appended.
+    const dividers = after.filter((m) => m.kind === "compaction");
+    expect(dividers).toHaveLength(1);
+    expect(dividers[0].id).toBe("cb_blk-cmp");
+    expect(after.map((m) => m.text)).toContain("first message");
+    expect(after.map((m) => m.text)).toContain("agent reply");
+  });
+});
+
+describe("FRI-156: live compacting event ↔ durable divider convergence (BOTH store-level interleavings)", () => {
+  const cmpRow = (turnId: string, blockId: string, ts: number) => ({
+    id: blockId,
+    block_id: blockId,
+    turn_id: turnId,
+    agent_name: "friday",
+    session_id: "s",
+    message_id: null,
+    block_index: 0,
+    role: "system",
+    kind: "compaction",
+    source: "sdk",
+    content_json: { pre_tokens: 779_000, post_tokens: 50_000, duration_ms: 4_200 },
+    status: "complete",
+    streaming: false,
+    origin_mutation_id: null,
+    ts,
+  });
+  const compacting = (phase: "start" | "done", seq: number) =>
+    ({
+      v: 1,
+      type: "compacting",
+      agent: "friday",
+      turn_id: "t-c",
+      phase,
+      seq,
+    }) as Parameters<InstanceType<typeof import("./chat.svelte").ChatState>["applyEvent"]>[0];
+
+  it("durable block FIRST, then live start→done: exactly one divider, spinner cleared", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s" }];
+
+    chat.applyZeroBlocks([cmpRow("t-c", "blk-c", 200)], "friday", "complete");
+    chat.applyEvent(compacting("start", 1));
+    chat.applyEvent(compacting("done", 2));
+
+    expect(chat.messages.filter((m) => m.kind === "compaction")).toHaveLength(1);
+    expect(chat.focusedAgentIsCompacting).toBe(false);
+  });
+
+  it("live start FIRST, then durable block, then live done: exactly one divider, spinner cleared", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s" }];
+
+    chat.applyEvent(compacting("start", 1));
+    expect(chat.focusedAgentIsCompacting).toBe(true);
+    chat.applyZeroBlocks([cmpRow("t-c", "blk-c", 200)], "friday", "complete");
+    chat.applyEvent(compacting("done", 2));
+
+    expect(chat.messages.filter((m) => m.kind === "compaction")).toHaveLength(1);
+    expect(chat.focusedAgentIsCompacting).toBe(false);
+  });
+});
+
+describe("FRI-156 §F: live 'compacting' event drives focusedAgentIsCompacting (per-agent, focus-gated)", () => {
+  const compactingEvent = (agent: string, phase: "start" | "done", seq: number) =>
+    ({
+      v: 1,
+      type: "compacting",
+      agent,
+      turn_id: "t-c",
+      phase,
+      seq,
+    }) as Parameters<InstanceType<typeof import("./chat.svelte").ChatState>["applyEvent"]>[0];
+
+  const terminalEvent = (type: "turn_done" | "error", agent: string, turnId: string, seq: number) =>
+    ({
+      v: 1,
+      type,
+      agent,
+      turn_id: turnId,
+      ...(type === "turn_done" ? { status: "complete" } : {}),
+      seq,
+    }) as Parameters<InstanceType<typeof import("./chat.svelte").ChatState>["applyEvent"]>[0];
+
+  it("phase:'start' sets the compacting indicator; phase:'done' clears it", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.applyEvent(compactingEvent("friday", "start", 1));
+    expect(chat.compactingAgents.has("friday")).toBe(true);
+    expect(chat.focusedAgentIsCompacting).toBe(true);
+
+    chat.applyEvent(compactingEvent("friday", "done", 2));
+    expect(chat.compactingAgents.has("friday")).toBe(false);
+    expect(chat.focusedAgentIsCompacting).toBe(false);
+  });
+
+  it("a BACKGROUND agent's compaction does not show in the focused agent's indicator", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.applyEvent(compactingEvent("kitchen", "start", 1));
+    // Tracked, but the focus gate keeps the spinner out of friday's chat.
+    expect(chat.compactingAgents.has("kitchen")).toBe(true);
+    expect(chat.focusedAgentIsCompacting).toBe(false);
+  });
+
+  it("a stale 'done' for a DIFFERENT agent does not clear an in-flight indicator", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.applyEvent(compactingEvent("friday", "start", 1));
+    expect(chat.compactingAgents.has("friday")).toBe(true);
+    // A 'done' for kitchen must not wipe friday's in-progress indicator.
+    chat.applyEvent(compactingEvent("kitchen", "done", 2));
+    expect(chat.compactingAgents.has("friday")).toBe(true);
+    expect(chat.focusedAgentIsCompacting).toBe(true);
+  });
+
+  it("CONCURRENT: a background agent's start does NOT clobber the focused agent's spinner, and each clears independently", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    // Nightly sweep: friday (focused) starts, then kitchen (background) starts.
+    chat.applyEvent(compactingEvent("friday", "start", 1));
+    chat.applyEvent(compactingEvent("kitchen", "start", 2));
+    // friday's spinner stays on through kitchen's start (a scalar would have
+    // clobbered it to "kitchen" and flipped focusedAgentIsCompacting false).
+    expect(chat.focusedAgentIsCompacting).toBe(true);
+    expect(chat.compactingAgents.has("kitchen")).toBe(true);
+
+    // kitchen finishes first: friday's spinner is untouched.
+    chat.applyEvent(compactingEvent("kitchen", "done", 3));
+    expect(chat.compactingAgents.has("kitchen")).toBe(false);
+    expect(chat.focusedAgentIsCompacting).toBe(true);
+
+    // friday finishes: now cleared.
+    chat.applyEvent(compactingEvent("friday", "done", 4));
+    expect(chat.focusedAgentIsCompacting).toBe(false);
+  });
+
+  it("TERMINAL FALLBACK: turn_done for an agent clears a stuck compacting indicator (worker died before phase:'done')", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.applyEvent(compactingEvent("friday", "start", 1));
+    expect(chat.focusedAgentIsCompacting).toBe(true);
+    // No phase:'done' frame ever arrives (worker OOM/force-kill mid-compaction);
+    // the turn's terminal turn_done must clear the indicator.
+    chat.applyEvent(terminalEvent("turn_done", "friday", "t-c", 2));
+    expect(chat.compactingAgents.has("friday")).toBe(false);
+    expect(chat.focusedAgentIsCompacting).toBe(false);
+  });
+
+  it("TERMINAL FALLBACK: error for an agent clears a stuck compacting indicator", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+
+    chat.applyEvent(compactingEvent("friday", "start", 1));
+    expect(chat.focusedAgentIsCompacting).toBe(true);
+    chat.applyEvent(terminalEvent("error", "friday", "t-c", 2));
+    expect(chat.compactingAgents.has("friday")).toBe(false);
+    expect(chat.focusedAgentIsCompacting).toBe(false);
+  });
+});
+
+describe("FRI-156 §E: latestCompactionDividerId picks the most-recent divider", () => {
+  it("returns the last compaction divider id in the focused agent's messages", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s" }];
+    chat.messages = [
+      {
+        id: "cb_blk-1",
+        role: "assistant",
+        kind: "compaction",
+        text: "",
+        status: "complete",
+        agent: "friday",
+        turnId: "t1",
+        ts: 100,
+        preTokens: 779_000,
+        postTokens: 50_000,
+      },
+      {
+        id: "b_mid",
+        role: "assistant",
+        text: "more",
+        status: "complete",
+        agent: "friday",
+        turnId: "t2",
+        ts: 200,
+      },
+      {
+        id: "cb_blk-2",
+        role: "assistant",
+        kind: "compaction",
+        text: "",
+        status: "complete",
+        agent: "friday",
+        turnId: "t3",
+        ts: 300,
+        preTokens: 600_000,
+        postTokens: 40_000,
+      },
+    ];
+    expect(chat.latestCompactionDividerId).toBe("cb_blk-2");
+  });
+
+  it("returns null when there is no divider", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s" }];
+    chat.messages = [
+      {
+        id: "b_only",
+        role: "assistant",
+        text: "no compaction here",
+        status: "complete",
+        agent: "friday",
+        turnId: "t1",
+        ts: 100,
+      },
+    ];
+    expect(chat.latestCompactionDividerId).toBeNull();
+  });
+});
