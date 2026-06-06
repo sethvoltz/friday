@@ -242,22 +242,26 @@ describe("buildMcpServers: built-in surface", () => {
     }
   });
 
-  it("orchestrator/builder/helper get agents; orchestrator alone gets schedule/evolve", () => {
-    // ADR-022: agent_create / agent_* opens up to builder + helper. The
+  it("orchestrator/builder/helper/bare get agents; orchestrator alone gets schedule/evolve", () => {
+    // ADR-022: agent_create / agent_* opens up to builder + helper — and,
+    // since FRI-16, bare (the spawn matrix permits bare→helper/planner
+    // with a reason, so the tool surface must expose agent_create). The
     // daemon-side guard at POST /api/agents enforces the actual
     // structural rules (orchestrator-only Builders, required `reason`
-    // for non-orchestrator callers).
+    // for non-orchestrator callers, planner-as-spawner forbidden).
     const orch = buildMcpServers(baseOpts("orchestrator"));
     const builder = buildMcpServers(baseOpts("builder"));
     const helper = buildMcpServers(baseOpts("helper"));
     const bare = buildMcpServers(baseOpts("bare"));
     const scheduled = buildMcpServers(baseOpts("scheduled"));
+    const planner = buildMcpServers(baseOpts("planner"));
 
     expect(orch["friday-agents"]).toBeDefined();
     expect(builder["friday-agents"]).toBeDefined();
     expect(helper["friday-agents"]).toBeDefined();
-    expect(bare["friday-agents"]).toBeUndefined();
+    expect(bare["friday-agents"]).toBeDefined();
     expect(scheduled["friday-agents"]).toBeUndefined();
+    expect(planner["friday-agents"]).toBeUndefined();
 
     for (const name of ["friday-schedule", "friday-evolve"]) {
       expect(orch[name]).toBeDefined();
@@ -265,6 +269,52 @@ describe("buildMcpServers: built-in surface", () => {
       expect(helper[name]).toBeUndefined();
       expect(bare[name]).toBeUndefined();
       expect(scheduled[name]).toBeUndefined();
+      expect(planner[name]).toBeUndefined();
+    }
+  });
+
+  // FRI-16 AC #23 (MCP-surface half): a bare agent's friday-agents server
+  // actually exposes agent_create — the spawn matrix's bare row is enforced
+  // by the POST /api/agents gate (spawn-permissions.test.ts covers every
+  // cell's HTTP code); this pins the tool-surface layer so the two agree.
+  it("bare's friday-agents server exposes agent_create (FRI-16 closes the bare MCP gap)", () => {
+    interface ServerLike {
+      instance: { _registeredTools: Record<string, unknown> };
+    }
+    const bare = buildMcpServers(baseOpts("bare"));
+    const tools = Object.keys(
+      (bare["friday-agents"] as unknown as ServerLike).instance._registeredTools,
+    );
+    expect(tools).toEqual(
+      expect.arrayContaining(["agent_create", "agent_list", "agent_status", "agent_archive"]),
+    );
+  });
+
+  // FRI-16 AC #10b: the planner MCP surface, pinned exactly (present AND
+  // absent sets) so it stays deliberate rather than accidental. No gate
+  // names "planner" — the equality gates above produce this surface for a
+  // planner callerType by falling through.
+  it("planner gets exactly echo/mail/memory/reminder/integrations/playwright (FRI-16 AC #10b)", () => {
+    const planner = buildMcpServers(baseOpts("planner"));
+    expect(Object.keys(planner).sort()).toEqual(
+      [
+        "friday-echo",
+        "friday-mail",
+        "friday-memory",
+        "friday-reminder",
+        "friday-integrations",
+        "playwright",
+      ].sort(),
+    );
+    for (const absent of [
+      "friday-agents",
+      "friday-tickets",
+      "friday-schedule",
+      "friday-evolve",
+      "friday-apps",
+      "friday-elicitation",
+    ]) {
+      expect(planner[absent]).toBeUndefined();
     }
   });
 

@@ -37,7 +37,17 @@ const INSPECT_BLOCK_PREVIEW_CHARS = 320;
  * match. Exported so the contract can be asserted without booting the MCP server.
  */
 export const AGENT_CREATE_DESCRIPTION =
-  "Delegate scoped work to a sub-agent (helper for research, builder for code). PREFER this over the built-in Task tool — agent_create forks a real process so the work doesn't tie up your own turn, and the sub-agent reports back via mail when done. Returns immediately; do not wait synchronously.";
+  "Delegate scoped work to a sub-agent (helper for research, builder for code, planner for deep planning that mails back a handoff). PREFER this over the built-in Task tool — agent_create forks a real process so the work doesn't tie up your own turn, and the sub-agent reports back via mail when done. Returns immediately; do not wait synchronously.";
+
+/**
+ * FRI-16: the spawn types `agent_create` accepts over the wire. Must agree
+ * with the spawn matrix enforced by `validateSpawnPermissions` at
+ * POST /api/agents (`scheduled` is cron-only and never spawnable here;
+ * which CALLERS may request which types is the gate's job, not the
+ * schema's). Exported so the contract can be asserted without booting the
+ * MCP server.
+ */
+export const AGENT_CREATE_SPAWNABLE_TYPES = ["builder", "helper", "bare", "planner"] as const;
 
 function formatBlocksAsMarkdown(agentName: string, blocks: BlockRow[]): string {
   if (blocks.length === 0) return `_No blocks yet for \`${agentName}\`._`;
@@ -113,8 +123,10 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
         AGENT_CREATE_DESCRIPTION,
         {
           type: z
-            .enum(["builder", "helper", "bare"])
-            .describe("Sub-agent type. Builders get a fresh git worktree."),
+            .enum(AGENT_CREATE_SPAWNABLE_TYPES)
+            .describe(
+              "Sub-agent type. Builders get a fresh git worktree; planners inherit your cwd and mail back a handoff (FRI-16).",
+            ),
           name: z
             .string()
             .describe("Unique agent name. Lowercase alphanumeric + dashes, up to 64 chars."),
@@ -142,7 +154,7 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
             .string()
             .optional()
             .describe(
-              "Free-text rationale for why this spawn is necessary. Required by the daemon when caller is a builder or helper; ignored when caller is orchestrator. Distinct from agent_archive's `reason` field (which is a closed enum).",
+              "Free-text rationale for why this spawn is necessary. Required by the daemon for every non-orchestrator caller; ignored when caller is orchestrator. Distinct from agent_archive's `reason` field (which is a closed enum).",
             ),
         },
         async (args, extra) => {
@@ -171,7 +183,9 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
         "agent_list",
         "List registered agents, optionally filtered by type or status.",
         {
-          type: z.enum(["orchestrator", "builder", "helper", "scheduled", "bare"]).optional(),
+          type: z
+            .enum(["orchestrator", "builder", "helper", "scheduled", "bare", "planner"])
+            .optional(),
           status: z.enum(["idle", "working", "stalled", "archived"]).optional(),
         },
         async (args, extra) => {

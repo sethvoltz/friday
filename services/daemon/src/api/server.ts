@@ -15,8 +15,8 @@ import {
   isLocalHost,
   loadConfig,
   loadFridayConfig,
-  normalizeModelConfig,
   resolveDaemonPort,
+  resolveModelForRole,
 } from "@friday/shared";
 import {
   addComment,
@@ -1471,7 +1471,12 @@ async function createAgent(
   if (await registry.getAgent(body.name)) {
     return { status: 409, body: { error: `agent "${body.name}" already exists` } };
   }
-  if (body.type !== "builder" && body.type !== "helper" && body.type !== "bare") {
+  if (
+    body.type !== "builder" &&
+    body.type !== "helper" &&
+    body.type !== "bare" &&
+    body.type !== "planner"
+  ) {
     return {
       status: 400,
       body: { error: `cannot create agent of type "${body.type}" via this endpoint` },
@@ -1480,9 +1485,10 @@ async function createAgent(
 
   // ADR-022 spawn-permission gate. Resolve the caller's agent type by
   // looking up the parent row; absent parent ⇒ implicit orchestrator
-  // (matches the implicit-create path in POST /api/chat/turn). Builder
-  // and helper callers are restricted to spawning helpers and must
-  // include a non-empty `reason`.
+  // (matches the implicit-create path in POST /api/chat/turn). Non-
+  // orchestrator callers are restricted to spawning helpers and planners
+  // (FRI-16) and must include a non-empty `reason`; planners are leaves
+  // and cannot spawn at all.
   const callerRow = body.parentName ? await registry.getAgent(body.parentName) : null;
   const callerType: CallerType = callerRow?.type ?? "orchestrator";
   // FRI-149: `opts.evolveEscalation` is the un-forgeable carve-out marker. It is
@@ -1539,6 +1545,19 @@ async function createAgent(
     spawnReason: persistedReason,
   });
 
+  // FRI-16: planners inherit their parent's cwd (a planner under a builder
+  // runs inside that builder's worktree, middle-path guarded). Resolve via
+  // the same registry helper every other dispatch path (mail respawn,
+  // watchdog refork, dispatch-listener) uses, so the spawn turn and every
+  // later turn agree on the session cwd — the SDK encodes cwd into the
+  // JSONL transcript path, and divergence breaks session resume (FRI-61).
+  if (body.type === "planner") {
+    const plannerRow = await registry.getAgent(body.name);
+    if (plannerRow) {
+      workingDirectory = await registry.workingDirectoryFor(plannerRow);
+    }
+  }
+
   // ADR-022 telemetry: emit one `agent.spawn` event per successful
   // spawn. Walks the parent chain to record true `depth` (1 =
   // orchestrator-rooted) and the orchestrator-rooted `parentChain`
@@ -1584,7 +1603,7 @@ async function createAgent(
     bootstrapAppends.length > 0
       ? `${baseSystemPrompt}\n\n---\n\n${bootstrapAppends.join("\n\n")}`
       : baseSystemPrompt;
-  const modelCfg = normalizeModelConfig(cfg.model);
+  const modelCfg = resolveModelForRole(cfg, body.type);
   const { body: wrappedSpawnPrompt, systemPrompt: spawnSystemPrompt } = await buildDispatchPrompt(
     { name: body.name, type: body.type, parentName: body.parentName },
     {
@@ -1835,7 +1854,7 @@ async function handleSystemCommand(
       // not a `/<skill>` invocation).
       if (topic) {
         const seedTurnId = `t_${randomUUID()}`;
-        const modelCfg = normalizeModelConfig(cfg.model);
+        const modelCfg = resolveModelForRole(cfg, "bare");
         const { body: wrappedTopic, systemPrompt: scratchSystemPrompt } = await buildDispatchPrompt(
           { name, type: "bare" },
           { kind: "scratch", userText: topic },

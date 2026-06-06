@@ -69,6 +69,12 @@ interface MockSettingsUpdateCall {
   id: string;
   model?: string;
   watchdog_refork?: boolean;
+  theme_kind?: string | null;
+  theme_palette_single?: string | null;
+  theme_palette_light?: string | null;
+  theme_palette_dark?: string | null;
+  models?: Record<string, unknown> | null;
+  evolve_models?: Record<string, unknown> | null;
   updated_at: number;
 }
 
@@ -671,6 +677,102 @@ describe("updateSettings", () => {
     expect("theme_palette_single" in patch).toBe(false);
     expect("theme_palette_light" in patch).toBe(false);
     expect("theme_palette_dark" in patch).toBe(false);
+  });
+
+  /* ---------------- FRI-16: per-role / per-evolve-task model maps ---------------- */
+  // The dashboard's per-role and per-evolve-task pickers write through
+  // these fields. Same three-state convention as the theme fields
+  // (undefined preserves, null clears, value replaces) and the mutator
+  // stays a pure DB patch — the daemon's listener owns the merge into
+  // config.json.
+
+  it("UPDATEs models with the per-role override map verbatim (AC #19)", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, {
+      models: { builder: "claude-sonnet-4-6", planner: "claude-opus-4-8" },
+      ts: 11,
+    });
+    expect(settingsUpdates).toEqual([
+      {
+        id: "singleton",
+        models: { builder: "claude-sonnet-4-6", planner: "claude-opus-4-8" },
+        updated_at: 11,
+      },
+    ]);
+  });
+
+  it("UPDATEs evolve_models with the per-task override map verbatim (AC #19)", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, {
+      evolveModels: { enrich: "claude-sonnet-4-6", scanFriction: "claude-haiku-4-5-20251001" },
+      ts: 12,
+    });
+    expect(settingsUpdates).toEqual([
+      {
+        id: "singleton",
+        evolve_models: { enrich: "claude-sonnet-4-6", scanFriction: "claude-haiku-4-5-20251001" },
+        updated_at: 12,
+      },
+    ]);
+  });
+
+  it("null passes through as SQL NULL on each map (key present with null, not omitted)", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { models: null, evolveModels: null, ts: 13 });
+    const patch = settingsUpdates[0] ?? {};
+    expect(patch.models).toBeNull();
+    expect(patch.evolve_models).toBeNull();
+    expect("models" in patch).toBe(true);
+    expect("evolve_models" in patch).toBe(true);
+  });
+
+  it("omitting both maps leaves them absent from the patch (no clobber)", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { watchdogRefork: true, ts: 14 });
+    const patch = settingsUpdates[0] ?? {};
+    expect("models" in patch).toBe(false);
+    expect("evolve_models" in patch).toBe(false);
+  });
+
+  it("preserves a full ModelConfig object value inside the map (polymorphic form)", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, {
+      models: {
+        planner: { name: "claude-opus-4-8", thinking: { type: "adaptive" }, effort: "high" },
+      },
+      ts: 15,
+    });
+    expect(settingsUpdates[0]!.models).toEqual({
+      planner: { name: "claude-opus-4-8", thinking: { type: "adaptive" }, effort: "high" },
+    });
+  });
+
+  /* ---------------- FRI-16 AC #22b: legacy Haiku id coercion ---------------- */
+
+  it("coerces model 'claude-haiku-4-5' to 'claude-haiku-4-5-20251001' at the write boundary", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { model: "claude-haiku-4-5", ts: 16 });
+    expect(settingsUpdates[0]!.model).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("coercion is idempotent — the dated id is written unchanged", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { model: "claude-haiku-4-5-20251001", ts: 17 });
+    expect(settingsUpdates[0]!.model).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("coercion leaves non-Haiku model ids untouched", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { model: "claude-opus-4-8", ts: 18 });
+    expect(settingsUpdates[0]!.model).toBe("claude-opus-4-8");
   });
 });
 

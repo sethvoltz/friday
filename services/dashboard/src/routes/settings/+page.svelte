@@ -13,6 +13,17 @@
     wakeLockSettings,
     wakeLockState,
   } from "$lib/stores/wake-lock.svelte";
+  // Runtime imports of @friday/shared in client code must go through the
+  // browser-safe `sync` surface — the root barrel re-exports node-only
+  // modules (db/client.js → pg, env.js → dotenv, config.js → node:os) that
+  // Vite stubs to empty modules, crashing every page at hydration. Types
+  // from the root are fine: `import type` is fully erased.
+  import { coerceLegacyModelId } from "@friday/shared/sync";
+  import type {
+    AgentTypeName,
+    EvolveTaskName,
+    ModelConfig,
+  } from "@friday/shared";
   import type { AppSummary } from "./+page.server";
   let { data }: { data: PageData } = $props();
 
@@ -88,21 +99,47 @@
   // ~/.friday/config.json so worker spawns see the new value on the
   // next read (no restart required). The SSR `data.settings` seed
   // covers first paint before Zero's WS handshake completes.
-  const liveSettings = $derived.by<{ model: string; watchdogRefork: boolean }>(
-    () => {
-      if (!zeroOn) {
-        return {
-          model: data.settings.model,
-          watchdogRefork: data.settings.watchdogRefork,
-        };
-      }
-      const row = zeroSync.settings[0];
+  // FRI-16: collapse a jsonb override map (values are bare model-id
+  // strings or {name, …} ModelConfig objects) to picker-ready names.
+  // Legacy ids coerce to their dated form so a stored
+  // `claude-haiku-4-5` still selects the matching MODEL_OPTIONS entry.
+  function overrideNames<K extends string>(
+    map: Partial<Record<K, string | ModelConfig>> | null | undefined,
+  ): Partial<Record<K, string>> {
+    const out: Partial<Record<K, string>> = {};
+    for (const [key, value] of Object.entries(map ?? {})) {
+      if (value == null) continue;
+      out[key as K] = coerceLegacyModelId(
+        typeof value === "string" ? value : (value as ModelConfig).name,
+      );
+    }
+    return out;
+  }
+
+  const liveSettings = $derived.by<{
+    model: string;
+    watchdogRefork: boolean;
+    models: Partial<Record<AgentTypeName, string>>;
+    evolveModels: Partial<Record<EvolveTaskName, string>>;
+  }>(() => {
+    if (!zeroOn) {
       return {
-        model: row?.model ?? data.settings.model,
-        watchdogRefork: row?.watchdog_refork ?? data.settings.watchdogRefork,
+        model: data.settings.model,
+        watchdogRefork: data.settings.watchdogRefork,
+        models: data.settings.models,
+        evolveModels: data.settings.evolveModels,
       };
-    },
-  );
+    }
+    const row = zeroSync.settings[0];
+    return {
+      // Coerce on display too — a row written before the dated-id
+      // standardization (FRI-16 AC #22b) may still carry the legacy id.
+      model: row?.model != null ? coerceLegacyModelId(row.model) : data.settings.model,
+      watchdogRefork: row?.watchdog_refork ?? data.settings.watchdogRefork,
+      models: row ? overrideNames(row.models) : data.settings.models,
+      evolveModels: row ? overrideNames(row.evolve_models) : data.settings.evolveModels,
+    };
+  });
   // Two-way bindings for the form inputs. `$effect` mirrors the
   // derived live values into the writable state so cross-tab updates
   // converge the inputs without trampling an in-progress edit.
@@ -110,6 +147,14 @@
   let model = $state(data.settings.model);
   // svelte-ignore state_referenced_locally
   let watchdogRefork = $state(data.settings.watchdogRefork);
+  // svelte-ignore state_referenced_locally
+  let roleModels = $state<Partial<Record<AgentTypeName, string>>>({
+    ...data.settings.models,
+  });
+  // svelte-ignore state_referenced_locally
+  let evolveModels = $state<Partial<Record<EvolveTaskName, string>>>({
+    ...data.settings.evolveModels,
+  });
   let savingSettings = $state(false);
 
   $effect(() => {
@@ -117,18 +162,50 @@
     if (savingSettings) return; // don't trample an in-flight save
     model = liveSettings.model;
     watchdogRefork = liveSettings.watchdogRefork;
+    roleModels = liveSettings.models;
+    evolveModels = liveSettings.evolveModels;
   });
 
   const MODEL_OPTIONS: Array<{ id: string; label: string }> = [
-    { id: "claude-opus-4-7", label: "Claude Opus 4.7 — best for reasoning" },
+    { id: "claude-opus-4-8", label: "Claude Opus 4.8 — best for reasoning" },
+    { id: "claude-opus-4-7", label: "Claude Opus 4.7 — prior tier" },
     { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 — balanced" },
-    { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 — fast / cheap" },
+    {
+      id: "claude-haiku-4-5-20251001",
+      label: "Claude Haiku 4.5 — fastest / cheapest",
+    },
+  ];
+
+  // FRI-16: one picker per agent role + per evolve internal LLM pass.
+  // A missing key in the corresponding map means "use the global
+  // default" — the daemon resolves via resolveModelForRole /
+  // resolveModelForEvolveTask with cfg.model as the fallthrough.
+  const ROLE_PICKERS: Array<{ role: AgentTypeName; label: string }> = [
+    { role: "orchestrator", label: "Orchestrator" },
+    { role: "builder", label: "Builder" },
+    { role: "helper", label: "Helper" },
+    { role: "planner", label: "Planner" },
+    { role: "scheduled", label: "Scheduled" },
+    { role: "bare", label: "Bare" },
+  ];
+  const EVOLVE_PICKERS: Array<{ task: EvolveTaskName; label: string }> = [
+    { task: "enrich", label: "Enrich" },
+    { task: "scanFriction", label: "Scan friction" },
+    { task: "scanPreferences", label: "Scan preferences" },
   ];
 
   // svelte-ignore state_referenced_locally
   let priorModel = $state(data.settings.model);
   // svelte-ignore state_referenced_locally
   let priorWatchdog = $state(data.settings.watchdogRefork);
+  // svelte-ignore state_referenced_locally
+  let priorRoleModels = $state<Partial<Record<AgentTypeName, string>>>({
+    ...data.settings.models,
+  });
+  // svelte-ignore state_referenced_locally
+  let priorEvolveModels = $state<Partial<Record<EvolveTaskName, string>>>({
+    ...data.settings.evolveModels,
+  });
   let settingsToast = $state<{ msg: string; kind: "ok" | "err" } | null>(null);
 
   function showSettingsToast(msg: string, kind: "ok" | "err") {
@@ -141,6 +218,8 @@
   async function patchSettings(body: {
     model?: string;
     watchdogRefork?: boolean;
+    models?: Partial<Record<AgentTypeName, string>> | null;
+    evolveModels?: Partial<Record<EvolveTaskName, string>> | null;
   }) {
     savingSettings = true;
     try {
@@ -154,6 +233,10 @@
         zeroSync.updateSettings(body);
         priorModel = body.model ?? priorModel;
         priorWatchdog = body.watchdogRefork ?? priorWatchdog;
+        if (body.models !== undefined) priorRoleModels = body.models ?? {};
+        if (body.evolveModels !== undefined) {
+          priorEvolveModels = body.evolveModels ?? {};
+        }
         showSettingsToast("saved", "ok");
         return;
       }
@@ -168,6 +251,8 @@
       } catch (err) {
         model = priorModel;
         watchdogRefork = priorWatchdog;
+        roleModels = { ...priorRoleModels };
+        evolveModels = { ...priorEvolveModels };
         showSettingsToast(
           `save failed: ${err instanceof Error ? err.message : String(err)}`,
           "err",
@@ -181,6 +266,8 @@
           .catch(() => null);
         model = priorModel;
         watchdogRefork = priorWatchdog;
+        roleModels = { ...priorRoleModels };
+        evolveModels = { ...priorEvolveModels };
         showSettingsToast(
           detail ? `save failed: ${detail}` : `save failed (${r.status})`,
           "err",
@@ -190,11 +277,17 @@
       const fresh = (await r.json()) as {
         model: string;
         watchdogRefork: boolean;
+        models: Partial<Record<AgentTypeName, string>>;
+        evolveModels: Partial<Record<EvolveTaskName, string>>;
       };
       model = fresh.model;
       watchdogRefork = fresh.watchdogRefork;
+      roleModels = fresh.models;
+      evolveModels = fresh.evolveModels;
       priorModel = fresh.model;
       priorWatchdog = fresh.watchdogRefork;
+      priorRoleModels = fresh.models;
+      priorEvolveModels = fresh.evolveModels;
       showSettingsToast("saved · restart daemon for changes to take effect", "ok");
     } finally {
       savingSettings = false;
@@ -204,6 +297,31 @@
   async function onModelChange(e: Event) {
     const next = (e.target as HTMLSelectElement).value;
     await patchSettings({ model: next });
+  }
+
+  /** FRI-16: per-role override picker. "Use default" (the empty option)
+   *  removes the role's key; the patch carries the whole replacement map
+   *  per the updateSettings contract. Clearing the last override emits
+   *  `{}` (NOT `null`): the daemon listener treats a NULL column as
+   *  "never configured — preserve config.json", so an empty map is the
+   *  shape that actually clears `cfg.models` on the Zero path. */
+  async function onRoleModelChange(role: AgentTypeName, e: Event) {
+    const value = (e.target as HTMLSelectElement).value;
+    const next = { ...roleModels };
+    if (value === "") delete next[role];
+    else next[role] = value;
+    roleModels = next;
+    await patchSettings({ models: next });
+  }
+
+  /** FRI-16: per-evolve-task override picker — same contract as roles. */
+  async function onEvolveModelChange(task: EvolveTaskName, e: Event) {
+    const value = (e.target as HTMLSelectElement).value;
+    const next = { ...evolveModels };
+    if (value === "") delete next[task];
+    else next[task] = value;
+    evolveModels = next;
+    await patchSettings({ evolveModels: next });
   }
 
   // Toggle uses bind:checked, so we react to mutations via $effect instead
@@ -383,6 +501,75 @@
 </header>
 
 <div class="grid">
+  <div class="card models-card">
+    <div class="card-header"><h2>Models</h2></div>
+    <p class="row-value">
+      Default model — used when no per-role or per-task override is set.
+      Existing forked workers keep their current model until they exit.
+    </p>
+    <div class="actions">
+      <select
+        class="model-select"
+        value={model}
+        onchange={onModelChange}
+        disabled={savingSettings}>
+        {#each MODEL_OPTIONS as opt (opt.id)}
+          <option value={opt.id}>{opt.label}</option>
+        {/each}
+      </select>
+    </div>
+
+    <div class="model-section">
+      <div class="section-label">Per role</div>
+      <p class="row-value">
+        Route each agent role to its own model. Roles without an override
+        use the default above.
+      </p>
+      <div class="model-grid">
+        {#each ROLE_PICKERS as { role, label } (role)}
+          <label class="model-pick">
+            <span class="model-pick-label">{label}</span>
+            <select
+              class="model-select"
+              value={roleModels[role] ?? ""}
+              onchange={(e) => onRoleModelChange(role, e)}
+              disabled={savingSettings}>
+              <option value="">Use default</option>
+              {#each MODEL_OPTIONS as opt (opt.id)}
+                <option value={opt.id}>{opt.label}</option>
+              {/each}
+            </select>
+          </label>
+        {/each}
+      </div>
+    </div>
+
+    <div class="model-section">
+      <div class="section-label">Evolve tasks</div>
+      <p class="row-value">
+        Internal LLM passes in the evolve pipeline. Tasks without an
+        override use the default above.
+      </p>
+      <div class="model-grid">
+        {#each EVOLVE_PICKERS as { task, label } (task)}
+          <label class="model-pick">
+            <span class="model-pick-label">{label}</span>
+            <select
+              class="model-select"
+              value={evolveModels[task] ?? ""}
+              onchange={(e) => onEvolveModelChange(task, e)}
+              disabled={savingSettings}>
+              <option value="">Use default</option>
+              {#each MODEL_OPTIONS as opt (opt.id)}
+                <option value={opt.id}>{opt.label}</option>
+              {/each}
+            </select>
+          </label>
+        {/each}
+      </div>
+    </div>
+  </div>
+
   <div class="card">
     <div class="card-header"><h2>Account</h2></div>
     <div class="row">
@@ -395,25 +582,6 @@
     </div>
     <div class="actions">
       <button class="ghost" onclick={signOut}>Sign out</button>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-header"><h2>Model</h2></div>
-    <p class="row-value">
-      Default Claude model the daemon uses for new turns. Existing forked
-      workers keep their current model until they exit.
-    </p>
-    <div class="actions">
-      <select
-        class="model-select"
-        value={model}
-        onchange={onModelChange}
-        disabled={savingSettings}>
-        {#each MODEL_OPTIONS as opt (opt.id)}
-          <option value={opt.id}>{opt.label}</option>
-        {/each}
-      </select>
     </div>
   </div>
 
@@ -722,6 +890,7 @@
   .config-card { grid-column: 1 / -1; }
   .sessions-card { grid-column: 1 / -1; }
   .appearance-card { grid-column: 1 / -1; }
+  .models-card { grid-column: 1 / -1; }
   .storage-usage { color: var(--text-primary); }
 
   /* FRI-124 Appearance card --------------------------------------- */
@@ -807,6 +976,33 @@
     min-width: 280px;
   }
   .model-select:disabled { opacity: 0.6; }
+
+  /* FRI-16 Models card: per-role + per-evolve-task override pickers. */
+  .model-section {
+    margin-top: 1.25rem;
+  }
+  .model-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 0.75rem 1rem;
+    margin-top: 0.5rem;
+  }
+  .model-pick {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .model-pick-label {
+    color: var(--text-tertiary);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  .model-pick .model-select {
+    min-width: 0;
+    width: 100%;
+  }
 
   .toggle-row {
     display: inline-flex;

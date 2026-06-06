@@ -12,6 +12,7 @@ import {
   schema,
 } from "@friday/shared";
 import { captureFor } from "../posthog.js";
+import { logger } from "../log.js";
 
 /**
  * FRI-113: status state machine. Every write to `agents.status` flows
@@ -66,6 +67,8 @@ const TRANSITIONS_BY_TYPE: Readonly<Record<AgentType, StatusTransitionTable>> = 
   helper: COMMON_TRANSITIONS,
   scheduled: COMMON_TRANSITIONS,
   bare: COMMON_TRANSITIONS,
+  // FRI-16: planners follow the same archiving rules as helpers/builders.
+  planner: COMMON_TRANSITIONS,
 };
 
 export type IllegalTransitionCode =
@@ -424,12 +427,27 @@ function rowToEntry(r: typeof schema.agents.$inferSelect): AgentEntry {
         type: "bare",
         parentName: r.parentName ?? undefined,
       } as AgentEntry;
+    case "planner":
+      // FRI-16: planners are parented sub-agents like helpers, but the
+      // parent is optional (PlannerEntry) — cwd inheritance falls back to
+      // the per-agent home when the parent is missing or archived.
+      return {
+        ...base,
+        type: "planner",
+        parentName: r.parentName ?? undefined,
+      } as AgentEntry;
   }
 }
 
 /**
  * Resolve the cwd a worker should run under for a given agent. Branch order:
  *
+ *   0. Planners → their parent's cwd (FRI-16; resolved recursively through
+ *      `parentName`, bounded — see below). A planner under a builder runs
+ *      inside that builder's worktree (read-mostly, middle-path guarded);
+ *      under the orchestrator it runs in the orchestrator's home. When the
+ *      parent is archived or missing, fall through to the planner's own
+ *      per-agent home (never read a dead worktree).
  *   1. Builders → their git worktree (workspace containment, Constitution rule).
  *   2. App-installed agents → `~/.friday/apps/<id>/` (the app owns its dir).
  *   3. Everyone else → `~/.friday/agents/<name>/` (FRI-61 per-agent home).
@@ -446,6 +464,36 @@ function rowToEntry(r: typeof schema.agents.$inferSelect): AgentEntry {
  * needs to fire.
  */
 export async function workingDirectoryFor(a: AgentEntry): Promise<string> {
+  return workingDirectoryForBounded(a, 0);
+}
+
+/**
+ * FRI-16: hard ceiling on the planner parent-inheritance walk. A corrupted
+ * planner→planner parent cycle would otherwise recurse forever; at the
+ * bound we log `registry.cwd.cycle-bounded` and fall through to the
+ * current entry's own per-agent home.
+ */
+const CWD_PARENT_HOP_BOUND = 8;
+
+async function workingDirectoryForBounded(a: AgentEntry, hops: number): Promise<string> {
+  // Branch 0 (FRI-16): planner inherits the parent's cwd.
+  if (a.type === "planner" && a.parentName) {
+    if (hops >= CWD_PARENT_HOP_BOUND) {
+      logger.log("warn", "registry.cwd.cycle-bounded", {
+        agent: a.name,
+        parent: a.parentName,
+        hops,
+      });
+      // Fall through to the per-agent home below.
+    } else {
+      const parent = await getAgent(a.parentName);
+      if (parent && parent.status !== "archived") {
+        return workingDirectoryForBounded(parent, hops + 1);
+      }
+      // Parent missing or archived — fall through to the per-agent home
+      // below (don't read a dead worktree).
+    }
+  }
   if ("worktreePath" in a && a.worktreePath) return a.worktreePath;
   const appId = await getAppId(a.name);
   if (appId) return appDir(appId);

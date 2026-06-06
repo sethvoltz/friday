@@ -36,8 +36,8 @@ import {
   LISTEN_CHANNELS,
   loadConfig,
   loadFridayConfig,
-  normalizeModelConfig,
   resolveDaemonPort,
+  resolveModelForRole,
   schema,
 } from "@friday/shared";
 import { getBlockById } from "@friday/shared/services";
@@ -152,7 +152,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
   // will queue — that's the legacy contract: dispatchTurn uses it to
   // re-stamp the row's status when the worker drains the queue
   // (`block_meta_update` flips queued → streaming).
-  const modelCfg = normalizeModelConfig(cfg.model);
+  const modelCfg = resolveModelForRole(cfg, agentRow.type);
   const turnCwd = await registry.workingDirectoryFor(agentRow);
   dispatchTurn({
     agentName,
@@ -185,6 +185,11 @@ async function processPendingBlockRow(id: string): Promise<void> {
     queued: willQueue,
     has_attachments: !!(attachments && attachments.length > 0),
     skill_invoked: skillMatch ? skillMatch.skill.name : null,
+    // FRI-16: surface the per-role resolved model so role→model routing
+    // is observable in telemetry, not just in config.
+    model: modelCfg.name,
+    effort: modelCfg.effort ?? null,
+    thinking_type: modelCfg.thinking?.type ?? null,
   });
   logger.log("info", "block.dispatch.applied", {
     block_id: row.blockId,

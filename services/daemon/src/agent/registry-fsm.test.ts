@@ -169,6 +169,12 @@ describe("registry FSM gate (ADR-031)", () => {
     expect(isLegalTransition("builder", "working", "archived")).toBe(true);
     expect(isLegalTransition("builder", "archived", "idle")).toBe(false);
     expect(isLegalTransition("builder", "archived", "archived")).toBe(true); // same-status no-op
+    // FRI-16 AC #5b: planners ride COMMON_TRANSITIONS (same archiving rules
+    // as helpers/builders — NOT the orchestrator's no-archive matrix).
+    expect(isLegalTransition("planner", "idle", "working")).toBe(true);
+    expect(isLegalTransition("planner", "working", "idle")).toBe(true);
+    expect(isLegalTransition("planner", "idle", "archived")).toBe(true);
+    expect(isLegalTransition("planner", "archived", "idle")).toBe(false);
   });
 
   it("does NOT backfill the 68 historical archive_reason IS NULL rows (epic constraint)", async () => {

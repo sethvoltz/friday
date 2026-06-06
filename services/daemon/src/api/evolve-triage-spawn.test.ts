@@ -408,4 +408,98 @@ describe("POST /api/agents — contract (createAgent extraction)", () => {
     // Orchestrator-spawned helpers carry no spawnReason (per the gate).
     expect(await registry.getSpawnReason("create-ok")).toBeNull();
   });
+
+  // FRI-16: the endpoint's own type allowlist must admit "planner" — the
+  // pre-FRI-16 allowlist 400'd before validateSpawnPermissions ever ran, so
+  // every planner cell of the spawn matrix died at this layer even though
+  // the pure gate permitted it. These tests pin the endpoint, not the gate.
+  it("returns 201 for an orchestrator-spawned planner and persists the planner row (FRI-16)", async () => {
+    const res = await postAgent({
+      type: "planner",
+      name: "planner-via-rest",
+      parentName: "friday",
+      prompt: "design the migration",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { name: string; turn_id: string };
+    expect(body.name).toBe("planner-via-rest");
+    expect(body.turn_id).toMatch(/^t_/);
+    // The row INSERT also proves the agents_type_check CHECK constraint
+    // (widened by shared migration 0032) accepts 'planner' in a real DB.
+    expect(await registry.getAgent("planner-via-rest")).toMatchObject({
+      name: "planner-via-rest",
+      type: "planner",
+      parentName: "friday",
+    });
+    expect(await registry.getSpawnReason("planner-via-rest")).toBeNull();
+  });
+
+  it("returns 201 for a builder-spawned planner with reason; the spawn turn runs in the builder's worktree (FRI-16)", async () => {
+    const worktree = join(DATA_DIR, "wt-parent-builder");
+    await registry.registerAgent({
+      name: "parent-builder",
+      type: "builder",
+      parentName: "friday",
+      worktreePath: worktree,
+    });
+    const res = await postAgent({
+      type: "planner",
+      name: "planner-under-builder",
+      parentName: "parent-builder",
+      reason: "deep design on a stronger model",
+      prompt: "plan the refactor",
+    });
+    expect(res.status).toBe(201);
+    expect(await registry.getAgent("planner-under-builder")).toMatchObject({
+      type: "planner",
+      parentName: "parent-builder",
+    });
+    expect(await registry.getSpawnReason("planner-under-builder")).toBe(
+      "deep design on a stronger model",
+    );
+    // The spawn-time dispatch must already run in the inherited cwd —
+    // planner workers are long-lived, so the first session's cwd IS the
+    // session cwd (and the middle-path guard keys off it).
+    const lifecycle = await import("../agent/lifecycle.js");
+    const call = vi
+      .mocked(lifecycle.dispatchTurn)
+      .mock.calls.find((c) => c[0].agentName === "planner-under-builder");
+    expect(call?.[0].options.workingDirectory).toBe(worktree);
+  });
+
+  it("returns 400 (reason required) for a builder-spawned planner without reason", async () => {
+    await registry.registerAgent({
+      name: "parent-builder-2",
+      type: "builder",
+      parentName: "friday",
+      worktreePath: join(DATA_DIR, "wt-parent-builder-2"),
+    });
+    const res = await postAgent({
+      type: "planner",
+      name: "planner-no-reason",
+      parentName: "parent-builder-2",
+      prompt: "plan it",
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("SPAWN_REASON_REQUIRED");
+    expect(await registry.getAgent("planner-no-reason")).toBeNull();
+  });
+
+  it("returns 403 PLANNER_SPAWN_FORBIDDEN when a planner caller tries to spawn (leaf rule, endpoint layer)", async () => {
+    await registry.registerAgent({
+      name: "parent-planner",
+      type: "planner",
+      parentName: "friday",
+    });
+    const res = await postAgent({
+      type: "helper",
+      name: "child-of-planner",
+      parentName: "parent-planner",
+      reason: "planners cannot delegate",
+      prompt: "x",
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code: string }).code).toBe("PLANNER_SPAWN_FORBIDDEN");
+    expect(await registry.getAgent("child-of-planner")).toBeNull();
+  });
 });

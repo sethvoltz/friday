@@ -62,8 +62,8 @@ import {
   getPool,
   loadConfig,
   loadFridayConfig,
-  normalizeModelConfig,
   resolveDaemonPort,
+  resolveModelForRole,
   schema,
   LISTEN_CHANNELS,
 } from "@friday/shared";
@@ -240,7 +240,7 @@ async function processResumeRequestedRow(blockId: string): Promise<void> {
   });
 
   const cfg = loadConfig();
-  const modelCfg = normalizeModelConfig(cfg.model);
+  const modelCfg = resolveModelForRole(cfg, agentRow.type);
   const resumeCwd = await registry.workingDirectoryFor(agentRow);
   dispatchTurn({
     agentName,

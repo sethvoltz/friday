@@ -77,7 +77,7 @@ describe("composeSystemPrompt with identity", () => {
 describe("SOUL is identity-neutral; orchestrator owns 'You are Friday' (FRI-127)", () => {
   const ORCH_FRAMING = "You are Friday: the user's personal AI orchestrator";
 
-  it.each(["helper", "builder", "bare", "scheduled"] as const)(
+  it.each(["helper", "builder", "bare", "scheduled", "planner"] as const)(
     "%s composed prompt does NOT carry the orchestrator framing",
     (agentType) => {
       const stack = readPromptStack(agentType, []);
@@ -179,13 +179,48 @@ describe("default protocols by agent type", () => {
     const occurrences = stack.protocols.split("# Protocol: Memory").length - 1;
     expect(occurrences).toBe(1);
   });
+
+  /* ---------------- FRI-16: planner (AC #4) ---------------- */
+
+  it("planner stack auto-includes the memory protocol", () => {
+    const stack = readPromptStack("planner", []);
+    expect(stack.protocols).toContain("# Protocol: Memory");
+  });
+
+  it("planner stack does NOT include the elicitation protocol (questions go to the parent via mail)", () => {
+    const stack = readPromptStack("planner", []);
+    expect(stack.protocols).not.toContain("# Protocol: Asking the user a structured question");
+  });
+
+  it("planner agentBase is the Planner role prompt with the worktree-privilege sentence (AC #10)", () => {
+    const stack = readPromptStack("planner", []);
+    expect(stack.agentBase).toContain("# Role: Planner");
+    expect(stack.agentBase).toContain(
+      "You are the only sub-agent type that runs inside the parent's worktree",
+    );
+  });
+
+  it("planner agentBase pins the handoff workflow literals (AC #17)", () => {
+    const { agentBase } = readPromptStack("planner", []);
+    expect(agentBase).toContain("/handoff");
+    expect(agentBase).toContain("`Read` the tmp file");
+    expect(agentBase).toContain("mail_send");
+    expect(agentBase).toContain("[handoff] <topic>");
+    expect(agentBase).toContain('"handoff"');
+    expect(agentBase).toContain('"normal"');
+  });
+
+  it("planner agentBase does not claim the elicitation/ask_user surface (AC #10b)", () => {
+    const { agentBase } = readPromptStack("planner", []);
+    expect(agentBase).not.toContain("ask_user");
+  });
 });
 
 describe("pr-links protocol (FRI-131, Option A — unconditional)", () => {
   const PR_LINKS_HEADER = "# Protocol: PR & Issue Links";
 
   // AC#2 — fragment loads for every agent type, with NO env precondition.
-  it.each(["orchestrator", "builder", "helper", "scheduled", "bare"] as const)(
+  it.each(["orchestrator", "builder", "helper", "scheduled", "bare", "planner"] as const)(
     "%s stack auto-includes the pr-links protocol",
     (agentType) => {
       const stack = readPromptStack(agentType, []);

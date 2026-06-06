@@ -1,6 +1,16 @@
 import { redirect, type ServerLoad } from "@sveltejs/kit";
 import { listActiveSessionsForUser } from "@friday/shared/services";
-import { getDb, loadConfig, type Manifest, normalizeModelConfig, schema } from "@friday/shared";
+import {
+  coerceLegacyModelId,
+  getDb,
+  loadConfig,
+  type AgentTypeName,
+  type EvolveTaskName,
+  type Manifest,
+  type ModelConfig,
+  normalizeModelConfig,
+  schema,
+} from "@friday/shared";
 
 export interface SessionSummary {
   id: string;
@@ -14,6 +24,24 @@ export interface SessionSummary {
 export interface SettingsSnapshot {
   model: string;
   watchdogRefork: boolean;
+  /** FRI-16: per-role / per-evolve-task model overrides, name-extracted
+   *  for the pickers. A missing key means "use the global default". */
+  models: Partial<Record<AgentTypeName, string>>;
+  evolveModels: Partial<Record<EvolveTaskName, string>>;
+}
+
+/** Collapse an override map to picker-ready model names: ModelConfig
+ *  forms reduce to `.name`, legacy ids coerce to their dated form
+ *  (FRI-16 AC #22b — stored legacy values must still select). */
+function overrideNames<K extends string>(
+  map: Partial<Record<K, string | ModelConfig>> | undefined,
+): Partial<Record<K, string>> {
+  const out: Partial<Record<K, string>> = {};
+  for (const [key, value] of Object.entries(map ?? {})) {
+    if (value == null) continue;
+    out[key as K] = coerceLegacyModelId(normalizeModelConfig(value as string | ModelConfig).name);
+  }
+  return out;
 }
 
 export interface AppSummary {
@@ -82,8 +110,10 @@ export const load: ServerLoad = async ({ locals }) => {
   // FIX_FORWARD 6.3: configurable knobs surfaced in the settings page.
   const cfg = loadConfig();
   const settings: SettingsSnapshot = {
-    model: normalizeModelConfig(cfg.model).name,
+    model: coerceLegacyModelId(normalizeModelConfig(cfg.model).name),
     watchdogRefork: cfg.watchdog?.refork ?? false,
+    models: overrideNames(cfg.models),
+    evolveModels: overrideNames(cfg.evolve?.models),
   };
 
   const apps = await loadApps();

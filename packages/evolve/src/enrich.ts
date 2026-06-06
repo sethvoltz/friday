@@ -6,6 +6,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { loadConfig, resolveModelForEvolveTask } from "@friday/shared";
 import { getProposal, listProposals, updateProposal } from "./store.js";
 import type { EvidencePointer, Proposal, ProposalType, Signal } from "./types.js";
 import { chat, extractJson, ChatAbortError } from "./llm.js";
@@ -52,7 +53,6 @@ export interface HydratedEvidence {
   snippet: string;
 }
 
-const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_LIMIT = 50;
 const DEFAULT_EVIDENCE_CAP = 2000;
 // First attempt: generous enough for a cold SDK subprocess + Sonnet streaming
@@ -66,7 +66,7 @@ const ENRICH_RETRY_BACKOFF_MS = 2_000;
 
 export async function enrichProposals(opts: EnrichOptions = {}): Promise<EnrichResult> {
   const result: EnrichResult = { enriched: [], skipped: [], failed: [] };
-  const model = opts.model ?? DEFAULT_MODEL;
+  const model = opts.model ?? resolveModelForEvolveTask(loadConfig(), "enrich").name;
   const limit = opts.limit ?? DEFAULT_LIMIT;
   const evidenceCap = opts.evidenceCharCap ?? DEFAULT_EVIDENCE_CAP;
   const enrich = opts.enrichFn ?? defaultEnrichFn;

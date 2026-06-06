@@ -20,7 +20,7 @@
  */
 
 import { eq, inArray } from "drizzle-orm";
-import { getDb, schema } from "@friday/shared";
+import { getDb, loadConfig, resolveModelForEvolveTask, schema } from "@friday/shared";
 import type { EvidencePointer, Signal, SignalSeverity } from "./types.js";
 import { signalHash } from "./scan.js";
 import { chat, extractJson } from "./llm.js";
@@ -42,7 +42,7 @@ export interface FrictionScanOptions {
   maxTurns?: number;
   /** Turns per LLM batch. Default 30. */
   batchSize?: number;
-  /** Haiku model id. Default the current Haiku 4.5. */
+  /** Model id override. Default resolves via `cfg.evolve.models.scanFriction`. */
   model?: string;
   /** Inject for tests — replaces the real LLM call. */
   scoreFn?: ScoreFn;
@@ -90,7 +90,7 @@ export async function scanFriction(opts: FrictionScanOptions = {}): Promise<Sign
   const sinceMs = opts.since ? Date.parse(opts.since) : 0;
   const maxTurns = opts.maxTurns ?? 1000;
   const batchSize = opts.batchSize ?? 30;
-  const model = opts.model ?? "claude-haiku-4-5-20251001";
+  const model = opts.model ?? resolveModelForEvolveTask(loadConfig(), "scanFriction").name;
   const score = opts.scoreFn ?? defaultScoreFn;
 
   const turns = await collectOrchestratorTurns(sinceMs, maxTurns);

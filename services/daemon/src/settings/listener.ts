@@ -34,6 +34,7 @@
 import { eq } from "drizzle-orm";
 import pgPkg from "pg";
 import {
+  coerceLegacyModelId,
   getDb,
   getPool,
   loadConfig,
@@ -50,13 +51,37 @@ const { Client } = pgPkg;
 const SINGLETON_KEY = "singleton";
 
 /**
+ * JSON.stringify with object keys sorted at every depth. The JSONB
+ * settings columns (`models` / `evolve_models`) come back from Drizzle
+ * as a fresh object reference on every query, and Postgres normalizes
+ * jsonb key order independently of insertion order — so neither `!==`
+ * nor plain `JSON.stringify` comparison is a stable idempotency
+ * predicate. Sorted-key serialization is.
+ */
+function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) => {
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+      return Object.fromEntries(
+        Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)),
+      );
+    }
+    return v;
+  });
+}
+
+/** Deep equality on JSON-shaped values via sorted-key serialization. */
+function jsonDeepEqual(a: unknown, b: unknown): boolean {
+  return stableStringify(a) === stableStringify(b);
+}
+
+/**
  * Apply the current settings-row values to `~/.friday/config.json`.
  * Returns `true` when the file was actually rewritten (i.e., values
  * differed), `false` when the row matched config.json already.
  *
- * Only touches the user-toggleable fields (`model`, `watchdog.refork`);
- * structural fields (ports, mcpServers, base URLs) are preserved
- * because they're not in the settings table.
+ * Only touches the user-toggleable fields (`model`, `watchdog.refork`,
+ * `models`, `evolve.models`); structural fields (ports, mcpServers,
+ * base URLs) are preserved because they're not in the settings table.
  */
 export async function syncConfigFromSettingsRow(): Promise<boolean> {
   const db = getDb();
@@ -76,8 +101,12 @@ export async function syncConfigFromSettingsRow(): Promise<boolean> {
   const cfg = loadConfig();
   let changed = false;
 
-  if (row.model !== null && row.model !== cfg.model) {
-    cfg.model = row.model;
+  // FRI-16 / AC #22b: coerce the legacy un-dated Haiku id on read so a row
+  // (or file) holding "claude-haiku-4-5" converges on the dated id the
+  // dashboard's MODEL_OPTIONS standardizes on. Idempotent — a dated id is
+  // a no-op.
+  if (row.model !== null && coerceLegacyModelId(row.model) !== cfg.model) {
+    cfg.model = coerceLegacyModelId(row.model);
     changed = true;
   }
   if (row.watchdogRefork !== null && (cfg.watchdog?.refork ?? false) !== row.watchdogRefork) {
@@ -89,11 +118,52 @@ export async function syncConfigFromSettingsRow(): Promise<boolean> {
     changed = true;
   }
 
+  // FRI-16: mirror the per-role / per-evolve-task JSONB columns into
+  // cfg.models / cfg.evolve.models. Deep-equal (sorted-key JSON) guards
+  // the idempotency contract — Drizzle returns a fresh object reference
+  // on every query, so a `!==` identity check would rewrite config.json
+  // on every NOTIFY.
+  //
+  // Three-state column semantics: NULL = never configured via the
+  // dashboard (preserve whatever config.json has, e.g. a hand-edited
+  // map); `{}` = the user cleared the last override (delete the key so
+  // resolution falls through to the global default — same behavior as
+  // the REST PATCH path); non-empty map = replace wholesale. Empty maps
+  // normalize to `undefined` before comparison so a cleared slot stays
+  // idempotent across NOTIFYs.
+  if (row.models !== null) {
+    const rowModels =
+      Object.keys(row.models as Record<string, unknown>).length > 0
+        ? (row.models as FridayConfig["models"])
+        : undefined;
+    if (!jsonDeepEqual(rowModels, cfg.models)) {
+      if (rowModels) cfg.models = rowModels;
+      else delete cfg.models;
+      changed = true;
+    }
+  }
+  if (row.evolveModels !== null) {
+    const rowEvolveModels =
+      Object.keys(row.evolveModels as Record<string, unknown>).length > 0
+        ? (row.evolveModels as NonNullable<FridayConfig["evolve"]>["models"])
+        : undefined;
+    if (!jsonDeepEqual(rowEvolveModels, cfg.evolve?.models)) {
+      if (rowEvolveModels) {
+        cfg.evolve = { ...(cfg.evolve ?? {}), models: rowEvolveModels };
+      } else if (cfg.evolve) {
+        delete cfg.evolve.models;
+      }
+      changed = true;
+    }
+  }
+
   if (changed) {
     writeConfig(cfg);
     logger.log("info", "settings.sync.applied", {
       model: row.model,
       watchdogRefork: row.watchdogRefork,
+      models: row.models,
+      evolveModels: row.evolveModels,
     });
   }
   return changed;

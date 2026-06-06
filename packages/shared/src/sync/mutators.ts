@@ -24,6 +24,12 @@
 
 import type { CustomMutatorDefs, Transaction } from "@rocicorp/zero";
 import type { ArchiveReason } from "../agents.js";
+// Runtime import deliberately routes through the browser-safe model-ids.ts —
+// NOT config.ts, whose module top-level calls `join(homedir(), ".friday")`
+// and would crash the client bundle (node builtins are stubbed by Vite).
+// config.ts types are fine: `import type` is fully erased at compile time.
+import { coerceLegacyModelId } from "../model-ids.js";
+import type { AgentTypeName, EvolveTaskName, ModelConfig } from "../config.js";
 import type { Schema } from "./schema.js";
 
 export type { ArchiveReason };
@@ -150,6 +156,18 @@ export interface UpdateSettingsArgs {
   themePaletteSingle?: string | null;
   themePaletteLight?: string | null;
   themePaletteDark?: string | null;
+  /** FRI-16: per-role model overrides. Omitted preserves the column; a
+   *  value replaces the whole map; `null` writes SQL NULL — which the
+   *  daemon's settings listener reads as "never configured via the
+   *  dashboard" and therefore PRESERVES whatever `~/.friday/config.json`
+   *  holds (protects hand-edited maps on installs that never touched the
+   *  pickers). To clear the last override back to "global default
+   *  everywhere", send `{}` (an empty map) — that's what the settings
+   *  pickers emit. The mutator is a pure DB patch; the listener owns the
+   *  merge into config.json. */
+  models?: Partial<Record<AgentTypeName, string | ModelConfig>> | null;
+  /** FRI-16: per-evolve-task model overrides. Same convention as `models`. */
+  evolveModels?: Partial<Record<EvolveTaskName, string | ModelConfig>> | null;
   /** Client-side wall clock for diagnostics; server overwrites. */
   ts: number;
 }
@@ -1134,12 +1152,18 @@ export const createMutators = (userId?: string | null) =>
         theme_palette_single?: string | null;
         theme_palette_light?: string | null;
         theme_palette_dark?: string | null;
+        models?: Partial<Record<AgentTypeName, string | ModelConfig>> | null;
+        evolve_models?: Partial<Record<EvolveTaskName, string | ModelConfig>> | null;
         updated_at: number;
       } = {
         id: "singleton",
         updated_at: args.ts,
       };
-      if (args.model !== undefined) patch.model = args.model;
+      // FRI-16 AC #22b: coerce the legacy un-dated Haiku id to its dated
+      // snapshot at the write boundary so the stored value always matches
+      // the dashboard's MODEL_OPTIONS ids. Idempotent — dated ids and every
+      // other model id pass through unchanged.
+      if (args.model !== undefined) patch.model = coerceLegacyModelId(args.model);
       if (args.watchdogRefork !== undefined) {
         patch.watchdog_refork = args.watchdogRefork;
       }
@@ -1155,6 +1179,16 @@ export const createMutators = (userId?: string | null) =>
       }
       if (args.themePaletteDark !== undefined) {
         patch.theme_palette_dark = args.themePaletteDark;
+      }
+      // FRI-16: model-override maps. `undefined` = preserve; value =
+      // replace the whole map (an empty `{}` is the UI's "clear all
+      // overrides" shape); `null` = write SQL NULL, which the daemon
+      // listener treats as never-configured and preserves config.json.
+      // Pure DB patch — no `loadConfig()` here; the daemon's listener
+      // owns the canonical merge.
+      if (args.models !== undefined) patch.models = args.models;
+      if (args.evolveModels !== undefined) {
+        patch.evolve_models = args.evolveModels;
       }
       await tx.mutate.settings.update(patch);
     },

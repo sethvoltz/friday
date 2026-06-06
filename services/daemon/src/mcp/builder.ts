@@ -79,14 +79,20 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   servers[MAIL_SERVER_NAME] = buildMailServer(ctx);
 
   // agent_create / agent_list / agent_archive / etc.: orchestrator + builder +
-  // helper (ADR-022). The daemon-side guard at POST /api/agents enforces the
-  // structural rule that only the orchestrator can spawn Builders, and that
-  // builders/helpers must supply a non-empty `reason`. `bare` and `scheduled`
-  // stay excluded — they don't manage sub-agents.
+  // helper + bare (ADR-022; `bare` added by FRI-16 — the spawn matrix permits
+  // bare→helper/planner with a reason, so its tool surface must expose
+  // agent_create). The daemon-side guard at POST /api/agents enforces the
+  // structural rules: only the orchestrator can spawn Builders, and non-
+  // orchestrator callers must supply a non-empty `reason`. `scheduled`
+  // remains excluded — it doesn't manage sub-agents (its FRI-149 evolve
+  // escalation is daemon-internal, not MCP) — and `planner` is deliberately
+  // excluded: planners are leaves by design (FRI-16 §4c); a planner that
+  // needs help mails its parent.
   if (
     opts.callerType === "orchestrator" ||
     opts.callerType === "builder" ||
-    opts.callerType === "helper"
+    opts.callerType === "helper" ||
+    opts.callerType === "bare"
   ) {
     servers[AGENTS_SERVER_NAME] = buildAgentsServer({
       callerName: opts.callerName,
@@ -143,8 +149,11 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // friday-elicitation: ask_user tool (FRI-152). Every agent that may need
   // to surface a structured prompt to Seth — orchestrator and bare types,
   // plus scheduled (which can dispatch back to the orchestrator for input).
-  // Builders/helpers run headless and shouldn't be prompting the user
-  // directly; mail their parent instead.
+  // Builders/helpers/planners run headless and shouldn't be prompting the
+  // user directly; mail their parent instead (a planner routes user-facing
+  // questions through its parent via mail — FRI-16, same discipline; the
+  // FRI-152 unconditional built-in `AskUserQuestion` deny applies to
+  // planners too).
   if (
     opts.callerType === "orchestrator" ||
     opts.callerType === "bare" ||

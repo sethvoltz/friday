@@ -26,7 +26,7 @@ export interface PromptStack {
   protocols: string;
 }
 
-export type AgentBaseKey = "orchestrator" | "builder" | "helper" | "scheduled" | "bare";
+export type AgentBaseKey = "orchestrator" | "builder" | "helper" | "scheduled" | "bare" | "planner";
 
 /**
  * Protocols loaded automatically for an agent type, regardless of the
@@ -56,6 +56,9 @@ const DEFAULT_PROTOCOLS_BY_TYPE: Record<AgentBaseKey, readonly string[]> = {
   builder: ["pr-links"],
   helper: ["pr-links"],
   bare: ["memory", "pr-links", "elicitation"],
+  // FRI-16: planners research deeply and save what they learn; they don't
+  // ship the elicitation MCP server (questions go to the parent via mail).
+  planner: ["memory", "pr-links"],
 };
 
 /**

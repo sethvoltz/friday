@@ -27,6 +27,7 @@ import { Zero } from "@rocicorp/zero";
 // mutator-method return-type readable.
 import type { PromiseWithServerResult as MutatorResult } from "@rocicorp/zero";
 import { createMutators, schema, type Mutators, type Schema } from "@friday/shared/sync";
+import type { AgentTypeName, EvolveTaskName, ModelConfig } from "@friday/shared";
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
 import { awaitMutatorServer, type SendUserMessageOutcome } from "./mutator-result";
 import { reconcileWakeLock } from "./wake-lock.svelte";
@@ -159,6 +160,11 @@ export interface ZeroSettingsRow {
   theme_palette_single: string | null;
   theme_palette_light: string | null;
   theme_palette_dark: string | null;
+  /** FRI-16: per-role / per-evolve-task model override maps (jsonb).
+   *  Values may be bare model-id strings or `{name, …}` ModelConfig
+   *  objects (hand-edited configs); `null` means no overrides. */
+  models: Partial<Record<AgentTypeName, string | ModelConfig>> | null;
+  evolve_models: Partial<Record<EvolveTaskName, string | ModelConfig>> | null;
   updated_at: number;
 }
 
@@ -1111,6 +1117,11 @@ class ZeroSyncStore {
     themePaletteSingle?: string | null;
     themePaletteLight?: string | null;
     themePaletteDark?: string | null;
+    /** FRI-16: per-role / per-evolve-task model overrides. Whole-map
+     *  replace — a value swaps the entire map, `null` clears every
+     *  override, `undefined` preserves the existing map. */
+    models?: Partial<Record<AgentTypeName, string | ModelConfig>> | null;
+    evolveModels?: Partial<Record<EvolveTaskName, string | ModelConfig>> | null;
   }): void {
     if (!this.#zero) return;
     const result = this.#zero!.mutate.updateSettings({

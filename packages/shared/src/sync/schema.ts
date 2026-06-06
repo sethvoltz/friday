@@ -254,6 +254,11 @@ const apps = table("apps")
 // theme_kind / theme_palette_*, breaking AC #27 cross-tab sync. Each
 // column is `.optional()` because the DB column is NULLable (an unset
 // pick falls back to the resolver's default at runtime).
+// FRI-16: models / evolve_models mirror the Drizzle jsonb columns (per-role
+// and per-evolve-task model overrides). Both `.optional()` — NULLable in
+// Postgres; NULL means "no overrides set, global default everywhere". Zero
+// must project them or the dashboard's per-role pickers would always read
+// `undefined` even though Postgres replicates the columns.
 const settings = table("settings")
   .columns({
     id: string(),
@@ -263,6 +268,8 @@ const settings = table("settings")
     theme_palette_single: string().optional(),
     theme_palette_light: string().optional(),
     theme_palette_dark: string().optional(),
+    models: json().optional(),
+    evolve_models: json().optional(),
     updated_at: number(),
   })
   .primaryKey("id");
