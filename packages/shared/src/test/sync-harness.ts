@@ -389,7 +389,12 @@ export async function spawnZeroCacheForTest(opts: SpawnZeroCacheOpts): Promise<Z
   // valid HTTP status (4xx is fine; means it accepted the request),
   // we know clients can connect.
   const ready = (async () => {
-    await waitForTcp(port, { timeoutMs: 90_000 });
+    // Mirror daemon/dashboard: retry once on TCP timeout and surface the
+    // child's stderr tail on failure. A raw 90s waitForTcp with no retry
+    // was the sync-harness.e2e beforeAll flake on loaded CI runners —
+    // zero-cache occasionally binds just past the first ceiling even
+    // though the child is healthy.
+    await waitForBoot(port, child, getOutput, "zero");
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       const ok = await new Promise<boolean>((resolve) => {
