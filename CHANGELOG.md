@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/sethvoltz/friday/compare/v1.7.0...v1.8.0) (2026-06-06)
+
+
+### Features
+
+* **system:** age-encrypted secrets vault (ADR-038) ([#182](https://github.com/sethvoltz/friday/issues/182)) ([44d2e17](https://github.com/sethvoltz/friday/commit/44d2e17bc4f4da0cb503e0b95b4909a0e82c1ff4))
+
 ## [1.7.0](https://github.com/sethvoltz/friday/compare/v1.6.0...v1.7.0) (2026-06-06)
 
 
