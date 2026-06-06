@@ -1369,6 +1369,39 @@ Per-worker shell capture adds ~50-300ms to every worker spawn on common zsh setu
 - An empirical case shows that worker-fork latency from shell capture is materially hurting user-visible response time. Consider a daemon-level cache with explicit invalidation, or a longer-lived per-worker cache.
 - The dotenv refactor's per-caller migration leaves edge cases where a secret quietly slips back into `process.env`. Add a daemon-boot assertion: scan `process.env` for known-secret-shaped keys + fail loudly if present.
 
+## ADR-038 — Age-encrypted secrets vault (integration vs machine-local split)
+
+**Status:** accepted
+
+### Context
+
+ADR-037 keeps daemon `process.env` secret-free via `loadFridayConfig()`, but integration secrets still lived in plaintext `~/.friday/.env` — unsafe to commit to the operator's `~/.friday` git repo. Operators want ciphertext in git, unattended unlock on a trusted Mac (FileVault + auto-login + `.age-key` chmod 600), and two delivery modes: env injection for MCP/daemon consumers vs audited on-demand fetch for agent turns.
+
+### Decision
+
+**Age vault + reference-only substitution + in-process fetch MCP.**
+
+- **On disk:** `secrets/vault.enc` (committed), `secrets/meta.yaml` (committed, no values), `secrets/recipients.txt`, `.age-key` (gitignored, 0600), `secrets/.generation` (gitignored, bumped on write for cache invalidation).
+- **Machine-local tier** (`BETTER_AUTH_SECRET`, `ZERO_*`, `DATABASE_URL`, …) stays in gitignored `.env.local`.
+- **Integration tier** lives in the vault (`mode: env`); **agent-fetched tier** is `mode: on-demand`.
+- **`loadFridayConfig()`** overlays daemon-flagged vault entries onto typed fields (`LINEAR_API_KEY` → `linearApiKey`, etc.); workers/MCP never read `process.env` for substitution.
+- **Reference-only env substitution:** only `${VAR}` references appearing in manifest/config MCP `env` values enter the substitution map — not all global secrets.
+- **`friday-secrets` MCP** (`secrets_fetch`, `secrets_list`) runs in-process in the worker; caller identity comes from spawn options, not spoofable HTTP headers. Audit rows land in `secrets_fetch_log`. Rate limit: 10 MCP fetches/caller/hour.
+- **PreToolUse denies** (all agent types) on Read/Write/Edit/Glob/Grep targeting `.age-key`, `secrets/vault.enc`, `secrets/meta.yaml`, `.daemon-secret`.
+- **Trust model:** OS user account is the security boundary. Agents with filesystem/bash tools on orchestrator/helper/bare can still reach `~/.friday/` — vault security assumes a trusted macOS user, not agent isolation.
+
+### Consequences
+
+- `friday secrets` CLI: init, set/get/list/unset/edit, migrate-from-env, audit, unlock --check, public-key.
+- Daemon watches `secrets/.generation` and reloads cache; health surfaces `secretsLocked`.
+- Backup includes `secrets/` and `.env.local` by default; `.age-key` excluded unless `--include-age-key`.
+
+### Rejected alternatives
+
+- **HTTP loopback fetch with `x-friday-caller-*` headers** — spoofable; replaced by in-process MCP with trusted spawn identity.
+- **Inject all global env-mode secrets at worker spawn** — over-broad; replaced by reference-only map.
+- **1Password/exec provider (FRI-32)** — deferred.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.

@@ -3,8 +3,14 @@ import {
   ensureDirs,
   ensureSoul,
   loadConfig,
+  GENERATION_PATH,
   loadFridayConfig,
+  readGeneration,
   resolveDaemonPort,
+  warmVaultCache,
+  unlockVault,
+  clearFridayConfigCache,
+  clearSecretsCache,
   resolveModelForRole,
   runMigrations,
 } from "@friday/shared";
@@ -50,7 +56,7 @@ import { runResumeBootScan, startResumeListener } from "./agent/resume-listener.
 import { deleteBlockById, inbox as mailInbox, listQueuedUserBlocks } from "@friday/shared/services";
 import { buildMailPrompt } from "./comms/mail-prompt.js";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, watchFile } from "node:fs";
 import { posthog, DISTINCT_ID } from "./posthog.js";
 
 async function main(): Promise<void> {
@@ -59,7 +65,9 @@ async function main(): Promise<void> {
   // does NOT mutate process.env. Daemon-side callers read secrets via
   // `loadFridayConfig().<field>`; the daemon's process.env is kept clean
   // of secrets so the worker fork doesn't inherit them.
+  await warmVaultCache();
   loadFridayConfig();
+  startSecretsGenerationWatch();
   // FRI-150 (pivot, ADR-037): shell-env capture has moved from the daemon
   // boot path to the per-worker entry point (`services/daemon/src/agent/
   // worker.ts`). Workers capture their own user-shell env at startup; the
@@ -522,6 +530,25 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
  * no explicit checkpoint needed (Postgres autovacuum + bgwriter handle
  * it). This is fire-and-forget; the shutdown timer below caps wait time.
  */
+/** Reload vault cache when CLI bumps `secrets/.generation`. */
+function startSecretsGenerationWatch(): void {
+  let lastGen = readGeneration();
+  const reload = async (): Promise<void> => {
+    const gen = readGeneration();
+    if (gen === lastGen) return;
+    lastGen = gen;
+    clearSecretsCache();
+    clearFridayConfigCache();
+    await unlockVault(true);
+    loadFridayConfig();
+    logger.log("info", "secrets.generation.reload", { generation: gen });
+  };
+  if (!existsSync(GENERATION_PATH)) return;
+  watchFile(GENERATION_PATH, { interval: 2000 }, () => {
+    void reload();
+  });
+}
+
 function flushDb(): void {
   void closeDb().catch((err: unknown) => {
     logger.log("warn", "db.close.error", {

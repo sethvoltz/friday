@@ -23,6 +23,7 @@ import { restoreCommand } from "./commands/restore.js";
 import { exportLegacySqliteCommand } from "./commands/export-legacy-sqlite.js";
 import { updateCommand } from "./commands/update.js";
 import { uninstallCommand } from "./commands/uninstall.js";
+import { secretsCommand } from "./commands/secrets.js";
 import { maybePrintVersion } from "./lib/version.js";
 
 const main = defineCommand({
@@ -54,6 +55,7 @@ const main = defineCommand({
     "export-legacy-sqlite": exportLegacySqliteCommand,
     update: updateCommand,
     uninstall: uninstallCommand,
+    secrets: secretsCommand,
   },
 });
 

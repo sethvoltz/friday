@@ -109,7 +109,8 @@ Who can spawn whom:
 - **Two-phase bootstrap, generous client cache.** First-time device load fetches the orchestrator's recent chat and active-state metadata in ~2s; background Phase 2 fills the full history for active agents, tickets, memory, and recent mail. Blocks for agents archived >30 days expunge from the client cache; the server keeps everything.
 - **Boot recovery.** `~/.claude/projects/.../sessionId.jsonl` is walked once on startup to back-fill any blocks lost between worker `block-complete` and the Postgres write. Idempotent on `(session_id, message_id, kind)` for text/thinking and `(session_id, tool_use_id)` for tool blocks.
 - **Continuous invariant auditor.** Every 60s the daemon checks builder-worktree presence and `status=working ⇒ live worker map` against the canonical source. Self-heals quietly; loud only when it has to be.
-- **Optional PostHog analytics.** Set `POSTHOG_API_KEY` in `~/.friday/.env` to light up instrumentation across the stack — daemon business + exception events (`posthog-node`) and dashboard product analytics, autocapture, session replay, and client/server error tracking (`posthog-js`). Off by default; silent no-op with no key set. See `docs/setup.md` § Analytics.
+- **Age-encrypted secrets vault.** Integration secrets in committed `secrets/vault.enc`; machine-local autogen secrets in `.env.local`. `friday secrets` CLI + `friday-secrets` MCP for on-demand fetch (ADR-038).
+- **Optional PostHog analytics.** Set `POSTHOG_API_KEY` via `friday secrets set … --daemon` to light up instrumentation across the stack — daemon business + exception events (`posthog-node`) and dashboard product analytics, autocapture, session replay, and client/server error tracking (`posthog-js`). Off by default; silent no-op with no key set. See `docs/setup.md` § Analytics.
 
 ## Quick start
 
@@ -235,8 +236,13 @@ friday app install <path> [--adopt]
 friday app uninstall <id> [--folder=archive|keep|delete] [--yes]
 friday app list | inspect <id> | reload <id>
 
+# Secrets vault (ADR-038)
+friday secrets init | unlock --check
+friday secrets set <name> [--app <id>] [--mode env|on-demand] [--daemon] [--agents a,b]
+friday secrets get|list|unset|edit|audit|migrate-from-env|public-key
+
 # Backup & restore
-friday backup [output-path]                    # pg_dump + filesystem → portable .tar.gz
+friday backup [output-path] [--include-age-key]  # pg_dump + filesystem → portable .tar.gz
 friday restore <bundle> [--force]              # auto-detects pg_dump vs legacy_sqlite bundles
 friday export-legacy-sqlite [output] [--source <path>]
                                                # one-shot SQLite → Postgres cutover bundle

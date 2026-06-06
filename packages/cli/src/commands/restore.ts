@@ -32,13 +32,15 @@ import {
   DATA_DIR,
   HEALTH_PATH,
   clearFridayConfigCache,
+  clearSecretsCache,
   getPool,
   loadFridayConfig,
   runMigrations,
 } from "@friday/shared";
 
 const BACKUP_PATHS = [
-  ".env",
+  ".env.local",
+  "secrets",
   "SOUL.md",
   "config.json",
   "skills",
@@ -258,6 +260,7 @@ export const restoreCommand = defineCommand({
 
       // FRI-150 (pivot, ADR-037): the restored .env file is now on disk;
       // invalidate the in-memory cache so loadFridayConfig() re-reads it.
+      clearSecretsCache();
       clearFridayConfigCache();
       const dbUrl = loadFridayConfig().databaseUrl;
       if (!dbUrl) {

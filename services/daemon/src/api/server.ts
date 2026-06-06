@@ -14,6 +14,7 @@ import {
   getDaemonSecret,
   isLocalHost,
   loadConfig,
+  isSecretsLocked,
   loadFridayConfig,
   resolveDaemonPort,
   resolveModelForRole,
@@ -163,7 +164,41 @@ async function handle(
     if (!authorizeSameHost(req)) {
       return json(res, 401, { error: "unauthorized" });
     }
-    return json(res, 200, { ok: true, ts: Date.now() });
+    return json(res, 200, {
+      ok: true,
+      ts: Date.now(),
+      secretsLocked: isSecretsLocked(),
+    });
+  }
+
+  if (method === "POST" && path === "/api/secrets/reload") {
+    if (!authorizeSameHost(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+    const { clearFridayConfigCache, clearSecretsCache, unlockVault } =
+      await import("@friday/shared");
+    clearSecretsCache();
+    clearFridayConfigCache();
+    const result = await unlockVault(true);
+    return json(res, 200, { ok: result.ok, reason: result.ok ? undefined : result.reason });
+  }
+
+  if (method === "POST" && path === "/api/secrets/audit") {
+    if (!authorizeSameHost(req)) {
+      return json(res, 401, { error: "unauthorized" });
+    }
+    const body = await readJson<{
+      secretName: string;
+      callerName: string;
+      callerType: string;
+      appId?: string | null;
+      reason: string;
+      source: "mcp" | "cli";
+    }>(req);
+    const { logSecretsFetch } = await import("../services/secrets-audit.js");
+    const logged = await logSecretsFetch(body);
+    if (!logged.ok) return json(res, 429, { error: logged.error });
+    return json(res, 200, { ok: true });
   }
 
   // --- Commands (system + skills, for chat autocomplete) ---

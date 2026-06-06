@@ -647,6 +647,28 @@ export const settings = pgTable("settings", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
 
+/* ---------------- Secrets audit (ADR-038) ---------------- */
+
+export const secretsFetchLog = pgTable(
+  "secrets_fetch_log",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    secretName: text("secret_name").notNull(),
+    callerName: text("caller_name").notNull(),
+    callerType: text("caller_type").notNull(),
+    appId: text("app_id"),
+    reason: text("reason").notNull(),
+    source: text("source").notNull(),
+    ts: timestamp("ts", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => [
+    index("secrets_fetch_log_caller_ts_idx").on(t.callerName, t.ts),
+    check("secrets_fetch_log_source_check", sql`${t.source} IN ('mcp', 'cli')`),
+  ],
+);
+
 /* ---------------- Generic key/value store ---------------- */
 
 export const dbMeta = pgTable("db_meta", {

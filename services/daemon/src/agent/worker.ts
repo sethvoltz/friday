@@ -18,10 +18,15 @@
 import { randomUUID } from "node:crypto";
 import { query, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
+  AGE_KEY_PATH,
+  DATA_DIR,
+  META_PATH,
+  VAULT_ENC_PATH,
   autoCompactWindowFor,
   loadConfig,
   renderLocalDatetime,
   stringifyToolResult,
+  unlockVault,
 } from "@friday/shared";
 import { runMemoryFlush } from "./compact-flush.js";
 import { readAttachmentBytes, type MailRow } from "@friday/shared/services";
@@ -44,6 +49,8 @@ import "../hooks/register.js";
 import { denyBuiltinAskUserQuestion } from "../hooks/block-builtin-ask-user-question.js";
 import { captureShellEnv } from "../shell-env.js";
 import { logger } from "../log.js";
+import { homedir } from "node:os";
+import { resolve as resolvePath } from "node:path";
 
 // FRI-150 (pivot, ADR-037): per-agent shell capture. Each forked worker
 // runs `$SHELL -ilc` at startup to learn what the user's interactive
@@ -182,6 +189,7 @@ async function mainLoop(): Promise<void> {
   // sanitized process.env snapshot — mainLoop never throws because of
   // shell-env issues.
   await shellEnvCapturePromise;
+  await unlockVault();
   try {
     while (!stopped) {
       if (pendingPrompt) {
@@ -554,6 +562,41 @@ export function isInsideBuilderWorkspace(p: string): boolean {
  * guard chain runs for, and with which mode) can be asserted without forking
  * a worker — see `worker-guard-gate.test.ts`.
  */
+const SECRET_FS_PATHS = new Set([
+  resolvePath(AGE_KEY_PATH),
+  resolvePath(VAULT_ENC_PATH),
+  resolvePath(META_PATH),
+  resolvePath(DATA_DIR, ".daemon-secret"),
+]);
+
+function expandHome(p: string): string {
+  return p.startsWith("~/") ? resolvePath(homedir(), p.slice(2)) : p;
+}
+
+function denySecretsFilesystemAccess(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+): string | undefined {
+  const fsTools = new Set(["Read", "Write", "Edit", "Glob", "Grep"]);
+  if (!fsTools.has(toolName)) return undefined;
+  const candidates = [
+    toolInput.file_path,
+    toolInput.path,
+    toolInput.pattern,
+    toolInput.notebook_path,
+  ];
+  for (const raw of candidates) {
+    if (typeof raw !== "string" || !raw) continue;
+    const abs = resolvePath(expandHome(raw));
+    for (const denied of SECRET_FS_PATHS) {
+      if (abs === denied || abs.startsWith(`${denied}/`)) {
+        return "Access to Friday secrets files is denied (ADR-038). Use mcp__friday-secrets__secrets_fetch for on-demand secrets.";
+      }
+    }
+  }
+  return undefined;
+}
+
 export function buildPreToolUseHooks(opts: WorkerSpawnOptions) {
   return {
     PreToolUse: [
@@ -566,6 +609,16 @@ export function buildPreToolUseHooks(opts: WorkerSpawnOptions) {
               tool_input?: Record<string, unknown>;
             };
             if (i.hook_event_name !== "PreToolUse") return {};
+            const secretsDeny = denySecretsFilesystemAccess(i.tool_name ?? "", i.tool_input ?? {});
+            if (secretsDeny) {
+              return {
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse" as const,
+                  permissionDecision: "deny" as const,
+                  permissionDecisionReason: secretsDeny,
+                },
+              };
+            }
             // FRI-152: built-in AskUserQuestion deny. Pure check, runs
             // for all agent types.
             const builtinDeny = denyBuiltinAskUserQuestion(i.tool_name ?? "");

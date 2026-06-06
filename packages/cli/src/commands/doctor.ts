@@ -7,8 +7,12 @@ import { join } from "node:path";
 import {
   CONFIG_PATH,
   DATA_DIR,
+  AGE_KEY_PATH,
+  ENV_LOCAL_PATH,
   ENV_PATH,
   FRIDAY_PG_CONSTANTS,
+  unlockVault,
+  validateBijection,
   LOGS_DIR,
   SOUL_PATH,
   closeDb,
@@ -58,7 +62,7 @@ export const doctorCommand = defineCommand({
   meta: { name: "doctor", description: "Check system health" },
   async run() {
     console.log(BANNER);
-    if (existsSync(ENV_PATH)) loadFridayConfig();
+    if (existsSync(ENV_LOCAL_PATH) || existsSync(ENV_PATH)) loadFridayConfig();
 
     // Sections render one block at a time, live: each box paints its known
     // rows as pending, then flips each glyph (and the top-border count) in
@@ -311,7 +315,9 @@ async function runConfiguration(): Promise<DoctorCheck[]> {
   for (const label of [
     "data dir",
     "config",
-    "env",
+    ".env.local",
+    "secrets vault",
+    ".age-key",
     "SOUL.md",
     "primary account",
     "cloudflare token",
@@ -329,7 +335,52 @@ async function runConfiguration(): Promise<DoctorCheck[]> {
     dataDirOk ? undefined : "run `friday setup` to create",
   );
   box.resolve("config", existsSync(CONFIG_PATH) ? "ok" : "fail", displayPath(CONFIG_PATH));
-  box.resolve("env", existsSync(ENV_PATH) ? "ok" : "fail", displayPath(ENV_PATH));
+  const envLocalOk = existsSync(ENV_LOCAL_PATH) || existsSync(ENV_PATH);
+  box.resolve(
+    ".env.local",
+    envLocalOk ? "ok" : "fail",
+    existsSync(ENV_LOCAL_PATH) ? displayPath(ENV_LOCAL_PATH) : displayPath(ENV_PATH),
+    envLocalOk ? undefined : "run `friday setup`",
+  );
+
+  const vaultUnlock = await unlockVault(true);
+  box.resolve(
+    "secrets vault",
+    vaultUnlock.ok ? "ok" : existsSync(ENV_PATH) ? "warn" : "fail",
+    vaultUnlock.ok ? "unlocked" : (vaultUnlock.reason ?? "missing"),
+    vaultUnlock.ok ? undefined : "run `friday secrets init` + `friday secrets migrate-from-env`",
+  );
+  if (vaultUnlock.ok) {
+    const bio = validateBijection(
+      vaultUnlock.cache.meta,
+      new Set(Object.keys(vaultUnlock.cache.payload.secrets)),
+    );
+    if (!bio.ok) {
+      box.add("fail", "secrets bijection", "meta/vault mismatch", "run `friday secrets list`");
+    }
+  }
+
+  if (existsSync(AGE_KEY_PATH)) {
+    const mode = statSync(AGE_KEY_PATH).mode & 0o777;
+    box.resolve(
+      ".age-key",
+      mode === 0o600 ? "ok" : "warn",
+      mode === 0o600 ? "0600" : `mode ${mode.toString(8)}`,
+      mode === 0o600 ? undefined : "chmod 600 ~/.friday/.age-key",
+    );
+  } else {
+    box.resolve(".age-key", "warn", "missing", "run `friday secrets init`");
+  }
+
+  if (existsSync(ENV_PATH)) {
+    box.add(
+      "warn",
+      "legacy .env",
+      "plaintext present",
+      "migrate with `friday secrets migrate-from-env`",
+    );
+  }
+
   box.resolve("SOUL.md", existsSync(SOUL_PATH) ? "ok" : "fail", displayPath(SOUL_PATH));
 
   // primary account

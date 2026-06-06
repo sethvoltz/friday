@@ -225,6 +225,13 @@
       "when": 1780726659432,
       "tag": "0031_nebulous_maelstrom",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1780777687362,
+      "tag": "0032_secrets_fetch_log",
+      "breakpoints": true
     }
   ]
 }

@@ -9,6 +9,7 @@
  */
 
 import type { AgentType, ManifestMcpServer, McpServerConfig } from "@friday/shared";
+import { buildSubstitutionMap, collectRefsFromEnvRecords, isSecretsLocked } from "@friday/shared";
 import type {
   McpSdkServerConfigWithInstance,
   McpStdioServerConfig,
@@ -28,6 +29,7 @@ import { buildReminderServer, REMINDER_SERVER_NAME } from "./reminder.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
 import { buildIntegrationsServer, INTEGRATIONS_SERVER_NAME } from "./integrations.js";
 import { buildElicitationServer, ELICITATION_SERVER_NAME } from "./elicitation.js";
+import { buildSecretsServer, SECRETS_SERVER_NAME } from "./secrets.js";
 
 export interface BuildMcpServersOptions {
   callerType: AgentType;
@@ -70,6 +72,8 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
     daemonPort: opts.daemonPort,
   };
 
+  const substitutionMap = resolveSubstitutionMap(opts);
+
   // Echo stays for now as a sanity check; remove once the rest of the surface
   // is reliable.
   servers[ECHO_SERVER_NAME] = buildEchoServer();
@@ -105,6 +109,22 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // friday-memory: every caller. Builders get a read-only filtered subset
   // (handled inside buildMemoryServer based on callerType).
   servers[MEMORY_SERVER_NAME] = buildMemoryServer(ctx);
+
+  // friday-secrets: on-demand fetch for orchestrator/builder/helper/bare (ADR-038).
+  // Scheduled + planner are excluded — headless leaves without secret disclosure.
+  if (
+    opts.callerType === "orchestrator" ||
+    opts.callerType === "builder" ||
+    opts.callerType === "helper" ||
+    opts.callerType === "bare"
+  ) {
+    servers[SECRETS_SERVER_NAME] = buildSecretsServer({
+      callerName: opts.callerName,
+      callerType: opts.callerType,
+      daemonPort: opts.daemonPort,
+      appId: opts.appContext?.appId,
+    });
+  }
 
   // friday-tickets: orchestrator, builder, helper. Bare and scheduled don't
   // touch tickets directly.
@@ -208,7 +228,10 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
       // `env`; manifest entries still win on top via spread order. The
       // SDK then merges `{...allowlist, ...config.env}`, so the manifest
       // and captured env both supersede the allowlist filter.
-      env: { ...shellEnvForStdio(), ...(s.env ?? {}) },
+      env: {
+        ...shellEnvForStdio(),
+        ...substituteEnv(s.env ?? {}, substitutionMap),
+      },
     };
   }
 
@@ -217,7 +240,7 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // relative to `appContext.folderPath`, with `${VAR}` substitution from
   // the app's own `.env`.
   if (opts.appContext) {
-    const { appId, folderPath, mcpServers, envFile } = opts.appContext;
+    const { appId, folderPath, mcpServers } = opts.appContext;
     for (const srv of mcpServers) {
       if (srv.name.startsWith("friday-") || RESERVED_NAMES.has(srv.name)) {
         logger.log("warn", "mcp.app.shadows-builtin", {
@@ -255,7 +278,7 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
         // shadow it (FRI-36).
         env: {
           ...shellEnvForStdio(),
-          ...substituteEnv(srv.env ?? {}, envFile ?? {}),
+          ...substituteEnv(srv.env ?? {}, substitutionMap),
           FRIDAY_APP_DIR: folderPath,
         },
         cwd: folderPath,
@@ -271,20 +294,49 @@ function isLikelyAppPath(arg: string): boolean {
   return arg.includes("/") || /\.(m?js|cjs|ts)$/i.test(arg);
 }
 
+function resolveSubstitutionMap(opts: BuildMcpServersOptions): Record<string, string> {
+  const envRecords: Record<string, string>[] = [];
+  for (const s of opts.userMcpServers ?? []) {
+    if (s.env) envRecords.push(s.env);
+  }
+  if (opts.appContext) {
+    for (const srv of opts.appContext.mcpServers) {
+      if (srv.env) envRecords.push(srv.env);
+    }
+  }
+  const referenced = collectRefsFromEnvRecords(envRecords);
+  const map = buildSubstitutionMap({
+    referenced,
+    agentType: opts.callerType,
+    appId: opts.appContext?.appId,
+    legacyEnv: opts.appContext?.envFile,
+  });
+  for (const name of referenced) {
+    if (!map[name]) {
+      logger.log("warn", "secrets.substitution.missing", {
+        name,
+        locked: isSecretsLocked(),
+        callerType: opts.callerType,
+        callerName: opts.callerName,
+        appId: opts.appContext?.appId,
+      });
+    }
+  }
+  return map;
+}
+
 /**
- * Substitute `${VAR}` references in env values from the app's `.env` (with
- * `process.env` as a fallback). Unmatched references collapse to empty
- * string — a missing-secret bug surfaces as "tool can't authenticate"
- * rather than a crash at spawn time.
+ * Substitute `${VAR}` references from the reference-only vault map (ADR-038).
+ * No `process.env` fallback — daemon/worker process.env stays secret-free.
  */
-function substituteEnv(
+export function substituteEnv(
   env: Record<string, string>,
-  envFile: Record<string, string>,
+  substitutionMap: Record<string, string>,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
     out[k] = v.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_, name) => {
-      return envFile[name] ?? process.env[name] ?? "";
+      return substitutionMap[name] ?? "";
     });
   }
   return out;

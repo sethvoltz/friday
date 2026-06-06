@@ -84,7 +84,12 @@ Everything lives at `~/.friday/`:
 
 ```
 ~/.friday/
-├── .env                       Secrets (DATABASE_URL, ZERO_AUTH_SECRET, LINEAR_API_KEY, etc.)
+├── .env.local                 Machine-local secrets (DATABASE_URL, ZERO_AUTH_SECRET, …) — gitignored
+├── .age-key                   Age identity for vault unlock — gitignored, chmod 600
+├── secrets/
+│   ├── vault.enc              Age-encrypted integration secrets — safe to commit
+│   ├── meta.yaml              Secret names, modes, scopes — no values
+│   └── recipients.txt         Age pubkey for vault.enc
 ├── .daemon-secret             HMAC secret for daemon-internal auth (0600 — packages/shared/src/daemon-secret.ts)
 ├── config.json                Settings + MCP server config
 ├── SOUL.md                    Your editable identity layer
@@ -127,7 +132,7 @@ Knobs that don't live in `config.toml`:
 | `POSTHOG_API_KEY`                | _(unset → off)_            | PostHog project API key (the public `phc_…` token). When unset, both the daemon's `posthog-node` client and the dashboard's `posthog-js` client construct with an empty key and silently no-op — analytics are strictly opt-in. The daemon emits business + exception events; the dashboard server passes the same key to the browser for product analytics, autocapture, session replay, and client error tracking. |
 | `POSTHOG_HOST`                   | `https://us.i.posthog.com` | PostHog ingestion host. Override for EU cloud (`https://eu.i.posthog.com`) or a self-hosted instance. Read by both the daemon and the dashboard (server + browser).                                                                                                                                                                                                                                                  |
 
-> PostHog vars live in `~/.friday/.env` like any other secret. Setting `POSTHOG_API_KEY` enables analytics across the whole stack on the next `friday start`; the dashboard server reads it (via `ensureFridayEnv`) and forwards it to the browser through the root layout load.
+> PostHog vars live in the secrets vault (`friday secrets set POSTHOG_API_KEY --daemon`). Setting the key enables analytics across the whole stack on the next `friday start`; the dashboard server reads it via `loadFridayConfig()` and forwards it to the browser through the root layout load.
 
 ## Config-file knobs (`~/.friday/config.json`)
 

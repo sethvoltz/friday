@@ -15,8 +15,12 @@ import {
   loadFridayConfig,
   provisionPostgres,
   resolveDashboardPort,
-  upsertEnvVar,
+  generateAgeKeypair,
+  initVault,
+  patchFridayGitignore,
+  upsertIntegrationSecret,
   writeConfig,
+  AGE_KEY_PATH,
   getDb,
   runMigrations,
   schema,
@@ -230,10 +234,18 @@ async function runCloudflareSetup({ force }: { force: boolean }): Promise<void> 
     validate: (v) => (v && /^https?:\/\//.test(v) ? undefined : "must start with http(s)://"),
   })) as string;
 
-  upsertEnvVar("CLOUDFLARE_TUNNEL_TOKEN", token);
+  if (!existsSync(AGE_KEY_PATH)) {
+    const { identity, recipient } = await generateAgeKeypair();
+    await initVault(identity, recipient);
+    patchFridayGitignore();
+  }
+  await upsertIntegrationSecret(
+    { name: "CLOUDFLARE_TUNNEL_TOKEN", mode: "env", daemon: true },
+    token,
+  );
   cfg.publicUrl = publicUrl.trim();
   writeConfig(cfg);
-  console.log(pc.green(`  token saved → ~/.friday/.env`));
+  console.log(pc.green(`  token saved → secrets vault`));
   console.log(pc.green(`  publicUrl saved → ${cfg.publicUrl}`));
 
   installCloudflaredLaunchAgent(token);
@@ -277,7 +289,7 @@ function installCloudflaredLaunchAgent(token: string): void {
     if (install.stdout.trim()) console.error(install.stdout.trim());
     console.error(
       pc.dim(
-        "  the token is saved in ~/.friday/.env; re-run `friday setup --cloudflare` to retry the launch agent install.",
+        "  the token is saved in the secrets vault; re-run `friday setup --cloudflare` to retry the launch agent install.",
       ),
     );
     return;

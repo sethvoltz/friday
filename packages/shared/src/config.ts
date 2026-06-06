@@ -5,6 +5,9 @@ import { dirname, join } from "node:path";
 export const DATA_DIR = process.env.FRIDAY_DATA_DIR ?? join(homedir(), ".friday");
 
 export const CONFIG_PATH = join(DATA_DIR, "config.json");
+/** Machine-local autogen secrets (gitignored). */
+export const ENV_LOCAL_PATH = join(DATA_DIR, ".env.local");
+/** Legacy plaintext env — migration source only. */
 export const ENV_PATH = join(DATA_DIR, ".env");
 export const SOUL_PATH = join(DATA_DIR, "SOUL.md");
 export const SKILLS_DIR = join(DATA_DIR, "skills");
