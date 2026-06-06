@@ -6,7 +6,7 @@
  *     `lastSweepAt`, exact booleans per case (NO vitest fake timers, matching
  *     the repo's injected-`now` scheduler convention).
  *   - `selectSweepTargets` — pure policy; the EXACT candidate list + the
- *     estimate math, with every exclusion class (builder/scheduled/bare,
+ *     estimate math, with every exclusion class (builder/scheduled/planner,
  *     non-idle, offline, below-threshold) provably excluded.
  *   - `__runSweepForTest` — the imperative tick against a real scratch
  *     Postgres (createTestDb) with seeded agents + usage rows + fake live
@@ -111,6 +111,16 @@ function helper(name: string, status: AgentEntry["status"] = "idle"): AgentEntry
     updatedAt: "2026-06-01T00:00:00.000Z",
   };
 }
+function bare(name: string, status: AgentEntry["status"] = "idle"): AgentEntry {
+  return {
+    name,
+    type: "bare",
+    status,
+    appId: "kitchen",
+    createdAt: "2026-06-01T00:00:00.000Z",
+    updatedAt: "2026-06-01T00:00:00.000Z",
+  };
+}
 function builder(name: string): AgentEntry {
   return {
     name,
@@ -124,10 +134,11 @@ function builder(name: string): AgentEntry {
 }
 
 describe("selectSweepTargets (pure policy)", () => {
-  it("selects orchestrator + helper above threshold; excludes builder, below-threshold, non-idle, offline", () => {
+  it("selects orchestrator + helper + bare above threshold; excludes builder, below-threshold, non-idle, offline", () => {
     const agents: AgentEntry[] = [
       orch("friday"), // idle, above threshold -> SELECTED
       helper("scout"), // idle, above threshold -> SELECTED
+      bare("kitchen"), // app bare, idle, above threshold -> SELECTED
       builder("bob"), // builder type -> EXCLUDED (even above threshold + idle)
       orch("busy"), // live status 'working' -> EXCLUDED
       orch("offline"), // no live worker (null) -> EXCLUDED
@@ -137,6 +148,7 @@ describe("selectSweepTargets (pure policy)", () => {
     const liveStatus = new Map<string, "idle" | "working" | null>([
       ["friday", "idle"],
       ["scout", "idle"],
+      ["kitchen", "idle"],
       ["bob", "idle"],
       ["busy", "working"],
       ["offline", null],
@@ -146,6 +158,7 @@ describe("selectSweepTargets (pure policy)", () => {
     const usageByAgent = new Map<string, number>([
       ["friday", 75_000],
       ["scout", 90_000],
+      ["kitchen", 82_000],
       ["bob", 120_000],
       ["busy", 200_000],
       ["offline", 150_000],
@@ -159,6 +172,7 @@ describe("selectSweepTargets (pure policy)", () => {
     expect(targets).toEqual([
       { name: "friday", type: "orchestrator", estimatedContext: 75_000 },
       { name: "scout", type: "helper", estimatedContext: 90_000 },
+      { name: "kitchen", type: "bare", estimatedContext: 82_000 },
     ]);
   });
 
