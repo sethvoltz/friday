@@ -61,6 +61,15 @@ const TICK_MS = 300_000;
  *  at exactly 03:30 and boots shortly after, while keeping the sweep nightly. */
 const SWEEP_WINDOW_MINUTES = 120;
 
+/** Long-lived companion types eligible for the nightly sweep. Builders are
+ *  excluded (read-only memory + mid-task tool stream); scheduled/planner are
+ *  one-shot or bounded handoff work. */
+const SWEEP_ELIGIBLE_TYPES = new Set<AgentType>(["orchestrator", "helper", "bare"]);
+
+function isSweepEligibleType(type: AgentType): boolean {
+  return SWEEP_ELIGIBLE_TYPES.has(type);
+}
+
 let interval: NodeJS.Timeout | null = null;
 /** Epoch-ms of the last completed sweep pass; null until the first runs.
  *  In-memory only — see the idempotency note in the module doc-comment. */
@@ -114,9 +123,9 @@ export function isSweepDue(now: Date, lastSweepAt: number | null, cfg: FridayCon
 
 /**
  * The pure target-selection policy. An agent is swept only when ALL hold:
- *   - its type is `orchestrator` or `helper` (the long-lived companion types;
- *     builders are skipped — read-only memory + mid-task tool stream — and so
- *     are scheduled/bare per §B);
+ *   - its type is `orchestrator`, `helper`, or `bare` (long-lived companion
+ *     types, including app bare agents such as kitchen); builders are skipped
+ *     (read-only memory + mid-task tool stream), as are scheduled/planner;
  *   - it is currently LIVE and IDLE (`liveStatus.get(name) === 'idle'`) — the
  *     sweep never wakes an offline registered agent (no live context pressure)
  *     and never interrupts a working/stalled turn;
@@ -133,7 +142,7 @@ export function selectSweepTargets(
   const threshold = compactionSweepThreshold(cfg);
   const out: SweepCandidate[] = [];
   for (const a of agents) {
-    if (a.type !== "orchestrator" && a.type !== "helper") continue;
+    if (!isSweepEligibleType(a.type)) continue;
     // Registry-side gate: only a settled idle agent qualifies.
     if (a.status !== "idle") continue;
     // Live-side gate: must be live AND idle right now (not offline, not working).
@@ -267,7 +276,7 @@ async function runSweep(now: Date = new Date()): Promise<void> {
     for (const a of agents) {
       // Only the candidate types can be swept — skip the usage query for the
       // rest so a wide registry doesn't fan out into needless reads.
-      if (a.type !== "orchestrator" && a.type !== "helper") continue;
+      if (!isSweepEligibleType(a.type)) continue;
       usageByAgent.set(a.name, await estimateAgentContext(a));
     }
 
