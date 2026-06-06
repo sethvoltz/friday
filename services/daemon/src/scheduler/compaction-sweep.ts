@@ -31,8 +31,8 @@ import {
   compactionSweepMinute,
   compactionSweepThreshold,
   loadConfig,
-  normalizeModelConfig,
   resolveDaemonPort,
+  resolveModelForRole,
   type AgentEntry,
   type AgentType,
   type FridayConfig,
@@ -201,7 +201,7 @@ async function dispatchSweep(name: string, cfg: FridayConfig): Promise<boolean> 
   // live work) — exactly what §B says to avoid. Skip rather than queue, and
   // do NOT record a user block for a turn we won't dispatch.
   if (peekLiveWorker(name)?.status !== "idle") return false;
-  const modelCfg = normalizeModelConfig(cfg.model);
+  const modelCfg = resolveModelForRole(cfg, a.type);
   const turnId = `t_${randomUUID()}`;
   // Leading "/compact " is load-bearing — see the doc-comment above.
   const body = `/compact ${COMPACT_CUSTOM_INSTRUCTIONS}`;

@@ -9,7 +9,17 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { AGENT_CREATE_DESCRIPTION } from "./agents.js";
+import { AGENT_CREATE_DESCRIPTION, AGENT_CREATE_SPAWNABLE_TYPES } from "./agents.js";
+
+// FRI-16 AC #23 (wire-schema half): `agent_create`'s `type` enum must agree
+// with the spawn matrix's columns — builder/helper/bare/planner, never
+// scheduled (cron-only). The caller-side gate (which CALLERS may request
+// which types) lives in spawn-permissions.test.ts.
+describe("agent_create spawnable-type enum (FRI-16)", () => {
+  it("accepts exactly builder/helper/bare/planner", () => {
+    expect([...AGENT_CREATE_SPAWNABLE_TYPES]).toEqual(["builder", "helper", "bare", "planner"]);
+  });
+});
 
 describe("agent_create description (FRI-127 §3)", () => {
   it("leads with the delegation value-proposition", () => {

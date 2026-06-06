@@ -4,6 +4,12 @@
  * actually enforces it as a Claude SDK PreToolUse hook so a misbehaving
  * model can't escape the worktree.
  *
+ * FRI-16: planners running inside a builder's worktree get the "middle"
+ * path — `mode: "middle"` loosens ONLY the Read and Glob/Grep arms (read
+ * anywhere on disk) while Write/Edit containment and the full Bash check
+ * (cwd, absolute-path scan, disaster patterns) stay strict. The default
+ * `"strict"` mode is byte-identical to the pre-FRI-16 behavior.
+ *
  * FIX_FORWARD 5.3: containment is checked via `fs.realpathSync`, not bare
  * `path.normalize`. A symlink inside the workspace pointing at /etc/passwd
  * now resolves to /etc/passwd before the containment check fires, so the
@@ -115,18 +121,32 @@ function makeGuard(workspacePath: string): Guard {
 /**
  * Returns null if the tool call is permitted; a human-readable reason string
  * if it should be blocked.
+ *
+ * `opts.mode` (FRI-16): `"strict"` (default) contains Read/Write/Edit/Glob/
+ * Grep/Bash to the workspace; `"middle"` (planner-in-builder-worktree)
+ * bypasses only the Read arm and the Glob/Grep arm — Write/Edit stay
+ * contained and the Bash + disaster checks are unchanged.
  */
 export function checkToolCall(
   workspacePath: string,
   toolName: string | undefined,
   toolInput: Record<string, unknown>,
+  opts?: { mode?: "strict" | "middle" },
 ): string | null {
+  const mode = opts?.mode ?? "strict";
   const { workspaceReal, isOutside } = makeGuard(workspacePath);
 
   switch (toolName) {
     case "Read":
+      if (mode === "middle") break; // planner: read anywhere on disk
+      if (isOutside(toolInput.file_path)) {
+        return `${toolName} blocked — "${toolInput.file_path}" resolves outside workspace "${workspaceReal}"`;
+      }
+      break;
+
     case "Write":
     case "Edit":
+      // Mutations stay contained in BOTH modes.
       if (isOutside(toolInput.file_path)) {
         return `${toolName} blocked — "${toolInput.file_path}" resolves outside workspace "${workspaceReal}"`;
       }
@@ -134,6 +154,7 @@ export function checkToolCall(
 
     case "Glob":
     case "Grep":
+      if (mode === "middle") break; // planner: search anywhere on disk
       if (isOutside(toolInput.path)) {
         return `${toolName} blocked — path "${toolInput.path}" resolves outside workspace "${workspaceReal}"`;
       }

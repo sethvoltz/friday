@@ -71,12 +71,19 @@ export interface BareEntry extends BaseAgentEntry {
   parentName?: string;
 }
 
+export interface PlannerEntry extends BaseAgentEntry {
+  type: "planner";
+  /** FRI-16: planners inherit cwd from their parent (see `workingDirectoryFor`). */
+  parentName?: string;
+}
+
 export type AgentEntry =
   | OrchestratorEntry
   | BuilderEntry
   | HelperEntry
   | ScheduledEntry
-  | BareEntry;
+  | BareEntry
+  | PlannerEntry;
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 

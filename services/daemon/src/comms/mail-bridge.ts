@@ -15,7 +15,7 @@
  *  driven by the cron tick, and unknown recipients are simply logged.
  */
 
-import { loadConfig, normalizeModelConfig, resolveDaemonPort } from "@friday/shared";
+import { loadConfig, resolveDaemonPort, resolveModelForRole } from "@friday/shared";
 import { inbox, isMailDeadLettered, mailBus, type MailRow } from "@friday/shared/services";
 import { logger } from "../log.js";
 import { dispatchTurn, isAgentLive, wakeAgent, wakeAgentCritical } from "../agent/lifecycle.js";
@@ -132,7 +132,7 @@ export async function maybeSpawnFromMail(agentName: string): Promise<void> {
   if (pending.length === 0) return;
 
   const cfg = loadConfig();
-  const modelCfg = normalizeModelConfig(cfg.model);
+  const modelCfg = resolveModelForRole(cfg, agentRow.type);
   const turnId = `t_${randomUUID()}`;
 
   // Use the joined mail bodies as the intent text so the memory query

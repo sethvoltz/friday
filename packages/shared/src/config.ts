@@ -115,8 +115,21 @@ export interface FridayConfig {
   publicUrl?: string;
   /** Linear integration settings. Read by `@friday/integrations-linear`. */
   linear?: LinearIntegrationConfig;
-  /** Evolve agency settings (FRI-40 triage helpers; FRI-149 auto-builders). */
-  evolve?: { autoSpawnTriageHelpers?: boolean; autoSpawnBuilders?: boolean };
+  /**
+   * Per-role model overrides (FRI-16). Missing keys fall through to
+   * `cfg.model` — resolution goes through `resolveModelForRole`, never a
+   * direct read, so the fallback semantics live in one place.
+   */
+  models?: Partial<Record<AgentTypeName, string | ModelConfig>>;
+  /** Evolve agency settings (FRI-40 triage helpers; FRI-149 auto-builders;
+   *  FRI-16 per-task model overrides). */
+  evolve?: {
+    autoSpawnTriageHelpers?: boolean;
+    autoSpawnBuilders?: boolean;
+    /** Per-evolve-task model overrides (FRI-16). Missing keys fall through
+     *  to `cfg.model` via `resolveModelForEvolveTask`. */
+    models?: Partial<Record<EvolveTaskName, string | ModelConfig>>;
+  };
   /** Context-budget compaction policy (FRI-156): per-agent-type auto-compact
    *  window + nightly maintenance-sweep tuning. */
   compaction?: CompactionConfig;
@@ -164,6 +177,10 @@ export const DEFAULT_WATCHDOG_THRESHOLDS_MS: Record<AgentTypeName, number> = {
   builder: 90_000,
   bare: 90_000,
   scheduled: 3_600_000,
+  // FRI-16: planners are deep-research agents — multi-minute thinking
+  // between heartbeats is legitimate, like a scheduled run. Matching the
+  // scheduled-class threshold avoids spurious "stalled" markers.
+  planner: 3_600_000,
 };
 
 export function watchdogThresholdMs(cfg: WatchdogConfig | undefined, type: AgentTypeName): number {
@@ -200,6 +217,7 @@ export const DEFAULT_AUTO_COMPACT_WINDOW: Record<AgentTypeName, number> = {
   builder: 200_000,
   scheduled: 200_000,
   bare: 200_000,
+  planner: 200_000,
 };
 
 /** Default nightly maintenance-sweep schedule + threshold (FRI-156 §B):
@@ -264,6 +282,35 @@ export function normalizeModelConfig(model: string | ModelConfig | undefined): M
   return { ...model };
 }
 
+/** Evolve pipeline LLM passes that can carry a per-task model override
+ *  (FRI-16). Mirrors the three `chat()` callers in `packages/evolve/src/`. */
+export type EvolveTaskName = "enrich" | "scanFriction" | "scanPreferences";
+
+/**
+ * Resolve the model for an agent role (FRI-16): `cfg.models[role]` when set,
+ * else the global `cfg.model`. Every daemon spawn site routes through this so
+ * a missing override always means "global default", never a hardcoded model.
+ */
+export function resolveModelForRole(cfg: FridayConfig, role: AgentTypeName): ModelConfig {
+  const override = cfg.models?.[role];
+  return normalizeModelConfig(override ?? cfg.model);
+}
+
+/**
+ * Resolve the model for an evolve internal LLM pass (FRI-16):
+ * `cfg.evolve.models[task]` when set, else the global `cfg.model`.
+ */
+export function resolveModelForEvolveTask(cfg: FridayConfig, task: EvolveTaskName): ModelConfig {
+  const override = cfg.evolve?.models?.[task];
+  return normalizeModelConfig(override ?? cfg.model);
+}
+
+// `coerceLegacyModelId` lives in model-ids.ts (browser-safe — no node:*
+// imports) because the client-bundled `@friday/shared/sync` surface needs it
+// too. Re-exported here so node-side consumers keep importing it alongside
+// `normalizeModelConfig` / `loadConfig` from the root barrel.
+export { coerceLegacyModelId } from "./model-ids.js";
+
 export interface McpServerConfig {
   name: string;
   command: string;
@@ -273,7 +320,13 @@ export interface McpServerConfig {
   scope?: AgentTypeName[];
 }
 
-export type AgentTypeName = "orchestrator" | "builder" | "helper" | "scheduled" | "bare";
+export type AgentTypeName =
+  | "orchestrator"
+  | "builder"
+  | "helper"
+  | "scheduled"
+  | "bare"
+  | "planner";
 
 /**
  * Production port assignments. The full resolution chain everywhere is

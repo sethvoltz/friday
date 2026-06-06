@@ -126,7 +126,7 @@ export const agents = pgTable(
     appIdx: index("agents_app").on(t.appId),
     typeCheck: check(
       "agents_type_check",
-      sql`${t.type} IN ('orchestrator','builder','helper','scheduled','bare')`,
+      sql`${t.type} IN ('orchestrator','builder','helper','scheduled','bare','planner')`,
     ),
     statusCheck: check(
       "agents_status_check",
@@ -623,6 +623,15 @@ export const systemBanners = pgTable(
 // NULL as "user hasn't picked for this slot yet" and falls back to a
 // built-in default. The daemon's LISTEN handler ignores these columns —
 // theme state is dashboard-only and is not synced into config.json.
+
+// FRI-16: `models` / `evolve_models` mirror `cfg.models` /
+// `cfg.evolve.models` (per-role and per-evolve-task model overrides).
+// `~/.friday/config.json` is canonical; the row is a cache for Zero
+// replication. `updateSettings` is a pure DB patch; the daemon's
+// listener owns the canonical merge into config.json (deep-equal
+// guarded so byte-identical rows don't rewrite the file). The
+// inherited clobber-race between a hand-edited file and a stale row
+// write is unchanged in scope — tracked as a follow-up.
 export const settings = pgTable("settings", {
   id: text("id").primaryKey(),
   model: text("model"),
@@ -631,6 +640,10 @@ export const settings = pgTable("settings", {
   themePaletteSingle: text("theme_palette_single"),
   themePaletteLight: text("theme_palette_light"),
   themePaletteDark: text("theme_palette_dark"),
+  /** Partial<Record<AgentTypeName, string | ModelConfig>> — see config.ts */
+  models: jsonb("models"),
+  /** Partial<Record<EvolveTaskName, string | ModelConfig>> — see config.ts */
+  evolveModels: jsonb("evolve_models"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
 

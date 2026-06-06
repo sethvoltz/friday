@@ -3,7 +3,13 @@ import { EventEmitter } from "node:events";
 import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
 
-export type MailType = "message" | "notification" | "task";
+/**
+ * `handoff` (FRI-16) is a Planner→parent handoff-document delivery. The
+ * mail-bridge wake/respawn paths don't branch on type, so it behaves
+ * exactly like `message` in transit; the value exists so inbox UX can
+ * distinguish handoffs later.
+ */
+export type MailType = "message" | "notification" | "task" | "handoff";
 /**
  * FRI-116: the legacy 4-value union (pending/delivered/read/closed)
  * narrowed to three. Production data only ever lands at `pending`

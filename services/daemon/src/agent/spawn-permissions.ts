@@ -7,11 +7,14 @@
  *  1. `validateSpawnPermissions` — synchronous shape check. Given the
  *     caller's type (the agent that issued `agent_create`) and the spawn
  *     body, decide whether to reject up front. Orchestrator may spawn
- *     anything with no `reason`. Builder/helper may spawn helpers but
- *     not builders, and must include a non-empty `reason`. `bare` is
- *     only reachable when the orchestrator dispatches one — non-
- *     orchestrator callers that ask for `bare` fall through to the
- *     "only helper allowed" 403.
+ *     anything with no `reason`. Builder/helper/bare/scheduled may spawn
+ *     helpers and planners (FRI-16) but not builders, and must include a
+ *     non-empty `reason`. Planners are leaves by design — a `planner`
+ *     caller is rejected outright (403 PLANNER_SPAWN_FORBIDDEN), before
+ *     every other branch including the FRI-149 carve-out. `bare` as a
+ *     SPAWNED type is only reachable when the orchestrator dispatches
+ *     one — non-orchestrator callers that ask for `bare` fall through
+ *     to the "only helper/planner allowed" 403.
  *
  *  2. `computeSpawnDepth` — walk the parent chain up to the root,
  *     returning the new spawn's `depth` (1 = orchestrator, +1 per
@@ -33,7 +36,10 @@ export interface SpawnValidationInput {
 
 export interface SpawnRejection {
   status: 400 | 403;
-  body: { error: string; code: "BUILDER_SPAWN_ORCHESTRATOR_ONLY" | "SPAWN_REASON_REQUIRED" };
+  body: {
+    error: string;
+    code: "BUILDER_SPAWN_ORCHESTRATOR_ONLY" | "SPAWN_REASON_REQUIRED" | "PLANNER_SPAWN_FORBIDDEN";
+  };
 }
 
 /**
@@ -78,6 +84,20 @@ export function validateSpawnPermissions(
 ): SpawnRejection | null {
   if (callerType === "orchestrator") return null;
 
+  // FRI-16: planners are leaves by design — they research and hand off,
+  // never spawn. This gate fires BEFORE the FRI-149 carve-out so even an
+  // audited evolve escalation can't be issued from a planner caller. A
+  // planner that needs help mails its parent and asks them to dispatch.
+  if (callerType === "planner") {
+    return {
+      status: 403,
+      body: {
+        error: "planners cannot spawn other agents",
+        code: "PLANNER_SPAWN_FORBIDDEN",
+      },
+    };
+  }
+
   // FRI-149 audited evolve→builder carve-out (ADR-036). The ONLY path by which
   // a non-orchestrator caller may spawn a builder. Gated on the un-forgeable
   // server-set `evolveEscalation` marker (never a request-body field), narrowed
@@ -96,11 +116,11 @@ export function validateSpawnPermissions(
   }
 
   // ADR-022 hard rule: builder→builder and helper→builder are forbidden.
-  // Non-orchestrator callers may only spawn helpers; `bare` from a
-  // non-orchestrator caller also falls through to this 403 (the existing
-  // `agent_create` schema lets `bare` through, but only the orchestrator
-  // is allowed to ask for one through this endpoint).
-  if (body.type !== "helper") {
+  // Non-orchestrator callers may only spawn helpers and planners (FRI-16);
+  // `bare` from a non-orchestrator caller also falls through to this 403
+  // (the existing `agent_create` schema lets `bare` through, but only the
+  // orchestrator is allowed to ask for one through this endpoint).
+  if (body.type !== "helper" && body.type !== "planner") {
     return {
       status: 403,
       body: {

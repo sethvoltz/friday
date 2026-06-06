@@ -4,8 +4,8 @@ import {
   ensureSoul,
   loadConfig,
   loadFridayConfig,
-  normalizeModelConfig,
   resolveDaemonPort,
+  resolveModelForRole,
   runMigrations,
 } from "@friday/shared";
 import { logger } from "./log.js";
@@ -237,7 +237,7 @@ async function main(): Promise<void> {
       }),
     );
 
-  const modelCfg = normalizeModelConfig(cfg.model);
+  const modelCfg = resolveModelForRole(cfg, "orchestrator");
   logger.log("info", "daemon.ready", {
     port: daemonPort,
     model: modelCfg.name,
@@ -372,7 +372,7 @@ async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> 
     if (a.type !== "scheduled" && a.status !== "archived") {
       const pending = await mailInbox(a.name);
       if (pending.length > 0) {
-        const modelCfg = normalizeModelConfig(cfg.model);
+        const modelCfg = resolveModelForRole(cfg, a.type);
         const turnId = `t_${randomUUID()}`;
         logger.log("info", "agent.recovery.drain-mail", {
           agent: a.name,
@@ -442,7 +442,6 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
   const queued = await listQueuedUserBlocks();
   if (queued.length === 0) return;
   const daemonPort = resolveDaemonPort(cfg);
-  const modelCfg = normalizeModelConfig(cfg.model);
   for (const block of queued) {
     const a = await registry.getAgent(block.agentName);
     if (!a || a.status === "archived") {
@@ -482,6 +481,7 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
       userText: text,
     });
     const queuedCwd = await registry.workingDirectoryFor(a);
+    const modelCfg = resolveModelForRole(cfg, a.type);
     try {
       dispatchTurn({
         agentName: a.name,

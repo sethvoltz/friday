@@ -51,10 +51,36 @@ The daemon binds to `127.0.0.1`. zero-cache binds to `127.0.0.1`. The dashboard 
 
 ### Multi-agent orchestration
 
-- **Builders, Helpers, Bare, Scheduled.** The orchestrator (Friday herself) spawns isolated Builder agents in their own git worktrees for project work, short-lived Helpers for delegated tasks, Bare agents for ad-hoc `/scratch` sessions, and Scheduled agents for cron / one-shot autonomous work. Builders are confined to their worktree by a PreToolUse workspace guard.
+- **Builders, Helpers, Planners, Bare, Scheduled.** The orchestrator (Friday herself) spawns isolated Builder agents in their own git worktrees for project work, short-lived Helpers for delegated tasks, read-only Planners for deep research that ends in a handoff document, Bare agents for ad-hoc `/scratch` sessions, and Scheduled agents for cron / one-shot autonomous work. Builders are confined to their worktree by a PreToolUse workspace guard.
+- **Per-role and per-task model selection.** Route each agent role — and each evolve internal pass — to its own Claude model from the settings page, so an Opus planner can design the work while Sonnet builders execute and Haiku handles the scans. Roles without an override fall through to the global default.
 - **Mail as the universal delivery primitive.** Every user-visible reply, every cross-agent message, every scheduled-agent escalation flows through the same `mail` table. Priority field on each row; `priority='critical'` mid-turn-injects into a live worker so an interruption actually interrupts.
 - **Scheduled agents with state continuity.** Cron and one-shot runs persist `state.md` between fires (auto-injected on the next prompt) and `last-run.md` written by the daemon. Missed runs catch up on restart; cooperative abort on shutdown.
 - **User-facing scheduled reminders.** Any agent can set a cron or one-shot reminder (e.g. "thaw the chicken at midday Thursday") that fires straight into your chat as a notification — no worker spawns, no turn, no tokens. The unread badge lights up cross-device; the reminder lands as a `mail`-like chat block without waking the orchestrator.
+
+#### Agent types
+
+**Orchestrator.** Friday herself — the single long-lived agent behind the main chat, and the only role that can spawn anything without stating a reason. She is never archived; compaction and memory keep her one continuous conversation.
+
+**Builder.** Spawned by the orchestrator (only) for project work, each Builder gets an isolated git worktree and a PreToolUse workspace guard that confines writes to it. A Builder lives for the duration of a ticket and is archived when the work ships or is abandoned.
+
+**Helper.** A short-lived delegate for a bounded task — research a question, run a check, draft a document. Any role except a Planner can spawn one with a stated reason, and the spawner owns its archive.
+
+**Planner.** A long-lived deep-research role that designs work but never executes it: read-only on the filesystem, it inherits its parent's working directory, converges on a plan, and mails the parent a handoff document. It is a leaf — it cannot spawn other agents — and its parent archives it once the plan is locked.
+
+**Scheduled.** An autonomous agent fired by cron or a one-shot timer, persisting `state.md` between runs so each fire resumes where the last one left off. No other agent spawns one — the scheduler owns its lifecycle — and missed runs catch up on daemon restart.
+
+**Bare.** A minimal ad-hoc session created by `/scratch`, with a stripped-down prompt stack and the daemon's working directory. It lives until you archive it.
+
+Who can spawn whom:
+
+| Spawner ↓ \ Spawned → | builder             | helper      | bare | planner     | scheduled  |
+| --------------------- | ------------------- | ----------- | ---- | ----------- | ---------- |
+| orchestrator          | ✅                  | ✅          | ✅   | ✅          | n/a (cron) |
+| builder               | ❌                  | ✅ (reason) | ❌   | ✅ (reason) | n/a        |
+| helper                | ❌                  | ✅ (reason) | ❌   | ✅ (reason) | n/a        |
+| bare                  | ❌                  | ✅ (reason) | ❌   | ✅ (reason) | n/a        |
+| scheduled             | 🔒 evolve carve-out | ✅ (reason) | ❌   | ✅ (reason) | n/a        |
+| planner               | ❌                  | ❌          | ❌   | ❌          | n/a        |
 
 ### Friday Apps
 

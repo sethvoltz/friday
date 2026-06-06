@@ -237,6 +237,137 @@ describe("validateSpawnPermissions (ADR-022 §6 #4 #5)", () => {
   });
 });
 
+// FRI-16: the full spawn matrix, every cell, exact return shapes. The matrix
+// (ticket §"Spawn matrix"):
+//
+//   | Spawner ↓ \ Spawned → | builder | helper      | bare | planner     |
+//   | orchestrator          | ✅      | ✅          | ✅   | ✅          |
+//   | builder               | ❌      | ✅ (reason) | ❌   | ✅ (reason) |
+//   | helper                | ❌      | ✅ (reason) | ❌   | ✅ (reason) |
+//   | bare                  | ❌      | ✅ (reason) | ❌   | ✅ (reason) |
+//   | scheduled             | 🔒      | ✅ (reason) | ❌   | ✅ (reason) |
+//   | planner               | ❌      | ❌          | ❌   | ❌          |
+//
+// `scheduled` (the spawned column) is cron-only — `agent_create` never asks
+// for one, so it has no column here. 🔒 = the FRI-149 evolve carve-out,
+// asserted separately above and re-pinned below for the planner-caller case.
+describe("validateSpawnPermissions: FRI-16 spawn matrix (every cell, exact shapes)", () => {
+  const REJECT_403 = {
+    status: 403,
+    body: {
+      error: "only the orchestrator can spawn builders",
+      code: "BUILDER_SPAWN_ORCHESTRATOR_ONLY",
+    },
+  } as const;
+  const REJECT_PLANNER = {
+    status: 403,
+    body: {
+      error: "planners cannot spawn other agents",
+      code: "PLANNER_SPAWN_FORBIDDEN",
+    },
+  } as const;
+  const REJECT_400 = {
+    status: 400,
+    body: {
+      error: "reason required when spawner is not the orchestrator",
+      code: "SPAWN_REASON_REQUIRED",
+    },
+  } as const;
+
+  type Spawned = "builder" | "helper" | "bare" | "planner";
+  const SPAWNED: readonly Spawned[] = ["builder", "helper", "bare", "planner"];
+
+  it.each<Spawned>([...SPAWNED])("orchestrator → %s is allowed with no reason", (spawned) => {
+    expect(perms.validateSpawnPermissions({ type: spawned }, "orchestrator")).toBeNull();
+  });
+
+  // Non-orchestrator, non-planner spawners share one row shape: helper and
+  // planner permitted with reason; builder and bare rejected 403.
+  const NON_ORCH_SPAWNERS = ["builder", "helper", "bare", "scheduled"] as const;
+
+  it.each(NON_ORCH_SPAWNERS)("%s → helper with non-empty reason is allowed", (spawner) => {
+    expect(
+      perms.validateSpawnPermissions({ type: "helper", reason: "scoped research" }, spawner),
+    ).toBeNull();
+  });
+
+  it.each(NON_ORCH_SPAWNERS)("%s → planner with non-empty reason is allowed", (spawner) => {
+    expect(
+      perms.validateSpawnPermissions(
+        { type: "planner", reason: "deep planning on Opus while I execute" },
+        spawner,
+      ),
+    ).toBeNull();
+  });
+
+  it.each(NON_ORCH_SPAWNERS)(
+    "%s → builder is rejected 403 BUILDER_SPAWN_ORCHESTRATOR_ONLY (no carve-out flag)",
+    (spawner) => {
+      expect(perms.validateSpawnPermissions({ type: "builder", reason: "x" }, spawner)).toEqual(
+        REJECT_403,
+      );
+    },
+  );
+
+  it.each(NON_ORCH_SPAWNERS)(
+    "%s → bare is rejected 403 BUILDER_SPAWN_ORCHESTRATOR_ONLY",
+    (spawner) => {
+      expect(perms.validateSpawnPermissions({ type: "bare", reason: "x" }, spawner)).toEqual(
+        REJECT_403,
+      );
+    },
+  );
+
+  it.each(NON_ORCH_SPAWNERS)(
+    "%s → planner WITHOUT reason is rejected 400 SPAWN_REASON_REQUIRED",
+    (spawner) => {
+      expect(perms.validateSpawnPermissions({ type: "planner" }, spawner)).toEqual(REJECT_400);
+    },
+  );
+
+  it("builder → planner with whitespace-only reason is rejected 400 SPAWN_REASON_REQUIRED", () => {
+    expect(
+      perms.validateSpawnPermissions({ type: "planner", reason: "  \t\n " }, "builder"),
+    ).toEqual(REJECT_400);
+  });
+
+  // Planner-as-spawner row: every cell is 403 PLANNER_SPAWN_FORBIDDEN, reason
+  // or not — planners are leaves by design (ticket §4c).
+  it.each<Spawned>([...SPAWNED])(
+    "planner → %s is rejected 403 PLANNER_SPAWN_FORBIDDEN even with a reason",
+    (spawned) => {
+      expect(
+        perms.validateSpawnPermissions({ type: spawned, reason: "please" }, "planner"),
+      ).toEqual(REJECT_PLANNER);
+    },
+  );
+
+  it.each<Spawned>([...SPAWNED])(
+    "planner → %s without reason is also 403 PLANNER_SPAWN_FORBIDDEN (gate fires before the reason check)",
+    (spawned) => {
+      expect(perms.validateSpawnPermissions({ type: spawned }, "planner")).toEqual(REJECT_PLANNER);
+    },
+  );
+
+  it("planner → builder WITH { evolveEscalation: true } is still 403 PLANNER_SPAWN_FORBIDDEN (planner gate fires before the FRI-149 carve-out)", () => {
+    expect(
+      perms.validateSpawnPermissions({ type: "builder", reason: "escalate" }, "planner", {
+        evolveEscalation: true,
+      }),
+    ).toEqual(REJECT_PLANNER);
+  });
+
+  it("scheduled → builder 🔒 carve-out cell still returns null with evolveEscalation + reason (FRI-149 intact after FRI-16)", () => {
+    expect(
+      perms.validateSpawnPermissions(
+        { type: "builder", reason: "evolve escalation: proposal p-bbbb" },
+        "scheduled",
+        { evolveEscalation: true },
+      ),
+    ).toBeNull();
+  });
+});
+
 describe("computeSpawnDepth (ADR-022 §6 #7 #30)", () => {
   const buildGetAgent = (rows: Record<string, { type: string; parentName?: string | null }>) => {
     return async (name: string): Promise<AgentEntry | null> => {

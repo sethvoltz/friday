@@ -14,8 +14,8 @@
 
 import {
   loadConfig,
-  normalizeModelConfig,
   resolveDaemonPort,
+  resolveModelForRole,
   watchdogThresholdMs,
 } from "@friday/shared";
 import { randomUUID } from "node:crypto";
@@ -154,7 +154,7 @@ async function refork(agentName: string): Promise<void> {
 
   const cfg = loadConfig();
   const { systemPrompt } = await buildSystemPrompt(a);
-  const modelCfg = normalizeModelConfig(cfg.model);
+  const modelCfg = resolveModelForRole(cfg, a.type);
 
   // Empty prompt — the worker will idle and drain mail on its own (the long-
   // lived loop does this when no pendingPrompt is set… but we need to give

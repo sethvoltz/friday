@@ -36,6 +36,12 @@ export interface HookContextMap {
     workspacePath: string;
     toolName: string | undefined;
     toolInput: Record<string, unknown>;
+    /** FRI-16: workspace-guard strictness — the planner-vs-builder selector.
+     *  `"middle"` (planner inside a builder worktree) loosens Read/Glob/Grep
+     *  to anywhere on disk while Write/Edit/Bash containment stays strict;
+     *  absent defaults to `"strict"` (builder behavior, byte-identical to
+     *  pre-FRI-16). */
+    mode?: "strict" | "middle";
   };
   before_compaction: {
     sessionId: string;

@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { loadConfig, normalizeModelConfig, resolveDaemonPort, schema } from "@friday/shared";
+import { loadConfig, resolveDaemonPort, resolveModelForRole, schema } from "@friday/shared";
 import { logger } from "../log.js";
 import { dispatchTurn } from "../agent/lifecycle.js";
 import { recordUserBlock } from "../agent/block-injectors.js";
@@ -40,7 +40,7 @@ export async function spawnScheduledRun(
     });
   }
 
-  const modelCfg = normalizeModelConfig(cfg.model);
+  const modelCfg = resolveModelForRole(cfg, "scheduled");
 
   // Use the raw task prompt as recall intent — the first-turn template
   // adds state-injection scaffolding that would noise the memory query

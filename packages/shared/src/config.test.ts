@@ -13,6 +13,7 @@ import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   autoCompactWindowFor,
+  coerceLegacyModelId,
   compactionSweepHour,
   compactionSweepMinute,
   compactionSweepThreshold,
@@ -20,11 +21,15 @@ import {
   DEFAULT_AUTO_COMPACT_WINDOW,
   DEFAULT_COMPACTION_SWEEP,
   DEFAULT_CONFIG,
+  DEFAULT_WATCHDOG_THRESHOLDS_MS,
   loadConfig,
   PROD_DAEMON_PORT,
   PROD_DASHBOARD_PORT,
   resolveDaemonPort,
   resolveDashboardPort,
+  resolveModelForEvolveTask,
+  resolveModelForRole,
+  watchdogThresholdMs,
   type FridayConfig,
 } from "./config.js";
 
@@ -177,6 +182,159 @@ describe("evolve.autoSpawnBuilders (FRI-149)", () => {
   });
 });
 
+describe("per-role / per-evolve-task model resolution (FRI-16)", () => {
+  // AC #2 — six resolver cases. Each pins the exact ModelConfig shape so a
+  // regression in fallback order (override vs global) or in ModelConfig
+  // pass-through (thinking / effort dropped) is caught.
+
+  it("resolveModelForRole falls through to cfg.model when no override is set", () => {
+    const cfg: FridayConfig = { ...FULL_CFG, model: "claude-opus-4-7" };
+    expect(resolveModelForRole(cfg, "builder")).toEqual({ name: "claude-opus-4-7" });
+  });
+
+  it("resolveModelForRole returns the per-role string override", () => {
+    const cfg: FridayConfig = {
+      ...FULL_CFG,
+      model: "claude-opus-4-7",
+      models: { builder: "claude-sonnet-4-6" },
+    };
+    expect(resolveModelForRole(cfg, "builder")).toEqual({ name: "claude-sonnet-4-6" });
+  });
+
+  it("resolveModelForRole passes a full ModelConfig override through verbatim", () => {
+    const cfg: FridayConfig = {
+      ...FULL_CFG,
+      model: "x",
+      models: {
+        builder: {
+          name: "claude-sonnet-4-6",
+          thinking: { type: "enabled", budgetTokens: 4000 },
+          effort: "high",
+        },
+      },
+    };
+    expect(resolveModelForRole(cfg, "builder")).toEqual({
+      name: "claude-sonnet-4-6",
+      thinking: { type: "enabled", budgetTokens: 4000 },
+      effort: "high",
+    });
+  });
+
+  it("resolveModelForRole does NOT leak another role's override", () => {
+    const cfg: FridayConfig = {
+      ...FULL_CFG,
+      model: "claude-opus-4-7",
+      models: { helper: "claude-haiku-4-5-20251001" },
+    };
+    expect(resolveModelForRole(cfg, "builder")).toEqual({ name: "claude-opus-4-7" });
+    expect(resolveModelForRole(cfg, "planner")).toEqual({ name: "claude-opus-4-7" });
+  });
+
+  it("resolveModelForEvolveTask falls through to cfg.model when no override is set", () => {
+    const cfg: FridayConfig = { ...FULL_CFG, model: "claude-opus-4-7" };
+    expect(resolveModelForEvolveTask(cfg, "enrich")).toEqual({ name: "claude-opus-4-7" });
+  });
+
+  it("resolveModelForEvolveTask returns the per-task string override", () => {
+    const cfg: FridayConfig = {
+      ...FULL_CFG,
+      model: "claude-opus-4-7",
+      evolve: { models: { enrich: "claude-sonnet-4-6" } },
+    };
+    expect(resolveModelForEvolveTask(cfg, "enrich")).toEqual({ name: "claude-sonnet-4-6" });
+  });
+
+  it("resolveModelForEvolveTask passes a full ModelConfig override through verbatim", () => {
+    const cfg: FridayConfig = {
+      ...FULL_CFG,
+      model: "x",
+      evolve: {
+        models: {
+          enrich: {
+            name: "claude-sonnet-4-6",
+            thinking: { type: "enabled", budgetTokens: 4000 },
+            effort: "high",
+          },
+        },
+      },
+    };
+    expect(resolveModelForEvolveTask(cfg, "enrich")).toEqual({
+      name: "claude-sonnet-4-6",
+      thinking: { type: "enabled", budgetTokens: 4000 },
+      effort: "high",
+    });
+  });
+
+  it("resolveModelForEvolveTask does NOT leak another task's override", () => {
+    const cfg: FridayConfig = {
+      ...FULL_CFG,
+      model: "claude-opus-4-7",
+      evolve: { models: { scanFriction: "claude-haiku-4-5-20251001" } },
+    };
+    expect(resolveModelForEvolveTask(cfg, "enrich")).toEqual({ name: "claude-opus-4-7" });
+  });
+
+  it("AC #5: DEFAULT_CONFIG is unchanged — `models` and `evolve.models` stay absent", () => {
+    expect(DEFAULT_CONFIG.models).toBeUndefined();
+    expect(DEFAULT_CONFIG.evolve?.models).toBeUndefined();
+    // Full-shape pin: opting into per-role models must be an explicit user
+    // action, never a shipped default.
+    expect(DEFAULT_CONFIG).toEqual({
+      model: "claude-opus-4-7",
+      daemonPort: PROD_DAEMON_PORT,
+      dashboardPort: PROD_DASHBOARD_PORT,
+      sseKeepaliveSec: 20,
+      workerMemoryBudgetMb: 2048,
+      mcpServers: [],
+      orchestratorName: "friday",
+      watchdog: { refork: true },
+      evolve: { autoSpawnTriageHelpers: false, autoSpawnBuilders: false },
+    });
+  });
+
+  it("loadConfig() on a config.json without the new fields returns the same shape as today", () => {
+    if (!existsSync(dirname(CONFIG_PATH))) mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+    writeFileSync(CONFIG_PATH, JSON.stringify({ model: "claude-opus-4-7" }) + "\n");
+    try {
+      const cfg = loadConfig();
+      expect(cfg.models).toBeUndefined();
+      expect(cfg.evolve?.models).toBeUndefined();
+      expect(resolveModelForRole(cfg, "orchestrator")).toEqual({ name: "claude-opus-4-7" });
+    } finally {
+      rmSync(CONFIG_PATH, { force: true });
+    }
+  });
+});
+
+describe("planner watchdog threshold (FRI-16 AC #5b)", () => {
+  it("DEFAULT_WATCHDOG_THRESHOLDS_MS gives planner the scheduled-class threshold", () => {
+    expect(DEFAULT_WATCHDOG_THRESHOLDS_MS.planner).toBe(3_600_000);
+  });
+
+  it("watchdogThresholdMs(undefined, 'planner') === 3_600_000", () => {
+    expect(watchdogThresholdMs(undefined, "planner")).toBe(3_600_000);
+  });
+
+  it("a config override still wins for planner", () => {
+    expect(watchdogThresholdMs({ thresholdsMs: { planner: 120_000 } }, "planner")).toBe(120_000);
+  });
+});
+
+describe("coerceLegacyModelId (FRI-16 AC #22b)", () => {
+  it("coerces the legacy un-dated Haiku id to the dated snapshot", () => {
+    expect(coerceLegacyModelId("claude-haiku-4-5")).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("is idempotent — the dated id passes through unchanged", () => {
+    expect(coerceLegacyModelId("claude-haiku-4-5-20251001")).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("leaves every other id untouched", () => {
+    expect(coerceLegacyModelId("claude-opus-4-8")).toBe("claude-opus-4-8");
+    expect(coerceLegacyModelId("claude-sonnet-4-6")).toBe("claude-sonnet-4-6");
+  });
+});
+
 describe("compaction config (FRI-156 §A/§B)", () => {
   beforeEach(() => {
     if (!existsSync(dirname(CONFIG_PATH))) mkdirSync(dirname(CONFIG_PATH), { recursive: true });
@@ -201,6 +359,7 @@ describe("compaction config (FRI-156 §A/§B)", () => {
       builder: 200_000,
       scheduled: 200_000,
       bare: 200_000,
+      planner: 200_000,
     });
     expect(DEFAULT_COMPACTION_SWEEP).toEqual({
       sweepHour: 3,

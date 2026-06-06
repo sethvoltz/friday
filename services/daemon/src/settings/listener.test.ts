@@ -22,10 +22,22 @@ import {
   loadConfig,
   schema,
   writeConfig,
+  type FridayConfig,
   type TestDbHandle,
   newTestClient,
 } from "@friday/shared";
 import { syncConfigFromSettingsRow } from "./listener.js";
+
+// FRI-16 (AC #20): the idempotency tests below count writeConfig calls —
+// "exactly one writeConfig per real change, zero on a byte-identical
+// rerun". Wrap the real implementation in a pass-through spy so the
+// filesystem leg keeps working while calls stay observable. Module
+// identity is shared with listener.ts's own import, so the spy sees the
+// production call path, not a test-local copy.
+vi.mock("@friday/shared", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@friday/shared")>();
+  return { ...actual, writeConfig: vi.fn(actual.writeConfig) };
+});
 
 let handle: TestDbHandle;
 
@@ -226,5 +238,209 @@ describe("FRI-124: daemon LISTEN handler ignores theme columns", () => {
     expect("themePaletteSingle" in written).toBe(false);
     expect("themePaletteLight" in written).toBe(false);
     expect("themePaletteDark" in written).toBe(false);
+  });
+});
+
+describe("FRI-16: per-role / per-evolve-task model mirrors (AC #20)", () => {
+  it("mirrors row.models into cfg.models with exactly one writeConfig; byte-identical rerun is a no-op", async () => {
+    const db = getDb();
+    const models = { builder: "claude-sonnet-4-6", helper: "claude-haiku-4-5-20251001" };
+    await db.update(schema.settings).set({ models, updatedAt: new Date() });
+
+    // Materialize config.json as the baseline, then zero the call count so
+    // only the production sync path's writes are counted.
+    writeConfig(loadConfig());
+    vi.mocked(writeConfig).mockClear();
+
+    const changed = await syncConfigFromSettingsRow();
+    expect(changed).toBe(true);
+    expect(writeConfig).toHaveBeenCalledTimes(1);
+    const written = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as FridayConfig;
+    expect(written.models).toEqual(models);
+
+    // Rerun: Drizzle returns a FRESH object reference for the jsonb column
+    // on every query, so an identity (!==) check would always fire. The
+    // sorted-key deep-equal must report no change — and must NOT rewrite
+    // config.json (not even with identical bytes).
+    const changedAgain = await syncConfigFromSettingsRow();
+    expect(changedAgain).toBe(false);
+    expect(writeConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("mirrors row.evolveModels (including ModelConfig object values) into cfg.evolve.models", async () => {
+    const db = getDb();
+    const evolveModels = {
+      enrich: { name: "claude-sonnet-4-6", effort: "low" },
+      scanFriction: "claude-haiku-4-5-20251001",
+    };
+    await db.update(schema.settings).set({ evolveModels, updatedAt: new Date() });
+
+    writeConfig(loadConfig());
+    vi.mocked(writeConfig).mockClear();
+
+    const changed = await syncConfigFromSettingsRow();
+    expect(changed).toBe(true);
+    expect(writeConfig).toHaveBeenCalledTimes(1);
+    const written = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as FridayConfig;
+    expect(written.evolve?.models).toEqual(evolveModels);
+
+    // Nested-object deep-equal: the rerun must be a no-op too.
+    const changedAgain = await syncConfigFromSettingsRow();
+    expect(changedAgain).toBe(false);
+    expect(writeConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not rewrite when cfg.models matches row.models despite different key insertion order", async () => {
+    // Postgres normalizes jsonb key order independently of insertion
+    // order, and the file may hold keys in whatever order the user (or a
+    // prior write) produced. Same content + different order must compare
+    // equal — a plain JSON.stringify comparison would spuriously rewrite.
+    const db = getDb();
+    await db.update(schema.settings).set({
+      models: { builder: "claude-sonnet-4-6", scheduled: "claude-haiku-4-5-20251001" },
+      updatedAt: new Date(),
+    });
+
+    const cfg = loadConfig();
+    // Reversed insertion order relative to the row write above.
+    cfg.models = { scheduled: "claude-haiku-4-5-20251001", builder: "claude-sonnet-4-6" };
+    writeConfig(cfg);
+    const before = readFileSync(CONFIG_PATH, "utf8");
+    vi.mocked(writeConfig).mockClear();
+
+    const changed = await syncConfigFromSettingsRow();
+    expect(changed).toBe(false);
+    expect(writeConfig).not.toHaveBeenCalled();
+    expect(readFileSync(CONFIG_PATH, "utf8")).toBe(before);
+  });
+
+  it("leaves cfg.models untouched while row.models is NULL (never configured)", async () => {
+    const cfg = loadConfig();
+    cfg.models = { builder: "claude-sonnet-4-6" };
+    writeConfig(cfg);
+    vi.mocked(writeConfig).mockClear();
+
+    const changed = await syncConfigFromSettingsRow();
+    expect(changed).toBe(false);
+    expect(writeConfig).not.toHaveBeenCalled();
+    const written = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as FridayConfig;
+    expect(written.models).toEqual({ builder: "claude-sonnet-4-6" });
+  });
+
+  it("clearing the last per-role override via the UI path deletes cfg.models (set → clear interleaving)", async () => {
+    // The dashboard picker emits the whole replacement map on every
+    // change and `{}` once the final override is removed (NOT null —
+    // NULL means "never configured" and is preserved above). Walk the
+    // exact interleaving the UI produces: set an override, then clear
+    // it, asserting config.json converges on no `models` key at all.
+    const db = getDb();
+    await db
+      .update(schema.settings)
+      .set({ models: { builder: "claude-sonnet-4-6" }, updatedAt: new Date() });
+    // Prime the file with NO models key — config.json persists across
+    // tests in this file (per-worker tmpdir) and the NULL test above
+    // leaves the same map behind, which would make the set step a no-op.
+    const primed = loadConfig();
+    delete primed.models;
+    writeConfig(primed);
+    vi.mocked(writeConfig).mockClear();
+
+    expect(await syncConfigFromSettingsRow()).toBe(true);
+    let written = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as FridayConfig;
+    expect(written.models).toEqual({ builder: "claude-sonnet-4-6" });
+
+    // User selects "Use default" on the last overridden role → the
+    // picker patches `models: {}` → the mutator writes `{}` to the row.
+    await db.update(schema.settings).set({ models: {}, updatedAt: new Date() });
+
+    expect(await syncConfigFromSettingsRow()).toBe(true);
+    expect(writeConfig).toHaveBeenCalledTimes(2);
+    written = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as FridayConfig;
+    expect("models" in written).toBe(false);
+
+    // Idempotent: the row still holds `{}`; the cleared file must not
+    // be rewritten on the next NOTIFY.
+    expect(await syncConfigFromSettingsRow()).toBe(false);
+    expect(writeConfig).toHaveBeenCalledTimes(2);
+  });
+
+  it("clearing the last evolve-task override deletes cfg.evolve.models but preserves sibling evolve keys", async () => {
+    const db = getDb();
+    await db
+      .update(schema.settings)
+      .set({ evolveModels: { enrich: "claude-sonnet-4-6" }, updatedAt: new Date() });
+    const cfg = loadConfig();
+    // A sibling evolve setting that must survive the clear — the listener
+    // owns only the `models` slot inside `evolve`.
+    cfg.evolve = { autoSpawnTriageHelpers: true };
+    writeConfig(cfg);
+    vi.mocked(writeConfig).mockClear();
+
+    expect(await syncConfigFromSettingsRow()).toBe(true);
+    let written = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as FridayConfig;
+    expect(written.evolve).toEqual({
+      autoSpawnTriageHelpers: true,
+      models: { enrich: "claude-sonnet-4-6" },
+    });
+
+    await db.update(schema.settings).set({ evolveModels: {}, updatedAt: new Date() });
+
+    expect(await syncConfigFromSettingsRow()).toBe(true);
+    expect(writeConfig).toHaveBeenCalledTimes(2);
+    written = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as FridayConfig;
+    expect(written.evolve).toEqual({ autoSpawnTriageHelpers: true });
+
+    expect(await syncConfigFromSettingsRow()).toBe(false);
+    expect(writeConfig).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("FRI-16 AC #22b: legacy Haiku id coercion on listener read", () => {
+  it("a stored bare claude-haiku-4-5 rewrites config.json with the dated id on the first pass, then no-ops", async () => {
+    const db = getDb();
+    await db.update(schema.settings).set({ model: "claude-haiku-4-5", updatedAt: new Date() });
+
+    // Prime the file at a non-Haiku model so the coercion write is
+    // unambiguous regardless of what earlier tests left in config.json.
+    const cfg = loadConfig();
+    cfg.model = "claude-opus-4-7";
+    writeConfig(cfg);
+    vi.mocked(writeConfig).mockClear();
+
+    const changed = await syncConfigFromSettingsRow();
+    expect(changed).toBe(true);
+    expect(writeConfig).toHaveBeenCalledTimes(1);
+    const written = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as FridayConfig;
+    expect(written.model).toBe("claude-haiku-4-5-20251001");
+
+    // Idempotent: the row still holds the bare id, but the coerced
+    // comparison now matches the file — no second rewrite.
+    const changedAgain = await syncConfigFromSettingsRow();
+    expect(changedAgain).toBe(false);
+    expect(writeConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("a dated id is a coercion no-op (writes once for the model change, not for the coercion)", async () => {
+    const db = getDb();
+    await db
+      .update(schema.settings)
+      .set({ model: "claude-haiku-4-5-20251001", updatedAt: new Date() });
+
+    // Prime the file at a non-Haiku model — config.json persists across
+    // tests in this file (the tmpdir is per-worker), so the previous
+    // coercion test may have already left the dated id in place.
+    const cfg = loadConfig();
+    cfg.model = "claude-opus-4-7";
+    writeConfig(cfg);
+    vi.mocked(writeConfig).mockClear();
+
+    const changed = await syncConfigFromSettingsRow();
+    expect(changed).toBe(true);
+    const written = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as FridayConfig;
+    expect(written.model).toBe("claude-haiku-4-5-20251001");
+
+    const changedAgain = await syncConfigFromSettingsRow();
+    expect(changedAgain).toBe(false);
+    expect(writeConfig).toHaveBeenCalledTimes(1);
   });
 });

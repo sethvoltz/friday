@@ -14,13 +14,13 @@
  * a hook-registry round-trip.
  *
  * Why not register through the `before_tool_call` hook registry? That
- * registry's adapter at `services/daemon/src/agent/worker.ts:651-685`
- * currently fires only for `opts.agentType === "builder"`. The
- * `AskUserQuestion` deny needs to fire for orchestrator, bare, and
- * scheduled (all the agent types that ship `friday-elicitation`) — and
- * conversely the workspace-guard hook should stay gated to builder. The
- * worker adapter composes both: a small unconditional check for this
- * deny, plus the existing builder-only loop.
+ * registry's adapter (`buildPreToolUseHooks` in
+ * `services/daemon/src/agent/worker.ts`) fires only for builders — and,
+ * since FRI-16, for planners running inside a builder worktree. The
+ * `AskUserQuestion` deny needs to fire for every agent type — and
+ * conversely the workspace-guard chain should stay gated to those
+ * worktree-contained types. The worker adapter composes both: a small
+ * unconditional check for this deny, plus the gated guard-chain loop.
  */
 
 export const ASK_USER_QUESTION_BUILTIN_DENY_REASON = [
