@@ -30,7 +30,7 @@ export type WireEvent =
   | BlockCompleteEvent
   | BlockCanceledEvent
   | ConnectionEstablishedEvent
-  | CompactionEvent
+  | CompactingEvent
   | WorkerNoMailBackEvent
   | WorkerForceKillDeadLetterEvent
   | ElicitationRequestedEvent;
@@ -149,7 +149,14 @@ export interface AppLifecycleEvent extends BaseEvent {
 // to keep the row and the SSE event in sync; the SSE `seq` is the only
 // sequence anyone reads now.
 
-export type BlockKind = "text" | "thinking" | "tool_use" | "tool_result" | "error";
+export type BlockKind =
+  | "text"
+  | "thinking"
+  | "tool_use"
+  | "tool_result"
+  | "error"
+  | "mail"
+  | "compaction";
 
 export interface BlockStartEvent extends BaseEvent {
   type: "block_start";
@@ -227,18 +234,25 @@ export interface BlockCanceledEvent extends BaseEvent {
 // replicates without an SSE-triggered REST refetch.
 
 /**
- * FRI-60 Phase B: fired when the SDK emits a `compact_boundary` system frame
- * mid-turn. Lets the dashboard render a retroactive "Context compacted" inline
- * notice in the message thread so the user knows the context window was
- * trimmed during this turn.
+ * FRI-156 §F: live compaction-in-progress signal. Fired at the START of a
+ * compaction (`phase:'start'`) so the dashboard can show a "Compacting
+ * context…" spinner, and again at the END (`phase:'done'`, with `result`)
+ * when the compaction settles. This is purely a transient lifecycle signal —
+ * the durable artifact is the `kind:'compaction'` block row (written by the
+ * daemon's compaction-boundary handler), which replicates via Zero and
+ * survives reload. The retired `compaction` event (FRI-60 Phase B inline
+ * notice + its `pre_tokens`/`post_tokens`/`duration_ms` payload) is now
+ * carried by that block's `content_json` instead, so this event omits the
+ * token deltas.
  */
-export interface CompactionEvent extends BaseEvent {
-  type: "compaction";
+export interface CompactingEvent extends BaseEvent {
+  type: "compacting";
   agent: string;
   turn_id: string;
-  pre_tokens: number;
-  post_tokens?: number;
-  duration_ms?: number;
+  /** 'start' when the SDK begins compacting; 'done' when it settles. */
+  phase: "start" | "done";
+  /** Outcome on the closing (`phase:'done'`) frame; omitted on 'start'. */
+  result?: "success" | "failed";
 }
 
 /**

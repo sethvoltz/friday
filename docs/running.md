@@ -129,6 +129,20 @@ Knobs that don't live in `config.toml`:
 
 > PostHog vars live in `~/.friday/.env` like any other secret. Setting `POSTHOG_API_KEY` enables analytics across the whole stack on the next `friday start`; the dashboard server reads it (via `ensureFridayEnv`) and forwards it to the browser through the root layout load.
 
+## Config-file knobs (`~/.friday/config.json`)
+
+Most behavior tunes itself; the defaults below live **in code** (never written to `.env`, and `config.json` is an _override-only_ surface — omit a key to keep the default). Optional overrides:
+
+| Key                                               | Default              | Purpose                                                                                                                                                               |
+| ------------------------------------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `daemonPort` / `dashboardPort`                    | prod constants       | Bind ports (see above).                                                                                                                                               |
+| `watchdog.refork`                                 | `false`              | Re-fork a stalled worker instead of just flagging it.                                                                                                                 |
+| `compaction.sweepHour` / `compaction.sweepMinute` | `3` / `30`           | Local wall-clock time the nightly compaction sweep runs (default 03:30 local). Not cron — a single daily hour:minute check.                                           |
+| `compaction.sweepThresholdTokens`                 | `60000`              | The sweep only `/compact`s a live, idle long-lived agent whose estimated live context exceeds this.                                                                   |
+| `compaction.autoCompactWindow`                    | `200000` (all types) | Per-agent-type SDK auto-compact ceiling (`settings.autoCompactWindow`). `Partial<Record<agentType, number>>` — a partial override keeps siblings at the code default. |
+
+The two compaction numbers form a deliberate scheme: the sweep threshold (60K) keeps each wake's cache-creation cost low; the auto-compact window (200K) is the runaway-day backstop. See `docs/architecture.md` → _Agent lifecycle → Context compaction_.
+
 ## Cutover from old Friday
 
 If you're running the old Slack-based Friday alongside this:

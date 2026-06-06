@@ -5,6 +5,7 @@
   import { clock } from "$lib/stores/clock.svelte";
   import { zeroSync } from "$lib/stores/zero.svelte";
   import { computeGroupingMeta } from "$lib/util/chat-grouping";
+  import { fmtTokensCompact } from "$lib/util/format";
   import {
     formatAbsoluteTooltip,
     formatDaySeparator,
@@ -487,6 +488,59 @@
       el.scrollIntoView({ behavior: "smooth", block: "center" });
     });
   });
+
+  // FRI-156 §E: "Viewing pre-compaction history" pill detection. Observe the
+  // most-recent compaction divider element; flip chat.viewingPreCompaction
+  // true when the user is scrolled ABOVE it (the divider sits below the
+  // scroller's viewport). Re-runs when the divider id changes (a fresh
+  // compaction lands) or the list re-slices (virtualization may mount /
+  // unmount the divider). When no divider exists, the pill is forced off.
+  //
+  // Detection uses the IntersectionObserver entry geometry directly rather
+  // than hand-rolled scroll math: `!isIntersecting` with the divider's
+  // `boundingClientRect.top` at or below the root's bottom edge means the
+  // element is past the bottom of the viewport — i.e. scrolled above. The
+  // symmetric case (divider above the viewport top) leaves the pill off,
+  // because the user is then looking at post-compaction (recent) history.
+  $effect(() => {
+    if (readonly) {
+      chat.viewingPreCompaction = false;
+      return;
+    }
+    const dividerId = chat.latestCompactionDividerId;
+    // Re-key on the rendered window too, so a virtualization re-slice that
+    // mounts/unmounts the divider element re-attaches the observer.
+    void list;
+    if (!dividerId) {
+      chat.viewingPreCompaction = false;
+      return;
+    }
+    const el = document.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(dividerId)}"]`);
+    if (!el) {
+      // Divider not currently mounted (scrolled far above the window):
+      // the user is necessarily viewing pre-compaction history.
+      chat.viewingPreCompaction = true;
+      return;
+    }
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            chat.viewingPreCompaction = false;
+            continue;
+          }
+          const rootBottom = e.rootBounds?.bottom ?? window.innerHeight;
+          // Divider is below the viewport bottom → user scrolled above it.
+          chat.viewingPreCompaction = e.boundingClientRect.top >= rootBottom;
+        }
+      },
+      { threshold: 0 },
+    );
+    obs.observe(el);
+    return () => {
+      obs.disconnect();
+    };
+  });
 </script>
 
 <div class="list">
@@ -609,6 +663,31 @@
           canResume={!readonly && chat.canResumeTurn(msg.turnId, msg.errorCode)}
           onResend={() => msg.turnId && chat.resendUserText(msg.turnId)}
           onResume={() => msg.turnId && chat.resumeTurn(msg.turnId)} />
+      </div>
+    {:else if msg.kind === "compaction"}
+      <!-- FRI-156 §E: durable full-width compaction divider. Derived from a
+           persisted kind:'compaction' block (parseBlocks → cb_<blockId>), so
+           it survives reload — unlike the retired in-memory inline notice.
+           NOT gated on `!readonly`: durability is the point, so the divider
+           appears in past-session views too. `data-msg-id` lets the
+           pre-compaction pill scroll to it via chat.scrollTarget. -->
+      <div
+        class="compaction-divider"
+        role="separator"
+        data-msg-id={msg.id}
+        data-kind="compaction"
+        aria-label={msg.preTokens != null && msg.postTokens != null
+          ? `Context compacted from ${fmtTokensCompact(msg.preTokens)} to ${fmtTokensCompact(msg.postTokens)} tokens`
+          : "Context compacted"}>
+        <span class="compaction-divider-label">
+          {#if msg.preTokens != null && msg.postTokens != null}
+            Context compacted · {fmtTokensCompact(msg.preTokens)} → {fmtTokensCompact(
+              msg.postTokens,
+            )} tokens
+          {:else}
+            Context compacted
+          {/if}
+        </span>
       </div>
     {:else if msg.role === "tool"}
       <!-- FRI-130: route through the per-tool renderer registry. A
@@ -746,14 +825,21 @@
         </div>
       </div>
     {/if}
-    {#if !readonly && msg.turnId && chat.compactionTurnIds.has(msg.turnId) && list[i + 1]?.turnId !== msg.turnId}
-      <!-- FRI-60 Phase B: inline "Context compacted" notice at the turn
-           boundary where the SDK trimmed the context window. Rendered as
-           a faint italic line between the last message of the compacted
-           turn and the first message of the next turn. -->
-      <div class="compaction-notice" role="note">Context compacted</div>
-    {/if}
   {/each}
+  {#if !readonly && chat.focusedAgentIsCompacting}
+    <!-- FRI-156 §F: transient compaction-in-progress indicator. Driven by
+         the `compacting` SSE event (phase start → done) via
+         chat.focusedAgentIsCompacting. The retired FRI-60 inline
+         `.compaction-notice` (in-memory, per-turn, lost on reload) is
+         superseded by the durable divider above; this is the live spinner
+         for the moment compaction is actually running. -->
+    <div class="message inline" data-compacting="true">
+      <div class="compacting-status" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        Compacting context…
+      </div>
+    </div>
+  {/if}
   {#if !readonly && chat.showThinkingPlaceholder}
     <div class="message inline">
       <ThinkingBlock text="" status="running" />
@@ -1067,12 +1153,56 @@
     padding: 0.35rem 0.5rem;
     opacity: 0.85;
   }
-  .compaction-notice {
-    font-size: 0.75rem;
+  /* FRI-156 §E: durable full-width compaction divider. Reuses the
+     .day-separator idiom (centered pill flanked by hairlines) so it reads as
+     a structural boundary in the transcript rather than a chat bubble. */
+  .compaction-divider {
+    display: flex;
+    align-items: center;
+    margin: 1.25rem 0 0.5rem;
+    position: relative;
+  }
+  .compaction-divider::before,
+  .compaction-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border-subtle);
+  }
+  .compaction-divider-label {
+    padding: 0.15rem 0.75rem;
+    margin: 0 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    background: var(--bg-card);
+    white-space: nowrap;
+  }
+  /* FRI-156 §F: transient "Compacting context…" live indicator. */
+  .compacting-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.78rem;
     color: var(--text-tertiary);
     font-style: italic;
-    text-align: center;
-    padding: 0.25rem 0.5rem;
-    opacity: 0.7;
+    padding: 0.35rem 0.5rem;
+    opacity: 0.85;
+  }
+  .spinner {
+    width: 0.85rem;
+    height: 0.85rem;
+    border: 2px solid var(--border-subtle);
+    border-top-color: var(--accent-primary);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex: none;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>

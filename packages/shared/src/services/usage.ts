@@ -370,6 +370,84 @@ export async function getSessionStats(sessionId: string): Promise<SessionStats |
   };
 }
 
+export interface LatestUsageRow {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  timestamp: Date;
+}
+
+/**
+ * FRI-156 §C: the most recent usage row for an agent, used by the nightly
+ * maintenance sweep to estimate live context pressure. The `usage` table is
+ * intentionally NOT Zero-replicated (excluded from SYNC_TABLES), so the sweep
+ * must read it server-side.
+ *
+ * When `sessionId` is supplied the lookup is scoped to it, so a cleared or
+ * rotated old session's tokens don't trigger a phantom sweep; otherwise it
+ * falls back to the latest row for the agent across all sessions. Uses the
+ * `usage_agent_ts` index.
+ */
+export async function getLatestUsageForAgent(
+  agentName: string,
+  sessionId?: string,
+): Promise<LatestUsageRow | null> {
+  const pool = getPool();
+  const result =
+    sessionId === undefined
+      ? await pool.query<{
+          inputTokens: number;
+          outputTokens: number;
+          cacheCreationTokens: number;
+          cacheReadTokens: number;
+          timestamp: Date;
+        }>(
+          `SELECT input_tokens           AS "inputTokens",
+                  output_tokens          AS "outputTokens",
+                  cache_creation_tokens  AS "cacheCreationTokens",
+                  cache_read_tokens      AS "cacheReadTokens",
+                  timestamp
+           FROM usage
+           WHERE agent_name = $1
+           ORDER BY timestamp DESC
+           LIMIT 1`,
+          [agentName],
+        )
+      : await pool.query<{
+          inputTokens: number;
+          outputTokens: number;
+          cacheCreationTokens: number;
+          cacheReadTokens: number;
+          timestamp: Date;
+        }>(
+          `SELECT input_tokens           AS "inputTokens",
+                  output_tokens          AS "outputTokens",
+                  cache_creation_tokens  AS "cacheCreationTokens",
+                  cache_read_tokens      AS "cacheReadTokens",
+                  timestamp
+           FROM usage
+           WHERE agent_name = $1 AND session_id = $2
+           ORDER BY timestamp DESC
+           LIMIT 1`,
+          [agentName, sessionId],
+        );
+  return result.rows[0] ?? null;
+}
+
+/**
+ * The SDK's effective context size for a turn = input + cacheRead +
+ * cacheCreation of the latest usage row (output tokens don't re-enter the
+ * window). FRI-156 §C: the sweep compares this against the sweep threshold.
+ */
+export function estimateContextTokens(row: {
+  inputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+}): number {
+  return row.inputTokens + row.cacheCreationTokens + row.cacheReadTokens;
+}
+
 // Re-export the table object for callers that want raw Drizzle access.
 export { usage } from "../db/schema.js";
 // Re-export the sql helper so consumers can compose ad-hoc queries.

@@ -117,6 +117,9 @@ export interface FridayConfig {
   linear?: LinearIntegrationConfig;
   /** Evolve agency settings (FRI-40 triage helpers; FRI-149 auto-builders). */
   evolve?: { autoSpawnTriageHelpers?: boolean; autoSpawnBuilders?: boolean };
+  /** Context-budget compaction policy (FRI-156): per-agent-type auto-compact
+   *  window + nightly maintenance-sweep tuning. */
+  compaction?: CompactionConfig;
 }
 
 export interface LinearIntegrationConfig {
@@ -165,6 +168,62 @@ export const DEFAULT_WATCHDOG_THRESHOLDS_MS: Record<AgentTypeName, number> = {
 
 export function watchdogThresholdMs(cfg: WatchdogConfig | undefined, type: AgentTypeName): number {
   return cfg?.thresholdsMs?.[type] ?? DEFAULT_WATCHDOG_THRESHOLDS_MS[type];
+}
+
+/**
+ * Context-budget compaction policy (FRI-156). Two-number scheme: the nightly
+ * `sweep*` knobs keep long-lived idle agents' next-wake context small (~60K),
+ * while `autoCompactWindow` is the per-agent-type SDK ceiling that catches
+ * runaway days. All fields optional; every read goes through a `?? DEFAULT`
+ * resolver below (see `CONFIG SHALLOW-MERGE DROP` rationale — `loadConfig`
+ * does a shallow `{...DEFAULT_CONFIG, ...parsed}`, so a user setting one field
+ * would otherwise drop the sibling defaults).
+ */
+export interface CompactionConfig {
+  /** Local-time hour (0–23) the nightly maintenance sweep runs. */
+  sweepHour?: number;
+  /** Local-time minute (0–59) the nightly maintenance sweep runs. */
+  sweepMinute?: number;
+  /** Estimated-context token floor above which an idle agent is swept. */
+  sweepThresholdTokens?: number;
+  /** Per-agent-type SDK auto-compact window (`settings.autoCompactWindow`). */
+  autoCompactWindow?: Partial<Record<AgentTypeName, number>>;
+}
+
+/** Default per-agent-type SDK auto-compact window applied when
+ *  `CompactionConfig.autoCompactWindow` is absent or partial. 200K for every
+ *  type (FRI-156 §A) — the SDK ceiling backstop, distinct from the 60K sweep
+ *  threshold. Defaults in code (never .env), overridable via config. */
+export const DEFAULT_AUTO_COMPACT_WINDOW: Record<AgentTypeName, number> = {
+  orchestrator: 200_000,
+  helper: 200_000,
+  builder: 200_000,
+  scheduled: 200_000,
+  bare: 200_000,
+};
+
+/** Default nightly maintenance-sweep schedule + threshold (FRI-156 §B):
+ *  03:30 local, 60K-token floor. Defaults in code; config overrides per field. */
+export const DEFAULT_COMPACTION_SWEEP = {
+  sweepHour: 3,
+  sweepMinute: 30,
+  sweepThresholdTokens: 60_000,
+} as const;
+
+export function autoCompactWindowFor(cfg: FridayConfig, type: AgentTypeName): number {
+  return cfg.compaction?.autoCompactWindow?.[type] ?? DEFAULT_AUTO_COMPACT_WINDOW[type];
+}
+
+export function compactionSweepHour(cfg: FridayConfig): number {
+  return cfg.compaction?.sweepHour ?? DEFAULT_COMPACTION_SWEEP.sweepHour;
+}
+
+export function compactionSweepMinute(cfg: FridayConfig): number {
+  return cfg.compaction?.sweepMinute ?? DEFAULT_COMPACTION_SWEEP.sweepMinute;
+}
+
+export function compactionSweepThreshold(cfg: FridayConfig): number {
+  return cfg.compaction?.sweepThresholdTokens ?? DEFAULT_COMPACTION_SWEEP.sweepThresholdTokens;
 }
 
 /**

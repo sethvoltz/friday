@@ -427,6 +427,22 @@
   </div>
 {/if}
 
+<!-- FRI-156 §E: sticky "Viewing pre-compaction history" pill. Shown when the
+     user is scrolled above the most-recent compaction divider
+     (chat.viewingPreCompaction, set by ChatMessages's IntersectionObserver).
+     Click scrolls back to the divider via the nonce-keyed scrollTarget. -->
+{#if !readonly && chat.viewingPreCompaction}
+  <div class="pre-compaction-wrap">
+    <button
+      class="floating-pill pre-compaction"
+      type="button"
+      onclick={() => chat.scrollToLatestCompactionDivider()}
+      aria-label="Scroll to the latest compaction divider">
+      Viewing pre-compaction history
+    </button>
+  </div>
+{/if}
+
 <!-- FIX_FORWARD 6.1: transient toast surfaced by /jump and other client-
      side commands. Auto-dismisses via chat.setToast(message, level, ms). -->
 {#if !readonly && chat.toast}
@@ -446,6 +462,7 @@
   .chat-sidebar-floating,
   .chat-input-floating,
   .jump-to-bottom-wrap,
+  .pre-compaction-wrap,
   .loading-older {
     --page-gutter: max(1rem, calc((100vw - 1200px) / 2));
     --sidebar-w: 240px;
@@ -553,6 +570,20 @@
     align-items: center;
     gap: 0.5rem;
   }
+  /* FRI-156 §E: the pre-compaction pill sits at the top of the chat area —
+     the divider it points back to is below the viewport (the user scrolled
+     up into pre-compaction history), so the affordance to return to it
+     anchors under the header, mirroring the loading-older placement. */
+  .pre-compaction-wrap {
+    position: fixed;
+    top: calc(var(--chat-top) + 0.5rem);
+    left: var(--content-left);
+    right: var(--page-gutter);
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 95;
+  }
 
   /* Shared bordered + blurred-background style for floating chat affordances. */
   .floating-pill {
@@ -632,11 +663,13 @@
     }
     /* Mobile: full-width chat means the centering wrapper spans gutter to gutter. */
     .jump-to-bottom-wrap,
+    .pre-compaction-wrap,
     .loading-older {
       left: var(--page-gutter);
       right: var(--page-gutter);
     }
-    .loading-older {
+    .loading-older,
+    .pre-compaction-wrap {
       top: calc(var(--chat-top) + 3.75rem);
     }
   }

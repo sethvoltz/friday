@@ -66,7 +66,12 @@ export function computeGroupingMeta(
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
-    if (msg.role === "tool" || msg.role === "thinking") {
+    // FRI-156 §E: the durable compaction divider is a full-width row, not an
+    // authored bubble. Treat it as a continuation (like tool/thinking) so it
+    // never emits its own author/timestamp separator above it. It carries
+    // role:'assistant' (to ride the focused-agent filter), so the role check
+    // alone wouldn't catch it — discriminate on kind.
+    if (msg.role === "tool" || msg.role === "thinking" || msg.kind === "compaction") {
       out[i] = {
         showDaySeparator: false,
         showInactivitySeparator: false,

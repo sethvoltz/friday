@@ -47,6 +47,7 @@ The daemon binds to `127.0.0.1`. zero-cache binds to `127.0.0.1`. The dashboard 
 - **Mobile-first dashboard.** Priority+ navigation, virtualized lists, PWA install with offline shell, tap-to-insert autocomplete, image and PDF attachments via the native file picker. Fully usable on phone over cellular.
 - **Markdown-first rendering.** Streamed responses render with Shiki syntax highlighting (Catppuccin Latte / Mocha) and DOMPurify-hardened output. KaTeX and Mermaid render inline.
 - **Local-first sync, live deltas.** Each device runs Zero's reactive cache, so opening Friday on your phone is instant — your chat history, tickets, memory, and unread badges are already there. Settled state flows over a sync WebSocket; live token streaming rides a narrow per-agent SSE side-channel. The connectivity widget honestly distinguishes Internet / Sync / Daemon health.
+- **Compaction in place, never session rotation.** As a chat grows, Friday compacts it instead of starting over — a nightly maintenance sweep keeps long-lived agents lean while persona-continuity instructions preserve open commitments, in-flight work, tone, and the reasoning behind recent decisions. Each compaction leaves a durable full-width "Context compacted" divider you can scroll past into pre-compaction history, and a pre-compaction memory flush saves any context that summarization would otherwise lose.
 
 ### Multi-agent orchestration
 

@@ -77,6 +77,34 @@ describe("memory recall hook (FRI-89)", () => {
 
     expect(result).toBeUndefined();
   });
+
+  it("FRI-156 §B: returns void for intentTag='compact' WITHOUT touching memory (no recall pollution)", async () => {
+    vi.resetModules();
+    // Both memory fns would otherwise produce a non-empty recall block — the
+    // mock returns hits so a regression that DROPS the compact early-return
+    // would surface as a non-undefined result. They must NOT be called at all.
+    const buildAutoRecallBlock = vi.fn(
+      async () => "<memory-context>\nleaked fact\n</memory-context>",
+    );
+    const listEntries = vi.fn(() => Promise.resolve([]));
+    vi.doMock("@friday/memory", () => ({ buildAutoRecallBlock, listEntries }));
+    const { memoryRecallHook } = await import("./memory-recall-hook.js");
+
+    const result = await memoryRecallHook({
+      // The literal "/compact …" body would be a garbage FTS query — the whole
+      // point of the early-return is that it never reaches recall.
+      intent: "",
+      intentTag: "compact",
+      body: "/compact <persona instructions>",
+      agentType: "orchestrator",
+    });
+
+    expect(result).toBeUndefined();
+    // No listEntries() read (recallCount pollution + full-table scan avoided)
+    // and no recall block built.
+    expect(listEntries).not.toHaveBeenCalled();
+    expect(buildAutoRecallBlock).not.toHaveBeenCalled();
+  });
 });
 
 describe("before_prompt_build hook composition surface (FRI-123)", () => {

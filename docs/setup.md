@@ -152,6 +152,10 @@ Edit `~/.friday/config.json` to:
   Friday files Linear issues. Overridable per-process with the
   `FRIDAY_LINEAR_TEAM` env var. When unset, the integration falls back to
   the first team the API key can see and logs a warning.
+- Tune context compaction under `compaction` (`sweepHour`, `sweepMinute`,
+  `sweepThresholdTokens`, `autoCompactWindow`). All four default in code
+  (never `.env`); see `docs/running.md` → _Config-file knobs_ for the
+  defaults and the two-number sweep/ceiling scheme.
 
 Edit `~/.friday/SOUL.md` to customize Friday's voice and identity. Source upgrades never overwrite this file.
 

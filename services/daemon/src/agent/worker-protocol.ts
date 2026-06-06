@@ -204,6 +204,35 @@ export type WorkerEvent =
       preTokens: number;
       postTokens?: number;
       durationMs?: number;
+      /** FRI-156 §C: the SDK's `compact_metadata.trigger` — 'manual' for a
+       *  user /compact or the nightly sweep, 'auto' for the autoCompactWindow
+       *  ceiling. Forwarded so a future consumer can distinguish them; the
+       *  durable marker block does not currently persist it. */
+      trigger?: "manual" | "auto";
+    }
+  | {
+      /** FRI-156 §C: the SDK `system/status` frame, surfaced as a live
+       *  compaction-in-progress signal. `phase:'start'` fires when the SDK
+       *  begins compacting (`status:'compacting'`); `phase:'done'` fires when
+       *  it settles (`compact_result` present). `status:'requesting'` is
+       *  unrelated to compaction and is filtered out upstream
+       *  (see {@link classifyStatusFrame}). */
+      type: "compacting-status";
+      sessionId: string;
+      phase: "start" | "done";
+      result?: "success" | "failed";
+      error?: string;
+    }
+  | {
+      /** FRI-27: the PreCompact memory-flush sub-query lifecycle. `start` when
+       *  the flush begins, `complete` with `savedCount` when it finishes
+       *  cleanly, `error` (with `message`) when it threw or timed out. The
+       *  outer turn is unaffected in every case. */
+      type: "memory-flush";
+      phase: "start" | "complete" | "error";
+      sessionId: string;
+      savedCount?: number;
+      message?: string;
     }
   | {
       type: "status-change";

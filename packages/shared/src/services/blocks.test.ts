@@ -120,6 +120,77 @@ describe("blocks service (FIX_FORWARD 1.2)", () => {
   });
 });
 
+describe("blocks_kind_check: compaction marker (FRI-156 §D, migration 0030)", () => {
+  // This run also proves migration 0030 applies cleanly: createTestDb replays
+  // the FULL journal (incl. 0030) into a disposable scratch DB, so a green
+  // insert of kind='compaction' below means the widened CHECK is live, and the
+  // bogus-kind rejection means the CHECK still constrains.
+  it("inserts and round-trips a durable kind='compaction' marker block", async () => {
+    const { insertBlock, getBlockById } = await import("./blocks.js");
+    await insertBlock({
+      blockId: "blk-compaction-1",
+      turnId: "turn-compaction-1",
+      agentName: "friday",
+      sessionId: "sess-compaction",
+      blockIndex: 0,
+      role: "system",
+      kind: "compaction",
+      source: null,
+      contentJson: '{"pre_tokens":779378,"post_tokens":50000,"duration_ms":4200}',
+      status: "complete",
+      ts: 1000,
+    });
+    const fetched = await getBlockById("blk-compaction-1");
+    expect(fetched).toMatchObject({
+      blockId: "blk-compaction-1",
+      turnId: "turn-compaction-1",
+      agentName: "friday",
+      sessionId: "sess-compaction",
+      role: "system",
+      kind: "compaction",
+      status: "complete",
+      ts: 1000,
+    });
+    // content_json is jsonb — Postgres re-serializes and does not preserve key
+    // order, so compare the parsed object, not the raw string. Pins the exact
+    // token-delta payload the dashboard divider reads.
+    expect(JSON.parse(fetched!.contentJson)).toEqual({
+      pre_tokens: 779378,
+      post_tokens: 50000,
+      duration_ms: 4200,
+    });
+  });
+
+  it("rejects a kind outside the widened CHECK with blocks_kind_check", async () => {
+    const { insertBlock } = await import("./blocks.js");
+    // Drizzle wraps the Postgres error; the constraint name lives on the
+    // chained `cause` (pg error, code 23514 = check_violation), not the outer
+    // "Failed query" message. Pin the exact constraint so this proves the
+    // kind CHECK fired (not some unrelated rejection).
+    let caught: unknown;
+    try {
+      await insertBlock({
+        blockId: "blk-bogus-kind",
+        turnId: "turn-bogus",
+        agentName: "friday",
+        sessionId: "sess-bogus",
+        blockIndex: 0,
+        role: "assistant",
+        kind: "not_a_real_kind",
+        contentJson: "{}",
+        status: "complete",
+        ts: 1000,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const cause = (caught as { cause?: { constraint?: string; code?: string } }).cause;
+    expect(cause?.constraint).toBe("blocks_kind_check");
+    expect(cause?.code).toBe("23514");
+  });
+});
+
 describe("getTurnAuthorUserId (PostHog per-originator attribution)", () => {
   // This is the daemon's read side of block authorship: turn_completed /
   // turn_errored fire long after the request context is gone, so the daemon

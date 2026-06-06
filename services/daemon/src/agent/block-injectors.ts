@@ -29,6 +29,7 @@
 import { randomUUID } from "node:crypto";
 
 import { insertBlock } from "@friday/shared/services";
+import type { BlockSource } from "@friday/shared/services";
 
 import { eventBus } from "../events/bus.js";
 import { logger } from "../log.js";
@@ -135,6 +136,116 @@ export async function recordError(
   return { blockId };
 }
 
+/* ---------------- recordCompactionMarker ---------------- */
+
+/**
+ * FRI-156 §D: synthesize a DURABLE compaction-marker block for the current
+ * turn. Persists one row with `role='system'` + `kind='compaction'` +
+ * `status='complete'` whose `content_json` carries the token deltas
+ * (`{ pre_tokens, post_tokens, duration_ms }`), then publishes the matching
+ * `block_start` + `block_complete` SSE pair so the dashboard materializes the
+ * full-width "Context compacted · 779K → 50K" divider live. The row ALSO
+ * replicates via Zero, so the divider survives a reload — the bug the old
+ * ephemeral `type:'compaction'` SSE event could not fix (it was lost on
+ * reload). This durable row + its SSE pair fully supersede that event.
+ *
+ * Modeled on {@link recordError}: same `peekNextBlockIndex` → `9999`
+ * post-finalize fallback, same try/catch-and-return-null so a CHECK/dup
+ * error can never wedge the lifecycle IPC handler.
+ *
+ * blocksThisTurn (CRITICAL, the SECOND writer): on a successful insert we
+ * increment `w.blocksThisTurn`. block-stream's `open` is the documented sole
+ * writer (lifecycle.ts) and `recordError` deliberately ABSTAINS — this is a
+ * deliberate divergence. Rationale: the compaction-boundary IPC is ordered
+ * BEFORE turn-complete on the agent-keyed transition queue, so by the time
+ * the turn-state machine runs `applyComplete`, `w.blocksThisTurn >= 1`. That
+ * makes (a) the durable divider REPLACE the synthesized "Compacted — no
+ * response" bubble (zeroBlockReason → undefined, FRI-156 §E), and (b)
+ * `evaluateWedge` see a non-zero block count so a legitimate /compact turn no
+ * longer advances the wedge streak. The pure turn-state-machine.ts is NOT
+ * modified; its `blocksThisTurn===0 + compactionThisTurn → 'compaction'`
+ * mapping stays valid for the genuine edge (SDK compacted but emitted no
+ * boundary block we could persist).
+ */
+export async function recordCompactionMarker(
+  w: LiveWorker,
+  meta: { preTokens: number; postTokens?: number; durationMs?: number; sessionId?: string },
+): Promise<{ blockId: string } | null> {
+  // Prefer the live worker's session, then the IPC-carried session, then the
+  // sentinel — avoids orphaning the marker outside the session view.
+  const sessionId = w.sessionId ?? meta.sessionId ?? "__pending__";
+  const blockId = randomUUID();
+  const ts = Date.now();
+  const { index, turnLive } = peekNextBlockIndex(w.turnId);
+  const blockIndex = turnLive ? index : 9999;
+  const contentJson = JSON.stringify({
+    pre_tokens: meta.preTokens,
+    post_tokens: meta.postTokens,
+    duration_ms: meta.durationMs,
+  });
+
+  try {
+    await insertBlock({
+      blockId,
+      turnId: w.turnId,
+      agentName: w.agentName,
+      sessionId,
+      messageId: null,
+      blockIndex,
+      role: "system",
+      kind: "compaction",
+      source: null,
+      contentJson,
+      status: "complete",
+      ts,
+    });
+  } catch (err) {
+    logger.log("warn", "blocks.compaction.insert.fail", {
+      agent: w.agentName,
+      turnId: w.turnId,
+      blockId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+
+  // SECOND writer of blocksThisTurn — see the doc-comment above for the
+  // wedge-detector + zeroBlockReason rationale. Increment ONLY on a
+  // successful insert (a failed insert produced no durable divider, so the
+  // synthesized "no response" fallback should still apply).
+  w.blocksThisTurn++;
+
+  eventBus.publish({
+    v: 1,
+    type: "block_start",
+    turn_id: w.turnId,
+    agent: w.agentName,
+    block_id: blockId,
+    message_id: null,
+    block_index: blockIndex,
+    role: "system",
+    kind: "compaction",
+    source: null,
+    ts,
+  });
+  eventBus.publish({
+    v: 1,
+    type: "block_complete",
+    turn_id: w.turnId,
+    agent: w.agentName,
+    block_id: blockId,
+    message_id: null,
+    block_index: blockIndex,
+    role: "system",
+    kind: "compaction",
+    source: null,
+    content_json: contentJson,
+    status: "complete",
+    ts,
+  });
+  return { blockId };
+}
+
 /* ---------------- recordUserBlock ---------------- */
 
 export interface RecordUserBlockInput {
@@ -151,7 +262,13 @@ export interface RecordUserBlockInput {
     | "agent_spawn"
     | "schedule"
     | "refork_notice"
-    | "reminder";
+    | "reminder"
+    /** FRI-156 §B: the nightly maintenance sweep's `/compact …` dispatch. A
+     *  dedicated source keeps the audit/log trail of an autonomous overnight
+     *  compaction turn distinct from a user-typed /compact. This member is
+     *  daemon-local (not in shared `BlockSource`) — the DB `source` column has
+     *  no CHECK, so the literal persists; the typed sinks below cast through. */
+    | "compaction_sweep";
   /** `complete` for the common path (block is final the moment it's
    *  written). `queued` for user_chat POSTs that arrived while the agent
    *  was mid-turn — the row is parked until the worker drains it from
@@ -233,6 +350,10 @@ export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
   // via the natural `handleBlockComplete` id-match: the optimistic was
   // re-keyed to `user_<turnId>` in `confirmPending`, and the
   // subsequent SSE finds the same id and updates in place.
+  // `compaction_sweep` is a daemon-local audit source not present in the
+  // shared `BlockSource` union; the DB `source` column is free text (no CHECK)
+  // so the literal persists. Cast once at the typed boundary.
+  const blockSource = input.source as BlockSource;
   await insertBlock({
     blockId,
     turnId: input.turnId,
@@ -242,7 +363,7 @@ export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
     blockIndex: 0,
     role: "user",
     kind: "text",
-    source: input.source,
+    source: blockSource,
     contentJson,
     status,
     ts,
@@ -272,7 +393,7 @@ export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
     blockId,
     role: "user",
     kind: "text",
-    source: input.source,
+    source: blockSource,
     status,
     contentJson,
   });

@@ -27,4 +27,13 @@ describe("fmtTokensCompact (4 sig-fig collapse)", () => {
   it("collapses trillions to T with 4 sig figs", () => {
     expect(fmtTokensCompact(1_500_000_000_000)).toBe("1.500T");
   });
+
+  // FRI-156 §E: the compaction divider copy is
+  // `Context compacted · ${fmtTokensCompact(pre)} → ${fmtTokensCompact(post)} tokens`.
+  // Pin the exact token strings the divider displays so the rendered copy is
+  // contract-tested (these are the canonical example values from the ticket).
+  it("renders the compaction-divider example token strings exactly", () => {
+    expect(fmtTokensCompact(779_000)).toBe("779.0K");
+    expect(fmtTokensCompact(50_000)).toBe("50.00K");
+  });
 });

@@ -35,7 +35,7 @@ export interface BuiltDispatchPrompt {
 }
 
 interface ResolvedIntent {
-  intentTag: "user_chat" | "mail" | "scheduled" | "scratch" | "agent_spawn";
+  intentTag: "user_chat" | "mail" | "scheduled" | "scratch" | "agent_spawn" | "compact";
   intentText: string;
   body: string;
   skillMatch?: SkillMatch;
@@ -78,6 +78,18 @@ export function resolveIntent(intent: DispatchIntent): ResolvedIntent {
         intentTag: "scratch",
         intentText: intent.userText,
         body: intent.userText,
+      };
+    case "compact":
+      // FRI-156 §B/§C: the body is the native `/compact` slash command
+      // (leading slash is load-bearing — the SDK's claude_code preset
+      // interprets it as compaction). `intentText` is empty so `memoryRecallHook`
+      // has nothing to query even before its `intentTag === "compact"`
+      // early-return, and the recall pollution a /compact turn would otherwise
+      // cause never happens.
+      return {
+        intentTag: "compact",
+        intentText: "",
+        body: `/compact ${intent.instructions}`,
       };
     case "agent_spawn": {
       // FRI-127 §4: wrap the spawn body with a mail-back trailer naming the

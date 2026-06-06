@@ -92,6 +92,12 @@ export async function safeRecall(text: string, intent: IntentTag = "user_chat"):
 export async function memoryRecallHook(
   ctx: HookContextMap["before_prompt_build"],
 ): Promise<HookResultMap["before_prompt_build"] | void> {
+  // FRI-156 §B: a `/compact …` maintenance turn exists only to compact the
+  // session. Passive recall against the literal "/compact <persona text>" body
+  // would return garbage, append a junk <memory-context> block, do a full
+  // listEntries() read, and bump recallCount — all pollution. Skip it; the
+  // /compact turn's system prompt stays the base prompt only.
+  if (ctx.intentTag === "compact") return;
   const block = await safeRecall(ctx.intent, ctx.intentTag);
   if (!block) return;
   return { appendSystemPrompt: block };

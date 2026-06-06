@@ -12,7 +12,13 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  autoCompactWindowFor,
+  compactionSweepHour,
+  compactionSweepMinute,
+  compactionSweepThreshold,
   CONFIG_PATH,
+  DEFAULT_AUTO_COMPACT_WINDOW,
+  DEFAULT_COMPACTION_SWEEP,
   DEFAULT_CONFIG,
   loadConfig,
   PROD_DAEMON_PORT,
@@ -168,5 +174,91 @@ describe("evolve.autoSpawnBuilders (FRI-149)", () => {
   it("an explicit `{ evolve: { autoSpawnBuilders: true } }` loads as true", () => {
     writeFileSync(CONFIG_PATH, JSON.stringify({ evolve: { autoSpawnBuilders: true } }) + "\n");
     expect(loadConfig().evolve?.autoSpawnBuilders).toBe(true);
+  });
+});
+
+describe("compaction config (FRI-156 §A/§B)", () => {
+  beforeEach(() => {
+    if (!existsSync(dirname(CONFIG_PATH))) mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+    rmSync(CONFIG_PATH, { force: true });
+  });
+  afterEach(() => {
+    rmSync(CONFIG_PATH, { force: true });
+  });
+
+  it("DEFAULT_CONFIG does NOT populate `compaction` (resolved via helpers, not deep-merge)", () => {
+    // Mirrors watchdogThresholdMs: the defaults live in the resolvers + the
+    // DEFAULT_* consts, NOT in DEFAULT_CONFIG, so a partial user override
+    // resolves field-by-field rather than relying on a deep merge that
+    // loadConfig's shallow spread doesn't do.
+    expect(DEFAULT_CONFIG.compaction).toBeUndefined();
+  });
+
+  it("DEFAULT_* consts hold the FRI-156 code defaults", () => {
+    expect(DEFAULT_AUTO_COMPACT_WINDOW).toEqual({
+      orchestrator: 200_000,
+      helper: 200_000,
+      builder: 200_000,
+      scheduled: 200_000,
+      bare: 200_000,
+    });
+    expect(DEFAULT_COMPACTION_SWEEP).toEqual({
+      sweepHour: 3,
+      sweepMinute: 30,
+      sweepThresholdTokens: 60_000,
+    });
+  });
+
+  it("resolvers return code defaults when `compaction` is absent", () => {
+    const cfg = loadConfig(); // no config.json → no compaction key
+    expect(cfg.compaction).toBeUndefined();
+    expect(compactionSweepHour(cfg)).toBe(3);
+    expect(compactionSweepMinute(cfg)).toBe(30);
+    expect(compactionSweepThreshold(cfg)).toBe(60_000);
+    expect(autoCompactWindowFor(cfg, "orchestrator")).toBe(200_000);
+    expect(autoCompactWindowFor(cfg, "builder")).toBe(200_000);
+  });
+
+  it("shallow-merge sibling-drop: a user `{ compaction: { sweepHour: 5 } }` keeps sibling defaults via the per-field resolvers", () => {
+    // THE bug the resolvers exist to prevent (decisions.md CONFIG SHALLOW-MERGE
+    // DROP): loadConfig does `{...DEFAULT_CONFIG, ...parsed}`, and since
+    // DEFAULT_CONFIG.compaction is absent, the user object lands verbatim with
+    // only sweepHour set. Reading sweepMinute/threshold straight off cfg would
+    // be undefined; the resolvers backfill from the code defaults.
+    writeFileSync(CONFIG_PATH, JSON.stringify({ compaction: { sweepHour: 5 } }) + "\n");
+    const cfg = loadConfig();
+    // The raw object reflects the shallow drop...
+    expect(cfg.compaction).toEqual({ sweepHour: 5 });
+    expect(cfg.compaction?.sweepMinute).toBeUndefined();
+    // ...but the resolvers backfill the siblings from code defaults.
+    expect(compactionSweepHour(cfg)).toBe(5); // overridden
+    expect(compactionSweepMinute(cfg)).toBe(30); // backfilled default
+    expect(compactionSweepThreshold(cfg)).toBe(60_000); // backfilled default
+  });
+
+  it("autoCompactWindowFor backfills per-type defaults under a partial override", () => {
+    writeFileSync(
+      CONFIG_PATH,
+      JSON.stringify({ compaction: { autoCompactWindow: { orchestrator: 500_000 } } }) + "\n",
+    );
+    const cfg = loadConfig();
+    expect(autoCompactWindowFor(cfg, "orchestrator")).toBe(500_000); // overridden type
+    expect(autoCompactWindowFor(cfg, "helper")).toBe(200_000); // unset type → default
+    expect(autoCompactWindowFor(cfg, "builder")).toBe(200_000);
+    expect(autoCompactWindowFor(cfg, "scheduled")).toBe(200_000);
+    expect(autoCompactWindowFor(cfg, "bare")).toBe(200_000);
+  });
+
+  it("a full `{ compaction: {...} }` override loads each field verbatim", () => {
+    writeFileSync(
+      CONFIG_PATH,
+      JSON.stringify({
+        compaction: { sweepHour: 1, sweepMinute: 15, sweepThresholdTokens: 80_000 },
+      }) + "\n",
+    );
+    const cfg = loadConfig();
+    expect(compactionSweepHour(cfg)).toBe(1);
+    expect(compactionSweepMinute(cfg)).toBe(15);
+    expect(compactionSweepThreshold(cfg)).toBe(80_000);
   });
 });

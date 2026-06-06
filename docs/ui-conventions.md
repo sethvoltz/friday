@@ -38,6 +38,18 @@ plus a magic max-height.
   must render non-interactively, no glyph, no `aria-expanded`. The pure
   derivation lives in `collapsible-toggle.ts:shouldShowToggle`.
 
+## Floating overlay pills
+
+Transient, position-relative chat affordances render as **floating pills**
+(`.floating-pill` in `ChatShell.svelte`): a small blurred-background rounded
+control that floats over the message list rather than occupying layout. The
+same class backs the jump-to-bottom pill, the loading-older indicator, and the
+"Viewing pre-compaction history" pill (FRI-156). A new "scroll back to X" or
+"you are at position Y" affordance should reuse `.floating-pill` and sit in the
+same overlay band — don't invent a bespoke floating chrome per surface. The
+pill's visibility is derived from a scroll/`IntersectionObserver` signal, never
+from a manual toggle.
+
 ## Agent-type glyphs (sidebar)
 
 The Sidebar renders each agent's type as a Lucide glyph, color-tinted

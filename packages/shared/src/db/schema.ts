@@ -167,7 +167,7 @@ export const blocks = pgTable(
     messageId: text("message_id"),
     blockIndex: integer("block_index").notNull(),
     role: text("role").notNull(), // user|assistant|system
-    kind: text("kind").notNull(), // text|thinking|tool_use|tool_result|error
+    kind: text("kind").notNull(), // text|thinking|tool_use|tool_result|error|mail|compaction
     source: text("source"), // user_chat|mail|queue_inject|sdk|scratch|agent_spawn|schedule|refork_notice|dashboard-mutator
     // BetterAuth user id of the human who authored this block, when there is
     // one. Stamped by the `sendUserMessage` mutator from the verified JWT
@@ -197,7 +197,7 @@ export const blocks = pgTable(
     roleCheck: check("blocks_role_check", sql`${t.role} IN ('user','assistant','system')`),
     kindCheck: check(
       "blocks_kind_check",
-      sql`${t.kind} IN ('text','thinking','tool_use','tool_result','error','mail')`,
+      sql`${t.kind} IN ('text','thinking','tool_use','tool_result','error','mail','compaction')`,
     ),
     statusCheck: check(
       "blocks_status_check",

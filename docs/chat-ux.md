@@ -40,6 +40,14 @@ The dashboard's home `/` is a single persistent chat with Friday. This doc captu
 
 **WebKit / Safari / Orion paint-deferral.** Setting `scrollTop` while WebKit's scroll thread is still hot (fast-scroll just stopped, momentum still resolving) makes WebKit defer both the scroll-position commit and the paint of the newly-revealed region until the next user-originated scroll event. The DOM and layout are correct; the GPU paint is stale. Symptom: blank chat below a thin top band, fixed by any 1px scroll. We wrap the `scrollTop` write in a synchronous `overflow-y: hidden` → write → `setTimeout(0)` restore. Setting `overflow-y: hidden` detaches the element from the scroll thread, forcing WebKit to commit + paint synchronously; the async restore reattaches it once paint has happened. Synchronous restore reproduces the bug — the `setTimeout` tick is load-bearing. Pattern lifted from `inokawa/virtua` (PR #862, originally `prud/ios-overflow-scroll-to-top`). See ADR-019.
 
+## Compaction divider (FRI-156)
+
+When a session is compacted (manual `/compact`, the nightly sweep, or the SDK auto-compact ceiling — see `docs/architecture.md` → _Agent lifecycle → Context compaction_), the daemon writes a durable `kind:'compaction'` block. `ChatMessages.svelte` renders it as a **full-width divider** reading `Context compacted · 779.0K → 50.00K tokens` (the pre/post token counts humanized from `content_json` via `fmtTokensCompact`). Because it is a real persisted block, the divider **survives reload** and shows up in past-session views — it replaces the old in-memory "Context compacted" inline notice (`type:'compaction'` SSE event), which was lost on refresh.
+
+- **Never-reset invariant.** Compaction never clears, mutates, or hides visible history — the divider is purely additive. `/clear` remains the only path that resets the chat. This is pinned by tests at both the daemon and dashboard layers, not enforced by new runtime code.
+- **"Viewing pre-compaction history" pill.** When the user scrolls **above** the most-recent compaction divider, `ChatShell.svelte` shows a sticky overlay pill ("Viewing pre-compaction history") next to the jump-to-bottom pill — same `.floating-pill` affordance. Clicking it scrolls the divider back into view. An `IntersectionObserver` on the divider drives the pill's visibility (it forces on when the divider has scrolled out of the virtualization window above the viewport).
+- **While compaction is in flight**, a transient "Compacting context…" indicator (driven by the `compacting` SSE event, `phase:'start'` → on, `'done'` → off) shows for the focused agent. It is ephemeral — not replayed on reload; the settled divider is the durable record.
+
 ## Timestamps and grouping
 
 Slack-canonical: relative wall-clock labels everywhere; same-author messages within 5 minutes collapse into a single group; only the first bubble of a group shows an inline timestamp.
