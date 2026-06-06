@@ -111,8 +111,13 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   servers[MEMORY_SERVER_NAME] = buildMemoryServer(ctx);
 
   // friday-secrets: on-demand fetch for orchestrator/builder/helper/bare (ADR-038).
-  // Scheduled agents are excluded — they run headless without secret disclosure.
-  if (opts.callerType !== "scheduled") {
+  // Scheduled + planner are excluded — headless leaves without secret disclosure.
+  if (
+    opts.callerType === "orchestrator" ||
+    opts.callerType === "builder" ||
+    opts.callerType === "helper" ||
+    opts.callerType === "bare"
+  ) {
     servers[SECRETS_SERVER_NAME] = buildSecretsServer({
       callerName: opts.callerName,
       callerType: opts.callerType,
