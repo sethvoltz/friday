@@ -17,9 +17,7 @@ export function extractEnvVarRefs(...values: (string | undefined)[]): Set<string
   return refs;
 }
 
-export function collectRefsFromEnvRecords(
-  records: Record<string, string>[],
-): Set<string> {
+export function collectRefsFromEnvRecords(records: Record<string, string>[]): Set<string> {
   const refs = new Set<string>();
   for (const rec of records) {
     for (const v of Object.values(rec)) {
@@ -118,7 +116,8 @@ export function canFetchOnDemand(opts: {
   if (!resolvedMeta) return { ok: false, reason: "unknown secret" };
   if (resolvedMeta.mode !== "on-demand") return { ok: false, reason: "not on-demand" };
   if (resolvedMeta.daemon) return { ok: false, reason: "daemon secret" };
-  if (!scopeAllows(resolvedMeta, opts.agentType, opts.appId)) return { ok: false, reason: "scope denied" };
+  if (!scopeAllows(resolvedMeta, opts.agentType, opts.appId))
+    return { ok: false, reason: "scope denied" };
 
   const vaultKey = vaultKeyForMeta(resolvedMeta);
   const value = cache.payload.secrets[vaultKey]?.value;

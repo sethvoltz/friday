@@ -3,7 +3,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { AgentTypeName } from "../config.js";
 import { META_PATH } from "./paths.js";
 import { vaultKeyForMeta } from "./paths.js";
-import type { SecretMeta, SecretsMetaFile, VaultPayload } from "./types.js";
+import type { SecretMeta, SecretsMetaFile } from "./types.js";
 
 const VALID_MODES = new Set(["env", "on-demand"]);
 const VALID_AGENTS = new Set<AgentTypeName>([
@@ -48,7 +48,11 @@ export function writeMetaFile(meta: SecretsMetaFile): void {
   writeFileSync(META_PATH, stringifyYaml(meta), "utf8");
 }
 
-export function findMeta(meta: SecretsMetaFile, name: string, app?: string): SecretMeta | undefined {
+export function findMeta(
+  meta: SecretsMetaFile,
+  name: string,
+  app?: string,
+): SecretMeta | undefined {
   return meta.secrets.find((s) => s.name === name && (s.app ?? undefined) === (app ?? undefined));
 }
 

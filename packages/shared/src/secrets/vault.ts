@@ -1,11 +1,14 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-import { decryptPayload, encryptPayload, identityToRecipient, readAgeIdentityFromDisk } from "./age.js";
+import {
+  decryptPayload,
+  encryptPayload,
+  identityToRecipient,
+  readAgeIdentityFromDisk,
+} from "./age.js";
 import { emptyMeta, readMetaFile, validateBijection, writeMetaFile } from "./meta.js";
 import {
   AGE_KEY_PATH,
   GENERATION_PATH,
-  META_PATH,
   RECIPIENTS_PATH,
   SECRETS_DIR,
   VAULT_ENC_PATH,
@@ -154,9 +157,7 @@ export function getSecretValue(vaultKey: string): string | undefined {
 export async function upsertSecret(meta: SecretMeta, value: string): Promise<void> {
   const unlock = await unlockVault(true);
   const payload: VaultPayload =
-    unlock.ok === true
-      ? structuredClone(unlock.cache.payload)
-      : { version: 1, secrets: {} };
+    unlock.ok === true ? structuredClone(unlock.cache.payload) : { version: 1, secrets: {} };
   const fileMeta = unlock.ok === true ? structuredClone(unlock.cache.meta) : emptyMeta();
 
   const key = vaultKeyForMeta(meta);

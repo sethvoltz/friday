@@ -347,10 +347,8 @@ async function runConfiguration(): Promise<DoctorCheck[]> {
   box.resolve(
     "secrets vault",
     vaultUnlock.ok ? "ok" : existsSync(ENV_PATH) ? "warn" : "fail",
-    vaultUnlock.ok ? "unlocked" : vaultUnlock.reason ?? "missing",
-    vaultUnlock.ok
-      ? undefined
-      : "run `friday secrets init` + `friday secrets migrate-from-env`",
+    vaultUnlock.ok ? "unlocked" : (vaultUnlock.reason ?? "missing"),
+    vaultUnlock.ok ? undefined : "run `friday secrets init` + `friday secrets migrate-from-env`",
   );
   if (vaultUnlock.ok) {
     const bio = validateBijection(
@@ -375,7 +373,12 @@ async function runConfiguration(): Promise<DoctorCheck[]> {
   }
 
   if (existsSync(ENV_PATH)) {
-    box.add("warn", "legacy .env", "plaintext present", "migrate with `friday secrets migrate-from-env`");
+    box.add(
+      "warn",
+      "legacy .env",
+      "plaintext present",
+      "migrate with `friday secrets migrate-from-env`",
+    );
   }
 
   box.resolve("SOUL.md", existsSync(SOUL_PATH) ? "ok" : "fail", displayPath(SOUL_PATH));

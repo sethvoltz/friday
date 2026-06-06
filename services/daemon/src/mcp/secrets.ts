@@ -42,7 +42,12 @@ export function buildSecretsServer(opts: BuildSecretsServerOptions) {
         async (args, extra) => {
           if (isSecretsLocked()) {
             return {
-              content: [{ type: "text" as const, text: "Vault is locked — operator must run `friday secrets unlock --check`." }],
+              content: [
+                {
+                  type: "text" as const,
+                  text: "Vault is locked — operator must run `friday secrets unlock --check`.",
+                },
+              ],
               isError: true,
             };
           }
@@ -94,7 +99,7 @@ export function buildSecretsServer(opts: BuildSecretsServerOptions) {
         "secrets_list",
         "List on-demand secret names available in your scope (names only, no values).",
         {},
-        async (_args, extra) => {
+        async (_args, _extra) => {
           if (isSecretsLocked()) {
             return {
               content: [{ type: "text" as const, text: "Vault is locked." }],

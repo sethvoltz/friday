@@ -9,11 +9,7 @@
  */
 
 import type { AgentType, ManifestMcpServer, McpServerConfig } from "@friday/shared";
-import {
-  buildSubstitutionMap,
-  collectRefsFromEnvRecords,
-  isSecretsLocked,
-} from "@friday/shared";
+import { buildSubstitutionMap, collectRefsFromEnvRecords, isSecretsLocked } from "@friday/shared";
 import type {
   McpSdkServerConfigWithInstance,
   McpStdioServerConfig,
@@ -239,7 +235,7 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // relative to `appContext.folderPath`, with `${VAR}` substitution from
   // the app's own `.env`.
   if (opts.appContext) {
-    const { appId, folderPath, mcpServers, envFile } = opts.appContext;
+    const { appId, folderPath, mcpServers } = opts.appContext;
     for (const srv of mcpServers) {
       if (srv.name.startsWith("friday-") || RESERVED_NAMES.has(srv.name)) {
         logger.log("warn", "mcp.app.shadows-builtin", {

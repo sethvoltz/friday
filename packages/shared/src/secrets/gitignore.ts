@@ -2,20 +2,20 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DATA_DIR } from "../config.js";
 
-const SECRETS_ALLOW_BLOCK = [
-  "!secrets/",
-  "!secrets/**",
-  "secrets/.generation",
-] as const;
+const SECRETS_ALLOW_BLOCK = ["!secrets/", "!secrets/**", "secrets/.generation"] as const;
 
 export function patchFridayGitignore(): { changed: boolean; removedEnvAllow: boolean } {
   const path = join(DATA_DIR, ".gitignore");
   if (!existsSync(path)) {
     writeFileSync(
       path,
-      ["# Start by ignoring everything, un-ignoring what we want tracked.", "*", "!.gitignore", ...SECRETS_ALLOW_BLOCK, ""].join(
-        "\n",
-      ),
+      [
+        "# Start by ignoring everything, un-ignoring what we want tracked.",
+        "*",
+        "!.gitignore",
+        ...SECRETS_ALLOW_BLOCK,
+        "",
+      ].join("\n"),
     );
     return { changed: true, removedEnvAllow: false };
   }

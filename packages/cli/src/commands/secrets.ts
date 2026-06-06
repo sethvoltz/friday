@@ -122,7 +122,7 @@ export const secretsCommand = defineCommand({
       },
     }),
 
-    "unlock": defineCommand({
+    unlock: defineCommand({
       meta: { name: "unlock", description: "Test vault decryption" },
       args: { check: { type: "boolean", description: "Exit 1 if unlock fails" } },
       async run({ args }) {
@@ -180,7 +180,11 @@ export const secretsCommand = defineCommand({
           console.error(pc.red("vault locked"));
           process.exit(1);
         }
-        const meta = findMeta(unlock.cache.meta, args.name as string, args.app as string | undefined);
+        const meta = findMeta(
+          unlock.cache.meta,
+          args.name as string,
+          args.app as string | undefined,
+        );
         if (!meta) {
           console.error("not found");
           process.exit(1);
@@ -321,7 +325,10 @@ export const secretsCommand = defineCommand({
             continue;
           }
           const daemon = key in DAEMON_FIELD_ALIASES;
-          await upsertSecret({ name: key, mode: "env", daemon: daemon || undefined }, String(value));
+          await upsertSecret(
+            { name: key, mode: "env", daemon: daemon || undefined },
+            String(value),
+          );
         }
         writeFileSync(ENV_LOCAL_PATH, `${localLines.join("\n")}\n`);
         patchFridayGitignore();
@@ -329,7 +336,9 @@ export const secretsCommand = defineCommand({
         await notifyDaemonReload();
         console.log(pc.green("  migrated machine keys → .env.local"));
         console.log(pc.green("  migrated integration keys → vault"));
-        console.log(pc.yellow("  scrub plaintext from .env manually and `git rm --cached .env` if tracked"));
+        console.log(
+          pc.yellow("  scrub plaintext from .env manually and `git rm --cached .env` if tracked"),
+        );
       },
     }),
 

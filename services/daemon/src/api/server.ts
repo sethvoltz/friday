@@ -175,9 +175,8 @@ async function handle(
     if (!authorizeSameHost(req)) {
       return json(res, 401, { error: "unauthorized" });
     }
-    const { clearFridayConfigCache, clearSecretsCache, unlockVault } = await import(
-      "@friday/shared"
-    );
+    const { clearFridayConfigCache, clearSecretsCache, unlockVault } =
+      await import("@friday/shared");
     clearSecretsCache();
     clearFridayConfigCache();
     const result = await unlockVault(true);

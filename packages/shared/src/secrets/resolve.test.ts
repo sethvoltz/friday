@@ -90,9 +90,7 @@ describe("on-demand fetch scope", () => {
   });
 
   it("rejects env-mode and daemon secrets on fetch", () => {
-    expect(canFetchOnDemand({ name: "GITHUB_TOKEN", agentType: "builder", cache }).ok).toBe(
-      false,
-    );
+    expect(canFetchOnDemand({ name: "GITHUB_TOKEN", agentType: "builder", cache }).ok).toBe(false);
     expect(canFetchOnDemand({ name: "DAEMON_ONLY", agentType: "orchestrator", cache }).ok).toBe(
       false,
     );

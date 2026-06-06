@@ -579,7 +579,12 @@ function denySecretsFilesystemAccess(
 ): string | undefined {
   const fsTools = new Set(["Read", "Write", "Edit", "Glob", "Grep"]);
   if (!fsTools.has(toolName)) return undefined;
-  const candidates = [toolInput.file_path, toolInput.path, toolInput.pattern, toolInput.notebook_path];
+  const candidates = [
+    toolInput.file_path,
+    toolInput.path,
+    toolInput.pattern,
+    toolInput.notebook_path,
+  ];
   for (const raw of candidates) {
     if (typeof raw !== "string" || !raw) continue;
     const abs = resolvePath(expandHome(raw));
@@ -604,10 +609,7 @@ export function buildPreToolUseHooks(opts: WorkerSpawnOptions) {
               tool_input?: Record<string, unknown>;
             };
             if (i.hook_event_name !== "PreToolUse") return {};
-            const secretsDeny = denySecretsFilesystemAccess(
-              i.tool_name ?? "",
-              i.tool_input ?? {},
-            );
+            const secretsDeny = denySecretsFilesystemAccess(i.tool_name ?? "", i.tool_input ?? {});
             if (secretsDeny) {
               return {
                 hookSpecificOutput: {

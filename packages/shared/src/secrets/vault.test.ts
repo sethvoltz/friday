@@ -4,13 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateAgeKeypair } from "./age.js";
 import { readMetaFile, validateBijection } from "./meta.js";
 import { AGE_KEY_PATH, GENERATION_PATH, META_PATH, SECRETS_DIR, VAULT_ENC_PATH } from "./paths.js";
-import {
-  clearSecretsCache,
-  initVault,
-  removeSecret,
-  unlockVault,
-  upsertSecret,
-} from "./vault.js";
+import { clearSecretsCache, initVault, removeSecret, unlockVault, upsertSecret } from "./vault.js";
 
 describe("vault transactional writes", () => {
   beforeEach(() => {
@@ -36,7 +30,10 @@ describe("vault transactional writes", () => {
     expect(unlock.ok).toBe(true);
     if (unlock.ok) {
       expect(unlock.cache.payload.secrets.TEST_KEY?.value).toBe("value123");
-      const bio = validateBijection(unlock.cache.meta, new Set(Object.keys(unlock.cache.payload.secrets)));
+      const bio = validateBijection(
+        unlock.cache.meta,
+        new Set(Object.keys(unlock.cache.payload.secrets)),
+      );
       expect(bio.ok).toBe(true);
     }
     expect(existsSync(GENERATION_PATH)).toBe(true);

@@ -64,11 +64,6 @@ function ensureLocalEnvFile(): Record<string, string> {
   return dotenvParse(readFileSync(path));
 }
 
-function persistLocalKey(path: string, key: string, value: string, parsed: Record<string, string>): void {
-  appendFileSync(path, `${key}=${value}\n`);
-  parsed[key] = value;
-}
-
 /**
  * Warm the vault cache. Call at daemon boot before serving traffic.
  */
