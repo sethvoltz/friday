@@ -460,6 +460,23 @@ async function handle(
     }
     return json(res, 200, { ok: true, workspacePath: workspacePathRemoved });
   }
+  if (method === "POST" && /^\/api\/agents\/[^/]+\/unarchive$/.test(path)) {
+    const name = path.split("/")[3];
+    const a = await registry.getAgent(name);
+    if (!a) return json(res, 404, { error: "not found" });
+    if (a.status !== "archived") {
+      return json(res, 409, {
+        error: `"${name}" is not archived (status=${a.status})`,
+        code: "not_archived",
+      });
+    }
+    try {
+      await registry.unarchiveAgent(name);
+    } catch (err) {
+      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+    return json(res, 200, { ok: true });
+  }
   if (method === "POST" && /^\/api\/agents\/[^/]+\/abort$/.test(path)) {
     const name = path.split("/")[3];
     const aborted = abortTurn(name);

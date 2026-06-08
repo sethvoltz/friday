@@ -244,6 +244,21 @@ export function buildAgentsServer(opts: BuildAgentsServerOptions) {
         },
       ),
       tool(
+        "agent_unarchive",
+        "Restore an archived agent to idle status. Use to reactivate a helper, planner, or bare agent that was archived but whose work was not actually finished. For builders whose worktree was already removed, the agent will be idle but cannot resume code work without a new worktree.",
+        { name: z.string() },
+        async (args, extra) => {
+          const row = await daemonFetch({
+            ...ctx,
+            signal: signalFrom(extra),
+            path: `/api/agents/${encodeURIComponent(args.name)}/unarchive`,
+            method: "POST",
+            body: {},
+          });
+          return { content: [{ type: "text", text: JSON.stringify(row, null, 2) }] };
+        },
+      ),
+      tool(
         "agent_inspect",
         "Read recent content blocks from a sub-agent's transcript. Default `markdown` format gives a compact human-readable summary; pass `format: 'json'` for raw block rows.",
         {
