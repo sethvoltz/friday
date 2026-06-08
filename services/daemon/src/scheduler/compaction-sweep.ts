@@ -4,8 +4,8 @@
  * A daemon-internal timer that, once per night (default 03:30 local),
  * dispatches a `/compact <persona instructions>` maintenance turn to each
  * long-lived, currently-idle agent whose estimated live context has crept
- * above the sweep threshold (default 60K tokens). This is the LOW number in
- * the two-number scheme: the sweep keeps wakes cheap (~60K) and the per-agent
+ * above the sweep threshold (default 100K tokens). This is the LOW number in
+ * the two-number scheme: the sweep keeps wakes cheap (~100K) and the per-agent
  * `settings.autoCompactWindow` SDK ceiling (200K, FRI-156 §A) is the runaway-
  * day backstop.
  *
@@ -21,7 +21,7 @@
  * per local day. `isSweepDue` also bounds firing to a catch-up WINDOW after the
  * scheduled time (`SWEEP_WINDOW_MINUTES`) so a daytime daemon restart (fresh
  * `lastSweepAt === null`) does NOT immediately mass-compact — it waits for the
- * next night. The 60K threshold gate is the further backstop against an
+ * next night. The 100K threshold gate is the further backstop against an
  * overnight restart re-sweeping — a session that was just compacted sits below
  * threshold, so a same-day second pass selects nothing.
  */

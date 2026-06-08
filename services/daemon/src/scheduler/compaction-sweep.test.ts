@@ -33,7 +33,7 @@ import {
 import { COMPACT_CUSTOM_INSTRUCTIONS } from "../prompts/compact-instructions.js";
 
 // Default config: no `compaction` block, so the resolvers fall to the code
-// defaults (03:30 local, 60K threshold). Cast keeps the test honest about
+// defaults (03:30 local, 100K threshold). Cast keeps the test honest about
 // using the real resolver path rather than hand-poking fields.
 const cfg = {} as FridayConfig;
 
@@ -156,31 +156,31 @@ describe("selectSweepTargets (pure policy)", () => {
       ["stalled-reg", null],
     ]);
     const usageByAgent = new Map<string, number>([
-      ["friday", 75_000],
-      ["scout", 90_000],
-      ["kitchen", 82_000],
+      ["friday", 175_000],
+      ["scout", 190_000],
+      ["kitchen", 182_000],
       ["bob", 120_000],
       ["busy", 200_000],
       ["offline", 150_000],
-      ["light", 12_000], // below 60K
-      ["stalled-reg", 99_000],
+      ["light", 12_000], // below 100K
+      ["stalled-reg", 199_000],
     ]);
 
     const targets = selectSweepTargets(agents, liveStatus, usageByAgent, cfg);
 
     // EXACT candidate list — order follows the agents array.
     expect(targets).toEqual([
-      { name: "friday", type: "orchestrator", estimatedContext: 75_000 },
-      { name: "scout", type: "helper", estimatedContext: 90_000 },
-      { name: "kitchen", type: "bare", estimatedContext: 82_000 },
+      { name: "friday", type: "orchestrator", estimatedContext: 175_000 },
+      { name: "scout", type: "helper", estimatedContext: 190_000 },
+      { name: "kitchen", type: "bare", estimatedContext: 182_000 },
     ]);
   });
 
   it("excludes an agent exactly AT the threshold (strict `>` comparison)", () => {
     const agents = [orch("edge")];
     const liveStatus = new Map<string, "idle" | "working" | null>([["edge", "idle"]]);
-    // 60_000 is the default threshold; estimate === threshold must NOT select.
-    const usageByAgent = new Map<string, number>([["edge", 60_000]]);
+    // 100_000 is the default threshold; estimate === threshold must NOT select.
+    const usageByAgent = new Map<string, number>([["edge", 100_000]]);
     expect(selectSweepTargets(agents, liveStatus, usageByAgent, cfg)).toEqual([]);
   });
 
@@ -282,7 +282,7 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     // Eligible: idle orchestrator, session s-friday, ~90K context.
     await registry.registerAgent({ name: "friday", type: "orchestrator" });
     await registry.setSession("friday", "s-friday");
-    await seedUsage("friday", "s-friday", 90_000);
+    await seedUsage("friday", "s-friday", 190_000);
     fakeLiveWorker("friday", "idle");
 
     // Builder — never swept regardless of context/idle.
@@ -309,7 +309,7 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     await seedUsage("offline", "s-offline", 180_000);
     // intentionally NO fakeLiveWorker
 
-    // Idle orchestrator below threshold — excluded by the 60K gate.
+    // Idle orchestrator below threshold — excluded by the 100K gate.
     await registry.registerAgent({ name: "light", type: "orchestrator" });
     await registry.setSession("light", "s-light");
     await seedUsage("light", "s-light", 20_000);
@@ -365,15 +365,15 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     expect(dispatchedLog).toBeDefined();
     expect(dispatchedLog![2]).toMatchObject({
       agent: "friday",
-      estimate: 90_000,
-      threshold: 60_000,
+      estimate: 190_000,
+      threshold: 100_000,
     });
   });
 
   it("no-ops entirely (no dispatch, no started log) when the clock is before 03:30", async () => {
     await registry.registerAgent({ name: "friday", type: "orchestrator" });
     await registry.setSession("friday", "s-friday");
-    await seedUsage("friday", "s-friday", 90_000);
+    await seedUsage("friday", "s-friday", 190_000);
     fakeLiveWorker("friday", "idle");
 
     const dispatchSpy = vi.spyOn(lifecycle, "dispatchTurn").mockImplementation(() => {});
@@ -391,7 +391,7 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     // liveStatus map from peekLiveWorker, which reports 'working').
     await registry.registerAgent({ name: "friday", type: "orchestrator" });
     await registry.setSession("friday", "s-friday");
-    await seedUsage("friday", "s-friday", 90_000);
+    await seedUsage("friday", "s-friday", 190_000);
     fakeLiveWorker("friday", "working");
     // Registry status must also be 'working' so the registry-side gate agrees
     // (idle→working is a legal transition).
@@ -435,7 +435,7 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     // while A is suspended, then release A. The guard must make B a no-op.
     await registry.registerAgent({ name: "friday", type: "orchestrator" });
     await registry.setSession("friday", "s-friday");
-    await seedUsage("friday", "s-friday", 90_000);
+    await seedUsage("friday", "s-friday", 190_000);
     fakeLiveWorker("friday", "idle");
 
     let releaseA: (v: AgentEntry[]) => void;
@@ -479,7 +479,7 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     // peekLiveWorker: idle for the selection-phase call, working thereafter.
     await registry.registerAgent({ name: "friday", type: "orchestrator" });
     await registry.setSession("friday", "s-friday");
-    await seedUsage("friday", "s-friday", 90_000);
+    await seedUsage("friday", "s-friday", 190_000);
     fakeLiveWorker("friday", "idle");
 
     let calls = 0;

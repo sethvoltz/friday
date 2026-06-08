@@ -509,7 +509,7 @@ export function buildQueryOptions(
     // FRI-156 §A: `autoCompactWindow` is the per-agent-type SDK auto-compact
     // ceiling (200K default for every type, config-overridable). When live
     // context crosses it, the SDK compacts in place — the backstop above the
-    // 60K nightly sweep. Resolved field-by-field via `autoCompactWindowFor`
+    // 100K nightly sweep. Resolved field-by-field via `autoCompactWindowFor`
     // so a partial `compaction.autoCompactWindow` config override doesn't drop
     // the other types' defaults (the shallow-merge hazard).
     settings: {
@@ -673,7 +673,7 @@ export function buildPreToolUseHooks(opts: WorkerSpawnOptions) {
  * does NOT flow through (older SDK, field renamed, threshold absent), log the
  * documented SDK gap. The probe verdict drives nothing directly; the documented
  * fallback is the INDEPENDENT nightly sweep (FRI-156 §B), which dispatches
- * `/compact` on its own timer at the 60K budget regardless of whether the SDK
+ * `/compact` on its own timer at the 100K budget regardless of whether the SDK
  * ceiling takes effect — so context is bounded even when this probe reports
  * `takes_effect:false`.
  *

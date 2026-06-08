@@ -364,7 +364,7 @@ describe("compaction config (FRI-156 §A/§B)", () => {
     expect(DEFAULT_COMPACTION_SWEEP).toEqual({
       sweepHour: 3,
       sweepMinute: 30,
-      sweepThresholdTokens: 60_000,
+      sweepThresholdTokens: 100_000,
     });
   });
 
@@ -373,7 +373,7 @@ describe("compaction config (FRI-156 §A/§B)", () => {
     expect(cfg.compaction).toBeUndefined();
     expect(compactionSweepHour(cfg)).toBe(3);
     expect(compactionSweepMinute(cfg)).toBe(30);
-    expect(compactionSweepThreshold(cfg)).toBe(60_000);
+    expect(compactionSweepThreshold(cfg)).toBe(100_000);
     expect(autoCompactWindowFor(cfg, "orchestrator")).toBe(200_000);
     expect(autoCompactWindowFor(cfg, "builder")).toBe(200_000);
   });
@@ -392,7 +392,7 @@ describe("compaction config (FRI-156 §A/§B)", () => {
     // ...but the resolvers backfill the siblings from code defaults.
     expect(compactionSweepHour(cfg)).toBe(5); // overridden
     expect(compactionSweepMinute(cfg)).toBe(30); // backfilled default
-    expect(compactionSweepThreshold(cfg)).toBe(60_000); // backfilled default
+    expect(compactionSweepThreshold(cfg)).toBe(100_000); // backfilled default
   });
 
   it("autoCompactWindowFor backfills per-type defaults under a partial override", () => {

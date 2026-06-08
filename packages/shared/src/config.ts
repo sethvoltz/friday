@@ -192,7 +192,7 @@ export function watchdogThresholdMs(cfg: WatchdogConfig | undefined, type: Agent
 
 /**
  * Context-budget compaction policy (FRI-156). Two-number scheme: the nightly
- * `sweep*` knobs keep long-lived idle agents' next-wake context small (~60K),
+ * `sweep*` knobs keep long-lived idle agents' next-wake context small (~100K),
  * while `autoCompactWindow` is the per-agent-type SDK ceiling that catches
  * runaway days. All fields optional; every read goes through a `?? DEFAULT`
  * resolver below (see `CONFIG SHALLOW-MERGE DROP` rationale — `loadConfig`
@@ -212,7 +212,7 @@ export interface CompactionConfig {
 
 /** Default per-agent-type SDK auto-compact window applied when
  *  `CompactionConfig.autoCompactWindow` is absent or partial. 200K for every
- *  type (FRI-156 §A) — the SDK ceiling backstop, distinct from the 60K sweep
+ *  type (FRI-156 §A) — the SDK ceiling backstop, distinct from the 100K sweep
  *  threshold. Defaults in code (never .env), overridable via config. */
 export const DEFAULT_AUTO_COMPACT_WINDOW: Record<AgentTypeName, number> = {
   orchestrator: 200_000,
@@ -224,11 +224,11 @@ export const DEFAULT_AUTO_COMPACT_WINDOW: Record<AgentTypeName, number> = {
 };
 
 /** Default nightly maintenance-sweep schedule + threshold (FRI-156 §B):
- *  03:30 local, 60K-token floor. Defaults in code; config overrides per field. */
+ *  03:30 local, 100K-token floor. Defaults in code; config overrides per field. */
 export const DEFAULT_COMPACTION_SWEEP = {
   sweepHour: 3,
   sweepMinute: 30,
-  sweepThresholdTokens: 60_000,
+  sweepThresholdTokens: 100_000,
 } as const;
 
 /** Floor a user-supplied token budget at a sane minimum so a hostile/buggy
