@@ -156,6 +156,7 @@
     ...data.settings.evolveModels,
   });
   let savingSettings = $state(false);
+  let reloadState = $state<Record<string, "idle" | "loading" | "ok" | "error">>({});
 
   $effect(() => {
     if (!zeroOn) return;
@@ -360,6 +361,31 @@
   async function signOut() {
     await fetch("/api/auth/sign-out", { method: "POST" });
     window.location.href = "/login";
+  }
+
+  async function reloadApp(appId: string) {
+    reloadState[appId] = "loading";
+    try {
+      const r = await fetch(`/api/apps/${encodeURIComponent(appId)}/reload`, { method: "POST" });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `reload failed (${r.status})`);
+      }
+      reloadState[appId] = "ok";
+      showSettingsToast(`${appId} reloaded`, "ok");
+      setTimeout(() => {
+        reloadState[appId] = "idle";
+      }, 3000);
+    } catch (err) {
+      reloadState[appId] = "error";
+      showSettingsToast(
+        `reload failed: ${err instanceof Error ? err.message : String(err)}`,
+        "err",
+      );
+      setTimeout(() => {
+        reloadState[appId] = "idle";
+      }, 3000);
+    }
   }
 
   /** FIX_FORWARD 5.11: revoke one session. If it's the current one, the
@@ -588,9 +614,7 @@
   <div class="card">
     <div class="card-header"><h2>Apps</h2></div>
     <p class="row-value">
-      Installed Friday Apps from <code>~/.friday/apps/</code>. Install,
-      uninstall, and reload are CLI/MCP-only in v1 — this card is
-      read-only.
+      Installed Friday Apps from <code>~/.friday/apps/</code>.
     </p>
     {#if apps.length === 0}
       <p class="row-value muted">No apps installed.</p>
@@ -604,6 +628,20 @@
               <span class="app-status app-status-{app.status}">
                 {app.status}
               </span>
+              <button
+                class="ghost app-reload-btn"
+                disabled={reloadState[app.id] === "loading"}
+                onclick={() => reloadApp(app.id)}>
+                {#if reloadState[app.id] === "loading"}
+                  Reloading…
+                {:else if reloadState[app.id] === "ok"}
+                  Reloaded ✓
+                {:else if reloadState[app.id] === "error"}
+                  Failed — retry?
+                {:else}
+                  Reload
+                {/if}
+              </button>
             </div>
             <div class="app-name">{app.name}</div>
             {#if app.agents.length > 0}
@@ -1154,6 +1192,11 @@
     background: var(--bg-card);
     border: 1px solid var(--border-subtle);
     text-transform: lowercase;
+  }
+  .app-reload-btn {
+    margin-left: auto;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.75rem;
   }
   .app-status-installed { color: var(--status-success); }
   .app-status-orphaned { color: var(--text-tertiary); }
