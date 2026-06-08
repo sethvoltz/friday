@@ -568,7 +568,7 @@
   .toast-info {
     border-color: var(--accent-primary);
   }
-  @media (max-width: 768px) {
+  @media (max-width: 1023px) {
     .input,
     .textarea {
       font-size: 16px;

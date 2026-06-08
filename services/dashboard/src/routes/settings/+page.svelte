@@ -1216,7 +1216,7 @@
     margin-right: 0.3rem;
   }
   .row-value.muted { color: var(--text-tertiary); }
-  @media (max-width: 768px) {
+  @media (max-width: 1023px) {
     .model-select {
       font-size: 16px;
     }

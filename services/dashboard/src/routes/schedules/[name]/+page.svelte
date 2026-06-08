@@ -397,6 +397,8 @@
     .grid {
       grid-template-columns: 1fr;
     }
+  }
+  @media (max-width: 1023px) {
     .input,
     .textarea {
       font-size: 16px;
