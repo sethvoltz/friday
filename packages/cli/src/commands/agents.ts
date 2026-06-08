@@ -78,5 +78,14 @@ export const agentsCommand = defineCommand({
         }
       },
     }),
+    unarchive: defineCommand({
+      meta: { name: "unarchive", description: "Restore an archived agent to idle" },
+      args: { name: { type: "positional", required: true } },
+      async run({ args }) {
+        const c = new DaemonClient();
+        await c.post(`/api/agents/${args.name}/unarchive`, {});
+        console.log(pc.green(`unarchived ${args.name}`));
+      },
+    }),
   },
 });
