@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.0](https://github.com/sethvoltz/friday/compare/v1.12.0...v1.13.0) (2026-06-08)
+
+
+### Features
+
+* **dashboard:** purpose-built ScheduleWakeup tool renderer ([#194](https://github.com/sethvoltz/friday/issues/194)) ([fd1a7d1](https://github.com/sethvoltz/friday/commit/fd1a7d1d3fb44ac950112602ee3225ad84cc1953))
+
 ## [1.12.0](https://github.com/sethvoltz/friday/compare/v1.11.0...v1.12.0) (2026-06-08)
 
 
