@@ -1543,11 +1543,6 @@ export async function forceWorkerRefork(agentName: string): Promise<WorkerPrompt
   return drained;
 }
 
-/**
- * Stop all live workers whose agents belong to the given app, so they re-fork
- * with fresh env and MCP subprocesses on next dispatch. Returns the number of
- * workers that were live and stopped.
- */
 export async function stopWorkersForApp(appId: string): Promise<number> {
   const db = getDb();
   const rows = await db

@@ -1449,10 +1449,9 @@ async function handle(
       return json(res, 401, { error: "unauthorized" });
     }
     const id = decodeURIComponent(path.split("/")[3]);
+    let result!: { id: string; changed: boolean };
     try {
-      const result = await reloadApp(id);
-      const stoppedWorkers = await stopWorkersForApp(id);
-      return json(res, 200, { ...result, stoppedWorkers });
+      result = await reloadApp(id);
     } catch (err) {
       if (err instanceof AppInstallError) {
         return json(res, 404, { error: err.message, code: err.code });
@@ -1461,6 +1460,17 @@ async function handle(
         error: err instanceof Error ? err.message : String(err),
       });
     }
+    let stoppedWorkers = 0;
+    // Stop workers even when manifest unchanged — picks up rotated secrets.
+    try {
+      stoppedWorkers = await stopWorkersForApp(id);
+    } catch (err) {
+      logger.log("warn", "app.reload.stop-workers.fail", {
+        app: id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return json(res, 200, { ...result, stoppedWorkers });
   }
 
   return json(res, 404, { error: "not found", path });

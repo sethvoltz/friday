@@ -1,14 +1,6 @@
-/**
- * stopWorkersForApp: stops all live workers belonging to an app's agents and
- * leaves workers from other apps untouched.
- *
- * Uses __putLiveWorkerForTest to inject synthetic workers (pgid=0 → killPgrp
- * is a no-op; exitCode=0 → drainLiveWorker resolves immediately via the
- * early-exit branch rather than hanging on the "exit" event).
- */
-
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, type TestDbHandle } from "@friday/shared";
+import type { LiveWorker } from "./lifecycle.js";
 
 let handle: TestDbHandle;
 let lifecycle: typeof import("./lifecycle.js");
@@ -73,8 +65,8 @@ describe("stopWorkersForApp", () => {
 
     const { worker: wa } = makeFakeWorker({ agentName: "app1-agent-a" });
     const { worker: wb } = makeFakeWorker({ agentName: "app1-agent-b" });
-    lifecycle.__putLiveWorkerForTest("app1-agent-a", wa as never);
-    lifecycle.__putLiveWorkerForTest("app1-agent-b", wb as never);
+    lifecycle.__putLiveWorkerForTest("app1-agent-a", wa as unknown as LiveWorker);
+    lifecycle.__putLiveWorkerForTest("app1-agent-b", wb as unknown as LiveWorker);
 
     const stopped = await lifecycle.stopWorkersForApp("app-one");
 
@@ -89,7 +81,7 @@ describe("stopWorkersForApp", () => {
     await registry.registerAgent({ name: "app2-agent", type: "bare", appId: "app-two" });
     await registry.setStatus("app2-agent", "working");
     const { worker: wo } = makeFakeWorker({ agentName: "app2-agent" });
-    lifecycle.__putLiveWorkerForTest("app2-agent", wo as never);
+    lifecycle.__putLiveWorkerForTest("app2-agent", wo as unknown as LiveWorker);
 
     const stopped = await lifecycle.stopWorkersForApp("app-one");
 

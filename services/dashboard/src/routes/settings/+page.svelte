@@ -156,7 +156,7 @@
     ...data.settings.evolveModels,
   });
   let savingSettings = $state(false);
-  let reloadState = $state(new Map<string, "idle" | "loading" | "ok" | "error">());
+  let reloadState = $state<Record<string, "idle" | "loading" | "ok" | "error">>({});
 
   $effect(() => {
     if (!zeroOn) return;
@@ -364,31 +364,26 @@
   }
 
   async function reloadApp(appId: string) {
-    reloadState.set(appId, "loading");
-    reloadState = reloadState;
+    reloadState[appId] = "loading";
     try {
       const r = await fetch(`/api/apps/${encodeURIComponent(appId)}/reload`, { method: "POST" });
       if (!r.ok) {
-        const body = await r.json().catch(() => ({})) as { error?: string };
+        const body = (await r.json().catch(() => ({}))) as { error?: string };
         throw new Error(body.error ?? `reload failed (${r.status})`);
       }
-      reloadState.set(appId, "ok");
-      reloadState = reloadState;
+      reloadState[appId] = "ok";
       showSettingsToast(`${appId} reloaded`, "ok");
       setTimeout(() => {
-        reloadState.set(appId, "idle");
-        reloadState = reloadState;
+        reloadState[appId] = "idle";
       }, 3000);
     } catch (err) {
-      reloadState.set(appId, "error");
-      reloadState = reloadState;
+      reloadState[appId] = "error";
       showSettingsToast(
         `reload failed: ${err instanceof Error ? err.message : String(err)}`,
         "err",
       );
       setTimeout(() => {
-        reloadState.set(appId, "idle");
-        reloadState = reloadState;
+        reloadState[appId] = "idle";
       }, 3000);
     }
   }
@@ -635,12 +630,14 @@
               </span>
               <button
                 class="ghost app-reload-btn"
-                disabled={reloadState.get(app.id) === "loading"}
+                disabled={reloadState[app.id] === "loading"}
                 onclick={() => reloadApp(app.id)}>
-                {#if reloadState.get(app.id) === "loading"}
+                {#if reloadState[app.id] === "loading"}
                   Reloading…
-                {:else if reloadState.get(app.id) === "ok"}
-                  Reloaded
+                {:else if reloadState[app.id] === "ok"}
+                  Reloaded ✓
+                {:else if reloadState[app.id] === "error"}
+                  Failed — retry?
                 {:else}
                   Reload
                 {/if}
