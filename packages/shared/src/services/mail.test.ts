@@ -202,10 +202,7 @@ describe("searchMail (FRI-153)", () => {
 
   it("filters by priority", async () => {
     const { searchMail } = await import("./mail.js");
-    await seed([
-      { body: "urgent", priority: "critical" },
-      { body: "routine", priority: "normal" },
-    ]);
+    await seed([{ body: "urgent", priority: "critical" }, { body: "routine", priority: "normal" }]);
     const result = await searchMail({ priority: ["critical"] });
     expect(result.total).toBe(1);
     expect(result.results[0].priority).toBe("critical");
@@ -280,9 +277,19 @@ describe("searchMail (FRI-153)", () => {
   it("combines FTS query with metadata filters", async () => {
     const { searchMail } = await import("./mail.js");
     await seed([
-      { body: "deploy the dashboard", delivery: "pending", fromAgent: "orchestrator", toAgent: "builder" },
+      {
+        body: "deploy the dashboard",
+        delivery: "pending",
+        fromAgent: "orchestrator",
+        toAgent: "builder",
+      },
       { body: "dashboard report", delivery: "read", fromAgent: "orchestrator", toAgent: "builder" },
-      { body: "deploy the scheduler", delivery: "pending", fromAgent: "orchestrator", toAgent: "builder" },
+      {
+        body: "deploy the scheduler",
+        delivery: "pending",
+        fromAgent: "orchestrator",
+        toAgent: "builder",
+      },
     ]);
     const result = await searchMail({ q: "dashboard", delivery: ["pending"] });
     expect(result.total).toBe(1);
@@ -299,16 +306,31 @@ describe("searchMail (FRI-153)", () => {
       .insert(schema.mail)
       .values([
         {
-          fromAgent: "a", toAgent: "b", type: "message", delivery: "pending",
-          body: "oldest", priority: "normal", ts: new Date(now - 3000),
+          fromAgent: "a",
+          toAgent: "b",
+          type: "message",
+          delivery: "pending",
+          body: "oldest",
+          priority: "normal",
+          ts: new Date(now - 3000),
         },
         {
-          fromAgent: "a", toAgent: "b", type: "message", delivery: "pending",
-          body: "newest", priority: "normal", ts: new Date(now - 1000),
+          fromAgent: "a",
+          toAgent: "b",
+          type: "message",
+          delivery: "pending",
+          body: "newest",
+          priority: "normal",
+          ts: new Date(now - 1000),
         },
         {
-          fromAgent: "a", toAgent: "b", type: "message", delivery: "pending",
-          body: "middle", priority: "normal", ts: new Date(now - 2000),
+          fromAgent: "a",
+          toAgent: "b",
+          type: "message",
+          delivery: "pending",
+          body: "middle",
+          priority: "normal",
+          ts: new Date(now - 2000),
         },
       ]);
     const result = await searchMail({});
@@ -318,9 +340,7 @@ describe("searchMail (FRI-153)", () => {
 
   it("limit and offset paginate results", async () => {
     const { searchMail } = await import("./mail.js");
-    await seed([
-      { body: "a" }, { body: "b" }, { body: "c" }, { body: "d" }, { body: "e" },
-    ]);
+    await seed([{ body: "a" }, { body: "b" }, { body: "c" }, { body: "d" }, { body: "e" }]);
     const page1 = await searchMail({ limit: 2, offset: 0 });
     const page2 = await searchMail({ limit: 2, offset: 2 });
     expect(page1.results).toHaveLength(2);
