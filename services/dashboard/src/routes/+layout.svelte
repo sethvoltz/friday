@@ -82,6 +82,7 @@
     { href: "/evolve", label: "Evolve", match: (p) => p.startsWith("/evolve") },
     { href: "/skills", label: "Skills", match: (p) => p.startsWith("/skills") },
     { href: "/logs", label: "Logs", match: (p) => p.startsWith("/logs") },
+    { href: "/mail", label: "Mail", match: (p) => p.startsWith("/mail") },
     {
       href: "/settings",
       label: "Settings",

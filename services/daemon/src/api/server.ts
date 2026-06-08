@@ -37,6 +37,7 @@ import {
   listTickets,
   markRead,
   readAttachmentBytes,
+  searchMail,
   sendMail,
   sessionCountsByAgent,
   updateTicket,
@@ -1251,6 +1252,49 @@ async function handle(
     if (!row) return json(res, 404, { error: "mail not found" });
     await closeMail(id);
     return json(res, 200, { ok: true });
+  }
+
+  if (method === "GET" && path === "/api/mail/search") {
+    const q = url.searchParams.get("q") ?? undefined;
+    const from = url.searchParams.get("from") ?? undefined;
+    const to = url.searchParams.get("to") ?? undefined;
+    const involves = url.searchParams.get("involves") ?? undefined;
+    const typeRaw = url.searchParams.get("type");
+    const deliveryRaw = url.searchParams.get("delivery");
+    const priorityRaw = url.searchParams.get("priority");
+    const since = url.searchParams.get("since") ?? undefined;
+    const until = url.searchParams.get("until") ?? undefined;
+    const limit = Math.min(Number(url.searchParams.get("limit") ?? "100"), 500);
+    const offset = Number(url.searchParams.get("offset") ?? "0");
+
+    const type = typeRaw
+      ? (typeRaw.split(",").filter(Boolean) as Array<"message" | "notification" | "task">)
+      : undefined;
+    const delivery = deliveryRaw
+      ? (deliveryRaw.split(",").filter(Boolean) as Array<"pending" | "read" | "closed">)
+      : undefined;
+    const priority = priorityRaw
+      ? (priorityRaw.split(",").filter(Boolean) as Array<"normal" | "critical">)
+      : undefined;
+
+    try {
+      const result = await searchMail({
+        q,
+        from,
+        to,
+        involves,
+        type,
+        delivery,
+        priority,
+        since,
+        until,
+        limit,
+        offset,
+      });
+      return json(res, 200, result);
+    } catch (err) {
+      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   // --- Attachments / uploads ---

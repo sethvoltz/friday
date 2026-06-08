@@ -156,6 +156,11 @@
             <pre class="mail-pre">{sendBody}</pre>
           </CollapsibleSection>
         {/if}
+        {#if sentId}
+          <div class="open-bar">
+            <a href="/mail/{sentId}" class="open-in-mail">Open in Mail</a>
+          </div>
+        {/if}
       </div>
     {/if}
   {:else if short === "mail_read"}
@@ -181,6 +186,9 @@
             <pre class="mail-pre">{readRow.body}</pre>
           </CollapsibleSection>
         {/if}
+        <div class="open-bar">
+          <a href="/mail/{readRow.id}" class="open-in-mail">Open in Mail</a>
+        </div>
       </div>
     {:else if output}
       <!-- Parse-failure fallback: show the raw output text. -->
@@ -206,6 +214,9 @@
               </li>
             {/each}
           </ul>
+          <div class="open-bar">
+            <a href="/mail" class="open-in-mail">Browse in Mail</a>
+          </div>
         {/if}
       </div>
     {:else if output}
@@ -219,6 +230,9 @@
     {#if closeId}
       <div class="mail-tool-body">
         <div class="mail-close-line">mail #{closeId} closed</div>
+        <div class="open-bar">
+          <a href="/mail/{closeId}" class="open-in-mail">Open in Mail</a>
+        </div>
       </div>
     {/if}
   {/if}
@@ -364,5 +378,24 @@
   .mail-close-line {
     color: var(--text-secondary);
     font-size: 0.8rem;
+  }
+  .open-bar {
+    margin-top: 0.5rem;
+    padding-top: 0.4rem;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .open-in-mail {
+    font-size: 0.72rem;
+    color: var(--accent-primary);
+    text-decoration: none;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    display: inline-block;
+    transition: all var(--transition-fast);
+  }
+  .open-in-mail:hover {
+    border-color: var(--accent-primary);
+    background: var(--accent-glow);
   }
 </style>

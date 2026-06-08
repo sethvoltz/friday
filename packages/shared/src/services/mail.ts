@@ -1,4 +1,4 @@
-import { and, asc, eq, gt } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lte, or, sql } from "drizzle-orm";
 import { EventEmitter } from "node:events";
 import { getDb } from "../db/client.js";
 import * as schema from "../db/schema.js";
@@ -177,6 +177,108 @@ export function isMailDeadLettered(row: MailRow): boolean {
 
 export async function pendingForAgent(toAgent: string): Promise<MailRow[]> {
   return inbox(toAgent);
+}
+
+/* ---------------- Mail search (FRI-153) ---------------- */
+
+export interface SearchMailOpts {
+  /** Postgres plainto_tsquery string. When absent, no FTS filter. */
+  q?: string;
+  /** Exact from_agent match. */
+  from?: string;
+  /** Exact to_agent match. */
+  to?: string;
+  /** Either from_agent OR to_agent matches this name. */
+  involves?: string;
+  /** Filter by one or more types. */
+  type?: Array<"message" | "notification" | "task">;
+  /** Filter by one or more delivery states. */
+  delivery?: Array<"pending" | "read" | "closed">;
+  /** Filter by one or more priorities. */
+  priority?: Array<"normal" | "critical">;
+  /** ISO timestamp lower bound (inclusive). */
+  since?: string;
+  /** ISO timestamp upper bound (inclusive). */
+  until?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SearchMailResult {
+  results: MailRow[];
+  total: number;
+}
+
+export async function searchMail(opts: SearchMailOpts): Promise<SearchMailResult> {
+  const db = getDb();
+  const limit = Math.min(opts.limit ?? 100, 500);
+  const offset = opts.offset ?? 0;
+
+  const conds: ReturnType<typeof eq>[] = [];
+
+  if (opts.q) {
+    conds.push(sql`content_tsv @@ plainto_tsquery('english', ${opts.q})` as ReturnType<typeof eq>);
+  }
+  if (opts.from) {
+    conds.push(eq(schema.mail.fromAgent, opts.from));
+  }
+  if (opts.to) {
+    conds.push(eq(schema.mail.toAgent, opts.to));
+  }
+  if (opts.involves) {
+    conds.push(
+      or(
+        eq(schema.mail.fromAgent, opts.involves),
+        eq(schema.mail.toAgent, opts.involves),
+      ) as ReturnType<typeof eq>,
+    );
+  }
+  if (opts.type && opts.type.length > 0) {
+    conds.push(inArray(schema.mail.type, opts.type) as ReturnType<typeof eq>);
+  }
+  if (opts.delivery && opts.delivery.length > 0) {
+    conds.push(inArray(schema.mail.delivery, opts.delivery) as ReturnType<typeof eq>);
+  }
+  if (opts.priority && opts.priority.length > 0) {
+    conds.push(inArray(schema.mail.priority, opts.priority) as ReturnType<typeof eq>);
+  }
+  if (opts.since) {
+    const sinceDate = new Date(opts.since);
+    if (!isNaN(sinceDate.getTime())) {
+      conds.push(gte(schema.mail.ts, sinceDate) as unknown as ReturnType<typeof eq>);
+    }
+  }
+  if (opts.until) {
+    const untilDate = new Date(opts.until);
+    if (!isNaN(untilDate.getTime())) {
+      conds.push(lte(schema.mail.ts, untilDate) as unknown as ReturnType<typeof eq>);
+    }
+  }
+
+  const where = conds.length > 0 ? and(...conds) : undefined;
+
+  const orderBy = opts.q
+    ? [sql`ts_rank(content_tsv, plainto_tsquery('english', ${opts.q})) DESC`, desc(schema.mail.ts)]
+    : [desc(schema.mail.ts)];
+
+  const [rows, totalRows] = await Promise.all([
+    db
+      .select()
+      .from(schema.mail)
+      .where(where)
+      .orderBy(...(orderBy as [ReturnType<typeof desc>]))
+      .limit(limit)
+      .offset(offset),
+    db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.mail)
+      .where(where),
+  ]);
+
+  return {
+    results: rows.map(rowToMail),
+    total: totalRows[0]?.count ?? 0,
+  };
 }
 
 /**

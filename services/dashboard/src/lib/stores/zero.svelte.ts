@@ -113,6 +113,23 @@ export interface ZeroMemoryEntryRow {
   status: "ready" | "pending_file" | "pending_delete" | "deleted";
 }
 
+/** Row shape mirrors the `mail` Zero table definition (FRI-153). */
+export interface ZeroMailRow {
+  id: number;
+  from_agent: string;
+  to_agent: string;
+  type: "message" | "notification" | "task";
+  delivery: "pending" | "read" | "closed";
+  subject: string | null;
+  thread_id: string | null;
+  body: string;
+  meta_json: Record<string, unknown> | null;
+  ts: number;
+  read_at: number | null;
+  closed_at: number | null;
+  priority: "normal" | "critical";
+}
+
 /** Row shape mirrors the `evolve_proposals` Zero table definition (item #54). */
 export interface ZeroEvolveProposalRow {
   id: string;
@@ -267,6 +284,11 @@ class ZeroSyncStore {
   /** Live ticket external links (Phase 3.1 follow-up — reactive read
    *  path for the detail page's link list). */
   ticketExternalLinks = $state<ZeroTicketExternalLinkRow[]>([]);
+
+  /** Live mail rows from Zero (FRI-153). Full corpus — no filter.
+   *  The /mail page derives its filtered/sorted view client-side;
+   *  FTS search flows through GET /api/mail/search. */
+  mail = $state<ZeroMailRow[]>([]);
 
   /** Live evolve proposals (item #54). Replaces the REST poll on the
    *  /evolve dashboard page. Daemon-side projector keeps the
@@ -529,6 +551,7 @@ class ZeroSyncStore {
       this.#bindSchedules();
       this.#bindMemory();
       this.#bindApps();
+      this.#bindMail();
       this.#bindReadCursors();
       this.#bindClientDevices();
       this.#bindSettings();
@@ -791,6 +814,25 @@ class ZeroSyncStore {
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroAppRow[];
       this.apps = rows as ZeroAppRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  #bindMail(): void {
+    if (!this.#zero) return;
+    // Full corpus — no filter. The /mail page performs client-side
+    // filtering for delivery/type/agent/priority and time range.
+    // FTS search replaces this slice with REST results when active.
+    const query = this.#zero!.query.mail.orderBy("ts", "desc");
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      this.mail = data as ZeroMailRow[];
     };
     update(view.data as readonly unknown[]);
     view.addListener((data) => update(data as readonly unknown[]));
@@ -1244,6 +1286,24 @@ class ZeroSyncStore {
   deleteMemoryEntry(args: { id: string }): MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero!.mutate.deleteMemoryEntry({ ...args, ts: Date.now() });
+  }
+
+  /**
+   * FRI-153: mark a mail row as read. No-op when already read/closed
+   * (the /mail page disables the button in those states).
+   */
+  markMailRead(id: number): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.markMailRead({ id, ts: Date.now() });
+  }
+
+  /**
+   * FRI-153: close a mail row. No-op when already closed (the /mail
+   * page disables the button in that state).
+   */
+  closeMailRow(id: number): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.closeMail({ id, ts: Date.now() });
   }
 
   /**
