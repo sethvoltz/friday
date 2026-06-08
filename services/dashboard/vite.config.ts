@@ -1,6 +1,16 @@
 import { sveltekit } from "@sveltejs/kit/vite";
 import { defineConfig } from "vite";
 import { loadConfig } from "@friday/shared";
+import { readFileSync } from "node:fs";
+
+// process.env mutation is the correct injection point here: vite.config.ts
+// runs before Vite's loadEnv step, so setting process.env.PUBLIC_APP_VERSION
+// here takes precedence over any .env file value and is picked up by
+// SvelteKit's $env/static/public generation without a separate dotenv file.
+const { version: appVersion } = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf-8"),
+) as { version: string };
+process.env.PUBLIC_APP_VERSION = appVersion;
 
 // When a Cloudflare Tunnel is configured, Vite's host-header check would
 // otherwise reject requests proxied in under the public hostname. Pull

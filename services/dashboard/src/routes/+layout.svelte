@@ -28,6 +28,7 @@
   } from "$lib/util/pwa-platform";
   import type { LayoutData } from "./$types";
   import type { Snippet } from "svelte";
+  import { PUBLIC_APP_VERSION } from "$env/static/public";
 
   let { data, children }: { data: LayoutData; children: Snippet } = $props();
 
@@ -435,6 +436,36 @@
   // three dots already carry the same signal (and finer state — sync
   // vs daemon, reconnecting vs down), so the banner was redundant
   // visual noise.
+
+  // Staleness detection: when the tab returns from hidden, compare the
+  // server's reported version against the version embedded at build time.
+  // A mismatch means the app was updated while the tab was backgrounded;
+  // silent auto-reload brings the client up to date. Only fires on a
+  // hidden → visible transition, never on the initial page load.
+  $effect(() => {
+    let wasHidden = false;
+    const onVisibilityChange = async () => {
+      if (document.visibilityState === "hidden") {
+        wasHidden = true;
+        return;
+      }
+      if (!wasHidden) return;
+      try {
+        const r = await fetch("/api/health", { method: "HEAD" });
+        const serverVersion = r.headers.get("X-Friday-Version");
+        if (serverVersion && serverVersion !== PUBLIC_APP_VERSION) {
+          window.location.reload();
+        }
+      } catch {
+        // daemon unreachable — skip, connectivity widget will surface it
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  });
+
   function fmtDuration(ms: number) {
     const s = Math.max(0, Math.floor(ms / 1000));
     if (s < 60) return `${s}s`;
