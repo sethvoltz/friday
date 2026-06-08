@@ -178,7 +178,7 @@ describe("friday-mail renderer registration (FRI-135)", () => {
   });
 });
 
-describe("ScheduleWakeup renderer registration", () => {
+describe("ScheduleWakeup renderer registration (PR #194)", () => {
   it("resolves 'ScheduleWakeup' to ScheduleWakeupBlock", () => {
     const renderer = resolveToolRenderer("ScheduleWakeup");
     expect(renderer).toBeDefined();

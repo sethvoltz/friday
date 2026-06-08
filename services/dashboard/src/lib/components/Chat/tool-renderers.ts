@@ -151,8 +151,8 @@ TOOL_RENDERERS["mail_close"] = { component: MailToolBlock };
 TOOL_RENDERERS["ask_user"] = { component: AskUserQuestionPanel, direct: true };
 TOOL_RENDERERS["AskUserQuestion"] = { component: AskUserQuestionPanel, direct: true };
 
-// ScheduleWakeup is a built-in tool (no `mcp__` prefix), so the registry key
-// is the literal string "ScheduleWakeup". Renders a glanceable timer card
-// (reason headline + delay pill + status badge + collapsible prompt) in place
-// of the generic raw-JSON ToolBlock.
+// PR #194: ScheduleWakeup is a built-in tool (no `mcp__` prefix), so the
+// registry key is the literal string "ScheduleWakeup". Renders a glanceable
+// timer card (reason headline + delay pill + status badge + collapsible prompt)
+// in place of the generic raw-JSON ToolBlock.
 TOOL_RENDERERS["ScheduleWakeup"] = { component: ScheduleWakeupBlock };

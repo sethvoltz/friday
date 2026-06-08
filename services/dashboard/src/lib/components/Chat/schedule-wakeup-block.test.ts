@@ -17,5 +17,7 @@ describe("formatDelay", () => {
     expect(formatDelay(3600)).toBe("1h 0m");
     expect(formatDelay(5400)).toBe("1h 30m");
     expect(formatDelay(7320)).toBe("2h 2m");
+    // remainder rounds up to 60 → carry into hour
+    expect(formatDelay(7170)).toBe("2h 0m");
   });
 });

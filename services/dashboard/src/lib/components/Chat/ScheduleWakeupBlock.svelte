@@ -9,7 +9,7 @@
   //
   // Accepts all seven ToolRendererProps so the spread at the dispatch site
   // (ChatMessages.svelte) neither drops data nor warns under svelte-check.
-  // `friendlyName` / `output` / `toolId` are intentionally unused.
+  // `toolName` / `friendlyName` / `output` / `toolId` are intentionally unused.
   interface Props {
     toolName: string;
     friendlyName?: string;
