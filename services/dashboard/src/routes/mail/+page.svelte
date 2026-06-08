@@ -1197,6 +1197,12 @@
     .detail {
       min-height: 300px;
     }
+    .search-input,
+    .agent-input,
+    .mode-select,
+    .date-input {
+      font-size: 16px;
+    }
   }
 
   @media (min-width: 1024px) {

@@ -398,6 +398,12 @@
       grid-template-columns: 1fr;
     }
   }
+  @media (max-width: 1023px) {
+    .input,
+    .textarea {
+      font-size: 16px;
+    }
+  }
   .session-link {
     color: var(--accent-primary);
     text-decoration: none;

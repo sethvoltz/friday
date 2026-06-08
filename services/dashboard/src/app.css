@@ -200,6 +200,9 @@ html {
   font-size: 15px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* iOS Safari inflates text after landscape→portrait rotation without this. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
@@ -538,5 +541,15 @@ pre.code-block {
   ::-webkit-scrollbar-thumb {
     background: initial;
     border-radius: initial;
+  }
+}
+
+/* iOS Safari zooms the viewport when focusing an input whose font-size is
+   below 16px. The base is 15px so all rem values are below the threshold;
+   pin to 16px on mobile only so desktop layout is unchanged. */
+@media (max-width: 1023px) {
+  input.page-input,
+  textarea.page-input {
+    font-size: 16px;
   }
 }

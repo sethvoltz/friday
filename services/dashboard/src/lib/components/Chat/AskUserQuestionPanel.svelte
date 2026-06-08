@@ -589,4 +589,10 @@
   .auq-footer-error {
     color: var(--status-error);
   }
+  @media (max-width: 1023px) {
+    .auq-other-input,
+    .auq-notes-input {
+      font-size: 16px;
+    }
+  }
 </style>

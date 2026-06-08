@@ -482,4 +482,10 @@
   .muted {
     color: var(--text-tertiary);
   }
+  @media (max-width: 1023px) {
+    .input,
+    .textarea {
+      font-size: 16px;
+    }
+  }
 </style>
