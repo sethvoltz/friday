@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/sethvoltz/friday/compare/v1.9.0...v1.10.0) (2026-06-08)
+
+
+### Features
+
+* **dashboard:** mail explorer route — FTS, filters, deep-link (FRI-153) ([#186](https://github.com/sethvoltz/friday/issues/186)) ([6f6548b](https://github.com/sethvoltz/friday/commit/6f6548baf64434220383eaf97030939ff64e0519))
+
 ## [1.9.0](https://github.com/sethvoltz/friday/compare/v1.8.0...v1.9.0) (2026-06-06)
 
 
