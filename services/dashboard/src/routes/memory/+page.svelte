@@ -568,4 +568,10 @@
   .toast-info {
     border-color: var(--accent-primary);
   }
+  @media (max-width: 768px) {
+    .input,
+    .textarea {
+      font-size: 16px;
+    }
+  }
 </style>

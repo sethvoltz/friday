@@ -614,6 +614,10 @@
     .grid {
       grid-template-columns: 1fr;
     }
+    .input,
+    .textarea {
+      font-size: 16px;
+    }
   }
   .link-list {
     list-style: none;

@@ -457,4 +457,10 @@
       display: none;
     }
   }
+  @media (max-width: 768px) {
+    /* iOS Safari zoom fix — see app.css comment. */
+    .palette-input {
+      font-size: 16px;
+    }
+  }
 </style>
