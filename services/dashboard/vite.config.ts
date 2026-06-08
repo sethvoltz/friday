@@ -3,9 +3,10 @@ import { defineConfig } from "vite";
 import { loadConfig } from "@friday/shared";
 import { readFileSync } from "node:fs";
 
-// Stamp the dashboard's package.json version as a PUBLIC_ env var at build
-// time so it's available via $env/static/public in all Svelte components and
-// server routes. SvelteKit picks up process.env.PUBLIC_* at config evaluation.
+// process.env mutation is the correct injection point here: vite.config.ts
+// runs before Vite's loadEnv step, so setting process.env.PUBLIC_APP_VERSION
+// here takes precedence over any .env file value and is picked up by
+// SvelteKit's $env/static/public generation without a separate dotenv file.
 const { version: appVersion } = JSON.parse(
   readFileSync(new URL("./package.json", import.meta.url), "utf-8"),
 ) as { version: string };

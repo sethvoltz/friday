@@ -1,7 +1,3 @@
-declare module "$env/static/public" {
-  export const PUBLIC_APP_VERSION: string;
-}
-
 declare global {
   namespace App {
     interface Locals {
