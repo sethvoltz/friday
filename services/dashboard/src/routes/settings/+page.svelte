@@ -19,6 +19,7 @@
   // Vite stubs to empty modules, crashing every page at hydration. Types
   // from the root are fine: `import type` is fully erased.
   import { coerceLegacyModelId } from "@friday/shared/sync";
+  import { PUBLIC_APP_VERSION } from "$env/static/public";
   import type {
     AgentTypeName,
     EvolveTaskName,
@@ -605,6 +606,10 @@
     <div class="row">
       <span class="row-label">Name</span>
       <span class="row-value">{data.user.name}</span>
+    </div>
+    <div class="row">
+      <span class="row-label">Version</span>
+      <span class="row-value">v{PUBLIC_APP_VERSION}</span>
     </div>
     <div class="actions">
       <button class="ghost" onclick={signOut}>Sign out</button>

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { logger } from "../log.js";
@@ -137,6 +138,10 @@ import { randomUUID } from "node:crypto";
 import { isValidAgentName } from "@friday/shared";
 import type { AgentType } from "@friday/shared";
 
+const DAEMON_VERSION = (JSON.parse(
+  readFileSync(new URL("../../../../package.json", import.meta.url), "utf8")
+) as { version: string }).version;
+
 export interface StartServerOptions {
   port: number;
 }
@@ -157,6 +162,8 @@ async function handle(
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
   const method = req.method ?? "GET";
+
+  res.setHeader("X-Friday-Version", DAEMON_VERSION);
 
   // --- Health ---
   if (method === "GET" && path === "/api/health") {

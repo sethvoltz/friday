@@ -1,6 +1,15 @@
 import { sveltekit } from "@sveltejs/kit/vite";
 import { defineConfig } from "vite";
 import { loadConfig } from "@friday/shared";
+import { readFileSync } from "node:fs";
+
+// Stamp the dashboard's package.json version as a PUBLIC_ env var at build
+// time so it's available via $env/static/public in all Svelte components and
+// server routes. SvelteKit picks up process.env.PUBLIC_* at config evaluation.
+const { version: appVersion } = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf-8")
+) as { version: string };
+process.env.PUBLIC_APP_VERSION = appVersion;
 
 // When a Cloudflare Tunnel is configured, Vite's host-header check would
 // otherwise reject requests proxied in under the public hostname. Pull
