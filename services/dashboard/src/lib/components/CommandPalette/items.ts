@@ -12,6 +12,7 @@ import {
   Sun,
   Moon,
   Monitor,
+  Inbox,
 } from "lucide-svelte";
 import type { AgentInfo } from "$lib/stores/chat.svelte";
 import { agentIconFor } from "$lib/util/agent-icon";
@@ -72,6 +73,7 @@ const NAV_SPECS: readonly NavSpec[] = [
   { href: "/evolve", label: "Evolve", icon: Sparkles },
   { href: "/skills", label: "Skills", icon: Wrench },
   { href: "/logs", label: "Logs", icon: ScrollText },
+  { href: "/mail", label: "Mail", icon: Inbox },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

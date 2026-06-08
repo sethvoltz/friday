@@ -726,6 +726,14 @@ export const FTS_SETUP_SQL = `
     ) STORED;
   CREATE INDEX IF NOT EXISTS memory_entries_content_tsv_idx
     ON memory_entries USING GIN (content_tsv);
+
+  -- mail: search across subject + body.
+  ALTER TABLE mail
+    ADD COLUMN IF NOT EXISTS content_tsv tsvector
+    GENERATED ALWAYS AS (
+      to_tsvector('english', coalesce(subject, '') || ' ' || coalesce(body, ''))
+    ) STORED;
+  CREATE INDEX IF NOT EXISTS mail_content_tsv_idx ON mail USING GIN (content_tsv);
 `;
 
 /* ---------------- LISTEN/NOTIFY channels (ADR-023) ---------------- */

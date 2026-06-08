@@ -607,6 +607,35 @@ export interface ResumeTurnArgs {
   ts: number;
 }
 
+/* ---------------- FRI-153: mail delivery mutators ---------------- */
+// Two pure-data mutators for the /mail dashboard page. No daemon side
+// effect — delivery state changes are pure Postgres writes replicated
+// via Zero to all connected clients.
+//
+// `markMailRead`: sets delivery='read' and read_at. No-op when already
+//   read or closed — the dashboard gates the button on delivery state.
+//
+// `closeMail`: sets delivery='closed' and closed_at. No-op when already
+//   closed — the dashboard disables the button.
+//
+// Both are idempotent in the UPDATE-same-value sense: re-running on a
+// row already in the target state writes the same field values, which
+// Postgres treats as a no-op at the row level.
+
+export interface MarkMailReadArgs {
+  /** The mail row's numeric PK. */
+  id: number;
+  /** Client-side wall clock (ms) used as read_at timestamp. */
+  ts: number;
+}
+
+export interface CloseMailMutatorArgs {
+  /** The mail row's numeric PK. */
+  id: number;
+  /** Client-side wall clock (ms) used as closed_at timestamp. */
+  ts: number;
+}
+
 /* ---------------- Phase 4.11: sendUserMessage ---------------- */
 // The largest mutator. INSERTs a new user-chat block at
 // status='pending'; the Postgres trigger fires NOTIFY
@@ -1135,6 +1164,27 @@ export const createMutators = (userId?: string | null) =>
       await tx.mutate.blocks.update({
         id: args.id,
         status: "resume_requested",
+      });
+    },
+    markMailRead: async (tx: FridayTx, args: MarkMailReadArgs): Promise<void> => {
+      // FRI-153: mark a mail row as read. Pure data write — no daemon
+      // side effect, no NOTIFY trigger. The dashboard's /mail page
+      // gates the button on delivery === 'pending', so calling this on
+      // an already-read or closed row is a UI-prevented edge case.
+      // Updating to the same delivery value is a Postgres no-op.
+      await tx.mutate.mail.update({
+        id: args.id,
+        delivery: "read",
+        read_at: args.ts,
+      });
+    },
+    closeMail: async (tx: FridayTx, args: CloseMailMutatorArgs): Promise<void> => {
+      // FRI-153: close a mail row. Pure data write — no daemon side
+      // effect. The dashboard gates the button on delivery !== 'closed'.
+      await tx.mutate.mail.update({
+        id: args.id,
+        delivery: "closed",
+        closed_at: args.ts,
       });
     },
     updateSettings: async (tx: FridayTx, args: UpdateSettingsArgs): Promise<void> => {
