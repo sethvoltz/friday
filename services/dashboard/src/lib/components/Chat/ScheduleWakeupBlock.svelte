@@ -58,8 +58,8 @@
   // Override "done" label — "woke up" is more meaningful than the generic "done".
   let effectiveLabel = $derived(status === "done" ? "woke up" : statusLabel(status));
 
-  let canExpand = $derived(!!prompt);
   let open = $state(false);
+  let canExpand = $derived(!!prompt);
 </script>
 
 <div class="tool-block">
