@@ -83,8 +83,14 @@ export const agentsCommand = defineCommand({
       args: { name: { type: "positional", required: true } },
       async run({ args }) {
         const c = new DaemonClient();
-        await c.post(`/api/agents/${args.name}/unarchive`, {});
-        console.log(pc.green(`unarchived ${args.name}`));
+        try {
+          await c.post<{ ok: boolean }>(`/api/agents/${args.name}/unarchive`, {});
+          console.log(pc.green(`unarchived ${args.name}`));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(pc.red(msg));
+          process.exit(1);
+        }
       },
     }),
   },

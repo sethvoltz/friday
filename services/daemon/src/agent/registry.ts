@@ -374,6 +374,7 @@ export async function unarchiveAgent(name: string): Promise<void> {
     throw new Error(`unarchiveAgent: "${name}" is not archived (status=${row.status})`);
   }
   await _setStatusUnchecked(row.name, "idle", { archiveReason: null });
+  captureFor(null, "agent_unarchived", { agent_name: name });
 }
 
 /**

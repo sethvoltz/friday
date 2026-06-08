@@ -470,7 +470,11 @@ async function handle(
         code: "not_archived",
       });
     }
-    await registry.unarchiveAgent(name);
+    try {
+      await registry.unarchiveAgent(name);
+    } catch (err) {
+      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
     return json(res, 200, { ok: true });
   }
   if (method === "POST" && /^\/api\/agents\/[^/]+\/abort$/.test(path)) {
