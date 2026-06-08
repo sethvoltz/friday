@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.12.0](https://github.com/sethvoltz/friday/compare/v1.11.0...v1.12.0) (2026-06-08)
+
+
+### Features
+
+* **dashboard:** client staleness detection + version display ([#191](https://github.com/sethvoltz/friday/issues/191)) ([1ac110c](https://github.com/sethvoltz/friday/commit/1ac110cd6307bee772d671abc892681ab86850a0))
+
+
+### Bug Fixes
+
+* **dashboard:** prevent iOS Safari text-size inflation and input zoom ([#192](https://github.com/sethvoltz/friday/issues/192)) ([c1e4375](https://github.com/sethvoltz/friday/commit/c1e437584d90307446744845fed3a57406a0d994))
+
 ## [1.11.0](https://github.com/sethvoltz/friday/compare/v1.10.0...v1.11.0) (2026-06-08)
 
 
