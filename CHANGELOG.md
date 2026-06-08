@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.1](https://github.com/sethvoltz/friday/compare/v1.13.0...v1.13.1) (2026-06-08)
+
+
+### Bug Fixes
+
+* **daemon:** raise nightly compaction sweep threshold to 100K ([#197](https://github.com/sethvoltz/friday/issues/197)) ([6560467](https://github.com/sethvoltz/friday/commit/6560467b9f68bdd08dd09de9d8a1f3cb70c69573))
+
 ## [1.13.0](https://github.com/sethvoltz/friday/compare/v1.12.0...v1.13.0) (2026-06-08)
 
 
