@@ -15,12 +15,13 @@
  *     in-flight turn keep their original turn_id.
  */
 
+import { eq } from "drizzle-orm";
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentType } from "@friday/shared";
-import { loadConfig } from "@friday/shared";
+import { getDb, loadConfig, schema } from "@friday/shared";
 import {
   claimPendingSession,
   getTurnAuthorUserId,
@@ -1540,6 +1541,27 @@ export async function forceWorkerRefork(agentName: string): Promise<WorkerPrompt
   // 'idle' on this teardown.
   await registry.setStatus(agentName, "idle");
   return drained;
+}
+
+/**
+ * Stop all live workers whose agents belong to the given app, so they re-fork
+ * with fresh env and MCP subprocesses on next dispatch. Returns the number of
+ * workers that were live and stopped.
+ */
+export async function stopWorkersForApp(appId: string): Promise<number> {
+  const db = getDb();
+  const rows = await db
+    .select({ name: schema.agents.name })
+    .from(schema.agents)
+    .where(eq(schema.agents.appId, appId));
+  let stopped = 0;
+  for (const { name } of rows) {
+    if (live.has(name)) {
+      await forceWorkerRefork(name);
+      stopped++;
+    }
+  }
+  return stopped;
 }
 
 /**

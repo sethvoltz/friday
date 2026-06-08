@@ -117,6 +117,7 @@ import {
   forceWorkerRefork,
   peekLiveWorker,
   removeQueuedPrompt,
+  stopWorkersForApp,
 } from "../agent/lifecycle.js";
 import { recordUserBlock } from "../agent/block-injectors.js";
 import { getBlockById } from "@friday/shared/services";
@@ -1450,7 +1451,8 @@ async function handle(
     const id = decodeURIComponent(path.split("/")[3]);
     try {
       const result = await reloadApp(id);
-      return json(res, 200, result);
+      const stoppedWorkers = await stopWorkersForApp(id);
+      return json(res, 200, { ...result, stoppedWorkers });
     } catch (err) {
       if (err instanceof AppInstallError) {
         return json(res, 404, { error: err.message, code: err.code });

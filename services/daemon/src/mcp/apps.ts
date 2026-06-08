@@ -114,7 +114,7 @@ export function buildAppsServer(opts: BuildAppsServerOptions) {
       ),
       tool(
         "app_reload",
-        "Re-read the manifest from disk and reconcile the DB. No-op when the manifest hasn't changed. Does not archive agents removed from the manifest — use uninstall for that.",
+        "Re-read the manifest from disk, reconcile the DB, and stop the app's live agent workers so they re-fork with fresh env and MCP server processes on next dispatch. Use after updating secrets or the manifest. Does not archive agents removed from the manifest — use uninstall for that.",
         { app: z.string() },
         async (args, extra) => {
           const result = await daemonFetch({
