@@ -3,6 +3,7 @@ import TodoList from "./TodoList.svelte";
 import FileEditRenderer from "./FileEditRenderer.svelte";
 import MailToolBlock from "./MailToolBlock.svelte";
 import AskUserQuestionPanel from "./AskUserQuestionPanel.svelte";
+import ScheduleWakeupBlock from "./ScheduleWakeupBlock.svelte";
 
 /**
  * Per-tool render dispatch for chat tool-use blocks (FRI-130 foundation).
@@ -149,3 +150,9 @@ TOOL_RENDERERS["mail_close"] = { component: MailToolBlock };
 // still sees a panel rather than raw JSON.
 TOOL_RENDERERS["ask_user"] = { component: AskUserQuestionPanel, direct: true };
 TOOL_RENDERERS["AskUserQuestion"] = { component: AskUserQuestionPanel, direct: true };
+
+// PR #194: ScheduleWakeup is a built-in tool (no `mcp__` prefix), so the
+// registry key is the literal string "ScheduleWakeup". Renders a glanceable
+// timer card (reason headline + delay pill + status badge + collapsible prompt)
+// in place of the generic raw-JSON ToolBlock.
+TOOL_RENDERERS["ScheduleWakeup"] = { component: ScheduleWakeupBlock };
