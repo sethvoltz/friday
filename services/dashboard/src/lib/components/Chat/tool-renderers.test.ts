@@ -8,6 +8,7 @@ import {
 } from "./tool-renderers";
 import FileEditRenderer from "./FileEditRenderer.svelte";
 import MailToolBlock from "./MailToolBlock.svelte";
+import ScheduleWakeupBlock from "./ScheduleWakeupBlock.svelte";
 
 // Sentinel renderers. We assert *identity* of the resolved object, never a
 // mount — mounting a real `.svelte` component would need the vite-svelte
@@ -49,11 +50,11 @@ describe("resolveToolRenderer", () => {
     expect(originalKeys).toContain("TodoWrite");
   });
 
-  it("registers exactly the renderer tickets' keys by default (FRI-133 + FRI-134 + FRI-135 + FRI-152)", () => {
+  it("registers exactly the renderer tickets' keys by default (FRI-133 + FRI-134 + FRI-135 + FRI-152 + ScheduleWakeup)", () => {
     // FRI-130 shipped the registry empty; FRI-133 (renderer A) adds TodoWrite,
     // FRI-134 (ticket B) adds the file-edit family, FRI-135 (ticket C) adds
-    // the four friday-mail short names, and FRI-152 (this ticket) adds
-    // AskUserQuestion. With all renderer tickets landed, these ten are the
+    // the four friday-mail short names, FRI-152 adds AskUserQuestion, and the
+    // ScheduleWakeup renderer adds "ScheduleWakeup". These eleven are the
     // complete default key set.
     expect(new Set(originalKeys)).toEqual(
       new Set([
@@ -68,6 +69,7 @@ describe("resolveToolRenderer", () => {
         "mail_close",
         "AskUserQuestion",
         "ask_user",
+        "ScheduleWakeup",
       ]),
     );
   });
@@ -173,5 +175,18 @@ describe("friday-mail renderer registration (FRI-135)", () => {
     for (const k of ["mail_send", "mail_inbox", "mail_read", "mail_close"]) {
       expect(TOOL_RENDERERS[k]?.component).toBe(MailToolBlock);
     }
+  });
+});
+
+describe("ScheduleWakeup renderer registration", () => {
+  it("resolves 'ScheduleWakeup' to ScheduleWakeupBlock", () => {
+    const renderer = resolveToolRenderer("ScheduleWakeup");
+    expect(renderer).toBeDefined();
+    expect(renderer!.component).toBe(ScheduleWakeupBlock);
+  });
+
+  it("does not mark ScheduleWakeup as direct (card, not inline)", () => {
+    const renderer = resolveToolRenderer("ScheduleWakeup");
+    expect(renderer!.direct).toBeFalsy();
   });
 });
