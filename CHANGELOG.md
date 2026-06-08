@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/sethvoltz/friday/compare/v1.10.0...v1.11.0) (2026-06-08)
+
+
+### Features
+
+* **daemon:** add agent_unarchive ([#187](https://github.com/sethvoltz/friday/issues/187)) ([cfaad05](https://github.com/sethvoltz/friday/commit/cfaad05596f7096b575293b1ca283d8f8042de1b))
+* **daemon:** app hot-reload stops live workers on reload ([#189](https://github.com/sethvoltz/friday/issues/189)) ([6a5cafb](https://github.com/sethvoltz/friday/commit/6a5cafbf883e7096b1cc7b90b0b117131f90849d))
+
 ## [1.10.0](https://github.com/sethvoltz/friday/compare/v1.9.0...v1.10.0) (2026-06-08)
 
 
