@@ -202,7 +202,10 @@ describe("searchMail (FRI-153)", () => {
 
   it("filters by priority", async () => {
     const { searchMail } = await import("./mail.js");
-    await seed([{ body: "urgent", priority: "critical" }, { body: "routine", priority: "normal" }]);
+    await seed([
+      { body: "urgent", priority: "critical" },
+      { body: "routine", priority: "normal" },
+    ]);
     const result = await searchMail({ priority: ["critical"] });
     expect(result.total).toBe(1);
     expect(result.results[0].priority).toBe("critical");
