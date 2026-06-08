@@ -214,10 +214,10 @@
               </li>
             {/each}
           </ul>
-          <div class="open-bar">
-            <a href="/mail" class="open-in-mail">Browse in Mail</a>
-          </div>
         {/if}
+        <div class="open-bar">
+          <a href="/mail" class="open-in-mail">Browse in Mail</a>
+        </div>
       </div>
     {:else if output}
       <div class="mail-tool-body">

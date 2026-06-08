@@ -130,7 +130,7 @@
   });
 
   const selectedRow = $derived(
-    selectedId !== null ? (visible.find((r) => r.id === selectedId) ?? null) : null,
+    selectedId !== null ? (allMail.find((r) => r.id === selectedId) ?? null) : null,
   );
 
   const threadCount = $derived.by(() => {
@@ -223,9 +223,9 @@
         searchResults = [];
         return;
       }
-      const data = (await r.json()) as { results: ZeroMailRow[]; total: number };
-      searchResults = data.results;
-      searchTotal = data.total;
+      const searchData = (await r.json()) as { results: ZeroMailRow[]; total: number };
+      searchResults = searchData.results;
+      searchTotal = searchData.total;
     } finally {
       searching = false;
     }
@@ -241,15 +241,17 @@
   function selectRow(id: number) {
     selectedId = id;
     metaExpanded = false;
+    const row = allMail.find((r) => r.id === id);
+    if (row && row.delivery === "pending") doMarkRead(row);
     void goto(`/mail?id=${id}`, { replaceState: true, noScroll: true });
   }
 
-  async function doMarkRead(row: ZeroMailRow) {
+  function doMarkRead(row: ZeroMailRow) {
     if (row.delivery !== "pending") return;
     zeroSync.markMailRead(row.id);
   }
 
-  async function doClose(row: ZeroMailRow) {
+  function doClose(row: ZeroMailRow) {
     if (row.delivery === "closed") return;
     zeroSync.closeMailRow(row.id);
   }
@@ -505,7 +507,7 @@
           </button>
         {/each}
       </div>
-      {#if filterTimePreset === "all" && (filterSince || filterUntil || true)}
+      {#if filterTimePreset === "all"}
         <div class="date-range">
           <input type="date" class="date-input" bind:value={filterSince} aria-label="Since date" />
           <span class="date-sep">–</span>
@@ -1134,10 +1136,6 @@
 
     .mobile-bar {
       display: block;
-    }
-
-    .sidebar {
-      display: none;
     }
 
     .mobile-dropdown {

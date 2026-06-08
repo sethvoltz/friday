@@ -1264,8 +1264,8 @@ async function handle(
     const priorityRaw = url.searchParams.get("priority");
     const since = url.searchParams.get("since") ?? undefined;
     const until = url.searchParams.get("until") ?? undefined;
-    const limit = Math.min(Number(url.searchParams.get("limit") ?? "100"), 500);
-    const offset = Number(url.searchParams.get("offset") ?? "0");
+    const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "") || 100, 500);
+    const offset = parseInt(url.searchParams.get("offset") ?? "") || 0;
 
     const type = typeRaw
       ? (typeRaw.split(",").filter(Boolean) as Array<"message" | "notification" | "task">)
