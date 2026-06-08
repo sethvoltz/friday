@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 // time so it's available via $env/static/public in all Svelte components and
 // server routes. SvelteKit picks up process.env.PUBLIC_* at config evaluation.
 const { version: appVersion } = JSON.parse(
-  readFileSync(new URL("./package.json", import.meta.url), "utf-8")
+  readFileSync(new URL("./package.json", import.meta.url), "utf-8"),
 ) as { version: string };
 process.env.PUBLIC_APP_VERSION = appVersion;
 

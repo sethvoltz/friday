@@ -138,9 +138,9 @@ import { randomUUID } from "node:crypto";
 import { isValidAgentName } from "@friday/shared";
 import type { AgentType } from "@friday/shared";
 
-const DAEMON_VERSION = (JSON.parse(
-  readFileSync(new URL("../../../../package.json", import.meta.url), "utf8")
-) as { version: string }).version;
+const { version: DAEMON_VERSION } = JSON.parse(
+  readFileSync(new URL("../../../../package.json", import.meta.url), "utf8"),
+) as { version: string };
 
 export interface StartServerOptions {
   port: number;
