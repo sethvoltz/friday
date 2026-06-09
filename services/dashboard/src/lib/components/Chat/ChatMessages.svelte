@@ -808,8 +808,9 @@
       <div class="message inline">
         <ThinkingBlock
           text={msg.text}
-          status={msg.status === "done" ? "done" : msg.status === "aborted" ? "aborted" : "running"}
-          isRedacted={msg.isRedacted} />
+          status={msg.status === "done" ? "done" : msg.status === "aborted" ? "aborted" : msg.status === "error" ? "error" : "running"}
+          isRedacted={msg.isRedacted}
+          showBall={chat.ballInThinking} />
       </div>
     {:else if msg.role === "user" && msg.source === "mail"}
       <div
@@ -900,7 +901,7 @@
               <div class="footer-tag {userFooter.className ?? ''}">{userFooter.text}</div>
             {/if}
           {:else}
-            <Markdown source={msg.text} streaming={msg.status === "streaming"} />{#if msg.status === "streaming"}<StreamingBall />{/if}
+            <Markdown source={msg.text} streaming={msg.status === "streaming"} />{#if chat.ballInText && msg.status === "streaming"}<StreamingBall />{/if}
             {@const assistantFooter = stopFooter(msg.status, msg.abortReason)}
             {#if assistantFooter}
               <div class="footer-tag {assistantFooter.className ?? ''}">{assistantFooter.text}</div>
@@ -930,9 +931,9 @@
       </div>
     </div>
   {/if}
-  {#if !readonly && chat.showThinkingPlaceholder}
+  {#if !readonly && chat.ballStandalone}
     <div class="message inline">
-      <ThinkingBlock text="" status="running" />
+      <StreamingBall />
     </div>
   {/if}
   <div

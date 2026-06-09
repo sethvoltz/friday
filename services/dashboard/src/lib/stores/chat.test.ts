@@ -7669,3 +7669,216 @@ describe("compaction-in-progress: durable + transient union (reconstructable ind
     expect(chat.compactingSinceFor("nonexistent")).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// FRI-158: ball-state getters
+// ---------------------------------------------------------------------------
+
+describe("FRI-158: ballInText / ballInThinking / ballStandalone getters", () => {
+  function makeWorkingChat(messages: import("./chat.svelte").ChatMessage[]) {
+    return import("./chat.svelte").then(({ ChatState }) => {
+      const chat = new ChatState();
+      chat.focusedAgent = "friday";
+      chat.agents = [{ name: "friday", type: "orchestrator", status: "working", sessionId: "s" }];
+      chat.messages = messages;
+      return chat;
+    });
+  }
+
+  it("ballInText: true when focusedAgentIsWorking and an assistant message is streaming", async () => {
+    const chat = await makeWorkingChat([
+      {
+        id: "b_1",
+        role: "assistant",
+        text: "hi",
+        status: "streaming",
+        agent: "friday",
+        turnId: "t1",
+        ts: 100,
+      },
+    ]);
+    expect(chat.ballInText).toBe(true);
+    expect(chat.ballInThinking).toBe(false);
+    expect(chat.ballStandalone).toBe(false);
+  });
+
+  it("ballInThinking: true when focusedAgentIsWorking and a thinking message is running", async () => {
+    const chat = await makeWorkingChat([
+      {
+        id: "th_1",
+        role: "thinking",
+        text: "",
+        status: "running",
+        agent: "friday",
+        turnId: "t1",
+        ts: 100,
+      },
+    ]);
+    expect(chat.ballInThinking).toBe(true);
+    expect(chat.ballInText).toBe(false);
+    expect(chat.ballStandalone).toBe(false);
+  });
+
+  it("ballInThinking takes priority over ballInText when both conditions hold", async () => {
+    const chat = await makeWorkingChat([
+      {
+        id: "th_1",
+        role: "thinking",
+        text: "",
+        status: "running",
+        agent: "friday",
+        turnId: "t1",
+        ts: 100,
+      },
+      {
+        id: "b_1",
+        role: "assistant",
+        text: "partial",
+        status: "streaming",
+        agent: "friday",
+        turnId: "t1",
+        ts: 101,
+      },
+    ]);
+    expect(chat.ballInThinking).toBe(true);
+    expect(chat.ballInText).toBe(false);
+  });
+
+  it("ballStandalone: true when focusedAgentIsWorking and no streaming/running messages", async () => {
+    const chat = await makeWorkingChat([
+      {
+        id: "u_1",
+        role: "user",
+        text: "hello",
+        status: "complete",
+        agent: "friday",
+        turnId: "t1",
+        ts: 100,
+      },
+    ]);
+    expect(chat.ballStandalone).toBe(true);
+    expect(chat.ballInThinking).toBe(false);
+    expect(chat.ballInText).toBe(false);
+  });
+
+  it("all false when agent is not working", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "idle", sessionId: "s" }];
+    chat.messages = [
+      {
+        id: "b_1",
+        role: "assistant",
+        text: "hi",
+        status: "streaming",
+        agent: "friday",
+        turnId: "t1",
+        ts: 100,
+      },
+    ];
+    expect(chat.ballInText).toBe(false);
+    expect(chat.ballInThinking).toBe(false);
+    expect(chat.ballStandalone).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FRI-158: parseBlocks — redacted thinking + queued-race fixes
+// ---------------------------------------------------------------------------
+
+describe("FRI-158: parseBlocks redacted thinking and queued-race", () => {
+  const baseBlock = {
+    agentName: "friday",
+    sessionId: "s",
+    messageId: "msg-1" as string | null,
+    blockIndex: 0,
+    source: null as string | null,
+  };
+
+  it("redacted thinking block survives D4 ghost filter", async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks(
+      [
+        {
+          id: "1",
+          blockId: "blk-r",
+          turnId: "t1",
+          role: "assistant",
+          kind: "thinking",
+          contentJson: JSON.stringify({ isRedacted: true, data: "" }),
+          status: "complete",
+          ts: 100,
+          ...baseBlock,
+        },
+      ],
+      "friday",
+    );
+    const th = out.find((m) => m.id === "th_blk-r");
+    expect(th).toBeDefined();
+    expect(th?.isRedacted).toBe(true);
+    expect(th?.status).toBe("done");
+  });
+
+  it("empty non-redacted complete thinking block is still ghost-filtered", async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks(
+      [
+        {
+          id: "1",
+          blockId: "blk-g",
+          turnId: "t1",
+          role: "assistant",
+          kind: "thinking",
+          contentJson: JSON.stringify({ text: "" }),
+          status: "complete",
+          ts: 100,
+          ...baseBlock,
+        },
+      ],
+      "friday",
+    );
+    expect(out.find((m) => m.id === "th_blk-g")).toBeUndefined();
+  });
+
+  it("queued user block for turn X suppresses no-response synth for X; completed turn Y with no assistant content still gets synth", async () => {
+    const { parseBlocks } = await import("./chat.svelte");
+    const out = parseBlocks(
+      [
+        // Turn X — user block is queued (not yet dispatched)
+        {
+          ...baseBlock,
+          id: "1",
+          blockId: "blk-ux",
+          turnId: "t-x",
+          role: "user",
+          kind: "text",
+          contentJson: '{"text":"queued msg"}',
+          status: "queued",
+          source: "user_chat",
+          ts: 100,
+          messageId: null,
+        },
+        // Turn Y — user block is complete but no assistant reply
+        {
+          ...baseBlock,
+          id: "2",
+          blockId: "blk-uy",
+          turnId: "t-y",
+          role: "user",
+          kind: "text",
+          contentJson: '{"text":"sent msg"}',
+          status: "complete",
+          source: "user_chat",
+          ts: 200,
+          messageId: null,
+        },
+      ],
+      "friday",
+    );
+    // Turn X must NOT get a no-response synth
+    expect(out.find((m) => m.id === "nr_t-x")).toBeUndefined();
+    // Turn Y MUST get a no-response synth
+    expect(out.find((m) => m.id === "nr_t-y")).toBeDefined();
+  });
+});

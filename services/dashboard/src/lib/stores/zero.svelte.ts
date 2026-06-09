@@ -662,7 +662,7 @@ class ZeroSyncStore {
       // prior session to filtered-empty without waiting for the next
       // blocks event.
       if (this.blocksAgent !== null && this.blocksAgent === chat.focusedAgent) {
-        chat.applyZeroBlocks(this.blocks, this.blocksAgent, this.blocksResultType, this.status !== "live");
+        chat.applyZeroBlocks(this.blocks, this.blocksAgent, this.blocksResultType);
       }
       // Explicit wake-lock reconcile. The wake-lock module's $effect
       // tracks `chat.agents` reads in theory, but cross-context
@@ -1926,7 +1926,7 @@ if (browser) {
     zeroSync.onBlocksUpdate((rows, resultType) => {
       const agent = zeroSync.blocksAgent;
       if (!agent) return;
-      chat.applyZeroBlocks(rows, agent, resultType, zeroSync.status !== "live");
+      chat.applyZeroBlocks(rows, agent, resultType);
     });
     // Phase 4.1: register the markRead callback. Chat calls this from
     // `applyZeroBlocks` after each per-agent snapshot to advance the

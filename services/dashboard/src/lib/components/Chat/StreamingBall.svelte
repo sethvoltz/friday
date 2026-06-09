@@ -2,52 +2,85 @@
   // No props — parent controls visibility by conditionally rendering.
 </script>
 
-<span class="streaming-ball" aria-hidden="true"></span>
+<span class="streaming-ball" aria-hidden="true">
+  <span class="blob b1"></span>
+  <span class="blob b2"></span>
+  <span class="blob b3"></span>
+</span>
 
 <style>
   .streaming-ball {
     display: inline-block;
-    width: 0.65em;
-    height: 0.65em;
-    border-radius: 50%;
-    margin-left: 0.2em;
-    vertical-align: middle;
     position: relative;
+    width: 16px;
+    height: 16px;
+    vertical-align: middle;
+    overflow: hidden;
+    margin-left: 0.15em;
     top: -0.05em;
-
-    /* Aurora gradient that scrolls along the X axis */
-    background: linear-gradient(
-      90deg,
-      var(--accent-primary),
-      color-mix(in srgb, var(--accent-primary) 60%, var(--text-primary)),
-      var(--accent-primary),
-      color-mix(in srgb, var(--accent-primary) 40%, transparent)
-    );
-    background-size: 300% 100%;
-
-    animation:
-      aurora 2.4s linear infinite,
-      streaming-motion 3.2s ease-in-out infinite;
   }
 
-  @keyframes aurora {
-    0%   { background-position: 0% 50%; }
-    100% { background-position: 300% 50%; }
+  .blob {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    filter: blur(2px);
+    mix-blend-mode: screen;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
   }
 
-  /* Combines subtle travel + breathe into a single transform timeline. */
-  @keyframes streaming-motion {
-    0%   { transform: translate(0, 0) scale(1); }
-    25%  { transform: translate(0.06em, -0.06em) scale(0.88); }
-    50%  { transform: translate(0.03em, 0.04em) scale(1); }
-    75%  { transform: translate(-0.04em, -0.03em) scale(0.88); }
-    100% { transform: translate(0, 0) scale(1); }
+  .b1 {
+    background: var(--chat-aurora-1);
+    animation: orbit1 2.1s ease-in-out infinite;
+  }
+
+  .b2 {
+    background: var(--chat-aurora-2);
+    animation: orbit2 2.7s ease-in-out infinite;
+  }
+
+  .b3 {
+    background: var(--chat-aurora-3);
+    animation: orbit3 3.3s ease-in-out infinite;
+  }
+
+  @keyframes orbit1 {
+    0%   { transform: translate(-50%, -50%) translate(0px, 0px); }
+    33%  { transform: translate(-50%, -50%) translate(3px, -3px); }
+    66%  { transform: translate(-50%, -50%) translate(-3px, 2px); }
+    100% { transform: translate(-50%, -50%) translate(0px, 0px); }
+  }
+
+  @keyframes orbit2 {
+    0%   { transform: translate(-50%, -50%) translate(0px, 0px); }
+    33%  { transform: translate(-50%, -50%) translate(-4px, -2px); }
+    66%  { transform: translate(-50%, -50%) translate(2px, 3px); }
+    100% { transform: translate(-50%, -50%) translate(0px, 0px); }
+  }
+
+  @keyframes orbit3 {
+    0%   { transform: translate(-50%, -50%) translate(0px, 0px); }
+    33%  { transform: translate(-50%, -50%) translate(2px, 4px); }
+    66%  { transform: translate(-50%, -50%) translate(-2px, -3px); }
+    100% { transform: translate(-50%, -50%) translate(0px, 0px); }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .streaming-ball {
+    .blob {
       animation: none;
-      background: var(--text-tertiary);
+      filter: none;
+    }
+    .b2,
+    .b3 {
+      display: none;
+    }
+    .b1 {
+      background: var(--text-primary);
+      width: 8px;
+      height: 8px;
     }
   }
 </style>

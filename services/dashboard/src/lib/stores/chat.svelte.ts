@@ -56,8 +56,7 @@ export interface ChatMessage {
 
   // Thinking-specific
   blockId?: string;
-  /** True when this thinking block was redacted by Anthropic (encrypted
-   *  reasoning). No text; renders a "Redacted by Anthropic" badge. */
+  /** True when thinking was redacted by Anthropic; renders a badge instead of text. */
   isRedacted?: boolean;
 
   /** Optimistic-send queue id. When set, this user bubble represents a
@@ -419,6 +418,7 @@ export class StreamingEntry implements ChatMessage {
     initialStatus?: ChatMessage["status"];
     initialText?: string;
     initialToolName?: string;
+    isRedacted?: boolean;
   }) {
     this.id = init.id;
     this.role = init.role;
@@ -432,6 +432,7 @@ export class StreamingEntry implements ChatMessage {
     if (init.initialStatus) this.status = init.initialStatus;
     if (init.initialText) this.text = init.initialText;
     if (init.initialToolName) this.toolName = init.initialToolName;
+    if (init.isRedacted) this.isRedacted = init.isRedacted;
   }
 }
 
@@ -700,15 +701,21 @@ export class ChatState {
   get focusedAgentIsWorking(): boolean {
     return this.agents.some((a) => a.name === this.focusedAgent && a.status === "working");
   }
-  /**
-   * True when the focused agent is working but no streaming/running block has
-   * arrived yet. ChatMessages renders a pulsing "thinking…" placeholder so the
-   * user sees immediate feedback after sending a message instead of silence.
-   * Drops to false the moment any block starts streaming via SSE or Zero.
-   */
-  get showThinkingPlaceholder(): boolean {
+  /** True when a thinking block is actively running — StreamingBall renders inside ThinkingBlock. */
+  get ballInThinking(): boolean {
     if (!this.focusedAgentIsWorking) return false;
-    return !this.messages.some((m) => m.status === "streaming" || m.status === "running");
+    return this.messages.some((m) => m.role === "thinking" && m.status === "running");
+  }
+  /** True when an assistant text block is streaming and no thinking block is running. */
+  get ballInText(): boolean {
+    if (!this.focusedAgentIsWorking) return false;
+    if (this.ballInThinking) return false;
+    return this.messages.some((m) => m.role === "assistant" && m.status === "streaming");
+  }
+  /** True when the agent is working but no streaming/running block has arrived yet. */
+  get ballStandalone(): boolean {
+    if (!this.focusedAgentIsWorking) return false;
+    return !this.ballInThinking && !this.ballInText;
   }
   connected = $state(false);
   /** Per-agent unread badge counts (FIX_FORWARD 3.6). Bumped by SSE
@@ -1731,6 +1738,8 @@ export class ChatState {
    * bubble in that gap.
    */
   noResponseGraceUntil = $state<Record<string, number>>({});
+  /** Epoch ms; no-response guard is suppressed while now < this. Set on reconnect. */
+  reconnectGraceUntil = $state<number>(0);
 
   /**
    * FRI-60: maps turn_id → zero_block_reason for turns that ended with no
@@ -2383,6 +2392,7 @@ export class ChatState {
           inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
           agentWorking: agentIsWorking,
           noResponseGraceUntil: this.noResponseGraceUntil,
+          reconnectGraceUntil: this.reconnectGraceUntil,
           zeroBlockReasonByTurn: this.zeroBlockReasonByTurn,
         });
         this.oldestBlockId = oldestBlockCursor(blocks);
@@ -2537,7 +2547,6 @@ export class ChatState {
     rows: readonly ZeroBlocksRow[],
     forAgent: string,
     resultType: "complete" | "unknown" | "error" = "unknown",
-    zeroIsResyncing?: boolean,
   ): void {
     if (this.focusedAgent !== forAgent) return;
     // Defer the entire snapshot if we don't yet know which session
@@ -2597,14 +2606,10 @@ export class ChatState {
       // the grace map. Covers the SSE-cleared-inflight-but-Zero-hasn't-
       // landed-the-block-yet flash, mirroring the REST fetch path.
       noResponseGraceUntil: this.noResponseGraceUntil,
-      // FRI-91 Part B: the structural fix. Until Zero confirms the
-      // local replica matches upstream for this query, treat any
-      // user-only turn as "assistant block hasn't replicated yet,"
-      // not "the agent didn't respond." See parseBlocks's safety-net
-      // loop for the suppression logic.
-      // FRI-158: also suppress during active resync (Zero is reconnecting;
-      // the replica may be missing blocks that the agent already sent).
-      zeroResultIncomplete: resultType !== "complete" || (zeroIsResyncing ?? false),
+      reconnectGraceUntil: this.reconnectGraceUntil,
+      // FRI-91 Part B: until Zero confirms the local replica matches
+      // upstream, a user-only turn may just be waiting for replication.
+      zeroResultIncomplete: resultType !== "complete",
       // FRI-60: pass reason map so the synthesized no-response bubble gets
       // the right display copy.
       zeroBlockReasonByTurn: this.zeroBlockReasonByTurn,
@@ -3348,7 +3353,7 @@ export class ChatState {
       // block_start created. Aborted/error preserve their bubble so the
       // user sees a "stopped" affordance.
       const hasText = typeof parsed.text === "string" && parsed.text.length > 0;
-      // FRI-158: redacted_thinking blocks legitimately have no text — keep them.
+      // Redacted blocks legitimately have no text — exempt from the ghost filter.
       if (!hasText && !parsed.isRedacted && event.status === "complete") {
         this.streaming.delete(overlayKey(this.focusedAgent, id));
         this.#legacyMessages = this.#legacyMessages.filter((m) => m.id !== id);
@@ -3517,8 +3522,7 @@ interface ParsedBlockContent {
   pre_tokens?: number;
   post_tokens?: number;
   duration_ms?: number;
-  /** True when the thinking block was redacted by Anthropic (kind='thinking',
-   *  written by finalizeBlockContent in worker.ts). Paired with `data`. */
+  /** True when the thinking block was redacted by Anthropic. */
   isRedacted?: boolean;
   /** Opaque encrypted payload from a `redacted_thinking` content block. */
   data?: string;
@@ -3835,6 +3839,8 @@ export function parseBlocks(
      *  partial view (applyZeroBlocks) set this; REST-driven paths pass
      *  full server payloads and leave it falsy. */
     zeroResultIncomplete?: boolean;
+    /** Epoch ms; no-response guard is suppressed while now < this. */
+    reconnectGraceUntil?: number;
     /** FRI-60: maps turn_id → zero_block_reason. When the safety-net
      *  synthesizes a no-response bubble, attaches the reason so
      *  ChatMessages can show the right copy (abort / compaction /
@@ -3921,10 +3927,7 @@ export function parseBlocks(
         // / agent_spawn / schedule are agent-driven traffic where a silent
         // turn is fine. The safety-net synth below only fires for
         // user_chat-sourced user blocks.
-        // FRI-158: exclude queued blocks — they haven't been dispatched yet,
-        // so there's no agent turn to respond to. If we counted them here the
-        // no-response guard would fire between turn N completing and turn N+1
-        // starting (the window where inflightTurnId is briefly null).
+        // Queued blocks haven't been dispatched yet; don't expect a response.
         if (b.source === "user_chat" && b.status !== "queued") {
           userTurns.set(b.turnId, { ts: b.ts, index: out.length });
         }
@@ -3976,7 +3979,7 @@ export function parseBlocks(
       // (the worker explicitly tore the block down). Streaming rows are
       // preserved so reload-mid-turn deltas still attach.
       const hasText = typeof parsed.text === "string" && parsed.text.length > 0;
-      // FRI-158: redacted_thinking blocks legitimately have no text — keep them.
+      // Redacted blocks legitimately have no text — exempt from the ghost filter.
       if (!hasText && !parsed.isRedacted && b.status === "complete") continue;
       // FRI-85: only count rows that survive the D4 filter as assistant
       // content. A dropped ghost thinking row should not suppress the
@@ -4161,10 +4164,12 @@ export function parseBlocks(
   const inflight = opts.inflightTurnId;
   const grace = opts.noResponseGraceUntil;
   const zeroReasons = opts.zeroBlockReasonByTurn;
+  const reconnectGrace = opts.reconnectGraceUntil ?? 0;
   const now = Date.now();
   for (const [turnId, info] of userTurns) {
     if (assistantTurns.has(turnId)) continue;
     if (inflight && turnId === inflight) continue;
+    if (reconnectGrace > now) continue;
     // Post-clear grace: SSE turn_done cleared the inflight slot, but
     // Zero may still be pushing the assistant block over WS. Without
     // this check, the next parseBlocks pass on a frame between SSE

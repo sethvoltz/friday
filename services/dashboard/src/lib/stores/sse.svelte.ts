@@ -267,6 +267,13 @@ export function acceptConnectionEstablished(incomingBootId: string, bootTs: numb
   saveString(BOOT_ID_KEY, incomingBootId);
   chat.bootId = incomingBootId;
   chat.bootTs = bootTs;
+  // Suppress no-response guard for 4s after reconnect — Zero's replica
+  // may lag behind blocks the agent already sent before the reconnect.
+  const deadline = Date.now() + 4000;
+  chat.reconnectGraceUntil = deadline;
+  setTimeout(() => {
+    chat.reconnectGraceUntil = 0;
+  }, 4250);
 }
 
 function handleEvent(evt: ParsedEvent, myId: number): void {
