@@ -304,6 +304,19 @@ export function coldStartCutoff(): number {
  *  the past, so CVR reuse is unchanged. */
 export const BACKFILL_CHUNK_MS = 1 * DAY_MS;
 
+/** Per-chunk ack budget for the background backfill. Zero 1.5's
+ *  `preload().complete` only ever RESOLVES (on the server's `got` ack) — it
+ *  never rejects, even on a server-side query error (the gotCallback in
+ *  `query-delegate-base.js` ignores its error argument). With no timeout, a
+ *  single chunk the server errors on would block the sequential backfill
+ *  loop forever and strand the session on the narrow window. This bounds
+ *  each chunk's await: a chunk that hasn't acked within the budget is
+ *  treated as degraded and the loop advances (the handle stays held, so its
+ *  rows still land if the server recovers). 30 s comfortably clears the
+ *  ~3.4 s worst-case single-day materialization while bounding a hung
+ *  chunk. */
+export const BACKFILL_CHUNK_TIMEOUT_MS = 30 * 1000;
+
 /** Epoch-aligned chunk-grid floor: `Math.floor(ts / BACKFILL_CHUNK_MS) *
  *  BACKFILL_CHUNK_MS`. With `BACKFILL_CHUNK_MS === DAY_MS` this is the same
  *  UTC-day grid the retention cutoff uses, so chunk literals are stable across
@@ -779,7 +792,12 @@ class ZeroSyncStore {
       // prior session to filtered-empty without waiting for the next
       // blocks event.
       if (this.blocksAgent !== null && this.blocksAgent === chat.focusedAgent) {
-        chat.applyZeroBlocks(this.blocks, this.blocksAgent, this.blocksResultType);
+        chat.applyZeroBlocks(
+          this.blocks,
+          this.blocksAgent,
+          this.blocksResultType,
+          this.blocksFullWindow,
+        );
       }
       // Explicit wake-lock reconcile. The wake-lock module's $effect
       // tracks `chat.agents` reads in theory, but cross-context
@@ -1196,36 +1214,40 @@ class ZeroSyncStore {
       chunks.push({ lo: hi - BACKFILL_CHUNK_MS, hi });
     }
 
+    let degraded = false;
     for (const { lo, hi } of chunks) {
       // Abort if the store was torn down between chunks (destroy() bumps
       // #backfillGen) — never apply a preload to a stale/closed client. Only
       // teardown bumps the gen; the idle-guard above means no second backfill
       // can race this one, so teardown is the sole supersede path.
       if (!this.#zero || gen !== this.#backfillGen) return;
-      let lastErr: unknown = null;
-      let ok = false;
-      // Retry the chunk once on failure (Q6), then park as `error`.
-      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
-        if (!this.#zero || gen !== this.#backfillGen) return;
-        try {
-          const handle = this.#issueBackfillChunk(lo, hi);
-          this.#unsubscribers.push(handle.cleanup);
-          await handle.complete;
-          ok = true;
-        } catch (err) {
-          lastErr = err;
-        }
-      }
-      if (!ok) {
-        // Foreground stays on the narrow window; the next reload retries.
-        // Never persist the warm flag on error.
-        this.blocksBackfill = "error";
-        console.warn("[zeroSync] blocks backfill chunk failed, parking:", lastErr);
-        return;
-      }
+      const handle = this.#issueBackfillChunk(lo, hi);
+      // Hold the handle for the tab lifetime regardless of outcome — dropping
+      // it would, after its ttl, del-poke this chunk's now-unreferenced rows
+      // (deleteUnreferencedRows, cvr.js) and evict them.
+      this.#unsubscribers.push(handle.cleanup);
+      // `preload().complete` never rejects in Zero 1.5 (see
+      // BACKFILL_CHUNK_TIMEOUT_MS), so a server-errored chunk would hang this
+      // loop forever. Bound it: a chunk that doesn't ack within the budget
+      // marks the run degraded and we ADVANCE rather than wedge the session.
+      const timedOut = await this.#awaitChunkOrTimeout(handle.complete);
+      if (!this.#zero || gen !== this.#backfillGen) return;
+      if (timedOut) degraded = true;
     }
 
     if (!this.#zero || gen !== this.#backfillGen) return;
+    if (degraded) {
+      // At least one chunk never acked within the timeout. Do NOT persist the
+      // warm flag — the next reload must re-prime the missing chunk(s). Still
+      // widen the focused agent's bind to the full window: its own per-agent
+      // query is a superset that streams whatever a chunk missed, so the user
+      // isn't pinned to the 2-day window for the rest of the session.
+      this.blocksBackfill = "error";
+      console.warn("[zeroSync] blocks backfill degraded: a chunk did not ack within the timeout");
+      this.#widenForegroundWindow();
+      return;
+    }
+
     this.blocksBackfill = "complete";
     // Persist the warm flag (value = this client group's id) so the next
     // reload of THIS replica skips the tiered dance and binds the full
@@ -1242,6 +1264,29 @@ class ZeroSyncStore {
     // Widen the active foreground bind, if it's still on the narrow window,
     // without flashing an empty frame.
     this.#widenForegroundWindow();
+  }
+
+  /** FRI-161: await a chunk's preload `complete`, or give up after
+   *  {@linkcode BACKFILL_CHUNK_TIMEOUT_MS}. Resolves `true` iff it timed out
+   *  (or `complete` rejected on some future Zero version) so the caller can
+   *  advance the backfill instead of hanging on a chunk the server never
+   *  acks. Zero 1.5's `complete` never rejects, so the timeout is the only
+   *  escape from a server-errored chunk. */
+  #awaitChunkOrTimeout(complete: Promise<void>): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (timedOut: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(timedOut);
+      };
+      const timer = setTimeout(() => settle(true), BACKFILL_CHUNK_TIMEOUT_MS);
+      void complete.then(
+        () => settle(false),
+        () => settle(true),
+      );
+    });
   }
 
   /** FRI-161: issue one backfill chunk preload. `hi === null` is the
@@ -2194,7 +2239,11 @@ if (browser) {
     zeroSync.onBlocksUpdate((rows, resultType) => {
       const agent = zeroSync.blocksAgent;
       if (!agent) return;
-      chat.applyZeroBlocks(rows, agent, resultType);
+      // FRI-161: pass the current window state so `applyZeroBlocks` only
+      // honors a 'complete' as "reached oldest" when the FULL window is
+      // bound. `#widenForegroundWindow` sets `blocksFullWindow = true`
+      // before it fires the listener, so the widened 'complete' reads true.
+      chat.applyZeroBlocks(rows, agent, resultType, zeroSync.blocksFullWindow);
     });
     // Phase 4.1: register the markRead callback. Chat calls this from
     // `applyZeroBlocks` after each per-agent snapshot to advance the

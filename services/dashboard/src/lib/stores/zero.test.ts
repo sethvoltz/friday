@@ -706,6 +706,37 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
     expect((tsBounds[0].args as unknown[])[2]).toBe(fullCutoff);
   });
 
+  it("a warm flag from a DIFFERENT client group does NOT mark a fresh replica warm — schema-bump self-heal (FRI-161)", async () => {
+    // The core FRI-161 scenario: a `friday update` bumps the Zero sync schema,
+    // so the browser mints a NEW client group ("test-cg" per the mock) and
+    // discards the old IndexedDB replica. localStorage still holds the warm
+    // flag written under the PRIOR group ("old-cg"). Because the stored value
+    // mismatches the current clientGroupID, the store must treat the replica
+    // as COLD and run the tiered path — NOT skip it (which would re-gate first
+    // paint on the 90-day hydration, the exact stall the feature removes).
+    localStorage.setItem("friday.zero.blocksBackfillComplete", "old-cg");
+
+    const { zeroSync, coldStartCutoff } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    const z = instances[0];
+    const blocksQuery = z.query.blocks as {
+      __calls: Array<{ method: string; args: unknown[] }>;
+    };
+
+    zeroSync.bindBlocksFor("friday");
+    // Cold: narrow window, not marked full.
+    expect(zeroSync.blocksFullWindow).toBe(false);
+    const tsBounds = blocksQuery.__calls.filter(
+      (c) =>
+        c.method === "where" &&
+        (c.args as unknown[])[0] === "ts" &&
+        (c.args as unknown[])[1] === ">",
+    );
+    expect(tsBounds).toHaveLength(1);
+    // Exactly the cold-start literal — never the full retention bound.
+    expect((tsBounds[0].args as unknown[])[2]).toBe(coldStartCutoff());
+  });
+
   it("no blocks preload or query is issued during the init batch (FRI-161 AC 4)", async () => {
     const { zeroSync: _zs } = await importStore();
     // Settle past init but well before the 10s no-foreground fallback.
@@ -1144,10 +1175,11 @@ describe("FRI-161: tiered cold-start backfill", () => {
       ) as unknown[]
     )[2] as number;
 
-    // Resolve the head; the second (closed) chunk must now be issued.
+    // Resolve the head; the second (closed) chunk must now be issued. Flush
+    // microtasks until the loop advances (the timeout-race wrapper adds a hop
+    // between `complete` resolving and the next `#issueBackfillChunk`).
     cap.blocksPreloadCalls[0].resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 10 && cap.blocksPreloadCalls.length < 2; i++) await Promise.resolve();
     expect(cap.blocksPreloadCalls.length).toBe(2);
 
     const second = cap.blocksPreloadCalls[1].args;
@@ -1368,31 +1400,90 @@ describe("FRI-161: tiered cold-start backfill", () => {
     }
   });
 
-  it("a chunk error retries once then parks as 'error' without writing the warm flag (FRI-161 AC 12)", async () => {
+  it("a focus switch AFTER backfill completes binds the FULL window (the blocksBackfill==='complete' disjunct) — FRI-161", async () => {
     const cap = await patchZeroForBackfill();
-    const { zeroSync } = await importStore();
+    const { zeroSync, blocksRetentionCutoff } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
 
+    // Drive a full backfill to completion on agent "friday".
     zeroSync.bindBlocksFor("friday");
     cap.fireForegroundComplete();
+    for (let guard = 0; guard < 300 && zeroSync.blocksBackfill === "running"; guard++) {
+      await Promise.resolve();
+      await Promise.resolve();
+      const last = cap.blocksPreloadCalls[cap.blocksPreloadCalls.length - 1];
+      if (last) last.resolve();
+    }
     await Promise.resolve();
-    await Promise.resolve();
-    // First attempt of chunk 1.
-    expect(cap.blocksPreloadCalls.length).toBe(1);
-    cap.blocksPreloadCalls[0].reject(new Error("boom-1"));
-    await Promise.resolve();
-    await Promise.resolve();
-    // Retry: a second preload for the same (head) chunk.
-    expect(cap.blocksPreloadCalls.length).toBe(2);
-    cap.blocksPreloadCalls[1].reject(new Error("boom-2"));
-    await Promise.resolve();
-    await Promise.resolve();
+    expect(zeroSync.blocksBackfill).toBe("complete");
 
-    expect(zeroSync.blocksBackfill).toBe("error");
-    // No further chunks issued after the retry exhausts.
-    expect(cap.blocksPreloadCalls.length).toBe(2);
-    // Warm flag must NOT be written on error.
-    expect(localStorage.getItem("friday.zero.blocksBackfillComplete")).toBeNull();
+    // Now focus a NEVER-BEFORE-FOCUSED agent in the same session. With the
+    // backfill complete the replica is fully primed, so this bind must use the
+    // FULL retention window (not re-enter the narrow cold tier) — that path
+    // depends on the `blocksBackfill === 'complete'` disjunct in bindBlocksFor.
+    const blocksQuery = instances[0].query.blocks as {
+      __calls: Array<{ method: string; args: unknown[] }>;
+    };
+    const before = blocksQuery.__calls.length;
+    zeroSync.bindBlocksFor("alpha");
+    expect(zeroSync.blocksAgent).toBe("alpha");
+    expect(zeroSync.blocksFullWindow).toBe(true);
+    const newTsGt = blocksQuery.__calls
+      .slice(before)
+      .find(
+        (c) =>
+          c.method === "where" &&
+          (c.args as unknown[])[0] === "ts" &&
+          (c.args as unknown[])[1] === ">",
+      );
+    expect(newTsGt, "alpha's bind must carry a `ts >` bound").toBeDefined();
+    // The full retention literal, not a cold-start-valued one.
+    expect((newTsGt!.args as unknown[])[2]).toBe(blocksRetentionCutoff());
+  });
+
+  it("a chunk whose complete never acks times out, the loop ADVANCES past it, and the run degrades to 'error' without writing the warm flag (FRI-161 AC 12)", async () => {
+    // Zero 1.5's `preload().complete` only ever resolves (on the server `got`
+    // ack) — it never rejects, even on a server-side query error. So the real
+    // failure mode is a `complete` that never settles; without a timeout the
+    // sequential loop would hang forever and strand the session on the narrow
+    // window. The backfill bounds each chunk with BACKFILL_CHUNK_TIMEOUT_MS.
+    vi.useFakeTimers();
+    stubSyncFetch();
+    try {
+      const cap = await patchZeroForBackfill();
+      const { zeroSync, BACKFILL_CHUNK_TIMEOUT_MS } = await importStore();
+      await vi.advanceTimersByTimeAsync(100);
+
+      zeroSync.bindBlocksFor("friday");
+      cap.fireForegroundComplete();
+      await vi.advanceTimersByTimeAsync(0);
+      // Head chunk in flight; leave it UNRESOLVED (the server-errored case).
+      expect(cap.blocksPreloadCalls.length).toBe(1);
+
+      // Cross the per-chunk timeout. The loop must give up on the stuck chunk
+      // and ADVANCE to the next one — exactly one new chunk is now in flight
+      // (the next chunk's own timeout is armed but not yet elapsed).
+      await vi.advanceTimersByTimeAsync(BACKFILL_CHUNK_TIMEOUT_MS + 1);
+      expect(cap.blocksPreloadCalls.length).toBe(2);
+
+      // Resolve every remaining chunk promptly so the loop drains to the end.
+      for (let guard = 0; guard < 300 && zeroSync.blocksBackfill === "running"; guard++) {
+        await vi.advanceTimersByTimeAsync(0);
+        const last = cap.blocksPreloadCalls[cap.blocksPreloadCalls.length - 1];
+        if (last && last.resolve) last.resolve();
+      }
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Degraded: parked 'error', warm flag NOT written (next reload re-primes
+      // the missing chunk), but the focused agent was still widened to the
+      // full window — its per-agent query is a superset, so the user is not
+      // pinned to the 2-day window for the rest of the session.
+      expect(zeroSync.blocksBackfill).toBe("error");
+      expect(localStorage.getItem("friday.zero.blocksBackfillComplete")).toBeNull();
+      expect(zeroSync.blocksFullWindow).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

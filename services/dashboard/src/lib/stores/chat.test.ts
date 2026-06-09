@@ -318,6 +318,76 @@ describe("loadOlderTurns", () => {
   });
 });
 
+describe("FRI-161: applyZeroBlocks reachedOldest is gated on the full window", () => {
+  // The tiered cold start binds a NARROW 2-day window first. A 'complete'
+  // result on that window means "the last 2 days are synced", NOT "you have
+  // reached the oldest message". applyZeroBlocks must only set reachedOldest
+  // when the FULL window is bound — otherwise "Beginning of history" lies
+  // mid-backfill. (zero.svelte.ts's ChatMessages $effect was gated, but
+  // applyZeroBlocks is a SECOND, independent writer of reachedOldest.)
+  const userRow = (id: string, ts: number) =>
+    ({
+      id,
+      block_id: `blk-${id}`,
+      turn_id: `t_blk-${id}`,
+      agent_name: "friday",
+      session_id: "s1",
+      message_id: null,
+      block_index: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      content_json: { text: `msg ${id}` },
+      status: "complete",
+      streaming: false,
+      origin_mutation_id: null,
+      ts,
+    }) as Parameters<typeof import("./chat.svelte").ChatState.prototype.applyZeroBlocks>[0][number];
+
+  it("a NARROW-window 'complete' (fullWindow=false) does NOT set reachedOldest; the widened 'complete' (fullWindow=true) does", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    // Narrow-window snapshot settles 'complete' — must NOT claim reachedOldest.
+    chat.applyZeroBlocks([userRow("a", 1000)], "friday", "complete", false);
+    expect(chat.reachedOldest).toBe(false);
+
+    // Backfill completes; the widened bind re-fires 'complete' with the full
+    // window — now reachedOldest is honest.
+    chat.applyZeroBlocks([userRow("a", 1000)], "friday", "complete", true);
+    expect(chat.reachedOldest).toBe(true);
+  });
+
+  it("the empty-rows branch is gated too: narrow 'complete' with no rows leaves reachedOldest false", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    chat.applyZeroBlocks([], "friday", "complete", false);
+    expect(chat.reachedOldest).toBe(false);
+
+    chat.applyZeroBlocks([], "friday", "complete", true);
+    expect(chat.reachedOldest).toBe(true);
+  });
+
+  it("defaults to fullWindow=true so non-tiered callers preserve the prior 'complete ⇒ reachedOldest' behavior", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    // No 4th arg — the default must be `true`, so a legacy caller's 'complete'
+    // still reaches oldest. Assert via the empty branch (the non-empty merge
+    // path independently re-derives reachedOldest when older rows arrive, which
+    // is orthogonal to the window gate).
+    chat.applyZeroBlocks([], "friday", "complete");
+    expect(chat.reachedOldest).toBe(true);
+  });
+});
+
 describe("no marker pollution on user blocks (FRI-152 reshape)", () => {
   // After the MCP-bridge reshape the chat store does NOT introspect the
   // user message body for AskUserQuestion answer markers. The answer
