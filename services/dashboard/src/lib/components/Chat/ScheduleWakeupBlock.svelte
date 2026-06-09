@@ -48,12 +48,12 @@
   let delaySeconds = $derived(
     typeof parsedInput?.delaySeconds === "number" ? parsedInput.delaySeconds : undefined,
   );
-  const SENTINEL_PROMPTS = new Set(["<<autonomous-loop-dynamic>>", "<<autonomous-loop>>"]);
+  const SENTINEL_RE = /^<<[^>]+>>$/;
 
   let prompt = $derived(
     typeof parsedInput?.prompt === "string" &&
       parsedInput.prompt.length > 0 &&
-      !SENTINEL_PROMPTS.has(parsedInput.prompt)
+      !SENTINEL_RE.test(parsedInput.prompt)
       ? parsedInput.prompt
       : undefined,
   );
