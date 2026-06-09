@@ -26,6 +26,11 @@
     return undefined;
   }
 
+  const SENTINEL_LABELS: Record<string, string> = {
+    "<<autonomous-loop-dynamic>>": "Resume self-paced loop",
+    "<<autonomous-loop>>": "Resume scheduled loop",
+  };
+
   // Canonical `input` lands at block_complete; during streaming only
   // `inputPartialJson` is populated. Best-effort parse so the card is
   // populated as early as the partial JSON happens to be valid.
@@ -48,11 +53,12 @@
   let delaySeconds = $derived(
     typeof parsedInput?.delaySeconds === "number" ? parsedInput.delaySeconds : undefined,
   );
-  let prompt = $derived(
-    typeof parsedInput?.prompt === "string" && parsedInput.prompt.length > 0
-      ? parsedInput.prompt
-      : undefined,
-  );
+
+  let prompt = $derived.by(() => {
+    const raw = parsedInput?.prompt;
+    if (typeof raw !== "string" || raw.length === 0) return undefined;
+    return SENTINEL_LABELS[raw] ?? raw;
+  });
 
   let delayText = $derived(delaySeconds !== undefined ? formatDelay(delaySeconds) : "");
   // Override "done" label — "woke up" is more meaningful than the generic "done".
