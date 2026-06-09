@@ -285,6 +285,13 @@ interface BlockState {
   text: string;
   /** Accumulated `input_json_delta.partial_json` for tool_use blocks. */
   inputJson?: string;
+  /** True for `redacted_thinking` blocks — the model's reasoning was encrypted
+   *  by Anthropic. No delta events follow; the `data` blob below is the opaque
+   *  signed payload needed for session continuity (the SDK writes it to the
+   *  session JSONL automatically; we store it in content_json for completeness). */
+  isRedacted?: boolean;
+  /** Opaque encrypted data blob from `redacted_thinking` content_block_start. */
+  redactedData?: string;
 }
 
 function nextClientBlockId(): string {
@@ -836,6 +843,9 @@ function finalizeBlockContent(b: BlockState): string {
     return JSON.stringify({ text: b.text });
   }
   if (b.kind === "thinking") {
+    if (b.isRedacted) {
+      return JSON.stringify({ isRedacted: true, data: b.redactedData ?? "" });
+    }
     return JSON.stringify({ text: b.text });
   }
   // tool_use
@@ -908,7 +918,8 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   // its own terminal status based on whether content actually accumulated.
   // See the FRI-22 comment at the `m.type === "assistant"` boundary for why.
   const blockHasContent = (b: BlockState): boolean => {
-    if (b.kind === "text" || b.kind === "thinking") return b.text.length > 0;
+    if (b.kind === "thinking") return b.isRedacted === true || b.text.length > 0;
+    if (b.kind === "text") return b.text.length > 0;
     if (b.kind === "tool_use") return (b.inputJson?.length ?? 0) > 0;
     return false;
   };
@@ -1289,6 +1300,26 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
               blockIndex: e.index,
               messageId: currentMessageId || undefined,
               text: "",
+            };
+            blocks.set(e.index, state);
+            emit({
+              type: "block-start",
+              clientBlockId: state.clientBlockId,
+              kind: "thinking",
+              blockIndex: e.index,
+              messageId: state.messageId,
+            });
+          } else if (cb.type === "redacted_thinking") {
+            const state: BlockState = {
+              clientBlockId: nextClientBlockId(),
+              kind: "thinking",
+              blockIndex: e.index,
+              messageId: currentMessageId || undefined,
+              text: "",
+              isRedacted: true,
+              redactedData: typeof (cb as Record<string, unknown>).data === "string"
+                ? ((cb as Record<string, unknown>).data as string)
+                : "",
             };
             blocks.set(e.index, state);
             emit({

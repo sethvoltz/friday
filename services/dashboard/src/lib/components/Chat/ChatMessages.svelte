@@ -22,6 +22,7 @@
   import { resolveToolRenderer } from "$lib/components/Chat/tool-renderers";
   import { stopFooter } from "$lib/components/Chat/stop-footer";
   import ThinkingBlock from "$lib/components/Chat/ThinkingBlock.svelte";
+  import StreamingBall from "$lib/components/Chat/StreamingBall.svelte";
   import MailBlock from "$lib/components/Chat/MailBlock.svelte";
   import ErrorBlock from "$lib/components/Chat/ErrorBlock.svelte";
   import { X } from "lucide-svelte";
@@ -807,7 +808,8 @@
       <div class="message inline">
         <ThinkingBlock
           text={msg.text}
-          status={msg.status === "done" ? "done" : msg.status === "aborted" ? "aborted" : "running"} />
+          status={msg.status === "done" ? "done" : msg.status === "aborted" ? "aborted" : "running"}
+          isRedacted={msg.isRedacted} />
       </div>
     {:else if msg.role === "user" && msg.source === "mail"}
       <div
@@ -898,14 +900,12 @@
               <div class="footer-tag {userFooter.className ?? ''}">{userFooter.text}</div>
             {/if}
           {:else}
-            <Markdown source={msg.text} streaming={msg.status === "streaming"} />
+            <Markdown source={msg.text} streaming={msg.status === "streaming"} />{#if msg.status === "streaming"}<StreamingBall />{/if}
             {@const assistantFooter = stopFooter(msg.status, msg.abortReason)}
             {#if assistantFooter}
               <div class="footer-tag {assistantFooter.className ?? ''}">{assistantFooter.text}</div>
             {:else if msg.status === "error"}
               <div class="footer-tag err">Error</div>
-            {:else if msg.status === "streaming"}
-              <div class="footer-tag streaming">…</div>
             {/if}
           {/if}
         </div>
@@ -1017,9 +1017,6 @@
   }
   .footer-tag.err {
     color: var(--status-error);
-  }
-  .footer-tag.streaming {
-    color: var(--accent-primary);
   }
   .footer-tag.stopping {
     color: var(--status-warn);

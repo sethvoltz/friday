@@ -56,6 +56,9 @@ export interface ChatMessage {
 
   // Thinking-specific
   blockId?: string;
+  /** True when this thinking block was redacted by Anthropic (encrypted
+   *  reasoning). No text; renders a "Redacted by Anthropic" badge. */
+  isRedacted?: boolean;
 
   /** Optimistic-send queue id. When set, this user bubble represents a
    * message that is waiting to flush — render with a "queued" pill so the
@@ -401,6 +404,7 @@ export class StreamingEntry implements ChatMessage {
   input = $state<unknown>(undefined);
   output = $state<string | undefined>(undefined);
   inputPartialJson = $state<string | undefined>(undefined);
+  isRedacted = $state(false);
 
   constructor(init: {
     id: string;
@@ -2533,6 +2537,7 @@ export class ChatState {
     rows: readonly ZeroBlocksRow[],
     forAgent: string,
     resultType: "complete" | "unknown" | "error" = "unknown",
+    zeroIsResyncing?: boolean,
   ): void {
     if (this.focusedAgent !== forAgent) return;
     // Defer the entire snapshot if we don't yet know which session
@@ -2597,7 +2602,9 @@ export class ChatState {
       // user-only turn as "assistant block hasn't replicated yet,"
       // not "the agent didn't respond." See parseBlocks's safety-net
       // loop for the suppression logic.
-      zeroResultIncomplete: resultType !== "complete",
+      // FRI-158: also suppress during active resync (Zero is reconnecting;
+      // the replica may be missing blocks that the agent already sent).
+      zeroResultIncomplete: resultType !== "complete" || (zeroIsResyncing ?? false),
       // FRI-60: pass reason map so the synthesized no-response bubble gets
       // the right display copy.
       zeroBlockReasonByTurn: this.zeroBlockReasonByTurn,
@@ -3341,7 +3348,8 @@ export class ChatState {
       // block_start created. Aborted/error preserve their bubble so the
       // user sees a "stopped" affordance.
       const hasText = typeof parsed.text === "string" && parsed.text.length > 0;
-      if (!hasText && event.status === "complete") {
+      // FRI-158: redacted_thinking blocks legitimately have no text — keep them.
+      if (!hasText && !parsed.isRedacted && event.status === "complete") {
         this.streaming.delete(overlayKey(this.focusedAgent, id));
         this.#legacyMessages = this.#legacyMessages.filter((m) => m.id !== id);
         return;
@@ -3356,12 +3364,14 @@ export class ChatState {
       const thinkOverlay = this.streaming.get(overlayKey(agent, id));
       if (thinkOverlay && thinkOverlay.role === "thinking") {
         if (typeof parsed.text === "string") thinkOverlay.text = parsed.text;
+        if (parsed.isRedacted) thinkOverlay.isRedacted = true;
         thinkOverlay.status = status;
         return;
       }
       for (const m of this.messages) {
         if (m.id !== id) continue;
         if (typeof parsed.text === "string") m.text = parsed.text;
+        if (parsed.isRedacted) m.isRedacted = true;
         m.status = status;
         return;
       }
@@ -3369,6 +3379,7 @@ export class ChatState {
         id,
         role: "thinking",
         text: parsed.text ?? "",
+        isRedacted: parsed.isRedacted === true,
         status,
         agent,
         blockId: event.block_id,
@@ -3506,6 +3517,11 @@ interface ParsedBlockContent {
   pre_tokens?: number;
   post_tokens?: number;
   duration_ms?: number;
+  /** True when the thinking block was redacted by Anthropic (kind='thinking',
+   *  written by finalizeBlockContent in worker.ts). Paired with `data`. */
+  isRedacted?: boolean;
+  /** Opaque encrypted payload from a `redacted_thinking` content block. */
+  data?: string;
 }
 
 function parseBlockContent(contentJson: string): ParsedBlockContent {
@@ -3905,7 +3921,11 @@ export function parseBlocks(
         // / agent_spawn / schedule are agent-driven traffic where a silent
         // turn is fine. The safety-net synth below only fires for
         // user_chat-sourced user blocks.
-        if (b.source === "user_chat") {
+        // FRI-158: exclude queued blocks — they haven't been dispatched yet,
+        // so there's no agent turn to respond to. If we counted them here the
+        // no-response guard would fire between turn N completing and turn N+1
+        // starting (the window where inflightTurnId is briefly null).
+        if (b.source === "user_chat" && b.status !== "queued") {
           userTurns.set(b.turnId, { ts: b.ts, index: out.length });
         }
       }
@@ -3956,7 +3976,8 @@ export function parseBlocks(
       // (the worker explicitly tore the block down). Streaming rows are
       // preserved so reload-mid-turn deltas still attach.
       const hasText = typeof parsed.text === "string" && parsed.text.length > 0;
-      if (!hasText && b.status === "complete") continue;
+      // FRI-158: redacted_thinking blocks legitimately have no text — keep them.
+      if (!hasText && !parsed.isRedacted && b.status === "complete") continue;
       // FRI-85: only count rows that survive the D4 filter as assistant
       // content. A dropped ghost thinking row should not suppress the
       // user-only-turn safety-net no-response affordance below.
@@ -3979,6 +4000,7 @@ export function parseBlocks(
         id: `th_${b.blockId}`,
         role: "thinking",
         text: parsed.text ?? "",
+        isRedacted: parsed.isRedacted === true,
         status,
         blockId: b.blockId,
         turnId: b.turnId,
