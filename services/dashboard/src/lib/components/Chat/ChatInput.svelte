@@ -61,7 +61,18 @@
   onMount(() => {
     void fetch("/api/commands")
       .then((r) => r.json())
-      .then((c: CommandsResponse) => (commands = c))
+      .then((c: CommandsResponse) => {
+        // Shape-guard before assigning: a proxy error while the daemon
+        // is unreachable (502 during boot/restart) can still resolve
+        // json() — with an error body. Assigning that would make the
+        // `suggestions` $derived throw `undefined.filter` on the user's
+        // first "/" keystroke, and an exception inside a derived poisons
+        // the whole reactivity graph (observed as a permanently-disabled
+        // Send button against a visibly-filled textarea).
+        if (Array.isArray(c?.system) && Array.isArray(c?.skills)) {
+          commands = c;
+        }
+      })
       .catch(() => undefined);
 
     const mq = window.matchMedia("(pointer: coarse)");

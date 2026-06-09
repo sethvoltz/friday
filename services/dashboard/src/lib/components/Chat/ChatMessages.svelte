@@ -81,6 +81,11 @@
     /** Active flag for the past-page-load — drives the "Loading older…"
      * pill so the user knows the scroll-up triggered something. */
     loadingOlderPast?: boolean;
+    /** FRI-160: notifies ChatShell's single anchor-restore owner after a
+     * window slide's DOM has settled. Load-bearing — a slide mounts and
+     * unmounts the same bubble count, so `.list`'s net height change can
+     * be ~0px and ChatShell's ResizeObserver alone never sees it. */
+    onWindowSlide?: () => void;
   }
   let {
     messages,
@@ -90,6 +95,7 @@
     onLoadOlderPast,
     pastReachedOldest = false,
     loadingOlderPast = false,
+    onWindowSlide,
   }: Props = $props();
   let rawMessages = $derived(messages ?? chat.messages);
   let readonly = $derived(messages !== undefined);
@@ -260,10 +266,19 @@
   }
 
   /**
-   * Slide the windowEnd cursor and restore the user's viewport to the
-   * same content they were looking at. Same anchor-restore math the
-   * old REST scroll-back path used — only the source of the new rows
-   * changed (the Zero local replica instead of a server fetch).
+   * Slide the windowEnd cursor. Viewport restoration is NOT computed
+   * here: after the re-slice settles, `onWindowSlide` hands the
+   * mutation to ChatShell's single anchor-restore owner (FRI-160),
+   * which measures how far the user's topmost visible bubble moved and
+   * queues one deferred window-scroll correction. The old
+   * element-scroller code restored here with its own anchor math; that
+   * can't survive alongside ChatShell's ResizeObserver restore — with
+   * the writes deferred (double-rAF, doc-scroll.ts) the two would each
+   * queue a full-height correction and double-apply. The hook (rather
+   * than relying on the RO alone) is load-bearing in the other
+   * direction too: a slide mounts SLIDE_AMOUNT bubbles on one edge and
+   * unmounts the same count on the other, so `.list`'s NET height can
+   * change by ~0px and the RO never fires at all.
    *
    * Direction:
    *   - "up"   → reveal older. Decreases windowEnd, shifting the
@@ -272,26 +287,8 @@
    *              window unmount from the BOTTOM. DOM stays bounded.
    *   - "down" → reveal newer. Increases windowEnd. Symmetric: new
    *              bubbles mount BELOW, oldest unmount from the TOP.
-   *
-   * Anchor is the FIRST visible bubble (topmost in viewport).
-   * Capturing the first bubble works for both directions because
-   * after the slide it stays in the rendered DOM (only the edges
-   * change) and its viewport-relative offset shifts predictably.
    */
-  function slideWindow(
-    scroller: HTMLElement | null,
-    direction: "up" | "down",
-  ): void {
-    if (!scroller) return;
-    const anchorEl =
-      scroller.querySelector<HTMLElement>("[data-msg-id]") ?? null;
-    const anchorId = anchorEl?.getAttribute("data-msg-id") ?? null;
-    const anchorOffset =
-      anchorEl
-        ? anchorEl.getBoundingClientRect().top -
-          scroller.getBoundingClientRect().top
-        : 0;
-
+  function slideWindow(direction: "up" | "down"): void {
     const current = windowEnd;
     const newEnd =
       direction === "up"
@@ -309,34 +306,14 @@
       chat.chatWindowEnd = { agent: chat.focusedAgent, end: newEnd };
     }
 
+    // Hand the mutation to the restore owner once the new slice is in
+    // the DOM. tick() resolves after Svelte's flush but before the
+    // browser's RO delivery, so the hook measures first and the RO —
+    // if the net height did change — measures a delta of 0 against the
+    // shared, eagerly-advanced anchor. Order is safe in both worlds.
     void (async () => {
-      if (!anchorId) return;
       await tick();
-      const target = scroller.querySelector<HTMLElement>(
-        `[data-msg-id="${CSS.escape(anchorId)}"]`,
-      );
-      // If the anchor scrolled out of the new slice (window slid past
-      // it — happens on a fast slide-down when the user was already
-      // near the top of the old window), there's nothing to restore
-      // against. Bail rather than guess; the next scroll event will
-      // re-anchor naturally.
-      if (!target) return;
-      const newOffset =
-        target.getBoundingClientRect().top -
-        scroller.getBoundingClientRect().top;
-      const delta = newOffset - anchorOffset;
-      if (delta === 0) return;
-      // WebKit/Safari/Orion paint-deferral fix. A programmatic
-      // scrollTop write while the scroll thread is hot (momentum or
-      // recent input) defers paint of the newly-revealed region
-      // until the next user scroll. Toggling overflow-y: hidden
-      // synchronously detaches the element from the scroll thread,
-      // forcing WebKit to commit + flush a full paint.
-      scroller.style.overflowY = "hidden";
-      scroller.scrollTop += delta;
-      setTimeout(() => {
-        if (scroller) scroller.style.overflowY = "";
-      }, 0);
+      onWindowSlide?.();
     })();
   }
 
@@ -371,43 +348,16 @@
             // to onLoadOlderPast only when we've slid all the way to
             // the head AND the parent says more pages remain.
             if (windowStart > 0) {
-              const scroller = el.closest(".chat-scroll") as HTMLElement | null;
-              slideWindow(scroller, "up");
+              slideWindow("up");
               continue;
             }
             if (!onLoadOlderPast || pastReachedOldest || loadingOlderPast)
               continue;
-            const scroller = el.closest(".chat-scroll") as HTMLElement | null;
-            const anchorEl =
-              scroller?.querySelector<HTMLElement>("[data-msg-id]") ?? null;
-            const anchorId = anchorEl?.getAttribute("data-msg-id") ?? null;
-            const anchorOffset =
-              anchorEl && scroller
-                ? anchorEl.getBoundingClientRect().top -
-                  scroller.getBoundingClientRect().top
-                : 0;
-            void Promise.resolve(onLoadOlderPast()).then(async () => {
-              if (!scroller || !anchorId) return;
-              await tick();
-              if (!scroller) return;
-              const target = scroller.querySelector<HTMLElement>(
-                `[data-msg-id="${CSS.escape(anchorId)}"]`,
-              );
-              if (!target) return;
-              const newOffset =
-                target.getBoundingClientRect().top -
-                scroller.getBoundingClientRect().top;
-              const delta = newOffset - anchorOffset;
-              // WebKit scroll-thread paint deferral fix — see the
-              // matching block in the live-chat onPrepended below for
-              // full rationale, including the re-entrancy note on why
-              // we restore to "" instead of a snapshotted prev.
-              scroller.style.overflowY = "hidden";
-              scroller.scrollTop += delta;
-              setTimeout(() => {
-                if (scroller) scroller.style.overflowY = "";
-              }, 0);
-            });
+            // Older-page prepend: no viewport restore here either —
+            // the prepended rows resize `.list` and ChatShell's
+            // ResizeObserver (the single anchor-restore owner) queues
+            // the one deferred correction. See slideWindow.
+            void Promise.resolve(onLoadOlderPast());
             continue;
           }
           // Slide the window UP (reveal older). No-op when already at
@@ -415,8 +365,7 @@
           // toward. The Zero local replica already holds the older
           // messages we're about to mount — there is no network call.
           if (windowStart === 0) continue;
-          const scroller = el.closest(".chat-scroll") as HTMLElement | null;
-          slideWindow(scroller, "up");
+          slideWindow("up");
         }
       },
       // Generous top margin: fire the slide BEFORE the user's scroll
@@ -502,9 +451,7 @@
           // in both modes — the slide writes to readonlyWindowEnd or
           // chat.chatWindowEnd depending on mode.
           if (atBottomOfWindow && windowEnd < allMessages.length) {
-            const scroller =
-              sentinel.closest(".chat-scroll") as HTMLElement | null;
-            slideWindow(scroller, "down");
+            slideWindow("down");
           }
         }
       },

@@ -188,12 +188,24 @@ test.describe("FRI-156 — compaction divider + pre-compaction pill (visual)", (
 
     // Scroll the transcript to the very top: the divider now sits below the
     // viewport → the "Viewing pre-compaction history" pill appears.
-    // Scroll up with a real wheel gesture (not a programmatic scrollTop write,
+    // FRI-160: the document/window is the chat scroller now — the transcript
+    // element (`.chat-transcript`) is inert, so the wheel must be delivered
+    // to the document scroller. Gate on the entry scroll-to-bottom having
+    // converged first (auto-retrying in-viewport assertion, no sleeps), then
+    // scroll up with a real wheel gesture (not a programmatic scroll write,
     // which the post-resync bottom-chase loop immediately reverts). Real user
     // scroll input self-aborts that loop, mirroring how a person reaches
-    // pre-compaction history. Hover the transcript first so the wheel targets it.
-    const scroller = page.locator(".chat-scroll");
-    await scroller.hover();
+    // pre-compaction history. Hover `body` first so the wheel targets the
+    // document — at an explicitly computed point at the center of the
+    // *visible* viewport, because a bare body.hover() aims for the center of
+    // the full document-height box, which sits outside the viewport on a
+    // tall page and never resolves.
+    await expect(page.locator(".bottom-sentinel")).toBeInViewport({ timeout: 10_000 });
+    const hoverPos = await page.evaluate(() => ({
+      x: window.scrollX + Math.floor(window.innerWidth / 2),
+      y: window.scrollY + Math.floor(window.innerHeight / 2),
+    }));
+    await page.locator("body").hover({ position: hoverPos });
     await page.mouse.wheel(0, -4000);
     await expect(pill).toBeVisible({ timeout: 10_000 });
     await expect(pill).toHaveText("Viewing pre-compaction history");

@@ -222,7 +222,7 @@ setTimeout(() => {
 
 Setting `overflow-y: hidden` synchronously detaches the element from WebKit's scroll thread, forcing it to commit the pending scroll position and flush a paint of the now-non-scrollable region. The async restore (`setTimeout 0`) reattaches the scroll thread once the paint has happened. **A synchronous restore reproduces the bug** — the asynchronous tick is load-bearing; this is not a place to "clean up" by inlining. Pattern adopted from `inokawa/virtua` PR #862, originally `prud/ios-overflow-scroll-to-top`. Preserves inertial / momentum scrolling because the toggle window is one task wide and visually invisible.
 
-Implementation lives at the call site in `services/dashboard/src/lib/components/Chat/ChatMessages.svelte` (`onPrepended` + the past-session equivalent). The CSS rule on `.chat-scroll` keeps `overflow-anchor: none` as Chromium-side belt-and-braces (free on WebKit); layer-promotion hints are deliberately _not_ added.
+The CSS rule on `.chat-transcript` keeps `overflow-anchor: none` as Chromium-side belt-and-braces (free on WebKit); layer-promotion hints are deliberately _not_ added. **Amendment (ADR-039):** the chat scroller is now the document, not an element — §1's element-anchor technique stands, but the overflow-toggle in §2 is superseded by ADR-039's double-`requestAnimationFrame` around the `window` scroll write. Because that write is deferred (no longer synchronous before ResizeObserver delivery), the restore moved to a single owner in ChatShell, which performs the element-anchor measurement and queues the one correction — fed by its `.list` ResizeObserver (content growth, prepends) and by an `onWindowSlide` hook from ChatMessages (a virtualization slide swaps equal bubble counts, so the list's net height can be ~0px and the RO never fires). The ChatMessages call sites no longer restore on their own.
 
 ## ADR-020 — Invariant auditor is a timer-based safety net, not the primary enforcement
 
@@ -1401,6 +1401,36 @@ ADR-037 keeps daemon `process.env` secret-free via `loadFridayConfig()`, but int
 - **HTTP loopback fetch with `x-friday-caller-*` headers** — spoofable; replaced by in-process MCP with trusted spawn identity.
 - **Inject all global env-mode secrets at worker spawn** — over-broad; replaced by reference-only map.
 - **1Password/exec provider (FRI-32)** — deferred.
+
+## ADR-039 — Chat scrolls the document, not a fixed overlay
+
+**Status:** accepted (FRI-160, 2026-06-09)
+
+**Supersedes the overflow-toggle half of ADR-019 (§2); §1's element-anchor technique stands.**
+
+### Context
+
+The chat route was the one page in the dashboard that did not scroll the document: `ChatShell` rendered the transcript inside a `position: fixed; inset: 0; overflow-y: auto` overlay that was the page's sole scroller. Every other route lets the document/window scroll. On mobile WebKit (worst in the installed iOS PWA) the browser intermittently routed a touch to the **parent** of the fixed overlay and dragged/rubber-banded the whole page as a chunk instead of scrolling the chat — a scroll-routing fight between the overlay and the document that no amount of `touch-action` / `overscroll-behavior` tuning reliably won. Desktop was functionally fine, but Space/PageDown/Home/End never scrolled the chat: document keyboard scrolling doesn't reach a fixed overlay.
+
+### Decision
+
+The document/window is the single scroller on the chat route, exactly like every other route. Header, sidebar, and composer stay `position: fixed` — pinned bars layered over the document scroll, not competing scrollers. The transcript itself is an inert in-flow `.chat-transcript` element (renamed from the old overlay class) that keeps the ChatShell-scoped layout vars and padding but has no overflow of its own. All scroll reads go through `window.scrollY`, all writes through `window.scrollTo` / `window.scrollBy`, and the scroll/cancel listeners (`scroll` / `wheel` / `touchmove` / `keydown`) bind to `window`.
+
+### Consequences
+
+- The fixed-overlay artifact set is deleted: `position: fixed; inset: 0; overflow-y: auto`, `touch-action: pan-y`, and `overscroll-behavior: contain` are gone. Other document-scrolling pages never needed them; re-add only if top-bounce tap-misplacement resurfaces on-device.
+- The three `overflow-y: hidden` paint-defer toggles (the ADR-019 §2 pattern) are deleted. The toggle cannot be re-homed onto `<html>`/`<body>` — `overflow: hidden` on the document root is silently ignored on iOS WebKit (WebKit #153852, #240860). Replaced with a double-`requestAnimationFrame` around the `window.scrollTo` / `window.scrollBy` write, which sidesteps overflow entirely. Programmatic follow writes never pass `behavior: "smooth"` (WebKit #238497 — smooth-behavior interplay makes scrollTo fail silently; the overflow half of that bug is gone, but the rule stands so the hazard can't come back).
+- Entry scroll is now router territory: SvelteKit scroll-to-tops on navigation, and the chat route lands at the bottom itself via an `afterNavigate` + deferred `window.scrollTo` write that supersedes the router's pass two frames later. Deliberately **without** `disableScrollHandling()`: in kit 2.59 the router's scroll pass runs — and resets its autoscroll flag — _before_ `afterNavigate` callbacks fire, so calling it there can't affect the current navigation and instead disables the _next_ one (chat's deep scrollY leaked into the next page visited).
+- Space / PageDown / Home / End now scroll the chat on desktop — the document scroller receives keyboard scrolling for free.
+
+### Rejected alternatives
+
+- **Fold the transcript padding into `.app-main.chat-route` and drop the element.** The six chat layout CSS vars are ChatShell-scoped with zero references elsewhere; folding up would force them global and split chat layout across two files.
+- **Keep the fixed overlay and tune `touch-action` / `overscroll-behavior` harder.** That is exactly the artifact set being deleted; it doesn't fix the parent-routing fight.
+
+### Do not "fix" this back
+
+A future pass that notices "chat isn't a self-contained scroller anymore" and restores a nested or fixed overlay scroller would reintroduce the mobile scroll-routing bug this ADR exists to kill. The inert `.chat-transcript` + document scroll is deliberate.
 
 ## Watch list
 
