@@ -1,5 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EVOLVE_DIR, SPIKE_CURSOR_PATH } from "@friday/shared";
 import type { UsageEntryRow } from "@friday/shared/services";
 
@@ -8,7 +10,7 @@ vi.mock("@friday/shared/services", () => ({
   getAllUsageEntries: vi.fn(),
 }));
 
-const { scanUsage } = await import("./scan.js");
+const { scanUsage, scanTranscripts } = await import("./scan.js");
 const { getUsageEntriesSince, getAllUsageEntries } = await import("@friday/shared/services");
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -138,5 +140,124 @@ describe("scanUsage — cold-resume exclusion", () => {
     const signals = await scanUsage({ since: "2026-04-30T00:00:00Z" });
     expect(signals).toHaveLength(1);
     expect(signals[0].key).toBe("usage_token_spike");
+  });
+});
+
+// ── scanTranscripts ───────────────────────────────────────────────────────────
+
+function writeJsonl(filePath: string, entries: object[]): void {
+  writeFileSync(filePath, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+}
+
+function userEntry(text: string, timestamp: string) {
+  return { type: "user", message: { role: "user", content: text }, timestamp };
+}
+
+function manualCompactEntry(timestamp: string) {
+  return {
+    type: "system",
+    subtype: "compact_boundary",
+    compact_metadata: { trigger: "manual" },
+    timestamp,
+  };
+}
+
+describe("scanTranscripts — compact boundary suppression", () => {
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = join(tmpdir(), `fri-scan-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(tmpRoot, "proj"), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("does not fire when a manual compact_boundary precedes the second message", () => {
+    writeJsonl(join(tmpRoot, "proj", "abc123.jsonl"), [
+      userEntry("fix the bug", "2026-05-01T00:00:00.000Z"),
+      manualCompactEntry("2026-05-01T00:01:00.000Z"),
+      userEntry("fix the bug", "2026-05-01T00:01:01.000Z"),
+    ]);
+
+    const signals = scanTranscripts({ projectsRoot: tmpRoot });
+    expect(signals.filter((s) => s.key === "transcript_user_retry")).toHaveLength(0);
+  });
+
+  it("fires for a genuine retry when no compact_boundary is present", () => {
+    writeJsonl(join(tmpRoot, "proj", "abc124.jsonl"), [
+      userEntry("fix the bug", "2026-05-01T00:00:00.000Z"),
+      userEntry("fix the bug", "2026-05-01T00:01:00.000Z"),
+    ]);
+
+    const signals = scanTranscripts({ projectsRoot: tmpRoot });
+    const retrySignals = signals.filter((s) => s.key === "transcript_user_retry");
+    expect(retrySignals).toHaveLength(1);
+    expect(retrySignals[0].evidencePointers[0].sessionId).toBe("abc124");
+  });
+
+  it("does not suppress when compact_boundary trigger is 'auto'", () => {
+    writeJsonl(join(tmpRoot, "proj", "abc125.jsonl"), [
+      userEntry("fix the bug", "2026-05-01T00:00:00.000Z"),
+      {
+        type: "system",
+        subtype: "compact_boundary",
+        compact_metadata: { trigger: "auto" },
+        timestamp: "2026-05-01T00:01:00.000Z",
+      },
+      userEntry("fix the bug", "2026-05-01T00:01:01.000Z"),
+    ]);
+
+    const signals = scanTranscripts({ projectsRoot: tmpRoot });
+    expect(signals.filter((s) => s.key === "transcript_user_retry")).toHaveLength(1);
+  });
+});
+
+describe("scanTranscripts — session-scoped dedup", () => {
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = join(tmpdir(), `fri-scan-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(tmpRoot, "proj"), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("emits exactly one signal for a session with multiple retry pairs", () => {
+    // Three identical messages in window → two retry pairs, but one signal.
+    writeJsonl(join(tmpRoot, "proj", "sess1.jsonl"), [
+      userEntry("please fix the bug", "2026-05-01T00:00:00.000Z"),
+      userEntry("please fix the bug", "2026-05-01T00:01:00.000Z"),
+      userEntry("please fix the bug", "2026-05-01T00:02:00.000Z"),
+    ]);
+
+    const signals = scanTranscripts({ projectsRoot: tmpRoot });
+    const retrySignals = signals.filter((s) => s.key === "transcript_user_retry");
+    expect(retrySignals).toHaveLength(1);
+    expect(retrySignals[0].count).toBe(1);
+    expect(retrySignals[0].evidencePointers).toHaveLength(1);
+    expect(retrySignals[0].evidencePointers[0].sessionId).toBe("sess1");
+  });
+
+  it("accumulates one count per session across multiple sessions with retries", () => {
+    writeJsonl(join(tmpRoot, "proj", "sess2.jsonl"), [
+      userEntry("please fix the bug", "2026-05-01T00:00:00.000Z"),
+      userEntry("please fix the bug", "2026-05-01T00:01:00.000Z"),
+    ]);
+    writeJsonl(join(tmpRoot, "proj", "sess3.jsonl"), [
+      userEntry("please fix the bug", "2026-05-01T00:00:00.000Z"),
+      userEntry("please fix the bug", "2026-05-01T00:01:00.000Z"),
+    ]);
+
+    const signals = scanTranscripts({ projectsRoot: tmpRoot });
+    const retrySignals = signals.filter((s) => s.key === "transcript_user_retry");
+    expect(retrySignals).toHaveLength(1);
+    expect(retrySignals[0].count).toBe(2);
+    const sessionIds = retrySignals[0].evidencePointers.map((p) => p.sessionId);
+    expect(sessionIds).toContain("sess2");
+    expect(sessionIds).toContain("sess3");
   });
 });

@@ -310,23 +310,25 @@ export function scanTranscripts(opts: TranscriptScanOptions = {}): Signal[] {
       if (!stat) continue;
       if (sinceMs && stat.mtimeMs < sinceMs) continue;
 
-      const turns = collectUserTurns(filePath, sinceMs);
-      const retries = countRetries(turns, threshold, windowMs);
+      const { turns, manualCompactTs } = collectUserTurns(filePath, sinceMs);
+      const retries = countRetries(turns, threshold, windowMs, manualCompactTs);
       if (retries === 0) continue;
 
-      for (let r = 0; r < retries; r++) {
-        bucketAppend(
-          buckets,
-          "transcript_user_retry",
-          "transcript",
-          "medium",
-          filePath,
-          undefined,
-          new Date(stat.mtimeMs).toISOString(),
-          undefined,
-          sessionId,
-        );
-      }
+      // Session-scoped dedup: fire at most once per session file regardless of
+      // how many retry pairs were detected. Multiple retries from the same
+      // session (e.g. compaction artefacts) previously produced N identical
+      // evidence pointers for the same sessionId.
+      bucketAppend(
+        buckets,
+        "transcript_user_retry",
+        "transcript",
+        "medium",
+        filePath,
+        undefined,
+        new Date(stat.mtimeMs).toISOString(),
+        undefined,
+        sessionId,
+      );
     }
   }
 
@@ -430,27 +432,47 @@ function safeStat(path: string): { mtimeMs: number } | null {
   }
 }
 
-function collectUserTurns(filePath: string, sinceMs: number): TranscriptUserTurn[] {
-  const out: TranscriptUserTurn[] = [];
+function collectUserTurns(
+  filePath: string,
+  sinceMs: number,
+): { turns: TranscriptUserTurn[]; manualCompactTs: number[] } {
+  const turns: TranscriptUserTurn[] = [];
+  const manualCompactTs: number[] = [];
   let raw: string;
   try {
     raw = readFileSync(filePath, "utf-8");
   } catch {
-    return out;
+    return { turns, manualCompactTs };
   }
   for (const line of raw.split("\n")) {
     if (!line) continue;
     let parsed: {
       type?: string;
+      subtype?: string;
       message?: { role?: string; content?: unknown };
       timestamp?: string;
       ts?: string;
+      compact_metadata?: { trigger?: string };
     };
     try {
       parsed = JSON.parse(line);
     } catch {
       continue;
     }
+
+    // Collect timestamps of manual compact boundaries so countRetries can
+    // suppress pairs that are artefacts of a /compact re-submission.
+    if (
+      parsed.type === "system" &&
+      parsed.subtype === "compact_boundary" &&
+      parsed.compact_metadata?.trigger === "manual"
+    ) {
+      const tsString = parsed.timestamp ?? parsed.ts;
+      const ts = tsString ? Date.parse(tsString) : 0;
+      if (ts) manualCompactTs.push(ts);
+      continue;
+    }
+
     if (parsed.type !== "user") continue;
     const message = parsed.message;
     if (!message || message.role !== "user") continue;
@@ -461,9 +483,9 @@ function collectUserTurns(filePath: string, sinceMs: number): TranscriptUserTurn
 
     const text = extractText(message.content);
     if (!text) continue;
-    out.push({ ts, text });
+    turns.push({ ts, text });
   }
-  return out;
+  return { turns, manualCompactTs };
 }
 
 function extractText(content: unknown): string {
@@ -479,12 +501,20 @@ function extractText(content: unknown): string {
   return parts.join(" ");
 }
 
-function countRetries(turns: TranscriptUserTurn[], threshold: number, windowMs: number): number {
+function countRetries(
+  turns: TranscriptUserTurn[],
+  threshold: number,
+  windowMs: number,
+  manualCompactTs: number[],
+): number {
   let retries = 0;
   for (let i = 1; i < turns.length; i++) {
     const a = turns[i - 1];
     const b = turns[i];
     if (b.ts && a.ts && b.ts - a.ts > windowMs) continue;
+    // Suppress: a manual compact between the two messages means the second
+    // message is a /compact re-submission artefact, not a genuine user retry.
+    if (a.ts && b.ts && manualCompactTs.some((t) => t > a.ts && t <= b.ts)) continue;
     if (cosine(tokenize(a.text), tokenize(b.text)) >= threshold) retries++;
   }
   return retries;
