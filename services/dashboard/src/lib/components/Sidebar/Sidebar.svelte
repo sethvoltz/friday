@@ -430,6 +430,7 @@
 </script>
 
 {#snippet agentRow(a: AgentInfo, isPinned: boolean)}
+  {@const compacting = chat.isAgentCompacting(a.name)}
   <div
     class="row"
     data-agent={a.name}
@@ -442,9 +443,14 @@
       onclick={(e) => focusAgentGuarded(e, a.name, a.type)}>
       <span
         class="dot"
-        class:pulse={a.status === "working"}
+        class:pulse={a.status === "working" && !compacting}
+        class:compacting
         class:archived={a.status === "archived"}
-        style:background={a.status === "archived" ? undefined : statusDot(a.status)}
+        style:background={a.status === "archived"
+          ? undefined
+          : compacting
+            ? "var(--status-compacting)"
+            : statusDot(a.status)}
       ></span>
       {#if isPinned}
         <span class="agent-icon agent-orchestrator" aria-hidden="true">
@@ -556,9 +562,14 @@
       onclick={(e) => { e.stopPropagation(); open = !open; }}>
       <span
         class="dot"
-        class:pulse={focused.status === "working"}
+        class:pulse={focused.status === "working" && !chat.isAgentCompacting(focused.name)}
+        class:compacting={chat.isAgentCompacting(focused.name)}
         class:archived={focused.status === "archived"}
-        style:background={focused.status === "archived" ? undefined : statusDot(focused.status)}
+        style:background={focused.status === "archived"
+          ? undefined
+          : chat.isAgentCompacting(focused.name)
+            ? "var(--status-compacting)"
+            : statusDot(focused.status)}
       ></span>
       {#if focused.type === "orchestrator"}
         <span class="agent-icon agent-orchestrator" aria-hidden="true">
@@ -869,8 +880,30 @@
       box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-ok) 0%, transparent);
     }
   }
+  /* Compacting agents pulse a SLOWER cyan ring, distinct from the green
+     `working` pulse, so a background agent mid-compaction is visible in the
+     sidebar without opening its chat — the gap this feature closes. The dot
+     itself is `--status-compacting` (set via style:background); this `!important`
+     trumps the `.dot.pulse` box-shadow/animation if both classes ever co-exist
+     during a render frame. */
+  .dot.compacting {
+    box-shadow: 0 0 0 0 var(--status-compacting);
+    animation: dot-pulse-compacting 2.4s ease-out infinite !important;
+  }
+  @keyframes dot-pulse-compacting {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-compacting) 75%, transparent);
+    }
+    70% {
+      box-shadow: 0 0 0 6px color-mix(in srgb, var(--status-compacting) 0%, transparent);
+    }
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-compacting) 0%, transparent);
+    }
+  }
   @media (prefers-reduced-motion: reduce) {
-    .dot.pulse { animation: none; }
+    .dot.pulse,
+    .dot.compacting { animation: none; }
   }
   /* Typed agent glyph. Lucide icon centred in a fixed-size box so rows align
      even when an agent's type rolls over (the glyph swaps; the column stays

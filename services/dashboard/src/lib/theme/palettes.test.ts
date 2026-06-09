@@ -53,12 +53,13 @@ describe("palette catalog", () => {
     }
   });
 
-  it("each palette declares exactly 54 tokens", () => {
+  it("each palette declares exactly 55 tokens", () => {
     // 49 existing color/shadow tokens migrated from :root + .dark, plus
-    // 5 new tokens added for leak fixes: --diff-removed, --diff-added,
-    // --toggle-knob, --chart-5, --chart-6.
+    // 5 leak-fix tokens (--diff-removed, --diff-added, --toggle-knob,
+    // --chart-5, --chart-6), plus --status-compacting (compaction-in-progress
+    // sidebar dot) = 55.
     for (const name of Object.keys(PALETTES)) {
-      expect(tokensFor(name).size).toBe(54);
+      expect(tokensFor(name).size).toBe(55);
     }
   });
 

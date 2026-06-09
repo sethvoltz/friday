@@ -332,6 +332,16 @@ async function main(): Promise<void> {
 async function recoverAgents(cfg: ReturnType<typeof loadConfig>): Promise<void> {
   const daemonPort = resolveDaemonPort(cfg);
   const jsonlAgents: RecoveryAgent[] = [];
+  // Clear any stale `compacting_since` left by a daemon that died
+  // mid-compaction: no worker is alive to emit the `compacting` done frame,
+  // and no compaction is in flight until the SDK re-signals on resume. Without
+  // this, the dashboard would reconstruct a permanent "Compacting context…"
+  // indicator from the orphaned flag after a restart — the very scenario this
+  // feature exists to fix, inverted.
+  const clearedCompacting = await registry.clearStaleCompacting();
+  if (clearedCompacting > 0) {
+    logger.log("info", "agent.recovery.clear-stale-compacting", { count: clearedCompacting });
+  }
   for (const a of await registry.listAgents()) {
     // Heal-on-boot: a builder whose worktree was already removed cannot
     // run another turn. If we don't archive it here, the eligibility

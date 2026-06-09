@@ -7587,3 +7587,85 @@ describe("FRI-156 §E: latestCompactionDividerId picks the most-recent divider",
     expect(chat.latestCompactionDividerId).toBeNull();
   });
 });
+
+describe("compaction-in-progress: durable + transient union (reconstructable indicator)", () => {
+  it("RECONSTRUCTS from the durable `compactingSince` column with NO live SSE event", async () => {
+    // The exact reload/reconnect/daemon-restart scenario: the `compacting`
+    // start frame was missed (or lost on reload), so the transient set is
+    // EMPTY — but the Zero-replicated column carries the truth.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "working", compactingSince: 1_000_000 },
+    ];
+    expect(chat.compactingAgents.has("friday")).toBe(false); // no SSE signal
+    expect(chat.isAgentCompacting("friday")).toBe(true); // reconstructed
+    expect(chat.focusedAgentIsCompacting).toBe(true);
+  });
+
+  it("lights from the transient SSE set alone when the column has not replicated yet (fast-path)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
+    chat.compactingAgents.add("friday");
+    expect(chat.isAgentCompacting("friday")).toBe(true);
+    expect(chat.focusedAgentIsCompacting).toBe(true);
+  });
+
+  it("stays compacting when the transient set clears but the column is still set (no flicker on done-race)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "working", compactingSince: 1_000_000 },
+    ];
+    chat.compactingAgents.add("friday");
+    // turn_done's defensive clear empties the set, but the column hasn't
+    // cleared yet — the union must keep the indicator up.
+    chat.compactingAgents.delete("friday");
+    expect(chat.isAgentCompacting("friday")).toBe(true);
+  });
+
+  it("is NOT compacting when neither signal is present", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [{ name: "friday", type: "orchestrator", status: "working" }];
+    expect(chat.isAgentCompacting("friday")).toBe(false);
+    expect(chat.focusedAgentIsCompacting).toBe(false);
+  });
+
+  it("does NOT surface a BACKGROUND agent's compaction in the focused chat indicator", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [
+      { name: "friday", type: "orchestrator", status: "working" },
+      { name: "builder-x", type: "builder", status: "working", compactingSince: 1_000_000 },
+    ];
+    // The background agent IS compacting (sidebar dot will show it)…
+    expect(chat.isAgentCompacting("builder-x")).toBe(true);
+    // …but the focused-agent chat indicator stays off.
+    expect(chat.focusedAgentIsCompacting).toBe(false);
+  });
+
+  it("compactingSinceFor returns the column instant (drives the elapsed-time readout), undefined otherwise", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    chat.agents = [
+      {
+        name: "friday",
+        type: "orchestrator",
+        status: "working",
+        compactingSince: 1_700_000_000_000,
+      },
+      { name: "idle-one", type: "helper", status: "idle" },
+    ];
+    expect(chat.compactingSinceFor("friday")).toBe(1_700_000_000_000);
+    expect(chat.compactingSinceFor("idle-one")).toBeUndefined();
+    expect(chat.compactingSinceFor("nonexistent")).toBeUndefined();
+  });
+});

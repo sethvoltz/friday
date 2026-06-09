@@ -80,6 +80,26 @@ interface CapturedEvent {
   content_json?: string;
   block_index?: number;
   zero_block_reason?: string;
+  phase?: string;
+}
+
+/** Insert a minimal `working` agent row so the `compacting_since` UPDATE
+ *  (keyed on agent name) lands on a real row rather than no-opping. */
+async function registerWorkingAgent(
+  name: string,
+  opts: { compactingSince?: Date | null } = {},
+): Promise<void> {
+  await getDb()
+    .insert(schema.agents)
+    .values({
+      name,
+      type: "orchestrator",
+      status: "working",
+      sessionCount: 0,
+      compactingSince: opts.compactingSince ?? null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
 }
 
 describe("lifecycle.handleEvent on `compaction-boundary` IPC (FRI-156 §D/§E)", () => {
@@ -393,5 +413,83 @@ describe("lifecycle.handleEvent on `compacting-status` IPC (FRI-156 §F / AC8)",
     __deleteLiveWorkerForTest(worker.agentName);
 
     expect(logSpy.mock.calls.some((c) => c[1] === "worker.compact.result")).toBe(false);
+  });
+});
+
+describe("lifecycle.handleEvent on `compacting-status` IPC — durable compacting_since flag", () => {
+  it("stamps agents.compacting_since on the 'start' frame (durable mirror of the SSE signal)", async () => {
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    await registerWorkingAgent("cmp-agent");
+
+    const worker = makeFakeWorker({ turnId: "turn-cmp-since-start" });
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+    await handleEvent(
+      worker as never,
+      { type: "compacting-status", sessionId: "sess-cmp-1", phase: "start" } as never,
+    );
+    __deleteLiveWorkerForTest(worker.agentName);
+
+    const [row] = await getDb()
+      .select()
+      .from(schema.agents)
+      .where(eq(schema.agents.name, "cmp-agent"));
+    expect(row.compactingSince).toBeInstanceOf(Date);
+  });
+
+  it("clears agents.compacting_since to NULL on the 'done' frame", async () => {
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    await registerWorkingAgent("cmp-agent", { compactingSince: new Date(Date.now() - 5000) });
+
+    const worker = makeFakeWorker({ turnId: "turn-cmp-since-done" });
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+    await handleEvent(
+      worker as never,
+      {
+        type: "compacting-status",
+        sessionId: "sess-cmp-1",
+        phase: "done",
+        result: "success",
+      } as never,
+    );
+    __deleteLiveWorkerForTest(worker.agentName);
+
+    const [row] = await getDb()
+      .select()
+      .from(schema.agents)
+      .where(eq(schema.agents.name, "cmp-agent"));
+    expect(row.compactingSince).toBeNull();
+  });
+
+  it("CROSS-BOUNDARY: 'start' BOTH publishes the transient `compacting` SSE event AND stamps the durable column", async () => {
+    const { handleEvent, __putLiveWorkerForTest, __deleteLiveWorkerForTest } =
+      await import("./lifecycle.js");
+    const { eventBus } = await import("../events/bus.js");
+    const captured: CapturedEvent[] = [];
+    const unsub = eventBus.subscribe((e) => captured.push(e as CapturedEvent));
+
+    await registerWorkingAgent("cmp-agent");
+    const worker = makeFakeWorker({ turnId: "turn-cmp-both" });
+    __putLiveWorkerForTest(worker.agentName, worker as never);
+    await handleEvent(
+      worker as never,
+      { type: "compacting-status", sessionId: "sess-cmp-1", phase: "start" } as never,
+    );
+    __deleteLiveWorkerForTest(worker.agentName);
+    unsub();
+
+    // Transient half: the low-latency SSE signal still fires.
+    expect(
+      captured.some(
+        (e) => e.type === "compacting" && e.phase === "start" && e.agent === "cmp-agent",
+      ),
+    ).toBe(true);
+    // Durable half: the reconstructable column is stamped.
+    const [row] = await getDb()
+      .select()
+      .from(schema.agents)
+      .where(eq(schema.agents.name, "cmp-agent"));
+    expect(row.compactingSince).toBeInstanceOf(Date);
   });
 });

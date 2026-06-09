@@ -92,6 +92,30 @@
   let rawMessages = $derived(messages ?? chat.messages);
   let readonly = $derived(messages !== undefined);
 
+  // Ticking clock for the compaction elapsed-time readout. The interval only
+  // runs WHILE the focused agent is compacting (effect re-subscribes on the
+  // `focusedAgentIsCompacting` edge) so there is no idle 1s timer otherwise.
+  let compactingNowMs = $state(Date.now());
+  $effect(() => {
+    if (!chat.focusedAgentIsCompacting) return;
+    compactingNowMs = Date.now();
+    const id = setInterval(() => {
+      compactingNowMs = Date.now();
+    }, 1000);
+    return () => clearInterval(id);
+  });
+  // "M:SS" elapsed since compaction began, from the durable `compacting_since`
+  // column. Null while only the transient SSE signal is present (column not yet
+  // replicated) — the label then renders without a timer until it lands.
+  let compactingElapsedLabel = $derived.by(() => {
+    const since = chat.compactingSinceFor(chat.focusedAgent);
+    if (since == null) return null;
+    const secs = Math.max(0, Math.floor((compactingNowMs - since) / 1000));
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  });
+
   // FIX_FORWARD 2.6: pin pending bubbles to the bottom regardless of natural
   // sort. Extended to also pin user blocks the daemon recorded with
   // `status='queued'` — these are sitting in the worker's `nextPrompts`
@@ -892,16 +916,20 @@
     {/if}
   {/each}
   {#if !readonly && chat.focusedAgentIsCompacting}
-    <!-- FRI-156 §F: transient compaction-in-progress indicator. Driven by
-         the `compacting` SSE event (phase start → done) via
-         chat.focusedAgentIsCompacting. The retired FRI-60 inline
-         `.compaction-notice` (in-memory, per-turn, lost on reload) is
-         superseded by the durable divider above; this is the live spinner
-         for the moment compaction is actually running. -->
+    <!-- Compaction-in-progress indicator. Now reconstructable: driven by
+         chat.focusedAgentIsCompacting, which unions the transient `compacting`
+         SSE signal with the durable `agents.compacting_since` column — so it
+         survives reload/reconnect and the daemon-restart window, not just the
+         live SSE frame. The retired FRI-60 inline `.compaction-notice`
+         (in-memory, per-turn, lost on reload) is superseded by the durable
+         divider above; this is the live readout while compaction runs, and it
+         hands off to that divider on completion. -->
     <div class="message inline" data-compacting="true">
       <div class="compacting-status" role="status" aria-live="polite">
         <span class="spinner" aria-hidden="true"></span>
-        Compacting context…
+        Compacting context…{#if compactingElapsedLabel}<span class="elapsed"
+            >&nbsp;{compactingElapsedLabel}</span
+          >{/if}
       </div>
     </div>
   {/if}
@@ -1245,7 +1273,7 @@
     background: var(--bg-card);
     white-space: nowrap;
   }
-  /* FRI-156 §F: transient "Compacting context…" live indicator. */
+  /* "Compacting context…" live indicator (durable-backed, reconstructable). */
   .compacting-status {
     display: flex;
     align-items: center;
@@ -1255,6 +1283,12 @@
     font-style: italic;
     padding: 0.35rem 0.5rem;
     opacity: 0.85;
+  }
+  /* Elapsed readout ("M:SS"). Tabular figures so the width doesn't jitter as
+     the seconds tick. Not italic — it reads as a value, not prose. */
+  .compacting-status .elapsed {
+    font-style: normal;
+    font-variant-numeric: tabular-nums;
   }
   .spinner {
     width: 0.85rem;

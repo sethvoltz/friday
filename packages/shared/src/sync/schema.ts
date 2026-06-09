@@ -83,6 +83,12 @@ const agents = table("agents")
     spawn_reason: string().optional(),
     app_id: string().optional(),
     archive_reason: string().optional(),
+    // Epoch-millis when the daemon began compacting this agent's context;
+    // absent/NULL when not compacting. Mirrors `db/schema.ts:agents.
+    // compacting_since`. Lets the dashboard reconstruct the "Compacting
+    // context…" indicator on reload/reconnect rather than relying solely on
+    // the transient `compacting` SSE event.
+    compacting_since: number().optional(),
     session_count: number(),
     created_at: number(),
     updated_at: number(),
