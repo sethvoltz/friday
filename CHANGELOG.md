@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.17.0](https://github.com/sethvoltz/friday/compare/v1.16.0...v1.17.0) (2026-06-09)
+
+
+### Features
+
+* **dashboard:** FRI-160 chat scrolls the document, not a fixed overlay ([#213](https://github.com/sethvoltz/friday/issues/213)) ([b4afb68](https://github.com/sethvoltz/friday/commit/b4afb682ad2c0b4ce05a02d1e6d2012e08bc8c8f))
+
 ## [1.16.0](https://github.com/sethvoltz/friday/compare/v1.15.0...v1.16.0) (2026-06-09)
 
 
