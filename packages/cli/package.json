@@ -1,6 +1,6 @@
 {
   "name": "@friday/cli",
-  "version": "1.13.3",
+  "version": "1.14.0",
   "private": true,
   "type": "module",
   "bin": {
