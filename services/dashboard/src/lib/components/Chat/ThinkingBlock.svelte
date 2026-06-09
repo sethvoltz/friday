@@ -1,39 +1,50 @@
 <script lang="ts">
   import { Brain } from "lucide-svelte";
+  import StreamingBall from "./StreamingBall.svelte";
 
   interface Props {
     text: string;
-    status: "running" | "done" | "aborted";
+    status: "running" | "done" | "aborted" | "error";
+    isRedacted?: boolean;
+    showBall?: boolean;
   }
-  let { text, status }: Props = $props();
+  let { text, status, isRedacted = false, showBall = false }: Props = $props();
 
-  let open = $state(false);
+  let _open = $state(false);
+  let open = $derived(status === "running" ? true : _open);
   let hasText = $derived(text.length > 0);
 </script>
 
 <div class="thinking-block">
-  <button
-    type="button"
-    class="thinking-head"
-    onclick={() => (open = !open)}
-    aria-expanded={open}>
-    <span class="thinking-icon" aria-hidden="true"><Brain size={16} /></span>
-    <span class="label">
-      Thinking{status === "running" ? "…" : ""}
-    </span>
-    {#if status === "running"}<span class="dots">●●●</span>{/if}
-    {#if status === "aborted"}<span class="aborted-tag">stopped</span>{/if}
-    <span class="expand-toggle" aria-hidden="true">{open ? "−" : "+"}</span>
-  </button>
-  {#if open}
+  {#if status !== "running"}
+    <button
+      type="button"
+      class="thinking-head"
+      onclick={() => (_open = !_open)}
+      aria-expanded={open}>
+      <span class="thinking-icon" aria-hidden="true"><Brain size={16} /></span>
+      <span class="label">Thinking</span>
+      {#if status === "aborted"}<span class="aborted-tag">stopped</span>{/if}
+      {#if status === "error"}<span class="aborted-tag">error</span>{/if}
+      <span class="expand-toggle" aria-hidden="true">{open ? "−" : "+"}</span>
+    </button>
+  {:else}
+    <div class="thinking-head running-head">
+      <span class="thinking-icon" aria-hidden="true"><Brain size={16} /></span>
+      <span class="label">Thinking…</span>
+      <span class="dots">●●●</span>
+      {#if showBall && !hasText}<StreamingBall />{/if}
+    </div>
+  {/if}
+  {#if isRedacted}
+    <span class="redacted-badge">Redacted by Anthropic</span>
+  {:else if open}
     {#if hasText}
-      <pre class="thinking-body">{text}</pre>
-    {:else}
-      <div class="thinking-redacted">
-        The model's reasoning was redacted by Anthropic's safety system.
-        The signed reasoning blocks are preserved on disk for session
-        continuity, but the human-readable content isn't surfaced.
-      </div>
+      <pre class="thinking-body">{text}{#if showBall && status === "running"}<StreamingBall />{/if}</pre>
+    {:else if status === "aborted"}
+      <div class="thinking-empty">Thinking was stopped before any content was produced.</div>
+    {:else if status === "error"}
+      <div class="thinking-empty">Thinking encountered an error before producing content.</div>
     {/if}
   {/if}
 </div>
@@ -45,7 +56,8 @@
     color: var(--text-tertiary);
     font-size: 0.85rem;
   }
-  .thinking-head {
+  .thinking-head,
+  .running-head {
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -58,6 +70,9 @@
     text-align: left;
     cursor: pointer;
     user-select: none;
+  }
+  .running-head {
+    cursor: default;
   }
   .thinking-icon {
     display: inline-flex;
@@ -117,7 +132,7 @@
     overflow-y: auto;
     font-style: italic;
   }
-  .thinking-redacted {
+  .thinking-empty {
     margin: 0.4rem 0.75rem 0.25rem 1.25rem;
     padding: 0.5rem 0.75rem;
     background: var(--bg-tertiary);
@@ -126,5 +141,19 @@
     color: var(--text-tertiary);
     line-height: 1.5;
     font-style: italic;
+  }
+  .redacted-badge {
+    display: inline-block;
+    margin: 0 0.75rem 0.25rem 0.75rem;
+    padding: 0.1rem 0.5rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-tertiary);
+    font-style: normal;
   }
 </style>

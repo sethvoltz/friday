@@ -1298,6 +1298,28 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
               blockIndex: e.index,
               messageId: state.messageId,
             });
+          } else if (cb.type === "redacted_thinking") {
+            // Emit start + stop immediately — no delta events follow.
+            // Do NOT add to `blocks`; when content_block_stop arrives
+            // blocks.get(e.index) returns undefined and the guard skips it.
+            const clientBlockId = nextClientBlockId();
+            const data =
+              typeof (cb as Record<string, unknown>).data === "string"
+                ? ((cb as Record<string, unknown>).data as string)
+                : "";
+            emit({
+              type: "block-start",
+              clientBlockId,
+              kind: "thinking",
+              blockIndex: e.index,
+              messageId: currentMessageId || undefined,
+            });
+            emit({
+              type: "block-stop",
+              clientBlockId,
+              contentJson: JSON.stringify({ isRedacted: true, data }),
+              status: "complete",
+            });
           } else {
             const state: BlockState = {
               clientBlockId: nextClientBlockId(),
