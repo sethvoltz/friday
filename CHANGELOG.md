@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.3](https://github.com/sethvoltz/friday/compare/v1.13.2...v1.13.3) (2026-06-09)
+
+
+### Bug Fixes
+
+* **dashboard:** show friendly labels for sentinel prompts in ScheduleWakeupBlock ([#202](https://github.com/sethvoltz/friday/issues/202)) ([dbe52ed](https://github.com/sethvoltz/friday/commit/dbe52eda29e5934a537f741b6cdea04a957820d6))
+
 ## [1.13.2](https://github.com/sethvoltz/friday/compare/v1.13.1...v1.13.2) (2026-06-09)
 
 
