@@ -163,10 +163,13 @@
         if (!isActive(a.status)) return showInactive;
         return true;
       })
-      // Recency-first within each age bucket below. Falls back to name when
-      // neither agent has a timestamp yet (SSE-synthesized rows that haven't
-      // been touched by an /api/agents poll).
-      .sort((a, b) => ageMsOf(b) - ageMsOf(a) || a.name.localeCompare(b.name)),
+      // Working agents pin to the top of each bucket, then recency-first.
+      // Falls back to name when neither agent has a timestamp yet.
+      .sort((a, b) =>
+        statusPriority(a.status) - statusPriority(b.status) ||
+        ageMsOf(b) - ageMsOf(a) ||
+        a.name.localeCompare(b.name)
+      ),
   );
 
   // Age-bucketed separators. Buckets are derived from local-time calendar
@@ -206,6 +209,10 @@
     earlierYear: "Earlier this Year",
     older: "Older",
   };
+
+  function statusPriority(s: string): number {
+    return s === "working" ? 0 : 1;
+  }
 
   function ageMsOf(a: AgentInfo): number {
     // updatedAt wins; createdAt is the fallback. Missing both → 0, which
