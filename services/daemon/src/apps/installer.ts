@@ -259,6 +259,10 @@ export async function installApp(
               archiveReason: null,
               appId: manifest.id,
               updatedAt: now,
+              // Leaving `working` clears the compaction flag; these reconcile
+              // writes bypass _setStatusUnchecked, so null it here to keep the
+              // "not working ⇒ no compacting_since" invariant true.
+              compactingSince: null,
               ...(dispo.clearSession ? { sessionId: null } : {}),
             })
             .where(eq(schema.agents.name, agent.name));
@@ -271,7 +275,11 @@ export async function installApp(
               appId: manifest.id,
               type: agent.type,
               updatedAt: now,
-              ...(dispo.wasArchived ? { status: "idle", archiveReason: null } : {}),
+              // Same invariant as unarchive: when this rebind resets an
+              // archived row to idle, clear any stale compacting_since too.
+              ...(dispo.wasArchived
+                ? { status: "idle", archiveReason: null, compactingSince: null }
+                : {}),
               ...(dispo.clearSession ? { sessionId: null } : {}),
             })
             .where(eq(schema.agents.name, agent.name));

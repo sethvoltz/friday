@@ -70,6 +70,19 @@ describe("compacting_since backstop on status transitions", () => {
     await registry.setStatus("friday", "working");
     expect((await compactingSinceOf("friday"))?.getTime()).toBe(t.getTime());
   });
+
+  it("clears compacting_since when the agent is archived (any non-working target, not just idle)", async () => {
+    // The backstop keys on `status !== "working"`, so idle is representative —
+    // but pin the `archived` terminal too (orchestrators can't archive, so use
+    // a helper). archiveAgent routes through setStatus → _setStatusUnchecked.
+    await registry.registerAgent({ name: "helper-1", type: "helper", parentName: "friday" });
+    await registry.setStatus("helper-1", "working");
+    await registry.setCompactingSince("helper-1", new Date());
+    expect(await compactingSinceOf("helper-1")).not.toBeNull();
+
+    await registry.archiveAgent("helper-1", { reason: "completed" });
+    expect(await compactingSinceOf("helper-1")).toBeNull();
+  });
 });
 
 describe("registry.clearStaleCompacting (boot reconcile)", () => {

@@ -446,11 +446,7 @@
         class:pulse={a.status === "working" && !compacting}
         class:compacting
         class:archived={a.status === "archived"}
-        style:background={a.status === "archived"
-          ? undefined
-          : compacting
-            ? "var(--status-compacting)"
-            : statusDot(a.status)}
+        style:background={a.status === "archived" ? undefined : statusDot(a.status, { compacting })}
       ></span>
       {#if isPinned}
         <span class="agent-icon agent-orchestrator" aria-hidden="true">
@@ -567,9 +563,7 @@
         class:archived={focused.status === "archived"}
         style:background={focused.status === "archived"
           ? undefined
-          : chat.isAgentCompacting(focused.name)
-            ? "var(--status-compacting)"
-            : statusDot(focused.status)}
+          : statusDot(focused.status, { compacting: chat.isAgentCompacting(focused.name) })}
       ></span>
       {#if focused.type === "orchestrator"}
         <span class="agent-icon agent-orchestrator" aria-hidden="true">
@@ -883,12 +877,13 @@
   /* Compacting agents pulse a SLOWER cyan ring, distinct from the green
      `working` pulse, so a background agent mid-compaction is visible in the
      sidebar without opening its chat — the gap this feature closes. The dot
-     itself is `--status-compacting` (set via style:background); this `!important`
-     trumps the `.dot.pulse` box-shadow/animation if both classes ever co-exist
-     during a render frame. */
+     itself is `--status-compacting` (set via style:background). `pulse` and
+     `compacting` are mutually exclusive by construction (the markup binds
+     `class:pulse={working && !compacting}`), so no `!important` is needed —
+     and using it would defeat the `prefers-reduced-motion` override below. */
   .dot.compacting {
     box-shadow: 0 0 0 0 var(--status-compacting);
-    animation: dot-pulse-compacting 2.4s ease-out infinite !important;
+    animation: dot-pulse-compacting 2.4s ease-out infinite;
   }
   @keyframes dot-pulse-compacting {
     0% {

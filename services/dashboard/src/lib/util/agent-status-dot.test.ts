@@ -45,4 +45,22 @@ describe("agentStatusDot (FRI-145 M5)", () => {
   it("undefined status falls to the muted default", () => {
     expect(agentStatusDot(undefined)).toBe("var(--text-tertiary)");
   });
+
+  describe("compacting (orthogonal to status)", () => {
+    it("compacting paints the cyan dot (--status-compacting), winning over the base status", () => {
+      // Compaction runs while the agent stays `working`, so the flag must
+      // override the green `working` color — this is what makes a compacting
+      // agent distinguishable in BOTH the Sidebar and the Command Palette.
+      expect(agentStatusDot("working", { compacting: true })).toBe("var(--status-compacting)");
+      expect(agentStatusDot("idle", { compacting: true })).toBe("var(--status-compacting)");
+    });
+
+    it("compacting:false falls through to the base status color", () => {
+      expect(agentStatusDot("working", { compacting: false })).toBe("var(--status-ok)");
+    });
+
+    it("no opts behaves exactly as before (base status color)", () => {
+      expect(agentStatusDot("working")).toBe("var(--status-ok)");
+    });
+  });
 });

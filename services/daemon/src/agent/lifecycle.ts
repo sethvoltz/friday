@@ -2139,6 +2139,17 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
       // path failed to clear, so a dropped done-write can't wedge it on.
       try {
         await registry.setCompactingSince(w.agentName, e.phase === "start" ? new Date() : null);
+        // Race guard: a force-kill's `setStatus(idle)` runs OFF the per-agent
+        // transition queue and nulls the flag via its backstop; if it demotes
+        // this worker's generation WHILE the start-stamp above is awaiting its
+        // UPDATE, our stamp can land last and wedge `compacting_since` set on a
+        // now-idle agent. Re-check generation after the await and undo the
+        // stamp if we've been superseded. (Only `start` writes a non-null
+        // value, so only `start` can wedge.) Backstop + boot reconcile would
+        // self-heal on the next turn/boot anyway; this closes the window now.
+        if (e.phase === "start" && !isCurrentGeneration(w)) {
+          await registry.setCompactingSince(w.agentName, null);
+        }
       } catch (err) {
         logger.log("warn", "worker.compact.compacting-since.error", {
           agent: w.agentName,

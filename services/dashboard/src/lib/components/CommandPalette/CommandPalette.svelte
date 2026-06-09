@@ -151,6 +151,7 @@
               {#each section.items as item (item.kind + ":" + item.id)}
                 {@const idx = flatIndexOf(item)}
                 {@const Icon = item.icon}
+                {@const compacting = item.kind === "agent" && chat.isAgentCompacting(item.id)}
                 <button
                   type="button"
                   id={`palette-row-${idx}`}
@@ -166,10 +167,11 @@
                     class="agent-dot"
                     class:placeholder={item.kind !== "agent"}
                     class:archived={item.agentStatus === "archived"}
-                    class:pulse={item.agentStatus === "working"}
+                    class:pulse={item.agentStatus === "working" && !compacting}
+                    class:compacting
                     style:background={item.kind === "agent" &&
                     item.agentStatus !== "archived"
-                      ? statusDotColor(item.agentStatus)
+                      ? statusDotColor(item.agentStatus, { compacting })
                       : undefined}
                     aria-hidden="true"
                   ></span>
@@ -438,6 +440,25 @@
     50% {
       transform: scale(1.8);
       opacity: 0;
+    }
+  }
+  /* Compacting agent: same ring, but SLOWER, so it reads differently from a
+     normally-working agent here too. The ring inherits the dot background
+     (cyan --status-compacting, set via style:background through agentStatusDot).
+     `pulse` and `compacting` are mutually exclusive (bound that way in markup). */
+  .agent-dot.compacting::before {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    background: inherit;
+    opacity: 0.3;
+    animation: palette-pulse 3s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .agent-dot.pulse::before,
+    .agent-dot.compacting::before {
+      animation: none;
     }
   }
 

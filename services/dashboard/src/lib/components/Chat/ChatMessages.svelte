@@ -12,6 +12,7 @@
   import { fmtTokensCompact } from "$lib/util/format";
   import {
     formatAbsoluteTooltip,
+    formatCompactingElapsed,
     formatDaySeparator,
     formatRelativeTime,
   } from "$lib/util/time-format";
@@ -107,14 +108,10 @@
   // "M:SS" elapsed since compaction began, from the durable `compacting_since`
   // column. Null while only the transient SSE signal is present (column not yet
   // replicated) — the label then renders without a timer until it lands.
-  let compactingElapsedLabel = $derived.by(() => {
-    const since = chat.compactingSinceFor(chat.focusedAgent);
-    if (since == null) return null;
-    const secs = Math.max(0, Math.floor((compactingNowMs - since) / 1000));
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m}:${s.toString().padStart(2, "0")}`;
-  });
+  // Formatting + guards live in the pure, unit-tested `formatCompactingElapsed`.
+  let compactingElapsedLabel = $derived(
+    formatCompactingElapsed(chat.compactingSinceFor(chat.focusedAgent), compactingNowMs),
+  );
 
   // FIX_FORWARD 2.6: pin pending bubbles to the bottom regardless of natural
   // sort. Extended to also pin user blocks the daemon recorded with
