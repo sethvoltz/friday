@@ -34,6 +34,7 @@ type MockedZero = {
   preload: ReturnType<typeof vi.fn>;
   materialize: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
+  clientGroupID: Promise<string>;
   mutate: Record<string, ReturnType<typeof vi.fn>>;
   // Capture the constructor args so tests can inspect them.
   __ctorOpts: Record<string, unknown>;
@@ -76,6 +77,11 @@ vi.mock("@rocicorp/zero", () => {
       destroy: vi.fn(),
     }));
     close = vi.fn();
+    // FRI-161: the store awaits `this.#zero.clientGroupID` in `#init` (it is a
+    // Promise<ClientGroupID> resolved locally during IndexedDB open) to read
+    // the per-client-group warm-replica flag before binding blocks. Default to
+    // a fixed test id; warm-reload tests pre-seed localStorage with this value.
+    clientGroupID: Promise<string> = Promise.resolve("test-cg");
     // Phase 4.1: custom mutators surface. The store calls
     // `this.#zero.mutate.<name>(args)`. The test mock returns a
     // chained mutator-shape object whose call returns a no-op
@@ -569,37 +575,77 @@ describe("blocksRetentionCutoff (Zero query-cache stability)", () => {
     expect(age).toBeGreaterThanOrEqual(BLOCKS_RETENTION_MS);
     expect(age).toBeLessThan(BLOCKS_RETENTION_MS + DAY_MS);
   });
+
+  // FRI-161 AC 2: the narrow cold-start foreground bound is its own exported
+  // helper and must carry the SAME day-quantization stability property as the
+  // retention cutoff, while sitting 2–3 days in the past. Asserted directly
+  // against `coldStartCutoff`'s own return value (not transitively through a
+  // bind), so a regression to `Math.round`, a wrong window multiple, or a
+  // raw `Date.now()` literal is caught here at the atomic level.
+  it("coldStartCutoff is day-quantized and 2–3 days old", async () => {
+    vi.useFakeTimers();
+    const { coldStartCutoff, COLD_START_WINDOW_MS, DAY_MS } = await importStore();
+    vi.setSystemTime(new Date("2026-06-01T13:22:47.123Z"));
+    // Day-quantized — stable literal across same-day reloads (CVR reuse).
+    expect(coldStartCutoff() % DAY_MS).toBe(0);
+    // 2 days old at minimum (the window), and never more than one extra day
+    // older from flooring to the UTC-day boundary.
+    const age = Date.now() - coldStartCutoff();
+    expect(age).toBeGreaterThanOrEqual(COLD_START_WINDOW_MS);
+    expect(age).toBeLessThan(COLD_START_WINDOW_MS + DAY_MS);
+  });
+
+  it("coldStartCutoff is identical for two loads within the same UTC day (cache reuse)", async () => {
+    vi.useFakeTimers();
+    const { coldStartCutoff } = await importStore();
+    vi.setSystemTime(new Date("2026-06-01T00:07:00.000Z"));
+    const earlyInDay = coldStartCutoff();
+    vi.setSystemTime(new Date("2026-06-01T23:51:00.000Z"));
+    const lateInDay = coldStartCutoff();
+    expect(lateInDay).toBe(earlyInDay);
+  });
+
+  // FRI-161 AC 11 rests entirely on `backfillChunkFloor` producing stable,
+  // epoch-day-aligned chunk bounds. Pin the alignment at the atomic level so a
+  // regression in the chunk grid is caught here, not only via the multi-chunk
+  // backfill integration test.
+  it("backfillChunkFloor aligns to the epoch chunk grid and is stable in-grid", async () => {
+    const { backfillChunkFloor, BACKFILL_CHUNK_MS } = await importStore();
+    // Floored to a chunk boundary.
+    expect(backfillChunkFloor(Date.parse("2026-06-09T14:00:00.000Z")) % BACKFILL_CHUNK_MS).toBe(0);
+    // Two timestamps in the same chunk floor to the same bound.
+    const a = backfillChunkFloor(Date.parse("2026-06-09T00:07:00.000Z"));
+    const b = backfillChunkFloor(Date.parse("2026-06-09T23:51:00.000Z"));
+    expect(a).toBe(b);
+    // The next chunk is exactly BACKFILL_CHUNK_MS later.
+    const next = backfillChunkFloor(Date.parse("2026-06-10T12:00:00.000Z"));
+    expect(next - a).toBe(BACKFILL_CHUNK_MS);
+  });
 });
 
 describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
-  it("bindBlocksFor materializes a per-agent query with status filter + day-quantized 90d retention bound + ts ordering (no row limit — plan §39 local-first)", async () => {
-    const { zeroSync } = await importStore();
+  it("cold bindBlocksFor materializes a per-agent query with the NARROW 2-day day-quantized cold-start bound + ts ordering (no row limit, no all-agent init prime — FRI-161)", async () => {
+    const { zeroSync, COLD_START_WINDOW_MS, DAY_MS } = await importStore();
     await new Promise((r) => setTimeout(r, 30));
     expect(instances).toHaveLength(1);
     const z = instances[0];
 
-    // The background-sync prime (`#bindAllBlocksBackground`) calls
-    // `.where` on the SAME query proxy during init, so snapshot the
-    // call count before invoking bindBlocksFor and assert against the
-    // delta — otherwise this test couples to the background prime's
-    // internal call shape.
+    // FRI-161: no all-agent prime fires during init anymore, so the blocks
+    // query proxy has ZERO recorded calls before the foreground bind — the
+    // foreground bind is the only blocks activity (AC 4 covers init quiet).
     const blocksQuery = z.query.blocks as {
       __calls: Array<{ method: string; args: unknown[] }>;
     };
-    const baseline = blocksQuery.__calls.length;
+    expect(blocksQuery.__calls).toEqual([]);
 
     const before = Date.now();
     zeroSync.bindBlocksFor("friday");
     expect(zeroSync.blocksAgent).toBe("friday");
+    // Cold start: the foreground window is NARROW, so the honest-oldest /
+    // pastLoading gates must see `blocksFullWindow === false`.
+    expect(zeroSync.blocksFullWindow).toBe(false);
 
-    // Local-first contract (plan §39 phase 1 + §40 retention):
-    //   - filter streaming + cancel_requested in-flight markers
-    //   - filter ts > now - 90 days (client retention bound; server
-    //     keeps everything beyond that for the jump-to-message path)
-    //   - order by ts DESC for the chat scroller
-    //   - NO `.limit(N)` — the local replica IS the source of truth;
-    //     dropping the limit is what kills REST `?before=` pagination.
-    const fgCalls = blocksQuery.__calls.slice(baseline);
+    const fgCalls = blocksQuery.__calls;
     expect(fgCalls).toHaveLength(5);
     expect(fgCalls[0]).toEqual({
       method: "where",
@@ -616,56 +662,94 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
     expect(fgCalls[3].method).toBe("where");
     expect((fgCalls[3].args as unknown[]).slice(0, 2)).toEqual(["ts", ">"]);
     const cutoff = (fgCalls[3].args as unknown[])[2] as number;
-    const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
-    const dayMs = 24 * 60 * 60 * 1000;
-    // The bound is day-quantized (floored to a UTC-day boundary) so the
-    // query literal is stable across refreshes within a day — otherwise a
-    // raw `now - 90d` changes every load and Zero can't reuse the client
-    // replica or server CVR, re-streaming the whole blocks view group each
-    // time. Day-alignment is the load-bearing assertion that catches a
-    // revert to the raw bound.
-    expect(cutoff % dayMs).toBe(0);
-    // Flooring drops the bound by up to one day below `now - 90d`.
-    expect(cutoff).toBeGreaterThanOrEqual(before - ninetyDaysMs - dayMs);
-    expect(cutoff).toBeLessThanOrEqual(Date.now() - ninetyDaysMs);
+    // FRI-161: the cold bound is the NARROW 2-day window, still day-quantized
+    // so the literal is stable across same-day reloads (CVR reuse).
+    expect(cutoff % DAY_MS).toBe(0);
+    // Flooring drops the bound by up to one day below `now - COLD_START_WINDOW`.
+    expect(cutoff).toBeGreaterThanOrEqual(before - COLD_START_WINDOW_MS - DAY_MS);
+    expect(cutoff).toBeLessThanOrEqual(Date.now() - COLD_START_WINDOW_MS);
     expect(fgCalls[4]).toEqual({
       method: "orderBy",
       args: ["ts", "desc"],
     });
-    // No `.limit(N)` in the foreground bind — that's the architectural
-    // contract this test is pinning.
+    // No `.limit(N)` in the foreground bind — the architectural contract.
     expect(fgCalls.some((c) => c.method === "limit")).toBe(false);
     const materializeCallCount = z.materialize.mock.calls.length;
     expect(materializeCallCount).toBeGreaterThan(0);
   });
 
-  it("background-syncs all-agent blocks within the 90-day retention bound (plan §39 phase 2)", async () => {
-    const { zeroSync: _zs } = await importStore();
-    await new Promise((r) => setTimeout(r, 30));
-    expect(instances).toHaveLength(1);
-    const z = instances[0];
+  it("warm reload binds the FULL 90-day window directly (no cold-start bound ever issued) — FRI-161 AC 10", async () => {
+    // Pre-seed the per-client-group warm flag for the mocked clientGroupID
+    // BEFORE importing the store, so `#init` reads it warm and every
+    // foreground bind uses the full retention bound.
+    localStorage.setItem("friday.zero.blocksBackfillComplete", "test-cg");
 
-    // `#bindAllBlocksBackground` runs during #init and preloads (no
-    // materialize) the full 90d window across every agent. This is
-    // what makes a focus switch instant — the rows are already in
-    // IndexedDB by the time the foreground per-agent bind fires.
+    const { zeroSync, blocksRetentionCutoff } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    const z = instances[0];
     const blocksQuery = z.query.blocks as {
       __calls: Array<{ method: string; args: unknown[] }>;
     };
-    // Background prime is the only blocks-query activity that fires
-    // during init (bindBlocksFor is on-demand from chat focus).
-    expect(blocksQuery.__calls).toEqual([
-      { method: "where", args: ["status", "!=", "streaming"] },
-      { method: "where", args: ["status", "!=", "cancel_requested"] },
-      {
-        method: "where",
-        args: ["ts", ">", expect.any(Number) as unknown as number],
-      },
-    ]);
-    // Preload was invoked for the background prime; materialize is
-    // skipped because we don't want every agent's blocks in memory.
-    const preloadCallCount = z.preload.mock.calls.length;
-    expect(preloadCallCount).toBeGreaterThan(0);
+
+    const fullCutoff = blocksRetentionCutoff();
+    zeroSync.bindBlocksFor("friday");
+    expect(zeroSync.blocksFullWindow).toBe(true);
+
+    const tsBounds = blocksQuery.__calls.filter(
+      (c) =>
+        c.method === "where" &&
+        (c.args as unknown[])[0] === "ts" &&
+        (c.args as unknown[])[1] === ">",
+    );
+    // Exactly the full retention literal — never a cold-start-valued bound.
+    expect(tsBounds).toHaveLength(1);
+    expect((tsBounds[0].args as unknown[])[2]).toBe(fullCutoff);
+  });
+
+  it("a warm flag from a DIFFERENT client group does NOT mark a fresh replica warm — schema-bump self-heal (FRI-161)", async () => {
+    // The core FRI-161 scenario: a `friday update` bumps the Zero sync schema,
+    // so the browser mints a NEW client group ("test-cg" per the mock) and
+    // discards the old IndexedDB replica. localStorage still holds the warm
+    // flag written under the PRIOR group ("old-cg"). Because the stored value
+    // mismatches the current clientGroupID, the store must treat the replica
+    // as COLD and run the tiered path — NOT skip it (which would re-gate first
+    // paint on the 90-day hydration, the exact stall the feature removes).
+    localStorage.setItem("friday.zero.blocksBackfillComplete", "old-cg");
+
+    const { zeroSync, coldStartCutoff } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+    const z = instances[0];
+    const blocksQuery = z.query.blocks as {
+      __calls: Array<{ method: string; args: unknown[] }>;
+    };
+
+    zeroSync.bindBlocksFor("friday");
+    // Cold: narrow window, not marked full.
+    expect(zeroSync.blocksFullWindow).toBe(false);
+    const tsBounds = blocksQuery.__calls.filter(
+      (c) =>
+        c.method === "where" &&
+        (c.args as unknown[])[0] === "ts" &&
+        (c.args as unknown[])[1] === ">",
+    );
+    expect(tsBounds).toHaveLength(1);
+    // Exactly the cold-start literal — never the full retention bound.
+    expect((tsBounds[0].args as unknown[])[2]).toBe(coldStartCutoff());
+  });
+
+  it("no blocks preload or query is issued during the init batch (FRI-161 AC 4)", async () => {
+    const { zeroSync: _zs } = await importStore();
+    // Settle past init but well before the 10s no-foreground fallback.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(instances).toHaveLength(1);
+    const z = instances[0];
+    const blocksQuery = z.query.blocks as {
+      __calls: Array<{ method: string; args: unknown[] }>;
+    };
+    // The old all-agent prime fired 3 `.where` calls at init; under FRI-161
+    // nothing touches the blocks query until a foreground bind or the
+    // backfill triggers. First paint is not gated on a blocks hydration.
+    expect(blocksQuery.__calls).toEqual([]);
   });
 
   it("rebinding to a new agent tears down the previous view", async () => {
@@ -875,6 +959,531 @@ describe("Phase 3.7: bindBlocksFor / unbindBlocks", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]).toEqual([]);
     unsub();
+  });
+});
+
+describe("FRI-161: tiered cold-start backfill", () => {
+  // A controllable preload resolver: every `preload` call records its handle
+  // and exposes resolve/reject so tests gate chunk sequencing manually
+  // (per repo discipline: mock the IO boundary, leave reactivity real).
+  type PreloadHandle = {
+    args: unknown[];
+    resolve: () => void;
+    reject: (e: unknown) => void;
+    cleanup: ReturnType<typeof vi.fn>;
+  };
+
+  /**
+   * Patch the mocked Zero ctor so that:
+   *  - `preload` returns controlled `complete` promises captured in `handles`,
+   *    EXCEPT the per-agent foreground bind's preload (no `ttl` arg) which
+   *    resolves immediately so it doesn't pollute the chunk handle list.
+   *  - `materialize` captures the foreground view's listener so a test can
+   *    drive `resultType === "complete"` (the backfill trigger).
+   * Returns accessors for the captured state.
+   */
+  // The pristine (unpatched) ctor, captured the first time we patch so a
+  // double-patch within one test (AC 11) doesn't capture an already-patched
+  // ctor as its "original" and leak it past the suite.
+  let pristineCtor: unknown = null;
+
+  async function patchZeroForBackfill(): Promise<{
+    handles: PreloadHandle[];
+    blocksPreloadCalls: PreloadHandle[];
+    fireForegroundComplete: () => void;
+    materialize: () => ReturnType<typeof vi.fn>;
+    queryCalls: () => Array<{ method: string; args: unknown[] }>;
+    viewLifecycle: Array<{ event: "materialize" | "destroy"; seq: number }>;
+  }> {
+    const mockedZero = await import("@rocicorp/zero");
+    if (pristineCtor === null) pristineCtor = mockedZero.Zero;
+    const origCtor = pristineCtor as new (opts: Record<string, unknown>) => MockedZero;
+
+    const handles: PreloadHandle[] = [];
+    // Ordered log of materialize/destroy events across ALL blocks views, so
+    // AC 9 can pin the swap ORDERING invariant directly: the wider view must
+    // be materialized BEFORE the narrow view is destroyed. `unbindBlocks`'s
+    // `blocks = []` write never notifies `#blocksListeners`, so an empty-frame
+    // listener check alone cannot catch a destroy-before-materialize regression
+    // — this lifecycle log makes the ordering observable.
+    const viewLifecycle: Array<{ event: "materialize" | "destroy"; seq: number }> = [];
+    let lifecycleSeq = 0;
+    let foregroundListener: ((data: unknown, rt: string) => void) | null = null;
+    // Cursor into the shared blocks-query `__calls` array so each captured
+    // chunk records ONLY its own `.where` calls (the mock reuses one proxy
+    // whose calls accumulate across every chain — slice per preload).
+    let callsCursor = 0;
+
+    const patched = function (opts: Record<string, unknown>) {
+      const inst = new origCtor(opts);
+      // preload: backfill chunks (called with a `{ttl}` 2nd arg) get
+      // controlled resolvers; the foreground bind preload (1 arg) resolves
+      // immediately.
+      inst.preload = vi.fn((_q: unknown, second?: unknown) => {
+        const blocksQuery = inst.query.blocks as {
+          __calls: Array<{ method: string; args: unknown[] }>;
+        };
+        const cleanup = vi.fn();
+        if (second === undefined) {
+          // Foreground bind preload — not a chunk. Advance the cursor past
+          // its calls so the next chunk capture excludes them.
+          callsCursor = blocksQuery.__calls.length;
+          return { cleanup, complete: Promise.resolve() };
+        }
+        let resolve!: () => void;
+        let reject!: (e: unknown) => void;
+        const complete = new Promise<void>((res, rej) => {
+          resolve = res;
+          reject = rej;
+        });
+        // Swallow unhandled rejection — tests assert state, not the promise.
+        complete.catch(() => {});
+        // This chunk's own calls are those since the last cursor mark.
+        const ownCalls = blocksQuery.__calls.slice(callsCursor).map((c) => c.args);
+        callsCursor = blocksQuery.__calls.length;
+        handles.push({
+          args: ownCalls,
+          resolve,
+          reject,
+          cleanup,
+        });
+        return { cleanup, complete };
+      }) as unknown as MockedZero["preload"];
+      // materialize: every view carries one row. The fields are a superset
+      // valid for BOTH the agents mapping (`toAgentInfo` needs created_at /
+      // updated_at) AND the blocks shape, so the init agent slice doesn't
+      // throw on a blocks-only row. The non-empty data lets AC 9 distinguish
+      // a legitimate snapshot from the `blocks = []` write `unbindBlocks`
+      // would do. The LAST captured listener is the foreground blocks view's,
+      // which a test fires `'complete'` on to trigger the backfill.
+      const fgRow = {
+        id: 1,
+        name: "friday",
+        type: "bare",
+        status: "idle",
+        session_id: null,
+        session_count: 0,
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_000_000_000,
+        agent_name: "friday",
+        ts: 1_000,
+      } as unknown;
+      inst.materialize = vi.fn(() => {
+        viewLifecycle.push({ event: "materialize", seq: lifecycleSeq++ });
+        return {
+          data: [fgRow],
+          addListener: vi.fn((l: (data: unknown, rt: string) => void) => {
+            foregroundListener = l;
+            return () => {};
+          }),
+          destroy: vi.fn(() => {
+            viewLifecycle.push({ event: "destroy", seq: lifecycleSeq++ });
+          }),
+        };
+      }) as unknown as MockedZero["materialize"];
+      return inst;
+    };
+    (mockedZero as unknown as { Zero: unknown }).Zero = patched;
+    restoreCtor = () => {
+      (mockedZero as unknown as { Zero: unknown }).Zero = pristineCtor;
+    };
+
+    return {
+      handles,
+      // The chunk handles are exactly the `preload` calls captured (the
+      // foreground bind preload resolves inline and is not pushed).
+      get blocksPreloadCalls() {
+        return handles;
+      },
+      fireForegroundComplete: () => {
+        // Fire with the foreground view's row so 'complete' doesn't itself
+        // look like an empty frame (AC 9 counts empty frames).
+        if (foregroundListener)
+          foregroundListener([{ id: 1, agent_name: "friday", ts: 1_000 }], "complete");
+      },
+      materialize: () => instances[0].materialize as ReturnType<typeof vi.fn>,
+      queryCalls: () =>
+        (instances[0].query.blocks as { __calls: Array<{ method: string; args: unknown[] }> })
+          .__calls,
+      viewLifecycle,
+    };
+  }
+
+  // Restore the original (unpatched) Zero ctor after every test in this
+  // suite so downstream suites see the default mock — `vi.resetModules()`
+  // in the file-level afterEach re-evaluates the store but NOT the
+  // `vi.mock("@rocicorp/zero")` factory, so a left-patched ctor would leak.
+  let restoreCtor: (() => void) | null = null;
+  afterEach(() => {
+    if (restoreCtor) restoreCtor();
+    restoreCtor = null;
+    // Re-capture the pristine ctor next test: `vi.resetModules()` (file-level
+    // afterEach) may re-evaluate the mocked `@rocicorp/zero` module, making a
+    // cached reference stale.
+    pristineCtor = null;
+  });
+
+  it("issues no backfill chunk until the first foreground 'complete'; then issues exactly one head chunk (FRI-161 AC 5 trigger)", async () => {
+    const cap = await patchZeroForBackfill();
+    const { zeroSync, DAY_MS } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    zeroSync.bindBlocksFor("friday");
+    // Cold bind alone (resultType 'unknown') does NOT start the backfill.
+    expect(cap.blocksPreloadCalls.length).toBe(0);
+    expect(zeroSync.blocksBackfill).toBe("idle");
+
+    cap.fireForegroundComplete();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Exactly one chunk (the head) is in flight; the next is gated on its
+    // `complete` (controlled resolver, still pending).
+    expect(cap.blocksPreloadCalls.length).toBe(1);
+    expect(zeroSync.blocksBackfill).toBe("running");
+
+    // Head chunk: open-ended (`ts > B_head`, day-quantized floor of now), no
+    // `<=` bound. Pin the EXACT lower bound, not just "is day-aligned": it must
+    // equal today's UTC-day floor so warm reloads reuse the same CVR literal.
+    // (Same ±1-day midnight-crossing slack convention as the retention-cutoff
+    // tests above; the backfill is issued synchronously after the trigger, so
+    // `Date.now()` here floors to the same day the store used.)
+    const head = cap.blocksPreloadCalls[0].args;
+    const tsGt = head.find((a) => (a as unknown[])[0] === "ts" && (a as unknown[])[1] === ">");
+    const tsLe = head.find((a) => (a as unknown[])[0] === "ts" && (a as unknown[])[1] === "<=");
+    const expectedHeadFloor = Math.floor(Date.now() / DAY_MS) * DAY_MS;
+    expect(tsGt, "head chunk must carry an exact day-floored `ts >` lower bound").toEqual([
+      "ts",
+      ">",
+      expectedHeadFloor,
+    ]);
+    expect(tsLe, "head chunk must be open-ended (no `ts <=` upper bound)").toBeUndefined();
+  });
+
+  it("advances to the next (closed) chunk only after the previous chunk's complete resolves (FRI-161 AC 5 sequencing)", async () => {
+    const cap = await patchZeroForBackfill();
+    const { zeroSync, BACKFILL_CHUNK_MS } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    zeroSync.bindBlocksFor("friday");
+    cap.fireForegroundComplete();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cap.blocksPreloadCalls.length).toBe(1);
+    const bHead = (
+      cap.blocksPreloadCalls[0].args.find(
+        (a) => (a as unknown[])[0] === "ts" && (a as unknown[])[1] === ">",
+      ) as unknown[]
+    )[2] as number;
+
+    // Resolve the head; the second (closed) chunk must now be issued. Flush
+    // microtasks until the loop advances (the timeout-race wrapper adds a hop
+    // between `complete` resolving and the next `#issueBackfillChunk`).
+    cap.blocksPreloadCalls[0].resolve();
+    for (let i = 0; i < 10 && cap.blocksPreloadCalls.length < 2; i++) await Promise.resolve();
+    expect(cap.blocksPreloadCalls.length).toBe(2);
+
+    const second = cap.blocksPreloadCalls[1].args;
+    const gt = second.find((a) => (a as unknown[])[0] === "ts" && (a as unknown[])[1] === ">");
+    const le = second.find((a) => (a as unknown[])[0] === "ts" && (a as unknown[])[1] === "<=");
+    expect((gt as unknown[])[2]).toBe(bHead - BACKFILL_CHUNK_MS);
+    expect((le as unknown[])[2]).toBe(bHead);
+  });
+
+  it("covers the full retention window and marks backfill complete + persists the warm flag (FRI-161 AC 6)", async () => {
+    const cap = await patchZeroForBackfill();
+    const { zeroSync, blocksRetentionCutoff } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    zeroSync.bindBlocksFor("friday");
+    cap.fireForegroundComplete();
+    // Drain the chunk loop: resolve each chunk as it appears until done.
+    for (let guard = 0; guard < 200 && zeroSync.blocksBackfill === "running"; guard++) {
+      await Promise.resolve();
+      await Promise.resolve();
+      const pending = cap.blocksPreloadCalls.filter((h) => h.resolve);
+      // Resolve the most recently issued, still-unresolved chunk.
+      const last = cap.blocksPreloadCalls[cap.blocksPreloadCalls.length - 1];
+      if (last) last.resolve();
+      void pending;
+    }
+    await Promise.resolve();
+    expect(zeroSync.blocksBackfill).toBe("complete");
+
+    // Oldest issued chunk's lower bound reaches at or below the retention cut.
+    const lowerBounds = cap.blocksPreloadCalls.map(
+      (h) =>
+        (
+          h.args.find(
+            (a) => (a as unknown[])[0] === "ts" && (a as unknown[])[1] === ">",
+          ) as unknown[]
+        )[2] as number,
+    );
+    const oldestLo = Math.min(...lowerBounds);
+    expect(oldestLo).toBeLessThanOrEqual(blocksRetentionCutoff());
+
+    // Warm flag persisted with the client group id as value.
+    expect(localStorage.getItem("friday.zero.blocksBackfillComplete")).toBe("test-cg");
+  });
+
+  // Stub fetch with a synchronous-`.json()` response so `#init` drains under
+  // fake timers — a real `Response.json()` reads the body on a faked
+  // macrotask and would hang the init await chain.
+  function stubSyncFetch(): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          token: "test-token-123",
+          deviceId: "test-device-id",
+          userId: "test-user-id",
+          expiresAt: Date.now() + 900_000,
+        }),
+      })),
+    );
+  }
+
+  it("starts via the 10s fallback when no foreground bind ever happens (FRI-161 AC 7b)", async () => {
+    vi.useFakeTimers();
+    stubSyncFetch();
+    try {
+      const cap = await patchZeroForBackfill();
+      const { zeroSync } = await importStore();
+      // Drain init's await chain (fetch → json → clientGroupID) so the
+      // fallback timer is armed, without crossing 10s.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(cap.blocksPreloadCalls.length).toBe(0);
+      expect(zeroSync.blocksBackfill).toBe("idle");
+
+      // Cross the 10s fallback (generous margin past the arm time).
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(zeroSync.blocksBackfill).toBe("running");
+      expect(cap.blocksPreloadCalls.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("foreground 'complete' starts backfill once; the 10s fallback does NOT double-start it (FRI-161 AC 7a)", async () => {
+    vi.useFakeTimers();
+    stubSyncFetch();
+    try {
+      const cap = await patchZeroForBackfill();
+      const { zeroSync } = await importStore();
+      await vi.advanceTimersByTimeAsync(100);
+
+      zeroSync.bindBlocksFor("friday");
+      cap.fireForegroundComplete();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(zeroSync.blocksBackfill).toBe("running");
+      const afterTrigger = cap.blocksPreloadCalls.length;
+      expect(afterTrigger).toBe(1);
+
+      // Advancing past the 10s fallback must not arm a second backfill.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(cap.blocksPreloadCalls.length).toBe(afterTrigger);
+      expect(zeroSync.blocksBackfill).toBe("running");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a foreground rebind is NOT blocked by an in-flight backfill chunk (FRI-161 AC 8)", async () => {
+    const cap = await patchZeroForBackfill();
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    zeroSync.bindBlocksFor("friday");
+    cap.fireForegroundComplete();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Chunk 1 in flight (unresolved).
+    expect(cap.blocksPreloadCalls.length).toBe(1);
+
+    const matBefore = cap.materialize().mock.calls.length;
+    // Synchronous rebind to a different agent must materialize immediately.
+    zeroSync.bindBlocksFor("alpha");
+    expect(zeroSync.blocksAgent).toBe("alpha");
+    expect(cap.materialize().mock.calls.length).toBe(matBefore + 1);
+  });
+
+  it("backfill completion widens the foreground window without an empty frame (FRI-161 AC 9)", async () => {
+    const cap = await patchZeroForBackfill();
+    const { zeroSync, blocksRetentionCutoff } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    let emptyFramesDuringSwap = 0;
+    let armed = false;
+    zeroSync.onBlocksUpdate((rows) => {
+      if (armed && rows.length === 0) emptyFramesDuringSwap++;
+    });
+
+    zeroSync.bindBlocksFor("friday");
+    expect(zeroSync.blocksFullWindow).toBe(false);
+    expect(zeroSync.blocks.length).toBe(1);
+    // The narrow foreground view is now materialized; record where in the
+    // lifecycle log the swap begins so we can assert the swap's OWN ordering
+    // (materialize-before-destroy) without it being masked by init-time
+    // materializations.
+    const lifecycleBeforeSwap = cap.viewLifecycle.length;
+    armed = true;
+    cap.fireForegroundComplete();
+
+    // Drain all chunks.
+    for (let guard = 0; guard < 200 && zeroSync.blocksBackfill === "running"; guard++) {
+      await Promise.resolve();
+      await Promise.resolve();
+      const last = cap.blocksPreloadCalls[cap.blocksPreloadCalls.length - 1];
+      if (last) last.resolve();
+    }
+    await Promise.resolve();
+    expect(zeroSync.blocksBackfill).toBe("complete");
+    expect(zeroSync.blocksFullWindow).toBe(true);
+    expect(emptyFramesDuringSwap).toBe(0);
+
+    // Load-bearing swap-ordering assertion. `unbindBlocks`'s `blocks = []`
+    // write never notifies `#blocksListeners`, so the empty-frame counter
+    // above cannot by itself catch a destroy-before-materialize regression in
+    // `#widenForegroundWindow`. Pin the ordering directly: across the swap the
+    // WIDER view must be materialized BEFORE the narrow view is destroyed.
+    const swapEvents = cap.viewLifecycle.slice(lifecycleBeforeSwap);
+    const firstMaterialize = swapEvents.find((e) => e.event === "materialize");
+    const firstDestroy = swapEvents.find((e) => e.event === "destroy");
+    expect(firstMaterialize, "the widen swap must materialize a new view").toBeDefined();
+    expect(firstDestroy, "the widen swap must destroy the old narrow view").toBeDefined();
+    // The new (wider) view materializes before the old (narrow) view is destroyed.
+    expect(firstMaterialize!.seq).toBeLessThan(firstDestroy!.seq);
+
+    // The widened foreground query was re-issued with the FULL retention bound.
+    const tsBounds = cap
+      .queryCalls()
+      .filter(
+        (c) =>
+          c.method === "where" &&
+          (c.args as unknown[])[0] === "ts" &&
+          (c.args as unknown[])[1] === ">",
+      )
+      .map((c) => (c.args as unknown[])[2] as number);
+    expect(tsBounds).toContain(blocksRetentionCutoff());
+  });
+
+  it("chunk literals are stable across two backfill runs in the same day (FRI-161 AC 11)", async () => {
+    vi.useFakeTimers();
+    stubSyncFetch();
+    vi.setSystemTime(new Date("2026-06-09T14:00:00.000Z"));
+    try {
+      const collect = async (): Promise<number[][]> => {
+        const cap = await patchZeroForBackfill();
+        const { zeroSync } = await importStore();
+        await vi.advanceTimersByTimeAsync(100);
+        zeroSync.bindBlocksFor("friday");
+        cap.fireForegroundComplete();
+        for (let guard = 0; guard < 200 && zeroSync.blocksBackfill === "running"; guard++) {
+          await vi.advanceTimersByTimeAsync(0);
+          const last = cap.blocksPreloadCalls[cap.blocksPreloadCalls.length - 1];
+          if (last) last.resolve();
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        return cap.blocksPreloadCalls.map((h) =>
+          h.args
+            .filter((a) => (a as unknown[])[0] === "ts")
+            .map((a) => (a as unknown[])[2] as number),
+        );
+      };
+      const run1 = await collect();
+      vi.resetModules();
+      instances.length = 0;
+      const run2 = await collect();
+      expect(run2).toEqual(run1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a focus switch AFTER backfill completes binds the FULL window (the blocksBackfill==='complete' disjunct) — FRI-161", async () => {
+    const cap = await patchZeroForBackfill();
+    const { zeroSync, blocksRetentionCutoff } = await importStore();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Drive a full backfill to completion on agent "friday".
+    zeroSync.bindBlocksFor("friday");
+    cap.fireForegroundComplete();
+    for (let guard = 0; guard < 300 && zeroSync.blocksBackfill === "running"; guard++) {
+      await Promise.resolve();
+      await Promise.resolve();
+      const last = cap.blocksPreloadCalls[cap.blocksPreloadCalls.length - 1];
+      if (last) last.resolve();
+    }
+    await Promise.resolve();
+    expect(zeroSync.blocksBackfill).toBe("complete");
+
+    // Now focus a NEVER-BEFORE-FOCUSED agent in the same session. With the
+    // backfill complete the replica is fully primed, so this bind must use the
+    // FULL retention window (not re-enter the narrow cold tier) — that path
+    // depends on the `blocksBackfill === 'complete'` disjunct in bindBlocksFor.
+    const blocksQuery = instances[0].query.blocks as {
+      __calls: Array<{ method: string; args: unknown[] }>;
+    };
+    const before = blocksQuery.__calls.length;
+    zeroSync.bindBlocksFor("alpha");
+    expect(zeroSync.blocksAgent).toBe("alpha");
+    expect(zeroSync.blocksFullWindow).toBe(true);
+    const newTsGt = blocksQuery.__calls
+      .slice(before)
+      .find(
+        (c) =>
+          c.method === "where" &&
+          (c.args as unknown[])[0] === "ts" &&
+          (c.args as unknown[])[1] === ">",
+      );
+    expect(newTsGt, "alpha's bind must carry a `ts >` bound").toBeDefined();
+    // The full retention literal, not a cold-start-valued one.
+    expect((newTsGt!.args as unknown[])[2]).toBe(blocksRetentionCutoff());
+  });
+
+  it("a chunk whose complete never acks times out, the loop ADVANCES past it, and the run degrades to 'error' without writing the warm flag (FRI-161 AC 12)", async () => {
+    // Zero 1.5's `preload().complete` only ever resolves (on the server `got`
+    // ack) — it never rejects, even on a server-side query error. So the real
+    // failure mode is a `complete` that never settles; without a timeout the
+    // sequential loop would hang forever and strand the session on the narrow
+    // window. The backfill bounds each chunk with BACKFILL_CHUNK_TIMEOUT_MS.
+    vi.useFakeTimers();
+    stubSyncFetch();
+    try {
+      const cap = await patchZeroForBackfill();
+      const { zeroSync, BACKFILL_CHUNK_TIMEOUT_MS } = await importStore();
+      await vi.advanceTimersByTimeAsync(100);
+
+      zeroSync.bindBlocksFor("friday");
+      cap.fireForegroundComplete();
+      await vi.advanceTimersByTimeAsync(0);
+      // Head chunk in flight; leave it UNRESOLVED (the server-errored case).
+      expect(cap.blocksPreloadCalls.length).toBe(1);
+
+      // Cross the per-chunk timeout. The loop must give up on the stuck chunk
+      // and ADVANCE to the next one — exactly one new chunk is now in flight
+      // (the next chunk's own timeout is armed but not yet elapsed).
+      await vi.advanceTimersByTimeAsync(BACKFILL_CHUNK_TIMEOUT_MS + 1);
+      expect(cap.blocksPreloadCalls.length).toBe(2);
+
+      // Resolve every remaining chunk promptly so the loop drains to the end.
+      for (let guard = 0; guard < 300 && zeroSync.blocksBackfill === "running"; guard++) {
+        await vi.advanceTimersByTimeAsync(0);
+        const last = cap.blocksPreloadCalls[cap.blocksPreloadCalls.length - 1];
+        if (last && last.resolve) last.resolve();
+      }
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Degraded: parked 'error', warm flag NOT written (next reload re-primes
+      // the missing chunk), but the focused agent was still widened to the
+      // full window — its per-agent query is a superset, so the user is not
+      // pinned to the 2-day window for the rest of the session.
+      expect(zeroSync.blocksBackfill).toBe("error");
+      expect(localStorage.getItem("friday.zero.blocksBackfillComplete")).toBeNull();
+      expect(zeroSync.blocksFullWindow).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -272,6 +272,67 @@ export function blocksRetentionCutoff(): number {
   return Math.floor((Date.now() - BLOCKS_RETENTION_MS) / DAY_MS) * DAY_MS;
 }
 
+/** FRI-161 tiered cold-start hydration. After a `friday update` changes the
+ *  Zero sync schema, the client's schema hash changes, the browser discards
+ *  its IndexedDB replica, and the whole 90-day blocks window must re-hydrate.
+ *  Done in one batch (the old all-agent prime), the slowest query (46 K rows,
+ *  ~31 s) gates the first poke and the user stares at skeletons for 30–45 s.
+ *
+ *  The fix: cold-start the FOREGROUND per-agent query on a NARROW window so
+ *  first paint is ~1–2 s, then backfill to the full 90-day window via
+ *  sequentially-awaited day-chunk preloads (each chunk = its own hydration
+ *  batch with its own poke, so a focus switch interleaves between chunks).
+ *
+ *  `COLD_START_WINDOW_MS` is the narrow foreground window (2 days; 1 day risks
+ *  an empty chat right after the UTC boundary — Q2). */
+export const COLD_START_WINDOW_MS = 2 * DAY_MS;
+
+/** Day-quantized lower bound for the narrow cold-start foreground window.
+ *  Same stability property as {@link blocksRetentionCutoff}: floored to a
+ *  UTC-day boundary so the literal is stable across reloads within a day and
+ *  warm reloads reuse the CVR. Never derive a raw `Date.now()` literal into a
+ *  Zero query `where`. */
+export function coldStartCutoff(): number {
+  return Math.floor((Date.now() - COLD_START_WINDOW_MS) / DAY_MS) * DAY_MS;
+}
+
+/** Backfill chunk size. Reviewer-corrected from 7 d → 1 d (= the existing day
+ *  grid): live data shows the busiest epoch week holds ~17.4 K rows (~12 s of
+ *  lock-hold for the head chunk, right when the user is most likely to switch
+ *  agents — reproducing the bug). The busiest single day worst-cases at ~5 K
+ *  rows ~3.4 s. Closed chunks on the day grid have permanent literals once in
+ *  the past, so CVR reuse is unchanged. */
+export const BACKFILL_CHUNK_MS = 1 * DAY_MS;
+
+/** Per-chunk ack budget for the background backfill. Zero 1.5's
+ *  `preload().complete` only ever RESOLVES (on the server's `got` ack) — it
+ *  never rejects, even on a server-side query error (the gotCallback in
+ *  `query-delegate-base.js` ignores its error argument). With no timeout, a
+ *  single chunk the server errors on would block the sequential backfill
+ *  loop forever and strand the session on the narrow window. This bounds
+ *  each chunk's await: a chunk that hasn't acked within the budget is
+ *  treated as degraded and the loop advances (the handle stays held, so its
+ *  rows still land if the server recovers). 30 s comfortably clears the
+ *  ~3.4 s worst-case single-day materialization while bounding a hung
+ *  chunk. */
+export const BACKFILL_CHUNK_TIMEOUT_MS = 30 * 1000;
+
+/** Epoch-aligned chunk-grid floor: `Math.floor(ts / BACKFILL_CHUNK_MS) *
+ *  BACKFILL_CHUNK_MS`. With `BACKFILL_CHUNK_MS === DAY_MS` this is the same
+ *  UTC-day grid the retention cutoff uses, so chunk literals are stable across
+ *  reloads and two devices on the same day share one server CVR per chunk. */
+export function backfillChunkFloor(ts: number): number {
+  return Math.floor(ts / BACKFILL_CHUNK_MS) * BACKFILL_CHUNK_MS;
+}
+
+/** Single localStorage key (Q5, reviewer nit): store the clientGroupID as the
+ *  VALUE and compare on read, rather than per-group keys, to avoid unbounded
+ *  key accumulation across schema bumps. The flag is written only when a
+ *  backfill run completes successfully; it is read once in `#init` (after
+ *  awaiting the clientGroupID Promise) to decide whether to skip the tiered
+ *  dance and bind the full window directly on a warm replica. */
+export const BLOCKS_BACKFILL_COMPLETE_KEY = "friday.zero.blocksBackfillComplete";
+
 class ZeroSyncStore {
   /** Live agent rows from Zero, filtered server-side to non-archived. */
   agents = $state<ZeroAgentRow[]>([]);
@@ -343,6 +404,21 @@ class ZeroSyncStore {
    *  is honest vs. provisional. */
   blocksResultType = $state<"complete" | "unknown" | "error">("unknown");
 
+  /** FRI-161: phase of the chunked background backfill that widens the
+   *  IndexedDB replica from the narrow cold-start window to the full 90-day
+   *  retention window. `'idle'` until the first foreground `'complete'` (or
+   *  the 10 s no-foreground fallback) arms it; `'running'` while chunks are
+   *  hydrating sequentially; `'complete'` once every chunk has resolved;
+   *  `'error'` if a chunk failed its single retry. */
+  blocksBackfill = $state<"idle" | "running" | "complete" | "error">("idle");
+
+  /** FRI-161: true iff the *current* foreground blocks bind used the full
+   *  {@link blocksRetentionCutoff} bound (warm replica, or post-backfill)
+   *  rather than the narrow {@link coldStartCutoff}. Consumers read this so
+   *  the "Beginning of history" affordance and the read-only `pastLoading`
+   *  skeleton don't lie while the window is still narrow mid-backfill. */
+  blocksFullWindow = $state<boolean>(false);
+
   /** Connection status of the underlying Zero client. `pending` until
    *  the first materialization, `live` once a snapshot has been
    *  delivered, `error` when the WS bridge is unhealthy. */
@@ -378,6 +454,26 @@ class ZeroSyncStore {
   #blocksListeners = new Set<
     (rows: ZeroBlocksRow[], resultType: "complete" | "unknown" | "error") => void
   >();
+  /** FRI-161: true once `#init` has read the persisted backfill-complete flag
+   *  for THIS client group from localStorage and found it set. A warm replica
+   *  already holds the full 90-day window in IndexedDB, so `bindBlocksFor`
+   *  binds the full-window literal directly and the tiered cold-start dance is
+   *  skipped. Resolved in `#init` AFTER awaiting the `clientGroupID` Promise,
+   *  BEFORE the bind block + pending-agent drain — `bindBlocksFor` is
+   *  synchronous and cannot await it lazily. */
+  #warmReplica: boolean = false;
+  /** FRI-161: resolved clientGroupID (awaited once in `#init`). Used as the
+   *  localStorage flag value so the warm-flag self-heals when the replica is
+   *  discarded (new schema hash ⇒ new client group ⇒ stale value mismatches). */
+  #clientGroupId: string | null = null;
+  /** FRI-161: monotonic token bumped on each `destroy()` so an in-flight
+   *  backfill loop can detect it has been superseded and stop between chunks
+   *  without applying further preloads to a torn-down client. */
+  #backfillGen: number = 0;
+  /** FRI-161: armed in `#init` for the no-foreground-bind case (direct nav to
+   *  /tickets etc.). Cleared via `#unsubscribers` on teardown and cancelled
+   *  once a foreground `'complete'` triggers the backfill first (Q4). */
+  #backfillFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Phase 4.2: telemetry-loop handle. `setInterval` token returned by
    * `#init` after `#zero` is constructed; cleared in `destroy()`.
@@ -546,6 +642,26 @@ class ZeroSyncStore {
       }, 5_000);
       this.#unsubscribers.push(() => clearInterval(watchdog));
 
+      // FRI-161: resolve the warm-replica flag BEFORE binding blocks. The
+      // backfill-complete flag is keyed by clientGroupID — which is a
+      // `Promise<ClientGroupID>` (zero.d.ts:211), resolved locally during
+      // IndexedDB open (replicache-impl.js:265–278, no network dependency).
+      // `bindBlocksFor` is synchronous and cannot await it, so we settle
+      // `#warmReplica` here, before the bind block and the pending-agent
+      // drain at the end of #init. On a warm replica every later
+      // `bindBlocksFor` binds the full 90-day window directly and the tiered
+      // cold-start dance is skipped. Cost: a few ms of IndexedDB-open latency
+      // Zero pays internally anyway before any materialization.
+      try {
+        const cgid = await this.#zero.clientGroupID;
+        this.#clientGroupId = cgid;
+        this.#warmReplica = localStorage.getItem(BLOCKS_BACKFILL_COMPLETE_KEY) === cgid;
+      } catch {
+        // No clientGroupID (or storage access denied) ⇒ treat as cold; the
+        // tiered dance + backfill still runs and self-heals on completion.
+        this.#warmReplica = false;
+      }
+
       this.#bindAgents();
       this.#bindTickets();
       this.#bindTicketComments();
@@ -558,11 +674,25 @@ class ZeroSyncStore {
       this.#bindReadCursors();
       this.#bindClientDevices();
       this.#bindSettings();
-      // Plan §39 phase 2: background-sync the 90-day blocks window
-      // across every agent so a focus switch is served entirely from
-      // the local IndexedDB replica. Fires after the foreground
-      // slices so the user-visible first-paint isn't gated on this.
-      this.#bindAllBlocksBackground();
+      // FRI-161: the old all-agent prime used to fire here, but it
+      // coalesced into the init batch → one server
+      // hydration batch → one poke gated on the slowest (46 K-row, ~31 s)
+      // query, so first paint waited 30–45 s. It is replaced by
+      // `#startBlocksBackfill`, which runs AFTER first paint, triggered by
+      // the first foreground `'complete'` (or, for routes that never bind a
+      // foreground agent, a 10 s fallback — Q4). On a warm replica the full
+      // window is already local; the backfill still runs but every chunk's
+      // `complete` resolves synchronously, so it's a no-op that gates nothing.
+      this.#backfillFallbackTimer = setTimeout(() => {
+        this.#backfillFallbackTimer = null;
+        void this.#startBlocksBackfill();
+      }, 10_000);
+      this.#unsubscribers.push(() => {
+        if (this.#backfillFallbackTimer) {
+          clearTimeout(this.#backfillFallbackTimer);
+          this.#backfillFallbackTimer = null;
+        }
+      });
       // FRI-121: status is now driven by the connection.state subscriber
       // wired above — no unconditional 'live' write here.
       // Phase 4.2: report storage stats immediately on connect +
@@ -662,7 +792,12 @@ class ZeroSyncStore {
       // prior session to filtered-empty without waiting for the next
       // blocks event.
       if (this.blocksAgent !== null && this.blocksAgent === chat.focusedAgent) {
-        chat.applyZeroBlocks(this.blocks, this.blocksAgent, this.blocksResultType);
+        chat.applyZeroBlocks(
+          this.blocks,
+          this.blocksAgent,
+          this.blocksResultType,
+          this.blocksFullWindow,
+        );
       }
       // Explicit wake-lock reconcile. The wake-lock module's $effect
       // tracks `chat.agents` reads in theory, but cross-context
@@ -964,8 +1099,8 @@ class ZeroSyncStore {
    * are reachable only via the "lazy on demand" jump-to-message
    * search path (kept on REST for now since it crosses retention).
    *
-   * Background sync of OTHER agents is primed by
-   * {@link #bindAllBlocksBackground} at init time so a focus switch
+   * Background sync of OTHER agents is handled by the chunked backfill
+   * ({@link #startBlocksBackfill}) after first paint, so a focus switch
    * to a previously-untouched agent finds its rows already local.
    */
   bindBlocksFor(agentName: string): void {
@@ -993,6 +1128,198 @@ class ZeroSyncStore {
     }
     this.unbindBlocks();
     this.blocksAgent = agentName;
+    // FRI-161 tiered cold start: bind the FULL 90-day window only when the
+    // replica is already warm (flag set for this client group) or the
+    // backfill has finished widening it; otherwise bind the NARROW 2-day
+    // cold-start window so first paint isn't gated on the 90-day hydration.
+    const full = this.#warmReplica || this.blocksBackfill === "complete";
+    const cutoff = full ? blocksRetentionCutoff() : coldStartCutoff();
+    this.blocksFullWindow = full;
+    const query = this.#zero!.query.blocks.where("agent_name", "=", agentName)
+      .where("status", "!=", "streaming")
+      .where("status", "!=", "cancel_requested")
+      .where("ts", ">", cutoff)
+      .orderBy("ts", "desc");
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
+    const update = (
+      data: readonly unknown[],
+      resultType: "complete" | "unknown" | "error",
+    ): void => {
+      const rows = data as readonly ZeroBlocksRow[];
+      this.blocks = rows as ZeroBlocksRow[];
+      this.blocksResultType = resultType;
+      // FRI-161: the first foreground `'complete'` is the trigger for the
+      // chunked backfill — first paint is done, so we can start widening the
+      // window in the background. Idempotent (guards on `blocksBackfill`),
+      // so repeated `'complete'` frames don't restart it. No-op on a warm
+      // replica (the cold tier was skipped; backfill stays a fast no-op).
+      if (resultType === "complete") void this.#startBlocksBackfill();
+      for (const listener of this.#blocksListeners) listener(this.blocks, resultType);
+    };
+    update(view.data as readonly unknown[], "unknown");
+    view.addListener((data, resultType) => update(data as readonly unknown[], resultType));
+    this.#blocksTeardown = (): void => {
+      preload.cleanup();
+      view.destroy();
+    };
+  }
+
+  /**
+   * FRI-161 chunked background backfill. Replaces the old all-agent prime,
+   * which gated first paint by coalescing into the init batch. This runs
+   * AFTER first paint and widens the IndexedDB
+   * replica from the narrow cold-start window to the full 90-day retention
+   * window across *all* agents, one epoch-aligned day-chunk at a time,
+   * newest-first, each awaited before the next so:
+   *   - each chunk is issued > 10 ms after the previous `flushBatch`, so it
+   *     gets its own `changeDesiredQueries` → its own server hydration batch
+   *     → its own poke (view-syncer.js per-batch poke), and
+   *   - a foreground focus switch issued mid-backfill queues behind at most
+   *     ONE chunk's lock-hold (~3.4 s worst at 1-day chunks) instead of the
+   *     ~31 s single-batch hold the old prime caused.
+   *
+   * Idempotent: guards on `blocksBackfill !== "idle"`, so the first
+   * foreground `'complete'` AND the 10 s fallback can both call it — only the
+   * first wins. Handles are held for the tab lifetime (pushed to
+   * `#unsubscribers`): dropping a chunk handle would, after its 10 m ttl,
+   * poke `del`s for that chunk's now-unreferenced rows
+   * (`deleteUnreferencedRows`, cvr.js:558) and evict backfilled rows.
+   *
+   * On a warm replica every chunk's `complete` resolves synchronously from
+   * persisted `g/` keys, so the loop finishes in milliseconds and gates no
+   * paint — correct, not a bug.
+   */
+  async #startBlocksBackfill(): Promise<void> {
+    if (!this.#zero) return;
+    if (this.blocksBackfill !== "idle") return;
+    this.blocksBackfill = "running";
+    // We won the race; cancel the no-foreground fallback if it was armed.
+    if (this.#backfillFallbackTimer) {
+      clearTimeout(this.#backfillFallbackTimer);
+      this.#backfillFallbackTimer = null;
+    }
+    const gen = this.#backfillGen;
+
+    // Build the chunk-boundary list once, newest-first. The HEAD chunk is
+    // open-ended (`ts > B_head`, no upper bound) so it stays live for new
+    // rows across all agents — it replaces the old live all-agent prime.
+    // Closed chunks step down the day grid until the first grid point at or
+    // below the retention cutoff, so the union covers the full 90-day window.
+    const retentionFloor = blocksRetentionCutoff();
+    const headLo = backfillChunkFloor(Date.now());
+    // chunks[0] = head (open-ended above headLo); chunks[k>0] = (lo, hi].
+    const chunks: Array<{ lo: number; hi: number | null }> = [{ lo: headLo, hi: null }];
+    for (let hi = headLo; hi > retentionFloor; hi -= BACKFILL_CHUNK_MS) {
+      chunks.push({ lo: hi - BACKFILL_CHUNK_MS, hi });
+    }
+
+    let degraded = false;
+    for (const { lo, hi } of chunks) {
+      // Abort if the store was torn down between chunks (destroy() bumps
+      // #backfillGen) — never apply a preload to a stale/closed client. Only
+      // teardown bumps the gen; the idle-guard above means no second backfill
+      // can race this one, so teardown is the sole supersede path.
+      if (!this.#zero || gen !== this.#backfillGen) return;
+      const handle = this.#issueBackfillChunk(lo, hi);
+      // Hold the handle for the tab lifetime regardless of outcome — dropping
+      // it would, after its ttl, del-poke this chunk's now-unreferenced rows
+      // (deleteUnreferencedRows, cvr.js) and evict them.
+      this.#unsubscribers.push(handle.cleanup);
+      // `preload().complete` never rejects in Zero 1.5 (see
+      // BACKFILL_CHUNK_TIMEOUT_MS), so a server-errored chunk would hang this
+      // loop forever. Bound it: a chunk that doesn't ack within the budget
+      // marks the run degraded and we ADVANCE rather than wedge the session.
+      const timedOut = await this.#awaitChunkOrTimeout(handle.complete);
+      if (!this.#zero || gen !== this.#backfillGen) return;
+      if (timedOut) degraded = true;
+    }
+
+    if (!this.#zero || gen !== this.#backfillGen) return;
+    if (degraded) {
+      // At least one chunk never acked within the timeout. Do NOT persist the
+      // warm flag — the next reload must re-prime the missing chunk(s). Still
+      // widen the focused agent's bind to the full window: its own per-agent
+      // query is a superset that streams whatever a chunk missed, so the user
+      // isn't pinned to the 2-day window for the rest of the session.
+      this.blocksBackfill = "error";
+      console.warn("[zeroSync] blocks backfill degraded: a chunk did not ack within the timeout");
+      this.#widenForegroundWindow();
+      return;
+    }
+
+    this.blocksBackfill = "complete";
+    // Persist the warm flag (value = this client group's id) so the next
+    // reload of THIS replica skips the tiered dance and binds the full
+    // window directly. Self-heals on schema bump (new client group ⇒ stale
+    // value ⇒ mismatch ⇒ cold path again).
+    if (this.#clientGroupId) {
+      try {
+        localStorage.setItem(BLOCKS_BACKFILL_COMPLETE_KEY, this.#clientGroupId);
+      } catch {
+        // Storage write failed (private mode / quota) — harmless; this run
+        // already widened the live replica, next reload just re-backfills.
+      }
+    }
+    // Widen the active foreground bind, if it's still on the narrow window,
+    // without flashing an empty frame.
+    this.#widenForegroundWindow();
+  }
+
+  /** FRI-161: await a chunk's preload `complete`, or give up after
+   *  {@linkcode BACKFILL_CHUNK_TIMEOUT_MS}. Resolves `true` iff it timed out
+   *  (or `complete` rejected on some future Zero version) so the caller can
+   *  advance the backfill instead of hanging on a chunk the server never
+   *  acks. Zero 1.5's `complete` never rejects, so the timeout is the only
+   *  escape from a server-errored chunk. */
+  #awaitChunkOrTimeout(complete: Promise<void>): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (timedOut: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(timedOut);
+      };
+      const timer = setTimeout(() => settle(true), BACKFILL_CHUNK_TIMEOUT_MS);
+      void complete.then(
+        () => settle(false),
+        () => settle(true),
+      );
+    });
+  }
+
+  /** FRI-161: issue one backfill chunk preload. `hi === null` is the
+   *  open-ended head chunk (`ts > lo`); otherwise a closed `(lo, hi]` chunk.
+   *  Held for the tab lifetime (caller pushes `cleanup` to `#unsubscribers`).
+   *  Same 10 m ttl as the old prime — the cap silences Zero's clamp warning
+   *  and the practical effect is identical while the handle is alive. */
+  #issueBackfillChunk(
+    lo: number,
+    hi: number | null,
+  ): { complete: Promise<void>; cleanup: () => void } {
+    let query = this.#zero!.query.blocks.where("status", "!=", "streaming")
+      .where("status", "!=", "cancel_requested")
+      .where("ts", ">", lo);
+    if (hi !== null) query = query.where("ts", "<=", hi);
+    return this.#zero!.preload(query, { ttl: "10m" });
+  }
+
+  /** FRI-161: after the backfill completes, re-bind the active foreground
+   *  agent to the FULL 90-day window so the "Beginning of history" gate and
+   *  the read-only `pastLoading` skeleton stop lying. Materialize the new
+   *  (wider) view BEFORE destroying the narrow one, so no `blocks = []` frame
+   *  (which `unbindBlocks` would write) is ever observed by listeners during
+   *  the swap. Row retention across the swap is guaranteed regardless of
+   *  ordering — the held chunk handles keep every row referenced, so no `del`
+   *  poke can race the swap (cvr.js:558). */
+  #widenForegroundWindow(): void {
+    if (!this.#zero) return;
+    const agentName = this.blocksAgent;
+    // Nothing to widen if no agent is bound, or the bind is already full.
+    if (agentName === null || this.blocksFullWindow) return;
+
+    const oldTeardown = this.#blocksTeardown;
     const cutoff = blocksRetentionCutoff();
     const query = this.#zero!.query.blocks.where("agent_name", "=", agentName)
       .where("status", "!=", "streaming")
@@ -1010,38 +1337,17 @@ class ZeroSyncStore {
       this.blocksResultType = resultType;
       for (const listener of this.#blocksListeners) listener(this.blocks, resultType);
     };
+    // Populate from the new view first (the wider window is a superset of the
+    // narrow one, so this never shrinks the rendered set), THEN tear down the
+    // old view — no empty frame in between.
+    this.blocksFullWindow = true;
     update(view.data as readonly unknown[], "unknown");
     view.addListener((data, resultType) => update(data as readonly unknown[], resultType));
     this.#blocksTeardown = (): void => {
       preload.cleanup();
       view.destroy();
     };
-  }
-
-  /**
-   * Plan §39 phase 2 ("background full active state"): after the
-   * foreground per-agent query for the focused agent is bound, prime
-   * the local replica with the 90-day window across *all* agents so
-   * focus switches don't pay network cost. Preloads only — no JS
-   * materialization (we don't need every agent's blocks in memory).
-   * Runs once per `#init` and is torn down with the other slices.
-   */
-  #bindAllBlocksBackground(): void {
-    if (!this.#zero) return;
-    const cutoff = blocksRetentionCutoff();
-    const query = this.#zero!.query.blocks.where("status", "!=", "streaming")
-      .where("status", "!=", "cancel_requested")
-      .where("ts", ">", cutoff);
-    // `ttl` here only matters AFTER `handle.cleanup()` fires — while
-    // the handle is alive (i.e. for the life of this dashboard tab),
-    // the preloaded rows stay in the replica. Zero 1.5 hard-caps the
-    // ttl at 10 minutes (`MAX_TTL_MS` in `@rocicorp/zero/out/zql/src/query/ttl.js`)
-    // and emits a `QueryManager: TTL (Xd) is too high, clamping to 10m`
-    // warning on every page load for any value higher. 10m matches
-    // the cap and silences the warning; the practical effect is
-    // identical because we hold the handle for the tab's lifetime.
-    const handle = this.#zero!.preload(query, { ttl: "10m" });
-    this.#unsubscribers.push(() => handle.cleanup());
+    if (oldTeardown) oldTeardown();
   }
 
   /** Release the per-agent blocks subscription. Idempotent on a
@@ -1722,6 +2028,13 @@ class ZeroSyncStore {
   }
 
   destroy(): void {
+    // FRI-161: supersede any in-flight backfill loop so it stops between
+    // chunks instead of applying preloads to a closed client.
+    this.#backfillGen++;
+    if (this.#backfillFallbackTimer) {
+      clearTimeout(this.#backfillFallbackTimer);
+      this.#backfillFallbackTimer = null;
+    }
     if (this.#statsInterval) {
       clearInterval(this.#statsInterval);
       this.#statsInterval = null;
@@ -1926,7 +2239,11 @@ if (browser) {
     zeroSync.onBlocksUpdate((rows, resultType) => {
       const agent = zeroSync.blocksAgent;
       if (!agent) return;
-      chat.applyZeroBlocks(rows, agent, resultType);
+      // FRI-161: pass the current window state so `applyZeroBlocks` only
+      // honors a 'complete' as "reached oldest" when the FULL window is
+      // bound. `#widenForegroundWindow` sets `blocksFullWindow = true`
+      // before it fires the listener, so the widened 'complete' reads true.
+      chat.applyZeroBlocks(rows, agent, resultType, zeroSync.blocksFullWindow);
     });
     // Phase 4.1: register the markRead callback. Chat calls this from
     // `applyZeroBlocks` after each per-agent snapshot to advance the

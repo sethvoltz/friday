@@ -2554,6 +2554,7 @@ export class ChatState {
     rows: readonly ZeroBlocksRow[],
     forAgent: string,
     resultType: "complete" | "unknown" | "error" = "unknown",
+    fullWindow: boolean = true,
   ): void {
     if (this.focusedAgent !== forAgent) return;
     // Defer the entire snapshot if we don't yet know which session
@@ -2577,7 +2578,13 @@ export class ChatState {
     // `'unknown'` (initial bootstrap streaming in), the UI keeps any
     // existing "load more" affordance as a no-op spinner; the next
     // snapshot frame will either bring more rows or flip to 'complete'.
-    if (resultType === "complete") this.reachedOldest = true;
+    //
+    // FRI-161: `complete` on the NARROW cold-start window only means the
+    // last 2 days are synced — NOT that the user has reached the oldest
+    // message. Gate on `fullWindow` so "Beginning of history" never lies
+    // mid-backfill. The wider bind re-fires this with fullWindow=true once
+    // `#widenForegroundWindow` runs, flipping `reachedOldest` honestly then.
+    if (resultType === "complete" && fullWindow) this.reachedOldest = true;
 
     // The live chat view is the agent's CURRENT session. See
     // `filterRowsToCurrentSession`.
@@ -2596,7 +2603,9 @@ export class ChatState {
       // must not mutate `messages` because it also runs for an honest
       // fresh-agent state where the optimistic bubble from `addUser` is
       // the only thing the user sees until the canonical row replicates.
-      if (resultType === "complete") this.reachedOldest = true;
+      // FRI-161: same fullWindow gate as the main-body writer above — a
+      // narrow-window 'complete' is not "reached oldest".
+      if (resultType === "complete" && fullWindow) this.reachedOldest = true;
       return;
     }
 

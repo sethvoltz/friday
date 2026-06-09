@@ -227,7 +227,11 @@
     if (readonly) return;
     const ws = windowStart;
     const total = allMessages.length;
-    const complete = zeroSync.blocksResultType === "complete";
+    // FRI-161: with tiered cold-start the foreground query may be 'complete'
+    // for only the NARROW 2-day window while the backfill is still widening
+    // to 90 days. "Beginning of history" must not fire until the foreground
+    // bind covers the full retention window (`blocksFullWindow`), or it lies.
+    const complete = zeroSync.blocksResultType === "complete" && zeroSync.blocksFullWindow;
     untrack(() => {
       // "Beginning of history" affordance fires only when the rendered
       // window genuinely starts at index 0 AND there are actual rows
