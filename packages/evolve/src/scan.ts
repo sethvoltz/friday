@@ -310,14 +310,15 @@ export function scanTranscripts(opts: TranscriptScanOptions = {}): Signal[] {
       if (!stat) continue;
       if (sinceMs && stat.mtimeMs < sinceMs) continue;
 
-      const { turns, manualCompactTs } = collectUserTurns(filePath, sinceMs);
+      const { turns, manualCompactTs } = collectTurnsAndBoundaries(filePath, sinceMs);
       const retries = countRetries(turns, threshold, windowMs, manualCompactTs);
       if (retries === 0) continue;
 
       // Session-scoped dedup: fire at most once per session file regardless of
       // how many retry pairs were detected. Multiple retries from the same
       // session (e.g. compaction artefacts) previously produced N identical
-      // evidence pointers for the same sessionId.
+      // evidence pointers for the same sessionId. Pass the actual retry count
+      // so signal density reflects real activity (5 genuine retries > 1).
       bucketAppend(
         buckets,
         "transcript_user_retry",
@@ -328,6 +329,7 @@ export function scanTranscripts(opts: TranscriptScanOptions = {}): Signal[] {
         new Date(stat.mtimeMs).toISOString(),
         undefined,
         sessionId,
+        retries,
       );
     }
   }
@@ -347,6 +349,7 @@ function bucketAppend(
   ts: string,
   agent: string | undefined,
   sessionId?: string,
+  count = 1,
 ): void {
   const hash = signalHash(event, agent);
   const pointer: EvidencePointer = { kind: source, path };
@@ -355,7 +358,7 @@ function bucketAppend(
 
   const existing = buckets.get(hash);
   if (existing) {
-    existing.count++;
+    existing.count += count;
     existing.lastSeenAt = ts;
     if (existing.evidencePointers.length < 3) existing.evidencePointers.push(pointer);
     return;
@@ -366,7 +369,7 @@ function bucketAppend(
     source,
     key: event,
     severity,
-    count: 1,
+    count,
     firstSeenAt: ts,
     lastSeenAt: ts,
     agent,
@@ -432,7 +435,7 @@ function safeStat(path: string): { mtimeMs: number } | null {
   }
 }
 
-function collectUserTurns(
+function collectTurnsAndBoundaries(
   filePath: string,
   sinceMs: number,
 ): { turns: TranscriptUserTurn[]; manualCompactTs: number[] } {
