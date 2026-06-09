@@ -9,9 +9,14 @@
  * divider.spec.ts`):
  *
  *   - AC6: navigating to `/` lands at the BOTTOM of the transcript
- *     (router scroll-to-top is disabled on the chat route; entry parity),
- *     and `window.scrollY > 0` proves the *document* did the scrolling —
- *     a nested-scroller regression would leave `window.scrollY` at 0.
+ *     (the chat entry's deferred bottom-write supersedes the router's
+ *     scroll-to-top; entry parity), and `window.scrollY > 0` proves the
+ *     *document* did the scrolling — a nested-scroller regression would
+ *     leave `window.scrollY` at 0.
+ *   - AC6b: leaving chat does NOT leak its scroll position into other
+ *     routes — kit 2.59 runs afterNavigate callbacks AFTER its scroll
+ *     pass, so a disableScrollHandling() issued there poisons the NEXT
+ *     navigation; the layout deliberately doesn't call it.
  *   - AC7a: stick-to-bottom — while assistant blocks stream in, the
  *     `.bottom-sentinel` stays in the viewport.
  *   - AC7b: anchor-restore — scrolling up across a virtualization window
@@ -257,6 +262,45 @@ test.describe("FRI-160 — document is the chat scroller", () => {
     // transcript pinned to its bottom means window.scrollY is far from 0.
     // A regression back to a nested element scroller would leave it at 0.
     await expect(page.locator(".chat-transcript")).toBeVisible();
+    await expect.poll(() => readScrollY(page)).toBeGreaterThan(0);
+
+    await context.close();
+  });
+
+  test("AC6b — leaving chat does not leak its scroll position into other routes", async ({
+    browser,
+  }) => {
+    const env = loadEnv();
+    const stamp = `fri160-leave-${Date.now()}`;
+    await seedTranscript(env.databaseUrl, stamp, 160);
+
+    // Short viewport so the destination page (Settings) is taller than
+    // the viewport — a too-short destination would clamp scrollY to 0 on
+    // its own and mask the leak this test exists to catch.
+    const { context, page } = await openChat(browser, env, { width: 1280, height: 500 });
+    await awaitSeededTranscript(page, stamp, 160);
+    await expect.poll(() => readScrollY(page)).toBeGreaterThan(0);
+
+    // Header-nav to Settings. The regression this pins: a scroll-handling
+    // disable issued during the chat entry leaked into the NEXT
+    // navigation (SvelteKit runs afterNavigate callbacks AFTER the
+    // router's scroll pass and its autoscroll-flag reset), so the router
+    // skipped its scroll-to-top and Settings inherited chat's deep
+    // scrollY.
+    await page.getByRole("link", { name: "Settings" }).click();
+    await expect(page).toHaveURL(/\/settings/);
+    // Guard against vacuity: the destination must actually be scrollable,
+    // otherwise scrollY=0 proves nothing.
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollHeight > window.innerHeight))
+      .toBe(true);
+    await expect.poll(() => readScrollY(page)).toBe(0);
+
+    // And header-nav back INTO chat lands at the bottom again (the
+    // direct-load case is AC6; this is the in-app link case).
+    await page.getByRole("link", { name: "Chat" }).click();
+    await expect(page).toHaveURL(`${env.dashboardURL.replace(/\/$/, "")}/`);
+    await expect(page.locator(".bottom-sentinel")).toBeInViewport({ timeout: 10_000 });
     await expect.poll(() => readScrollY(page)).toBeGreaterThan(0);
 
     await context.close();

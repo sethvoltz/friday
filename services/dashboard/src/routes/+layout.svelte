@@ -3,7 +3,7 @@
   import favicon from "$lib/assets/favicon.svg";
   import avatar from "$lib/assets/avatar.png";
   import { page } from "$app/stores";
-  import { afterNavigate, disableScrollHandling } from "$app/navigation";
+  import { afterNavigate } from "$app/navigation";
   import {
     afterNextPaint,
     scrollToBottom,
@@ -229,23 +229,41 @@
   let signedIn = $derived(!!data.user);
 
   // FRI-160: the chat route scrolls the DOCUMENT (the transcript is an
-  // inert in-flow block — see ChatShell's .chat-transcript). SvelteKit's
-  // built-in scroll handling writes `window.scrollTo` after every
-  // navigation (scroll-to-top, or position restore on back/forward),
-  // which would fight chat's scroll-to-bottom now that the document is
-  // the scroller — the old fixed overlay bypassed the router entirely.
-  // On the chat route only: disable the router's scroll write, then
-  // land at the bottom after a double-rAF so the transcript's layout
-  // has committed a paint first. Entry behavior is at parity with the
-  // overlay era: always land at the bottom of the current agent's chat.
+  // inert in-flow block — see ChatShell's .chat-transcript), so entering
+  // chat must land at the bottom. The double-rAF defer lets the
+  // transcript's layout commit a paint before the write. Entry behavior
+  // is at parity with the overlay era: always land at the bottom of the
+  // current agent's chat.
+  //
+  // Deliberately NO disableScrollHandling() here. In @sveltejs/kit 2.59
+  // the router's scroll pass (scrollTo(0,0), or popped-state restore)
+  // runs — and resets its internal autoscroll flag — BEFORE
+  // afterNavigate callbacks fire (src/runtime/client/client.js:
+  // `if (autoscroll)` block → `autoscroll = true` → callbacks). Calling
+  // disableScrollHandling() from here therefore cannot affect THIS
+  // navigation; it disables the NEXT one. In practice that meant chat's
+  // deep scrollY leaked into whatever page the user visited after chat
+  // (Memory/Settings rendered pre-scrolled to chat's position — they
+  // never got their scroll-to-top). The router's scroll-to-top on chat
+  // entry is harmless: the queued bottom-write below supersedes it
+  // within two frames.
+  //
+  // The cancel handle drops the queued write if another navigation
+  // lands inside the two-frame defer window, so a rapid chat→elsewhere
+  // hop can't receive a stale bottom-write.
   //
   // SSR-safe by construction: `afterNavigate` registers during
   // component init but its callback only ever runs client-side, so all
   // window/document access stays inside the callback.
+  let cancelChatEntryScroll: (() => void) | null = null;
   afterNavigate(() => {
+    cancelChatEntryScroll?.();
+    cancelChatEntryScroll = null;
     if (!isChat) return;
-    disableScrollHandling();
-    afterNextPaint(() => scrollToBottom());
+    cancelChatEntryScroll = afterNextPaint(() => {
+      cancelChatEntryScroll = null;
+      scrollToBottom();
+    });
   });
 
   // PostHog identity: associate captured events + session replays with the

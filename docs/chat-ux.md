@@ -29,7 +29,7 @@ The dashboard's home `/` is a single persistent chat with Friday. This doc captu
 
 ## Scroll behavior
 
-The chat scrolls the **document/window**, like every other route — there is no nested or fixed chat scroller (ADR-039). The transcript is an inert in-flow `.chat-transcript` element; header, sidebar, and composer are `position: fixed` pinned bars layered over the document scroll. Programmatic scrolling goes through `window.scrollTo` / `window.scrollBy` (never `behavior: "smooth"` on the follow path — WebKit #238497), scroll listeners bind to `window`, and on navigation the chat route calls `afterNavigate` + `disableScrollHandling()` so SvelteKit's scroll-to-top doesn't fight the land-at-bottom behavior.
+The chat scrolls the **document/window**, like every other route — there is no nested or fixed chat scroller (ADR-039). The transcript is an inert in-flow `.chat-transcript` element; header, sidebar, and composer are `position: fixed` pinned bars layered over the document scroll. Programmatic scrolling goes through `window.scrollTo` / `window.scrollBy` (never `behavior: "smooth"` on the follow path — WebKit #238497), scroll listeners bind to `window`, and on navigation into chat an `afterNavigate` hook queues a deferred land-at-bottom write that supersedes SvelteKit's scroll-to-top two frames later. Deliberately no `disableScrollHandling()` — kit 2.59 runs `afterNavigate` callbacks _after_ its scroll pass, so calling it there disables the _next_ navigation's scroll-to-top and leaks chat's scroll position into other routes (ADR-039).
 
 `ChatMessages.svelte` runs two `IntersectionObserver`s on sentinel divs at the top and bottom of the message list:
 
