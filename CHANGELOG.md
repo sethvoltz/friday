@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.0](https://github.com/sethvoltz/friday/compare/v1.14.1...v1.15.0) (2026-06-09)
+
+
+### Features
+
+* **system:** durable, reconstructable compaction-in-progress indicator (FRI-159) ([#210](https://github.com/sethvoltz/friday/issues/210)) ([394359c](https://github.com/sethvoltz/friday/commit/394359cae161102c03dcf0be65588e5bbbc5f933))
+
 ## [1.14.1](https://github.com/sethvoltz/friday/compare/v1.14.0...v1.14.1) (2026-06-09)
 
 
