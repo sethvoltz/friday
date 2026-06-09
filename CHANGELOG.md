@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.14.1](https://github.com/sethvoltz/friday/compare/v1.14.0...v1.14.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **dashboard:** pin working agents to top of each sidebar bucket ([#206](https://github.com/sethvoltz/friday/issues/206)) ([daec740](https://github.com/sethvoltz/friday/commit/daec740ccfc667d8986d6b338e629b2c861c4c07))
+* **dashboard:** reset chatWindowEnd on agent focus to fix scroll-back regression ([#208](https://github.com/sethvoltz/friday/issues/208)) ([c2c6cfb](https://github.com/sethvoltz/friday/commit/c2c6cfb51277873dda09a3f6c7cb9df0396edfef))
+
 ## [1.14.0](https://github.com/sethvoltz/friday/compare/v1.13.3...v1.14.0) (2026-06-09)
 
 
