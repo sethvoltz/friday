@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.17.1](https://github.com/sethvoltz/friday/compare/v1.17.0...v1.17.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **dashboard:** FRI-162 sidebar sessions fetch — error state + bounded retry ([#215](https://github.com/sethvoltz/friday/issues/215)) ([49eb4b2](https://github.com/sethvoltz/friday/commit/49eb4b28aab34b64ee26d2c3822d2d0aa4cc7a9d))
+
 ## [1.17.0](https://github.com/sethvoltz/friday/compare/v1.16.0...v1.17.0) (2026-06-09)
 
 
