@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.0](https://github.com/sethvoltz/friday/compare/v1.13.3...v1.14.0) (2026-06-09)
+
+
+### Features
+
+* **dashboard:** add planner agent icon ([#204](https://github.com/sethvoltz/friday/issues/204)) ([d9fe897](https://github.com/sethvoltz/friday/commit/d9fe8979aca03082b86ffffacc8c5739a3b81102))
+
 ## [1.13.3](https://github.com/sethvoltz/friday/compare/v1.13.2...v1.13.3) (2026-06-09)
 
 
