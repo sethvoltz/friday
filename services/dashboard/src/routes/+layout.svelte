@@ -3,6 +3,11 @@
   import favicon from "$lib/assets/favicon.svg";
   import avatar from "$lib/assets/avatar.png";
   import { page } from "$app/stores";
+  import { afterNavigate, disableScrollHandling } from "$app/navigation";
+  import {
+    afterNextPaint,
+    scrollToBottom,
+  } from "$lib/components/Chat/doc-scroll";
   import { onMount } from "svelte";
   import { sseConnected, startSSE, stopSSE } from "$lib/stores/sse.svelte";
   import { startConnectivity } from "$lib/stores/connectivity.svelte";
@@ -223,6 +228,26 @@
   );
   let signedIn = $derived(!!data.user);
 
+  // FRI-160: the chat route scrolls the DOCUMENT (the transcript is an
+  // inert in-flow block — see ChatShell's .chat-transcript). SvelteKit's
+  // built-in scroll handling writes `window.scrollTo` after every
+  // navigation (scroll-to-top, or position restore on back/forward),
+  // which would fight chat's scroll-to-bottom now that the document is
+  // the scroller — the old fixed overlay bypassed the router entirely.
+  // On the chat route only: disable the router's scroll write, then
+  // land at the bottom after a double-rAF so the transcript's layout
+  // has committed a paint first. Entry behavior is at parity with the
+  // overlay era: always land at the bottom of the current agent's chat.
+  //
+  // SSR-safe by construction: `afterNavigate` registers during
+  // component init but its callback only ever runs client-side, so all
+  // window/document access stays inside the callback.
+  afterNavigate(() => {
+    if (!isChat) return;
+    disableScrollHandling();
+    afterNextPaint(() => scrollToBottom());
+  });
+
   // PostHog identity: associate captured events + session replays with the
   // signed-in user once posthog-js has initialized (see +layout.ts). Runs
   // client-side only ($effect never fires during SSR). `identify` is
@@ -383,6 +408,14 @@
         blurTimeout = undefined;
         if (!isField(document.activeElement)) {
           document.documentElement.classList.remove("keyboard-open");
+          // FRI-160 defensive nudge (WebKit #297779): on iOS 26,
+          // visualViewport.offsetTop can stay stuck at ~24px after the
+          // keyboard dismisses, shifting the fixed header/composer. A
+          // net-zero 1px scroll wiggle forces WebKit to re-resolve the
+          // visual viewport against the layout viewport, resetting the
+          // stale offset. No-op everywhere else.
+          window.scrollBy(0, -1);
+          window.scrollBy(0, 1);
         }
       }, 100);
     };

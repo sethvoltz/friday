@@ -8,7 +8,16 @@
     zeroBlockRowToBlockRow,
   } from "$lib/stores/chat.svelte";
   import { zeroSync } from "$lib/stores/zero.svelte";
-  import { chaseScrollBottom, type ResyncChaseHandle } from "$lib/components/Chat/resync-scroll";
+  import {
+    chaseScrollBottom,
+    makeWindowChaseTarget,
+    type ResyncChaseHandle,
+  } from "$lib/components/Chat/resync-scroll";
+  import {
+    afterNextPaint,
+    scrollByDelta,
+    scrollToBottom,
+  } from "$lib/components/Chat/doc-scroll";
   import { tick, untrack } from "svelte";
 
   interface Props {
@@ -21,7 +30,11 @@
   let { agent, sessionId }: Props = $props();
   let readonly = $derived(sessionId !== undefined);
 
-  let scrollEl: HTMLElement | undefined = $state();
+  // Inert query root for anchor bookkeeping (`.list` ResizeObserver,
+  // `[data-msg-id]` bubble lookups) — NOT a scroller. The DOCUMENT is
+  // the only scroller on the chat route (FRI-160); all scroll reads and
+  // writes go through the window seam in doc-scroll.ts.
+  let transcriptEl: HTMLElement | undefined = $state();
   let inputEl: HTMLDivElement | undefined = $state();
 
   // Read-only past-session views auto-pin to bottom on initial load and
@@ -94,8 +107,25 @@
       pastMessages.length === 0,
   );
 
+  // Drops any deferred anchor-restore correction queued by the `.list`
+  // ResizeObserver below (assigned inside that $effect; no-op until it
+  // mounts). The document scroller is global, so a queued `scrollBy`
+  // outlives the slice/view that motivated it — anything that asserts
+  // new scroll ownership (jump-to-bottom, a resync chase, teardown)
+  // must invalidate pending corrections or a stale relative write
+  // lands 1–2 frames later and yanks the viewport off its new target.
+  let invalidatePendingRestore: () => void = () => {};
+
+  // Entry point for ChatMessages's window slides into the single
+  // anchor-restore owner below (assigned inside the `.list` $effect).
+  // See that effect's doc-comment for why slides can't rely on the
+  // ResizeObserver alone (net-zero-height slides never fire it).
+  let notifyListMutation: () => void = () => {};
+
   async function jumpToBottom() {
-    if (!scrollEl) return;
+    // A correction queued for the pre-jump geometry must not land on
+    // top of the bottom we're about to scroll to.
+    invalidatePendingRestore();
     // With sliding-window virtualization, the bottom of the rendered
     // DOM is the bottom of the WINDOW, not the bottom of history. If
     // the user has slid the window back into history (chatWindowEnd <
@@ -107,8 +137,7 @@
       chat.resetChatWindowToLatest();
       await tick();
     }
-    if (!scrollEl) return;
-    scrollEl.scrollTop = scrollEl.scrollHeight;
+    scrollToBottom();
     // Optimistic update so the jump-button hides immediately; the
     // bottom-sentinel observer will confirm on its next tick.
     if (!readonly) chat.pinnedToBottom = true;
@@ -128,9 +157,14 @@
    * write. One-shot, not sticky.
    */
   function startResyncChase(): void {
-    if (!scrollEl) return;
     activeChase?.abort();
-    activeChase = chaseScrollBottom(scrollEl, {
+    // The chase owns the scroll for its window — a stale deferred
+    // anchor-restore from the previous agent/session must not land
+    // mid-chase (or just after it ends).
+    invalidatePendingRestore();
+    // The chase target is the document scroller — built lazily here
+    // (client-only call sites) so SSR never touches window/document.
+    activeChase = chaseScrollBottom(makeWindowChaseTarget(), {
       now: () => performance.now(),
       raf: (cb) => requestAnimationFrame(cb),
       cancelRaf: (h) => cancelAnimationFrame(h),
@@ -166,11 +200,9 @@
       void chat.loadAgentTurns(a).then(async () => {
         chat.resetChatWindowToLatest();
         await tick();
-        if (scrollEl) {
-          scrollEl.scrollTop = scrollEl.scrollHeight;
-          chat.pinnedToBottom = true;
-          startResyncChase();
-        }
+        scrollToBottom();
+        chat.pinnedToBottom = true;
+        startResyncChase();
       });
     });
   });
@@ -223,24 +255,18 @@
 
   // Initial scroll-to-bottom + scroll-pin while streaming.
   $effect(() => {
-    if (scrollEl) {
-      queueMicrotask(() => {
-        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
-      });
-    }
+    queueMicrotask(() => scrollToBottom());
   });
 
   $effect(() => {
-    if (!inputEl || !scrollEl) return;
+    if (!inputEl) return;
     const ro = new ResizeObserver(([entry]) => {
       const h = entry.contentRect.height;
-      // Set on the document root so the chat-scroll padding *and* the
+      // Set on the document root so the chat-transcript padding *and* the
       // sibling floating pills (.jump-to-bottom-wrap, .loading-older) all
       // see the same live value via inheritance.
       document.documentElement.style.setProperty("--chat-input-h", `${h}px`);
-      if (pinnedToBottom && scrollEl) {
-        scrollEl.scrollTop = scrollEl.scrollHeight;
-      }
+      if (pinnedToBottom) scrollToBottom();
     });
     ro.observe(inputEl);
     return () => ro.disconnect();
@@ -255,11 +281,9 @@
       chat.messages.at(-1)?.text;
     }
     untrack(() => {
-      if (pinnedToBottom && scrollEl) {
+      if (pinnedToBottom) {
         queueMicrotask(() => {
-          if (scrollEl && pinnedToBottom) {
-            scrollEl.scrollTop = scrollEl.scrollHeight;
-          }
+          if (pinnedToBottom) scrollToBottom();
         });
       }
     });
@@ -276,33 +300,55 @@
   //      down — classic broken-scroll-anchor UX.
   //
   // Browser-native `overflow-anchor: auto` would handle case 2, but the
-  // dashboard disables it explicitly (see .chat-scroll's overflow-anchor:
-  // none) to avoid fighting the manual scrollTop math in the pagination
-  // prepend handler. So we implement scroll anchoring ourselves: cache
-  // the topmost message that's visible (its id + offset from the scroller
-  // top) on every scroll event, then on every ResizeObserver tick adjust
-  // scrollTop by whatever delta that anchor moved, returning the user's
-  // viewport to where they were looking.
+  // dashboard disables it explicitly (see .chat-transcript's
+  // overflow-anchor: none) to avoid fighting this manual scroll math. So
+  // we implement scroll anchoring ourselves: cache the topmost message
+  // that's visible (its id + offset from the viewport top — the document
+  // is the scroller) on every scroll event, then on every ResizeObserver
+  // tick adjust the window scroll by whatever delta that anchor moved,
+  // returning the user's viewport to where they were looking.
+  //
+  // This effect is the SINGLE owner of anchor-restore for every `.list`
+  // mutation — ChatMessages's window slides and older-page prepends
+  // deliberately do NOT restore on their own (FRI-160). With the writes
+  // deferred (double-rAF, below), a second restorer measuring the same
+  // mutation against its own anchor would queue a second full-height
+  // correction and the viewport would jump by the prepended height
+  // instead of holding still.
+  //
+  // Two triggers feed the one restore path:
+  //   - the ResizeObserver on `.list`, for content-growth mutations
+  //     (late mermaid/KaTeX/image mounts, tool expands, prepends);
+  //   - the `onWindowSlide` hook ChatMessages calls after a window
+  //     slide. The hook is load-bearing, not belt-and-braces: a slide
+  //     mounts SLIDE_AMOUNT bubbles on one edge and unmounts the same
+  //     count on the other, so `.list`'s NET height change can be ~0px
+  //     and the RO never fires — yet every retained bubble shifted by
+  //     the full prepended height. Both triggers share one anchor and
+  //     one pending delta (anchorOffset advances eagerly on measure),
+  //     so whichever runs second measures a delta of 0 — double-apply
+  //     stays impossible.
   $effect(() => {
-    if (!scrollEl) return;
-    const inner = scrollEl.querySelector(".list");
+    if (!transcriptEl) return;
+    const root = transcriptEl;
+    const inner = root.querySelector(".list");
     if (!inner) return;
 
     let anchorEl: HTMLElement | null = null;
     let anchorOffset = 0;
 
     function snapshotAnchor() {
-      if (!scrollEl) return;
-      const scrollerTop = scrollEl.getBoundingClientRect().top;
-      // First message bubble whose bottom is still inside (or below) the
-      // viewport top — i.e. the topmost element the user can actually see
-      // (or the one that just scrolled off the top by a hair).
-      const bubbles = scrollEl.querySelectorAll<HTMLElement>("[data-msg-id]");
+      // The document is the scroller, so the reference line is the
+      // viewport top (≡ 0). First message bubble whose bottom is still
+      // inside (or below) it — i.e. the topmost element the user can
+      // actually see (or the one that just scrolled off the top by a
+      // hair).
+      const bubbles = root.querySelectorAll<HTMLElement>("[data-msg-id]");
       for (const el of bubbles) {
         const r = el.getBoundingClientRect();
-        if (r.bottom > scrollerTop) {
+        if (r.bottom > 0) {
           anchorEl = el;
-          anchorOffset = r.top - scrollerTop;
+          anchorOffset = r.top;
           return;
         }
       }
@@ -310,39 +356,49 @@
     }
 
     snapshotAnchor();
-    scrollEl.addEventListener("scroll", snapshotAnchor, { passive: true });
+    // Document scrolls fire the `scroll` event at the document, where a
+    // `window` listener receives it. A listener on the inert
+    // `.chat-transcript` (no overflow) would silently never fire.
+    window.addEventListener("scroll", snapshotAnchor, { passive: true });
 
-    // WebKit/iOS Safari paint-defer fix (same shape as the pagination
-    // prepend handler in ChatMessages.svelte). A programmatic scrollTop
-    // write that lands while the scroll thread is still hot (mid-momentum
-    // or just-stopped) defers paint of the newly-revealed region until
-    // the next user scroll. Toggling overflow-y: hidden synchronously
-    // detaches the element from the scroll thread, forcing a paint
-    // commit; the async restore reattaches with a fresh paint. Mobile-
-    // critical: without this, iOS users get blank regions during
-    // late-render-driven scroll adjustments.
-    //
-    // Re-entrancy: the restore always targets "" (let CSS overflow-y:
-    // auto resume) rather than a snapshotted `prev`. The pagination
-    // prepend handler in ChatMessages.svelte writes "hidden" and the
-    // resulting `.list` height change synchronously fires this RO,
-    // which used to capture `prev = "hidden"`. The trailing restore
-    // then re-applied "hidden", permanently locking the scroller until
-    // the element unmounted (matching the reported "switch session to
-    // recover" workaround). Nothing else writes scrollEl.style.overflowY,
-    // so "" — falling back to .chat-scroll's CSS auto — is the correct
-    // steady state for every caller.
-    function writeScrollTop(newTop: number) {
-      if (!scrollEl) return;
-      scrollEl.style.overflowY = "hidden";
-      scrollEl.scrollTop = newTop;
-      setTimeout(() => {
-        if (scrollEl) scrollEl.style.overflowY = "";
-      }, 0);
+    // WebKit/iOS Safari paint-defer mitigation, document-scroller
+    // edition. A programmatic scroll write that lands while
+    // the scroll thread is still hot (mid-momentum or just-stopped)
+    // defers paint of the newly-revealed region until the next user
+    // scroll. The old fixed-overlay scroller forced a paint commit by
+    // toggling overflow-y:hidden; with the document as the scroller
+    // there is no element overflow to toggle (and overflow:hidden on
+    // <html>/<body> is unreliable on iOS WebKit — #153852, #240860), so
+    // the write is instead deferred past the in-flight frame via
+    // double-rAF (`afterNextPaint` in doc-scroll.ts). Writes go through
+    // window.scrollTo/scrollBy with behavior:'auto' — NEVER 'smooth' on
+    // the follow path (WebKit #238497: smooth programmatic scrolls can
+    // silently no-op).
+    // Deferred-correction bookkeeping. Deferring the writes (double-rAF,
+    // see above) loses the old synchronous ordering guarantee that each
+    // RO tick observed already-corrected geometry, so two invariants are
+    // enforced by hand here:
+    //   1. COALESCE — corrections accumulate into one pending delta
+    //      flushed once per afterNextPaint. Two resizes landing within
+    //      the 2-frame defer window (consecutive late image / mermaid /
+    //      KaTeX mounts above the anchor) would otherwise each queue a
+    //      full write and double-apply the first delta.
+    //   2. CANCELLABLE — the handles let jumpToBottom / chase start /
+    //      teardown drop a queued write before it lands on a view that
+    //      no longer wants it (the document scroller is global; queued
+    //      writes don't die with the DOM that motivated them).
+    let pendingRestoreDelta = 0;
+    let cancelQueuedRestore: (() => void) | null = null;
+    let cancelQueuedFollow: (() => void) | null = null;
+
+    function invalidateRestore() {
+      pendingRestoreDelta = 0;
+      cancelQueuedRestore?.();
+      cancelQueuedRestore = null;
     }
+    invalidatePendingRestore = invalidateRestore;
 
-    const ro = new ResizeObserver(() => {
-      if (!scrollEl) return;
+    function handleListMutation() {
       // Bottom-pinned *and* a turn is active: follow new output to the
       // bottom. Without the turn-active gate, every content-height
       // change snapped at-bottom users to the bottom — including idle
@@ -352,31 +408,70 @@
       // of an active turn; the streaming-text follow path lives in the
       // message-data effect above and doesn't go through this RO.
       if (pinnedToBottom && turnActive) {
-        writeScrollTop(scrollEl.scrollHeight);
+        // Following supersedes restoring — a pending anchor-restore
+        // would land on top of the follow write and pull us off the
+        // bottom.
+        invalidateRestore();
+        if (!cancelQueuedFollow) {
+          cancelQueuedFollow = afterNextPaint(() => {
+            cancelQueuedFollow = null;
+            // Re-check the gate at write time — the turn may have ended
+            // (or the user unpinned) during the two-frame defer. The
+            // write is absolute (reads scrollHeight at write time), so
+            // one queued follow covers any further growth that lands
+            // during the defer.
+            if (pinnedToBottom && turnActive) scrollToBottom();
+          });
+        }
         return;
       }
       // Mid-history (or idle-at-bottom): anchor-restore. If our cached
       // anchor is gone (DOM re-rendered the bubble) or never existed,
       // re-snapshot and bail — we have no "before" to compare to this
       // tick.
-      if (!anchorEl || !scrollEl.contains(anchorEl)) {
+      if (!anchorEl || !root.contains(anchorEl)) {
         snapshotAnchor();
         return;
       }
-      const scrollerTop = scrollEl.getBoundingClientRect().top;
-      const newOffset = anchorEl.getBoundingClientRect().top - scrollerTop;
+      // Measure the delta NOW (synchronously with the resize that fired
+      // this RO) so a user scroll during the deferred frames is
+      // preserved rather than undone; only the write is deferred.
+      const newOffset = anchorEl.getBoundingClientRect().top;
       const delta = newOffset - anchorOffset;
       if (delta === 0) return;
-      writeScrollTop(scrollEl.scrollTop + delta);
-      // We don't update anchorOffset here — the scrollTop write should
-      // restore the anchor to its original offset, and the scroll
-      // event the write triggers will re-snapshot anyway.
-    });
+      // Eagerly advance the cached offset to the just-measured one so
+      // the NEXT tick measures only its own shift. Without this, a
+      // second resize inside the defer window would re-measure the
+      // still-pending delta against the same stale anchorOffset and the
+      // two writes would over-correct by the first delta. The scroll
+      // event the flushed write triggers re-snapshots against reality
+      // anyway.
+      anchorOffset = newOffset;
+      pendingRestoreDelta += delta;
+      if (!cancelQueuedRestore) {
+        cancelQueuedRestore = afterNextPaint(() => {
+          cancelQueuedRestore = null;
+          const d = pendingRestoreDelta;
+          pendingRestoreDelta = 0;
+          if (d !== 0) scrollByDelta(d);
+        });
+      }
+    }
+
+    const ro = new ResizeObserver(() => handleListMutation());
     ro.observe(inner);
+    notifyListMutation = handleListMutation;
 
     return () => {
       ro.disconnect();
-      scrollEl?.removeEventListener("scroll", snapshotAnchor);
+      window.removeEventListener("scroll", snapshotAnchor);
+      // Drop queued writes — they'd land 1–2 frames after teardown
+      // against whatever view (route, agent) is current by then.
+      invalidateRestore();
+      cancelQueuedFollow?.();
+      cancelQueuedFollow = null;
+      invalidatePendingRestore = () => {};
+      notifyListMutation = () => {};
     };
   });
 
@@ -393,7 +488,7 @@
   <Sidebar />
 </aside>
 
-<section class="chat-scroll" bind:this={scrollEl}>
+<div class="chat-transcript" bind:this={transcriptEl}>
   {#if readonly}
     <div class="readonly-banner">
       Past session — read only
@@ -406,8 +501,9 @@
     onRetryPast={undefined}
     onLoadOlderPast={undefined}
     pastReachedOldest={readonly}
-    loadingOlderPast={false} />
-</section>
+    loadingOlderPast={false}
+    onWindowSlide={() => notifyListMutation()} />
+</div>
 
 {#if !readonly && chat.loadingOlder}
   <div class="floating-pill loading-older" aria-live="polite">
@@ -459,7 +555,7 @@
 {/if}
 
 <style>
-  .chat-scroll,
+  .chat-transcript,
   .chat-sidebar-floating,
   .chat-input-floating,
   .jump-to-bottom-wrap,
@@ -473,16 +569,22 @@
     --chat-top: calc(4.3rem + var(--chat-inset));
   }
 
-  .chat-scroll {
-    position: fixed;
-    inset: 0;
-    overflow-y: auto;
+  /* Inert in-flow transcript block — the DOCUMENT is the only scroller
+     on the chat route (FRI-160), same as every other page. No
+     position:fixed / overflow here: the old full-viewport fixed-overlay
+     scroller intermittently lost the touch-routing fight with the
+     document on iOS/WebKit (the whole view rubber-banded as a chunk
+     instead of scrolling the chat). The header / sidebar / composer /
+     floating pills stay position:fixed — pinned bars, not competing
+     scrollers — and this padding reserves their room in the flow. */
+  .chat-transcript {
     /* Chromium-side belt-and-braces: disable the browser's scroll-
-       anchoring heuristic so it doesn't fight the manual scrollTop fix
-       in ChatMessages.svelte → onPrepended. No-op on WebKit, free.
-       The WebKit-specific paint-deferral fix lives at the call site
-       (overflow-y toggle around the scrollTop write); CSS-level layer
-       promotion isn't the right tool for that bug. */
+       anchoring heuristic so it doesn't fight the manual anchor-restore
+       scroll math in ChatShell's `.list` ResizeObserver (the single
+       restore owner — covers window slides and older-page prepends
+       too). No-op on WebKit, free. The WebKit-specific paint-deferral
+       mitigation lives at the call sites (double-rAF around the window
+       scroll writes — see doc-scroll.ts). */
     overflow-anchor: none;
     padding-top: var(--chat-top);
     /* Mirrors the floating input's bottom offset (1rem inset + safe-area)
@@ -493,16 +595,6 @@
     padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px));
     padding-left: var(--content-left);
     padding-right: var(--page-gutter);
-    background: var(--bg-primary);
-    z-index: 0;
-    /* touch-action: pan-y narrows the WebCore ScrollableArea router's
-       claim to vertical pans only, so taps fall through to z-index
-       hit-testing where the sidebar trigger and header correctly win.
-       overscroll-behavior: contain prevents bounce compositor-frame lag
-       that causes taps immediately after a scroll to land at wrong DOM
-       positions. Both apply unconditionally — they're no-ops on desktop. */
-    touch-action: pan-y;
-    overscroll-behavior: contain;
   }
   .chat-sidebar-floating {
     position: fixed;
@@ -656,7 +748,7 @@
       width: auto;
       overflow: visible;
     }
-    .chat-scroll {
+    .chat-transcript {
       padding-left: var(--page-gutter);
       padding-right: var(--page-gutter);
       padding-top: calc(var(--chat-top) + 3.25rem);
