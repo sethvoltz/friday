@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, isNotNull } from "drizzle-orm";
 import {
   AGENTS_DIR,
   type AgentEntry,
@@ -244,9 +244,21 @@ async function _setStatusUnchecked(
     status: AgentStatus;
     updatedAt: Date;
     archiveReason?: ArchiveReason | null;
+    compactingSince?: Date | null;
   } = { status, updatedAt: new Date() };
   if (opts.archiveReason !== undefined) {
     setShape.archiveReason = opts.archiveReason;
+  }
+  // Backstop for the durable compaction-in-progress flag: compaction only
+  // happens DURING a turn (status === 'working'), so any transition OUT of
+  // 'working' (→ idle/stalled/archived) must null `compacting_since` in the
+  // SAME write. This guarantees a worker that dies mid-compaction — and never
+  // emits the `compacting` done frame that primarily clears the flag (see
+  // `setCompactingSince`, called from the lifecycle's `compacting-status`
+  // handler) — can't wedge the indicator on. A 'working' target is left alone
+  // so it never races an in-flight compaction flag set during the same turn.
+  if (status !== "working") {
+    setShape.compactingSince = null;
   }
   await db.update(schema.agents).set(setShape).where(eq(schema.agents.name, name));
 }
@@ -341,6 +353,44 @@ export async function clearSession(name: string): Promise<void> {
     .update(schema.agents)
     .set({ sessionId: null, updatedAt: new Date() })
     .where(eq(schema.agents.name, name));
+}
+
+/**
+ * Set or clear the durable compaction-in-progress flag for an agent.
+ * Pass a `Date` (the compaction start instant) on the SDK's `compacting`
+ * start frame, and `null` on the matching done frame. Replicated via Zero so
+ * the dashboard's "Compacting context…" indicator reconstructs on
+ * reload/reconnect. This is the PRIMARY writer; `_setStatusUnchecked` clears
+ * it as a backstop whenever the agent leaves `working`, and boot reconcile
+ * clears any stale value. Independent of `status` (compaction runs while the
+ * agent stays `working`), so it does NOT go through the FSM-gated status door.
+ */
+export async function setCompactingSince(name: string, since: Date | null): Promise<void> {
+  const db = getDb();
+  await db
+    .update(schema.agents)
+    .set({ compactingSince: since, updatedAt: new Date() })
+    .where(eq(schema.agents.name, name));
+}
+
+/**
+ * Boot reconcile: clear every stale `compacting_since`. A daemon that died
+ * mid-compaction leaves the flag set with no worker alive to emit the done
+ * frame; on the next boot no compaction is in flight until the SDK re-signals,
+ * so any lingering value is stale by definition. Returns the number of rows
+ * cleared (for the boot log). The per-agent `working → idle` reset already
+ * nulls the flag via the `_setStatusUnchecked` backstop; this is the
+ * belt-and-braces sweep that also catches a row whose status drifted from its
+ * flag. NOT scoped to status so it heals any inconsistency.
+ */
+export async function clearStaleCompacting(): Promise<number> {
+  const db = getDb();
+  const rows = await db
+    .update(schema.agents)
+    .set({ compactingSince: null, updatedAt: new Date() })
+    .where(isNotNull(schema.agents.compactingSince))
+    .returning({ name: schema.agents.name });
+  return rows.length;
 }
 
 /**

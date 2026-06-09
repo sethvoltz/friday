@@ -11,12 +11,22 @@
  * The agent-status `error` was pruned end-to-end in M5 — a worker that exits
  * mid-turn now self-heals to `idle`, so there is no resting `error` dot.
  *
+ *   - compacting → --status-compacting (cyan) — ORTHOGONAL to status: an agent
+ *       stays `working` while its context compacts, so callers pass this via
+ *       `opts.compacting` (derived from `chat.isAgentCompacting`) and it wins
+ *       over the base color. Keeping it here makes this helper the single
+ *       source of truth for the dot COLOR across the Sidebar and Command
+ *       Palette (the pulse animation is a per-component CSS concern).
  *   - working  → --status-ok   (active, green)
  *   - stalled  → --status-warn (no progress past the heartbeat budget, amber)
  *   - archived → --text-tertiary (muted; the caller usually hides the dot)
  *   - idle / unknown → --text-tertiary (muted)
  */
-export function agentStatusDot(status: string | undefined): string {
+export function agentStatusDot(
+  status: string | undefined,
+  opts?: { compacting?: boolean },
+): string {
+  if (opts?.compacting) return "var(--status-compacting)";
   return status === "working"
     ? "var(--status-ok)"
     : status === "stalled"

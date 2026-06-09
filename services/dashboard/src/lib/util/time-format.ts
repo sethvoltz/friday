@@ -102,6 +102,22 @@ export function formatAbsoluteTooltip(ts: number): string {
   return `${WEEKDAY_LONG[d.getDay()]}, ${MONTH_LONG[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} at ${clockTime(d)}`;
 }
 
+/**
+ * Elapsed "M:SS" since a start instant, for the compaction-in-progress
+ * readout. Returns null when there's no start instant (caller then renders the
+ * label without a timer). Clamps negative deltas (clock skew) to "0:00" and
+ * rejects non-finite inputs so a corrupt/garbage `compacting_since` can never
+ * render "NaN:NaN" or an absurd string. Minutes are unbounded (a compaction
+ * could legitimately run many minutes); seconds are zero-padded.
+ */
+export function formatCompactingElapsed(sinceMs: number | undefined, now: number): string | null {
+  if (sinceMs == null || !Number.isFinite(sinceMs)) return null;
+  const secs = Math.max(0, Math.floor((now - sinceMs) / 1000));
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
 /** Stable local-day key for grouping comparisons. */
 export function localDayKey(ts: number): string {
   const d = new Date(ts);

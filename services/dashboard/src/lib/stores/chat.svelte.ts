@@ -183,6 +183,13 @@ export interface AgentInfo {
    * don't carry them yet. */
   createdAt?: string;
   updatedAt?: string;
+  /** Epoch-millis when the daemon began compacting this agent's context;
+   * undefined when not compacting. Replicated from `agents.compacting_since`
+   * via Zero. The DURABLE half of the compaction-in-progress signal — lets the
+   * "Compacting context…" indicator reconstruct on reload/reconnect and drives
+   * the sidebar dot + elapsed-time readout. See {@link compactingAgents} for
+   * the transient SSE half this is unioned with. */
+  compactingSince?: number;
 }
 
 /** Shape returned by `/api/agents/:name/sessions` and cached on the chat
@@ -1769,10 +1776,36 @@ export class ChatState {
    */
   compactingAgents = new SvelteSet<string>();
 
+  /**
+   * True when `name`'s context is compacting, per EITHER signal:
+   *   - the transient SSE set ({@link compactingAgents}) — low-latency, lights
+   *     the instant the `compacting` start frame arrives; and
+   *   - the durable `agents.compacting_since` column (replicated via Zero) —
+   *     reconstructs after a reload/reconnect or across the daemon-restart
+   *     window, where the SSE set (in-memory) is empty.
+   * Unioning the two means the indicator lights instantly AND survives reload.
+   * Reactive: reads `compactingAgents` membership and the agent row's
+   * `compactingSince`, so both a set mutation and a Zero row update re-render.
+   */
+  isAgentCompacting(name: string): boolean {
+    if (this.compactingAgents.has(name)) return true;
+    const row = this.agents.find((a) => a.name === name);
+    return row?.compactingSince != null;
+  }
+
+  /** The compaction start instant (epoch-millis) for `name`, from the durable
+   *  column — used for the elapsed-time readout. Undefined when not compacting
+   *  or when only the transient SSE signal is present (column not yet
+   *  replicated): callers render the label without a timer until it lands. */
+  compactingSinceFor(name: string): number | undefined {
+    return this.agents.find((a) => a.name === name)?.compactingSince;
+  }
+
   /** FRI-156 §F: true while the FOCUSED agent's context is compacting.
-   *  Drives the transient "Compacting context…" indicator in ChatMessages. */
+   *  Drives the transient "Compacting context…" indicator in ChatMessages.
+   *  Now reconstructable — see {@link isAgentCompacting}. */
   get focusedAgentIsCompacting(): boolean {
-    return this.compactingAgents.has(this.focusedAgent);
+    return this.isAgentCompacting(this.focusedAgent);
   }
 
   /** FRI-156 §E: scroll the chat to the most-recent compaction divider.

@@ -110,6 +110,16 @@ export const agents = pgTable(
     // ADR-023: when archive was requested by a mutator (before the daemon
     // picked it up). Used to drive the daemon's archive side-effect handler.
     archiveReason: text("archive_reason"),
+    // Durable compaction-in-progress signal. Stamped `now()` by the daemon
+    // (sole writer) on the SDK's `compacting` start frame and cleared to NULL
+    // on the matching `done` frame; also nulled on any transition out of
+    // `working` and on boot reconcile so a worker that dies mid-compaction
+    // can't wedge it on. NULL = not compacting. Replicated via Zero so the
+    // dashboard's "Compacting context…" indicator RECONSTRUCTS on
+    // reload/reconnect — the transient `compacting` SSE event alone is
+    // in-memory and lost across the daemon-restart window. Drives the sidebar
+    // dot, the chat-pane indicator, and the elapsed-time readout.
+    compactingSince: timestamp("compacting_since", { withTimezone: true }),
     // Distinct session count across this agent's `blocks` rows. Maintained
     // by an AFTER INSERT trigger on `blocks` (see migration
     // `0020_session_count_trigger.sql`) so the sidebar's expand-history

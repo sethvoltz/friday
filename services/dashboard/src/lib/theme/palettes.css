@@ -43,6 +43,9 @@
   --status-warn-bg: #fef8e7;
   --status-error: #b54a4a;
   --status-error-bg: #fbe9e9;
+  /* Compaction-in-progress: a teal distinct from the green `working` dot so a
+     compacting agent reads differently at a glance in the sidebar. */
+  --status-compacting: #2f8f9d;
 
   /* Chat aurora — three hues that drive the conic-gradient animation
      around the chat input (consumed in ChatInput.svelte). */
@@ -121,6 +124,8 @@
   --status-warn-bg: #2e2610;
   --status-error: #e05555;
   --status-error-bg: #2e1515;
+  /* Compaction-in-progress: cyan, distinct from the green `working` dot. */
+  --status-compacting: #38c0cc;
 
   /* Brighter aurora hues read against the deep blue background — same
      hue families as Dawn, re-saturated for dark surroundings. */
@@ -204,6 +209,8 @@
      buttons read as red against the green field rather than as pink. */
   --status-error: #ff6e4d;
   --status-error-bg: #1f1008;
+  /* Compaction-in-progress: bright cyan against the green CRT field. */
+  --status-compacting: #2ad4d4;
 
   /* Aurora — three distinct shades of green: teal-leaning phosphor,
      pure P1, then chartreuse-leaning phosphor. Sweeps across the green

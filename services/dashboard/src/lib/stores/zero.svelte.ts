@@ -45,6 +45,9 @@ export interface ZeroAgentRow {
   session_id: string | null;
   app_id: string | null;
   session_count: number;
+  /** Epoch-millis the daemon began compacting this agent's context; null when
+   *  not compacting. Mirrors `agents.compacting_since`. */
+  compacting_since: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -1832,6 +1835,7 @@ function toAgentInfo(r: ZeroAgentRow): AgentInfo {
     status: r.status,
     sessionId: r.session_id ?? undefined,
     sessionCount: r.session_count,
+    compactingSince: r.compacting_since ?? undefined,
     createdAt: new Date(r.created_at).toISOString(),
     updatedAt: new Date(r.updated_at).toISOString(),
   };

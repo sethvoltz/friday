@@ -58,3 +58,27 @@ and power users. Glyph map: orchestrator → `DraftingCompass`, helper →
 `LifeBuoy`, builder → `Hammer`, scheduled → `CalendarClock`, bare →
 `PawPrint`. Colors come from `--agent-<type>` CSS vars in `app.css` and
 have both light and dark variants.
+
+## Status dots (sidebar + command palette)
+
+A small colored dot left of each agent name encodes runtime state. The dot
+**color** comes from `agentStatusDot(status, { compacting })`
+(`$lib/util/agent-status-dot.ts`) — the single source of truth for the color,
+used by both the Sidebar and the Command Palette. The **pulse** animation is a
+per-component CSS concern (each surface defines its own keyframes), but the
+color and the set of states are shared:
+
+- **working** → `--status-ok` (green), with a soft pulsing ring.
+- **stalled** → `--status-warn` (amber).
+- **idle / archived / unknown** → `--text-tertiary` (muted); archived rows draw
+  a hollow ring instead of a filled dot.
+- **compacting** → `--status-compacting` (cyan), with a **slower** pulse so a
+  compacting agent is distinguishable from a normally-working one at a glance,
+  _even when it isn't the focused agent_. This state is **orthogonal** to status
+  (compaction runs while the agent stays `working`), so callers pass it as
+  `agentStatusDot(status, { compacting })` where `compacting =
+chat.isAgentCompacting(name)` — the union of the transient `compacting` SSE
+  signal and the durable `agents.compacting_since` column, so it survives
+  reload/reconnect. The markup binds `pulse` and `compacting` as mutually
+  exclusive classes. See `docs/chat-ux.md` → _Compaction divider_. All pulses
+  respect `prefers-reduced-motion`.

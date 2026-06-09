@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   formatAbsoluteTooltip,
+  formatCompactingElapsed,
   formatDaySeparator,
   formatRelativeTime,
   localDayKey,
@@ -101,5 +102,34 @@ describe("localDayKey", () => {
     const a = mkLocal(2026, 4, 17, 23, 59);
     const b = mkLocal(2026, 4, 18, 0, 1);
     expect(localDayKey(a)).not.toBe(localDayKey(b));
+  });
+});
+
+describe("formatCompactingElapsed", () => {
+  const NOW = 1_700_000_000_000;
+
+  it("returns null when there is no start instant", () => {
+    expect(formatCompactingElapsed(undefined, NOW)).toBeNull();
+  });
+
+  it("formats sub-minute elapsed as 0:SS (zero-padded)", () => {
+    expect(formatCompactingElapsed(NOW - 5_000, NOW)).toBe("0:05");
+    expect(formatCompactingElapsed(NOW, NOW)).toBe("0:00");
+  });
+
+  it("formats minutes:seconds and does not cap minutes", () => {
+    expect(formatCompactingElapsed(NOW - 65_000, NOW)).toBe("1:05");
+    expect(formatCompactingElapsed(NOW - 600_000, NOW)).toBe("10:00");
+    expect(formatCompactingElapsed(NOW - 3_725_000, NOW)).toBe("62:05");
+  });
+
+  it("clamps a future start (clock skew) to 0:00 rather than going negative", () => {
+    expect(formatCompactingElapsed(NOW + 10_000, NOW)).toBe("0:00");
+  });
+
+  it("rejects non-finite inputs (corrupt row can never render NaN:NaN / absurd strings)", () => {
+    expect(formatCompactingElapsed(Number.NaN, NOW)).toBeNull();
+    expect(formatCompactingElapsed(Number.POSITIVE_INFINITY, NOW)).toBeNull();
+    expect(formatCompactingElapsed(Number.NEGATIVE_INFINITY, NOW)).toBeNull();
   });
 });
