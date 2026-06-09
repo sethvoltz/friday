@@ -4,6 +4,7 @@
     type AgentInfo,
     type SidebarSessionSummary,
   } from "$lib/stores/chat.svelte";
+  import { applyLoadResult, loadPastSessionsWithRetry } from "./load-sessions";
   // Importing `zeroSidebar` triggers its singleton constructor — which
   // opens the Zero WS subscription and writes `chat.agents` live. The
   // Sidebar reads `chat.agents`; the import side-effect is the only
@@ -354,14 +355,20 @@
     }
   }
 
+  // FRI-162: a non-ok response (proxy 502 during a daemon boot/restart race)
+  // or a thrown fetch (hard ECONNREFUSED) used to be swallowed silently —
+  // `sidebarPastSessions[name]` stayed undefined and the submenu showed "No
+  // past sessions", indistinguishable from a genuinely-empty agent, with no
+  // retry. The fetch + bounded-retry policy now lives in `./load-sessions`;
+  // this wrapper owns only the store-mutation seams: it caches the array on
+  // success and records `sidebarSessionsError[name]` on ultimate failure so
+  // the submenu can render a distinct error + Retry affordance.
   async function loadPastSessions(name: string): Promise<void> {
     chat.sidebarLoadingSessions[name] = true;
+    chat.sidebarSessionsError[name] = false;
     try {
-      const r = await fetch(`/api/agents/${name}/sessions`);
-      if (r.ok) {
-        chat.sidebarPastSessions[name] =
-          (await r.json()) as SidebarSessionSummary[];
-      }
+      const result = await loadPastSessionsWithRetry(name);
+      applyLoadResult(chat, name, result);
     } finally {
       chat.sidebarLoadingSessions[name] = false;
     }
@@ -375,6 +382,15 @@
     if (!routeAgent || !routeSession) return;
     if (chat.sidebarPastSessions[routeAgent]) return;
     if (chat.sidebarLoadingSessions[routeAgent]) return;
+    // FRI-162: bail once a load has settled into the error state. Without
+    // this guard the bounded retry exhausting to `sidebarSessionsError` would
+    // spin: `loadPastSessions`'s `finally` flips `sidebarLoadingSessions`
+    // true→false, this effect re-tracks that flip, sees `sidebarPastSessions`
+    // still undefined + loading false, and re-fires the full retry forever on
+    // a persistently-down daemon — defeating the stable Retry affordance the
+    // error state exists to surface. A route change or the Retry button (which
+    // clears the flag) still re-fetches.
+    if (chat.sidebarSessionsError[routeAgent]) return;
     void loadPastSessions(routeAgent);
   });
 
@@ -499,6 +515,20 @@
     <div class="history">
       {#if chat.sidebarLoadingSessions[a.name]}
         <div class="history-empty">Loading…</div>
+      {:else if chat.sidebarSessionsError[a.name]}
+        <!-- FRI-162: distinct error + Retry affordance — never "No past
+             sessions" — when the fetch ultimately failed after retries.
+             Mirrors ChatMessages.svelte's .error-banner / .retry-btn idiom.
+             Retry re-issues loadPastSessions. -->
+        <div class="history-error" role="alert">
+          <span class="error-msg">Couldn't load sessions</span>
+          <button
+            type="button"
+            class="retry-btn"
+            onclick={() => loadPastSessions(a.name)}>
+            Retry
+          </button>
+        </div>
       {:else if pastFor(a).length === 0}
         <div class="history-empty">No past sessions</div>
       {:else}
@@ -806,6 +836,40 @@
     color: var(--text-tertiary);
     font-size: 0.75rem;
     padding: 0.25rem 0.5rem;
+  }
+  /* FRI-162 error affordance. Mirrors ChatMessages.svelte's .error-banner /
+     .retry-btn idiom (status-error border + 10% tint, error-colored Retry
+     button) but scaled down to the submenu's tighter type and spacing. */
+  .history-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin: 0.15rem 0;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--status-error);
+    background: color-mix(in srgb, var(--status-error) 10%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 0.75rem;
+  }
+  .history-error .error-msg {
+    flex: 1;
+  }
+  .history-error .retry-btn {
+    flex-shrink: 0;
+    background: var(--status-error);
+    color: var(--bg-primary);
+    border: none;
+    padding: 0.2rem 0.55rem;
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 0.7rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .history-error .retry-btn:hover {
+    filter: brightness(1.1);
   }
   .history-row {
     background: transparent;

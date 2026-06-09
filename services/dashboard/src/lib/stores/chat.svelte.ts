@@ -809,6 +809,13 @@ export class ChatState {
   sidebarPastSessions = $state<Record<string, SidebarSessionSummary[]>>({});
   /** Per-agent inflight flag for the sessions fetch. */
   sidebarLoadingSessions = $state<Record<string, boolean>>({});
+  /** Per-agent failure flag for the sessions fetch (FRI-162). Set when the
+   *  fetch ultimately fails after its bounded retries (non-ok response or a
+   *  thrown fetch) so the history submenu can render a distinct error +
+   *  Retry affordance instead of the misleading "No past sessions" — which
+   *  is indistinguishable from a genuinely-empty agent. Cleared back to
+   *  `false` at the start of each load attempt and on success. */
+  sidebarSessionsError = $state<Record<string, boolean>>({});
 
   /** localStorage key for F3-C cursor persistence. Cleared when the
    *  daemon's boot_id changes (different process — old seqs are stale). */
