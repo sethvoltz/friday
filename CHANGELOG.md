@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.0](https://github.com/sethvoltz/friday/compare/v1.17.1...v1.18.0) (2026-06-09)
+
+
+### Features
+
+* **dashboard:** tiered cold-start Zero blocks hydration (FRI-161) ([#217](https://github.com/sethvoltz/friday/issues/217)) ([a86298f](https://github.com/sethvoltz/friday/commit/a86298f9ef6a91220fa6576914c57c50b01e0af0))
+
 ## [1.17.1](https://github.com/sethvoltz/friday/compare/v1.17.0...v1.17.1) (2026-06-09)
 
 
