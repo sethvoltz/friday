@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.16.0](https://github.com/sethvoltz/friday/compare/v1.15.0...v1.16.0) (2026-06-09)
+
+
+### Features
+
+* **daemon,dashboard:** FRI-158 StreamingBall cursor + redacted-thinking + no-response fixes ([#209](https://github.com/sethvoltz/friday/issues/209)) ([3c4a323](https://github.com/sethvoltz/friday/commit/3c4a323398968763243fe6fe24b3738867f34131))
+
 ## [1.15.0](https://github.com/sethvoltz/friday/compare/v1.14.1...v1.15.0) (2026-06-09)
 
 
