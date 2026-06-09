@@ -2242,6 +2242,7 @@ export class ChatState {
     // the new one. Re-entry to the same agent loses pagination position;
     // that's the acceptable trade-off for the cross-agent leak the
     // previous gating couldn't prevent.
+    this.resetChatWindowToLatest();
     this.oldestBlockId = null;
     this.reachedOldest = false;
     this.historyError = null;
