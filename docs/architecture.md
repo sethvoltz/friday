@@ -204,6 +204,7 @@ Schema reference: see [`packages/shared/src/db/schema.ts`](../packages/shared/sr
 - **Streaming rows excluded from sync.** Block rows for the in-flight turn live only in the daemon's in-memory `blockStream` accumulator; they're written to Postgres only on `block_complete` with `streaming=0`. Clients' reactive queries are scoped to `WHERE streaming=0`. See ADR-024.
 - **Read cursors are synced** (`read_cursors` table, per `device_id`). Unread badges become cross-device-correct by construction; today's localStorage-only badge state retires.
 - **Client retention**: blocks for agents archived >30 days ago are expunged from the client cache; blocks older than 90 days are expunged regardless. Memory/tickets/agents/schedules/apps are never expunged (small). Server data is never deleted by this — retention is a client-cache property only.
+- **Tiered cold-start hydration** (FRI-161): after a schema-changing `friday update` the browser discards its IndexedDB replica and must re-hydrate the whole 90-day blocks window. To keep first paint at ~1–2 s rather than 30–45 s, the foreground per-agent query cold-starts on a narrow 2-day (day-quantized) window; once it materializes, a background backfill widens the replica to the full 90 days via sequentially-awaited, epoch-aligned 1-day chunk preloads (newest-first, each its own server hydration batch/poke so focus switches interleave). A per-client-group `localStorage` flag marks the replica warm so subsequent reloads bind the full window directly and skip the tiered dance.
 
 ### File storage layout (`~/.friday/`)
 

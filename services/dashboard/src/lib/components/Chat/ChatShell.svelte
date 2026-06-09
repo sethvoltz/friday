@@ -99,11 +99,17 @@
     if (filtered.length === 0) return [];
     return parseBlocks(filtered.map(zeroBlockRowToBlockRow), agent);
   });
+  // FRI-161: a past session older than the narrow cold-start window would,
+  // mid-backfill, have `blocksResultType === "complete"` but zero matching
+  // rows — rendering an empty transcript instead of a skeleton. Treat a
+  // not-yet-full window (`!blocksFullWindow`) as still-loading so the
+  // skeleton holds until the backfill reaches this session.
   let pastLoading = $derived(
     readonly &&
       sessionId !== undefined &&
       (zeroSync.blocksAgent !== agent ||
-        zeroSync.blocksResultType !== "complete") &&
+        zeroSync.blocksResultType !== "complete" ||
+        !zeroSync.blocksFullWindow) &&
       pastMessages.length === 0,
   );
 
