@@ -164,6 +164,7 @@
     untrack(() => {
       if (chat.focusedAgent !== a) chat.focusedAgent = a;
       void chat.loadAgentTurns(a).then(async () => {
+        chat.resetChatWindowToLatest();
         await tick();
         if (scrollEl) {
           scrollEl.scrollTop = scrollEl.scrollHeight;
