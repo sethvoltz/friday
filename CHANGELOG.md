@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.2](https://github.com/sethvoltz/friday/compare/v1.13.1...v1.13.2) (2026-06-09)
+
+
+### Bug Fixes
+
+* **evolve:** suppress compact-boundary artefacts in transcript_user_retry scanner ([#200](https://github.com/sethvoltz/friday/issues/200)) ([57f2001](https://github.com/sethvoltz/friday/commit/57f20015721576ae49ceb1bccc0e7fc71d13a8c9))
+
 ## [1.13.1](https://github.com/sethvoltz/friday/compare/v1.13.0...v1.13.1) (2026-06-08)
 
 
