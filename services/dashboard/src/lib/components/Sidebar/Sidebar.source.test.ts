@@ -88,6 +88,45 @@ describe("Sidebar.svelte source invariants (FRI-126)", () => {
     expect(SRC).toMatch(/e\.preventDefault\(\)/);
   });
 
+  it("FRI-162 AC1: loadPastSessions resets the error flag, delegates to the retry helper, and maps the result via applyLoadResult", () => {
+    // The wrapper must clear the per-agent error flag at the start of a
+    // load and route the result through applyLoadResult — it must NOT
+    // re-implement the success-only `if (r.ok)` swallow that was the bug.
+    expect(SRC).toMatch(/chat\.sidebarSessionsError\[name\]\s*=\s*false/);
+    expect(SRC).toMatch(/await loadPastSessionsWithRetry\(name\)/);
+    expect(SRC).toMatch(/applyLoadResult\(chat, name, result\)/);
+    // The old swallow path is gone: no bare `if (r.ok)` cache in the
+    // component anymore (that logic moved into the helper).
+    expect(SRC).not.toMatch(/if\s*\(\s*r\.ok\s*\)/);
+  });
+
+  it("FRI-162 AC3: the history submenu renders a distinct error + Retry affordance gated on sidebarSessionsError, not 'No past sessions'", () => {
+    // The error branch must sit on sidebarSessionsError[a.name] and render
+    // its own block (role=alert), distinct from the "No past sessions"
+    // empty branch.
+    expect(SRC).toMatch(/\{:else if chat\.sidebarSessionsError\[a\.name\]\}/);
+    expect(SRC).toMatch(/class="history-error"\s+role="alert"/);
+    // The empty branch still exists and is a SEPARATE branch — a failure
+    // must not fall through to it.
+    expect(SRC).toMatch(/No past sessions/);
+  });
+
+  it("FRI-162 AC3: clicking Retry re-issues loadPastSessions for the row's agent", () => {
+    expect(SRC).toMatch(/class="retry-btn"[\s\S]*?onclick=\{\(\) => loadPastSessions\(a\.name\)\}/);
+  });
+
+  it("FRI-162: the route-driven fetch effect bails on a settled error state so a persistent failure can't spin loadPastSessions", () => {
+    // The route effect's finally-flips-loading-false re-runs the effect; on a
+    // persistently-down daemon with the route pinned to a past session,
+    // without an error-flag guard it would re-fire the full bounded retry
+    // indefinitely and never settle into the stable Retry affordance. The
+    // guard must sit AFTER the loading guard and BEFORE the loadPastSessions
+    // call, keyed on routeAgent.
+    expect(SRC).toMatch(
+      /if \(chat\.sidebarLoadingSessions\[routeAgent\]\) return;[\s\S]*?if \(chat\.sidebarSessionsError\[routeAgent\]\) return;[\s\S]*?void loadPastSessions\(routeAgent\)/,
+    );
+  });
+
   it("AC11: no require() or dynamic import() in the changed component", () => {
     // CLAUDE.md "Static imports only" — guard against a regression that
     // sneaks a dynamic import into the click-guard logic.
