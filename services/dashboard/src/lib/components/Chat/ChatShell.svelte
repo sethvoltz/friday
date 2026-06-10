@@ -265,6 +265,56 @@
     queueMicrotask(() => scrollToBottom());
   });
 
+  // TEMPORARY on-device debug HUD (delete before merge): append
+  // ?kbdebug to the URL to render the live keyboard-geometry inputs as
+  // a fixed overlay — innerHeight, vv.height, vv.offsetTop, scrollY,
+  // the written --kb-inset, and the keyboard-open class. Updated on a
+  // 250ms interval (cheap, reads only).
+  let kbDebug = $state(false);
+  let dbg = $state({ ih: 0, vvh: 0, vvot: 0, vvpt: 0, sy: 0, inset: "", cls: false });
+  $effect(() => {
+    if (!window.location.search.includes("kbdebug")) return;
+    kbDebug = true;
+    const upd = () => {
+      const vv = window.visualViewport;
+      dbg = {
+        ih: Math.round(window.innerHeight),
+        vvh: vv ? Math.round(vv.height) : -1,
+        vvot: vv ? Math.round(vv.offsetTop) : -1,
+        vvpt: vv ? Math.round(vv.pageTop) : -1,
+        sy: Math.round(window.scrollY),
+        inset: document.documentElement.style.getPropertyValue("--kb-inset") || "(unset)",
+        cls: document.documentElement.classList.contains("keyboard-open"),
+      };
+    };
+    upd();
+    const i = setInterval(upd, 250);
+    return () => clearInterval(i);
+  });
+
+  // Scroll-to-dismiss: a touch-drag on the transcript while the
+  // composer is focused blurs it, dropping the keyboard (the
+  // iMessage/Slack gesture). This is load-bearing, not a nicety: with
+  // the keyboard up, scrolling makes iOS re-pan the visual viewport
+  // inside the layout viewport every frame, and a fixed composer lifted
+  // by --kb-inset can only follow that signal one rAF late — visible as
+  // jitter, sometimes a full keyboard-height misplacement. Dismissing
+  // on scroll means keyboard-up and scrolling never coexist, so the
+  // composer only ever sits in the two stable states. Touches inside
+  // the composer itself (textarea scroll, autocomplete list drag) are
+  // exempt.
+  $effect(() => {
+    if (readonly) return;
+    const onTouchMove = (e: TouchEvent) => {
+      const active = document.activeElement;
+      if (!isTextEntryElement(active)) return;
+      if (inputEl && e.target instanceof Node && inputEl.contains(e.target)) return;
+      (active as HTMLElement).blur();
+    };
+    window.addEventListener("touchmove", onTouchMove, { passive: true });
+    return () => window.removeEventListener("touchmove", onTouchMove);
+  });
+
   // Soft-keyboard open/close shrinks/grows the visual viewport (in the
   // standalone-PWA regime, the layout viewport itself — see
   // $lib/util/keyboard-inset.ts for the regime split). If the user was
@@ -528,6 +578,20 @@
   });
 </script>
 
+{#if kbDebug}
+  <!-- TEMPORARY debug HUD (delete before merge) -->
+  <div class="kb-debug" aria-hidden="true">
+    <div>build: dbg-1</div>
+    <div>innerH: {dbg.ih}</div>
+    <div>vv.h: {dbg.vvh}</div>
+    <div>vv.offTop: {dbg.vvot}</div>
+    <div>vv.pageTop: {dbg.vvpt}</div>
+    <div>scrollY: {dbg.sy}</div>
+    <div>--kb-inset: {dbg.inset}</div>
+    <div>kb-open: {dbg.cls}</div>
+  </div>
+{/if}
+
 <aside class="chat-sidebar-floating">
   <Sidebar />
 </aside>
@@ -636,6 +700,23 @@
     padding-left: var(--content-left);
     padding-right: var(--page-gutter);
   }
+  /* TEMPORARY debug HUD (delete before merge). Anchored to the top so
+     it stays readable regardless of keyboard/composer state. */
+  .kb-debug {
+    position: fixed;
+    top: 30%;
+    left: 0.5rem;
+    z-index: 9999;
+    pointer-events: none;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: #0f0;
+    background: rgba(0, 0, 0, 0.75);
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+  }
+
   .chat-sidebar-floating {
     position: fixed;
     top: var(--chat-top);
