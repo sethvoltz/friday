@@ -115,7 +115,6 @@ export interface KeyboardInsetTracker {
 const SETTLE_PROBE_DELAYS_MS = [150, 350, 700, 1200];
 
 export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardInsetTracker {
-  let fieldFocused = false;
   let rafHandle: number | null = null;
   let blurTimer: ReturnType<typeof setTimeout> | null = null;
   let settleProbes: Array<ReturnType<typeof setTimeout>> = [];
@@ -211,7 +210,6 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
     onFocusIn(target: Element | null) {
       if (!isTextEntryElement(target)) return;
       clearBlurTimer();
-      fieldFocused = true;
       host.setKeyboardOpenClass(true);
       queueMeasure();
       scheduleSettleProbes();
@@ -226,7 +224,6 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
         // everything as-is.
         if (isTextEntryElement(host.activeElement())) return;
         clearSettleProbes();
-        fieldFocused = false;
         host.setKeyboardOpenClass(false);
         // Do NOT clear the geometry — the column stays sized to the
         // visual viewport when the keyboard is closed. Re-measure so
@@ -256,7 +253,6 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
         host.cancelRaf(rafHandle);
         rafHandle = null;
       }
-      fieldFocused = false;
       host.setKeyboardOpenClass(false);
       clearVars();
     },
