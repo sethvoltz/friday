@@ -32,7 +32,6 @@
     <div class="thinking-head running-head">
       <span class="thinking-icon" aria-hidden="true"><Brain size={16} /></span>
       <span class="label">Thinking…</span>
-      <span class="dots">●●●</span>
       {#if showBall && !hasText}<StreamingBall />{/if}
     </div>
   {/if}
@@ -82,12 +81,6 @@
   .label {
     font-style: italic;
   }
-  .dots {
-    color: var(--accent-primary);
-    font-size: 0.55rem;
-    letter-spacing: 0.1em;
-    animation: pulse 1.4s ease-in-out infinite;
-  }
   .aborted-tag {
     font-size: 0.65rem;
     text-transform: uppercase;
@@ -95,10 +88,6 @@
     color: var(--text-tertiary);
     font-weight: 600;
     font-style: normal;
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 0.3; }
-    50% { opacity: 1; }
   }
   .expand-toggle {
     margin-left: auto;

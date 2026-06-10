@@ -619,6 +619,8 @@
   .chat-input-floating {
     position: fixed;
     bottom: calc(1rem + var(--kb-safe-bottom, 0px));
+    /* --vv-offset-bottom = keyboard height in layout-viewport coords; lifts composer above the iOS soft keyboard. */
+    transform: translateY(calc(-1 * var(--vv-offset-bottom, 0px)));
     left: var(--content-left);
     right: var(--page-gutter);
     background: var(--header-float-bg);

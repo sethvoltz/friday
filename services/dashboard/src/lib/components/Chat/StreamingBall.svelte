@@ -15,7 +15,7 @@
     width: 16px;
     height: 16px;
     vertical-align: middle;
-    overflow: hidden;
+    overflow: visible;
     margin-left: 0.15em;
     top: -0.05em;
   }

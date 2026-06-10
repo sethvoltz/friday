@@ -997,6 +997,12 @@
       onkeydown={onKeydown}
       oninput={() => { onInput(); autoresize(); }}
       onpaste={onPaste}
+      onfocus={() => {
+        // iOS raises the keyboard async; delay so vv has started shrinking first.
+        setTimeout(() => {
+          textarea?.scrollIntoView({ block: "nearest", behavior: "instant" });
+        }, 100);
+      }}
       placeholder="Message Friday… or /command"
       rows="1"
       autocomplete="off"
@@ -1324,17 +1330,15 @@
     color: var(--text-primary);
   }
   .input {
-    /* Lift the textarea + buttons above the aurora (z-index: 0) and
-       the translucent backdrop-blur pseudo (z-index: 1). */
     position: relative;
     z-index: 2;
     display: flex;
     gap: 0.25rem;
     align-items: flex-end;
-    /* Padding sets the visual inset of the children inside the bordered
-       wrap. Concentric icon-button radius (above) is computed from this. */
     padding: 0.5rem;
     background: transparent;
+    /* Isolates repaint from siblings — prevents WebKit compositing-layer teardown on resize. */
+    contain: layout paint;
   }
   textarea {
     flex: 1;
@@ -1352,6 +1356,9 @@
     color: var(--text-primary);
     font-family: var(--font-sans);
     font-size: 0.9rem;
+    /* Keep GPU compositing layer promoted to prevent iOS WebKit blank-on-resize. */
+    transform: translateZ(0);
+    will-change: transform;
   }
   textarea:focus { outline: none; }
   .autocomplete {

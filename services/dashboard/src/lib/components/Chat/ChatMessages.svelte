@@ -852,7 +852,12 @@
               <div class="footer-tag {userFooter.className ?? ''}">{userFooter.text}</div>
             {/if}
           {:else}
-            <Markdown source={msg.text} streaming={msg.status === "streaming"} />{#if chat.ballInText && msg.status === "streaming"}<StreamingBall />{/if}
+            <div class:streaming-text-wrap={chat.ballInText && msg.status === "streaming"}>
+              <Markdown source={msg.text} streaming={msg.status === "streaming"} />
+              {#if chat.ballInText && msg.status === "streaming"}
+                <span class="streaming-ball-inline" aria-hidden="true"><StreamingBall /></span>
+              {/if}
+            </div>
             {@const assistantFooter = stopFooter(msg.status, msg.abortReason)}
             {#if assistantFooter}
               <div class="footer-tag {assistantFooter.className ?? ''}">{assistantFooter.text}</div>
@@ -883,8 +888,10 @@
     </div>
   {/if}
   {#if !readonly && chat.ballStandalone}
-    <div class="message inline">
-      <StreamingBall />
+    <div class="message assistant">
+      <div class="bubble">
+        <StreamingBall />
+      </div>
     </div>
   {/if}
   <div
@@ -1249,5 +1256,17 @@
     to {
       transform: rotate(360deg);
     }
+  }
+  /* display:contents hoists .markdown's children into the wrapper's BFC; p:last-child + ball share one anonymous block → same line. */
+  .streaming-text-wrap :global(.markdown) {
+    display: contents;
+  }
+  .streaming-text-wrap :global(.markdown > p:last-child) {
+    display: inline;
+  }
+  .streaming-ball-inline {
+    display: inline-block;
+    vertical-align: middle;
+    line-height: 1;
   }
 </style>

@@ -381,6 +381,14 @@
           tag === "TEXTAREA" ||
           (active instanceof HTMLElement && active.isContentEditable);
         setOffset(isTextField ? vv.offsetTop : 0);
+        // keyboard height in layout-viewport coords: window.innerHeight - (vv.offsetTop + vv.height)
+        const kbHeight = isTextField
+          ? Math.max(0, window.innerHeight - (vv.offsetTop + vv.height))
+          : 0;
+        document.documentElement.style.setProperty(
+          "--vv-offset-bottom",
+          `${kbHeight}px`,
+        );
       };
       vvUpdate();
       vv.addEventListener("resize", vvUpdate);

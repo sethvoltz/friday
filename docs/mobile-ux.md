@@ -59,6 +59,18 @@ Friday is mobile-first, not mobile-responsive-as-an-afterthought. Every page is 
 - Standard `<input type="file" multiple>` for gallery picker.
 - HEIC files are converted to PNG by the upload handler (ADR-007 + `attachments.ts`); the dashboard doesn't care about the source format.
 
+## iOS soft keyboard — visualViewport pinning
+
+iOS raises the soft keyboard asynchronously after a text field is focused. `position: fixed` elements use the **layout viewport** as their reference, which does not shrink when the keyboard opens — so a `bottom: 0` composer bar stays pinned to the bottom of the layout viewport and ends up hidden behind the keyboard.
+
+Fix implemented in `b32595b`:
+
+- **`--vv-offset-bottom`** (set in `+layout.svelte` `vvUpdate`): `max(0, window.innerHeight - (vv.offsetTop + vv.height))`. This is the gap between the visual viewport bottom and the layout viewport bottom — equal to the keyboard height, in layout-viewport coordinates. Set to `0` when no text field is focused so scroll animations don't reposition the composer.
+- **`.chat-input-floating`** in `ChatShell.svelte` applies `transform: translateY(calc(-1 * var(--vv-offset-bottom, 0px)))` to lift the composer above the keyboard. `transform` works in the layout-viewport coordinate system, so this precisely counteracts the overlap.
+- **`scrollIntoView` on focus** (`ChatInput.svelte`): fires after a 100ms delay so the keyboard has begun raising before we scroll. Uses `behavior: "instant"` — `behavior: "smooth"` is unreliable on WebKit (bug #238497).
+
+`vvUpdate` is wired to both `visualViewport` `resize` and `scroll` events, plus `focusin`/`focusout` on the document, so the offset tracks both keyboard appearance and any subsequent scroll of the viewport.
+
 ## Public reachability + Cloudflare Tunnel
 
 - The dashboard is the only thing exposed publicly. CFT terminates at `127.0.0.1:5173`.
