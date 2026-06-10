@@ -2179,9 +2179,16 @@ function zeroServerUrl(): string {
   if (env?.PROD && typeof window !== "undefined") {
     return `${window.location.origin}/zero`;
   }
-  // Dev (`vite dev`): connect directly to the local zero-cache.
-  // vite dev doesn't run the server-entry proxy, and dev only ever
-  // serves clients on the same host anyway.
+  // Dev (`vite dev`): connect directly to zero-cache on the host that
+  // served the page. vite dev doesn't run the server-entry `/zero` WS
+  // proxy, but the page host isn't always localhost — testing a dev
+  // build from a phone (`vite dev --host` + the Mac's LAN IP) needs the
+  // sync WS to target that same LAN IP, or the client spins on
+  // "Syncing your data" forever against the phone's own localhost.
+  // zero-cache binds 0.0.0.0:4848, so the page host always reaches it.
+  if (typeof window !== "undefined") {
+    return `http://${window.location.hostname}:4848`;
+  }
   return "http://localhost:4848";
 }
 
