@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.1](https://github.com/sethvoltz/friday/compare/v1.18.0...v1.18.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* **dashboard:** StreamingBall overflow clip + iOS keyboard scroll-into-view ([#220](https://github.com/sethvoltz/friday/issues/220)) ([a3c314c](https://github.com/sethvoltz/friday/commit/a3c314c846572b430aa86e6a3c354cfa8d6d3e0b))
+
 ## [1.18.0](https://github.com/sethvoltz/friday/compare/v1.17.1...v1.18.0) (2026-06-09)
 
 
