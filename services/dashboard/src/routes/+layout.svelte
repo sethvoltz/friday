@@ -347,25 +347,20 @@
 
     // iOS pins position:fixed top:0 against the visual viewport automatically — no JS translation needed.
     const vv = window.visualViewport;
-    let setKb: (() => void) | undefined;
+    let kbFocusInHandler: (() => void) | undefined;
+    let kbFocusOutHandler: (() => void) | undefined;
     if (vv) {
-      setKb = () => {
-        const active = document.activeElement;
-        const tag = active?.tagName;
-        const isField =
-          tag === "INPUT" || tag === "TEXTAREA" ||
-          (active instanceof HTMLElement && active.isContentEditable);
-        if (!isField) {
-          document.documentElement.style.setProperty("--kb-h", "0px");
-          return;
-        }
-        const kb = Math.max(0, window.innerHeight - (window.visualViewport?.height ?? window.innerHeight));
-        document.documentElement.style.setProperty("--kb-h", `${kb}px`);
+      kbFocusInHandler = () => {
+        requestAnimationFrame(() => {
+          const kb = Math.max(0, window.innerHeight - (window.visualViewport?.height ?? window.innerHeight));
+          document.documentElement.style.setProperty("--kb-h", `${kb}px`);
+        });
       };
-      setKb();
-      vv.addEventListener("resize", setKb);
-      document.addEventListener("focusin", setKb);
-      document.addEventListener("focusout", setKb);
+      kbFocusOutHandler = () => {
+        document.documentElement.style.setProperty("--kb-h", "0px");
+      };
+      document.addEventListener("focusin", kbFocusInHandler);
+      document.addEventListener("focusout", kbFocusOutHandler);
     }
 
     // Soft-keyboard suppression — focus-based.
@@ -444,11 +439,8 @@
       stopWakeLock();
       unbindTheme();
       window.removeEventListener("keydown", onKey);
-      if (vv && setKb) {
-        vv.removeEventListener("resize", setKb);
-        document.removeEventListener("focusin", setKb);
-        document.removeEventListener("focusout", setKb);
-      }
+      if (kbFocusInHandler) document.removeEventListener("focusin", kbFocusInHandler);
+      if (kbFocusOutHandler) document.removeEventListener("focusout", kbFocusOutHandler);
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onFocusOut);
       if (iosStandalone) {
