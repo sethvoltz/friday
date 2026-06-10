@@ -99,6 +99,8 @@ export interface KeyboardInsetTracker {
    * only watches vv keeps the stale full-height innerHeight and
    * overshoots the lift by a full keyboard height). */
   onViewportChange(): void;
+  /** Measure once on startup so the geometry vars exist before focus. */
+  init(): void;
   /** Detach timers/rAF and reset the var + class. */
   stop(): void;
 }
@@ -136,7 +138,13 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
   function measure() {
     rafHandle = null;
     const vv = host.viewport();
-    if (!fieldFocused || !vv) {
+    // SPIKE (inner-scroller): the geometry is written ALWAYS, not just
+    // while a field is focused — the `.chat-viewport` column is sized to
+    // --vv-bottom-y in every state so the composer clears the iOS bottom
+    // URL bar (keyboard closed) and the keyboard (open) uniformly. Only
+    // the `keyboard-open` CLASS stays focus-gated (it zeroes the
+    // home-indicator safe-area while typing).
+    if (!vv) {
       clearVars();
       return;
     }
@@ -220,15 +228,24 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
         clearSettleProbes();
         fieldFocused = false;
         host.setKeyboardOpenClass(false);
-        clearVars();
+        // Do NOT clear the geometry — the column stays sized to the
+        // visual viewport when the keyboard is closed. Re-measure so
+        // --vv-bottom-y reflects the grown-back viewport, plus the
+        // #297779 nudge.
+        queueMeasure();
         host.nudgeScroll();
       }, FOCUS_SETTLE_MS);
     },
 
     onViewportChange() {
-      // Unfocused viewport noise (URL-bar collapse during scroll) takes
-      // the measure() early-return to a guarded "0px" write — a no-op
-      // after the first — so it can never move the layout.
+      // Always re-measure: the geometry vars track the visual viewport
+      // in every state (keyboard or URL-bar). Change-guarded writes make
+      // a no-op event free.
+      queueMeasure();
+    },
+
+    /** Measure once on startup so the column is sized before any focus. */
+    init() {
       queueMeasure();
     },
 
@@ -283,8 +300,10 @@ export function startKeyboardInsetTracker(): () => void {
   vv?.addEventListener("scroll", onViewportChange);
   // innerHeight is a formula input and can change with NO vv event
   // (layout-viewport resize at keyboard-animation end on iOS 26
-  // bottom-bar Safari). Focus-gated like everything else.
+  // bottom-bar Safari).
   window.addEventListener("resize", onViewportChange);
+  // Size the column before any focus (keyboard-closed visual viewport).
+  tracker.init();
 
   return () => {
     document.removeEventListener("focusin", onFocusIn);

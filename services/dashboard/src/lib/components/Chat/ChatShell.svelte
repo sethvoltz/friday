@@ -778,47 +778,47 @@
     --chat-top: calc(4.3rem + var(--chat-inset));
   }
 
-  /* SPIKE (inner-scroller): the chat column. A position:fixed box sized
-     to the layout viewport (keyboard closed) — the containing block for
-     the absolutely-positioned pills, and a flex column so the transcript
-     scroller takes the slack while the composer sits in flow at the
-     bottom. The composer therefore NEVER needs per-frame visual-viewport
-     chasing — only the column height changes when the keyboard opens. */
+  /* SPIKE (inner-scroller): the chat column. A position:fixed box that
+     spans the FULL viewport height (under the floating header, over the
+     floating composer) so the inner scroller can bleed content beneath
+     both translucent bars — preserving the glassmorphism where chat
+     content is visible-but-blurred behind them. It is the containing
+     block for the scroller, composer, and pills (all absolute within). */
   .chat-viewport {
     position: fixed;
-    top: var(--chat-top);
+    top: 0;
     left: var(--content-left);
     right: var(--page-gutter);
-    bottom: calc(1rem + var(--kb-safe-bottom, 0px));
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
+    /* Height tracks the VISUAL viewport bottom in every state — the
+       tracker keeps --vv-bottom-y current whether the keyboard is up or
+       not. Closed, this lands the column bottom (and the composer) above
+       the iOS bottom URL bar; open, above the keyboard. The composer
+       rides this purely by layout — no per-frame scroll-thread chase, so
+       no stutter. (100dvh is the pre-hydration / desktop fallback.) */
+    height: var(--vv-bottom-y, 100dvh);
     z-index: 40;
   }
-  /* Keyboard up: shrink the column so its bottom edge lands on the
-     visual viewport's bottom (--vv-bottom-y, in layout-viewport
-     coordinates = the keyboard's top). The composer re-lays-out above
-     the keyboard; the transcript scroller shrinks. Pure layout — no
-     scroll-thread chase, so no stutter. --kb-safe-bottom is dropped here
-     because the keyboard already covers the home-indicator zone. */
-  :global(:root.keyboard-open) .chat-viewport {
-    bottom: auto;
-    height: calc(var(--vv-bottom-y, 100dvh) - var(--chat-top));
-  }
 
-  /* The inner scroller. overflow-anchor:none keeps the browser's native
-     scroll-anchoring off the manual anchor-restore math in the `.list`
-     ResizeObserver. contain prevents iOS rubber-band from leaking to the
-     (locked) body — the touch-routing fight ADR-039 fled is gone because
-     the body cannot scroll at all on this route (.chat-scroll-lock). */
+  /* The inner scroller fills the column edge-to-edge and is the ONLY
+     scroller on the chat route (body is locked — .chat-scroll-lock). Its
+     padding-top / padding-bottom reserve the header and composer bands
+     so content RESTS in the clear but SCROLLS UNDER the translucent bars
+     (the under-glass effect). overflow-anchor:none keeps the browser's
+     native scroll-anchoring off the manual `.list` anchor-restore math;
+     overscroll-behavior:contain keeps iOS rubber-band off the locked
+     body — the touch-routing fight ADR-039 fled can't happen because the
+     body cannot scroll at all. */
   .chat-transcript {
-    flex: 1 1 auto;
-    min-height: 0;
+    position: absolute;
+    inset: 0;
     overflow-y: auto;
     overflow-anchor: none;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
-    padding-top: 0.5rem;
+    padding-top: var(--chat-top);
+    padding-bottom: calc(
+      var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px)
+    );
   }
   /* ?kbdebug probe ladder. */
   .kb-probe {
@@ -872,13 +872,17 @@
     z-index: 50;
   }
 
-  /* Composer: in normal flow at the bottom of the flex column
-     (flex-shrink:0 keeps its height as the scroller takes the slack).
-     No position:fixed, no keyboard JS — the column height places it
-     above the keyboard. */
+  /* Composer: a translucent overlay anchored to the column bottom (the
+     scroller's padding-bottom reserves its band so content rests above
+     it but scrolls under its frosted glass). No keyboard JS — the column
+     height shrinks on keyboard-open and the composer rides the new
+     bottom. z-index above the scroller content it floats over. */
   .chat-input-floating {
-    flex: 0 0 auto;
-    margin-top: var(--chat-inset);
+    position: absolute;
+    bottom: calc(1rem + var(--kb-safe-bottom, 0px));
+    left: 0;
+    right: 0;
+    z-index: 2;
     background: var(--header-float-bg);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
@@ -905,7 +909,7 @@
      gap); the top pills sit just under the column top. */
   .jump-to-bottom-wrap {
     position: absolute;
-    bottom: calc(var(--chat-input-h, 6rem) + 1.5rem);
+    bottom: calc(var(--chat-input-h, 6rem) + 1.5rem + var(--kb-safe-bottom, 0px));
     left: 0;
     right: 0;
     display: flex;
@@ -913,9 +917,11 @@
     pointer-events: none;
     z-index: 95;
   }
+  /* Top pills clear the floating header (the column starts at y=0, under
+     it). --chat-top puts them in the clear band below the header. */
   .loading-older {
     position: absolute;
-    top: 0.5rem;
+    top: calc(var(--chat-top) + 0.5rem);
     left: 0;
     right: 0;
     margin: 0 auto;
@@ -929,7 +935,7 @@
      below .loading-older so they don't overlap when both surface. */
   .pre-compaction-wrap {
     position: absolute;
-    top: 3rem;
+    top: calc(var(--chat-top) + 3rem);
     left: 0;
     right: 0;
     display: flex;
@@ -1005,29 +1011,31 @@
       width: auto;
       overflow: visible;
     }
-    /* Mobile: full-width column, starting below the mobile sidebar
-       trigger row (which sits at --chat-top spanning gutter-to-gutter). */
+    /* Mobile: full-width column (still full-bleed top:0). The scroller's
+       padding-top clears BOTH the header and the mobile sidebar trigger
+       row (which sits at --chat-top spanning gutter-to-gutter), so chat
+       content rests below them but still scrolls under. */
     .chat-viewport {
       left: var(--page-gutter);
       right: var(--page-gutter);
-      top: calc(var(--chat-top) + 3.25rem);
     }
-    /* Pills are column-relative now, so the older gutter overrides are
-       unnecessary; only the stacking offsets differ on mobile. */
+    .chat-transcript {
+      padding-top: calc(var(--chat-top) + 3.25rem);
+    }
     .loading-older {
-      top: 0.75rem;
+      top: calc(var(--chat-top) + 3.75rem);
     }
     .pre-compaction-wrap {
-      top: 3.25rem;
+      top: calc(var(--chat-top) + 6.25rem);
     }
   }
 
   @media (max-width: 640px) {
-    .chat-viewport {
+    .chat-input-floating {
       bottom: calc(0.5rem + var(--kb-safe-bottom, 0px));
     }
-    :global(:root.keyboard-open) .chat-viewport {
-      bottom: auto;
+    .jump-to-bottom-wrap {
+      bottom: calc(var(--chat-input-h, 6rem) + 1rem + var(--kb-safe-bottom, 0px));
     }
   }
 </style>
