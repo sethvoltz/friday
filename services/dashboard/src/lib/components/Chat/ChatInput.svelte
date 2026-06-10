@@ -1060,10 +1060,6 @@
   .input-wrap {
     position: relative;
     width: 100%;
-    /* Promote the wrapper to a GPU compositing layer to prevent iOS WebKit
-       blank-on-resize without putting the layer on the textarea itself
-       (which would break the native text caret). */
-    transform: translateZ(0);
     /* Background lives on ::before so that the same element can carry
        backdrop-filter — needed to blur the aurora that paints behind
        the input bar AND the chat content scrolling below it (mirroring
