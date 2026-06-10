@@ -998,13 +998,9 @@
       oninput={() => { onInput(); autoresize(); }}
       onpaste={onPaste}
       onfocus={() => {
-        // iOS PWA: the keyboard starts rising asynchronously on focus.
-        // A plain synchronous scrollIntoView fires before the viewport
-        // shrinks, so the input lands behind the keyboard. Delaying ~100ms
-        // gives the OS time to begin raising the keyboard before we scroll,
-        // ensuring the input is actually visible when the user starts typing.
+        // iOS raises the keyboard async; delay so vv has started shrinking first.
         setTimeout(() => {
-          textarea?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          textarea?.scrollIntoView({ block: "nearest", behavior: "instant" });
         }, 100);
       }}
       placeholder="Message Friday… or /command"
@@ -1334,19 +1330,14 @@
     color: var(--text-primary);
   }
   .input {
-    /* Lift the textarea + buttons above the aurora (z-index: 0) and
-       the translucent backdrop-blur pseudo (z-index: 1). */
     position: relative;
     z-index: 2;
     display: flex;
     gap: 0.25rem;
     align-items: flex-end;
-    /* Padding sets the visual inset of the children inside the bordered
-       wrap. Concentric icon-button radius (above) is computed from this. */
     padding: 0.5rem;
     background: transparent;
-    /* Isolate layout and paint so iOS WebKit doesn't tear the compositing
-       layer when the textarea resizes, which is what causes the blank-out. */
+    /* Isolates repaint from siblings — prevents WebKit compositing-layer teardown on resize. */
     contain: layout paint;
   }
   textarea {
@@ -1365,10 +1356,7 @@
     color: var(--text-primary);
     font-family: var(--font-sans);
     font-size: 0.9rem;
-    /* iOS WebKit: forces a GPU compositing layer and keeps it promoted,
-       preventing the repaint bug where textarea content goes blank as
-       the element grows tall due to layout recalculation. */
-    -webkit-overflow-scrolling: touch;
+    /* Keep GPU compositing layer promoted to prevent iOS WebKit blank-on-resize. */
     transform: translateZ(0);
     will-change: transform;
   }

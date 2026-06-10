@@ -381,12 +381,7 @@
           tag === "TEXTAREA" ||
           (active instanceof HTMLElement && active.isContentEditable);
         setOffset(isTextField ? vv.offsetTop : 0);
-        // Track the gap between the visual viewport bottom and the layout
-        // viewport bottom — this equals the keyboard height when the soft
-        // keyboard is open. Applied to the floating composer via
-        // translateY so it stays pinned above the keyboard on iOS.
-        // Same focus gate as --vv-offset-top to prevent spurious updates
-        // during scroll animations.
+        // keyboard height in layout-viewport coords: window.innerHeight - (vv.offsetTop + vv.height)
         const kbHeight = isTextField
           ? Math.max(0, window.innerHeight - (vv.offsetTop + vv.height))
           : 0;

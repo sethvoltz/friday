@@ -1257,12 +1257,7 @@
       transform: rotate(360deg);
     }
   }
-  /* streaming-text-wrap: makes the StreamingBall appear inline at the end of
-     the last paragraph rather than on its own line below the markdown block.
-     display:contents removes .markdown's box from the layout tree so its
-     children participate directly in the wrapper's block formatting context.
-     p:last-child becomes inline, which groups it with the following inline-block
-     ball into one anonymous block — putting them in the same line box. */
+  /* display:contents hoists .markdown's children into the wrapper's BFC; p:last-child + ball share one anonymous block → same line. */
   .streaming-text-wrap :global(.markdown) {
     display: contents;
   }

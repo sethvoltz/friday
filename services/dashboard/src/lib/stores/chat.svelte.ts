@@ -706,8 +706,8 @@ export class ChatState {
     if (!this.focusedAgentIsWorking) return false;
     return this.messages.some((m) => m.role === "thinking" && m.status === "running");
   }
-  /** True when any tool block is actively executing. */
   get toolIsRunning(): boolean {
+    if (!this.focusedAgentIsWorking) return false;
     return this.messages.some((m) => m.role === "tool" && m.status === "running");
   }
   /** True when an assistant text block is streaming and no thinking block or tool is running. */
