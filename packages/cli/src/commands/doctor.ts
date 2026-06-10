@@ -20,6 +20,7 @@ import {
   loadFridayConfig,
   probePostgresHealth,
   schema,
+  warmVaultCache,
 } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
 import { BANNER } from "../lib/branding.js";
@@ -62,6 +63,13 @@ export const doctorCommand = defineCommand({
   meta: { name: "doctor", description: "Check system health" },
   async run() {
     console.log(BANNER);
+    // Warm the vault BEFORE the first loadFridayConfig(). loadFridayConfig()
+    // freezes a one-shot snapshot whose integration-secret overlay
+    // (CLOUDFLARE_TUNNEL_TOKEN, etc.) is read from the vault cache at call
+    // time. Without warming first, that snapshot memoizes an empty overlay and
+    // vault-backed secrets — which now live in the age vault, not .env — read
+    // as "absent" even when present.
+    await warmVaultCache();
     if (existsSync(ENV_LOCAL_PATH) || existsSync(ENV_PATH)) loadFridayConfig();
 
     // Sections render one block at a time, live: each box paints its known
