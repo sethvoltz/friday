@@ -365,6 +365,7 @@
     // still near the top of the visible area."
     const vv = window.visualViewport;
     let vvUpdate: (() => void) | undefined;
+    let vvUpdateDeferred: (() => void) | undefined;
     if (vv) {
       const setOffset = (value: number) => {
         const clamped = Math.max(0, Math.min(value, 200));
@@ -381,17 +382,24 @@
           tag === "TEXTAREA" ||
           (active instanceof HTMLElement && active.isContentEditable);
         setOffset(isTextField ? vv.offsetTop : 0);
-        // keyboard height: window.innerHeight - vv.height (stable — vv.height only changes when the keyboard appears/disappears, not on scroll)
+        // Keyboard height: gap between the bottom of the visual viewport and
+        // the bottom of the layout viewport — exactly where the keyboard sits.
+        // In iOS PWA standalone, window.innerHeight - vv.height stays near-zero
+        // because both shrink together; this formula avoids that by using
+        // vv.offsetTop (how far the visual viewport has scrolled up) instead.
         const kbHeight = isTextField
-          ? Math.max(0, window.innerHeight - vv.height)
+          ? Math.max(0, window.innerHeight - (vv.offsetTop + vv.height))
           : 0;
         document.documentElement.style.setProperty(
           "--vv-offset-bottom",
           `${kbHeight}px`,
         );
       };
+      // iOS may fire `resize` before updating vv.offsetTop — defer via rAF so
+      // the formula reads the settled value. focusin/focusout stay immediate.
+      vvUpdateDeferred = () => requestAnimationFrame(vvUpdate!);
       vvUpdate();
-      vv.addEventListener("resize", vvUpdate);
+      vv.addEventListener("resize", vvUpdateDeferred);
       // Re-evaluate when focus state changes — blur on the input must
       // immediately reset the offset to 0 even if no vv event fires.
       document.addEventListener("focusin", vvUpdate);
@@ -474,8 +482,8 @@
       stopWakeLock();
       unbindTheme();
       window.removeEventListener("keydown", onKey);
-      if (vv && vvUpdate) {
-        vv.removeEventListener("resize", vvUpdate);
+      if (vv && vvUpdate && vvUpdateDeferred) {
+        vv.removeEventListener("resize", vvUpdateDeferred);
         document.removeEventListener("focusin", vvUpdate);
         document.removeEventListener("focusout", vvUpdate);
       }

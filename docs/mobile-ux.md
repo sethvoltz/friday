@@ -63,13 +63,19 @@ Friday is mobile-first, not mobile-responsive-as-an-afterthought. Every page is 
 
 iOS raises the soft keyboard asynchronously after a text field is focused. `position: fixed` elements use the **layout viewport** as their reference, which does not shrink when the keyboard opens — so a `bottom: 0` composer bar stays pinned to the bottom of the layout viewport and ends up hidden behind the keyboard.
 
-Fix implemented in `b32595b`:
+Fix implemented in `b32595b` (formula corrected in a subsequent patch):
 
-- **`--vv-offset-bottom`** (set in `+layout.svelte` `vvUpdate`): `max(0, window.innerHeight - vv.height)`. This is the true keyboard height in layout-viewport coordinates — stable once the keyboard is up because `vv.height` only changes when the keyboard appears/disappears, not during scroll. Set to `0` when no text field is focused so scroll animations don't reposition the composer.
+- **`--vv-offset-bottom`** (set in `+layout.svelte` `vvUpdate`): `max(0, window.innerHeight - (vv.offsetTop + vv.height))`. This measures the gap between the bottom of the visual viewport and the bottom of the layout viewport — exactly where the keyboard sits. The simpler `window.innerHeight - vv.height` formula doesn't work in iOS PWA standalone because `window.innerHeight` shrinks together with `vv.height` when the keyboard opens, keeping the delta near-zero. Set to `0` when no text field is focused so scroll animations don't reposition the composer.
 - **`.chat-input-floating`** in `ChatShell.svelte` applies `transform: translateY(calc(-1 * var(--vv-offset-bottom, 0px)))` to lift the composer above the keyboard. `transform` works in the layout-viewport coordinate system, so this precisely counteracts the overlap.
 - **`scrollIntoView` on focus** (`ChatInput.svelte`): fires after a 100ms delay so the keyboard has begun raising before we scroll. Uses `behavior: "instant"` — `behavior: "smooth"` is unreliable on WebKit (bug #238497).
 
-`vvUpdate` is wired to `visualViewport` `resize` events plus `focusin`/`focusout` on the document. The initial keyboard-open scroll is captured when `resize` fires (iOS shrinks `vv.height`, which fires `resize`, at which point `vv.offsetTop` already reflects the new position). Subsequent user scrolling does not move the header or composer.
+`vvUpdate` is wired to `visualViewport` `resize` and `focusin`/`focusout` on the document. The `resize` handler is deferred via `requestAnimationFrame` (`vvUpdateDeferred`) because iOS may fire `resize` before `vv.offsetTop` has settled — the rAF ensures the formula reads the final value. `focusin`/`focusout` stay immediate so blur resets the offset to 0 without a frame of delay. Subsequent user scrolling does not move the header or composer.
+
+## Mobile Send/Stop: `pointerdown` blur suppression
+
+On iOS, `pointerdown` on any non-input element causes the currently-focused textarea to blur before `click` fires. For the Send and Stop buttons this means: tap → textarea blurs → `vvUpdate` resets `--vv-offset-bottom` to 0 → composer snaps down → by the time `click` fires, the button has shifted and the event may misfire.
+
+Fix: both the Send and Stop buttons carry `onpointerdown={(e) => e.preventDefault()}`. `preventDefault` on `pointerdown` suppresses the implicit blur without blocking the subsequent `click`. This is the same pattern used for autocomplete entries (see §Mobile autocomplete above).
 
 ## Public reachability + Cloudflare Tunnel
 
