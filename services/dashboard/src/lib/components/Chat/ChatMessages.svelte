@@ -852,7 +852,12 @@
               <div class="footer-tag {userFooter.className ?? ''}">{userFooter.text}</div>
             {/if}
           {:else}
-            <Markdown source={msg.text} streaming={msg.status === "streaming"} />{#if chat.ballInText && msg.status === "streaming"}<StreamingBall />{/if}
+            <div class:streaming-text-wrap={chat.ballInText && msg.status === "streaming"}>
+              <Markdown source={msg.text} streaming={msg.status === "streaming"} />
+              {#if chat.ballInText && msg.status === "streaming"}
+                <span class="streaming-ball-inline" aria-hidden="true"><StreamingBall /></span>
+              {/if}
+            </div>
             {@const assistantFooter = stopFooter(msg.status, msg.abortReason)}
             {#if assistantFooter}
               <div class="footer-tag {assistantFooter.className ?? ''}">{assistantFooter.text}</div>
@@ -1251,5 +1256,22 @@
     to {
       transform: rotate(360deg);
     }
+  }
+  /* streaming-text-wrap: makes the StreamingBall appear inline at the end of
+     the last paragraph rather than on its own line below the markdown block.
+     display:contents removes .markdown's box from the layout tree so its
+     children participate directly in the wrapper's block formatting context.
+     p:last-child becomes inline, which groups it with the following inline-block
+     ball into one anonymous block — putting them in the same line box. */
+  .streaming-text-wrap :global(.markdown) {
+    display: contents;
+  }
+  .streaming-text-wrap :global(.markdown > p:last-child) {
+    display: inline;
+  }
+  .streaming-ball-inline {
+    display: inline-block;
+    vertical-align: middle;
+    line-height: 1;
   }
 </style>
