@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.2](https://github.com/sethvoltz/friday/compare/v1.19.1...v1.19.2) (2026-06-10)
+
+
+### Bug Fixes
+
+* **dashboard:** chat-route inner-scroller — kills keyboard-up composer stutter (ADR-041) ([#237](https://github.com/sethvoltz/friday/issues/237)) ([4079448](https://github.com/sethvoltz/friday/commit/4079448a9a97f6bed77bbfb11a6a7afbccb8f5c9))
+
 ## [1.19.1](https://github.com/sethvoltz/friday/compare/v1.19.0...v1.19.1) (2026-06-10)
 
 
