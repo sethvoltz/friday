@@ -5,6 +5,7 @@
   import { confirmDialog } from "$lib/components/ConfirmDialog/store.svelte";
   import type { TicketStatus } from "@friday/shared/services";
   import { useZero, zeroSync } from "$lib/stores/zero.svelte";
+  import { randomUUID } from "$lib/util/uuid";
 
   let { data }: { data: PageData } = $props();
 
@@ -199,10 +200,7 @@
         // Phase 4.4: comment id is a client-generated UUID. The
         // mutator inserts the row + bumps the parent ticket's
         // updated_at so list-sort reorders the ticket to the top.
-        const id =
-          typeof crypto !== "undefined" && "randomUUID" in crypto
-            ? (crypto as { randomUUID: () => string }).randomUUID()
-            : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const id = randomUUID();
         const result = zeroSync.addTicketComment({
           id,
           ticketId: t.id,

@@ -10,13 +10,15 @@
   import { zeroSync } from "$lib/stores/zero.svelte";
   import {
     chaseScrollBottom,
-    makeWindowChaseTarget,
+    makeElementChaseTarget,
     type ResyncChaseHandle,
   } from "$lib/components/Chat/resync-scroll";
   import {
     afterNextPaint,
+    onChatScroll,
     scrollByDelta,
     scrollToBottom,
+    setChatScroller,
   } from "$lib/components/Chat/doc-scroll";
   import { isTextEntryElement } from "$lib/util/keyboard-inset";
   import { tick, untrack } from "svelte";
@@ -31,10 +33,11 @@
   let { agent, sessionId }: Props = $props();
   let readonly = $derived(sessionId !== undefined);
 
-  // Inert query root for anchor bookkeeping (`.list` ResizeObserver,
-  // `[data-msg-id]` bubble lookups) — NOT a scroller. The DOCUMENT is
-  // the only scroller on the chat route (FRI-160); all scroll reads and
-  // writes go through the window seam in doc-scroll.ts.
+  // The chat's INNER scroller (ADR-041): `.chat-transcript`
+  // (overflow-y:auto) inside the visual-viewport-sized fixed column.
+  // Registered as the active scroller for the doc-scroll.ts seam below;
+  // also the query root for anchor bookkeeping (`.list` ResizeObserver,
+  // `[data-msg-id]` bubble lookups).
   let transcriptEl: HTMLElement | undefined = $state();
   let inputEl: HTMLDivElement | undefined = $state();
 
@@ -129,6 +132,23 @@
   // ResizeObserver alone (net-zero-height slides never fire it).
   let notifyListMutation: () => void = () => {};
 
+  // ADR-041: register the transcript as the chat scroll
+  // seam's active scroller, and lock body/document scroll on the chat
+  // route so iOS never pans the visual viewport during scroll (the
+  // source of the keyboard-up composer stutter under document scroll).
+  // The composer lives in normal flow at the bottom of the
+  // viewport-sized flex column, so it never overlaps the transcript —
+  // no clearComposerOverlap needed.
+  $effect(() => {
+    if (!transcriptEl) return;
+    setChatScroller(transcriptEl);
+    document.documentElement.classList.add("chat-scroll-lock");
+    return () => {
+      setChatScroller(null);
+      document.documentElement.classList.remove("chat-scroll-lock");
+    };
+  });
+
   async function jumpToBottom() {
     // A correction queued for the pre-jump geometry must not land on
     // top of the bottom we're about to scroll to.
@@ -169,9 +189,10 @@
     // anchor-restore from the previous agent/session must not land
     // mid-chase (or just after it ends).
     invalidatePendingRestore();
-    // The chase target is the document scroller — built lazily here
-    // (client-only call sites) so SSR never touches window/document.
-    activeChase = chaseScrollBottom(makeWindowChaseTarget(), {
+    // The chase target is the inner scroller element. Bail if it hasn't
+    // bound yet (SSR / first paint); the agent-load effect re-chases.
+    if (!transcriptEl) return;
+    activeChase = chaseScrollBottom(makeElementChaseTarget(transcriptEl), {
       now: () => performance.now(),
       raf: (cb) => requestAnimationFrame(cb),
       cancelRaf: (h) => cancelAnimationFrame(h),
@@ -491,15 +512,15 @@
     let anchorOffset = 0;
 
     function snapshotAnchor() {
-      // The document is the scroller, so the reference line is the
-      // viewport top (≡ 0). First message bubble whose bottom is still
-      // inside (or below) it — i.e. the topmost element the user can
-      // actually see (or the one that just scrolled off the top by a
-      // hair).
+      // Inner-scroller edition: the reference line is the SCROLLER's top
+      // edge (not the viewport's 0), since content above it is clipped
+      // by the scroller, not the viewport. First bubble whose bottom is
+      // still at/below that line — the topmost one the user can see.
+      const refTop = root.getBoundingClientRect().top;
       const bubbles = root.querySelectorAll<HTMLElement>("[data-msg-id]");
       for (const el of bubbles) {
         const r = el.getBoundingClientRect();
-        if (r.bottom > 0) {
+        if (r.bottom > refTop) {
           anchorEl = el;
           anchorOffset = r.top;
           return;
@@ -509,10 +530,9 @@
     }
 
     snapshotAnchor();
-    // Document scrolls fire the `scroll` event at the document, where a
-    // `window` listener receives it. A listener on the inert
-    // `.chat-transcript` (no overflow) would silently never fire.
-    window.addEventListener("scroll", snapshotAnchor, { passive: true });
+    // The inner scroller fires `scroll` at the element; onChatScroll
+    // binds to it (window fallback before the scroller is set).
+    const unbindScroll = onChatScroll(snapshotAnchor);
 
     // WebKit/iOS Safari paint-defer mitigation, document-scroller
     // edition. A programmatic scroll write that lands while
@@ -617,7 +637,7 @@
 
     return () => {
       ro.disconnect();
-      window.removeEventListener("scroll", snapshotAnchor);
+      unbindScroll();
       // Drop queued writes — they'd land 1–2 frames after teardown
       // against whatever view (route, agent) is current by then.
       invalidateRestore();
@@ -638,19 +658,10 @@
 </script>
 
 {#if kbDebug}
-  <!-- ?kbdebug probe ladder (docs/mobile-ux.md): fixed lines at
-       known layout-viewport y coordinates. A screenshot with the
-       keyboard up shows which layout coordinate physically renders at
-       the keyboard's top edge — measuring the layout→screen mapping
-       that no viewport API value reports. -->
-  {#each [250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900] as y (y)}
-    <div class="kb-probe" style="top: {y}px" aria-hidden="true">
-      <span>{y}</span>
-    </div>
-  {/each}
-  <!-- ?kbdebug HUD (docs/mobile-ux.md) -->
+  <!-- ?kbdebug HUD (docs/mobile-ux.md): live tracker inputs/outputs,
+       used to verify on-device keyboard geometry (esp. the PWA, which
+       can't be tested over the insecure-HTTP LAN dev origin). -->
   <div class="kb-debug" aria-hidden="true">
-    <div>build: dbg-6</div>
     <div>--vv-top-y: {dbg.vvTopY}</div>
     <div>innerH: {dbg.ih}</div>
     <div>vv.h: {dbg.vvh}</div>
@@ -667,57 +678,73 @@
   <Sidebar />
 </aside>
 
-<div class="chat-transcript" bind:this={transcriptEl}>
-  {#if readonly}
-    <div class="readonly-banner">
-      Past session — read only
+<!-- ADR-041: a fixed column sized to the visual viewport. The transcript
+     is a real inner scroller (overflow-y:auto, full-bleed under the
+     translucent bars); the composer and pills are overlays within the
+     column. When the keyboard opens, only the column HEIGHT shrinks (to
+     --vv-bottom-y) and the composer re-lays-out above the keyboard — no
+     per-frame visual-viewport chasing, so no keyboard-up scroll
+     stutter. Pills are absolutely positioned within this column. -->
+<div class="chat-viewport">
+  <div class="chat-transcript" bind:this={transcriptEl}>
+    {#if readonly}
+      <div class="readonly-banner">
+        Past session — read only
+      </div>
+    {/if}
+    <ChatMessages
+      messages={readonly ? pastMessages : undefined}
+      pastLoading={readonly ? pastLoading : false}
+      pastError={null}
+      onRetryPast={undefined}
+      onLoadOlderPast={undefined}
+      pastReachedOldest={readonly}
+      loadingOlderPast={false}
+      onWindowSlide={() => notifyListMutation()}
+      scrollRoot={transcriptEl} />
+  </div>
+
+  {#if !readonly && chat.loadingOlder}
+    <div class="floating-pill loading-older" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      Loading older messages…
     </div>
   {/if}
-  <ChatMessages
-    messages={readonly ? pastMessages : undefined}
-    pastLoading={readonly ? pastLoading : false}
-    pastError={null}
-    onRetryPast={undefined}
-    onLoadOlderPast={undefined}
-    pastReachedOldest={readonly}
-    loadingOlderPast={false}
-    onWindowSlide={() => notifyListMutation()} />
+
+  {#if !readonly && !pinnedToBottom}
+    <div class="jump-to-bottom-wrap">
+      <button
+        class="floating-pill jump-to-bottom"
+        type="button"
+        onclick={jumpToBottom}
+        aria-label="Scroll to latest">
+        ↓ Latest
+      </button>
+    </div>
+  {/if}
+
+  <!-- FRI-156 §E: sticky "Viewing pre-compaction history" pill. Shown when
+       the user is scrolled above the most-recent compaction divider
+       (chat.viewingPreCompaction, set by ChatMessages's IntersectionObserver).
+       Click scrolls back to the divider via the nonce-keyed scrollTarget. -->
+  {#if !readonly && chat.viewingPreCompaction}
+    <div class="pre-compaction-wrap">
+      <button
+        class="floating-pill pre-compaction"
+        type="button"
+        onclick={() => chat.scrollToLatestCompactionDivider()}
+        aria-label="Scroll to the latest compaction divider">
+        Viewing pre-compaction history
+      </button>
+    </div>
+  {/if}
+
+  {#if !readonly}
+    <div class="chat-input-floating" bind:this={inputEl}>
+      <ChatInput />
+    </div>
+  {/if}
 </div>
-
-{#if !readonly && chat.loadingOlder}
-  <div class="floating-pill loading-older" aria-live="polite">
-    <span class="spinner" aria-hidden="true"></span>
-    Loading older messages…
-  </div>
-{/if}
-
-{#if !readonly && !pinnedToBottom}
-  <div class="jump-to-bottom-wrap">
-    <button
-      class="floating-pill jump-to-bottom"
-      type="button"
-      onclick={jumpToBottom}
-      aria-label="Scroll to latest">
-      ↓ Latest
-    </button>
-  </div>
-{/if}
-
-<!-- FRI-156 §E: sticky "Viewing pre-compaction history" pill. Shown when the
-     user is scrolled above the most-recent compaction divider
-     (chat.viewingPreCompaction, set by ChatMessages's IntersectionObserver).
-     Click scrolls back to the divider via the nonce-keyed scrollTarget. -->
-{#if !readonly && chat.viewingPreCompaction}
-  <div class="pre-compaction-wrap">
-    <button
-      class="floating-pill pre-compaction"
-      type="button"
-      onclick={() => chat.scrollToLatestCompactionDivider()}
-      aria-label="Scroll to the latest compaction divider">
-      Viewing pre-compaction history
-    </button>
-  </div>
-{/if}
 
 <!-- FIX_FORWARD 6.1: transient toast surfaced by /jump and other client-
      side commands. Auto-dismisses via chat.setToast(message, level, ms). -->
@@ -727,13 +754,8 @@
   </div>
 {/if}
 
-{#if !readonly}
-  <div class="chat-input-floating" bind:this={inputEl}>
-    <ChatInput />
-  </div>
-{/if}
-
 <style>
+  .chat-viewport,
   .chat-transcript,
   .chat-sidebar-floating,
   .chat-input-floating,
@@ -748,50 +770,48 @@
     --chat-top: calc(4.3rem + var(--chat-inset));
   }
 
-  /* Inert in-flow transcript block — the DOCUMENT is the only scroller
-     on the chat route (FRI-160), same as every other page. No
-     position:fixed / overflow here: the old full-viewport fixed-overlay
-     scroller intermittently lost the touch-routing fight with the
-     document on iOS/WebKit (the whole view rubber-banded as a chunk
-     instead of scrolling the chat). The header / sidebar / composer /
-     floating pills stay position:fixed — pinned bars, not competing
-     scrollers — and this padding reserves their room in the flow. */
-  .chat-transcript {
-    /* Chromium-side belt-and-braces: disable the browser's scroll-
-       anchoring heuristic so it doesn't fight the manual anchor-restore
-       scroll math in ChatShell's `.list` ResizeObserver (the single
-       restore owner — covers window slides and older-page prepends
-       too). No-op on WebKit, free. The WebKit-specific paint-deferral
-       mitigation lives at the call sites (double-rAF around the window
-       scroll writes — see doc-scroll.ts). */
-    overflow-anchor: none;
-    padding-top: var(--chat-top);
-    /* Mirrors the floating input offset so the last message scrolls fully above it. */
-    padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px) + var(--kb-inset, 0px));
-    padding-left: var(--content-left);
-    padding-right: var(--page-gutter);
-  }
-  /* ?kbdebug probe ladder. */
-  .kb-probe {
+  /* ADR-041: the chat column. A position:fixed box that
+     spans the FULL viewport height (under the floating header, over the
+     floating composer) so the inner scroller can bleed content beneath
+     both translucent bars — preserving the glassmorphism where chat
+     content is visible-but-blurred behind them. It is the containing
+     block for the scroller, composer, and pills (all absolute within). */
+  .chat-viewport {
     position: fixed;
-    left: 0;
-    right: 0;
-    height: 2px;
-    background: #f0f;
-    z-index: 9998;
-    pointer-events: none;
-  }
-  .kb-probe span {
-    position: absolute;
-    right: 2px;
-    top: -16px;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: #f0f;
-    background: rgba(0, 0, 0, 0.75);
-    padding: 0 4px;
+    top: 0;
+    left: var(--content-left);
+    right: var(--page-gutter);
+    /* Height tracks the VISUAL viewport bottom in every state — the
+       tracker keeps --vv-bottom-y current whether the keyboard is up or
+       not. Closed, this lands the column bottom (and the composer) above
+       the iOS bottom URL bar; open, above the keyboard. The composer
+       rides this purely by layout — no per-frame scroll-thread chase, so
+       no stutter. (100dvh is the pre-hydration / desktop fallback.) */
+    height: var(--vv-bottom-y, 100dvh);
+    z-index: 40;
   }
 
+  /* The inner scroller fills the column edge-to-edge and is the ONLY
+     scroller on the chat route (body is locked — .chat-scroll-lock). Its
+     padding-top / padding-bottom reserve the header and composer bands
+     so content RESTS in the clear but SCROLLS UNDER the translucent bars
+     (the under-glass effect). overflow-anchor:none keeps the browser's
+     native scroll-anchoring off the manual `.list` anchor-restore math;
+     overscroll-behavior:contain keeps iOS rubber-band off the locked
+     body — the touch-routing fight ADR-039 fled can't happen because the
+     body cannot scroll at all. */
+  .chat-transcript {
+    position: absolute;
+    inset: 0;
+    overflow-y: auto;
+    overflow-anchor: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    padding-top: var(--chat-top);
+    padding-bottom: calc(
+      var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px)
+    );
+  }
   /* ?kbdebug HUD. Anchored to the top so
      it stays readable regardless of keyboard/composer state. */
   .kb-debug {
@@ -823,43 +843,22 @@
     z-index: 50;
   }
 
+  /* Composer: a translucent overlay anchored to the column bottom (the
+     scroller's padding-bottom reserves its band so content rests above
+     it but scrolls under its frosted glass). No keyboard JS — the column
+     height shrinks on keyboard-open and the composer rides the new
+     bottom. z-index above the scroller content it floats over. */
   .chat-input-floating {
-    position: fixed;
+    position: absolute;
     bottom: calc(1rem + var(--kb-safe-bottom, 0px));
-    left: var(--content-left);
-    right: var(--page-gutter);
+    left: 0;
+    right: 0;
+    z-index: 2;
     background: var(--header-float-bg);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-lg);
     backdrop-filter: blur(20px) saturate(160%);
-    z-index: 90;
-  }
-  /* Soft keyboard up: anchor the composer's bottom to the VISUAL
-     viewport's bottom edge (--vv-bottom-y = vv.offsetTop + vv.height in
-     layout coordinates — exactly where the keyboard's top sits). This
-     placement uses visualViewport numbers ONLY: every lift computed
-     from window.innerHeight landed mid-screen on iOS 26 bottom-bar
-     Safari, which misreports innerHeight while the keyboard is open.
-     translateY's percentage resolves against the box's OWN height, so
-     the bottom edge aligns without knowing the composer's size. On
-     desktop (hardware keyboard, vv = layout viewport) this resolves to
-     the same place as the bottom: rule above — no visual change on
-     focus. */
-  :global(:root.keyboard-open) .chat-input-floating {
-    top: var(--vv-bottom-y, 100dvh);
-    bottom: auto;
-    transform: translateY(calc(-100% - 1rem));
-    /* NO transition on top — a transition smears every anchor
-       correction over its duration, which reads as the composer lazily
-       sliding around during keyboard-up scrolling. Corrections land
-       same-frame or not at all. */
-  }
-  /* Same treatment as the header (+layout.svelte): pin under the visual
-     viewport's top edge while the keyboard is up so the agent dropdown
-     doesn't slide out of view as iOS pans. */
-  :global(:root.keyboard-open) .chat-sidebar-floating {
-    top: calc(var(--chat-top) + var(--vv-top-y, 0px));
   }
 
   .readonly-banner {
@@ -874,27 +873,28 @@
     font-size: 0.85rem;
   }
 
-  /* Wrapper spans the chat content area and centers the button within it,
-     so "centered" means centered on the chat (not on the window). The
-     wrapper is pointer-events:none so the area below the button still
-     scrolls / receives clicks for the chat itself. */
+  /* ADR-041: pills are absolutely positioned WITHIN
+     .chat-viewport (its containing block), so they ride the column as it
+     resizes with the keyboard — no per-pill visual-viewport math. The
+     jump pill sits just above the in-flow composer (composer height +
+     gap); the top pills sit just under the column top. */
   .jump-to-bottom-wrap {
-    position: fixed;
-    bottom: calc(var(--chat-input-h, 6rem) + 3rem + var(--kb-safe-bottom, 0px) + var(--kb-inset, 0px));
-    left: var(--content-left);
-    right: var(--page-gutter);
+    position: absolute;
+    bottom: calc(var(--chat-input-h, 6rem) + 1.5rem + var(--kb-safe-bottom, 0px));
+    left: 0;
+    right: 0;
     display: flex;
     justify-content: center;
     pointer-events: none;
     z-index: 95;
   }
-  /* Loading-older pill mirrors the jump-to-bottom: same floating + blurred
-     style, centered on the chat area, anchored just below the chat header. */
+  /* Top pills clear the floating header (the column starts at y=0, under
+     it). --chat-top puts them in the clear band below the header. */
   .loading-older {
-    position: fixed;
+    position: absolute;
     top: calc(var(--chat-top) + 0.5rem);
-    left: var(--content-left);
-    right: var(--page-gutter);
+    left: 0;
+    right: 0;
     margin: 0 auto;
     width: max-content;
     z-index: 95;
@@ -902,18 +902,13 @@
     align-items: center;
     gap: 0.5rem;
   }
-  /* FRI-156 §E: the pre-compaction pill sits at the top of the chat area —
-     the divider it points back to is below the viewport (the user scrolled
-     up into pre-compaction history), so the affordance to return to it
-     anchors under the header. Offset BELOW .loading-older (which shares the
-     top band) so that if both surface at once — scrolling up above the
-     divider can also trigger older-block pagination — they stack rather than
-     render at identical coordinates and overlap. */
+  /* FRI-156 §E: pre-compaction pill at the top of the chat area, stacked
+     below .loading-older so they don't overlap when both surface. */
   .pre-compaction-wrap {
-    position: fixed;
+    position: absolute;
     top: calc(var(--chat-top) + 3rem);
-    left: var(--content-left);
-    right: var(--page-gutter);
+    left: 0;
+    right: 0;
     display: flex;
     justify-content: center;
     pointer-events: none;
@@ -987,26 +982,20 @@
       width: auto;
       overflow: visible;
     }
+    /* Mobile: full-width column (still full-bleed top:0). The scroller's
+       padding-top clears BOTH the header and the mobile sidebar trigger
+       row (which sits at --chat-top spanning gutter-to-gutter), so chat
+       content rests below them but still scrolls under. */
+    .chat-viewport {
+      left: var(--page-gutter);
+      right: var(--page-gutter);
+    }
     .chat-transcript {
-      padding-left: var(--page-gutter);
-      padding-right: var(--page-gutter);
       padding-top: calc(var(--chat-top) + 3.25rem);
-    }
-    .chat-input-floating {
-      left: var(--page-gutter);
-      right: var(--page-gutter);
-    }
-    /* Mobile: full-width chat means the centering wrapper spans gutter to gutter. */
-    .jump-to-bottom-wrap,
-    .pre-compaction-wrap,
-    .loading-older {
-      left: var(--page-gutter);
-      right: var(--page-gutter);
     }
     .loading-older {
       top: calc(var(--chat-top) + 3.75rem);
     }
-    /* Stacked below .loading-older on mobile too. */
     .pre-compaction-wrap {
       top: calc(var(--chat-top) + 6.25rem);
     }
@@ -1016,9 +1005,8 @@
     .chat-input-floating {
       bottom: calc(0.5rem + var(--kb-safe-bottom, 0px));
     }
-    :global(:root.keyboard-open) .chat-input-floating {
-      bottom: auto;
-      transform: translateY(calc(-100% - 0.5rem));
+    .jump-to-bottom-wrap {
+      bottom: calc(var(--chat-input-h, 6rem) + 1rem + var(--kb-safe-bottom, 0px));
     }
   }
 </style>

@@ -7,6 +7,7 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { portal } from "$lib/actions/portal";
+  import { randomUUID } from "$lib/util/uuid";
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
   import { onDestroy, onMount, tick } from "svelte";
   import { Paperclip, Send, CircleStop } from "lucide-svelte";
@@ -457,7 +458,7 @@
     // Pre-mint the blockId so `queueId` on the optimistic bubble equals
     // the Zero block's PK — `applyZeroBlocks` drops the pending bubble
     // the moment the optimistic write lands in the local replica.
-    const blockId = crypto.randomUUID();
+    const blockId = randomUUID();
     const eagerTurnId = `t_${blockId}`;
     chat.addUser(t, {
       queueId: blockId,

@@ -1,72 +1,83 @@
 /**
- * Document-scroller seam for the chat route (FRI-160).
+ * Chat scroll seam.
  *
- * The chat transcript is an inert in-flow block (`.chat-transcript`);
- * the DOCUMENT is the only scroller, matching every other route. The
- * old `position:fixed; overflow-y:auto` overlay intermittently lost
- * the touch-routing fight with the document on iOS/WebKit (the whole
- * view rubber-banded as a chunk instead of scrolling the chat).
+ * ADR-041: the chat route uses an INNER
+ * scroller element again (a height-constrained `.chat-scroller` inside a
+ * visual-viewport-sized flex column), not the document. The body does
+ * not scroll on the chat route, so iOS never pans the visual viewport
+ * during scroll — the composer is laid out at the bottom of the column
+ * and never has to chase the keyboard (killing the document-scroll
+ * stutter). This reverses the FRI-160/ADR-039 document-scroll decision
+ * for the chat route specifically; see the spike's evaluation before
+ * promoting.
  *
- * When the document scrolls, the `scroll` event fires at the document
- * and a `window` listener receives it; `window.scrollY` /
- * `window.scrollTo` / `window.scrollBy` are the matching read/write
- * surface. All chat scroll reads/writes go through these helpers so
- * ChatShell, ChatMessages, and the layout's router hook share one seam.
+ * All chat scroll reads/writes go through this one seam. The active
+ * scroller is set by ChatShell on mount via `setChatScroller`; until
+ * then (and on non-chat routes, and in SSR-safe call ordering) the
+ * helpers fall back to the document/window so nothing throws.
  *
  * NEVER pass a smooth `behavior` on the programmatic follow path
- * (WebKit #238497: smooth programmatic scrolls can silently no-op).
- * `/jump`'s user-initiated `scrollIntoView` is the one allowed smooth
- * scroll and lives outside this seam.
- *
- * SSR safety: every helper touches `window`/`document` at CALL time
- * only — importing this module during SSR is safe as long as calls
- * stay inside client-only code ($effect, onMount, event handlers).
+ * (WebKit #238497). `/jump`'s user-initiated `scrollIntoView` is the one
+ * allowed smooth scroll and lives outside this seam.
  */
 
-/** Snap the viewport to the bottom of the document. The follow path —
- * always `behavior:'auto'`, never smooth (see module doc). */
+let scroller: HTMLElement | null = null;
+
+/** Set (or clear, with null) the chat route's inner scroller element. */
+export function setChatScroller(el: HTMLElement | null): void {
+  scroller = el;
+}
+
+/** The active scroller element, or null when falling back to the window. */
+export function getChatScroller(): HTMLElement | null {
+  return scroller;
+}
+
+/**
+ * IntersectionObserver `root` for the chat sentinels: the scroller
+ * element when set, `null` (viewport) as the SSR-safe fallback.
+ */
+export function chatScrollRoot(): Element | null {
+  return scroller;
+}
+
+/** Snap the active scroller to the bottom. behavior:'auto' only. */
 export function scrollToBottom(): void {
-  window.scrollTo({
-    top: document.documentElement.scrollHeight,
-    behavior: "auto",
-  });
+  if (scroller) {
+    scroller.scrollTop = scroller.scrollHeight;
+    return;
+  }
+  window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
 }
 
 /** Relative scroll adjustment (anchor-restore deltas). */
 export function scrollByDelta(dy: number): void {
+  if (scroller) {
+    scroller.scrollTop += dy;
+    return;
+  }
   window.scrollBy(0, dy);
 }
 
-/** Current document scroll position. */
+/** Current scroll position of the active scroller. */
 export function readScrollY(): number {
-  return window.scrollY;
+  return scroller ? scroller.scrollTop : window.scrollY;
+}
+
+/** Bind a scroll listener to the active scroll surface. Returns an
+ * unbind function. Falls back to `window` when no scroller is set. */
+export function onChatScroll(handler: () => void): () => void {
+  const target: EventTarget = scroller ?? window;
+  target.addEventListener("scroll", handler, { passive: true });
+  return () => target.removeEventListener("scroll", handler);
 }
 
 /**
  * Defer a programmatic scroll write until after the next paint has
- * committed (double-rAF: the first callback runs before the upcoming
- * paint, so a callback scheduled from it runs after that paint).
- *
- * This replaces the old fixed-overlay scroller's `overflow-y:hidden`
- * paint-defer toggle: WebKit defers paint of a region revealed by a
- * programmatic scroll write that lands while the scroll thread is hot
- * (mid-momentum or just-stopped). With the document as the scroller
- * there is no element overflow to toggle — and `overflow:hidden` on
- * `<html>`/`<body>` is unreliable on iOS WebKit anyway (#153852,
- * #240860: the body stays scrollable). Deferring the write past the
- * in-flight frame lets the resized layout commit first, so the write
- * lands on settled geometry.
- *
- * Returns a cancel function. The document scroller is GLOBAL — unlike
- * the old per-component scroller element, whose queued writes died
- * with the element, a deferred write queued here outlives the view
- * that queued it and would land 1–2 frames later against whatever is
- * then on screen (e.g. a stale anchor-restore `scrollBy` yanking the
- * viewport right after a jump-to-bottom or a session switch). Callers
- * that queue corrections MUST hold the cancel handle and invalidate it
- * when scroll ownership changes (jump-to-bottom, chase start,
- * component teardown). Canceling after the callback has fired is a
- * safe no-op.
+ * committed (double-rAF). Returns a cancel function; cancelling after
+ * the callback fires is a safe no-op. Deferred writes let a resized
+ * layout commit before the write lands (the FRI-160 rationale carries
+ * over to the inner scroller).
  */
 export function afterNextPaint(fn: () => void): () => void {
   let raf2 = 0;

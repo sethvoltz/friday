@@ -1404,7 +1404,7 @@ ADR-037 keeps daemon `process.env` secret-free via `loadFridayConfig()`, but int
 
 ## ADR-039 — Chat scrolls the document, not a fixed overlay
 
-**Status:** accepted (FRI-160, 2026-06-09)
+**Status:** accepted (FRI-160, 2026-06-09); **superseded for the chat route by ADR-041 (2026-06-10).** The document-scroll model below is correct everywhere it identifies a real hazard — keep reading it for the WebKit landmines (#153852/#240860 overflow-on-root, #238497 smooth-scroll) — but the chat route now uses a hard-body-locked inner scroller again, which is NOT the overlay this ADR fled (see ADR-041's "why this isn't a regression").
 
 **Supersedes the overflow-toggle half of ADR-019 (§2); §1's element-anchor technique stands.**
 
@@ -1430,7 +1430,80 @@ The document/window is the single scroller on the chat route, exactly like every
 
 ### Do not "fix" this back
 
-A future pass that notices "chat isn't a self-contained scroller anymore" and restores a nested or fixed overlay scroller would reintroduce the mobile scroll-routing bug this ADR exists to kill. The inert `.chat-transcript` + document scroll is deliberate.
+A future pass that notices "chat isn't a self-contained scroller anymore" and restores a nested or fixed overlay scroller **without also hard-locking the body** would reintroduce the mobile scroll-routing bug this ADR exists to kill. ADR-041 reintroduces an inner scroller deliberately and safely: the body is `overflow: hidden` on the chat route, so there is no document scroll left for a touch to fight over — the parent-routing condition this ADR documents cannot arise. The two ADRs are not in conflict; ADR-041's precondition (locked body) is exactly what ADR-039 lacked.
+
+## ADR-040 — Soft-keyboard geometry: fixed chat bars anchor to the visual viewport's edges via one focus-gated tracker
+
+**Status:** accepted (2026-06-10); **largely superseded the same day by ADR-041.** The inner-scroller (ADR-041) sizes a single fixed column to the visual viewport, so the composer is positioned by _layout_ and no longer chases the keyboard per-frame — the fixed-bar anchor machinery this ADR built (`--vv-top-y`, the composer `translateY` anchor, the settle probes, the windowed re-pin) is gone. What SURVIVES into ADR-041: the focus-gated tracker, the `keyboard-open` class, and `--vv-bottom-y = vv.offsetTop + vv.height` (now the column's height, written in every state). **Keep this ADR as the record of the hard-won iOS 26.5 facts below** — they still constrain ADR-041's column sizing.
+
+### Context
+
+ADR-039 made the document the chat scroller, with the header, agent dropdown, composer, and pills as `position: fixed` bars. `position: fixed` anchors to the **layout viewport**, and the iOS soft keyboard's interaction with the layout viewport is both regime-dependent and (on iOS 26.5) partially misreported. Five successive fix commits (#220, #222, #224, #228, #230) each patched one symptom with a different formula or listener set and regressed another; this ADR's model was then itself iterated four times against **on-device telemetry** (geometry snapshots posted through `/api/_diag/client-error`, cross-checked against the composer's measured `getBoundingClientRect` and a `?kbdebug` probe ladder photographed on the device).
+
+Established facts (iOS 26.5 Safari, bottom URL bar):
+
+- Keyboard open in a tab starts as an **overlay** (`innerHeight` full, `vv.height` shrinks, vv pans for the focused-field reveal), then on scroll iOS **shrinks** `innerHeight` to ≈ `vv.height` and parks the layout viewport at the focus-time scroll position; further scrolling pans the vv **beyond the layout viewport's bottom** (`offsetTop + vv.height > innerHeight`). That is real renderable geometry — fixed elements positioned past `innerHeight` paint there.
+- **`vv.offsetTop` is the only honest pan source.** `vv.pageTop` mirrors `scrollY` and drops the pan (rect-verified in every captured sample). In the standalone PWA the layout viewport resizes and `offsetTop` stays ≈ 0.
+- Platform escape hatches absent: no `interactive-widget` on iOS (WebKit #259770), no VirtualKeyboard API / `env(keyboard-inset-height)` (WebKit #230225), `dvh` is spec-blind to the keyboard, `position: sticky` is layout-viewport-anchored like fixed.
+
+### Decision
+
+One tracker (`$lib/util/keyboard-inset.ts`, dependency-injected, with stateful unit tests that replay the captured device telemetry as fixtures) owns all soft-keyboard geometry. Full model in `docs/mobile-ux.md`; the essence:
+
+- **Presence is focus-derived, geometry is visualViewport-derived.** While a text-entry element is focused: `--vv-top-y = vv.offsetTop` (raw, unclamped) anchors the header and agent dropdown under the vv's top edge; `--vv-bottom-y = vv.offsetTop + vv.height` anchors the composer's bottom on the vv's bottom edge (`top:` + `translateY(-100%)`); `--kb-inset = max(0, innerHeight − vv.height)` (pan-free, scroll-stable) pads the transcript's scroll headroom. No field focused → vars cleared, zero keyboard JS influence.
+- Re-measures on `vv.resize` + `vv.scroll` + `window.resize`, rAF-coalesced, change-guarded, with timed post-focus settle probes; no transitions on anchors (they smear corrections into visible sliding). The tracker also owns the `keyboard-open` class (zeroes `--kb-safe-bottom`) and the WebKit #297779 post-dismissal wiggle. ChatShell's bottom re-pin is windowed to 1.6s after focus so regime-flip resize events mid-scroll can't yank the viewport.
+
+### Consequences
+
+- Header, dropdown, and composer stay on-screen and keyboard-adjacent through keyboard-up scrolling in both Safari-tab regimes, the standalone PWA, and Android; the unit suite replays each captured device state.
+- **Accepted platform ceiling (Safari tab):** in the parked first-tap state, iOS's claimed `vv.height` under-reports the truly visible area by an unexposed chrome allowance (~100–200px; CSSWG #7475). The composer sits exactly at the claimed boundary, which can leave a visible gap above the keyboard chrome. Photographically verified to be iOS's claim, not our math; no magic-constant compensation (it would rot with every iOS point release). The standalone PWA — the primary mobile mode — is unaffected.
+- `?kbdebug` (HUD + probe ladder) is kept as a documented diagnostic; dev builds also post geometry snapshots to the dashboard JSONL. When WebKit ships `interactive-widget` (#259770) or fixes its viewport reporting, the tracker degrades gracefully and becomes deletable.
+
+### Rejected alternatives
+
+- **One-shot measurement on `focusin`** (the #230 state): reads pre-keyboard geometry; structurally wrong in every regime.
+- **Pan from `pageTop − scrollY`** ("by definition" equal to offsetTop): pageTop drops the pan on iOS 26.5; froze the anchors. Rect-verification decided this, not spec text.
+- **Clamping the pan to `innerHeight − vv.height`:** the shrunk regime's beyond-the-layout pan is real; clamping threw every bar off the top of the screen.
+- **Sticky/monotonic padding inset:** held overlay-sized padding into the shrunk regime, rendering as an ever-growing blank band that eventually filled the screen.
+- **Dismissing the keyboard on scroll:** rejected outright — scrolling up to read while composing is the core chat gesture.
+- **`position: sticky` composer; counter-translate-on-every-frame without focus gating; inner-scroller app shell:** the first two fail as documented above; the app shell (how every major chat product avoids this class entirely) remains the documented fallback if the Safari-tab ceiling proves unacceptable in practice — it would reopen ADR-039 deliberately.
+
+## ADR-041 — Chat route uses a body-locked inner scroller; composer positioned by layout, not keyboard-chasing
+
+**Status:** accepted (2026-06-10). **Supersedes ADR-039 for the chat route and the fixed-bar half of ADR-040.**
+
+### Context
+
+ADR-039's document-scroll model and ADR-040's fixed-bar keyboard tracker hit a platform ceiling: with the chat bars `position: fixed` against the layout viewport and the keyboard moving the _visual_ viewport, the composer could only track the keyboard via per-frame JS, which lags the scroll thread during momentum scroll. The result was a composer that visibly **stuttered** while scrolling with the keyboard up — and no web API lets a fixed element follow the iOS visual viewport without that lag (CSSWG #7475 is open precisely for this). Every major mobile-web chat product (ChatGPT, Claude, Discord) avoids the entire class by NOT scrolling the document: a viewport-height app shell with an inner scroller and the composer in normal flow. ADR-040 named that app shell as the documented fallback "if the Safari-tab ceiling proves unacceptable." It did.
+
+The reason ADR-039 fled the inner/overlay scroller was a mobile-WebKit touch-routing fight: a touch on a `position: fixed; inset: 0` overlay intermittently routed to the **document** behind it and dragged the whole page as a chunk. The crucial detail: that fight requires a scrollable document to fight _over_.
+
+### Decision
+
+The chat route is a `position: fixed` flex-less column (`.chat-viewport`) sized to the visual viewport, **and the document body is hard-locked** (`html.chat-scroll-lock { overflow: hidden; height: 100% }`, toggled by ChatShell on mount). Inside the column:
+
+- `.chat-transcript` is the inner scroller (`position: absolute; inset: 0; overflow-y: auto; overscroll-behavior: contain`), full-bleed under the translucent header and composer. Its `padding-top`/`padding-bottom` reserve the header and composer bands so content **rests in the clear but scrolls under** them (the glassmorphism design element is preserved).
+- The composer and floating pills are absolutely-positioned overlays within the column.
+- The column height is `var(--vv-bottom-y)` (= `vv.offsetTop + vv.height`, written by the ADR-040 tracker in **every** state, not just while focused). Keyboard up → the column shrinks and the composer re-lays-out above the keyboard; keyboard down → it sizes above the iOS bottom URL bar. **No per-frame chasing**, so no stutter — the composer moves only when the viewport actually resizes.
+
+The scroll seam is element-based again: `doc-scroll.ts` routes reads/writes through a settable scroller (`setChatScroller`, window fallback); `ChatMessages` takes a `scrollRoot` for its IntersectionObserver roots; the resync chase uses `makeElementChaseTarget`; anchor-restore measures against the scroller top and listens on the element.
+
+### Why this is NOT an ADR-039 regression
+
+ADR-039's bug needs a scrollable document behind the inner scroller. Here the body is `overflow: hidden` and pinned to the viewport — there is **nothing behind the scroller for a touch to route to or rubber-band**. On-device (iPhone, iOS 26.5 Safari) the scroll was confirmed rock-solid with no chunk-drag; the AC6 e2e pins the invariant (`window.scrollY === 0` and `html` overflow hidden while the transcript scrolls). The trade-off the body-lock buys back: the iOS URL bar no longer auto-collapses on the chat route (no document scroll to collapse it) — standard for the app-shell pattern and accepted.
+
+### Consequences
+
+- Keyboard-up composer stutter is eliminated (verified on-device); the composer is correct keyboard-up AND keyboard-down (clears the URL bar) because the column tracks the visual viewport in all states.
+- Desktop Space/PageDown/Home/End scroll the transcript when it (or a descendant) has focus — the inner scroller receives keyboard scrolling; this is a minor regression vs ADR-039's free document keyboard scrolling, mitigated because the transcript is focusable via tab/click.
+- `?kbdebug` HUD + dev-only geometry telemetry are retained as the diagnostic for post-release PWA verification (the standalone PWA can't be tested over the insecure-HTTP LAN dev origin).
+- A secure-context-safe `randomUUID()` helper (`$lib/util/uuid.ts`) replaces direct `crypto.randomUUID()` — the latter is undefined on insecure origins (LAN-IP dev over HTTP), which threw in the send path during on-device testing. Prod (HTTPS) was unaffected.
+
+### Rejected alternatives
+
+- **Stay on document scroll (ADR-039/040) and tune the keyboard tracker further:** the stutter is the structural ceiling of fixed-bars-on-the-layout-viewport; no further tuning removes the scroll-thread lag.
+- **Inner scroller WITHOUT body-lock:** reopens the exact ADR-039 touch-routing fight.
+- **Dismiss the keyboard on scroll** (an early spike): rejected outright — scrolling up to read while composing is the core chat gesture.
 
 ## ADR-040 — Soft-keyboard geometry: fixed chat bars anchor to the visual viewport's edges via one focus-gated tracker
 

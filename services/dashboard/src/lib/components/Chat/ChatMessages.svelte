@@ -86,6 +86,12 @@
      * unmounts the same bubble count, so `.list`'s net height change can
      * be ~0px and ChatShell's ResizeObserver alone never sees it. */
     onWindowSlide?: () => void;
+    /** ADR-041: the `.chat-scroller` element ChatShell
+     * owns. Used as the IntersectionObserver `root` for the top/bottom/
+     * compaction sentinels so they measure against the inner scroller,
+     * not the viewport. Undefined falls back to the viewport (SSR / the
+     * brief pre-bind window). */
+    scrollRoot?: HTMLElement;
   }
   let {
     messages,
@@ -96,6 +102,7 @@
     pastReachedOldest = false,
     loadingOlderPast = false,
     onWindowSlide,
+    scrollRoot,
   }: Props = $props();
   let rawMessages = $derived(messages ?? chat.messages);
   let readonly = $derived(messages !== undefined);
@@ -377,7 +384,7 @@
       // batch has time to mount + anchor-restore in. Without this
       // headroom the user briefly sees a hard stop at the top while
       // the new chunk renders.
-      { rootMargin: "600px 0px 0px 0px" },
+      { root: scrollRoot ?? null, rootMargin: "600px 0px 0px 0px" },
     );
     obs.observe(el);
     topSentinelObserver = obs;
@@ -464,7 +471,7 @@
       // intersection so the window starts mounting newer messages
       // ~200px before the user's scroll actually reaches the visual
       // bottom — same headroom strategy as the top-sentinel.
-      { rootMargin: "0px 0px 200px 0px" },
+      { root: scrollRoot ?? null, rootMargin: "0px 0px 200px 0px" },
     );
     obs.observe(sentinel);
     return () => obs.disconnect();
@@ -561,7 +568,10 @@
     const obs = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
-          const rootBottom = e.rootBounds?.bottom ?? window.innerHeight;
+          const rootBottom =
+            e.rootBounds?.bottom ??
+            scrollRoot?.getBoundingClientRect().bottom ??
+            window.innerHeight;
           chat.viewingPreCompaction = isViewingPreCompaction({
             dividerTop: e.boundingClientRect.top,
             viewportBottom: rootBottom,
@@ -572,7 +582,7 @@
       // Negative top inset: the region under the floating chat header is
       // treated as out-of-view so a divider occluded by the header still
       // reports as not-intersecting (matching the top/bottom sentinels).
-      { threshold: 0, rootMargin: `${-headerInset}px 0px 0px 0px` },
+      { root: scrollRoot ?? null, threshold: 0, rootMargin: `${-headerInset}px 0px 0px 0px` },
     );
     obs.observe(el);
     return () => {

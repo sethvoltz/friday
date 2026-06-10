@@ -273,42 +273,51 @@ describe("iOS standalone PWA regime (innerHeight shrinks WITH vv)", () => {
   });
 });
 
-describe("URL-bar collapse noise (the #230 regression class)", () => {
-  it("vv.resize with NO field focused produces zero movement and zero extra writes", () => {
+describe("unfocused viewport changes (inner-scroller: geometry always tracked)", () => {
+  it("writes the live geometry even with no field focused, but never toggles the keyboard-open class", () => {
+    // ADR-041 contract: the column tracks the visual viewport in every
+    // state (so the composer clears the iOS URL bar when closed), so the
+    // anchor vars ARE written unfocused — but the keyboard-open CLASS
+    // (which drives --kb-safe-bottom) only toggles on focus.
     const h = makeHost({ innerHeight: 844, vvHeight: 780 });
     const t = createKeyboardInsetTracker(h.host);
 
     t.onViewportChange();
     h.flushRaf();
-    expect(h.writes).toEqual([["--kb-inset", "0px"]]);
+    expect(h.lastAnchor()).toBe("780px");
+    expect(h.classToggles).toEqual([]);
 
-    // Repeated collapse/expand cycles during scroll: geometry changes,
-    // but unfocused → pinned to 0px, and the change-guard means NO
-    // further style writes at all.
-    for (const vvH of [844, 790, 844, 760]) {
+    // Each distinct viewport height produces a fresh anchor write; the
+    // change-guard means repeats don't.
+    for (const vvH of [800, 800, 760]) {
       h.state.vvHeight = vvH;
       t.onViewportChange();
       h.flushRaf();
     }
-    expect(h.writes).toHaveLength(1);
+    expect(h.lastAnchor()).toBe("760px");
     expect(h.classToggles).toEqual([]);
   });
 });
 
 describe("blur settle + dismissal", () => {
-  it("blur → settle window → inset 0, class removed, #297779 nudge fired", () => {
+  it("blur → settle window → class removed + #297779 nudge; geometry re-measured to the grown-back viewport (NOT cleared)", () => {
     const h = makeHost({ innerHeight: 844, vvHeight: 526 });
     const t = createKeyboardInsetTracker(h.host);
     t.onFocusIn(fakeTextarea());
     h.flushRaf();
-    expect(h.lastVar()).toBe("318px");
+    expect(h.lastAnchor()).toBe("526px");
 
     h.state.activeElement = fakeEl("BODY");
     t.onFocusOut();
     // Before the settle window elapses nothing has moved.
-    expect(h.lastVar()).toBe("318px");
+    expect(h.lastAnchor()).toBe("526px");
+    // Keyboard dismissed: the visual viewport grows back.
+    h.state.vvHeight = 844;
     h.flushTimers();
-    expect(h.lastVar()).toBe("0px");
+    h.flushRaf();
+    // Class removed, nudge fired, and the anchor re-measured to the
+    // grown-back viewport — NOT cleared (the column stays sized to it).
+    expect(h.lastAnchor()).toBe("844px");
     expect(h.classToggles).toEqual([true, false]);
     expect(h.nudgeCount()).toBe(1);
   });
@@ -364,7 +373,7 @@ describe("composer anchor (--vv-bottom-y)", () => {
     }
   });
 
-  it("is removed (not zeroed) on settled blur so the CSS falls back to the static bottom anchor", () => {
+  it("stays current across a blur (inner-scroller: the column is sized to the visual viewport even keyboard-closed)", () => {
     const h = makeHost({ innerHeight: 844, vvHeight: 526 });
     const t = createKeyboardInsetTracker(h.host);
     t.onFocusIn(fakeTextarea());
@@ -372,8 +381,19 @@ describe("composer anchor (--vv-bottom-y)", () => {
     expect(h.lastAnchor()).toBe("526px");
     h.state.activeElement = fakeEl("BODY");
     t.onFocusOut();
+    h.state.vvHeight = 844; // keyboard dismissed → viewport grows back
     h.flushTimers();
-    expect(h.lastAnchor()).toBe("");
+    h.flushRaf();
+    expect(h.lastAnchor()).toBe("844px");
+  });
+
+  it("init() sizes the column before any focus", () => {
+    const h = makeHost({ innerHeight: 844, vvHeight: 800 });
+    const t = createKeyboardInsetTracker(h.host);
+    t.init();
+    h.flushRaf();
+    expect(h.lastAnchor()).toBe("800px");
+    expect(h.classToggles).toEqual([]); // no keyboard, no class
   });
 });
 

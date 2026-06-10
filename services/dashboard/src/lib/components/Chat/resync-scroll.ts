@@ -53,35 +53,27 @@ export interface ResyncChaseHandle {
 const CANCEL_EVENTS = ["wheel", "touchmove", "keydown"] as const;
 
 /**
- * `ResyncChaseTarget` adapter for the document scroller (FRI-160). With
- * the chat transcript inert and the document as the only scroller, the
- * scroll surface splits across two globals: position lives on `window`
- * (`scrollY` / `scrollTo`), content height on
- * `document.documentElement.scrollHeight`, and direct-user-input cancel
- * events (wheel / touchmove / keydown) fire on `window`. This adapter
- * folds that split back into the element-shaped target the chase loop
- * expects — `chaseScrollBottom` itself is unchanged.
- *
- * SSR safety: touches `window`/`document` when CALLED, so construct it
- * lazily in client-only code (ChatShell's `startResyncChase`), never at
- * module top level.
+ * `ResyncChaseTarget` adapter for an INNER scroller element
+ * (ADR-041). scrollTop/scrollHeight and the
+ * cancel-input events all live on the one element, so this is a thin
+ * pass-through — the element already has the shape the chase loop wants.
  */
-export function makeWindowChaseTarget(): ResyncChaseTarget {
+export function makeElementChaseTarget(el: HTMLElement): ResyncChaseTarget {
   return {
     get scrollTop() {
-      return window.scrollY;
+      return el.scrollTop;
     },
     set scrollTop(v: number) {
-      window.scrollTo(0, v);
+      el.scrollTop = v;
     },
     get scrollHeight() {
-      return document.documentElement.scrollHeight;
+      return el.scrollHeight;
     },
     addEventListener(type, listener, options) {
-      window.addEventListener(type, listener, options);
+      el.addEventListener(type, listener, options);
     },
     removeEventListener(type, listener) {
-      window.removeEventListener(type, listener);
+      el.removeEventListener(type, listener);
     },
   };
 }
