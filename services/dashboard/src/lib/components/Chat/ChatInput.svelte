@@ -1345,6 +1345,9 @@
        wrap. Concentric icon-button radius (above) is computed from this. */
     padding: 0.5rem;
     background: transparent;
+    /* Isolate layout and paint so iOS WebKit doesn't tear the compositing
+       layer when the textarea resizes, which is what causes the blank-out. */
+    contain: layout paint;
   }
   textarea {
     flex: 1;
@@ -1362,10 +1365,12 @@
     color: var(--text-primary);
     font-family: var(--font-sans);
     font-size: 0.9rem;
-    /* iOS WebKit: forces a GPU compositing layer, preventing the repaint
-       bug where textarea content goes blank as the element grows tall. */
+    /* iOS WebKit: forces a GPU compositing layer and keeps it promoted,
+       preventing the repaint bug where textarea content goes blank as
+       the element grows tall due to layout recalculation. */
     -webkit-overflow-scrolling: touch;
     transform: translateZ(0);
+    will-change: transform;
   }
   textarea:focus { outline: none; }
   .autocomplete {

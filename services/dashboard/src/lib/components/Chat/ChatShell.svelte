@@ -619,6 +619,10 @@
   .chat-input-floating {
     position: fixed;
     bottom: calc(1rem + var(--kb-safe-bottom, 0px));
+    /* Lift above the keyboard on iOS. --vv-offset-bottom is the gap between
+       the visual viewport bottom and the layout viewport bottom, computed
+       from visualViewport in +layout.svelte while a text field is focused. */
+    transform: translateY(calc(-1 * var(--vv-offset-bottom, 0px)));
     left: var(--content-left);
     right: var(--page-gutter);
     background: var(--header-float-bg);
