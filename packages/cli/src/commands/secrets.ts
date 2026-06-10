@@ -35,11 +35,11 @@ import {
   schema,
   unlockVault,
   upsertSecret,
-  validateBijection,
   writeVaultAndMeta,
 } from "@friday/shared";
 import type { AgentTypeName, SecretMeta, SecretMode } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
+import { buildSecretRows, renderSecretsList } from "./secrets-format.js";
 
 function parseDotEnv(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -146,20 +146,12 @@ export const secretsCommand = defineCommand({
         const vaultKeys = unlock.ok
           ? new Set(Object.keys(unlock.cache.payload.secrets))
           : new Set<string>();
-        const bio = validateBijection(meta, vaultKeys);
-        for (const s of meta.secrets) {
-          if (args.app && s.app !== args.app) continue;
-          const broken = !vaultKeys.has(s.app ? `apps/${s.app}/${s.name}` : s.name);
-          const flags = [
-            s.mode,
-            s.app ? `app=${s.app}` : null,
-            s.daemon ? "daemon" : null,
-            s.agents?.length ? `agents=${s.agents.join(",")}` : null,
-            broken || (!bio.ok && bio.orphanMeta.length) ? pc.red("broken") : null,
-          ]
-            .filter(Boolean)
-            .join(" ");
-          console.log(`  ${s.name}  ${flags}`);
+        const rows = buildSecretRows(meta.secrets, vaultKeys, {
+          unlocked: unlock.ok,
+          app: args.app as string | undefined,
+        });
+        for (const line of renderSecretsList(rows, { tty: output.isTTY === true })) {
+          console.log(line);
         }
       },
     }),
