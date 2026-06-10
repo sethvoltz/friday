@@ -74,7 +74,10 @@ function makeHost(initial: {
       timerQueue.clear();
       for (const cb of pending) cb();
     },
-    lastVar: () => writes.at(-1)?.[1],
+    /** Latest --kb-inset write (the padding/pill offset). */
+    lastVar: () => writes.filter((w) => w[0] === "--kb-inset").at(-1)?.[1],
+    /** Latest --vv-bottom-y write (the composer anchor; "" = removed). */
+    lastAnchor: () => writes.filter((w) => w[0] === "--vv-bottom-y").at(-1)?.[1],
   };
 }
 
@@ -281,8 +284,39 @@ describe("blur settle + dismissal", () => {
   });
 });
 
+describe("composer anchor (--vv-bottom-y)", () => {
+  it("equals vv.offsetTop + vv.height and is COMPLETELY innerHeight-independent", () => {
+    // iOS 26 bottom-bar Safari misreports innerHeight with the keyboard
+    // open. The composer anchor must not care: same vv numbers, wildly
+    // different innerHeight claims, same anchor.
+    for (const lyingInnerHeight of [526, 844, 1000, 5000]) {
+      const h = makeHost({
+        innerHeight: lyingInnerHeight,
+        vvHeight: 430,
+        vvOffsetTop: 100,
+      });
+      const t = createKeyboardInsetTracker(h.host);
+      t.onFocusIn(fakeTextarea());
+      h.flushRaf();
+      expect(h.lastAnchor()).toBe("530px");
+    }
+  });
+
+  it("is removed (not zeroed) on settled blur so the CSS falls back to the static bottom anchor", () => {
+    const h = makeHost({ innerHeight: 844, vvHeight: 526 });
+    const t = createKeyboardInsetTracker(h.host);
+    t.onFocusIn(fakeTextarea());
+    h.flushRaf();
+    expect(h.lastAnchor()).toBe("526px");
+    h.state.activeElement = fakeEl("BODY");
+    t.onFocusOut();
+    h.flushTimers();
+    expect(h.lastAnchor()).toBe("");
+  });
+});
+
 describe("write hygiene", () => {
-  it("identical geometry across events produces exactly one style write", () => {
+  it("identical geometry across events produces exactly one write per var", () => {
     const h = makeHost({ innerHeight: 844, vvHeight: 526 });
     const t = createKeyboardInsetTracker(h.host);
     t.onFocusIn(fakeTextarea());
@@ -291,7 +325,10 @@ describe("write hygiene", () => {
     h.flushRaf();
     t.onViewportChange();
     h.flushRaf();
-    expect(h.writes).toEqual([["--kb-inset", "318px"]]);
+    expect(h.writes).toEqual([
+      ["--vv-bottom-y", "526px"],
+      ["--kb-inset", "318px"],
+    ]);
   });
 
   it("burst of events inside one frame coalesces to a single measure", () => {
@@ -302,7 +339,10 @@ describe("write hygiene", () => {
     t.onViewportChange();
     t.onViewportChange();
     h.flushRaf();
-    expect(h.writes).toEqual([["--kb-inset", "318px"]]);
+    expect(h.writes).toEqual([
+      ["--vv-bottom-y", "526px"],
+      ["--kb-inset", "318px"],
+    ]);
   });
 
   it("fractional viewport heights round to integer px", () => {

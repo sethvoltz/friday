@@ -130,29 +130,45 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
   let rafHandle: number | null = null;
   let blurTimer: ReturnType<typeof setTimeout> | null = null;
   let settleProbes: Array<ReturnType<typeof setTimeout>> = [];
-  let lastWritten = "";
+  const lastWritten = new Map<string, string>();
 
-  function write(value: string) {
-    if (value === lastWritten) return;
-    lastWritten = value;
-    host.setVar("--kb-inset", value);
+  // Change-guarded var write. Empty string means "remove the property"
+  // (mapped to style.removeProperty by the browser wiring).
+  function write(name: string, value: string) {
+    if ((lastWritten.get(name) ?? "") === value) return;
+    lastWritten.set(name, value);
+    host.setVar(name, value);
+  }
+
+  function clearVars() {
+    write("--kb-inset", "0px");
+    write("--vv-bottom-y", "");
   }
 
   function measure() {
     rafHandle = null;
-    if (!fieldFocused) {
-      write("0px");
-      return;
-    }
     const vv = host.viewport();
-    if (!vv) {
-      write("0px");
+    if (!fieldFocused || !vv) {
+      clearVars();
       return;
     }
+    // The y-coordinate of the visual viewport's bottom edge in LAYOUT
+    // viewport coordinates — where the keyboard's top edge sits. This
+    // is the composer's anchor while the keyboard is up: it is built
+    // from visualViewport numbers ONLY. window.innerHeight is
+    // deliberately not an input — iOS 26 bottom-bar Safari misreports
+    // it with the keyboard open, which made every innerHeight-derived
+    // lift land the composer mid-screen.
+    const vvBottom = Math.round(vv.offsetTop + vv.height);
+    write("--vv-bottom-y", `${vvBottom}px`);
+    // The approximate obstruction of the layout viewport's bottom strip
+    // — still innerHeight-based, but consumed only by the transcript's
+    // scroll-headroom padding and the jump pill, where an overestimate
+    // costs blank scroll slack, not visible misplacement.
     const innerH = host.innerHeight();
-    const raw = innerH - vv.height - vv.offsetTop;
+    const raw = innerH - vvBottom;
     const inset = Math.round(Math.min(Math.max(0, raw), innerH * MAX_INSET_FRACTION));
-    write(`${inset}px`);
+    write("--kb-inset", `${inset}px`);
   }
 
   function queueMeasure() {
@@ -198,7 +214,7 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
         clearSettleProbes();
         fieldFocused = false;
         host.setKeyboardOpenClass(false);
-        write("0px");
+        clearVars();
         host.nudgeScroll();
       }, FOCUS_SETTLE_MS);
     },
@@ -219,7 +235,7 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
       }
       fieldFocused = false;
       host.setKeyboardOpenClass(false);
-      write("0px");
+      clearVars();
     },
   };
 }
@@ -237,7 +253,8 @@ export function startKeyboardInsetTracker(): () => void {
       return vv ? { height: vv.height, offsetTop: vv.offsetTop } : null;
     },
     activeElement: () => document.activeElement,
-    setVar: (name, value) => root.style.setProperty(name, value),
+    setVar: (name, value) =>
+      value === "" ? root.style.removeProperty(name) : root.style.setProperty(name, value),
     setKeyboardOpenClass: (on) => root.classList.toggle("keyboard-open", on),
     nudgeScroll: () => {
       window.scrollBy(0, -1);
