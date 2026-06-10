@@ -13,6 +13,14 @@
   let _open = $state(false);
   let open = $derived(status === "running" ? true : _open);
   let hasText = $derived(text.length > 0);
+
+  let bodyEl: HTMLPreElement | undefined = $state();
+
+  $effect(() => {
+    if (status === "running" && text && bodyEl) {
+      bodyEl.scrollTop = bodyEl.scrollHeight;
+    }
+  });
 </script>
 
 <div class="thinking-block">
@@ -39,7 +47,7 @@
     <span class="redacted-badge">Redacted by Anthropic</span>
   {:else if open}
     {#if hasText}
-      <pre class="thinking-body">{text}{#if showBall && status === "running"}<StreamingBall />{/if}</pre>
+      <pre class="thinking-body" bind:this={bodyEl}>{text}{#if showBall && status === "running"}<StreamingBall />{/if}</pre>
     {:else if status === "aborted"}
       <div class="thinking-empty">Thinking was stopped before any content was produced.</div>
     {:else if status === "error"}
