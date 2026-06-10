@@ -59,21 +59,23 @@ Friday is mobile-first, not mobile-responsive-as-an-afterthought. Every page is 
 - Standard `<input type="file" multiple>` for gallery picker.
 - HEIC files are converted to PNG by the upload handler (ADR-007 + `attachments.ts`); the dashboard doesn't care about the source format.
 
-## iOS soft keyboard — visualViewport pinning
+## iOS soft keyboard — keyboard-height tracking
 
 iOS raises the soft keyboard asynchronously after a text field is focused. `position: fixed` elements use the **layout viewport** as their reference, which does not shrink when the keyboard opens — so a `bottom: 0` composer bar stays pinned to the bottom of the layout viewport and ends up hidden behind the keyboard.
 
-Fix implemented in `b32595b`:
+Current implementation:
 
-- **`--vv-offset-bottom`** (set in `+layout.svelte` `vvUpdate`): `max(0, window.innerHeight - (vv.offsetTop + vv.height))`. This measures the gap between the bottom of the visual viewport and the bottom of the layout viewport — exactly where the keyboard sits. The simpler `window.innerHeight - vv.height` formula doesn't work in iOS PWA standalone because `window.innerHeight` shrinks together with `vv.height` when the keyboard opens, keeping the delta near-zero. Set to `0` when no text field is focused so scroll animations don't reposition the composer.
-- **`.chat-input-floating`** in `ChatShell.svelte` applies `transform: translateY(calc(-1 * var(--vv-offset-bottom, 0px)))` to lift the composer above the keyboard. `transform` works in the layout-viewport coordinate system, so this precisely counteracts the overlap.
+- **Viewport meta** (`app.html`): `interactive-widget=resizes-content` — iOS ignores this hint; Android Chrome gets a free keyboard-shrinks-layout fix with no code changes.
+- **`--kb-h`** (set by `setKb` in `+layout.svelte`): `max(0, window.innerHeight - vv.height)`. `vv.height` is scroll-stable — it only changes when the keyboard opens or closes, not on every scroll frame. Cleared to `0px` when no text field is focused.
+- **`.chat-input-floating`** in `ChatShell.svelte` uses `bottom: calc(1rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px))` to lift the composer above the keyboard. `.jump-to-bottom-wrap` bottom and `.chat-transcript` padding-bottom include `--kb-h` as well so the whole layout shifts up together.
+- **Header**: `position: fixed; top: 1rem`. No JS translation needed — iOS automatically pins `position: fixed` elements against the visual viewport top, so the header stays in place as the keyboard opens.
 - **`scrollIntoView` on focus** (`ChatInput.svelte`): fires after a 100ms delay so the keyboard has begun raising before we scroll. Uses `behavior: "instant"` — `behavior: "smooth"` is unreliable on WebKit (bug #238497).
 
-`vvUpdate` is wired to `visualViewport` `resize` and `focusin`/`focusout` on the document. The `resize` handler is deferred via `requestAnimationFrame` (`vvUpdateDeferred`) because iOS may fire `resize` before `vv.offsetTop` has settled — the rAF ensures the formula reads the final value. `focusin`/`focusout` stay immediate so blur resets the offset to 0 without a frame of delay. Subsequent user scrolling does not move the header or composer.
+`setKb` is wired to `visualViewport` `resize`, `focusin`, and `focusout` (all direct — no rAF defer). The `resize` event is the scroll-stable signal for keyboard open/close; `focusin`/`focusout` ensure `--kb-h` resets to `0px` when focus leaves a text field even if no resize fires.
 
 ## Mobile Send/Stop: `mousedown` blur suppression
 
-On iOS, `mousedown` on any non-input element causes the currently-focused textarea to blur before `click` fires. For the Send and Stop buttons this means: tap → textarea blurs → `vvUpdate` resets `--vv-offset-bottom` to 0 → composer snaps down → by the time `click` fires, the button has shifted and the event may misfire.
+On iOS, `mousedown` on any non-input element causes the currently-focused textarea to blur before `click` fires. For the Send and Stop buttons this means: tap → textarea blurs → `setKb` resets `--kb-h` to 0px → composer snaps down → by the time `click` fires, the button has shifted and the event may misfire.
 
 Both the Send and Stop buttons carry `onmousedown={(e) => e.preventDefault()}`. `preventDefault` on `mousedown` stops the browser from transferring focus away from the textarea, suppressing the blur, without blocking the subsequent `click` — iOS synthesizes `click` from `touchstart`/`touchend` independently of `mousedown`.
 

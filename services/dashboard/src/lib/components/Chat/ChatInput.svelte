@@ -883,13 +883,16 @@
       textarea.style.height = "auto";
       return;
     }
-    // Cap at roughly half the viewport, rounded down to a whole line count.
-    const maxLines = Math.max(1, Math.floor((window.innerHeight * 0.5 - padY - borderY) / lineH));
+    const isCoarsePointer = window.matchMedia("(pointer: coarse)").matches;
+    const viewportH = window.visualViewport?.height ?? window.innerHeight;
+    const targetH = isCoarsePointer ? viewportH * 0.35 : window.innerHeight * 0.5;
+    const maxLines = Math.max(1, Math.floor((targetH - padY - borderY) / lineH));
     textarea.style.height = "auto";
     const contentH = textarea.scrollHeight - padY;
     const rawLines = contentH / lineH;
     const lines = Math.min(Math.max(1, Math.ceil(rawLines - 0.05)), maxLines);
     textarea.style.height = lines * lineH + padY + borderY + "px";
+    textarea.scrollTop = textarea.scrollHeight;
   }
 </script>
 
