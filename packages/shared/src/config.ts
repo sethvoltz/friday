@@ -387,8 +387,13 @@ export function resolveDashboardPort(cfg: FridayConfig): number {
 
 export const DEFAULT_CONFIG: FridayConfig = {
   model: "claude-opus-4-7",
-  daemonPort: PROD_DAEMON_PORT,
-  dashboardPort: PROD_DASHBOARD_PORT,
+  // daemonPort / dashboardPort are deliberately ABSENT: they resolve via
+  // resolveDaemonPort/resolveDashboardPort (`cfg.<x>Port ?? PROD_<X>_PORT`),
+  // so shipping them as defaults is redundant. Worse, `loadConfig()` does
+  // `{...DEFAULT_CONFIG, ...parsed}`, so any command that round-trips
+  // loadConfig() → writeConfig() would re-persist them into config.json —
+  // re-introducing the exact rows `friday doctor` flags as stale every time a
+  // user deletes them. Leave them out; only an explicit user override lands.
   sseKeepaliveSec: 20,
   workerMemoryBudgetMb: 2048,
   mcpServers: [],
