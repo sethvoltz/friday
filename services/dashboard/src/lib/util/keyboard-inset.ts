@@ -74,8 +74,15 @@ const MAX_INSET_FRACTION = 0.6;
 export interface KeyboardInsetHost {
   /** window.innerHeight at read time. */
   innerHeight(): number;
-  /** visualViewport geometry at read time; null when the API is absent. */
-  viewport(): { height: number; offsetTop: number } | null;
+  /** visualViewport geometry at read time; null when the API is absent.
+   * pageTop (vv top in DOCUMENT coordinates), NOT offsetTop: on-device
+   * telemetry (iOS 26.5 Safari) showed `vv.offsetTop` returning stale
+   * values — claiming 343/441px pans while `pageTop − scrollY` (which
+   * equals offsetTop by definition) read 0 in the same snapshot. The
+   * pan is derived from the coherent pair instead. */
+  viewport(): { height: number; pageTop: number } | null;
+  /** window.scrollY at read time (pan derivation, see viewport()). */
+  scrollY(): number;
   /** The element currently holding focus (document.activeElement). */
   activeElement(): Element | null;
   /** Write a custom property on :root. */
@@ -158,23 +165,25 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
       clearVars();
       return;
     }
-    // On-device telemetry (iOS 26.5 Safari, bottom URL bar) showed the
-    // SAME session flipping between two reporting modes while the
-    // keyboard is up:
-    //   Mode A (overlay): innerHeight stays full (796), vv.height
-    //     shrinks (453), offsetTop pans 0..343.
-    //   Mode B (resized, mid-scroll): innerHeight SHRINKS to ≈vv.height
-    //     (355) but offsetTop retains a stale pan (441) — geometrically
-    //     impossible (vv bottom 796 > layout bottom 355).
-    // The fix is to clamp the pan into the only range that is
-    // geometrically possible, 0..(innerHeight − vv.height). In Mode A
-    // the clamp never binds (the real pan range is exactly that); in
-    // Mode B it collapses the garbage pan to 0, which lands the anchor
-    // on the resized layout bottom — exactly where a static bottom
-    // anchor would sit, which is correct in a resized layout viewport.
+    // Pan derivation — two layers of defense against iOS 26.5's broken
+    // reporting (all observed in on-device telemetry):
+    //   1. `vv.offsetTop` returns STALE values (claims 343/441px pans
+    //      while `pageTop − scrollY`, its definition, reads 0 in the
+    //      same snapshot). The pan is therefore derived from the
+    //      coherent (pageTop, scrollY) pair, never read from offsetTop.
+    //   2. The same sessions flip between an overlay mode (innerHeight
+    //      796, vv 453) and a mid-scroll resized mode (innerHeight 355
+    //      ≈ vv 355); any pan that would push the vv bottom past the
+    //      layout bottom is geometrically impossible, so the pan is
+    //      clamped to 0..(innerHeight − vv.height). In the overlay mode
+    //      the clamp never binds (that range IS the real pan range); in
+    //      the resized mode it collapses to 0, landing the anchor on
+    //      the resized layout bottom — exactly where a static bottom
+    //      anchor sits, which is correct there.
     const innerH = host.innerHeight();
     const maxPan = Math.max(0, innerH - vv.height);
-    const vvTop = Math.round(Math.min(Math.max(0, vv.offsetTop), maxPan));
+    const rawPan = vv.pageTop - host.scrollY();
+    const vvTop = Math.round(Math.min(Math.max(0, rawPan), maxPan));
     const vvBottom = Math.round(vvTop + vv.height);
     // Anchors for the fixed bars while the keyboard is up: the header /
     // agent dropdown pin under the visual viewport's top edge, the
@@ -273,8 +282,9 @@ export function startKeyboardInsetTracker(): () => void {
     innerHeight: () => window.innerHeight,
     viewport: () => {
       const vv = window.visualViewport;
-      return vv ? { height: vv.height, offsetTop: vv.offsetTop } : null;
+      return vv ? { height: vv.height, pageTop: vv.pageTop } : null;
     },
+    scrollY: () => window.scrollY,
     activeElement: () => document.activeElement,
     setVar: (name, value) =>
       value === "" ? root.style.removeProperty(name) : root.style.setProperty(name, value),

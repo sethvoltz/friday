@@ -339,10 +339,27 @@
         setTimeout(() => post(`+${ms}ms`), ms),
       );
     };
+    // Also snapshot ~400ms after viewport activity settles while a
+    // field is focused — captures the scrolled-with-keyboard-up states
+    // the focus-relative probes miss.
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
+    const onVvActivity = () => {
+      if (!isTextEntryElement(document.activeElement)) return;
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => post("vv-settle"), 400);
+    };
+    const vvDbg = window.visualViewport;
     document.addEventListener("focusin", onFocusIn);
+    vvDbg?.addEventListener("resize", onVvActivity);
+    vvDbg?.addEventListener("scroll", onVvActivity);
+    window.addEventListener("resize", onVvActivity);
     return () => {
       for (const t of timers) clearTimeout(t);
+      clearTimeout(settleTimer);
       document.removeEventListener("focusin", onFocusIn);
+      vvDbg?.removeEventListener("resize", onVvActivity);
+      vvDbg?.removeEventListener("scroll", onVvActivity);
+      window.removeEventListener("resize", onVvActivity);
     };
   });
 
@@ -621,7 +638,7 @@
 {#if kbDebug}
   <!-- TEMPORARY debug HUD (delete before merge) -->
   <div class="kb-debug" aria-hidden="true">
-    <div>build: dbg-3</div>
+    <div>build: dbg-4</div>
     <div>--vv-top-y: {dbg.vvTopY}</div>
     <div>innerH: {dbg.ih}</div>
     <div>vv.h: {dbg.vvh}</div>
@@ -800,16 +817,16 @@
     top: var(--vv-bottom-y, 100dvh);
     bottom: auto;
     transform: translateY(calc(-100% - 1rem));
-    /* Smooths the one-frame anchor lag while iOS pans the visual
-       viewport during keyboard-up scrolling — follow, not stutter. */
-    transition: top 200ms ease-out;
+    /* NO transition on top — a transition smears every anchor
+       correction over its duration, which reads as the composer lazily
+       sliding around during keyboard-up scrolling. Corrections land
+       same-frame or not at all. */
   }
   /* Same treatment as the header (+layout.svelte): pin under the visual
      viewport's top edge while the keyboard is up so the agent dropdown
      doesn't slide out of view as iOS pans. */
   :global(:root.keyboard-open) .chat-sidebar-floating {
     top: calc(var(--chat-top) + var(--vv-top-y, 0px));
-    transition: top 200ms ease-out;
   }
 
   .readonly-banner {

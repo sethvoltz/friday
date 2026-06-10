@@ -583,15 +583,14 @@
     gap: 1rem;
   }
   /* Soft keyboard up: pin under the VISUAL viewport's top edge
-     (--vv-top-y = clamped vv.offsetTop, written by the keyboard-inset
-     tracker). With the keyboard open, iOS pans the visual viewport
-     inside the taller layout viewport as the user scrolls; a bar fixed
-     to the layout viewport slides half out of view. The short top
-     transition turns the one-frame tracking lag into a follow instead
-     of a stutter. Desktop focus resolves --vv-top-y to 0 — no change. */
+     (--vv-top-y = clamped pan derived from vv.pageTop − scrollY,
+     written by the keyboard-inset tracker). With the keyboard open,
+     iOS pans the visual viewport inside the taller layout viewport as
+     the user scrolls; a bar fixed to the layout viewport slides half
+     out of view. No transition — it would smear corrections into a
+     visible slide. Desktop focus resolves --vv-top-y to 0 — no change. */
   :global(:root.keyboard-open) .app-header {
     top: calc(1rem + var(--vv-top-y, 0px));
-    transition: top 200ms ease-out;
   }
 
   .header-left { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }

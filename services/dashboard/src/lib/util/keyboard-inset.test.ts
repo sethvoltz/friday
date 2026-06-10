@@ -13,17 +13,22 @@ import {
   type KeyboardInsetHost,
 } from "./keyboard-inset";
 
-/** Deterministic host: manual rAF + timer queues, recorded writes. */
+/** Deterministic host: manual rAF + timer queues, recorded writes.
+ * The pan is modeled as `vvPan` and exposed the way the tracker reads
+ * it — via pageTop (= scrollY + pan) and scrollY — because
+ * vv.offsetTop is deliberately not an input (stale on iOS 26.5). */
 function makeHost(initial: {
   innerHeight: number;
   vvHeight: number;
-  vvOffsetTop?: number;
+  vvPan?: number;
+  scrollY?: number;
   hasViewport?: boolean;
 }) {
   const state = {
     innerHeight: initial.innerHeight,
     vvHeight: initial.vvHeight,
-    vvOffsetTop: initial.vvOffsetTop ?? 0,
+    vvPan: initial.vvPan ?? 0,
+    scrollY: initial.scrollY ?? 0,
     hasViewport: initial.hasViewport ?? true,
     activeElement: null as Element | null,
   };
@@ -39,7 +44,8 @@ function makeHost(initial: {
   const host: KeyboardInsetHost = {
     innerHeight: () => state.innerHeight,
     viewport: () =>
-      state.hasViewport ? { height: state.vvHeight, offsetTop: state.vvOffsetTop } : null,
+      state.hasViewport ? { height: state.vvHeight, pageTop: state.scrollY + state.vvPan } : null,
+    scrollY: () => state.scrollY,
     activeElement: () => state.activeElement,
     setVar: (name, value) => writes.push([name, value]),
     setKeyboardOpenClass: (on) => classToggles.push(on),
@@ -139,7 +145,7 @@ describe("iOS Safari tab regime (innerHeight fixed, vv shrinks)", () => {
     // viewport — fires vv.scroll, no resize. Both bar anchors follow;
     // the padding inset is monotonic within the session (a padding that
     // shrinks mid-pan changes document height under the user's finger).
-    h.state.vvOffsetTop = 100;
+    h.state.vvPan = 100;
     t.onViewportChange();
     h.flushRaf();
     expect(h.lastAnchor()).toBe("626px");
@@ -147,7 +153,7 @@ describe("iOS Safari tab regime (innerHeight fixed, vv shrinks)", () => {
     expect(h.lastVar()).toBe("318px");
 
     // Fully panned to the layout-viewport bottom.
-    h.state.vvOffsetTop = 318;
+    h.state.vvPan = 318;
     t.onViewportChange();
     h.flushRaf();
     expect(h.lastAnchor()).toBe("844px");
@@ -172,7 +178,7 @@ describe("iOS 26.5 mode flips (replayed from on-device telemetry)", () => {
 
     // Mode A with reveal pan: vv pans fully (343 = ih − vvh). Anchor
     // rides to the layout bottom; sticky inset holds.
-    h.state.vvOffsetTop = 343;
+    h.state.vvPan = 343;
     t.onViewportChange();
     h.flushRaf();
     expect(h.lastAnchor()).toBe("796px");
@@ -186,7 +192,7 @@ describe("iOS 26.5 mode flips (replayed from on-device telemetry)", () => {
     // bottom anchor sits, correct in a resized layout viewport).
     h.state.innerHeight = 355;
     h.state.vvHeight = 355;
-    h.state.vvOffsetTop = 441;
+    h.state.vvPan = 441;
     t.onViewportChange();
     h.flushRaf();
     expect(h.lastTopAnchor()).toBe("0px");
@@ -196,7 +202,7 @@ describe("iOS 26.5 mode flips (replayed from on-device telemetry)", () => {
     // Back to Mode A settled (pan folded into scrollY by iOS).
     h.state.innerHeight = 796;
     h.state.vvHeight = 453;
-    h.state.vvOffsetTop = 0;
+    h.state.vvPan = 0;
     t.onViewportChange();
     h.flushRaf();
     expect(h.lastAnchor()).toBe("453px");
@@ -236,7 +242,7 @@ describe("iOS 26 bottom-bar Safari: layout viewport resizes AFTER the last vv ev
     h.flushRaf();
 
     h.state.vvHeight = 526;
-    h.state.vvOffsetTop = 100;
+    h.state.vvPan = 100;
     // Geometry settles silently — no further events of any kind. The
     // post-focus settle probes pick the change up on a timetable.
     h.flushTimers();
@@ -344,7 +350,7 @@ describe("composer anchor (--vv-bottom-y)", () => {
     // A geometrically possible pan passes through untouched regardless
     // of how large innerHeight claims to be...
     for (const innerHeight of [844, 1000, 5000]) {
-      const h = makeHost({ innerHeight, vvHeight: 430, vvOffsetTop: 100 });
+      const h = makeHost({ innerHeight, vvHeight: 430, vvPan: 100 });
       const t = createKeyboardInsetTracker(h.host);
       t.onFocusIn(fakeTextarea());
       h.flushRaf();
@@ -352,7 +358,7 @@ describe("composer anchor (--vv-bottom-y)", () => {
     }
     // ...while an impossible one (vv bottom would exceed the layout
     // bottom) collapses to the layout bottom itself.
-    const h = makeHost({ innerHeight: 430, vvHeight: 430, vvOffsetTop: 100 });
+    const h = makeHost({ innerHeight: 430, vvHeight: 430, vvPan: 100 });
     const t = createKeyboardInsetTracker(h.host);
     t.onFocusIn(fakeTextarea());
     h.flushRaf();
