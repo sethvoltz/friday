@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.5](https://github.com/sethvoltz/friday/compare/v1.18.4...v1.18.5) (2026-06-10)
+
+
+### Bug Fixes
+
+* **dashboard:** fix mobile keyboard layout bugs ([#228](https://github.com/sethvoltz/friday/issues/228)) ([a162b9a](https://github.com/sethvoltz/friday/commit/a162b9ae2cde38a5f6c05972559db9a57560e129))
+
 ## [1.18.4](https://github.com/sethvoltz/friday/compare/v1.18.3...v1.18.4) (2026-06-10)
 
 
