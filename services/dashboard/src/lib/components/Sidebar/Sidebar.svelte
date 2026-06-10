@@ -1050,7 +1050,7 @@
     flex-direction: column;
     /* Cap to viewport height minus header offset and a margin. The agents
        list above scrolls; the filters strip stays pinned at the bottom. */
-    max-height: calc(100vh - 8rem);
+    max-height: calc(100dvh - 8rem);
     background: var(--bg-card);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);

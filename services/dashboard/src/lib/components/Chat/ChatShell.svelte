@@ -18,6 +18,7 @@
     scrollByDelta,
     scrollToBottom,
   } from "$lib/components/Chat/doc-scroll";
+  import { isTextEntryElement } from "$lib/util/keyboard-inset";
   import { tick, untrack } from "svelte";
 
   interface Props {
@@ -262,6 +263,38 @@
   // Initial scroll-to-bottom + scroll-pin while streaming.
   $effect(() => {
     queueMicrotask(() => scrollToBottom());
+  });
+
+  // Soft-keyboard open/close shrinks/grows the visual viewport (in the
+  // standalone-PWA regime, the layout viewport itself — see
+  // $lib/util/keyboard-inset.ts for the regime split). If the user was
+  // pinned to the bottom, keep them there: without this, opening the
+  // keyboard hides the conversation tail behind it (standalone) or
+  // leaves the last message under the lifted composer after the
+  // transcript's --kb-inset padding grows (Safari tab). Gated on a
+  // focused text field so URL-bar collapse resizes during normal
+  // scrolling never issue scroll writes; the write itself re-checks the
+  // pin at landing time (same discipline as every other deferred write
+  // here).
+  $effect(() => {
+    if (readonly) return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+    let cancel: (() => void) | null = null;
+    const onVvResize = () => {
+      if (!isTextEntryElement(document.activeElement)) return;
+      if (!chat.pinnedToBottom) return;
+      cancel?.();
+      cancel = afterNextPaint(() => {
+        cancel = null;
+        if (chat.pinnedToBottom) scrollToBottom();
+      });
+    };
+    vv.addEventListener("resize", onVvResize);
+    return () => {
+      cancel?.();
+      vv.removeEventListener("resize", onVvResize);
+    };
   });
 
   $effect(() => {
@@ -594,7 +627,7 @@
     overflow-anchor: none;
     padding-top: var(--chat-top);
     /* Mirrors the floating input offset so the last message scrolls fully above it. */
-    padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px));
+    padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px) + var(--kb-inset, 0px));
     padding-left: var(--content-left);
     padding-right: var(--page-gutter);
   }
@@ -614,7 +647,7 @@
 
   .chat-input-floating {
     position: fixed;
-    bottom: calc(1rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px));
+    bottom: calc(1rem + var(--kb-safe-bottom, 0px) + var(--kb-inset, 0px));
     left: var(--content-left);
     right: var(--page-gutter);
     background: var(--header-float-bg);
@@ -643,7 +676,7 @@
      scrolls / receives clicks for the chat itself. */
   .jump-to-bottom-wrap {
     position: fixed;
-    bottom: calc(var(--chat-input-h, 6rem) + 3rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px));
+    bottom: calc(var(--chat-input-h, 6rem) + 3rem + var(--kb-safe-bottom, 0px) + var(--kb-inset, 0px));
     left: var(--content-left);
     right: var(--page-gutter);
     display: flex;
@@ -776,6 +809,6 @@
   }
 
   @media (max-width: 640px) {
-    .chat-input-floating { bottom: calc(0.5rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px)); }
+    .chat-input-floating { bottom: calc(0.5rem + var(--kb-safe-bottom, 0px) + var(--kb-inset, 0px)); }
   }
 </style>

@@ -1432,6 +1432,42 @@ The document/window is the single scroller on the chat route, exactly like every
 
 A future pass that notices "chat isn't a self-contained scroller anymore" and restores a nested or fixed overlay scroller would reintroduce the mobile scroll-routing bug this ADR exists to kill. The inert `.chat-transcript` + document scroll is deliberate.
 
+## ADR-040 — Soft-keyboard geometry: one focus-gated visualViewport tracker owns `--kb-inset`
+
+**Status:** accepted (2026-06-10)
+
+### Context
+
+ADR-039 made the document the chat scroller, with the header, agent dropdown, composer, and pills as `position: fixed` bars. `position: fixed` anchors to the **layout viewport**, and the iOS soft keyboard interacts with the layout viewport differently per regime: in a Safari tab the keyboard is an overlay (`innerHeight` constant, `visualViewport` shrinks and can pan), while in a standalone home-screen PWA the layout viewport itself resizes (`innerHeight` shrinks with `vv.height`). Five successive fix commits (#220, #222, #224, #228, #230) each patched one regime's symptom with a different formula or listener set and regressed the other regime — one-shot measurements read the pre-keyboard geometry (the keyboard animates over ~250ms after `focusin`); height-delta keyboard detection reads 0 in standalone; ungated `vv.resize` listeners fired on URL-bar collapse and bounced the composer mid-scroll; counter-translating the header by `--vv-offset-top` made it bounce.
+
+Platform escape hatches verified absent (June 2026): iOS does not support `interactive-widget=resizes-content` (WebKit #259770 open, nothing in Safari 26.x/27 beta), nor the VirtualKeyboard API / `env(keyboard-inset-height)` (WebKit #230225 open). `dvh` units are spec-blind to the keyboard. `position: sticky` is equally layout-viewport-anchored, so an in-flow sticky composer does not stay above the keyboard either.
+
+### Decision
+
+One tracker (`$lib/util/keyboard-inset.ts`, a dependency-injected state machine with stateful unit tests) owns all soft-keyboard geometry:
+
+- **Presence is focus-derived** (`focusin`/`focusout` on text-entry elements, debounced blur), never geometry-derived. No field focused → inset pinned to `0px`, so URL-bar viewport noise cannot move anything.
+- **Magnitude is viewport-derived**: `--kb-inset = max(0, innerHeight − vv.height − vv.offsetTop)`, updated from `vv.resize` AND `vv.scroll` while focused. The formula yields the keyboard height in the Safari-tab regime and ≈0 in the standalone/Android regimes — one formula, no regime sniffing.
+- **Reads rAF-coalesced** (WebKit #237851), **writes change-guarded and rounded** (no thrash), **clamped** to 60% of `innerHeight` (garbage mid-transition frames).
+- The tracker also owns the `keyboard-open` root class (zeroes `--kb-safe-bottom` — the keyboard covers the home-indicator zone) and the WebKit #297779 post-dismissal nudge.
+- **The header and agent dropdown get no keyboard JS at all.** They pan off-screen with the layout viewport while typing in a Safari tab — standard platform behavior — and stay put in standalone/Android.
+- ChatShell re-pins to the bottom on focused `vv.resize` when already pinned, so opening the keyboard never hides the conversation tail.
+
+Consumers: `.chat-input-floating` bottom, `.jump-to-bottom-wrap` bottom, `.chat-transcript` padding-bottom. The `scrollIntoView`-on-focus hack is deleted (a no-op on a fixed element — document scroll cannot move it). Chat-route viewport heights use `dvh`.
+
+### Consequences
+
+- The keyboard model is a single tested module instead of formula fragments spread across `+layout.svelte` handlers; the unit suite pins each regime and each regression class (URL-bar noise, focus hops, one-shot timing, write hygiene).
+- In a Safari tab, scrolling with the keyboard up moves the composer with up-to-a-frame lag (`vv.scroll` is async to the scroll thread). This is the platform ceiling; the standalone PWA — the primary mobile mode — has zero lag because the layout viewport resizes natively.
+- If WebKit ships `interactive-widget` (watch WebKit #259770), the formula degrades gracefully to 0 and the tracker becomes deletable.
+
+### Rejected alternatives
+
+- **One-shot measurement on `focusin`** (the #230 state): reads pre-keyboard geometry; structurally 0 in the tab regime.
+- **`position: sticky` in-flow composer + native focused-field reveal:** sticky bottoms anchor to the un-resized layout viewport on iOS exactly like fixed; no improvement, plus it forfeits ADR-039's padding model.
+- **Counter-translating header/dropdown to the visual viewport:** per-frame JS chasing an async signal — the documented source of the header bounce.
+- **Inner-scroller app shell (how ChatGPT/Claude web avoid this):** reintroduces the ADR-039 scroll-routing bug; document scroll is locked in.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.

@@ -32,9 +32,12 @@
   /* iOS PWA safe-area inset that the floating chat input + scroll padding
      both consume. iOS does NOT collapse env(safe-area-inset-bottom) when
      the soft keyboard appears (it reflects the home-indicator zone, not
-     the keyboard), so the `.keyboard-open` override below zeroes it while
-     a visualViewport listener in +layout.svelte detects keyboard presence
-     via window.innerHeight - visualViewport.height. */
+     the keyboard), so the `.keyboard-open` override below zeroes it —
+     the keyboard covers the home-indicator zone, and stacking this inset
+     on top of `--kb-inset` would double-offset the composer. Both the
+     class and `--kb-inset` are owned by the keyboard-inset tracker
+     ($lib/util/keyboard-inset.ts), which derives keyboard PRESENCE from
+     text-field focus (geometry deltas read 0 in iOS standalone PWA). */
   --kb-safe-bottom: env(safe-area-inset-bottom);
 }
 

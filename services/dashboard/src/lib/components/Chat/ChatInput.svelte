@@ -1000,12 +1000,6 @@
       onkeydown={onKeydown}
       oninput={() => { onInput(); autoresize(); }}
       onpaste={onPaste}
-      onfocus={() => {
-        // iOS raises the keyboard async; delay so vv has started shrinking first.
-        setTimeout(() => {
-          textarea?.scrollIntoView({ block: "nearest", behavior: "instant" });
-        }, 100);
-      }}
       placeholder="Message Friday… or /command"
       rows="1"
       autocomplete="off"
@@ -1496,7 +1490,9 @@
     textarea { font-size: 16px; }
     .modal {
       max-width: 100%;
-      height: 100vh;
+      /* dvh, not vh: vh is the LARGEST viewport on iOS, so a 100vh sheet
+         overflows below the home indicator while the URL bar is showing. */
+      height: 100dvh;
       border-radius: 0;
       border: none;
       display: flex;
