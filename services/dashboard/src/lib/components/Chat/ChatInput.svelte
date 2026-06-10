@@ -1011,6 +1011,7 @@
     <button
       type="button"
       class="icon-btn send"
+      onmousedown={(e) => e.preventDefault()}
       onclick={() => void submit()}
       aria-label="Send"
       title="Send"
@@ -1022,6 +1023,7 @@
         type="button"
         class="icon-btn stop"
         class:stopping={isStopping}
+        onmousedown={(e) => e.preventDefault()}
         onclick={stop}
         disabled={isStopping}
         aria-label={isStopping ? "Stopping" : "Stop"}

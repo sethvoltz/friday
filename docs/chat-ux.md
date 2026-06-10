@@ -111,6 +111,7 @@ auto_invoke: true # default true; built-ins set false
 - `zeroSync.abortTurn(turnId)` → `abortTurn` Zero mutator + the localhost `/api/internal/abort-turn` fast-path → daemon's `AbortController.abort()`. The legacy `POST /api/chat/turn/<id>/abort` REST route retired in FRI-123 (ADR-024 retirement set).
 - Aborts at next SDK iteration. Tool calls already in flight finish; no next step. Honest UI copy: _Stop prevents future steps. It can't undo a step already started._
 - Stop only cancels the running turn — anything sitting in `nextPrompts` after it stays queued and dispatches on the next idle window.
+- Both Send and Stop carry `onmousedown={(e) => e.preventDefault()}` to prevent iOS from blurring the textarea before `click` fires (without it, the tap snaps the composer down and the click misfires).
 
 ### Stop confirmation (FRI-95)
 

@@ -365,6 +365,7 @@
     // still near the top of the visible area."
     const vv = window.visualViewport;
     let vvUpdate: (() => void) | undefined;
+    let vvUpdateDeferred: (() => void) | undefined;
     if (vv) {
       const setOffset = (value: number) => {
         const clamped = Math.max(0, Math.min(value, 200));
@@ -381,17 +382,19 @@
           tag === "TEXTAREA" ||
           (active instanceof HTMLElement && active.isContentEditable);
         setOffset(isTextField ? vv.offsetTop : 0);
-        // keyboard height: window.innerHeight - vv.height (stable — vv.height only changes when the keyboard appears/disappears, not on scroll)
+        // window.innerHeight - vv.height alone fails in iOS PWA standalone where both shrink together.
         const kbHeight = isTextField
-          ? Math.max(0, window.innerHeight - vv.height)
+          ? Math.max(0, window.innerHeight - (vv.offsetTop + vv.height))
           : 0;
         document.documentElement.style.setProperty(
           "--vv-offset-bottom",
           `${kbHeight}px`,
         );
       };
+      // rAF lets vv.offsetTop settle before we read it — iOS fires resize before updating the offset.
+      vvUpdateDeferred = () => requestAnimationFrame(vvUpdate!);
       vvUpdate();
-      vv.addEventListener("resize", vvUpdate);
+      vv.addEventListener("resize", vvUpdateDeferred);
       // Re-evaluate when focus state changes — blur on the input must
       // immediately reset the offset to 0 even if no vv event fires.
       document.addEventListener("focusin", vvUpdate);
@@ -474,8 +477,8 @@
       stopWakeLock();
       unbindTheme();
       window.removeEventListener("keydown", onKey);
-      if (vv && vvUpdate) {
-        vv.removeEventListener("resize", vvUpdate);
+      if (vv && vvUpdate && vvUpdateDeferred) {
+        vv.removeEventListener("resize", vvUpdateDeferred);
         document.removeEventListener("focusin", vvUpdate);
         document.removeEventListener("focusout", vvUpdate);
       }
