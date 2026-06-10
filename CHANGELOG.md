@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.19.0](https://github.com/sethvoltz/friday/compare/v1.18.6...v1.19.0) (2026-06-10)
+
+
+### Features
+
+* **cli:** TTY-aware columns + color for `secrets list` ([#233](https://github.com/sethvoltz/friday/issues/233)) ([bcd2beb](https://github.com/sethvoltz/friday/commit/bcd2beb066ed7b9953251d48475cf8473a4c36f7))
+
+
+### Bug Fixes
+
+* **system:** friday doctor reports vault secrets and config ports accurately ([#232](https://github.com/sethvoltz/friday/issues/232)) ([54c7529](https://github.com/sethvoltz/friday/commit/54c75298d4d5049a2b9d24230a24474f34fca106))
+
 ## [1.18.6](https://github.com/sethvoltz/friday/compare/v1.18.5...v1.18.6) (2026-06-10)
 
 
