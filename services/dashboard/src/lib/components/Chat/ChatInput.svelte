@@ -997,6 +997,16 @@
       onkeydown={onKeydown}
       oninput={() => { onInput(); autoresize(); }}
       onpaste={onPaste}
+      onfocus={() => {
+        // iOS PWA: the keyboard starts rising asynchronously on focus.
+        // A plain synchronous scrollIntoView fires before the viewport
+        // shrinks, so the input lands behind the keyboard. Delaying ~100ms
+        // gives the OS time to begin raising the keyboard before we scroll,
+        // ensuring the input is actually visible when the user starts typing.
+        setTimeout(() => {
+          textarea?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }, 100);
+      }}
       placeholder="Message Friday… or /command"
       rows="1"
       autocomplete="off"
