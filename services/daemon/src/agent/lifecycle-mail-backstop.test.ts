@@ -202,7 +202,7 @@ describe("mail-back backstop (FRI-127 §5)", () => {
         status: "complete",
         contentJson: JSON.stringify({
           tool_use_id: "tu_1",
-          name: "mail_send",
+          name: "mcp__friday-mail__mail_send",
           input: { to: "friday", body: "found X" },
         }),
       } as never,
@@ -231,7 +231,7 @@ describe("mail-back backstop (FRI-127 §5)", () => {
         status: "complete",
         contentJson: JSON.stringify({
           tool_use_id: "tu_1",
-          name: "mail_send",
+          name: "mcp__friday-mail__mail_send",
           input: { to: "parent", body: "found X" },
         }),
       } as never,
@@ -260,7 +260,7 @@ describe("mail-back backstop (FRI-127 §5)", () => {
         status: "complete",
         contentJson: JSON.stringify({
           tool_use_id: "tu_1",
-          name: "mail_send",
+          name: "mcp__friday-mail__mail_send",
           input: { to: "some-other-agent", body: "hi" },
         }),
       } as never,
