@@ -7,8 +7,11 @@ import {
 } from "./secrets-format.js";
 
 // picocolors may or may not emit escape codes depending on the runner's TTY /
-// FORCE_COLOR state. Strip them so assertions pin layout, not color.
-const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/gu, "");
+// FORCE_COLOR state. Strip them so assertions pin layout, not color. The ESC
+// byte is built via fromCharCode so it isn't a control char in a regex literal
+// (no-control-regex).
+const ANSI = new RegExp(String.fromCharCode(27) + "\\[[0-9;]*m", "gu");
+const strip = (s: string): string => s.replace(ANSI, "");
 
 const ROWS: SecretListRow[] = [
   { name: "LINEAR_API_KEY", mode: "env", scope: ["daemon"], broken: false },
