@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.6](https://github.com/sethvoltz/friday/compare/v1.18.5...v1.18.6) (2026-06-10)
+
+
+### Bug Fixes
+
+* **dashboard:** replace vv.resize keyboard listener with focusin/focusout-only ([#230](https://github.com/sethvoltz/friday/issues/230)) ([0d4cb01](https://github.com/sethvoltz/friday/commit/0d4cb019e9055e0b1834058947757bbd02843689))
+
 ## [1.18.5](https://github.com/sethvoltz/friday/compare/v1.18.4...v1.18.5) (2026-06-10)
 
 
