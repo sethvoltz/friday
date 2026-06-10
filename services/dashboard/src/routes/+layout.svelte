@@ -382,11 +382,7 @@
           tag === "TEXTAREA" ||
           (active instanceof HTMLElement && active.isContentEditable);
         setOffset(isTextField ? vv.offsetTop : 0);
-        // Keyboard height: gap between the bottom of the visual viewport and
-        // the bottom of the layout viewport — exactly where the keyboard sits.
-        // In iOS PWA standalone, window.innerHeight - vv.height stays near-zero
-        // because both shrink together; this formula avoids that by using
-        // vv.offsetTop (how far the visual viewport has scrolled up) instead.
+        // vv.offsetTop + vv.height = visual viewport bottom; the gap to window.innerHeight is the keyboard. window.innerHeight - vv.height alone fails in iOS PWA standalone where both shrink together.
         const kbHeight = isTextField
           ? Math.max(0, window.innerHeight - (vv.offsetTop + vv.height))
           : 0;
@@ -395,8 +391,7 @@
           `${kbHeight}px`,
         );
       };
-      // iOS may fire `resize` before updating vv.offsetTop — defer via rAF so
-      // the formula reads the settled value. focusin/focusout stay immediate.
+      // rAF lets vv.offsetTop settle before we read it — iOS fires resize before updating the offset.
       vvUpdateDeferred = () => requestAnimationFrame(vvUpdate!);
       vvUpdate();
       vv.addEventListener("resize", vvUpdateDeferred);
