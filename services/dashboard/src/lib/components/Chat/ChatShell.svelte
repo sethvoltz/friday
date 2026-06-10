@@ -636,9 +636,19 @@
 </script>
 
 {#if kbDebug}
+  <!-- TEMPORARY probe ladder (delete before merge): fixed lines at
+       known layout-viewport y coordinates. A screenshot with the
+       keyboard up shows which layout coordinate physically renders at
+       the keyboard's top edge — measuring the layout→screen mapping
+       that no viewport API value reports. -->
+  {#each [250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900] as y (y)}
+    <div class="kb-probe" style="top: {y}px" aria-hidden="true">
+      <span>{y}</span>
+    </div>
+  {/each}
   <!-- TEMPORARY debug HUD (delete before merge) -->
   <div class="kb-debug" aria-hidden="true">
-    <div>build: dbg-5</div>
+    <div>build: dbg-6</div>
     <div>--vv-top-y: {dbg.vvTopY}</div>
     <div>innerH: {dbg.ih}</div>
     <div>vv.h: {dbg.vvh}</div>
@@ -759,6 +769,27 @@
     padding-left: var(--content-left);
     padding-right: var(--page-gutter);
   }
+  /* TEMPORARY probe ladder (delete before merge). */
+  .kb-probe {
+    position: fixed;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: #f0f;
+    z-index: 9998;
+    pointer-events: none;
+  }
+  .kb-probe span {
+    position: absolute;
+    right: 2px;
+    top: -16px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: #f0f;
+    background: rgba(0, 0, 0, 0.75);
+    padding: 0 4px;
+  }
+
   /* TEMPORARY debug HUD (delete before merge). Anchored to the top so
      it stays readable regardless of keyboard/composer state. */
   .kb-debug {
