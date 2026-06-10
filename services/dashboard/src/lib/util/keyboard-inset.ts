@@ -1,74 +1,55 @@
 /**
- * Soft-keyboard inset tracker — the single owner of `--kb-inset` and the
- * `keyboard-open` root class.
+ * Soft-keyboard geometry tracker — the single owner of the visual-
+ * viewport anchor vars and the `keyboard-open` root class (ADR-040).
  *
- * Geometry model (verified against WebKit behavior, June 2026):
+ * While a text-entry element is focused, it writes on `:root`:
  *
- *   `--kb-inset` = the height of the strip at the BOTTOM of the layout
- *   viewport that the soft keyboard obscures = how far a
- *   `position: fixed; bottom: 0` element must lift to clear it.
+ *   --vv-top-y    = vv.offsetTop            (header / dropdown anchor)
+ *   --vv-bottom-y = vv.offsetTop + vv.height (composer bottom anchor —
+ *                   where iOS claims the keyboard's top edge sits, in
+ *                   layout-viewport coordinates)
+ *   --kb-inset    = max(0, innerHeight − vv.height)
+ *                   (transcript scroll-headroom padding + jump pill;
+ *                   deliberately pan-free so it is scroll-stable)
  *
- *     inset = max(0, innerHeight − vv.height − vv.offsetTop)
+ * No field focused → all vars cleared; the bars are plain fixed
+ * elements with zero keyboard JS influence.
  *
- *   This one formula is correct across all three mobile regimes because
- *   each regime zeroes a different term:
+ * The model was established against ON-DEVICE TELEMETRY (iOS 26.5
+ * Safari, bottom URL bar): geometry snapshots cross-checked against the
+ * composer's measured getBoundingClientRect and a `?kbdebug` probe
+ * ladder photographed on the device. Hard-won facts — each reversed at
+ * least one plausible-but-wrong revision (see ADR-040's rejected
+ * alternatives and the telemetry-replay tests):
  *
- *   - iOS Safari TAB: the keyboard is an overlay. `innerHeight` (layout
- *     viewport) does NOT shrink; `vv.height` does → inset = keyboard
- *     height. When Safari pans the visual viewport down inside the
- *     layout viewport (`vv.offsetTop` > 0, its focused-field reveal),
- *     the layout-viewport bottom comes back into view and the required
- *     lift shrinks by exactly `offsetTop`.
- *   - iOS STANDALONE PWA (home-screen app): the layout viewport itself
- *     resizes — `innerHeight` shrinks together with `vv.height` → inset
- *     ≈ 0, which is correct: `fixed; bottom: 0` already sits above the
- *     keyboard. (A delta heuristic like `innerHeight − vv.height > 100`
- *     can never detect the keyboard here; that is why keyboard PRESENCE
- *     is focus-derived, see below.)
- *   - Android Chrome 108+ / Firefox 132+ with
- *     `interactive-widget=resizes-content` (set in app.html): layout
- *     viewport resizes natively → inset ≈ 0, nothing to do.
+ *   - PRESENCE is focus-derived, never geometry-derived: viewport
+ *     height deltas read 0 in the resize regimes (standalone PWA,
+ *     Android `interactive-widget=resizes-content`) and false-positive
+ *     on URL-bar collapse during scroll.
+ *   - `vv.offsetTop`, RAW, is the only honest pan source. `pageTop`
+ *     mirrors scrollY and drops the pan. Do not clamp the pan to
+ *     innerHeight − vv.height: with the keyboard up, iOS 26.5 shrinks
+ *     the layout viewport and parks it, then pans the vv BEYOND its
+ *     bottom — fixed elements positioned past innerHeight render there.
+ *   - Re-measure on vv.resize AND vv.scroll AND window.resize
+ *     (innerHeight can change with no vv event at keyboard-animation
+ *     end), rAF-coalesced (WebKit #237851), change-guarded writes, plus
+ *     timed post-focus settle probes for silent settles.
+ *   - On settled blur: clear everything and fire a net-zero 1px scroll
+ *     wiggle (WebKit #297779 — offsetTop can stick after dismissal).
  *
- * Keyboard PRESENCE is derived from text-field focus (`focusin` /
- * `focusout`), never from viewport geometry — geometry deltas read 0 in
- * the standalone regime and false-positive on URL-bar collapse. While no
- * text field is focused the inset is pinned to 0, so `vv.resize` noise
- * from URL-bar collapse/expand during scroll can never move the
- * composer (the bug that killed the previous ungated listener).
- *
- * Magnitude updates while focused come from `vv.resize` AND `vv.scroll`:
- * resize fires as the keyboard animates open (progressive lift for
- * free), scroll fires when Safari pans the visual viewport inside the
- * layout viewport, which changes the lift even though nothing resized.
- * Reads are rAF-coalesced — WebKit #237851: standalone mode can report
- * a stale `vv.offsetTop` in the same task as the event — and writes are
- * change-guarded so a no-op event never touches style (no layout
- * thrash, no bounce).
- *
- * Hardware-keyboard focus (no soft keyboard) self-corrects: the class
- * is applied but the viewport never shrinks, so the inset stays 0.
- *
- * `focusout` is debounced (FOCUS_SETTLE_MS) so focus hopping between
- * fields doesn't flash the layout. On a settled blur the inset drops to
- * 0 immediately and a net-zero 1px scroll wiggle works around WebKit
- * #297779 (iOS 26.0/26.1: `vv.offsetTop` sticks at ~24px after keyboard
- * dismissal, shifting every fixed bar until the next scroll).
- *
- * Consumers:
- *   - `.chat-input-floating` lifts by the inset (ChatShell.svelte);
- *   - `.chat-transcript` bottom padding reserves the inset so the last
- *     message can scroll above the lifted composer;
- *   - `.jump-to-bottom-wrap` mirrors the composer's offset;
- *   - `:root.keyboard-open` zeroes `--kb-safe-bottom` (app.css) — the
- *     keyboard covers the home-indicator zone, so stacking the safe-area
- *     inset on top of the keyboard inset would double-offset.
+ * Known platform ceiling (accepted in ADR-040): in a Safari TAB's
+ * parked first-tap state, the claimed vv.height under-reports the truly
+ * visible area by a floating chrome allowance no web API exposes
+ * (CSSWG #7475). The composer sits exactly at the claimed boundary.
+ * The standalone PWA and Android are unaffected.
  */
 
 const FOCUS_SETTLE_MS = 100;
 
-/** Sanity clamp: no phone keyboard exceeds ~60% of the screen. A larger
- * reading means we caught the viewport mid-transition or mid-pinch-zoom;
- * clamping keeps a garbage frame from launching the composer off-screen. */
+/** Sanity clamp for the PADDING inset only: no phone keyboard exceeds
+ * ~60% of the screen; a larger ih−vvh reading is a mid-transition
+ * frame. (The anchors are deliberately NOT clamped — see module doc.) */
 const MAX_INSET_FRACTION = 0.6;
 
 export interface KeyboardInsetHost {

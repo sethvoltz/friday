@@ -265,7 +265,9 @@
     queueMicrotask(() => scrollToBottom());
   });
 
-  // TEMPORARY on-device debug instrumentation (delete before merge).
+  // `?kbdebug` diagnostics (documented in docs/mobile-ux.md): the
+  // instrument that established the iOS 26.5 keyboard geometry; kept
+  // until WebKit's viewport reporting stabilizes.
   // Two parts, both dev-only:
   //   1. ?kbdebug renders the live keyboard-geometry inputs as a fixed
   //      HUD overlay.
@@ -636,7 +638,7 @@
 </script>
 
 {#if kbDebug}
-  <!-- TEMPORARY probe ladder (delete before merge): fixed lines at
+  <!-- ?kbdebug probe ladder (docs/mobile-ux.md): fixed lines at
        known layout-viewport y coordinates. A screenshot with the
        keyboard up shows which layout coordinate physically renders at
        the keyboard's top edge — measuring the layout→screen mapping
@@ -646,7 +648,7 @@
       <span>{y}</span>
     </div>
   {/each}
-  <!-- TEMPORARY debug HUD (delete before merge) -->
+  <!-- ?kbdebug HUD (docs/mobile-ux.md) -->
   <div class="kb-debug" aria-hidden="true">
     <div>build: dbg-6</div>
     <div>--vv-top-y: {dbg.vvTopY}</div>
@@ -769,7 +771,7 @@
     padding-left: var(--content-left);
     padding-right: var(--page-gutter);
   }
-  /* TEMPORARY probe ladder (delete before merge). */
+  /* ?kbdebug probe ladder. */
   .kb-probe {
     position: fixed;
     left: 0;
@@ -790,7 +792,7 @@
     padding: 0 4px;
   }
 
-  /* TEMPORARY debug HUD (delete before merge). Anchored to the top so
+  /* ?kbdebug HUD. Anchored to the top so
      it stays readable regardless of keyboard/composer state. */
   .kb-debug {
     position: fixed;
