@@ -1944,7 +1944,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
             input?: { to?: string };
           };
           if (
-            parsed.name === "mail_send" &&
+            parsed.name === "mcp__friday-mail__mail_send" &&
             (parsed.input?.to === w.parentName || parsed.input?.to === "parent")
           ) {
             w.mailSendToParentThisTurn++;
