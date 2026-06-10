@@ -86,6 +86,32 @@ export function makeWindowChaseTarget(): ResyncChaseTarget {
   };
 }
 
+/**
+ * `ResyncChaseTarget` adapter for an INNER scroller element
+ * (spike/chat-inner-scroller). scrollTop/scrollHeight and the
+ * cancel-input events all live on the one element, so this is a thin
+ * pass-through — the element already has the shape the chase loop wants.
+ */
+export function makeElementChaseTarget(el: HTMLElement): ResyncChaseTarget {
+  return {
+    get scrollTop() {
+      return el.scrollTop;
+    },
+    set scrollTop(v: number) {
+      el.scrollTop = v;
+    },
+    get scrollHeight() {
+      return el.scrollHeight;
+    },
+    addEventListener(type, listener, options) {
+      el.addEventListener(type, listener, options);
+    },
+    removeEventListener(type, listener) {
+      el.removeEventListener(type, listener);
+    },
+  };
+}
+
 export function chaseScrollBottom(
   target: ResyncChaseTarget,
   deps: ResyncChaseDeps,

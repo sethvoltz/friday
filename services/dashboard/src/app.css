@@ -45,6 +45,19 @@
   --kb-safe-bottom: 0px;
 }
 
+/* SPIKE (inner-scroller): lock document/body scroll on the chat route.
+   The chat column is position:fixed and the transcript is the only
+   scroller, so the body has nothing to scroll — locking it stops iOS
+   from panning the visual viewport during scroll (the keyboard-up
+   composer stutter) and kills the rubber-band that ADR-039's overlay
+   lost the touch-routing fight to. ChatShell toggles the class on mount. */
+html.chat-scroll-lock,
+html.chat-scroll-lock body {
+  overflow: hidden;
+  height: 100%;
+  overscroll-behavior: none;
+}
+
 /* Theme `<input>` / `<textarea>` placeholder text across the app. Without
    this, browsers fall back to a UA-default gray that reads as un-themed
    against palettes whose --text-* tokens are far from gray (Phosphor's
