@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.1](https://github.com/sethvoltz/friday/compare/v1.19.0...v1.19.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* **dashboard:** rebuild soft-keyboard geometry on visual-viewport anchors (ADR-040) ([#235](https://github.com/sethvoltz/friday/issues/235)) ([db8e88f](https://github.com/sethvoltz/friday/commit/db8e88fb3146389591a75d7a92a7fef6708e7799))
+
 ## [1.19.0](https://github.com/sethvoltz/friday/compare/v1.18.6...v1.19.0) (2026-06-10)
 
 
