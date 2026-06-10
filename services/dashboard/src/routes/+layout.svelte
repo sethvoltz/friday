@@ -382,7 +382,7 @@
           tag === "TEXTAREA" ||
           (active instanceof HTMLElement && active.isContentEditable);
         setOffset(isTextField ? vv.offsetTop : 0);
-        // vv.offsetTop + vv.height = visual viewport bottom; the gap to window.innerHeight is the keyboard. window.innerHeight - vv.height alone fails in iOS PWA standalone where both shrink together.
+        // window.innerHeight - vv.height alone fails in iOS PWA standalone where both shrink together.
         const kbHeight = isTextField
           ? Math.max(0, window.innerHeight - (vv.offsetTop + vv.height))
           : 0;

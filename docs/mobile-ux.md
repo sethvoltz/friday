@@ -63,7 +63,7 @@ Friday is mobile-first, not mobile-responsive-as-an-afterthought. Every page is 
 
 iOS raises the soft keyboard asynchronously after a text field is focused. `position: fixed` elements use the **layout viewport** as their reference, which does not shrink when the keyboard opens — so a `bottom: 0` composer bar stays pinned to the bottom of the layout viewport and ends up hidden behind the keyboard.
 
-Fix implemented in `b32595b` (formula corrected in a subsequent patch):
+Fix implemented in `b32595b`:
 
 - **`--vv-offset-bottom`** (set in `+layout.svelte` `vvUpdate`): `max(0, window.innerHeight - (vv.offsetTop + vv.height))`. This measures the gap between the bottom of the visual viewport and the bottom of the layout viewport — exactly where the keyboard sits. The simpler `window.innerHeight - vv.height` formula doesn't work in iOS PWA standalone because `window.innerHeight` shrinks together with `vv.height` when the keyboard opens, keeping the delta near-zero. Set to `0` when no text field is focused so scroll animations don't reposition the composer.
 - **`.chat-input-floating`** in `ChatShell.svelte` applies `transform: translateY(calc(-1 * var(--vv-offset-bottom, 0px)))` to lift the composer above the keyboard. `transform` works in the layout-viewport coordinate system, so this precisely counteracts the overlap.
