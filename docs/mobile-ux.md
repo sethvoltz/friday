@@ -75,7 +75,7 @@ Current implementation:
 
 ## Mobile Send/Stop: `mousedown` blur suppression
 
-On iOS, `mousedown` on any non-input element causes the currently-focused textarea to blur before `click` fires. For the Send and Stop buttons this means: tap → textarea blurs → `vvUpdate` resets `--vv-offset-bottom` to 0 → composer snaps down → by the time `click` fires, the button has shifted and the event may misfire.
+On iOS, `mousedown` on any non-input element causes the currently-focused textarea to blur before `click` fires. For the Send and Stop buttons this means: tap → textarea blurs → `setKb` resets `--kb-h` to 0px → composer snaps down → by the time `click` fires, the button has shifted and the event may misfire.
 
 Both the Send and Stop buttons carry `onmousedown={(e) => e.preventDefault()}`. `preventDefault` on `mousedown` stops the browser from transferring focus away from the textarea, suppressing the blur, without blocking the subsequent `click` — iOS synthesizes `click` from `touchstart`/`touchend` independently of `mousedown`.
 

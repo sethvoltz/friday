@@ -345,11 +345,7 @@
       startWakeLock();
     }
 
-    // Mobile keyboard: --kb-h tracks the keyboard height via the scroll-stable
-    // vv.height formula (window.innerHeight - vv.height). Only set while a
-    // text field is focused; cleared to 0px on blur. The header is
-    // position:fixed; top:0 — iOS already pins it against the visual viewport
-    // automatically, so no JS translation needed there.
+    // iOS pins position:fixed top:0 against the visual viewport automatically — no JS translation needed.
     const vv = window.visualViewport;
     let setKb: (() => void) | undefined;
     if (vv) {

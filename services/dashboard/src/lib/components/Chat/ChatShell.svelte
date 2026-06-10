@@ -593,11 +593,7 @@
        scroll writes — see doc-scroll.ts). */
     overflow-anchor: none;
     padding-top: var(--chat-top);
-    /* Mirrors the floating input's bottom offset (1rem inset + safe-area)
-       PLUS the input's own height so the last message can scroll fully
-       above the input. --kb-safe-bottom is `env(safe-area-inset-bottom)`
-       normally and 0 while the soft keyboard is open (see app.css +
-       +layout.svelte visualViewport hook). */
+    /* Mirrors the floating input offset so the last message scrolls fully above it. */
     padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px));
     padding-left: var(--content-left);
     padding-right: var(--page-gutter);
