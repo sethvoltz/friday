@@ -104,16 +104,32 @@ export interface KeyboardInsetTracker {
   onFocusIn(target: Element | null): void;
   /** Wire to document `focusout`. */
   onFocusOut(): void;
-  /** Wire to visualViewport `resize` AND `scroll`. */
+  /** Wire to visualViewport `resize` AND `scroll`, and to window
+   * `resize`. ALL THREE inputs of the formula must trigger a
+   * re-measure: `innerHeight` can change WITHOUT a visualViewport event
+   * (iOS 26 bottom-bar Safari resizes the layout viewport at the END of
+   * the keyboard animation, after the last vv.resize — a tracker that
+   * only watches vv keeps the stale full-height innerHeight and
+   * overshoots the lift by a full keyboard height). */
   onViewportChange(): void;
   /** Detach timers/rAF and reset the var + class. */
   stop(): void;
 }
 
+/** Post-focus settle probes. Keyboard open is a multi-actor animation
+ * (keyboard slide, URL-bar collapse, layout-viewport resize) whose
+ * events can land in any order — and the last actor to settle may not
+ * fire an event the tracker hears. Re-measuring on a coarse timetable
+ * after focus guarantees convergence to the settled geometry no matter
+ * the event interleaving; the change-guard makes redundant probes
+ * free. */
+const SETTLE_PROBE_DELAYS_MS = [150, 350, 700, 1200];
+
 export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardInsetTracker {
   let fieldFocused = false;
   let rafHandle: number | null = null;
   let blurTimer: ReturnType<typeof setTimeout> | null = null;
+  let settleProbes: Array<ReturnType<typeof setTimeout>> = [];
   let lastWritten = "";
 
   function write(value: string) {
@@ -151,6 +167,16 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
     }
   }
 
+  function clearSettleProbes() {
+    for (const t of settleProbes) host.clearTimeout(t);
+    settleProbes = [];
+  }
+
+  function scheduleSettleProbes() {
+    clearSettleProbes();
+    settleProbes = SETTLE_PROBE_DELAYS_MS.map((ms) => host.setTimeout(queueMeasure, ms));
+  }
+
   return {
     onFocusIn(target: Element | null) {
       if (!isTextEntryElement(target)) return;
@@ -158,6 +184,7 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
       fieldFocused = true;
       host.setKeyboardOpenClass(true);
       queueMeasure();
+      scheduleSettleProbes();
     },
 
     onFocusOut() {
@@ -168,6 +195,7 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
         // window (textarea → input) — keyboard never dismissed, keep
         // everything as-is.
         if (isTextEntryElement(host.activeElement())) return;
+        clearSettleProbes();
         fieldFocused = false;
         host.setKeyboardOpenClass(false);
         write("0px");
@@ -184,6 +212,7 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
 
     stop() {
       clearBlurTimer();
+      clearSettleProbes();
       if (rafHandle !== null) {
         host.cancelRaf(rafHandle);
         rafHandle = null;
@@ -229,12 +258,17 @@ export function startKeyboardInsetTracker(): () => void {
   const vv = window.visualViewport;
   vv?.addEventListener("resize", onViewportChange);
   vv?.addEventListener("scroll", onViewportChange);
+  // innerHeight is a formula input and can change with NO vv event
+  // (layout-viewport resize at keyboard-animation end on iOS 26
+  // bottom-bar Safari). Focus-gated like everything else.
+  window.addEventListener("resize", onViewportChange);
 
   return () => {
     document.removeEventListener("focusin", onFocusIn);
     document.removeEventListener("focusout", onFocusOut);
     vv?.removeEventListener("resize", onViewportChange);
     vv?.removeEventListener("scroll", onViewportChange);
+    window.removeEventListener("resize", onViewportChange);
     tracker.stop();
   };
 }

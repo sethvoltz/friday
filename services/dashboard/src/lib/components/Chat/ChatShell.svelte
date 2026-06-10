@@ -291,9 +291,14 @@
       });
     };
     vv.addEventListener("resize", onVvResize);
+    // The layout viewport can resize with no vv event (iOS 26 bottom-bar
+    // Safari resizes it at keyboard-animation end) — same focused+pinned
+    // gate, same deferred write.
+    window.addEventListener("resize", onVvResize);
     return () => {
       cancel?.();
       vv.removeEventListener("resize", onVvResize);
+      window.removeEventListener("resize", onVvResize);
     };
   });
 

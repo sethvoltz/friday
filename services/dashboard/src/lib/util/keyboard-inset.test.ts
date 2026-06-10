@@ -144,6 +144,50 @@ describe("iOS Safari tab regime (innerHeight fixed, vv shrinks)", () => {
   });
 });
 
+describe("iOS 26 bottom-bar Safari: layout viewport resizes AFTER the last vv event", () => {
+  it("a late innerHeight shrink (window.resize only, no vv event) converges the inset back to 0", () => {
+    const h = makeHost({ innerHeight: 844, vvHeight: 844 });
+    const t = createKeyboardInsetTracker(h.host);
+    t.onFocusIn(fakeTextarea());
+    h.flushRaf();
+
+    // vv shrinks first, mid-animation — innerHeight still holds the old
+    // full height, so the formula reads a full keyboard lift.
+    h.state.vvHeight = 526;
+    t.onViewportChange();
+    h.flushRaf();
+    expect(h.lastVar()).toBe("318px");
+
+    // Then the LAYOUT viewport resizes at animation end. No vv event —
+    // only window.resize fires (wired to the same handler). Without the
+    // re-measure the composer stays double-lifted a full keyboard
+    // height above the keyboard (the bug observed on-device).
+    h.state.innerHeight = 526;
+    t.onViewportChange();
+    h.flushRaf();
+    expect(h.lastVar()).toBe("0px");
+  });
+
+  it("settle probes converge the inset even when NO event fires after the geometry settles", () => {
+    const h = makeHost({ innerHeight: 844, vvHeight: 844 });
+    const t = createKeyboardInsetTracker(h.host);
+    t.onFocusIn(fakeTextarea());
+    h.flushRaf();
+
+    h.state.vvHeight = 526;
+    t.onViewportChange();
+    h.flushRaf();
+    expect(h.lastVar()).toBe("318px");
+
+    // Geometry settles silently — no further events of any kind. The
+    // post-focus settle probes re-measure on a timetable.
+    h.state.innerHeight = 526;
+    h.flushTimers();
+    h.flushRaf();
+    expect(h.lastVar()).toBe("0px");
+  });
+});
+
 describe("iOS standalone PWA regime (innerHeight shrinks WITH vv)", () => {
   it("keyboard open reads inset 0 — fixed bars already cleared the keyboard natively", () => {
     const h = makeHost({ innerHeight: 844, vvHeight: 844 });
