@@ -381,9 +381,9 @@
           tag === "TEXTAREA" ||
           (active instanceof HTMLElement && active.isContentEditable);
         setOffset(isTextField ? vv.offsetTop : 0);
-        // keyboard height in layout-viewport coords: window.innerHeight - (vv.offsetTop + vv.height)
+        // keyboard height: window.innerHeight - vv.height (stable — vv.height only changes when the keyboard appears/disappears, not on scroll)
         const kbHeight = isTextField
-          ? Math.max(0, window.innerHeight - (vv.offsetTop + vv.height))
+          ? Math.max(0, window.innerHeight - vv.height)
           : 0;
         document.documentElement.style.setProperty(
           "--vv-offset-bottom",
@@ -392,7 +392,6 @@
       };
       vvUpdate();
       vv.addEventListener("resize", vvUpdate);
-      vv.addEventListener("scroll", vvUpdate);
       // Re-evaluate when focus state changes — blur on the input must
       // immediately reset the offset to 0 even if no vv event fires.
       document.addEventListener("focusin", vvUpdate);
@@ -477,7 +476,6 @@
       window.removeEventListener("keydown", onKey);
       if (vv && vvUpdate) {
         vv.removeEventListener("resize", vvUpdate);
-        vv.removeEventListener("scroll", vvUpdate);
         document.removeEventListener("focusin", vvUpdate);
         document.removeEventListener("focusout", vvUpdate);
       }

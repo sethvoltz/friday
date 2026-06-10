@@ -1356,9 +1356,6 @@
     color: var(--text-primary);
     font-family: var(--font-sans);
     font-size: 0.9rem;
-    /* Keep GPU compositing layer promoted to prevent iOS WebKit blank-on-resize. */
-    transform: translateZ(0);
-    will-change: transform;
   }
   textarea:focus { outline: none; }
   .autocomplete {
