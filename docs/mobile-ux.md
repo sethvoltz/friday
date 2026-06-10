@@ -71,11 +71,11 @@ Fix implemented in `b32595b` (formula corrected in a subsequent patch):
 
 `vvUpdate` is wired to `visualViewport` `resize` and `focusin`/`focusout` on the document. The `resize` handler is deferred via `requestAnimationFrame` (`vvUpdateDeferred`) because iOS may fire `resize` before `vv.offsetTop` has settled — the rAF ensures the formula reads the final value. `focusin`/`focusout` stay immediate so blur resets the offset to 0 without a frame of delay. Subsequent user scrolling does not move the header or composer.
 
-## Mobile Send/Stop: `pointerdown` blur suppression
+## Mobile Send/Stop: `mousedown` blur suppression
 
-On iOS, `pointerdown` on any non-input element causes the currently-focused textarea to blur before `click` fires. For the Send and Stop buttons this means: tap → textarea blurs → `vvUpdate` resets `--vv-offset-bottom` to 0 → composer snaps down → by the time `click` fires, the button has shifted and the event may misfire.
+On iOS, `mousedown` on any non-input element causes the currently-focused textarea to blur before `click` fires. For the Send and Stop buttons this means: tap → textarea blurs → `vvUpdate` resets `--vv-offset-bottom` to 0 → composer snaps down → by the time `click` fires, the button has shifted and the event may misfire.
 
-Fix: both the Send and Stop buttons carry `onpointerdown={(e) => e.preventDefault()}`. `preventDefault` on `pointerdown` suppresses the implicit blur without blocking the subsequent `click`. This is the same pattern used for autocomplete entries (see §Mobile autocomplete above).
+Fix: both the Send and Stop buttons carry `onmousedown={(e) => e.preventDefault()}`. `preventDefault` on `mousedown` stops the browser from transferring focus away from the textarea, suppressing the blur, without blocking the subsequent `click` — iOS synthesizes `click` from `touchstart`/`touchend` independently of `mousedown`.
 
 ## Public reachability + Cloudflare Tunnel
 
