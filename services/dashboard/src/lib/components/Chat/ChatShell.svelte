@@ -638,7 +638,7 @@
 {#if kbDebug}
   <!-- TEMPORARY debug HUD (delete before merge) -->
   <div class="kb-debug" aria-hidden="true">
-    <div>build: dbg-4</div>
+    <div>build: dbg-5</div>
     <div>--vv-top-y: {dbg.vvTopY}</div>
     <div>innerH: {dbg.ih}</div>
     <div>vv.h: {dbg.vvh}</div>

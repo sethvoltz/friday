@@ -13,22 +13,18 @@ import {
   type KeyboardInsetHost,
 } from "./keyboard-inset";
 
-/** Deterministic host: manual rAF + timer queues, recorded writes.
- * The pan is modeled as `vvPan` and exposed the way the tracker reads
- * it — via pageTop (= scrollY + pan) and scrollY — because
- * vv.offsetTop is deliberately not an input (stale on iOS 26.5). */
+/** Deterministic host: manual rAF + timer queues, recorded writes. */
 function makeHost(initial: {
   innerHeight: number;
   vvHeight: number;
+  /** vv.offsetTop — the pan source (rect-verified honest on iOS 26.5). */
   vvPan?: number;
-  scrollY?: number;
   hasViewport?: boolean;
 }) {
   const state = {
     innerHeight: initial.innerHeight,
     vvHeight: initial.vvHeight,
     vvPan: initial.vvPan ?? 0,
-    scrollY: initial.scrollY ?? 0,
     hasViewport: initial.hasViewport ?? true,
     activeElement: null as Element | null,
   };
@@ -43,9 +39,7 @@ function makeHost(initial: {
 
   const host: KeyboardInsetHost = {
     innerHeight: () => state.innerHeight,
-    viewport: () =>
-      state.hasViewport ? { height: state.vvHeight, pageTop: state.scrollY + state.vvPan } : null,
-    scrollY: () => state.scrollY,
+    viewport: () => (state.hasViewport ? { height: state.vvHeight, offsetTop: state.vvPan } : null),
     activeElement: () => state.activeElement,
     setVar: (name, value) => writes.push([name, value]),
     setKeyboardOpenClass: (on) => classToggles.push(on),
@@ -161,23 +155,27 @@ describe("iOS Safari tab regime (innerHeight fixed, vv shrinks)", () => {
   });
 });
 
-describe("iOS 26.5 mode flips (replayed from on-device telemetry)", () => {
-  it("Mode B's impossible pan (offsetTop+height > innerHeight) clamps to the resized layout bottom; padding never yanks", () => {
-    // Real sequence captured from the device (dashboard JSONL):
+describe("iOS 26.5 regimes (replayed from rect-verified on-device telemetry)", () => {
+  it("overlay regime, shrunk-and-panned regime, and back — anchors track offsetTop raw, padding only tracks ih−vvh", () => {
+    // Real sequence captured from the device (dashboard JSONL); every
+    // expectation below was cross-checked against the composer's
+    // measured getBoundingClientRect in the same snapshots.
     const h = makeHost({ innerHeight: 796, vvHeight: 796 });
     const t = createKeyboardInsetTracker(h.host);
     t.onFocusIn(fakeTextarea());
     h.flushRaf();
 
-    // Keyboard opens (Mode A, overlay): ih 796, vv 453, pan 0.
+    // Keyboard opens (overlay): ih 796, vv 453, pan 0.
     h.state.vvHeight = 453;
     t.onViewportChange();
     h.flushRaf();
     expect(h.lastAnchor()).toBe("453px");
+    expect(h.lastTopAnchor()).toBe("0px");
     expect(h.lastVar()).toBe("343px");
 
-    // Mode A with reveal pan: vv pans fully (343 = ih − vvh). Anchor
-    // rides to the layout bottom; sticky inset holds.
+    // Overlay with reveal pan: vv pans 343 (= ih − vvh). Anchors ride;
+    // padding inset (ih − vvh) is pan-independent — no document-height
+    // change under the user's finger.
     h.state.vvPan = 343;
     t.onViewportChange();
     h.flushRaf();
@@ -185,21 +183,25 @@ describe("iOS 26.5 mode flips (replayed from on-device telemetry)", () => {
     expect(h.lastTopAnchor()).toBe("343px");
     expect(h.lastVar()).toBe("343px");
 
-    // Mode B mid-scroll: layout viewport SHRINKS (ih 355 ≈ vvh 355) but
-    // offsetTop retains a stale 441 — vv bottom 796 > layout bottom 355
-    // is geometrically impossible. Clamp collapses the pan to 0: the
-    // anchor lands on the resized layout bottom (= where a static
-    // bottom anchor sits, correct in a resized layout viewport).
+    // Shrunk regime mid-scroll: iOS SHRINKS the layout viewport to the
+    // visible height (ih 355 = vvh) and parks it at the focus-time
+    // scroll position; the vv pans BEYOND its bottom (offsetTop 441 >
+    // ih). This is real, renderable geometry — fixed elements placed
+    // past innerHeight paint there and the panned vv shows them. The
+    // device rect for the composer confirmed offsetTop, so the pan
+    // passes through raw. Padding drops to 0: the shrink already
+    // extended the scroll range, and keeping the overlay padding here
+    // was the "huge blank space at the bottom" bug.
     h.state.innerHeight = 355;
     h.state.vvHeight = 355;
     h.state.vvPan = 441;
     t.onViewportChange();
     h.flushRaf();
-    expect(h.lastTopAnchor()).toBe("0px");
-    expect(h.lastAnchor()).toBe("355px");
-    expect(h.lastVar()).toBe("343px"); // sticky — no 343→0 padding yank
+    expect(h.lastTopAnchor()).toBe("441px");
+    expect(h.lastAnchor()).toBe("796px");
+    expect(h.lastVar()).toBe("0px");
 
-    // Back to Mode A settled (pan folded into scrollY by iOS).
+    // Back to overlay settled (pan folded into scrollY by iOS).
     h.state.innerHeight = 796;
     h.state.vvHeight = 453;
     h.state.vvPan = 0;
@@ -346,24 +348,20 @@ describe("blur settle + dismissal", () => {
 });
 
 describe("composer anchor (--vv-bottom-y)", () => {
-  it("equals clamped offsetTop + vv.height: innerHeight only ever bounds the pan, never inflates the anchor", () => {
-    // A geometrically possible pan passes through untouched regardless
-    // of how large innerHeight claims to be...
-    for (const innerHeight of [844, 1000, 5000]) {
+  it("equals offsetTop + vv.height and is COMPLETELY innerHeight-independent", () => {
+    // The anchor must track the visual viewport regardless of what
+    // innerHeight claims — including the shrunk regime where the pan
+    // legitimately exceeds innerHeight − vv.height (rect-verified on
+    // device). No clamping: an earlier clamped revision threw the
+    // composer off the top of the screen in exactly that regime.
+    for (const innerHeight of [430, 526, 844, 5000]) {
       const h = makeHost({ innerHeight, vvHeight: 430, vvPan: 100 });
       const t = createKeyboardInsetTracker(h.host);
       t.onFocusIn(fakeTextarea());
       h.flushRaf();
       expect(h.lastAnchor()).toBe("530px");
+      expect(h.lastTopAnchor()).toBe("100px");
     }
-    // ...while an impossible one (vv bottom would exceed the layout
-    // bottom) collapses to the layout bottom itself.
-    const h = makeHost({ innerHeight: 430, vvHeight: 430, vvPan: 100 });
-    const t = createKeyboardInsetTracker(h.host);
-    t.onFocusIn(fakeTextarea());
-    h.flushRaf();
-    expect(h.lastAnchor()).toBe("430px");
-    expect(h.lastTopAnchor()).toBe("0px");
   });
 
   it("is removed (not zeroed) on settled blur so the CSS falls back to the static bottom anchor", () => {

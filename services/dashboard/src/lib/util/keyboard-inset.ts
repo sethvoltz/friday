@@ -75,14 +75,13 @@ export interface KeyboardInsetHost {
   /** window.innerHeight at read time. */
   innerHeight(): number;
   /** visualViewport geometry at read time; null when the API is absent.
-   * pageTop (vv top in DOCUMENT coordinates), NOT offsetTop: on-device
-   * telemetry (iOS 26.5 Safari) showed `vv.offsetTop` returning stale
-   * values — claiming 343/441px pans while `pageTop − scrollY` (which
-   * equals offsetTop by definition) read 0 in the same snapshot. The
-   * pan is derived from the coherent pair instead. */
-  viewport(): { height: number; pageTop: number } | null;
-  /** window.scrollY at read time (pan derivation, see viewport()). */
-  scrollY(): number;
+   * offsetTop is the pan source. On iOS 26.5 the API's three pan-related
+   * values disagree, and cross-checking each candidate against the
+   * composer's MEASURED getBoundingClientRect in on-device telemetry
+   * showed `offsetTop` consistent with the rendered truth in every
+   * sample, while `pageTop` simply mirrors scrollY and drops the pan.
+   * Do not "fix" this back to pageTop − scrollY. */
+  viewport(): { height: number; offsetTop: number } | null;
   /** The element currently holding focus (document.activeElement). */
   activeElement(): Element | null;
   /** Write a custom property on :root. */
@@ -147,12 +146,7 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
     host.setVar(name, value);
   }
 
-  // Monotonic padding inset for the current keyboard session — see
-  // measure(). Reset on blur/stop via clearVars().
-  let stickyInset = 0;
-
   function clearVars() {
-    stickyInset = 0;
     write("--kb-inset", "0px");
     write("--vv-top-y", "");
     write("--vv-bottom-y", "");
@@ -165,25 +159,22 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
       clearVars();
       return;
     }
-    // Pan derivation — two layers of defense against iOS 26.5's broken
-    // reporting (all observed in on-device telemetry):
-    //   1. `vv.offsetTop` returns STALE values (claims 343/441px pans
-    //      while `pageTop − scrollY`, its definition, reads 0 in the
-    //      same snapshot). The pan is therefore derived from the
-    //      coherent (pageTop, scrollY) pair, never read from offsetTop.
-    //   2. The same sessions flip between an overlay mode (innerHeight
-    //      796, vv 453) and a mid-scroll resized mode (innerHeight 355
-    //      ≈ vv 355); any pan that would push the vv bottom past the
-    //      layout bottom is geometrically impossible, so the pan is
-    //      clamped to 0..(innerHeight − vv.height). In the overlay mode
-    //      the clamp never binds (that range IS the real pan range); in
-    //      the resized mode it collapses to 0, landing the anchor on
-    //      the resized layout bottom — exactly where a static bottom
-    //      anchor sits, which is correct there.
-    const innerH = host.innerHeight();
-    const maxPan = Math.max(0, innerH - vv.height);
-    const rawPan = vv.pageTop - host.scrollY();
-    const vvTop = Math.round(Math.min(Math.max(0, rawPan), maxPan));
+    // The pan is RAW vv.offsetTop, unclamped. Two on-device findings
+    // (iOS 26.5, verified by cross-checking the composer's rendered
+    // getBoundingClientRect against each API value):
+    //   1. offsetTop is the honest pan; pageTop mirrors scrollY and
+    //      drops it. (An earlier revision derived the pan from
+    //      pageTop − scrollY and froze the anchors.)
+    //   2. With the keyboard up, iOS 26.5 SHRINKS the layout viewport
+    //      (innerHeight 796 → 355) and parks it at the focus-time
+    //      scroll position; further scrolling pans the visual viewport
+    //      BEYOND the layout viewport's bottom (offsetTop 441 with
+    //      innerHeight 355). That is real, renderable geometry —
+    //      `position: fixed; top:` past innerHeight paints there, and
+    //      the panned visual viewport shows it. An earlier revision
+    //      clamped the pan to innerHeight − vv.height as "impossible"
+    //      and threw every fixed bar off the top of the screen.
+    const vvTop = Math.round(Math.max(0, vv.offsetTop));
     const vvBottom = Math.round(vvTop + vv.height);
     // Anchors for the fixed bars while the keyboard is up: the header /
     // agent dropdown pin under the visual viewport's top edge, the
@@ -191,16 +182,18 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
     write("--vv-top-y", `${vvTop}px`);
     write("--vv-bottom-y", `${vvBottom}px`);
     // Scroll-headroom inset for the transcript padding + jump pill.
-    // MONOTONIC within one keyboard session (sticky max): the raw value
-    // flips with the A/B mode changes mid-scroll, and a padding that
-    // grows/shrinks 343px mid-gesture changes the document height under
-    // the user's finger — the "content jumps around while scrolling"
-    // bug. Held at the session max, it can only over-reserve (blank
-    // scroll slack), never yank.
-    const raw = innerH - vvBottom;
-    const inset = Math.round(Math.min(Math.max(0, raw), innerH * MAX_INSET_FRACTION));
-    stickyInset = Math.max(stickyInset, inset);
-    write("--kb-inset", `${stickyInset}px`);
+    // innerHeight − vv.height, deliberately WITHOUT the pan: it is
+    // nonzero only in the overlay regime (layout viewport keeps its
+    // full height, so the keyboard eats scroll range that the padding
+    // must give back) and 0 in the shrunk regime (iOS already extended
+    // the scroll range by the shrink; padding there is pure blank space
+    // — the "huge empty bottom" bug). Both terms are scroll-stable, so
+    // the document height never changes under the user's finger.
+    const innerH = host.innerHeight();
+    const inset = Math.round(
+      Math.min(Math.max(0, innerH - vv.height), innerH * MAX_INSET_FRACTION),
+    );
+    write("--kb-inset", `${inset}px`);
   }
 
   function queueMeasure() {
@@ -282,9 +275,8 @@ export function startKeyboardInsetTracker(): () => void {
     innerHeight: () => window.innerHeight,
     viewport: () => {
       const vv = window.visualViewport;
-      return vv ? { height: vv.height, pageTop: vv.pageTop } : null;
+      return vv ? { height: vv.height, offsetTop: vv.offsetTop } : null;
     },
-    scrollY: () => window.scrollY,
     activeElement: () => document.activeElement,
     setVar: (name, value) =>
       value === "" ? root.style.removeProperty(name) : root.style.setProperty(name, value),
