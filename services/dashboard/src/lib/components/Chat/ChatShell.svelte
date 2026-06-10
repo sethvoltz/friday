@@ -598,7 +598,7 @@
        above the input. --kb-safe-bottom is `env(safe-area-inset-bottom)`
        normally and 0 while the soft keyboard is open (see app.css +
        +layout.svelte visualViewport hook). */
-    padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px));
+    padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px));
     padding-left: var(--content-left);
     padding-right: var(--page-gutter);
   }
@@ -618,9 +618,7 @@
 
   .chat-input-floating {
     position: fixed;
-    bottom: calc(1rem + var(--kb-safe-bottom, 0px));
-    /* --vv-offset-bottom = keyboard height in layout-viewport coords; lifts composer above the iOS soft keyboard. */
-    transform: translateY(calc(-1 * var(--vv-offset-bottom, 0px)));
+    bottom: calc(1rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px));
     left: var(--content-left);
     right: var(--page-gutter);
     background: var(--header-float-bg);
@@ -649,7 +647,7 @@
      scrolls / receives clicks for the chat itself. */
   .jump-to-bottom-wrap {
     position: fixed;
-    bottom: calc(var(--chat-input-h, 6rem) + 3rem + var(--kb-safe-bottom, 0px));
+    bottom: calc(var(--chat-input-h, 6rem) + 3rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px));
     left: var(--content-left);
     right: var(--page-gutter);
     display: flex;
@@ -782,6 +780,6 @@
   }
 
   @media (max-width: 640px) {
-    .chat-input-floating { bottom: calc(0.5rem + var(--kb-safe-bottom, 0px)); }
+    .chat-input-floating { bottom: calc(0.5rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px)); }
   }
 </style>

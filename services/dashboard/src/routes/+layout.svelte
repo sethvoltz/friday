@@ -345,60 +345,31 @@
       startWakeLock();
     }
 
-    // Mobile keyboard handling: when the soft keyboard opens, iOS Safari
-    // scrolls the visual viewport up inside the layout viewport, which
-    // drags `position: fixed` elements (the floating header, in
-    // particular) out of view. Track visualViewport.offsetTop in a CSS
-    // var so the header can stay anchored to the *visible* top edge.
-    //
-    // **Only update while an input or textarea is focused** — without
-    // this gate, iOS fires `visualViewport.scroll` events during chat
-    // scroll-to-bottom animations and the offset wanders to mid-screen,
-    // dragging the floating header down with it (the "snaps to center
-    // of the screen while running" symptom). When no input is focused,
-    // the keyboard isn't open and the offset is always 0 anyway; clearing
-    // it explicitly prevents a stale value from sticking past a blur.
-    //
-    // Clamp the value defensively too: a runaway vv.offsetTop (older
-    // Safari pinch-zoom edge case) would otherwise position the header
-    // at arbitrary screen coordinates. 200px caps it at "definitely
-    // still near the top of the visible area."
+    // Mobile keyboard: --kb-h tracks the keyboard height via the scroll-stable
+    // vv.height formula (window.innerHeight - vv.height). Only set while a
+    // text field is focused; cleared to 0px on blur. The header is
+    // position:fixed; top:0 — iOS already pins it against the visual viewport
+    // automatically, so no JS translation needed there.
     const vv = window.visualViewport;
-    let vvUpdate: (() => void) | undefined;
-    let vvUpdateDeferred: (() => void) | undefined;
+    let setKb: (() => void) | undefined;
     if (vv) {
-      const setOffset = (value: number) => {
-        const clamped = Math.max(0, Math.min(value, 200));
-        document.documentElement.style.setProperty(
-          "--vv-offset-top",
-          `${clamped}px`,
-        );
-      };
-      vvUpdate = () => {
+      setKb = () => {
         const active = document.activeElement;
         const tag = active?.tagName;
-        const isTextField =
-          tag === "INPUT" ||
-          tag === "TEXTAREA" ||
+        const isField =
+          tag === "INPUT" || tag === "TEXTAREA" ||
           (active instanceof HTMLElement && active.isContentEditable);
-        setOffset(isTextField ? vv.offsetTop : 0);
-        // window.innerHeight - vv.height alone fails in iOS PWA standalone where both shrink together.
-        const kbHeight = isTextField
-          ? Math.max(0, window.innerHeight - (vv.offsetTop + vv.height))
-          : 0;
-        document.documentElement.style.setProperty(
-          "--vv-offset-bottom",
-          `${kbHeight}px`,
-        );
+        if (!isField) {
+          document.documentElement.style.setProperty("--kb-h", "0px");
+          return;
+        }
+        const kb = Math.max(0, window.innerHeight - (window.visualViewport?.height ?? window.innerHeight));
+        document.documentElement.style.setProperty("--kb-h", `${kb}px`);
       };
-      // rAF lets vv.offsetTop settle before we read it — iOS fires resize before updating the offset.
-      vvUpdateDeferred = () => requestAnimationFrame(vvUpdate!);
-      vvUpdate();
-      vv.addEventListener("resize", vvUpdateDeferred);
-      // Re-evaluate when focus state changes — blur on the input must
-      // immediately reset the offset to 0 even if no vv event fires.
-      document.addEventListener("focusin", vvUpdate);
-      document.addEventListener("focusout", vvUpdate);
+      setKb();
+      vv.addEventListener("resize", setKb);
+      document.addEventListener("focusin", setKb);
+      document.addEventListener("focusout", setKb);
     }
 
     // Soft-keyboard suppression — focus-based.
@@ -477,10 +448,10 @@
       stopWakeLock();
       unbindTheme();
       window.removeEventListener("keydown", onKey);
-      if (vv && vvUpdate && vvUpdateDeferred) {
-        vv.removeEventListener("resize", vvUpdateDeferred);
-        document.removeEventListener("focusin", vvUpdate);
-        document.removeEventListener("focusout", vvUpdate);
+      if (vv && setKb) {
+        vv.removeEventListener("resize", setKb);
+        document.removeEventListener("focusin", setKb);
+        document.removeEventListener("focusout", setKb);
       }
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onFocusOut);
@@ -669,10 +640,7 @@
     border: 1px solid var(--border-subtle);
     background: var(--header-float-bg);
     position: fixed;
-    /* --vv-offset-top is set from visualViewport in +layout.svelte and
-       keeps the header pinned to the top of the *visible* viewport when
-       the mobile keyboard is open. Defaults to 0 on desktop. */
-    top: calc(1rem + var(--vv-offset-top, 0px));
+    top: 1rem;
     left: 50%;
     transform: translateX(-50%);
     width: calc(100% - 2rem);
