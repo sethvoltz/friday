@@ -883,8 +883,10 @@
     </div>
   {/if}
   {#if !readonly && chat.ballStandalone}
-    <div class="message inline">
-      <StreamingBall />
+    <div class="message assistant">
+      <div class="bubble">
+        <StreamingBall />
+      </div>
     </div>
   {/if}
   <div

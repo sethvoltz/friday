@@ -706,15 +706,21 @@ export class ChatState {
     if (!this.focusedAgentIsWorking) return false;
     return this.messages.some((m) => m.role === "thinking" && m.status === "running");
   }
-  /** True when an assistant text block is streaming and no thinking block is running. */
+  /** True when any tool block is actively executing. */
+  get toolIsRunning(): boolean {
+    return this.messages.some((m) => m.role === "tool" && m.status === "running");
+  }
+  /** True when an assistant text block is streaming and no thinking block or tool is running. */
   get ballInText(): boolean {
     if (!this.focusedAgentIsWorking) return false;
     if (this.ballInThinking) return false;
+    if (this.toolIsRunning) return false;
     return this.messages.some((m) => m.role === "assistant" && m.status === "streaming");
   }
   /** True when the agent is working but no streaming/running block has arrived yet. */
   get ballStandalone(): boolean {
     if (!this.focusedAgentIsWorking) return false;
+    if (this.toolIsRunning) return false;
     return !this.ballInThinking && !this.ballInText;
   }
   connected = $state(false);

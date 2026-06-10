@@ -1362,6 +1362,10 @@
     color: var(--text-primary);
     font-family: var(--font-sans);
     font-size: 0.9rem;
+    /* iOS WebKit: forces a GPU compositing layer, preventing the repaint
+       bug where textarea content goes blank as the element grows tall. */
+    -webkit-overflow-scrolling: touch;
+    transform: translateZ(0);
   }
   textarea:focus { outline: none; }
   .autocomplete {
