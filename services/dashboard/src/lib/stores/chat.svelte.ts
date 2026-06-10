@@ -3,6 +3,7 @@ import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import { compactionDividerId } from "../components/Chat/compaction-render";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { initialPageSize } from "../util/page-size";
+import { randomUUID } from "../util/uuid";
 import type { SendUserMessageOutcome } from "./mutator-result";
 import { KEYS, loadJSON, removeKey, saveJSON } from "./persistent";
 
@@ -1104,11 +1105,7 @@ export class ChatState {
     // bubble at `userBlockIdForTurn(turnId)` once Zero's mutator
     // resolves; the daemon's `recordUserBlock` writes the same id and
     // Zero replicates it next, which dedups in applyZeroBlocks's merge.
-    const id = `pending_${
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? (crypto as { randomUUID: () => string }).randomUUID()
-        : `${Date.now()}_${Math.random().toString(36).slice(2)}`
-    }`;
+    const id = `pending_${randomUUID()}`;
     const agent = this.focusedAgent;
     this.optimistic.set(
       overlayKey(agent, id),
@@ -2018,10 +2015,7 @@ export class ChatState {
       this.setToast("Cannot resend — original message not found.", "warn");
       return;
     }
-    const blockId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? (crypto as { randomUUID: () => string }).randomUUID()
-        : `blk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const blockId = randomUUID();
     const newTurnId = `t_${blockId}`;
     const agent = this.focusedAgent;
     this.addUser(text, { queueId: blockId });
