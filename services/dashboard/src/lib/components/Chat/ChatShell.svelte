@@ -129,6 +129,25 @@
   // ResizeObserver alone (net-zero-height slides never fire it).
   let notifyListMutation: () => void = () => {};
 
+  // When the keyboard is up, the composer floats over the transcript at
+  // the visual-viewport bottom (--vv-bottom-y), not at the static
+  // layout-viewport bottom the transcript's padding reserves for. After
+  // a scroll-to-bottom that leaves the last message a few px under the
+  // composer, correct by the EXACT rendered overlap: both rects come
+  // from getBoundingClientRect, so they share one coordinate frame and
+  // the delta is right regardless of which viewport iOS is reporting.
+  // No-op with the keyboard closed (the padding already clears the
+  // pinned composer) and bounded by scrollBy's own clamp.
+  function clearComposerOverlap() {
+    if (!document.documentElement.classList.contains("keyboard-open")) return;
+    if (!inputEl || !transcriptEl) return;
+    const bubbles = transcriptEl.querySelectorAll<HTMLElement>("[data-msg-id]");
+    const last = bubbles[bubbles.length - 1];
+    if (!last) return;
+    const overlap = last.getBoundingClientRect().bottom - inputEl.getBoundingClientRect().top;
+    if (overlap > 0) scrollByDelta(overlap + 8); // +8px breathing room
+  }
+
   async function jumpToBottom() {
     // A correction queued for the pre-jump geometry must not land on
     // top of the bottom we're about to scroll to.
@@ -145,6 +164,9 @@
       await tick();
     }
     scrollToBottom();
+    // Keyboard-open: clear any residual overlap with the floating
+    // composer once the scroll + layout have settled.
+    afterNextPaint(clearComposerOverlap);
     // Optimistic update so the jump-button hides immediately; the
     // bottom-sentinel observer will confirm on its next tick.
     if (!readonly) chat.pinnedToBottom = true;
@@ -395,7 +417,11 @@
       cancel?.();
       cancel = afterNextPaint(() => {
         cancel = null;
-        if (chat.pinnedToBottom) scrollToBottom();
+        if (!chat.pinnedToBottom) return;
+        scrollToBottom();
+        // Second paint: clear residual overlap with the floating
+        // composer (the scroll above must commit + lay out first).
+        afterNextPaint(clearComposerOverlap);
       });
     };
     document.addEventListener("focusin", onFocusIn);
@@ -918,6 +944,25 @@
     justify-content: center;
     pointer-events: none;
     z-index: 95;
+  }
+
+  /* Keyboard up: the floating pills must track the VISUAL viewport just
+     like the composer (--vv-bottom-y / --vv-top-y), or they anchor to
+     the shrunk-and-parked layout viewport and float to the wrong place
+     (the jump-to-bottom pill ending up mid-screen). The jump pill sits
+     one composer-height + the same 2rem gap above the composer's top
+     edge; its bottom edge lands at `top` via translateY(-100%). The two
+     top pills shift down by the same --vv-top-y the header/sidebar use. */
+  :global(:root.keyboard-open) .jump-to-bottom-wrap {
+    top: calc(var(--vv-bottom-y, 100dvh) - var(--chat-input-h, 6rem) - 3rem);
+    bottom: auto;
+    transform: translateY(-100%);
+  }
+  /* Top pills shift by the pan via transform (NOT a recomputed `top`)
+     so the per-breakpoint `top` overrides below still apply underneath. */
+  :global(:root.keyboard-open) .loading-older,
+  :global(:root.keyboard-open) .pre-compaction-wrap {
+    transform: translateY(var(--vv-top-y, 0px));
   }
 
   /* Shared bordered + blurred-background style for floating chat affordances. */
