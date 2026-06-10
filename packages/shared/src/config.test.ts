@@ -8,7 +8,7 @@
  * edits.
  */
 
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -30,6 +30,7 @@ import {
   resolveModelForEvolveTask,
   resolveModelForRole,
   watchdogThresholdMs,
+  writeConfig,
   type FridayConfig,
 } from "./config.js";
 
@@ -103,6 +104,37 @@ describe("resolveDashboardPort", () => {
       if (originalEnv === undefined) delete process.env.FRIDAY_DAEMON_PORT;
       else process.env.FRIDAY_DAEMON_PORT = originalEnv;
     }
+  });
+});
+
+describe("port fields are not synthesized into config.json", () => {
+  // Regression: DEFAULT_CONFIG used to ship daemonPort/dashboardPort, so a
+  // loadConfig() → writeConfig() round-trip (any command that edits config)
+  // re-persisted them into config.json — re-introducing the exact rows
+  // `friday doctor` flags as stale every time the user deleted them.
+  afterEach(() => rmSync(CONFIG_PATH, { force: true }));
+
+  it("loadConfig() on a config without ports leaves them undefined", () => {
+    if (!existsSync(dirname(CONFIG_PATH))) mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+    writeFileSync(CONFIG_PATH, JSON.stringify({ model: "claude-opus-4-7" }) + "\n");
+    const cfg = loadConfig();
+    expect(cfg.daemonPort).toBeUndefined();
+    expect(cfg.dashboardPort).toBeUndefined();
+    // …yet resolution still yields the prod ports via the fallback.
+    expect(resolveDaemonPort(cfg)).toBe(PROD_DAEMON_PORT);
+    expect(resolveDashboardPort(cfg)).toBe(PROD_DASHBOARD_PORT);
+  });
+
+  it("a loadConfig() → writeConfig() round-trip does NOT add port rows", () => {
+    if (!existsSync(dirname(CONFIG_PATH))) mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+    writeFileSync(CONFIG_PATH, JSON.stringify({ model: "claude-sonnet-4-6" }) + "\n");
+    // Simulate a command that loads, mutates an unrelated field, and saves.
+    const cfg = loadConfig();
+    cfg.orchestratorName = "friday";
+    writeConfig(cfg);
+    const persisted = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Record<string, unknown>;
+    expect("daemonPort" in persisted).toBe(false);
+    expect("dashboardPort" in persisted).toBe(false);
   });
 });
 
@@ -281,8 +313,6 @@ describe("per-role / per-evolve-task model resolution (FRI-16)", () => {
     // action, never a shipped default.
     expect(DEFAULT_CONFIG).toEqual({
       model: "claude-opus-4-7",
-      daemonPort: PROD_DAEMON_PORT,
-      dashboardPort: PROD_DASHBOARD_PORT,
       sseKeepaliveSec: 20,
       workerMemoryBudgetMb: 2048,
       mcpServers: [],

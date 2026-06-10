@@ -1,6 +1,6 @@
 {
   "name": "@friday/shared",
-  "version": "1.18.6",
+  "version": "1.19.1",
   "private": true,
   "type": "module",
   "exports": {
