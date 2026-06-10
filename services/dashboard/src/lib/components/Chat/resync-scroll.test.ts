@@ -18,8 +18,8 @@
  *   - it aborts on direct user scroll input (one-shot, not sticky);
  *   - it aborts on caller `abort()` (agent / session switch).
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { chaseScrollBottom, makeWindowChaseTarget, type ResyncChaseTarget } from "./resync-scroll";
+import { describe, expect, it, vi } from "vitest";
+import { chaseScrollBottom, makeElementChaseTarget, type ResyncChaseTarget } from "./resync-scroll";
 
 interface Listener {
   type: string;
@@ -255,50 +255,58 @@ describe("chaseScrollBottom", () => {
 });
 
 /**
- * FRI-160: the chat transcript is inert and the DOCUMENT is the
- * scroller, so ChatShell passes `makeWindowChaseTarget()` instead of an
- * element. These tests pin the adapter's window/documentElement split:
- * position reads from `window.scrollY`, position writes via
- * `window.scrollTo(0, v)`, height from
- * `document.documentElement.scrollHeight`, and the cancel-event
- * listeners bind to (and unbind from) `window`.
+ * ADR-041: the chat transcript is again an INNER scroller element, so
+ * ChatShell passes `makeElementChaseTarget(transcriptEl)`. These tests
+ * pin the thin element adapter: scrollTop reads/writes pass through to
+ * the element, scrollHeight reads from it, and the cancel-event listeners
+ * bind to (and unbind from) the element.
  */
-describe("makeWindowChaseTarget", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  function stubDocScroller({ scrollY, scrollHeight }: { scrollY: number; scrollHeight: number }) {
-    Object.defineProperty(window, "scrollY", {
-      value: scrollY,
-      configurable: true,
-    });
-    Object.defineProperty(document.documentElement, "scrollHeight", {
-      value: scrollHeight,
-      configurable: true,
-    });
-    return vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+describe("makeElementChaseTarget", () => {
+  function makeFakeEl() {
+    const listeners = new Map<string, Set<EventListener>>();
+    let scrollTop = 0;
+    const el = {
+      get scrollTop() {
+        return scrollTop;
+      },
+      set scrollTop(v: number) {
+        scrollTop = v;
+      },
+      scrollHeight: 0,
+      addEventListener: vi.fn((type: string, l: EventListener) => {
+        (listeners.get(type) ?? listeners.set(type, new Set()).get(type)!).add(l);
+      }),
+      removeEventListener: vi.fn((type: string, l: EventListener) => {
+        listeners.get(type)?.delete(l);
+      }),
+      dispatch(type: string) {
+        for (const l of listeners.get(type) ?? []) l(new Event(type));
+      },
+      listenerCount(type: string) {
+        return listeners.get(type)?.size ?? 0;
+      },
+    };
+    return el;
   }
+  const asEl = (f: ReturnType<typeof makeFakeEl>) => f as unknown as HTMLElement;
 
-  it("reads scrollTop from window.scrollY and scrollHeight from documentElement", () => {
-    stubDocScroller({ scrollY: 123, scrollHeight: 777 });
-    const target = makeWindowChaseTarget();
+  it("reads/writes scrollTop and reads scrollHeight straight from the element", () => {
+    const el = makeFakeEl();
+    el.scrollTop = 123;
+    el.scrollHeight = 777;
+    const target = makeElementChaseTarget(asEl(el));
     expect(target.scrollTop).toBe(123);
     expect(target.scrollHeight).toBe(777);
-  });
-
-  it("writes scrollTop via window.scrollTo(0, v)", () => {
-    const scrollTo = stubDocScroller({ scrollY: 0, scrollHeight: 777 });
-    const target = makeWindowChaseTarget();
     target.scrollTop = 456;
-    expect(scrollTo).toHaveBeenCalledWith(0, 456);
+    expect(el.scrollTop).toBe(456);
   });
 
-  it("chases the document bottom each frame and aborts on window wheel input", () => {
-    const scrollTo = stubDocScroller({ scrollY: 0, scrollHeight: 500 });
+  it("chases the element bottom each frame and aborts on the element's wheel input", () => {
+    const el = makeFakeEl();
+    el.scrollHeight = 500;
     const clock = makeClock();
     let ended: string | null = null;
-    chaseScrollBottom(makeWindowChaseTarget(), {
+    chaseScrollBottom(makeElementChaseTarget(asEl(el)), {
       now: clock.now,
       raf: clock.raf,
       cancelRaf: clock.cancelRaf,
@@ -308,15 +316,14 @@ describe("makeWindowChaseTarget", () => {
       },
     });
     clock.tick(16);
-    expect(scrollTo).toHaveBeenCalledWith(0, 500);
-    // Direct user input fires on `window` — the adapter's listeners
-    // must be bound there, not on any element.
-    window.dispatchEvent(new Event("wheel"));
+    expect(el.scrollTop).toBe(500);
+    // Direct user input fires on the ELEMENT — the adapter's listeners
+    // bind there, not on window.
+    el.dispatch("wheel");
     expect(ended).toBe("input");
-    // Listeners removed from window on exit: a later wheel must not
-    // re-enter the (already-ended) chase, and no further frames run.
+    // Listeners removed from the element on exit; no further frames run.
+    expect(el.listenerCount("wheel")).toBe(0);
     clock.tick(16);
-    expect(scrollTo).toHaveBeenCalledTimes(1);
     expect(clock.hasPending()).toBe(false);
   });
 });

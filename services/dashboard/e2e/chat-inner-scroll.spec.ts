@@ -1,32 +1,34 @@
 /**
- * FRI-160 (ACs 6, 7) — document-as-scroller chat round-trip.
+ * Chat inner-scroller round-trip (ADR-041 — supersedes the FRI-160
+ * document-scroll model for the chat route).
  *
- * The chat shell no longer owns a fixed-overlay scroller: the document/
- * window is the single scroller (the transcript element `.chat-transcript`
- * is inert, no overflow). This spec pins the four user-visible scroll
- * behaviors that the rework had to preserve, in a real Chromium against
- * the full sync env (mirrors `todo-renderer.spec.ts` / `compaction-
- * divider.spec.ts`):
+ * The chat transcript is again a real INNER scroller (`.chat-transcript`,
+ * `position:absolute; inset:0; overflow-y:auto`) inside a visual-viewport-
+ * sized fixed column, with the body hard-locked (`html.chat-scroll-lock`)
+ * so the document never scrolls on this route. The composer sits in the
+ * column as a translucent overlay and never has to chase the keyboard
+ * (the keyboard-up stutter that document scroll couldn't avoid is gone).
+ * This spec pins the user-visible scroll behaviors against the full sync
+ * env (mirrors `todo-renderer.spec.ts` / `compaction-divider.spec.ts`):
  *
- *   - AC6: navigating to `/` lands at the BOTTOM of the transcript
- *     (the chat entry's deferred bottom-write supersedes the router's
- *     scroll-to-top; entry parity), and `window.scrollY > 0` proves the
- *     *document* did the scrolling — a nested-scroller regression would
- *     leave `window.scrollY` at 0.
- *   - AC6b: leaving chat does NOT leak its scroll position into other
- *     routes — kit 2.59 runs afterNavigate callbacks AFTER its scroll
- *     pass, so a disableScrollHandling() issued there poisons the NEXT
- *     navigation; the layout deliberately doesn't call it.
+ *   - AC6: navigating to `/` lands at the BOTTOM of the transcript, and
+ *     the INNER SCROLLER holds the position (`.chat-transcript.scrollTop
+ *     > 0`) while `window.scrollY === 0` proves the document/body is
+ *     LOCKED — a regression back to document scroll would move
+ *     window.scrollY and leave the body scrollable.
+ *   - AC6b: chat (locked body, transcript scrolls) → Settings (normal
+ *     document scroll, lands at top) → back into chat (transcript at
+ *     bottom again). The two routes use different scrollers; this proves
+ *     the body-lock is scoped to the chat route and released on leave.
  *   - AC7a: stick-to-bottom — while assistant blocks stream in, the
- *     `.bottom-sentinel` stays in the viewport.
+ *     `.bottom-sentinel` stays in the viewport and the transcript follows.
  *   - AC7b: anchor-restore — scrolling up across a virtualization window
- *     slide keeps the topmost visible `[data-msg-id]` in the viewport
- *     (identity preserved, no content jump when 20 older bubbles prepend).
+ *     slide keeps the topmost visible `[data-msg-id]` in the viewport.
  *   - AC7c: the `button.floating-pill.jump-to-bottom` pill returns to the
  *     latest message (`.bottom-sentinel` back in viewport, pill unmounts).
  *   - AC7d: `/jump <term>` scrolls the matched `[data-msg-id]` into view,
- *     including a target that sits OUTSIDE the rendered window (the jump
- *     must slide the window before scrollIntoView can land).
+ *     including a target OUTSIDE the rendered window (the jump must slide
+ *     the window before scrollIntoView can land).
  *
  * Streaming caveat (AC7a): the harness runs no real Claude turn (no
  * ANTHROPIC_API_KEY — same boundary live-typing.spec.ts documents), so
@@ -34,25 +36,17 @@
  * assistant blocks one at a time through the canonical Postgres → zero-cache
  * → Zero-client path, gating on each bubble's arrival before the next
  * insert. Each append grows the transcript while `pinnedToBottom` is true —
- * the exact follow path streaming deltas drive — and the per-block cadence
- * keeps each growth step inside the bottom sentinel's 200px rootMargin
- * headroom, matching streaming's small-increment profile.
+ * the exact follow path streaming deltas drive.
  *
- * Determinism (ticket Decision): every wait is an auto-retrying web-first
- * assertion (`expect(...).toBeInViewport()/.toBeVisible()/.toBeAttached()`,
- * `expect.poll`, `expect(...).toPass`) on a converged state — NO
- * `waitForTimeout`/sleeps on scroll state. The wheel loops are gated on
- * `window.scrollY` actually changing before the next measurement, because
- * `page.mouse.wheel` does not wait for the resulting scroll to apply.
+ * Determinism: every wait is an auto-retrying web-first assertion
+ * (`toBeInViewport()/.toBeVisible()/.toBeAttached()`, `expect.poll`,
+ * `toPass`) on a converged state — NO sleeps on scroll state. The wheel
+ * loops gate on `.chat-transcript.scrollTop` actually changing before the
+ * next measurement, because `page.mouse.wheel` does not wait for the
+ * resulting scroll to apply.
  *
  * Wheel delivery: the wheel lands on whatever is under the pointer, so we
- * hover `body` first — but at an explicitly computed position. A plain
- * `body.hover()` targets the center of the element box, which for a
- * document-height body on a tall page sits OUTSIDE the visible viewport
- * and never resolves; `window.scroll{X,Y} + innerWidth/innerHeight / 2`
- * maps the hover point back to the center of the *visible* viewport
- * (body has `margin: 0` via the app.css universal reset, so its box
- * origin is the document origin).
+ * hover the `.chat-transcript` scroller at its visible centre first.
  *
  * Session match is load-bearing (same as todo-renderer.spec.ts): the chat
  * view binds the Zero `blocks` slice by `agent_name`, then
@@ -174,8 +168,9 @@ async function openChat(
   return { context, page };
 }
 
-function readScrollY(page: Page): Promise<number> {
-  return page.evaluate(() => window.scrollY);
+/** Scroll position of the chat's INNER scroller (`.chat-transcript`). */
+function readScroll(page: Page): Promise<number> {
+  return page.evaluate(() => document.querySelector(".chat-transcript")?.scrollTop ?? 0);
 }
 
 /**
@@ -197,26 +192,22 @@ async function awaitSeededTranscript(page: Page, stamp: string, count: number): 
 }
 
 /**
- * Park the pointer over the document scroller at the center of the
- * *visible* viewport so subsequent `page.mouse.wheel` calls scroll the
- * document (see file header for why a bare `body.hover()` can't be used).
+ * Park the pointer over the `.chat-transcript` inner scroller at the
+ * centre of its visible box so subsequent `page.mouse.wheel` calls scroll
+ * the transcript (not the locked document).
  */
-async function hoverDocScroller(page: Page): Promise<void> {
-  const pos = await page.evaluate(() => ({
-    x: window.scrollX + Math.floor(window.innerWidth / 2),
-    y: window.scrollY + Math.floor(window.innerHeight / 2),
-  }));
-  await page.locator("body").hover({ position: pos });
+async function hoverScroller(page: Page): Promise<void> {
+  await page.locator(".chat-transcript").hover();
 }
 
 /**
  * Wheel upward in `step`px increments until the `.top-sentinel`'s bottom
  * edge rises above `threshold` (a negative viewport-relative px value).
- * Each iteration measures FIRST, then wheels, then gates on
- * `window.scrollY` having changed — so the next measurement never reads a
- * stale position and the loop cannot overshoot by more than one `step`.
- * Used to stop a controlled distance BEFORE the slide trigger (the top
- * sentinel's IntersectionObserver fires at rootMargin 600px, i.e. when
+ * Each iteration measures FIRST, then wheels, then gates on the
+ * transcript's `scrollTop` having changed — so the next measurement never
+ * reads a stale position and the loop cannot overshoot by more than one
+ * `step`. Used to stop a controlled distance BEFORE the slide trigger (the
+ * top sentinel's IntersectionObserver fires at rootMargin 600px, i.e. when
  * the sentinel's bottom rises above -600).
  */
 async function wheelUntilTopSentinelAbove(
@@ -232,21 +223,21 @@ async function wheelUntilTopSentinelAbove(
         Number.NEGATIVE_INFINITY,
     );
     if (bottom > threshold) return;
-    const before = await readScrollY(page);
+    const before = await readScroll(page);
     await page.mouse.wheel(0, -step);
-    await expect.poll(() => readScrollY(page), { timeout: 5_000 }).not.toBe(before);
+    await expect.poll(() => readScroll(page), { timeout: 5_000 }).not.toBe(before);
   }
   throw new Error(
     `top sentinel never rose above ${threshold}px after ${maxIters} wheel steps of ${step}px`,
   );
 }
 
-test.describe("FRI-160 — document is the chat scroller", () => {
-  test("AC6 — navigation lands at the bottom and the document is what scrolled", async ({
+test.describe("chat inner scroller (ADR-041)", () => {
+  test("AC6 — navigation lands at the bottom; the INNER scroller holds it and the body is locked", async ({
     browser,
   }) => {
     const env = loadEnv();
-    const stamp = `fri160-nav-${Date.now()}`;
+    const stamp = `inner-nav-${Date.now()}`;
     await seedTranscript(env.databaseUrl, stamp, 160);
 
     const { context, page } = await openChat(browser, env, { width: 1280, height: 720 });
@@ -257,51 +248,59 @@ test.describe("FRI-160 — document is the chat scroller", () => {
     await awaitSeededTranscript(page, stamp, 160);
     await expect(page.locator(".bottom-sentinel")).toBeInViewport({ timeout: 20_000 });
 
-    // The transcript element is the renamed inert `.chat-transcript` (no
-    // fixed overlay) and the *document* holds the scroll position: a tall
-    // transcript pinned to its bottom means window.scrollY is far from 0.
-    // A regression back to a nested element scroller would leave it at 0.
+    // The `.chat-transcript` inner scroller holds the position: a tall
+    // transcript pinned to its bottom means its scrollTop is far from 0.
     await expect(page.locator(".chat-transcript")).toBeVisible();
-    await expect.poll(() => readScrollY(page)).toBeGreaterThan(0);
+    await expect.poll(() => readScroll(page)).toBeGreaterThan(0);
+    // ...and the document/body is LOCKED — window.scrollY stays 0 and the
+    // body is not scrollable. A regression back to document scroll would
+    // break both invariants (and reopen the ADR-039 touch-routing fight).
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    expect(
+      await page.evaluate(() => getComputedStyle(document.documentElement).overflow),
+    ).toContain("hidden");
 
     await context.close();
   });
 
-  test("AC6b — leaving chat does not leak its scroll position into other routes", async ({
+  test("AC6b — chat (locked body) → Settings (document scroll, top) → back into chat (bottom)", async ({
     browser,
   }) => {
     const env = loadEnv();
-    const stamp = `fri160-leave-${Date.now()}`;
+    const stamp = `inner-leave-${Date.now()}`;
     await seedTranscript(env.databaseUrl, stamp, 160);
 
     // Short viewport so the destination page (Settings) is taller than
     // the viewport — a too-short destination would clamp scrollY to 0 on
-    // its own and mask the leak this test exists to catch.
+    // its own and mask a leak.
     const { context, page } = await openChat(browser, env, { width: 1280, height: 500 });
     await awaitSeededTranscript(page, stamp, 160);
-    await expect.poll(() => readScrollY(page)).toBeGreaterThan(0);
+    // Chat: the inner scroller is at the bottom and the body is locked.
+    await expect.poll(() => readScroll(page)).toBeGreaterThan(0);
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
 
-    // Header-nav to Settings. The regression this pins: a scroll-handling
-    // disable issued during the chat entry leaked into the NEXT
-    // navigation (SvelteKit runs afterNavigate callbacks AFTER the
-    // router's scroll pass and its autoscroll-flag reset), so the router
-    // skipped its scroll-to-top and Settings inherited chat's deep
-    // scrollY.
+    // Header-nav to Settings — a normal document-scrolling route. The
+    // body-lock must be released (ChatShell unmount removes
+    // .chat-scroll-lock) and the router lands Settings at the top.
     await page.getByRole("link", { name: "Settings" }).click();
     await expect(page).toHaveURL(/\/settings/);
+    // The lock is gone: the document is scrollable again.
+    await expect
+      .poll(() => page.evaluate(() => getComputedStyle(document.documentElement).overflow))
+      .not.toContain("hidden");
     // Guard against vacuity: the destination must actually be scrollable,
     // otherwise scrollY=0 proves nothing.
     await expect
       .poll(() => page.evaluate(() => document.documentElement.scrollHeight > window.innerHeight))
       .toBe(true);
-    await expect.poll(() => readScrollY(page)).toBe(0);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 
-    // And header-nav back INTO chat lands at the bottom again (the
-    // direct-load case is AC6; this is the in-app link case).
+    // And header-nav back INTO chat lands at the transcript bottom again
+    // (the direct-load case is AC6; this is the in-app link case).
     await page.getByRole("link", { name: "Chat" }).click();
     await expect(page).toHaveURL(`${env.dashboardURL.replace(/\/$/, "")}/`);
     await expect(page.locator(".bottom-sentinel")).toBeInViewport({ timeout: 10_000 });
-    await expect.poll(() => readScrollY(page)).toBeGreaterThan(0);
+    await expect.poll(() => readScroll(page)).toBeGreaterThan(0);
 
     await context.close();
   });
@@ -310,13 +309,13 @@ test.describe("FRI-160 — document is the chat scroller", () => {
     browser,
   }) => {
     const env = loadEnv();
-    const stamp = `fri160-stick-${Date.now()}`;
+    const stamp = `inner-stick-${Date.now()}`;
     const { sessionId } = await seedTranscript(env.databaseUrl, stamp, 40);
 
     const { context, page } = await openChat(browser, env, { width: 1280, height: 720 });
     await awaitSeededTranscript(page, stamp, 40);
     await expect(page.locator(".bottom-sentinel")).toBeInViewport({ timeout: 20_000 });
-    const yAtBottom = await readScrollY(page);
+    const yAtBottom = await readScroll(page);
 
     // Append 10 assistant blocks one at a time, gating on each bubble's
     // arrival in the DOM before inserting the next. The per-block cadence
@@ -362,7 +361,7 @@ test.describe("FRI-160 — document is the chat scroller", () => {
     // Stick-to-bottom held: the sentinel is still in the viewport after
     // ~10 bubbles of growth, and the document scrolled DOWN to follow.
     await expect(page.locator(".bottom-sentinel")).toBeInViewport({ timeout: 10_000 });
-    await expect.poll(() => readScrollY(page)).toBeGreaterThan(yAtBottom);
+    await expect.poll(() => readScroll(page)).toBeGreaterThan(yAtBottom);
 
     await context.close();
   });
@@ -371,7 +370,7 @@ test.describe("FRI-160 — document is the chat scroller", () => {
     browser,
   }) => {
     const env = loadEnv();
-    const stamp = `fri160-anchor-${Date.now()}`;
+    const stamp = `inner-anchor-${Date.now()}`;
     // 160 messages: WINDOW_SIZE is 100, so the initial render mounts
     // indices 60..159 and a slide-up (SLIDE_AMOUNT 20) prepends 40..59.
     await seedTranscript(env.databaseUrl, stamp, 160);
@@ -382,7 +381,7 @@ test.describe("FRI-160 — document is the chat scroller", () => {
     const { context, page } = await openChat(browser, env, { width: 1280, height: 1100 });
     await awaitSeededTranscript(page, stamp, 160);
 
-    await hoverDocScroller(page);
+    await hoverScroller(page);
     // Approach the slide trigger in two gated phases: coarse to within
     // ~2.2k px of the top sentinel, then fine 200px steps to within
     // 1000px — comfortably short of the 600px rootMargin trigger, so the
@@ -443,23 +442,23 @@ test.describe("FRI-160 — document is the chat scroller", () => {
 
   test("AC7c — jump-to-bottom pill returns to the latest message", async ({ browser }) => {
     const env = loadEnv();
-    const stamp = `fri160-jumpbtn-${Date.now()}`;
+    const stamp = `inner-jumpbtn-${Date.now()}`;
     await seedTranscript(env.databaseUrl, stamp, 60);
 
     const { context, page } = await openChat(browser, env, { width: 1280, height: 720 });
     await awaitSeededTranscript(page, stamp, 60);
-    await expect.poll(() => readScrollY(page)).toBeGreaterThan(0);
-    const yAtBottom = await readScrollY(page);
+    await expect.poll(() => readScroll(page)).toBeGreaterThan(0);
+    const yAtBottom = await readScroll(page);
 
     // Wheel up past the bottom sentinel's 200px headroom: pinnedToBottom
     // flips false and the pill mounts. The pill's visibility is the
     // converged-state gate for the wheel having scrolled.
-    await hoverDocScroller(page);
+    await hoverScroller(page);
     await page.mouse.wheel(0, -1_600);
     const pill = page.locator("button.floating-pill.jump-to-bottom");
     await expect(pill).toBeVisible({ timeout: 10_000 });
     // ...and it was the DOCUMENT that scrolled up, not a nested element.
-    await expect.poll(() => readScrollY(page)).toBeLessThan(yAtBottom);
+    await expect.poll(() => readScroll(page)).toBeLessThan(yAtBottom);
 
     // Click → back at the latest message; the IntersectionObserver flips
     // pinnedToBottom true again and the pill unmounts itself.
@@ -472,7 +471,7 @@ test.describe("FRI-160 — document is the chat scroller", () => {
 
   test("AC7d — /jump scrolls the matched message into view", async ({ browser }) => {
     const env = loadEnv();
-    const stamp = `fri160-slash-${Date.now()}`;
+    const stamp = `inner-slash-${Date.now()}`;
     const needle = `needle-${stamp}`;
     // Plant the needle at index 5 — OUTSIDE the initial 100-message render
     // window (which starts at index 60), so the jump must slide the
