@@ -140,8 +140,14 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
     host.setVar(name, value);
   }
 
+  // Monotonic padding inset for the current keyboard session — see
+  // measure(). Reset on blur/stop via clearVars().
+  let stickyInset = 0;
+
   function clearVars() {
+    stickyInset = 0;
     write("--kb-inset", "0px");
+    write("--vv-top-y", "");
     write("--vv-bottom-y", "");
   }
 
@@ -152,23 +158,40 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
       clearVars();
       return;
     }
-    // The y-coordinate of the visual viewport's bottom edge in LAYOUT
-    // viewport coordinates — where the keyboard's top edge sits. This
-    // is the composer's anchor while the keyboard is up: it is built
-    // from visualViewport numbers ONLY. window.innerHeight is
-    // deliberately not an input — iOS 26 bottom-bar Safari misreports
-    // it with the keyboard open, which made every innerHeight-derived
-    // lift land the composer mid-screen.
-    const vvBottom = Math.round(vv.offsetTop + vv.height);
-    write("--vv-bottom-y", `${vvBottom}px`);
-    // The approximate obstruction of the layout viewport's bottom strip
-    // — still innerHeight-based, but consumed only by the transcript's
-    // scroll-headroom padding and the jump pill, where an overestimate
-    // costs blank scroll slack, not visible misplacement.
+    // On-device telemetry (iOS 26.5 Safari, bottom URL bar) showed the
+    // SAME session flipping between two reporting modes while the
+    // keyboard is up:
+    //   Mode A (overlay): innerHeight stays full (796), vv.height
+    //     shrinks (453), offsetTop pans 0..343.
+    //   Mode B (resized, mid-scroll): innerHeight SHRINKS to ≈vv.height
+    //     (355) but offsetTop retains a stale pan (441) — geometrically
+    //     impossible (vv bottom 796 > layout bottom 355).
+    // The fix is to clamp the pan into the only range that is
+    // geometrically possible, 0..(innerHeight − vv.height). In Mode A
+    // the clamp never binds (the real pan range is exactly that); in
+    // Mode B it collapses the garbage pan to 0, which lands the anchor
+    // on the resized layout bottom — exactly where a static bottom
+    // anchor would sit, which is correct in a resized layout viewport.
     const innerH = host.innerHeight();
+    const maxPan = Math.max(0, innerH - vv.height);
+    const vvTop = Math.round(Math.min(Math.max(0, vv.offsetTop), maxPan));
+    const vvBottom = Math.round(vvTop + vv.height);
+    // Anchors for the fixed bars while the keyboard is up: the header /
+    // agent dropdown pin under the visual viewport's top edge, the
+    // composer sits on its bottom edge.
+    write("--vv-top-y", `${vvTop}px`);
+    write("--vv-bottom-y", `${vvBottom}px`);
+    // Scroll-headroom inset for the transcript padding + jump pill.
+    // MONOTONIC within one keyboard session (sticky max): the raw value
+    // flips with the A/B mode changes mid-scroll, and a padding that
+    // grows/shrinks 343px mid-gesture changes the document height under
+    // the user's finger — the "content jumps around while scrolling"
+    // bug. Held at the session max, it can only over-reserve (blank
+    // scroll slack), never yank.
     const raw = innerH - vvBottom;
     const inset = Math.round(Math.min(Math.max(0, raw), innerH * MAX_INSET_FRACTION));
-    write("--kb-inset", `${inset}px`);
+    stickyInset = Math.max(stickyInset, inset);
+    write("--kb-inset", `${stickyInset}px`);
   }
 
   function queueMeasure() {

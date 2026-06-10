@@ -283,6 +283,7 @@
       vvpt: vv ? Math.round(vv.pageTop) : -1,
       sy: Math.round(window.scrollY),
       inset: document.documentElement.style.getPropertyValue("--kb-inset") || "(unset)",
+      vvTopY: document.documentElement.style.getPropertyValue("--vv-top-y") || "(unset)",
       vvBottomY:
         document.documentElement.style.getPropertyValue("--vv-bottom-y") || "(unset)",
       cls: document.documentElement.classList.contains("keyboard-open"),
@@ -298,6 +299,7 @@
       vvpt: 0,
       sy: 0,
       inset: "",
+      vvTopY: "",
       vvBottomY: "",
       cls: false,
     };
@@ -344,24 +346,32 @@
     };
   });
 
-  // Soft-keyboard open/close shrinks/grows the visual viewport (in the
-  // standalone-PWA regime, the layout viewport itself — see
-  // $lib/util/keyboard-inset.ts for the regime split). If the user was
-  // pinned to the bottom, keep them there: without this, opening the
-  // keyboard hides the conversation tail behind it (standalone) or
-  // leaves the last message under the lifted composer after the
-  // transcript's --kb-inset padding grows (Safari tab). Gated on a
-  // focused text field so URL-bar collapse resizes during normal
-  // scrolling never issue scroll writes; the write itself re-checks the
-  // pin at landing time (same discipline as every other deferred write
-  // here).
+  // Soft-keyboard open shrinks the visual viewport; if the user was
+  // pinned to the bottom, keep them there so the keyboard doesn't hide
+  // the conversation tail. STRICTLY limited to the keyboard-OPEN
+  // transition: only within REPIN_WINDOW_MS after a text field gains
+  // focus. iOS 26 Safari also fires viewport resizes while SCROLLING
+  // with the keyboard up (its layout viewport flips reporting modes
+  // mid-gesture — see keyboard-inset.ts); an unwindowed re-pin turned
+  // each of those into a scrollToBottom() that yanked the viewport out
+  // from under the user's finger ("scrolling suddenly snaps to the
+  // bottom"). The write re-checks the pin at landing time, as every
+  // deferred write here does.
+  const REPIN_WINDOW_MS = 1600;
   $effect(() => {
     if (readonly) return;
     const vv = window.visualViewport;
     if (!vv) return;
     let cancel: (() => void) | null = null;
+    let focusedAt = -Infinity;
+    const onFocusIn = (e: FocusEvent) => {
+      if (isTextEntryElement(e.target as Element | null)) {
+        focusedAt = performance.now();
+      }
+    };
     const onVvResize = () => {
       if (!isTextEntryElement(document.activeElement)) return;
+      if (performance.now() - focusedAt > REPIN_WINDOW_MS) return;
       if (!chat.pinnedToBottom) return;
       cancel?.();
       cancel = afterNextPaint(() => {
@@ -369,13 +379,14 @@
         if (chat.pinnedToBottom) scrollToBottom();
       });
     };
+    document.addEventListener("focusin", onFocusIn);
     vv.addEventListener("resize", onVvResize);
     // The layout viewport can resize with no vv event (iOS 26 bottom-bar
-    // Safari resizes it at keyboard-animation end) — same focused+pinned
-    // gate, same deferred write.
+    // Safari resizes it at keyboard-animation end) — same gates.
     window.addEventListener("resize", onVvResize);
     return () => {
       cancel?.();
+      document.removeEventListener("focusin", onFocusIn);
       vv.removeEventListener("resize", onVvResize);
       window.removeEventListener("resize", onVvResize);
     };
@@ -610,7 +621,8 @@
 {#if kbDebug}
   <!-- TEMPORARY debug HUD (delete before merge) -->
   <div class="kb-debug" aria-hidden="true">
-    <div>build: dbg-2</div>
+    <div>build: dbg-3</div>
+    <div>--vv-top-y: {dbg.vvTopY}</div>
     <div>innerH: {dbg.ih}</div>
     <div>vv.h: {dbg.vvh}</div>
     <div>vv.offTop: {dbg.vvot}</div>
@@ -788,6 +800,16 @@
     top: var(--vv-bottom-y, 100dvh);
     bottom: auto;
     transform: translateY(calc(-100% - 1rem));
+    /* Smooths the one-frame anchor lag while iOS pans the visual
+       viewport during keyboard-up scrolling — follow, not stutter. */
+    transition: top 200ms ease-out;
+  }
+  /* Same treatment as the header (+layout.svelte): pin under the visual
+     viewport's top edge while the keyboard is up so the agent dropdown
+     doesn't slide out of view as iOS pans. */
+  :global(:root.keyboard-open) .chat-sidebar-floating {
+    top: calc(var(--chat-top) + var(--vv-top-y, 0px));
+    transition: top 200ms ease-out;
   }
 
   .readonly-banner {

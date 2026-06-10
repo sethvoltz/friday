@@ -78,6 +78,8 @@ function makeHost(initial: {
     lastVar: () => writes.filter((w) => w[0] === "--kb-inset").at(-1)?.[1],
     /** Latest --vv-bottom-y write (the composer anchor; "" = removed). */
     lastAnchor: () => writes.filter((w) => w[0] === "--vv-bottom-y").at(-1)?.[1],
+    /** Latest --vv-top-y write (the header anchor; "" = removed). */
+    lastTopAnchor: () => writes.filter((w) => w[0] === "--vv-top-y").at(-1)?.[1],
   };
 }
 
@@ -124,70 +126,123 @@ describe("iOS Safari tab regime (innerHeight fixed, vv shrinks)", () => {
     expect(h.lastVar()).toBe("318px");
   });
 
-  it("Safari's focused-field reveal pan (vv.scroll → offsetTop) reduces the lift by exactly offsetTop", () => {
+  it("Safari's reveal pan (vv.scroll → offsetTop) moves the anchors; the padding inset stays sticky", () => {
     const h = makeHost({ innerHeight: 844, vvHeight: 526 });
     const t = createKeyboardInsetTracker(h.host);
     t.onFocusIn(fakeTextarea());
     h.flushRaf();
+    expect(h.lastAnchor()).toBe("526px");
+    expect(h.lastTopAnchor()).toBe("0px");
     expect(h.lastVar()).toBe("318px");
 
     // Safari pans the visual viewport 100px down inside the layout
-    // viewport — fires vv.scroll, no resize.
+    // viewport — fires vv.scroll, no resize. Both bar anchors follow;
+    // the padding inset is monotonic within the session (a padding that
+    // shrinks mid-pan changes document height under the user's finger).
     h.state.vvOffsetTop = 100;
     t.onViewportChange();
     h.flushRaf();
-    expect(h.lastVar()).toBe("218px");
+    expect(h.lastAnchor()).toBe("626px");
+    expect(h.lastTopAnchor()).toBe("100px");
+    expect(h.lastVar()).toBe("318px");
 
-    // Fully panned to the layout-viewport bottom: fixed bottom:0 is
-    // naturally visible, lift must be 0.
+    // Fully panned to the layout-viewport bottom.
     h.state.vvOffsetTop = 318;
     t.onViewportChange();
     h.flushRaf();
-    expect(h.lastVar()).toBe("0px");
+    expect(h.lastAnchor()).toBe("844px");
+    expect(h.lastTopAnchor()).toBe("318px");
+  });
+});
+
+describe("iOS 26.5 mode flips (replayed from on-device telemetry)", () => {
+  it("Mode B's impossible pan (offsetTop+height > innerHeight) clamps to the resized layout bottom; padding never yanks", () => {
+    // Real sequence captured from the device (dashboard JSONL):
+    const h = makeHost({ innerHeight: 796, vvHeight: 796 });
+    const t = createKeyboardInsetTracker(h.host);
+    t.onFocusIn(fakeTextarea());
+    h.flushRaf();
+
+    // Keyboard opens (Mode A, overlay): ih 796, vv 453, pan 0.
+    h.state.vvHeight = 453;
+    t.onViewportChange();
+    h.flushRaf();
+    expect(h.lastAnchor()).toBe("453px");
+    expect(h.lastVar()).toBe("343px");
+
+    // Mode A with reveal pan: vv pans fully (343 = ih − vvh). Anchor
+    // rides to the layout bottom; sticky inset holds.
+    h.state.vvOffsetTop = 343;
+    t.onViewportChange();
+    h.flushRaf();
+    expect(h.lastAnchor()).toBe("796px");
+    expect(h.lastTopAnchor()).toBe("343px");
+    expect(h.lastVar()).toBe("343px");
+
+    // Mode B mid-scroll: layout viewport SHRINKS (ih 355 ≈ vvh 355) but
+    // offsetTop retains a stale 441 — vv bottom 796 > layout bottom 355
+    // is geometrically impossible. Clamp collapses the pan to 0: the
+    // anchor lands on the resized layout bottom (= where a static
+    // bottom anchor sits, correct in a resized layout viewport).
+    h.state.innerHeight = 355;
+    h.state.vvHeight = 355;
+    h.state.vvOffsetTop = 441;
+    t.onViewportChange();
+    h.flushRaf();
+    expect(h.lastTopAnchor()).toBe("0px");
+    expect(h.lastAnchor()).toBe("355px");
+    expect(h.lastVar()).toBe("343px"); // sticky — no 343→0 padding yank
+
+    // Back to Mode A settled (pan folded into scrollY by iOS).
+    h.state.innerHeight = 796;
+    h.state.vvHeight = 453;
+    h.state.vvOffsetTop = 0;
+    t.onViewportChange();
+    h.flushRaf();
+    expect(h.lastAnchor()).toBe("453px");
+    expect(h.lastTopAnchor()).toBe("0px");
+    expect(h.lastVar()).toBe("343px");
   });
 });
 
 describe("iOS 26 bottom-bar Safari: layout viewport resizes AFTER the last vv event", () => {
-  it("a late innerHeight shrink (window.resize only, no vv event) converges the inset back to 0", () => {
+  it("a late innerHeight shrink (window.resize only, no vv event) keeps the anchor on the layout bottom", () => {
     const h = makeHost({ innerHeight: 844, vvHeight: 844 });
     const t = createKeyboardInsetTracker(h.host);
     t.onFocusIn(fakeTextarea());
     h.flushRaf();
 
-    // vv shrinks first, mid-animation — innerHeight still holds the old
-    // full height, so the formula reads a full keyboard lift.
+    // vv shrinks first, mid-animation — overlay-regime reading.
     h.state.vvHeight = 526;
     t.onViewportChange();
     h.flushRaf();
-    expect(h.lastVar()).toBe("318px");
+    expect(h.lastAnchor()).toBe("526px");
 
     // Then the LAYOUT viewport resizes at animation end. No vv event —
-    // only window.resize fires (wired to the same handler). Without the
-    // re-measure the composer stays double-lifted a full keyboard
-    // height above the keyboard (the bug observed on-device).
+    // only window.resize fires (wired to the same handler). The anchor
+    // must land on the resized layout bottom (526), i.e. exactly where
+    // the static bottom rule would put the composer.
     h.state.innerHeight = 526;
     t.onViewportChange();
     h.flushRaf();
-    expect(h.lastVar()).toBe("0px");
+    expect(h.lastAnchor()).toBe("526px");
+    expect(h.lastTopAnchor()).toBe("0px");
   });
 
-  it("settle probes converge the inset even when NO event fires after the geometry settles", () => {
+  it("settle probes re-measure even when NO event fires after the geometry settles", () => {
     const h = makeHost({ innerHeight: 844, vvHeight: 844 });
     const t = createKeyboardInsetTracker(h.host);
     t.onFocusIn(fakeTextarea());
     h.flushRaf();
 
     h.state.vvHeight = 526;
-    t.onViewportChange();
-    h.flushRaf();
-    expect(h.lastVar()).toBe("318px");
-
+    h.state.vvOffsetTop = 100;
     // Geometry settles silently — no further events of any kind. The
-    // post-focus settle probes re-measure on a timetable.
-    h.state.innerHeight = 526;
+    // post-focus settle probes pick the change up on a timetable.
     h.flushTimers();
     h.flushRaf();
-    expect(h.lastVar()).toBe("0px");
+    expect(h.lastAnchor()).toBe("626px");
+    expect(h.lastTopAnchor()).toBe("100px");
   });
 });
 
@@ -285,21 +340,24 @@ describe("blur settle + dismissal", () => {
 });
 
 describe("composer anchor (--vv-bottom-y)", () => {
-  it("equals vv.offsetTop + vv.height and is COMPLETELY innerHeight-independent", () => {
-    // iOS 26 bottom-bar Safari misreports innerHeight with the keyboard
-    // open. The composer anchor must not care: same vv numbers, wildly
-    // different innerHeight claims, same anchor.
-    for (const lyingInnerHeight of [526, 844, 1000, 5000]) {
-      const h = makeHost({
-        innerHeight: lyingInnerHeight,
-        vvHeight: 430,
-        vvOffsetTop: 100,
-      });
+  it("equals clamped offsetTop + vv.height: innerHeight only ever bounds the pan, never inflates the anchor", () => {
+    // A geometrically possible pan passes through untouched regardless
+    // of how large innerHeight claims to be...
+    for (const innerHeight of [844, 1000, 5000]) {
+      const h = makeHost({ innerHeight, vvHeight: 430, vvOffsetTop: 100 });
       const t = createKeyboardInsetTracker(h.host);
       t.onFocusIn(fakeTextarea());
       h.flushRaf();
       expect(h.lastAnchor()).toBe("530px");
     }
+    // ...while an impossible one (vv bottom would exceed the layout
+    // bottom) collapses to the layout bottom itself.
+    const h = makeHost({ innerHeight: 430, vvHeight: 430, vvOffsetTop: 100 });
+    const t = createKeyboardInsetTracker(h.host);
+    t.onFocusIn(fakeTextarea());
+    h.flushRaf();
+    expect(h.lastAnchor()).toBe("430px");
+    expect(h.lastTopAnchor()).toBe("0px");
   });
 
   it("is removed (not zeroed) on settled blur so the CSS falls back to the static bottom anchor", () => {
@@ -326,6 +384,7 @@ describe("write hygiene", () => {
     t.onViewportChange();
     h.flushRaf();
     expect(h.writes).toEqual([
+      ["--vv-top-y", "0px"],
       ["--vv-bottom-y", "526px"],
       ["--kb-inset", "318px"],
     ]);
@@ -340,6 +399,7 @@ describe("write hygiene", () => {
     t.onViewportChange();
     h.flushRaf();
     expect(h.writes).toEqual([
+      ["--vv-top-y", "0px"],
       ["--vv-bottom-y", "526px"],
       ["--kb-inset", "318px"],
     ]);
