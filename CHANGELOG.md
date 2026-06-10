@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.4](https://github.com/sethvoltz/friday/compare/v1.18.3...v1.18.4) (2026-06-10)
+
+
+### Bug Fixes
+
+* **daemon:** correct mail backstop tool-name check to use MCP-prefixed name ([#226](https://github.com/sethvoltz/friday/issues/226)) ([42401a1](https://github.com/sethvoltz/friday/commit/42401a1d5d46ba4ce4a6f94744e40251ad90d223))
+
 ## [1.18.3](https://github.com/sethvoltz/friday/compare/v1.18.2...v1.18.3) (2026-06-10)
 
 
