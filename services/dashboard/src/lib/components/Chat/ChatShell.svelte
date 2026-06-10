@@ -18,6 +18,7 @@
     scrollByDelta,
     scrollToBottom,
   } from "$lib/components/Chat/doc-scroll";
+  import { isTextEntryElement } from "$lib/util/keyboard-inset";
   import { tick, untrack } from "svelte";
 
   interface Props {
@@ -264,6 +265,152 @@
     queueMicrotask(() => scrollToBottom());
   });
 
+  // `?kbdebug` diagnostics (documented in docs/mobile-ux.md): the
+  // instrument that established the iOS 26.5 keyboard geometry; kept
+  // until WebKit's viewport reporting stabilizes.
+  // Two parts, both dev-only:
+  //   1. ?kbdebug renders the live keyboard-geometry inputs as a fixed
+  //      HUD overlay.
+  //   2. In dev builds, every keyboard open posts geometry snapshots
+  //      (at +120/+600/+1500ms, when the animation should be settling)
+  //      to /api/_diag/client-error, which lands them in the dashboard
+  //      JSONL log — the side-band built for exactly this, readable on
+  //      the dev machine without the phone's cooperation.
+  function kbSnapshot() {
+    const vv = window.visualViewport;
+    return {
+      ih: Math.round(window.innerHeight),
+      vvh: vv ? Math.round(vv.height) : -1,
+      vvot: vv ? Math.round(vv.offsetTop) : -1,
+      vvpt: vv ? Math.round(vv.pageTop) : -1,
+      sy: Math.round(window.scrollY),
+      inset: document.documentElement.style.getPropertyValue("--kb-inset") || "(unset)",
+      vvTopY: document.documentElement.style.getPropertyValue("--vv-top-y") || "(unset)",
+      vvBottomY:
+        document.documentElement.style.getPropertyValue("--vv-bottom-y") || "(unset)",
+      cls: document.documentElement.classList.contains("keyboard-open"),
+    };
+  }
+  let kbDebug = $state(false);
+  let dbg = $state(kbSnapshotInit());
+  function kbSnapshotInit() {
+    return {
+      ih: 0,
+      vvh: 0,
+      vvot: 0,
+      vvpt: 0,
+      sy: 0,
+      inset: "",
+      vvTopY: "",
+      vvBottomY: "",
+      cls: false,
+    };
+  }
+  $effect(() => {
+    if (!window.location.search.includes("kbdebug")) return;
+    kbDebug = true;
+    const upd = () => (dbg = kbSnapshot());
+    upd();
+    const i = setInterval(upd, 250);
+    return () => clearInterval(i);
+  });
+  $effect(() => {
+    if (!import.meta.env.DEV || readonly) return;
+    let timers: ReturnType<typeof setTimeout>[] = [];
+    const post = (phase: string) => {
+      const composer = inputEl?.getBoundingClientRect();
+      void fetch("/api/_diag/client-error", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event: "kbdebug",
+          message: JSON.stringify({
+            phase,
+            ...kbSnapshot(),
+            composerTop: composer ? Math.round(composer.top) : -1,
+            composerBottom: composer ? Math.round(composer.bottom) : -1,
+          }),
+          userAgent: navigator.userAgent,
+        }),
+      }).catch(() => undefined);
+    };
+    const onFocusIn = (e: FocusEvent) => {
+      if (!isTextEntryElement(e.target as Element | null)) return;
+      for (const t of timers) clearTimeout(t);
+      timers = [120, 600, 1500].map((ms) =>
+        setTimeout(() => post(`+${ms}ms`), ms),
+      );
+    };
+    // Also snapshot ~400ms after viewport activity settles while a
+    // field is focused — captures the scrolled-with-keyboard-up states
+    // the focus-relative probes miss.
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
+    const onVvActivity = () => {
+      if (!isTextEntryElement(document.activeElement)) return;
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => post("vv-settle"), 400);
+    };
+    const vvDbg = window.visualViewport;
+    document.addEventListener("focusin", onFocusIn);
+    vvDbg?.addEventListener("resize", onVvActivity);
+    vvDbg?.addEventListener("scroll", onVvActivity);
+    window.addEventListener("resize", onVvActivity);
+    return () => {
+      for (const t of timers) clearTimeout(t);
+      clearTimeout(settleTimer);
+      document.removeEventListener("focusin", onFocusIn);
+      vvDbg?.removeEventListener("resize", onVvActivity);
+      vvDbg?.removeEventListener("scroll", onVvActivity);
+      window.removeEventListener("resize", onVvActivity);
+    };
+  });
+
+  // Soft-keyboard open shrinks the visual viewport; if the user was
+  // pinned to the bottom, keep them there so the keyboard doesn't hide
+  // the conversation tail. STRICTLY limited to the keyboard-OPEN
+  // transition: only within REPIN_WINDOW_MS after a text field gains
+  // focus. iOS 26 Safari also fires viewport resizes while SCROLLING
+  // with the keyboard up (its layout viewport flips reporting modes
+  // mid-gesture — see keyboard-inset.ts); an unwindowed re-pin turned
+  // each of those into a scrollToBottom() that yanked the viewport out
+  // from under the user's finger ("scrolling suddenly snaps to the
+  // bottom"). The write re-checks the pin at landing time, as every
+  // deferred write here does.
+  const REPIN_WINDOW_MS = 1600;
+  $effect(() => {
+    if (readonly) return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+    let cancel: (() => void) | null = null;
+    let focusedAt = -Infinity;
+    const onFocusIn = (e: FocusEvent) => {
+      if (isTextEntryElement(e.target as Element | null)) {
+        focusedAt = performance.now();
+      }
+    };
+    const onVvResize = () => {
+      if (!isTextEntryElement(document.activeElement)) return;
+      if (performance.now() - focusedAt > REPIN_WINDOW_MS) return;
+      if (!chat.pinnedToBottom) return;
+      cancel?.();
+      cancel = afterNextPaint(() => {
+        cancel = null;
+        if (chat.pinnedToBottom) scrollToBottom();
+      });
+    };
+    document.addEventListener("focusin", onFocusIn);
+    vv.addEventListener("resize", onVvResize);
+    // The layout viewport can resize with no vv event (iOS 26 bottom-bar
+    // Safari resizes it at keyboard-animation end) — same gates.
+    window.addEventListener("resize", onVvResize);
+    return () => {
+      cancel?.();
+      document.removeEventListener("focusin", onFocusIn);
+      vv.removeEventListener("resize", onVvResize);
+      window.removeEventListener("resize", onVvResize);
+    };
+  });
+
   $effect(() => {
     if (!inputEl) return;
     const ro = new ResizeObserver(([entry]) => {
@@ -490,6 +637,32 @@
   });
 </script>
 
+{#if kbDebug}
+  <!-- ?kbdebug probe ladder (docs/mobile-ux.md): fixed lines at
+       known layout-viewport y coordinates. A screenshot with the
+       keyboard up shows which layout coordinate physically renders at
+       the keyboard's top edge — measuring the layout→screen mapping
+       that no viewport API value reports. -->
+  {#each [250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900] as y (y)}
+    <div class="kb-probe" style="top: {y}px" aria-hidden="true">
+      <span>{y}</span>
+    </div>
+  {/each}
+  <!-- ?kbdebug HUD (docs/mobile-ux.md) -->
+  <div class="kb-debug" aria-hidden="true">
+    <div>build: dbg-6</div>
+    <div>--vv-top-y: {dbg.vvTopY}</div>
+    <div>innerH: {dbg.ih}</div>
+    <div>vv.h: {dbg.vvh}</div>
+    <div>vv.offTop: {dbg.vvot}</div>
+    <div>vv.pageTop: {dbg.vvpt}</div>
+    <div>scrollY: {dbg.sy}</div>
+    <div>--kb-inset: {dbg.inset}</div>
+    <div>--vv-bottom-y: {dbg.vvBottomY}</div>
+    <div>kb-open: {dbg.cls}</div>
+  </div>
+{/if}
+
 <aside class="chat-sidebar-floating">
   <Sidebar />
 </aside>
@@ -594,10 +767,48 @@
     overflow-anchor: none;
     padding-top: var(--chat-top);
     /* Mirrors the floating input offset so the last message scrolls fully above it. */
-    padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px));
+    padding-bottom: calc(var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px) + var(--kb-inset, 0px));
     padding-left: var(--content-left);
     padding-right: var(--page-gutter);
   }
+  /* ?kbdebug probe ladder. */
+  .kb-probe {
+    position: fixed;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: #f0f;
+    z-index: 9998;
+    pointer-events: none;
+  }
+  .kb-probe span {
+    position: absolute;
+    right: 2px;
+    top: -16px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: #f0f;
+    background: rgba(0, 0, 0, 0.75);
+    padding: 0 4px;
+  }
+
+  /* ?kbdebug HUD. Anchored to the top so
+     it stays readable regardless of keyboard/composer state. */
+  .kb-debug {
+    position: fixed;
+    top: 30%;
+    left: 0.5rem;
+    z-index: 9999;
+    pointer-events: none;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: #0f0;
+    background: rgba(0, 0, 0, 0.75);
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+  }
+
   .chat-sidebar-floating {
     position: fixed;
     top: var(--chat-top);
@@ -614,7 +825,7 @@
 
   .chat-input-floating {
     position: fixed;
-    bottom: calc(1rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px));
+    bottom: calc(1rem + var(--kb-safe-bottom, 0px));
     left: var(--content-left);
     right: var(--page-gutter);
     background: var(--header-float-bg);
@@ -623,6 +834,32 @@
     box-shadow: var(--shadow-lg);
     backdrop-filter: blur(20px) saturate(160%);
     z-index: 90;
+  }
+  /* Soft keyboard up: anchor the composer's bottom to the VISUAL
+     viewport's bottom edge (--vv-bottom-y = vv.offsetTop + vv.height in
+     layout coordinates — exactly where the keyboard's top sits). This
+     placement uses visualViewport numbers ONLY: every lift computed
+     from window.innerHeight landed mid-screen on iOS 26 bottom-bar
+     Safari, which misreports innerHeight while the keyboard is open.
+     translateY's percentage resolves against the box's OWN height, so
+     the bottom edge aligns without knowing the composer's size. On
+     desktop (hardware keyboard, vv = layout viewport) this resolves to
+     the same place as the bottom: rule above — no visual change on
+     focus. */
+  :global(:root.keyboard-open) .chat-input-floating {
+    top: var(--vv-bottom-y, 100dvh);
+    bottom: auto;
+    transform: translateY(calc(-100% - 1rem));
+    /* NO transition on top — a transition smears every anchor
+       correction over its duration, which reads as the composer lazily
+       sliding around during keyboard-up scrolling. Corrections land
+       same-frame or not at all. */
+  }
+  /* Same treatment as the header (+layout.svelte): pin under the visual
+     viewport's top edge while the keyboard is up so the agent dropdown
+     doesn't slide out of view as iOS pans. */
+  :global(:root.keyboard-open) .chat-sidebar-floating {
+    top: calc(var(--chat-top) + var(--vv-top-y, 0px));
   }
 
   .readonly-banner {
@@ -643,7 +880,7 @@
      scrolls / receives clicks for the chat itself. */
   .jump-to-bottom-wrap {
     position: fixed;
-    bottom: calc(var(--chat-input-h, 6rem) + 3rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px));
+    bottom: calc(var(--chat-input-h, 6rem) + 3rem + var(--kb-safe-bottom, 0px) + var(--kb-inset, 0px));
     left: var(--content-left);
     right: var(--page-gutter);
     display: flex;
@@ -776,6 +1013,12 @@
   }
 
   @media (max-width: 640px) {
-    .chat-input-floating { bottom: calc(0.5rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px)); }
+    .chat-input-floating {
+      bottom: calc(0.5rem + var(--kb-safe-bottom, 0px));
+    }
+    :global(:root.keyboard-open) .chat-input-floating {
+      bottom: auto;
+      transform: translateY(calc(-100% - 0.5rem));
+    }
   }
 </style>

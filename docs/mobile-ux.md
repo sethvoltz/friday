@@ -59,23 +59,41 @@ Friday is mobile-first, not mobile-responsive-as-an-afterthought. Every page is 
 - Standard `<input type="file" multiple>` for gallery picker.
 - HEIC files are converted to PNG by the upload handler (ADR-007 + `attachments.ts`); the dashboard doesn't care about the source format.
 
-## iOS soft keyboard — keyboard-height tracking
+## Soft keyboard — the visual-viewport anchor model (ADR-040)
 
-iOS raises the soft keyboard asynchronously after a text field is focused. `position: fixed` elements use the **layout viewport** as their reference, which does not shrink when the keyboard opens — so a `bottom: 0` composer bar stays pinned to the bottom of the layout viewport and ends up hidden behind the keyboard.
+While the soft keyboard is up, the chat's fixed bars anchor to the **visual viewport's edges**; with it closed they are plain `position: fixed` bars with zero keyboard JS. One tracker — `$lib/util/keyboard-inset.ts`, started from `+layout.svelte` — owns the model. It writes three custom properties plus one class on `:root`:
 
-Current implementation:
+- **`--vv-top-y`** = `vv.offsetTop` (raw): the visual viewport's top edge in layout-viewport coordinates. The app header and the chat sidebar/agent dropdown pin under it (`top: calc(<offset> + var(--vv-top-y))` under `.keyboard-open`) so they don't slide out of view when iOS pans the visual viewport across the layout viewport during keyboard-up scrolling.
+- **`--vv-bottom-y`** = `vv.offsetTop + vv.height`: the visual viewport's bottom edge — where iOS claims the keyboard begins. The composer anchors its bottom there (`top: var(--vv-bottom-y); transform: translateY(calc(-100% - <margin>))`; the translate percentage resolves against the box's own height).
+- **`--kb-inset`** = `max(0, innerHeight − vv.height)`: scroll-headroom for the transcript's bottom padding and the jump pill. Nonzero only in the overlay regime (where the keyboard eats scroll range the padding must give back); 0 in the shrunk regime, where iOS already extended the scroll range and any extra padding renders as blank space. Deliberately excludes the pan so the document height never changes mid-gesture.
+- **`keyboard-open` class**: zeroes `--kb-safe-bottom` while typing (the keyboard covers the home-indicator zone) and gates all of the anchor CSS.
 
-- **Viewport meta** (`app.html`): `interactive-widget=resizes-content` — iOS ignores this hint; Android Chrome gets a free keyboard-shrinks-layout fix with no code changes.
-- **`--kb-h`** (set by focusin/focusout handlers in `+layout.svelte`): `max(0, window.innerHeight - vv.height)` measured inside a `requestAnimationFrame` on `focusin`, so the keyboard animation settles before the height is read. Cleared to `0px` on `focusout`.
-- **`.chat-input-floating`** in `ChatShell.svelte` uses `bottom: calc(1rem + var(--kb-safe-bottom, 0px) + var(--kb-h, 0px))` to lift the composer above the keyboard. `.jump-to-bottom-wrap` bottom and `.chat-transcript` padding-bottom include `--kb-h` as well so the whole layout shifts up together.
-- **Header**: `position: fixed; top: 1rem`. No JS translation needed — iOS automatically pins `position: fixed` elements against the visual viewport top, so the header stays in place as the keyboard opens.
-- **`scrollIntoView` on focus** (`ChatInput.svelte`): fires after a 100ms delay so the keyboard has begun raising before we scroll. Uses `behavior: "instant"` — `behavior: "smooth"` is unreliable on WebKit (bug #238497).
+iOS 26.5 regimes, as captured by on-device telemetry (every claim below was cross-checked against the composer's measured `getBoundingClientRect` and a `?kbdebug` probe ladder — see Diagnostics):
 
-`--kb-h` is driven by `document` `focusin` and `focusout` only — no `visualViewport` `resize` listener. `vv.resize` fires on iOS Safari whenever the URL bar collapses during scroll (not just on keyboard open/close), causing ~50px false keyboard heights mid-scroll and composer snapping. Restricting measurement to focus events eliminates that noise; the `requestAnimationFrame` defer on `focusin` lets the keyboard animation settle before the height is sampled.
+| Regime                                                              | Behavior                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| iOS Safari tab, overlay state                                       | `innerHeight` keeps its full height; `vv.height` shrinks; iOS pans the vv (`offsetTop` > 0) for its focused-field reveal.                                                                                                                                                                                                                                    |
+| iOS Safari tab, shrunk state                                        | After scrolling with the keyboard up, iOS SHRINKS `innerHeight` to ≈ `vv.height` and parks the layout viewport at the focus-time scroll position; further scrolling pans the vv BEYOND the layout bottom (`offsetTop + vv.height > innerHeight`). That is real, renderable geometry — fixed elements placed past `innerHeight` paint there. Do not clamp it. |
+| iOS standalone PWA / Android (`interactive-widget=resizes-content`) | Layout viewport resizes natively; `offsetTop` stays ≈ 0; the anchors degrade to the static positions.                                                                                                                                                                                                                                                        |
+
+Load-bearing rules, each one a scar from a tested regression:
+
+- **Presence is focus-derived** (`focusin`/`focusout` on text-entry elements, debounced blur), never geometry-derived — height deltas read 0 in resize regimes and false-positive on URL-bar collapse. No field focused → all vars cleared, so viewport noise cannot move the layout.
+- **The pan source is `vv.offsetTop`, raw.** On iOS 26.5 the API's pan values disagree with each other; rect cross-checks showed `offsetTop` consistent with the rendered truth in every sample, while `vv.pageTop` mirrors `scrollY` and DROPS the pan. Deriving the pan from `pageTop − scrollY` froze the anchors.
+- **Re-measure on `vv.resize`, `vv.scroll`, AND `window.resize`,** rAF-coalesced with change-guarded writes, plus timed settle probes after focus — `innerHeight` can change with no vv event at the end of the keyboard animation, and some settles fire no event at all.
+- **No transitions on the anchors.** A transition smears every correction over its duration and reads as the composer lazily sliding around.
+- **Bottom re-pin is windowed**: ChatShell re-issues `scrollToBottom()` on focused viewport resizes only within 1.6s of focus (the keyboard-open transition). iOS fires resize events mid-scroll when regimes flip; an unwindowed re-pin yanks the viewport out from under the user's finger.
+- **Post-dismissal nudge** (WebKit #297779): a net-zero 1px scroll wiggle on settled blur forces WebKit to re-resolve a stuck `vv.offsetTop`.
+
+**Known platform ceiling (Safari tab only):** in the parked first-tap state, iOS's claimed `vv.height` under-reports the truly visible area by a floating chrome allowance (~100–200px above the collapsed URL pill) that **no web API exposes** (CSSWG #7475). The composer sits exactly at the claimed boundary, which can leave a visual gap above the keyboard chrome. Every document-scrolling page in a Safari tab shares this; the standalone PWA and Android are unaffected.
+
+### Diagnostics: `?kbdebug`
+
+Append `?kbdebug` to the chat URL to render (a) a live HUD of every tracker input/output (`innerHeight`, `vv.height`, `vv.offsetTop`, `vv.pageTop`, `scrollY`, the three written vars, the class) and (b) a probe ladder — fixed magenta lines at known layout y coordinates — which photographically reveals the layout→screen mapping that the viewport APIs misreport. In dev builds, keyboard opens additionally post geometry snapshots to `/api/_diag/client-error` (dashboard JSONL log). This instrumentation is how the iOS 26.5 behavior above was established; keep it until WebKit's keyboard reporting stabilizes.
 
 ## Mobile Send/Stop: `mousedown` blur suppression
 
-On iOS, `mousedown` on any non-input element causes the currently-focused textarea to blur before `click` fires. For the Send and Stop buttons this means: tap → textarea blurs → the `focusout` handler resets `--kb-h` to 0px → composer snaps down → by the time `click` fires, the button has shifted and the event may misfire.
+On iOS, `mousedown` on any non-input element causes the currently-focused textarea to blur before `click` fires. For the Send and Stop buttons this means: tap → textarea blurs → the `focusout` handler resets `--kb-inset` to 0px → composer snaps down → by the time `click` fires, the button has shifted and the event may misfire.
 
 Both the Send and Stop buttons carry `onmousedown={(e) => e.preventDefault()}`. `preventDefault` on `mousedown` stops the browser from transferring focus away from the textarea, suppressing the blur, without blocking the subsequent `click` — iOS synthesizes `click` from `touchstart`/`touchend` independently of `mousedown`.
 

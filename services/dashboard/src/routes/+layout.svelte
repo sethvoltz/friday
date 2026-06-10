@@ -31,6 +31,7 @@
     isIOSStandalonePWA,
     openInSystemBrowser,
   } from "$lib/util/pwa-platform";
+  import { startKeyboardInsetTracker } from "$lib/util/keyboard-inset";
   import type { LayoutData } from "./$types";
   import type { Snippet } from "svelte";
   import { PUBLIC_APP_VERSION } from "$env/static/public";
@@ -345,72 +346,15 @@
       startWakeLock();
     }
 
-    // iOS pins position:fixed top:0 against the visual viewport automatically — no JS translation needed.
-    const vv = window.visualViewport;
-    let kbFocusInHandler: (() => void) | undefined;
-    let kbFocusOutHandler: (() => void) | undefined;
-    if (vv) {
-      kbFocusInHandler = () => {
-        requestAnimationFrame(() => {
-          const kb = Math.max(0, window.innerHeight - (window.visualViewport?.height ?? window.innerHeight));
-          document.documentElement.style.setProperty("--kb-h", `${kb}px`);
-        });
-      };
-      kbFocusOutHandler = () => {
-        document.documentElement.style.setProperty("--kb-h", "0px");
-      };
-      document.addEventListener("focusin", kbFocusInHandler);
-      document.addEventListener("focusout", kbFocusOutHandler);
-    }
-
-    // Soft-keyboard suppression — focus-based.
-    //
-    // The original height-delta detection (window.innerHeight - vv.height > 100)
-    // doesn't fire on iOS PWA standalone: innerHeight shrinks together with
-    // visualViewport.height when the keyboard opens, so the delta stays at 0
-    // and `.keyboard-open` was never applied. Bug shown by screenshot Seth
-    // sent — input pinned near the top with ~350px of dead space below it
-    // (the home-indicator inset was still active above the form-accessory
-    // bar + keyboard).
-    //
-    // Focus-based detection sidesteps the viewport math entirely: the soft
-    // keyboard is open iff a text-entry field has focus. focusout is debounced
-    // ~100ms so focus-to-focus transitions (textarea → another input without
-    // the keyboard ever dismissing) don't briefly drop the class and flash
-    // the layout.
-    const isField = (el: Element | null): boolean => {
-      if (!(el instanceof HTMLElement)) return false;
-      const tag = el.tagName;
-      return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable;
-    };
-    let blurTimeout: ReturnType<typeof setTimeout> | undefined;
-    const onFocusIn = (e: FocusEvent) => {
-      if (!isField(e.target as Element | null)) return;
-      if (blurTimeout !== undefined) {
-        clearTimeout(blurTimeout);
-        blurTimeout = undefined;
-      }
-      document.documentElement.classList.add("keyboard-open");
-    };
-    const onFocusOut = () => {
-      if (blurTimeout !== undefined) clearTimeout(blurTimeout);
-      blurTimeout = setTimeout(() => {
-        blurTimeout = undefined;
-        if (!isField(document.activeElement)) {
-          document.documentElement.classList.remove("keyboard-open");
-          // FRI-160 defensive nudge (WebKit #297779): on iOS 26,
-          // visualViewport.offsetTop can stay stuck at ~24px after the
-          // keyboard dismisses, shifting the fixed header/composer. A
-          // net-zero 1px scroll wiggle forces WebKit to re-resolve the
-          // visual viewport against the layout viewport, resetting the
-          // stale offset. No-op everywhere else.
-          window.scrollBy(0, -1);
-          window.scrollBy(0, 1);
-        }
-      }, 100);
-    };
-    document.addEventListener("focusin", onFocusIn);
-    document.addEventListener("focusout", onFocusOut);
+    // Soft-keyboard geometry: one tracker owns `--kb-inset` (the lift a
+    // fixed bottom bar needs to clear the keyboard) and the
+    // `keyboard-open` root class (zeroes --kb-safe-bottom while typing).
+    // Keyboard PRESENCE is focus-derived (geometry deltas read 0 in iOS
+    // standalone PWA, where innerHeight shrinks with the keyboard, and
+    // false-positive on URL-bar collapse); MAGNITUDE is visual-viewport-
+    // derived. Full geometry model + WebKit bug references in
+    // $lib/util/keyboard-inset.ts.
+    const stopKeyboardInset = startKeyboardInsetTracker();
 
     // iOS PWA external-link override. In iOS 16.4+, `target="_blank"` and
     // out-of-scope navigations from an installed standalone PWA route
@@ -439,15 +383,10 @@
       stopWakeLock();
       unbindTheme();
       window.removeEventListener("keydown", onKey);
-      if (kbFocusInHandler) document.removeEventListener("focusin", kbFocusInHandler);
-      if (kbFocusOutHandler) document.removeEventListener("focusout", kbFocusOutHandler);
-      document.removeEventListener("focusin", onFocusIn);
-      document.removeEventListener("focusout", onFocusOut);
+      stopKeyboardInset();
       if (iosStandalone) {
         document.removeEventListener("click", onAnchorClick);
       }
-      if (blurTimeout !== undefined) clearTimeout(blurTimeout);
-      document.documentElement.classList.remove("keyboard-open");
     };
   });
   // The "Daemon unreachable — retrying" banner used to live here, gated
@@ -615,7 +554,7 @@
 
 <style>
   .app-shell {
-    min-height: 100vh;
+    min-height: 100dvh;
     background: var(--bg-primary);
     transition: background var(--transition-normal);
   }
@@ -642,6 +581,16 @@
     border-radius: 999px;
     box-shadow: var(--shadow-lg);
     gap: 1rem;
+  }
+  /* Soft keyboard up: pin under the VISUAL viewport's top edge
+     (--vv-top-y = clamped pan derived from vv.pageTop − scrollY,
+     written by the keyboard-inset tracker). With the keyboard open,
+     iOS pans the visual viewport inside the taller layout viewport as
+     the user scrolls; a bar fixed to the layout viewport slides half
+     out of view. No transition — it would smear corrections into a
+     visible slide. Desktop focus resolves --vv-top-y to 0 — no change. */
+  :global(:root.keyboard-open) .app-header {
+    top: calc(1rem + var(--vv-top-y, 0px));
   }
 
   .header-left { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
