@@ -213,7 +213,7 @@ The four friday-mail tool **calls** — `mail_send`, `mail_inbox`, `mail_read`, 
 
 ## Height-capped collapsible primitive
 
-`CollapsibleSection.svelte` is the shared "shown-directly, height-capped, expand-for-more" primitive. Content renders directly (not buried behind a separate disclosure click); when collapsed it is clamped to `collapsedMaxHeight` px (default 320) with `overflow-y: auto`, and a `+` / `−` control toggles to full height. It encodes the [disclosure-glyph convention](ui-conventions.md) (`aria-hidden` glyph, `aria-expanded` button, no chevrons) and exposes `open` as `$bindable` so a renderer can read/drive expansion. `FileDiff` (400px) and `ToolBlock` input/output bodies (300px) are refactored onto it; `ThinkingBlock` and `MailBlock` still hand-roll their own toggles until a renderer needs them.
+`CollapsibleSection.svelte` is the shared "shown-directly, height-capped, expand-for-more" primitive. Content renders directly (not buried behind a separate disclosure click); when collapsed it is clamped to `collapsedMaxHeight` px (default 320) with `overflow-y: auto`, and a `+` / `−` control toggles to full height. It encodes the [disclosure-glyph convention](ui-conventions.md) (`aria-hidden` glyph, `aria-expanded` button, no chevrons) and exposes `open` as `$bindable` so a renderer can read/drive expansion. `FileDiff` (400px) and `ToolBlock` input/output bodies (300px) are refactored onto it; `ThinkingBlock` and `MailBlock` still hand-roll their own toggles until a renderer needs them. `ThinkingBlock`'s `.thinking-body` pre is capped at 280px; while `status === "running"` a `$effect` auto-scrolls it to the bottom on each streaming delta so the latest content stays visible within the cap.
 
 ## Sub-agent reference rendering
 
