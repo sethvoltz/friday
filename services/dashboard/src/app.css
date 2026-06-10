@@ -45,7 +45,7 @@
   --kb-safe-bottom: 0px;
 }
 
-/* SPIKE (inner-scroller): lock document/body scroll on the chat route.
+/* ADR-041: lock document/body scroll on the chat route.
    The chat column is position:fixed and the transcript is the only
    scroller, so the body has nothing to scroll — locking it stops iOS
    from panning the visual viewport during scroll (the keyboard-up

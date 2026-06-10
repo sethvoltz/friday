@@ -1,7 +1,7 @@
 /**
  * Chat scroll seam.
  *
- * SPIKE (spike/chat-inner-scroller): the chat route uses an INNER
+ * ADR-041: the chat route uses an INNER
  * scroller element again (a height-constrained `.chat-scroller` inside a
  * visual-viewport-sized flex column), not the document. The body does
  * not scroll on the chat route, so iOS never pans the visual viewport

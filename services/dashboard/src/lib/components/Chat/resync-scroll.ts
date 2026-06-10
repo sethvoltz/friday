@@ -54,7 +54,7 @@ const CANCEL_EVENTS = ["wheel", "touchmove", "keydown"] as const;
 
 /**
  * `ResyncChaseTarget` adapter for an INNER scroller element
- * (spike/chat-inner-scroller). scrollTop/scrollHeight and the
+ * (ADR-041). scrollTop/scrollHeight and the
  * cancel-input events all live on the one element, so this is a thin
  * pass-through — the element already has the shape the chase loop wants.
  */

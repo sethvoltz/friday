@@ -275,7 +275,7 @@ describe("iOS standalone PWA regime (innerHeight shrinks WITH vv)", () => {
 
 describe("unfocused viewport changes (inner-scroller: geometry always tracked)", () => {
   it("writes the live geometry even with no field focused, but never toggles the keyboard-open class", () => {
-    // SPIKE contract: the column tracks the visual viewport in every
+    // ADR-041 contract: the column tracks the visual viewport in every
     // state (so the composer clears the iOS URL bar when closed), so the
     // anchor vars ARE written unfocused — but the keyboard-open CLASS
     // (which drives --kb-safe-bottom) only toggles on focus.

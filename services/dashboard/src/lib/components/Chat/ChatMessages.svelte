@@ -86,7 +86,7 @@
      * unmounts the same bubble count, so `.list`'s net height change can
      * be ~0px and ChatShell's ResizeObserver alone never sees it. */
     onWindowSlide?: () => void;
-    /** SPIKE (inner-scroller): the `.chat-scroller` element ChatShell
+    /** ADR-041: the `.chat-scroller` element ChatShell
      * owns. Used as the IntersectionObserver `root` for the top/bottom/
      * compaction sentinels so they measure against the inner scroller,
      * not the viewport. Undefined falls back to the viewport (SSR / the

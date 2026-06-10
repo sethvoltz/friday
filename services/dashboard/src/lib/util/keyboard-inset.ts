@@ -138,7 +138,7 @@ export function createKeyboardInsetTracker(host: KeyboardInsetHost): KeyboardIns
   function measure() {
     rafHandle = null;
     const vv = host.viewport();
-    // SPIKE (inner-scroller): the geometry is written ALWAYS, not just
+    // ADR-041: the geometry is written ALWAYS, not just
     // while a field is focused — the `.chat-viewport` column is sized to
     // --vv-bottom-y in every state so the composer clears the iOS bottom
     // URL bar (keyboard closed) and the keyboard (open) uniformly. Only

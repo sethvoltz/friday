@@ -33,10 +33,11 @@
   let { agent, sessionId }: Props = $props();
   let readonly = $derived(sessionId !== undefined);
 
-  // Inert query root for anchor bookkeeping (`.list` ResizeObserver,
-  // `[data-msg-id]` bubble lookups) — NOT a scroller. The DOCUMENT is
-  // the only scroller on the chat route (FRI-160); all scroll reads and
-  // writes go through the window seam in doc-scroll.ts.
+  // The chat's INNER scroller (ADR-041): `.chat-transcript`
+  // (overflow-y:auto) inside the visual-viewport-sized fixed column.
+  // Registered as the active scroller for the doc-scroll.ts seam below;
+  // also the query root for anchor bookkeeping (`.list` ResizeObserver,
+  // `[data-msg-id]` bubble lookups).
   let transcriptEl: HTMLElement | undefined = $state();
   let inputEl: HTMLDivElement | undefined = $state();
 
@@ -131,7 +132,7 @@
   // ResizeObserver alone (net-zero-height slides never fire it).
   let notifyListMutation: () => void = () => {};
 
-  // SPIKE (inner-scroller): register the transcript as the chat scroll
+  // ADR-041: register the transcript as the chat scroll
   // seam's active scroller, and lock body/document scroll on the chat
   // route so iOS never pans the visual viewport during scroll (the
   // source of the keyboard-up composer stutter under document scroll).
@@ -657,19 +658,10 @@
 </script>
 
 {#if kbDebug}
-  <!-- ?kbdebug probe ladder (docs/mobile-ux.md): fixed lines at
-       known layout-viewport y coordinates. A screenshot with the
-       keyboard up shows which layout coordinate physically renders at
-       the keyboard's top edge — measuring the layout→screen mapping
-       that no viewport API value reports. -->
-  {#each [250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900] as y (y)}
-    <div class="kb-probe" style="top: {y}px" aria-hidden="true">
-      <span>{y}</span>
-    </div>
-  {/each}
-  <!-- ?kbdebug HUD (docs/mobile-ux.md) -->
+  <!-- ?kbdebug HUD (docs/mobile-ux.md): live tracker inputs/outputs,
+       used to verify on-device keyboard geometry (esp. the PWA, which
+       can't be tested over the insecure-HTTP LAN dev origin). -->
   <div class="kb-debug" aria-hidden="true">
-    <div>build: dbg-6</div>
     <div>--vv-top-y: {dbg.vvTopY}</div>
     <div>innerH: {dbg.ih}</div>
     <div>vv.h: {dbg.vvh}</div>
@@ -686,10 +678,10 @@
   <Sidebar />
 </aside>
 
-<!-- SPIKE (inner-scroller): a fixed flex column sized to the visual
-     viewport. The transcript is a real inner scroller (flex:1,
-     overflow-y:auto); the composer sits in normal flow at the bottom.
-     When the keyboard opens, only the column HEIGHT shrinks (to
+<!-- ADR-041: a fixed column sized to the visual viewport. The transcript
+     is a real inner scroller (overflow-y:auto, full-bleed under the
+     translucent bars); the composer and pills are overlays within the
+     column. When the keyboard opens, only the column HEIGHT shrinks (to
      --vv-bottom-y) and the composer re-lays-out above the keyboard — no
      per-frame visual-viewport chasing, so no keyboard-up scroll
      stutter. Pills are absolutely positioned within this column. -->
@@ -778,7 +770,7 @@
     --chat-top: calc(4.3rem + var(--chat-inset));
   }
 
-  /* SPIKE (inner-scroller): the chat column. A position:fixed box that
+  /* ADR-041: the chat column. A position:fixed box that
      spans the FULL viewport height (under the floating header, over the
      floating composer) so the inner scroller can bleed content beneath
      both translucent bars — preserving the glassmorphism where chat
@@ -820,27 +812,6 @@
       var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px)
     );
   }
-  /* ?kbdebug probe ladder. */
-  .kb-probe {
-    position: fixed;
-    left: 0;
-    right: 0;
-    height: 2px;
-    background: #f0f;
-    z-index: 9998;
-    pointer-events: none;
-  }
-  .kb-probe span {
-    position: absolute;
-    right: 2px;
-    top: -16px;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: #f0f;
-    background: rgba(0, 0, 0, 0.75);
-    padding: 0 4px;
-  }
-
   /* ?kbdebug HUD. Anchored to the top so
      it stays readable regardless of keyboard/composer state. */
   .kb-debug {
@@ -902,7 +873,7 @@
     font-size: 0.85rem;
   }
 
-  /* SPIKE (inner-scroller): pills are absolutely positioned WITHIN
+  /* ADR-041: pills are absolutely positioned WITHIN
      .chat-viewport (its containing block), so they ride the column as it
      resizes with the keyboard — no per-pill visual-viewport math. The
      jump pill sits just above the in-flow composer (composer height +
