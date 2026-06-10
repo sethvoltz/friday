@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.3](https://github.com/sethvoltz/friday/compare/v1.18.2...v1.18.3) (2026-06-10)
+
+
+### Bug Fixes
+
+* **dashboard:** revert kbHeight formula + pointerdown blur fix for Send/Stop ([#224](https://github.com/sethvoltz/friday/issues/224)) ([01c7265](https://github.com/sethvoltz/friday/commit/01c726549ee53b7760825168c9f120aff9fdcccb))
+
 ## [1.18.2](https://github.com/sethvoltz/friday/compare/v1.18.1...v1.18.2) (2026-06-10)
 
 

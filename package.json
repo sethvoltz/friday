@@ -1,6 +1,6 @@
 {
   "name": "agent-friday",
-  "version": "1.18.2",
+  "version": "1.18.3",
   "private": true,
   "scripts": {
     "build": "turbo run build",
