@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.2](https://github.com/sethvoltz/friday/compare/v1.18.1...v1.18.2) (2026-06-10)
+
+
+### Bug Fixes
+
+* **dashboard:** four mobile polish bugs — composer jitter, header bounce, ThinkingBlock auto-scroll, textarea caret ([#222](https://github.com/sethvoltz/friday/issues/222)) ([2ee6676](https://github.com/sethvoltz/friday/commit/2ee66764d39f6b7f9218f5e628f4bc590ed2331c))
+
 ## [1.18.1](https://github.com/sethvoltz/friday/compare/v1.18.0...v1.18.1) (2026-06-10)
 
 
