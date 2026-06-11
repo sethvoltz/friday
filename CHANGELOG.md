@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.0](https://github.com/sethvoltz/friday/compare/v1.21.0...v1.22.0) (2026-06-11)
+
+
+### Features
+
+* **cli:** reconcile Cloudflare tunnel to serve-intent on start; restore stages dark (FRI-166) ([#255](https://github.com/sethvoltz/friday/issues/255)) ([004be9f](https://github.com/sethvoltz/friday/commit/004be9f92aa0793b9df1fb5c87fd8c395bd95b17))
+
 ## [1.21.0](https://github.com/sethvoltz/friday/compare/v1.20.4...v1.21.0) (2026-06-11)
 
 
