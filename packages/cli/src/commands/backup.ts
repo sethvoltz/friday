@@ -139,6 +139,19 @@ export const backupCommand = defineCommand({
           if (cp.status !== 0) throw new Error("Failed to copy .age-key");
           console.log(pc.yellow("  .age-key included — protect this bundle like a password"));
         }
+      } else if (existsSync(join(DATA_DIR, "secrets", "vault.enc"))) {
+        // Migration gotcha: the encrypted vault is in the bundle, but it can't be
+        // decrypted on another machine without `.age-key`. Warn so a migration
+        // bundle isn't silently non-portable for secrets (Cloudflare tunnel
+        // token, integration API keys, app secrets).
+        console.log(
+          pc.yellow("  note: .age-key NOT included — secrets/vault.enc won't decrypt elsewhere."),
+        );
+        console.log(
+          pc.yellow(
+            "        For a migration, re-run with --include-age-key (or copy ~/.friday/.age-key separately).",
+          ),
+        );
       }
 
       for (const rel of BACKUP_PATHS) {

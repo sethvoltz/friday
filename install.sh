@@ -424,7 +424,23 @@ main() {
   flip_current "${version}"
   write_shim
   write_plist
-  bootstrap_launchd
+
+  # First-time install vs update, keyed on .env.local (which `friday setup`
+  # creates when it provisions Postgres + writes DATABASE_URL).
+  local data_dir first_run
+  data_dir="${FRIDAY_DATA_DIR:-${HOME}/.friday}"
+  first_run=1
+  [ -f "${data_dir}/.env.local" ] && first_run=0
+
+  # On an update/reinstall, (re)bootstrap the launchd job so the supervised
+  # stack restarts into this version. On a FIRST-TIME install, DON'T start the
+  # daemon: there is no database yet (`friday setup` provisions it), so starting
+  # now would just restart-loop against a missing DB. The plist is written
+  # (RunAtLoad) and `friday start` — the documented step after setup — brings
+  # the stack up cleanly.
+  if [ "${first_run}" -eq 0 ]; then
+    bootstrap_launchd
+  fi
 
   ok "Friday ${version} installed"
   info "tree    ${target}"
@@ -432,16 +448,11 @@ main() {
   info "shim    ${SHIM_PATH}"
   info "plist   ${PLIST_PATH}"
 
-  # First-time install: `friday setup` provisions Postgres + creates the account
-  # and writes .env.local. Without it the just-bootstrapped daemon can't connect
-  # to a DB and will restart-loop until setup runs — so make the required next
-  # step explicit rather than leaving a fresh user to discover it in the docs.
-  local data_dir="${FRIDAY_DATA_DIR:-${HOME}/.friday}"
-  if [ ! -f "${data_dir}/.env.local" ]; then
+  if [ "${first_run}" -eq 1 ]; then
     printf '\n'
-    step "Next step — first-time setup"
-    info "Run \`friday setup\` to provision Postgres and create your account."
-    info "(the supervised daemon will keep restarting until setup completes)"
+    step "Next steps — first-time setup"
+    info "1. friday setup   # provision Postgres + create your account"
+    info "2. friday start   # launch the supervised stack"
   else
     printf '%s\n' "${C_DIM}  manage with: friday start | friday status | friday update${C_RESET}"
   fi
