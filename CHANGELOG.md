@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.20.3](https://github.com/sethvoltz/friday/compare/v1.20.2...v1.20.3) (2026-06-11)
+
+
+### Bug Fixes
+
+* **cli:** friday setup auto-restarts Postgres on wal_level change + always inits the vault ([#249](https://github.com/sethvoltz/friday/issues/249)) ([1b1c34d](https://github.com/sethvoltz/friday/commit/1b1c34dd657146143fa9d3d1fc9ec81f38fe8e91))
+
 ## [1.20.2](https://github.com/sethvoltz/friday/compare/v1.20.1...v1.20.2) (2026-06-11)
 
 
