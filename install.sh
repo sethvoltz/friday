@@ -43,7 +43,13 @@ trap cleanup EXIT
 # ---- constants --------------------------------------------------------
 
 GITHUB_REPO="sethvoltz/friday"
-RELEASE_BASE="https://github.com/${GITHUB_REPO}/releases/latest/download"
+# Where the installer pulls VERSION + the tarball + its .sha256 from. Defaults to
+# GitHub's latest release; override with FRIDAY_RELEASE_BASE to install from a
+# local build dir or mirror. A `file://` base lets you install an on-device build
+# (e.g. an Intel x64 tarball built via `node packaging/pack.mjs`) when no hosted
+# asset exists — curl handles file:// transparently. The base must contain
+# VERSION, friday-<os>-<arch>.tar.gz, and friday-<os>-<arch>.tar.gz.sha256.
+RELEASE_BASE="${FRIDAY_RELEASE_BASE:-https://github.com/${GITHUB_REPO}/releases/latest/download}"
 
 # Brewfile-tracked third-party deps (Friday itself is NOT brew-managed).
 # Postgres + cloudflared + gh + pnpm + fnm stay brew deps. Claude Code is
@@ -114,7 +120,13 @@ detect_platform() {
 
 ensure_brew() {
   if ! command -v brew >/dev/null 2>&1; then
-    fail "Homebrew not found. Install it from https://brew.sh, then re-run this installer."
+    fail "Homebrew not found — it's a prerequisite. Install it, then re-run this installer:
+
+  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"
+
+On Intel Macs Homebrew lives in /usr/local (already on PATH); on Apple Silicon it
+installs to /opt/homebrew — follow the post-install 'Next steps' to add it to PATH.
+More: https://brew.sh"
   fi
 }
 
