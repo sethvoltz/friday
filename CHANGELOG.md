@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.20.2](https://github.com/sethvoltz/friday/compare/v1.20.1...v1.20.2) (2026-06-11)
+
+
+### Bug Fixes
+
+* defer daemon start to first-run setup; warn on age-key-less backups ([#247](https://github.com/sethvoltz/friday/issues/247)) ([1e34450](https://github.com/sethvoltz/friday/commit/1e34450b0887ee1a3dc52bdadbf08736f5973696))
+
 ## [1.20.1](https://github.com/sethvoltz/friday/compare/v1.20.0...v1.20.1) (2026-06-11)
 
 
