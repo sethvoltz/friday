@@ -52,7 +52,7 @@ friday setup
 This walks you through:
 
 1. Creating `~/.friday/` directory tree.
-2. Initializing the SQLite database and applying migrations.
+2. Provisioning the Postgres `friday` role + database, applying Drizzle migrations, and creating the `friday_pub` publication for zero-cache's logical replication (ADR-023). Connection details are written to `~/.friday/.env.local`.
 3. Copying the default `SOUL.md` into `~/.friday/SOUL.md` (your editable identity layer).
 4. Creating the primary user account (email + password).
 

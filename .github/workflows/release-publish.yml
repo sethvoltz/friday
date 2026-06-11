@@ -2,20 +2,21 @@ name: Release Publish
 
 # Fires when release-please's merged Release PR cuts a GitHub Release. Builds
 # the pre-baked, ABI-matched tarball for BOTH darwin arches — arm64 (Apple
-# Silicon, primary) on macos-latest and x64 (Intel, legacy) on macos-13 — and
-# uploads each as a Release asset alongside its .sha256. The shared VERSION
-# asset — the "latest" pointer every installer resolves — is uploaded LAST by a
-# separate publish-version job gated on BOTH arches succeeding, so a partial
-# release never advertises a version whose tarball is missing for one arch. All
-# standard runners are free on public repos; do NOT swap for a *-xlarge label.
+# Silicon, primary) on macos-latest and x64 (Intel, legacy) on the self-hosted
+# `friday-intel` runner (the prod Intel box) — and uploads each as a Release
+# asset alongside its .sha256. The shared VERSION asset — the "latest" pointer
+# every installer resolves — is uploaded LAST by a separate publish-version job
+# gated on BOTH arches succeeding, so a partial release never advertises a
+# version whose tarball is missing for one arch. The arm64 runner is free on
+# public repos; do NOT swap for a *-xlarge label.
 #
 # Each arch MUST build on a runner of that arch: `pnpm install --prod` fetches
 # native prebuilds (@oxfmt/binding, @rocicorp/zero-sqlite3, better-sqlite3,
 # sharp) by process.arch, so there is no cross-compile — an arm64 runner can
-# only produce an arm64 tree, and vice versa. macos-13 is GitHub's last free
-# Intel macOS image; Intel hardware caps out at macOS 26, so no newer Intel
-# runner is coming and none is needed — Intel is legacy support, arm64 is the
-# permanent primary.
+# only produce an arm64 tree, and vice versa. GitHub's hosted macos-13 Intel
+# pool proved unusable (it queues indefinitely), so the x64 leg runs on a
+# self-hosted Intel Mac registered with the `friday-intel` label; Intel is
+# legacy support, arm64 is the permanent primary.
 #
 # NO formula render, NO GitHub-App token, NO brew-tap push: Friday is
 # distributed via install.sh + `friday update` pulling these assets directly
@@ -38,22 +39,25 @@ jobs:
   publish:
     name: Pack + upload darwin-${{ matrix.arch }} tarball
     # One row per shipped darwin arch, each on a runner of that arch so native
-    # addons are ABI-matched to the pinned Node. macos-latest (Apple Silicon)
-    # and macos-13 (Intel) are both free on public repos; the larger *-xlarge
-    # labels are billed and must not be used. fail-fast off so a failure on one
-    # arch still reports the other rather than cancelling it.
+    # addons are ABI-matched to the pinned Node. arm64 on macos-latest (free on
+    # public repos; the larger *-xlarge labels are billed and must not be used);
+    # x64 on the self-hosted `friday-intel` runner. fail-fast off so a failure on
+    # one arch still reports the other rather than cancelling it.
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: macos-latest # Apple Silicon — primary target
             arch: arm64
-          # TEMP (2026-06-04): x64 disabled — GitHub's macos-13 Intel pool queues
-          # indefinitely (v1.3.0's leg never got a runner), blocking the release.
-          # Restore by un-commenting once a self-hosted `friday-intel` runner is
-          # online. See ../HANDOFF-intel-x64-runner.md.
-          # - runner: [self-hosted, macOS, X64, friday-intel] # Intel — legacy support
-          #   arch: x64
+          # Intel (legacy) — built on the self-hosted `friday-intel` runner (the
+          # prod Intel box), re-enabled 2026-06-11 after GitHub's hosted macos-13
+          # pool proved unusable (v1.3.0's leg never got a runner). The runner MUST
+          # be registered with exactly these labels: self-hosted, macOS, X64,
+          # friday-intel. VERSION is gated on `needs: [publish]` (all legs), so do
+          # NOT merge a release-please Release PR until this runner is online and
+          # idle — otherwise the x64 leg queues forever and no VERSION is published.
+          - runner: [self-hosted, macOS, X64, friday-intel] # Intel — legacy support
+            arch: x64
     runs-on: ${{ matrix.runner }}
 
     steps:
