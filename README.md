@@ -246,8 +246,11 @@ friday secrets set <name> [--app <id>] [--mode env|on-demand] [--daemon] [--agen
 friday secrets get|list|unset|edit|audit|migrate-from-env|public-key
 
 # Backup & restore
-friday backup [output-path] [--include-age-key]  # pg_dump + filesystem → portable .tar.gz
-friday restore <bundle> [--force]              # auto-detects pg_dump vs legacy_sqlite bundles
+friday backup [output-path] [--include-age-key]  # pg_dump + curated filesystem → portable .tar.gz
+friday backup --full [--include-age-key]         # complete migration bundle: whole ~/.friday
+                                               # (incl .git) + Claude SDK sessions
+friday restore <bundle> [--force]              # auto-detects selective/full/legacy bundles; full
+                                               # restores the whole tree + Claude sessions
 friday export-legacy-sqlite [output] [--source <path>]
                                                # one-shot SQLite → Postgres cutover bundle
 ```

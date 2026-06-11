@@ -9,6 +9,7 @@ export * from "./transcript.js";
 export * from "./atomic-write.js";
 export * from "./cron.js";
 export * from "./skills.js";
+export * from "./claude-sessions.js";
 export * from "./hooks/index.js";
 export * from "./prompts/loader.js";
 export * from "./apps/manifest.js";
@@ -23,6 +24,8 @@ export {
   provisionPostgres,
   probePostgresHealth,
   dropFridayDatabaseForTest,
+  findPgBin,
+  findPgIsReady,
   FRIDAY_PG_CONSTANTS,
   type PgHealth,
   type ProvisionResult,
