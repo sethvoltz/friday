@@ -1,15 +1,22 @@
 # Path filters for dorny/paths-filter, consumed by .github/workflows/ci.yml.
 #
-# `code` is TRUE when the diff touches anything that is NOT pure markdown.
-# It's expressed as a single picomatch negation: the filter matches when at
-# least one changed file is not a `*.md`, so a docs-only change yields false
-# and the heavy jobs (Tests, Checks, E2E, Playwright) skip. Anything with a
-# non-`.md` file in the diff (source, config, images, lockfile, even an
-# extensionless file) flips it true — it deliberately errs toward running the
-# full suite rather than skipping a real code change.
+# `code` is TRUE when the diff touches anything that is NOT documentation —
+# i.e. at least one changed file is neither under `docs/` (any file type:
+# markdown, images, diagrams, assets) nor a `*.md` anywhere in the tree
+# (root README, per-package READMEs, etc.). A change confined to docs yields
+# false and the heavy jobs (Tests, Checks, E2E, Playwright) skip.
+#
+# It's a single negated alternation — NOT(docs OR markdown) — because
+# paths-filter ORs its rules: two separate negations (`!docs/**`, `!**/*.md`)
+# would wrongly fire on `docs/foo.png` (it IS "not-markdown", so the OR is
+# true). Keeping it one `!{...}` predicate gives the intended AND. The `*.md`
+# arm is needed alongside `**/*.md` because picomatch's globstar does not
+# match a root-level file. It deliberately errs toward running: any non-doc
+# file in the diff flips it true, so a real code change can never silently
+# skip the suite.
 #
 # NOTE: Lint is intentionally NOT gated on this — `pnpm format:check` runs
 # `prettier --check`, which validates markdown formatting too, so it must run
 # on docs-only changes.
 code:
-  - "!**/*.md"
+  - "!{docs/**,**/*.md,*.md}"
