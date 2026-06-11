@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.0](https://github.com/sethvoltz/friday/compare/v1.20.4...v1.21.0) (2026-06-11)
+
+
+### Features
+
+* **cli:** `friday backup --full` + faithful full restore for machine migration ([#253](https://github.com/sethvoltz/friday/issues/253)) ([435b9df](https://github.com/sethvoltz/friday/commit/435b9df9f53f1f99bb2daa1b5b8b3f6dae973566))
+
 ## [1.20.4](https://github.com/sethvoltz/friday/compare/v1.20.3...v1.20.4) (2026-06-11)
 
 
