@@ -12,8 +12,9 @@ concurrency:
 
 jobs:
   # Single gate job: classifies the diff so the heavy jobs can sit out a
-  # docs-only change. `code` is false only when every changed file is *.md
-  # (see .github/file-filters.yml). The four expensive jobs gate on it via a
+  # docs-only change. `code` is false only when every changed file is
+  # documentation — under docs/ (any file type) or a *.md anywhere (see
+  # .github/file-filters.yml). The four expensive jobs gate on it via a
   # job-level `if:`; a skipped job reports conclusion "skipped", which a
   # required status check (ruleset "Main") treats as satisfied — so docs-only
   # PRs still go green and auto-merge. Lint is deliberately NOT gated: its
@@ -39,7 +40,13 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     needs: files-changed
-    if: needs.files-changed.outputs.code == 'true'
+    # Run UNLESS the gate explicitly classified the diff as docs-only. The
+    # `always() && != 'false'` form is fail-safe: if the gate job errors (its
+    # output is then empty, not 'false') the job still runs, so a transient
+    # gate failure can never let untested code merge via a "skipped" → required-
+    # check-satisfied path. Only an explicit `code == 'false'` (every changed
+    # file is *.md) skips it.
+    if: ${{ always() && needs.files-changed.outputs.code != 'false' }}
 
     # Phase 1+ moved Friday's canonical persistence from SQLite to
     # Postgres (ADR-023). Tests in @friday/daemon, @friday/cli, and
@@ -108,7 +115,13 @@ jobs:
     name: Checks
     runs-on: ubuntu-latest
     needs: files-changed
-    if: needs.files-changed.outputs.code == 'true'
+    # Run UNLESS the gate explicitly classified the diff as docs-only. The
+    # `always() && != 'false'` form is fail-safe: if the gate job errors (its
+    # output is then empty, not 'false') the job still runs, so a transient
+    # gate failure can never let untested code merge via a "skipped" → required-
+    # check-satisfied path. Only an explicit `code == 'false'` (every changed
+    # file is *.md) skips it.
+    if: ${{ always() && needs.files-changed.outputs.code != 'false' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -162,7 +175,13 @@ jobs:
     name: E2E (sync harness)
     runs-on: ubuntu-latest
     needs: files-changed
-    if: needs.files-changed.outputs.code == 'true'
+    # Run UNLESS the gate explicitly classified the diff as docs-only. The
+    # `always() && != 'false'` form is fail-safe: if the gate job errors (its
+    # output is then empty, not 'false') the job still runs, so a transient
+    # gate failure can never let untested code merge via a "skipped" → required-
+    # check-satisfied path. Only an explicit `code == 'false'` (every changed
+    # file is *.md) skips it.
+    if: ${{ always() && needs.files-changed.outputs.code != 'false' }}
 
     # Item #50 multi-subprocess suites need Postgres with `wal_level=logical`
     # so zero-cache can set up logical replication. The default `services:`
@@ -219,7 +238,13 @@ jobs:
     name: E2E (Playwright browser)
     runs-on: ubuntu-latest
     needs: files-changed
-    if: needs.files-changed.outputs.code == 'true'
+    # Run UNLESS the gate explicitly classified the diff as docs-only. The
+    # `always() && != 'false'` form is fail-safe: if the gate job errors (its
+    # output is then empty, not 'false') the job still runs, so a transient
+    # gate failure can never let untested code merge via a "skipped" → required-
+    # check-satisfied path. Only an explicit `code == 'false'` (every changed
+    # file is *.md) skips it.
+    if: ${{ always() && needs.files-changed.outputs.code != 'false' }}
 
     steps:
       - uses: actions/checkout@v6
