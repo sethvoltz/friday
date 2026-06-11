@@ -687,6 +687,9 @@
      stutter. Pills are absolutely positioned within this column. -->
 <div class="chat-viewport">
   <div class="chat-transcript" bind:this={transcriptEl}>
+    {#if !readonly}
+      <div class="transcript-push-spacer" aria-hidden="true"></div>
+    {/if}
     {#if readonly}
       <div class="readonly-banner">
         Past session — read only
@@ -809,12 +812,14 @@
     overscroll-behavior: contain;
     display: flex;
     flex-direction: column;
-    justify-content: flex-end;
-    min-height: 200dvh;
     padding-top: var(--chat-top);
     padding-bottom: calc(
       var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px)
     );
+  }
+  .transcript-push-spacer {
+    flex-shrink: 0;
+    height: max(0px, calc(var(--vv-top-y, 0px) - var(--chat-top, 0px)));
   }
   /* ?kbdebug HUD. Anchored to the top so
      it stays readable regardless of keyboard/composer state. */
