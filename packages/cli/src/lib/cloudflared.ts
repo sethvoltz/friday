@@ -40,6 +40,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { dirname, join } from "node:path";
 import pc from "picocolors";
 import { STATE_DIR } from "@friday/shared";
+import { jobLoaded } from "./launchd.js";
 
 /** cloudflared's own user launch agent label. `cloudflared service install`
  *  writes `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist` with this
@@ -242,14 +243,14 @@ export function uninstallCloudflared(): void {
   });
 }
 
-/** True if the cloudflared launch agent is currently loaded in launchd. */
+/** True if the cloudflared launch agent is currently loaded in launchd.
+ *  Delegates to the shared `jobLoaded` probe in launchd.ts (one definition of
+ *  "is this gui job loaded?"). NOTE: "loaded" means launchd has the job
+ *  bootstrapped — a crash-looping connector (expired token, network down) can
+ *  still read as loaded. Good enough for the reconcile decision (don't reinstall
+ *  a loaded job); it is NOT a connector-health check. */
 export function cloudflaredLoaded(): boolean {
-  const uid = process.getuid?.() ?? 0;
-  return (
-    spawnSync("launchctl", ["print", `gui/${uid}/${CLOUDFLARED_LAUNCHD_LABEL}`], {
-      stdio: ["ignore", "ignore", "ignore"],
-    }).status === 0
-  );
+  return jobLoaded(CLOUDFLARED_LAUNCHD_LABEL);
 }
 
 export function sha256(s: string): string {
@@ -267,8 +268,25 @@ function readInstalledSha(): string | null {
 }
 
 function writeInstalledSha(sha: string): void {
-  mkdirSync(dirname(INSTALLED_TOKEN_SHA_PATH), { recursive: true });
-  writeFileSync(INSTALLED_TOKEN_SHA_PATH, sha + "\n");
+  // The fingerprint is an optimization (rotation detection), NOT correctness:
+  // losing it only costs an extra reinstall on the next reconcile. It is
+  // written AFTER `cloudflared service install` already succeeded, so a throw
+  // here (unwritable STATE_DIR, disk full, a racing rmdir) must never abort a
+  // reconcile that actually brought the tunnel up — `friday start`'s reconcile
+  // call sits outside its try/catch, so an unguarded throw would crash a start
+  // that already succeeded. Downgrade to a warning.
+  try {
+    mkdirSync(dirname(INSTALLED_TOKEN_SHA_PATH), { recursive: true });
+    writeFileSync(INSTALLED_TOKEN_SHA_PATH, sha + "\n");
+  } catch (err) {
+    console.warn(
+      pc.dim(
+        `  · could not record tunnel token fingerprint (${
+          err instanceof Error ? err.message : String(err)
+        }); rotation detection may reinstall once more than necessary.`,
+      ),
+    );
+  }
 }
 
 function clearInstalledSha(): void {

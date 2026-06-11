@@ -168,9 +168,19 @@ function launchctl(args: string[]): LaunchctlResult {
   };
 }
 
+/** True if the launchd job `label` is currently bootstrapped (loaded) in the
+ *  gui domain. Label-agnostic `launchctl print gui/<uid>/<label>` probe, shared
+ *  by the friday-supervisor check below and the cloudflared reconcile
+ *  (`cloudflaredLoaded`, FRI-166) so there's one definition of "is this gui job
+ *  loaded?" rather than separate hand-rolled copies. */
+export function jobLoaded(label: string): boolean {
+  const uid = process.getuid?.() ?? 0;
+  return launchctl(["print", `gui/${uid}/${label}`]).status === 0;
+}
+
 /** True if the job is currently bootstrapped (loaded) in the gui domain. */
 export function isBootstrapped(): boolean {
-  return launchctl(["print", serviceTarget()]).status === 0;
+  return jobLoaded(FRIDAY_LAUNCHD_LABEL);
 }
 
 /**
