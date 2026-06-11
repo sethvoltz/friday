@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.20.0](https://github.com/sethvoltz/friday/compare/v1.19.2...v1.20.0) (2026-06-11)
+
+
+### Features
+
+* restore Intel x64 release publishing + installer robustness ([#240](https://github.com/sethvoltz/friday/issues/240)) ([e7a4fa9](https://github.com/sethvoltz/friday/commit/e7a4fa96a41e7a104d9c9477246769bf0c484bd6))
+
 ## [1.19.2](https://github.com/sethvoltz/friday/compare/v1.19.1...v1.19.2) (2026-06-10)
 
 
