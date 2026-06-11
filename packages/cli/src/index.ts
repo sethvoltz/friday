@@ -24,6 +24,7 @@ import { exportLegacySqliteCommand } from "./commands/export-legacy-sqlite.js";
 import { updateCommand } from "./commands/update.js";
 import { uninstallCommand } from "./commands/uninstall.js";
 import { secretsCommand } from "./commands/secrets.js";
+import { tunnelCommand } from "./commands/tunnel.js";
 import { maybePrintVersion } from "./lib/version.js";
 
 const main = defineCommand({
@@ -56,6 +57,7 @@ const main = defineCommand({
     update: updateCommand,
     uninstall: uninstallCommand,
     secrets: secretsCommand,
+    tunnel: tunnelCommand,
   },
 });
 

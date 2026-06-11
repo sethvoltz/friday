@@ -27,6 +27,7 @@ import {
 } from "@friday/shared";
 import { resetRateLimitPrefix, revokeAllSessionsForUser } from "@friday/shared/services";
 import { BANNER } from "../lib/branding.js";
+import { reconcileTunnel } from "../lib/cloudflared.js";
 
 export const setupCommand = defineCommand({
   meta: {
@@ -308,59 +309,30 @@ async function runCloudflareSetup({ force }: { force: boolean }): Promise<void> 
     token,
   );
   cfg.publicUrl = publicUrl.trim();
+  // FRI-166: `friday setup --cloudflare` is an explicit "serve here" flip —
+  // set serve-intent so the reconcile (here and on every `friday start`)
+  // keeps the agent installed. (`friday restore` forces this back off on a
+  // staged box; `friday tunnel down` turns it off deliberately.)
+  cfg.tunnel = { ...cfg.tunnel, serve: true };
   writeConfig(cfg);
   console.log(pc.green(`  token saved → secrets vault`));
   console.log(pc.green(`  publicUrl saved → ${cfg.publicUrl}`));
 
-  installCloudflaredLaunchAgent(token);
-}
-
-// Connector-token tunnels need `cloudflared tunnel run --token <T>`. The
-// `homebrew.mxcl.cloudflared` plist that `brew services start cloudflared`
-// would load runs `cloudflared` bare — no args, no token — so it spins on
-// "permission denied" and exits 1. The canonical token-tunnel path is
-// `cloudflared service install <T>`, which writes its own user launch
-// agent (`~/Library/LaunchAgents/com.cloudflare.cloudflared.plist`) and
-// bootstraps it. We sidestep brew's plist entirely.
-function installCloudflaredLaunchAgent(token: string): void {
-  const cloudflaredOnPath = spawnSync("which", ["cloudflared"], { stdio: "ignore" }).status === 0;
-  if (!cloudflaredOnPath) {
+  // Reconcile the cloudflared launch agent to the just-saved state (install
+  // from the vault token, idempotently). Shared with `friday start` and
+  // `friday tunnel up` so there's one install path.
+  const res = reconcileTunnel({ serve: true, token });
+  if (res.skipped) {
+    console.log(pc.yellow(`  ${res.detail}`));
+  } else if (!res.ok) {
+    // installCloudflared already printed the failure detail to stderr.
+  } else if (res.action === "install" || res.action === "reinstall") {
     console.log(
-      pc.yellow(
-        "  cloudflared not on PATH — install with `brew install cloudflared` then re-run `friday setup --cloudflare`",
+      pc.green(
+        "  cloudflared launch agent installed → ~/Library/LaunchAgents/com.cloudflare.cloudflared.plist",
       ),
     );
-    return;
+  } else {
+    console.log(pc.green("  cloudflared launch agent already serving"));
   }
-
-  // Clean up brew's bare-cloudflared job if a prior install loaded it; the
-  // formula's auto-generated plist is incompatible with token tunnels.
-  const brewHasCloudflared =
-    spawnSync("brew", ["list", "cloudflared"], { stdio: "ignore" }).status === 0;
-  if (brewHasCloudflared) {
-    spawnSync("brew", ["services", "stop", "cloudflared"], { stdio: "ignore" });
-  }
-
-  // Idempotent: replaces any prior `cloudflared service install` (token
-  // rotation, re-run setup, etc.). The uninstall is best-effort — it
-  // errors out cleanly if nothing is installed, which we don't care about.
-  spawnSync("cloudflared", ["service", "uninstall"], { stdio: "ignore" });
-
-  const install = spawnSync("cloudflared", ["service", "install", token], { encoding: "utf8" });
-  if (install.status !== 0) {
-    console.error(pc.red("  cloudflared service install failed:"));
-    if (install.stderr.trim()) console.error(install.stderr.trim());
-    if (install.stdout.trim()) console.error(install.stdout.trim());
-    console.error(
-      pc.dim(
-        "  the token is saved in the secrets vault; re-run `friday setup --cloudflare` to retry the launch agent install.",
-      ),
-    );
-    return;
-  }
-  console.log(
-    pc.green(
-      "  cloudflared launch agent installed → ~/Library/LaunchAgents/com.cloudflare.cloudflared.plist",
-    ),
-  );
 }

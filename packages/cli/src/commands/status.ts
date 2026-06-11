@@ -142,18 +142,27 @@ export const statusCommand = defineCommand({
       console.log(`  supervisor  ${pc.dim("down")}  (run ${pc.cyan("friday start")})`);
     }
 
-    // cloudflared (its own user launch agent installed by
-    // `friday setup --cloudflare` → `cloudflared service install`; only
-    // checked when a token is configured).
+    // cloudflared (its own user launch agent, reconciled to serve-intent +
+    // token by `friday start` — FRI-166). Only shown when a token is
+    // configured. The serve-intent (`tunnel.serve`) distinguishes a staged box
+    // (token present, intent off → intentionally dark) from a misconfigured
+    // one (intent on but agent down).
     if (fridayEnv.cloudflareTunnelToken) {
       const cfJob = launchdJobStatus("com.cloudflare.cloudflared");
+      const serve = cfg.tunnel?.serve === true;
+      const suffix = cfg.publicUrl ? `  ${pc.cyan(cfg.publicUrl)}` : "";
       if (cfJob.loaded) {
         const detail = cfJob.pid !== undefined ? `pid=${cfJob.pid}` : "(loaded)";
-        const suffix = cfg.publicUrl ? `  ${pc.cyan(cfg.publicUrl)}` : "";
         console.log(`  tunnel      ${pc.green("up")}  ${detail}${suffix}`);
+      } else if (!serve) {
+        // Staged/restored: token present but serve-intent off (split-brain
+        // guard). Intentionally dark; flip with `friday tunnel up`.
+        console.log(
+          `  tunnel      ${pc.dim("staged")}  (token kept, not serving — ${pc.cyan("friday tunnel up")})`,
+        );
       } else {
         console.log(
-          `  tunnel      ${pc.dim("down")}  (run ${pc.cyan("friday setup --cloudflare")})`,
+          `  tunnel      ${pc.dim("down")}  (serve-intent on — run ${pc.cyan("friday start")})`,
         );
       }
     }

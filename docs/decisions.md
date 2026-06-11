@@ -817,7 +817,7 @@ Friday's production stack moves from `tmux new-session -d` to a Homebrew formula
 
 7. **cloudflared runs as its own user launch agent, installed via `cloudflared service install`.** Cloudflared is declared as a `depends_on` of the friday brew formula so the binary is on PATH, but Friday's tunnel does not use brew's auto-generated `homebrew.mxcl.cloudflared.plist`. That plist runs `cloudflared` with no arguments, which only supports config-file-based named tunnels — connector tokens (the shape `friday setup --cloudflare` collects) have no `~/.cloudflared/config.yml` equivalent, so the brew job spins on "permission denied" and exits 1.
 
-   **Correction landed 2026-05-21:** the original §7 text claimed `friday start` kicked off `brew services start cloudflared`; that path was wrong-shape from day one because brew's plist could never see the token. The canonical token-tunnel path is `cloudflared service install <TOKEN>`, which writes its own user launch agent at `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist` (label `com.cloudflare.cloudflared`) with the token embedded in ProgramArguments and `RunAtLoad: true` + `KeepAlive`. `friday setup --cloudflare` now invokes it: stops the broken brew job if loaded, runs `cloudflared service uninstall` (idempotent), then `cloudflared service install <TOKEN>`. Token rotation is the same flow — re-run setup. `friday start` no longer touches cloudflared; the launchd job manages itself. `friday status` checks the `com.cloudflare.cloudflared` label.
+   **Correction landed 2026-05-21:** the original §7 text claimed `friday start` kicked off `brew services start cloudflared`; that path was wrong-shape from day one because brew's plist could never see the token. The canonical token-tunnel path is `cloudflared service install <TOKEN>`, which writes its own user launch agent at `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist` (label `com.cloudflare.cloudflared`) with the token embedded in ProgramArguments and `RunAtLoad: true` + `KeepAlive`. `friday setup --cloudflare` now invokes it: stops the broken brew job if loaded, runs `cloudflared service uninstall` (idempotent), then `cloudflared service install <TOKEN>`. Token rotation is the same flow — re-run setup. `friday start` no longer touches cloudflared; the launchd job manages itself. `friday status` checks the `com.cloudflare.cloudflared` label. _(Superseded by ADR-042, 2026-06-11: `friday start` now **reconciles** the cloudflared agent against `tunnel.serve` + token presence — it is no longer fire-and-forget.)_
 
 8. **Postgres is host-managed.** Same as today — `brew services start postgresql@18`. Friday's supervisor doesn't supervise Postgres; it depends on it being up (caught by `friday doctor`'s `pg_isready` check).
 
@@ -1540,6 +1540,27 @@ One tracker (`$lib/util/keyboard-inset.ts`, dependency-injected, with stateful u
 - **Sticky/monotonic padding inset:** held overlay-sized padding into the shrunk regime, rendering as an ever-growing blank band that eventually filled the screen.
 - **Dismissing the keyboard on scroll:** rejected outright — scrolling up to read while composing is the core chat gesture.
 - **`position: sticky` composer; counter-translate-on-every-frame without focus gating; inner-scroller app shell:** the first two fail as documented above; the app shell (how every major chat product avoids this class entirely) remains the documented fallback if the Safari-tab ceiling proves unacceptable in practice — it would reopen ADR-039 deliberately.
+
+## ADR-042 — `friday start` reconciles the Cloudflare tunnel to a serve-intent flag; restore stages dark (split-brain guard)
+
+**Status:** accepted (2026-06-11). FRI-166.
+
+Before this, the cloudflared launch agent was managed **imperatively**: `friday setup --cloudflare` ran `cloudflared service install <TOKEN>` once and nothing ever reconciled it. Config/vault state and on-disk launchd reality drifted both directions — a `friday restore` of a tunnel-enabled config left the public URL **dead** until the user re-ran setup (DR broken), and a removed/rotated token left a stale agent serving. The cloudflared plist lives outside `~/.friday`, so even a `--full` backup can't carry it.
+
+**Decision.** `friday start` now reconciles the cloudflared agent **declaratively** every launch, keyed on an explicit **serve-intent** (`config.json` `tunnel.serve`) **AND** token presence in the vault — deliberately NOT bare token presence:
+
+- serve-intent on + token → ensure the agent is installed and running (from the vault token, no re-prompt).
+- serve-intent off / no token → ensure it's stopped and removed.
+
+The decision is a pure function (`decideTunnelAction`, exhaustively unit-tested); the effectful wrapper (`reconcileTunnel`) wires it to `cloudflared`/`launchctl` (`packages/cli/src/lib/cloudflared.ts`). Idempotent: an already-serving tunnel on the current token is a no-op — the installed token's SHA-256 is fingerprinted under `~/.friday/state/cloudflared-token.sha256` so only a **rotated** token forces a reinstall, never a gratuitous bounce on every `start`.
+
+**Why serve-intent is separate from the token (the split-brain guard).** A `--full` migration restore stages the SOURCE machine's _live_ tunnel token into the TARGET's vault (decryptable via `--include-age-key`). If reconcile keyed on token presence, `friday start` on the staged box would bring up a **second connector on the same public hostname** while prod is still serving — split-brain. So `friday restore` **forces `tunnel.serve` off** and reconciles the agent dark regardless of what the bundle's config said, and prints the cutover instructions. `decideTunnelAction` guarantees serve-intent off can _never_ yield install/reinstall across the entire state space (a dedicated test pins this). Cutover is one deliberate flip after the source tunnel is stopped: `friday tunnel up` (or `friday setup --cloudflare`).
+
+**Operator surface.** `friday tunnel up|down|status` is the explicit serve-intent lever (no token re-prompt); `friday setup --cloudflare` also sets serve-intent on. `friday status` distinguishes `up` / `staged` (token present, intent off — a restored box) / `down`.
+
+**Consequences.** DR works: restore-then-start on the _same_ machine relights the tunnel automatically (serve-intent restored from its own config). The cloudflared plist still lives outside `~/.friday` and is still not in the bundle — but it no longer needs to be, because reconcile rebuilds it from the vault token on the next `start`. The earlier doc claim that "`friday start`/`stop` no longer touch cloudflared" is retired (`stop` still leaves the agent's self-supervising job alone; `start` reconciles it).
+
+**Rejected:** _reconcile on bare token presence_ (auto-serves a staged box → split-brain); _carry the cloudflared plist in the bundle_ (machine-specific paths, still wouldn't gate split-brain); _restore preserves the bundle's `tunnel.serve: true`_ (DR-automatic on a different box, but unsafe — a test restore could relight prod's hostname). Safety won: restore always stages dark, DR is one explicit `friday tunnel up` away.
 
 ## Watch list
 

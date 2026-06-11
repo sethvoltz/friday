@@ -190,11 +190,14 @@ For dev hot-reload, use the `pnpm dev:*` wrappers — see [Developing Friday](#d
 ### 5. (Optional) Public access via Cloudflare Tunnel
 
 ```bash
-friday setup --cloudflare    # paste connector token + public URL
+friday setup --cloudflare    # paste connector token + public URL (sets serve-intent on)
 friday start                  # daemon + dashboard + tunnel
+friday tunnel up | down | status   # flip "serve here" intent without re-prompting for the token
 ```
 
-`friday setup --cloudflare` installs cloudflared as its own user launch agent (`com.cloudflare.cloudflared`) — it self-starts at login and survives reboots independently of Friday's stack. If `cloudflared` is missing or no token is set, the tunnel is skipped — daemon and dashboard come up regardless. See [docs/setup.md](docs/setup.md) for the full Cloudflare walkthrough.
+`friday setup --cloudflare` saves the connector token to the secrets vault, sets the **serve-intent** (`tunnel.serve`) on, and installs cloudflared as its own user launch agent (`com.cloudflare.cloudflared`). From then on `friday start` **reconciles** that agent declaratively against `tunnel.serve` + token presence (FRI-166): serve-intent on with a token → the agent is installed and running; serve-intent off or no token → the agent is torn down. So a restored config brings the tunnel back on the same box automatically (DR works), and removing the token tears it down — no manual `cloudflared` surgery. If `cloudflared` is missing or no token is set, the tunnel is skipped — daemon and dashboard come up regardless.
+
+`friday tunnel up`/`down` are the explicit serve-intent lever (no token re-prompt); `friday tunnel status` reports intent, token, agent state, and public URL. **Migration note:** `friday restore` deliberately leaves the tunnel **dark** (forces `tunnel.serve` off) even though the bundle carries the source machine's live token — this avoids two connectors serving one hostname (split-brain). Cut over by stopping the tunnel on the source box, then `friday tunnel up` on the new one. See [docs/setup.md](docs/setup.md) for the full Cloudflare walkthrough.
 
 ## CLI
 
@@ -208,6 +211,7 @@ friday start                                   # bootstrap/kickstart the launchd
 friday stop                                    # bootout the launchd job (cascade-stops every child)
 friday restart                                 # launchctl kickstart -k the launchd job
 friday status                                  # supervisor + service state + probed ports
+friday tunnel <up|down|status>                 # flip Cloudflare tunnel serve-intent (FRI-166)
 friday attach <daemon|dashboard|zero-cache>    # `tail -F ~/.friday/logs/<service>.jsonl`
 friday logs [daemon|dashboard|zero-cache|tunnel] [--follow]
 
