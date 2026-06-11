@@ -1,0 +1,15 @@
+# Path filters for dorny/paths-filter, consumed by .github/workflows/ci.yml.
+#
+# `code` is TRUE when the diff touches anything that is NOT pure markdown.
+# It's expressed as a single picomatch negation: the filter matches when at
+# least one changed file is not a `*.md`, so a docs-only change yields false
+# and the heavy jobs (Tests, Checks, E2E, Playwright) skip. Anything with a
+# non-`.md` file in the diff (source, config, images, lockfile, even an
+# extensionless file) flips it true — it deliberately errs toward running the
+# full suite rather than skipping a real code change.
+#
+# NOTE: Lint is intentionally NOT gated on this — `pnpm format:check` runs
+# `prettier --check`, which validates markdown formatting too, so it must run
+# on docs-only changes.
+code:
+  - "!**/*.md"
