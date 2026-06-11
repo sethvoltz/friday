@@ -214,8 +214,12 @@ download_release() {
   DL_TARBALL="${dest}/${TARBALL_NAME}"
   DL_SHA="${dest}/${SHA_NAME}"
   info "downloading ${TARBALL_NAME}"
-  curl -fsSL "${RELEASE_BASE}/${TARBALL_NAME}" -o "${DL_TARBALL}" \
+  # The tarball is the one large, slow fetch — show curl's progress bar (drop
+  # -s/-S, keep -fL) so the user sees movement instead of a silent hang. The
+  # bar goes to stderr, so it still renders under `curl install.sh | bash`.
+  curl -fL --progress-bar "${RELEASE_BASE}/${TARBALL_NAME}" -o "${DL_TARBALL}" \
     || fail "download failed: ${RELEASE_BASE}/${TARBALL_NAME}"
+  # The .sha256 is tiny — stay quiet for it.
   curl -fsSL "${RELEASE_BASE}/${SHA_NAME}" -o "${DL_SHA}" \
     || fail "download failed: ${RELEASE_BASE}/${SHA_NAME}"
 }

@@ -22,7 +22,6 @@ import {
   writeConfig,
   AGE_KEY_PATH,
   getDb,
-  runMigrations,
   schema,
 } from "@friday/shared";
 import { resetRateLimitPrefix, revokeAllSessionsForUser } from "@friday/shared/services";
@@ -55,12 +54,15 @@ export const setupCommand = defineCommand({
     // missing and writes them to ~/.friday/.env. The returned object is
     // read later when we need the secrets — `process.env` is NOT mutated.
     loadFridayConfig();
-    await runMigrations();
     ensureSoul();
 
-    // Phase 0 (ADR-023): provision the Postgres canonical store side-by-side
-    // with the still-active SQLite chain. The daemon code path keeps using
-    // SQLite until Phase 1 cuts it over; this step gets the new home ready.
+    // Provision the Postgres canonical store (ADR-023). This is the single
+    // place that creates the `friday` role + database, writes DATABASE_URL to
+    // ~/.friday/.env (clearing the config cache), AND applies Drizzle
+    // migrations. It MUST run before any DB access below — there is no separate
+    // runMigrations() step (provisionPostgres owns migrations, and a standalone
+    // runMigrations() here would throw "DATABASE_URL not set" on a fresh box,
+    // before this step has minted the URL).
     try {
       console.log(pc.dim("  provisioning Postgres (ADR-023)…"));
       const result = await provisionPostgres({
@@ -89,9 +91,10 @@ export const setupCommand = defineCommand({
       );
       console.error(
         pc.dim(
-          "  Setup will continue with the legacy SQLite store. Re-run `friday setup` once Postgres is available.",
+          "  Postgres is required. Ensure it's running (`brew services start postgresql@18`), then re-run `friday setup`.",
         ),
       );
+      process.exit(1);
     }
 
     if (!existsSync(CONFIG_PATH)) {
