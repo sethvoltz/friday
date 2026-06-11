@@ -427,7 +427,20 @@ main() {
   info "current ${CURRENT_LINK} -> versions/${version}"
   info "shim    ${SHIM_PATH}"
   info "plist   ${PLIST_PATH}"
-  printf '%s\n' "${C_DIM}  manage with: friday start | friday status | friday update${C_RESET}"
+
+  # First-time install: `friday setup` provisions Postgres + creates the account
+  # and writes .env.local. Without it the just-bootstrapped daemon can't connect
+  # to a DB and will restart-loop until setup runs — so make the required next
+  # step explicit rather than leaving a fresh user to discover it in the docs.
+  local data_dir="${FRIDAY_DATA_DIR:-${HOME}/.friday}"
+  if [ ! -f "${data_dir}/.env.local" ]; then
+    printf '\n'
+    step "Next step — first-time setup"
+    info "Run \`friday setup\` to provision Postgres and create your account."
+    info "(the supervised daemon will keep restarting until setup completes)"
+  else
+    printf '%s\n' "${C_DIM}  manage with: friday start | friday status | friday update${C_RESET}"
+  fi
 }
 
 main "$@"
