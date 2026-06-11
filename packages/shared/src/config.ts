@@ -116,6 +116,21 @@ export interface FridayConfig {
    * route from the connector token. Set via `friday setup --cloudflare`.
    */
   publicUrl?: string;
+  /**
+   * Cloudflare Tunnel serve-intent (FRI-166). Separate from token presence
+   * on purpose: a `--full` restore stages the source machine's tunnel token
+   * into this machine's vault, but the staged box must NOT auto-serve the
+   * public URL (that's the split-brain we avoid by cutting over deliberately).
+   * `friday start` reconciles the cloudflared launch agent against
+   * `tunnel.serve` AND token presence:
+   *   - `serve: true` + token in vault → ensure the agent is installed+running.
+   *   - `serve: false`/absent or no token → ensure the agent is stopped+removed.
+   * `friday setup --cloudflare` and `friday tunnel up` set `serve: true`;
+   * `friday tunnel down` and `friday restore` set it `false`. Absent is treated
+   * as `false` (the reconcile checks `tunnel?.serve === true`), so a fresh
+   * install and a freshly-restored box both stay dark until an explicit flip.
+   */
+  tunnel?: TunnelConfig;
   /** Linear integration settings. Read by `@friday/integrations-linear`. */
   linear?: LinearIntegrationConfig;
   /**
@@ -136,6 +151,16 @@ export interface FridayConfig {
   /** Context-budget compaction policy (FRI-156): per-agent-type auto-compact
    *  window + nightly maintenance-sweep tuning. */
   compaction?: CompactionConfig;
+}
+
+export interface TunnelConfig {
+  /**
+   * Whether THIS machine should serve the Cloudflare tunnel (FRI-166). The
+   * explicit "serve here" intent the reconcile keys on, deliberately distinct
+   * from token presence so a staged/restored second machine never auto-serves.
+   * Absent ≡ false.
+   */
+  serve?: boolean;
 }
 
 export interface LinearIntegrationConfig {

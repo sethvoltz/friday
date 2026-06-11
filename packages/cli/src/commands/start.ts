@@ -8,6 +8,7 @@ import {
   SERVICES,
 } from "@friday/shared";
 import * as launchd from "../lib/launchd.js";
+import { reconcileTunnel } from "../lib/cloudflared.js";
 import { currentLink } from "../lib/install-paths.js";
 
 /**
@@ -25,11 +26,13 @@ import { currentLink } from "../lib/install-paths.js";
  * individual services via `friday restart` (also whole-stack); the
  * per-service IPC story is an explicit follow-up ticket.
  *
- * cloudflared is installed as its own user launch agent by
- * `friday setup --cloudflare` (`cloudflared service install <TOKEN>`),
- * which writes `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist`
- * with `RunAtLoad: true` + `KeepAlive`. Once installed, launchd brings
- * it up automatically — `friday start` doesn't need to touch it.
+ * cloudflared is its own user launch agent
+ * (`com.cloudflare.cloudflared`). FRI-166: `friday start` now *reconciles*
+ * that agent to desired state — explicit serve-intent (`config.json`
+ * `tunnel.serve`) AND a token in the vault — rather than assuming setup
+ * already installed it. serve+token → install+run from the vault token (no
+ * re-prompt); otherwise → ensure it's torn down. A staged/restored box stays
+ * dark because `friday restore` forces `tunnel.serve` off (split-brain guard).
  */
 
 export const startCommand = defineCommand({
@@ -73,13 +76,30 @@ export const startCommand = defineCommand({
       process.exit(1);
     }
 
-    // cloudflared is supervised independently via its own launchd job
-    // (`com.cloudflare.cloudflared`), installed by `friday setup --cloudflare`.
-    // RunAtLoad + KeepAlive bring it up automatically; nothing to do here
-    // beyond reminding the user when they haven't run setup yet.
-    if (!loadFridayConfig().cloudflareTunnelToken) {
+    // FRI-166: reconcile the cloudflared launch agent to (serve-intent, token).
+    // Declarative + idempotent: an already-serving tunnel is a no-op, a
+    // removed token tears the agent down, and a restored tunnel-enabled config
+    // (serve-intent on, same machine) brings it back — DR works without a
+    // re-run of `friday setup --cloudflare`.
+    const fridayEnv = loadFridayConfig();
+    const serve = loadConfig().tunnel?.serve === true;
+    const tunnel = reconcileTunnel({ serve, token: fridayEnv.cloudflareTunnelToken });
+    if (!tunnel.ok) {
+      // install/reinstall couldn't complete (cloudflared missing or errored).
+      console.log(pc.yellow(`  · ${tunnel.detail}`));
+    } else if (tunnel.action === "install" || tunnel.action === "reinstall") {
+      console.log(pc.green(`  · ${tunnel.detail}`));
+    } else if (tunnel.action === "uninstall") {
+      console.log(pc.dim(`  · ${tunnel.detail}`));
+    } else if (!fridayEnv.cloudflareTunnelToken) {
       console.log(
         pc.dim(`  · no public tunnel — ${pc.cyan("friday setup --cloudflare")} to enable`),
+      );
+    } else if (!serve) {
+      // Token is staged in the vault but serve-intent is off — the
+      // split-brain-safe state after a `friday restore`.
+      console.log(
+        pc.dim(`  · tunnel staged, not serving — ${pc.cyan("friday tunnel up")} to serve`),
       );
     }
 

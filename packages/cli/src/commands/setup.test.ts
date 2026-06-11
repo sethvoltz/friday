@@ -33,6 +33,9 @@ const fakeDb = {
 
 vi.mock("@friday/shared", () => ({
   CONFIG_PATH: "/tmp/friday-setup-test/config.json",
+  // FRI-166: setup.ts → lib/cloudflared.ts reads STATE_DIR at module load to
+  // compute the installed-token fingerprint path; the mock must provide it.
+  STATE_DIR: "/tmp/friday-setup-test/state",
   DEFAULT_CONFIG: {},
   ensureDirs: () => calls.push("ensureDirs"),
   ensureSoul: () => calls.push("ensureSoul"),

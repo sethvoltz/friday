@@ -35,11 +35,14 @@ import {
   clearSecretsCache,
   findPgBin,
   getPool,
+  loadConfig,
   loadFridayConfig,
   runMigrations,
   sessionFilePath,
   sessionSidecarDir,
+  writeConfig,
 } from "@friday/shared";
+import { reconcileTunnel } from "../lib/cloudflared.js";
 
 const BACKUP_PATHS = [
   ".env.local",
@@ -330,6 +333,39 @@ export const restoreCommand = defineCommand({
       // auth as friday:<bundle-pw> against a role holding <target-pw> and fail
       // unless pg_hba happens to be `trust`. Idempotent.
       syncFridayRolePassword(dbUrl);
+
+      // 5b. Split-brain guard (FRI-166). The restored config.json carries the
+      //     SOURCE machine's tunnel state — including `tunnel.serve: true` and
+      //     its live connector token (back in this machine's vault via
+      //     --include-age-key). If `friday start` honored that, the staged box
+      //     would race the source machine on the SAME public hostname — the
+      //     split-brain we cut over deliberately to avoid. So force serve-intent
+      //     OFF here and actively reconcile the agent dark, regardless of what
+      //     the bundle said. Cutover relights it with one explicit flip
+      //     (`friday tunnel up`) AFTER the source machine's tunnel is stopped.
+      const restored = loadConfig();
+      const sourceServed = restored.tunnel?.serve === true;
+      if (sourceServed) {
+        restored.tunnel = { ...restored.tunnel, serve: false };
+        writeConfig(restored);
+      }
+      // Ensure no cloudflared agent is left serving on this box (defensive: the
+      // target may have served previously). serve:false → tear down if loaded.
+      reconcileTunnel({ serve: false, token: undefined });
+      if (sourceServed) {
+        console.log(
+          pc.yellow("  ⚠ tunnel serve-intent disabled on this machine (split-brain guard)."),
+        );
+        console.log(
+          pc.dim(
+            `    the bundle's tunnel token is restored but kept DARK. To serve ${
+              restored.publicUrl ?? "the public URL"
+            } from here, stop the tunnel on the source machine, then run ${pc.cyan(
+              "friday tunnel up",
+            )}.`,
+          ),
+        );
+      }
 
       // 6. Bundle-type-specific data restore.
       if (bundleType === "pg_dump") {

@@ -93,7 +93,9 @@ Open `http://localhost:7615` and sign in with the credentials you set in step 3.
 
 ## 6. Public access via Cloudflare Tunnel
 
-`friday setup --cloudflare` handles the persistence end-to-end: it saves the token to the age-encrypted secrets vault (`friday secrets` / ADR-038; auto-inits the vault on first run) and invokes `cloudflared service install <TOKEN>`, which writes `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist` with `RunAtLoad: true` + `KeepAlive`. The tunnel comes back automatically after reboot — no separate `brew services start` step. (Brew's auto-generated `homebrew.mxcl.cloudflared.plist` runs `cloudflared` bare, which only supports config-file-based named tunnels — connector tokens have no config.yml equivalent, so we sidestep that plist entirely.)
+`friday setup --cloudflare` handles the persistence end-to-end: it saves the token to the age-encrypted secrets vault (`friday secrets` / ADR-038; auto-inits the vault on first run), sets the **serve-intent** (`tunnel.serve: true` in `config.json`), and invokes `cloudflared service install <TOKEN>`, which writes `~/Library/LaunchAgents/com.cloudflare.cloudflared.plist` with `RunAtLoad: true` + `KeepAlive`. The tunnel comes back automatically after reboot — no separate `brew services start` step. (Brew's auto-generated `homebrew.mxcl.cloudflared.plist` runs `cloudflared` bare, which only supports config-file-based named tunnels — connector tokens have no config.yml equivalent, so we sidestep that plist entirely.)
+
+**Reconcile, not fire-and-forget (FRI-166).** Since FRI-166, `friday start` reconciles the cloudflared agent to desired state on every launch — it keys on serve-intent (`tunnel.serve`) AND token presence, so a restored config relights the tunnel on the same box automatically (DR), removing the token tears it down, and a staged second machine stays dark until you flip intent. `friday tunnel up` / `friday tunnel down` are the explicit serve-intent lever (no token re-prompt). See `docs/running.md` → _Tunnel reconcile_.
 
 ### Create the tunnel in Cloudflare
 
@@ -107,20 +109,22 @@ Open `http://localhost:7615` and sign in with the credentials you set in step 3.
 friday setup --cloudflare
 ```
 
-Paste the token and your public URL (e.g. `https://friday.example.com`). The token is written to the vault as `CLOUDFLARE_TUNNEL_TOKEN` (`--daemon` scope); the public URL is stored in `~/.friday/config.json` for display; the launch agent is installed and started immediately.
+Paste the token and your public URL (e.g. `https://friday.example.com`). The token is written to the vault as `CLOUDFLARE_TUNNEL_TOKEN` (`--daemon` scope); the public URL is stored in `~/.friday/config.json` for display; `tunnel.serve` is set on; the launch agent is installed and started immediately.
 
 ### Run
 
-The tunnel runs under its own launchd job, independent of Friday's stack:
+The tunnel runs under its own launchd job, reconciled by `friday start` against serve-intent + token (FRI-166):
 
 ```bash
-friday status         # shows tunnel up/down + public URL
+friday status         # shows tunnel up / staged / down + public URL
+friday tunnel status  # serve-intent, token, agent state, public URL
+friday tunnel down    # stop serving from this box (clears serve-intent; keeps token)
+friday tunnel up      # start serving again (re-flips serve-intent; no token re-prompt)
 friday logs tunnel -f # tail cloudflared output
-launchctl kickstart -k gui/$(id -u)/com.cloudflare.cloudflared   # restart the tunnel
-cloudflared service uninstall   # tear down the launch agent
+cloudflared service uninstall   # low-level: tear down the launch agent directly
 ```
 
-`friday start` / `friday stop` no longer touch cloudflared — the launchd job manages itself.
+`friday start` reconciles cloudflared to match `tunnel.serve` + token presence; `friday stop` leaves the tunnel's own launchd job alone (it self-supervises). Prefer `friday tunnel up`/`down` over poking `launchctl`/`cloudflared` directly so config and reality stay in sync.
 
 If `cloudflared` is missing from `PATH` when you run `friday setup --cloudflare`, the token is still saved to the vault but the launch agent install is skipped with a one-line note; install `cloudflared` then re-run setup. `friday doctor` surfaces both conditions.
 
@@ -255,9 +259,12 @@ Sequence:
 2. Drop any zero-cache logical replication slots — the daemon and zero-cache re-create them on next start.
 3. `DROP DATABASE friday; CREATE DATABASE friday OWNER friday;`.
 4. Restore filesystem.
-5. Run `pg_restore` against the `friday` role via `DATABASE_URL` so restored objects end up correctly owned.
-6. Re-apply pending migrations.
-7. Run `friday doctor` for a readiness check.
+5. **Force the Cloudflare tunnel dark (FRI-166).** A `--full` bundle restores the source machine's tunnel token (vault) and its `tunnel.serve: true` config. Restore overrides `tunnel.serve` to `false` and reconciles the cloudflared agent down, so `friday start` won't auto-serve — two connectors on one public hostname is split-brain. The token is kept; relight deliberately with `friday tunnel up` (after stopping the source machine's tunnel).
+6. Run `pg_restore` against the `friday` role via `DATABASE_URL` so restored objects end up correctly owned.
+7. Re-apply pending migrations.
+8. Run `friday doctor` for a readiness check.
+
+**Migration cutover (prod → new machine).** This is exactly why restore leaves the tunnel dark: stage the new box with `friday restore`, verify locally on `http://localhost:7615`, then cut over — stop the tunnel on the OLD box (`friday tunnel down`), then `friday tunnel up` on the NEW box. Same token → same tunnel hostname, new connector, no DNS change, never two live at once.
 
 ### One-time SQLite → Postgres cutover
 

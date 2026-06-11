@@ -1541,6 +1541,27 @@ One tracker (`$lib/util/keyboard-inset.ts`, dependency-injected, with stateful u
 - **Dismissing the keyboard on scroll:** rejected outright — scrolling up to read while composing is the core chat gesture.
 - **`position: sticky` composer; counter-translate-on-every-frame without focus gating; inner-scroller app shell:** the first two fail as documented above; the app shell (how every major chat product avoids this class entirely) remains the documented fallback if the Safari-tab ceiling proves unacceptable in practice — it would reopen ADR-039 deliberately.
 
+## ADR-042 — `friday start` reconciles the Cloudflare tunnel to a serve-intent flag; restore stages dark (split-brain guard)
+
+**Status:** accepted (2026-06-11). FRI-166.
+
+Before this, the cloudflared launch agent was managed **imperatively**: `friday setup --cloudflare` ran `cloudflared service install <TOKEN>` once and nothing ever reconciled it. Config/vault state and on-disk launchd reality drifted both directions — a `friday restore` of a tunnel-enabled config left the public URL **dead** until the user re-ran setup (DR broken), and a removed/rotated token left a stale agent serving. The cloudflared plist lives outside `~/.friday`, so even a `--full` backup can't carry it.
+
+**Decision.** `friday start` now reconciles the cloudflared agent **declaratively** every launch, keyed on an explicit **serve-intent** (`config.json` `tunnel.serve`) **AND** token presence in the vault — deliberately NOT bare token presence:
+
+- serve-intent on + token → ensure the agent is installed and running (from the vault token, no re-prompt).
+- serve-intent off / no token → ensure it's stopped and removed.
+
+The decision is a pure function (`decideTunnelAction`, exhaustively unit-tested); the effectful wrapper (`reconcileTunnel`) wires it to `cloudflared`/`launchctl` (`packages/cli/src/lib/cloudflared.ts`). Idempotent: an already-serving tunnel on the current token is a no-op — the installed token's SHA-256 is fingerprinted under `~/.friday/state/cloudflared-token.sha256` so only a **rotated** token forces a reinstall, never a gratuitous bounce on every `start`.
+
+**Why serve-intent is separate from the token (the split-brain guard).** A `--full` migration restore stages the SOURCE machine's _live_ tunnel token into the TARGET's vault (decryptable via `--include-age-key`). If reconcile keyed on token presence, `friday start` on the staged box would bring up a **second connector on the same public hostname** while prod is still serving — split-brain. So `friday restore` **forces `tunnel.serve` off** and reconciles the agent dark regardless of what the bundle's config said, and prints the cutover instructions. `decideTunnelAction` guarantees serve-intent off can _never_ yield install/reinstall across the entire state space (a dedicated test pins this). Cutover is one deliberate flip after the source tunnel is stopped: `friday tunnel up` (or `friday setup --cloudflare`).
+
+**Operator surface.** `friday tunnel up|down|status` is the explicit serve-intent lever (no token re-prompt); `friday setup --cloudflare` also sets serve-intent on. `friday status` distinguishes `up` / `staged` (token present, intent off — a restored box) / `down`.
+
+**Consequences.** DR works: restore-then-start on the _same_ machine relights the tunnel automatically (serve-intent restored from its own config). The cloudflared plist still lives outside `~/.friday` and is still not in the bundle — but it no longer needs to be, because reconcile rebuilds it from the vault token on the next `start`. The earlier doc claim that "`friday start`/`stop` no longer touch cloudflared" is retired (`stop` still leaves the agent's self-supervising job alone; `start` reconciles it).
+
+**Rejected:** _reconcile on bare token presence_ (auto-serves a staged box → split-brain); _carry the cloudflared plist in the bundle_ (machine-specific paths, still wouldn't gate split-brain); _restore preserves the bundle's `tunnel.serve: true`_ (DR-automatic on a different box, but unsafe — a test restore could relight prod's hostname). Safety won: restore always stages dark, DR is one explicit `friday tunnel up` away.
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.
