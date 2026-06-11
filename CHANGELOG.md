@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.20.1](https://github.com/sethvoltz/friday/compare/v1.20.0...v1.20.1) (2026-06-11)
+
+
+### Bug Fixes
+
+* **cli:** provision Postgres before migrating in `friday setup` ([#244](https://github.com/sethvoltz/friday/issues/244)) ([5cf1c85](https://github.com/sethvoltz/friday/commit/5cf1c85a446810ccf6c6381bc22651cafbbbf7ee))
+
 ## [1.20.0](https://github.com/sethvoltz/friday/compare/v1.19.2...v1.20.0) (2026-06-11)
 
 
