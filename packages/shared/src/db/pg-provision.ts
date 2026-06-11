@@ -199,23 +199,29 @@ function defaultMigrationsDir(): string {
 }
 
 /**
- * Resolves the pg_isready binary name. On Homebrew versioned installs
- * (e.g. `postgresql@18`) only `pg_isready-18` is on PATH, not the bare
- * `pg_isready`. Tries bare first, then versioned suffixes 18→16, then
- * scans Homebrew opt paths directly.
+ * Resolve a Postgres client binary (`pg_isready`, `pg_dump`, `psql`,
+ * `pg_restore`, …) to an executable. On Homebrew versioned installs
+ * (`postgresql@18` is keg-only) only `<name>-18` may be on PATH, not the bare
+ * name. Tries bare first, then versioned suffixes 18→16, then scans Homebrew
+ * opt paths directly. Used by provisioning AND backup/restore so they run on a
+ * stock Postgres box where the bare binaries aren't on PATH.
  */
-export function findPgIsReady(): string {
-  const candidates = ["pg_isready", "pg_isready-18", "pg_isready-17", "pg_isready-16"];
-  for (const name of candidates) {
-    const probe = spawnSync("which", [name], { encoding: "utf8" });
-    if (probe.status === 0 && probe.stdout.trim()) return name;
+export function findPgBin(name: string): string {
+  const candidates = [name, `${name}-18`, `${name}-17`, `${name}-16`];
+  for (const c of candidates) {
+    const probe = spawnSync("which", [c], { encoding: "utf8" });
+    if (probe.status === 0 && probe.stdout.trim()) return c;
   }
   const homebrewPrefix = process.arch === "arm64" ? "/opt/homebrew" : "/usr/local";
   for (const ver of [18, 17, 16]) {
-    const fullPath = `${homebrewPrefix}/opt/postgresql@${ver}/bin/pg_isready`;
+    const fullPath = `${homebrewPrefix}/opt/postgresql@${ver}/bin/${name}`;
     if (existsSync(fullPath)) return fullPath;
   }
-  return "pg_isready";
+  return name;
+}
+
+export function findPgIsReady(): string {
+  return findPgBin("pg_isready");
 }
 
 function assertPgReady(): void {

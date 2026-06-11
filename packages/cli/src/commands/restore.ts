@@ -21,7 +21,7 @@
 
 import { defineCommand } from "citty";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -33,9 +33,12 @@ import {
   HEALTH_PATH,
   clearFridayConfigCache,
   clearSecretsCache,
+  findPgBin,
   getPool,
   loadFridayConfig,
   runMigrations,
+  sessionFilePath,
+  sessionSidecarDir,
 } from "@friday/shared";
 
 const BACKUP_PATHS = [
@@ -51,6 +54,13 @@ const BACKUP_PATHS = [
   "uploads",
 ] as const;
 
+interface ClaudeSessionEntry {
+  agent: string;
+  type: string;
+  sessionId: string;
+  sidecar?: boolean;
+}
+
 interface BackupManifest {
   createdAt: string;
   bundleId: string;
@@ -59,12 +69,26 @@ interface BackupManifest {
    *  tarballs from `friday export-legacy-sqlite`. Older bundles
    *  (pre-Phase-7c) don't carry this field — default to `pg_dump`. */
   bundleType?: "pg_dump" | "legacy_sqlite";
+  /** "full" = whole-dir migration bundle (restore the entire staged tree +
+   *  place Claude SDK sessions); "selective"/absent = curated BACKUP_PATHS. */
+  mode?: "selective" | "full";
   postgresDumpSha256?: string;
   fridayVersion?: string;
   /** Present on legacy_sqlite bundles only. */
   tables?: Array<{ name: string; rowCount: number; sha256: string }>;
   files: Array<{ path: string; exists: boolean }>;
+  /** Captured Claude SDK sessions (full mode only). */
+  claudeSessions?: ClaudeSessionEntry[];
 }
+
+/** Bundle-meta entries that live at the staged-tree root but must NOT be copied
+ *  into ~/.friday during a full-tree restore. */
+const FULL_RESTORE_SKIP = new Set<string>([
+  "manifest.json",
+  "postgres.dump",
+  "claude-sessions",
+  "rows", // legacy_sqlite NDJSON dir
+]);
 
 /** Columns whose runtime value must be re-stringified as JSON before
  *  the parameterized INSERT — `pg` would otherwise pass the JS object
@@ -258,33 +282,54 @@ export const restoreCommand = defineCommand({
         "CREATE DATABASE friday OWNER friday;",
       ]);
 
-      // FRI-150 (pivot, ADR-037): the restored .env file is now on disk;
-      // invalidate the in-memory cache so loadFridayConfig() re-reads it.
+      // 5. Restore filesystem FIRST — so the bundle's `.env.local` is on disk
+      //    before we read DATABASE_URL. For a cross-machine restore the bundle
+      //    carries the SOURCE's friday password; we adopt it (and sync the role
+      //    to it below) so the daemon can connect afterward.
+      const full = manifest.mode === "full";
+      console.log(pc.dim(`  restoring filesystem${full ? " (full tree)" : ""}…`));
+      mkdirSync(DATA_DIR, { recursive: true });
+      if (full) {
+        // Restore the entire staged tree (incl. .git, agents/, .env.local),
+        // skipping bundle-meta. Replace each target to avoid merged state.
+        for (const entry of readdirSync(stageDir)) {
+          if (FULL_RESTORE_SKIP.has(entry)) continue;
+          const src = join(stageDir, entry);
+          const dest = join(DATA_DIR, entry);
+          if (existsSync(dest)) rmSync(dest, { recursive: true, force: true });
+          mkdirSync(dirname(dest), { recursive: true });
+          await cp(src, dest, { recursive: true, preserveTimestamps: true });
+        }
+        const ageKey = join(DATA_DIR, ".age-key");
+        if (existsSync(ageKey)) chmodSync(ageKey, 0o600);
+      } else {
+        for (const rel of BACKUP_PATHS) {
+          const src = join(stageDir, rel);
+          if (!existsSync(src)) continue;
+          const dest = join(DATA_DIR, rel);
+          if (existsSync(dest)) rmSync(dest, { recursive: true, force: true });
+          mkdirSync(dirname(dest), { recursive: true });
+          await cp(src, dest, { recursive: true, preserveTimestamps: true });
+        }
+      }
+
+      // FRI-150 (pivot, ADR-037): the restored .env is now on disk — invalidate
+      // the cache so loadFridayConfig() reads the BUNDLE's DATABASE_URL.
       clearSecretsCache();
       clearFridayConfigCache();
       const dbUrl = loadFridayConfig().databaseUrl;
       if (!dbUrl) {
         throw new Error(
-          "DATABASE_URL is missing from ~/.friday/.env. Run `friday setup` first to provision Postgres.",
+          "DATABASE_URL missing from the restored ~/.friday/.env. The bundle carried none — run `friday setup` to provision Postgres, then re-restore.",
         );
       }
 
-      // 5. Restore filesystem first so `.env` is in place + migrations
-      //    can find configuration. Each path that existed at backup
-      //    time is copied back into DATA_DIR; existing target is
-      //    removed first to avoid merged-state surprises.
-      console.log(pc.dim("  restoring filesystem…"));
-      mkdirSync(DATA_DIR, { recursive: true });
-      for (const rel of BACKUP_PATHS) {
-        const src = join(stageDir, rel);
-        if (!existsSync(src)) continue;
-        const dest = join(DATA_DIR, rel);
-        if (existsSync(dest)) {
-          rmSync(dest, { recursive: true, force: true });
-        }
-        mkdirSync(dirname(dest), { recursive: true });
-        await cp(src, dest, { recursive: true, preserveTimestamps: true });
-      }
+      // Sync the local `friday` role's password to the restored DATABASE_URL.
+      // Cross-machine: the target's role was minted with a DIFFERENT password by
+      // its own `friday setup`; without this, pg_restore (and then the daemon)
+      // auth as friday:<bundle-pw> against a role holding <target-pw> and fail
+      // unless pg_hba happens to be `trust`. Idempotent.
+      syncFridayRolePassword(dbUrl);
 
       // 6. Bundle-type-specific data restore.
       if (bundleType === "pg_dump") {
@@ -304,6 +349,13 @@ export const restoreCommand = defineCommand({
       if (bundleType === "pg_dump") {
         console.log(pc.dim("  re-running drizzle migrations…"));
         await runMigrations();
+      }
+
+      // 7b. Place captured Claude SDK session transcripts (full bundle only) so
+      //     each agent's NEXT turn resumes its conversation instead of starting a
+      //     cold session. The target path is RE-DERIVED from this machine's cwd.
+      if (full) {
+        await placeClaudeSessions(stageDir, manifest);
       }
 
       // 8. Final readiness check. Spawn `friday doctor` so the user
@@ -374,7 +426,7 @@ async function restorePgDumpBundle(
   }
   console.log(pc.dim("  pg_restore…"));
   const pgRestore = spawnSync(
-    "pg_restore",
+    findPgBin("pg_restore"),
     ["--no-owner", "--no-privileges", "-d", dbUrl, dumpPath],
     { stdio: ["ignore", "inherit", "inherit"] },
   );
@@ -602,7 +654,7 @@ function runPsqlAdmin(extraArgs: string[]): void {
   // Connect to the default `postgres` database so we can DROP friday
   // while no one else is connected. Local Postgres trust auth means we
   // don't need credentials here.
-  const res = spawnSync("psql", ["-d", "postgres", ...extraArgs], {
+  const res = spawnSync(findPgBin("psql"), ["-d", "postgres", ...extraArgs], {
     stdio: ["ignore", "inherit", "inherit"],
   });
   if (res.status !== 0) {
@@ -610,6 +662,49 @@ function runPsqlAdmin(extraArgs: string[]): void {
       `psql admin command failed with status ${res.status}. Manual cleanup may be required.`,
     );
   }
+}
+
+/** ALTER the local `friday` role's password to match a DATABASE_URL, so a
+ *  cross-machine restore's pg_restore + the daemon can auth against it. No-op
+ *  when the URL carries no password (socket/trust auth). Idempotent. */
+function syncFridayRolePassword(dbUrl: string): void {
+  let rawPw: string;
+  try {
+    rawPw = new URL(dbUrl).password;
+  } catch {
+    return;
+  }
+  if (!rawPw) return;
+  const escaped = decodeURIComponent(rawPw).replace(/'/g, "''");
+  runPsqlAdmin(["-c", `ALTER ROLE friday WITH LOGIN REPLICATION PASSWORD '${escaped}'`]);
+  console.log(pc.dim("  synced friday role password to the restored .env.local"));
+}
+
+/** Place captured Claude SDK sessions back under `~/.claude/projects`,
+ *  RE-DERIVING the project-dir hash from THIS machine's agent cwd (not the
+ *  source's) so resume finds them even if `$HOME`/user differs. Builders are
+ *  skipped — their worktree cwd isn't migrated. */
+async function placeClaudeSessions(stageDir: string, manifest: BackupManifest): Promise<void> {
+  let placed = 0;
+  for (const s of manifest.claudeSessions ?? []) {
+    if (s.type === "builder") continue;
+    const srcDir = join(stageDir, "claude-sessions", s.agent);
+    const srcJsonl = join(srcDir, `${s.sessionId}.jsonl`);
+    if (!existsSync(srcJsonl)) continue;
+    const cwd = join(DATA_DIR, "agents", s.agent); // target cwd → target hash
+    const destJsonl = sessionFilePath(cwd, s.sessionId);
+    mkdirSync(dirname(destJsonl), { recursive: true });
+    await cp(srcJsonl, destJsonl, { preserveTimestamps: true });
+    const srcSidecar = join(srcDir, s.sessionId);
+    if (s.sidecar && existsSync(srcSidecar)) {
+      await cp(srcSidecar, sessionSidecarDir(cwd, s.sessionId), {
+        recursive: true,
+        preserveTimestamps: true,
+      });
+    }
+    placed++;
+  }
+  if (placed > 0) console.log(pc.dim(`  placed ${placed} claude session(s)`));
 }
 
 function sha256File(path: string): string {

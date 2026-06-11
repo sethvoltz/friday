@@ -232,6 +232,12 @@ Excludes by design: `workspaces/` (rebuildable git worktrees), `logs/`, `health.
 
 The bundle write is atomic — stages in a tempdir, single `tar -czf` to `<path>.tmp`, then renames to the final name.
 
+### Full (migration) bundle
+
+For a faithful machine-to-machine migration, use `friday backup --full --include-age-key`. It captures the **whole `~/.friday`** (including the `.git` state repo and `.env.local`) minus the regenerable/machine-tied bulk above, **plus** the Claude SDK session transcripts (`~/.claude/projects/<cwd>/<sessionId>.jsonl` + sidecars) for every non-archived agent. Without those transcripts the SDK silently starts a **fresh** session after restore — the Postgres history still renders, but each agent loses its Claude-side conversation context. `--include-age-key` adds `.age-key` so the secrets vault decrypts on the target (→ the bundle is **not** safe to distribute).
+
+`friday restore` of a full bundle restores the whole tree, **re-derives** each Claude session path from the target machine's cwd (so resume finds them even if `$HOME`/user differs), and **syncs the local `friday` role's password** to the restored `.env.local` (so `pg_restore` + the daemon can authenticate even though the target minted a different password at `friday setup`).
+
 ### Restore
 
 ```bash
