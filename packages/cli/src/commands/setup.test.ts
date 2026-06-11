@@ -1,19 +1,24 @@
-// Regression tests for the `friday setup` command ORDERING.
+// Regression + behavior tests for the `friday setup` command.
 //
-// The bug these guard against (fixed 2026-06-11): setup called runMigrations()
-// — which needs DATABASE_URL — BEFORE provisionPostgres(), the step that mints
-// the role/db and writes DATABASE_URL. On a fresh Postgres-era box that threw a
+// Ordering regression (fixed 2026-06-11): setup called runMigrations() — which
+// needs DATABASE_URL — BEFORE provisionPostgres(), the step that mints the
+// role/db and writes DATABASE_URL. On a fresh Postgres-era box that threw a
 // circular "DATABASE_URL is not set — run friday setup" error, blocking every
-// first-time install. provisionPostgres() is the single source of truth: it
-// creates the role+db, writes DATABASE_URL, AND applies migrations, so it MUST
-// run before any DB access (getDb / migrations) in setup.run().
+// first-time install. provisionPostgres() is the single source of truth.
 //
-// We mock setup's dependencies to record call order — the orchestration is the
-// unit under test, not the mocked helpers.
+// Behavior (added 2026-06-11): setup always initializes the secrets vault, and
+// restarts Postgres ONLY when provisioning flipped wal_level to logical.
+//
+// We mock setup's dependencies to record call order / side effects — the
+// orchestration is the unit under test, not the mocked helpers.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const calls: string[] = [];
+const spawnCalls: Array<{ cmd: string; args: string[] }> = [];
+// Mutable control read by the provisionPostgres mock (vitest lets the hoisted
+// factory close over module-level bindings, same as `calls`/`fakeDb` below).
+const ctl = { walLevelChanged: false };
 
 const DB_URL = "postgresql://friday@localhost:5432/friday";
 
@@ -39,11 +44,27 @@ vi.mock("@friday/shared", () => ({
   }),
   provisionPostgres: vi.fn(async () => {
     calls.push("provisionPostgres");
-    return { freshInstall: true, appliedMigrations: [], databaseUrl: DB_URL };
+    return {
+      freshInstall: true,
+      appliedMigrations: [],
+      databaseUrl: DB_URL,
+      createdPublication: true,
+      walLevelChanged: ctl.walLevelChanged,
+    };
+  }),
+  probePostgresHealth: async () => ({
+    reachable: true,
+    walLevelLogical: true,
+    walLevelActual: "logical",
   }),
   resolveDashboardPort: () => 7615,
-  generateAgeKeypair: async () => ({ identity: "i", recipient: "r" }),
-  initVault: async () => {},
+  generateAgeKeypair: async () => {
+    calls.push("generateAgeKeypair");
+    return { identity: "i", recipient: "r" };
+  },
+  initVault: async () => {
+    calls.push("initVault");
+  },
   patchFridayGitignore: () => {},
   upsertIntegrationSecret: async () => {},
   writeConfig: () => {},
@@ -62,6 +83,15 @@ vi.mock("@friday/shared", () => ({
 vi.mock("@friday/shared/services", () => ({
   resetRateLimitPrefix: async () => 0,
   revokeAllSessionsForUser: async () => 0,
+}));
+
+// Record + neutralize child_process so the wal_level restart helper never runs
+// a real `brew services restart` during the test.
+vi.mock("node:child_process", () => ({
+  spawnSync: (cmd: string, args: string[] = []) => {
+    spawnCalls.push({ cmd, args });
+    return { status: 0 };
+  },
 }));
 
 // Non-interactive prompt stubs. confirm: "Keep existing account?" → true so the
@@ -90,8 +120,13 @@ async function runSetup(): Promise<void> {
   });
 }
 
+const brewRestarted = (): boolean =>
+  spawnCalls.some((c) => c.cmd === "brew" && c.args.join(" ") === "services restart postgresql@18");
+
 beforeEach(() => {
   calls.length = 0;
+  spawnCalls.length = 0;
+  ctl.walLevelChanged = false;
   vi.clearAllMocks();
 });
 
@@ -130,5 +165,25 @@ describe("friday setup — provisioning order", () => {
     expect(calls).not.toContain("getDb");
 
     exitSpy.mockRestore();
+  });
+});
+
+describe("friday setup — vault + Postgres restart", () => {
+  it("always initializes the secrets vault on a fresh install", async () => {
+    await runSetup();
+    expect(calls).toContain("generateAgeKeypair");
+    expect(calls).toContain("initVault");
+  });
+
+  it("restarts Postgres when provisioning flipped wal_level to logical", async () => {
+    ctl.walLevelChanged = true;
+    await runSetup();
+    expect(brewRestarted()).toBe(true);
+  });
+
+  it("does NOT restart Postgres when wal_level was already logical", async () => {
+    ctl.walLevelChanged = false;
+    await runSetup();
+    expect(brewRestarted()).toBe(false);
   });
 });

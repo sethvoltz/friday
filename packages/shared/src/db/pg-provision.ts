@@ -96,6 +96,12 @@ export interface ProvisionResult {
   appliedMigrations: string[];
   /** True when the publication was created this run. */
   createdPublication: boolean;
+  /** True when this run changed `wal_level` to logical — Postgres must be
+   *  restarted for it to take effect (ALTER SYSTEM is postmaster-level). False
+   *  when it was already logical (no restart needed). Lets `friday setup`
+   *  restart Postgres ONLY when the level actually changed, so re-runs on a
+   *  live prod box don't bounce a Postgres that's already configured. */
+  walLevelChanged: boolean;
 }
 
 /**
@@ -168,13 +174,14 @@ export async function provisionPostgres(opts: {
   // Phase 2 (ADR-024): Zero needs logical replication enabled. The
   // default `wal_level = replica` leaves zero-cache in a boot loop —
   // surface the fix here so `friday setup` is idempotent end-to-end.
-  await ensureWalLevelLogical(log);
+  const walLevelChanged = await ensureWalLevelLogical(log);
 
   return {
     freshInstall: created.role || created.database,
     databaseUrl,
     appliedMigrations,
     createdPublication,
+    walLevelChanged,
   };
 }
 
@@ -497,13 +504,14 @@ async function ensurePublication(
   }
 }
 
-async function ensureWalLevelLogical(log: (msg: string) => void): Promise<void> {
+/** Ensure `wal_level = logical` (Zero needs it for logical replication).
+ *  Returns true when it changed the setting this run — ALTER SYSTEM is a
+ *  postmaster-level setting that requires a full Postgres restart (NOT
+ *  `pg_reload_conf()`), so the caller must restart Postgres when this returns
+ *  true. Returns false when it was already logical (no restart needed). */
+async function ensureWalLevelLogical(log: (msg: string) => void): Promise<boolean> {
   // ALTER SYSTEM requires superuser; use the same admin connection
-  // pattern as ensurePublication. `wal_level` is a `postmaster`-level
-  // setting — applying it requires a Postgres restart, NOT just
-  // `pg_reload_conf()`. We surface that with a clear log message and
-  // a non-fatal continuation so first-time setup completes; the
-  // operator restarts Postgres and re-runs `friday doctor` to confirm.
+  // pattern as ensurePublication.
   const admin = new Client({ connectionString: adminConnectionUrl() });
   await admin.connect();
   try {
@@ -511,17 +519,14 @@ async function ensureWalLevelLogical(log: (msg: string) => void): Promise<void> 
     const lvl = cur.rows[0]?.wal_level;
     if (lvl === "logical") {
       log(`  wal_level already logical`);
-      return;
+      return false;
     }
     // Persist the change so it survives the restart.
     await admin.query(`ALTER SYSTEM SET wal_level = 'logical'`);
-    log(`  ALTER SYSTEM SET wal_level = 'logical' (was: ${lvl ?? "unknown"})`);
     log(
-      `  ⚠ restart Postgres for the change to take effect: ` +
-        `\`brew services restart postgresql@18\` ` +
-        `(or your platform's equivalent). Re-run \`friday doctor\` ` +
-        `after the restart to confirm.`,
+      `  ALTER SYSTEM SET wal_level = 'logical' (was: ${lvl ?? "unknown"}) — Postgres restart required`,
     );
+    return true;
   } finally {
     await admin.end();
   }

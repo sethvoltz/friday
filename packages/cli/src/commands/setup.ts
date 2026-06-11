@@ -14,6 +14,7 @@ import {
   loadConfig,
   loadFridayConfig,
   provisionPostgres,
+  probePostgresHealth,
   resolveDashboardPort,
   generateAgeKeypair,
   initVault,
@@ -63,11 +64,13 @@ export const setupCommand = defineCommand({
     // runMigrations() step (provisionPostgres owns migrations, and a standalone
     // runMigrations() here would throw "DATABASE_URL not set" on a fresh box,
     // before this step has minted the URL).
+    let walLevelChanged = false;
     try {
       console.log(pc.dim("  provisioning Postgres (ADR-023)…"));
       const result = await provisionPostgres({
         log: (msg) => console.log(pc.dim(msg)),
       });
+      walLevelChanged = result.walLevelChanged;
       if (result.freshInstall) {
         console.log(
           pc.green(
@@ -100,6 +103,18 @@ export const setupCommand = defineCommand({
     if (!existsSync(CONFIG_PATH)) {
       writeConfig(DEFAULT_CONFIG);
       console.log(pc.dim(`  wrote ${CONFIG_PATH}`));
+    }
+
+    // Always initialize the secrets vault on setup (ADR-038) so a fresh install
+    // lands with a working vault + age key, not a `no_vault` doctor failure.
+    // Idempotent: skipped when the age key already exists. Integration secrets
+    // (incl. the Cloudflare token) are added later into this same vault via
+    // `friday secrets set` / `friday setup --cloudflare`.
+    if (!existsSync(AGE_KEY_PATH)) {
+      const { identity, recipient } = await generateAgeKeypair();
+      await initVault(identity, recipient);
+      patchFridayGitignore();
+      console.log(pc.green("  secrets vault initialized"));
     }
 
     if (args.cloudflare) {
@@ -205,9 +220,55 @@ export const setupCommand = defineCommand({
 
     await runCloudflareSetup({ force: false });
 
+    // If provisioning flipped wal_level to logical, restart Postgres so the
+    // change takes effect — otherwise zero-cache boot-loops on first `friday
+    // start`. Gated on walLevelChanged, so a re-setup on a box that's already
+    // logical never bounces a running Postgres.
+    if (walLevelChanged) {
+      await restartPostgresForWalLevel();
+    }
+
     outro(pc.green("Setup complete."));
   },
 });
+
+// `wal_level` changed to logical this run — ALTER SYSTEM needs a full Postgres
+// restart to take effect. Do it for the user so a fresh install is usable
+// end-to-end without a manual step (the warning was easy to miss). Best-effort:
+// if the brew service isn't how Postgres is managed, fall back to instructing.
+async function restartPostgresForWalLevel(): Promise<void> {
+  console.log(pc.dim("  restarting Postgres to activate wal_level=logical…"));
+  const r = spawnSync("brew", ["services", "restart", "postgresql@18"], {
+    stdio: ["ignore", "ignore", "inherit"],
+  });
+  if (r.status !== 0) {
+    console.log(
+      pc.yellow(
+        "  could not auto-restart Postgres — run `brew services restart postgresql@18` manually, then `friday doctor`.",
+      ),
+    );
+    return;
+  }
+  // Wait (bounded) for Postgres to accept connections again so the next
+  // `friday start` / `friday doctor` is clean.
+  for (let i = 0; i < 30; i++) {
+    const health = await probePostgresHealth();
+    if (health.reachable) {
+      console.log(
+        health.walLevelLogical
+          ? pc.green("  Postgres restarted — wal_level=logical active")
+          : pc.yellow(
+              "  Postgres restarted but wal_level still not logical — check `friday doctor`.",
+            ),
+      );
+      return;
+    }
+    await new Promise((res) => setTimeout(res, 500));
+  }
+  console.log(
+    pc.yellow("  Postgres restarted but not ready yet — re-run `friday doctor` shortly."),
+  );
+}
 
 async function runCloudflareSetup({ force }: { force: boolean }): Promise<void> {
   const tokenAlreadySet = !!loadFridayConfig().cloudflareTunnelToken;
