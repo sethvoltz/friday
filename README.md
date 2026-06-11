@@ -116,11 +116,13 @@ Who can spawn whom:
 
 ### 1. Prerequisites
 
+Requires [Homebrew](https://brew.sh). The curl install in step 2 doesn't clone the repo, so stream the `Brewfile` straight from GitHub:
+
 ```bash
-brew bundle --file=Brewfile
+curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/Brewfile | brew bundle --file=-
 ```
 
-Installs:
+(Contributors with a local checkout can just `brew bundle --file=Brewfile`.) Installs:
 
 - **`postgresql@18`** — Friday's canonical store. Managed by `brew services`, lifecycle-independent of `friday start/stop`.
 - **`gh`** — GitHub CLI for Builders to clone and open PRs
@@ -156,6 +158,8 @@ curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/install.sh | 
 ```
 
 Friday runs on macOS — Apple Silicon (arm64) is the primary target, Intel (x64) is supported as legacy. The installer downloads the **pre-baked release tarball** for your Mac's architecture (no on-device build), verifies its `shasum -a 256`, ensures the pinned Node via `fnm install` (reading `.node-version`), extracts to `~/.local/share/friday/versions/<version>/`, flips the `~/.local/share/friday/current` symlink, drops a `~/.local/bin/friday` shim on your PATH, and writes + bootstraps the launchd plist (`com.sethvoltz.friday`) directly. It finishes in seconds — there's no `pnpm install`/`pnpm -r build` step on your machine. Re-running it updates in place; `friday update` does the same from the CLI (see [CLI](#cli)).
+
+> The shim lands at `~/.local/bin/friday`. If that's not already on your `PATH`, the installer prints the line to add to your shell profile (`export PATH="$HOME/.local/bin:$PATH"`) — add it and open a new shell (or `source` your profile) before running `friday` in step 3.
 
 Source-editing contributors who don't want the curl installer can clone + `pnpm install + pnpm build` from the repo — see [Developing Friday](#developing-friday) below. The dev workflow doesn't need the release tarball.
 
@@ -349,15 +353,16 @@ Verifies the data dir, config, db migrations, account presence, external CLIs, a
 
 ## Documentation
 
-| Doc                                              | What's in it                                                                                                       |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| [docs/architecture.md](docs/architecture.md)     | System overview, topology, prompt stack, block model, wire protocol, agent lifecycle                               |
-| [docs/chat-ux.md](docs/chat-ux.md)               | Single-chat UX, sidebar, focus model, slash commands, attachments, markdown                                        |
-| [docs/mobile-ux.md](docs/mobile-ux.md)           | Priority+ nav, virtualization, PWA, mobile autocomplete                                                            |
-| [docs/mcp.md](docs/mcp.md)                       | MCP server surface (Friday-internal + user-configured)                                                             |
-| [docs/sandbox.md](docs/sandbox.md)               | Worker isolation: M1–M5 rollout (PreToolUse rules, sandbox-exec, pgrp containment, stall watchdog) + residual risk |
-| [docs/decisions.md](docs/decisions.md)           | Architecture Decision Records (ADRs) + watch list                                                                  |
-| [docs/roadmap.md](docs/roadmap.md)               | Open work, sequenced for execution                                                                                 |
-| [docs/setup.md](docs/setup.md)                   | Full setup including Cloudflare Tunnel walkthrough                                                                 |
-| [docs/running.md](docs/running.md)               | Daily commands, modes, data layout, cutover from old Friday                                                        |
-| [docs/ui-conventions.md](docs/ui-conventions.md) | Cross-cutting UI patterns and icon map                                                                             |
+| Doc                                                      | What's in it                                                                                                       |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| [docs/architecture.md](docs/architecture.md)             | System overview, topology, prompt stack, block model, wire protocol, agent lifecycle                               |
+| [docs/chat-ux.md](docs/chat-ux.md)                       | Single-chat UX, sidebar, focus model, slash commands, attachments, markdown                                        |
+| [docs/mobile-ux.md](docs/mobile-ux.md)                   | Priority+ nav, virtualization, PWA, mobile autocomplete                                                            |
+| [docs/mcp.md](docs/mcp.md)                               | MCP server surface (Friday-internal + user-configured)                                                             |
+| [docs/sandbox.md](docs/sandbox.md)                       | Worker isolation: M1–M5 rollout (PreToolUse rules, sandbox-exec, pgrp containment, stall watchdog) + residual risk |
+| [docs/decisions.md](docs/decisions.md)                   | Architecture Decision Records (ADRs) + watch list                                                                  |
+| [docs/roadmap.md](docs/roadmap.md)                       | Open work, sequenced for execution                                                                                 |
+| [docs/setup.md](docs/setup.md)                           | Full setup including Cloudflare Tunnel walkthrough                                                                 |
+| [docs/running.md](docs/running.md)                       | Daily commands, modes, data layout, cutover from old Friday                                                        |
+| [docs/self-hosted-runner.md](docs/self-hosted-runner.md) | Intel x64 self-hosted GitHub Actions runner that builds the `darwin-x64` release leg                               |
+| [docs/ui-conventions.md](docs/ui-conventions.md)         | Cross-cutting UI patterns and icon map                                                                             |
