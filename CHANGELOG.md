@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.20.4](https://github.com/sethvoltz/friday/compare/v1.20.3...v1.20.4) (2026-06-11)
+
+
+### Bug Fixes
+
+* **daemon:** seed the orchestrator agent on boot (fresh-install chat skeleton hang) ([#251](https://github.com/sethvoltz/friday/issues/251)) ([655e950](https://github.com/sethvoltz/friday/commit/655e95023acd2b22b1a84bd8841e493401d4e9da))
+
 ## [1.20.3](https://github.com/sethvoltz/friday/compare/v1.20.2...v1.20.3) (2026-06-11)
 
 
