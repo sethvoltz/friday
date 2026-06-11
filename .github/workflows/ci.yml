@@ -11,9 +11,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Single gate job: classifies the diff so the heavy jobs can sit out a
+  # docs-only change. `code` is false only when every changed file is *.md
+  # (see .github/file-filters.yml). The four expensive jobs gate on it via a
+  # job-level `if:`; a skipped job reports conclusion "skipped", which a
+  # required status check (ruleset "Main") treats as satisfied — so docs-only
+  # PRs still go green and auto-merge. Lint is deliberately NOT gated: its
+  # `prettier --check` validates markdown formatting too. Do NOT convert this
+  # into an `on: paths:` filter — a workflow that never runs leaves required
+  # checks stuck "Expected" and blocks the merge forever.
+  files-changed:
+    name: Determine files changed
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dorny/paths-filter@v4
+        id: changes
+        with:
+          filters: .github/file-filters.yml
+
   tests:
     name: Tests
     runs-on: ubuntu-latest
+    needs: files-changed
+    if: needs.files-changed.outputs.code == 'true'
 
     # Phase 1+ moved Friday's canonical persistence from SQLite to
     # Postgres (ADR-023). Tests in @friday/daemon, @friday/cli, and
@@ -81,6 +107,8 @@ jobs:
   checks:
     name: Checks
     runs-on: ubuntu-latest
+    needs: files-changed
+    if: needs.files-changed.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v6
@@ -133,6 +161,8 @@ jobs:
   e2e:
     name: E2E (sync harness)
     runs-on: ubuntu-latest
+    needs: files-changed
+    if: needs.files-changed.outputs.code == 'true'
 
     # Item #50 multi-subprocess suites need Postgres with `wal_level=logical`
     # so zero-cache can set up logical replication. The default `services:`
@@ -188,6 +218,8 @@ jobs:
   playwright:
     name: E2E (Playwright browser)
     runs-on: ubuntu-latest
+    needs: files-changed
+    if: needs.files-changed.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v6
