@@ -101,6 +101,11 @@ async function main(): Promise<void> {
 
   const cfg = loadConfig();
   const daemonPort = resolveDaemonPort(cfg);
+  // Seed the orchestrator agent row BEFORE the API serves, so a fresh install
+  // has it from the very first request. Without it the dashboard's orchestrator
+  // chat 404s on GET /api/agents/<name> (→ 502) and hangs on the loading
+  // skeleton until the user sends a message. Insert-only — no-op once it exists.
+  await registry.ensureOrchestratorAgent(cfg.orchestratorName);
   const server = startServer({ port: daemonPort });
   const heartbeat = startHealthHeartbeat(daemonPort);
 

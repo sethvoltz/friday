@@ -180,6 +180,26 @@ export async function registerAgent(input: RegisterInput): Promise<AgentEntry> {
 }
 
 /**
+ * Seed the orchestrator agent row on daemon boot if it doesn't exist yet.
+ *
+ * Insert-only and idempotent: when the orchestrator already exists this is a
+ * no-op that NEVER touches its status/session/history (unlike a bare
+ * `registerAgent`, whose conflict-update would flip `status` to idle). That
+ * matters because the orchestrator is otherwise registered lazily — only when
+ * the first message is dispatched to it (`dispatch-listener.ts`). On a brand-new
+ * install that leaves the `agents` table with no orchestrator row until the user
+ * sends a message, so the dashboard's always-present orchestrator chat 404s on
+ * `GET /api/agents/<name>` (→ 502 through the proxy) and the transcript hangs on
+ * the loading skeleton forever (`applyZeroBlocks` bails on the missing agents
+ * row before it can clear `loadingInitial`). Seeding here makes the first-ever
+ * open render an empty chat instead.
+ */
+export async function ensureOrchestratorAgent(name: string): Promise<void> {
+  if (await getAgent(name)) return;
+  await registerAgent({ name, type: "orchestrator" });
+}
+
+/**
  * Read the raw `spawn_reason` column for an agent. AgentEntry is the
  * user-facing wire shape and deliberately omits this field, so the
  * watchdog refork (and any future audit consumer) reads it directly via
