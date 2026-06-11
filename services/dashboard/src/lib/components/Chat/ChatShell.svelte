@@ -807,6 +807,10 @@
     overflow-anchor: none;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    min-height: 200dvh;
     padding-top: var(--chat-top);
     padding-bottom: calc(
       var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px)
