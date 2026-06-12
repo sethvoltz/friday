@@ -505,10 +505,13 @@ export function buildQueryOptions(
     // captured shell env so the user's PATH/toolchain wins. Without this the
     // agent's Bash tool inherits the daemon's launchd-minimal PATH on a fresh
     // (launchd-started) box and can't find `gh`, brew tools, etc. — even though
-    // the MCP children (which already read this capture) can. Secrets are
-    // already stripped from the capture (sanitizeEnv), so Friday's own
-    // ANTHROPIC_*/secret vars in process.env survive the overlay. `shellEnv`
-    // omitted (tests) → no `env` override, identical to prior behavior.
+    // the MCP children (which already read this capture) can. Secret-shaped keys
+    // are stripped from the capture (sanitizeEnv), so a user-shell export can't
+    // clobber the CLI's creds in process.env (ANTHROPIC_API_KEY/_TOKEN/OAuth all
+    // match the strip regex). Non-secret user vars (e.g. ANTHROPIC_BASE_URL) DO
+    // overlay — intended: it's the user's box and their interactive shell wins,
+    // same as if they ran `claude` in their terminal. `shellEnv` omitted (tests)
+    // → no `env` override, identical to prior behavior.
     ...(shellEnv ? { env: { ...process.env, ...shellEnv } } : {}),
     // Drop Anthropic's built-in `Task` sub-agent tool from the catalog for
     // every agent type. Friday farms work out via `agent_create` + mail, not

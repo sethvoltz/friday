@@ -16,6 +16,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 import {
+  ghCliHint,
   probeInteractiveShellCommand,
   probeInteractiveShellNode,
   runDependencies,
@@ -150,6 +151,58 @@ describe("probeInteractiveShellCommand", () => {
     expect(res.unverified).toBe(true);
     expect(res.ok).toBe(false);
     expect(spawned).toBe(false);
+  });
+});
+
+describe("ghCliHint — the gh-row remediation decision tree", () => {
+  const base = {
+    agentOk: false,
+    agentUnverified: false,
+    nonInteractiveOk: undefined as boolean | undefined,
+    inProcessEnv: false,
+    shellBase: "zsh",
+  };
+
+  it("no hint when the shell is unverified (we can't reason about it)", () => {
+    expect(ghCliHint({ ...base, agentUnverified: true })).toBeUndefined();
+  });
+
+  it("agent can't see gh but it IS installed → 'on PATH' fix keyed to ~/.zshenv (zsh)", () => {
+    const h = ghCliHint({ ...base, agentOk: false, inProcessEnv: true, shellBase: "zsh" });
+    expect(h).toContain("not on the agents' PATH");
+    expect(h).toContain("~/.zshenv");
+  });
+
+  it("agent can't see gh and it's NOT installed → brew install, keyed to the rc", () => {
+    const h = ghCliHint({ ...base, agentOk: false, inProcessEnv: false, shellBase: "zsh" });
+    expect(h).toContain("brew install gh");
+    expect(h).toContain("~/.zshenv");
+  });
+
+  it("bash user gets ~/.bashrc, NOT ~/.zshenv (the .zshenv advice would mislead them)", () => {
+    const h = ghCliHint({ ...base, agentOk: false, inProcessEnv: true, shellBase: "bash" });
+    expect(h).toContain("~/.bashrc");
+    expect(h).not.toContain("zshenv");
+  });
+
+  it("unknown shell falls back to a generic 'your shell rc'", () => {
+    const h = ghCliHint({ ...base, agentOk: false, inProcessEnv: false, shellBase: "fish" });
+    expect(h).toContain("your shell rc");
+  });
+
+  it("agent CAN see gh and non-interactive ALSO resolves → no hint (fully healthy)", () => {
+    expect(ghCliHint({ ...base, agentOk: true, nonInteractiveOk: true })).toBeUndefined();
+  });
+
+  it("agent CAN see gh but non-interactive can't → soft ~/.zshenv robustness nudge", () => {
+    const h = ghCliHint({ ...base, agentOk: true, nonInteractiveOk: false });
+    expect(h).toContain("interactive rc only");
+    expect(h).toContain("~/.zshenv");
+  });
+
+  it("agent CAN see gh and non-interactive was not run (undefined) → no nudge", () => {
+    // e.g. bash/sh: we skip the -c cross-check, so there's nothing to nudge about.
+    expect(ghCliHint({ ...base, agentOk: true, nonInteractiveOk: undefined })).toBeUndefined();
   });
 });
 
