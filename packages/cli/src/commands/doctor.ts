@@ -131,43 +131,53 @@ export function probeInteractiveShellNode(
 const RESOLVE_MARK = "__friday_path__";
 
 /**
- * Probe whether an arbitrary `cmd` resolves on the user's INTERACTIVE shell
- * PATH — the same `$SHELL -ilc` environment agent workers capture
- * (shell-env.ts). This matters most for tools the AGENT shells out to (notably
- * `gh`, which the orchestrator/builders invoke to open PRs): doctor's plain
- * `which gh` runs in doctor's OWN process env — the terminal that launched it,
- * which routinely has a richer PATH (brew shellenv already sourced, IDE-injected
- * dirs) than a freshly-spawned login shell. So `which gh` passing does NOT prove
- * an agent worker's captured env can find `gh`. This runs `command -v <cmd>`
- * under `$SHELL -ilc` to check the environment agents actually get.
+ * Probe whether an arbitrary `cmd` resolves on the user's shell PATH. Two modes:
  *
- * `cmd` is a trusted literal at every call site (never user input); the shells
- * we run this on are restricted to the `-ilc` set, fish/nu/csh/pwsh are reported
- * unverified rather than probed with the wrong invocation.
+ *  - interactive (default, `$SHELL -ilc`): the env the worker CAPTURES and — since
+ *    FRI-150's env-injection (buildQueryOptions threads the captured env into the
+ *    SDK `query()` options) — the env the agent's Claude Code process actually
+ *    runs with. So this is the authoritative "can the agent find `cmd`" check.
+ *    doctor's plain `which gh` runs in doctor's OWN process env (the terminal that
+ *    launched it, with brew shellenv already sourced) and can pass on a box where
+ *    the agent's captured env can't see `gh` at all.
+ *
+ *  - non-interactive (`$SHELL -c`): what a FRESHLY spawned, non-login shell sees —
+ *    on zsh that sources ONLY `~/.zshenv` (not `.zshrc`/`.zprofile`). Used as a
+ *    robustness signal: a tool present interactively but absent here lives in an
+ *    interactive-only rc, so it survives our env-injection but would vanish in any
+ *    nested shell the agent re-execs, and in the capture-failure fallback. The cure
+ *    is to move the PATH line to `~/.zshenv` (sourced by every shell).
+ *
+ * `cmd` is a trusted literal at every call site (never user input); we only run
+ * the probe for shells whose `-ilc`/`-c` invocation we know (bash/zsh/sh) —
+ * fish/nu/csh/pwsh are reported unverified rather than probed with wrong flags.
  */
 export function probeInteractiveShellCommand(
   cmd: string,
+  opts: { interactive?: boolean } = {},
   spawnFn: typeof spawnSync = spawnSync,
   shell: string = resolveInteractiveShell(),
 ): ShellNodeProbe {
+  const interactive = opts.interactive ?? true;
+  const flags = interactive ? "-ilc" : "-c";
   const base = shell.split("/").pop() ?? shell;
   if (!ILC_SHELLS.has(base)) {
     return {
       ok: false,
       unverified: true,
       shell,
-      detail: `unverified for ${base} (non -ilc shell) — ensure \`${cmd}\` runs in your interactive shell`,
+      detail: `unverified for ${base} (non ${flags} shell) — ensure \`${cmd}\` runs in your shell`,
     };
   }
   const r = spawnFn(
     shell,
-    ["-ilc", `command -v ${cmd} >/dev/null 2>&1 && printf '${RESOLVE_MARK}'`],
+    [flags, `command -v ${cmd} >/dev/null 2>&1 && printf '${RESOLVE_MARK}'`],
     { encoding: "utf8", timeout: 8000 },
   );
   if (r.status === 0 && (r.stdout ?? "").toString().includes(RESOLVE_MARK)) {
-    return { ok: true, shell, detail: `${cmd} resolvable in ${shell} -ilc` };
+    return { ok: true, shell, detail: `${cmd} resolvable in ${shell} ${flags}` };
   }
-  return { ok: false, shell, detail: `${cmd} not resolvable in ${shell} -ilc` };
+  return { ok: false, shell, detail: `${cmd} not resolvable in ${shell} ${flags}` };
 }
 
 // Box dimensions. 68 columns matches the ASCII banner width (67) and the
@@ -406,27 +416,38 @@ export async function runDependencies(): Promise<DoctorCheck[]> {
     shellNode.ok || shellNode.unverified ? shellNode.detail : "not resolvable",
     shellNode.ok || shellNode.unverified
       ? undefined
-      : `agents can't run — add  eval "$(fnm env)"  to your shell rc (e.g. ~/.zshrc), open a new terminal. Workers capture \`${shellNode.shell} -ilc\` and need node there.`,
+      : `agents can't run — add  eval "$(fnm env)"  to your shell rc (prefer ~/.zshenv so non-interactive shells get it too), open a new terminal. The agent runs with your captured \`${shellNode.shell} -ilc\` env and needs node there.`,
   );
 
-  // gh CLI — probe the INTERACTIVE shell, not doctor's process env. Agents
-  // (orchestrator/builders) shell out to `gh` to open PRs etc., and they run in
-  // the worker's captured `$SHELL -ilc` env. A plain `which gh` here passes from
-  // a terminal that already sourced brew shellenv even when the freshly-spawned
-  // login shell agents capture can't find it — the same false-✓ that the
-  // `node in shell` row exists to catch. We also run `which gh` in process env
-  // to tell "not installed" apart from "installed but not on the agent PATH".
-  const ghShell = probeInteractiveShellCommand("gh");
+  // gh CLI — the one external CLI the AGENT itself shells out to (orchestrator
+  // and builders open PRs / read issues). The agent's Claude Code process runs
+  // with the worker's captured `$SHELL -ilc` env (FRI-150 env-injection), so the
+  // interactive probe is the authoritative "can the agent find gh" check — NOT
+  // doctor's own `which gh`, which passes from a terminal that already sourced
+  // brew shellenv even when the captured env can't see it. The non-interactive
+  // probe is a robustness signal: gh present interactively but not in `$SHELL -c`
+  // (which sources only ~/.zshenv on zsh) means it lives in an interactive-only
+  // rc — fine for the agent today, but it'd vanish in any nested shell the agent
+  // re-execs and in the capture-failure fallback. Cure: move the PATH line to
+  // ~/.zshenv. `which gh` in process env disambiguates "not installed" from
+  // "installed but not on the agent PATH".
+  const ghAgent = probeInteractiveShellCommand("gh", { interactive: true });
+  const ghNonInteractive = probeInteractiveShellCommand("gh", { interactive: false });
   const ghInProcessEnv = spawnSync("which", ["gh"], { encoding: "utf8" }).status === 0;
-  box.resolve(
-    "gh CLI",
-    ghShell.unverified ? "warn" : ghShell.ok ? "ok" : "fail",
-    ghShell.ok || ghShell.unverified ? ghShell.detail : "not on agent PATH",
-    ghShell.ok || ghShell.unverified
+  const ghHint = ghAgent.ok
+    ? ghNonInteractive.ok || ghNonInteractive.unverified
+      ? undefined
+      : "resolves via your interactive rc only — move the PATH line to ~/.zshenv (sourced by every shell) so nested agent shells and the capture-failure fallback find gh too"
+    : ghAgent.unverified
       ? undefined
       : ghInProcessEnv
-        ? `installed but not on the agents' PATH — ensure \`gh\` is on your interactive shell (e.g. \`eval "$(/opt/homebrew/bin/brew shellenv)"\` in ~/.zprofile), open a new terminal. Workers capture \`${ghShell.shell} -ilc\`.`
-        : "install with `brew install gh`",
+        ? "installed but not on the agents' PATH — add gh's dir to ~/.zshenv (e.g. `eval \"$(/opt/homebrew/bin/brew shellenv)\"`), open a new terminal. The agent runs with your captured shell env."
+        : "install with `brew install gh`, then ensure it's on ~/.zshenv";
+  box.resolve(
+    "gh CLI",
+    ghAgent.unverified ? "warn" : ghAgent.ok ? "ok" : "fail",
+    ghAgent.ok || ghAgent.unverified ? ghAgent.detail : "not on agent PATH",
+    ghHint,
   );
 
   // postgres: postgresql@18 is keg-only, so psql often isn't on PATH even

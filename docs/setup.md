@@ -16,13 +16,17 @@ The Brewfile installs:
 - `pnpm` — build/dev-time package manager (CI pack + contributor builds); not on Friday's runtime path
 - `cloudflared` — Cloudflare Tunnel client (optional, for public reachability)
 
-> **Required: wire fnm into your shell.** `brew install fnm` does **not** put `node` on your interactive PATH — you must add fnm's shell hook to your shell rc and open a new terminal:
+> **Required: put your tool PATHs where agents can see them — `~/.zshenv`.** This is the single most important shell-setup step, and the easiest to get subtly wrong.
+>
+> Friday's agents shell out to your tools (`node`, `gh`, brew binaries). The daemon captures your interactive shell env (`$SHELL -ilc`) and hands it to each agent's Claude Code process, and agents also re-exec shells for nested commands. The **only** zsh file sourced by _every_ one of those shells — interactive or not, login or not — is **`~/.zshenv`**. `~/.zshrc` and `~/.zprofile` are skipped by the non-interactive shells agents spawn. So put PATH-affecting lines in `~/.zshenv`:
 >
 > ```bash
-> echo 'eval "$(fnm env)"' >> ~/.zshrc   # then open a NEW terminal
+> # ~/.zshenv — sourced by every zsh, so every agent shell sees these
+> eval "$(fnm env)"                              # node (fnm prints no brew caveat)
+> eval "$(/opt/homebrew/bin/brew shellenv)"      # gh + brew tools (Apple Silicon; Intel brew is already on PATH)
 > ```
 >
-> This is easy to miss because fnm's Homebrew formula prints no caveat (the curl installer surfaces it for you, and `friday doctor` flags it). It is **not optional**: Friday's agent workers spawn `$SHELL -ilc` and run a `node` marker to capture your environment, so without node on the interactive PATH **every agent turn silently completes with no reply** — the daemon looks healthy, messages send, but Friday never responds.
+> Then open a **new** terminal. `friday doctor` flags both `node in shell` and `gh CLI` when they're missing, and warns when a tool is reachable only via your interactive rc (works today via the captured env, but fragile for nested shells). Skipping this is **not** harmless: without `node` on the agent PATH, **every agent turn silently completes with no reply** — the daemon looks healthy, messages send, but Friday never responds.
 
 Install **Claude Code** separately — the brew cask shadows Anthropic's own installer, so the Brewfile leaves it to you:
 
@@ -72,7 +76,7 @@ You can re-run `friday setup` anytime — it's idempotent. Use `friday setup --r
 friday doctor
 ```
 
-Verifies the data dir, config, db migrations, account presence, external CLIs, and — critically — that `node` **and `gh`** resolve in your **interactive shell** (`$SHELL -ilc`), the context agent workers run in. A failing `node in shell` row is the tell-tale for "daemon healthy but Friday never replies" (the fnm shell hook above is missing). The `gh CLI` row probes the same interactive shell rather than `doctor`'s own `PATH`, because the orchestrator and builders shell out to `gh` (opening PRs, reading issues) from that captured environment — a `gh` that your terminal can see but a fresh login shell can't is "installed but not on the agents' PATH" (typically a missing `brew shellenv` line in `~/.zprofile`).
+Verifies the data dir, config, db migrations, account presence, external CLIs, and — critically — that `node` **and `gh`** resolve in the shell environment agents actually run in. The daemon captures your interactive shell (`$SHELL -ilc`) and threads it into each agent's Claude Code process, so the `node in shell` and `gh CLI` rows probe that captured env rather than `doctor`'s own `PATH` (which, run from your terminal, has already sourced brew shellenv and can mask the gap). A failing `node in shell` row is the tell-tale for "daemon healthy but Friday never replies." The `gh CLI` row additionally cross-checks a **non-interactive** shell (`$SHELL -c`, which sources only `~/.zshenv`): if `gh` is reachable interactively but not there, doctor warns that it lives in an interactive-only rc — it works today via the captured env, but would vanish in nested agent shells and the capture-failure fallback. The fix in every case is to put the PATH line in `~/.zshenv` (see step 1).
 
 ## 5. Run
 

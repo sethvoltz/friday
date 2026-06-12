@@ -90,7 +90,7 @@ describe("probeInteractiveShellNode", () => {
 describe("probeInteractiveShellCommand", () => {
   it("ok when `command -v <cmd>` succeeds and emits the resolve marker under -ilc", () => {
     const { fn, calls } = fakeSpawn({ status: 0, stdout: "__friday_path__" });
-    const res = probeInteractiveShellCommand("gh", fn, "/bin/zsh");
+    const res = probeInteractiveShellCommand("gh", { interactive: true }, fn, "/bin/zsh");
 
     expect(res.ok).toBe(true);
     expect(res.detail).toContain("gh resolvable");
@@ -100,22 +100,39 @@ describe("probeInteractiveShellCommand", () => {
     expect(calls[0]?.args[1]).toContain("command -v gh");
   });
 
+  it("probes the NON-interactive shell with -c (only ~/.zshenv) when interactive:false", () => {
+    // The robustness signal: -c is what a freshly-spawned nested agent shell gets.
+    const { fn, calls } = fakeSpawn({ status: 0, stdout: "__friday_path__" });
+    const res = probeInteractiveShellCommand("gh", { interactive: false }, fn, "/bin/zsh");
+    expect(res.ok).toBe(true);
+    expect(calls[0]?.args[0]).toBe("-c");
+    expect(res.detail).toContain("-c");
+  });
+
+  it("defaults to the interactive (-ilc) probe when no opts are given", () => {
+    const { fn, calls } = fakeSpawn({ status: 0, stdout: "__friday_path__" });
+    probeInteractiveShellCommand("gh", {}, fn, "/bin/zsh");
+    expect(calls[0]?.args[0]).toBe("-ilc");
+  });
+
   it("ok even when a login rc prints a banner before the marker (marker isolates the hit)", () => {
     const { fn } = fakeSpawn({ status: 0, stdout: "motd banner\nwelcome\n__friday_path__" });
-    expect(probeInteractiveShellCommand("gh", fn, "/bin/zsh").ok).toBe(true);
+    expect(probeInteractiveShellCommand("gh", { interactive: true }, fn, "/bin/zsh").ok).toBe(true);
   });
 
   it("fails (does not throw) when the command is not on the interactive PATH", () => {
     // `command -v` returns non-zero AND the `&& printf marker` never runs.
     const { fn } = fakeSpawn({ status: 1, stdout: "" });
-    const res = probeInteractiveShellCommand("gh", fn, "/bin/zsh");
+    const res = probeInteractiveShellCommand("gh", { interactive: true }, fn, "/bin/zsh");
     expect(res.ok).toBe(false);
     expect(res.detail).toContain("not resolvable");
   });
 
   it("does not false-✓ on exit 0 with no marker (e.g. a stray rc echo)", () => {
     const { fn } = fakeSpawn({ status: 0, stdout: "hello from .zshrc\n" });
-    expect(probeInteractiveShellCommand("gh", fn, "/bin/zsh").ok).toBe(false);
+    expect(probeInteractiveShellCommand("gh", { interactive: true }, fn, "/bin/zsh").ok).toBe(
+      false,
+    );
   });
 
   it("unverified (not fail) for a non -ilc shell, and never spawns the wrong invocation", () => {
@@ -124,7 +141,12 @@ describe("probeInteractiveShellCommand", () => {
       spawned = true;
       return { status: 0, stdout: "" };
     }) as unknown as typeof SpawnSync;
-    const res = probeInteractiveShellCommand("gh", fn, "/opt/homebrew/bin/fish");
+    const res = probeInteractiveShellCommand(
+      "gh",
+      { interactive: true },
+      fn,
+      "/opt/homebrew/bin/fish",
+    );
     expect(res.unverified).toBe(true);
     expect(res.ok).toBe(false);
     expect(spawned).toBe(false);
