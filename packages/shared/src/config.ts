@@ -53,9 +53,15 @@ export function appDir(id: string): string {
  *   - app agent (`appId` set)  → `~/.friday/apps/<appId>` (ADR-021)
  *   - everything else          → `~/.friday/agents/<name>`
  *
- * NOTE: planner agents inherit their parent's cwd at runtime (the daemon's
- * `workingDirectoryFor` walks the parent chain via DB lookups). That walk is
- * daemon-only; resolve a planner's parent BEFORE falling back here.
+ * PLANNER CAVEAT: a planner inherits its PARENT's cwd at runtime — the daemon's
+ * `workingDirectoryFor` walks the parent chain (DB lookups) ABOVE this leaf.
+ * This function does NOT do that walk. The daemon satisfies the precondition;
+ * `friday backup`/`restore`/`migrate` do NOT, so a planner rooted at a
+ * non-app parent (orchestrator/builder) resolves here to `~/.friday/agents/
+ * <planner-name>` — the wrong dir — and its transcript is skipped. Bounded:
+ * planners are short-lived and archived planners are already excluded from
+ * backup; a planner under an APP parent is fine (it inherits the parent's
+ * `appId` onto its own row). Tracked as a follow-up; not migration-critical.
  *
  * Before this existed, backup/restore re-derived the cwd with a partial copy
  * that omitted the `appId` branch, so every app agent's Claude transcript was

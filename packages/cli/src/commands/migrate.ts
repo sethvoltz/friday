@@ -17,30 +17,26 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import pc from "picocolors";
 import {
-  AGENTS_DIR,
   ENV_PATH,
-  appDir,
+  agentWorkingDir,
+  encodeProjectDir,
   ensureDirs,
   getDb,
   loadFridayConfig,
   schema,
 } from "@friday/shared";
 
-function encodeProjectDir(cwd: string): string {
-  return cwd.replace(/[^a-zA-Z0-9]/g, "-");
-}
-
-async function resolveAgentCwd(row: {
+/** Resolve an agent's session cwd via the SHARED `agentWorkingDir` (so this
+ *  one-shot migration can never diverge from backup/restore/daemon), ensuring
+ *  the per-agent home exists — the only side effect this command needs. */
+function resolveAgentCwd(row: {
   name: string;
-  type: string;
   worktreePath: string | null;
   appId: string | null;
-}): Promise<string> {
-  if (row.worktreePath) return row.worktreePath;
-  if (row.appId) return appDir(row.appId);
-  const home = join(AGENTS_DIR, row.name);
-  mkdirSync(home, { recursive: true });
-  return home;
+}): string {
+  const cwd = agentWorkingDir(row);
+  if (!row.worktreePath && !row.appId) mkdirSync(cwd, { recursive: true });
+  return cwd;
 }
 
 export const migrateCommand = defineCommand({
@@ -97,7 +93,7 @@ export const migrateCommand = defineCommand({
 
         for (const a of agentRows) {
           if (!a.sessionId) continue;
-          const newCwd = await resolveAgentCwd(a);
+          const newCwd = resolveAgentCwd(a);
           const newEncoded = encodeProjectDir(newCwd);
           const newJsonl = join(projectsDir, newEncoded, `${a.sessionId}.jsonl`);
           if (existsSync(newJsonl)) {

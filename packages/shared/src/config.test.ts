@@ -501,4 +501,20 @@ describe("agentWorkingDir (canonical agent cwd — shared by daemon + backup + r
       join(AGENTS_DIR, "scratch-x"),
     );
   });
+
+  it("planner UNDER AN APP parent resolves to the app dir (its row inherits the parent's appId)", () => {
+    // The daemon persists the parent's appId onto a non-builder child's row, so
+    // an app-rooted planner carries appId and resolves correctly here.
+    expect(agentWorkingDir({ name: "kitchen-research", appId: "kitchen" })).toBe(appDir("kitchen"));
+  });
+
+  it("does NOT do planner parent-inheritance — a bare planner falls to its own home (daemon-only walk)", () => {
+    // Documents the known caveat: this leaf can't walk to an orchestrator/builder
+    // parent's cwd; the daemon's workingDirectoryFor does. Backup/restore using
+    // this resolver therefore skip such a planner's transcript (bounded: planners
+    // are short-lived + archived planners are excluded from backup).
+    expect(agentWorkingDir({ name: "deep-research", worktreePath: null, appId: null })).toBe(
+      join(AGENTS_DIR, "deep-research"),
+    );
+  });
 });
