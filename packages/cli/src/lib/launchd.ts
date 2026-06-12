@@ -40,7 +40,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { LOGS_DIR } from "@friday/shared";
@@ -208,6 +208,20 @@ export function bootstrap(installDir: string): void {
  *  job booting out is not an error worth surfacing. */
 export function bootout(): LaunchctlResult {
   return launchctl(["bootout", serviceTarget()]);
+}
+
+/** True if the launchd plist is present on disk. The plist's `RunAtLoad`
+ *  is what auto-launches Friday at login — so "plist exists" == "autostart
+ *  armed", distinct from "currently loaded" (`isBootstrapped`). */
+export function plistExists(): boolean {
+  return existsSync(plistPath());
+}
+
+/** Delete the plist so launchd won't auto-launch Friday at the next login
+ *  (disarms autostart). Idempotent — absent file is a no-op. Does NOT bootout
+ *  a currently-loaded job; callers pair this with `bootout()`. */
+export function removePlist(): void {
+  rmSync(plistPath(), { force: true });
 }
 
 /** `launchctl kickstart -k` — kill the running instance (if any) and

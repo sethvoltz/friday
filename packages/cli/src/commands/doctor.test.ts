@@ -4,9 +4,18 @@
 // detector, so it must load-bear: report ok ONLY when `$SHELL -ilc` actually
 // runs `node -e` and emits a version, and fail (not crash) otherwise.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { spawnSync as SpawnSync } from "node:child_process";
-import { probeInteractiveShellNode } from "./doctor.js";
+
+// For the runDependencies integration test below: stub every subprocess so the
+// section runs offline. All checks resolve to fail/absent, which is fine — the
+// point is that EVERY resolved row was declared (a `box.resolve()` for an
+// undeclared row throws "no declared row", which is exactly the bug this guards).
+vi.mock("node:child_process", () => ({
+  spawnSync: () => ({ status: 1, stdout: "", stderr: "" }),
+}));
+
+import { probeInteractiveShellNode, runDependencies } from "./doctor.js";
 
 /** A fake spawnSync that records its invocation and returns a canned result. */
 function fakeSpawn(result: { status: number | null; stdout: string }) {
@@ -71,5 +80,20 @@ describe("probeInteractiveShellNode", () => {
   it("treats a null exit status (spawn failure / timeout) as a failure", () => {
     const { fn } = fakeSpawn({ status: null, stdout: "" });
     expect(probeInteractiveShellNode(fn, "/bin/zsh").ok).toBe(false);
+  });
+});
+
+describe("runDependencies — every resolved row is declared (LiveBox contract)", () => {
+  it("completes without throwing 'no declared row' and includes the 'node in shell' row", async () => {
+    // Regression: #261 added `box.resolve("node in shell", …)` but forgot to
+    // `box.declare()` it, so doctor threw at runtime. If any resolved row is
+    // undeclared, runDependencies throws here and the test fails.
+    const checks = await runDependencies();
+    const labels = checks.map((c) => c.label);
+    expect(labels).toContain("node in shell");
+    // Sanity: the other declared rows are present too (so the box stayed intact).
+    expect(labels).toEqual(
+      expect.arrayContaining(["fnm", "node version", "claude CLI", "node in shell"]),
+    );
   });
 });

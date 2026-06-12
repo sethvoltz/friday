@@ -320,6 +320,17 @@ export interface UpdateDeps {
    *  than a bare `kickstart` so updates that change the plist's
    *  ProgramArguments / EnvironmentVariables reach the launchd job. */
   bootstrap(installDir: string): void;
+  /** Whether the launchd supervisor is currently loaded. Captured BEFORE the
+   *  update so a STOPPED Friday is left stopped, not restarted (user intent). */
+  isRunning(): boolean;
+  /** Whether the launchd plist is on disk (autostart armed). When Friday was
+   *  stopped via `friday disable` the plist is GONE — update must not resurrect
+   *  it, so the stopped-path plist refresh is gated on this. */
+  plistExists(): boolean;
+  /** Rewrite the plist for `installDir` WITHOUT bootstrapping. Used when Friday
+   *  was stopped (but still autostart-armed): keeps the plist current (new
+   *  version's shape) for the next `friday start` / reboot RunAtLoad. */
+  writePlist(installDir: string): void;
 }
 
 function defaultDownloadRelease(
@@ -416,7 +427,40 @@ export const defaultUpdateDeps: UpdateDeps = {
   bootstrap(installDir: string): void {
     launchd.bootstrap(installDir);
   },
+  isRunning(): boolean {
+    return launchd.isBootstrapped();
+  },
+  plistExists(): boolean {
+    return launchd.plistExists();
+  },
+  writePlist(installDir: string): void {
+    launchd.writePlist(installDir);
+  },
 };
+
+/**
+ * Activate the just-flipped version: restart the supervisor into it IF Friday
+ * was running before the update; if it was STOPPED, only refresh the plist (so
+ * the next `friday start` / reboot picks up the new version) — never start a
+ * stopped Friday on update. `wasRunning` MUST be sampled before the flip.
+ */
+function activate(deps: UpdateDeps, reporter: UpdateReporter, wasRunning: boolean): void {
+  if (wasRunning) {
+    reporter.step("Restarting Friday…");
+    deps.bootstrap(currentLink());
+  } else if (deps.plistExists()) {
+    // Stopped but autostart still armed: refresh the plist so the next
+    // `friday start` / reboot picks up the new version's shape. Don't start it.
+    reporter.step("Friday was stopped — updated in place (run `friday start` to launch it)");
+    deps.writePlist(currentLink());
+  } else {
+    // Autostart disabled (`friday disable` removed the plist) — keep it that
+    // way; never resurrect the plist on update.
+    reporter.step(
+      "Friday is disabled — updated in place (`friday start` to launch, `friday enable` to re-arm autostart)",
+    );
+  }
+}
 
 /** sha256 of a file, hex. */
 function sha256File(path: string): string {
@@ -489,6 +533,11 @@ async function doForwardUpdate(deps: UpdateDeps, reporter: UpdateReporter): Prom
     return;
   }
 
+  // Sample the running state AFTER validating the version (security first) but
+  // BEFORE the flip — a Friday the user stopped must come back stopped, not get
+  // restarted by the update.
+  const wasRunning = deps.isRunning();
+
   reporter.step(`Updating ${installed ?? "(none)"} → ${pc.bold(latest)}`);
 
   const target = versionDir(latest);
@@ -497,8 +546,7 @@ async function doForwardUpdate(deps: UpdateDeps, reporter: UpdateReporter): Prom
     reporter.note(`version ${latest} already downloaded — reusing`);
     reporter.step("Activating new version…");
     flipCurrent(latest);
-    reporter.step("Restarting Friday…");
-    deps.bootstrap(currentLink());
+    activate(deps, reporter, wasRunning);
     reporter.success(`Updated to ${latest} ${elapsedSince(startedAt)}`);
     return;
   }
@@ -547,8 +595,7 @@ async function doForwardUpdate(deps: UpdateDeps, reporter: UpdateReporter): Prom
   deps.fnmInstall(target);
   reporter.step("Activating new version…");
   flipCurrent(latest);
-  reporter.step("Restarting Friday…");
-  deps.bootstrap(currentLink());
+  activate(deps, reporter, wasRunning);
   reporter.success(`Updated to ${latest} ${elapsedSince(startedAt)}`);
 }
 
@@ -566,6 +613,7 @@ async function doCheck(deps: UpdateDeps): Promise<void> {
 }
 
 function doRollback(deps: UpdateDeps, reporter: UpdateReporter): void {
+  const wasRunning = deps.isRunning();
   const current = currentVersion();
   const versions = installedVersions();
   // The prior version = the install-order neighbor immediately before the
@@ -584,8 +632,7 @@ function doRollback(deps: UpdateDeps, reporter: UpdateReporter): void {
   // Defensive: prior comes from on-disk version-dir basenames (validated at
   // install time), but re-assert before it becomes a symlink target.
   flipCurrent(assertValidVersion(prior));
-  reporter.step("Restarting Friday…");
-  deps.bootstrap(currentLink());
+  activate(deps, reporter, wasRunning);
   reporter.success(`Rolled back to ${prior}`);
 }
 

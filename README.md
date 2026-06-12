@@ -216,15 +216,17 @@ The `friday` CLI manages services and inspects state. Inspection commands work r
 friday setup [--cloudflare] [--reset-password]
 friday doctor                                  # data dir, db, account, external CLIs
 friday start                                   # bootstrap/kickstart the launchd job (whole stack atomically)
-friday stop                                    # bootout the launchd job (cascade-stops every child)
+friday stop                                    # bootout the launchd job (cascade-stops every child; auto-launches again on reboot)
 friday restart                                 # launchctl kickstart -k the launchd job
+friday disable                                 # stop + remove the plist: keeps the install, NO auto-launch on reboot
+friday enable                                  # re-arm auto-launch (writes the plist; does not start now)
 friday status                                  # supervisor + service state + probed ports
 friday tunnel <up|down|status>                 # flip Cloudflare tunnel serve-intent (FRI-166)
 friday attach <daemon|dashboard|zero-cache>    # `tail -F ~/.friday/logs/<service>.jsonl`
 friday logs [daemon|dashboard|zero-cache|tunnel] [--follow]
 
 # Install lifecycle (ADR-034)
-friday update [--check] [--rollback]           # download + verify + extract latest; flip current symlink; kickstart
+friday update [--check] [--rollback]           # download + verify + extract latest; flip symlink; restart ONLY if it was running
 friday uninstall [--data=keep|delete] [--yes]  # remove the install tree + launchd job; ~/.friday preserved by default
 
 # Inspection (read-only; daemon optional)

@@ -26,6 +26,7 @@ import { updateCommand } from "./commands/update.js";
 import { uninstallCommand } from "./commands/uninstall.js";
 import { secretsCommand } from "./commands/secrets.js";
 import { tunnelCommand } from "./commands/tunnel.js";
+import { disableCommand, enableCommand } from "./commands/autostart.js";
 import { maybePrintVersion } from "./lib/version.js";
 
 const main = defineCommand({
@@ -55,6 +56,8 @@ const main = defineCommand({
     start: startCommand,
     stop: stopCommand,
     restart: restartCommand,
+    disable: disableCommand,
+    enable: enableCommand,
     status: statusCommand,
     logs: logsCommand,
     attach: attachCommand,
