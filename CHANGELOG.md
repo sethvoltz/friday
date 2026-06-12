@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.1](https://github.com/sethvoltz/friday/compare/v1.22.0...v1.22.1) (2026-06-12)
+
+
+### Bug Fixes
+
+* **cli:** warm the age vault once at CLI entry so vault secrets resolve (FRI-166) ([#257](https://github.com/sethvoltz/friday/issues/257)) ([fbb618d](https://github.com/sethvoltz/friday/commit/fbb618d395172de91583b4ee735093efaf26d1ed))
+
 ## [1.22.0](https://github.com/sethvoltz/friday/compare/v1.21.0...v1.22.0) (2026-06-11)
 
 
