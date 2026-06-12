@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.22.2](https://github.com/sethvoltz/friday/compare/v1.22.1...v1.22.2) (2026-06-12)
+
+
+### Bug Fixes
+
+* **system:** build server-side PostHog lazily so its vault key resolves post-warm (FRI-166) ([#259](https://github.com/sethvoltz/friday/issues/259)) ([a2566bb](https://github.com/sethvoltz/friday/commit/a2566bb18b39820c0c0239a6161cf9fc04e5d5ed))
+* **system:** surface Brewfile caveats + doctor checks node resolves in the worker shell ([#261](https://github.com/sethvoltz/friday/issues/261)) ([030c6ee](https://github.com/sethvoltz/friday/commit/030c6ee68880d3f029488a1d8e906d1a9e5437b0))
+
 ## [1.22.1](https://github.com/sethvoltz/friday/compare/v1.22.0...v1.22.1) (2026-06-12)
 
 
