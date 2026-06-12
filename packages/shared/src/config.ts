@@ -42,6 +42,36 @@ export function appDir(id: string): string {
   return join(APPS_DIR, id);
 }
 
+/**
+ * Resolve the working directory an agent's worker runs in — the cwd the Claude
+ * SDK encodes into its `~/.claude/projects/<encoded-cwd>/` transcript path.
+ * SINGLE SOURCE OF TRUTH shared by the daemon (worker fork + session resume),
+ * `friday backup` (session capture), and `friday restore` (session placement),
+ * so they can never disagree about where an agent's transcript lives.
+ *
+ *   - builder with a worktree  → the worktree path
+ *   - app agent (`appId` set)  → `~/.friday/apps/<appId>` (ADR-021)
+ *   - everything else          → `~/.friday/agents/<name>`
+ *
+ * NOTE: planner agents inherit their parent's cwd at runtime (the daemon's
+ * `workingDirectoryFor` walks the parent chain via DB lookups). That walk is
+ * daemon-only; resolve a planner's parent BEFORE falling back here.
+ *
+ * Before this existed, backup/restore re-derived the cwd with a partial copy
+ * that omitted the `appId` branch, so every app agent's Claude transcript was
+ * silently skipped on backup and misplaced on restore — app agents came back
+ * unable to resume their conversation.
+ */
+export function agentWorkingDir(a: {
+  name: string;
+  worktreePath?: string | null;
+  appId?: string | null;
+}): string {
+  if (a.worktreePath) return a.worktreePath;
+  if (a.appId) return appDir(a.appId);
+  return join(AGENTS_DIR, a.name);
+}
+
 export type ServiceName = "daemon" | "dashboard" | "zero-cache" | "tunnel";
 export const SERVICES: ServiceName[] = ["daemon", "dashboard", "zero-cache", "tunnel"];
 

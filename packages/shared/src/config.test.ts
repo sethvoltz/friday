@@ -9,7 +9,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   autoCompactWindowFor,
@@ -22,6 +22,9 @@ import {
   DEFAULT_COMPACTION_SWEEP,
   DEFAULT_CONFIG,
   DEFAULT_WATCHDOG_THRESHOLDS_MS,
+  AGENTS_DIR,
+  agentWorkingDir,
+  appDir,
   loadConfig,
   PROD_DAEMON_PORT,
   PROD_DASHBOARD_PORT,
@@ -470,5 +473,32 @@ describe("compaction config (FRI-156 §A/§B)", () => {
     expect(autoCompactWindowFor(cfg, "orchestrator")).toBe(10_000);
     // Unset type still backfills its default (clamp doesn't disturb the fallback).
     expect(autoCompactWindowFor(cfg, "helper")).toBe(200_000);
+  });
+});
+
+describe("agentWorkingDir (canonical agent cwd — shared by daemon + backup + restore)", () => {
+  it("app agent (appId set) resolves to ~/.friday/apps/<appId> — the case the backup bug dropped", () => {
+    expect(agentWorkingDir({ name: "kitchen", appId: "kitchen" })).toBe(appDir("kitchen"));
+    // The bug returned AGENTS_DIR/<name> here; assert it does NOT.
+    expect(agentWorkingDir({ name: "kitchen", appId: "kitchen" })).not.toBe(
+      join(AGENTS_DIR, "kitchen"),
+    );
+  });
+
+  it("builder with a worktree resolves to the worktree path verbatim", () => {
+    const wt = "/Users/seth/.friday/workspaces/builder-x";
+    expect(agentWorkingDir({ name: "builder-x", worktreePath: wt, appId: null })).toBe(wt);
+  });
+
+  it("worktree takes precedence over appId", () => {
+    const wt = "/tmp/wt";
+    expect(agentWorkingDir({ name: "x", worktreePath: wt, appId: "some-app" })).toBe(wt);
+  });
+
+  it("plain agent (no worktree, no app) resolves to ~/.friday/agents/<name>", () => {
+    expect(agentWorkingDir({ name: "friday" })).toBe(join(AGENTS_DIR, "friday"));
+    expect(agentWorkingDir({ name: "scratch-x", worktreePath: null, appId: null })).toBe(
+      join(AGENTS_DIR, "scratch-x"),
+    );
   });
 });

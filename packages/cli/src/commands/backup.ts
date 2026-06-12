@@ -42,6 +42,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { ne } from "drizzle-orm";
 import pc from "picocolors";
 import {
+  agentWorkingDir,
   DATA_DIR,
   findPgBin,
   getDb,
@@ -89,6 +90,11 @@ interface ClaudeSessionEntry {
   agent: string;
   type: string;
   sessionId: string;
+  /** Owning app id (ADR-021), null for unaffiliated agents. Carried so RESTORE
+   *  re-derives the same cwd (`~/.friday/apps/<appId>`) the transcript lived
+   *  under — without it, app-agent sessions land at the wrong path and resume
+   *  fails. */
+  appId: string | null;
   /** True when the `<sessionId>/` tool-results sidecar dir was present + copied. */
   sidecar: boolean;
 }
@@ -264,6 +270,7 @@ async function captureClaudeSessions(stageDir: string): Promise<ClaudeSessionEnt
       type: schema.agents.type,
       sessionId: schema.agents.sessionId,
       worktreePath: schema.agents.worktreePath,
+      appId: schema.agents.appId,
     })
     .from(schema.agents)
     .where(ne(schema.agents.status, "archived"));
@@ -271,7 +278,7 @@ async function captureClaudeSessions(stageDir: string): Promise<ClaudeSessionEnt
   const out: ClaudeSessionEntry[] = [];
   for (const r of rows) {
     if (!r.sessionId) continue;
-    const cwd = agentCwd(r);
+    const cwd = agentWorkingDir(r);
     const jsonl = sessionFilePath(cwd, r.sessionId);
     if (!existsSync(jsonl)) continue; // session never wrote a transcript yet
     const dest = join(stageDir, "claude-sessions", r.name);
@@ -280,17 +287,16 @@ async function captureClaudeSessions(stageDir: string): Promise<ClaudeSessionEnt
     const sidecar = sessionSidecarDir(cwd, r.sessionId);
     const hasSidecar = existsSync(sidecar);
     if (hasSidecar) cpR(sidecar, join(dest, r.sessionId), `session-sidecar ${r.name}`);
-    out.push({ agent: r.name, type: r.type, sessionId: r.sessionId, sidecar: hasSidecar });
+    out.push({
+      agent: r.name,
+      type: r.type,
+      sessionId: r.sessionId,
+      appId: r.appId ?? null,
+      sidecar: hasSidecar,
+    });
     console.log(pc.dim(`  claude session: ${r.name} (${r.sessionId.slice(0, 8)}…)`));
   }
   return out;
-}
-
-/** Resolve an agent's working dir (= its `~/.claude/projects` cwd). Builders use
- *  their worktree; everything else its per-agent home `~/.friday/agents/<name>`. */
-function agentCwd(r: { name: string; type: string; worktreePath: string | null }): string {
-  if (r.type === "builder" && r.worktreePath) return r.worktreePath;
-  return join(DATA_DIR, "agents", r.name);
 }
 
 function copyAgeKey(stageDir: string): void {

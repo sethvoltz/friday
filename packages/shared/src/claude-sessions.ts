@@ -9,11 +9,15 @@
  * applied to the absolute cwd — every non-alphanumeric ASCII char becomes a
  * single `-`. Verified against the CLI binary's behaviour 2026-05-21.
  *
- * Migration note: these paths are derived from the worker's cwd, which for
- * non-builder agents is `~/.friday/agents/<name>` — so the encoding is identical
- * across machines that share a `$HOME`. `friday restore` RE-DERIVES the target
- * path from the target machine's cwd rather than reusing the source hash, so a
- * migration to a different `$HOME`/user still lands sessions where resume looks.
+ * Migration note: these paths are derived from the worker's cwd, resolved by
+ * `agentWorkingDir` (config.ts) — `~/.friday/apps/<appId>` for app agents, the
+ * worktree for builders, else `~/.friday/agents/<name>` — so the encoding is
+ * identical across machines that share a `$HOME`. `friday restore` RE-DERIVES
+ * the target path from the target machine's cwd (via the same `agentWorkingDir`)
+ * rather than reusing the source hash, so a migration to a different
+ * `$HOME`/user still lands sessions where resume looks. Using the one shared
+ * resolver is load-bearing: a partial re-implementation that omitted the
+ * app-agent branch silently dropped every app agent's transcript from bundles.
  */
 
 import { homedir } from "node:os";
