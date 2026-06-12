@@ -47,7 +47,7 @@ import { daemonFetch } from "../mcp/http.js";
 import { runHooks } from "@friday/shared";
 import "../hooks/register.js";
 import { denyBuiltinAskUserQuestion } from "../hooks/block-builtin-ask-user-question.js";
-import { captureShellEnv } from "../shell-env.js";
+import { captureShellEnv, getResolvedShellEnv } from "../shell-env.js";
 import { logger } from "../log.js";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
@@ -489,6 +489,7 @@ export function buildQueryOptions(
   thinking: QueryOptions["thinking"] | undefined,
   mcpServers: QueryOptions["mcpServers"],
   abortController: AbortController | undefined,
+  shellEnv?: Record<string, string>,
 ): QueryOptions {
   return {
     cwd: opts.workingDirectory,
@@ -496,6 +497,22 @@ export function buildQueryOptions(
     permissionMode: "bypassPermissions",
     includePartialMessages: true,
     mcpServers,
+    // FRI-150 / ADR-037: hand the agent's Claude Code process the user's
+    // captured interactive shell env — the missing half of the documented
+    // trust gradient (shell-env.ts: "agent sees the captured user shell env
+    // (full)"). The SDK's `env` REPLACES its `process.env` default, so we spread
+    // process.env first (Friday's operational vars + creds) and overlay the
+    // captured shell env so the user's PATH/toolchain wins. Without this the
+    // agent's Bash tool inherits the daemon's launchd-minimal PATH on a fresh
+    // (launchd-started) box and can't find `gh`, brew tools, etc. — even though
+    // the MCP children (which already read this capture) can. Secret-shaped keys
+    // are stripped from the capture (sanitizeEnv), so a user-shell export can't
+    // clobber the CLI's creds in process.env (ANTHROPIC_API_KEY/_TOKEN/OAuth all
+    // match the strip regex). Non-secret user vars (e.g. ANTHROPIC_BASE_URL) DO
+    // overlay — intended: it's the user's box and their interactive shell wins,
+    // same as if they ran `claude` in their terminal. `shellEnv` omitted (tests)
+    // → no `env` override, identical to prior behavior.
+    ...(shellEnv ? { env: { ...process.env, ...shellEnv } } : {}),
     // Drop Anthropic's built-in `Task` sub-agent tool from the catalog for
     // every agent type. Friday farms work out via `agent_create` + mail, not
     // SDK Task. See the doc-comment above.
@@ -1107,6 +1124,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
         thinking,
         mcpServers,
         abortController,
+        getResolvedShellEnv().env,
       ),
     });
     // FRI-156 §A: fire-and-forget runtime probe that the SDK actually honors

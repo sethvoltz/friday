@@ -15,7 +15,12 @@ vi.mock("node:child_process", () => ({
   spawnSync: () => ({ status: 1, stdout: "", stderr: "" }),
 }));
 
-import { probeInteractiveShellNode, runDependencies } from "./doctor.js";
+import {
+  ghCliHint,
+  probeInteractiveShellCommand,
+  probeInteractiveShellNode,
+  runDependencies,
+} from "./doctor.js";
 
 /** A fake spawnSync that records its invocation and returns a canned result. */
 function fakeSpawn(result: { status: number | null; stdout: string }) {
@@ -83,6 +88,124 @@ describe("probeInteractiveShellNode", () => {
   });
 });
 
+describe("probeInteractiveShellCommand", () => {
+  it("ok when `command -v <cmd>` succeeds and emits the resolve marker under -ilc", () => {
+    const { fn, calls } = fakeSpawn({ status: 0, stdout: "__friday_path__" });
+    const res = probeInteractiveShellCommand("gh", { interactive: true }, fn, "/bin/zsh");
+
+    expect(res.ok).toBe(true);
+    expect(res.detail).toContain("gh resolvable");
+    // Must probe the INTERACTIVE shell (-ilc) with `command -v gh`, not a bare `which`.
+    expect(calls[0]?.cmd).toBe("/bin/zsh");
+    expect(calls[0]?.args[0]).toBe("-ilc");
+    expect(calls[0]?.args[1]).toContain("command -v gh");
+  });
+
+  it("probes the NON-interactive shell with -c (only ~/.zshenv) when interactive:false", () => {
+    // The robustness signal: -c is what a freshly-spawned nested agent shell gets.
+    const { fn, calls } = fakeSpawn({ status: 0, stdout: "__friday_path__" });
+    const res = probeInteractiveShellCommand("gh", { interactive: false }, fn, "/bin/zsh");
+    expect(res.ok).toBe(true);
+    expect(calls[0]?.args[0]).toBe("-c");
+    expect(res.detail).toContain("-c");
+  });
+
+  it("defaults to the interactive (-ilc) probe when no opts are given", () => {
+    const { fn, calls } = fakeSpawn({ status: 0, stdout: "__friday_path__" });
+    probeInteractiveShellCommand("gh", {}, fn, "/bin/zsh");
+    expect(calls[0]?.args[0]).toBe("-ilc");
+  });
+
+  it("ok even when a login rc prints a banner before the marker (marker isolates the hit)", () => {
+    const { fn } = fakeSpawn({ status: 0, stdout: "motd banner\nwelcome\n__friday_path__" });
+    expect(probeInteractiveShellCommand("gh", { interactive: true }, fn, "/bin/zsh").ok).toBe(true);
+  });
+
+  it("fails (does not throw) when the command is not on the interactive PATH", () => {
+    // `command -v` returns non-zero AND the `&& printf marker` never runs.
+    const { fn } = fakeSpawn({ status: 1, stdout: "" });
+    const res = probeInteractiveShellCommand("gh", { interactive: true }, fn, "/bin/zsh");
+    expect(res.ok).toBe(false);
+    expect(res.detail).toContain("not resolvable");
+  });
+
+  it("does not false-✓ on exit 0 with no marker (e.g. a stray rc echo)", () => {
+    const { fn } = fakeSpawn({ status: 0, stdout: "hello from .zshrc\n" });
+    expect(probeInteractiveShellCommand("gh", { interactive: true }, fn, "/bin/zsh").ok).toBe(
+      false,
+    );
+  });
+
+  it("unverified (not fail) for a non -ilc shell, and never spawns the wrong invocation", () => {
+    let spawned = false;
+    const fn = (() => {
+      spawned = true;
+      return { status: 0, stdout: "" };
+    }) as unknown as typeof SpawnSync;
+    const res = probeInteractiveShellCommand(
+      "gh",
+      { interactive: true },
+      fn,
+      "/opt/homebrew/bin/fish",
+    );
+    expect(res.unverified).toBe(true);
+    expect(res.ok).toBe(false);
+    expect(spawned).toBe(false);
+  });
+});
+
+describe("ghCliHint — the gh-row remediation decision tree", () => {
+  const base = {
+    agentOk: false,
+    agentUnverified: false,
+    nonInteractiveOk: undefined as boolean | undefined,
+    inProcessEnv: false,
+    shellBase: "zsh",
+  };
+
+  it("no hint when the shell is unverified (we can't reason about it)", () => {
+    expect(ghCliHint({ ...base, agentUnverified: true })).toBeUndefined();
+  });
+
+  it("agent can't see gh but it IS installed → 'on PATH' fix keyed to ~/.zshenv (zsh)", () => {
+    const h = ghCliHint({ ...base, agentOk: false, inProcessEnv: true, shellBase: "zsh" });
+    expect(h).toContain("not on the agents' PATH");
+    expect(h).toContain("~/.zshenv");
+  });
+
+  it("agent can't see gh and it's NOT installed → brew install, keyed to the rc", () => {
+    const h = ghCliHint({ ...base, agentOk: false, inProcessEnv: false, shellBase: "zsh" });
+    expect(h).toContain("brew install gh");
+    expect(h).toContain("~/.zshenv");
+  });
+
+  it("bash user gets ~/.bashrc, NOT ~/.zshenv (the .zshenv advice would mislead them)", () => {
+    const h = ghCliHint({ ...base, agentOk: false, inProcessEnv: true, shellBase: "bash" });
+    expect(h).toContain("~/.bashrc");
+    expect(h).not.toContain("zshenv");
+  });
+
+  it("unknown shell falls back to a generic 'your shell rc'", () => {
+    const h = ghCliHint({ ...base, agentOk: false, inProcessEnv: false, shellBase: "fish" });
+    expect(h).toContain("your shell rc");
+  });
+
+  it("agent CAN see gh and non-interactive ALSO resolves → no hint (fully healthy)", () => {
+    expect(ghCliHint({ ...base, agentOk: true, nonInteractiveOk: true })).toBeUndefined();
+  });
+
+  it("agent CAN see gh but non-interactive can't → soft ~/.zshenv robustness nudge", () => {
+    const h = ghCliHint({ ...base, agentOk: true, nonInteractiveOk: false });
+    expect(h).toContain("interactive rc only");
+    expect(h).toContain("~/.zshenv");
+  });
+
+  it("agent CAN see gh and non-interactive was not run (undefined) → no nudge", () => {
+    // e.g. bash/sh: we skip the -c cross-check, so there's nothing to nudge about.
+    expect(ghCliHint({ ...base, agentOk: true, nonInteractiveOk: undefined })).toBeUndefined();
+  });
+});
+
 describe("runDependencies — every resolved row is declared (LiveBox contract)", () => {
   it("completes without throwing 'no declared row' and includes the 'node in shell' row", async () => {
     // Regression: #261 added `box.resolve("node in shell", …)` but forgot to
@@ -93,7 +216,7 @@ describe("runDependencies — every resolved row is declared (LiveBox contract)"
     expect(labels).toContain("node in shell");
     // Sanity: the other declared rows are present too (so the box stayed intact).
     expect(labels).toEqual(
-      expect.arrayContaining(["fnm", "node version", "claude CLI", "node in shell"]),
+      expect.arrayContaining(["fnm", "node version", "claude CLI", "node in shell", "gh CLI"]),
     );
   });
 });

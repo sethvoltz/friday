@@ -185,8 +185,8 @@ forward_brew_caveats() {
     printf '%s\n' "${cav}" | sed 's/^/    /'
   done
   if [ "${shown}" -eq 1 ]; then
-    warn "Add the relevant lines above to your shell rc (e.g. ~/.zshrc), then open a NEW terminal."
-    warn "Friday's agent workers run \`\$SHELL -ilc\` and need node (via fnm) resolvable there — without it, every agent turn silently produces no reply. Verify with \`friday doctor\`."
+    warn "Add the relevant lines above to ~/.zshenv (the one zsh file EVERY shell sources — agents spawn non-interactive shells that skip ~/.zshrc), then open a NEW terminal."
+    warn "Friday hands the agent's Claude Code process your captured shell env and agents re-exec shells for nested commands — they need node (via fnm) + gh resolvable there, or turns silently produce no reply. Verify with \`friday doctor\`."
   fi
 }
 
@@ -219,9 +219,9 @@ verify_interactive_node() {
 
   printf '\n'
   warn "node is NOT resolvable in your interactive shell (\`${sh} -ilc\`), or the shell took too long to start."
-  warn "fnm needs a shell hook. Add this to your shell rc (e.g. ~/.zshrc), then open a NEW terminal:"
+  warn "fnm needs a shell hook. Add this to ~/.zshenv (sourced by every shell, including the non-interactive ones agents spawn), then open a NEW terminal:"
   printf '%s\n' "${C_BOLD}    eval \"\$(fnm env)\"${C_RESET}"
-  warn "Friday's agent workers run \`\$SHELL -ilc\` and need node there — without it every agent turn silently produces no reply. Re-check with \`friday doctor\`."
+  warn "Friday hands the agent's Claude Code process your captured shell env and needs node there — without it every agent turn silently produces no reply. Re-check with \`friday doctor\`."
 }
 
 ensure_fnm() {

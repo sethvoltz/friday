@@ -16,9 +16,17 @@
  *                            just operational vars + worker-fork inheritance
  *   worker process         — runs `$SHELL -ilc` at startup to capture user shell env
  *                            (no Friday secrets — they were never in process.env)
- *   Claude Code CLI        — SDK forwards the worker's process.env verbatim → agent
- *                            sees the captured user shell env (full)
- *   agent's Bash calls     — inherits CLI env → user shell env (full)
+ *   Claude Code CLI        — worker passes the captured env into the SDK `query()`
+ *                            `options.env` (`{ ...process.env, ...capturedShellEnv }`)
+ *                            in buildQueryOptions → the CLI process gets the user's
+ *                            interactive PATH/toolchain, not the daemon's launchd floor
+ *   agent's Bash calls     — inherit the CLI process env → user shell env (full).
+ *                            NOTE: the SDK `env` REPLACES its process.env default, so
+ *                            the spread of process.env is load-bearing (keeps Friday's
+ *                            operational vars + creds). Before FRI-150's env-injection
+ *                            this was aspirational: nothing wired the capture into the
+ *                            agent env, so a launchd-started daemon left the agent's
+ *                            Bash on the minimal PATH (couldn't find `gh`/brew tools).
  *   MCP children           — RESTRICTED via per-server `env`: PATH + locale + toolchain
  *                            hints + manifest env + FRIDAY_APP_DIR (not the full capture)
  *
