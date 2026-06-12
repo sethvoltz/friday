@@ -224,7 +224,7 @@ friday attach <daemon|dashboard|zero-cache>    # `tail -F ~/.friday/logs/<servic
 friday logs [daemon|dashboard|zero-cache|tunnel] [--follow]
 
 # Install lifecycle (ADR-034)
-friday update [--check] [--rollback]           # download + verify + extract latest; flip current symlink; kickstart
+friday update [--check] [--rollback]           # download + verify + extract latest; flip symlink; restart ONLY if it was running
 friday uninstall [--data=keep|delete] [--yes]  # remove the install tree + launchd job; ~/.friday preserved by default
 
 # Inspection (read-only; daemon optional)

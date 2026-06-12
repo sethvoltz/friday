@@ -61,8 +61,16 @@ function makeDeps(opts: {
   latestVersion: string;
   /** When true, the .sha256 won't match the tarball (tamper simulation). */
   corruptSha?: boolean;
-}): { deps: UpdateDeps; bootstrap: ReturnType<typeof vi.fn> } {
+  /** Whether the supervisor is "running" before the update. Default true
+   *  (the common case); set false to exercise the stopped-stays-stopped path. */
+  running?: boolean;
+}): {
+  deps: UpdateDeps;
+  bootstrap: ReturnType<typeof vi.fn>;
+  writePlist: ReturnType<typeof vi.fn>;
+} {
   const bootstrap = vi.fn();
+  const writePlist = vi.fn();
   const deps: UpdateDeps = {
     resolveLatestVersion: async () => opts.latestVersion,
     downloadRelease: async (destDir: string) => {
@@ -87,8 +95,10 @@ function makeDeps(opts: {
     },
     fnmInstall: () => {},
     bootstrap,
+    isRunning: () => opts.running ?? true,
+    writePlist,
   };
-  return { deps, bootstrap };
+  return { deps, bootstrap, writePlist };
 }
 
 /** A reporter that records every emitted event as a `kind:message` string so
@@ -159,6 +169,39 @@ describe("friday update", () => {
       "step:Restarting Friday…",
       expect.stringMatching(/^success:Updated to 1\.1\.0 /),
     ]);
+  });
+
+  it("update while Friday is STOPPED refreshes the plist but does NOT restart it", async () => {
+    plantVersion("1.0.0");
+    flipCurrent("1.0.0");
+
+    const { deps, bootstrap, writePlist } = makeDeps({ latestVersion: "1.1.0", running: false });
+    const { reporter, events } = recordingReporter();
+    await runUpdate({}, deps, reporter);
+
+    // Still updated to the new version…
+    expect(currentVersion()).toBe("1.1.0");
+    // …but the supervisor was NOT started (user had it stopped), and the plist
+    // was refreshed so the next `friday start` / reboot picks up the new version.
+    expect(bootstrap).not.toHaveBeenCalled();
+    expect(writePlist).toHaveBeenCalledTimes(1);
+    // Narration reflects in-place update, not a restart.
+    expect(events).not.toContain("step:Restarting Friday…");
+    expect(events).toContainEqual(expect.stringMatching(/^step:Friday was stopped/));
+  });
+
+  it("rollback while Friday is STOPPED does not restart it either", async () => {
+    plantVersion("1.0.0");
+    plantVersion("1.1.0");
+    flipCurrent("1.1.0");
+
+    const { deps, bootstrap, writePlist } = makeDeps({ latestVersion: "1.1.0", running: false });
+    const { reporter } = recordingReporter();
+    await runUpdate({ rollback: true }, deps, reporter);
+
+    expect(currentVersion()).toBe("1.0.0"); // rolled back
+    expect(bootstrap).not.toHaveBeenCalled();
+    expect(writePlist).toHaveBeenCalledTimes(1);
   });
 
   it("rolls back to the immediately-prior version + kickstarts (AC#5)", async () => {
@@ -352,6 +395,8 @@ describe("friday update — rejects an untrusted resolved version before touchin
       },
       fnmInstall: () => {},
       bootstrap,
+      isRunning: () => true,
+      writePlist: vi.fn(),
     };
 
     await expect(runUpdate({}, malicious)).rejects.toThrow(/not a valid semver/);
