@@ -1,8 +1,32 @@
-import { redirect, type Handle, type HandleServerError } from "@sveltejs/kit";
+import { redirect, type Handle, type HandleServerError, type ServerInit } from "@sveltejs/kit";
+import { clearFridayConfigCache, warmVaultCache } from "@friday/shared";
 import { auth } from "$lib/server/auth";
 import { logger } from "$lib/server/log";
-import { posthog, DISTINCT_ID } from "$lib/server/posthog";
+import { posthog, DISTINCT_ID, initPosthog } from "$lib/server/posthog";
 import { consumeRateLimit, resetRateLimit } from "@friday/shared/services";
+
+/**
+ * Server init — runs once at dashboard startup, before any request is handled.
+ *
+ * The dashboard is its own process with a CLEAN env: the supervisor injects no
+ * secrets into it (only zero-cache gets explicit injection; see
+ * packages/cli/src/bin/supervisor.ts) and expects the dashboard to call
+ * loadFridayConfig() itself. Integration secrets (POSTHOG_API_KEY) live in the
+ * age vault, which loadFridayConfig() resolves only from the in-memory cache
+ * that warmVaultCache() populates — the daemon warms at boot, but the dashboard
+ * never did, so server analytics silently no-op'd (FRI-166 follow-up).
+ *
+ * Warm the vault once here, then clearFridayConfigCache() to drop any config
+ * already memoized from the unwarmed vault during module load (e.g. auth.ts).
+ * Finally build the PostHog client (now that the key resolves) so its
+ * exception-autocapture handlers install at startup. Non-interactive (uses
+ * ~/.friday/.age-key) and a safe no-op when there's no vault.
+ */
+export const init: ServerInit = async () => {
+  await warmVaultCache();
+  clearFridayConfigCache();
+  initPosthog();
+};
 
 // `/ingest` is the first-party PostHog reverse proxy (src/routes/ingest):
 // it must be reachable anonymously because pageviews/replay fire on the
