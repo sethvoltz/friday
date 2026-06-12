@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.3](https://github.com/sethvoltz/friday/compare/v1.22.2...v1.22.3) (2026-06-12)
+
+
+### Bug Fixes
+
+* **cli:** capture + restore app-agent Claude sessions (shared agent-cwd resolver) ([#262](https://github.com/sethvoltz/friday/issues/262)) ([50acba5](https://github.com/sethvoltz/friday/commit/50acba57a777b7b705de6d3cb159e113c8f7c8d2))
+
 ## [1.22.2](https://github.com/sethvoltz/friday/compare/v1.22.1...v1.22.2) (2026-06-12)
 
 
