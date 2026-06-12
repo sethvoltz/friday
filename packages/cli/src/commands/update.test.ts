@@ -64,6 +64,9 @@ function makeDeps(opts: {
   /** Whether the supervisor is "running" before the update. Default true
    *  (the common case); set false to exercise the stopped-stays-stopped path. */
   running?: boolean;
+  /** Whether the launchd plist is on disk (autostart armed). Default true; set
+   *  false to model a `friday disable`d box (update must not resurrect it). */
+  plistExists?: boolean;
 }): {
   deps: UpdateDeps;
   bootstrap: ReturnType<typeof vi.fn>;
@@ -96,6 +99,7 @@ function makeDeps(opts: {
     fnmInstall: () => {},
     bootstrap,
     isRunning: () => opts.running ?? true,
+    plistExists: () => opts.plistExists ?? true,
     writePlist,
   };
   return { deps, bootstrap, writePlist };
@@ -202,6 +206,26 @@ describe("friday update", () => {
     expect(currentVersion()).toBe("1.0.0"); // rolled back
     expect(bootstrap).not.toHaveBeenCalled();
     expect(writePlist).toHaveBeenCalledTimes(1);
+  });
+
+  it("update while Friday is DISABLED (plist removed) does NOT resurrect the plist", async () => {
+    plantVersion("1.0.0");
+    flipCurrent("1.0.0");
+
+    // `friday disable`d box: stopped AND no plist on disk.
+    const { deps, bootstrap, writePlist } = makeDeps({
+      latestVersion: "1.1.0",
+      running: false,
+      plistExists: false,
+    });
+    const { reporter, events } = recordingReporter();
+    await runUpdate({}, deps, reporter);
+
+    // Updated, but neither started NOR plist-rewritten — autostart stays off.
+    expect(currentVersion()).toBe("1.1.0");
+    expect(bootstrap).not.toHaveBeenCalled();
+    expect(writePlist).not.toHaveBeenCalled();
+    expect(events).toContainEqual(expect.stringMatching(/^step:Friday is disabled/));
   });
 
   it("rolls back to the immediately-prior version + kickstarts (AC#5)", async () => {
@@ -396,6 +420,7 @@ describe("friday update — rejects an untrusted resolved version before touchin
       fnmInstall: () => {},
       bootstrap,
       isRunning: () => true,
+      plistExists: () => true,
       writePlist: vi.fn(),
     };
 
@@ -419,6 +444,7 @@ describe("friday update — rejects an untrusted resolved version before touchin
       fnmInstall: () => {},
       bootstrap: vi.fn(),
       isRunning: () => true,
+      plistExists: () => true,
       writePlist: vi.fn(),
     };
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});

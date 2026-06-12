@@ -323,9 +323,13 @@ export interface UpdateDeps {
   /** Whether the launchd supervisor is currently loaded. Captured BEFORE the
    *  update so a STOPPED Friday is left stopped, not restarted (user intent). */
   isRunning(): boolean;
+  /** Whether the launchd plist is on disk (autostart armed). When Friday was
+   *  stopped via `friday disable` the plist is GONE — update must not resurrect
+   *  it, so the stopped-path plist refresh is gated on this. */
+  plistExists(): boolean;
   /** Rewrite the plist for `installDir` WITHOUT bootstrapping. Used when Friday
-   *  was stopped: keeps the plist current (new version's shape) for the next
-   *  `friday start` / reboot RunAtLoad, without starting the stack now. */
+   *  was stopped (but still autostart-armed): keeps the plist current (new
+   *  version's shape) for the next `friday start` / reboot RunAtLoad. */
   writePlist(installDir: string): void;
 }
 
@@ -426,6 +430,9 @@ export const defaultUpdateDeps: UpdateDeps = {
   isRunning(): boolean {
     return launchd.isBootstrapped();
   },
+  plistExists(): boolean {
+    return launchd.plistExists();
+  },
   writePlist(installDir: string): void {
     launchd.writePlist(installDir);
   },
@@ -441,9 +448,17 @@ function activate(deps: UpdateDeps, reporter: UpdateReporter, wasRunning: boolea
   if (wasRunning) {
     reporter.step("Restarting Friday…");
     deps.bootstrap(currentLink());
-  } else {
+  } else if (deps.plistExists()) {
+    // Stopped but autostart still armed: refresh the plist so the next
+    // `friday start` / reboot picks up the new version's shape. Don't start it.
     reporter.step("Friday was stopped — updated in place (run `friday start` to launch it)");
     deps.writePlist(currentLink());
+  } else {
+    // Autostart disabled (`friday disable` removed the plist) — keep it that
+    // way; never resurrect the plist on update.
+    reporter.step(
+      "Friday is disabled — updated in place (`friday start` to launch, `friday enable` to re-arm autostart)",
+    );
   }
 }
 
