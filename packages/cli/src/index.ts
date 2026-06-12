@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { defineCommand, runMain } from "citty";
+import { clearFridayConfigCache, warmVaultCache } from "@friday/shared";
 import pkg from "../package.json" with { type: "json" };
 import { setupCommand } from "./commands/setup.js";
 import { doctorCommand } from "./commands/doctor.js";
@@ -32,6 +33,21 @@ const main = defineCommand({
     name: "friday",
     version: pkg.version,
     description: "Friday — local-first AI orchestrator",
+  },
+  // FRI-166: warm the age vault ONCE for the whole CLI process before any
+  // subcommand runs. Integration secrets (e.g. CLOUDFLARE_TUNNEL_TOKEN) live in
+  // the vault and `loadFridayConfig()` resolves them from the in-memory cache
+  // that `warmVaultCache()` populates. The daemon warms at boot; the CLI must
+  // too, or every command reads vault secrets as absent. citty invokes this
+  // root `setup` before subcommand dispatch, so doing it here means no command
+  // has to remember to warm — eliminating the whole missing-warm bug class
+  // rather than patching it per read site. Non-interactive (uses
+  // ~/.friday/.age-key) and a safe no-op when there's no vault; cost is one
+  // age-decrypt, then generation-gated cache hits. `clearFridayConfigCache()`
+  // drops any config cached from a not-yet-warm vault (e.g. a module-load read).
+  async setup() {
+    await warmVaultCache();
+    clearFridayConfigCache();
   },
   subCommands: {
     setup: setupCommand,

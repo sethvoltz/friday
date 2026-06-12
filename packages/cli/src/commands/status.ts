@@ -125,6 +125,8 @@ function formatUptime(sec: number): string {
 export const statusCommand = defineCommand({
   meta: { name: "status", description: "Show supervisor + daemon + dashboard + tunnel status" },
   async run() {
+    // The vault is warmed once at CLI entry (index.ts `setup`), so the
+    // daemon-scoped CLOUDFLARE_TUNNEL_TOKEN resolves for the tunnel line below.
     const fridayEnv = loadFridayConfig();
     const cfg = loadConfig();
 
