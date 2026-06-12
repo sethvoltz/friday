@@ -63,10 +63,26 @@ function resolveInteractiveShell(exists: (p: string) => boolean = existsSync): s
 
 export interface ShellNodeProbe {
   ok: boolean;
+  /** True when we couldn't run the probe faithfully (a shell whose `-ilc`
+   *  invocation differs — fish/nu/csh/pwsh). Reported as `warn`, not `fail`,
+   *  so we never false-alarm by running the wrong invocation. */
+  unverified?: boolean;
   shell: string;
-  /** Node version string on success, else a short failure reason. */
+  /** Node version string on success, else a short reason. */
   detail: string;
 }
+
+/** Shells whose interactive-login env probe is `<shell> -ilc <cmd>`. The
+ *  worker (shell-env.ts buildInvocation) uses different flags for fish/nu
+ *  (`-i -l -c`), csh (`-ic`), pwsh (`-Login -Command`); rather than guess and
+ *  false-fail, we mark those "unverified". */
+const ILC_SHELLS = new Set(["zsh", "bash", "sh"]);
+
+/** Unique marker so we can isolate node's version from any banner a login rc
+ *  prints to stdout (fastfetch/motd/p10k). The worker does the same with
+ *  START/END markers (shell-env.ts) — a bare `node -e` + `^v…` anchor would
+ *  false-fail on every box whose rc echoes to stdout. */
+const NODE_MARK = "__friday_node__";
 
 /**
  * Probe whether `node` resolves and runs in the user's INTERACTIVE shell — the
@@ -86,13 +102,25 @@ export function probeInteractiveShellNode(
   spawnFn: typeof spawnSync = spawnSync,
   shell: string = resolveInteractiveShell(),
 ): ShellNodeProbe {
-  const r = spawnFn(shell, ["-ilc", "node -e 'process.stdout.write(process.version)'"], {
-    encoding: "utf8",
-    timeout: 8000,
-  });
-  const out = (r.stdout ?? "").toString().trim();
-  if (r.status === 0 && /^v\d+\.\d+/.test(out)) {
-    return { ok: true, shell, detail: `node ${out} resolvable in ${shell} -ilc` };
+  const base = shell.split("/").pop() ?? shell;
+  if (!ILC_SHELLS.has(base)) {
+    return {
+      ok: false,
+      unverified: true,
+      shell,
+      detail: `unverified for ${base} (non -ilc shell) — ensure \`node\` runs in your interactive shell`,
+    };
+  }
+  const r = spawnFn(
+    shell,
+    ["-ilc", `node -e 'process.stdout.write("${NODE_MARK}"+process.version)'`],
+    { encoding: "utf8", timeout: 8000 },
+  );
+  // Extract the version that follows our marker — robust to a login rc that
+  // prints a banner to stdout before the command runs.
+  const m = (r.stdout ?? "").toString().match(new RegExp(`${NODE_MARK}(v\\d+\\.\\d+\\.\\d+)`));
+  if (r.status === 0 && m) {
+    return { ok: true, shell, detail: `node ${m[1]} resolvable in ${shell} -ilc` };
   }
   return { ok: false, shell, detail: `node not resolvable in ${shell} -ilc` };
 }
@@ -328,9 +356,9 @@ async function runDependencies(): Promise<DoctorCheck[]> {
   const shellNode = probeInteractiveShellNode();
   box.resolve(
     "node in shell",
-    shellNode.ok ? "ok" : "fail",
-    shellNode.ok ? shellNode.detail : "not resolvable",
-    shellNode.ok
+    shellNode.unverified ? "warn" : shellNode.ok ? "ok" : "fail",
+    shellNode.ok || shellNode.unverified ? shellNode.detail : "not resolvable",
+    shellNode.ok || shellNode.unverified
       ? undefined
       : `agents can't run — add  eval "$(fnm env)"  to your shell rc (e.g. ~/.zshrc), open a new terminal. Workers capture \`${shellNode.shell} -ilc\` and need node there.`,
   );

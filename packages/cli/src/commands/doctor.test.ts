@@ -19,8 +19,8 @@ function fakeSpawn(result: { status: number | null; stdout: string }) {
 }
 
 describe("probeInteractiveShellNode", () => {
-  it("ok when the interactive shell runs node -e and emits a version", () => {
-    const { fn, calls } = fakeSpawn({ status: 0, stdout: "v22.21.1\n" });
+  it("ok when the interactive shell runs node -e and emits the marked version", () => {
+    const { fn, calls } = fakeSpawn({ status: 0, stdout: "__friday_node__v22.21.1" });
     const res = probeInteractiveShellNode(fn, "/bin/zsh");
 
     expect(res.ok).toBe(true);
@@ -30,6 +30,29 @@ describe("probeInteractiveShellNode", () => {
     expect(calls[0]?.cmd).toBe("/bin/zsh");
     expect(calls[0]?.args[0]).toBe("-ilc");
     expect(calls[0]?.args[1]).toContain("node -e");
+  });
+
+  it("ok even when the login rc prints a banner to stdout before the version (marker isolates it)", () => {
+    // The regression the marker exists to prevent: a `.zshrc` that echoes a
+    // banner would defeat a bare `^v…` anchor and false-fail on a healthy box.
+    const { fn } = fakeSpawn({
+      status: 0,
+      stdout: "fastfetch banner line 1\nwelcome\n__friday_node__v22.21.1",
+    });
+    expect(probeInteractiveShellNode(fn, "/bin/zsh").ok).toBe(true);
+  });
+
+  it("unverified (not fail) for a shell whose -ilc invocation differs (fish)", () => {
+    let spawned = false;
+    const fn = (() => {
+      spawned = true;
+      return { status: 0, stdout: "" };
+    }) as unknown as typeof SpawnSync;
+    const res = probeInteractiveShellNode(fn, "/opt/homebrew/bin/fish");
+    expect(res.unverified).toBe(true);
+    expect(res.ok).toBe(false);
+    // It must NOT run a wrong `-ilc` invocation against fish.
+    expect(spawned).toBe(false);
   });
 
   it("fails (does not throw) when node is not on the interactive PATH (exit 127)", () => {
