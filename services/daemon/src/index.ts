@@ -57,7 +57,7 @@ import { deleteBlockById, inbox as mailInbox, listQueuedUserBlocks } from "@frid
 import { buildMailPrompt } from "./comms/mail-prompt.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, watchFile } from "node:fs";
-import { posthog, DISTINCT_ID } from "./posthog.js";
+import { posthog, DISTINCT_ID, initPosthog } from "./posthog.js";
 
 async function main(): Promise<void> {
   ensureDirs();
@@ -67,6 +67,11 @@ async function main(): Promise<void> {
   // of secrets so the worker fork doesn't inherit them.
   await warmVaultCache();
   loadFridayConfig();
+  // FRI-166 follow-up: build the PostHog client now that the vault is warm (it
+  // resolves POSTHOG_API_KEY from the warmed cache, and exception-autocapture
+  // installs at startup). posthog.ts is lazy precisely so its key read lands
+  // here, after the warm, not at its module-load import above.
+  initPosthog();
   startSecretsGenerationWatch();
   // FRI-150 (pivot, ADR-037): shell-env capture has moved from the daemon
   // boot path to the per-worker entry point (`services/daemon/src/agent/

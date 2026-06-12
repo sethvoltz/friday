@@ -15,11 +15,33 @@ const SERVICE_DISTINCT_ID = "friday-daemon";
 // silently no-ops, so analytics are strictly opt-in.
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 
-const phCfg = loadFridayConfig();
-const client = new PostHog(phCfg.posthogApiKey ?? "", {
-  host: phCfg.posthogHost ?? DEFAULT_POSTHOG_HOST,
-  enableExceptionAutocapture: true,
-});
+// Build the client LAZILY, on first use — not at module load. POSTHOG_API_KEY
+// is a daemon-scoped vault secret, and the daemon warms the age vault at boot
+// (index.ts `warmVaultCache()`), which runs AFTER this module is imported.
+// Reading the key at module load (the prior behavior) hit an unwarmed vault, so
+// the client was built with an empty key and silently no-op'd all daemon
+// analytics. Deferring the loadFridayConfig() read to first use guarantees it
+// runs after the boot warm. (FRI-166 follow-up: vault-warm timing.)
+let instance: PostHog | undefined;
+function getClient(): PostHog {
+  if (!instance) {
+    const cfg = loadFridayConfig();
+    instance = new PostHog(cfg.posthogApiKey ?? "", {
+      host: cfg.posthogHost ?? DEFAULT_POSTHOG_HOST,
+      enableExceptionAutocapture: true,
+    });
+  }
+  return instance;
+}
+
+/**
+ * Eagerly construct the client (after the vault is warmed). Called from daemon
+ * boot so `enableExceptionAutocapture` installs its global handlers at startup
+ * rather than waiting for the first capture.
+ */
+export function initPosthog(): void {
+  getClient();
+}
 
 // Per-id cache of BetterAuth identity (email/name) so we can $set person
 // properties on daemon events without a DB round-trip per capture.
@@ -66,7 +88,7 @@ export function captureFor(
     void resolveIdentity(userId).then((ident) => {
       const set =
         ident.email || ident.name ? { $set: { email: ident.email, name: ident.name } } : {};
-      client.capture({
+      getClient().capture({
         distinctId: userId,
         event,
         properties: { ...properties, ...set, server_side: true },
@@ -74,11 +96,22 @@ export function captureFor(
     });
     return;
   }
-  client.capture({
+  getClient().capture({
     distinctId: SERVICE_DISTINCT_ID,
     event,
     properties: { ...properties, server_side: true },
   });
 }
 
-export { client as posthog, SERVICE_DISTINCT_ID as DISTINCT_ID };
+// Lazy proxy: preserves `posthog.captureException(...)` / `.shutdown()` call
+// sites (daemon index.ts) unchanged while deferring construction to first
+// property access. Methods are bound to the underlying client.
+const posthog = new Proxy({} as PostHog, {
+  get(_target, prop) {
+    const c = getClient();
+    const value = Reflect.get(c, prop, c);
+    return typeof value === "function" ? value.bind(c) : value;
+  },
+});
+
+export { posthog, SERVICE_DISTINCT_ID as DISTINCT_ID };
