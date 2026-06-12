@@ -22,6 +22,10 @@ import pc from "picocolors";
 import { loadConfig, loadFridayConfig, writeConfig } from "@friday/shared";
 import { cloudflaredLoaded, reconcileTunnel } from "../lib/cloudflared.js";
 
+// The vault holding CLOUDFLARE_TUNNEL_TOKEN is warmed once at CLI entry (see
+// index.ts `setup`), so `loadFridayConfig().cloudflareTunnelToken` resolves it
+// in every subcommand below without a per-command warm.
+
 const upCommand = defineCommand({
   meta: {
     name: "up",

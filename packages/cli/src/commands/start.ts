@@ -80,7 +80,9 @@ export const startCommand = defineCommand({
     // Declarative + idempotent: an already-serving tunnel is a no-op, a
     // removed token tears the agent down, and a restored tunnel-enabled config
     // (serve-intent on, same machine) brings it back — DR works without a
-    // re-run of `friday setup --cloudflare`.
+    // re-run of `friday setup --cloudflare`. The vault holding
+    // CLOUDFLARE_TUNNEL_TOKEN is warmed once at CLI entry (see index.ts
+    // `setup`), so loadFridayConfig() resolves it here.
     const fridayEnv = loadFridayConfig();
     const serve = loadConfig().tunnel?.serve === true;
     const tunnel = reconcileTunnel({ serve, token: fridayEnv.cloudflareTunnelToken });
