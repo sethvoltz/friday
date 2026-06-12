@@ -260,9 +260,10 @@ async function seedUsage(
   sessionId: string,
   contextTokens: number,
 ): Promise<void> {
-  // estimateContextTokens = input + cacheCreation + cacheRead. Spread the
-  // tokens across the three so the SUM equals the intended estimate; output
-  // is deliberately non-zero to prove it's NOT counted.
+  // inputTokens is the full context estimate (the Anthropic API reports the
+  // total input including cached portions in inputTokens; cache fields are
+  // subsets of that, not additive). outputTokens is non-zero to prove it
+  // is NOT counted.
   await insertUsage({
     timestamp: new Date().toISOString(),
     sessionId,
@@ -270,10 +271,10 @@ async function seedUsage(
     agentType: "orchestrator",
     model: "claude-opus-4-8",
     costUsd: 0.5,
-    inputTokens: Math.floor(contextTokens / 3),
+    inputTokens: contextTokens,
     outputTokens: 9_999, // must NOT enter the estimate
-    cacheCreationTokens: Math.floor(contextTokens / 3),
-    cacheReadTokens: contextTokens - 2 * Math.floor(contextTokens / 3),
+    cacheCreationTokens: Math.floor(contextTokens * 0.1),
+    cacheReadTokens: Math.floor(contextTokens * 0.8),
   });
 }
 

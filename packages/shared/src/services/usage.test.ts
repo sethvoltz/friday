@@ -214,6 +214,8 @@ describe("getLatestUsageForAgent + estimateContextTokens (FRI-156 §C sweep esti
     const row = { inputTokens: 111, cacheCreationTokens: 222, cacheReadTokens: 333 };
     expect(estimateContextTokens(row)).toBe(111);
     // Zero cache fields — result unchanged.
-    expect(estimateContextTokens({ inputTokens: 81_000, cacheCreationTokens: 0, cacheReadTokens: 0 })).toBe(81_000);
+    expect(
+      estimateContextTokens({ inputTokens: 81_000, cacheCreationTokens: 0, cacheReadTokens: 0 }),
+    ).toBe(81_000);
   });
 });
