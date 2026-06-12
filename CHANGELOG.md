@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.4](https://github.com/sethvoltz/friday/compare/v1.22.3...v1.22.4) (2026-06-12)
+
+
+### Bug Fixes
+
+* **cli:** doctor row + update respects stopped/disabled state + friday disable/enable ([#264](https://github.com/sethvoltz/friday/issues/264)) ([07896b5](https://github.com/sethvoltz/friday/commit/07896b527db52643ea06756c014f2ce28c00cd27))
+
 ## [1.22.3](https://github.com/sethvoltz/friday/compare/v1.22.2...v1.22.3) (2026-06-12)
 
 
