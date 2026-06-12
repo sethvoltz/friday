@@ -418,6 +418,8 @@ describe("friday update — rejects an untrusted resolved version before touchin
       extract: () => {},
       fnmInstall: () => {},
       bootstrap: vi.fn(),
+      isRunning: () => true,
+      writePlist: vi.fn(),
     };
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
