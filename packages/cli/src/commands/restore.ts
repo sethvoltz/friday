@@ -29,6 +29,7 @@ import { createHash } from "node:crypto";
 import { confirm } from "@clack/prompts";
 import pc from "picocolors";
 import {
+  agentWorkingDir,
   DATA_DIR,
   HEALTH_PATH,
   clearFridayConfigCache,
@@ -61,6 +62,10 @@ interface ClaudeSessionEntry {
   agent: string;
   type: string;
   sessionId: string;
+  /** Owning app id (ADR-021); re-derives the app-agent cwd on restore. Absent
+   *  on bundles from before the app-agent-cwd fix — treated as null (the agent
+   *  resolves to `~/.friday/agents/<name>`, the old behavior). */
+  appId?: string | null;
   sidecar?: boolean;
 }
 
@@ -727,7 +732,10 @@ async function placeClaudeSessions(stageDir: string, manifest: BackupManifest): 
     const srcDir = join(stageDir, "claude-sessions", s.agent);
     const srcJsonl = join(srcDir, `${s.sessionId}.jsonl`);
     if (!existsSync(srcJsonl)) continue;
-    const cwd = join(DATA_DIR, "agents", s.agent); // target cwd → target hash
+    // RE-DERIVE the cwd from THIS machine's agent layout — app agents live at
+    // `~/.friday/apps/<appId>`, everyone else at `~/.friday/agents/<name>`. Must
+    // match what `friday backup` captured under, or resume can't find it.
+    const cwd = agentWorkingDir({ name: s.agent, appId: s.appId });
     const destJsonl = sessionFilePath(cwd, s.sessionId);
     mkdirSync(dirname(destJsonl), { recursive: true });
     await cp(srcJsonl, destJsonl, { preserveTimestamps: true });

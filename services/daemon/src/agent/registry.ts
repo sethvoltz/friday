@@ -1,13 +1,11 @@
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
 import { eq, isNotNull } from "drizzle-orm";
 import {
-  AGENTS_DIR,
   type AgentEntry,
   type AgentStatus,
   type AgentType,
   type ArchiveReason,
-  appDir,
+  agentWorkingDir,
   getDb,
   schema,
 } from "@friday/shared";
@@ -565,10 +563,15 @@ async function workingDirectoryForBounded(a: AgentEntry, hops: number): Promise<
       // below (don't read a dead worktree).
     }
   }
-  if ("worktreePath" in a && a.worktreePath) return a.worktreePath;
+  // Leaf resolution (worktree → app → per-agent home) is shared with
+  // backup/restore via `agentWorkingDir`, so the three can never disagree about
+  // where an agent's Claude transcript lives (the divergence that silently
+  // dropped app-agent sessions from migration bundles).
+  const worktreePath = "worktreePath" in a ? a.worktreePath : null;
   const appId = await getAppId(a.name);
-  if (appId) return appDir(appId);
-  const home = join(AGENTS_DIR, a.name);
-  mkdirSync(home, { recursive: true });
-  return home;
+  const dir = agentWorkingDir({ name: a.name, worktreePath, appId });
+  // The per-agent home (non-worktree, non-app) must exist before the worker
+  // chdir's into it; worktrees and app dirs already exist on disk.
+  if (!worktreePath && !appId) mkdirSync(dir, { recursive: true });
+  return dir;
 }
