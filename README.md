@@ -130,6 +130,14 @@ curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/Brewfile | br
 - **`pnpm`** — build/dev-time package manager (CI packs the release tarball, contributors build from source); not on Friday's runtime path
 - **`cloudflared`** — Cloudflare Tunnel client (optional, for public reachability)
 
+After installing, **wire fnm into your shell** (`brew install fnm` alone does _not_ put `node` on your interactive PATH, and its formula prints no caveat):
+
+```bash
+echo 'eval "$(fnm env)"' >> ~/.zshrc   # then open a NEW terminal
+```
+
+This is required, not cosmetic: Friday's agent workers spawn `$SHELL -ilc` to capture your environment, so without `node` on the interactive PATH **every agent turn silently completes with no reply**. The curl installer surfaces this for you and `friday doctor` flags it (the `node in shell` row).
+
 **Install Claude Code separately** (not in the Brewfile, since the cask shadows Anthropic's own installer):
 
 ```bash

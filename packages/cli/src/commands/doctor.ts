@@ -49,6 +49,54 @@ interface Row {
   hint?: string;
 }
 
+/**
+ * Resolve the user's interactive shell the same way the daemon's shell-env
+ * capture does (services/daemon/src/shell-env.ts): `$SHELL` unless it's unset
+ * or the useless `/bin/sh`, then prefer zsh, then bash.
+ */
+function resolveInteractiveShell(exists: (p: string) => boolean = existsSync): string {
+  const fromEnv = process.env.SHELL;
+  if (fromEnv && fromEnv !== "/bin/sh" && exists(fromEnv)) return fromEnv;
+  for (const c of ["/bin/zsh", "/bin/bash"]) if (exists(c)) return c;
+  return fromEnv || "/bin/sh";
+}
+
+export interface ShellNodeProbe {
+  ok: boolean;
+  shell: string;
+  /** Node version string on success, else a short failure reason. */
+  detail: string;
+}
+
+/**
+ * Probe whether `node` resolves and runs in the user's INTERACTIVE shell — the
+ * exact context Friday's agent workers use. Each worker spawns `$SHELL -ilc`
+ * and runs a `node -e` marker to capture the user's environment
+ * (shell-env.ts:269). If node isn't on the interactive PATH (classically: fnm
+ * installed but its `eval "$(fnm env)"` shell hook never added), that capture
+ * fails, the worker falls back to the launchd minimal PATH, the Claude SDK
+ * can't run, and EVERY agent turn silently completes with no reply — with no
+ * error shown to the user. doctor's other dependency checks use `which` in
+ * doctor's OWN process env, which has the install shim's PATH and so misses
+ * this entirely. This check runs the real `$SHELL -ilc node -e …` instead.
+ *
+ * `spawnFn`/`shell` are injectable for tests (the real probe spawns a shell).
+ */
+export function probeInteractiveShellNode(
+  spawnFn: typeof spawnSync = spawnSync,
+  shell: string = resolveInteractiveShell(),
+): ShellNodeProbe {
+  const r = spawnFn(shell, ["-ilc", "node -e 'process.stdout.write(process.version)'"], {
+    encoding: "utf8",
+    timeout: 8000,
+  });
+  const out = (r.stdout ?? "").toString().trim();
+  if (r.status === 0 && /^v\d+\.\d+/.test(out)) {
+    return { ok: true, shell, detail: `node ${out} resolvable in ${shell} -ilc` };
+  }
+  return { ok: false, shell, detail: `node not resolvable in ${shell} -ilc` };
+}
+
 // Box dimensions. 68 columns matches the ASCII banner width (67) and the
 // docs/architecture diagrams, fitting an 80-column terminal with margin.
 // Adjust here only; the renderer derives everything else from these.
@@ -270,6 +318,21 @@ async function runDependencies(): Promise<DoctorCheck[]> {
     claudeOk
       ? undefined
       : "install via `curl -fsSL https://claude.ai/install.sh | bash` or `brew install --cask claude-code`",
+  );
+
+  // node in the INTERACTIVE shell — the context agent workers actually run in
+  // (`$SHELL -ilc`, shell-env.ts). The `node version` row above only checks the
+  // .node-version pin in the install tree; THIS catches "fnm installed but its
+  // shell hook never added", which silently kills every agent turn (no reply,
+  // no error) — exactly the prod→Intel migration failure.
+  const shellNode = probeInteractiveShellNode();
+  box.resolve(
+    "node in shell",
+    shellNode.ok ? "ok" : "fail",
+    shellNode.ok ? shellNode.detail : "not resolvable",
+    shellNode.ok
+      ? undefined
+      : `agents can't run — add  eval "$(fnm env)"  to your shell rc (e.g. ~/.zshrc), open a new terminal. Workers capture \`${shellNode.shell} -ilc\` and need node there.`,
   );
 
   // gh CLI

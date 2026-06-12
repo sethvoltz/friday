@@ -159,6 +159,55 @@ ensure_brew_deps() {
   fi
 }
 
+# Homebrew prints post-install "Caveats" (e.g. fnm's "add `eval "$(fnm env)"`
+# to your shell") during `brew install`, but they scroll past and get swallowed
+# when several deps install at once — and never appear at all when the formula
+# is ALREADY installed (a re-run, or a migration onto a box that already has
+# the dep). Friday's agent workers spawn `$SHELL -ilc` to capture the user's
+# environment and need these tools — especially node, via fnm — resolvable in
+# the interactive shell, or every agent turn silently produces no reply. So
+# surface the caveats explicitly for the user to action, regardless of whether
+# we just installed the dep. (FRI: prod→Intel migration hit exactly this — fnm
+# installed, but its shell-eval caveat was never run, so node wasn't on the
+# interactive PATH and the daemon's workers couldn't run the Claude SDK.)
+forward_brew_caveats() {
+  local dep cav shown=0
+  for dep in ${BREW_DEPS}; do
+    cav="$(brew info "${dep}" 2>/dev/null | awk '/^==> Caveats/{f=1;next} /^==>/{f=0} f{print}')"
+    [ -z "${cav}" ] && continue
+    if [ "${shown}" -eq 0 ]; then
+      warn "Some Homebrew dependencies need shell setup — caveats below:"
+      shown=1
+    fi
+    step "  ${dep}:"
+    printf '%s\n' "${cav}" | sed 's/^/    /'
+  done
+  if [ "${shown}" -eq 1 ]; then
+    warn "Add the relevant lines above to your shell rc (e.g. ~/.zshrc), then open a NEW terminal."
+    warn "Friday's agent workers run \`\$SHELL -ilc\` and need node (via fnm) resolvable there — without it, every agent turn silently produces no reply. Verify with \`friday doctor\`."
+  fi
+}
+
+# fnm's Homebrew formula emits NO caveat (so `forward_brew_caveats` can't catch
+# it), yet fnm REQUIRES a shell hook — `eval "$(fnm env)"` — to put node on the
+# interactive PATH. Friday's agent workers capture `$SHELL -ilc` env and need
+# node resolvable there. Check the real end-state and print the exact fix when
+# it's missing: this is the single most common "installed fine but agents never
+# reply" failure on a fresh box or migration (the prod→Intel cutover hit it —
+# fnm installed, no shell hook, so the workers' Claude SDK couldn't run).
+verify_interactive_node() {
+  local sh="${SHELL:-/bin/zsh}"
+  [ -x "${sh}" ] || sh="/bin/zsh"
+  if "${sh}" -ilc 'command -v node >/dev/null 2>&1' >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '\n'
+  warn "node is NOT resolvable in your interactive shell (\`${sh} -ilc\`)."
+  warn "fnm needs a shell hook. Add this to your shell rc (e.g. ~/.zshrc), then open a NEW terminal:"
+  printf '%s\n' "${C_BOLD}    eval \"\$(fnm env)\"${C_RESET}"
+  warn "Friday's agent workers run \`\$SHELL -ilc\` and need node there — without it every agent turn silently produces no reply. Re-check with \`friday doctor\`."
+}
+
 ensure_fnm() {
   if command -v fnm >/dev/null 2>&1; then
     return 0
@@ -398,6 +447,7 @@ main() {
   ensure_brew
   ensure_brew_deps
   ensure_fnm
+  forward_brew_caveats
 
   local version target
   version="$(resolve_version)"
@@ -447,6 +497,8 @@ main() {
   info "current ${CURRENT_LINK} -> versions/${version}"
   info "shim    ${SHIM_PATH}"
   info "plist   ${PLIST_PATH}"
+
+  verify_interactive_node
 
   if [ "${first_run}" -eq 1 ]; then
     printf '\n'
