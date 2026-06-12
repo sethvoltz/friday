@@ -436,16 +436,17 @@ export async function getLatestUsageForAgent(
 }
 
 /**
- * The SDK's effective context size for a turn = input + cacheRead +
- * cacheCreation of the latest usage row (output tokens don't re-enter the
- * window). FRI-156 §C: the sweep compares this against the sweep threshold.
+ * The SDK's effective context size for a turn = inputTokens of the latest
+ * usage row. cacheCreationTokens and cacheReadTokens are subsets of
+ * inputTokens, not additive — summing them inflates the estimate 2-3x.
+ * FRI-156 §C / FRI-71: the sweep compares this against the sweep threshold.
  */
 export function estimateContextTokens(row: {
   inputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
 }): number {
-  return row.inputTokens + row.cacheCreationTokens + row.cacheReadTokens;
+  return row.inputTokens;
 }
 
 // Re-export the table object for callers that want raw Drizzle access.

@@ -205,14 +205,15 @@ describe("getLatestUsageForAgent + estimateContextTokens (FRI-156 §C sweep esti
     expect(await getLatestUsageForAgent("nobody", "sess-x")).toBeNull();
   });
 
-  it("estimateContextTokens sums input + cacheCreation + cacheRead exactly (excludes output)", async () => {
+  it("estimateContextTokens returns inputTokens only (cache fields are subsets, not additive) (FRI-71)", async () => {
     const { estimateContextTokens } = await import("./usage.js");
+    // Cache tokens are subsets of inputTokens; adding them inflated estimates 2-3x.
     expect(
       estimateContextTokens({ inputTokens: 100, cacheCreationTokens: 200, cacheReadTokens: 300 }),
-    ).toBe(600);
-    // Mirrors what the sweep actually feeds it: the latest row's three context
-    // components, with output deliberately not part of the window estimate.
+    ).toBe(100);
     const row = { inputTokens: 111, cacheCreationTokens: 222, cacheReadTokens: 333 };
-    expect(estimateContextTokens(row)).toBe(666);
+    expect(estimateContextTokens(row)).toBe(111);
+    // Zero cache fields — result unchanged.
+    expect(estimateContextTokens({ inputTokens: 81_000, cacheCreationTokens: 0, cacheReadTokens: 0 })).toBe(81_000);
   });
 });
