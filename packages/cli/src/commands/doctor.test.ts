@@ -15,7 +15,11 @@ vi.mock("node:child_process", () => ({
   spawnSync: () => ({ status: 1, stdout: "", stderr: "" }),
 }));
 
-import { probeInteractiveShellNode, runDependencies } from "./doctor.js";
+import {
+  probeInteractiveShellCommand,
+  probeInteractiveShellNode,
+  runDependencies,
+} from "./doctor.js";
 
 /** A fake spawnSync that records its invocation and returns a canned result. */
 function fakeSpawn(result: { status: number | null; stdout: string }) {
@@ -83,6 +87,50 @@ describe("probeInteractiveShellNode", () => {
   });
 });
 
+describe("probeInteractiveShellCommand", () => {
+  it("ok when `command -v <cmd>` succeeds and emits the resolve marker under -ilc", () => {
+    const { fn, calls } = fakeSpawn({ status: 0, stdout: "__friday_path__" });
+    const res = probeInteractiveShellCommand("gh", fn, "/bin/zsh");
+
+    expect(res.ok).toBe(true);
+    expect(res.detail).toContain("gh resolvable");
+    // Must probe the INTERACTIVE shell (-ilc) with `command -v gh`, not a bare `which`.
+    expect(calls[0]?.cmd).toBe("/bin/zsh");
+    expect(calls[0]?.args[0]).toBe("-ilc");
+    expect(calls[0]?.args[1]).toContain("command -v gh");
+  });
+
+  it("ok even when a login rc prints a banner before the marker (marker isolates the hit)", () => {
+    const { fn } = fakeSpawn({ status: 0, stdout: "motd banner\nwelcome\n__friday_path__" });
+    expect(probeInteractiveShellCommand("gh", fn, "/bin/zsh").ok).toBe(true);
+  });
+
+  it("fails (does not throw) when the command is not on the interactive PATH", () => {
+    // `command -v` returns non-zero AND the `&& printf marker` never runs.
+    const { fn } = fakeSpawn({ status: 1, stdout: "" });
+    const res = probeInteractiveShellCommand("gh", fn, "/bin/zsh");
+    expect(res.ok).toBe(false);
+    expect(res.detail).toContain("not resolvable");
+  });
+
+  it("does not false-✓ on exit 0 with no marker (e.g. a stray rc echo)", () => {
+    const { fn } = fakeSpawn({ status: 0, stdout: "hello from .zshrc\n" });
+    expect(probeInteractiveShellCommand("gh", fn, "/bin/zsh").ok).toBe(false);
+  });
+
+  it("unverified (not fail) for a non -ilc shell, and never spawns the wrong invocation", () => {
+    let spawned = false;
+    const fn = (() => {
+      spawned = true;
+      return { status: 0, stdout: "" };
+    }) as unknown as typeof SpawnSync;
+    const res = probeInteractiveShellCommand("gh", fn, "/opt/homebrew/bin/fish");
+    expect(res.unverified).toBe(true);
+    expect(res.ok).toBe(false);
+    expect(spawned).toBe(false);
+  });
+});
+
 describe("runDependencies — every resolved row is declared (LiveBox contract)", () => {
   it("completes without throwing 'no declared row' and includes the 'node in shell' row", async () => {
     // Regression: #261 added `box.resolve("node in shell", …)` but forgot to
@@ -93,7 +141,7 @@ describe("runDependencies — every resolved row is declared (LiveBox contract)"
     expect(labels).toContain("node in shell");
     // Sanity: the other declared rows are present too (so the box stayed intact).
     expect(labels).toEqual(
-      expect.arrayContaining(["fnm", "node version", "claude CLI", "node in shell"]),
+      expect.arrayContaining(["fnm", "node version", "claude CLI", "node in shell", "gh CLI"]),
     );
   });
 });

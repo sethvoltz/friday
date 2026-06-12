@@ -125,6 +125,51 @@ export function probeInteractiveShellNode(
   return { ok: false, shell, detail: `node not resolvable in ${shell} -ilc` };
 }
 
+/** Marker proving a `command -v` succeeded under the login shell — distinct
+ *  from the resolved path itself, so a login rc banner echoing to stdout can't
+ *  be mistaken for a hit (same rationale as NODE_MARK). */
+const RESOLVE_MARK = "__friday_path__";
+
+/**
+ * Probe whether an arbitrary `cmd` resolves on the user's INTERACTIVE shell
+ * PATH — the same `$SHELL -ilc` environment agent workers capture
+ * (shell-env.ts). This matters most for tools the AGENT shells out to (notably
+ * `gh`, which the orchestrator/builders invoke to open PRs): doctor's plain
+ * `which gh` runs in doctor's OWN process env — the terminal that launched it,
+ * which routinely has a richer PATH (brew shellenv already sourced, IDE-injected
+ * dirs) than a freshly-spawned login shell. So `which gh` passing does NOT prove
+ * an agent worker's captured env can find `gh`. This runs `command -v <cmd>`
+ * under `$SHELL -ilc` to check the environment agents actually get.
+ *
+ * `cmd` is a trusted literal at every call site (never user input); the shells
+ * we run this on are restricted to the `-ilc` set, fish/nu/csh/pwsh are reported
+ * unverified rather than probed with the wrong invocation.
+ */
+export function probeInteractiveShellCommand(
+  cmd: string,
+  spawnFn: typeof spawnSync = spawnSync,
+  shell: string = resolveInteractiveShell(),
+): ShellNodeProbe {
+  const base = shell.split("/").pop() ?? shell;
+  if (!ILC_SHELLS.has(base)) {
+    return {
+      ok: false,
+      unverified: true,
+      shell,
+      detail: `unverified for ${base} (non -ilc shell) — ensure \`${cmd}\` runs in your interactive shell`,
+    };
+  }
+  const r = spawnFn(
+    shell,
+    ["-ilc", `command -v ${cmd} >/dev/null 2>&1 && printf '${RESOLVE_MARK}'`],
+    { encoding: "utf8", timeout: 8000 },
+  );
+  if (r.status === 0 && (r.stdout ?? "").toString().includes(RESOLVE_MARK)) {
+    return { ok: true, shell, detail: `${cmd} resolvable in ${shell} -ilc` };
+  }
+  return { ok: false, shell, detail: `${cmd} not resolvable in ${shell} -ilc` };
+}
+
 // Box dimensions. 68 columns matches the ASCII banner width (67) and the
 // docs/architecture diagrams, fitting an 80-column terminal with margin.
 // Adjust here only; the renderer derives everything else from these.
@@ -364,13 +409,24 @@ export async function runDependencies(): Promise<DoctorCheck[]> {
       : `agents can't run — add  eval "$(fnm env)"  to your shell rc (e.g. ~/.zshrc), open a new terminal. Workers capture \`${shellNode.shell} -ilc\` and need node there.`,
   );
 
-  // gh CLI
-  const ghOk = spawnSync("which", ["gh"], { encoding: "utf8" }).status === 0;
+  // gh CLI — probe the INTERACTIVE shell, not doctor's process env. Agents
+  // (orchestrator/builders) shell out to `gh` to open PRs etc., and they run in
+  // the worker's captured `$SHELL -ilc` env. A plain `which gh` here passes from
+  // a terminal that already sourced brew shellenv even when the freshly-spawned
+  // login shell agents capture can't find it — the same false-✓ that the
+  // `node in shell` row exists to catch. We also run `which gh` in process env
+  // to tell "not installed" apart from "installed but not on the agent PATH".
+  const ghShell = probeInteractiveShellCommand("gh");
+  const ghInProcessEnv = spawnSync("which", ["gh"], { encoding: "utf8" }).status === 0;
   box.resolve(
     "gh CLI",
-    ghOk ? "ok" : "fail",
-    ghOk ? "installed" : "missing",
-    ghOk ? undefined : "install with `brew install gh`",
+    ghShell.unverified ? "warn" : ghShell.ok ? "ok" : "fail",
+    ghShell.ok || ghShell.unverified ? ghShell.detail : "not on agent PATH",
+    ghShell.ok || ghShell.unverified
+      ? undefined
+      : ghInProcessEnv
+        ? `installed but not on the agents' PATH — ensure \`gh\` is on your interactive shell (e.g. \`eval "$(/opt/homebrew/bin/brew shellenv)"\` in ~/.zprofile), open a new terminal. Workers capture \`${ghShell.shell} -ilc\`.`
+        : "install with `brew install gh`",
   );
 
   // postgres: postgresql@18 is keg-only, so psql often isn't on PATH even

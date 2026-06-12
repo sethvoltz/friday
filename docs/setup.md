@@ -72,7 +72,7 @@ You can re-run `friday setup` anytime — it's idempotent. Use `friday setup --r
 friday doctor
 ```
 
-Verifies the data dir, config, db migrations, account presence, external CLIs, and — critically — that `node` resolves in your **interactive shell** (`$SHELL -ilc`), the context agent workers run in. A failing `node in shell` row is the tell-tale for "daemon healthy but Friday never replies" (the fnm shell hook above is missing).
+Verifies the data dir, config, db migrations, account presence, external CLIs, and — critically — that `node` **and `gh`** resolve in your **interactive shell** (`$SHELL -ilc`), the context agent workers run in. A failing `node in shell` row is the tell-tale for "daemon healthy but Friday never replies" (the fnm shell hook above is missing). The `gh CLI` row probes the same interactive shell rather than `doctor`'s own `PATH`, because the orchestrator and builders shell out to `gh` (opening PRs, reading issues) from that captured environment — a `gh` that your terminal can see but a fresh login shell can't is "installed but not on the agents' PATH" (typically a missing `brew shellenv` line in `~/.zprofile`).
 
 ## 5. Run
 
