@@ -285,12 +285,13 @@ class LiveBox {
 // one by one as the (sometimes slow) probes complete.
 // ============================================================================
 
-async function runDependencies(): Promise<DoctorCheck[]> {
+export async function runDependencies(): Promise<DoctorCheck[]> {
   const box = new LiveBox("Dependencies");
   for (const label of [
     "fnm",
     "node version",
     "claude CLI",
+    "node in shell",
     "gh CLI",
     "postgres",
     "cloudflared",
