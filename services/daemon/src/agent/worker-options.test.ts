@@ -62,6 +62,44 @@ describe("buildQueryOptions disallowedTools (FRI-127 §2)", () => {
     expect(out.disallowedTools).toEqual(["Task"]);
   });
 
+  it("threads the captured shell env so the agent's Bash inherits the user PATH, overlaid on process.env", () => {
+    // FRI-150/ADR-037: the agent's Claude Code process must receive the user's
+    // captured interactive PATH (the missing half of the trust gradient).
+    // Without `shellEnv` the SDK defaults `env` to the daemon's launchd-minimal
+    // process.env and the agent can't find `gh`/brew tools on a fresh box.
+    const shellEnv = { PATH: "/opt/homebrew/bin:/usr/bin", FOO_TOOLCHAIN: "1" };
+    const out = buildQueryOptions(
+      makeOpts("builder"),
+      promptCmd,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {},
+      undefined,
+      shellEnv,
+    );
+    // The captured PATH must WIN over whatever process.env carried (launchd
+    // minimal), and Friday's own process.env vars must still be present.
+    expect(out.env?.PATH).toBe("/opt/homebrew/bin:/usr/bin");
+    expect(out.env?.FOO_TOOLCHAIN).toBe("1");
+    expect(out.env?.HOME).toBe(process.env.HOME); // process.env preserved under the overlay
+  });
+
+  it("omits env entirely when no shell env is supplied (SDK falls back to process.env)", () => {
+    const out = buildQueryOptions(
+      makeOpts("helper"),
+      promptCmd,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {},
+      undefined,
+    );
+    expect(out.env).toBeUndefined();
+  });
+
   it("sets resume only when a session id is present", () => {
     const withSession = buildQueryOptions(
       makeOpts("helper"),
