@@ -159,6 +159,71 @@ ensure_brew_deps() {
   fi
 }
 
+# Homebrew prints post-install "Caveats" (e.g. fnm's "add `eval "$(fnm env)"`
+# to your shell") during `brew install`, but they scroll past and get swallowed
+# when several deps install at once — and never appear at all when the formula
+# is ALREADY installed (a re-run, or a migration onto a box that already has
+# the dep). Friday's agent workers spawn `$SHELL -ilc` to capture the user's
+# environment and need these tools — especially node, via fnm — resolvable in
+# the interactive shell, or every agent turn silently produces no reply. So
+# surface the caveats explicitly for the user to action, regardless of whether
+# we just installed the dep. (FRI: prod→Intel migration hit exactly this — fnm
+# installed, but its shell-eval caveat was never run, so node wasn't on the
+# interactive PATH and the daemon's workers couldn't run the Claude SDK.)
+forward_brew_caveats() {
+  local dep cav shown=0
+  for dep in ${BREW_DEPS}; do
+    # `|| true`: under `set -euo pipefail` a failing `brew info` (or the pipe)
+    # would otherwise abort the whole installer on this assignment.
+    cav="$(brew info "${dep}" 2>/dev/null | awk '/^==> Caveats/{f=1;next} /^==>/{f=0} f{print}' || true)"
+    [ -z "${cav}" ] && continue
+    if [ "${shown}" -eq 0 ]; then
+      warn "Some Homebrew dependencies need shell setup — caveats below:"
+      shown=1
+    fi
+    step "  ${dep}:"
+    printf '%s\n' "${cav}" | sed 's/^/    /'
+  done
+  if [ "${shown}" -eq 1 ]; then
+    warn "Add the relevant lines above to your shell rc (e.g. ~/.zshrc), then open a NEW terminal."
+    warn "Friday's agent workers run \`\$SHELL -ilc\` and need node (via fnm) resolvable there — without it, every agent turn silently produces no reply. Verify with \`friday doctor\`."
+  fi
+}
+
+# fnm's Homebrew formula emits NO caveat (so `forward_brew_caveats` can't catch
+# it), yet fnm REQUIRES a shell hook — `eval "$(fnm env)"` — to put node on the
+# interactive PATH. Friday's agent workers capture `$SHELL -ilc` env and need
+# node resolvable there. Check the real end-state and print the exact fix when
+# it's missing: this is the single most common "installed fine but agents never
+# reply" failure on a fresh box or migration (the prod→Intel cutover hit it —
+# fnm installed, no shell hook, so the workers' Claude SDK couldn't run).
+verify_interactive_node() {
+  local sh="${SHELL:-/bin/zsh}"
+  [ -x "${sh}" ] || sh="/bin/zsh"
+
+  # Bound the probe. `$SHELL -ilc` sources the FULL interactive rc, which can
+  # block (a `read` prompt, a powerlevel10k first-run wizard, a slow network
+  # call in an rc). macOS ships no `timeout`/`gtimeout`, so background the probe
+  # and a watchdog that kills it after 5s — never let a misbehaving rc wedge a
+  # `curl | bash` install. (The worker's equivalent capture in shell-env.ts is
+  # likewise 5s-bounded.) A timeout is treated as "couldn't verify" → same hint.
+  "${sh}" -ilc 'command -v node >/dev/null 2>&1' >/dev/null 2>&1 &
+  local probe=$!
+  ( sleep 5; kill "${probe}" 2>/dev/null ) >/dev/null 2>&1 &
+  local watch=$!
+  if wait "${probe}" 2>/dev/null; then
+    kill "${watch}" 2>/dev/null || true
+    return 0
+  fi
+  kill "${watch}" 2>/dev/null || true
+
+  printf '\n'
+  warn "node is NOT resolvable in your interactive shell (\`${sh} -ilc\`), or the shell took too long to start."
+  warn "fnm needs a shell hook. Add this to your shell rc (e.g. ~/.zshrc), then open a NEW terminal:"
+  printf '%s\n' "${C_BOLD}    eval \"\$(fnm env)\"${C_RESET}"
+  warn "Friday's agent workers run \`\$SHELL -ilc\` and need node there — without it every agent turn silently produces no reply. Re-check with \`friday doctor\`."
+}
+
 ensure_fnm() {
   if command -v fnm >/dev/null 2>&1; then
     return 0
@@ -448,7 +513,14 @@ main() {
   info "shim    ${SHIM_PATH}"
   info "plist   ${PLIST_PATH}"
 
+  # Always check node resolves in the interactive shell (silent when healthy —
+  # so it's quiet on every `friday update`, loud only when actually broken).
+  verify_interactive_node
+
   if [ "${first_run}" -eq 1 ]; then
+    # Surface Homebrew caveats once, on first install (postgres start, etc.) —
+    # gated to first-run so updates aren't noisy.
+    forward_brew_caveats
     printf '\n'
     step "Next steps — first-time setup"
     info "1. friday setup   # provision Postgres + create your account"

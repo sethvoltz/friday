@@ -49,6 +49,82 @@ interface Row {
   hint?: string;
 }
 
+/**
+ * Resolve the user's interactive shell the same way the daemon's shell-env
+ * capture does (services/daemon/src/shell-env.ts): `$SHELL` unless it's unset
+ * or the useless `/bin/sh`, then prefer zsh, then bash.
+ */
+function resolveInteractiveShell(exists: (p: string) => boolean = existsSync): string {
+  const fromEnv = process.env.SHELL;
+  if (fromEnv && fromEnv !== "/bin/sh" && exists(fromEnv)) return fromEnv;
+  for (const c of ["/bin/zsh", "/bin/bash"]) if (exists(c)) return c;
+  return fromEnv || "/bin/sh";
+}
+
+export interface ShellNodeProbe {
+  ok: boolean;
+  /** True when we couldn't run the probe faithfully (a shell whose `-ilc`
+   *  invocation differs — fish/nu/csh/pwsh). Reported as `warn`, not `fail`,
+   *  so we never false-alarm by running the wrong invocation. */
+  unverified?: boolean;
+  shell: string;
+  /** Node version string on success, else a short reason. */
+  detail: string;
+}
+
+/** Shells whose interactive-login env probe is `<shell> -ilc <cmd>`. The
+ *  worker (shell-env.ts buildInvocation) uses different flags for fish/nu
+ *  (`-i -l -c`), csh (`-ic`), pwsh (`-Login -Command`); rather than guess and
+ *  false-fail, we mark those "unverified". */
+const ILC_SHELLS = new Set(["zsh", "bash", "sh"]);
+
+/** Unique marker so we can isolate node's version from any banner a login rc
+ *  prints to stdout (fastfetch/motd/p10k). The worker does the same with
+ *  START/END markers (shell-env.ts) — a bare `node -e` + `^v…` anchor would
+ *  false-fail on every box whose rc echoes to stdout. */
+const NODE_MARK = "__friday_node__";
+
+/**
+ * Probe whether `node` resolves and runs in the user's INTERACTIVE shell — the
+ * exact context Friday's agent workers use. Each worker spawns `$SHELL -ilc`
+ * and runs a `node -e` marker to capture the user's environment
+ * (shell-env.ts:269). If node isn't on the interactive PATH (classically: fnm
+ * installed but its `eval "$(fnm env)"` shell hook never added), that capture
+ * fails, the worker falls back to the launchd minimal PATH, the Claude SDK
+ * can't run, and EVERY agent turn silently completes with no reply — with no
+ * error shown to the user. doctor's other dependency checks use `which` in
+ * doctor's OWN process env, which has the install shim's PATH and so misses
+ * this entirely. This check runs the real `$SHELL -ilc node -e …` instead.
+ *
+ * `spawnFn`/`shell` are injectable for tests (the real probe spawns a shell).
+ */
+export function probeInteractiveShellNode(
+  spawnFn: typeof spawnSync = spawnSync,
+  shell: string = resolveInteractiveShell(),
+): ShellNodeProbe {
+  const base = shell.split("/").pop() ?? shell;
+  if (!ILC_SHELLS.has(base)) {
+    return {
+      ok: false,
+      unverified: true,
+      shell,
+      detail: `unverified for ${base} (non -ilc shell) — ensure \`node\` runs in your interactive shell`,
+    };
+  }
+  const r = spawnFn(
+    shell,
+    ["-ilc", `node -e 'process.stdout.write("${NODE_MARK}"+process.version)'`],
+    { encoding: "utf8", timeout: 8000 },
+  );
+  // Extract the version that follows our marker — robust to a login rc that
+  // prints a banner to stdout before the command runs.
+  const m = (r.stdout ?? "").toString().match(new RegExp(`${NODE_MARK}(v\\d+\\.\\d+\\.\\d+)`));
+  if (r.status === 0 && m) {
+    return { ok: true, shell, detail: `node ${m[1]} resolvable in ${shell} -ilc` };
+  }
+  return { ok: false, shell, detail: `node not resolvable in ${shell} -ilc` };
+}
+
 // Box dimensions. 68 columns matches the ASCII banner width (67) and the
 // docs/architecture diagrams, fitting an 80-column terminal with margin.
 // Adjust here only; the renderer derives everything else from these.
@@ -270,6 +346,21 @@ async function runDependencies(): Promise<DoctorCheck[]> {
     claudeOk
       ? undefined
       : "install via `curl -fsSL https://claude.ai/install.sh | bash` or `brew install --cask claude-code`",
+  );
+
+  // node in the INTERACTIVE shell — the context agent workers actually run in
+  // (`$SHELL -ilc`, shell-env.ts). The `node version` row above only checks the
+  // .node-version pin in the install tree; THIS catches "fnm installed but its
+  // shell hook never added", which silently kills every agent turn (no reply,
+  // no error) — exactly the prod→Intel migration failure.
+  const shellNode = probeInteractiveShellNode();
+  box.resolve(
+    "node in shell",
+    shellNode.unverified ? "warn" : shellNode.ok ? "ok" : "fail",
+    shellNode.ok || shellNode.unverified ? shellNode.detail : "not resolvable",
+    shellNode.ok || shellNode.unverified
+      ? undefined
+      : `agents can't run — add  eval "$(fnm env)"  to your shell rc (e.g. ~/.zshrc), open a new terminal. Workers capture \`${shellNode.shell} -ilc\` and need node there.`,
   );
 
   // gh CLI

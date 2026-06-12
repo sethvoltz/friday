@@ -16,6 +16,14 @@ The Brewfile installs:
 - `pnpm` — build/dev-time package manager (CI pack + contributor builds); not on Friday's runtime path
 - `cloudflared` — Cloudflare Tunnel client (optional, for public reachability)
 
+> **Required: wire fnm into your shell.** `brew install fnm` does **not** put `node` on your interactive PATH — you must add fnm's shell hook to your shell rc and open a new terminal:
+>
+> ```bash
+> echo 'eval "$(fnm env)"' >> ~/.zshrc   # then open a NEW terminal
+> ```
+>
+> This is easy to miss because fnm's Homebrew formula prints no caveat (the curl installer surfaces it for you, and `friday doctor` flags it). It is **not optional**: Friday's agent workers spawn `$SHELL -ilc` and run a `node` marker to capture your environment, so without node on the interactive PATH **every agent turn silently completes with no reply** — the daemon looks healthy, messages send, but Friday never responds.
+
 Install **Claude Code** separately — the brew cask shadows Anthropic's own installer, so the Brewfile leaves it to you:
 
 ```bash
@@ -64,7 +72,7 @@ You can re-run `friday setup` anytime — it's idempotent. Use `friday setup --r
 friday doctor
 ```
 
-Verifies the data dir, config, db migrations, account presence, and external CLIs.
+Verifies the data dir, config, db migrations, account presence, external CLIs, and — critically — that `node` resolves in your **interactive shell** (`$SHELL -ilc`), the context agent workers run in. A failing `node in shell` row is the tell-tale for "daemon healthy but Friday never replies" (the fnm shell hook above is missing).
 
 ## 5. Run
 
