@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.5](https://github.com/sethvoltz/friday/compare/v1.22.4...v1.22.5) (2026-06-12)
+
+
+### Bug Fixes
+
+* agents inherit the captured shell PATH (gh/brew tools) + doctor steers PATH to ~/.zshenv ([#266](https://github.com/sethvoltz/friday/issues/266)) ([70584d5](https://github.com/sethvoltz/friday/commit/70584d5a9eab45372143664494626e5f39bd26da))
+
 ## [1.22.4](https://github.com/sethvoltz/friday/compare/v1.22.3...v1.22.4) (2026-06-12)
 
 
