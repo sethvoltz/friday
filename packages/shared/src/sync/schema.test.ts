@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { schema } from "./schema.js";
+import { permissions, schema } from "./schema.js";
 
 describe("FRI-143 Zero sync schema — schedules slice (AC8)", () => {
   const columns = schema.tables.schedules.columns as Record<
@@ -33,5 +33,37 @@ describe("FRI-143 Zero sync schema — schedules slice (AC8)", () => {
     expect(Object.keys(columns)).toEqual(
       expect.arrayContaining(["kind", "delivery_json", "name", "task_prompt", "status"]),
     );
+  });
+});
+
+describe("ADR-024 Zero sync schema — schedule_runs slice", () => {
+  // The schedule_runs table is declared in db/schema.ts and published for
+  // replication (pg-provision SYNC_TABLES), but was missing from the Zero
+  // client schema — so its rows never reached the dashboard. Pin the projected
+  // columns + nullability so a regression dropping or mistyping one is caught.
+  const columns = schema.tables.schedule_runs.columns as Record<
+    string,
+    { type: string; optional: boolean }
+  >;
+
+  it("is registered as a synced table with id as the primary key", () => {
+    expect(schema.tables.schedule_runs).toBeDefined();
+    expect(columns.id).toMatchObject({ type: "number", optional: false });
+  });
+
+  it("projects schedule_name / fired_at / status as non-optional", () => {
+    expect(columns.schedule_name).toMatchObject({ type: "string", optional: false });
+    expect(columns.fired_at).toMatchObject({ type: "number", optional: false });
+    expect(columns.status).toMatchObject({ type: "string", optional: false });
+  });
+
+  it("projects completed_at / error as optional (NULL while a run is 'running')", () => {
+    expect(columns.completed_at).toMatchObject({ type: "number", optional: true });
+    expect(columns.error).toMatchObject({ type: "string", optional: true });
+  });
+
+  it("grants select on schedule_runs (read-only history; no client mutator)", async () => {
+    const resolved = await permissions;
+    expect(resolved?.tables?.schedule_runs).toBeDefined();
   });
 });

@@ -24,10 +24,16 @@ import {
   scheduleStateDir,
   writeLastRun,
 } from "./state.js";
+import { closeScheduleRun } from "./runs.js";
 
 export async function spawnScheduledRun(
   scheduleRow: typeof schema.schedules.$inferSelect,
   runId: string,
+  // ADR-024: the `schedule_runs` row opened by fireSchedule. The worker is
+  // fire-and-forget, so we transition this row to a terminal status from the
+  // onExit callback when the worker actually finishes. Null when the open
+  // insert failed (recording is best-effort and never blocks a fire).
+  runRowId: number | null = null,
 ): Promise<void> {
   const cfg = loadConfig();
   const stateDir = ensureScheduleStateDir(scheduleRow.name);
@@ -84,6 +90,16 @@ export async function spawnScheduledRun(
   dispatchTurn({
     agentName: scheduleRow.name,
     onExit: (info) => {
+      // ADR-024: transition the schedule_runs row to a terminal status now
+      // that the worker has actually exited. `complete` maps to a clean exit;
+      // `aborted`/`error` both record as `error` (aborted carries no error
+      // text). Fire-and-forget — closeScheduleRun is best-effort and swallows
+      // its own failures.
+      void closeScheduleRun(
+        runRowId,
+        info.status === "complete" ? "complete" : "error",
+        info.status === "error" ? "worker exited with error" : undefined,
+      );
       try {
         writeLastRun(scheduleRow.name, {
           timestamp: new Date().toISOString(),
