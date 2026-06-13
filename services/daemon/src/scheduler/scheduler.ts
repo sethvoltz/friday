@@ -6,6 +6,7 @@ import * as registry from "../agent/registry.js";
 import { captureFor } from "../posthog.js";
 import { spawnScheduledRun } from "./spawn.js";
 import { deliverReminder } from "./deliver-reminder.js";
+import { closeScheduleRun, openScheduleRun } from "./runs.js";
 
 /**
  * Thrown by `upsertSchedule` when the schedule name collides with an existing
@@ -254,10 +255,13 @@ export async function fireSchedule(r: typeof schema.schedules.$inferSelect): Pro
     has_cron: !!r.cron,
     kind: r.kind,
   });
-  // Phase 5: `schedule_fired` SSE retired — Zero replicates the
-  // `schedules` slice (and the `schedule_runs` history table) so
-  // the dashboard sees the row's last_run_at / last_run_id update
-  // through its reactive query.
+  // ADR-024: record the fire in `schedule_runs` so the dashboard can show a
+  // schedule's run history reactively (Zero replicates the table). Phase 5
+  // retired the `schedule_fired` SSE — the `schedules` slice + this history
+  // table are the replicated surface. We open the row as `running` here and
+  // transition it to a terminal status below (reminder, synchronous) or in
+  // `spawnScheduledRun`'s onExit callback (agent-run, asynchronous worker).
+  const runRowId = await openScheduleRun(r.name);
 
   try {
     // FRI-143: a reminder fires as a user-facing chat block via
@@ -265,8 +269,14 @@ export async function fireSchedule(r: typeof schema.schedules.$inferSelect): Pro
     // (agent-run) spawns the scheduled worker.
     if (r.kind === "reminder") {
       await deliverReminder(r, runId);
+      // A reminder completes the instant its block is delivered — there is no
+      // async worker, so close the run row here.
+      await closeScheduleRun(runRowId, "complete");
     } else {
-      await spawnScheduledRun(r, runId);
+      // The agent-run worker is fire-and-forget (dispatchTurn). Hand the run
+      // row id to spawnScheduledRun so its onExit callback can flip the row to
+      // a terminal status when the worker actually finishes.
+      await spawnScheduledRun(r, runId, runRowId);
     }
   } catch (err) {
     logger.log("error", "schedule.spawn-error", {
@@ -274,6 +284,10 @@ export async function fireSchedule(r: typeof schema.schedules.$inferSelect): Pro
       runId,
       message: err instanceof Error ? err.message : String(err),
     });
+    // The fire itself threw (reminder delivery failed, or spawn could not even
+    // start the worker) — mark the run errored. The agent-run onExit path no
+    // longer runs in this case, so this is the row's terminal write.
+    await closeScheduleRun(runRowId, "error", err instanceof Error ? err.message : String(err));
   }
 
   const next = nextRunAfterFire(r);
