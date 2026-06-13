@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.23.0](https://github.com/sethvoltz/friday/compare/v1.22.6...v1.23.0) (2026-06-13)
+
+
+### Features
+
+* **daemon:** bare-mirror workspaces for remote-only repos ([#271](https://github.com/sethvoltz/friday/issues/271)) ([2a93917](https://github.com/sethvoltz/friday/commit/2a9391717ecb79da0abfb7081bd0fb43e2991a87))
+* **daemon:** pending-block reaper — backstop missed-NOTIFY silent loss ([#275](https://github.com/sethvoltz/friday/issues/275)) ([ea990ec](https://github.com/sethvoltz/friday/commit/ea990ec0afebc1785b76808315d6d7b42a77155b))
+* **scheduler:** record schedule fires in schedule_runs + sync to dashboard ([#273](https://github.com/sethvoltz/friday/issues/273)) ([4b18f7d](https://github.com/sethvoltz/friday/commit/4b18f7dfe7ca6eda3bb88c952e167b7cd890c3f0))
+
+
+### Bug Fixes
+
+* **daemon:** estimate live context from per-request usage, not the cumulative turn row ([#272](https://github.com/sethvoltz/friday/issues/272)) ([d8683c4](https://github.com/sethvoltz/friday/commit/d8683c4e108e9679cba58f7c658278f08bd04468))
+* **daemon:** never silently drop a user chat to a scheduled agent (SEV-0) ([#274](https://github.com/sethvoltz/friday/issues/274)) ([adbd5fc](https://github.com/sethvoltz/friday/commit/adbd5fc13fc7d5d72dd8e78ce9bfe1476a968b36))
+
 ## [1.22.6](https://github.com/sethvoltz/friday/compare/v1.22.5...v1.22.6) (2026-06-13)
 
 
