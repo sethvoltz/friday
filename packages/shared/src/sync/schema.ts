@@ -194,6 +194,29 @@ const schedules = table("schedules")
   })
   .primaryKey("name");
 
+/* ---------------- schedule_runs (ADR-024) ---------------- */
+// Mirrors `db/schema.ts:scheduleRuns`. One row per schedule fire, opened as
+// `running` by the daemon's fireSchedule and transitioned to `complete`/
+// `error` when the fire finishes (synchronously for reminders, from the
+// agent-run worker's onExit callback otherwise). The table is already in
+// pg-provision's SYNC_TABLES (published on `friday_pub`); declaring it here is
+// what makes the replicated rows reachable as a reactive client query so the
+// dashboard can render a schedule's run history (the run-history UI on
+// `schedules/[name]/+page.svelte` is the remaining follow-up). `id` is the
+// Postgres bigserial PK, surfaced over the wire as a number; `fired_at` /
+// `completed_at` are epoch-millis; `completed_at` and `error` are NULL while a
+// run is still `running`.
+const scheduleRuns = table("schedule_runs")
+  .columns({
+    id: number(),
+    schedule_name: string(),
+    fired_at: number(),
+    status: string<"running" | "complete" | "error">(),
+    completed_at: number().optional(),
+    error: string().optional(),
+  })
+  .primaryKey("id");
+
 /* ---------------- memory_entries (Phase 3.3) ---------------- */
 // Mirrors `db/schema.ts:memoryEntries`. `tagsJson` is a `jsonb` array
 // of strings in Postgres; Zero exposes it as `json` and the dashboard
@@ -442,6 +465,7 @@ export const schema: ZeroSchema & { readonly enableLegacyQueries: true } = creat
     ticketRelations,
     ticketExternalLinks,
     schedules,
+    scheduleRuns,
     memoryEntries,
     apps,
     mail,
@@ -483,6 +507,11 @@ export const permissions = definePermissions(schema, () => ({
   ticket_relations: { row: { select: ANYONE_CAN } },
   ticket_external_links: { row: { select: ANYONE_CAN } },
   schedules: { row: { select: ANYONE_CAN } },
+  // ADR-024: read-only run history. Rows are written exclusively by the
+  // daemon's fireSchedule path (no client mutator), so only `select` is
+  // configured — same single-user "any authenticated session reads every row"
+  // model as the other slices.
+  schedule_runs: { row: { select: ANYONE_CAN } },
   memory_entries: { row: { select: ANYONE_CAN } },
   apps: { row: { select: ANYONE_CAN } },
   mail: { row: { select: ANYONE_CAN } },

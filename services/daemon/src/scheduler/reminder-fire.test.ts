@@ -132,9 +132,12 @@ describe("FRI-143 fireSchedule — reminder vs agent-run branch (AC1/AC2)", () =
     await fireSchedule(row);
 
     expect(spawnScheduledRun).toHaveBeenCalledTimes(1);
+    // ADR-024: fireSchedule now threads the opened schedule_runs row id as a
+    // third arg so the worker's onExit can close it.
     expect(spawnScheduledRun).toHaveBeenCalledWith(
       expect.objectContaining({ name: "meta-daily", kind: "agent-run" }),
       expect.any(String),
+      expect.any(Number),
     );
     const blocks = await reminderBlocks();
     expect(blocks.length).toBe(0);
