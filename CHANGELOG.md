@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.6](https://github.com/sethvoltz/friday/compare/v1.22.5...v1.22.6) (2026-06-13)
+
+
+### Bug Fixes
+
+* **dashboard:** capture browser exceptions in PostHog ([#269](https://github.com/sethvoltz/friday/issues/269)) ([1b6e0b8](https://github.com/sethvoltz/friday/commit/1b6e0b80144b2d6c4fd61a25d6cc3e345179bc9d))
+
 ## [1.22.5](https://github.com/sethvoltz/friday/compare/v1.22.4...v1.22.5) (2026-06-12)
 
 
