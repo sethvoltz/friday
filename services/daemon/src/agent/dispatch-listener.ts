@@ -170,7 +170,22 @@ async function processPendingBlockRow(id: string): Promise<void> {
       resumeSessionId,
       daemonPort: resolveDaemonPort(cfg),
       parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
-      mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
+      // FRI-156 follow-up (SEV-0): gate `mode` on the BLOCK SOURCE, not the
+      // agent type. This handler only ever runs for `user_chat`-sourced blocks
+      // (see the role/source guard at the top of the function) — i.e. an
+      // INTERACTIVE turn the user is waiting on a reply for. A `scheduled`-type
+      // agent dispatched `one-shot` short-circuits worker.ts's agent loop after
+      // the first `query()`; on a resumed (often stale) scheduled session that
+      // first query returns zero content, the turn lands `blocksThisTurn === 0`,
+      // gets zero-blocked (no synthesized "no response" bubble, FRI-156), and
+      // the worker exits 0 — the user's message silently vanishes (scheduled
+      // agents have no conversational reply surface, their output normally
+      // routes via mail). A user_chat turn must run `long-lived` so the agent
+      // actually responds in-band. Autonomous schedule FIRES (scheduler/spawn.ts)
+      // keep `one-shot` — that is the correct mode for a turnless/mail-only
+      // autonomous run; this path is never reached for them.
+      mode: "long-lived",
+      turnSource: row.source,
       allowedToolsOverride,
     },
     userBlockId: willQueue ? row.blockId : undefined,

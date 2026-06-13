@@ -20,6 +20,29 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
 
+// Handler-guard mocks (mirrors resume-listener.test.ts). Static `vi.mock` so
+// `@friday/shared`'s module-level Postgres pool stays bound to the test DB —
+// `resetModules` would spawn a second pool that leaks until the DB is dropped.
+vi.mock("./registry.js", () => ({
+  getAgent: vi.fn(),
+  registerAgent: vi.fn(),
+  workingDirectoryFor: vi.fn(async () => "/tmp/cwd"),
+}));
+vi.mock("./lifecycle.js", () => ({
+  dispatchTurn: vi.fn(),
+  peekLiveWorker: vi.fn(() => null),
+}));
+vi.mock("../prompts/build-dispatch-prompt.js", () => ({
+  buildDispatchPrompt: vi.fn(async () => ({
+    systemPrompt: "system-stub",
+    body: "body-stub",
+    allowedToolsOverride: undefined,
+  })),
+}));
+vi.mock("../skills/match.js", () => ({
+  matchSkillInvocation: vi.fn(() => null),
+}));
+
 let handle: TestDbHandle;
 
 beforeAll(async () => {
@@ -32,6 +55,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await handle.truncate();
+  vi.clearAllMocks();
 });
 
 async function insertBlock(id: string, status: string): Promise<void> {
@@ -174,5 +198,123 @@ describe("Postgres trigger: friday_block_dispatch_notify_trigger", () => {
     } finally {
       await client.end();
     }
+  });
+});
+
+/**
+ * FRI-156 follow-up (SEV-0): processPendingBlockRow dispatch-mode routing.
+ *
+ * The silent-vanish chain: a user_chat message to a `scheduled`-type agent was
+ * dispatched `one-shot` (mode keyed on agent TYPE). One-shot short-circuits the
+ * worker loop after the first `query()`; the resumed stale scheduled session
+ * returns zero content → blocksThisTurn===0 → zero-blocked → worker exits 0,
+ * nothing renders, the user's message disappears.
+ *
+ * The fix gates `mode` on the block SOURCE (this handler only ever runs for
+ * `user_chat`-origin blocks — an INTERACTIVE turn that must get a reply), so it
+ * always dispatches `long-lived`, regardless of agent type. The autonomous
+ * schedule fire (scheduler/spawn.ts) never reaches this handler and keeps
+ * one-shot. Also pins that the dispatch carries `turnSource: "user_chat"` so the
+ * downstream zero-block safety net (turn-state-machine) can emit a visible
+ * notice if the long-lived turn still produces nothing.
+ */
+describe("processPendingBlockRow dispatch-mode routing (FRI-156 SEV-0)", () => {
+  async function insertPendingUserBlock(blockId: string): Promise<void> {
+    const db = getDb();
+    await db.insert(schema.blocks).values({
+      id: blockId,
+      blockId,
+      turnId: `turn-${blockId}`,
+      agentName: "sched-agent",
+      sessionId: "__pending__",
+      messageId: null,
+      blockIndex: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      contentJson: { text: "hi scheduled agent" },
+      status: "pending",
+      streaming: false,
+      originMutationId: null,
+      ts: new Date(),
+    });
+  }
+
+  function scheduledAgent(name: string) {
+    return {
+      name,
+      type: "scheduled" as const,
+      status: "idle" as const,
+      taskPrompt: "do the thing",
+      paused: false,
+      sessionId: "stale-session",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  function orchestratorAgent(name: string) {
+    return {
+      name,
+      type: "orchestrator" as const,
+      status: "idle" as const,
+      sessionId: undefined,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  it("dispatches a user_chat → SCHEDULED-type agent as long-lived (not one-shot) so it replies", async () => {
+    await insertPendingUserBlock("blk-sched-1");
+    const registry = await import("./registry.js");
+    const lifecycle = await import("./lifecycle.js");
+    const { _processPendingBlockRow } = await import("./dispatch-listener.js");
+
+    vi.mocked(registry.getAgent).mockResolvedValue(scheduledAgent("sched-agent"));
+    vi.mocked(lifecycle.peekLiveWorker).mockReturnValue(null);
+
+    await _processPendingBlockRow("blk-sched-1");
+
+    expect(lifecycle.dispatchTurn).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(lifecycle.dispatchTurn).mock.calls[0]![0];
+    // The bug was `mode: "one-shot"` for a scheduled agent. The fix: a
+    // user_chat-origin turn is always long-lived so the agent actually replies.
+    expect(call.options.mode).toBe("long-lived");
+    // The origin source is threaded so the zero-block safety net can fire.
+    expect(call.options.turnSource).toBe("user_chat");
+  });
+
+  it("dispatches a user_chat → orchestrator agent as long-lived (unchanged)", async () => {
+    const db = getDb();
+    await db.insert(schema.blocks).values({
+      id: "blk-orch-1",
+      blockId: "blk-orch-1",
+      turnId: "turn-blk-orch-1",
+      agentName: "sched-agent",
+      sessionId: "__pending__",
+      messageId: null,
+      blockIndex: 0,
+      role: "user",
+      kind: "text",
+      source: "user_chat",
+      contentJson: { text: "hi" },
+      status: "pending",
+      streaming: false,
+      originMutationId: null,
+      ts: new Date(),
+    });
+    const registry = await import("./registry.js");
+    const lifecycle = await import("./lifecycle.js");
+    const { _processPendingBlockRow } = await import("./dispatch-listener.js");
+
+    vi.mocked(registry.getAgent).mockResolvedValue(orchestratorAgent("sched-agent"));
+    vi.mocked(lifecycle.peekLiveWorker).mockReturnValue(null);
+
+    await _processPendingBlockRow("blk-orch-1");
+
+    expect(lifecycle.dispatchTurn).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(lifecycle.dispatchTurn).mock.calls[0]![0];
+    expect(call.options.mode).toBe("long-lived");
+    expect(call.options.turnSource).toBe("user_chat");
   });
 });
