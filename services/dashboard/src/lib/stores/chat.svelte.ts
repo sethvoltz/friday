@@ -3,6 +3,7 @@ import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import { compactionDividerId } from "../components/Chat/compaction-render";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { initialPageSize } from "../util/page-size";
+import { resolveSendTargetAgent } from "../util/send-target";
 import { randomUUID } from "../util/uuid";
 import type { SendUserMessageOutcome } from "./mutator-result";
 import { KEYS, loadJSON, removeKey, saveJSON } from "./persistent";
@@ -1097,6 +1098,16 @@ export class ChatState {
     opts?: {
       queueId?: string;
       attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+      /**
+       * FRI-72: the authoritative agent this send targets. ChatInput passes
+       * the URL-resolved `sendAgent` so the optimistic overlay entry is
+       * keyed/stamped by the SAME agent as the canonical Zero write —
+       * otherwise, when `focusedAgent` lags a navigation, the bubble is
+       * stored under the wrong agent and the `#derivedMessages` overlay
+       * filter (`entry.agent !== focused`) drops it from the visible surface.
+       * Falls back to `focusedAgent` for callers without a route context.
+       */
+      agent?: string;
     },
   ): string {
     // FIX_FORWARD 2.6: mint a `pending_<uuid>` id and `pending: true` so
@@ -1106,7 +1117,7 @@ export class ChatState {
     // resolves; the daemon's `recordUserBlock` writes the same id and
     // Zero replicates it next, which dedups in applyZeroBlocks's merge.
     const id = `pending_${randomUUID()}`;
-    const agent = this.focusedAgent;
+    const agent = opts?.agent ?? this.focusedAgent;
     this.optimistic.set(
       overlayKey(agent, id),
       new OptimisticEntry({
@@ -1137,14 +1148,19 @@ export class ChatState {
    * applyZeroBlocks's merge dedups by id, so the canonical row that
    * lands later replaces the legacy entry without surfacing a duplicate.
    */
-  confirmPending(queueId: string, turnId: string): void {
+  confirmPending(queueId: string, turnId: string, agent?: string): void {
     this.clearTransportFailureTimer(queueId);
     const targetId = userBlockIdForTurn(turnId);
-    const agent = this.focusedAgent;
+    // FRI-72: confirm by the SAME authoritative agent the bubble was stored
+    // under (`addUser`'s `sendAgent`), not the possibly-lagging
+    // `focusedAgent`. If the route caught up after the optimistic write, the
+    // entry lives under the send agent; matching on `focusedAgent` would miss
+    // it and early-return without ever confirming the bubble.
+    const targetAgent = agent ?? this.focusedAgent;
     let entry: OptimisticEntry | undefined;
     let entryKey: OverlayKey | undefined;
     for (const [k, e] of this.optimistic.entries()) {
-      if (e.queueId === queueId && e.agent === agent) {
+      if (e.queueId === queueId && e.agent === targetAgent) {
         entry = e;
         entryKey = k;
         break;
@@ -1168,7 +1184,7 @@ export class ChatState {
       text: entry.text,
       status: "complete",
       ts: entry.ts,
-      agent,
+      agent: targetAgent,
       turnId,
       source: entry.source,
       attachments: entry.attachments,
@@ -2017,15 +2033,21 @@ export class ChatState {
     }
     const blockId = randomUUID();
     const newTurnId = `t_${blockId}`;
-    const agent = this.focusedAgent;
-    this.addUser(text, { queueId: blockId });
+    // FRI-72: the URL route is authoritative for the per-message Resend
+    // affordance too. Resolve from the current pathname and let it win over
+    // the possibly-lagging `focusedAgent`; fall back to `focusedAgent` when
+    // there's no live chat route (or no DOM, e.g. unit tests).
+    const routeAgent =
+      typeof window !== "undefined" ? resolveSendTargetAgent(window.location.pathname) : null;
+    const agent = routeAgent ?? this.focusedAgent;
+    this.addUser(text, { queueId: blockId, agent });
     const claimedInflight = this.inflightTurnIdByAgent[agent] == null;
     if (claimedInflight) this.markInflight(agent, newTurnId);
     const sendPromise: Promise<SendUserMessageOutcome> =
       this.sendMessageFn?.({ blockId, agent, text }) ?? Promise.resolve({ kind: "no-zero" });
     void sendPromise.then((outcome) => {
       if (outcome.kind === "ok") {
-        this.confirmPending(blockId, outcome.turnId);
+        this.confirmPending(blockId, outcome.turnId, agent);
         this.markInflight(agent, outcome.turnId);
         return;
       }

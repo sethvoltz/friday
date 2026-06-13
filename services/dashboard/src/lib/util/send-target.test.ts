@@ -35,4 +35,11 @@ describe("resolveSendTargetAgent", () => {
   it("returns null for a malformed /sessions/ route with no agent segment", () => {
     expect(resolveSendTargetAgent("/sessions/")).toBeNull();
   });
+
+  it("rejects a resolved agent name that decodes to contain a slash", () => {
+    // Defensive guard: `a%2Fb` decodes to `a/b`, which is not a valid
+    // single-segment agent name. Refuse it rather than stamping a send with
+    // a bogus, slash-bearing agent. Not reachable as a chat route today.
+    expect(resolveSendTargetAgent("/sessions/a%2Fb")).toBeNull();
+  });
 });

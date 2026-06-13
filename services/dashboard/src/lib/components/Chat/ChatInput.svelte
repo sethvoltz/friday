@@ -466,11 +466,19 @@
     chat.addUser(t, {
       queueId: blockId,
       attachments: attachments.length > 0 ? attachments : undefined,
+      // FRI-72: stamp/key the optimistic overlay by the authoritative send
+      // agent (not the lagging `focusedAgent`), so the bubble renders on the
+      // correct surface during a navigate-then-send.
+      agent: sendAgent,
     });
     // Eagerly claim the inflight slot before the Zero optimistic write fires
     // applyZeroBlocks — prevents the FRI-85 "Agent didn't respond" flash.
-    const claimedInflight = chat.inflightTurnId === null;
-    if (claimedInflight) chat.inflightTurnId = eagerTurnId;
+    // FRI-72: claim under `sendAgent` (the authoritative target), not the
+    // possibly-lagging `focusedAgent`. Claiming the focused slot during a
+    // navigation would wedge the WRONG agent's input on "Stop" with a stale
+    // eager inflight (`t_<blockId>`) that never resolves.
+    const claimedInflight = (chat.inflightTurnIdByAgent[sendAgent] ?? null) === null;
+    if (claimedInflight) chat.markInflight(sendAgent, eagerTurnId);
     // Release object URLs and clear the chip row.
     for (const a of pendingAttachments) {
       if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
@@ -489,8 +497,9 @@
     if (outcome.kind === "ok") {
       // Belt-and-suspenders: confirmPending re-keys the bubble if
       // applyZeroBlocks hasn't already done it via the optimistic write.
-      chat.confirmPending(blockId, outcome.turnId);
-      chat.inflightTurnId = outcome.turnId;
+      // FRI-72: confirm/mark inflight under the authoritative `sendAgent`.
+      chat.confirmPending(blockId, outcome.turnId, sendAgent);
+      chat.markInflight(sendAgent, outcome.turnId);
       // Product analytics: a user message that the server accepted. Capture
       // shape, not content — never the message text. No-op without a key.
       posthog.capture("message_sent", {
@@ -514,8 +523,10 @@
       // NOT in the DB) or no-zero (Zero never initialised — very rare,
       // only the first ~200ms of page load). Both warrant immediate
       // FAILED-TO-SEND chrome.
-      if (claimedInflight && chat.inflightTurnId === eagerTurnId) {
-        chat.inflightTurnId = null;
+      // FRI-72: release the eager claim from the agent we claimed it on
+      // (`sendAgent`), matching the claim above.
+      if (claimedInflight && chat.inflightTurnIdByAgent[sendAgent] === eagerTurnId) {
+        chat.markInflight(sendAgent, null);
       }
       chat.markPendingFailed(blockId);
     }

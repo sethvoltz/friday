@@ -142,7 +142,8 @@ test.describe("FRI-72: URL route is the authoritative chat send target", () => {
       return !!c;
     });
     await page.evaluate(() => {
-      const c = (globalThis as unknown as { __fridayChat?: { focusedAgent: string } }).__fridayChat!;
+      const c = (globalThis as unknown as { __fridayChat?: { focusedAgent: string } })
+        .__fridayChat!;
       c.focusedAgent = "agent-b";
     });
     // Sanity: the signal is now B while the URL is still A.
@@ -173,6 +174,73 @@ test.describe("FRI-72: URL route is the authoritative chat send target", () => {
     expect(rows.length).toBe(1);
     // THE INVARIANT: viewing /sessions/agent-a → stamped agent-a, full stop.
     expect(rows[0]!.agent_name).toBe("agent-a");
+
+    const realErrors = consoleErrors.filter((e) => !e.startsWith("Failed to load resource:"));
+    expect(realErrors, `Unexpected JS errors: ${realErrors.join("\n")}`).toEqual([]);
+
+    await context.close();
+  });
+
+  test("real navigation race: goto(B) then goto(A) then immediate send stamps agent-a", async ({
+    browser,
+  }) => {
+    // Unlike the first test (which force-sets `focusedAgent` via the
+    // `__fridayChat` probe), this drives the ACTUAL navigation timing: we
+    // navigate to B, then to A, then send immediately — without settling —
+    // so `focusedAgent`'s post-navigation `$effect` may still be lagging at
+    // B when the send fires. The canonical write must still land on A.
+    const env = loadEnv();
+
+    await seedAgent(env.databaseUrl, "agent-b");
+    await seedAgent(env.databaseUrl, "agent-a");
+
+    const context = await browser.newContext();
+    await context.addCookies(parseCookiesForPlaywright(env.cookie, env.dashboardURL));
+    const page = await context.newPage();
+
+    const consoleErrors: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error") consoleErrors.push(msg.text());
+    });
+
+    // 1. Land on agent-b and let it settle so focusedAgent === "agent-b".
+    await page.goto(`${env.dashboardURL}/sessions/agent-b`, { waitUntil: "domcontentloaded" });
+    await expect(page).not.toHaveURL(/\/login/);
+    await page.waitForFunction(() => {
+      const c = (globalThis as unknown as { __fridayChat?: { focusedAgent: string } }).__fridayChat;
+      return !!c && c.focusedAgent === "agent-b";
+    });
+
+    // 2. Client-side navigate to agent-a and IMMEDIATELY send, without
+    //    waiting for the focus `$effect` to catch up. We don't await any
+    //    settle between the route change and the send — that's the race.
+    await page.goto(`${env.dashboardURL}/sessions/agent-a`, { waitUntil: "commit" });
+
+    const input = page.getByPlaceholder(/Message/);
+    await expect(input).toBeVisible({ timeout: 15_000 });
+    await expect(input).toBeEnabled();
+    await expect(page).toHaveURL(/\/sessions\/agent-a$/);
+
+    const marker = `e2e-fri72-realrace-${Date.now()}`;
+    const messageText = `real navigation race send ${marker}`;
+    await input.fill(messageText);
+    await page.getByRole("button", { name: "Send" }).click();
+
+    // Canonical-write check: the row must be stamped with the URL agent (A),
+    // regardless of whether focusedAgent had caught up at send time.
+    let rows: Awaited<ReturnType<typeof readUserBlock>> = [];
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      rows = await readUserBlock(env.databaseUrl, marker);
+      if (rows.length > 0) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.agent_name).toBe("agent-a");
+
+    // The optimistic bubble must render on the agent-a surface (overlay
+    // keyed by the authoritative send agent, not the lagging focusedAgent).
+    await expect(page.getByText(messageText)).toBeVisible({ timeout: 10_000 });
 
     const realErrors = consoleErrors.filter((e) => !e.startsWith("Failed to load resource:"));
     expect(realErrors, `Unexpected JS errors: ${realErrors.join("\n")}`).toEqual([]);
