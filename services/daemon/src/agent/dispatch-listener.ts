@@ -137,16 +137,34 @@ async function processPendingBlockRow(id: string): Promise<void> {
   const liveBefore = peekLiveWorker(agentName);
   const willQueue = liveBefore?.status === "working";
 
-  // Flip the row out of 'pending'. Also populate the session_id with
-  // the agent's resumed session — the mutator wrote the sentinel
-  // '__pending__' because the daemon owns the session boundary.
-  await db
+  // Flip the row out of 'pending' — and treat THIS UPDATE as the authoritative
+  // single-dispatch claim. The line-69 read short-circuits the common case, but
+  // it is a non-atomic check: two callers (e.g. the reaper's tick racing the
+  // listener's NOTIFY / boot scan over the same `status='pending' AND
+  // role='user'` row) can BOTH pass that read while the row is still pending.
+  // The `WHERE status='pending'` predicate then lets exactly ONE of them change
+  // the row — so we gate dispatch on that UPDATE actually having matched a row.
+  // If it matched zero rows, another caller already claimed the row and is
+  // dispatching it; we must NOT also call dispatchTurn (dispatchTurn has no
+  // turnId dedupe → a duplicate claim here would mean a duplicate turn / a
+  // duplicate queued prompt). Normal single-caller path: rowCount === 1 →
+  // dispatch proceeds exactly as before.
+  const claim = await db
     .update(schema.blocks)
     .set({
       status: willQueue ? "queued" : "complete",
       sessionId: resumeSessionId ?? "__pending__",
     })
     .where(and(eq(schema.blocks.id, row.id), eq(schema.blocks.status, "pending")));
+  if ((claim.rowCount ?? 0) === 0) {
+    // Lost the claim race — another caller flipped this row off 'pending'
+    // between our line-69 read and this UPDATE. That caller owns the dispatch.
+    logger.log("info", "block.dispatch.claim-lost", {
+      block_id: row.blockId,
+      turn_id: row.turnId,
+    });
+    return;
+  }
 
   // Dispatch the turn. The userBlockId is only passed when the prompt
   // will queue — that's the legacy contract: dispatchTurn uses it to
@@ -303,3 +321,9 @@ export async function startDispatchListener(): Promise<DispatchListenerHandle> {
 
 // Test-only export.
 export { processPendingBlockRow as _processPendingBlockRow };
+
+// Re-dispatch entrypoint reused by the pending-block reaper
+// (scheduler/pending-block-reaper.ts) so the live-daemon missed-NOTIFY
+// sweep funnels through the SAME idempotent dispatch path as the NOTIFY
+// listener and the boot scan — never a duplicated dispatch implementation.
+export { processPendingBlockRow };
