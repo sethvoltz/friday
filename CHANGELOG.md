@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.23.1](https://github.com/sethvoltz/friday/compare/v1.23.0...v1.23.1) (2026-06-13)
+
+
+### Bug Fixes
+
+* **dashboard:** make URL route the authoritative chat send target (FRI-72) ([#276](https://github.com/sethvoltz/friday/issues/276)) ([0991d5a](https://github.com/sethvoltz/friday/commit/0991d5ab0d779732529d9ce27ed5ee21ac870c4f))
+
 ## [1.23.0](https://github.com/sethvoltz/friday/compare/v1.22.6...v1.23.0) (2026-06-13)
 
 
