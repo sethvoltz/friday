@@ -8,6 +8,7 @@
   import { page } from "$app/stores";
   import { portal } from "$lib/actions/portal";
   import { randomUUID } from "$lib/util/uuid";
+  import { resolveSendTargetAgent } from "$lib/util/send-target";
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
   import { onDestroy, onMount, tick } from "svelte";
   import { Paperclip, Send, CircleStop } from "lucide-svelte";
@@ -436,24 +437,26 @@
       filename: a.filename,
       mime: a.mime,
     }));
-    // FRI-72 instrumentation: catch the leak where chat.focusedAgent
-    // disagrees with the current route at submit time.
-    try {
-      const pathname = $page.url.pathname;
-      const expectedAgent =
-        pathname === "/"
-          ? "friday"
-          : pathname.startsWith("/sessions/")
-            ? decodeURIComponent(pathname.split("/")[2] ?? "")
-            : null;
-      if (expectedAgent && expectedAgent !== chat.focusedAgent) {
-        // eslint-disable-next-line no-console
-        console.error(
-          `[chat.submit] focusedAgent="${chat.focusedAgent}" but URL implies "${expectedAgent}" (pathname=${pathname}). Sending to focusedAgent — this is the bug we're hunting.`,
-        );
-      }
-    } catch {
-      /* instrumentation must not break send */
+    // FRI-72 fix: the URL route is the AUTHORITATIVE send target. The
+    // `chat.focusedAgent` signal is synced from the route by a
+    // post-navigation `$effect` in ChatShell.svelte and can lag the URL
+    // during/right-after a navigation — a send in that window would
+    // otherwise be stamped with the previously-viewed agent and silently
+    // misrouted (the confirmed root cause of a SEV-0 message loss). We
+    // resolve the target from `$page` here and let the URL win. The prior
+    // `console.error`-only instrumentation ("the bug we're hunting") is
+    // retired: this is now a correction, not just a log.
+    const routeAgent = resolveSendTargetAgent($page.url.pathname);
+    // Fall back to focusedAgent only when the route isn't a live chat
+    // route (no authoritative agent to read) — in practice ChatInput only
+    // renders on live `/` and `/sessions/<agent>` routes, so `routeAgent`
+    // is non-null here.
+    const sendAgent = routeAgent ?? chat.focusedAgent;
+    if (routeAgent && routeAgent !== chat.focusedAgent) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[chat.submit] focusedAgent="${chat.focusedAgent}" lagged URL "${routeAgent}" at send time; stamping send to the URL agent (FRI-72).`,
+      );
     }
     // Pre-mint the blockId so `queueId` on the optimistic bubble equals
     // the Zero block's PK — `applyZeroBlocks` drops the pending bubble
@@ -463,11 +466,19 @@
     chat.addUser(t, {
       queueId: blockId,
       attachments: attachments.length > 0 ? attachments : undefined,
+      // FRI-72: stamp/key the optimistic overlay by the authoritative send
+      // agent (not the lagging `focusedAgent`), so the bubble renders on the
+      // correct surface during a navigate-then-send.
+      agent: sendAgent,
     });
     // Eagerly claim the inflight slot before the Zero optimistic write fires
     // applyZeroBlocks — prevents the FRI-85 "Agent didn't respond" flash.
-    const claimedInflight = chat.inflightTurnId === null;
-    if (claimedInflight) chat.inflightTurnId = eagerTurnId;
+    // FRI-72: claim under `sendAgent` (the authoritative target), not the
+    // possibly-lagging `focusedAgent`. Claiming the focused slot during a
+    // navigation would wedge the WRONG agent's input on "Stop" with a stale
+    // eager inflight (`t_<blockId>`) that never resolves.
+    const claimedInflight = (chat.inflightTurnIdByAgent[sendAgent] ?? null) === null;
+    if (claimedInflight) chat.markInflight(sendAgent, eagerTurnId);
     // Release object URLs and clear the chip row.
     for (const a of pendingAttachments) {
       if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
@@ -479,19 +490,20 @@
     autoresize();
     const outcome = await zeroSync.sendUserMessage({
       blockId,
-      agent: chat.focusedAgent,
+      agent: sendAgent,
       text: t,
       attachments: attachments.length > 0 ? attachments : undefined,
     });
     if (outcome.kind === "ok") {
       // Belt-and-suspenders: confirmPending re-keys the bubble if
       // applyZeroBlocks hasn't already done it via the optimistic write.
-      chat.confirmPending(blockId, outcome.turnId);
-      chat.inflightTurnId = outcome.turnId;
+      // FRI-72: confirm/mark inflight under the authoritative `sendAgent`.
+      chat.confirmPending(blockId, outcome.turnId, sendAgent);
+      chat.markInflight(sendAgent, outcome.turnId);
       // Product analytics: a user message that the server accepted. Capture
       // shape, not content — never the message text. No-op without a key.
       posthog.capture("message_sent", {
-        agent: chat.focusedAgent,
+        agent: sendAgent,
         turn_id: outcome.turnId,
         text_length: t.length,
         has_attachments: attachments.length > 0,
@@ -511,8 +523,10 @@
       // NOT in the DB) or no-zero (Zero never initialised — very rare,
       // only the first ~200ms of page load). Both warrant immediate
       // FAILED-TO-SEND chrome.
-      if (claimedInflight && chat.inflightTurnId === eagerTurnId) {
-        chat.inflightTurnId = null;
+      // FRI-72: release the eager claim from the agent we claimed it on
+      // (`sendAgent`), matching the claim above.
+      if (claimedInflight && chat.inflightTurnIdByAgent[sendAgent] === eagerTurnId) {
+        chat.markInflight(sendAgent, null);
       }
       chat.markPendingFailed(blockId);
     }
