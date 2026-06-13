@@ -47,6 +47,16 @@ export interface WorkerSpawnOptions {
    */
   mode: "long-lived" | "one-shot";
   /**
+   * FRI-156 follow-up: the DB `blocks.source` of the block that originated
+   * this turn (e.g. `"user_chat"`, `"mail"`, `"schedule"`). Used daemon-side
+   * by the turn-state machine's zero-block carve-out — a `user_chat`-origin
+   * turn that produced zero content blocks surfaces a VISIBLE notice block
+   * rather than vanishing silently (a user message can never be dropped with
+   * no reply surface). Omitted for autonomous/system-origin turns. Daemon-only
+   * bookkeeping — the worker fork does not read it.
+   */
+  turnSource?: string;
+  /**
    * User-configured stdio MCP servers from `~/.friday/config.json`. Filtered
    * by the recipient worker's agent type against each entry's `scope`. The
    * daemon fills this from `loadConfig()` at spawn time; callers don't need
@@ -80,6 +90,10 @@ export interface WorkerPromptCommand {
   turnId: string;
   resumeSessionId?: string;
   allowedToolsOverride?: string[];
+  /** FRI-156 follow-up: DB `blocks.source` of the originating block (see
+   *  WorkerSpawnOptions.turnSource). Threaded so a queue-drained user_chat
+   *  turn keeps its origin for the zero-block visible-notice carve-out. */
+  turnSource?: string;
   /** The DB `blocks.block_id` of the user-chat block that backs this prompt,
    *  when the daemon recorded the user block before dispatch. Populated for
    *  `user_chat` POSTs (initial or queued); omitted for mail/scheduled

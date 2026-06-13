@@ -166,6 +166,13 @@ export interface LiveWorker {
    *  this field it would be silently dropped (FRI-58). */
   activePrompt?: WorkerPromptCommand;
   mode: "long-lived" | "one-shot";
+  /** FRI-156 follow-up: DB `blocks.source` of the block that originated the
+   *  CURRENT turn. Set at every dispatch boundary (spawn-fresh first turn +
+   *  `sendPrompt`). Read by the turn-state machine's zero-block carve-out so a
+   *  `user_chat`-origin turn that produced zero content blocks emits a VISIBLE
+   *  notice block instead of vanishing silently. Undefined for
+   *  autonomous/system-origin turns. */
+  turnSource?: string;
   /** Set by handleEvent on turn-complete; consumed by onExit. */
   lastExitStatus: "complete" | "aborted" | "error";
   completedAtLeastOnce: boolean;
@@ -478,6 +485,7 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     status: "working",
     nextPrompts: [],
     mode: input.options.mode,
+    turnSource: input.options.turnSource,
     lastExitStatus: "complete",
     completedAtLeastOnce: false,
     onExit: input.onExit,
@@ -664,6 +672,7 @@ export function dispatchTurn(input: SpawnTurnInput): void {
     // spawn, where `existing.sessionId` is undefined.
     resumeSessionId: existing.sessionId ?? input.options.resumeSessionId ?? undefined,
     allowedToolsOverride: input.options.allowedToolsOverride,
+    turnSource: input.options.turnSource,
     userBlockId: input.userBlockId,
   };
   if (existing.status === "idle") {
@@ -826,6 +835,7 @@ function toTurnContext(w: LiveWorker): TurnContext {
     abortRequested: w.abortRequested,
     turnStart: w.turnStart,
     blocksThisTurn: w.blocksThisTurn,
+    turnSource: w.turnSource,
     zeroBlockTurnStreak: w.zeroBlockTurnStreak,
     mailSendToParentThisTurn: w.mailSendToParentThisTurn,
     noMailBackNudgedThisTurn: w.noMailBackNudgedThisTurn,
@@ -1055,6 +1065,10 @@ function sendPrompt(w: LiveWorker, p: WorkerPromptCommand): void {
   p.resumeSessionId = w.sessionId ?? p.resumeSessionId;
   restampQueuedUserBlock(w.agentName, p.turnId, p.userBlockId);
   w.turnId = p.turnId;
+  // FRI-156 follow-up: refresh the turn's origin source at the dispatch
+  // boundary so the zero-block carve-out keys off THIS turn's origin, not a
+  // prior turn's. A queue-drained prompt carries its own `turnSource`.
+  w.turnSource = p.turnSource;
   w.turnStart = Date.now();
   // FRI-58: reset lastBlockStop so the turn-stall watchdog measures from the
   // start of this turn, not the end of the previous one. Without this, any

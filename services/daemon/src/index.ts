@@ -527,7 +527,14 @@ async function recoverQueuedTurns(cfg: ReturnType<typeof loadConfig>): Promise<v
           resumeSessionId: a.sessionId ?? undefined,
           daemonPort,
           parentName: "parentName" in a ? (a.parentName ?? undefined) : undefined,
-          mode: a.type === "scheduled" ? "one-shot" : "long-lived",
+          // FRI-156 follow-up (SEV-0): a recovered queued block is an
+          // INTERACTIVE user turn the dashboard persisted while the daemon was
+          // down. It must run `long-lived` so the agent responds — a
+          // scheduled-type agent dispatched `one-shot` short-circuits the
+          // worker loop and the user's message silently vanishes. Gate on the
+          // block source (these are user_chat blocks), not the agent type.
+          mode: "long-lived",
+          turnSource: block.source ?? "user_chat",
         },
         userBlockId: block.blockId,
       });

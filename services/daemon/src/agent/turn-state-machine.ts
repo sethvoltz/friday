@@ -71,6 +71,15 @@ export interface TurnContext {
   turnStart: number | undefined;
   /** Count of block-starts observed this turn. */
   blocksThisTurn: number;
+  /**
+   * FRI-156 follow-up: the DB `blocks.source` of the block that originated this
+   * turn (`"user_chat"`, `"mail"`, `"schedule"`, …). Drives the zero-block
+   * carve-out — a `user_chat`-origin turn that produced zero content blocks
+   * MUST emit a visible notice block (the user is waiting on a reply and has no
+   * other surface) rather than vanish silently. Undefined for autonomous /
+   * system-origin turns, which keep the existing silent zero-block behavior.
+   */
+  turnSource?: string;
   /** Consecutive zero-block turn-complete/error streak (wedge detector). */
   zeroBlockTurnStreak: number;
   /** Count of mail_send-to-parent tool_use blocks observed this turn. */
@@ -402,6 +411,25 @@ export const WEDGE_ERROR_PAYLOAD: ErrorBlockPayload = {
 };
 
 /**
+ * FRI-156 follow-up (SEV-0 safety net): the visible notice block emitted when
+ * an INTERACTIVE (`user_chat`-origin) turn completes with zero content blocks.
+ * Without this, such a turn is zero-blocked silently (FRI-156 suppresses the
+ * synthesized "no response" bubble) and the user's message vanishes with no
+ * reply surface. Kept as an `ErrorBlockPayload` (kind=`error`) so it renders
+ * through the dashboard's existing error-bubble path — no new block kind. This
+ * is a last-resort backstop; the primary fix (dispatch routing) means a healthy
+ * user_chat turn produces real content blocks and never reaches here.
+ */
+export const ZERO_BLOCK_USER_CHAT_PAYLOAD: ErrorBlockPayload = {
+  code: "no_response_generated",
+  headline: "No response was generated for this turn.",
+  rawMessage:
+    "The agent finished this turn without producing any content. Your message " +
+    "was received and saved, but the agent returned nothing to show. Try " +
+    "sending it again, or rephrasing.",
+};
+
+/**
  * The pure Transition function. No side effects: it reads `w` (TurnContext),
  * the `transition`, and `deps`, and returns the next state + projection +
  * in-memory mutations + ordered intents. The caller applies the mutations and
@@ -529,6 +557,21 @@ function applyComplete(w: TurnContext, e: CompletePayload, deps: ApplyDeps): App
   const completedBlocks = w.blocksThisTurn;
   const completedMailBacks = w.mailSendToParentThisTurn;
   const wedgeStreak = w.abortRequested ? w.zeroBlockTurnStreak : evaluateWedge(w, deps).streak;
+
+  // FRI-156 follow-up (SEV-0 safety net): a user message can NEVER vanish
+  // silently. An INTERACTIVE (`user_chat`-origin) turn that produced zero
+  // content blocks AND was not a user-requested abort gets a VISIBLE notice
+  // block instead of being zero-blocked into nothing. Emitted BEFORE
+  // tear-down-turn so it lands in the still-live turn's accumulator with a
+  // real block_index. Autonomous / system-origin turns (mail, schedule, …)
+  // keep the existing silent zero-block behavior — they have other reply
+  // surfaces (mail) and a turnless autonomous fire legitimately emits nothing.
+  // Aborts are excluded: the user explicitly stopped the turn and the dashboard
+  // already renders the abort state. The wedge-tripped path returned above and
+  // records its own WEDGE_ERROR_PAYLOAD, so this never double-fires.
+  if (w.blocksThisTurn === 0 && !w.abortRequested && w.turnSource === "user_chat") {
+    intents.push({ kind: "record-error-block", payload: ZERO_BLOCK_USER_CHAT_PAYLOAD });
+  }
 
   // FRI-4 #2 + FRI-148 A: finalize a mid-stream-abandoned block as aborted so
   // it leaves `streaming`, AND drop the per-turn accumulator. The two used to

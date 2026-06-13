@@ -258,7 +258,14 @@ async function processResumeRequestedRow(blockId: string): Promise<void> {
       resumeSessionId: agentRow.sessionId ?? undefined,
       daemonPort: resolveDaemonPort(cfg),
       parentName: "parentName" in agentRow ? (agentRow.parentName ?? undefined) : undefined,
-      mode: agentRow.type === "scheduled" ? "one-shot" : "long-lived",
+      // FRI-156 follow-up (SEV-0): a Resume re-fires an INTERACTIVE user_chat
+      // turn (validated role=user, kind=text above) the user is waiting on. It
+      // must run `long-lived` so the agent actually responds — dispatching a
+      // scheduled-type agent `one-shot` here short-circuits the worker loop and
+      // the user's resumed message silently vanishes (same chain as
+      // dispatch-listener). Gate on the block source, not the agent type.
+      mode: "long-lived",
+      turnSource: row.source ?? "user_chat",
       allowedToolsOverride,
     },
   });
