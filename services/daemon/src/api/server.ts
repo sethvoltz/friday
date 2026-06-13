@@ -1552,6 +1552,16 @@ export interface CreateAgentInput {
   prompt: string;
   model?: string;
   ticketId?: string;
+  /**
+   * Builder workspace source. `repo` is either:
+   *   - a local filesystem path to an existing git checkout (the worktree is
+   *     created directly off it), OR
+   *   - a remote URL (https / ssh / scp-style) when there is NO local checkout
+   *     on this machine. In that case the daemon maintains a bare `--mirror`
+   *     clone under `<DATA_DIR>/repos/<name>.git` and worktrees off the mirror.
+   * The orchestrator resolves a repo NAME → URL before calling; the daemon
+   * just needs to accept whichever form arrives in `repo`.
+   */
   worktree?: { repo: string; branch?: string; fromRef?: string };
   reason?: string;
 }
