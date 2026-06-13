@@ -145,7 +145,11 @@ async function statusOf(id: string): Promise<string | undefined> {
 
 describe("__tickForTest (imperative pass against scratch Postgres)", () => {
   it("(a) re-dispatches a stale user_chat pending block through processPendingBlockRow", async () => {
-    await insertBlockRow({ id: "stale", status: "pending", tsMs: NOW - STALE_THRESHOLD_MS - 1_000 });
+    await insertBlockRow({
+      id: "stale",
+      status: "pending",
+      tsMs: NOW - STALE_THRESHOLD_MS - 1_000,
+    });
 
     // Spy the shared dispatch entrypoint so we don't fork a real worker — the
     // point is that the reaper FUNNELS through this exact function.
