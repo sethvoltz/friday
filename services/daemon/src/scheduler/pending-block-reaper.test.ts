@@ -17,8 +17,17 @@
  *       (c) no double-dispatch when the row was already claimed (status flipped
  *           off 'pending' before the pass) — the spy is the real function,
  *           which re-reads + short-circuits;
- *       (d) a structurally-undispatchable stale row surfaces a VISIBLE error
- *           block AND is flipped to 'error' so it isn't re-scanned forever.
+ *       (d) a non-user_chat user `pending` row is surfaced as an
+ *           invariant-violation WARN and left UNTOUCHED (no destructive flip,
+ *           no synthetic error block — a flip on source alone could clobber a
+ *           legit future in-flight queued non-user_chat block);
+ *       (e) a stale `queued` user row is ignored (queued dropped from
+ *           SCAN_STATUSES — scanning it was a noisy no-op).
+ *
+ * The authoritative two-caller claim-race test (two REAL
+ * `processPendingBlockRow` calls that both pass the pending read → exactly one
+ * dispatch) lives in agent/dispatch-listener.test.ts where that function and
+ * its rowCount claim guard live.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -224,9 +233,14 @@ describe("__tickForTest (imperative pass against scratch Postgres)", () => {
     expect(await statusOf("toctou")).toBe("complete");
   });
 
-  it("(d) surfaces a VISIBLE error block AND marks an undispatchable stale row 'error' (not re-scanned forever)", async () => {
-    // Structurally undispatchable: role='user' but source is NOT 'user_chat'
-    // (the shape the boot scan silently skips). The reaper must surface it.
+  it("(d) a non-user_chat user pending row is surfaced as an invariant-violation WARN and left UNTOUCHED (no destructive flip, no synthetic error block)", async () => {
+    // MEDIUM finding: a user-role `pending` row whose source is NOT 'user_chat'
+    // violates the invariant (only sendUserMessage writes user 'pending', and
+    // only as 'user_chat'). The reaper must NOT error-flip on source alone:
+    // `RecordUserBlockInput.status` permits 'queued' for ANY source, so a future
+    // in-flight queued non-user_chat block could land here and a destructive
+    // flip would clobber it + emit a false "could not be delivered" bubble. So
+    // we warn (observable) and leave the row alone.
     await insertBlockRow({
       id: "weird",
       status: "pending",
@@ -245,26 +259,47 @@ describe("__tickForTest (imperative pass against scratch Postgres)", () => {
     // Never funneled through the dispatch entrypoint (it's undispatchable).
     expect(spy).not.toHaveBeenCalled();
 
-    // Original row flipped OUT of 'pending' so the next pass won't re-scan it.
-    expect(await statusOf("weird")).toBe("error");
+    // Row is LEFT UNTOUCHED — not flipped to 'error' (a flip on source alone
+    // could clobber a legit in-flight queued non-user_chat block).
+    expect(await statusOf("weird")).toBe("pending");
 
-    // A visible error block was synthesized on the row's own turn.
+    // No synthetic "could not be delivered" error block was inserted.
     const db = getDb();
     const errorBlocks = await db
       .select()
       .from(schema.blocks)
       .where(and(eq(schema.blocks.turnId, "t_weird"), eq(schema.blocks.kind, "error")));
-    expect(errorBlocks).toHaveLength(1);
-    expect(errorBlocks[0]!.role).toBe("assistant");
-    expect(errorBlocks[0]!.status).toBe("complete");
+    expect(errorBlocks).toHaveLength(0);
 
-    // Non-silent: a warn was logged.
-    const warned = logSpy.mock.calls.find((c) => c[1] === "block.reaper.undispatchable");
+    // Non-silent: an invariant-violation warn was logged (loud signal to fix the
+    // upstream writer).
+    const warned = logSpy.mock.calls.find((c) => c[1] === "block.reaper.invariant-violation");
     expect(warned).toBeDefined();
+  });
 
-    // And it is NOT re-scanned on a subsequent pass (the status flip is durable).
-    spy.mockClear();
-    await __tickForTest(NOW + 60_000);
+  it("(e) the scan does NOT touch a stale 'queued' user row (queued dropped from SCAN_STATUSES)", async () => {
+    // MEDIUM finding: a `queued` user_chat row is a legitimately in-flight turn
+    // parked behind a live worker. Scanning it (a) is a no-op via the dispatch
+    // re-read but (b) emits a spurious stale-found warn + redispatch info every
+    // tick until it drains. We scan `pending` only, so a stale `queued` row is
+    // ignored entirely.
+    await insertBlockRow({
+      id: "queued-old",
+      status: "queued",
+      tsMs: NOW - STALE_THRESHOLD_MS - 10_000,
+    });
+
+    const spy = vi
+      .spyOn(dispatchListener, "processPendingBlockRow")
+      .mockImplementation(async () => {});
+    const logSpy = vi.spyOn(log.logger, "log");
+
+    await __tickForTest(NOW);
+
     expect(spy).not.toHaveBeenCalled();
+    // Untouched and NOT noisy: no stale-found / redispatch noise for queued rows.
+    expect(await statusOf("queued-old")).toBe("queued");
+    expect(logSpy.mock.calls.find((c) => c[1] === "block.reaper.stale-found")).toBeUndefined();
+    expect(logSpy.mock.calls.find((c) => c[1] === "block.reaper.redispatch")).toBeUndefined();
   });
 });

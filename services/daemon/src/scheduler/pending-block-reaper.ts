@@ -32,15 +32,17 @@
  * exported for unit tests, a `__tickForTest` seam, and start/stop wired into
  * daemon boot/shutdown. Re-dispatch funnels through the SAME
  * `processPendingBlockRow` the NOTIFY listener and boot scan use (imported, not
- * duplicated) — that function re-reads the row and no-ops if its status has
- * already flipped, which IS the TOCTOU guard against double-dispatching a row
- * the normal NOTIFY path just claimed.
+ * duplicated) — that function re-reads the row, no-ops if its status has
+ * already flipped, AND gates its dispatch on its claiming `WHERE
+ * status='pending'` UPDATE actually matching a row (rowCount === 1). The
+ * rowCount gate — not the re-read alone — is the authoritative guard against
+ * double-dispatching a row the normal NOTIFY path (or a concurrent caller) is
+ * claiming: the loser's UPDATE matches zero rows and it returns before
+ * dispatch.
  */
 
 import { and, eq, inArray, lt } from "drizzle-orm";
 import { getDb, schema } from "@friday/shared";
-import { insertBlock } from "@friday/shared/services";
-import { randomUUID } from "node:crypto";
 import { logger } from "../log.js";
 import { processPendingBlockRow } from "../agent/dispatch-listener.js";
 
@@ -57,17 +59,27 @@ const TICK_MS = 30_000;
  *  only falls to the reaper if even that is missed. */
 const STALE_THRESHOLD_MS = 45_000;
 
-/** The statuses a still-undispatched user block can sit in. `pending` is the
- *  un-picked-up state; `queued` rows were accepted by the daemon but, if the
- *  worker that owned the queue died without draining (and recovery missed it),
- *  can also strand — re-running `processPendingBlockRow` is a no-op for a
- *  `queued` row whose turn is genuinely in flight (status != 'pending' →
- *  short-circuit), so including it here is safe and strictly more protective.
- *  Note: the `blocks_pending` partial index covers ('pending','abort_requested')
- *  only, so the `pending` arm of this scan is index-served; the `queued` arm
- *  falls to the `blocks_agent_ts`/seq scan, which is fine at this cadence and
- *  the table's pending-row cardinality. */
-const SCAN_STATUSES = ["pending", "queued"] as const;
+/** The single status a still-undispatched user block sits in: `pending` — the
+ *  un-picked-up state the `sendUserMessage` mutator writes and the NOTIFY/boot
+ *  paths claim. We deliberately do NOT scan `queued`:
+ *
+ *    - A `queued` user_chat row is a legitimately-in-flight turn parked behind a
+ *      live worker; it drains when the worker hits `nextPrompts`. Re-running
+ *      `processPendingBlockRow` on it is a no-op (status != 'pending' →
+ *      short-circuit), so scanning it buys nothing — but a turn that
+ *      legitimately sits `queued` for >45s (a long live turn ahead of it) would
+ *      emit a spurious `block.reaper.stale-found` warn + `block.reaper.redispatch`
+ *      info EVERY tick until it drains. Pure noise.
+ *    - The `blocks_pending` partial index predicate is `status IN
+ *      ('pending','abort_requested')`, which does NOT cover `queued`. Scanning
+ *      `pending` only keeps this scan fully index-served; adding `queued` would
+ *      have forced a non-index scan, contradicting the "index-served" claim.
+ *
+ *  (Dead-`queued` recovery — a worker that died mid-queue without draining and
+ *  whose `recoverQueuedTurns` boot pass missed it — is a real but distinct
+ *  concern; if it ever bites, it warrants its own non-noisy recovery path, not a
+ *  no-op re-scan here. Raised in the PR comment.) */
+const SCAN_STATUSES = ["pending"] as const;
 
 let interval: NodeJS.Timeout | null = null;
 /** Re-entrancy guard: a pass slower than the tick must not let a second tick
@@ -114,72 +126,54 @@ function isDispatchable(row: PendingBlockRow): boolean {
 }
 
 /**
- * Non-silent handling for a structurally-undispatchable stale pending row.
+ * Non-silent handling for a stale user-role `pending` row whose `source` is NOT
+ * `user_chat`.
  *
- * Cleanest non-silent outcome: surface a VISIBLE `error` block on the row's own
- * turn (so the user sees the message wasn't processed instead of it vanishing)
- * AND flip the original row OUT of `pending`/`queued` into `error` so this
- * reaper does not re-scan it every 30s forever. We log a `warn` either way.
+ * INVARIANT this protects. Only the `sendUserMessage` mutator writes a user
+ * block at `status='pending'`, and it only ever writes `source='user_chat'`.
+ * Every other user-role block (mail, reminder, schedule, …) is recorded
+ * directly at `status='complete'` (or, per `RecordUserBlockInput.status`,
+ * `'queued'`). So a non-`user_chat` user row sitting in the reaper's
+ * `pending` scan is an INVARIANT VIOLATION — a bug somewhere upstream — not a
+ * routine stranded message.
  *
- * The error block is born-closed (`kind:'error'`, `status:'complete'`),
- * mirroring `block-injectors.recordError` but without a LiveWorker (there is no
- * live turn for an un-dispatched row). `block_index` is the sort-last `9999`
- * sentinel the injectors use for post-finalize error blocks.
+ * Why we do NOT error-flip / synthesize an error block here (the prior
+ * behavior): `RecordUserBlockInput.status` permits `'queued'` for ANY source,
+ * so a FUTURE path could legitimately put an in-flight `queued` non-`user_chat`
+ * block in front of this scan. Destructively flipping any non-`user_chat` row
+ * to `error` on source ALONE would clobber that legitimate in-flight row and
+ * surface a false "could not be delivered" bubble. Identifying the row by
+ * `source` is not a safe basis for a destructive action.
+ *
+ * Safer choice: SURFACE the violation as a `warn` (so a real bug is observable
+ * in telemetry) and LEAVE THE ROW UNTOUCHED. The cost is that a genuinely
+ * stranded non-`user_chat` `pending` row would be re-warned each tick — but
+ * that state should never occur under the invariant, and a recurring warn is a
+ * loud, non-destructive signal to fix the upstream writer, which is exactly
+ * what we want. We do not clobber data on a heuristic.
  */
 async function surfaceUndispatchable(row: PendingBlockRow): Promise<void> {
-  const db = getDb();
-  logger.log("warn", "block.reaper.undispatchable", {
+  logger.log("warn", "block.reaper.invariant-violation", {
     block_id: row.blockId,
     role: row.role,
     source: row.source,
-    note: "structurally undispatchable stale pending block — surfacing error block and marking error so it is not re-scanned",
+    status: "pending",
+    note: "user-role pending block with source != 'user_chat' — only sendUserMessage should write user 'pending' rows, and only as 'user_chat'. NOT dispatching and NOT flipping (a flip on source alone could clobber a legit future queued non-user_chat block). Investigate the upstream writer.",
   });
-
-  // Visible error bubble bound to the stranded row's own turn.
-  try {
-    await insertBlock({
-      blockId: randomUUID(),
-      turnId: row.turnId,
-      agentName: row.agentName,
-      sessionId: row.sessionId,
-      messageId: null,
-      blockIndex: 9999,
-      role: "assistant",
-      kind: "error",
-      source: null,
-      contentJson: JSON.stringify({
-        code: "undispatchable_pending_block",
-        headline: "This message could not be delivered.",
-        rawMessage: `A user message was persisted but had an unexpected shape (role=${row.role}, source=${row.source ?? "null"}) and could not be dispatched. It has been surfaced here rather than dropped silently.`,
-      }),
-      status: "complete",
-      ts: Date.now(),
-    });
-  } catch (err) {
-    // Best-effort surface; the status flip below is the load-bearing part that
-    // stops the infinite re-scan. Log and continue.
-    logger.log("warn", "block.reaper.error-block.insert.fail", {
-      block_id: row.blockId,
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
-
-  // Flip OUT of the scanned statuses so it isn't re-reaped forever. Guarded on
-  // the still-stranded status so we never clobber a row another path claimed.
-  await db
-    .update(schema.blocks)
-    .set({ status: "error" })
-    .where(and(eq(schema.blocks.id, row.id), inArray(schema.blocks.status, [...SCAN_STATUSES])));
 }
 
 /**
  * Re-dispatch (or surface) one stale candidate.
  *
- * TOCTOU re-read: dispatchable rows go through `processPendingBlockRow`, which
- * re-reads the row by id and short-circuits if its status is no longer
- * `pending` — so a row the normal NOTIFY path claimed in the window between
- * this pass's SELECT and here is NOT double-dispatched. Undispatchable rows are
- * surfaced + marked so they leave the scan set.
+ * No double-dispatch: dispatchable rows go through `processPendingBlockRow`,
+ * which (a) re-reads the row by id and short-circuits if its status is no
+ * longer `pending`, AND (b) gates its `dispatchTurn` on its claiming UPDATE
+ * having actually matched a `WHERE status='pending'` row (rowCount === 1). So a
+ * row the normal NOTIFY path claimed in the window between this pass's SELECT
+ * and here — or one a second caller is claiming concurrently — is NOT
+ * double-dispatched: the loser's UPDATE matches zero rows and it returns before
+ * dispatch. Non-`user_chat` rows are surfaced as an invariant-violation warn
+ * (see `surfaceUndispatchable`); they are NOT mutated.
  */
 async function reapOne(row: PendingBlockRow): Promise<void> {
   if (!isDispatchable(row)) {
@@ -191,14 +185,16 @@ async function reapOne(row: PendingBlockRow): Promise<void> {
     agent: row.agentName,
     ageMs: Date.now() - row.ts,
   });
-  // Idempotent: re-reads the row, no-ops if status already flipped (TOCTOU).
+  // Idempotent + claim-guarded: re-reads the row, and even if two callers pass
+  // that read, only the one whose UPDATE wins `WHERE status='pending'`
+  // dispatches.
   await processPendingBlockRow(row.blockId);
 }
 
 /**
- * One reaper pass. Selects user-role `pending`/`queued` blocks, narrows to the
- * stale ones via the pure selector, and reaps each. `now` is injected for the
- * test seam.
+ * One reaper pass. Selects user-role `pending` blocks, narrows to the stale
+ * ones via the pure selector, and reaps each. `now` is injected for the test
+ * seam.
  */
 async function runReap(now: number = Date.now()): Promise<void> {
   if (reaping) return;

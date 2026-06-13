@@ -19,6 +19,31 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
+import { eq } from "drizzle-orm";
+
+// Static `vi.mock` (not doMock + resetModules) so @friday/shared's module-level
+// Postgres pool isn't rebound mid-file. Mirrors resume-listener.test.ts — these
+// stub out the heavy dispatch collaborators so `processPendingBlockRow` can run
+// against the real scratch DB without forking a worker.
+vi.mock("./registry.js", () => ({
+  getAgent: vi.fn(),
+  registerAgent: vi.fn(),
+  workingDirectoryFor: vi.fn(async () => "/tmp/cwd"),
+}));
+vi.mock("./lifecycle.js", () => ({
+  dispatchTurn: vi.fn(),
+  peekLiveWorker: vi.fn(() => null),
+}));
+vi.mock("../prompts/build-dispatch-prompt.js", () => ({
+  buildDispatchPrompt: vi.fn(async () => ({
+    systemPrompt: "system-stub",
+    body: "body-stub",
+    allowedToolsOverride: undefined,
+  })),
+}));
+vi.mock("../skills/match.js", () => ({
+  matchSkillInvocation: vi.fn(() => null),
+}));
 
 // Handler-guard mocks (mirrors resume-listener.test.ts). Static `vi.mock` so
 // `@friday/shared`'s module-level Postgres pool stays bound to the test DB —
@@ -316,5 +341,112 @@ describe("processPendingBlockRow dispatch-mode routing (FRI-156 SEV-0)", () => {
     const call = vi.mocked(lifecycle.dispatchTurn).mock.calls[0]![0];
     expect(call.options.mode).toBe("long-lived");
     expect(call.options.turnSource).toBe("user_chat");
+  });
+});
+
+describe("processPendingBlockRow — claim guard (no double dispatch)", () => {
+  function stubAgent(name: string): {
+    name: string;
+    type: "orchestrator";
+    status: "idle";
+    sessionId: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } {
+    return {
+      name,
+      type: "orchestrator",
+      status: "idle",
+      sessionId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  async function getStatus(id: string): Promise<string | null> {
+    const db = getDb();
+    const rows = await db
+      .select({ status: schema.blocks.status })
+      .from(schema.blocks)
+      .where(eq(schema.blocks.blockId, id))
+      .limit(1);
+    return rows[0]?.status ?? null;
+  }
+
+  it("two interleaved callers that BOTH pass the pending read dispatch exactly once", async () => {
+    // The HIGH finding: `processPendingBlockRow` short-circuits on a non-atomic
+    // line-69 read (`status !== 'pending'`). Two callers (e.g. the reaper's
+    // tick racing the listener's NOTIFY / boot scan over the SAME
+    // `status='pending' AND role='user'` row) can BOTH pass that read while the
+    // row is still pending. The claiming `UPDATE … WHERE status='pending'` then
+    // lets exactly ONE change the row; dispatch must be gated on that UPDATE's
+    // rowCount so only the winner calls `dispatchTurn` (which has no turnId
+    // dedupe → a second call would be a duplicate turn / duplicate queued
+    // prompt). This test interleaves two REAL invocations that both start while
+    // the row is pending and asserts a single dispatch.
+    await insertBlock("blk-claim-race", "pending");
+
+    const registry = await import("./registry.js");
+    const lifecycle = await import("./lifecycle.js");
+    const buildPrompt = await import("../prompts/build-dispatch-prompt.js");
+    const { processPendingBlockRow } = await import("./dispatch-listener.js");
+
+    vi.mocked(registry.getAgent).mockResolvedValue(
+      stubAgent("test-agent") as unknown as Awaited<ReturnType<typeof registry.getAgent>>,
+    );
+    vi.mocked(lifecycle.peekLiveWorker).mockReturnValue(null);
+
+    // Barrier: both invocations must reach `buildDispatchPrompt` (which is AFTER
+    // the line-69 `status !== 'pending'` read and BEFORE the claiming UPDATE)
+    // before EITHER is allowed to proceed. This makes the interleave
+    // DETERMINISTIC — it guarantees both callers passed the pending read while
+    // the row was still pending, so the rowCount claim gate (not the line-69
+    // read) is what arbitrates. Without this, the two calls could serialize and
+    // the second would short-circuit on the read instead, not exercising the
+    // guard the HIGH finding is about.
+    let arrived = 0;
+    let releaseBarrier!: () => void;
+    const bothArrived = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    vi.mocked(buildPrompt.buildDispatchPrompt).mockImplementation(async () => {
+      arrived += 1;
+      if (arrived === 2) releaseBarrier();
+      await bothArrived;
+      return { systemPrompt: "system-stub", body: "body-stub", allowedToolsOverride: undefined };
+    });
+
+    await Promise.all([
+      processPendingBlockRow("blk-claim-race"),
+      processPendingBlockRow("blk-claim-race"),
+    ]);
+
+    // Both passed the pending read; exactly one winner's UPDATE matched the row
+    // and dispatched, the loser's matched zero rows and returned before
+    // `dispatchTurn`.
+    expect(arrived).toBe(2);
+    expect(lifecycle.dispatchTurn).toHaveBeenCalledTimes(1);
+    // Row was claimed once, flipped out of 'pending'.
+    expect(await getStatus("blk-claim-race")).toBe("complete");
+  });
+
+  it("normal single-caller path still dispatches (rowCount-1 → proceed)", async () => {
+    // Regression guard for the rowCount gate: the common NOTIFY / boot-scan
+    // single-caller case must be unaffected — one call, one dispatch.
+    await insertBlock("blk-claim-single", "pending");
+
+    const registry = await import("./registry.js");
+    const lifecycle = await import("./lifecycle.js");
+    const { processPendingBlockRow } = await import("./dispatch-listener.js");
+
+    vi.mocked(registry.getAgent).mockResolvedValue(
+      stubAgent("test-agent") as unknown as Awaited<ReturnType<typeof registry.getAgent>>,
+    );
+    vi.mocked(lifecycle.peekLiveWorker).mockReturnValue(null);
+
+    await processPendingBlockRow("blk-claim-single");
+
+    expect(lifecycle.dispatchTurn).toHaveBeenCalledTimes(1);
+    expect(await getStatus("blk-claim-single")).toBe("complete");
   });
 });
