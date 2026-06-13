@@ -447,7 +447,13 @@ async function handle(
     }
     const reason = body.reason as ApiReason;
     const branch = a.type === "builder" && "branch" in a ? a.branch : undefined;
-    const repo = process.cwd();
+    // PR-271 BLOCKER 1: resolve teardown against the ORIGINAL source repo
+    // persisted on the agent row (the bare mirror, in remote mode), NOT
+    // `process.cwd()` (the daemon's own repo). Read it before archiveAgent in
+    // case archive ever mutates meta_json. Falls back to cwd only when absent
+    // (older builder rows), where the local-checkout behavior is unchanged.
+    const builderRepo =
+      a.type === "builder" ? ((await registry.getWorkspaceRepo(name)) ?? process.cwd()) : undefined;
     // F1-B: await the archive so the response is a strong "actually
     // archived" signal — no race against the worker's exit handler.
     await archiveAgent(name, { reason });
@@ -458,7 +464,7 @@ async function handle(
     if (a.type === "builder") {
       try {
         workspacePathRemoved = workspacePath(name);
-        archiveWorkspace(name, repo, { branch });
+        archiveWorkspace(name, builderRepo ?? process.cwd(), { branch, repo: builderRepo });
       } catch (err) {
         logger.log("warn", "agent.archive.workspace.fail", {
           agent: name,
@@ -1632,8 +1638,14 @@ async function createAgent(
   let workingDirectory = process.cwd();
   let worktreePath: string | undefined;
   let branch: string | undefined;
+  // PR-271 BLOCKER 1: the original source repo for a builder, persisted on the
+  // agent row so the archive route can resolve the correct git dir (the bare
+  // mirror, in remote mode) deterministically rather than depending on the
+  // in-workspace marker the SDK may delete first.
+  let builderRepo: string | undefined;
   if (body.type === "builder") {
     const repo = body.worktree?.repo ?? process.cwd();
+    builderRepo = repo;
     branch = body.worktree?.branch ?? `friday/${body.name}`;
     try {
       const ws = createWorkspace({
@@ -1668,6 +1680,9 @@ async function createAgent(
     branch,
     appId: inheritedAppId ?? undefined,
     spawnReason: persistedReason,
+    // Persist the builder's source repo so archive can deterministically resolve
+    // the teardown git dir (PR-271 BLOCKER 1).
+    metaJson: builderRepo ? { repo: builderRepo } : undefined,
   });
 
   // FRI-16: planners inherit their parent's cwd (a planner under a builder

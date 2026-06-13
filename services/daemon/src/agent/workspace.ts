@@ -7,6 +7,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, join, normalize } from "node:path";
 import { DATA_DIR, atomicWriteFile } from "@friday/shared";
@@ -100,22 +101,100 @@ export function isLocalRepo(baseRepo: string): boolean {
   }
 }
 
-/** Derive a stable mirror name from a remote URL: the final path segment with
- * any trailing `.git` and slashes stripped (e.g. `git@github.com:org/agent-friday.git`
- * → `agent-friday`). */
+/**
+ * Derive a stable, COLLISION-RESISTANT mirror name from a remote URL.
+ *
+ * The basename alone is ambiguous: `github.com/orgA/shared.git` and
+ * `github.com/orgB/shared.git` both end in `shared`, so a basename-only name
+ * would map two distinct codebases onto the same mirror — the second create
+ * would `remote update` against the first origin and worktree the WRONG repo
+ * (MEDIUM 3 in the PR-271 review). To keep mirrors distinct we append a short
+ * hash of the *full normalized* URL to the readable basename:
+ *   `git@github.com:org/agent-friday.git` → `agent-friday-1a2b3c4d`.
+ *
+ * Normalization folds only cosmetic differences (trailing slashes, a trailing
+ * `.git`, the scp-style `host:org/repo` ↔ `host/org/repo` form) so the same
+ * remote always hashes identically; everything that actually identifies the
+ * remote (host, org, path) feeds the hash. The hash is the load-bearing part —
+ * the basename prefix is purely for human-readable directory names.
+ */
+function normalizeRemoteForHash(remote: string): string {
+  let s = remote
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\.git$/, "");
+  // Fold scp-style `host:org/repo` into `host/org/repo` so it hashes the same
+  // as its ssh:// equivalent. Only rewrite the FIRST colon after the host and
+  // only when it isn't a scheme (`://`) or a port (`:1234/`).
+  const scp = /^([^/:]+@[^/:]+|[^/:]+):(?![/0-9])(.+)$/.exec(s);
+  if (scp) s = `${scp[1]}/${scp[2]}`;
+  return s;
+}
+
 export function mirrorNameFromRemote(remote: string): string {
   const stripped = remote.replace(/\/+$/, "").replace(/\.git$/, "");
   // Handle both `/`-separated URLs and scp-style `host:org/repo`.
   const lastSlash = stripped.lastIndexOf("/");
   const lastColon = stripped.lastIndexOf(":");
   const cut = Math.max(lastSlash, lastColon);
-  const base = cut >= 0 ? stripped.slice(cut + 1) : stripped;
-  return base || "repo";
+  const rawBase = cut >= 0 ? stripped.slice(cut + 1) : stripped;
+  // Sanitize the human-readable prefix to a safe directory token.
+  const base = (rawBase || "repo").replace(/[^A-Za-z0-9._-]/g, "-") || "repo";
+  const hash = createHash("sha256")
+    .update(normalizeRemoteForHash(remote))
+    .digest("hex")
+    .slice(0, 8);
+  return `${base}-${hash}`;
 }
 
 export function mirrorPathForRemote(remote: string): string {
   return join(REPOS_ROOT, `${mirrorNameFromRemote(remote)}.git`);
 }
+
+/**
+ * Reject a remote that could be interpreted as a git option or a transport
+ * helper invocation (LOW/MEDIUM 4). A leading `-` would be parsed as an option
+ * even after `--` in some git versions, and `ext::`/`fd::`/`-c` style values
+ * are remote-helper transports that can execute arbitrary commands. Not
+ * remotely exploitable here (loopback + trusted orchestrator) but cheap to
+ * harden. The `protocol.ext/fd.allow=never` config on the clone (see
+ * GIT_TRANSPORT_HARDENING) is the second layer, blocking those transports
+ * regardless of this check while leaving `file`/`http`/`ssh` working.
+ */
+function assertSafeRemote(remote: string): void {
+  if (remote.startsWith("-")) {
+    throw new Error(`refusing remote that begins with '-' (option injection): ${remote}`);
+  }
+  if (/^(ext|fd)::/i.test(remote)) {
+    throw new Error(`refusing remote with transport-helper scheme: ${remote}`);
+  }
+}
+
+/**
+ * Config flags that disable the dangerous remote-helper transports on the
+ * clone. `ext` runs an arbitrary shell command; `fd` reads from caller fds.
+ * We block exactly those (and NOT `file`/`http`/`ssh`, which legitimate local
+ * and remote mirrors use — a blanket `GIT_PROTOCOL_FROM_USER=0` would break a
+ * `file://`/bare-path remote). These are passed as leading `-c` options BEFORE
+ * the subcommand so they bind regardless of the remote value.
+ */
+const GIT_TRANSPORT_HARDENING = ["-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never"];
+
+/**
+ * LOW 5 — concurrent-create TOCTOU on the mirror: documented, not guarded.
+ *
+ * Two builders created against the same remote could in principle race the
+ * clone-if-missing/else-fetch below, and a concurrent `git clone --mirror`
+ * into a half-populated dir would corrupt the mirror. In practice this cannot
+ * happen within the daemon: the entire create path uses `execFileSync`, which
+ * blocks the Node event loop for the duration of each git op, so two
+ * `createWorkspace` calls in this single-threaded process run strictly
+ * sequentially — there is no interleaving window to race. A cross-process race
+ * would require a second daemon on the same DATA_DIR, which the deployment
+ * model forbids (exactly one daemon per machine). If the create path is ever
+ * made async (e.g. switched to `execFile`/spawn), add a per-`mirrorPath`
+ * promise-chain mutex here to restore serialization.
+ */
 
 /**
  * Ensure a bare `--mirror` clone of `remote` exists at `mirrorPath` and is
@@ -125,13 +204,23 @@ export function mirrorPathForRemote(remote: string): string {
  * `workspace.fetch.fail` semantics.
  */
 function ensureMirror(remote: string, mirrorPath: string, name: string): void {
+  assertSafeRemote(remote);
   if (!existsSync(REPOS_ROOT)) {
     mkdirSync(REPOS_ROOT, { recursive: true });
   }
   if (!existsSync(mirrorPath)) {
     logger.log("info", "workspace.mirror.clone", { name, remote, mirrorPath });
     try {
-      execFileSync("git", ["clone", "--mirror", remote, mirrorPath], { stdio: "pipe" });
+      // `--` separates the remote/path positionals from options; the
+      // assertSafeRemote guard + `protocol.ext/fd.allow=never` harden against a
+      // hostile `remote` value (LOW/MEDIUM 4).
+      execFileSync(
+        "git",
+        [...GIT_TRANSPORT_HARDENING, "clone", "--mirror", "--", remote, mirrorPath],
+        {
+          stdio: "pipe",
+        },
+      );
     } catch (err) {
       const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string };
       logger.log("error", "workspace.mirror.clone.fail", {
@@ -281,6 +370,23 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
     // A clone failure is fatal (handled inside ensureMirror via throw); a
     // refresh failure is non-fatal and proceeds against the cached mirror.
     ensureMirror(opts.baseRepo, gitDir, opts.name);
+    // BLOCKER 2: prune stale worktree registrations in the mirror before the
+    // `git worktree add` below. If a prior workspace dir of the same name was
+    // removed out-of-band (the SDK auto-removes a no-op builder's worktree, or
+    // a botched archive left the mirror with a dangling registration), the dir
+    // is gone but the mirror still lists `.../workspaces/<name>` as a worktree.
+    // Without this prune the add fails with
+    //   fatal: '.../workspaces/<name>' is a missing but already registered worktree
+    // and the re-create wedges permanently. Prune is a no-op when there's
+    // nothing stale, so it's safe to run unconditionally on the remote path.
+    try {
+      execFileSync("git", ["worktree", "prune"], { cwd: gitDir, stdio: "pipe" });
+    } catch (err) {
+      logger.log("warn", "workspace.create.prune.fail", {
+        name: opts.name,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // Pre-flight: if the branch already exists (stale from a prior failed
@@ -335,6 +441,34 @@ export interface ArchiveWorkspaceOptions {
    * Optional for backward compat — older callers without branch metadata
    * skip the branch delete. New code should always pass it. */
   branch?: string;
+  /**
+   * BLOCKER 1: the ORIGINAL source repo the workspace was created from — i.e.
+   * `worktree.repo` at create time, persisted on the agent registry row and
+   * read back here by the route. When present this is the AUTHORITATIVE input
+   * for resolving the git dir to tear down: the same `isLocalRepo(repo) ?
+   * repo : mirrorPathForRemote(repo)` derivation `createWorkspace` used, so
+   * teardown deterministically targets the mirror in remote mode and the local
+   * checkout in local mode. This must be preferred over the in-workspace marker
+   * because the Claude Agent SDK frequently removes a no-op builder's worktree
+   * (and thus the marker) BEFORE archive runs — so the marker is usually gone.
+   * Critically, in remote mode resolution NEVER falls back to `process.cwd()`
+   * (the daemon's own repo), which previously caused `git branch -D` /
+   * `git worktree prune` to run against the wrong repo.
+   */
+  repo?: string;
+}
+
+/**
+ * Deterministically resolve the git dir `archiveWorkspace` must operate on,
+ * given the original source `repo`. Mirrors `createWorkspace`'s `gitDir`
+ * derivation exactly so create and teardown always agree on the target:
+ *   - LOCAL repo (an on-disk working tree) → the repo path itself.
+ *   - REMOTE (a URL / bare repo / missing path) → the bare mirror under
+ *     `<DATA_DIR>/repos/`. It does NOT matter whether the local checkout the
+ *     URL might point at exists; remote mode ALWAYS targets the mirror.
+ */
+function resolveArchiveGitDir(repo: string): string {
+  return isLocalRepo(repo) ? repo : mirrorPathForRemote(repo);
 }
 
 /**
@@ -386,12 +520,19 @@ export function archiveWorkspace(
   opts: ArchiveWorkspaceOptions = {},
 ): void {
   const path = workspacePath(name);
-  // Resolve the git dir to operate against. For a mirror-based workspace the
-  // worktree is registered with the bare mirror, not the (possibly missing)
-  // local `baseRepo`; the marker records which. Read it before any removal,
-  // since the marker lives inside the workspace dir. Falls back to `baseRepo`
-  // for the local-worktree path and for older pre-mirror workspaces.
-  const gitDir = readWorkspaceGitDir(path) ?? baseRepo;
+  // Resolve the git dir to operate against, in priority order:
+  //   1. `opts.repo` (the original source repo, persisted on the agent row and
+  //      passed by the route) → DETERMINISTIC derivation that matches create.
+  //      This is authoritative: it does not depend on any state living inside
+  //      the workspace dir, which the SDK may have already deleted (BLOCKER 1).
+  //   2. The in-workspace marker's recorded gitDir → best-effort fallback for
+  //      in-flight rows created before `repo` was persisted, AND only readable
+  //      while the dir still exists. Read before any removal.
+  //   3. `baseRepo` as handed in → last-resort backward-compat fallback.
+  // In remote mode (1) always targets the bare mirror and NEVER `process.cwd()`.
+  const gitDir = opts.repo
+    ? resolveArchiveGitDir(opts.repo)
+    : (readWorkspaceGitDir(path) ?? baseRepo);
   // The worktree directory might already be gone (manual cleanup, prior
   // failed run); the branch may still exist independently, so we don't
   // early-return when the dir is missing.

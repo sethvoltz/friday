@@ -140,6 +140,14 @@ export interface RegisterInput {
    * so the audit trail survives recovery (FRI-102 AC #11).
    */
   spawnReason?: string | null;
+  /**
+   * Free-form metadata persisted to the `meta_json` column. For builders this
+   * carries `{ repo }` — the original `worktree.repo` the workspace was created
+   * from — so the archive route can resolve the correct git dir (the bare
+   * mirror, in remote mode) deterministically WITHOUT depending on the
+   * in-workspace marker the SDK may have already deleted (PR-271 BLOCKER 1).
+   */
+  metaJson?: Record<string, unknown> | null;
 }
 
 export async function registerAgent(input: RegisterInput): Promise<AgentEntry> {
@@ -157,6 +165,7 @@ export async function registerAgent(input: RegisterInput): Promise<AgentEntry> {
       ticketId: input.ticketId ?? null,
       appId: input.appId ?? null,
       spawnReason: input.spawnReason ?? null,
+      metaJson: input.metaJson ?? null,
       createdAt: now,
       updatedAt: now,
     })
@@ -212,6 +221,24 @@ export async function getSpawnReason(name: string): Promise<string | null> {
     .where(eq(schema.agents.name, name))
     .limit(1);
   return rows[0]?.spawnReason ?? null;
+}
+
+/**
+ * Read the original source repo a builder's workspace was created from
+ * (`meta_json.repo`). The archive route passes this to `archiveWorkspace` so
+ * teardown resolves the correct git dir (the bare mirror, in remote mode)
+ * deterministically — see PR-271 BLOCKER 1. Returns null when absent (older
+ * builder rows created before this was persisted; non-builders).
+ */
+export async function getWorkspaceRepo(name: string): Promise<string | null> {
+  const db = getDb();
+  const rows = await db
+    .select({ metaJson: schema.agents.metaJson })
+    .from(schema.agents)
+    .where(eq(schema.agents.name, name))
+    .limit(1);
+  const meta = rows[0]?.metaJson as { repo?: unknown } | null | undefined;
+  return meta && typeof meta.repo === "string" && meta.repo.length > 0 ? meta.repo : null;
 }
 
 /**
