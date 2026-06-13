@@ -520,6 +520,76 @@ describe("confirmPending", () => {
   });
 });
 
+describe("FRI-72: optimistic local state scoped to the authoritative send agent", () => {
+  it("addUser stamps the explicit agent and the bubble renders on THAT surface (not focusedAgent)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    // Simulate the navigate-then-send lag: URL/authoritative agent is A,
+    // but focusedAgent still points at the previous agent B.
+    chat.focusedAgent = "agent-b";
+    chat.addUser("hello A", { queueId: "q_a", agent: "agent-a" });
+
+    // While focus lags at B, the bubble must NOT leak onto B's surface.
+    expect(chat.messages.find((m) => m.text === "hello A")).toBeUndefined();
+
+    // Once focus catches up to A, the bubble appears on A's surface.
+    chat.focusedAgent = "agent-a";
+    const bubble = chat.messages.find((m) => m.text === "hello A");
+    expect(bubble).toBeDefined();
+    expect(bubble!.agent).toBe("agent-a");
+    expect(bubble!.pending).toBe(true);
+  });
+
+  it("confirmPending(queueId, turnId, agent) confirms the bubble keyed under the send agent even after focus catches up", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "agent-b";
+    chat.addUser("hello A", { queueId: "q_a", agent: "agent-a" });
+    // Focus catches up to A (post-navigation effect lands).
+    chat.focusedAgent = "agent-a";
+    // Without the agent arg this would search under focusedAgent — here that
+    // happens to be A, but we pass it explicitly the way ChatInput does.
+    chat.confirmPending("q_a", "turn-a", "agent-a");
+    const bubble = chat.messages.find((m) => m.text === "hello A");
+    expect(bubble).toBeDefined();
+    expect(bubble!.id).toBe("user_turn-a");
+    expect(bubble!.pending).toBe(false);
+    expect(bubble!.agent).toBe("agent-a");
+  });
+
+  it("confirmPending matching the lagging focusedAgent (no agent arg) misses a bubble stored under the send agent", async () => {
+    // Documents WHY the agent arg is needed: when the bubble was stored
+    // under agent-a but confirmPending defaults to the (then-lagging) focus
+    // agent-b, the search misses it and the bubble stays pending.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "agent-b";
+    chat.addUser("hello A", { queueId: "q_a", agent: "agent-a" });
+    // Default-arg confirm against the lagging focus → no match, no-op.
+    chat.confirmPending("q_a", "turn-a");
+    chat.focusedAgent = "agent-a";
+    const bubble = chat.messages.find((m) => m.text === "hello A");
+    expect(bubble).toBeDefined();
+    // Still pending because confirmPending searched the wrong agent.
+    expect(bubble!.pending).toBe(true);
+  });
+
+  it("eager inflight claim via markInflight(sendAgent) does not wedge the lagging focused agent's input", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "agent-b";
+    // ChatInput claims the inflight slot under the authoritative send agent.
+    chat.markInflight("agent-a", "t_block-1");
+    // The lagging focused agent (B) must NOT show busy/Stop.
+    expect(chat.inflightTurnId).toBeNull();
+    // The send agent (A) owns the inflight slot.
+    expect(chat.inflightTurnIdByAgent["agent-a"]).toBe("t_block-1");
+    // Once focus catches up to A, A's input correctly reflects inflight.
+    chat.focusedAgent = "agent-a";
+    expect(chat.inflightTurnId).toBe("t_block-1");
+  });
+});
+
 describe("reload-mid-turn replay → SSE resumption", () => {
   it("preserves streaming status on assistant blocks so block_delta keeps appending", async () => {
     // Reproduces the exact symptom of "hard refresh shows the bubble
