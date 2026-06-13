@@ -197,6 +197,19 @@ export type WorkerEvent =
         cache_read_tokens: number;
         cost_usd: number;
       };
+      /**
+       * Per-API-request usage, one entry per `assistant` message the SDK
+       * streamed this turn, in arrival order (omitted when the turn made no
+       * API requests). Unlike `usage` (the cumulative result), these are NOT
+       * summed — the LAST entry's prompt size is the true live context window,
+       * persisted to `usage_request` and read by the nightly compaction sweep.
+       */
+      requestUsages?: {
+        input_tokens: number;
+        output_tokens: number;
+        cache_creation_tokens: number;
+        cache_read_tokens: number;
+      }[];
     }
   | {
       type: "compaction-boundary";

@@ -48,6 +48,7 @@ interface Recorder {
   sendPromptCalls: { turnId: string }[];
   forceKillCalls: { reason: string; zeroBlockTurnStreak: number }[];
   usageInserts: number;
+  usageRequestInserts: { turnId: string; seq: number; context: number }[][];
   recoverCalls: { sessionId: string }[];
   posthogEvents: string[];
 }
@@ -64,6 +65,7 @@ function makeRecorder(): Recorder {
     sendPromptCalls: [],
     forceKillCalls: [],
     usageInserts: 0,
+    usageRequestInserts: [],
     recoverCalls: [],
     posthogEvents: [],
   };
@@ -90,6 +92,15 @@ function makeRecorder(): Recorder {
     },
     insertUsage: async () => {
       rec.usageInserts++;
+    },
+    insertUsageRequests: async (rows) => {
+      rec.usageRequestInserts.push(
+        rows.map((r) => ({
+          turnId: r.turnId,
+          seq: r.seq,
+          context: r.inputTokens + r.cacheReadTokens + r.cacheCreationTokens,
+        })),
+      );
     },
     captureTurnEvent: (_turnId, event) => {
       rec.posthogEvents.push(event);
@@ -158,6 +169,49 @@ describe("turn-state-ports: complete → executor wires the DB door + fan-out", 
     const rec = makeRecorder();
     await executeIntents(fakeWorker, r.intents, rec.ports);
     expect(rec.usageInserts).toBe(1);
+  });
+
+  it("fires insert-usage-requests with seq assigned in arrival order when requestUsages + session are present", async () => {
+    const requestUsages = [
+      // Earlier request — bigger window; must get seq 0.
+      {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 900,
+      },
+      // Final request — the live window (200); must get seq 1.
+      {
+        input_tokens: 50,
+        output_tokens: 5,
+        cache_creation_tokens: 100,
+        cache_read_tokens: 50,
+      },
+    ];
+    const r = apply(
+      ctx({ blocksThisTurn: 1, sessionId: "s" }),
+      { kind: "complete", payload: { requestUsages } },
+      DEPS,
+    );
+    const rec = makeRecorder();
+    await executeIntents(fakeWorker, r.intents, rec.ports);
+    expect(rec.usageRequestInserts).toEqual([
+      [
+        { turnId: "turn-1", seq: 0, context: 1000 },
+        { turnId: "turn-1", seq: 1, context: 200 },
+      ],
+    ]);
+  });
+
+  it("does NOT fire insert-usage-requests when requestUsages is empty/absent", async () => {
+    const r = apply(
+      ctx({ blocksThisTurn: 1, sessionId: "s" }),
+      { kind: "complete", payload: { requestUsages: [] } },
+      DEPS,
+    );
+    const rec = makeRecorder();
+    await executeIntents(fakeWorker, r.intents, rec.ports);
+    expect(rec.usageRequestInserts).toEqual([]);
   });
 });
 

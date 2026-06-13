@@ -74,6 +74,7 @@ function makeRealPublishPorts(): TurnStatePorts<PortWorker> {
     },
     recoverFromJsonl: async () => {},
     insertUsage: async () => {},
+    insertUsageRequests: async () => [],
     captureTurnEvent: () => {},
     sendPrompt: () => {},
     forceKill: async () => {},
