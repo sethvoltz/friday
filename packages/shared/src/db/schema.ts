@@ -531,6 +531,48 @@ export const usage = pgTable(
   }),
 );
 
+/* ---------------- Per-request usage (live-context back-compute) ---------------- */
+// One row per API request WITHIN a turn. The per-turn `usage` row above stores
+// the SDK's CUMULATIVE `result.usage` for the whole turn — correct for cost but
+// wrong for live-context estimation: `cache_read_input_tokens` is re-counted on
+// every API round-trip in a multi-tool-call turn, so the cumulative figure
+// inflates to a large multiple of the true window.
+//
+// The true live context window = the prompt size of the LAST (max-`seq`) request
+// in the turn = that single request's `input + cache_read + cache_creation`. The
+// SDK streams a per-request `usage` on each `assistant` message; we persist each
+// here so the nightly compaction sweep (and any later consumer) can back-compute
+// the real window. Like `usage`, this is high-volume append-only telemetry and is
+// NOT in SYNC_TABLES (server-side reads only).
+export const usageRequest = pgTable(
+  "usage_request",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
+    agentName: text("agent_name"),
+    sessionId: text("session_id").notNull(),
+    turnId: text("turn_id").notNull(),
+    /** Request index within the turn (0-based, in arrival order). The max-`seq`
+     *  row is the turn's final request — the one whose prompt size IS the live
+     *  context window. */
+    seq: integer("seq").notNull(),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    cacheCreationTokens: integer("cache_creation_tokens").notNull().default(0),
+    cacheReadTokens: integer("cache_read_tokens").notNull().default(0),
+  },
+  (t) => ({
+    // The live-window query: latest turn for an agent (scoped to session),
+    // then its max-`seq` row. Covered by an (agent, session, ts, turn, seq) sort.
+    agentSessionTsIdx: index("usage_request_agent_session_ts").on(
+      t.agentName,
+      t.sessionId,
+      t.timestamp,
+    ),
+    turnSeqIdx: index("usage_request_turn_seq").on(t.turnId, t.seq),
+  }),
+);
+
 /* ---------------- ADR-023: client_devices ---------------- */
 // First-class device tracking. Created on first bootstrap. Storage telemetry
 // reported via the reportClientStats mutator; `Forget this device` mutator

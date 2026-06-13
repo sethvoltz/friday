@@ -216,3 +216,127 @@ describe("getLatestUsageForAgent + estimateContextTokens (FRI-156 §C sweep esti
     expect(estimateContextTokens(row)).toBe(666);
   });
 });
+
+describe("insertUsageRequests + getLatestContextForAgent (live-window back-compute)", () => {
+  it("returns 0 when the agent has no per-request rows", async () => {
+    const { getLatestContextForAgent } = await import("./usage.js");
+    expect(await getLatestContextForAgent("nobody")).toBe(0);
+    expect(await getLatestContextForAgent("nobody", "sess-x")).toBe(0);
+  });
+
+  it("insertUsageRequests is a no-op on an empty batch and returns 0", async () => {
+    const { insertUsageRequests } = await import("./usage.js");
+    expect(await insertUsageRequests([])).toBe(0);
+  });
+
+  it("computes the live window from the FINAL (max-seq) request of the latest turn — NOT a sum", async () => {
+    const { insertUsageRequests, getLatestContextForAgent } = await import("./usage.js");
+    // One turn, two requests. The earlier (seq 0) request is huge (the kind of
+    // round-trip the cumulative row would over-count); the final (seq 1)
+    // request's window is 600 (100 + 200 + 300). The live window must be 600,
+    // proving we read only the final request — not a sum of both (which would
+    // be far larger), and not the cumulative inflation.
+    await insertUsageRequests([
+      {
+        timestamp: new Date(2026, 0, 15, 12, 0).toISOString(),
+        agentName: "friday",
+        sessionId: "sess-A",
+        turnId: "turn-1",
+        seq: 0,
+        inputTokens: 5000,
+        outputTokens: 100,
+        cacheCreationTokens: 5000,
+        cacheReadTokens: 50000, // cache_read inflation on an intermediate request
+      },
+      {
+        timestamp: new Date(2026, 0, 15, 12, 1).toISOString(),
+        agentName: "friday",
+        sessionId: "sess-A",
+        turnId: "turn-1",
+        seq: 1,
+        inputTokens: 100,
+        outputTokens: 999, // output excluded from the window
+        cacheCreationTokens: 200,
+        cacheReadTokens: 300,
+      },
+    ]);
+    expect(await getLatestContextForAgent("friday")).toBe(600);
+    expect(await getLatestContextForAgent("friday", "sess-A")).toBe(600);
+  });
+
+  it("picks the LATEST turn (by newest request timestamp), then that turn's final request", async () => {
+    const { insertUsageRequests, getLatestContextForAgent } = await import("./usage.js");
+    await insertUsageRequests([
+      // Older turn — bigger window; must be ignored.
+      {
+        timestamp: new Date(2026, 0, 15, 10, 0).toISOString(),
+        agentName: "friday",
+        sessionId: "sess-A",
+        turnId: "turn-old",
+        seq: 0,
+        inputTokens: 9000,
+        outputTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+      },
+      // Newer turn, final request window = 70 (10 + 20 + 40). Inserted before
+      // its own seq-0 to prove seq DESC (not insert order) picks the final row.
+      {
+        timestamp: new Date(2026, 0, 15, 14, 1).toISOString(),
+        agentName: "friday",
+        sessionId: "sess-A",
+        turnId: "turn-new",
+        seq: 1,
+        inputTokens: 10,
+        outputTokens: 0,
+        cacheCreationTokens: 20,
+        cacheReadTokens: 40,
+      },
+      {
+        timestamp: new Date(2026, 0, 15, 14, 0).toISOString(),
+        agentName: "friday",
+        sessionId: "sess-A",
+        turnId: "turn-new",
+        seq: 0,
+        inputTokens: 8000,
+        outputTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+      },
+    ]);
+    expect(await getLatestContextForAgent("friday")).toBe(70);
+  });
+
+  it("scopes to the supplied sessionId, ignoring a newer turn on another session", async () => {
+    const { insertUsageRequests, getLatestContextForAgent } = await import("./usage.js");
+    await insertUsageRequests([
+      // Newest overall but on sess-OLD — ignored when scoped to sess-NEW.
+      {
+        timestamp: new Date(2026, 0, 15, 16, 0).toISOString(),
+        agentName: "friday",
+        sessionId: "sess-OLD",
+        turnId: "turn-old",
+        seq: 0,
+        inputTokens: 99999,
+        outputTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+      },
+      // Latest within sess-NEW, final window = 15 (5 + 4 + 6).
+      {
+        timestamp: new Date(2026, 0, 15, 13, 0).toISOString(),
+        agentName: "friday",
+        sessionId: "sess-NEW",
+        turnId: "turn-new",
+        seq: 0,
+        inputTokens: 5,
+        outputTokens: 0,
+        cacheCreationTokens: 4,
+        cacheReadTokens: 6,
+      },
+    ]);
+    expect(await getLatestContextForAgent("friday", "sess-NEW")).toBe(15);
+    // Unscoped picks the newest overall (sess-OLD) = 99999.
+    expect(await getLatestContextForAgent("friday")).toBe(99999);
+  });
+});
