@@ -26,6 +26,7 @@ import {
   claimPendingSession,
   getTurnAuthorUserId,
   insertUsage,
+  insertUsageRequests,
   updateBlock,
 } from "@friday/shared/services";
 import { eventBus } from "../events/bus.js";
@@ -783,6 +784,7 @@ function makeProdPorts(): TurnStatePorts<LiveWorker> {
     },
     recoverFromJsonl: (inputs) => recoverFromJsonl(inputs),
     insertUsage: (row) => insertUsage(row),
+    insertUsageRequests: (rows) => insertUsageRequests(rows),
     // PR #145: attribute the turn analytics event to the turn's author
     // (resolved from its user block; null → service actor). The resolve is a
     // DB read, kept here in the port so the machine stays pure. Self-guarded:
@@ -2219,6 +2221,7 @@ export async function handleEvent(w: LiveWorker, e: WorkerEvent): Promise<void> 
           sessionId: e.sessionId,
           compactionThisTurn: e.compactionThisTurn,
           usage: e.usage,
+          requestUsages: e.requestUsages,
         },
       });
       // FRI-154: a successful turn-complete is the "this agent made forward

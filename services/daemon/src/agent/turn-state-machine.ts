@@ -83,6 +83,14 @@ export interface TurnContext {
   nextPrompts: WorkerPromptCommand[];
 }
 
+/** Per-API-request usage row (no cost; one per SDK `assistant` message). */
+export interface RequestUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+}
+
 /** Inputs the worker reports at turn-complete. */
 export interface CompletePayload {
   sessionId?: string;
@@ -94,6 +102,9 @@ export interface CompletePayload {
     cache_read_tokens: number;
     cost_usd: number;
   };
+  /** Per-request usage for the turn (one per `assistant` message), persisted to
+   *  `usage_request` for live-context back-compute. Omitted when none. */
+  requestUsages?: RequestUsage[];
 }
 
 /** Inputs the worker reports at error. */
@@ -222,6 +233,15 @@ export type Intent =
       model: string;
       usage: NonNullable<CompletePayload["usage"]>;
       durationMs: number;
+    }
+  /** Insert the per-API-request usage rows for the turn (insertUsageRequests).
+   *  Back-computes live context for the nightly compaction sweep. */
+  | {
+      kind: "insert-usage-requests";
+      sessionId: string;
+      agentName: string;
+      turnId: string;
+      requestUsages: RequestUsage[];
     }
   /** Capture a PostHog analytics event, attributed to the turn's author
    *  (PR #145). The author-resolve is async I/O, so the port — not this pure
@@ -447,15 +467,29 @@ function applyComplete(w: TurnContext, e: CompletePayload, deps: ApplyDeps): App
     usage: e.usage,
   });
 
-  if (e.usage && (w.sessionId || e.sessionId)) {
+  const sessionForUsage = w.sessionId ?? e.sessionId;
+  if (e.usage && sessionForUsage) {
     intents.push({
       kind: "insert-usage",
-      sessionId: (w.sessionId ?? e.sessionId)!,
+      sessionId: sessionForUsage,
       agentName: w.agentName,
       agentType: w.agentType,
       model: w.model,
       usage: e.usage,
       durationMs,
+    });
+  }
+
+  // Per-request usage rows for live-context back-compute (nightly sweep).
+  // Independent of the cumulative `usage` gate above: a turn can stream
+  // per-request usage even on a path that doesn't produce a final result row.
+  if (e.requestUsages && e.requestUsages.length > 0 && sessionForUsage) {
+    intents.push({
+      kind: "insert-usage-requests",
+      sessionId: sessionForUsage,
+      agentName: w.agentName,
+      turnId: w.turnId,
+      requestUsages: e.requestUsages,
     });
   }
 

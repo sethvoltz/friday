@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { getDb, getPool } from "../db/client.js";
-import { usage } from "../db/schema.js";
+import { usage, usageRequest } from "../db/schema.js";
 
 export interface InsertUsageInput {
   timestamp: string;
@@ -54,6 +54,45 @@ export async function bulkInsertUsage(rows: InsertUsageInput[]): Promise<number>
         cacheReadTokens: e.cacheReadTokens,
         turnNumber: e.turnNumber ?? null,
         durationMs: e.durationMs ?? null,
+      })),
+    );
+  return rows.length;
+}
+
+export interface InsertUsageRequestInput {
+  timestamp: string;
+  agentName?: string | null;
+  sessionId: string;
+  turnId: string;
+  /** Request index within the turn (0-based, arrival order). */
+  seq: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+}
+
+/**
+ * Persist the per-API-request usage rows for one completed turn (one row per
+ * `assistant` message the SDK streamed). Unlike the cumulative `usage` row,
+ * these are NOT summed: the LAST (max-`seq`) row's prompt size is the true live
+ * context window — see `getLatestContextForAgent`. Batched; a no-op on `[]`.
+ */
+export async function insertUsageRequests(rows: InsertUsageRequestInput[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  await getDb()
+    .insert(usageRequest)
+    .values(
+      rows.map((r) => ({
+        timestamp: new Date(r.timestamp),
+        agentName: r.agentName ?? null,
+        sessionId: r.sessionId,
+        turnId: r.turnId,
+        seq: r.seq,
+        inputTokens: r.inputTokens,
+        outputTokens: r.outputTokens,
+        cacheCreationTokens: r.cacheCreationTokens,
+        cacheReadTokens: r.cacheReadTokens,
       })),
     );
   return rows.length;
@@ -448,7 +487,60 @@ export function estimateContextTokens(row: {
   return row.inputTokens + row.cacheCreationTokens + row.cacheReadTokens;
 }
 
-// Re-export the table object for callers that want raw Drizzle access.
-export { usage } from "../db/schema.js";
+/**
+ * The TRUE live context window for an agent, back-computed from the per-request
+ * `usage_request` table. The live window = the prompt size of the FINAL API
+ * request of the agent's most-recent turn = that single (max-`seq`) row's
+ * `input + cache_read + cache_creation`.
+ *
+ * This replaces the old `estimateContextTokens(getLatestUsageForAgent(...))`
+ * estimate for the nightly sweep. That path summed the per-turn CUMULATIVE
+ * `usage` row, whose `cache_read_input_tokens` is re-counted on every API
+ * round-trip in a multi-tool-call turn — inflating the estimate to a large
+ * multiple of the real window and firing the sweep far below threshold.
+ *
+ * When `sessionId` is supplied the lookup is scoped to it (so a cleared/rotated
+ * old session's rows can't trigger a phantom sweep); otherwise the latest turn
+ * across all of the agent's sessions is used. Returns 0 when there are no rows
+ * (a never-run or freshly-cleared agent sits below threshold).
+ *
+ * "Latest turn" is the turn containing the newest-by-timestamp request row; the
+ * final request of that turn is its max-`seq` row. Output tokens are excluded
+ * (they don't re-enter the window) — matching `estimateContextTokens`.
+ */
+export async function getLatestContextForAgent(
+  agentName: string,
+  sessionId?: string,
+): Promise<number> {
+  const pool = getPool();
+  // CTE: find the latest turn (by newest request timestamp) for the agent,
+  // optionally scoped to a session, then take that turn's max-`seq` request row
+  // and sum its three context components. Both the CTE and the outer lookup
+  // carry the same agent (+ optional session) predicate so a turn_id collision
+  // across agents/sessions can't pull in a foreign row.
+  const scope = sessionId === undefined ? "" : "AND session_id = $2";
+  const params = sessionId === undefined ? [agentName] : [agentName, sessionId];
+  const result = await pool.query<{ context: number }>(
+    `WITH latest_turn AS (
+       SELECT turn_id
+       FROM usage_request
+       WHERE agent_name = $1 ${scope}
+       ORDER BY timestamp DESC
+       LIMIT 1
+     )
+     SELECT COALESCE(input_tokens + cache_read_tokens + cache_creation_tokens, 0)::int
+              AS "context"
+       FROM usage_request
+      WHERE agent_name = $1 ${scope}
+        AND turn_id = (SELECT turn_id FROM latest_turn)
+      ORDER BY seq DESC
+      LIMIT 1`,
+    params,
+  );
+  return result.rows[0]?.context ?? 0;
+}
+
+// Re-export the table objects for callers that want raw Drizzle access.
+export { usage, usageRequest } from "../db/schema.js";
 // Re-export the sql helper so consumers can compose ad-hoc queries.
 export { sql };

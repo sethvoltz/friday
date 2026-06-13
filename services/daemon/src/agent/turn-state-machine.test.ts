@@ -169,6 +169,53 @@ describe("turn-state-machine: complete (AC #3 — intents + projection)", () => 
     expect(r.state).toBe("idle");
   });
 
+  it("a turn-complete WITH requestUsages emits insert-usage-requests carrying turnId + the rows verbatim", () => {
+    const requestUsages = [
+      { input_tokens: 1000, output_tokens: 10, cache_creation_tokens: 0, cache_read_tokens: 5000 },
+      { input_tokens: 200, output_tokens: 20, cache_creation_tokens: 50, cache_read_tokens: 100 },
+    ];
+    const r = apply(
+      ctx({ blocksThisTurn: 1 }),
+      { kind: "complete", payload: { requestUsages } },
+      DEPS,
+    );
+    const intent = r.intents.find((i) => i.kind === "insert-usage-requests");
+    expect(intent).toEqual<Intent>({
+      kind: "insert-usage-requests",
+      sessionId: "sess-1",
+      agentName: "agent-1",
+      turnId: "turn-1",
+      requestUsages,
+    });
+  });
+
+  it("does NOT emit insert-usage-requests when requestUsages is absent or empty", () => {
+    const none = apply(ctx({ blocksThisTurn: 1 }), { kind: "complete", payload: {} }, DEPS);
+    expect(none.intents.some((i) => i.kind === "insert-usage-requests")).toBe(false);
+    const empty = apply(
+      ctx({ blocksThisTurn: 1 }),
+      { kind: "complete", payload: { requestUsages: [] } },
+      DEPS,
+    );
+    expect(empty.intents.some((i) => i.kind === "insert-usage-requests")).toBe(false);
+  });
+
+  it("emits insert-usage-requests even when the cumulative result usage is absent (gate is independent)", () => {
+    // The cumulative `usage` and the per-request `requestUsages` are gated
+    // separately: a turn can stream per-request usage without producing a final
+    // cumulative result row. insert-usage must be absent, insert-usage-requests present.
+    const requestUsages = [
+      { input_tokens: 50, output_tokens: 5, cache_creation_tokens: 0, cache_read_tokens: 0 },
+    ];
+    const r = apply(
+      ctx({ blocksThisTurn: 1 }),
+      { kind: "complete", payload: { requestUsages } },
+      DEPS,
+    );
+    expect(r.intents.some((i) => i.kind === "insert-usage")).toBe(false);
+    expect(r.intents.some((i) => i.kind === "insert-usage-requests")).toBe(true);
+  });
+
   it("(b) a clean turn-complete with a queued prompt emits send-next as the LAST intent", () => {
     const queued = { prompt: "next please", turnId: "turn-2" };
     const r = apply(

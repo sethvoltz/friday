@@ -22,7 +22,7 @@ import {
   type FridayConfig,
   type TestDbHandle,
 } from "@friday/shared";
-import { insertUsage } from "@friday/shared/services";
+import { insertUsage, insertUsageRequests } from "@friday/shared/services";
 
 import {
   isSweepDue,
@@ -33,7 +33,7 @@ import {
 import { COMPACT_CUSTOM_INSTRUCTIONS } from "../prompts/compact-instructions.js";
 
 // Default config: no `compaction` block, so the resolvers fall to the code
-// defaults (03:30 local, 100K threshold). Cast keeps the test honest about
+// defaults (03:30 local, 150K threshold). Cast keeps the test honest about
 // using the real resolver path rather than hand-poking fields.
 const cfg = {} as FridayConfig;
 
@@ -162,7 +162,7 @@ describe("selectSweepTargets (pure policy)", () => {
       ["bob", 120_000],
       ["busy", 200_000],
       ["offline", 150_000],
-      ["light", 12_000], // below 100K
+      ["light", 12_000], // below 150K
       ["stalled-reg", 199_000],
     ]);
 
@@ -179,8 +179,29 @@ describe("selectSweepTargets (pure policy)", () => {
   it("excludes an agent exactly AT the threshold (strict `>` comparison)", () => {
     const agents = [orch("edge")];
     const liveStatus = new Map<string, "idle" | "working" | null>([["edge", "idle"]]);
-    // 100_000 is the default threshold; estimate === threshold must NOT select.
-    const usageByAgent = new Map<string, number>([["edge", 100_000]]);
+    // 150_000 is the default threshold; estimate === threshold must NOT select.
+    const usageByAgent = new Map<string, number>([["edge", 150_000]]);
+    expect(selectSweepTargets(agents, liveStatus, usageByAgent, cfg)).toEqual([]);
+  });
+
+  it("selects an agent just OVER the 150K default threshold (the post-fix bump)", () => {
+    const agents = [orch("over")];
+    const liveStatus = new Map<string, "idle" | "working" | null>([["over", "idle"]]);
+    // 150_001 just clears the bumped default — a value that would have been
+    // swept under the old 100K floor stays a target; one between 100K and 150K
+    // no longer is (covered by the AT-threshold case + the 120K-below cases).
+    const usageByAgent = new Map<string, number>([["over", 150_001]]);
+    expect(selectSweepTargets(agents, liveStatus, usageByAgent, cfg)).toEqual([
+      { name: "over", type: "orchestrator", estimatedContext: 150_001 },
+    ]);
+  });
+
+  it("does NOT select an agent between the old 100K and new 150K thresholds", () => {
+    const agents = [orch("between")];
+    const liveStatus = new Map<string, "idle" | "working" | null>([["between", "idle"]]);
+    // 120K was swept under the old 100K floor; the 150K bump leaves it alone —
+    // exactly the nightly-runaway fix's intent for mid-window agents.
+    const usageByAgent = new Map<string, number>([["between", 120_000]]);
     expect(selectSweepTargets(agents, liveStatus, usageByAgent, cfg)).toEqual([]);
   });
 
@@ -255,26 +276,51 @@ function fakeLiveWorker(
   } as never);
 }
 
+/**
+ * Seed the per-request `usage_request` table for one turn so the sweep's
+ * live-window estimate (getLatestContextForAgent: the latest turn's FINAL
+ * request, `input + cache_read + cache_creation`) equals `contextTokens`.
+ *
+ * We seed TWO requests for the turn: an EARLIER request with deliberately
+ * larger numbers (which the old cumulative-row path would have summed and
+ * over-counted), and the FINAL (max-seq) request whose three context fields
+ * sum to exactly `contextTokens`. Output is non-zero on both to prove it's not
+ * counted. This proves the sweep reads only the final request, not a sum.
+ */
 async function seedUsage(
   agentName: string,
   sessionId: string,
   contextTokens: number,
 ): Promise<void> {
-  // estimateContextTokens = input + cacheCreation + cacheRead. Spread the
-  // tokens across the three so the SUM equals the intended estimate; output
-  // is deliberately non-zero to prove it's NOT counted.
-  await insertUsage({
-    timestamp: new Date().toISOString(),
-    sessionId,
-    agentName,
-    agentType: "orchestrator",
-    model: "claude-opus-4-8",
-    costUsd: 0.5,
-    inputTokens: Math.floor(contextTokens / 3),
-    outputTokens: 9_999, // must NOT enter the estimate
-    cacheCreationTokens: Math.floor(contextTokens / 3),
-    cacheReadTokens: contextTokens - 2 * Math.floor(contextTokens / 3),
-  });
+  const third = Math.floor(contextTokens / 3);
+  await insertUsageRequests([
+    {
+      // Earlier request in the turn — bigger than the final window. If the
+      // sweep summed requests (or used the cumulative row) this would inflate
+      // the estimate; the final-request-only read ignores it.
+      timestamp: new Date(Date.now() - 1000).toISOString(),
+      agentName,
+      sessionId,
+      turnId: `t_${agentName}_${sessionId}`,
+      seq: 0,
+      inputTokens: contextTokens,
+      outputTokens: 9_999,
+      cacheCreationTokens: contextTokens,
+      cacheReadTokens: contextTokens,
+    },
+    {
+      // FINAL request — its three context fields sum to `contextTokens`.
+      timestamp: new Date().toISOString(),
+      agentName,
+      sessionId,
+      turnId: `t_${agentName}_${sessionId}`,
+      seq: 1,
+      inputTokens: third,
+      outputTokens: 9_999, // must NOT enter the estimate
+      cacheCreationTokens: third,
+      cacheReadTokens: contextTokens - 2 * third,
+    },
+  ]);
 }
 
 describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
@@ -309,7 +355,7 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     await seedUsage("offline", "s-offline", 180_000);
     // intentionally NO fakeLiveWorker
 
-    // Idle orchestrator below threshold — excluded by the 100K gate.
+    // Idle orchestrator below threshold — excluded by the 150K gate.
     await registry.registerAgent({ name: "light", type: "orchestrator" });
     await registry.setSession("light", "s-light");
     await seedUsage("light", "s-light", 20_000);
@@ -366,7 +412,7 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     expect(dispatchedLog![2]).toMatchObject({
       agent: "friday",
       estimate: 190_000,
-      threshold: 100_000,
+      threshold: 150_000,
     });
   });
 
@@ -408,6 +454,41 @@ describe("__runSweepForTest (imperative tick against scratch Postgres)", () => {
     const startedLog = logSpy.mock.calls.find((c) => c[1] === "worker.compact.sweep.started");
     expect(startedLog).toBeDefined();
     expect(startedLog![2]).toMatchObject({ targetCount: 0 });
+  });
+
+  it("nightly-runaway regression: an inflated CUMULATIVE usage row does NOT trigger a sweep when the live window is small", async () => {
+    // The bug: the sweep summed the per-turn cumulative `usage` row, whose
+    // cache_read is re-counted on every API round-trip — so a ~28K-window agent
+    // that made a multi-tool-call turn looked like 500K+ and compacted nightly.
+    // Here the cumulative row is well over the 150K threshold, but the FINAL
+    // per-request row's window is ~28K. The fix reads the per-request final
+    // window, so nothing dispatches.
+    await registry.registerAgent({ name: "friday", type: "orchestrator" });
+    await registry.setSession("friday", "s-friday");
+    // The (now ignored for the sweep) cumulative row — wildly inflated.
+    await insertUsage({
+      timestamp: new Date().toISOString(),
+      sessionId: "s-friday",
+      agentName: "friday",
+      agentType: "orchestrator",
+      model: "claude-opus-4-8",
+      costUsd: 1.0,
+      inputTokens: 5_000,
+      outputTokens: 2_000,
+      cacheCreationTokens: 20_000,
+      cacheReadTokens: 800_000, // re-counted-per-round-trip inflation
+    });
+    // The TRUE live window: ~28K (the final request's prompt size).
+    await seedUsage("friday", "s-friday", 28_000);
+    fakeLiveWorker("friday", "idle");
+
+    const dispatchSpy = vi.spyOn(lifecycle, "dispatchTurn").mockImplementation(() => {});
+
+    await __runSweepForTest(at(3, 30));
+
+    // 28K < 150K — the agent is left alone (the old cumulative path would have
+    // summed 825K and swept it every night).
+    expect(dispatchSpy).not.toHaveBeenCalled();
   });
 
   it("scopes the context estimate to the agent's CURRENT session (a stale old session can't trigger a sweep)", async () => {

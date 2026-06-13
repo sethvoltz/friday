@@ -3,11 +3,17 @@
  *
  * A daemon-internal timer that, once per night (default 03:30 local),
  * dispatches a `/compact <persona instructions>` maintenance turn to each
- * long-lived, currently-idle agent whose estimated live context has crept
- * above the sweep threshold (default 100K tokens). This is the LOW number in
- * the two-number scheme: the sweep keeps wakes cheap (~100K) and the per-agent
+ * long-lived, currently-idle agent whose live context window has crept above
+ * the sweep threshold (default 150K tokens). This is the LOW number in the
+ * two-number scheme: the sweep keeps wakes cheap (~150K) and the per-agent
  * `settings.autoCompactWindow` SDK ceiling (200K, FRI-156 §A) is the runaway-
  * day backstop.
+ *
+ * The window is the TRUE live context — the prompt size of the latest turn's
+ * FINAL API request (`usage_request` via getLatestContextForAgent) — NOT the
+ * per-turn cumulative `usage` row, whose `cache_read` is re-counted on every
+ * round-trip and inflated the estimate so the sweep fired far below threshold
+ * every night (an agent with a ~28K window compacting nightly).
  *
  * Explicitly NOT a schedules-table row, NOT a scheduled agent, NOT an
  * agent-run schedule — it must never surface in the user-facing schedules UI.
@@ -21,7 +27,7 @@
  * per local day. `isSweepDue` also bounds firing to a catch-up WINDOW after the
  * scheduled time (`SWEEP_WINDOW_MINUTES`) so a daytime daemon restart (fresh
  * `lastSweepAt === null`) does NOT immediately mass-compact — it waits for the
- * next night. The 100K threshold gate is the further backstop against an
+ * next night. The 150K threshold gate is the further backstop against an
  * overnight restart re-sweeping — a session that was just compacted sits below
  * threshold, so a same-day second pass selects nothing.
  */
@@ -37,7 +43,7 @@ import {
   type AgentType,
   type FridayConfig,
 } from "@friday/shared";
-import { estimateContextTokens, getLatestUsageForAgent } from "@friday/shared/services";
+import { getLatestContextForAgent } from "@friday/shared/services";
 import { randomUUID } from "node:crypto";
 import { logger } from "../log.js";
 import { buildSystemPrompt } from "../prompts/build-system-prompt.js";
@@ -168,15 +174,23 @@ function buildLiveStatus(): Map<string, "idle" | "working" | null> {
 }
 
 /**
- * Estimated live context for one agent: the input + cache-read + cache-creation
- * of its latest usage row, scoped to its CURRENT sessionId so a cleared/rotated
- * old session's tokens can't trigger a phantom sweep. Returns 0 when there's no
- * usage row (a never-run or freshly-cleared agent sits below threshold).
+ * Live context window for one agent, scoped to its CURRENT sessionId so a
+ * cleared/rotated old session's tokens can't trigger a phantom sweep.
+ *
+ * This reads the per-request `usage_request` table (getLatestContextForAgent):
+ * the prompt size of the FINAL API request of the agent's latest turn = that
+ * single request's `input + cache_read + cache_creation`. It replaces the old
+ * `estimateContextTokens(getLatestUsageForAgent(...))` path, which summed the
+ * per-turn CUMULATIVE `usage` row — that row's `cache_read` is re-counted on
+ * every API round-trip in a multi-tool-call turn, inflating the estimate to a
+ * large multiple of the real window and firing the sweep far below threshold
+ * (the nightly-compaction runaway: a ~28K-window agent compacting every night).
+ *
+ * Returns 0 when there are no per-request rows (a never-run / freshly-cleared
+ * agent, or one whose turns all predate this table) — it sits below threshold.
  */
 async function estimateAgentContext(a: AgentEntry): Promise<number> {
-  const row = await getLatestUsageForAgent(a.name, a.sessionId ?? undefined);
-  if (!row) return 0;
-  return estimateContextTokens(row);
+  return getLatestContextForAgent(a.name, a.sessionId ?? undefined);
 }
 
 /**

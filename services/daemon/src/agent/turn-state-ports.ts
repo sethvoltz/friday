@@ -108,6 +108,20 @@ export interface TurnStatePorts<W extends PortWorker = PortWorker> {
     cacheReadTokens: number;
     durationMs: number;
   }) => Promise<void>;
+  /** Per-API-request usage batch insert (live-context back-compute). */
+  insertUsageRequests: (
+    rows: {
+      timestamp: string;
+      agentName: string;
+      sessionId: string;
+      turnId: string;
+      seq: number;
+      inputTokens: number;
+      outputTokens: number;
+      cacheCreationTokens: number;
+      cacheReadTokens: number;
+    }[],
+  ) => Promise<unknown>;
   /** Analytics capture, attributed to the turn's author (PR #145). The prod
    *  wiring resolves the originating user from the turn's user block (falling
    *  back to the service actor for autonomous turns) and captures under that
@@ -253,6 +267,31 @@ export async function executeIntents<W extends PortWorker>(
             });
           });
         break;
+      case "insert-usage-requests": {
+        // Fire-and-forget (matches insert-usage): the handler stays responsive.
+        // `seq` is the request index within the turn (arrival order); the
+        // max-`seq` row is the turn's final request — its prompt size is the
+        // live context window read by the nightly sweep.
+        const ts = new Date().toISOString();
+        const rows = intent.requestUsages.map((u, seq) => ({
+          timestamp: ts,
+          agentName: intent.agentName,
+          sessionId: intent.sessionId,
+          turnId: intent.turnId,
+          seq,
+          inputTokens: u.input_tokens,
+          outputTokens: u.output_tokens,
+          cacheCreationTokens: u.cache_creation_tokens,
+          cacheReadTokens: u.cache_read_tokens,
+        }));
+        void ports.insertUsageRequests(rows).catch((err: unknown) => {
+          ports.logWarn("usage.insert-requests.error", {
+            agent: intent.agentName,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
+        break;
+      }
       case "posthog":
         await ports.captureTurnEvent(intent.turnId, intent.event, intent.properties);
         break;

@@ -285,11 +285,15 @@ export const DEFAULT_AUTO_COMPACT_WINDOW: Record<AgentTypeName, number> = {
 };
 
 /** Default nightly maintenance-sweep schedule + threshold (FRI-156 §B):
- *  03:30 local, 100K-token floor. Defaults in code; config overrides per field. */
+ *  03:30 local, 150K-token floor. Defaults in code; config overrides per field.
+ *  The threshold is compared against the TRUE live context window (the latest
+ *  turn's final-request prompt size, from `usage_request`), not the inflated
+ *  cumulative `usage` row. 150K stays comfortably below the 200K
+ *  `autoCompactWindow` SDK backstop so the nightly sweep still fires first. */
 export const DEFAULT_COMPACTION_SWEEP = {
   sweepHour: 3,
   sweepMinute: 30,
-  sweepThresholdTokens: 100_000,
+  sweepThresholdTokens: 150_000,
 } as const;
 
 /** Floor a user-supplied token budget at a sane minimum so a hostile/buggy

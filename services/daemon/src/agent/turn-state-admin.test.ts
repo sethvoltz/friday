@@ -68,6 +68,7 @@ function makeAdminRecorder(archiveShouldThrow?: Error): AdminRecorder {
     },
     recoverFromJsonl: async () => {},
     insertUsage: async () => {},
+    insertUsageRequests: async () => [],
     captureTurnEvent: () => {},
     sendPrompt: () => {},
     forceKill: async () => {},

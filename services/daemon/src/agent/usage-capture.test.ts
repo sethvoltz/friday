@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractUsageFromResult } from "./usage-capture.js";
+import { extractRequestUsage, extractUsageFromResult } from "./usage-capture.js";
 
 describe("extractUsageFromResult", () => {
   it("maps a result message with usage and total_cost_usd to the worker-protocol shape", () => {
@@ -61,5 +61,65 @@ describe("extractUsageFromResult", () => {
     };
     const out = extractUsageFromResult(msg);
     expect(out?.cost_usd).toBe(0);
+  });
+});
+
+describe("extractRequestUsage", () => {
+  it("maps an assistant message's per-request usage (BetaUsage) to the worker-protocol shape (no cost)", () => {
+    const msg = {
+      type: "assistant",
+      message: {
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 80,
+          cache_creation_input_tokens: 300,
+          cache_read_input_tokens: 27000,
+        },
+      },
+    };
+    expect(extractRequestUsage(msg)).toEqual({
+      input_tokens: 1200,
+      output_tokens: 80,
+      cache_creation_tokens: 300,
+      cache_read_tokens: 27000,
+    });
+  });
+
+  it("treats null cache fields as zero (BetaUsage cache_* are nullable)", () => {
+    const msg = {
+      type: "assistant",
+      message: {
+        usage: {
+          input_tokens: 50,
+          output_tokens: 5,
+          cache_creation_input_tokens: null,
+          cache_read_input_tokens: null,
+        },
+      },
+    };
+    expect(extractRequestUsage(msg)).toEqual({
+      input_tokens: 50,
+      output_tokens: 5,
+      cache_creation_tokens: 0,
+      cache_read_tokens: 0,
+    });
+  });
+
+  it("returns undefined for non-assistant messages and assistant messages without usage", () => {
+    expect(extractRequestUsage({ type: "result" })).toBeUndefined();
+    expect(extractRequestUsage({ type: "stream_event" })).toBeUndefined();
+    expect(extractRequestUsage({ type: "assistant" })).toBeUndefined();
+    expect(extractRequestUsage({ type: "assistant", message: {} })).toBeUndefined();
+    expect(extractRequestUsage({})).toBeUndefined();
+  });
+
+  it("defaults a missing input_tokens to zero", () => {
+    const msg = { type: "assistant", message: { usage: { output_tokens: 9 } } };
+    expect(extractRequestUsage(msg)).toEqual({
+      input_tokens: 0,
+      output_tokens: 9,
+      cache_creation_tokens: 0,
+      cache_read_tokens: 0,
+    });
   });
 });

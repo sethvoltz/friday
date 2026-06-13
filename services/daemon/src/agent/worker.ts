@@ -37,7 +37,12 @@ import type {
   WorkerPromptCommand,
   WorkerSpawnOptions,
 } from "./worker-protocol.js";
-import { extractUsageFromResult, type FinalUsage } from "./usage-capture.js";
+import {
+  extractRequestUsage,
+  extractUsageFromResult,
+  type FinalUsage,
+  type RequestUsage,
+} from "./usage-capture.js";
 import { classifySdkError } from "./sdk-error.js";
 import { healDanglingToolUseInJsonl } from "./sdk-jsonl-heal.js";
 import { buildMcpServers } from "../mcp/builder.js";
@@ -896,6 +901,12 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   let sessionAnnounced = false;
   let currentMessageId = "";
   let finalUsage: FinalUsage | undefined;
+  // FRI nightly-compaction runaway: per-API-request usage, one per `assistant`
+  // message, in arrival order. The cumulative `finalUsage` (result.usage)
+  // re-counts cache_read on every round-trip and so inflates the live-context
+  // estimate; the LAST request row's prompt size is the true window. Reset per
+  // turn (this whole function body is one turn). Emitted on turn-complete.
+  const requestUsages: RequestUsage[] = [];
   // Keyed by SDK content-block index *within the current assistant message*.
   // We mint a fresh `clientBlockId` per block-start so the daemon can
   // correlate without relying on the SDK index (which resets each message).
@@ -1415,6 +1426,16 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       }
 
       if (m.type === "assistant") {
+        // Capture this API request's usage BEFORE any break path below. Each
+        // `assistant` message carries the SDK's per-request `usage` (an
+        // Anthropic BetaUsage). The LAST request's prompt size is the true
+        // live context window — see the per-turn `requestUsages` note above and
+        // getLatestContextForAgent. Captured here (not gated behind the break
+        // branches) so a turn that breaks for a queued prompt still records its
+        // final request.
+        const reqUsage = extractRequestUsage(m);
+        if (reqUsage) requestUsages.push(reqUsage);
+
         // FIX_FORWARD 2.4: SDK iteration boundary. Each assistant message
         // marks the end of one model step (tool calls land in the
         // subsequent `user` message). Check whether we have queued user
@@ -1540,6 +1561,7 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
       sessionId: sessionId ?? "",
       compactionThisTurn: compactionSeenThisTurn || undefined,
       usage: finalUsage,
+      requestUsages: requestUsages.length > 0 ? requestUsages : undefined,
     });
     emit({ type: "status-change", status: "idle" });
   } catch (err: unknown) {
