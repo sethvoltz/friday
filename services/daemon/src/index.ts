@@ -30,6 +30,10 @@ import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
 import { startCompactionSweep, stopCompactionSweep } from "./scheduler/compaction-sweep.js";
 import { sweepOrphanedScheduleRuns } from "./scheduler/runs.js";
 import {
+  startPendingBlockReaper,
+  stopPendingBlockReaper,
+} from "./scheduler/pending-block-reaper.js";
+import {
   archiveAgent,
   dispatchTurn,
   reapAllLiveWorkers,
@@ -221,6 +225,12 @@ async function main(): Promise<void> {
   // FRI-156 §B: the nightly maintenance compaction sweep — a daemon-internal
   // timer (NOT a schedules-table row). Unref'd, so it never holds the loop open.
   const compactionSweep = startCompactionSweep();
+  // SEV-0 "no user message is ever lost": the pending-block reaper is the
+  // live-daemon backstop for a `user_chat` block stranded at status='pending'
+  // by a missed NOTIFY or the boot-scan shape-mismatch skip. The boot scan
+  // only re-picks pending rows at STARTUP; this unref'd timer covers the
+  // live-daemon case. Complements (does not replace) the zero-block net.
+  const pendingBlockReaper = startPendingBlockReaper();
   startTurnStallWatchdog();
   startInvariantAuditor();
   startMailPruner();
@@ -290,8 +300,10 @@ async function main(): Promise<void> {
     clearInterval(schedTick);
     void watchdog;
     void compactionSweep;
+    void pendingBlockReaper;
     stopWatchdog();
     stopCompactionSweep();
+    stopPendingBlockReaper();
     stopTurnStallWatchdog();
     stopInvariantAuditor();
     stopMailPruner();
