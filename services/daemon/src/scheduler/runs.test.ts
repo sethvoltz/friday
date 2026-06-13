@@ -32,11 +32,12 @@ let handle: TestDbHandle;
 let fireSchedule: (typeof import("./scheduler.js"))["fireSchedule"];
 let closeScheduleRun: (typeof import("./runs.js"))["closeScheduleRun"];
 let openScheduleRun: (typeof import("./runs.js"))["openScheduleRun"];
+let sweepOrphanedScheduleRuns: (typeof import("./runs.js"))["sweepOrphanedScheduleRuns"];
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "schedule-runs" });
   ({ fireSchedule } = await import("./scheduler.js"));
-  ({ closeScheduleRun, openScheduleRun } = await import("./runs.js"));
+  ({ closeScheduleRun, openScheduleRun, sweepOrphanedScheduleRuns } = await import("./runs.js"));
 });
 
 afterAll(async () => {
@@ -187,5 +188,39 @@ describe("ADR-024 closeScheduleRun (agent-run worker onExit transition)", () => 
 
   it("AC4: is a no-op for a null id (open insert failed)", async () => {
     await expect(closeScheduleRun(null, "complete")).resolves.toBeUndefined();
+  });
+});
+
+describe("ADR-024 sweepOrphanedScheduleRuns (boot leak backstop)", () => {
+  it("closes every still-'running' row as error:'daemon restart' and leaves terminal rows untouched", async () => {
+    // Two orphans (opened `running`, never closed — simulates a daemon crash
+    // after openScheduleRun) and one already-terminal row.
+    const orphanA = await openScheduleRun("crashed-a");
+    const orphanB = await openScheduleRun("crashed-b");
+    const done = await openScheduleRun("finished");
+    await closeScheduleRun(done, "complete");
+
+    const closed = await sweepOrphanedScheduleRuns();
+    expect(closed).toBe(2);
+
+    const a = (await runsFor("crashed-a"))[0]!;
+    const b = (await runsFor("crashed-b"))[0]!;
+    expect(a.status).toBe("error");
+    expect(a.error).toBe("daemon restart");
+    expect(a.completedAt).toBeInstanceOf(Date);
+    expect(b.status).toBe("error");
+
+    // The already-complete row is NOT re-stamped.
+    expect((await runsFor("finished"))[0]!.status).toBe("complete");
+    expect((await runsFor("finished"))[0]!.error).toBeNull();
+
+    void orphanA;
+    void orphanB;
+  });
+
+  it("is a no-op (returns 0) when there are no running rows", async () => {
+    const id = await openScheduleRun("clean");
+    await closeScheduleRun(id, "complete");
+    expect(await sweepOrphanedScheduleRuns()).toBe(0);
   });
 });

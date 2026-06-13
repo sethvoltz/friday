@@ -67,3 +67,35 @@ export async function closeScheduleRun(
     });
   }
 }
+
+/**
+ * Boot-time orphan sweep. A `schedule_runs` row is opened `running` in memory:
+ * the only handle to it is the in-memory `runRowId` threaded to the worker's
+ * onExit. If the daemon crashes (or is killed) after `openScheduleRun` but
+ * before the terminal close, that handle is lost and the row leaks `running`
+ * forever — there is no live worker to ever close it. This sweep, run once at
+ * daemon boot (alongside the other boot-recovery sweeps in index.ts), closes
+ * every still-`running` row as `error: "daemon restart"`. Any worker that
+ * actually survived a restart is impossible (the fork dies with the daemon),
+ * so a `running` row at boot is always an orphan. Best-effort: a failed sweep
+ * is logged, never thrown, so it can't block daemon startup.
+ */
+export async function sweepOrphanedScheduleRuns(): Promise<number> {
+  try {
+    const db = getDb();
+    const closed = await db
+      .update(schema.scheduleRuns)
+      .set({ status: "error", completedAt: new Date(), error: "daemon restart" })
+      .where(eq(schema.scheduleRuns.status, "running"))
+      .returning({ id: schema.scheduleRuns.id });
+    if (closed.length > 0) {
+      logger.log("info", "schedule.run-sweep.orphans", { count: closed.length });
+    }
+    return closed.length;
+  } catch (err) {
+    logger.log("warn", "schedule.run-sweep.error", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return 0;
+  }
+}

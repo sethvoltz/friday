@@ -28,6 +28,7 @@ import { reconcileAppsOnBoot } from "./apps/reconcile.js";
 import { runEvolveBootSync } from "./evolve/projector.js";
 import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
 import { startCompactionSweep, stopCompactionSweep } from "./scheduler/compaction-sweep.js";
+import { sweepOrphanedScheduleRuns } from "./scheduler/runs.js";
 import {
   archiveAgent,
   dispatchTurn,
@@ -210,6 +211,11 @@ async function main(): Promise<void> {
   // dead one.
   await recoverDanglingToolUses();
   await recoverQueuedTurns(cfg);
+  // ADR-024 leak backstop: close any `schedule_runs` row left `running` by a
+  // crash/kill after `openScheduleRun` but before its terminal close (the row
+  // handle is in-memory only, so no live worker can ever close it). Must run
+  // BEFORE the scheduler tick re-fires anything. Best-effort, never throws.
+  await sweepOrphanedScheduleRuns();
   const schedTick = startScheduler();
   const watchdog = startWatchdog();
   // FRI-156 §B: the nightly maintenance compaction sweep — a daemon-internal

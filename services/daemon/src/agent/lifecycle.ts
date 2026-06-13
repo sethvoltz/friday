@@ -325,6 +325,16 @@ export interface SpawnTurnInput {
   options: WorkerSpawnOptions;
   /** Called when the worker process exits. Used by scheduled to write last-run.md. */
   onExit?: (info: ExitInfo) => void;
+  /** Called when the worker could not be started at all — `spawnTurn` threw
+   *  before the `child.on("exit")` handler was registered (e.g. the pre-fork
+   *  `registry.setStatus` / `writeProfile` / `spawn()` itself throws). Because
+   *  `dispatchTurn` is fire-and-forget, such a throw is swallowed by its
+   *  `.catch`; without this hook a caller that opened external bookkeeping (the
+   *  scheduler's `schedule_runs` row, ADR-024) would never learn the fork never
+   *  happened and the row would leak `running` forever. Distinct from `onExit`,
+   *  which only fires once a `child` object exists. Best-effort; invoked at most
+   *  once and never together with `onExit`. */
+  onSpawnError?: (err: unknown) => void;
   /** Present only when the caller recorded the user block as `status='queued'`
    *  (the worker was already busy at POST time). Propagates to the queued
    *  `WorkerPromptCommand` so `sendPrompt` knows to re-stamp the row on
@@ -499,8 +509,48 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
   // the next generation's spawn/IPC Transitions for the same name still apply in
   // strict arrival order. Fire-and-forget: the queue swallows + logs Transition
   // errors so one bad event can't wedge the chain.
+  // Single-fire guard for `onExit`. The `exit` and `error` events can both
+  // fire for one fork (e.g. a spawn that emits `error` and then `exit`), or
+  // `error` can fire with NO matching `exit` (ENOENT / EMFILE — the child
+  // never actually started). The scheduler's terminal-row write must run
+  // exactly once, so whichever event arrives first owns the `onExit` call.
+  let onExitFired = false;
+  const fireOnExit = (status: ExitInfo["status"]): void => {
+    if (onExitFired) return;
+    onExitFired = true;
+    if (!w.onExit) return;
+    try {
+      w.onExit({
+        sessionId: w.sessionId,
+        durationMs: Date.now() - w.spawnedAt,
+        completed: w.completedAtLeastOnce,
+        status,
+      });
+    } catch (err) {
+      logger.log("warn", "worker.onexit.error", {
+        agent: input.agentName,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
   child.on("message", (raw: unknown) => {
     void enqueueTransition(input.agentName, () => safeHandleEvent(w, raw));
+  });
+  // A failed `spawn()` (ENOENT — bad interpreter path, EMFILE — fd exhaustion)
+  // surfaces asynchronously as an `error` event and frequently emits NO `exit`
+  // event, so the `child.on("exit")` teardown below never runs. Without this
+  // handler the worker stays in the live map and any external bookkeeping the
+  // caller opened (the scheduler's `schedule_runs` row, ADR-024) leaks
+  // `running` forever. Demote the Generation and fire `onExit` as `error`.
+  child.on("error", (err) => {
+    logger.log("warn", "worker.spawn.error", {
+      agent: input.agentName,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    if (profilePath) removeProfile(profilePath);
+    if (isCurrentGeneration(w)) live.delete(input.agentName);
+    fireOnExit("error");
   });
   child.on("exit", (code, signal) => {
     logger.log("info", "worker.exit", {
@@ -565,27 +615,14 @@ export async function spawnTurn(input: SpawnTurnInput): Promise<void> {
     }
     // Phase 5: `agent_lifecycle` SSE retired — Zero replicates the
     // agents row UPDATE so the dashboard sees the status drop on
-    // worker exit.
-    if (w.onExit) {
-      const status: ExitInfo["status"] = w.completedAtLeastOnce
-        ? w.lastExitStatus
-        : code === 0
-          ? "complete"
-          : "error";
-      try {
-        w.onExit({
-          sessionId: w.sessionId,
-          durationMs: Date.now() - w.spawnedAt,
-          completed: w.completedAtLeastOnce,
-          status,
-        });
-      } catch (err) {
-        logger.log("warn", "worker.onexit.error", {
-          agent: input.agentName,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    // worker exit. `fireOnExit` is single-fire — if a preceding `error`
+    // event already closed out this fork, this is a no-op.
+    const status: ExitInfo["status"] = w.completedAtLeastOnce
+      ? w.lastExitStatus
+      : code === 0
+        ? "complete"
+        : "error";
+    fireOnExit(status);
   });
 
   // Send `start` after the worker emits its first `ready`. Inject
@@ -647,6 +684,18 @@ export function dispatchTurn(input: SpawnTurnInput): void {
         agent: input.agentName,
         message: err instanceof Error ? err.message : String(err),
       });
+      // The fork never happened (threw before `child.on("exit")` was wired),
+      // so `onExit` will never fire. Let the caller close out any external
+      // bookkeeping it opened (the scheduler's `schedule_runs` row). Best-
+      // effort: a throw here must not escape the fire-and-forget dispatch.
+      try {
+        input.onSpawnError?.(err);
+      } catch (cbErr) {
+        logger.log("warn", "spawn.on-spawn-error.callback-error", {
+          agent: input.agentName,
+          message: cbErr instanceof Error ? cbErr.message : String(cbErr),
+        });
+      }
     });
     return;
   }

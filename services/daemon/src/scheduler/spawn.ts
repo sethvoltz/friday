@@ -89,17 +89,30 @@ export async function spawnScheduledRun(
 
   dispatchTurn({
     agentName: scheduleRow.name,
+    // ADR-024 leak backstop: the worker is fire-and-forget, so a throw during
+    // the async spawn setup (before `child.on("exit")` is wired) is swallowed
+    // by dispatchTurn and `onExit` never runs. Close the run row `error` here
+    // so it doesn't leak `running` forever. Best-effort.
+    onSpawnError: (err) => {
+      void closeScheduleRun(runRowId, "error", err instanceof Error ? err.message : String(err));
+    },
     onExit: (info) => {
       // ADR-024: transition the schedule_runs row to a terminal status now
-      // that the worker has actually exited. `complete` maps to a clean exit;
-      // `aborted`/`error` both record as `error` (aborted carries no error
-      // text). Fire-and-forget — closeScheduleRun is best-effort and swallows
-      // its own failures.
-      void closeScheduleRun(
-        runRowId,
-        info.status === "complete" ? "complete" : "error",
-        info.status === "error" ? "worker exited with error" : undefined,
-      );
+      // that the worker has actually exited. A clean exit closes `complete`;
+      // an `error` exit closes `error` with an explanatory message; an
+      // `aborted` exit (user Stop / stall-kill) is NOT a failure but the
+      // schema's status check allows only running|complete|error — so we
+      // record it as `error` with the distinct, explanatory message
+      // `"aborted"` rather than a bare "failure with no reason". Fire-and-
+      // forget — closeScheduleRun is best-effort and swallows its own failures.
+      const closeStatus = info.status === "complete" ? "complete" : "error";
+      const closeError =
+        info.status === "error"
+          ? "worker exited with error"
+          : info.status === "aborted"
+            ? "aborted"
+            : undefined;
+      void closeScheduleRun(runRowId, closeStatus, closeError);
       try {
         writeLastRun(scheduleRow.name, {
           timestamp: new Date().toISOString(),
