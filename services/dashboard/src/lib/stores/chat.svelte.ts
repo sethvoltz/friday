@@ -3507,6 +3507,15 @@ export class ChatState {
 
 export const chat = new ChatState();
 
+// Dev probe: expose the singleton on `window` so devtools and Playwright
+// probes can read/drive its state without re-importing the module (Vite
+// gives each import path its own instance, defeating in-page inspection).
+// Mirrors `__fridayZero` in zero.svelte.ts. The FRI-72 send-target e2e
+// spec uses this to force the `focusedAgent`-lags-URL race deterministically.
+if (typeof window !== "undefined") {
+  (globalThis as unknown as { __fridayChat?: ChatState }).__fridayChat = chat;
+}
+
 /** Parsed shape of a block row's `content_json`. Mirrors what the daemon
  *  writes for each block kind (FIX_FORWARD 1.2 + 1.3). */
 interface ParsedBlockContent {

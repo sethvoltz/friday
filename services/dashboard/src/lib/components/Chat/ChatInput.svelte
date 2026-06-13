@@ -8,6 +8,7 @@
   import { page } from "$app/stores";
   import { portal } from "$lib/actions/portal";
   import { randomUUID } from "$lib/util/uuid";
+  import { resolveSendTargetAgent } from "$lib/util/send-target";
   import { KEYS, loadString, removeKey, saveString } from "$lib/stores/persistent";
   import { onDestroy, onMount, tick } from "svelte";
   import { Paperclip, Send, CircleStop } from "lucide-svelte";
@@ -436,24 +437,26 @@
       filename: a.filename,
       mime: a.mime,
     }));
-    // FRI-72 instrumentation: catch the leak where chat.focusedAgent
-    // disagrees with the current route at submit time.
-    try {
-      const pathname = $page.url.pathname;
-      const expectedAgent =
-        pathname === "/"
-          ? "friday"
-          : pathname.startsWith("/sessions/")
-            ? decodeURIComponent(pathname.split("/")[2] ?? "")
-            : null;
-      if (expectedAgent && expectedAgent !== chat.focusedAgent) {
-        // eslint-disable-next-line no-console
-        console.error(
-          `[chat.submit] focusedAgent="${chat.focusedAgent}" but URL implies "${expectedAgent}" (pathname=${pathname}). Sending to focusedAgent — this is the bug we're hunting.`,
-        );
-      }
-    } catch {
-      /* instrumentation must not break send */
+    // FRI-72 fix: the URL route is the AUTHORITATIVE send target. The
+    // `chat.focusedAgent` signal is synced from the route by a
+    // post-navigation `$effect` in ChatShell.svelte and can lag the URL
+    // during/right-after a navigation — a send in that window would
+    // otherwise be stamped with the previously-viewed agent and silently
+    // misrouted (the confirmed root cause of a SEV-0 message loss). We
+    // resolve the target from `$page` here and let the URL win. The prior
+    // `console.error`-only instrumentation ("the bug we're hunting") is
+    // retired: this is now a correction, not just a log.
+    const routeAgent = resolveSendTargetAgent($page.url.pathname);
+    // Fall back to focusedAgent only when the route isn't a live chat
+    // route (no authoritative agent to read) — in practice ChatInput only
+    // renders on live `/` and `/sessions/<agent>` routes, so `routeAgent`
+    // is non-null here.
+    const sendAgent = routeAgent ?? chat.focusedAgent;
+    if (routeAgent && routeAgent !== chat.focusedAgent) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[chat.submit] focusedAgent="${chat.focusedAgent}" lagged URL "${routeAgent}" at send time; stamping send to the URL agent (FRI-72).`,
+      );
     }
     // Pre-mint the blockId so `queueId` on the optimistic bubble equals
     // the Zero block's PK — `applyZeroBlocks` drops the pending bubble
@@ -479,7 +482,7 @@
     autoresize();
     const outcome = await zeroSync.sendUserMessage({
       blockId,
-      agent: chat.focusedAgent,
+      agent: sendAgent,
       text: t,
       attachments: attachments.length > 0 ? attachments : undefined,
     });
@@ -491,7 +494,7 @@
       // Product analytics: a user message that the server accepted. Capture
       // shape, not content — never the message text. No-op without a key.
       posthog.capture("message_sent", {
-        agent: chat.focusedAgent,
+        agent: sendAgent,
         turn_id: outcome.turnId,
         text_length: t.length,
         has_attachments: attachments.length > 0,
