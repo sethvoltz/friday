@@ -15,6 +15,18 @@ import type { LayoutLoad } from "./$types";
 // SvelteKit client-side navigation), autocapture, and session replay. The
 // per-user identify/reset lives in +layout.svelte, where `data.user` is
 // reactively available.
+//
+// The defaults bundle does NOT enable exception autocapture, and we never set
+// the project's remote-config `autocaptureExceptions` flag — so before
+// `capture_exceptions` was added here, the ONLY browser→PostHog error path was
+// SvelteKit's `handleError` (hooks.client.ts), which fires solely for uncaught
+// errors during load/render. Runtime console errors — thrown in event
+// handlers, async/promise rejections, `$effect` failures after mount — never
+// reached PostHog. `capture_exceptions: true` installs posthog-js's global
+// `error` + `unhandledrejection` observer so those land in Error Tracking with
+// stack traces and session-replay correlation, matching the server client's
+// `enableExceptionAutocapture` (src/lib/server/posthog.ts). `handleError`'s
+// forwarding stays — posthog-js dedups handled vs. unhandled captures.
 export const load: LayoutLoad = async ({ data }) => {
   if (browser && data.posthogKey && !posthog.__loaded) {
     posthog.init(data.posthogKey, {
@@ -26,6 +38,8 @@ export const load: LayoutLoad = async ({ data }) => {
       // not for ingestion. Keeps toolbar/links pointing at the actual app.
       ui_host: data.posthogHost,
       defaults: "2026-01-30",
+      // Browser exception autocapture (window.error + unhandledrejection).
+      capture_exceptions: true,
     });
   }
   return data;

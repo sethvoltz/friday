@@ -14,7 +14,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 const loadCalls = { count: 0 };
-const ctorCalls: Array<{ key: string; host?: string }> = [];
+const ctorCalls: Array<{ key: string; host?: string; enableExceptionAutocapture?: boolean }> = [];
 
 vi.mock("@friday/shared", async (importActual) => {
   const actual = await importActual<typeof import("@friday/shared")>();
@@ -41,8 +41,12 @@ vi.mock("@friday/shared", async (importActual) => {
 
 vi.mock("posthog-node", () => ({
   PostHog: class {
-    constructor(key: string, opts: { host?: string }) {
-      ctorCalls.push({ key, host: opts?.host });
+    constructor(key: string, opts: { host?: string; enableExceptionAutocapture?: boolean }) {
+      ctorCalls.push({
+        key,
+        host: opts?.host,
+        enableExceptionAutocapture: opts?.enableExceptionAutocapture,
+      });
     }
     captureException() {}
     shutdown() {
@@ -63,7 +67,15 @@ describe("dashboard server posthog — lazy build", () => {
     // Touching a method through the proxy triggers construction.
     void mod.posthog.captureException;
     expect(loadCalls.count).toBe(1);
-    expect(ctorCalls).toEqual([{ key: "ph-test-key", host: "https://example.posthog.com" }]);
+    expect(ctorCalls).toEqual([
+      {
+        key: "ph-test-key",
+        host: "https://example.posthog.com",
+        // Server-side exception autocapture must stay on — the parallel to the
+        // browser client's `capture_exceptions` in routes/+layout.ts.
+        enableExceptionAutocapture: true,
+      },
+    ]);
   });
 
   it("is a singleton — repeated access does not rebuild", () => {
