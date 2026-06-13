@@ -303,3 +303,9 @@ export async function startDispatchListener(): Promise<DispatchListenerHandle> {
 
 // Test-only export.
 export { processPendingBlockRow as _processPendingBlockRow };
+
+// Re-dispatch entrypoint reused by the pending-block reaper
+// (scheduler/pending-block-reaper.ts) so the live-daemon missed-NOTIFY
+// sweep funnels through the SAME idempotent dispatch path as the NOTIFY
+// listener and the boot scan — never a duplicated dispatch implementation.
+export { processPendingBlockRow };
