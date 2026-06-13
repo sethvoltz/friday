@@ -558,4 +558,41 @@ describe("processResumeRequestedRow handler guards", () => {
     expect(await getStatus("blk-resume-corrupt")).toBe("complete");
     void db; // satisfies "no unused" — kept for the comment above
   });
+
+  it("dispatches a Resume of a user_chat block to a SCHEDULED-type agent long-lived (FRI-156 SEV-0)", async () => {
+    // Resume re-fires an INTERACTIVE user turn the user is waiting on. A
+    // scheduled-type agent must NOT run one-shot here — that short-circuits the
+    // worker loop and the resumed message silently vanishes (same chain as the
+    // sendUserMessage path). Gate on the block source, not the agent type.
+    await insertUserBlock("blk-resume-sched", "resume_requested");
+    await insertErrorBlock("blk-resume-sched");
+    const registry = await import("./registry.js");
+    const lifecycle = await import("./lifecycle.js");
+    const skills = await import("../skills/match.js");
+    const { _processResumeRequestedRow } = await import("./resume-listener.js");
+    vi.mocked(skills.matchSkillInvocation).mockReturnValue(null);
+
+    vi.mocked(registry.getAgent).mockResolvedValue({
+      name: "test-agent",
+      type: "scheduled",
+      status: "idle",
+      taskPrompt: "do the thing",
+      paused: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    } as unknown as ReturnType<typeof registry.getAgent> extends Promise<infer T> ? T : never);
+    vi.mocked(lifecycle.findAgentByTurnId).mockReturnValue(null);
+    vi.mocked(lifecycle.peekLiveWorker).mockReturnValue({
+      status: "idle",
+    } as ReturnType<typeof lifecycle.peekLiveWorker>);
+
+    await _processResumeRequestedRow("blk-resume-sched");
+
+    expect(lifecycle.dispatchTurn).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(lifecycle.dispatchTurn).mock.calls[0]?.[0] as {
+      options: { mode: string; turnSource?: string };
+    };
+    expect(call.options.mode).toBe("long-lived");
+    expect(call.options.turnSource).toBe("user_chat");
+  });
 });

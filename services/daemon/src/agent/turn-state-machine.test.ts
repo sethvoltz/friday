@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
   apply,
   projectStatus,
+  ZERO_BLOCK_USER_CHAT_PAYLOAD,
   type ApplyDeps,
   type Intent,
   type TurnContext,
@@ -195,6 +196,69 @@ describe("turn-state-machine: complete (AC #3 — intents + projection)", () => 
     );
     const done = r.intents.find((i) => i.kind === "publish-turn-done");
     expect(done).toMatchObject({ status: "complete", zeroBlockReason: "compaction" });
+  });
+});
+
+describe("turn-state-machine: zero-block user_chat safety net (FRI-156 SEV-0)", () => {
+  it("a user_chat-origin zero-block complete emits a VISIBLE record-error-block notice", () => {
+    // The silent-vanish backstop: an INTERACTIVE turn that produced zero
+    // content blocks must surface a visible notice rather than disappear.
+    const r = apply(
+      ctx({ blocksThisTurn: 0, sessionId: undefined, turnSource: "user_chat" }),
+      { kind: "complete", payload: {} },
+      DEPS,
+    );
+    const notice = r.intents.find((i) => i.kind === "record-error-block");
+    expect(notice).toEqual<Intent>({
+      kind: "record-error-block",
+      payload: ZERO_BLOCK_USER_CHAT_PAYLOAD,
+    });
+    // The notice block lands BEFORE the turn is torn down (so it gets a real
+    // block_index in the still-live turn accumulator).
+    const noticeIdx = r.intents.findIndex((i) => i.kind === "record-error-block");
+    const tearIdx = r.intents.findIndex((i) => i.kind === "tear-down-turn");
+    expect(noticeIdx).toBeGreaterThanOrEqual(0);
+    expect(tearIdx).toBeGreaterThan(noticeIdx);
+    // Still heals to idle as a normal complete.
+    expect(r.state).toBe("idle");
+    expect(r.projection).toBe("idle");
+  });
+
+  it("does NOT emit the notice for an autonomous (non-user_chat) zero-block turn", () => {
+    // A schedule/mail-origin (or unspecified-origin) zero-block turn keeps the
+    // existing SILENT zero-block behavior — these have other reply surfaces
+    // (mail) and a turnless autonomous fire legitimately produces nothing.
+    for (const turnSource of [undefined, "schedule", "mail"]) {
+      const r = apply(
+        ctx({ blocksThisTurn: 0, sessionId: undefined, turnSource }),
+        { kind: "complete", payload: {} },
+        DEPS,
+      );
+      expect(r.intents.some((i) => i.kind === "record-error-block")).toBe(false);
+    }
+  });
+
+  it("does NOT emit the notice for a user_chat turn that DID produce blocks", () => {
+    const r = apply(
+      ctx({ blocksThisTurn: 2, sessionId: undefined, turnSource: "user_chat" }),
+      { kind: "complete", payload: {} },
+      DEPS,
+    );
+    expect(r.intents.some((i) => i.kind === "record-error-block")).toBe(false);
+  });
+
+  it("does NOT emit the notice on a user-requested abort (zero blocks but user stopped it)", () => {
+    const r = apply(
+      ctx({
+        blocksThisTurn: 0,
+        sessionId: undefined,
+        turnSource: "user_chat",
+        abortRequested: true,
+      }),
+      { kind: "complete", payload: {} },
+      DEPS,
+    );
+    expect(r.intents.some((i) => i.kind === "record-error-block")).toBe(false);
   });
 });
 
