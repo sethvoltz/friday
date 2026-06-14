@@ -454,7 +454,7 @@
     max-width: 100%;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
-    touch-action: pan-x;
+    touch-action: pan-x pan-y;
     border-collapse: collapse;
     margin: 0.5rem 0;
     font-size: 0.8rem;
