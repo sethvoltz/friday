@@ -639,6 +639,7 @@
   .table-scroll-wrapper {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
+    touch-action: pan-x pan-y;
   }
 
   .agent-name {
@@ -1064,6 +1065,19 @@
 
     .main-grid {
       grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .agents-card {
+      padding-left: 0;
+      padding-right: 0;
+    }
+
+    .agents-card .card-header,
+    .agents-card .empty-state {
+      padding-left: 1.25rem;
+      padding-right: 1.25rem;
     }
   }
 </style>
