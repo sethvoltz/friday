@@ -38,7 +38,6 @@ import { appendFileSync, createWriteStream, existsSync, mkdirSync } from "node:f
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  FRIDAY_PG_CONSTANTS,
   getLogPath,
   LOGS_DIR,
   loadConfig,
@@ -46,6 +45,12 @@ import {
   resolveDaemonPort,
   resolveDashboardPort,
 } from "@friday/shared";
+import {
+  buildZeroCacheEnv,
+  runZeroDeployPermissions,
+  zeroCacheCli,
+  zeroCacheCwd,
+} from "../lib/zero-cache.js";
 
 // ---- Layout -----------------------------------------------------------
 
@@ -109,45 +114,6 @@ interface ChildSpec {
   fastRestartCodes?: number[];
 }
 
-/**
- * Resolve `@rocicorp/zero`'s `cli.js` (the `zero-cache` bin) by direct path
- * join off the dashboard's `node_modules`. `require.resolve` on the package
- * subpath fails — `@rocicorp/zero`'s exports map doesn't export
- * `./package.json`, so we resolve the bin's compiled entry directly. The bin
- * map (`@rocicorp/zero` package.json) pins `zero-cache` →
- * `./out/zero/src/cli.js`.
- */
-function zeroCacheCli(repoRoot: string): string {
-  return join(
-    repoRoot,
-    "services",
-    "dashboard",
-    "node_modules",
-    "@rocicorp",
-    "zero",
-    "out",
-    "zero",
-    "src",
-    "cli.js",
-  );
-}
-
-/** `@rocicorp/zero`'s `zero-deploy-permissions` bin → `deploy-permissions.js`. */
-function zeroDeployPermissionsCli(repoRoot: string): string {
-  return join(
-    repoRoot,
-    "services",
-    "dashboard",
-    "node_modules",
-    "@rocicorp",
-    "zero",
-    "out",
-    "zero",
-    "src",
-    "deploy-permissions.js",
-  );
-}
-
 function buildSpecs(repoRoot: string): ChildSpec[] {
   const cfg = loadConfig();
   const daemonPort = resolveDaemonPort(cfg);
@@ -185,72 +151,18 @@ function buildSpecs(repoRoot: string): ChildSpec[] {
       name: "zero-cache",
       // Spawn zero-cache via `process.execPath` directly against
       // @rocicorp/zero's cli.js — never `pnpm exec` / the `.bin` shim, whose
-      // baked absolute NODE_PATH doesn't survive relocation (FRI-146).
+      // baked absolute NODE_PATH doesn't survive relocation (FRI-146). The
+      // env-construction + deploy-permissions preStart live in lib/zero-cache
+      // so the dev launcher (`bin/dev-zero.ts`) can't drift from prod.
       cmd: process.execPath,
       args: [zeroCacheCli(repoRoot)],
-      cwd: join(repoRoot, "services", "dashboard"),
-      env: {
-        // System default for the single-user local instance: zero-cache otherwise
-        // auto-sizes sync workers to ~1-per-core (availableParallelism() - 1), each
-        // holding ~5 Postgres connections (~42 on a 10-core Mac). Pinning to 2 keeps
-        // realtime sync parallelism while cutting connections ~65%. Placed BEFORE the
-        // process.env spread so it is a DEFAULT the user can override via
-        // ZERO_NUM_SYNC_WORKERS in ~/.friday/.env. Takes effect on next zero-cache restart.
-        ZERO_NUM_SYNC_WORKERS: "2",
-        // System default placed BEFORE the process.env spread so ~/.friday/.env
-        // overrides it. zero-cache must target Friday's logical-replication
-        // publication (created by `ensurePublication` in pg-provision); supplying
-        // the name here means `friday setup` needn't persist it to .env.
-        ZERO_APP_PUBLICATIONS: FRIDAY_PG_CONSTANTS.FRIDAY_PUBLICATION,
-        // System defaults for the single-user local instance. zero-cache bounds
-        // total syncer connections by these CLUSTER-WIDE caps — the real lever for
-        // connection count, distinct from the worker count — divided across sync
-        // workers. With ZERO_NUM_SYNC_WORKERS=2 these divide to ~2 upstream + ~3
-        // CVR per worker (the per-worker floor must stay ≥ the worker count or
-        // zero-cache throws at startup, so 4 and 6 are the safe minimum for 2
-        // workers). Placed BEFORE the process.env spread so ~/.friday/.env can
-        // override them. Takes effect on next zero-cache restart.
-        ZERO_UPSTREAM_MAX_CONNS: "4",
-        ZERO_CVR_MAX_CONNS: "6",
-        ...process.env,
-        // FRI-150 (pivot, ADR-037): explicit secret injection. zero-cache
-        // is an external binary; supervisor reads via loadFridayConfig()
-        // and hands the four secrets it needs to the spawn env.
-        ...(fridayEnv.zeroUpstreamDb ? { ZERO_UPSTREAM_DB: fridayEnv.zeroUpstreamDb } : {}),
-        ZERO_AUTH_SECRET: fridayEnv.zeroAuthSecret,
-        ZERO_ADMIN_PASSWORD: fridayEnv.zeroAdminPassword,
-        ...(fridayEnv.zeroReplicaFile ? { ZERO_REPLICA_FILE: fridayEnv.zeroReplicaFile } : {}),
-        ZERO_LOG_FORMAT: "json",
-        // FRI-83 follow-up: the spawn-time export of ZERO_MUTATE_URL
-        // is the source of truth, beating any stale value in .env.
-        ZERO_MUTATE_URL: `http://localhost:${dashboardPort}/api/mutators`,
-      },
+      cwd: zeroCacheCwd(repoRoot),
+      env: buildZeroCacheEnv(fridayEnv, dashboardPort),
       // Zero exits 14 on AutoResetSignal (replica schema-version drift
       // vs upstream Postgres); restart immediately, no backoff.
       fastRestartCodes: [14],
       async preStart(): Promise<void> {
-        const schemaPath = join(repoRoot, "packages", "shared", "dist", "sync", "schema.js");
-        // Spawn zero-deploy-permissions via `process.execPath` against the
-        // bin's compiled entry — never `pnpm exec` / the `.bin` shim (FRI-146).
-        // FRI-150 (pivot, ADR-037): inject the same secrets zero-cache
-        // needs, since deploy-permissions reads the same env.
-        const r = spawnSync(
-          process.execPath,
-          [zeroDeployPermissionsCli(repoRoot), "--schema-path", schemaPath],
-          {
-            cwd: join(repoRoot, "services", "dashboard"),
-            stdio: "inherit",
-            env: {
-              ...process.env,
-              ...(fridayEnv.zeroUpstreamDb ? { ZERO_UPSTREAM_DB: fridayEnv.zeroUpstreamDb } : {}),
-              ZERO_AUTH_SECRET: fridayEnv.zeroAuthSecret,
-              ZERO_ADMIN_PASSWORD: fridayEnv.zeroAdminPassword,
-            },
-          },
-        );
-        if (r.status !== 0) {
-          throw new Error(`zero-deploy-permissions exited ${r.status}`);
-        }
+        runZeroDeployPermissions(repoRoot, fridayEnv);
       },
     },
     {

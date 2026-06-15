@@ -62,16 +62,19 @@ Ports default to the prod constants. Override either via `~/.friday/config.json`
 
 ## Dev mode for contributors
 
-Dev is launched directly from the repo with two pnpm scripts, **not** the `friday` CLI:
+Dev is launched directly from the repo with three pnpm scripts, **not** the `friday` CLI (run each in its own terminal):
 
 ```bash
+pnpm dev:zero         # zero-cache on :4848 (binds 0.0.0.0 for LAN/mobile)
 pnpm dev:daemon       # tsx watch src/index.ts — daemon on :7444
 pnpm dev:dashboard    # vite dev --port 5173 — dashboard on :5173
 ```
 
-Both wrappers set `FRIDAY_DAEMON_PORT=7444` so the dev dashboard's SvelteKit server-side fetches reach the dev daemon (`:7444`) rather than the prod daemon (`:7610`) when both are running concurrently.
+`dev:daemon` / `dev:dashboard` set `FRIDAY_DAEMON_PORT=7444` so the dev dashboard's SvelteKit server-side fetches reach the dev daemon (`:7444`) rather than a prod daemon (`:7610`) when both run concurrently.
 
-By default, dev shares `~/.friday/` with prod — including the Postgres `friday` database and the running prod zero-cache. This is intentional: testing against live data is sometimes the point. **Co-running prod + dev daemons against the same Postgres DB will produce inconsistent writes** — either `friday stop` first, or use full isolation:
+**`dev:zero` is required** unless a prod zero-cache is already running on `:4848`. The launchd supervisor spawns zero-cache in prod; the dev scripts historically borrowed that prod listener, so a box that no longer hosts prod (e.g. after `friday restore` migrates serving elsewhere) had nothing on `:4848` and the dev dashboard spun on "Syncing your data" forever. `dev:zero` (`packages/cli/src/bin/dev-zero.ts`) closes that gap: it reuses the supervisor's exact env + `zero-deploy-permissions` step (`packages/cli/src/lib/zero-cache.ts`, shared with the supervisor so dev and prod can't drift) and points `ZERO_MUTATE_URL` at the vite dashboard (`:5173`, override with `FRIDAY_DASHBOARD_PORT`). In dev the Zero client connects **directly** to `http://<page-host>:4848` (no `/zero` WS proxy — that lives in the prod `server-entry.mjs`), so for phone testing run `pnpm dev:dashboard -- --host` and browse to the Mac's LAN IP; zero-cache binding `0.0.0.0` lets the phone reach both `:5173` and `:4848`.
+
+By default, dev shares `~/.friday/` with prod — including the Postgres `friday` database. This is intentional: testing against live data is sometimes the point. **Co-running prod + dev daemons against the same Postgres DB will produce inconsistent writes** — either `friday stop` first, or use full isolation:
 
 ```bash
 FRIDAY_DATA_DIR=$HOME/.friday-dev pnpm dev:daemon
