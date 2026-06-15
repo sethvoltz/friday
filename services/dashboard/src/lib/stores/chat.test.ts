@@ -17,7 +17,7 @@
  * the same code path the browser runs.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // `fetchWithTimeout` is the network boundary the chat store uses. Mock
 // it at module level so every import gets the stubbed version. We swap
@@ -72,6 +72,18 @@ function makeResponse(body: unknown, init: ResponseInit = {}): Response {
     ...init,
   });
 }
+
+// Pay the cold transform + import of `./chat.svelte` (and its heavy
+// dependency graph) exactly once, up-front, with a generous budget. On a
+// loaded CI runner that first dynamic import can take >10s — and when it
+// landed inside the per-test `beforeEach` below it intermittently tripped
+// Vitest's default 10s hookTimeout (`Error: Hook timed out in 10000ms` at
+// the `await import("./chat.svelte")` line). Warming the module cache here,
+// in a hook with its own large timeout, means every later `await import`
+// resolves instantly and the cold cost never counts against a 10s budget.
+beforeAll(async () => {
+  await import("./chat.svelte");
+}, 60_000);
 
 beforeEach(async () => {
   mockFetchWithTimeout.mockReset();
