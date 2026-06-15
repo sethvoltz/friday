@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.23.2](https://github.com/sethvoltz/friday/compare/v1.23.1...v1.23.2) (2026-06-15)
+
+
+### Bug Fixes
+
+* **dashboard:** add touch-action pan-x pan-y to prevent iOS scroll hijack ([#280](https://github.com/sethvoltz/friday/issues/280)) ([46d52de](https://github.com/sethvoltz/friday/commit/46d52dec16bbf51e8b6ce4d323124a56051da40a))
+
 ## [1.23.1](https://github.com/sethvoltz/friday/compare/v1.23.0...v1.23.1) (2026-06-13)
 
 
