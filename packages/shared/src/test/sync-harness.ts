@@ -110,7 +110,9 @@ const SCHEMA_DIST_PATH = join(REPO_ROOT, "packages", "shared", "dist", "sync", "
 // Free-port allocation. listen(0) → kernel picks an unused port; close
 // immediately and reuse the number. Race-prone in theory but acceptable
 // for test isolation given vitest's --no-file-parallelism (set in the
-// e2e script).
+// e2e script). For callers that need several non-colliding ports at once
+// (the sync env, where zero-cache also claims base+1), use `freeSyncPorts`
+// below — it holds every socket open simultaneously so no two collide.
 // ─────────────────────────────────────────────────────────────────────
 
 export async function freePort(): Promise<number> {
@@ -129,6 +131,74 @@ export async function freePort(): Promise<number> {
       }
     });
   });
+}
+
+// Bind a single port (0 = kernel-assigned), keeping the server OPEN so the
+// caller can reserve several ports simultaneously without the kernel
+// handing the same number out twice. Resolves null if the requested port
+// is already taken. Caller owns closing the returned server.
+function holdPort(port: number): Promise<net.Server | null> {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.once("error", () => {
+      srv.close();
+      resolve(null);
+    });
+    srv.listen(port, "127.0.0.1", () => resolve(srv));
+  });
+}
+
+// Allocate the three ports a sync env needs in one shot. zero-cache binds
+// ZERO_PORT for its main server AND ZERO_PORT+1 for its change-streamer
+// worker, but `freePort()` only reserves the single base port. Three
+// independent `freePort()` calls could therefore hand the daemon or
+// dashboard `zeroCachePort + 1` — they bind it first, and zero-cache's
+// change-streamer then dies with `EADDRINUSE :ZERO_PORT+1` (observed as the
+// `dashboard-down.e2e` "zero subprocess exited before binding" boot flake).
+// Reserve every port up-front while holding all sockets open at once, and
+// explicitly include zeroCachePort+1 in the held set, so no two collide.
+export async function freeSyncPorts(): Promise<{
+  zeroCachePort: number;
+  daemonPort: number;
+  dashboardPort: number;
+}> {
+  const held: net.Server[] = [];
+  try {
+    // Find a base port whose +1 neighbour is also free, holding both.
+    let zeroCachePort = 0;
+    for (let attempt = 0; attempt < 50 && zeroCachePort === 0; attempt++) {
+      const base = await holdPort(0);
+      if (!base) continue;
+      const p = (base.address() as net.AddressInfo).port;
+      const neighbour = await holdPort(p + 1);
+      if (neighbour) {
+        held.push(base, neighbour);
+        zeroCachePort = p;
+      } else {
+        // +1 was taken; release this base and try a fresh pair.
+        await new Promise<void>((r) => base.close(() => r()));
+      }
+    }
+    if (zeroCachePort === 0) {
+      throw new Error("freeSyncPorts: could not reserve a contiguous zero-cache port pair");
+    }
+    // Two more standalone ports. Still held, so the kernel can't hand back
+    // zeroCachePort, zeroCachePort+1, or the same number twice.
+    const daemonSrv = await holdPort(0);
+    const dashboardSrv = await holdPort(0);
+    if (!daemonSrv || !dashboardSrv) {
+      throw new Error("freeSyncPorts: could not reserve daemon/dashboard ports");
+    }
+    held.push(daemonSrv, dashboardSrv);
+    return {
+      zeroCachePort,
+      daemonPort: (daemonSrv.address() as net.AddressInfo).port,
+      dashboardPort: (dashboardSrv.address() as net.AddressInfo).port,
+    };
+  } finally {
+    await Promise.all(held.map((s) => new Promise<void>((r) => s.close(() => r()))));
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -845,9 +915,9 @@ export async function spawnTestSyncEnv(opts: SpawnEnvOpts = {}): Promise<SyncEnv
     }
   }
 
-  const zeroCachePort = await freePort();
-  const daemonPort = await freePort();
-  const dashboardPort = await freePort();
+  // Reserve all three ports together so the daemon/dashboard can't be
+  // handed zeroCachePort+1, which zero-cache claims for its change-streamer.
+  const { zeroCachePort, daemonPort, dashboardPort } = await freeSyncPorts();
 
   // Track partially-spawned subprocesses so a failure during setup
   // still tears them down. Without this, a timeout in zero-cache.ready
