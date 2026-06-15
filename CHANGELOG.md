@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.24.0](https://github.com/sethvoltz/friday/compare/v1.23.2...v1.24.0) (2026-06-15)
+
+
+### Features
+
+* **dashboard:** full-width chat scrollbar at the window edge + dev:zero launcher ([#282](https://github.com/sethvoltz/friday/issues/282)) ([5996b14](https://github.com/sethvoltz/friday/commit/5996b148bc60133272afd917a67fe82dfda3f00e))
+
 ## [1.23.2](https://github.com/sethvoltz/friday/compare/v1.23.1...v1.23.2) (2026-06-15)
 
 
