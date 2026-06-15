@@ -783,7 +783,13 @@
     position: fixed;
     top: 0;
     left: var(--content-left);
-    right: var(--page-gutter);
+    /* Right edge at the WINDOW edge (not inset by --page-gutter) so the inner
+       scroller's scrollbar paints at the screen edge and the full right gutter
+       is scroll-reactive, as if the whole page scrolled rather than an inset
+       box. The scroller stays a plain inset:0 child (see .chat-transcript);
+       the composer + pills re-inset themselves by --page-gutter to hold their
+       prior position. */
+    right: 0;
     /* Height tracks the VISUAL viewport bottom in every state — the
        tracker keeps --vv-bottom-y current whether the keyboard is up or
        not. Closed, this lands the column bottom (and the composer) above
@@ -803,6 +809,17 @@
      overscroll-behavior:contain keeps iOS rubber-band off the locked
      body — the touch-routing fight ADR-039 fled can't happen because the
      body cannot scroll at all. */
+  /* Full-width scrollbar (FRI chat): the column now reaches the window's right
+     edge (.chat-viewport right:0), so the scrollbar paints at the screen edge
+     and the whole right gutter is scroll-reactive. The scroller stays a plain
+     `inset:0` child of the fixed column — exactly the geometry that has always
+     shipped — and `padding-right: --page-gutter` re-insets content so every
+     block keeps its prior horizontal position; only the scrollbar and reactive
+     area move. DO NOT make this scroller overflow the fixed column (e.g. a
+     negative `right` inset to reach the edge directly): on iOS Safari a
+     scroller that spills past its position:fixed containing block silently
+     breaks the IntersectionObserver-driven older-message pagination (the top
+     sentinel stops firing). Widen the parent instead. */
   .chat-transcript {
     position: absolute;
     inset: 0;
@@ -813,6 +830,7 @@
     display: flex;
     flex-direction: column;
     padding-top: var(--chat-top);
+    padding-right: var(--page-gutter);
     padding-bottom: calc(
       var(--chat-input-h, 6rem) + 2 * var(--chat-inset) + var(--kb-safe-bottom, 0px)
     );
@@ -861,7 +879,9 @@
     position: absolute;
     bottom: calc(1rem + var(--kb-safe-bottom, 0px));
     left: 0;
-    right: 0;
+    /* Re-inset by one gutter: the column now reaches the window edge, but the
+       composer holds its prior right margin. */
+    right: var(--page-gutter);
     z-index: 2;
     background: var(--header-float-bg);
     border: 1px solid var(--border-subtle);
@@ -891,7 +911,9 @@
     position: absolute;
     bottom: calc(var(--chat-input-h, 6rem) + 1.5rem + var(--kb-safe-bottom, 0px));
     left: 0;
-    right: 0;
+    /* Re-inset by one gutter so the centered pill keeps its prior center now
+       that the column reaches the window edge. */
+    right: var(--page-gutter);
     display: flex;
     justify-content: center;
     pointer-events: none;
@@ -903,7 +925,7 @@
     position: absolute;
     top: calc(var(--chat-top) + 0.5rem);
     left: 0;
-    right: 0;
+    right: var(--page-gutter);
     margin: 0 auto;
     width: max-content;
     z-index: 95;
@@ -917,7 +939,7 @@
     position: absolute;
     top: calc(var(--chat-top) + 3rem);
     left: 0;
-    right: 0;
+    right: var(--page-gutter);
     display: flex;
     justify-content: center;
     pointer-events: none;
@@ -997,7 +1019,9 @@
        content rests below them but still scrolls under. */
     .chat-viewport {
       left: var(--page-gutter);
-      right: var(--page-gutter);
+      /* Edge-to-edge on the right here too — scrollbar at the screen edge,
+         composer/pills still re-inset by --page-gutter (base rule). */
+      right: 0;
     }
     .chat-transcript {
       padding-top: calc(var(--chat-top) + 3.25rem);
