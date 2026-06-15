@@ -331,14 +331,15 @@ pnpm --filter @friday/shared build
 
 ### Developing Friday
 
-Dev mode runs directly from the repo with two pnpm scripts — **not** the `friday` CLI:
+Dev mode runs directly from the repo with three pnpm scripts (each in its own terminal) — **not** the `friday` CLI:
 
 ```bash
+pnpm dev:zero         # zero-cache — binds 0.0.0.0:4848 (LAN/mobile reachable)
 pnpm dev:daemon       # tsx watch on the daemon — binds :7444
 pnpm dev:dashboard    # vite dev on the dashboard — binds :5173
 ```
 
-Both wrappers set `FRIDAY_DAEMON_PORT=7444` so the dev dashboard's SvelteKit server-side fetches reach the dev daemon (`:7444`) rather than the prod daemon (`:7610`). Prod (`friday start`) and dev (`pnpm dev:*`) can run side-by-side without TCP collisions — prod uses `:7610` / `:7615`, dev uses `:7444` / `:5173`. They share `~/.friday/` (and the prod Postgres `friday` DB + zero-cache) by default; for full isolation, prefix with `FRIDAY_DATA_DIR=$HOME/.friday-dev`. See `docs/running.md` for the parallel-Postgres + parallel-zero-cache caveat.
+`dev:daemon` / `dev:dashboard` set `FRIDAY_DAEMON_PORT=7444` so the dev dashboard's SvelteKit server-side fetches reach the dev daemon (`:7444`) rather than the prod daemon (`:7610`). `dev:zero` is required unless a prod zero-cache is already running on `:4848` — dev used to borrow the prod one, so a box that no longer hosts prod had nothing there and the dashboard hung on "Syncing your data". Prod (`friday start`) and dev (`pnpm dev:*`) can run side-by-side without TCP collisions — prod uses `:7610` / `:7615`, dev uses `:7444` / `:5173` (zero-cache is single-port on `:4848`, so run only one). They share `~/.friday/` (and the prod Postgres `friday` DB) by default; for full isolation, prefix with `FRIDAY_DATA_DIR=$HOME/.friday-dev`. See `docs/running.md` for the parallel-Postgres + parallel-zero-cache caveat.
 
 The `--dev` CLI flag was retired (FRI-83) — `friday start --dev` now exits with citty's unknown-flag error.
 
