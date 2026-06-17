@@ -74,7 +74,9 @@ async function wireRecall(recall: RecallMock, pins: PinSeed[] = []) {
 
 describe("FRI-89: dynamic recall rides the body, not the systemPrompt", () => {
   it("dynamic recall appears in the BODY and NOT the systemPrompt (end-to-end through buildDispatchPrompt)", async () => {
-    const buildDispatchPrompt = await wireRecall(async () => "<memory-context>\nFRESH\n</memory-context>");
+    const buildDispatchPrompt = await wireRecall(
+      async () => "<memory-context>\nFRESH\n</memory-context>",
+    );
 
     const out = await buildDispatchPrompt(
       { name: "orch", type: "orchestrator" },
