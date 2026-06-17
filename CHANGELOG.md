@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.24.1](https://github.com/sethvoltz/friday/compare/v1.24.0...v1.24.1) (2026-06-17)
+
+
+### Bug Fixes
+
+* **daemon:** inject fresh per-turn datetime on the dispatch body (FRI-167) ([#285](https://github.com/sethvoltz/friday/issues/285)) ([bc6bbd2](https://github.com/sethvoltz/friday/commit/bc6bbd29f34fda1267dc333dc6749bef7b230c08))
+
 ## [1.24.0](https://github.com/sethvoltz/friday/compare/v1.23.2...v1.24.0) (2026-06-15)
 
 
