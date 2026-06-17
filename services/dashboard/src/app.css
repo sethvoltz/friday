@@ -359,6 +359,11 @@ pre {
   color: var(--text-tertiary);
 }
 
+.badge.info {
+  background: var(--accent-glow);
+  color: var(--accent-primary);
+}
+
 /* === Bar chart (CSS-only) === */
 
 .bar-row {

@@ -99,6 +99,12 @@ export async function processPendingScheduleRow(name: string): Promise<void> {
   }
 
   if (row.status === "reload_requested") {
+    // ASYMMETRY (FRI-168): computeNext re-arms nextRunAt from runAt — correct on
+    // the spec-change/reload path. The one-shot-drop semantics (a fired one-shot
+    // reminder must NOT re-arm) live ONLY in nextRunAfterFire on the fire/trigger
+    // path, NOT here. A fired one-shot reminder must therefore never reach this
+    // reload branch with a past runAt; reminders have no dashboard reload path
+    // today, so this is safe.
     const next = computeNext(row);
     await db
       .update(schema.schedules)

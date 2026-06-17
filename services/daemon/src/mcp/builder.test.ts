@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type { AgentType, McpServerConfig } from "@friday/shared";
 import { dirname, join } from "node:path";
 
@@ -52,6 +52,7 @@ vi.mock("node:fs", async (importActual) => {
 
 const { buildMcpServers, resolveStdioCommand, restrictedMcpEnv, MCP_ENV_ALLOWLIST } =
   await import("./builder.js");
+const { REMINDER_SERVER_NAME } = await import("./reminder.js");
 
 const NODE_PATH = process.execPath;
 const NPX_PATH = join(dirname(process.execPath), "npx");
@@ -761,5 +762,62 @@ describe("buildMcpServers: FRI-150 env-merge precedence", () => {
     expect(smoke.command).toBe(NODE_PATH);
     expect(smoke.env.PATH).toBe("/smoke/test/path");
     expect(smoke.env.HOME).toBe("/Users/smoke");
+  });
+});
+
+// FRI-168 AC4: the per-app context's `appId` is threaded end-to-end —
+// buildMcpServers passes `appContext.appId` into buildReminderServer, and the
+// reminder_create handler forwards it as the POST body's `appId`. We exercise
+// the REAL assembled server (not a hand-built one) so a regression that drops
+// the appId-threading line in builder.ts is caught here, not in the field.
+describe("buildMcpServers: friday-reminder appId threaded end-to-end (FRI-168 AC4)", () => {
+  interface ServerLike {
+    instance: {
+      _registeredTools: Record<
+        string,
+        { handler: (args: unknown, extra: unknown) => Promise<unknown> }
+      >;
+    };
+  }
+
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  const bodies: Array<Record<string, unknown> | undefined> = [];
+
+  beforeEach(() => {
+    bodies.length = 0;
+    fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body =
+          typeof init?.body === "string"
+            ? (JSON.parse(init.body) as Record<string, unknown>)
+            : undefined;
+        bodies.push(body);
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("a scheduled caller under an app context POSTs appId='kitchen' on reminder_create", async () => {
+    const servers = buildMcpServers({
+      callerType: "scheduled",
+      callerName: "kitchen",
+      daemonPort: 7444,
+      appContext: { appId: "kitchen", folderPath: "/tmp/x", mcpServers: [] },
+    });
+    const reminder = servers[REMINDER_SERVER_NAME] as unknown as ServerLike;
+    const handler = reminder.instance._registeredTools.reminder_create!.handler;
+
+    const runAt = new Date(Date.now() + 3_600_000).toISOString();
+    await handler({ title: "thaw cod", runAt }, {});
+
+    expect(bodies.length).toBe(1);
+    expect(bodies[0]!.appId).toBe("kitchen");
   });
 });

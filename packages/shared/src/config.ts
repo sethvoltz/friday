@@ -187,6 +187,9 @@ export interface FridayConfig {
   /** Context-budget compaction policy (FRI-156): per-agent-type auto-compact
    *  window + nightly maintenance-sweep tuning. */
   compaction?: CompactionConfig;
+  /** Reminder timing policy (FRI-168): default local-time hour a day-scoped
+   *  reminder fires at. */
+  reminders?: RemindersConfig;
 }
 
 export interface TunnelConfig {
@@ -271,6 +274,11 @@ export interface CompactionConfig {
   autoCompactWindow?: Partial<Record<AgentTypeName, number>>;
 }
 
+export interface RemindersConfig {
+  /** Local-time hour (0-23) a day-scoped reminder (dueDate, no clock time) fires at. Default 09:00 (FRI-168). */
+  defaultHour?: number;
+}
+
 /** Default per-agent-type SDK auto-compact window applied when
  *  `CompactionConfig.autoCompactWindow` is absent or partial. 200K for every
  *  type (FRI-156 §A) — the SDK ceiling backstop, distinct from the 100K sweep
@@ -295,6 +303,11 @@ export const DEFAULT_COMPACTION_SWEEP = {
   sweepMinute: 30,
   sweepThresholdTokens: 150_000,
 } as const;
+
+/** Default hour (local time) a day-scoped reminder fires (FRI-168). 09:00 gives
+ *  the whole day to react (e.g. thaw a protein). Default in code (never .env),
+ *  overridable via config.json 'reminders.defaultHour'. */
+export const DEFAULT_REMINDER_HOUR = 9;
 
 /** Floor a user-supplied token budget at a sane minimum so a hostile/buggy
  *  `~/.friday/config.json` value (e.g. `0` or `1`) can't drive a pathological
@@ -333,6 +346,10 @@ export function compactionSweepThreshold(cfg: FridayConfig): number {
     cfg.compaction?.sweepThresholdTokens,
     DEFAULT_COMPACTION_SWEEP.sweepThresholdTokens,
   );
+}
+
+export function reminderDefaultHour(cfg: FridayConfig): number {
+  return clampInt(cfg.reminders?.defaultHour, 0, 23, DEFAULT_REMINDER_HOUR);
 }
 
 /**
