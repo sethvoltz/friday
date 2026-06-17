@@ -38,7 +38,7 @@ describe("memory recall hook (FRI-89)", () => {
     expect(result).toBeUndefined();
   });
 
-  it("memoryRecallHook surfaces the <memory-context> block via appendSystemPrompt when memory has hits", async () => {
+  it("memoryRecallHook surfaces the <memory-context> block via prependBody when memory has hits", async () => {
     vi.resetModules();
     vi.doMock("@friday/memory", () => ({
       buildAutoRecallBlock: async () => "<memory-context>\nrelevant fact\n</memory-context>",
@@ -54,7 +54,7 @@ describe("memory recall hook (FRI-89)", () => {
     });
 
     expect(result).toEqual({
-      appendSystemPrompt: "<memory-context>\nrelevant fact\n</memory-context>",
+      prependBody: "<memory-context>\nrelevant fact\n</memory-context>",
     });
   });
 
@@ -149,7 +149,7 @@ describe("memory recall hook (FRI-89)", () => {
 
     // NOT a /compact command → recall fires normally.
     expect(result).toEqual({
-      appendSystemPrompt: "<memory-context>\nrelevant fact\n</memory-context>",
+      prependBody: "<memory-context>\nrelevant fact\n</memory-context>",
     });
     expect(buildAutoRecallBlock).toHaveBeenCalled();
   });
@@ -162,9 +162,9 @@ describe("before_prompt_build hook composition surface (FRI-123)", () => {
   // `prompts/build-dispatch-prompt.ts` and its golden tests cover
   // the end-to-end stitching.
 
-  it("runHooks returns the appendSystemPrompt payload that handlers produce", async () => {
+  it("runHooks returns the prependBody payload that the recall handler produces", async () => {
     registerHook("before_prompt_build", async () => ({
-      appendSystemPrompt: "<memory-context>\nrelevant fact\n</memory-context>",
+      prependBody: "<memory-context>\nrelevant fact\n</memory-context>",
     }));
 
     const results = await runHooks("before_prompt_build", {
@@ -175,7 +175,7 @@ describe("before_prompt_build hook composition surface (FRI-123)", () => {
     });
 
     expect(results).toEqual([
-      { appendSystemPrompt: "<memory-context>\nrelevant fact\n</memory-context>" },
+      { prependBody: "<memory-context>\nrelevant fact\n</memory-context>" },
     ]);
   });
 
