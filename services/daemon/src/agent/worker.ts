@@ -25,6 +25,7 @@ import {
   autoCompactWindowFor,
   loadConfig,
   renderLocalDatetime,
+  renderLocalDatetimeLine,
   stringifyToolResult,
   unlockVault,
 } from "@friday/shared";
@@ -779,6 +780,18 @@ function normalizeMediaType(mime: string): string {
 }
 
 /**
+ * FRI-167: prefix a per-turn user body with a freshly-rendered local datetime
+ * line so every turn (including resumed ones) sees the current time rather than
+ * the session-frozen value baked into the systemPrompt append. Slash-command
+ * bodies are passed through untouched — they are routed/parsed verbatim and a
+ * prefix would corrupt the command.
+ */
+export function applyTurnDatetime(prompt: string): string {
+  if (prompt.startsWith("/")) return prompt;
+  return `${renderLocalDatetimeLine()}\n\n${prompt}`;
+}
+
+/**
  * Build the SDK's async-iterable prompt form when a turn carries
  * attachments. Yields a single `SDKUserMessage` whose `content` is the
  * text followed by one image/document block per attachment. The iterator
@@ -1107,10 +1120,11 @@ async function runQuery(p: WorkerPromptCommand): Promise<void> {
   // from bytes on disk. The fallback (no attachments) stays on the simpler
   // string form so the mail / scheduled / queue-injected paths are
   // unchanged.
+  const guardedPrompt = applyTurnDatetime(p.prompt);
   const promptInput =
     p.attachments && p.attachments.length > 0
-      ? await buildAttachmentPromptStream(p.prompt, p.attachments)
-      : p.prompt;
+      ? await buildAttachmentPromptStream(guardedPrompt, p.attachments)
+      : guardedPrompt;
 
   // FRI-78: when a pending-injection break would land on an assistant
   // message that carried tool_use blocks, defer it to the next

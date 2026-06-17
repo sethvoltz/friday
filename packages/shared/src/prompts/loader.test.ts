@@ -5,6 +5,7 @@ import {
   readPromptStack,
   renderIdentityBlock,
   renderLocalDatetime,
+  renderLocalDatetimeLine,
 } from "./loader.js";
 
 describe("renderIdentityBlock (FRI-11)", () => {
@@ -295,6 +296,38 @@ describe("renderLocalDatetime (FRI-52)", () => {
   it("includes a timezone abbreviation before the offset", () => {
     // Matches abbreviations like PDT, EST, UTC, IST, etc.
     expect(renderLocalDatetime()).toMatch(/[AP]M [A-Z]{2,5} \(UTC/);
+  });
+});
+
+describe("renderLocalDatetimeLine (FRI-167)", () => {
+  beforeEach(() => {
+    // Pin TZ so the exact toBe below is deterministic across machines.
+    vi.stubEnv("TZ", "America/Los_Angeles");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-08T17:58:00-07:00"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  it("renders the exact single-line tagged form (AC2)", () => {
+    expect(renderLocalDatetimeLine()).toBe(
+      "<current-time>Monday, June 8 2026, 5:58 PM PDT (UTC-7)</current-time>",
+    );
+  });
+
+  it("contains no newline and shares its core with renderLocalDatetime (AC1)", () => {
+    const line = renderLocalDatetimeLine();
+    expect(line.includes("\n")).toBe(false);
+
+    const lineCore = line.replace(/^<current-time>/, "").replace(/<\/current-time>$/, "");
+    const blockCore = renderLocalDatetime().replace(
+      /^# currentDateTime\nCurrent local date and time: /,
+      "",
+    );
+    expect(lineCore).toBe(blockCore);
+    expect(lineCore).toBe("Monday, June 8 2026, 5:58 PM PDT (UTC-7)");
   });
 });
 
