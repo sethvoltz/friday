@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.24.2](https://github.com/sethvoltz/friday/compare/v1.24.1...v1.24.2) (2026-06-17)
+
+
+### Bug Fixes
+
+* **daemon:** move dynamic memory recall to per-turn body, not frozen systemPrompt.append (FRI-89) ([#287](https://github.com/sethvoltz/friday/issues/287)) ([1cf3e1f](https://github.com/sethvoltz/friday/commit/1cf3e1f0a0f8b36af8f3b1630e8fbdd48bd943f4))
+
 ## [1.24.1](https://github.com/sethvoltz/friday/compare/v1.24.0...v1.24.1) (2026-06-17)
 
 
