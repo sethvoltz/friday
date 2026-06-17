@@ -178,7 +178,7 @@ export function composeSystemPrompt(
  *
  * Format: "Friday, May 23 2026, 9:45 PM PDT (UTC-7)"
  */
-export function renderLocalDatetime(): string {
+function buildLocalDatetimeCore(): string {
   const now = new Date();
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -204,7 +204,20 @@ export function renderLocalDatetime(): string {
   const mm = absMin % 60;
   const offset = mm > 0 ? `UTC${sign}${hh}:${String(mm).padStart(2, "0")}` : `UTC${sign}${hh}`;
   const datetime = `${p.weekday}, ${p.month} ${p.day} ${p.year}, ${p.hour}:${p.minute} ${p.dayPeriod} ${p.timeZoneName} (${offset})`;
-  return `# currentDateTime\nCurrent local date and time: ${datetime}`;
+  return datetime;
+}
+
+export function renderLocalDatetime(): string {
+  return `# currentDateTime\nCurrent local date and time: ${buildLocalDatetimeCore()}`;
+}
+
+/**
+ * Single-line variant of the local date-and-time, wrapped in a `<current-time>`
+ * tag for inline injection at the head of a per-turn user body. Contains no
+ * newline so it composes cleanly with the turn prompt.
+ */
+export function renderLocalDatetimeLine(): string {
+  return `<current-time>${buildLocalDatetimeCore()}</current-time>`;
 }
 
 /** First-boot copy: if ~/.friday/SOUL.md doesn't exist, install the default.
