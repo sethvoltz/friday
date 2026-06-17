@@ -1,6 +1,14 @@
 /**
  * FRI-123: `memoryRecallHook` — `before_prompt_build` handler that
- * appends a `<memory-context>` block when FTS recall returns hits.
+ * prepends a `<memory-context>` block onto the per-turn body when FTS
+ * recall returns hits.
+ *
+ * FRI-89 (reversal): this block used to ride `systemPrompt.append`, but
+ * the Claude Agent SDK only materializes the append at session-create /
+ * compaction re-anchor — never on ordinary resumed turns — so dynamic
+ * per-turn recall was frozen-on-resume. It now rides `prependBody` (a
+ * fresh user message every turn → resume-proof). See the return statement
+ * below and FRI-167 (the sibling datetime fix).
  *
  * Moved from `services/daemon/src/hooks/memory-recall-hook.ts` as
  * part of the prompts/ deepening: the hook is prompt-concern, not
@@ -115,5 +123,11 @@ export async function memoryRecallHook(
   if (ctx.intentTag === "compact" || isCompactCommand(ctx.intent)) return;
   const block = await safeRecall(ctx.intent, ctx.intentTag);
   if (!block) return;
-  return { appendSystemPrompt: block };
+  // FRI-89 (reversal): ride the per-turn body channel, NOT systemPrompt.append.
+  // The SDK only materializes systemPrompt.append at session-create / compaction
+  // re-anchor, so dynamic FTS recall computed every turn was frozen-on-resume on
+  // exactly the long-lived agents it matters most for. The body is a fresh user
+  // message every turn → resume-proof. build-dispatch-prompt.ts:135 already routes
+  // prependBody ahead of the user text. (Mirrors FRI-167's datetime body-inject.)
+  return { prependBody: block };
 }
