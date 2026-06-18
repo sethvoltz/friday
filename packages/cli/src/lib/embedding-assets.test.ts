@@ -3,10 +3,12 @@
  * onnxruntime-web's WASM backend (the `.wasm` files ship inside node_modules),
  * so there is NO native binary to fetch on-device — the ONLY thing
  * ensureEmbeddingAssets provisions is the MODEL warm. These tests pin that it
- * (a) invokes warmEmbeddingModel and maps a `true`/`false` warm onto the
+ * (a) invokes the injected model warm and maps a `true`/`false` warm onto the
  * discriminated `warmed`/`warm-failed` result, and (b) is FAIL-OPEN: a thrown
  * warm is swallowed and reported as `error`, never propagated. The warm is
- * injected, so nothing here touches the network or the transformers/ORT stack.
+ * injected, so nothing here forks a child, touches the network, or loads the
+ * transformers/ORT stack. (The real default forks the embedding child via
+ * warmEmbedChild — see embedding-assets.ts — so the CLI proc never loads ORT.)
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -16,7 +18,7 @@ import { ensureEmbeddingAssets } from "./embedding-assets.js";
 const INSTALL_DIR = "/tmp/friday-install-tree";
 
 describe("ensureEmbeddingAssets — WASM model warm, fail-open (FRI-24)", () => {
-  it("invokes warmEmbeddingModel and reports `warmed` when it returns true", async () => {
+  it("invokes the injected warm and reports `warmed` when it returns true", async () => {
     const warmModel = vi.fn(async () => true);
 
     const result = await ensureEmbeddingAssets({ installDir: INSTALL_DIR, warmModel });
@@ -27,8 +29,8 @@ describe("ensureEmbeddingAssets — WASM model warm, fail-open (FRI-24)", () => 
     expect(warmModel).toHaveBeenCalledWith(expect.objectContaining({ log: expect.any(Function) }));
   });
 
-  it("reports `warm-failed` (no throw) when warmEmbeddingModel returns false", async () => {
-    // Offline / no-data warm: warmEmbeddingModel returns false rather than
+  it("reports `warm-failed` (no throw) when the warm returns false", async () => {
+    // Offline / no-data warm: the warm returns false rather than
     // throwing. Recall degrades to FTS-only; the update must not abort.
     const warmModel = vi.fn(async () => false);
 

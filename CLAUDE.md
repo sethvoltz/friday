@@ -39,7 +39,7 @@ A docs-only change still warrants a commit with scope `docs`. A code change that
 - **Preserve over delete.** Default to keeping data. Patch and update rather than delete.
 - **Workspace containment.** Builders work exclusively in their assigned worktrees.
 - **User approval gates.** The orchestrator confirms plans with the user before creating Builders.
-- **Static imports only.** No inline `require()` or dynamic `import()` inside function bodies — tests excepted.
+- **Static imports only.** No inline `require()` or dynamic `import()` inside function bodies. Two exceptions: (a) tests; (b) **lazy-loading a heavy/optional dependency that must stay out of processes that don't use it** — e.g. the `onnxruntime-web` + `@huggingface/transformers` stack (~240 MB resident) is loaded only via `await import(...)` inside `packages/memory/src/embed-runtime.ts`, which runs exclusively in the forked embedding child, so importing `@friday/memory` from the daemon or CLI never drags ORT into those processes. A lazy `import()` under exception (b) MUST carry a comment at the import site stating which process it's keeping the dependency out of and why a static import is wrong. If you reach for a dynamic import, it must fit (a) or (b) — otherwise use a static import.
 
 ## Structure
 

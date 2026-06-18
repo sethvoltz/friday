@@ -10,7 +10,13 @@
  *
  * The all-MiniLM-L6-v2 quantized ONNX model + its tokenizer are cached under
  * `<DATA_DIR>/models` (honoring FRIDAY_DATA_DIR), fetched lazily on first use or
- * pre-warmed by `friday update` via warmEmbeddingModel().
+ * pre-warmed by `friday update`/daemon-boot via `warmEmbedChild` (which forks
+ * this code into the embedding child).
+ *
+ * This module is the ONLY place the ~240 MB onnxruntime-web + transformers stack
+ * is loaded (via the `await import(...)` in getRuntime — CLAUDE.md "Static
+ * imports only" exception b). It must run ONLY inside the forked embedding child
+ * (embed-child.ts) or tests — never imported-and-called in the daemon/CLI parent.
  */
 
 import { randomUUID } from "node:crypto";
@@ -78,6 +84,10 @@ async function ensureModelFile(): Promise<string> {
 async function getRuntime(): Promise<Runtime> {
   if (!runtimePromise) {
     runtimePromise = (async () => {
+      // LAZY (CLAUDE.md "Static imports only" exception b): keep the ~240 MB
+      // onnxruntime-web + transformers stack OUT of the daemon/CLI parent — a
+      // static import would load it into every process that imports
+      // @friday/memory. This runs only in the forked embedding child.
       // AutoTokenizer is pure JS. Importing transformers also (statically) imports
       // onnxruntime-node, which is patched (FRI-24) to no-op when its native
       // binary is absent — so this import succeeds on macOS x64 / a stripped
@@ -112,8 +122,8 @@ let inferenceChain: Promise<unknown> = Promise.resolve();
 /**
  * Embed `text` into a 384-float, L2-normalized vector via the WASM runtime.
  * Calls are serialized (one session.run at a time). Throws on any failure
- * (download/model/inference) — callers (embed-child, warmEmbeddingModel) own
- * the fail-open semantics.
+ * (download/model/inference) — the caller (embed-child) owns the fail-open
+ * semantics.
  */
 export async function embedTextWasm(text: string): Promise<number[]> {
   const run = inferenceChain.then(() => embedOnce(text));

@@ -20,7 +20,31 @@
  * The model warm is injectable ({@link EnsureEmbeddingAssetsOptions.warmModel})
  * so the unit suite asserts the invoke + fail-open behavior without loading the
  * transformers/onnxruntime-web stack or hitting the network.
+ *
+ * IMPORTANT (lazy-dep discipline, CLAUDE.md "Static imports only" exception b):
+ * the default warm forks @friday/memory's embedding CHILD (`warmEmbedChild`)
+ * rather than warming in-process. The fork is what keeps the ~240 MB ORT/
+ * transformers stack OUT of the short-lived `friday update` CLI process — only
+ * the ephemeral child loads it. `warmEmbedChild`/`shutdownEmbedChild` are plain
+ * manager functions (no heavy deps), so they are imported statically.
  */
+
+import { shutdownEmbedChild, warmEmbedChild } from "@friday/memory";
+
+/**
+ * Default model warm: fork the embedding child, run one warm embed (which
+ * downloads the tokenizer + quantized model into `<DATA_DIR>/models`), then kill
+ * the child so the short-lived CLI process exits promptly. ORT loads in the
+ * child, never in this process.
+ */
+async function warmViaForkedChild(o: { log?: (m: string) => void }): Promise<boolean> {
+  o.log?.("embedding: warming model via the forked child");
+  try {
+    return await warmEmbedChild();
+  } finally {
+    shutdownEmbedChild();
+  }
+}
 
 /** Outcome of a model-warm attempt — discriminated for precise assertions and
  *  so the caller can render an accurate ✓ / ✗ TUI line. */
@@ -37,7 +61,8 @@ export interface EnsureEmbeddingAssetsOptions {
    * `<DATA_DIR>/models`.
    */
   installDir: string;
-  /** Inject the model warm (defaults to @friday/memory's warmEmbeddingModel). */
+  /** Inject the model warm (defaults to forking @friday/memory's embedding
+   *  child via warmEmbedChild). */
   warmModel?: (o: { log?: (m: string) => void }) => Promise<boolean>;
   log?: (m: string) => void;
 }
@@ -51,10 +76,10 @@ export interface EnsureEmbeddingAssetsOptions {
  * NEVER throws. Returns:
  *   - `warmed`      — the model warmed (downloaded into the cache + produced a
  *                     vector).
- *   - `warm-failed` — warmEmbeddingModel returned false (offline / no data);
- *                     recall degrades to FTS-only until the first recall retries.
- *   - `error`       — warmEmbeddingModel threw (caught here); same FTS-only
- *                     fallback, with the message for the caller to surface.
+ *   - `warm-failed` — the warm returned false (offline / no data); recall
+ *                     degrades to FTS-only until the first recall retries.
+ *   - `error`       — the warm threw (caught here); same FTS-only fallback,
+ *                     with the message for the caller to surface.
  */
 export async function ensureEmbeddingAssets(
   opts: EnsureEmbeddingAssetsOptions,
@@ -62,7 +87,7 @@ export async function ensureEmbeddingAssets(
   const log = opts.log ?? (() => {});
 
   try {
-    const warm = opts.warmModel ?? (await import("@friday/memory")).warmEmbeddingModel;
+    const warm = opts.warmModel ?? warmViaForkedChild;
     const ok = await warm({ log });
     return ok ? { status: "warmed" } : { status: "warm-failed" };
   } catch (err) {

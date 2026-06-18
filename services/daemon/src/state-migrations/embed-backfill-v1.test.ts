@@ -55,9 +55,9 @@ vi.mock("@friday/memory", () => ({
     }
     return { embedded, skipped: 0 };
   }),
-  // The boot path also imports warmEmbeddingModel from this barrel; stub it so
+  // The boot path also imports warmEmbedChild from this barrel; stub it so
   // the daemon module graph resolves even though this test never boots it.
-  warmEmbeddingModel: vi.fn(async () => true),
+  warmEmbedChild: vi.fn(async () => true),
 }));
 
 let handle: TestDbHandle;
