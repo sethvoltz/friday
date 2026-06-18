@@ -11,7 +11,7 @@ A local-first, headless agent daemon with a SvelteKit dashboard exposed via Clou
 - `docs/mcp.md` — MCP server surface table (Friday + user-configured).
 - `docs/sandbox.md` — Worker isolation: M1–M5 rollout (PreToolUse rules, sandbox-exec, pgrp containment, stall watchdog) + residual risk.
 - `docs/decisions.md` — ADRs + watch list.
-- Schema reference: `packages/shared/src/db/schema.ts` (Drizzle source of truth; migrations under `packages/shared/drizzle/`).
+- Schema reference: `packages/shared/src/db/schema.ts` (Drizzle source of truth; migrations under `packages/shared/drizzle/`). Includes the FRI-24 `memory_entries.embedding vector(384)` pgvector column for semantic recall — server-side-only, NOT replicated to Zero (like `content_tsv`; ADR-025). The pgvector extension is created via an admin connection in `ensureVectorExtension()` (pg-provision.ts), NOT inside a migration — `CREATE EXTENSION vector` needs superuser and the `friday` role lacks it. The embedding runtime is onnxruntime-web (WASM) — its `.wasm` files ship in the release tarball's `node_modules`, so there's NO per-platform native binary to fetch and it runs cross-platform (Intel x64 + Apple Silicon). Only the embedding model + tokenizer cache on disk under `<FRIDAY_DATA_DIR>/models/` (quantized ONNX, all-MiniLM-L6-v2), fetched at `friday update`/setup and degrading fail-open to FTS-only if absent. No embedding secret exists — nothing is added to `.env` or the age vault (net `.env` reduction, by construction).
 - `docs/roadmap.md` — Open work, sequenced for execution.
 - `docs/setup.md` — Setup guide including CFT walkthrough.
 - `docs/running.md` — How to run the daemon and dashboard.
@@ -39,7 +39,7 @@ A docs-only change still warrants a commit with scope `docs`. A code change that
 - **Preserve over delete.** Default to keeping data. Patch and update rather than delete.
 - **Workspace containment.** Builders work exclusively in their assigned worktrees.
 - **User approval gates.** The orchestrator confirms plans with the user before creating Builders.
-- **Static imports only.** No inline `require()` or dynamic `import()` inside function bodies — tests excepted.
+- **Static imports only.** No inline `require()` or dynamic `import()` inside function bodies. Two exceptions: (a) tests; (b) **lazy-loading a heavy/optional dependency that must stay out of processes that don't use it** — e.g. the `onnxruntime-web` + `@huggingface/transformers` stack (~240 MB resident) is loaded only via `await import(...)` inside `packages/memory/src/embed-runtime.ts`, which runs exclusively in the forked embedding child, so importing `@friday/memory` from the daemon or CLI never drags ORT into those processes. A lazy `import()` under exception (b) MUST carry a comment at the import site stating which process it's keeping the dependency out of and why a static import is wrong. If you reach for a dynamic import, it must fit (a) or (b) — otherwise use a static import.
 
 ## Structure
 

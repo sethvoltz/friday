@@ -9,11 +9,14 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
+    "test:e2e": "vitest run --passWithNoTests --config ./vitest.e2e.config.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
     "@friday/shared": "workspace:*",
-    "drizzle-orm": "^0.45.2"
+    "@huggingface/transformers": "4.2.0",
+    "drizzle-orm": "^0.45.2",
+    "onnxruntime-web": "1.26.0-dev.20260416-b7804b056c"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

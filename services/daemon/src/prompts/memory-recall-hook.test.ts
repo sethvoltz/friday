@@ -155,6 +155,71 @@ describe("memory recall hook (FRI-89)", () => {
   });
 });
 
+describe("recall re-fires per turn off fresh ctx.intent (FRI-24 AC12)", () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it("builds the recall query from the CURRENT turn's intent on each call — turn 2 is not the turn-1 query", async () => {
+    vi.resetModules();
+    // Listener ready so recall proceeds both turns.
+    vi.doMock("../memory/listener.js", () => ({
+      whenMemoryListenerReady: () => Promise.resolve(),
+    }));
+    // The boundary: capture the query text passed to buildAutoRecallBlock on
+    // each call and echo it back inside the block so the per-turn freshness is
+    // observable in BOTH the call arg AND the returned appendSystemPrompt.
+    const buildAutoRecallBlock = vi.fn(
+      async (text: string) => `<memory-context>\nquery=${text}\n</memory-context>`,
+    );
+    const listEntries = vi.fn(() => Promise.resolve([]));
+    vi.doMock("@friday/memory", () => ({ buildAutoRecallBlock, listEntries }));
+    const { memoryRecallHook } = await import("./memory-recall-hook.js");
+
+    const turn1 = "what did Asher say about the move";
+    const turn2 = "summarize the daemon boot sequence";
+
+    const r1 = await memoryRecallHook({
+      intent: turn1,
+      intentTag: "user_chat",
+      body: turn1,
+      agentType: "orchestrator",
+    });
+    const r2 = await memoryRecallHook({
+      intent: turn2,
+      intentTag: "user_chat",
+      body: turn2,
+      agentType: "orchestrator",
+    });
+
+    // The query text differs turn-to-turn: each call recomputes recall from the
+    // CURRENT ctx.intent. A frozen-on-resume regression (turn-1 query reused for
+    // turn 2) would make these equal.
+    expect(buildAutoRecallBlock).toHaveBeenCalledTimes(2);
+    expect(buildAutoRecallBlock.mock.calls[0][0]).toBe(turn1);
+    expect(buildAutoRecallBlock.mock.calls[1][0]).toBe(turn2);
+    expect(buildAutoRecallBlock.mock.calls[1][0]).not.toBe(buildAutoRecallBlock.mock.calls[0][0]);
+
+    // The block surfaced to the dispatch site carries the CURRENT turn's query
+    // and differs turn-to-turn. AC12 is about FRESHNESS, not the delivery
+    // channel — the hook may surface the block via `appendSystemPrompt` or
+    // `prependBody` (FRI-89: ride the body once the system prompt is frozen on
+    // resume), and that choice is FRI-89's concern, asserted elsewhere. Assert
+    // channel-agnostically on the block CONTENT so this stays deterministic.
+    const blockOf = (r: typeof r1): string | undefined =>
+      (r as { appendSystemPrompt?: string; prependBody?: string } | undefined)
+        ?.appendSystemPrompt ??
+      (r as { appendSystemPrompt?: string; prependBody?: string } | undefined)?.prependBody;
+    expect(blockOf(r1)).toBe(`<memory-context>\nquery=${turn1}\n</memory-context>`);
+    expect(blockOf(r2)).toBe(`<memory-context>\nquery=${turn2}\n</memory-context>`);
+    expect(blockOf(r2)).not.toBe(blockOf(r1));
+
+    // A fresh full-table read happens each turn (recall is not memoized across
+    // turns) — both turns drove listEntries().
+    expect(listEntries).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("before_prompt_build hook composition surface (FRI-123)", () => {
   // Rewritten per the FRI-123 ticket's BLOCKED-ON-OWNER default
   // (Option A): assert the `runHooks` composition surface directly

@@ -68,6 +68,32 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");
 
+// ---- onnxruntime-node strip (FRI-24) ----------------------------------
+//
+// onnxruntime-node bundles ~210MB of all-platform CPU binaries under its
+// `bin/napi-v6/<platform>/<arch>/` tree, PER store copy. Friday does NOT use
+// the native onnxruntime-node backend at all — inference runs on
+// onnxruntime-web's WASM backend (see packages/memory/src/embed-runtime.ts),
+// whose small `.wasm` files ship inside the SEPARATE `onnxruntime-web` package
+// and stay in the tarball. onnxruntime-node is only present because
+// @huggingface/transformers@4.2.0 statically imports it for its (pure-JS)
+// AutoTokenizer; a pnpm patch (patches/onnxruntime-node@1.24.3.patch) makes that
+// import no-op when the native binary is absent. So the native `bin/` tree is
+// DEAD WEIGHT on every platform — we DELIBERATELY drop it (keeping the package's
+// JS so the import still resolves). There is nothing to re-fetch on-device:
+// missing native binary is irrelevant because the WASM backend does the work.
+//
+// We strip the `bin/` of EVERY onnxruntime-node store copy. The pnpm patch
+// causes pnpm to materialize the package twice — the bare
+// `onnxruntime-node@<v>` dir AND a `onnxruntime-node@<v>_patch_hash=<hash>` dir
+// (the one transformers actually resolves to) — and BOTH carry the 210MB bin/
+// tree. A glob over `onnxruntime-node@*` strips both and is robust to the hash
+// changing when the patch is edited. The CLI's `lib/embedding-assets.ts` no
+// longer re-fetches anything (WASM needs no native binary), so there is no
+// version/path constant to keep in sync here anymore.
+const ORT_PKG_GLOB_PREFIX = "onnxruntime-node@";
+const ORT_BIN_SUBDIR = "bin";
+
 // ---- args -------------------------------------------------------------
 
 function parseArgs(argv) {
@@ -190,6 +216,72 @@ function relativizeSymlinks(stageDir, srcRoot) {
 
   walk(stageDir);
   return { rewrote, kept };
+}
+
+/**
+ * Recursively sum the byte size of every regular file under `dir` (following
+ * no symlinks). Used to log how much weight the onnxruntime strip removes.
+ */
+function dirSizeBytes(dir) {
+  let total = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) {
+      total += dirSizeBytes(full);
+    } else if (entry.isFile()) {
+      total += statSync(full).size;
+    }
+  }
+  return total;
+}
+
+/**
+ * Strip the onnxruntime-node native binary tree (`bin/`) out of EVERY staged
+ * pnpm store copy (FRI-24). Keeps each package's JS (`dist/`, `lib/`,
+ * package.json) so `require('onnxruntime-node')` (via transformers'
+ * AutoTokenizer) still resolves — only the heavy
+ * `bin/napi-v6/<platform>/<arch>/` native blobs are removed. Friday runs
+ * inference on onnxruntime-web's WASM backend, so the native binary is never
+ * needed; nothing re-fetches it on-device.
+ *
+ * Iterates `.pnpm/onnxruntime-node@*` rather than a single hard-coded path so it
+ * catches BOTH store copies pnpm materializes when the package is patched (the
+ * bare `@<v>` dir and the `@<v>_patch_hash=<hash>` dir transformers resolves
+ * to). Touches ONLY `onnxruntime-node@*` dirs — `onnxruntime-web` (a different
+ * package) and its `.wasm` files are left untouched. Robust no-op if no
+ * onnxruntime-node copy is present (a future build that drops the dep). Returns
+ * total freed bytes.
+ */
+function stripOnnxRuntimeBinaries(stageDir) {
+  const pnpmDir = join(stageDir, "node_modules", ".pnpm");
+  if (!existsSync(pnpmDir)) {
+    log(`  .pnpm store not present in staged tree — nothing to strip`);
+    return 0;
+  }
+  // Every store dir named `onnxruntime-node@...` (bare + patch-hash variants).
+  // Explicitly NOT matching `onnxruntime-web@...` or `onnxruntime-common@...`.
+  const ortDirs = readdirSync(pnpmDir, { withFileTypes: true }).filter(
+    (e) => e.isDirectory() && e.name.startsWith(ORT_PKG_GLOB_PREFIX),
+  );
+  if (ortDirs.length === 0) {
+    log(`  no onnxruntime-node store copy in staged tree — nothing to strip`);
+    return 0;
+  }
+  let freed = 0;
+  let stripped = 0;
+  for (const entry of ortDirs) {
+    const binDir = join(pnpmDir, entry.name, "node_modules", "onnxruntime-node", ORT_BIN_SUBDIR);
+    if (!existsSync(binDir)) continue;
+    freed += dirSizeBytes(binDir);
+    rmSync(binDir, { recursive: true, force: true });
+    stripped++;
+    log(`  stripped bin/ from ${entry.name}`);
+  }
+  if (stripped === 0) {
+    log(`  onnxruntime-node bin/ not present in any store copy — nothing to strip`);
+  }
+  return freed;
 }
 
 // ---- the copy manifest ------------------------------------------------
@@ -316,6 +408,19 @@ function main() {
   log("relativizing symlinks");
   const { rewrote, kept } = relativizeSymlinks(stageDir, repoRoot);
   log(`  rewrote ${rewrote} absolute symlinks; kept ${kept} relative ones`);
+
+  // Strip onnxruntime-node's ~210MB-per-copy native binary tree to keep the
+  // release lean. The native backend is unused (inference is WASM via
+  // onnxruntime-web), so nothing re-fetches it on-device (FRI-24). Done AFTER
+  // relativizeSymlinks so the symlink walk sees the full tree, and BEFORE tar so
+  // the stripped tree is what ships.
+  log("stripping onnxruntime-node native binaries (FRI-24 lean tarball — WASM backend in use)");
+  const freedBytes = stripOnnxRuntimeBinaries(stageDir);
+  if (freedBytes > 0) {
+    log(
+      `  freed ${(freedBytes / (1024 * 1024)).toFixed(1)} MB of native onnxruntime-node binaries`,
+    );
+  }
 
   // ---- tar --------------------------------------------------------------
   // Tar the staged tree at its own root so extraction yields the tree

@@ -1,0 +1,52 @@
+diff --git a/dist/backend.js b/dist/backend.js
+index e982a91939801f52b4dcded77e9e247d0f4d6fd7..b1e63d9d30b142917ad0f70343472855acb72941 100644
+--- a/dist/backend.js
++++ b/dist/backend.js
+@@ -144,5 +144,9 @@ class OnnxruntimeBackend {
+     }
+ }
+ exports.onnxruntimeBackend = new OnnxruntimeBackend();
+-exports.listSupportedBackends = binding_1.binding.listSupportedBackends;
++// FRI-24 (Friday patch): binding may be null when no native prebuilt exists for
++// this platform (macOS x64) or when Friday's release tarball stripped bin/. Fall
++// back to an empty backend list so importing this package (and transformers,
++// which statically imports it) doesn't throw at module init.
++exports.listSupportedBackends = binding_1.binding ? binding_1.binding.listSupportedBackends : () => [];
+ //# sourceMappingURL=backend.js.map
+\ No newline at end of file
+diff --git a/dist/binding.js b/dist/binding.js
+index 0c6db2e92192376628ae6f428f38e14e1e1d36d4..f6e2be94f9292a684b471f8aaa74b7b3a8cbc733 100644
+--- a/dist/binding.js
++++ b/dist/binding.js
+@@ -5,9 +5,20 @@ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.initOrt = exports.binding = void 0;
+ const onnxruntime_common_1 = require("onnxruntime-common");
+ // export native binding
+-exports.binding = 
+-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+-require(`../bin/napi-v6/${process.platform}/${process.arch}/onnxruntime_binding.node`);
++// FRI-24 (Friday patch): load the native binding resiliently. onnxruntime-node
++// ships NO macOS x64 prebuilt (dropped at ORT 1.20), and Friday strips the
++// bin/ tree from its release tarball because it runs inference on the
++// cross-platform onnxruntime-web WASM backend instead. A hard top-level require
++// would throw on import and take @huggingface/transformers (which statically
++// imports this package) down with it — breaking the tokenizer we DO use. Swallow
++// a missing binary so importing transformers still works; native inference is
++// never invoked (Friday uses onnxruntime-web).
++try {
++  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
++  exports.binding = require(`../bin/napi-v6/${process.platform}/${process.arch}/onnxruntime_binding.node`);
++} catch {
++  exports.binding = null;
++}
+ let ortInitialized = false;
+ const initOrt = () => {
+     if (!ortInitialized) {
+@@ -34,6 +45,7 @@ const initOrt = () => {
+                     throw new Error(`Unsupported log level: ${onnxruntime_common_1.env.logLevel}`);
+             }
+         }
++        if (!exports.binding) throw new Error("onnxruntime-node native binding unavailable on this platform (Friday uses onnxruntime-web)");
+         exports.binding.initOrtOnce(logLevel, onnxruntime_common_1.Tensor);
+     }
+ };

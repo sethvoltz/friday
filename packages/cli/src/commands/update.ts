@@ -54,6 +54,12 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import * as launchd from "../lib/launchd.js";
 import { currentLink, versionDir, versionsDir } from "../lib/install-paths.js";
+import { ensureBrewDeps as ensureBrewDepsImpl } from "../lib/brew-deps.js";
+import {
+  ensureEmbeddingAssets as ensureEmbeddingAssetsImpl,
+  type EnsureEmbeddingAssetsResult,
+} from "../lib/embedding-assets.js";
+import { ensureVectorExtension } from "@friday/shared";
 
 const RELEASE_BASE = "https://github.com/sethvoltz/friday/releases/latest/download";
 
@@ -167,6 +173,24 @@ export interface DownloadProgress {
 }
 
 /**
+ * A live, labeled, indeterminate spinner for a single provisioning step
+ * (FRI-24). The model download is the slow one and reports no byte-level
+ * progress, so its UX is a labeled spinner with a clear start frame and exactly
+ * one terminal line: ✓ (succeeded), ⏭ (skipped — already provisioned), or ✗
+ * (failed). Returned by {@link UpdateReporter.spinner}; the caller picks the
+ * outcome method. Exactly one of done/skip/fail must be called (it stops the
+ * animation + lands the final glyph line).
+ */
+export interface StepSpinner {
+  /** Terminal ✓ line — the step did work (installed / created / warmed). */
+  done(message: string): void;
+  /** Terminal ⏭ line — nothing to do (already installed / already cached). */
+  skip(message: string): void;
+  /** Terminal ✗ line — the step failed (non-fatal unless the caller aborts). */
+  fail(message: string): void;
+}
+
+/**
  * Injectable user-facing output surface, so `runUpdate` can narrate the
  * multi-step flow (resolve → download → verify → extract → provision → restart)
  * with a live download bar — while tests pass a recording/silent reporter and
@@ -183,6 +207,13 @@ export interface UpdateReporter {
   progress(p: DownloadProgress): void;
   /** Finalize any in-flight progress line (writes the trailing newline). */
   endProgress(): void;
+  /**
+   * Start a labeled, indeterminate spinner for a provisioning step (FRI-24:
+   * pgvector install / extension / embedding-model warm). Returns a handle
+   * whose done/skip/fail lands the terminal ✓/⏭/✗ line. No silent multi-second
+   * hangs — the slow model download spins until it lands an outcome.
+   */
+  spinner(label: string): StepSpinner;
   /** Terminal success line. */
   success(message: string): void;
   /** Non-fatal warning line. */
@@ -226,6 +257,7 @@ function elapsedSince(startMs: number): string {
  */
 export function createConsoleReporter(): UpdateReporter {
   const tty = process.stdout.isTTY === true;
+  const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let dlAsset: string | null = null;
   let dlStart = 0;
   let lastRender = 0;
@@ -285,6 +317,50 @@ export function createConsoleReporter(): UpdateReporter {
     endProgress() {
       closeLine();
     },
+    spinner(label) {
+      closeLine();
+      let frame = 0;
+      let timer: ReturnType<typeof setInterval> | null = null;
+      let settled = false;
+
+      const render = () => {
+        const f = SPINNER_FRAMES[frame % SPINNER_FRAMES.length];
+        // \r to col 0, \x1b[2K clears the whole line, then repaint the frame.
+        process.stdout.write(`\r\x1b[2K${pc.cyan(f)} ${label}`);
+        lineOpen = true;
+        frame++;
+      };
+
+      if (tty) {
+        render();
+        timer = setInterval(render, 90);
+        // Don't let the spinner's interval keep the process alive on its own.
+        if (typeof timer.unref === "function") timer.unref();
+      } else {
+        // Piped: no animation — a single start line so the slow model download
+        // never looks like a silent hang.
+        console.log(`${pc.cyan("→")} ${label}`);
+      }
+
+      const settle = (glyph: string, color: (s: string) => string, message: string) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearInterval(timer);
+        if (tty) {
+          // Replace the spinning line in place with the terminal glyph line.
+          process.stdout.write(`\r\x1b[2K${color(glyph)} ${message}\n`);
+          lineOpen = false;
+        } else {
+          console.log(`${color(glyph)} ${message}`);
+        }
+      };
+
+      return {
+        done: (message) => settle("✓", pc.green, message),
+        skip: (message) => settle("⏭", pc.dim, message),
+        fail: (message) => settle("✗", pc.yellow, message),
+      };
+    },
     success(message) {
       closeLine();
       console.log(pc.green(`✔ ${message}`));
@@ -331,6 +407,27 @@ export interface UpdateDeps {
    *  was stopped (but still autostart-armed): keeps the plist current (new
    *  version's shape) for the next `friday start` / reboot RunAtLoad. */
   writePlist(installDir: string): void;
+  /** Reconcile Homebrew deps (the TS twin of install.sh's ensure_brew_deps):
+   *  install any Brewfile dep that's missing (incl. pgvector), skip present
+   *  ones. Runs BEFORE the daemon restarts so a newly-added dep is on the box
+   *  before the post-update boot. Returns the per-dep partition so the caller
+   *  renders a ✓ (installed) / ⏭ (already present) / ✗ (failed) line. FRI-24. */
+  ensureBrewDeps(): { installed: string[]; alreadyPresent: string[]; failed: string[] };
+  /** Ensure the pgvector `vector` extension exists in the friday DB (via the
+   *  admin/superuser connection — the friday role can't CREATE EXTENSION). The
+   *  extension is a HARD schema dependency for migration 0036's `embedding
+   *  vector(384)` column, which the daemon runs on the NEXT boot — so it MUST
+   *  exist before the restart. Throws on failure (fail-loud — do NOT brick the
+   *  daemon by booting it into a missing-type migration). Resolves `true` when
+   *  this run created the extension, `false` when it already existed (so the
+   *  caller renders ✓ vs ⏭). FRI-24. */
+  ensureVectorExtension(): Promise<boolean>;
+  /** Best-effort, FAIL-OPEN: warm the embedding MODEL into the cache. Inference
+   *  runs on onnxruntime-web's WASM backend (no native binary to fetch), so this
+   *  only pulls the tokenizer + quantized ONNX model. A failure here degrades
+   *  recall to FTS-only; it MUST NOT fail the update — so it returns the warm
+   *  outcome rather than throwing. FRI-24. */
+  ensureEmbeddingAssets(installDir: string): Promise<EnsureEmbeddingAssetsResult>;
 }
 
 function defaultDownloadRelease(
@@ -436,6 +533,26 @@ export const defaultUpdateDeps: UpdateDeps = {
   writePlist(installDir: string): void {
     launchd.writePlist(installDir);
   },
+  ensureBrewDeps(): { installed: string[]; alreadyPresent: string[]; failed: string[] } {
+    // brew install streams its own (inherited) stdout; the spinner is paused
+    // around that by the caller. Return the partition so the caller renders the
+    // ✓/⏭/✗ outcome line.
+    return ensureBrewDepsImpl();
+  },
+  async ensureVectorExtension(): Promise<boolean> {
+    // Create the pgvector extension via the admin (OS-superuser) connection.
+    // ensureVectorExtension throws if it can't be created — propagate it so the
+    // update fails loudly rather than restarting the daemon into a 0036
+    // migration that references a missing `vector` type. Returns true when it
+    // created the extension this run, false when it already existed.
+    return ensureVectorExtension();
+  },
+  async ensureEmbeddingAssets(installDir: string): Promise<EnsureEmbeddingAssetsResult> {
+    // FAIL-OPEN: the model warm never throws (its outcome is returned, not
+    // raised); a cold model degrades recall to FTS-only and the daemon still
+    // boots. The WASM runtime needs no native binary.
+    return ensureEmbeddingAssetsImpl({ installDir });
+  },
 };
 
 /**
@@ -518,6 +635,99 @@ export function flipCurrent(version: string): void {
   renameSync(tmp, link);
 }
 
+/**
+ * Run the post-extract provisioning steps in their LOAD-BEARING order, then
+ * flip `current` and (re)activate the supervisor (FRI-24). Each step renders a
+ * labeled spinner that lands a ✓ (did work) / ⏭ (already provisioned) / ✗
+ * (failed) line — no silent multi-second hangs (the model download is the slow
+ * one).
+ *
+ * Order matters:
+ *   1. ensureBrewDeps — install any newly-added Brewfile dep (e.g. pgvector)
+ *      so it's on the box before anything downstream needs it. ✓/⏭/✗.
+ *   2. ensureVectorExtension — create the pgvector `vector` extension. This is
+ *      a HARD schema dependency for migration 0036, which the daemon runs on
+ *      the NEXT boot; it MUST exist before the restart. Throws on failure
+ *      (fail-LOUD) so we never boot the daemon into a missing-type migration —
+ *      the spinner lands a ✗ and the error propagates, aborting the update.
+ *   3. ensureEmbeddingAssets — best-effort, FAIL-OPEN model warm. The WASM
+ *      runtime ships its `.wasm` files in node_modules, so this only warms the
+ *      model into the cache. A failure shows a NON-FATAL ✗ (recall → FTS-only)
+ *      and the update continues.
+ *   4. flipCurrent + activate — only now does the daemon get restarted into
+ *      the new version, with the extension already present.
+ *
+ * `installDir` is the new version's extracted tree, NOT the `current` symlink —
+ * the flip happens AFTER.
+ */
+async function provisionAndActivate(
+  deps: UpdateDeps,
+  reporter: UpdateReporter,
+  latest: string,
+  installDir: string,
+  wasRunning: boolean,
+): Promise<void> {
+  // 1. pgvector (and any other missing Brewfile dep). brew install streams its
+  // own output below the spinner when it actually installs; the common
+  // idempotent path lands ⏭ "pgvector already installed".
+  const brewSpin = reporter.spinner("Installing pgvector…");
+  let brew: { installed: string[]; alreadyPresent: string[]; failed: string[] };
+  try {
+    brew = deps.ensureBrewDeps();
+  } catch (err) {
+    brewSpin.fail("Installing pgvector failed");
+    throw err;
+  }
+  if (brew.failed.includes("pgvector")) {
+    // pgvector failing is load-bearing — the extension step that follows will
+    // throw, so surface the brew failure as the immediate cause.
+    brewSpin.fail(`pgvector install failed (brew install ${brew.failed.join(", ")})`);
+  } else if (brew.installed.includes("pgvector")) {
+    brewSpin.done(
+      brew.installed.length > 1
+        ? `pgvector installed (+ ${brew.installed.filter((d) => d !== "pgvector").join(", ")})`
+        : "pgvector installed",
+    );
+  } else if (brew.installed.length > 0) {
+    // pgvector already present, but some OTHER missing dep was installed.
+    brewSpin.done(`installed ${brew.installed.join(", ")}; pgvector already installed`);
+  } else {
+    brewSpin.skip("pgvector already installed");
+  }
+
+  // 2. pgvector EXTENSION — fail-LOUD (a missing `vector` type bricks the 0036
+  // migration the daemon runs on the next boot).
+  const extSpin = reporter.spinner("Enabling pgvector extension…");
+  let created: boolean;
+  try {
+    created = await deps.ensureVectorExtension();
+  } catch (err) {
+    extSpin.fail(
+      `pgvector extension could not be enabled: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw err; // abort before assets / flip / restart
+  }
+  if (created) extSpin.done("pgvector extension enabled");
+  else extSpin.skip("pgvector extension already enabled");
+
+  // 3. Embedding MODEL warm — fail-OPEN (recall degrades to FTS-only, daemon
+  // still boots). The WASM runtime needs no native binary.
+  const modelSpin = reporter.spinner("Downloading embedding model…");
+  const assets = await deps.ensureEmbeddingAssets(installDir);
+  if (assets.status === "warmed") {
+    modelSpin.done("embedding model ready");
+  } else if (assets.status === "warm-failed") {
+    modelSpin.fail("embedding model unavailable — recall falls back to FTS-only");
+  } else {
+    modelSpin.fail(`embedding model warm failed — recall falls back to FTS-only (${assets.error})`);
+  }
+
+  // 4. Only now: flip + (re)activate the supervisor.
+  reporter.step("Activating new version…");
+  flipCurrent(latest);
+  activate(deps, reporter, wasRunning);
+}
+
 async function doForwardUpdate(deps: UpdateDeps, reporter: UpdateReporter): Promise<void> {
   const startedAt = Date.now();
   const installed = installedVersion();
@@ -542,11 +752,10 @@ async function doForwardUpdate(deps: UpdateDeps, reporter: UpdateReporter): Prom
 
   const target = versionDir(latest);
   if (existsSync(target)) {
-    // Already extracted (interrupted prior run); just flip + restart.
+    // Already extracted (interrupted prior run); reconcile deps + provision the
+    // extension/assets against the existing tree, then flip + restart.
     reporter.note(`version ${latest} already downloaded — reusing`);
-    reporter.step("Activating new version…");
-    flipCurrent(latest);
-    activate(deps, reporter, wasRunning);
+    await provisionAndActivate(deps, reporter, latest, target, wasRunning);
     reporter.success(`Updated to ${latest} ${elapsedSince(startedAt)}`);
     return;
   }
@@ -590,12 +799,11 @@ async function doForwardUpdate(deps: UpdateDeps, reporter: UpdateReporter): Prom
     await rm(stage, { recursive: true, force: true }).catch(() => {});
   }
 
-  // Provision the pinned Node for the new tree, flip, restart.
+  // Provision the pinned Node for the new tree, then reconcile brew deps +
+  // pgvector extension + embedding assets (in that order) and flip + restart.
   reporter.step("Provisioning Node runtime…");
   deps.fnmInstall(target);
-  reporter.step("Activating new version…");
-  flipCurrent(latest);
-  activate(deps, reporter, wasRunning);
+  await provisionAndActivate(deps, reporter, latest, target, wasRunning);
   reporter.success(`Updated to ${latest} ${elapsedSince(startedAt)}`);
 }
 
