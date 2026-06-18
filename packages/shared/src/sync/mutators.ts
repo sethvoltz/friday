@@ -398,6 +398,33 @@ export interface TriggerScheduleArgs {
   ts: number;
 }
 
+/* ---------------- FRI-169: habit check-off mutators ---------------- */
+// Only the high-frequency check-off/undo are Zero mutators (latency-
+// sensitive, dashboard-frequent, optimistic) — like `triggerSchedule`.
+// Habit CRUD (create/update/archive) is low-frequency and already needs
+// an MCP/daemon path for agent callers, so it routes through the
+// `/api/habits*` daemon routes rather than duplicating that logic here.
+//
+// The client supplies both `id` and `ts` at INSERT (mirroring the
+// schedules/comments mutators) so the optimistic write and the canonical
+// write target the same `habit_checkins` row. Append-only: the only
+// mutation beyond this INSERT is `habitCheckinUndo`'s single-row DELETE.
+
+export interface HabitCheckinArgs {
+  /** Pre-computed UUID for the new Check-in row (client-supplied PK). */
+  id: string;
+  habitId: string;
+  /** Completion timestamp (epoch-millis). Defaults to now() at the call
+   *  site; a past value backdates the Check-in. */
+  ts: number;
+  note?: string;
+}
+
+export interface HabitCheckinUndoArgs {
+  /** PK of the single Check-in row to remove. */
+  id: string;
+}
+
 /* ---------------- Phase 4.7: app mutators ---------------- */
 // Three mutators that drive the daemon's transaction-wrapped
 // installer (see `services/daemon/src/apps/installer.ts`).
@@ -982,6 +1009,29 @@ export const createMutators = (userId?: string | null) =>
         name: args.name,
         status: "trigger_requested",
         updated_at: args.ts,
+      });
+    },
+    habitCheckin: async (tx: FridayTx, args: HabitCheckinArgs): Promise<void> => {
+      // FRI-169: append-only Check-in INSERT. The client supplies `id`
+      // and `ts` so the optimistic write and the canonical write land on
+      // the same `habit_checkins` row (text-uuid PK convention, like
+      // `addTicketComment`). Never UPDATE/DELETE a prior row here — the
+      // Streak is derived on read from the full log. `created_at` is
+      // server-stamped server-side via the column default in production;
+      // the mutator writes only the columns the client owns.
+      await tx.mutate.habit_checkins.insert({
+        id: args.id,
+        habit_id: args.habitId,
+        ts: args.ts,
+        note: args.note,
+      });
+    },
+    habitCheckinUndo: async (tx: FridayTx, args: HabitCheckinUndoArgs): Promise<void> => {
+      // FRI-169: the single allowed delete. Removes exactly one Check-in
+      // by PK, leaving sibling Check-ins for the same habit intact.
+      // Idempotent — Postgres DELETE WHERE no-match doesn't error.
+      await tx.mutate.habit_checkins.delete({
+        id: args.id,
       });
     },
     installApp: async (tx: FridayTx, args: InstallAppArgs): Promise<void> => {

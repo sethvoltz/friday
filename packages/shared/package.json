@@ -15,6 +15,7 @@
     "./markdown/code-highlight": "./dist/markdown/code-highlight.js",
     "./cron": "./dist/cron.js",
     "./apps": "./dist/apps/manifest.js",
+    "./habits": "./dist/habits/streak.js",
     "./sync": "./dist/sync/index.js",
     "./sync/jwt": "./dist/sync/jwt.js",
     "./test/sync-harness": "./dist/test/sync-harness.js"

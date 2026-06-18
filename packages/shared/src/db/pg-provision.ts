@@ -85,6 +85,11 @@ export const SYNC_TABLES: readonly string[] = [
   // installs recover by re-running setup (no replication-slot
   // rebuild needed).
   "evolve_proposals",
+  // FRI-169: Habits. The Today card + /habits route read these reactively
+  // via Zero; the `habitCheckin` mutator's INSERT replicates to clients
+  // the same way an MCP-originated Check-in does (same `friday_pub`).
+  "habits",
+  "habit_checkins",
 ];
 
 export interface ProvisionResult {

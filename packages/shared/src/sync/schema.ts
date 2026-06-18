@@ -217,6 +217,48 @@ const scheduleRuns = table("schedule_runs")
   })
   .primaryKey("id");
 
+/* ---------------- habits (FRI-169) ---------------- */
+// Mirrors `db/schema.ts:habits`. Timestamps (window_start/window_end,
+// created_at/updated_at) cross the wire as epoch-millis `number()`.
+// Check-constrained enums declare their union via `string<...>()`;
+// nullable columns use `.optional()`. `days_of_week` is the integer
+// weekday bitmask → `number().optional()` (a nullable number column,
+// same shape as `next_run_at`). The Streak is computed on read from the
+// Check-in log — there is no streak column to mirror.
+const habits = table("habits")
+  .columns({
+    id: string(),
+    name: string(),
+    description: string().optional(),
+    mode: string<"ongoing" | "bounded">(),
+    target: number(),
+    period: string<"day" | "week" | "month" | "year">(),
+    days_of_week: number().optional(),
+    bucket: string<"morning" | "afternoon" | "evening" | "anytime">().optional(),
+    color_index: number().optional(),
+    window_start: number().optional(),
+    window_end: number().optional(),
+    status: string<"active" | "archived" | "completed" | "expired">(),
+    created_at: number(),
+    updated_at: number(),
+  })
+  .primaryKey("id");
+
+/* ---------------- habit_checkins (FRI-169) ---------------- */
+// Mirrors `db/schema.ts:habitCheckins`. Append-only Check-in log; the
+// `habitCheckin` mutator INSERTs one row (client supplies `id` + `ts`),
+// `habitCheckinUndo` DELETEs one row by `id`. `ts` and `created_at` are
+// epoch-millis; `note` is nullable.
+const habitCheckins = table("habit_checkins")
+  .columns({
+    id: string(),
+    habit_id: string(),
+    ts: number(),
+    note: string().optional(),
+    created_at: number(),
+  })
+  .primaryKey("id");
+
 /* ---------------- memory_entries (Phase 3.3) ---------------- */
 // Mirrors `db/schema.ts:memoryEntries`. `tagsJson` is a `jsonb` array
 // of strings in Postgres; Zero exposes it as `json` and the dashboard
@@ -474,6 +516,8 @@ export const schema: ZeroSchema & { readonly enableLegacyQueries: true } = creat
     clientDevices,
     settings,
     evolveProposals,
+    habits,
+    habitCheckins,
   ],
   // Phase 3: enable the deprecated `z.query.<table>` field. The
   // createBuilder() path returns query objects that aren't bound to a
@@ -530,4 +574,10 @@ export const permissions = definePermissions(schema, () => ({
   // here; the daemon's LISTEN handler runs `~/.friday/config.json`
   // resync on every UPDATE.
   settings: { row: { select: ANYONE_CAN } },
+  // FRI-169: habit CRUD flows through the daemon /api/habits route;
+  // check-off/undo flow through the `habitCheckin`/`habitCheckinUndo`
+  // mutators. Only `select` is configured here so the dashboard's Today
+  // card + /habits route reactive queries can read the rows.
+  habits: { row: { select: ANYONE_CAN } },
+  habit_checkins: { row: { select: ANYONE_CAN } },
 }));
