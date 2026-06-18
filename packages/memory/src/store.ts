@@ -1,7 +1,8 @@
 import { and, eq, sql } from "drizzle-orm";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { MEMORY_ENTRIES_DIR, ensureDirs, getDb, schema } from "@friday/shared";
+import { EMBEDDING_DIM, MEMORY_ENTRIES_DIR, ensureDirs, getDb, schema } from "@friday/shared";
+import { embedText } from "./embed.js";
 
 export interface MemoryEntry {
   id: string;
@@ -76,7 +77,7 @@ export async function saveEntry(entry: MemoryEntry): Promise<void> {
   const db = getDb();
   const fileMtime = new Date(statSync(path).mtimeMs);
   const existingRows = await db
-    .select()
+    .select({ id: schema.memoryEntries.id })
     .from(schema.memoryEntries)
     .where(eq(schema.memoryEntries.id, entry.id))
     .limit(1);
@@ -107,12 +108,31 @@ export async function saveEntry(entry: MemoryEntry): Promise<void> {
       lastRecalledAt: null,
     });
   }
+
+  // Best-effort semantic embedding. Lives OUTSIDE the durability-critical
+  // path: the .md file and the canonical row are already persisted above, so a
+  // missing/crashed embedder leaves `embedding` NULL (recall degrades to
+  // FTS-only) but never loses the entry. FAIL-OPEN — never throws out of
+  // saveEntry. The raw `::vector` cast is used rather than Drizzle's
+  // `.set({ embedding })` because the customType passes a bare string param
+  // that Postgres won't implicitly coerce to `vector` in an UPDATE binding.
+  try {
+    const vec = await embedText(`${entry.title}\n${entry.content}`);
+    if (vec && vec.length === EMBEDDING_DIM) {
+      const literal = `[${vec.join(",")}]`;
+      await db.execute(
+        sql`UPDATE memory_entries SET embedding = ${literal}::vector WHERE id = ${entry.id}`,
+      );
+    }
+  } catch {
+    // fail-open: embedding stays NULL; file + row already persisted
+  }
 }
 
 export async function getEntry(id: string): Promise<MemoryEntry | null> {
   const db = getDb();
   const rows = await db
-    .select()
+    .select(ENTRY_COLUMNS)
     .from(schema.memoryEntries)
     .where(eq(schema.memoryEntries.id, id))
     .limit(1);
@@ -146,7 +166,7 @@ export async function forgetEntry(id: string): Promise<void> {
 
 export async function listEntries(): Promise<MemoryEntry[]> {
   const db = getDb();
-  const rows = await db.select().from(schema.memoryEntries);
+  const rows = await db.select(ENTRY_COLUMNS).from(schema.memoryEntries);
   return rows.map(rowToEntry);
 }
 
@@ -166,7 +186,7 @@ export async function listPinnedForAgent(
 ): Promise<MemoryEntry[]> {
   const db = getDb();
   const rows = await db
-    .select()
+    .select(ENTRY_COLUMNS)
     .from(schema.memoryEntries)
     .where(
       and(
@@ -184,7 +204,7 @@ export async function listPinnedForAgent(
 export async function touchRecall(id: string): Promise<void> {
   const db = getDb();
   const rows = await db
-    .select()
+    .select({ recallCount: schema.memoryEntries.recallCount })
     .from(schema.memoryEntries)
     .where(eq(schema.memoryEntries.id, id))
     .limit(1);
@@ -199,7 +219,40 @@ export async function touchRecall(id: string): Promise<void> {
     .where(eq(schema.memoryEntries.id, id));
 }
 
-function rowToEntry(r: typeof schema.memoryEntries.$inferSelect): MemoryEntry {
+// Column projection that OMITS the heavy `embedding` vector. rowToEntry never
+// reads it, and pulling + JSON-parsing a 384-float literal (~3-4KB) on every
+// read — listEntries() fires once per passive-recall turn — is pure waste. The
+// vector is consumed ONLY by the raw `<=>` SQL in search.ts / backfill.ts, which
+// select it explicitly. (FRI-24 perf: adding the column to the table def made
+// the bare `.select()` star-fetch it.)
+const ENTRY_COLUMNS = {
+  id: schema.memoryEntries.id,
+  title: schema.memoryEntries.title,
+  content: schema.memoryEntries.content,
+  tagsJson: schema.memoryEntries.tagsJson,
+  createdBy: schema.memoryEntries.createdBy,
+  createdAt: schema.memoryEntries.createdAt,
+  updatedAt: schema.memoryEntries.updatedAt,
+  fileMtime: schema.memoryEntries.fileMtime,
+  recallCount: schema.memoryEntries.recallCount,
+  lastRecalledAt: schema.memoryEntries.lastRecalledAt,
+  status: schema.memoryEntries.status,
+} as const;
+
+type MemoryRow = Pick<
+  typeof schema.memoryEntries.$inferSelect,
+  | "id"
+  | "title"
+  | "content"
+  | "tagsJson"
+  | "createdBy"
+  | "createdAt"
+  | "updatedAt"
+  | "recallCount"
+  | "lastRecalledAt"
+>;
+
+function rowToEntry(r: MemoryRow): MemoryEntry {
   // tags_json is jsonb in Postgres; Drizzle returns it as a parsed value.
   // Defend against historical rows that may have been stored as strings.
   const tagsRaw = r.tagsJson;

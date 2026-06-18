@@ -11,6 +11,8 @@ brew bundle --file=Brewfile
 
 The Brewfile installs:
 
+- `postgresql@18` — Friday's canonical store (ADR-023). Managed by `brew services`; start with `brew services start postgresql@18`.
+- `pgvector` — Postgres extension for semantic memory recall (the `embedding vector(384)` column on `memory_entries`, FRI-24). The Brewfile installs the extension binaries; `friday setup` / `friday update` then create the `vector` extension inside the `friday` database over an **admin** connection — `CREATE EXTENSION vector` needs superuser, so it can't be created by the non-superuser `friday` role that daemon-boot migrations run as. The embedding runtime is **onnxruntime-web (WASM)** — its `.wasm` files ship inside the release tarball's `node_modules`, so there's **no per-platform native binary to fetch** and it runs cross-platform (Intel x64 and Apple Silicon). Only the embedding model + tokenizer (quantized ONNX, all-MiniLM-L6-v2, under `<FRIDAY_DATA_DIR>/models/`) are fetched during install/update; if they're missing, recall degrades fail-open to full-text-only and the daemon still boots.
 - `gh` — GitHub CLI for builders
 - `fnm` — Fast Node Manager; resolves the pinned Node from `.node-version` (`22.21.1`) and is how the launchd-supervised stack launches Node (ADR-034)
 - `pnpm` — build/dev-time package manager (CI pack + contributor builds); not on Friday's runtime path
@@ -64,7 +66,7 @@ friday setup
 This walks you through:
 
 1. Creating `~/.friday/` directory tree.
-2. Provisioning the Postgres `friday` role + database, applying Drizzle migrations, and creating the `friday_pub` publication for zero-cache's logical replication (ADR-023). Connection details are written to `~/.friday/.env.local`.
+2. Provisioning the Postgres `friday` role + database, creating the `vector` extension over an admin connection (pgvector, for semantic memory recall — done before migrations because `CREATE EXTENSION vector` needs superuser, which the `friday` role lacks; ADR-025/FRI-24), applying Drizzle migrations, and creating the `friday_pub` publication for zero-cache's logical replication (ADR-023). Connection details are written to `~/.friday/.env.local`.
 3. Copying the default `SOUL.md` into `~/.friday/SOUL.md` (your editable identity layer).
 4. Creating the primary user account (email + password).
 

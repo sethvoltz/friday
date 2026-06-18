@@ -4,21 +4,44 @@ import type { MemoryEntry } from "./store.js";
 let entries: MemoryEntry[] = [];
 
 // FTS candidate ids the mocked Postgres pool returns. `null` (the default)
-// makes `query` reject so the scoring logic falls back to the full-scan branch
-// — the mode every pre-existing test relies on. A test that wants to exercise
-// the FTS-narrow branch sets `ftsRows` to the candidate id rows it should see.
+// makes the FTS query reject so the scoring logic falls back to the full-scan
+// branch — the mode every pre-existing test relies on. A test that wants to
+// exercise the FTS-narrow branch sets `ftsRows` to the candidate id rows it
+// should see.
 let ftsRows: { id: string }[] | null = null;
 
+// FRI-24: cosine rows the mocked Postgres pool returns for the VECTOR candidate
+// query (the `embedding <=> $1::vector` SELECT). `null` (default) makes that
+// query reject → vector path fails open. Set to an array of {id,cosine} to
+// drive the hybrid path.
+let vecRows: { id: string; cosine: number }[] | null = null;
+
+// FRI-24: the vector the mocked embedText returns for the query. `null` (the
+// default) makes the embedder unavailable → vector path entirely skipped →
+// FTS-only behavior. A number[] enables the hybrid path.
+let queryVector: number[] | null = null;
+
 // ADR-023: production code uses `getPool()` (returns pg.Pool whose `query` is
-// awaitable). The stub rejects (→ full scan) unless `ftsRows` is set, in which
-// case it resolves with those rows (→ FTS-narrow path).
+// awaitable). The stub branches on the SQL string: the vector candidate query
+// contains `<=>`, the FTS query contains `content_tsv`. Each independently
+// rejects (→ fallback / fail-open) unless its row source is set.
 vi.mock("@friday/shared", () => ({
   getPool: () => ({
-    query: () =>
-      ftsRows === null
+    query: (sqlText: string) => {
+      if (sqlText.includes("<=>") || sqlText.includes("embedding")) {
+        return vecRows === null
+          ? Promise.reject(new Error("force vector fail-open"))
+          : Promise.resolve({ rows: vecRows });
+      }
+      return ftsRows === null
         ? Promise.reject(new Error("force fallback to full scan"))
-        : Promise.resolve({ rows: ftsRows }),
+        : Promise.resolve({ rows: ftsRows });
+    },
   }),
+}));
+
+vi.mock("./embed.js", () => ({
+  embedText: () => Promise.resolve(queryVector),
 }));
 
 vi.mock("./store.js", () => ({
@@ -43,6 +66,8 @@ function mkEntry(partial: Partial<MemoryEntry> & { id: string }): MemoryEntry {
 beforeEach(() => {
   entries = [];
   ftsRows = null;
+  vecRows = null;
+  queryVector = null;
 });
 
 describe("searchMemories scoring", () => {
@@ -471,5 +496,188 @@ describe("searchMemories scoring", () => {
     const ids = results.map((r) => r.entry.id);
     expect(ids).toEqual(["from-preload"]);
     expect(ids).not.toContain("from-store");
+  });
+
+  // FRI-24 (AC7): vector recall surfaces a semantically-related entry that
+  // shares NO query token. Entry A matches the query lexically; entry B is
+  // semantically related ("Login & session sign-in flow") but contains none of
+  // the query tokens, so FTS alone returns only A. With the embedder live and a
+  // strong cosine on B (>= VEC_MIN), hybrid recall returns BOTH — A still ranks
+  // first on its large lexical score, B is admitted purely by its cosine.
+  it("vector recall surfaces a semantically-related entry that FTS-alone misses", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({
+        id: "A",
+        title: "How do we authenticate users",
+        content: "authenticate users via the API",
+      }),
+      mkEntry({
+        id: "B",
+        title: "Login & session sign-in flow",
+        content: "credential exchange and session cookies",
+      }),
+    ];
+
+    // FTS-only baseline: embedder unavailable → only A (lexical) comes back.
+    queryVector = null;
+    vecRows = null;
+    const ftsOnly = await searchMemories({ query: "how do we authenticate users" });
+    expect(ftsOnly.map((r) => r.entry.id)).toEqual(["A"]);
+
+    // Hybrid: embedder live; vector query ranks B high, A low.
+    queryVector = [0.1, 0.2, 0.3];
+    vecRows = [
+      { id: "B", cosine: 0.88 },
+      { id: "A", cosine: 0.2 },
+    ];
+    const hybrid = await searchMemories({ query: "how do we authenticate users" });
+    const ids = hybrid.map((r) => r.entry.id);
+    expect(ids).toContain("B");
+    // B's cosine (0.88*3=2.64) beats A's lexical "authenticate"+"users" content
+    // hits + weak cosine. Pin the full ordered array.
+    expect(ids).toEqual(["A", "B"]);
+    const b = hybrid.find((r) => r.entry.id === "B")!;
+    expect(b.matchedOn).toContain("vector");
+  });
+
+  // FRI-24 (AC8): AND-gate preserved for non-semantic noise. Entry C matches no
+  // query token AND its cosine is below VEC_MIN (0.75) → it must NOT survive.
+  it("AND-gate preserved for non-semantic noise", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({
+        id: "match",
+        title: "authenticate users guide",
+        content: "how we authenticate users",
+      }),
+      mkEntry({
+        id: "C",
+        title: "unrelated grocery list",
+        content: "milk eggs bread",
+      }),
+    ];
+    queryVector = [0.1, 0.2, 0.3];
+    vecRows = [
+      { id: "match", cosine: 0.9 },
+      { id: "C", cosine: 0.4 }, // below VEC_MIN and no token match → dropped
+    ];
+
+    const results = await searchMemories({ query: "authenticate users" });
+    const ids = results.map((r) => r.entry.id);
+    expect(ids).toContain("match");
+    expect(ids).not.toContain("C");
+  });
+
+  // FRI-24 (AC9): tag bypass unchanged (FRI-34 regression). With a tags filter,
+  // a tag-matched entry whose body matches no query token AND has a low cosine
+  // is STILL returned — the vector path is skipped entirely for tags-only
+  // queries, so it neither drops the entry nor is needed to admit it.
+  it("tag bypass unchanged (FRI-34 regression)", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({
+        id: "tagged",
+        title: "no token here",
+        content: "nothing relevant in the body",
+        tags: ["test:bucket"],
+      }),
+    ];
+    // Even if the embedder were live with a low cosine, the tags-only path must
+    // not consult it.
+    queryVector = [0.1, 0.2, 0.3];
+    vecRows = [{ id: "tagged", cosine: 0.1 }];
+
+    const results = await searchMemories({ query: "foo", tags: ["test:bucket"] });
+    const ids = results.map((r) => r.entry.id);
+    expect(ids).toEqual(["tagged"]);
+    // The tags-only path never adds a vector contribution.
+    expect(results[0].matchedOn).not.toContain("vector");
+  });
+
+  // FRI-24 (AC10): FTS fallback when embeddings unavailable. With embedText →
+  // null the vector path is entirely skipped and the result is byte-identical
+  // to a pure FTS-only run on the same seed — same ids, same order, non-empty,
+  // no throw.
+  it("FTS fallback when embeddings unavailable", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({ id: "p", title: "daemon worker pool", content: "the daemon forks workers" }),
+      mkEntry({ id: "q", title: "daemon scheduler", content: "the daemon schedules daemon jobs" }),
+      mkEntry({ id: "r", title: "unrelated", content: "nothing here" }),
+    ];
+
+    // Baseline: embedder explicitly OFF (the AC10 fallback path — the vector
+    // block is skipped entirely).
+    queryVector = null;
+    vecRows = null;
+    const baseline = await searchMemories({ query: "daemon" });
+    const baselineIds = baseline.map((r) => r.entry.id);
+    expect(baselineIds).not.toEqual([]);
+    expect(baselineIds).toContain("p");
+    expect(baselineIds).toContain("q");
+    expect(baselineIds).not.toContain("r");
+    for (const r of baseline) expect(r.matchedOn).not.toContain("vector");
+
+    // Contrast (NOT a re-run of the same path): embedder LIVE but the vector
+    // query yields NO candidates. This actually exercises the hybrid machinery
+    // (embed + vector SELECT + union) yet must produce a byte-identical id list
+    // + order to the FTS-only baseline — proving the vector term is a true
+    // additive no-op, not merely that the function is deterministic.
+    queryVector = [0.1, 0.2, 0.3];
+    vecRows = [];
+    const hybridNoHits = await searchMemories({ query: "daemon" });
+    expect(hybridNoHits.map((r) => r.entry.id)).toEqual(baselineIds);
+    for (const r of hybridNoHits) expect(r.matchedOn).not.toContain("vector");
+  });
+
+  // FRI-24: the OTHER fail-open interleaving — embedText SUCCEEDS but the vector
+  // SQL query THROWS mid-flight (e.g. a transient index error). The catch must
+  // leave the FTS candidate set + scores untouched → byte-identical to FTS-only.
+  it("vector-query error after a successful embed falls back to FTS-only", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({ id: "p", title: "daemon worker pool", content: "the daemon forks workers" }),
+      mkEntry({ id: "q", title: "daemon scheduler", content: "the daemon schedules daemon jobs" }),
+      mkEntry({ id: "r", title: "unrelated", content: "nothing here" }),
+    ];
+    queryVector = null;
+    vecRows = null;
+    const baselineIds = (await searchMemories({ query: "daemon" })).map((r) => r.entry.id);
+
+    // embedText returns a vector (non-null) BUT the vector query rejects
+    // (vecRows=null → the mock throws on the `<=>` query).
+    queryVector = [0.1, 0.2, 0.3];
+    vecRows = null;
+    const afterThrow = await searchMemories({ query: "daemon" });
+    expect(afterThrow.map((r) => r.entry.id)).toEqual(baselineIds);
+    for (const r of afterThrow) expect(r.matchedOn).not.toContain("vector");
+  });
+
+  // FRI-141 × FRI-24: excludeTags (person-recall suppression) must win over a
+  // high-cosine vector-only hit. The excludeTags `continue` fires BEFORE the
+  // relaxed cosine gate, so a person entry the vector path would otherwise admit
+  // (cosine ≥ VEC_MIN, no shared token) stays suppressed.
+  it("excludeTags suppresses a high-cosine vector-only person hit", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({ id: "person1", title: "Alice", content: "private notes", tags: ["person"] }),
+      mkEntry({ id: "proj1", title: "project plan", content: "the roadmap", tags: ["project"] }),
+    ];
+    // Live embedder; the person entry ranks well above VEC_MIN (0.75) and shares
+    // NO query token — the relaxed AND-gate would admit it absent excludeTags.
+    queryVector = [0.1, 0.2, 0.3];
+    vecRows = [
+      { id: "person1", cosine: 0.95 },
+      { id: "proj1", cosine: 0.2 },
+    ];
+    const ids = (await searchMemories({ query: "roadmap", excludeTags: ["person"] })).map(
+      (r) => r.entry.id,
+    );
+    // person1 (cosine 0.95 ≥ VEC_MIN, no token) would be admitted by the relaxed
+    // gate, but excludeTags drops it first; proj1 is admitted via the "roadmap"
+    // token match.
+    expect(ids).not.toContain("person1");
+    expect(ids).toContain("proj1");
   });
 });

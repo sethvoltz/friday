@@ -52,9 +52,12 @@ GITHUB_REPO="sethvoltz/friday"
 RELEASE_BASE="${FRIDAY_RELEASE_BASE:-https://github.com/${GITHUB_REPO}/releases/latest/download}"
 
 # Brewfile-tracked third-party deps (Friday itself is NOT brew-managed).
-# Postgres + cloudflared + gh + pnpm + fnm stay brew deps. Claude Code is
-# not installed here; `friday doctor` checks for `claude` on PATH.
-BREW_DEPS="fnm pnpm postgresql@18 cloudflared gh"
+# Postgres + pgvector + cloudflared + gh + pnpm + fnm stay brew deps. pgvector
+# supplies the `vector` extension `friday setup` (→ provisionPostgres →
+# ensureVectorExtension) creates for semantic memory recall (FRI-24); installing
+# the brew dep here is enough — setup creates the extension as the PG superuser.
+# Claude Code is not installed here; `friday doctor` checks for `claude` on PATH.
+BREW_DEPS="fnm pnpm postgresql@18 pgvector cloudflared gh"
 
 LAUNCHD_LABEL="com.sethvoltz.friday"
 

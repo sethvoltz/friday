@@ -78,14 +78,19 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
 
-      - name: Start Postgres (raised connection ceiling)
+      # FRI-24: pgvector/pgvector:pg18 is a drop-in superset of postgres:18 with
+      # the `vector` extension preinstalled. The unit suite's scratch DBs
+      # (createTestDb → ensureVectorExtension / test-pg's CREATE EXTENSION) need
+      # it, or every vector-touching test fails with `type "vector" does not
+      # exist`. Same CMD flags as before — the image only adds the extension.
+      - name: Start Postgres + pgvector (raised connection ceiling)
         run: |
           docker run -d --name postgres \
             -e POSTGRES_HOST_AUTH_METHOD=trust \
             -e POSTGRES_USER=runner \
             -e POSTGRES_DB=postgres \
             -p 5432:5432 \
-            postgres:18 \
+            pgvector/pgvector:pg18 \
             postgres \
               -c max_wal_senders=20 \
               -c max_replication_slots=20 \
@@ -203,14 +208,17 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
 
-      - name: Start Postgres (logical replication enabled)
+      # FRI-24: pgvector/pgvector:pg18 is a drop-in superset of postgres:18 with
+      # the `vector` extension preinstalled, needed by the scratch-DB tests'
+      # CREATE EXTENSION. Same logical-replication CMD flags as before.
+      - name: Start Postgres + pgvector (logical replication enabled)
         run: |
           docker run -d --name postgres \
             -e POSTGRES_HOST_AUTH_METHOD=trust \
             -e POSTGRES_USER=runner \
             -e POSTGRES_DB=postgres \
             -p 5432:5432 \
-            postgres:18 \
+            pgvector/pgvector:pg18 \
             postgres \
               -c wal_level=logical \
               -c max_wal_senders=20 \
@@ -256,14 +264,17 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
 
-      - name: Start Postgres (logical replication enabled)
+      # FRI-24: pgvector/pgvector:pg18 is a drop-in superset of postgres:18 with
+      # the `vector` extension preinstalled, needed by the scratch-DB tests'
+      # CREATE EXTENSION. Same logical-replication CMD flags as before.
+      - name: Start Postgres + pgvector (logical replication enabled)
         run: |
           docker run -d --name postgres \
             -e POSTGRES_HOST_AUTH_METHOD=trust \
             -e POSTGRES_USER=runner \
             -e POSTGRES_DB=postgres \
             -p 5432:5432 \
-            postgres:18 \
+            pgvector/pgvector:pg18 \
             postgres \
               -c wal_level=logical \
               -c max_wal_senders=20 \

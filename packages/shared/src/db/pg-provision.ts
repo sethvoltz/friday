@@ -167,6 +167,15 @@ export async function provisionPostgres(opts: {
     );
   }
 
+  // FRI-24: the `vector` extension MUST exist before migrations run —
+  // 0036's `ADD COLUMN embedding vector(384)` depends on the type. pgvector
+  // 0.8.2 is NOT a trusted extension, so the non-superuser `friday` role
+  // (which daemon boot runs migrations as) cannot CREATE EXTENSION itself.
+  // We create it here via the admin (OS-superuser) connection. Unlike the
+  // embedding runtime/model (fail-open), the extension is a hard schema
+  // dependency: ensureVectorExtension throws if it can't be created.
+  await ensureVectorExtension(log);
+
   const appliedMigrations = await applyMigrations(databaseUrl, migrationsDir, log);
 
   const createdPublication = await ensurePublication(databaseUrl, log);
@@ -425,6 +434,47 @@ async function applyMigrations(
     await client.end();
   }
   return applied;
+}
+
+/**
+ * Ensure the pgvector `vector` extension exists in the friday DB (FRI-24).
+ *
+ * pgvector 0.8.2 is NOT a trusted extension (empirically confirmed against
+ * the live system): `CREATE EXTENSION vector` requires SUPERUSER. The
+ * `friday` role is not superuser and daemon boot runs migrations as
+ * `friday`, so the extension can't live inside a migration. We create it
+ * here via the same admin-connected-to-friday-DB pattern `ensurePublication`
+ * uses (OS user = Homebrew-PG superuser, connected to the friday DB).
+ *
+ * Returns true when this run created the extension, false when it already
+ * existed. Throws (does NOT fail-open) if creation fails — the extension is
+ * a hard schema dependency for the 0036 `embedding vector(384)` column.
+ *
+ * `connectionString` overrides the connection target (tests point it at a
+ * scratch DB, where the OS user is the superuser). Production omits it and
+ * gets the admin-in-friday URL — the same pattern `ensurePublication` uses.
+ */
+export async function ensureVectorExtension(
+  log: (msg: string) => void = () => {},
+  connectionString?: string,
+): Promise<boolean> {
+  const adminInFriday =
+    connectionString ??
+    `postgresql://${process.env.USER ?? "postgres"}@localhost:5432/${FRIDAY_DB}`;
+  const client = new Client({ connectionString: adminInFriday });
+  await client.connect();
+  try {
+    const before = await client.query(`SELECT 1 FROM pg_extension WHERE extname = 'vector'`);
+    if (before.rows.length > 0) {
+      log(`  pgvector extension already present`);
+      return false;
+    }
+    await client.query(`CREATE EXTENSION IF NOT EXISTS vector`);
+    log(`  created pgvector extension (as admin)`);
+    return true;
+  } finally {
+    await client.end();
+  }
 }
 
 async function ensurePublication(

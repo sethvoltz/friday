@@ -1,5 +1,24 @@
 import { getPool } from "@friday/shared";
+import { embedText } from "./embed.js";
 import { listEntries, touchRecall, type MemoryEntry } from "./store.js";
+
+// ---------------------------------------------------------------------------
+// Hybrid-ranking constants (FRI-24). The vector path AUGMENTS FTS, never
+// replaces it: a cosine contribution is added to the token score, and a
+// vector-only hit survives the AND-gate iff its cosine clears VEC_MIN.
+// ---------------------------------------------------------------------------
+
+/** Weight applied to an entry's cosine similarity when adding it to the token
+ *  score. Tuned so a strong semantic match (cosine→1) contributes on the order
+ *  of a title hit (+3) without drowning exact lexical matches. */
+const VEC_WEIGHT = 3;
+
+/** Minimum cosine for a vector-only hit (no token match) to survive the
+ *  AND-gate. Below this a non-lexical entry is treated as noise and dropped. */
+const VEC_MIN = 0.75;
+
+/** Cap on vector candidates pulled from the ANN index per query. */
+const VEC_K = 50;
 
 export interface SearchOptions {
   query: string;
@@ -65,6 +84,47 @@ export async function searchMemories(opts: SearchOptions): Promise<SearchResult[
       candidateIds.length > 0 ? allEntries.filter((e) => candidateIds.includes(e.id)) : allEntries; // FTS fallback: scan all
   }
 
+  // ------------------------------------------------------------------------
+  // FRI-24 hybrid recall: when this is NOT a tags-only query, embed the query
+  // and pull the nearest vector candidates. Each candidate's cosine is added
+  // to the token score, and a strong vector-only hit (cosine >= VEC_MIN) can
+  // survive the AND-gate even with no lexical match. FAIL-OPEN: if the model
+  // is unavailable (embedText → null) or the vector query errors, this whole
+  // block is skipped and searchMemories returns EXACTLY the FTS-only result
+  // — same ids, same order.
+  // ------------------------------------------------------------------------
+  const cosineById = new Map<string, number>();
+  if (tags.length === 0) {
+    const qvec = await embedText(q);
+    if (qvec) {
+      try {
+        const pool = getPool();
+        const literal = `[${qvec.join(",")}]`;
+        const vecRows = await pool.query<{ id: string; cosine: number }>(
+          `SELECT id, 1 - (embedding <=> $1::vector) AS cosine
+             FROM memory_entries
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <=> $1::vector
+            LIMIT $2`,
+          [literal, VEC_K],
+        );
+        for (const row of vecRows.rows) {
+          cosineById.set(row.id, Number(row.cosine));
+        }
+        // Union vector candidates that the FTS narrow didn't already include.
+        // Build a fresh array — `candidatePool` may alias `allEntries` (or the
+        // caller's preloadedEntries) on the FTS-fallback path, so mutating it
+        // in place would leak into the caller's set.
+        const present = new Set(candidatePool.map((e) => e.id));
+        const extra = allEntries.filter((e) => cosineById.has(e.id) && !present.has(e.id));
+        if (extra.length > 0) candidatePool = [...candidatePool, ...extra];
+      } catch {
+        // FAIL-OPEN: behave as if there were no vector candidates.
+        cosineById.clear();
+      }
+    }
+  }
+
   const tokens = q
     .toLowerCase()
     .split(/\s+/)
@@ -123,10 +183,21 @@ export async function searchMemories(opts: SearchOptions): Promise<SearchResult[
       if (!tokenMatched) allTokensMatch = false;
     }
 
+    // FRI-24: add the semantic contribution. A live cosine for this entry
+    // (from the ANN candidate query) lifts the score proportionally and is
+    // recorded in matchedOn for observability. Absent → 0, so FTS-only
+    // behavior is byte-identical when the vector path was skipped.
+    const cosine = cosineById.get(entry.id) ?? 0;
+    if (cosine > 0) {
+      score += VEC_WEIGHT * cosine;
+      matchedOn.add("vector");
+    }
+
     // Tag filter is authoritative when present: include all tag-matched
     // entries regardless of token match. Tag-less search retains the AND-gate
-    // so unrelated entries don't leak in.
-    const include = tags.length > 0 || (allTokensMatch && score > 0);
+    // so unrelated entries don't leak in — RELAXED for FRI-24 so a strong
+    // vector-only hit (cosine >= VEC_MIN) survives even with no token match.
+    const include = tags.length > 0 || (allTokensMatch && score > 0) || cosine >= VEC_MIN;
     if (include) {
       score += Math.log2(entry.recallCount + 1);
       results.push({ entry, score, matchedOn: [...matchedOn] });
