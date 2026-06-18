@@ -349,6 +349,7 @@ The `--dev` CLI flag was retired (FRI-83) — `friday start --dev` now exits wit
 pnpm test                                                   # unit suite (fast — no subprocesses)
 pnpm test:e2e                                               # multi-subprocess e2e (daemon + dashboard + zero-cache against a scratch PG)
 pnpm test:playwright                                        # browser-driven user-visible round-trip (slowest; chromium must be installed)
+pnpm test:clean                                             # reclaim leaked test artifacts (orphan tmp data dirs + idle scratch DBs)
 pnpm --filter @friday/daemon run test                       # one package
 pnpm --filter @friday/daemon exec vitest run src/foo.test.ts  # one file
 ```

@@ -68,13 +68,14 @@ pnpm install
 pnpm test               # unit suite (fast — no subprocesses)
 pnpm test:e2e           # multi-subprocess e2e (daemon + dashboard + zero-cache against scratch PG); slow
 pnpm test:playwright    # browser-driven user-visible round-trip; slowest, needs chromium installed
+pnpm test:clean         # reclaim leaked test artifacts (orphan tmp data dirs + idle scratch DBs); run when no test run is in progress
 pnpm --filter @friday/daemon exec vitest run src/path/to/file.test.ts
 ```
 
 - TypeScript throughout, Vitest for tests, pnpm workspaces + Turborepo.
 - Tests are co-located with source as `*.test.ts`. Files named `*.e2e.test.ts` are heavy multi-subprocess suites — excluded from `pnpm test`, run via `pnpm test:e2e`. The Playwright browser suite lives in `services/dashboard/e2e/`.
 - All state lives in `~/.friday/` (override with `FRIDAY_DATA_DIR`). Never hardcode paths; use constants from `@friday/shared`.
-- Test files that touch `~/.friday/` state must set `process.env.FRIDAY_DATA_DIR = <tmpdir>` **before** importing any `@friday/shared` DB/data-dir machinery. The import is what binds the data-dir constants; setting the env after the import is too late and trashes the real prod data dir. A vitest setup file at `packages/shared/src/test/vitest-setup.ts` is wired into every package's `vitest.config.ts` as a backstop — it forces `FRIDAY_DATA_DIR` to a fresh tmpdir if unset, and throws if it's set to the real `~/.friday/`. Do not bypass it; individual test files can still set their own scoped `FRIDAY_DATA_DIR` if they need isolation between files within a worker.
+- Test files that touch `~/.friday/` state must set `process.env.FRIDAY_DATA_DIR = <tmpdir>` **before** importing any `@friday/shared` DB/data-dir machinery. The import is what binds the data-dir constants; setting the env after the import is too late and trashes the real prod data dir. A vitest setup file at `packages/shared/src/test/vitest-setup.ts` is wired into every package's `vitest.config.ts` as a backstop — it forces `FRIDAY_DATA_DIR` to a fresh tmpdir if unset, and throws if it's set to the real `~/.friday/`. Do not bypass it; individual test files can still set their own scoped `FRIDAY_DATA_DIR` if they need isolation between files within a worker. The tmpdir the setup creates is reclaimed automatically — each created dir is recorded in a per-run manifest and removed by a `globalSetup` teardown after the run (`packages/shared/src/test/{global-setup,tmp-data-dir}.ts`), which fires even when a file is fully skipped or its worker is killed; a startup sweep reclaims crash orphans from prior runs, and a caller-provided `FRIDAY_DATA_DIR` is adopted and never deleted. Every vitest config that wires `vitest-setup.ts` must also wire `global-setup.ts` (pinned by `vitest-config-wiring.test.ts`). `pnpm test:clean` is the manual catch-all (also drops idle `friday_test_*` scratch DBs).
 - `@friday/shared` is consumed via its built `dist/`. When you edit shared source, run `pnpm --filter @friday/shared build` before exercising the change in the daemon or dashboard.
 
 ## Database migrations

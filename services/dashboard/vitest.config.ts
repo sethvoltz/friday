@@ -6,6 +6,7 @@ export default defineConfig({
   test: {
     exclude: ["**/node_modules/**", "**/dist/**", "**/*.e2e.test.ts", "e2e/**"],
     setupFiles: ["../../packages/shared/src/test/vitest-setup.ts"],
+    globalSetup: ["../../packages/shared/src/test/global-setup.ts"],
     // Connection-budget cap — see packages/shared/vitest.config.ts. Most
     // dashboard unit tests mock the network/PG boundary, but a few (e.g.
     // sync/refresh) use a real scratch DB; cap concurrent files so those

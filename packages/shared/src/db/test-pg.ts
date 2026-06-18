@@ -190,27 +190,80 @@ async function dropTestDb(dbName: string): Promise<void> {
   const admin = newTestClient({ connectionString: adminUrl() });
   await admin.connect();
   try {
-    // Kill all other sessions on this DB so the DROP succeeds. This
-    // also deactivates any Zero logical replication slots (active slots
-    // can't be dropped while their consumer PID is alive).
-    await admin.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-       WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [dbName],
-    );
-    // Drop replication slots now that their consumers are terminated.
-    // A slot can still report active=true for a brief window after its
-    // walsender backend is terminated (the backend exits asynchronously),
-    // and pg_drop_replication_slot raises 55006 ("replication slot is
-    // active for PID …") against an active slot. That 55006 used to throw
-    // straight out of afterAll and leak the scratch DB. Re-terminate the
-    // walsender + retry the slot-drop with backoff until it lands or the
-    // slot is gone.
-    await dropReplicationSlotsWithRetry(admin, dbName);
-    await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
+    await forceDropDatabase(admin, dbName);
   } finally {
     await admin.end();
   }
+}
+
+/**
+ * Terminate every session on `dbName`, drop its replication slots, and
+ * `DROP DATABASE IF EXISTS`. Assumes `admin` is an already-connected client on
+ * a *different* database (the `postgres` maintenance DB). Shared by the
+ * per-file `dropTestDb` teardown and the {@link sweepStaleTestDbs} reclaim.
+ */
+async function forceDropDatabase(admin: pgPkg.Client, dbName: string): Promise<void> {
+  // Kill all other sessions on this DB so the DROP succeeds. This also
+  // deactivates any Zero logical replication slots (active slots can't be
+  // dropped while their consumer PID is alive).
+  await admin.query(
+    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+       WHERE datname = $1 AND pid <> pg_backend_pid()`,
+    [dbName],
+  );
+  // Drop replication slots now that their consumers are terminated. A slot can
+  // still report active=true for a brief window after its walsender backend is
+  // terminated (the backend exits asynchronously), and pg_drop_replication_slot
+  // raises 55006 ("replication slot is active for PID …") against an active
+  // slot. That 55006 used to throw straight out of afterAll and leak the scratch
+  // DB. Re-terminate the walsender + retry the slot-drop with backoff until it
+  // lands or the slot is gone.
+  await dropReplicationSlotsWithRetry(admin, dbName);
+  await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
+}
+
+/**
+ * Reclaim leaked scratch databases (FRI-170). Drops every database whose name
+ * starts with `match` (default all `friday_test_`) that has **no active
+ * sessions** — an in-use scratch DB normally has live backends in
+ * `pg_stat_activity` and is spared. This is why it is intended only for the
+ * `pnpm test:clean` maintenance task (run when no test run is in progress): the
+ * zero-session filter is NOT a hard concurrency guard — `createTestDb` has a
+ * brief zero-session window between `CREATE DATABASE` and its first migration
+ * connection, so a sweep racing that window could drop a just-created DB. Run it
+ * when idle. Returns the names dropped.
+ *
+ * Why this is needed: `createTestDb().drop()` reclaims on the happy path, but a
+ * worker hard-killed mid-test leaks its `friday_test_*` DB. ~100 idle orphans
+ * (~930 MB) had piled up on the dev box before this existed.
+ */
+export async function sweepStaleTestDbs(opts?: { match?: string }): Promise<string[]> {
+  const match = opts?.match ?? "friday_test_";
+  assertPgReady();
+
+  const admin = newTestClient({ connectionString: adminUrl() });
+  await admin.connect();
+  const dropped: string[] = [];
+  try {
+    // `starts_with(text, prefix)` keeps the match a literal prefix (no LIKE
+    // wildcard escaping). Exclude any DB with a live session so in-use scratch
+    // DBs are never touched.
+    const r = await admin.query<{ datname: string }>(
+      `SELECT d.datname FROM pg_database d
+        WHERE starts_with(d.datname, $1)
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname
+          )`,
+      [match],
+    );
+    for (const { datname } of r.rows) {
+      await forceDropDatabase(admin, datname);
+      dropped.push(datname);
+    }
+  } finally {
+    await admin.end();
+  }
+  return dropped;
 }
 
 /**

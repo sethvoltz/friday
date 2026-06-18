@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     exclude: ["**/node_modules/**", "**/dist/**", "**/*.e2e.test.ts"],
     setupFiles: ["./src/test/vitest-setup.ts"],
+    globalSetup: ["./src/test/global-setup.ts"],
     // Connection-budget cap. Every scratch-DB test file creates its own
     // `friday_test_*` database and opens a daemon pool (max 10) plus raw
     // LISTEN clients. Under the unit `Tests` job's Postgres

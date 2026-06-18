@@ -23,6 +23,7 @@
     "build": "tsc && node ./scripts/copy-prompts.mjs",
     "test": "vitest run --passWithNoTests",
     "test:e2e": "vitest run --passWithNoTests --config ./vitest.e2e.config.ts",
+    "test:clean": "tsx src/test/clean-test-artifacts.ts",
     "clean": "rm -rf dist",
     "drizzle:generate": "drizzle-kit generate",
     "drizzle:migrate": "drizzle-kit migrate"
@@ -45,6 +46,7 @@
     "@types/pg": "^8.11.10",
     "drizzle-kit": "^0.31.10",
     "jsdom": "^25.0.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.5"
   }
