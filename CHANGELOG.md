@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.26.0](https://github.com/sethvoltz/friday/compare/v1.25.0...v1.26.0) (2026-06-18)
+
+
+### Features
+
+* **memory:** add pgvector hybrid (FTS + semantic) recall to memory_entries (FRI-24) ([4a41043](https://github.com/sethvoltz/friday/commit/4a410436458ae9cc958c30c4160093086b818421))
+
 ## [1.25.0](https://github.com/sethvoltz/friday/compare/v1.24.2...v1.25.0) (2026-06-18)
 
 
