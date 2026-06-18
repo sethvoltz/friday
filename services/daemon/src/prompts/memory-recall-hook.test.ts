@@ -200,13 +200,19 @@ describe("recall re-fires per turn off fresh ctx.intent (FRI-24 AC12)", () => {
     expect(buildAutoRecallBlock.mock.calls[1][0]).toBe(turn2);
     expect(buildAutoRecallBlock.mock.calls[1][0]).not.toBe(buildAutoRecallBlock.mock.calls[0][0]);
 
-    // The appended block surfaced to the dispatch site differs accordingly.
-    expect(r1).toEqual({
-      appendSystemPrompt: `<memory-context>\nquery=${turn1}\n</memory-context>`,
-    });
-    expect(r2).toEqual({
-      appendSystemPrompt: `<memory-context>\nquery=${turn2}\n</memory-context>`,
-    });
+    // The block surfaced to the dispatch site carries the CURRENT turn's query
+    // and differs turn-to-turn. AC12 is about FRESHNESS, not the delivery
+    // channel — the hook may surface the block via `appendSystemPrompt` or
+    // `prependBody` (FRI-89: ride the body once the system prompt is frozen on
+    // resume), and that choice is FRI-89's concern, asserted elsewhere. Assert
+    // channel-agnostically on the block CONTENT so this stays deterministic.
+    const blockOf = (r: typeof r1): string | undefined =>
+      (r as { appendSystemPrompt?: string; prependBody?: string } | undefined)
+        ?.appendSystemPrompt ??
+      (r as { appendSystemPrompt?: string; prependBody?: string } | undefined)?.prependBody;
+    expect(blockOf(r1)).toBe(`<memory-context>\nquery=${turn1}\n</memory-context>`);
+    expect(blockOf(r2)).toBe(`<memory-context>\nquery=${turn2}\n</memory-context>`);
+    expect(blockOf(r2)).not.toBe(blockOf(r1));
 
     // A fresh full-table read happens each turn (recall is not memoized across
     // turns) — both turns drove listEntries().
