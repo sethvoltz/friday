@@ -30,6 +30,7 @@ export interface ScheduleSpec {
   paused?: boolean;
   kind?: "agent-run" | "reminder";
   deliveryJson?: import("./deliver-reminder.js").ReminderDelivery | null;
+  appId?: string;
 }
 
 export async function upsertSchedule(spec: ScheduleSpec): Promise<void> {
@@ -64,6 +65,11 @@ export async function upsertSchedule(spec: ScheduleSpec): Promise<void> {
         paused: spec.paused ?? false,
         kind: spec.kind ?? "agent-run",
         deliveryJson: spec.deliveryJson ?? null,
+        // FRI-168: only overwrite app_id on update when the caller explicitly
+        // provides it. A re-upsert that omits appId (e.g. orchestrator
+        // schedule_upsert of an app-owned schedule) must PRESERVE the existing
+        // app_id — uninstall keys on app_id, so nulling it orphans the row.
+        ...(spec.appId !== undefined ? { appId: spec.appId } : {}),
         nextRunAt: next,
         updatedAt: now,
       })
@@ -77,6 +83,7 @@ export async function upsertSchedule(spec: ScheduleSpec): Promise<void> {
       paused: spec.paused ?? false,
       kind: spec.kind ?? "agent-run",
       deliveryJson: spec.deliveryJson ?? null,
+      appId: spec.appId ?? null,
       nextRunAt: next,
       lastRunAt: null,
       lastRunId: null,
@@ -142,6 +149,37 @@ export async function resumeSchedule(name: string): Promise<boolean> {
     .update(schema.schedules)
     .set({ paused: false, nextRunAt: next, updatedAt: new Date() })
     .where(eq(schema.schedules.name, name));
+  return true;
+}
+
+/**
+ * FRI-168: re-arm a fired or pending reminder to fire again after `duration`
+ * (e.g. "2h", "30m", "1d"). Loads the row, computes a new runAt, and REUSES
+ * upsertSchedule so nextRunAt is recomputed via computeNext automatically.
+ * Returns false if no schedule with that name exists.
+ *
+ * For a fired one-shot reminder the row's status is already 'active' and
+ * upsertSchedule does not change status; nextRunAt is re-armed to newRunAt.
+ * For a recurring reminder (cron set) the cron is PRESERVED and computeNext
+ * re-derives nextRunAt from the cron, so a snooze is a non-destructive no-op
+ * on recurrence (the new runAt is ignored). Snooze is meaningful only for
+ * one-shot reminders.
+ */
+export async function snoozeSchedule(name: string, duration: string): Promise<boolean> {
+  const row = await getSchedule(name);
+  if (!row) return false;
+  const newRunAt = new Date(Date.now() + parseDuration(duration));
+  await upsertSchedule({
+    name: row.name,
+    kind: row.kind as ScheduleSpec["kind"],
+    taskPrompt: row.taskPrompt,
+    deliveryJson:
+      (row.deliveryJson as import("./deliver-reminder.js").ReminderDelivery | null) ?? undefined,
+    cron: row.cron ?? undefined,
+    runAt: newRunAt.toISOString(),
+    appId: row.appId ?? undefined,
+    paused: false,
+  });
   return true;
 }
 
@@ -343,6 +381,19 @@ export function nextRunAfterFire(r: typeof schema.schedules.$inferSelect): Date 
     runAt: r.runAt ?? undefined,
     taskPrompt: r.taskPrompt,
   });
+}
+
+/**
+ * FRI-168: parse a short relative-duration string (`<n>s|m|h|d`, e.g. "2h",
+ * "30m", "1d", "45s") into milliseconds. Used by snoozeSchedule to re-arm a
+ * reminder. Throws on any string that doesn't match the grammar.
+ */
+function parseDuration(s: string): number {
+  const m = /^(\d+)(s|m|h|d)$/.exec(s.trim());
+  if (!m) throw new Error(`invalid duration: ${s}`);
+  const n = Number(m[1]);
+  const unitMs = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]]!;
+  return n * unitMs;
 }
 
 /**

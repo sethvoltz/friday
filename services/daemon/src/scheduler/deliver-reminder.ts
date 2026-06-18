@@ -36,6 +36,9 @@ export async function deliverReminder(
     agentName,
     text,
     source: "reminder",
+    // FRI-168: stamp the originating schedule name so the delivered block
+    // carries its identity for ack/snooze.
+    reminderName: r.name,
   });
   logger.log("info", "reminder.delivered", {
     name: r.name,

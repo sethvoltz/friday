@@ -144,8 +144,16 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // friday-reminder: ALL caller types. Reminders are user-facing chat
   // nudges that fire without waking any agent; an app sub-agent (e.g. the
   // kitchen agent) must be able to set one. Contrast friday-schedule, which
-  // is orchestrator-only.
-  servers[REMINDER_SERVER_NAME] = buildReminderServer(ctx);
+  // is orchestrator-only. Threads the per-app context (FRI-168) so app
+  // sub-agents can emit idempotent, app-namespaced reminders — mirroring the
+  // buildSecretsServer call above. Do NOT widen the shared `ctx`: that would
+  // leak appId into mail/memory/tickets/etc.
+  servers[REMINDER_SERVER_NAME] = buildReminderServer({
+    callerName: opts.callerName,
+    callerType: opts.callerType,
+    daemonPort: opts.daemonPort,
+    appId: opts.appContext?.appId,
+  });
 
   // friday-evolve: orchestrator only. Sub-agents shouldn't be applying or
   // dismissing proposals — the meta-agent surfaces them via the orchestrator.

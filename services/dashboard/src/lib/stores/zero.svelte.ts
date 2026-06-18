@@ -96,6 +96,8 @@ export interface ZeroScheduleRow {
   last_run_id: string | null;
   meta_json: Record<string, unknown> | null;
   app_id: string | null;
+  kind: "agent-run" | "reminder";
+  delivery_json: Record<string, unknown> | null;
   status: "active" | "pending_register" | "reload_requested" | "deleted" | "paused";
   created_at: number;
   updated_at: number;

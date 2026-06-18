@@ -7,6 +7,7 @@ export interface ScheduleRow {
   runAt: string | null;
   taskPrompt: string;
   paused: boolean;
+  kind: "agent-run" | "reminder";
   nextRunAt: number | null;
   lastRunAt: number | null;
   lastRunId: string | null;

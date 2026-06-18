@@ -8,6 +8,7 @@
     zeroSync,
     type ZeroScheduleRow,
   } from "$lib/stores/zero.svelte";
+  import { filterReminders, upcomingReminders } from "./reminders";
 
   let { data }: { data: PageData } = $props();
 
@@ -31,6 +32,7 @@
       runAt: r.run_at,
       taskPrompt: r.task_prompt,
       paused: r.paused,
+      kind: r.kind,
       nextRunAt: r.next_run_at,
       lastRunAt: r.last_run_at,
       lastRunId: r.last_run_id,
@@ -38,6 +40,14 @@
       updatedAt: r.updated_at,
     };
   }
+  // FRI-168: reminder surface. `view` toggles the table between all
+  // schedules and reminders-only; `upcoming` drives the agenda panel.
+  let view = $state<"all" | "reminders">("all");
+  const visibleSchedules = $derived(
+    view === "reminders" ? filterReminders(schedules) : schedules,
+  );
+  const upcoming = $derived(upcomingReminders(schedules, Date.now()));
+
   let busy = $state<string | null>(null);
   let toast = $state<{ msg: string; kind: "ok" | "err" | "info" } | null>(null);
 
@@ -178,17 +188,61 @@
 
 <div class="card">
   <div class="card-header">
-    <h2>All schedules</h2>
-    <span class="stat-detail">{schedules.length} total</span>
+    <h2>Upcoming reminders</h2>
+    <span class="stat-detail">next 7 days</span>
   </div>
-  {#if schedules.length === 0}
-    <p class="empty-state">No schedules.</p>
+  {#if upcoming.length === 0}
+    <p class="empty-state">No upcoming reminders.</p>
+  {:else}
+    <ul class="upcoming-list">
+      {#each upcoming as r (r.name)}
+        <li class="upcoming-item">
+          <a class="link-strong" href="/schedules/{encodeURIComponent(r.name)}"
+            >{r.taskPrompt || r.name}</a>
+          <span class="upcoming-when">
+            {fmtTs(r.nextRunAt)}
+            <span class="muted text-xs">{fmtRelative(r.nextRunAt)}</span>
+          </span>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>All schedules</h2>
+    <div class="card-header-controls">
+      <div class="view-toggle" role="group" aria-label="Filter schedules">
+        <button
+          class="ghost compact"
+          class:active={view === "all"}
+          aria-pressed={view === "all"}
+          onclick={() => (view = "all")}>
+          All
+        </button>
+        <button
+          class="ghost compact"
+          class:active={view === "reminders"}
+          aria-pressed={view === "reminders"}
+          onclick={() => (view = "reminders")}>
+          Reminders
+        </button>
+      </div>
+      <span class="stat-detail">{visibleSchedules.length} total</span>
+    </div>
+  </div>
+  {#if visibleSchedules.length === 0}
+    <p class="empty-state">
+      {view === "reminders" ? "No reminders." : "No schedules."}
+    </p>
   {:else}
     <div class="table-scroll-wrapper">
     <table class="data-table">
       <thead>
         <tr>
           <th>Name</th>
+          <th>Kind</th>
           <th>Cron / At</th>
           <th>Status</th>
           <th>Next run</th>
@@ -197,12 +251,19 @@
         </tr>
       </thead>
       <tbody>
-        {#each schedules as s (s.name)}
+        {#each visibleSchedules as s (s.name)}
           {@const fires = nextFiresPreview(s.cron)}
           <tr>
             <td>
               <a class="link-strong" href="/schedules/{encodeURIComponent(s.name)}"
                 >{s.name}</a>
+            </td>
+            <td>
+              {#if s.kind === "reminder"}
+                <span class="badge info">reminder</span>
+              {:else}
+                <span class="badge">agent-run</span>
+              {/if}
             </td>
             <td>
               {#if s.cron}
@@ -335,6 +396,45 @@
   .ghost.compact {
     font-size: 0.75rem;
     padding: 0.25rem 0.55rem;
+  }
+  .ghost.compact.active {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+  }
+  .card-header-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .view-toggle {
+    display: inline-flex;
+    gap: 0.3rem;
+  }
+  .upcoming-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .upcoming-item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .upcoming-item:last-child {
+    border-bottom: none;
+  }
+  .upcoming-when {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    white-space: nowrap;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
   }
   .fires {
     margin-top: 0.3rem;

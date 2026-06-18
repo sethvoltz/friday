@@ -101,6 +101,7 @@ import {
   pauseSchedule,
   resumeSchedule,
   ScheduleNameCollisionError,
+  snoozeSchedule,
   triggerSchedule,
   upsertSchedule,
 } from "../scheduler/scheduler.js";
@@ -635,6 +636,18 @@ async function handle(
     const action = path.split("/")[4];
     const ok = action === "pause" ? await pauseSchedule(name) : await resumeSchedule(name);
     if (!ok) return json(res, 404, { error: "schedule not found" });
+    return json(res, 200, { ok: true });
+  }
+  // FRI-168: re-arm a fired/pending reminder to fire again after a delay.
+  if (method === "POST" && /^\/api\/schedules\/[^/]+\/snooze$/.test(path)) {
+    const name = decodeURIComponent(path.split("/")[3]);
+    const { duration } = await readJson<{ duration: string }>(req);
+    try {
+      const ok = await snoozeSchedule(name, duration);
+      if (!ok) return json(res, 404, { error: "schedule not found" });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
     return json(res, 200, { ok: true });
   }
   if (method === "GET" && /^\/api\/schedules\/[^/]+$/.test(path)) {

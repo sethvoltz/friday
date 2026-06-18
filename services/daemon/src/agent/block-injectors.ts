@@ -271,6 +271,10 @@ export interface RecordUserBlockInput {
    *  row in the dashboard. The bytes live on disk under `~/.friday/uploads`
    *  and are fetched via `GET /api/uploads/<sha>`. */
   attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+  /** FRI-168: the originating reminder schedule name, stamped into
+   *  content_json so a delivered reminder block carries its identity for
+   *  ack/snooze. */
+  reminderName?: string;
 }
 
 /**
@@ -292,6 +296,10 @@ export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
   const status = input.status ?? "complete";
   const attachments =
     input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {};
+  // FRI-168: a delivered reminder block carries its originating schedule name
+  // (camelCase `reminderName`) so the model can ack/snooze it by name. Applies
+  // to both the mail and the plain content branch.
+  const reminderMeta = input.reminderName ? { reminderName: input.reminderName } : {};
   const content =
     input.source === "mail" && input.fromAgent
       ? {
@@ -308,8 +316,9 @@ export async function recordUserBlock(input: RecordUserBlockInput): Promise<{
               }
             : {}),
           ...attachments,
+          ...reminderMeta,
         }
-      : { text: input.text, ...attachments };
+      : { text: input.text, ...attachments, ...reminderMeta };
   const contentJson = JSON.stringify(content);
   // FRI-78 follow-up: always publish the canonical `block_complete` SSE
   // frame, including for `user_chat` + `status='complete'`. Prior to this

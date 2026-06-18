@@ -29,6 +29,8 @@ let handle: TestDbHandle;
 let fireSchedule: (typeof import("./scheduler.js"))["fireSchedule"];
 let nextRunAfterFire: (typeof import("./scheduler.js"))["nextRunAfterFire"];
 let upsertSchedule: (typeof import("./scheduler.js"))["upsertSchedule"];
+let snoozeSchedule: (typeof import("./scheduler.js"))["snoozeSchedule"];
+let getSchedule: (typeof import("./scheduler.js"))["getSchedule"];
 let triggerSchedule: (typeof import("./scheduler.js"))["triggerSchedule"];
 let selectDueSchedules: (typeof import("./scheduler.js"))["selectDueSchedules"];
 let processPendingScheduleRow: (typeof import("./listener.js"))["processPendingScheduleRow"];
@@ -37,8 +39,15 @@ let lifecycle: typeof import("../agent/lifecycle.js");
 
 beforeAll(async () => {
   handle = await createTestDb({ label: "reminder-fire" });
-  ({ fireSchedule, nextRunAfterFire, upsertSchedule, triggerSchedule, selectDueSchedules } =
-    await import("./scheduler.js"));
+  ({
+    fireSchedule,
+    nextRunAfterFire,
+    upsertSchedule,
+    snoozeSchedule,
+    getSchedule,
+    triggerSchedule,
+    selectDueSchedules,
+  } = await import("./scheduler.js"));
   ({ processPendingScheduleRow } = await import("./listener.js"));
   ({ eventBus } = await import("../events/bus.js"));
   lifecycle = await import("../agent/lifecycle.js");
@@ -428,5 +437,202 @@ describe("FRI-143 upsertSchedule reminder write path (AC6)", () => {
 
     // The FRI-76 eager stub-agent registration is skipped for reminders.
     expect(await registry.getAgent("remind-me")).toBeNull();
+  });
+});
+
+describe("FRI-168 dueDate-derived one-shot persists at the default hour (AC1 persist half)", () => {
+  it("a reminder whose runAt is '<dueDate> at 09:00 local' persists a non-null default-hour nextRunAt AND nextRunAfterFire drops it (one-shot guard fires)", async () => {
+    // Mirror the MCP layer's dueDate→runAt resolution: a calendar day with
+    // NO clock time becomes the default-hour LOCAL instant. (The 09:00 literal
+    // is DEFAULT_REMINDER_HOUR; pinned here so a regression that drifts the
+    // default-hour resolution off the persisted row is caught.)
+    const y = 2026;
+    const mo = 12;
+    const d = 24;
+    const runAt = new Date(y, mo - 1, d, 9, 0, 0, 0).toISOString();
+    await upsertSchedule({
+      name: "thaw-cod",
+      kind: "reminder",
+      runAt,
+      taskPrompt: "thaw cod",
+      deliveryJson: { channel: "chat", title: "thaw cod" },
+    });
+
+    const row = (await getSchedule("thaw-cod"))!;
+    expect(row.runAt).not.toBeNull();
+    expect(row.nextRunAt).not.toBeNull();
+    expect(row.nextRunAt!.getHours()).toBe(9);
+    expect(row.nextRunAt!.getFullYear()).toBe(y);
+    expect(row.nextRunAt!.getMonth()).toBe(mo - 1);
+    expect(row.nextRunAt!.getDate()).toBe(d);
+
+    // The one-shot-drop guard: a dueDate-derived reminder (runAt set, no cron)
+    // completes on fire — nextRunAfterFire returns null so the tick filter
+    // permanently drops it (no 30s re-delivery loop).
+    expect(nextRunAfterFire(row)).toBeNull();
+  });
+});
+
+describe("FRI-168 app_id persists through upsertSchedule (AC5)", () => {
+  it("an app-namespaced reminder keeps its appId on the persisted row", async () => {
+    const runAt = new Date(Date.now() + 60_000).toISOString();
+    await upsertSchedule({
+      name: "app:kitchen:x",
+      kind: "reminder",
+      runAt,
+      appId: "kitchen",
+      taskPrompt: "thaw",
+      deliveryJson: { channel: "chat", title: "thaw" },
+    });
+
+    const row = (await getSchedule("app:kitchen:x"))!;
+    expect(row.appId).toBe("kitchen");
+  });
+});
+
+describe("FRI-168 idempotent upsert by deterministic name (AC6)", () => {
+  it("two upserts with the same name collapse to ONE row reflecting the 2nd taskPrompt, with updatedAt non-regressing", async () => {
+    const name = "app:kitchen:thaw-2026-W21-cod";
+    const runAt = new Date(Date.now() + 60_000).toISOString();
+    await upsertSchedule({
+      name,
+      kind: "reminder",
+      runAt,
+      appId: "kitchen",
+      taskPrompt: "thaw cod (v1)",
+      deliveryJson: { channel: "chat", title: "thaw cod" },
+    });
+    const first = (await getSchedule(name))!;
+
+    // A tiny real delay so the two `new Date()` re-stamps land on distinct ms —
+    // otherwise the strict `>` below could flake on a same-ms second write.
+    await new Promise((r) => setTimeout(r, 5));
+
+    await upsertSchedule({
+      name,
+      kind: "reminder",
+      runAt,
+      appId: "kitchen",
+      taskPrompt: "thaw cod (v2)",
+      deliveryJson: { channel: "chat", title: "thaw cod" },
+    });
+
+    const all = await getDb()
+      .select()
+      .from(schema.schedules)
+      .where(eq(schema.schedules.name, name));
+    expect(all.length).toBe(1);
+    const row = all[0]!;
+    expect(row.taskPrompt).toBe("thaw cod (v2)");
+    // upsertSchedule re-stamps updatedAt on every write; the 2nd write must
+    // ADVANCE the timestamp (strict `>` proves a real re-stamp, not equality).
+    expect(row.updatedAt.getTime()).toBeGreaterThan(first.updatedAt.getTime());
+  });
+});
+
+describe("FRI-168 snooze re-arms a fired one-shot reminder (AC9)", () => {
+  it("snoozeSchedule on a fired (nextRunAt=null) one-shot sets nextRunAt to ~now+2h and keeps status active", async () => {
+    // Simulate post-fire state: a one-shot reminder with a concrete PAST runAt
+    // whose nextRunAt has already been nulled by the fire path.
+    await seedRow({
+      name: "snooze-me",
+      kind: "reminder",
+      runAt: new Date(Date.now() - 3_600_000).toISOString(),
+      taskPrompt: "snooze me",
+      deliveryJson: { channel: "chat", title: "snooze me" },
+      nextRunAt: null,
+    });
+
+    const ok = await snoozeSchedule("snooze-me", "2h");
+    expect(ok).toBe(true);
+
+    const row = (await getSchedule("snooze-me"))!;
+    expect(row.nextRunAt).not.toBeNull();
+    expect(Math.abs(row.nextRunAt!.getTime() - (Date.now() + 2 * 3_600_000))).toBeLessThan(60_000);
+    expect(row.status).toBe("active");
+  });
+});
+
+describe("FRI-168 re-upsert without appId preserves an app-owned schedule's app_id", () => {
+  it("an orchestrator re-upsert that omits appId keeps the existing app_id and updates the taskPrompt", async () => {
+    // Seed an app-owned agent-run schedule directly (appId='kitchen').
+    const now = new Date();
+    await getDb().insert(schema.schedules).values({
+      name: "app:kitchen:nightly",
+      cron: "0 4 * * *",
+      runAt: null,
+      taskPrompt: "original",
+      paused: false,
+      status: "active",
+      kind: "agent-run",
+      deliveryJson: null,
+      appId: "kitchen",
+      nextRunAt: null,
+      lastRunAt: null,
+      lastRunId: null,
+      metaJson: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Orchestrator re-upsert — schedule_upsert never sends appId.
+    await upsertSchedule({
+      name: "app:kitchen:nightly",
+      kind: "agent-run",
+      cron: "0 4 * * *",
+      taskPrompt: "changed",
+    });
+
+    const row = (await getSchedule("app:kitchen:nightly"))!;
+    // app_id PRESERVED (not nulled) — uninstall keys on app_id.
+    expect(row.appId).toBe("kitchen");
+    // The substantive field (taskPrompt) did update.
+    expect(row.taskPrompt).toBe("changed");
+  });
+});
+
+describe("FRI-168 snoozing a recurring reminder preserves its cron", () => {
+  it("snoozeSchedule on a cron reminder keeps the cron and re-derives nextRunAt from it", async () => {
+    const cron = "0 9 * * *";
+    await seedRow({
+      name: "daily-recurring",
+      kind: "reminder",
+      cron,
+      runAt: null,
+      taskPrompt: "daily recurring",
+      deliveryJson: { channel: "chat", title: "daily recurring" },
+      nextRunAt: nextRun(cron),
+    });
+
+    const ok = await snoozeSchedule("daily-recurring", "2h");
+    expect(ok).toBe(true);
+
+    const row = (await getSchedule("daily-recurring"))!;
+    // Recurrence PRESERVED — snooze must NOT convert it to a one-shot.
+    expect(row.cron).toBe(cron);
+    // nextRunAt is the cron-derived instant (non-null), NOT the +2h snooze runAt.
+    expect(row.nextRunAt).not.toBeNull();
+    expect(row.nextRunAt!.getTime()).toBe(nextRun(cron)!.getTime());
+  });
+});
+
+describe("FRI-168 delivered reminder block carries reminderName (AC10)", () => {
+  it("a fired reminder's source='reminder' block has content_json.reminderName === the schedule name", async () => {
+    const scheduleName = "named-nudge";
+    const row = await seedRow({
+      name: scheduleName,
+      kind: "reminder",
+      runAt: new Date(Date.now() - 1000).toISOString(),
+      taskPrompt: "named nudge",
+      deliveryJson: { channel: "chat", title: "named nudge" },
+      nextRunAt: new Date(Date.now() - 1000),
+    });
+
+    await fireSchedule(row);
+
+    const blocks = await reminderBlocks();
+    expect(blocks.length).toBe(1);
+    const block = blocks[0]!;
+    expect((block.contentJson as { reminderName?: string }).reminderName).toBe(scheduleName);
   });
 });
