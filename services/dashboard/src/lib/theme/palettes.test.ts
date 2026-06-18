@@ -53,13 +53,33 @@ describe("palette catalog", () => {
     }
   });
 
-  it("each palette declares exactly 55 tokens", () => {
+  it("each palette declares exactly 63 tokens", () => {
     // 49 existing color/shadow tokens migrated from :root + .dark, plus
     // 5 leak-fix tokens (--diff-removed, --diff-added, --toggle-knob,
     // --chart-5, --chart-6), plus --status-compacting (compaction-in-progress
-    // sidebar dot) = 55.
+    // sidebar dot) = 55, plus the 8-token Habit color ramp (FRI-169:
+    // --habit-empty + --habit-1..7) = 63.
     for (const name of Object.keys(PALETTES)) {
-      expect(tokensFor(name).size).toBe(55);
+      expect(tokensFor(name).size).toBe(63);
+    }
+  });
+
+  it("the Habit color ramp (--habit-empty + --habit-1..7) is present in every palette", () => {
+    const required = [
+      "--habit-empty",
+      "--habit-1",
+      "--habit-2",
+      "--habit-3",
+      "--habit-4",
+      "--habit-5",
+      "--habit-6",
+      "--habit-7",
+    ];
+    for (const name of Object.keys(PALETTES)) {
+      const tokens = tokensFor(name);
+      for (const r of required) {
+        expect(tokens.has(r)).toBe(true);
+      }
     }
   });
 

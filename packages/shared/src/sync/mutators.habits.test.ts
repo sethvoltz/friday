@@ -8,11 +8,7 @@
 // touches no other table.
 
 import { describe, expect, it, vi } from "vitest";
-import {
-  createMutators,
-  type HabitCheckinArgs,
-  type HabitCheckinUndoArgs,
-} from "./mutators.js";
+import { createMutators, type HabitCheckinArgs, type HabitCheckinUndoArgs } from "./mutators.js";
 
 interface HabitCheckinInsertCall {
   id: string;

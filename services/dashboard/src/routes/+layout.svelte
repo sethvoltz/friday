@@ -85,6 +85,7 @@
       label: "Schedules",
       match: (p) => p.startsWith("/schedules"),
     },
+    { href: "/habits", label: "Habits", match: (p) => p.startsWith("/habits") },
     { href: "/memory", label: "Memory", match: (p) => p.startsWith("/memory") },
     { href: "/evolve", label: "Evolve", match: (p) => p.startsWith("/evolve") },
     { href: "/skills", label: "Skills", match: (p) => p.startsWith("/skills") },

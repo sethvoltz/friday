@@ -108,7 +108,7 @@ commitment).
 
 **Check-in**:
 A single logged completion of a **Habit** — one event, timestamped. A
-**Period** may hold *many* Check-ins (write 5 blog posts → 5 Check-ins) and
+**Period** may hold _many_ Check-ins (write 5 blog posts → 5 Check-ins) and
 all of them are recorded as **volume**; only the first **Target**-many count
 toward the **Streak**. The append-only atoms everything else is derived from.
 _Avoid_: completion (acceptable synonym but prefer Check-in), tick, done.
@@ -117,14 +117,14 @@ _Avoid_: completion (acceptable synonym but prefer Check-in), tick, done.
 The recurrence window a **Habit**'s **Target** is measured over — one of
 `day | week | month | year`, optionally constrained to specific weekdays
 (e.g. Mon/Wed/Fri ⇒ each of those days is its own day-Period). The unit the
-**Streak** is counted in. Cron's vocabulary suggests *which* Periods exist
+**Streak** is counted in. Cron's vocabulary suggests _which_ Periods exist
 but is not used to tally Check-ins into them.
 _Avoid_: interval, cadence (use cadence informally for the whole
 Target+Period shape, not for the window alone), bucket (that's
 **Time-of-day bucket**, a display attribute — distinct).
 
 **Target**:
-The number of **Check-in**s required within one **Period** to *satisfy* it
+The number of **Check-in**s required within one **Period** to _satisfy_ it
 (default 1). "20 workouts/month" ⇒ Target 20, Period month. Check-ins beyond
 the Target in a Period are still logged as volume but do not further advance
 the **Streak**.
@@ -135,8 +135,8 @@ A **Period** whose **Check-in** count reached its **Target**.
 
 **Streak**:
 The run of consecutive **Satisfied period**s for a **Habit**, counted in its
-**Period** unit (days-in-a-row, months-in-a-row, …). A *derived, time-
-dependent* projection of the **Check-in** log against the **Target**/
+**Period** unit (days-in-a-row, months-in-a-row, …). A _derived, time-
+dependent_ projection of the **Check-in** log against the **Target**/
 **Period** and the current clock — never stored as truth, never created
 directly by the user. Three states:
 
@@ -148,8 +148,8 @@ directly by the user. Three states:
 - **Active, current period satisfied**: the open Period reached **Target** →
   shows **N+1**.
 
-A Streak breaks on a *clock boundary*, not a Check-in: it drops to **Dormant**
-the instant an unsatisfied **Period** *closes* (e.g. midnight at month-end).
+A Streak breaks on a _clock boundary_, not a Check-in: it drops to **Dormant**
+the instant an unsatisfied **Period** _closes_ (e.g. midnight at month-end).
 Because the value depends on `now()`, it is computed on read, not stored.
 _Avoid_: count (too generic), habit (the Streak is not the Habit).
 
@@ -195,7 +195,7 @@ The lifecycle shape of a **Habit**. One of:
   never archives on its own.
 - **Bounded**: has a defined window (start + end / start + length); the
   **Streak** runs against that window. When the window closes the Habit
-  archives as *completed* (window finished, Streak intact) or *expired*
+  archives as _completed_ (window finished, Streak intact) or _expired_
   (window finished, Streak broken).
 
 Motivation-neutral — **Bounded** covers a fitness challenge, a medication

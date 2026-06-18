@@ -249,11 +249,7 @@ function priorRunLength(habit: HabitSpec, checkins: CheckinLike[], openStart: Da
  * `terminal` — `completed` if the run at window-close was live (> 0), else
  * `expired` — and the live state collapses to dormant.
  */
-export function computeStreak(
-  habit: HabitSpec,
-  checkins: CheckinLike[],
-  now: Date,
-): StreakResult {
+export function computeStreak(habit: HabitSpec, checkins: CheckinLike[], now: Date): StreakResult {
   const target = Math.max(1, habit.target);
 
   const openStart = periodStart(habit.period, now);

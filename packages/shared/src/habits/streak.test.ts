@@ -7,12 +7,7 @@
 // expected Period in any TZ frame.
 
 import { describe, expect, it } from "vitest";
-import {
-  computeStreak,
-  resolveSlots,
-  type CheckinLike,
-  type HabitSpec,
-} from "./streak.js";
+import { computeStreak, resolveSlots, type CheckinLike, type HabitSpec } from "./streak.js";
 
 /** Build a Check-in at a local-time instant. */
 function ci(y: number, mIdx: number, d: number, h = 12, min = 0): CheckinLike {
@@ -106,11 +101,22 @@ describe("FRI-169 computeStreak — month-Period target=5 (AC12)", () => {
   it("(b) active_pending count 2 — 5 in Apr, 5 in May, 4 so far in Jun", () => {
     const checkins = [
       // April (5)
-      ci(2026, 3, 2), ci(2026, 3, 9), ci(2026, 3, 16), ci(2026, 3, 23), ci(2026, 3, 30),
+      ci(2026, 3, 2),
+      ci(2026, 3, 9),
+      ci(2026, 3, 16),
+      ci(2026, 3, 23),
+      ci(2026, 3, 30),
       // May (5)
-      ci(2026, 4, 3), ci(2026, 4, 10), ci(2026, 4, 17), ci(2026, 4, 24), ci(2026, 4, 31),
+      ci(2026, 4, 3),
+      ci(2026, 4, 10),
+      ci(2026, 4, 17),
+      ci(2026, 4, 24),
+      ci(2026, 4, 31),
       // June so far (4)
-      ci(2026, 5, 4), ci(2026, 5, 9), ci(2026, 5, 14), ci(2026, 5, 17),
+      ci(2026, 5, 4),
+      ci(2026, 5, 9),
+      ci(2026, 5, 14),
+      ci(2026, 5, 17),
     ];
     const r = computeStreak(monthHabit, checkins, now);
     expect(r.state).toBe("active_pending");
@@ -120,9 +126,20 @@ describe("FRI-169 computeStreak — month-Period target=5 (AC12)", () => {
 
   it("(c) active_satisfied count 3 — the 5th June check-in at the same now", () => {
     const checkins = [
-      ci(2026, 3, 2), ci(2026, 3, 9), ci(2026, 3, 16), ci(2026, 3, 23), ci(2026, 3, 30),
-      ci(2026, 4, 3), ci(2026, 4, 10), ci(2026, 4, 17), ci(2026, 4, 24), ci(2026, 4, 31),
-      ci(2026, 5, 4), ci(2026, 5, 9), ci(2026, 5, 14), ci(2026, 5, 17),
+      ci(2026, 3, 2),
+      ci(2026, 3, 9),
+      ci(2026, 3, 16),
+      ci(2026, 3, 23),
+      ci(2026, 3, 30),
+      ci(2026, 4, 3),
+      ci(2026, 4, 10),
+      ci(2026, 4, 17),
+      ci(2026, 4, 24),
+      ci(2026, 4, 31),
+      ci(2026, 5, 4),
+      ci(2026, 5, 9),
+      ci(2026, 5, 14),
+      ci(2026, 5, 17),
       ci(2026, 5, 18, 7, 0), // the 5th, before `now`
     ];
     const r = computeStreak(monthHabit, checkins, now);
@@ -135,8 +152,15 @@ describe("FRI-169 computeStreak — month-Period target=5 (AC12)", () => {
     // Apr satisfied (5), May EMPTY (0, closed), June 4 so far. The empty
     // closed May breaks the run; the open June (sub-target) can't carry.
     const checkins = [
-      ci(2026, 3, 2), ci(2026, 3, 9), ci(2026, 3, 16), ci(2026, 3, 23), ci(2026, 3, 30),
-      ci(2026, 5, 4), ci(2026, 5, 9), ci(2026, 5, 14), ci(2026, 5, 17),
+      ci(2026, 3, 2),
+      ci(2026, 3, 9),
+      ci(2026, 3, 16),
+      ci(2026, 3, 23),
+      ci(2026, 3, 30),
+      ci(2026, 5, 4),
+      ci(2026, 5, 9),
+      ci(2026, 5, 14),
+      ci(2026, 5, 17),
     ];
     const r = computeStreak(monthHabit, checkins, now);
     expect(r.state).toBe("dormant");
@@ -194,7 +218,12 @@ describe("FRI-169 resolveSlots — per-day-slash vs floating-quota-slash (AC13)"
   it("overflow: Check-ins past Target count as volume, not extra Slots", () => {
     const ref = new Date(2026, 5, 18, 12, 0);
     const now = new Date(2026, 5, 18, 13, 0);
-    const checkins = [ci(2026, 5, 18, 8), ci(2026, 5, 18, 9), ci(2026, 5, 18, 10), ci(2026, 5, 18, 11)];
+    const checkins = [
+      ci(2026, 5, 18, 8),
+      ci(2026, 5, 18, 9),
+      ci(2026, 5, 18, 10),
+      ci(2026, 5, 18, 11),
+    ];
     const r = resolveSlots(perDay, checkins, ref, now); // target 3, 4 check-ins
     expect(r.slots).toEqual(["filled", "filled", "filled"]);
     expect(r.overflow).toBe(1);
@@ -210,8 +239,12 @@ describe("FRI-169 computeStreak — weekday-constrained day-Period (MWF)", () =>
     // now = Sat Jun 13 08:00 (open, but Sat is not listed → carries the
     // run forward from the last listed day).
     const checkins = [
-      ci(2026, 5, 1), ci(2026, 5, 3), ci(2026, 5, 5),
-      ci(2026, 5, 8), ci(2026, 5, 10), ci(2026, 5, 12),
+      ci(2026, 5, 1),
+      ci(2026, 5, 3),
+      ci(2026, 5, 5),
+      ci(2026, 5, 8),
+      ci(2026, 5, 10),
+      ci(2026, 5, 12),
     ];
     const now = new Date(2026, 5, 13, 8, 0);
     const r = computeStreak(mwf, checkins, now);
@@ -246,7 +279,11 @@ describe("FRI-169 computeStreak — Bounded mode window close", () => {
   it("completed: a live run at window close → terminal 'completed', state dormant", () => {
     // Check-ins each day Jun 1–5; now past the window close.
     const checkins = [
-      ci(2026, 5, 1), ci(2026, 5, 2), ci(2026, 5, 3), ci(2026, 5, 4), ci(2026, 5, 5),
+      ci(2026, 5, 1),
+      ci(2026, 5, 2),
+      ci(2026, 5, 3),
+      ci(2026, 5, 4),
+      ci(2026, 5, 5),
     ];
     const now = new Date(2026, 5, 10, 8, 0);
     const r = computeStreak(bounded, checkins, now);

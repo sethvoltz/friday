@@ -109,9 +109,9 @@ describe.skipIf(skip)("FRI-169 habit constraints (scratch PG)", () => {
   });
 
   it("AC3: non-null days_of_week with period != 'day' is rejected by the orthogonality guard", async () => {
-    await expect(
-      insertHabit({ period: "month", days_of_week: 0b0101010 }),
-    ).rejects.toThrow(/habits_days_of_week_period_check/);
+    await expect(insertHabit({ period: "month", days_of_week: 0b0101010 })).rejects.toThrow(
+      /habits_days_of_week_period_check/,
+    );
   });
 
   it("AC3: period='day' with a non-null days_of_week succeeds and reads back the exact mask", async () => {
@@ -126,10 +126,9 @@ describe.skipIf(skip)("FRI-169 habit constraints (scratch PG)", () => {
 
   it("habit_checkins.habit_id FK rejects an insert referencing a non-existent habit", async () => {
     await expect(
-      client.query(
-        `INSERT INTO habit_checkins (habit_id, ts) VALUES ($1, now())`,
-        ["no-such-habit-id"],
-      ),
+      client.query(`INSERT INTO habit_checkins (habit_id, ts) VALUES ($1, now())`, [
+        "no-such-habit-id",
+      ]),
     ).rejects.toThrow(/habit_checkins_habit_id_habits_id_fk|foreign key/);
   });
 
