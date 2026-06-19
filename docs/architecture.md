@@ -165,7 +165,7 @@ agent-friday/
         monitor/                    # health.json heartbeat
     dashboard/                      # @friday/dashboard (SvelteKit + Svelte 5 runes)
       src/
-        routes/                     # /, /dashboard, /sessions, /tickets, /schedules, /memory, /evolve, /logs, /settings
+        routes/                     # /, /dashboard, /sessions, /tickets, /schedules, /habits, /memory, /evolve, /logs, /settings
         lib/                        # components, stores, hooks
       static/                       # PWA manifest + icons
       scripts/generate-icons.mjs    # regenerate PWA icons from a source SVG
@@ -219,6 +219,14 @@ Full layout reference lives in [`docs/running.md#data-location`](running.md#data
 - **Pagination falls back** to `GET /api/agents/:name/blocks?before=...` for blocks older than the client's sync window (>90 days, or for agents archived >24h ago that the client hasn't yet pulled). Cursors: `before` / `after` / `around_ts`.
 
 See ADR-016 for the original block-model rationale; ADR-024 for the in-memory-accumulator amendment.
+
+### Habits (FRI-169, ADR-043)
+
+Habits are a **core** concept (not a Friday App — see ADR-043 for why: cross-app MCP reach + a first-class dashboard surface, neither of which an app can provide). Two canonical tables: **`habits`** (definition — name, `mode` `ongoing|bounded`, `target`/`period`/`days_of_week`, time-of-day `bucket`, `color_index`, bounded `window_start`/`window_end`, `status`) and **`habit_checkins`** (the append-only completion log). Both replicate to clients via Zero (`ANYONE_CAN` select) alongside `agents`/`tickets`/`schedules`/`apps`.
+
+- **Streak is a derived projection, not a column.** `@friday/shared/habits` `computeStreak(habit, checkins, now)` is a pure function (`now` injected at the boundary) consumed identically by the daemon (`habit_list`/`habit_status`) and the browser (a single adapter mapping the `snake_case` Zero row + epoch-millis → `Date`). A streak breaks at the clock boundary when an unsatisfied Period closes, so a stored counter would be silently stale — the log is canonical, the streak is a view (the Turn-state-vs-Status-projection pattern). See ADR-043.
+- **MCP + routes.** A core `friday-habit` MCP server (`habit_add`/`checkin`/`list`/`status`/`update`/`archive`/`checkin_undo`) is registered **unconditionally for all caller types** (like `friday-reminder`), POSTing to daemon `/api/habits*` routes. The dashboard check-off/undo writes are Zero mutators (`habitCheckin`/`habitCheckinUndo`); management (create/update/archive) goes through the `/api/habits` proxy.
+- **Bounded archival is a reconcile, not a schedules row.** A bounded window closes on a clock boundary with no write event, so `reconcileBoundedHabits` (`services/daemon/src/habits/reconcile.ts`) flips closed-window active bounded habits to `completed`/`expired` (verdict from the engine's `terminal`) — run at boot and on a 60s daemon-internal interval, the same daemon-internal-timer pattern as the compaction sweep (NOT a `schedules`-table row). Habits add no new `schedules.kind` and own no `schedules` rows; a reminder _about_ a habit is a separate `kind='reminder'` schedule (FRI-168).
 
 ## Auth
 
