@@ -3,6 +3,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     setupFiles: ["../shared/src/test/vitest-setup.ts"],
+    globalSetup: ["../shared/src/test/global-setup.ts"],
     // Connection-budget cap — see packages/shared/vitest.config.ts. evolve
     // itself doesn't open scratch DBs, but it runs concurrently with the
     // DB-heavy packages under `pnpm test`; the cap keeps total workers

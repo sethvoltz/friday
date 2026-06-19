@@ -15,6 +15,7 @@ export default defineConfig({
   test: {
     include: ["src/**/*.e2e.test.ts"],
     setupFiles: ["./src/test/vitest-setup.ts"],
+    globalSetup: ["./src/test/global-setup.ts"],
     // Each e2e file spawns its own subprocess set on free ports +
     // its own scratch DB. Running files in parallel works in theory
     // (free ports, unique DBs), but in practice the multi-process

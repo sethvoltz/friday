@@ -3,6 +3,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     setupFiles: ["../shared/src/test/vitest-setup.ts"],
+    globalSetup: ["../shared/src/test/global-setup.ts"],
     // Connection-budget cap — see packages/shared/vitest.config.ts.
     maxWorkers: 4,
     minWorkers: 1,

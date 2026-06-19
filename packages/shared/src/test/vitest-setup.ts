@@ -29,28 +29,36 @@
  * the test file's own assignment will win for any DYNAMIC imports it
  * does in beforeAll. Static imports of `@friday/shared` from a test
  * file will see this file's default (which is safe).
+ *
+ * Lifecycle of the substituted tmpdir is owned by `./tmp-data-dir.ts` +
+ * `./global-setup.ts` (FRI-170): each created dir is recorded in a per-run
+ * manifest and removed by the `globalSetup` teardown after all files complete;
+ * orphans from a crashed prior run are swept at run start. A caller-provided
+ * `FRIDAY_DATA_DIR` is *adopted*, never recorded — so we never delete it.
  */
 
-import { mkdtempSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { createManagedDataDir, decideDataDir } from "./tmp-data-dir.js";
 
 const realFridayDir = resolve(join(homedir(), ".friday"));
-const envValue = process.env.FRIDAY_DATA_DIR;
-const envResolved = envValue ? resolve(envValue) : undefined;
+const decision = decideDataDir(process.env.FRIDAY_DATA_DIR, realFridayDir);
 
-if (envResolved === realFridayDir) {
+if (decision.kind === "reject") {
   // An explicit assignment pointing at the real data dir is almost
   // certainly a bug — refuse to start so the test author notices.
   throw new Error(
     `vitest-setup: FRIDAY_DATA_DIR is set to the real user data dir ` +
-      `(${realFridayDir}). Tests must point at a tmpdir to avoid ` +
+      `(${decision.realDir}). Tests must point at a tmpdir to avoid ` +
       `clobbering live data. Unset FRIDAY_DATA_DIR (this setup file ` +
       `will substitute a tmpdir) or set it to a tmpdir explicitly.`,
   );
 }
 
-if (!envResolved) {
-  const dir = mkdtempSync(join(tmpdir(), "friday-test-data-"));
-  process.env.FRIDAY_DATA_DIR = dir;
+if (decision.kind === "create") {
+  // We created it → recorded in the per-run manifest, so the `globalSetup`
+  // teardown reclaims it even if this file's tests are all skipped or the
+  // worker is killed. (A caller-provided FRIDAY_DATA_DIR is the `adopt` case:
+  // never recorded, so never deleted — the AC2 guard.)
+  process.env.FRIDAY_DATA_DIR = createManagedDataDir();
 }
