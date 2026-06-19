@@ -369,7 +369,13 @@ describe("resolveByUpgrade — non-open proposals are skipped", () => {
       readyLine(hoursAgo(48), "1.27.0"),
       readyLine(boundaryTs, "1.28.0"),
     ]);
-    for (const status of ["applied", "rejected", "superseded", "auto-resolved", "approved"] as const) {
+    for (const status of [
+      "applied",
+      "rejected",
+      "superseded",
+      "auto-resolved",
+      "approved",
+    ] as const) {
       proposals.set(
         `p-${status}`,
         makeProposal(`p-${status}`, {
