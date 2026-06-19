@@ -61,6 +61,12 @@
       // FRI-149: builder linkage lives in the file store + agent row; the Zero
       // projection has no builder_agent column yet, so it is null in this view.
       builderAgent: null,
+      // Upgrade-resolution fields live in the file store only; Zero projection
+      // has no columns for them yet.
+      resolvedByUpgrade: false,
+      tentativelyResolvedByUpgrade: false,
+      resolvedByVersion: null,
+      resolvedAt: null,
     };
   }
 
@@ -90,6 +96,7 @@
 
   function badgeClass(status: string): string {
     if (status === "applied") return "ok";
+    if (status === "auto-resolved") return "ok";
     if (status === "approved") return "ok";
     if (status === "critical") return "error";
     if (status === "rejected") return "warn";
@@ -370,7 +377,7 @@
       <Toggle
         bind:checked={showCompleted}
         label="Show completed"
-        title="Show applied, rejected, and superseded proposals" />
+        title="Show applied, auto-resolved, rejected, and superseded proposals" />
     </div>
   </div>
 
@@ -456,7 +463,7 @@
             <td class="text-mono">{signalSummary(p)}</td>
             <td class="actions-cell">
               <div class="actions-row">
-                {#if p.status !== "applied" && p.status !== "rejected"}
+                {#if p.status !== "applied" && p.status !== "auto-resolved" && p.status !== "rejected"}
                   <button
                     class="ghost compact"
                     onclick={() => applyOne(p)}

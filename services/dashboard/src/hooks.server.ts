@@ -4,6 +4,7 @@ import { auth } from "$lib/server/auth";
 import { logger } from "$lib/server/log";
 import { posthog, DISTINCT_ID, initPosthog } from "$lib/server/posthog";
 import { consumeRateLimit, resetRateLimit } from "@friday/shared/services";
+import { PUBLIC_APP_VERSION } from "$env/static/public";
 
 /**
  * Server init — runs once at dashboard startup, before any request is handled.
@@ -26,6 +27,7 @@ export const init: ServerInit = async () => {
   await warmVaultCache();
   clearFridayConfigCache();
   initPosthog();
+  logger.log("info", "dashboard.ready", { version: PUBLIC_APP_VERSION });
 };
 
 // `/ingest` is the first-party PostHog reverse proxy (src/routes/ingest):

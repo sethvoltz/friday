@@ -7,11 +7,13 @@ import {
   mergeClusters,
   proposeFromSignals,
   rerankAll,
+  resolveByUpgrade,
   scanAll,
   sinceHoursAgo,
   appendRun,
   DEFAULT_RULE,
 } from "@friday/evolve";
+import { DAEMON_LOG_PATH, EVOLVE_PROPOSALS_DIR } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
 
 export const evolveCommand = defineCommand({
@@ -77,6 +79,10 @@ export const evolveCommand = defineCommand({
           createdBy: "cli",
         });
         const reranked = rerankAll(DEFAULT_RULE);
+        const upgradeResult = await resolveByUpgrade({
+          daemonLogPath: DAEMON_LOG_PATH,
+          proposalDir: EVOLVE_PROPOSALS_DIR,
+        });
         appendRun({
           ts: windowEnd,
           by: "cli",
@@ -98,6 +104,8 @@ export const evolveCommand = defineCommand({
               promotedFromRerank: reranked.promoted.length,
               familyResolved: propose.familyResolved.length,
               familyRejected: propose.familyRejected.length,
+              upgradeResolved: upgradeResult.definitive,
+              upgradeTentative: upgradeResult.tentative,
             },
             null,
             2,

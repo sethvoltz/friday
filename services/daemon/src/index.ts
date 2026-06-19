@@ -15,7 +15,7 @@ import {
   runMigrations,
 } from "@friday/shared";
 import { logger } from "./log.js";
-import { startServer } from "./api/server.js";
+import { startServer, DAEMON_VERSION } from "./api/server.js";
 import { startHealthHeartbeat, clearHealth } from "./monitor/health.js";
 import { backfillUsageFromLegacyJsonl, replayPending } from "@friday/shared/services";
 import { seedMetaAgents, startScheduler } from "./scheduler/scheduler.js";
@@ -306,6 +306,7 @@ async function main(): Promise<void> {
   const modelCfg = resolveModelForRole(cfg, "orchestrator");
   logger.log("info", "daemon.ready", {
     port: daemonPort,
+    version: DAEMON_VERSION,
     model: modelCfg.name,
     thinking: modelCfg.thinking?.type ?? "default",
     effort: modelCfg.effort ?? "default",

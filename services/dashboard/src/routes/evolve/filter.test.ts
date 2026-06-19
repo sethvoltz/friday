@@ -26,6 +26,10 @@ function p(id: string, status: ProposalStatus): Proposal {
     appliedTicketId: null,
     familyResolvedBy: null,
     builderAgent: null,
+    resolvedByUpgrade: false,
+    tentativelyResolvedByUpgrade: false,
+    resolvedByVersion: null,
+    resolvedAt: null,
   };
 }
 
@@ -35,13 +39,15 @@ describe("evolve filter", () => {
     p("c", "critical"),
     p("a", "approved"),
     p("ap", "applied"),
+    p("ar", "auto-resolved"),
     p("r", "rejected"),
     p("s", "superseded"),
   ];
 
-  it("treats applied / rejected / superseded as terminal", () => {
-    expect(TERMINAL_STATUSES).toEqual(["applied", "rejected", "superseded"]);
+  it("treats applied / auto-resolved / rejected / superseded as terminal", () => {
+    expect(TERMINAL_STATUSES).toEqual(["applied", "auto-resolved", "rejected", "superseded"]);
     expect(isTerminal("applied")).toBe(true);
+    expect(isTerminal("auto-resolved")).toBe(true);
     expect(isTerminal("rejected")).toBe(true);
     expect(isTerminal("superseded")).toBe(true);
   });
@@ -59,20 +65,22 @@ describe("evolve filter", () => {
 
   it("filterProposals(true) returns every row, in order", () => {
     const visible = filterProposals(rows, true);
-    expect(visible.map((r) => r.id)).toEqual(["o", "c", "a", "ap", "r", "s"]);
+    expect(visible.map((r) => r.id)).toEqual(["o", "c", "a", "ap", "ar", "r", "s"]);
   });
 
   it("filterProposals does not mutate the input", () => {
     const input = [...rows];
     filterProposals(input, false);
     filterProposals(input, true);
-    expect(input.map((r) => r.id)).toEqual(["o", "c", "a", "ap", "r", "s"]);
+    expect(input.map((r) => r.id)).toEqual(["o", "c", "a", "ap", "ar", "r", "s"]);
   });
 
   it("countActionable counts non-terminal rows", () => {
     expect(countActionable(rows)).toBe(3);
     expect(countActionable([])).toBe(0);
-    expect(countActionable([p("x", "applied"), p("y", "rejected")])).toBe(0);
+    expect(countActionable([p("x", "applied"), p("y", "rejected"), p("z", "auto-resolved")])).toBe(
+      0,
+    );
     expect(countActionable([p("x", "open"), p("y", "applied")])).toBe(1);
   });
 });
