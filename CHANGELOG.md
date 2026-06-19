@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.28.1](https://github.com/sethvoltz/friday/compare/v1.28.0...v1.28.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* **system:** reconcile Zero publication on daemon boot so `friday update` completes upgrades (ADR-045) ([#298](https://github.com/sethvoltz/friday/issues/298)) ([22babd6](https://github.com/sethvoltz/friday/commit/22babd6c0a51ea06812318eb1f26684536cbe037))
+
 ## [1.28.0](https://github.com/sethvoltz/friday/compare/v1.27.0...v1.28.0) (2026-06-19)
 
 
