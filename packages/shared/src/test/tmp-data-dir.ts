@@ -12,16 +12,18 @@
  *
  *  1. **Manifest + `globalSetup` teardown** (the guarantee). `global-setup.ts`
  *     runs once in the *main* vitest process: at start it calls
- *     {@link initDataDirManifest} (creating a per-run manifest file and
+ *     {@link initDataDirManifest} (creating a per-run manifest *directory* and
  *     exporting its path via {@link MANIFEST_ENV}, which the forked workers
- *     inherit); each {@link createManagedDataDir} call in a worker appends its
- *     dir to that manifest; at teardown {@link reclaimManifestDataDirs} removes
- *     every listed dir. The teardown fires once, in the main process, AFTER all
- *     files — so it does not depend on a per-file `afterAll` (which does NOT run
- *     for a fully-skipped file) nor on `process.on("exit")` (which does NOT fire
- *     under Vitest's forks pool — tinypool terminates workers without a clean
- *     exit). That is why this is a manifest-driven globalSetup teardown rather
- *     than a worker-side hook.
+ *     inherit); each {@link createManagedDataDir} call in a worker drops one
+ *     uniquely-named marker file into that directory recording its dir; at
+ *     teardown {@link reclaimManifestDataDirs} removes every recorded dir. One
+ *     marker file per dir (rather than a shared append-log) means concurrent
+ *     forks never write the same file, so no append can be lost to a race. The
+ *     teardown fires once, in the main process, AFTER all files — so it does not
+ *     depend on a per-file `afterAll` (which does NOT run for a fully-skipped
+ *     file) nor on `process.on("exit")` (which does NOT fire under Vitest's
+ *     forks pool — tinypool terminates workers without a clean exit). That is
+ *     why this is a manifest-driven globalSetup teardown, not a worker-side hook.
  *  2. **Startup sweep** (crash backstop). {@link sweepStaleDataDirs}, run once
  *     from `global-setup.ts` at run start, removes orphans left by a *prior*
  *     run whose main process died before its teardown fired. It is a best-effort
@@ -44,17 +46,19 @@
  * runner.
  */
 
-import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 /** Prefix for every per-worker test data dir AND the per-run manifest dir. The
  *  sweep keys off this, so anything this module leaves under tmpdir is prefixed
  *  with it and thus reclaimable by a later run's startup sweep. */
 export const TEST_DATA_DIR_PREFIX = "friday-test-data-";
 
-/** Env var carrying the per-run manifest file path from `globalSetup` (main
- *  process) to the forked workers, which inherit it. */
+/** Env var carrying the per-run manifest *directory* path from `globalSetup`
+ *  (main process) to the forked workers, which inherit it. The manifest is a
+ *  directory of one marker file per created dir (not a shared append-log) so
+ *  concurrent forks never contend on the same file. */
 export const MANIFEST_ENV = "FRIDAY_TEST_DATADIR_MANIFEST";
 
 /**
@@ -114,32 +118,42 @@ export function removeDataDirsBestEffort(dirs: Iterable<string>): void {
  * ------------------------------------------------------------------ */
 
 /**
- * Create the per-run manifest file and export its path via {@link MANIFEST_ENV}
- * so forked workers inherit it. The manifest lives in its own dir under
- * `os.tmpdir()`, prefixed so an orphaned manifest (teardown never fired) is
- * itself reclaimable by a later run's startup sweep. Returns the manifest path.
+ * `mkdtemp` a per-run manifest *directory* under `os.tmpdir()` and return its
+ * path. Prefixed so an orphaned manifest (teardown never fired) is itself
+ * reclaimable by a later run's startup sweep. No global side effects — callers
+ * decide whether to publish the path (see {@link initDataDirManifest}).
  */
-export function initDataDirManifest(): string {
-  const dir = mkdtempSync(join(tmpdir(), `${TEST_DATA_DIR_PREFIX}manifest-`));
-  const manifest = join(dir, "data-dirs.txt");
-  process.env[MANIFEST_ENV] = manifest;
-  return manifest;
+export function createDataDirManifest(): string {
+  return mkdtempSync(join(tmpdir(), `${TEST_DATA_DIR_PREFIX}manifest-`));
 }
 
 /**
- * `mkdtemp` a scoped data dir under `os.tmpdir()` and append it to the per-run
- * manifest (if one is active) so the `globalSetup` teardown will reclaim it.
- * Returns the absolute path. The append is the single line that makes the dir
- * reclaimable regardless of whether this file's tests run, skip, or crash.
+ * Create the per-run manifest dir AND export its path via {@link MANIFEST_ENV}
+ * so forked workers inherit it. Called once from `global-setup.ts` in the main
+ * process. Returns the directory path.
  */
-export function createManagedDataDir(): string {
+export function initDataDirManifest(): string {
+  const manifestDir = createDataDirManifest();
+  process.env[MANIFEST_ENV] = manifestDir;
+  return manifestDir;
+}
+
+/**
+ * `mkdtemp` a scoped data dir under `os.tmpdir()` and, if a manifest is active,
+ * drop a marker file recording it so the `globalSetup` teardown will reclaim it.
+ * `manifestDir` defaults to the run's manifest ({@link MANIFEST_ENV}); tests
+ * pass it explicitly so they never mutate that shared env var. Returns the
+ * absolute path. The marker is what makes the dir reclaimable regardless of
+ * whether this file's tests run, skip, or crash.
+ */
+export function createManagedDataDir(manifestDir = process.env[MANIFEST_ENV]): string {
   const dir = mkdtempSync(join(tmpdir(), TEST_DATA_DIR_PREFIX));
-  const manifest = process.env[MANIFEST_ENV];
-  if (manifest) {
-    // One path per line; `appendFileSync` of a sub-PIPE_BUF write is atomic on
-    // POSIX, so concurrent worker appends don't interleave.
+  if (manifestDir) {
+    // One marker file per dir, named by the dir's unique basename, content =
+    // full path. No two workers ever write the same file, so concurrent forks
+    // cannot race or lose a record (unlike a shared append-log).
     try {
-      appendFileSync(manifest, `${dir}\n`);
+      writeFileSync(join(manifestDir, basename(dir)), dir);
     } catch {
       /* best-effort: an unrecorded dir is reclaimed by the next startup sweep */
     }
@@ -147,28 +161,37 @@ export function createManagedDataDir(): string {
   return dir;
 }
 
-/** Read the dir paths recorded in a manifest file. Missing/unreadable → []. */
-export function readManifestDataDirs(manifestPath: string): string[] {
+/** Read the dir paths recorded by the marker files in a manifest dir. Missing/
+ *  unreadable manifest → []. */
+export function readManifestDataDirs(manifestDir: string): string[] {
+  let markers: string[];
   try {
-    return readFileSync(manifestPath, "utf8")
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    markers = readdirSync(manifestDir);
   } catch {
     return [];
   }
+  const dirs: string[] = [];
+  for (const name of markers) {
+    try {
+      const p = readFileSync(join(manifestDir, name), "utf8").trim();
+      if (p) dirs.push(p);
+    } catch {
+      /* marker vanished / unreadable — skip */
+    }
+  }
+  return dirs;
 }
 
 /**
- * Remove every dir recorded in the manifest, then the manifest's own dir.
- * Best-effort; never throws. Returns the dir paths that were recorded. Called
- * from the `globalSetup` teardown in the main process after all files complete.
+ * Remove every dir recorded by a marker in the manifest, then the manifest dir
+ * itself. Best-effort; never throws. Returns the recorded dir paths. Called from
+ * the `globalSetup` teardown in the main process after all files complete.
  */
-export function reclaimManifestDataDirs(manifestPath: string): string[] {
-  const dirs = readManifestDataDirs(manifestPath);
+export function reclaimManifestDataDirs(manifestDir: string): string[] {
+  const dirs = readManifestDataDirs(manifestDir);
   removeDataDirsBestEffort(dirs);
   try {
-    rmSync(dirname(manifestPath), { recursive: true, force: true });
+    rmSync(manifestDir, { recursive: true, force: true });
   } catch {
     /* best-effort */
   }

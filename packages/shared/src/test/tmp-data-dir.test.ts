@@ -4,18 +4,19 @@
  * Sweep tests run against an injected `root` + `now` so they are fully
  * deterministic and never touch the real `os.tmpdir()`; mtimes are pinned with
  * `utimesSync` to whole-second values to dodge filesystem mtime granularity.
- * Manifest tests set their own throwaway `MANIFEST_ENV` and restore the
- * run's real value (set by `global-setup.ts`) afterwards so the worker's own
- * reclaim is never disturbed.
+ * Manifest tests pass the manifest dir EXPLICITLY to `createManagedDataDir` so
+ * they never mutate the shared `MANIFEST_ENV` the running worker relies on
+ * (mutating it intermittently mis-routed other workers' markers).
  */
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   MANIFEST_ENV,
   TEST_DATA_DIR_PREFIX,
+  createDataDirManifest,
   createManagedDataDir,
   decideDataDir,
   initDataDirManifest,
@@ -33,13 +34,10 @@ function setMtime(path: string, epochSeconds: number): void {
 // Track on-disk paths these tests create under the real tmpdir so they are
 // always cleaned up (they are recorded only in throwaway manifests, so the
 // run's own globalSetup teardown will not reclaim them).
-const ORIG_MANIFEST = process.env[MANIFEST_ENV];
 const litter: string[] = [];
 afterEach(() => {
   for (const p of litter) rmSync(p, { recursive: true, force: true });
   litter.length = 0;
-  if (ORIG_MANIFEST === undefined) delete process.env[MANIFEST_ENV];
-  else process.env[MANIFEST_ENV] = ORIG_MANIFEST;
 });
 
 describe("decideDataDir (AC2 — caller dirs are adopted, never managed)", () => {
@@ -143,19 +141,31 @@ describe("sweepStaleDataDirs", () => {
 });
 
 describe("manifest lifecycle (createManagedDataDir → reclaim)", () => {
-  it("initDataDirManifest sets MANIFEST_ENV to a path under a prefixed dir", () => {
-    const manifest = initDataDirManifest();
-    litter.push(dirname(manifest));
-    expect(process.env[MANIFEST_ENV]).toBe(manifest);
-    expect(dirname(manifest).startsWith(join(tmpdir(), `${TEST_DATA_DIR_PREFIX}manifest-`))).toBe(
-      true,
-    );
+  it("createDataDirManifest returns a prefixed manifest dir with no env side effect", () => {
+    const before = process.env[MANIFEST_ENV];
+    const manifest = createDataDirManifest();
+    litter.push(manifest);
+    expect(existsSync(manifest)).toBe(true);
+    expect(manifest.startsWith(join(tmpdir(), `${TEST_DATA_DIR_PREFIX}manifest-`))).toBe(true);
+    expect(process.env[MANIFEST_ENV]).toBe(before); // unchanged
   });
 
-  it("createManagedDataDir creates a prefixed dir and records it in the active manifest", () => {
-    const manifest = initDataDirManifest();
-    litter.push(dirname(manifest));
-    const dir = createManagedDataDir();
+  it("initDataDirManifest publishes the manifest path via MANIFEST_ENV", () => {
+    const orig = process.env[MANIFEST_ENV];
+    try {
+      const manifest = initDataDirManifest();
+      litter.push(manifest);
+      expect(process.env[MANIFEST_ENV]).toBe(manifest);
+    } finally {
+      if (orig === undefined) delete process.env[MANIFEST_ENV];
+      else process.env[MANIFEST_ENV] = orig;
+    }
+  });
+
+  it("createManagedDataDir creates a prefixed dir and records it in the given manifest", () => {
+    const manifest = createDataDirManifest();
+    litter.push(manifest);
+    const dir = createManagedDataDir(manifest);
     litter.push(dir);
 
     expect(existsSync(dir)).toBe(true);
@@ -164,34 +174,34 @@ describe("manifest lifecycle (createManagedDataDir → reclaim)", () => {
   });
 
   it("reclaimManifestDataDirs removes EVERY recorded dir (incl. a would-be-skipped file's) and the manifest dir", () => {
-    const manifest = initDataDirManifest();
+    const manifest = createDataDirManifest();
     // Two workers' dirs; the second models a fully-skipped file whose per-file
     // afterAll would never fire — the manifest still captured it at create time.
-    const d1 = createManagedDataDir();
-    const d2 = createManagedDataDir();
+    const d1 = createManagedDataDir(manifest);
+    const d2 = createManagedDataDir(manifest);
     expect(existsSync(d1)).toBe(true);
     expect(existsSync(d2)).toBe(true);
 
     const reclaimed = reclaimManifestDataDirs(manifest);
 
-    expect(reclaimed).toEqual([d1, d2]);
+    // Order follows readdir, not insertion — compare as sets.
+    expect([...reclaimed].sort()).toEqual([d1, d2].sort());
     expect(existsSync(d1)).toBe(false);
     expect(existsSync(d2)).toBe(false);
-    expect(existsSync(dirname(manifest))).toBe(false); // manifest dir removed too
+    expect(existsSync(manifest)).toBe(false); // manifest dir removed too
   });
 
-  it("readManifestDataDirs trims and drops blank lines; missing file → []", () => {
-    const dir = mkdtempSync(join(tmpdir(), "fri170-manifest-test-"));
-    litter.push(dir);
-    const manifest = join(dir, "m.txt");
-    writeFileSync(manifest, "/a/b\n\n  /c/d  \n");
-    expect(readManifestDataDirs(manifest)).toEqual(["/a/b", "/c/d"]);
-    expect(readManifestDataDirs(join(dir, "nope.txt"))).toEqual([]);
+  it("readManifestDataDirs reads marker contents (trimmed); missing manifest dir → []", () => {
+    const manifest = createDataDirManifest();
+    litter.push(manifest);
+    writeFileSync(join(manifest, "marker-a"), "/a/b");
+    writeFileSync(join(manifest, "marker-b"), "  /c/d  \n");
+    expect(readManifestDataDirs(manifest).sort()).toEqual(["/a/b", "/c/d"]);
+    expect(readManifestDataDirs(join(tmpdir(), "fri170-no-such-manifest"))).toEqual([]);
   });
 
-  it("createManagedDataDir still creates a dir when no manifest is active (no throw)", () => {
-    delete process.env[MANIFEST_ENV];
-    const dir = createManagedDataDir();
+  it("createManagedDataDir with no manifest still creates a dir (no throw, not recorded)", () => {
+    const dir = createManagedDataDir(undefined);
     litter.push(dir);
     expect(existsSync(dir)).toBe(true);
   });
@@ -210,8 +220,8 @@ describe("AC2 end-to-end — an adopted caller dir survives the full cleanup cyc
     // passed through createManagedDataDir, so it never enters the manifest.
     expect(decideDataDir(caller, realDir)).toEqual({ kind: "adopt", dir: caller });
 
-    const manifest = initDataDirManifest();
-    const managed = createManagedDataDir(); // a real managed dir IS recorded
+    const manifest = createDataDirManifest();
+    const managed = createManagedDataDir(manifest); // a real managed dir IS recorded
     expect(readManifestDataDirs(manifest)).toEqual([managed]);
     expect(readManifestDataDirs(manifest)).not.toContain(caller);
 
