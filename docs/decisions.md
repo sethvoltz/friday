@@ -725,6 +725,10 @@ Keep the hybrid contract:
 
 The user-perceptible difference: search hits pay one network round-trip (~50–150ms on the live deploy); browsing and editing don't.
 
+**Amendment (FRI-24, 2026-06-17): the hybrid contract now also covers vector recall.** `memory_entries` gains an `embedding vector(384)` column (pgvector; all-MiniLM-L6-v2). Like `content_tsv`, that column is **server-side-only — NOT replicated to Zero** (Zero replicates the title/content/tags rows, not the generated FTS column and not the embedding). Vector similarity (`embedding <=> $query::vector`) runs inside `searchMemories` on the daemon, alongside the existing FTS query, behind the **same** `/api/memory/search` REST endpoint. So vector recall inherits this ADR's REST hop and introduces **no new network boundary**: the dashboard search path is unchanged, and the daemon's own recall path (which already runs in-process) just gains a second ranking signal. If the embedding runtime/model is unavailable or a vector query errors, recall **fails open to FTS-only** (see the implementation note in the consequences below).
+
+**The pgvector extension is created via an admin connection, NOT inside a migration.** `CREATE EXTENSION vector` requires SUPERUSER (pgvector 0.8.2 is not a trusted extension), and daemon boot runs migrations as the non-superuser `friday` role — so the extension can't live in migration `0036` (which carries only the drizzle-kit-generated `ADD COLUMN embedding vector(384)`). Provisioning calls `ensureVectorExtension()` over an admin connection (the OS-user Homebrew-Postgres superuser) before migrations run. The extension is a hard schema dependency: `ensureVectorExtension()` throws if it can't be created (fail-loud), in contrast to the embedding runtime, which fails open.
+
 ### Revisit trigger
 
 Bring this ADR back to the table if any of these fire:
@@ -736,7 +740,8 @@ Bring this ADR back to the table if any of these fire:
 ### Consequences
 
 - The /memory page has two distinct data paths (Zero for list, REST for search). The dashboard treats them as orthogonal: search results don't update the Zero snapshot's order, and Zero updates don't re-trigger the active search query.
-- No code change from this ADR. Existing implementation is correct; this entry documents _why_ the hybrid lives and _when_ we'd change it, so future architectural audits don't keep re-discovering the gap as a TODO.
+- No code change from the **original** ADR. Existing implementation is correct; this entry documents _why_ the hybrid lives and _when_ we'd change it, so future architectural audits don't keep re-discovering the gap as a TODO.
+- **FRI-24 consequence:** vector recall is purely additive within the existing REST hop — no new endpoint, no new replicated column, no new network boundary. The embedding runtime is **onnxruntime-web (WASM)** — its `.wasm` files ship inside `node_modules` in the release tarball, so there is **no per-platform native binary to fetch** and it runs cross-platform (Intel x64 and Apple Silicon alike). onnxruntime-node ships no macOS x64 binary at ≥1.20 and prod is an Intel x64 box, which is why the runtime is WASM, not native; a pnpm patch lets onnxruntime-node import gracefully when its native `bin/` is absent (it's stripped/unused), so transformers' tokenizer still imports cross-platform. The **only** assets fetched during `friday update`/setup are the quantized ONNX model + tokenizer (~30MB, under `<FRIDAY_DATA_DIR>/models/`); when they're missing, `embedText` returns `null` and `searchMemories` degrades to FTS-only, so the daemon still boots and recall still works (just without the semantic signal). The pgvector extension is the one part that must succeed (`ensureVectorExtension()` fails loud) because the `embedding` column's type depends on it.
 
 ## ADR-027 — Path to production: prod-mode-by-default, dev as pnpm wrappers, port surgery
 

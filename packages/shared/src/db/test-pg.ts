@@ -146,6 +146,23 @@ export async function createTestDb(opts?: {
 }
 
 async function applyMigrationsToScratch(url: string): Promise<void> {
+  // FRI-24: the `vector` extension must exist before migrations run —
+  // 0036's `ADD COLUMN embedding vector(384)` depends on the type. In
+  // production the extension is created via an admin (OS-superuser)
+  // connection in pg-provision's ensureVectorExtension (the friday role
+  // isn't superuser and pgvector 0.8.2 isn't trusted). The scratch URL
+  // connects as the OS user — which IS the Homebrew-PG superuser — so we
+  // can CREATE EXTENSION directly here before reusing the prod migrator.
+  {
+    const ext = newTestClient({ connectionString: url });
+    await ext.connect();
+    try {
+      await ext.query(`CREATE EXTENSION IF NOT EXISTS vector`);
+    } finally {
+      await ext.end();
+    }
+  }
+
   // Reuse the production migration runner so the scratch schema is
   // structurally identical. Locate the journal relative to this
   // module's location (dist/db/test-pg.js → ../../drizzle).

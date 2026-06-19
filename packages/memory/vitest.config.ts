@@ -2,6 +2,9 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // *.e2e.test.ts are heavy real-fork suites — excluded from the unit run
+    // (pnpm test), exercised via `pnpm test:e2e` (vitest.e2e.config.ts).
+    exclude: ["**/node_modules/**", "**/dist/**", "**/*.e2e.test.ts"],
     setupFiles: ["../shared/src/test/vitest-setup.ts"],
     globalSetup: ["../shared/src/test/global-setup.ts"],
     // Connection-budget cap — see packages/shared/vitest.config.ts.
