@@ -50,6 +50,29 @@ same overlay band — don't invent a bespoke floating chrome per surface. The
 pill's visibility is derived from a scroll/`IntersectionObserver` signal, never
 from a manual toggle.
 
+## Heatmap calendar (contribution grid)
+
+The GitHub-contribution-style square grid is a single reusable component:
+`$lib/components/Heatmap/HeatmapCalendar.svelte` (geometry in the sibling
+`heatmap.ts`). It owns the week-column layout, the **month labels above the
+columns**, the Mon/Wed/Fri day labels, the per-cell **date hover tooltip**
+(bits-ui), horizontal scroll, and an optional `legend` snippet. It is
+colour-agnostic: each caller passes `resolve(iso, date) => { className, style,
+tooltip }`, so the cell fills stay caller-owned (define them as `:global(...)`
+in the calling component). The base `.hm-cell` resets the `<button>` border;
+callers that want an outline use an inset `box-shadow` rather than a `border`
+so the square stays full-size.
+
+Two callers today:
+
+- `Dashboard/ActivityGrid.svelte` — turn volume on a quartile ramp
+  (`--grid-l1..l4`), with a Less→More legend.
+- `Habits/HabitCalendar.svelte` — per-habit hue (`var(--habit-N)` at graded
+  alpha), plus a slashed "missed scheduled day" cell, 12px cells, no legend.
+
+Any new contribution-style grid should adapt `HeatmapCalendar` via `resolve`
+rather than re-deriving week columns or re-implementing month labels.
+
 ## Agent-type glyphs (sidebar)
 
 The Sidebar renders each agent's type as a Lucide glyph, color-tinted

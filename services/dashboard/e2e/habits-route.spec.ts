@@ -6,7 +6,8 @@
  *      headline as exact text (here "3 month streak") and a square strip
  *      (>= 1 `.habit-square` Slot square);
  *   2. expanding that habit's detail renders a full Sun→Sat calendar grid
- *      built from the `ag-cell` square visual language (>= 1 `.ag-cell` node).
+ *      built on the reusable HeatmapCalendar (>= 1 `.hm-cell` node) with
+ *      month labels above the columns (>= 1 `.hm-month` node).
  *
  * Seeds one active MONTH-Period, target=1 habit plus four Check-ins — one in
  * each of the three prior calendar months and one in the current month — so
@@ -131,7 +132,7 @@ function midMonth(now: Date, monthsBack: number): Date {
 }
 
 test.describe("FRI-169 AC16: /habits route", () => {
-  test("summary row shows the numeric streak + square strip, detail shows a Sun-Sat ag-cell grid", async ({
+  test("summary row shows the numeric streak + square strip, detail shows a Sun-Sat hm-cell grid + month labels", async ({
     browser,
   }) => {
     const env = loadEnv();
@@ -187,12 +188,14 @@ test.describe("FRI-169 AC16: /habits route", () => {
     //     Period's filled quota square).
     await expect(habitItem.locator(".habit-square").first()).toBeVisible();
 
-    // 2. Expanding the detail renders the Sun→Sat calendar built from the
-    //    ag-cell square language.
+    // 2. Expanding the detail renders the Sun→Sat calendar built on the
+    //    reusable HeatmapCalendar (`.hm-cell` square language).
     await habitItem.getByRole("button", { name: `Expand ${habitName}` }).click();
-    await expect(habitItem.locator(".ag-cell").first()).toBeVisible({ timeout: 15_000 });
+    await expect(habitItem.locator(".hm-cell").first()).toBeVisible({ timeout: 15_000 });
     // The detail grid is a substantial calendar, not a stray single cell.
-    expect(await habitItem.locator(".ag-cell").count()).toBeGreaterThan(7);
+    expect(await habitItem.locator(".hm-cell").count()).toBeGreaterThan(7);
+    // The month labels above the columns are the requested follow-up feature.
+    expect(await habitItem.locator(".hm-month").count()).toBeGreaterThan(0);
 
     const realErrors = consoleErrors.filter((e) => !e.startsWith("Failed to load resource:"));
     expect(realErrors, `Unexpected JS errors: ${realErrors.join("\n")}`).toEqual([]);
