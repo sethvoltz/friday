@@ -129,4 +129,19 @@ describe.skipIf(skip)("FRI-169 habit store (scratch PG)", () => {
     expect(updated!.updatedAt.getTime()).toBeGreaterThanOrEqual(h.updatedAt.getTime());
     expect(await store.updateHabit("no-such-id", { name: "x" })).toBeNull();
   });
+
+  it("updateHabit clears days_of_week when period changes away from 'day' (orthogonality guard, no 400)", async () => {
+    const h = await store.createHabit({
+      name: "weekday-meds",
+      mode: "ongoing",
+      period: "day",
+      daysOfWeek: 0b0101010, // Mon/Wed/Fri
+    });
+    expect(h.daysOfWeek).toBe(0b0101010);
+    // Changing to a month-Period WITHOUT explicitly nulling the mask must succeed
+    // (period wins; the mask is auto-cleared) rather than violating the check constraint.
+    const updated = await store.updateHabit(h.id, { period: "month" });
+    expect(updated?.period).toBe("month");
+    expect(updated?.daysOfWeek).toBeNull();
+  });
 });

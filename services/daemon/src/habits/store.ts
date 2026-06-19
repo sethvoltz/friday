@@ -124,6 +124,10 @@ export async function updateHabit(id: string, patch: UpdateHabitInput): Promise<
   if (patch.period !== undefined) set.period = patch.period;
   if (patch.target !== undefined) set.target = patch.target;
   if (patch.daysOfWeek !== undefined) set.daysOfWeek = patch.daysOfWeek;
+  // A weekday mask is only meaningful for a day-Period (the habits_days_of_week_period_check
+  // constraint enforces this). Changing period away from 'day' must clear the mask, or the
+  // UPDATE would violate the constraint — so period wins over a now-meaningless mask.
+  if (patch.period !== undefined && patch.period !== "day") set.daysOfWeek = null;
   if (patch.bucket !== undefined) set.bucket = patch.bucket;
   if (patch.colorIndex !== undefined) set.colorIndex = patch.colorIndex;
   if (patch.windowStart !== undefined) set.windowStart = patch.windowStart;
