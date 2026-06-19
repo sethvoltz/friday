@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.28.0](https://github.com/sethvoltz/friday/compare/v1.27.0...v1.28.0) (2026-06-19)
+
+
+### Features
+
+* **cli:** dependency preflight gate + `friday provision`; update execs new binary's provisioner (ADR-044) ([#295](https://github.com/sethvoltz/friday/issues/295)) ([b30c98a](https://github.com/sethvoltz/friday/commit/b30c98a42790d7aebf81cd1ec87a37fcf9c67024))
+
 ## [1.27.0](https://github.com/sethvoltz/friday/compare/v1.26.0...v1.27.0) (2026-06-19)
 
 
