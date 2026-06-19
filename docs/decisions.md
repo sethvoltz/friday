@@ -1519,42 +1519,6 @@ ADR-039's bug needs a scrollable document behind the inner scroller. Here the bo
 - **Inner scroller WITHOUT body-lock:** reopens the exact ADR-039 touch-routing fight.
 - **Dismiss the keyboard on scroll** (an early spike): rejected outright — scrolling up to read while composing is the core chat gesture.
 
-## ADR-040 — Soft-keyboard geometry: fixed chat bars anchor to the visual viewport's edges via one focus-gated tracker
-
-**Status:** accepted (2026-06-10)
-
-### Context
-
-ADR-039 made the document the chat scroller, with the header, agent dropdown, composer, and pills as `position: fixed` bars. `position: fixed` anchors to the **layout viewport**, and the iOS soft keyboard's interaction with the layout viewport is both regime-dependent and (on iOS 26.5) partially misreported. Five successive fix commits (#220, #222, #224, #228, #230) each patched one symptom with a different formula or listener set and regressed another; this ADR's model was then itself iterated four times against **on-device telemetry** (geometry snapshots posted through `/api/_diag/client-error`, cross-checked against the composer's measured `getBoundingClientRect` and a `?kbdebug` probe ladder photographed on the device).
-
-Established facts (iOS 26.5 Safari, bottom URL bar):
-
-- Keyboard open in a tab starts as an **overlay** (`innerHeight` full, `vv.height` shrinks, vv pans for the focused-field reveal), then on scroll iOS **shrinks** `innerHeight` to ≈ `vv.height` and parks the layout viewport at the focus-time scroll position; further scrolling pans the vv **beyond the layout viewport's bottom** (`offsetTop + vv.height > innerHeight`). That is real renderable geometry — fixed elements positioned past `innerHeight` paint there.
-- **`vv.offsetTop` is the only honest pan source.** `vv.pageTop` mirrors `scrollY` and drops the pan (rect-verified in every captured sample). In the standalone PWA the layout viewport resizes and `offsetTop` stays ≈ 0.
-- Platform escape hatches absent: no `interactive-widget` on iOS (WebKit #259770), no VirtualKeyboard API / `env(keyboard-inset-height)` (WebKit #230225), `dvh` is spec-blind to the keyboard, `position: sticky` is layout-viewport-anchored like fixed.
-
-### Decision
-
-One tracker (`$lib/util/keyboard-inset.ts`, dependency-injected, with stateful unit tests that replay the captured device telemetry as fixtures) owns all soft-keyboard geometry. Full model in `docs/mobile-ux.md`; the essence:
-
-- **Presence is focus-derived, geometry is visualViewport-derived.** While a text-entry element is focused: `--vv-top-y = vv.offsetTop` (raw, unclamped) anchors the header and agent dropdown under the vv's top edge; `--vv-bottom-y = vv.offsetTop + vv.height` anchors the composer's bottom on the vv's bottom edge (`top:` + `translateY(-100%)`); `--kb-inset = max(0, innerHeight − vv.height)` (pan-free, scroll-stable) pads the transcript's scroll headroom. No field focused → vars cleared, zero keyboard JS influence.
-- Re-measures on `vv.resize` + `vv.scroll` + `window.resize`, rAF-coalesced, change-guarded, with timed post-focus settle probes; no transitions on anchors (they smear corrections into visible sliding). The tracker also owns the `keyboard-open` class (zeroes `--kb-safe-bottom`) and the WebKit #297779 post-dismissal wiggle. ChatShell's bottom re-pin is windowed to 1.6s after focus so regime-flip resize events mid-scroll can't yank the viewport.
-
-### Consequences
-
-- Header, dropdown, and composer stay on-screen and keyboard-adjacent through keyboard-up scrolling in both Safari-tab regimes, the standalone PWA, and Android; the unit suite replays each captured device state.
-- **Accepted platform ceiling (Safari tab):** in the parked first-tap state, iOS's claimed `vv.height` under-reports the truly visible area by an unexposed chrome allowance (~100–200px; CSSWG #7475). The composer sits exactly at the claimed boundary, which can leave a visible gap above the keyboard chrome. Photographically verified to be iOS's claim, not our math; no magic-constant compensation (it would rot with every iOS point release). The standalone PWA — the primary mobile mode — is unaffected.
-- `?kbdebug` (HUD + probe ladder) is kept as a documented diagnostic; dev builds also post geometry snapshots to the dashboard JSONL. When WebKit ships `interactive-widget` (#259770) or fixes its viewport reporting, the tracker degrades gracefully and becomes deletable.
-
-### Rejected alternatives
-
-- **One-shot measurement on `focusin`** (the #230 state): reads pre-keyboard geometry; structurally wrong in every regime.
-- **Pan from `pageTop − scrollY`** ("by definition" equal to offsetTop): pageTop drops the pan on iOS 26.5; froze the anchors. Rect-verification decided this, not spec text.
-- **Clamping the pan to `innerHeight − vv.height`:** the shrunk regime's beyond-the-layout pan is real; clamping threw every bar off the top of the screen.
-- **Sticky/monotonic padding inset:** held overlay-sized padding into the shrunk regime, rendering as an ever-growing blank band that eventually filled the screen.
-- **Dismissing the keyboard on scroll:** rejected outright — scrolling up to read while composing is the core chat gesture.
-- **`position: sticky` composer; counter-translate-on-every-frame without focus gating; inner-scroller app shell:** the first two fail as documented above; the app shell (how every major chat product avoids this class entirely) remains the documented fallback if the Safari-tab ceiling proves unacceptable in practice — it would reopen ADR-039 deliberately.
-
 ## ADR-042 — `friday start` reconciles the Cloudflare tunnel to a serve-intent flag; restore stages dark (split-brain guard)
 
 **Status:** accepted (2026-06-11). FRI-166.
