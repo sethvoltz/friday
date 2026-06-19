@@ -31,6 +31,7 @@ import type { AgentTypeName, EvolveTaskName, ModelConfig } from "@friday/shared"
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
 import { awaitMutatorServer, type SendUserMessageOutcome } from "./mutator-result";
 import { reconcileWakeLock } from "./wake-lock.svelte";
+import { randomUUID } from "../util/uuid";
 
 export type { SendUserMessageOutcome };
 
@@ -228,6 +229,40 @@ export interface ZeroAppRow {
   meta_json: Record<string, unknown> | null;
 }
 
+/** Row shape mirrors the `habits` Zero table definition (FRI-169).
+ *  Snake_case keys, epoch-millis `number` timestamps — the streak engine
+ *  in `@friday/shared/habits` wants camelCase + `Date`, so any caller of
+ *  `computeStreak`/`resolveSlots` MUST project this row through the single
+ *  adapter helper (it does NOT consume `ZeroHabitRow` directly). */
+export interface ZeroHabitRow {
+  id: string;
+  name: string;
+  description: string | null;
+  mode: "ongoing" | "bounded";
+  target: number;
+  period: "day" | "week" | "month" | "year";
+  /** Weekday bitmask (Sun=bit0 … Sat=bit6); only meaningful for period='day'. */
+  days_of_week: number | null;
+  bucket: "morning" | "afternoon" | "evening" | "anytime" | null;
+  color_index: number | null;
+  /** Bounded-mode window bounds, epoch-millis; null for ongoing habits. */
+  window_start: number | null;
+  window_end: number | null;
+  status: "active" | "archived" | "completed" | "expired";
+  created_at: number;
+  updated_at: number;
+}
+
+/** Row shape mirrors the `habit_checkins` Zero table definition (FRI-169).
+ *  Append-only Check-in log; `ts` / `created_at` are epoch-millis. */
+export interface ZeroHabitCheckinRow {
+  id: string;
+  habit_id: string;
+  ts: number;
+  note: string | null;
+  created_at: number;
+}
+
 interface RefreshResponse {
   token: string;
   deviceId: string;
@@ -370,6 +405,15 @@ class ZeroSyncStore {
 
   /** Live apps rows from Zero (Phase 3.4). */
   apps = $state<ZeroAppRow[]>([]);
+
+  /** Live habit rows from Zero (FRI-169). Powers the dashboard Today
+   *  card + /habits route; check-offs and edits reflect live so the
+   *  derived Streak recomputes without a reload. */
+  habits = $state<ZeroHabitRow[]>([]);
+
+  /** Live habit_checkins rows from Zero (FRI-169). The append-only
+   *  Check-in log the Streak is derived from on read. */
+  habitCheckins = $state<ZeroHabitCheckinRow[]>([]);
 
   /** Live read_cursors rows from Zero (Phase 4.1). All devices for
    *  the current user — the per-device unread derivation filters
@@ -672,6 +716,8 @@ class ZeroSyncStore {
       this.#bindSchedules();
       this.#bindMemory();
       this.#bindApps();
+      this.#bindHabits();
+      this.#bindHabitCheckins();
       this.#bindMail();
       this.#bindReadCursors();
       this.#bindClientDevices();
@@ -905,6 +951,45 @@ class ZeroSyncStore {
     const update = (data: readonly unknown[]): void => {
       const rows = data as readonly ZeroScheduleRow[];
       this.schedules = rows as ZeroScheduleRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  #bindHabits(): void {
+    if (!this.#zero) return;
+    // FRI-169: every habit row (active + archived/completed/expired);
+    // the /habits route lists terminal habits de-emphasized below the
+    // active ones, so the binding is unfiltered and the UI partitions
+    // by `status` client-side.
+    const query = this.#zero!.query.habits;
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      this.habits = data as ZeroHabitRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  #bindHabitCheckins(): void {
+    if (!this.#zero) return;
+    // FRI-169: the append-only Check-in log. The Streak engine derives
+    // state on read from this set, so it must reflect optimistic
+    // check-offs (via the `habitCheckin` mutator) and their undo live.
+    const query = this.#zero!.query.habit_checkins;
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      this.habitCheckins = data as ZeroHabitCheckinRow[];
     };
     update(view.data as readonly unknown[]);
     view.addListener((data) => update(data as readonly unknown[]));
@@ -1657,6 +1742,37 @@ class ZeroSyncStore {
   triggerSchedule(args: { name: string }): MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero!.mutate.triggerSchedule({ ...args, ts: Date.now() });
+  }
+
+  /**
+   * FRI-169: habit Check-in mutators (the optimistic, latency-sensitive
+   * write path — like `triggerSchedule`). CRUD (create/update/archive)
+   * goes through the daemon `/api/habits*` routes, not these.
+   *
+   * `habitCheckin` INSERTs one append-only Check-in. The caller passes
+   * the snake_case `habit_id` from the Zero row; `id` (a fresh uuid) and
+   * `ts` (epoch-millis) default here so a check-off site can call
+   * `habitCheckin({ habit_id })`. A past `ts` backdates the Check-in.
+   */
+  habitCheckin(args: {
+    habit_id: string;
+    id?: string;
+    ts?: number;
+    note?: string;
+  }): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.habitCheckin({
+      id: args.id ?? randomUUID(),
+      habitId: args.habit_id,
+      ts: args.ts ?? Date.now(),
+      note: args.note,
+    });
+  }
+
+  /** FRI-169: undo a single Check-in by its row id (the only delete). */
+  habitCheckinUndo(args: { id: string }): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.habitCheckinUndo({ id: args.id });
   }
 
   /**

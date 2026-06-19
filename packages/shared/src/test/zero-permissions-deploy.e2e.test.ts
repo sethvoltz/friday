@@ -7,7 +7,7 @@
  *   - AC #2 (direct probe of the deploy step): after a non-skip
  *     `spawnTestSyncEnv`, the scratch DB's `zero.permissions` row is
  *     deployed with the full permissions set — non-NULL, contains the
- *     `agents` table key, and covers all 15 tables.
+ *     `agents` table key, and covers all 17 tables.
  *
  *   - AC #5, half 1 (deploy runs exactly once per non-skip boot): the
  *     `zeroDeployInvocations` counter is exactly 1 after a single
@@ -61,7 +61,7 @@ afterAll(async () => {
 
 describe("FRI-129: sync-harness deploys Zero permissions", () => {
   it(
-    "AC#2: deploys the full permissions set to zero.permissions (non-NULL, agents key, 15 tables)",
+    "AC#2: deploys the full permissions set to zero.permissions (non-NULL, agents key, 17 tables)",
     async () => {
       const c = newTestClient({ connectionString: env.databaseUrl });
       await c.connect();
@@ -82,7 +82,8 @@ describe("FRI-129: sync-harness deploys Zero permissions", () => {
              FROM jsonb_object_keys((SELECT permissions->'tables' FROM zero.permissions))`,
         );
         // node-postgres returns count() as a string; compare numerically.
-        expect(Number(keyCount.rows[0]!.key_count)).toBe(15);
+        // 15 base tables + habits + habit_checkins (FRI-169) = 17.
+        expect(Number(keyCount.rows[0]!.key_count)).toBe(17);
       } finally {
         await c.end();
       }

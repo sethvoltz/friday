@@ -78,6 +78,20 @@
   --grid-l3: #b07840;
   --grid-l4: #8b5e2e;
 
+  /* Habit color ramp — the 7 colors a Habit's color-index (1–7) resolves
+     to. ROYGBIV harmonized to Dawn's warm light language: earthy, slightly
+     muted hues (not raw spectrum primaries) that read as legible small
+     filled squares on Dawn's near-white card surfaces. --habit-empty is the
+     unfilled-Slot outline/fill (an empty Slot square, not yet missed). */
+  --habit-empty: #e0d5c7;
+  --habit-1: #c0504a; /* red */
+  --habit-2: #d2823a; /* orange */
+  --habit-3: #c79a32; /* amber-yellow */
+  --habit-4: #5a8a5e; /* green */
+  --habit-5: #3f8aa6; /* blue */
+  --habit-6: #5a64b0; /* indigo */
+  --habit-7: #9265b0; /* violet */
+
   --shadow-sm: 0 1px 3px rgba(44, 36, 24, 0.06);
   --shadow-md: 0 4px 12px rgba(44, 36, 24, 0.08);
   --shadow-lg: 0 8px 24px rgba(44, 36, 24, 0.1);
@@ -158,6 +172,19 @@
   --grid-l2: #1a60b0;
   --grid-l3: #3b8edd;
   --grid-l4: #7bb8f0;
+
+  /* Habit color ramp — ROYGBIV tuned for Dusk's cool dark surfaces: each
+     hue is brightened and slightly desaturated so it reads clearly as a
+     small filled square against the deep-blue cards. --habit-empty is the
+     unfilled-Slot square (matches the dark grid-empty off-pixel). */
+  --habit-empty: #1d2330;
+  --habit-1: #ef6b6b; /* red */
+  --habit-2: #f0954e; /* orange */
+  --habit-3: #e6c44e; /* yellow */
+  --habit-4: #5fc77a; /* green */
+  --habit-5: #5b9fe6; /* blue */
+  --habit-6: #8b8ef0; /* indigo */
+  --habit-7: #c08fe6; /* violet */
 
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.2);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);
@@ -246,6 +273,22 @@
   --grid-l2: #1ea81e;
   --grid-l3: #2dd62d;
   --grid-l4: #33ff33;
+
+  /* Habit color ramp — Phosphor is a green-monochrome CRT, so the Habit
+     color contract is REINTERPRETED here: the 1–7 index maps to 7
+     distinguishable shades of green rather than ROYGBIV. Seven steps from
+     deep to bright phosphor, with slight teal→chartreuse hue drift so each
+     reads as a distinct small square on the near-black cards rather than
+     blurring into a pure-lightness gradient. --habit-empty is the
+     unfilled-Slot off-pixel square. */
+  --habit-empty: #0a140a;
+  --habit-1: #0f5230; /* deep teal-green */
+  --habit-2: #157a28; /* forest green */
+  --habit-3: #1ea81e; /* mid phosphor */
+  --habit-4: #33d633; /* bright phosphor */
+  --habit-5: #5cff5c; /* glowing green */
+  --habit-6: #8cff66; /* yellow-green */
+  --habit-7: #c0ff4d; /* chartreuse phosphor */
 
   /* Phosphor glow shadows — green halo instead of a black drop. This is
      the palette's tell. */

@@ -82,6 +82,10 @@ Who can spawn whom:
 | scheduled             | 🔒 evolve carve-out | ✅ (reason) | ❌   | ✅ (reason) | n/a        |
 | planner               | ❌                  | ❌          | ❌   | ❌          | n/a        |
 
+### Habits & streaks
+
+- **Habit tracking with streaks, as a first-class surface.** Define recurring habits — daily, specific weekdays, or a quota per week/month/year ("20 workouts a month", "one blog post a month") — and check them off from a Today card on the dashboard or from any agent via the core `friday-habit` MCP. Streaks are computed on read (consecutive satisfied periods, never a stored counter that goes stale at midnight) and shown as filled-square strips in a per-habit color drawn from a 7-stop palette ramp. A `/habits` route gives a Sun–Sat calendar history and manages **ongoing** habits alongside **bounded** ones ("run a 5K every day in June"), which auto-archive as completed or expired when their window closes. Separate from tasks and reminders by design — a reminder _about_ a habit is just a reminder you set independently.
+
 ### Friday Apps
 
 - **Folder-as-app**, one tool call to install. An app at `~/.friday/apps/<id>/` is a manifest plus optional prompt overlays, optional stdio MCP servers, and an optional `.env` for app-scoped secrets. Friday's installer registers the app's agents and schedules, scopes the MCP servers to those agents only, and runs each app's workers with the app folder as `cwd`.

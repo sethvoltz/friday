@@ -106,6 +106,20 @@ import {
   upsertSchedule,
 } from "../scheduler/scheduler.js";
 import { readScheduleArtifacts } from "../scheduler/state.js";
+import {
+  archiveHabit,
+  createHabit,
+  deleteCheckin,
+  getHabit,
+  insertCheckin,
+  listCheckins,
+  listHabits,
+  updateHabit,
+  type CreateHabitInput,
+  type HabitFilter,
+  type UpdateHabitInput,
+} from "../habits/store.js";
+import { withStreak } from "../habits/streak.js";
 import * as registry from "../agent/registry.js";
 import {
   computeSpawnDepth,
@@ -666,6 +680,121 @@ async function handle(
     const ok = await deleteSchedule(name);
     if (!ok) return json(res, 404, { error: "schedule not found" });
     return json(res, 200, { ok: true });
+  }
+
+  // --- Habits (FRI-169) ---
+  // Same loopback-bound, secret-header contract as /api/schedules above
+  // (no inline guard; the server binds 127.0.0.1 and daemonFetch injects the
+  // secret). The MCP `friday-habit` tools and the dashboard's management
+  // writes POST here; the Streak is derived on read via withStreak (now is
+  // injected at this boundary so the engine stays pure). Dynamic <id> /
+  // <checkinId> segments are matched by regex + path.split, mirroring the
+  // schedules routes — there is no express :param matcher.
+  //
+  // Order matters: the more-specific /checkin/<id>, /<id>/checkin and
+  // /<id>/archive paths are matched BEFORE the bare /<id> branches so the
+  // catch-all <id> regex doesn't swallow them.
+  if (method === "POST" && path === "/api/habits") {
+    // Raw body: window_* arrive as ISO strings over the wire (the store takes
+    // Date). Everything else maps straight onto CreateHabitInput.
+    const body = await readJson<
+      Omit<CreateHabitInput, "windowStart" | "windowEnd"> & {
+        windowStart?: string | null;
+        windowEnd?: string | null;
+      }
+    >(req);
+    if (!body?.name || !body?.mode || !body?.period) {
+      return json(res, 400, { error: "name, mode, and period are required" });
+    }
+    try {
+      const habit = await createHabit({
+        name: body.name,
+        mode: body.mode,
+        period: body.period,
+        target: body.target,
+        description: body.description,
+        daysOfWeek: body.daysOfWeek,
+        bucket: body.bucket,
+        colorIndex: body.colorIndex,
+        windowStart: body.windowStart != null ? new Date(body.windowStart) : null,
+        windowEnd: body.windowEnd != null ? new Date(body.windowEnd) : null,
+      });
+      return json(res, 200, habit);
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (method === "GET" && path === "/api/habits") {
+    const filterParam = url.searchParams.get("filter");
+    const filter: HabitFilter = filterParam === "archived" ? "archived" : "active";
+    const habits = await listHabits(filter);
+    const now = new Date();
+    const withStreaks = await Promise.all(
+      habits.map(async (h) => withStreak(h, await listCheckins(h.id), now)),
+    );
+    return json(res, 200, withStreaks);
+  }
+  // DELETE one Check-in by id (habit_checkin_undo — the single allowed delete).
+  // Matched before /api/habits/<id> so "checkin" isn't read as a habit id.
+  if (method === "DELETE" && /^\/api\/habits\/checkin\/[^/]+$/.test(path)) {
+    const checkinId = decodeURIComponent(path.split("/")[4]);
+    const removed = await deleteCheckin(checkinId);
+    if (!removed) return json(res, 404, { error: "check-in not found" });
+    return json(res, 200, { ok: true });
+  }
+  // POST a Check-in for a habit (append-only insert).
+  if (method === "POST" && /^\/api\/habits\/[^/]+\/checkin$/.test(path)) {
+    const id = decodeURIComponent(path.split("/")[3]);
+    if (!(await getHabit(id))) return json(res, 404, { error: "habit not found" });
+    const body = await readJson<{ ts?: string; note?: string | null }>(req);
+    const checkin = await insertCheckin(id, {
+      ts: body?.ts != null ? new Date(body.ts) : undefined,
+      note: body?.note ?? null,
+    });
+    return json(res, 200, checkin);
+  }
+  // POST archive a habit (status='archived'; preserve data, never delete).
+  if (method === "POST" && /^\/api\/habits\/[^/]+\/archive$/.test(path)) {
+    const id = decodeURIComponent(path.split("/")[3]);
+    const habit = await archiveHabit(id);
+    if (!habit) return json(res, 404, { error: "habit not found" });
+    return json(res, 200, habit);
+  }
+  // GET one habit: live streak/progress + recent Check-ins (habit_status).
+  if (method === "GET" && /^\/api\/habits\/[^/]+$/.test(path)) {
+    const id = decodeURIComponent(path.split("/")[3]);
+    const habit = await getHabit(id);
+    if (!habit) return json(res, 404, { error: "habit not found" });
+    const checkins = await listCheckins(id);
+    const decorated = withStreak(habit, checkins, new Date());
+    return json(res, 200, { ...decorated, checkins });
+  }
+  // PATCH a habit definition (bumps updated_at).
+  if (method === "PATCH" && /^\/api\/habits\/[^/]+$/.test(path)) {
+    const id = decodeURIComponent(path.split("/")[3]);
+    // Raw body: window_* arrive as ISO strings over the wire and are parsed
+    // to Date here; the rest map straight through to the patch.
+    const body = await readJson<
+      Omit<UpdateHabitInput, "windowStart" | "windowEnd"> & {
+        windowStart?: string | null;
+        windowEnd?: string | null;
+      }
+    >(req);
+    const { windowStart, windowEnd, ...rest } = body;
+    const patch: UpdateHabitInput = { ...rest };
+    if (windowStart !== undefined) {
+      patch.windowStart = windowStart != null ? new Date(windowStart) : null;
+    }
+    if (windowEnd !== undefined) {
+      patch.windowEnd = windowEnd != null ? new Date(windowEnd) : null;
+    }
+    try {
+      const habit = await updateHabit(id, patch);
+      if (!habit) return json(res, 404, { error: "habit not found" });
+      return json(res, 200, habit);
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   // --- Memory ---

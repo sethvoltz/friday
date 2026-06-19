@@ -6,6 +6,10 @@
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import { fmtTokensCompact } from "$lib/util/format";
   import { agentIconFor } from "$lib/util/agent-icon";
+  import { zeroSync } from "$lib/stores/zero.svelte";
+  import { isExpectedToday, bucketKey } from "$lib/habits/adapt";
+  import HabitCheckButton from "$lib/components/Habits/HabitCheckButton.svelte";
+  import type { ZeroHabitRow, ZeroHabitCheckinRow } from "$lib/habits/adapt";
   import type { PageData } from "./$types";
 
   let { data }: { data: PageData } = $props();
@@ -195,6 +199,96 @@
   const stateFiles = $derived(data.stateFiles ?? []);
   let activeFileTab = $state(0);
   const activeFile = $derived(stateFiles[activeFileTab]);
+
+  // FRI-169 — Today card. Live habit rows + Check-ins from Zero
+  // (zeroSync.habits / zeroSync.habitCheckins are unconditional reactive
+  // bindings), grouped by Time-of-day bucket. We show only habits that are
+  // EXPECTED today (active + scheduled by cadence/days_of_week/window) via
+  // the adapter's isExpectedToday — never compute streaks by hand here.
+  const nowDate = new Date(now);
+
+  // The four buckets in their fixed display order; null bucket -> "anytime".
+  type Bucket = "morning" | "afternoon" | "evening" | "anytime";
+  const BUCKET_ORDER: Bucket[] = ["morning", "afternoon", "evening", "anytime"];
+  const BUCKET_LABELS: Record<Bucket, string> = {
+    morning: "Morning",
+    afternoon: "Afternoon",
+    evening: "Evening",
+    anytime: "Anytime",
+  };
+
+  // Check-ins indexed by habit so each control sees only its own log.
+  const checkinsByHabit = $derived.by(() => {
+    const out = new Map<string, ZeroHabitCheckinRow[]>();
+    for (const c of zeroSync.habitCheckins as ZeroHabitCheckinRow[]) {
+      const list = out.get(c.habit_id);
+      if (list) list.push(c);
+      else out.set(c.habit_id, [c]);
+    }
+    return out;
+  });
+
+  // Today's expected habits grouped by bucket, in display order. Empty
+  // buckets are dropped so the card renders only the groups with work due.
+  const todayGroups = $derived.by(() => {
+    const expected = (zeroSync.habits as ZeroHabitRow[]).filter((h) =>
+      isExpectedToday(h, nowDate),
+    );
+    const byBucket = new Map<Bucket, ZeroHabitRow[]>();
+    for (const h of expected) {
+      const b = bucketKey(h) as Bucket;
+      const list = byBucket.get(b);
+      if (list) list.push(h);
+      else byBucket.set(b, [h]);
+    }
+    return BUCKET_ORDER.filter((b) => byBucket.has(b)).map((b) => ({
+      bucket: b,
+      label: BUCKET_LABELS[b],
+      habits: byBucket.get(b)!,
+    }));
+  });
+
+  const todayHabitCount = $derived(
+    todayGroups.reduce((n, g) => n + g.habits.length, 0),
+  );
+
+  // Per-habit busy flags so an in-flight optimistic write disables just its
+  // own control (keyed by habit id).
+  let habitBusy = $state<Record<string, boolean>>({});
+
+  function habitCheckins(habitId: string): ZeroHabitCheckinRow[] {
+    return checkinsByHabit.get(habitId) ?? [];
+  }
+
+  // Check the habit off: INSERT one Check-in via the Zero mutator (the
+  // wrapper supplies a fresh uuid + ts=Date.now()). Optimistic — the live
+  // binding reflects it without a refetch.
+  async function checkOff(habit: ZeroHabitRow) {
+    if (habitBusy[habit.id]) return;
+    habitBusy = { ...habitBusy, [habit.id]: true };
+    try {
+      const result = zeroSync.habitCheckin({ habit_id: habit.id });
+      await result?.server;
+    } finally {
+      habitBusy = { ...habitBusy, [habit.id]: false };
+    }
+  }
+
+  // Undo today's check-off: delete the most recent Check-in for this habit
+  // (the one the user just added) via the single-row undo mutator.
+  async function undoCheckOff(habit: ZeroHabitRow) {
+    if (habitBusy[habit.id]) return;
+    const mine = habitCheckins(habit.id);
+    if (mine.length === 0) return;
+    const latest = mine.reduce((a, b) => (b.ts > a.ts ? b : a));
+    habitBusy = { ...habitBusy, [habit.id]: true };
+    try {
+      const result = zeroSync.habitCheckinUndo({ id: latest.id });
+      await result?.server;
+    } finally {
+      habitBusy = { ...habitBusy, [habit.id]: false };
+    }
+  }
 </script>
 
 <svelte:head>
@@ -240,6 +334,41 @@
         <span class="stat-detail">{allStats.turns} total turns</span>
       </div>
     </div>
+  </div>
+
+  <!-- Today (habits due) — FRI-169. Must precede .activity-card (AC15). -->
+  <div class="card today-card" data-testid="today-card">
+    <div class="card-header">
+      <h2>Today</h2>
+      <span class="stat-detail">
+        {todayHabitCount === 0
+          ? "Nothing due"
+          : `${todayHabitCount} due`}
+      </span>
+    </div>
+    {#if todayHabitCount === 0}
+      <p class="empty-state">No habits due today.</p>
+    {:else}
+      <div class="today-groups">
+        {#each todayGroups as group (group.bucket)}
+          <div class="today-group">
+            <span class="today-bucket-label">{group.label}</span>
+            <div class="today-habits">
+              {#each group.habits as habit (habit.id)}
+                <HabitCheckButton
+                  row={habit}
+                  checkins={habitCheckins(habit.id)}
+                  now={nowDate}
+                  busy={habitBusy[habit.id] ?? false}
+                  oncheck={checkOff}
+                  onundo={undoCheckOff}
+                />
+              {/each}
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
   </div>
 
   <!-- Activity Grid -->
@@ -616,6 +745,35 @@
 
   .activity-card {
     padding: 1rem 1.25rem;
+  }
+
+  .today-card {
+    padding: 1rem 1.25rem;
+  }
+
+  .today-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .today-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .today-bucket-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-tertiary);
+  }
+
+  .today-habits {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+    gap: 0.5rem;
   }
 
   .main-grid {

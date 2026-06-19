@@ -425,6 +425,109 @@ export const scheduleRuns = pgTable(
   }),
 );
 
+/* ---------------- Habits (FRI-169) ---------------- */
+// A Habit is a recurring thing the user checks off; a Check-in is one
+// timestamped completion. The Streak (run of consecutive Satisfied
+// periods) is DERIVED ON READ from the habit_checkins log against now()
+// and is never stored — see packages/shared/src/habits/streak.ts.
+//
+// `id` is text-uuid (gen_random_uuid()::text) — NOT bigserial — because
+// the `habitCheckin` Zero mutator does tx.mutate.habit_checkins.insert()
+// and the client must supply the PK at INSERT so the optimistic write and
+// the canonical write land on the same row (same convention as
+// `blocks`:170-172 and `ticket_comments`:299-301). `habits.id` matches
+// for consistency and to keep habit-CRUD-via-mutator open as a future
+// option.
+
+export const habits = pgTable(
+  "habits",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()::text`),
+    name: text("name").notNull(),
+    description: text("description"),
+    // Habit mode (Ongoing|Bounded) — Ongoing never archives on its own;
+    // Bounded runs against a window (window_start/window_end) and archives
+    // completed|expired when the window closes.
+    mode: text("mode").notNull(),
+    // Target: Check-ins required within one Period to satisfy it (default 1).
+    target: integer("target").notNull().default(1),
+    // Period: the recurrence window the Target is measured over.
+    period: text("period").notNull(),
+    // days_of_week: weekday bitmask (Sun=bit0 … Sat=bit6), nullable. Only
+    // meaningful for period='day' (e.g. Mon/Wed/Fri). NULL otherwise — the
+    // orthogonality check() below enforces that invariant.
+    daysOfWeek: integer("days_of_week"),
+    // Time-of-day bucket: optional display/scheduling attribute; metadata
+    // only (NOT a Streak determinant in v1). Nullable.
+    bucket: text("bucket"),
+    // Habit color: stored as an index (1–7), never a hex. The active
+    // Palette supplies the actual color via its --habit-{N} ramp.
+    colorIndex: integer("color_index"),
+    // Bounded-mode window (NULL for Ongoing habits).
+    windowStart: timestamp("window_start", { withTimezone: true }),
+    windowEnd: timestamp("window_end", { withTimezone: true }),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    statusIdx: index("habits_status").on(t.status, t.updatedAt),
+    bucketIdx: index("habits_bucket").on(t.bucket),
+    modeCheck: check("habits_mode_check", sql`${t.mode} IN ('ongoing','bounded')`),
+    periodCheck: check("habits_period_check", sql`${t.period} IN ('day','week','month','year')`),
+    bucketCheck: check(
+      "habits_bucket_check",
+      sql`${t.bucket} IS NULL OR ${t.bucket} IN ('morning','afternoon','evening','anytime')`,
+    ),
+    colorIndexCheck: check(
+      "habits_color_index_check",
+      sql`${t.colorIndex} IS NULL OR ${t.colorIndex} BETWEEN 1 AND 7`,
+    ),
+    statusCheck: check(
+      "habits_status_check",
+      sql`${t.status} IN ('active','archived','completed','expired')`,
+    ),
+    // Orthogonality guard (AC3): days_of_week is only meaningful for a
+    // day-Period habit. Reject a non-null mask on any other period.
+    daysOfWeekPeriodCheck: check(
+      "habits_days_of_week_period_check",
+      sql`${t.daysOfWeek} IS NULL OR ${t.period} = 'day'`,
+    ),
+  }),
+);
+
+// Append-only Check-in log. One row per logged completion. Backdating is
+// supported by accepting a past `ts`. The single allowed mutation beyond
+// INSERT is the `habitCheckinUndo` mutator's single-row DELETE.
+export const habitCheckins = pgTable(
+  "habit_checkins",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()::text`),
+    habitId: text("habit_id")
+      .notNull()
+      .references(() => habits.id),
+    ts: timestamp("ts", { withTimezone: true }).notNull(),
+    note: text("note"),
+    // Server-stamped insert clock. Defaulted via now() so the optimistic
+    // `habitCheckin` Zero mutator (which writes only id/habit_id/ts/note)
+    // and the MCP/daemon HTTP write path both land a valid row without
+    // having to synthesize this value client-side. `ts` (the completion
+    // time, which backdating moves) stays distinct from `created_at` (when
+    // the row was logged). Matches the now()-default convention used by
+    // `secrets_fetch_log.ts` and `_friday_state_migrations.applied_at`.
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    habitTsIdx: index("habit_checkins_habit_ts").on(t.habitId, t.ts),
+  }),
+);
+
 /* ---------------- Apps registry (ADR-021) ---------------- */
 
 export const apps = pgTable(

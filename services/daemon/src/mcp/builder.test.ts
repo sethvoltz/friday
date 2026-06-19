@@ -53,6 +53,7 @@ vi.mock("node:fs", async (importActual) => {
 const { buildMcpServers, resolveStdioCommand, restrictedMcpEnv, MCP_ENV_ALLOWLIST } =
   await import("./builder.js");
 const { REMINDER_SERVER_NAME } = await import("./reminder.js");
+const { HABIT_SERVER_NAME } = await import("./habit.js");
 
 const NODE_PATH = process.execPath;
 const NPX_PATH = join(dirname(process.execPath), "npx");
@@ -295,7 +296,7 @@ describe("buildMcpServers: built-in surface", () => {
   // absent sets) so it stays deliberate rather than accidental. No gate
   // names "planner" — the equality gates above produce this surface for a
   // planner callerType by falling through.
-  it("planner gets exactly echo/mail/memory/reminder/integrations/playwright (FRI-16 AC #10b)", () => {
+  it("planner gets exactly echo/mail/memory/reminder/habit/integrations/playwright (FRI-16 AC #10b; +friday-habit FRI-169 all-caller)", () => {
     const planner = buildMcpServers(baseOpts("planner"));
     expect(Object.keys(planner).sort()).toEqual(
       [
@@ -303,6 +304,7 @@ describe("buildMcpServers: built-in surface", () => {
         "friday-mail",
         "friday-memory",
         "friday-reminder",
+        "friday-habit",
         "friday-integrations",
         "playwright",
       ].sort(),
@@ -819,5 +821,200 @@ describe("buildMcpServers: friday-reminder appId threaded end-to-end (FRI-168 AC
 
     expect(bodies.length).toBe(1);
     expect(bodies[0]!.appId).toBe("kitchen");
+  });
+});
+
+describe("buildMcpServers: friday-habit (FRI-169, AC7 — all-caller registration)", () => {
+  // The MCP SDK keeps registered tools on `instance._registeredTools` (private
+  // but stable across the pinned SDK versions — same accessor the reminder
+  // block above uses).
+  interface ServerLike {
+    instance: { _registeredTools: Record<string, unknown> };
+  }
+  const toolNames = (server: unknown): string[] =>
+    Object.keys((server as ServerLike).instance._registeredTools);
+
+  const ALL_HABIT_TOOLS = [
+    "habit_add",
+    "habit_checkin",
+    "habit_list",
+    "habit_status",
+    "habit_update",
+    "habit_archive",
+    "habit_checkin_undo",
+  ];
+
+  it("is wired for every caller type (orchestrator + builder + helper + scheduled + bare)", () => {
+    for (const t of ["orchestrator", "builder", "helper", "scheduled", "bare"] as const) {
+      const servers = buildMcpServers(baseOpts(t));
+      expect(servers[HABIT_SERVER_NAME]).toBeDefined();
+      expect(servers["friday-habit"]).toBeDefined();
+    }
+  });
+
+  it("exposes all seven habit tools for each caller type", () => {
+    for (const t of ["orchestrator", "builder", "helper", "scheduled", "bare"] as const) {
+      const servers = buildMcpServers(baseOpts(t));
+      expect(toolNames(servers["friday-habit"])).toEqual(expect.arrayContaining(ALL_HABIT_TOOLS));
+    }
+  });
+
+  it("a non-orchestrator (bare) caller gets friday-habit but NOT friday-schedule (orchestrator-only contrast)", () => {
+    const bare = buildMcpServers(baseOpts("bare"));
+    expect(bare["friday-habit"]).toBeDefined();
+    expect(toolNames(bare["friday-habit"])).toEqual(expect.arrayContaining(ALL_HABIT_TOOLS));
+    expect(bare["friday-schedule"]).toBeUndefined();
+  });
+});
+
+describe("buildMcpServers: friday-habit tool contracts (FRI-169, AC8)", () => {
+  interface ToolEntry {
+    description: string;
+    inputSchema: { shape: Record<string, unknown> };
+    handler: (args: unknown, extra: unknown) => Promise<unknown>;
+  }
+  interface ServerLike {
+    instance: { _registeredTools: Record<string, ToolEntry> };
+  }
+  const tools = (): Record<string, ToolEntry> => {
+    const servers = buildMcpServers(baseOpts("orchestrator"));
+    return (servers["friday-habit"] as unknown as ServerLike).instance._registeredTools;
+  };
+  const paramKeys = (t: ToolEntry): string[] => Object.keys(t.inputSchema.shape);
+
+  it("habit_add accepts the full creation param set", () => {
+    expect(paramKeys(tools().habit_add!)).toEqual(
+      expect.arrayContaining([
+        "name",
+        "mode",
+        "period",
+        "target",
+        "description",
+        "daysOfWeek",
+        "bucket",
+        "colorIndex",
+        "windowStart",
+        "windowEnd",
+      ]),
+    );
+  });
+
+  it("habit_checkin accepts {habit, ts?, note?}", () => {
+    expect(paramKeys(tools().habit_checkin!)).toEqual(
+      expect.arrayContaining(["habit", "ts", "note"]),
+    );
+  });
+
+  it("habit_list accepts {filter?}", () => {
+    expect(paramKeys(tools().habit_list!)).toContain("filter");
+  });
+
+  it("habit_status accepts {habit}", () => {
+    expect(paramKeys(tools().habit_status!)).toEqual(["habit"]);
+  });
+
+  it("habit_update accepts a patch keyed by habit id", () => {
+    const keys = paramKeys(tools().habit_update!);
+    expect(keys).toContain("habit");
+    expect(keys).toEqual(
+      expect.arrayContaining(["name", "period", "target", "bucket", "colorIndex"]),
+    );
+  });
+
+  it("habit_archive accepts {habit}", () => {
+    expect(paramKeys(tools().habit_archive!)).toEqual(["habit"]);
+  });
+
+  it("habit_checkin_undo accepts {checkinId}", () => {
+    expect(paramKeys(tools().habit_checkin_undo!)).toEqual(["checkinId"]);
+  });
+
+  it("the habit_checkin description carries the 'only check in' soft-guidance phrase", () => {
+    expect(tools().habit_checkin!.description).toContain("only check in");
+  });
+
+  it("write-tool descriptions steer the caller (habit_add and habit_checkin both carry ownership guidance)", () => {
+    expect(tools().habit_add!.description).toMatch(/only create Habits the user/i);
+    expect(tools().habit_checkin!.description).toContain("only check in");
+  });
+
+  it("every habit handler is (args, extra) and threads the abort signal into daemonFetch", async () => {
+    // Spy fetch; pass an abort signal via `extra` and assert the handler
+    // forwards it (signalFrom(extra)) into the daemon-bound request.
+    const controller = new AbortController();
+    const captured: Array<AbortSignal | undefined> = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        captured.push(init?.signal ?? undefined);
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+    try {
+      const t = tools();
+      // Two arity probes: a write (POST) and a read (GET) tool, both passed
+      // (args, extra) with extra.signal — both must surface the signal.
+      await t.habit_checkin!.handler(
+        { habit: "h1", ts: new Date().toISOString() },
+        { signal: controller.signal },
+      );
+      await t.habit_status!.handler({ habit: "h1" }, { signal: controller.signal });
+      expect(captured.length).toBe(2);
+      expect(captured[0]).toBe(controller.signal);
+      expect(captured[1]).toBe(controller.signal);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe("buildMcpServers: friday-habit appId threaded via explicit options (FRI-169 / FRI-168 trap)", () => {
+  interface ServerLike {
+    instance: {
+      _registeredTools: Record<
+        string,
+        { handler: (args: unknown, extra: unknown) => Promise<unknown> }
+      >;
+    };
+  }
+
+  it("does NOT leak appId into the daemonFetch body (habit tools carry no appId field)", async () => {
+    // friday-habit threads appId via the explicit options object for future
+    // per-app namespacing, but the v1 tools must not smuggle it into the wire
+    // body — assert the POSTed body has no appId key even under an app context.
+    const bodies: Array<Record<string, unknown> | undefined> = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(
+          typeof init?.body === "string"
+            ? (JSON.parse(init.body) as Record<string, unknown>)
+            : undefined,
+        );
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+    try {
+      const servers = buildMcpServers({
+        callerType: "scheduled",
+        callerName: "kitchen",
+        daemonPort: 7444,
+        appContext: { appId: "kitchen", folderPath: "/tmp/x", mcpServers: [] },
+      });
+      const habit = servers[HABIT_SERVER_NAME] as unknown as ServerLike;
+      await habit.instance._registeredTools.habit_add!.handler(
+        { name: "brush teeth", mode: "ongoing", period: "day" },
+        {},
+      );
+      expect(bodies.length).toBe(1);
+      expect(bodies[0]).not.toHaveProperty("appId");
+      expect(bodies[0]).toMatchObject({ name: "brush teeth", mode: "ongoing", period: "day" });
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

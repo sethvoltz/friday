@@ -221,14 +221,17 @@ describe("FRI-24 migration journal integrity (AC4)", () => {
       entries: { idx: number; when: number; tag: string }[];
     };
     const sorted = [...journal.entries].sort((a, b) => a.idx - b.idx);
-    const last = sorted[sorted.length - 1];
-    const prev = sorted[sorted.length - 2];
-    expect(last.tag).toMatch(/^0036_/);
-    expect(typeof last.when).toBe("number");
-    expect(last.when).toBeGreaterThan(prev.when);
-    expect(last.when).toBeLessThan(Date.now());
+    // Target FRI-24's idx-36 entry specifically (do NOT assume it is the last
+    // entry — later migrations, e.g. FRI-169's idx-37 habits migration, append
+    // after it).
+    const entry = sorted.find((e) => e.idx === 36)!;
+    const prev = sorted.find((e) => e.idx === 35)!;
+    expect(entry.tag).toMatch(/^0036_/);
+    expect(typeof entry.when).toBe("number");
+    expect(entry.when).toBeGreaterThan(prev.when);
+    expect(entry.when).toBeLessThan(Date.now());
     // A real Date.now() in ms is not a multiple of 100000 — guards against a
     // fabricated/rounded `when` (the migration-discipline red flag).
-    expect(last.when % 100000).not.toBe(0);
+    expect(entry.when % 100000).not.toBe(0);
   });
 });

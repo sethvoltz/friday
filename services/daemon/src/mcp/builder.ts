@@ -26,6 +26,7 @@ import { buildMemoryServer, MEMORY_SERVER_NAME } from "./memory.js";
 import { buildTicketsServer, TICKETS_SERVER_NAME } from "./tickets.js";
 import { buildScheduleServer, SCHEDULE_SERVER_NAME } from "./schedule.js";
 import { buildReminderServer, REMINDER_SERVER_NAME } from "./reminder.js";
+import { buildHabitServer, HABIT_SERVER_NAME } from "./habit.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
 import { buildIntegrationsServer, INTEGRATIONS_SERVER_NAME } from "./integrations.js";
 import { buildElicitationServer, ELICITATION_SERVER_NAME } from "./elicitation.js";
@@ -149,6 +150,19 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // buildSecretsServer call above. Do NOT widen the shared `ctx`: that would
   // leak appId into mail/memory/tickets/etc.
   servers[REMINDER_SERVER_NAME] = buildReminderServer({
+    callerName: opts.callerName,
+    callerType: opts.callerType,
+    daemonPort: opts.daemonPort,
+    appId: opts.appContext?.appId,
+  });
+
+  // friday-habit: ALL caller types (FRI-169). The habit tracker is a CORE
+  // feature — every app sub-agent + the orchestrator must be able to add,
+  // check off, and read Habits (contrast friday-schedule, orchestrator-only).
+  // Threads the per-app context via an EXPLICIT options object (mirroring the
+  // buildReminderServer/buildSecretsServer calls above). Do NOT widen the
+  // shared `ctx`: that would leak appId into mail/memory/tickets/etc.
+  servers[HABIT_SERVER_NAME] = buildHabitServer({
     callerName: opts.callerName,
     callerType: opts.callerType,
     daemonPort: opts.daemonPort,
