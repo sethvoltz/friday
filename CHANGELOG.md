@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.29.0](https://github.com/sethvoltz/friday/compare/v1.28.1...v1.29.0) (2026-06-19)
+
+
+### Features
+
+* **evolve:** upgrade-aware proposal resolution + version in startup logs ([#300](https://github.com/sethvoltz/friday/issues/300)) ([fd62a90](https://github.com/sethvoltz/friday/commit/fd62a9029d0d0eea064e73cd439c4c00382c9fd9))
+
 ## [1.28.1](https://github.com/sethvoltz/friday/compare/v1.28.0...v1.28.1) (2026-06-19)
 
 
