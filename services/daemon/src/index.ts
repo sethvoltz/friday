@@ -25,6 +25,7 @@ import { recoverFromJsonl, type RecoveryAgent } from "./agent/jsonl-recovery.js"
 import { recoverDanglingToolUses } from "./agent/dangling-tool-use-recovery.js";
 import { startMailBridge } from "./comms/mail-bridge.js";
 import { reconcileAppsOnBoot } from "./apps/reconcile.js";
+import { reconcileBoundedHabits, startHabitReconcile } from "./habits/reconcile.js";
 import { runEvolveBootSync } from "./evolve/projector.js";
 import { startWatchdog, stopWatchdog } from "./agent/watchdog.js";
 import { startCompactionSweep, stopCompactionSweep } from "./scheduler/compaction-sweep.js";
@@ -220,7 +221,16 @@ async function main(): Promise<void> {
   // handle is in-memory only, so no live worker can ever close it). Must run
   // BEFORE the scheduler tick re-fires anything. Best-effort, never throws.
   await sweepOrphanedScheduleRuns();
+  // FRI-169: archive Bounded Habits whose window closed while the daemon was
+  // DOWN. A Bounded window closes on a clock boundary with no write event, so
+  // nothing flips the row to completed|expired unless a sweep does — this boot
+  // sweep catches windows that closed during downtime; startHabitReconcile()
+  // below covers the live-daemon case. Best-effort, never blocks boot.
+  await reconcileBoundedHabits().catch((err: unknown) => {
+    logger.log("warn", "habits.reconcile.boot.error", { error: String(err) });
+  });
   const schedTick = startScheduler();
+  const habitReconcileTick = startHabitReconcile();
   const watchdog = startWatchdog();
   // FRI-156 §B: the nightly maintenance compaction sweep — a daemon-internal
   // timer (NOT a schedules-table row). Unref'd, so it never holds the loop open.
@@ -298,6 +308,7 @@ async function main(): Promise<void> {
     reapAllLiveWorkers();
     clearInterval(heartbeat);
     clearInterval(schedTick);
+    clearInterval(habitReconcileTick);
     void watchdog;
     void compactionSweep;
     void pendingBlockReaper;
