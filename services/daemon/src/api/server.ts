@@ -12,6 +12,7 @@ import {
 import {
   type AgentEntry,
   DAEMON_SECRET_HEADER,
+  DAEMON_LOG_PATH,
   getDaemonSecret,
   isLocalHost,
   loadConfig,
@@ -76,6 +77,7 @@ import {
   triageSpawnPlan,
   builderEscalationPlan,
   updateProposal,
+  resolveByUpgrade,
   type Proposal,
   type SaveProposalInput,
   type UpdateProposalInput,
@@ -153,7 +155,7 @@ import { randomUUID } from "node:crypto";
 import { isValidAgentName } from "@friday/shared";
 import type { AgentType } from "@friday/shared";
 
-const { version: DAEMON_VERSION } = JSON.parse(
+export const { version: DAEMON_VERSION } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
 ) as { version: string };
 
@@ -1009,6 +1011,11 @@ async function handle(
         createdBy: callerName,
       });
       const reranked = rerankAll(DEFAULT_RULE);
+      const upgradeResult = await resolveByUpgrade({ daemonLogPath: DAEMON_LOG_PATH });
+      logger.log("info", "evolve.upgrade-resolved", {
+        definitive: upgradeResult.definitive,
+        tentative: upgradeResult.tentative,
+      });
       appendRun({
         ts: windowEnd,
         by: callerName,

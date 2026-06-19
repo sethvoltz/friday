@@ -71,6 +71,11 @@ export function parseProposal(id: string, raw: string): Proposal {
     appliedTicketId: typeof fields.appliedTicketId === "string" ? fields.appliedTicketId : null,
     familyResolvedBy: typeof fields.familyResolvedBy === "string" ? fields.familyResolvedBy : null,
     builderAgent: typeof fields.builderAgent === "string" ? fields.builderAgent : null,
+    resolvedByUpgrade: fields.resolvedByUpgrade === true,
+    tentativelyResolvedByUpgrade: fields.tentativelyResolvedByUpgrade === true,
+    resolvedByVersion:
+      typeof fields.resolvedByVersion === "string" ? fields.resolvedByVersion : null,
+    resolvedAt: typeof fields.resolvedAt === "string" ? fields.resolvedAt : null,
   };
 }
 
@@ -96,6 +101,10 @@ export function serializeProposal(p: Proposal): string {
     `appliedTicketId: ${p.appliedTicketId ? JSON.stringify(p.appliedTicketId) : "null"}`,
     `familyResolvedBy: ${p.familyResolvedBy ? JSON.stringify(p.familyResolvedBy) : "null"}`,
     `builderAgent: ${p.builderAgent ? JSON.stringify(p.builderAgent) : "null"}`,
+    `resolvedByUpgrade: ${p.resolvedByUpgrade}`,
+    `tentativelyResolvedByUpgrade: ${p.tentativelyResolvedByUpgrade}`,
+    `resolvedByVersion: ${p.resolvedByVersion ? JSON.stringify(p.resolvedByVersion) : "null"}`,
+    `resolvedAt: ${p.resolvedAt ? JSON.stringify(p.resolvedAt) : "null"}`,
     `signals: ${JSON.stringify(p.signals)}`,
     "---",
     "",
@@ -164,6 +173,10 @@ export function saveProposal(input: SaveProposalInput): Proposal {
     appliedTicketId: input.appliedTicketId ?? null,
     familyResolvedBy: input.familyResolvedBy ?? null,
     builderAgent: input.builderAgent ?? null,
+    resolvedByUpgrade: false,
+    tentativelyResolvedByUpgrade: false,
+    resolvedByVersion: null,
+    resolvedAt: null,
   };
 
   writeFileSync(filePath(id), serializeProposal(proposal));
@@ -196,6 +209,10 @@ export interface UpdateProposalInput {
   familyResolvedBy?: string | null;
   /** Linked escalation Builder agent name (FRI-149). */
   builderAgent?: string | null;
+  resolvedByUpgrade?: boolean;
+  tentativelyResolvedByUpgrade?: boolean;
+  resolvedByVersion?: string | null;
+  resolvedAt?: string | null;
   /**
    * Override the auto-assigned `updatedAt`. Pass when a write needs
    * `enrichedAt` and `updatedAt` to share a timestamp so idempotency checks
@@ -278,7 +295,7 @@ export function findRecentlyAppliedByFamilyKey(
   let bestAppliedMs = 0;
 
   for (const p of listProposals()) {
-    if (p.status !== "applied") continue;
+    if (p.status !== "applied" && p.status !== "auto-resolved") continue;
     if (!p.appliedAt) continue;
     if (!p.signals.some((s) => s.key === key)) continue;
     const appliedMs = Date.parse(p.appliedAt);

@@ -1,6 +1,11 @@
 import type { Proposal, ProposalStatus } from "@friday/evolve";
 
-export const TERMINAL_STATUSES: readonly ProposalStatus[] = ["applied", "rejected", "superseded"];
+export const TERMINAL_STATUSES: readonly ProposalStatus[] = [
+  "applied",
+  "auto-resolved",
+  "rejected",
+  "superseded",
+];
 
 export function isTerminal(status: ProposalStatus): boolean {
   return TERMINAL_STATUSES.includes(status);

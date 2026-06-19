@@ -10,7 +10,8 @@ export type ProposalStatus =
   | "approved"
   | "rejected"
   | "applied"
-  | "superseded";
+  | "superseded"
+  | "auto-resolved";
 
 export type ProposalType = "memory" | "prompt" | "config" | "code";
 
@@ -98,4 +99,12 @@ export interface Proposal {
    * NULL until escalation. No DB migration — proposals are markdown files.
    */
   builderAgent: string | null;
+  /** True when this proposal was resolved by a daemon upgrade (auto-resolved or tentative). */
+  resolvedByUpgrade: boolean;
+  /** True when upgrade-resolution is tentative (sporadic signals, not a burst). Score halved; status unchanged. */
+  tentativelyResolvedByUpgrade: boolean;
+  /** Daemon version that resolved this proposal, or null. */
+  resolvedByVersion: string | null;
+  /** ISO timestamp of the upgrade boundary that resolved this proposal, or null. */
+  resolvedAt: string | null;
 }
