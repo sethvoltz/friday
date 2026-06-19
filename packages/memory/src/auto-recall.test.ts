@@ -16,6 +16,13 @@ vi.mock("./store.js", () => ({
   touchRecall: () => Promise.resolve(),
 }));
 
+// FRI-24: searchMemories now consults embedText for the vector path. These
+// FTS-only tests disable it (null → no vector candidates, byte-identical to the
+// pre-FRI-24 behavior) and avoid loading embed.ts (which would fork a real child).
+vi.mock("./embed.js", () => ({
+  embedText: () => Promise.resolve(null),
+}));
+
 function mkEntry(partial: Partial<MemoryEntry> & { id: string }): MemoryEntry {
   return {
     id: partial.id,

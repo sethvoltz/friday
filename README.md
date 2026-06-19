@@ -129,6 +129,7 @@ curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/Brewfile | br
 (Contributors with a local checkout can just `brew bundle --file=Brewfile`.) Installs:
 
 - **`postgresql@18`** — Friday's canonical store. Managed by `brew services`, lifecycle-independent of `friday start/stop`.
+- **`pgvector`** — Postgres extension backing semantic memory recall (`embedding vector(384)` on `memory_entries`). The Brewfile installs the extension binaries; `friday setup` / `friday update` create the `vector` extension in the `friday` database via an admin connection (it requires superuser, so it can't be created by daemon migrations). The embedding runtime is **onnxruntime-web (WASM)** — its `.wasm` files ride in the release tarball's `node_modules`, so there's **no per-platform native binary to fetch** and it runs cross-platform (Intel x64 and Apple Silicon). Only the quantized ONNX model + tokenizer (~30MB, under `~/.friday/models/`) are fetched at install/update time, and recall degrades fail-open to full-text-only if they're absent.
 - **`gh`** — GitHub CLI for Builders to clone and open PRs
 - **`fnm`** — Fast Node Manager; resolves the pinned Node from `.node-version` (`22.21.1`) and is how the launchd-supervised stack launches Node, ABI-matched to the pre-baked native modules (ADR-034)
 - **`pnpm`** — build/dev-time package manager (CI packs the release tarball, contributors build from source); not on Friday's runtime path
@@ -309,6 +310,7 @@ Operational files live at `~/.friday/`. Canonical state (blocks, mail, tickets, 
 ├── agents/<name>/                 Per-agent home (orchestrator/helper/scheduled cwd; ADR-029)
 ├── apps/<id>/                     Installed Friday Apps (ADR-021)
 ├── workspaces/<name>/             Builder git worktrees
+├── models/                        ONNX embedding-model cache (all-MiniLM-L6-v2; FRI-24)
 └── logs/*.jsonl                   Structured logs, rotated at 1 MiB
 ```
 
@@ -353,6 +355,7 @@ The `--dev` CLI flag was retired (FRI-83) — `friday start --dev` now exits wit
 pnpm test                                                   # unit suite (fast — no subprocesses)
 pnpm test:e2e                                               # multi-subprocess e2e (daemon + dashboard + zero-cache against a scratch PG)
 pnpm test:playwright                                        # browser-driven user-visible round-trip (slowest; chromium must be installed)
+pnpm test:clean                                             # reclaim leaked test artifacts (orphan tmp data dirs + idle scratch DBs)
 pnpm --filter @friday/daemon run test                       # one package
 pnpm --filter @friday/daemon exec vitest run src/foo.test.ts  # one file
 ```

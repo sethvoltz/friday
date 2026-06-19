@@ -12,6 +12,7 @@ export default defineConfig({
   test: {
     include: ["src/**/*.e2e.test.ts"],
     setupFiles: ["../../packages/shared/src/test/vitest-setup.ts"],
+    globalSetup: ["../../packages/shared/src/test/global-setup.ts"],
     fileParallelism: false,
     testTimeout: 60_000,
     // 180s — see packages/shared/vitest.e2e.config.ts (boot ceilings rose

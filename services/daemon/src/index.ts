@@ -48,7 +48,9 @@ import { startMailPruner, stopMailPruner } from "./services/mail-prune.js";
 import { buildDispatchPrompt } from "./prompts/build-dispatch-prompt.js";
 import "./hooks/register.js";
 import { agentCwdPinV1 } from "./state-migrations/agent-cwd-pin-v1.js";
+import { embedBackfillV1 } from "./state-migrations/embed-backfill-v1.js";
 import { runStateMigrations } from "./state-migrations/runner.js";
+import { warmEmbedChild } from "@friday/memory";
 import { syncProposalsForClosedTickets } from "./services/proposal-sync.js";
 import { runSettingsBootScan, startSettingsListener } from "./settings/listener.js";
 import { runMemoryBootScan, startMemoryListener } from "./memory/listener.js";
@@ -91,7 +93,11 @@ async function main(): Promise<void> {
   // created the `_friday_state_migrations` table) and BEFORE any
   // dispatch / mail bridge / scheduler / recovery path that could spawn
   // a worker against stale paths.
-  await runStateMigrations([agentCwdPinV1]);
+  // FRI-24: `embed-backfill-v1` fills the NULL `memory_entries.embedding`
+  // column that migration 0036 added. Per-entry fail-open inside
+  // backfillEmbeddings keeps boot non-blocking if the embedding runtime
+  // isn't provisioned yet (recall degrades to FTS-only).
+  await runStateMigrations([agentCwdPinV1, embedBackfillV1]);
   ensureSoul();
 
   const backfill = await backfillUsageFromLegacyJsonl();
@@ -131,6 +137,22 @@ async function main(): Promise<void> {
   // any pending rows that landed while the daemon was down.
   await runMemoryBootScan();
   const memoryListener = await startMemoryListener();
+
+  // FRI-24: best-effort, NON-BLOCKING warmup of the embedding CHILD (the same
+  // forked process the recall/store/backfill paths use). This keeps the ~240MB
+  // onnxruntime-web runtime OUT of the daemon process (the whole point of the
+  // forked child + idle reaper), warms the actual path the first recall hits so
+  // it doesn't cold-load under the query timeout, and is reaped when idle. The
+  // PRIMARY asset provisioning (model download) lives in `friday update`; this
+  // just spins the child up against the on-disk model. FAIL-OPEN — never throws,
+  // returns false on a missing runtime/model; not awaited so boot proceeds.
+  void warmEmbedChild().then(
+    (ok) => logger.log("info", "embed-warm.boot.done", { ok }),
+    (err) =>
+      logger.log("warn", "embed-warm.boot.error", {
+        message: err instanceof Error ? err.message : String(err),
+      }),
+  );
 
   // Phase 4.6: open the long-lived LISTEN connection for
   // `friday_schedule_changed`. Boot-recovery scan first to apply

@@ -1,12 +1,13 @@
 {
   "name": "agent-friday",
-  "version": "1.24.2",
+  "version": "1.26.0",
   "private": true,
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test",
     "test:e2e": "turbo run test:e2e --concurrency=1",
     "test:playwright": "pnpm --filter @friday/dashboard run test:playwright",
+    "test:clean": "pnpm --filter @friday/shared run test:clean",
     "dev": "turbo run dev",
     "dev:daemon": "FRIDAY_DAEMON_PORT=7444 pnpm --filter @friday/daemon dev",
     "dev:dashboard": "FRIDAY_DAEMON_PORT=7444 pnpm --filter @friday/dashboard dev",
@@ -48,6 +49,9 @@
       "allowAny": [
         "drizzle-orm"
       ]
+    },
+    "patchedDependencies": {
+      "onnxruntime-node@1.24.3": "patches/onnxruntime-node@1.24.3.patch"
     }
   }
 }

@@ -34,6 +34,7 @@ import {
   HEALTH_PATH,
   clearFridayConfigCache,
   clearSecretsCache,
+  ensureVectorExtension,
   findPgBin,
   getPool,
   loadConfig,
@@ -289,6 +290,14 @@ export const restoreCommand = defineCommand({
         "-c",
         "CREATE DATABASE friday OWNER friday;",
       ]);
+
+      // FRI-24: DROP DATABASE destroyed the database-scoped pgvector `vector`
+      // extension. Recreate it via an admin/superuser connection (the friday
+      // role lacks superuser) BEFORE pg_restore / runMigrations apply migration
+      // 0036 (`embedding vector(384)`) — otherwise every restore path throws
+      // `type "vector" does not exist`. Mirrors provisionPostgres / friday update.
+      console.log(pc.dim("  creating pgvector extension…"));
+      await ensureVectorExtension((m) => console.log(pc.dim(`  ${m}`)));
 
       // 5. Restore filesystem FIRST — so the bundle's `.env.local` is on disk
       //    before we read DATABASE_URL. For a cross-machine restore the bundle

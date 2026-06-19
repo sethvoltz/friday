@@ -11,7 +11,7 @@ A local-first, headless agent daemon with a SvelteKit dashboard exposed via Clou
 - `docs/mcp.md` — MCP server surface table (Friday + user-configured).
 - `docs/sandbox.md` — Worker isolation: M1–M5 rollout (PreToolUse rules, sandbox-exec, pgrp containment, stall watchdog) + residual risk.
 - `docs/decisions.md` — ADRs + watch list.
-- Schema reference: `packages/shared/src/db/schema.ts` (Drizzle source of truth; migrations under `packages/shared/drizzle/`).
+- Schema reference: `packages/shared/src/db/schema.ts` (Drizzle source of truth; migrations under `packages/shared/drizzle/`). Includes the FRI-24 `memory_entries.embedding vector(384)` pgvector column for semantic recall — server-side-only, NOT replicated to Zero (like `content_tsv`; ADR-025). The pgvector extension is created via an admin connection in `ensureVectorExtension()` (pg-provision.ts), NOT inside a migration — `CREATE EXTENSION vector` needs superuser and the `friday` role lacks it. The embedding runtime is onnxruntime-web (WASM) — its `.wasm` files ship in the release tarball's `node_modules`, so there's NO per-platform native binary to fetch and it runs cross-platform (Intel x64 + Apple Silicon). Only the embedding model + tokenizer cache on disk under `<FRIDAY_DATA_DIR>/models/` (quantized ONNX, all-MiniLM-L6-v2), fetched at `friday update`/setup and degrading fail-open to FTS-only if absent. No embedding secret exists — nothing is added to `.env` or the age vault (net `.env` reduction, by construction).
 - `docs/roadmap.md` — Open work, sequenced for execution.
 - `docs/setup.md` — Setup guide including CFT walkthrough.
 - `docs/running.md` — How to run the daemon and dashboard.
@@ -39,7 +39,7 @@ A docs-only change still warrants a commit with scope `docs`. A code change that
 - **Preserve over delete.** Default to keeping data. Patch and update rather than delete.
 - **Workspace containment.** Builders work exclusively in their assigned worktrees.
 - **User approval gates.** The orchestrator confirms plans with the user before creating Builders.
-- **Static imports only.** No inline `require()` or dynamic `import()` inside function bodies — tests excepted.
+- **Static imports only.** No inline `require()` or dynamic `import()` inside function bodies. Two exceptions: (a) tests; (b) **lazy-loading a heavy/optional dependency that must stay out of processes that don't use it** — e.g. the `onnxruntime-web` + `@huggingface/transformers` stack (~240 MB resident) is loaded only via `await import(...)` inside `packages/memory/src/embed-runtime.ts`, which runs exclusively in the forked embedding child, so importing `@friday/memory` from the daemon or CLI never drags ORT into those processes. A lazy `import()` under exception (b) MUST carry a comment at the import site stating which process it's keeping the dependency out of and why a static import is wrong. If you reach for a dynamic import, it must fit (a) or (b) — otherwise use a static import.
 
 ## Structure
 
@@ -68,13 +68,14 @@ pnpm install
 pnpm test               # unit suite (fast — no subprocesses)
 pnpm test:e2e           # multi-subprocess e2e (daemon + dashboard + zero-cache against scratch PG); slow
 pnpm test:playwright    # browser-driven user-visible round-trip; slowest, needs chromium installed
+pnpm test:clean         # reclaim leaked test artifacts (orphan tmp data dirs + idle scratch DBs); run when no test run is in progress
 pnpm --filter @friday/daemon exec vitest run src/path/to/file.test.ts
 ```
 
 - TypeScript throughout, Vitest for tests, pnpm workspaces + Turborepo.
 - Tests are co-located with source as `*.test.ts`. Files named `*.e2e.test.ts` are heavy multi-subprocess suites — excluded from `pnpm test`, run via `pnpm test:e2e`. The Playwright browser suite lives in `services/dashboard/e2e/`.
 - All state lives in `~/.friday/` (override with `FRIDAY_DATA_DIR`). Never hardcode paths; use constants from `@friday/shared`.
-- Test files that touch `~/.friday/` state must set `process.env.FRIDAY_DATA_DIR = <tmpdir>` **before** importing any `@friday/shared` DB/data-dir machinery. The import is what binds the data-dir constants; setting the env after the import is too late and trashes the real prod data dir. A vitest setup file at `packages/shared/src/test/vitest-setup.ts` is wired into every package's `vitest.config.ts` as a backstop — it forces `FRIDAY_DATA_DIR` to a fresh tmpdir if unset, and throws if it's set to the real `~/.friday/`. Do not bypass it; individual test files can still set their own scoped `FRIDAY_DATA_DIR` if they need isolation between files within a worker.
+- Test files that touch `~/.friday/` state must set `process.env.FRIDAY_DATA_DIR = <tmpdir>` **before** importing any `@friday/shared` DB/data-dir machinery. The import is what binds the data-dir constants; setting the env after the import is too late and trashes the real prod data dir. A vitest setup file at `packages/shared/src/test/vitest-setup.ts` is wired into every package's `vitest.config.ts` as a backstop — it forces `FRIDAY_DATA_DIR` to a fresh tmpdir if unset, and throws if it's set to the real `~/.friday/`. Do not bypass it; individual test files can still set their own scoped `FRIDAY_DATA_DIR` if they need isolation between files within a worker. The tmpdir the setup creates is reclaimed automatically — each created dir is recorded in a per-run manifest and removed by a `globalSetup` teardown after the run (`packages/shared/src/test/{global-setup,tmp-data-dir}.ts`), which fires even when a file is fully skipped or its worker is killed; a startup sweep reclaims crash orphans from prior runs, and a caller-provided `FRIDAY_DATA_DIR` is adopted and never deleted. Every vitest config that wires `vitest-setup.ts` must also wire `global-setup.ts` (pinned by `vitest-config-wiring.test.ts`). `pnpm test:clean` is the manual catch-all (also drops idle `friday_test_*` scratch DBs).
 - `@friday/shared` is consumed via its built `dist/`. When you edit shared source, run `pnpm --filter @friday/shared build` before exercising the change in the daemon or dashboard.
 
 ## Database migrations

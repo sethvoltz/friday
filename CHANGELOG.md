@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.26.0](https://github.com/sethvoltz/friday/compare/v1.25.0...v1.26.0) (2026-06-18)
+
+
+### Features
+
+* **memory:** add pgvector hybrid (FTS + semantic) recall to memory_entries (FRI-24) ([4a41043](https://github.com/sethvoltz/friday/commit/4a410436458ae9cc958c30c4160093086b818421))
+
+## [1.25.0](https://github.com/sethvoltz/friday/compare/v1.24.2...v1.25.0) (2026-06-18)
+
+
+### Features
+
+* **system:** make reminders first-class (FRI-168) ([#289](https://github.com/sethvoltz/friday/issues/289)) ([6ae559e](https://github.com/sethvoltz/friday/commit/6ae559e1338f0e8c002c8d4e900176ed6e42c835))
+
 ## [1.24.2](https://github.com/sethvoltz/friday/compare/v1.24.1...v1.24.2) (2026-06-17)
 
 

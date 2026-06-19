@@ -23,6 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { DownloadProgress, UpdateDeps, UpdateReporter } from "./update.js";
+import { ensureBrewDeps, BREW_DEPS } from "../lib/brew-deps.js";
 
 // Repoint HOME + data dir to scratch tmp BEFORE importing anything that
 // resolves install paths or @friday/shared data-dir constants.
@@ -56,7 +57,12 @@ function plantVersion(version: string): string {
 /** A stub UpdateDeps whose downloadRelease writes a tarball-shaped file plus
  *  a matching `.sha256`, and whose extract plants a package.json carrying
  *  `latestVersion`. bootstrap is a spy — it stands in for launchd.bootstrap,
- *  which rewrites the plist + boots-or-kickstarts the supervisor. */
+ *  which rewrites the plist + boots-or-kickstarts the supervisor.
+ *
+ *  FRI-24: ensureBrewDeps / ensureVectorExtension / ensureEmbeddingAssets are
+ *  spies too, and every call-order-sensitive step (incl. bootstrap, the flip's
+ *  proxy) pushes its name onto a shared `calls` array so a test can assert the
+ *  load-bearing ordering (deps → extension → assets → restart). */
 function makeDeps(opts: {
   latestVersion: string;
   /** When true, the .sha256 won't match the tarball (tamper simulation). */
@@ -67,13 +73,58 @@ function makeDeps(opts: {
   /** Whether the launchd plist is on disk (autostart armed). Default true; set
    *  false to model a `friday disable`d box (update must not resurrect it). */
   plistExists?: boolean;
+  /** When set, ensureVectorExtension rejects with this message (fail-loud). */
+  vectorExtensionError?: string;
+  /** ensureVectorExtension's resolved value: true=created this run, false=already
+   *  present (drives the ✓ vs ⏭ outcome line). Default true. */
+  vectorExtensionCreated?: boolean;
+  /** ensureBrewDeps's returned partition. Default: every dep already present
+   *  (the idempotent re-run). */
+  brewResult?: { installed: string[]; alreadyPresent: string[]; failed: string[] };
+  /** ensureEmbeddingAssets's returned warm outcome. Default: warmed. */
+  embeddingResult?:
+    | { status: "warmed" }
+    | { status: "warm-failed" }
+    | {
+        status: "error";
+        error: string;
+      };
 }): {
   deps: UpdateDeps;
   bootstrap: ReturnType<typeof vi.fn>;
   writePlist: ReturnType<typeof vi.fn>;
+  ensureBrewDeps: ReturnType<typeof vi.fn>;
+  ensureVectorExtension: ReturnType<typeof vi.fn>;
+  ensureEmbeddingAssets: ReturnType<typeof vi.fn>;
+  /** Ordered record of the provisioning/restart steps, in call order. */
+  calls: string[];
 } {
-  const bootstrap = vi.fn();
-  const writePlist = vi.fn();
+  const calls: string[] = [];
+  const bootstrap = vi.fn(() => {
+    calls.push("bootstrap");
+  });
+  const writePlist = vi.fn(() => {
+    calls.push("writePlist");
+  });
+  const ensureBrewDeps = vi.fn(() => {
+    calls.push("ensureBrewDeps");
+    return (
+      opts.brewResult ?? {
+        installed: [],
+        alreadyPresent: [...BREW_DEPS],
+        failed: [],
+      }
+    );
+  });
+  const ensureVectorExtension = vi.fn(async () => {
+    calls.push("ensureVectorExtension");
+    if (opts.vectorExtensionError) throw new Error(opts.vectorExtensionError);
+    return opts.vectorExtensionCreated ?? true;
+  });
+  const ensureEmbeddingAssets = vi.fn(async () => {
+    calls.push("ensureEmbeddingAssets");
+    return opts.embeddingResult ?? ({ status: "warmed" } as const);
+  });
   const deps: UpdateDeps = {
     resolveLatestVersion: async () => opts.latestVersion,
     downloadRelease: async (destDir: string) => {
@@ -96,13 +147,26 @@ function makeDeps(opts: {
         JSON.stringify({ name: "agent-friday", version: opts.latestVersion }),
       );
     },
-    fnmInstall: () => {},
+    fnmInstall: () => {
+      calls.push("fnmInstall");
+    },
     bootstrap,
     isRunning: () => opts.running ?? true,
     plistExists: () => opts.plistExists ?? true,
     writePlist,
+    ensureBrewDeps,
+    ensureVectorExtension,
+    ensureEmbeddingAssets,
   };
-  return { deps, bootstrap, writePlist };
+  return {
+    deps,
+    bootstrap,
+    writePlist,
+    ensureBrewDeps,
+    ensureVectorExtension,
+    ensureEmbeddingAssets,
+    calls,
+  };
 }
 
 /** A reporter that records every emitted event as a `kind:message` string so
@@ -120,6 +184,14 @@ function recordingReporter(): {
     note: (m) => events.push(`note:${m}`),
     progress: (p) => ticks.push({ ...p }),
     endProgress: () => events.push("endProgress"),
+    spinner: (label) => {
+      events.push(`spinner:${label}`);
+      return {
+        done: (m) => events.push(`spinner-done:${m}`),
+        skip: (m) => events.push(`spinner-skip:${m}`),
+        fail: (m) => events.push(`spinner-fail:${m}`),
+      };
+    },
     success: (m) => events.push(`success:${m}`),
     warn: (m) => events.push(`warn:${m}`),
   };
@@ -160,6 +232,10 @@ describe("friday update", () => {
     // download is bracketed by endProgress (the live-bar finalizer), and the
     // success line names the new version. This pins the narration the feature
     // exists for, not just that the flip happened.
+    // Default makeDeps: every brew dep already present (⏭), the extension is
+    // created this run (✓), the model warms (✓). The labeled spinners + their
+    // terminal glyph lines are the FRI-24 TUI the feature exists for — pin them
+    // exactly, in their load-bearing order.
     expect(events).toEqual([
       "step:Checking for the latest release…",
       expect.stringMatching(/^step:Updating 1\.0\.0 → .*1\.1\.0/),
@@ -169,6 +245,15 @@ describe("friday update", () => {
       expect.stringMatching(/^note:checksum verified \(/),
       "step:Extracting…",
       "step:Provisioning Node runtime…",
+      // FRI-24: brew deps → pgvector extension → embedding model land BEFORE
+      // the flip/restart, so the daemon boots into a tree whose `vector`
+      // extension already exists. Each is a labeled spinner with an outcome.
+      "spinner:Installing pgvector…",
+      "spinner-skip:pgvector already installed",
+      "spinner:Enabling pgvector extension…",
+      "spinner-done:pgvector extension enabled",
+      "spinner:Downloading embedding model…",
+      "spinner-done:embedding model ready",
       "step:Activating new version…",
       "step:Restarting Friday…",
       expect.stringMatching(/^success:Updated to 1\.1\.0 /),
@@ -422,6 +507,9 @@ describe("friday update — rejects an untrusted resolved version before touchin
       isRunning: () => true,
       plistExists: () => true,
       writePlist: vi.fn(),
+      ensureBrewDeps: vi.fn(() => ({ installed: [], alreadyPresent: [], failed: [] })),
+      ensureVectorExtension: vi.fn(async () => false),
+      ensureEmbeddingAssets: vi.fn(async () => ({ status: "warmed" }) as const),
     };
 
     await expect(runUpdate({}, malicious)).rejects.toThrow(/not a valid semver/);
@@ -446,6 +534,9 @@ describe("friday update — rejects an untrusted resolved version before touchin
       isRunning: () => true,
       plistExists: () => true,
       writePlist: vi.fn(),
+      ensureBrewDeps: vi.fn(() => ({ installed: [], alreadyPresent: [], failed: [] })),
+      ensureVectorExtension: vi.fn(async () => false),
+      ensureEmbeddingAssets: vi.fn(async () => ({ status: "warmed" }) as const),
     };
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
@@ -645,5 +736,232 @@ describe("installedVersions — semver-ordered, mtime-independent (AC#5)", () =>
     plantVersion("1.0.0");
     plantVersion("2.0.0");
     expect(installedVersions()).toEqual(["1.0.0", "1.2.0", "1.10.0", "2.0.0"]);
+  });
+});
+
+describe("friday update — pgvector + embedding provisioning ordering (FRI-24)", () => {
+  beforeEach(() => {
+    rmSync(installRoot(), { recursive: true, force: true });
+    mkdirSync(versionsDir(), { recursive: true });
+  });
+  afterEach(() => rmSync(installRoot(), { recursive: true, force: true }));
+
+  it("invokes ensureBrewDeps and runs deps→extension→assets BEFORE the restart", async () => {
+    plantVersion("1.0.0");
+    flipCurrent("1.0.0");
+
+    const { deps, bootstrap, ensureBrewDeps, ensureVectorExtension, ensureEmbeddingAssets, calls } =
+      makeDeps({ latestVersion: "1.1.0" });
+    const { reporter } = recordingReporter();
+    await runUpdate({}, deps, reporter);
+
+    // (a) ensureBrewDeps was actually invoked (the new seam member).
+    expect(ensureBrewDeps).toHaveBeenCalledTimes(1);
+    expect(ensureVectorExtension).toHaveBeenCalledTimes(1);
+    expect(ensureEmbeddingAssets).toHaveBeenCalledTimes(1);
+    // The embedding-asset fetch targets the NEW version's extracted tree, not
+    // the `current` symlink (the flip happens after).
+    expect(ensureEmbeddingAssets).toHaveBeenCalledWith(versionDir("1.1.0"));
+
+    // (b) Load-bearing order: brew deps → pgvector extension → embedding assets
+    // → restart. The extension MUST exist before the daemon boots into 0036.
+    // Pin the exact subsequence (filtering to the steps under test).
+    const ordered = calls.filter((c) =>
+      ["ensureBrewDeps", "ensureVectorExtension", "ensureEmbeddingAssets", "bootstrap"].includes(c),
+    );
+    expect(ordered).toEqual([
+      "ensureBrewDeps",
+      "ensureVectorExtension",
+      "ensureEmbeddingAssets",
+      "bootstrap",
+    ]);
+    // And bootstrap (the restart) is strictly last of the four.
+    expect(calls.indexOf("ensureVectorExtension")).toBeLessThan(calls.indexOf("bootstrap"));
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails the update LOUDLY (no flip, no restart) when ensureVectorExtension throws", async () => {
+    plantVersion("1.0.0");
+    flipCurrent("1.0.0");
+
+    const { deps, bootstrap, ensureEmbeddingAssets, calls } = makeDeps({
+      latestVersion: "1.1.0",
+      vectorExtensionError: "CREATE EXTENSION vector failed: must be superuser",
+    });
+    const { reporter, events } = recordingReporter();
+
+    await expect(runUpdate({}, deps, reporter)).rejects.toThrow(/must be superuser/);
+
+    // The extension is a hard dependency: its failure aborts BEFORE assets,
+    // flip, and restart — the daemon is never booted into a missing-type 0036.
+    expect(ensureEmbeddingAssets).not.toHaveBeenCalled();
+    expect(calls).not.toContain("ensureEmbeddingAssets");
+    expect(calls).not.toContain("bootstrap");
+    expect(bootstrap).not.toHaveBeenCalled();
+    expect(currentVersion()).toBe("1.0.0"); // no flip
+    // The extension spinner lands a ✗ line naming the cause BEFORE the throw
+    // propagates — and the model-warm spinner is never started (aborted first).
+    expect(events).toContainEqual(
+      expect.stringMatching(
+        /^spinner-fail:pgvector extension could not be enabled: .*must be superuser/,
+      ),
+    );
+    expect(events).not.toContain("spinner:Downloading embedding model…");
+  });
+
+  it("also runs the provisioning steps on the already-downloaded reuse path", async () => {
+    // Pre-stage the target version dir so doForwardUpdate takes the "already
+    // downloaded — reusing" branch; the new steps must still run there.
+    plantVersion("1.0.0");
+    flipCurrent("1.0.0");
+    plantVersion("1.1.0");
+
+    const { deps, ensureBrewDeps, ensureVectorExtension, ensureEmbeddingAssets, calls } = makeDeps({
+      latestVersion: "1.1.0",
+    });
+    const { reporter } = recordingReporter();
+    await runUpdate({}, deps, reporter);
+
+    expect(currentVersion()).toBe("1.1.0");
+    expect(ensureBrewDeps).toHaveBeenCalledTimes(1);
+    expect(ensureVectorExtension).toHaveBeenCalledTimes(1);
+    expect(ensureEmbeddingAssets).toHaveBeenCalledTimes(1);
+    // Same ordering invariant on the reuse path.
+    const ordered = calls.filter((c) =>
+      ["ensureBrewDeps", "ensureVectorExtension", "ensureEmbeddingAssets", "bootstrap"].includes(c),
+    );
+    expect(ordered).toEqual([
+      "ensureBrewDeps",
+      "ensureVectorExtension",
+      "ensureEmbeddingAssets",
+      "bootstrap",
+    ]);
+  });
+
+  it("renders ✓ outcomes when pgvector + extension were freshly provisioned (TUI)", async () => {
+    plantVersion("1.0.0");
+    flipCurrent("1.0.0");
+
+    // A box that did NOT have pgvector: brew installs it, the extension is
+    // created this run, the model warms. All three spinners land ✓ (done).
+    const { deps } = makeDeps({
+      latestVersion: "1.1.0",
+      brewResult: {
+        installed: ["pgvector"],
+        alreadyPresent: BREW_DEPS.filter((d) => d !== "pgvector"),
+        failed: [],
+      },
+      vectorExtensionCreated: true,
+      embeddingResult: { status: "warmed" },
+    });
+    const { reporter, events } = recordingReporter();
+    await runUpdate({}, deps, reporter);
+
+    // The three provisioning spinners + their done-glyph lines, in order.
+    expect(events).toContainEqual("spinner:Installing pgvector…");
+    expect(events).toContainEqual("spinner-done:pgvector installed");
+    expect(events).toContainEqual("spinner:Enabling pgvector extension…");
+    expect(events).toContainEqual("spinner-done:pgvector extension enabled");
+    expect(events).toContainEqual("spinner:Downloading embedding model…");
+    expect(events).toContainEqual("spinner-done:embedding model ready");
+    // None of the three skipped, since every one did work.
+    expect(events.filter((e) => e.startsWith("spinner-skip:"))).toEqual([]);
+  });
+
+  it("a FAILED model warm renders a non-fatal ✗ and the update still completes (fail-open TUI)", async () => {
+    plantVersion("1.0.0");
+    flipCurrent("1.0.0");
+
+    // The WASM warm threw (offline / runtime error): ensureEmbeddingAssets
+    // returns an `error` outcome rather than throwing. The model spinner lands
+    // ✗ naming the FTS-only fallback, and the update STILL flips + restarts.
+    const { deps, bootstrap } = makeDeps({
+      latestVersion: "1.1.0",
+      embeddingResult: { status: "error", error: "transformers blew up" },
+    });
+    const { reporter, events } = recordingReporter();
+    await runUpdate({}, deps, reporter);
+
+    // Non-fatal: the flip + restart happened despite the failed warm.
+    expect(currentVersion()).toBe("1.1.0");
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    // The model spinner shows a ✗ line that names the FTS-only fallback + cause.
+    expect(events).toContainEqual(
+      expect.stringMatching(
+        /^spinner-fail:embedding model warm failed.*FTS-only.*transformers blew up/,
+      ),
+    );
+    // And the run reached its success line — the warm failure did not abort it.
+    expect(events).toContainEqual(expect.stringMatching(/^success:Updated to 1\.1\.0 /));
+  });
+
+  it("a `warm-failed` (returned false) model warm also renders a non-fatal ✗ (fail-open TUI)", async () => {
+    plantVersion("1.0.0");
+    flipCurrent("1.0.0");
+
+    const { deps, bootstrap } = makeDeps({
+      latestVersion: "1.1.0",
+      embeddingResult: { status: "warm-failed" },
+    });
+    const { reporter, events } = recordingReporter();
+    await runUpdate({}, deps, reporter);
+
+    expect(currentVersion()).toBe("1.1.0");
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(events).toContainEqual(
+      "spinner-fail:embedding model unavailable — recall falls back to FTS-only",
+    );
+    expect(events).toContainEqual(expect.stringMatching(/^success:Updated to 1\.1\.0 /));
+  });
+});
+
+describe("ensureBrewDeps — idempotent reconcile (FRI-24)", () => {
+  it("installs only the missing deps and SKIPS ones brew already has", () => {
+    // Model a host that already has every dep EXCEPT pgvector (the FRI-24
+    // addition): only pgvector should be `brew install`ed, everything else
+    // skipped (the idempotent path).
+    const installed: string[] = [];
+    const has = (dep: string): boolean => dep !== "pgvector";
+    const install = (dep: string): boolean => {
+      installed.push(dep);
+      return true;
+    };
+
+    const result = ensureBrewDeps({ has, install });
+
+    // Exactly pgvector installed; the rest reported already-present.
+    expect(installed).toEqual(["pgvector"]);
+    expect(result.installed).toEqual(["pgvector"]);
+    expect(result.alreadyPresent).toEqual(BREW_DEPS.filter((d) => d !== "pgvector"));
+    expect(result.failed).toEqual([]);
+  });
+
+  it("triggers NO brew install when every dep (incl. pgvector) is present", () => {
+    // The pure idempotent re-run: a host that already has pgvector must not
+    // shell out to `brew install` at all.
+    const installCalls: string[] = [];
+    const result = ensureBrewDeps({
+      has: () => true,
+      install: (dep) => {
+        installCalls.push(dep);
+        return true;
+      },
+    });
+
+    expect(installCalls).toEqual([]);
+    expect(result.installed).toEqual([]);
+    expect(result.alreadyPresent).toEqual([...BREW_DEPS]);
+    expect(result.failed).toEqual([]);
+  });
+
+  it("records a failed brew install in `failed` without throwing", () => {
+    // install.sh's `|| warn` semantics: a failed install is recorded, not
+    // fatal. pgvector missing + its install failing surfaces in `failed`.
+    const result = ensureBrewDeps({
+      has: (dep) => dep !== "pgvector",
+      install: () => false,
+    });
+    expect(result.failed).toEqual(["pgvector"]);
+    expect(result.installed).toEqual([]);
   });
 });

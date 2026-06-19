@@ -20,10 +20,15 @@ export * as schema from "./db/schema.js";
 // and daemon — re-export the constant + type so daemon-side LISTEN
 // handlers don't have to drill through the schema namespace.
 export { LISTEN_CHANNELS, type ListenChannel } from "./db/schema.js";
+// FRI-24: pgvector column dimensionality. Surfaced as a top-level named
+// export so @friday/memory's embedder can size its output vector against the
+// same single source of truth the schema's `vector(N)` column uses.
+export { EMBEDDING_DIM } from "./db/schema.js";
 export {
   provisionPostgres,
   probePostgresHealth,
   dropFridayDatabaseForTest,
+  ensureVectorExtension,
   findPgBin,
   findPgIsReady,
   FRIDAY_PG_CONSTANTS,

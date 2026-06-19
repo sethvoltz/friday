@@ -23,6 +23,7 @@ import {
   bigserial,
   boolean,
   check,
+  customType,
   doublePrecision,
   index,
   integer,
@@ -33,6 +34,33 @@ import {
   timestamp,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+
+/* ---------------- Embedding vector type (FRI-24) ---------------- */
+// pgvector column dimensionality — single source of truth shared with
+// @friday/memory (it imports EMBEDDING_DIM to size the embedder output).
+// The local embedding model (all-MiniLM-L6-v2) emits 384-dim vectors.
+export const EMBEDDING_DIM = 384;
+
+/**
+ * Drizzle custom type mapping a pgvector `vector(N)` column. Postgres
+ * serializes the vector as a bracketed string (`[1,2,3]`); we marshal a
+ * `number[]` on the app side. The `vector` extension is created
+ * pre-migration via an admin connection (see `ensureVectorExtension` in
+ * pg-provision.ts) — pgvector 0.8.2 is NOT a trusted extension, so the
+ * non-superuser `friday` role can't `CREATE EXTENSION` itself.
+ */
+const vectorType = (dimensions: number) =>
+  customType<{ data: number[]; driverData: string }>({
+    dataType() {
+      return `vector(${dimensions})`;
+    },
+    toDriver(value: number[]): string {
+      return `[${value.join(",")}]`;
+    },
+    fromDriver(value: string): number[] {
+      return JSON.parse(value) as number[];
+    },
+  });
 
 /* ---------------- BetterAuth tables ---------------- */
 // BetterAuth's Postgres adapter expects these exact shapes (singular table
@@ -548,6 +576,11 @@ export const memoryEntries = pgTable(
     // ADR-023: pending_file → ready; daemon-side mutator writes the markdown
     // file on filesystem and flips status.
     status: text("status").notNull().default("ready"),
+    // FRI-24: pgvector embedding for semantic recall. NULLABLE — populated
+    // by app code (the daemon's embedder), not a generated column. Server-
+    // side only: like content_tsv it is NOT replicated to Zero (ADR-025);
+    // it never appears in the sync schema or the publication.
+    embedding: vectorType(EMBEDDING_DIM)("embedding"),
   },
   (t) => ({
     statusCheck: check(
@@ -881,6 +914,14 @@ export const FTS_SETUP_SQL = `
     ) STORED;
   CREATE INDEX IF NOT EXISTS memory_entries_content_tsv_idx
     ON memory_entries USING GIN (content_tsv);
+
+  -- memory_entries: HNSW index for pgvector cosine-distance similarity
+  -- search over the embedding column (FRI-24). The vector extension is
+  -- ensured pre-migration (ensureVectorExtension) so the type + opclass
+  -- exist by the time this runs; CREATE INDEX by the table owner (friday)
+  -- needs no superuser.
+  CREATE INDEX IF NOT EXISTS memory_entries_embedding_idx
+    ON memory_entries USING hnsw (embedding vector_cosine_ops);
 
   -- mail: search across subject + body.
   ALTER TABLE mail
