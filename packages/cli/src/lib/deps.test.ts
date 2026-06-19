@@ -83,7 +83,10 @@ describe("checkDeps — read-only dependency preflight", () => {
       },
     });
     expect(r.ok).toBe(false);
-    expect(r.hard.find((i) => i.name === "postgres")).toBeDefined();
+    expect(r.hard.find((i) => i.name === "postgres")).toMatchObject({
+      present: false,
+      remedy: expect.stringContaining("postgresql@18"),
+    });
     // The extension probe is skipped (no double-report of the same root cause).
     expect(r.hard.find((i) => i.name === "pgvector:extension")).toBeUndefined();
   });

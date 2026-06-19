@@ -45,13 +45,19 @@ function makeDeps(overrides: Partial<ProvisionDeps> = {}): {
 
 describe("runProvision", () => {
   it("invokes brew + extension + model warm and reports ok on a fully-present box", async () => {
-    const { deps, ensureBrewDeps, ensureVectorExtension, ensureEmbeddingAssets } = makeDeps();
+    const { deps, ensureBrewDeps, ensureVectorExtension, ensureEmbeddingAssets, logs } = makeDeps();
     const result = await runProvision(deps);
     expect(result.ok).toBe(true);
     expect(result.failures).toEqual([]);
     expect(ensureBrewDeps).toHaveBeenCalledTimes(1);
     expect(ensureVectorExtension).toHaveBeenCalledTimes(1);
     expect(ensureEmbeddingAssets).toHaveBeenCalledTimes(1);
+    // The idempotent outcome lines runProvision exists to render: ⏭ already
+    // present (default mock), ⏭ extension already enabled, ✓ model ready.
+    const out = logs.join("\n");
+    expect(out).toContain("⏭ already present");
+    expect(out).toContain("⏭ pgvector extension already enabled");
+    expect(out).toContain("✓ embedding model ready");
   });
 
   it("fails (non-ok) with a remedy when the pgvector brew install fails, and SKIPS the extension", async () => {
@@ -66,6 +72,24 @@ describe("runProvision", () => {
     // The extension CREATE is skipped when its binary didn't install — it would
     // only throw "could not open extension control file".
     expect(ensureVectorExtension).not.toHaveBeenCalled();
+  });
+
+  it("STAYS ok when a non-boot-critical brew dep (e.g. pnpm via corepack) fails to brew-install", async () => {
+    // Regression: a real `friday provision` on a box where pnpm is installed by
+    // corepack (not brew) hit `brew list pnpm` = false → `brew install pnpm`
+    // failed → the whole provision reported incomplete, which in the update
+    // flow rolls back a healthy upgrade. pnpm is build/dev-only, not on the
+    // runtime path — only pgvector failing may block.
+    const ensureVectorExtension = vi.fn(async () => false);
+    const { deps } = makeDeps({
+      ensureBrewDeps: () => ({ installed: [], alreadyPresent: ["pgvector"], failed: ["pnpm"] }),
+      ensureVectorExtension,
+    });
+    const result = await runProvision(deps);
+    expect(result.ok).toBe(true);
+    expect(result.failures).toEqual([]);
+    // The extension step still runs (pgvector itself is present).
+    expect(ensureVectorExtension).toHaveBeenCalledTimes(1);
   });
 
   it("fails (non-ok) when the extension CREATE throws (e.g. must be superuser)", async () => {

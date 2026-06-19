@@ -27,6 +27,7 @@ import {
   killChildGroup,
   preflightAndBringUp,
   resetGateForTest,
+  DEPS_RECHECK_MS,
   type ChildState,
 } from "./supervisor.js";
 import { clearBlockedState, readBlockedState, type DepReport } from "../lib/deps.js";
@@ -623,5 +624,37 @@ describe("dependency preflight gate — whole-stack park, no crash-loop", () => 
     // behaviour (spawn; the daemon's own fail-loud still applies).
     expect(bringUp).toHaveBeenCalledTimes(1);
     expect(readBlockedState()).toBeNull();
+  });
+
+  it("SELF-HEALS: once the parked dep becomes present, the re-check brings the stack up and clears the block", async () => {
+    // This is the "make healthy" transition — the whole point of parking rather
+    // than crash-looping. Park on a hard-missing dep, then make the dep present
+    // and advance past one re-check tick; the stack must come up and the
+    // blocked-state file must clear (so `friday status` stops reporting blocked).
+    vi.useFakeTimers();
+    try {
+      let healthy = false;
+      const check = vi.fn(async () => (healthy ? ok : blocked));
+      const bringUp = vi.fn(async () => {});
+
+      await preflightAndBringUp({ check, bringUp });
+      // Parked: nothing spawned, block recorded.
+      expect(bringUp).not.toHaveBeenCalled();
+      expect(readBlockedState()).not.toBeNull();
+
+      // Operator runs `friday provision`; the dep is now present.
+      healthy = true;
+      await vi.advanceTimersByTimeAsync(DEPS_RECHECK_MS + 1);
+
+      // The re-check brought the stack up exactly once and cleared the block.
+      expect(bringUp).toHaveBeenCalledTimes(1);
+      expect(readBlockedState()).toBeNull();
+
+      // And it does not re-fire on subsequent ticks (interval was cleared).
+      await vi.advanceTimersByTimeAsync(DEPS_RECHECK_MS * 2);
+      expect(bringUp).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

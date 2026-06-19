@@ -82,8 +82,27 @@ export async function runProvision(deps: ProvisionDeps): Promise<ProvisionResult
   if (brew.alreadyPresent.length)
     deps.log(pc.dim(`  ⏭ already present: ${brew.alreadyPresent.join(", ")}`));
   if (brew.failed.length) {
-    failures.push(`brew install failed: ${brew.failed.join(", ")}`);
-    deps.log(pc.yellow(`  ✗ brew install failed: ${brew.failed.join(", ")} — install manually`));
+    // Only pgvector is BOOT-CRITICAL: its absence crash-loops the daemon at
+    // migration 0036. The other Brewfile deps (fnm/pnpm/cloudflared/gh) are
+    // either supervisor prerequisites or build/tunnel-only — and they're often
+    // installed by a NON-brew method (pnpm via corepack, node via fnm), so
+    // `brew list` reports them absent and `brew install` may fail even on a
+    // perfectly healthy box. Failing the whole provision (→ rolling back a
+    // `friday update`) on one of those would be wrong, so only pgvector failing
+    // is fatal; the rest are a non-fatal warning.
+    const pgvectorFailed = brew.failed.includes("pgvector");
+    const otherFailed = brew.failed.filter((d) => d !== "pgvector");
+    if (otherFailed.length) {
+      deps.log(
+        pc.dim(
+          `  · ${otherFailed.join(", ")} not installed via brew (non-critical — install manually if you need them)`,
+        ),
+      );
+    }
+    if (pgvectorFailed) {
+      failures.push("brew install failed: pgvector");
+      deps.log(pc.yellow("  ✗ pgvector install failed — install it manually"));
+    }
   }
 
   // 2. pgvector EXTENSION (HARD). Skip when the binary install failed — the
