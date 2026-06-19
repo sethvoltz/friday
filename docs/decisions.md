@@ -1599,6 +1599,28 @@ Friday Apps (kitchen, reading-friend) are the established pattern for domain fea
 
 **Rejected:** _build it as an app_ (the proven, lean path — but cannot reach other apps' agents nor render a dashboard route); _overload `schedules` with a `habit` kind_ (a habit doesn't fire on a clock and still needs a separate check-in table — pays the overload cost without avoiding the second table); _store the streak as a column_ (a denormalized lie the instant a Period closes without a recompute trigger); _render bounded `terminal` only in the UI_ (splits the lifecycle across a stored status and a derived flag, and leaves non-UI consumers — MCP `habit_list`, future integrations — seeing a closed habit as `active`).
 
+## ADR-044 — Dependency provisioning + preflight live on the boot/start path, not the update path
+
+**Status:** accepted (2026-06-18).
+
+**Context.** FRI-24 added pgvector as a hard runtime dependency: migration `0036` adds an `embedding vector(384)` column, which needs the `vector` extension, which needs the pgvector Homebrew formula. FRI-24 wired provisioning (`ensureBrewDeps` → `brew install pgvector`, `ensureVectorExtension` → `CREATE EXTENSION vector`) into `friday update`. But a production box that updated **1.24.0 → 1.26.0** still crash-looped at boot with `type "vector" does not exist`, and the dashboard couldn't reconnect.
+
+**Root cause — the self-referential update gap.** `friday update` runs the **outgoing** version's update command, then flips `current` to the new version. So provisioning added in release N can **never** run on the hop _into_ N — only on the _next_ hop (N → N+1). The first box crossing into the pgvector-introducing release got the dependent schema with zero provisioning. No change to `update.ts` can fix this class, because the outgoing version's code is what runs.
+
+**The lever.** The launchd plist runs `…/current/bin/friday-supervisor` — the **`current` symlink** — so after any flip the supervisor (and the daemon it spawns) are **always the new version's code**, regardless of which version's `update` initiated the flip. The durable safety net therefore belongs on the **boot/start path**, not the update path.
+
+**Decision — three pieces, one read-only checker.**
+
+1. **`checkDeps()`** (`packages/cli/src/lib/deps.ts`) is a **read-only** dependency report (`{ ok, hard[], soft[] }`) built on `probePostgresHealth` (reachable / role / database / `wal_level=logical`) + `hasVectorExtension` + a single launchd-safe `brew list pgvector`. It NEVER installs anything, so it's safe on the boot path. `friday doctor` and the gates all read from it.
+2. **Supervisor preflight gate** (`bin/supervisor.ts`): before spawning **any** child, run `checkDeps()`. On a hard-missing dep, the supervisor refuses to bring up the stack (**whole-stack park** — not a per-child crash-loop + cascade-stop), writes a blocked-state file under `~/.friday/state/` that `friday status` surfaces, and stays alive re-checking every 15 s so the stack self-heals once the dep appears. This is the piece that fixes the introducing-hop and any already-bricked box, because it's always new code. `friday start` runs the same check for a fast interactive remedy before bootstrapping; `friday restart` / launchd `RunAtLoad` are covered by the supervisor gate (they don't pass through `start.ts`).
+3. **`friday provision`** (`commands/provision.ts`) is the interactive **actuator** (`ensureBrewDeps` + `ensureVectorExtension` + fail-open model warm). `friday update`, after flipping `current`, **execs the new version's `friday provision`** (`current/.../index.js provision`) rather than provisioning in-process — so every update self-provisions whatever deps that release introduced. On provision failure the update rolls the flip back and does not restart. **Installs never happen on the launchd boot path** — only in `friday provision` / `friday update`.
+
+**Why the extension can't self-heal inside the daemon.** Daemon boot runs migrations as the non-superuser `friday` role; pgvector is untrusted, so `CREATE EXTENSION vector` requires SUPERUSER. The extension must be created out-of-band via an admin (OS-superuser) connection — which is what `ensureVectorExtension` / `friday provision` do, and why it can't live in migration 0036.
+
+**Consequences.** A missing hard dep now produces a clean halt with an exact remedy (`friday provision`), visible in `friday status`, instead of a silent crash-loop. The brew/extension TUI moved out of `update.ts`'s narration into `friday provision`. `checkDeps` deliberately brew-checks only pgvector (the one boot-bricking, here-detectable dep) to keep the start/boot path fast — `friday doctor` still reports the full dependency set.
+
+**Rejected:** _`CREATE EXTENSION` inside migration 0036_ (the migration role isn't superuser); _daemon-boot self-heal as the daemon_ (same superuser problem; also can't `brew install`); _per-child "blocked daemon" state with the other children up_ (a half-up stack whose every mutator 502s is more confusing than a clean whole-stack park); _auto-`brew install` from the supervisor_ (a multi-minute, network-bound, non-interactive step on the launchd boot path).
+
 ## Watch list
 
 Open architectural questions deferred to v1.x or v2. Not yet ADRs because the trigger to decide hasn't fired.

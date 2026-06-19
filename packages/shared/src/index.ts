@@ -29,6 +29,7 @@ export {
   probePostgresHealth,
   dropFridayDatabaseForTest,
   ensureVectorExtension,
+  hasVectorExtension,
   findPgBin,
   findPgIsReady,
   FRIDAY_PG_CONSTANTS,

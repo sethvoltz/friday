@@ -14,6 +14,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 
 /**
  * Brewfile-tracked third-party deps Friday relies on. MUST match install.sh's
@@ -22,15 +23,34 @@ import { spawnSync } from "node:child_process";
  */
 export const BREW_DEPS = ["fnm", "pnpm", "postgresql@18", "pgvector", "cloudflared", "gh"] as const;
 
+/**
+ * Resolve an ABSOLUTE path to the `brew` binary.
+ *
+ * `friday update` runs interactively, where the operator's PATH has brew. But
+ * the supervisor (and any boot-path preflight) runs under launchd, whose PATH
+ * is the stripped `/usr/bin:/bin:/usr/sbin:/sbin` — `/usr/local/bin` and
+ * `/opt/homebrew/bin` are NOT on it (the friday plist sets no PATH). A bare
+ * `brew` therefore resolves only in the interactive path and silently fails
+ * under launchd. Probe the two canonical Homebrew prefixes (arm64 first, then
+ * Intel) and fall back to bare `brew` (PATH lookup) when neither exists, so the
+ * same `brewHas` / `brewInstall` / `checkDeps` code works from both contexts.
+ */
+export function resolveBrew(exists: (p: string) => boolean = existsSync): string {
+  for (const p of ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]) {
+    if (exists(p)) return p;
+  }
+  return "brew";
+}
+
 /** Whether `brew list <dep>` reports the dep installed. */
-function brewHas(dep: string): boolean {
-  const r = spawnSync("brew", ["list", dep], { stdio: "ignore" });
+export function brewHas(dep: string): boolean {
+  const r = spawnSync(resolveBrew(), ["list", dep], { stdio: "ignore" });
   return r.status === 0;
 }
 
 /** Install a single brew dep. Returns true on success. */
 function brewInstall(dep: string): boolean {
-  const r = spawnSync("brew", ["install", dep], { stdio: "inherit" });
+  const r = spawnSync(resolveBrew(), ["install", dep], { stdio: "inherit" });
   return r.status === 0;
 }
 

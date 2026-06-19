@@ -51,6 +51,13 @@ import {
   zeroCacheCli,
   zeroCacheCwd,
 } from "../lib/zero-cache.js";
+import {
+  checkDeps,
+  clearBlockedState,
+  PROVISION_REMEDY,
+  writeBlockedState,
+  type DepReport,
+} from "../lib/deps.js";
 
 // ---- Layout -----------------------------------------------------------
 
@@ -439,6 +446,115 @@ async function cascadeStop(exitCode = 0): Promise<void> {
   process.exit(exitCode);
 }
 
+// ---- Dependency preflight gate ---------------------------------------
+
+/** How often the parked supervisor re-checks deps so the stack self-heals
+ *  once `friday provision` makes them present — no `friday restart` needed. */
+const DEPS_RECHECK_MS = 15_000;
+
+let depsRecheckTimer: ReturnType<typeof setInterval> | null = null;
+let stackBroughtUp = false;
+
+/**
+ * Spawn the three children in dependency order: daemon first (it owns
+ * migrations), then zero-cache (needs the daemon-applied schema current), then
+ * dashboard (proxies WS to zero-cache via server-entry.mjs).
+ */
+async function bringUpStack(): Promise<void> {
+  if (stackBroughtUp || supervisorShuttingDown) return;
+  stackBroughtUp = true;
+  for (const name of ["daemon", "zero-cache", "dashboard"] as const) {
+    const state = children.get(name);
+    if (!state) continue;
+    await spawnChild(state);
+    // Small inter-spawn gap to let daemon settle before zero-cache probes its
+    // schema, and zero-cache settle before dashboard tries to proxy /api/sync.
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+/**
+ * READ-ONLY dependency preflight. A HARD-missing dep (pgvector binary or
+ * extension, Postgres unreachable, wal_level != logical, …) would crash-loop
+ * the daemon and cascade-stop the healthy children — so we refuse to bring up
+ * the stack at all (whole-stack park), record WHY in a blocked-state file
+ * `friday status` reads, and stay alive re-checking. The supervisor NEVER
+ * installs anything here (no `brew install` on the launchd boot path); the
+ * remedy points at the interactive `friday provision`. Once deps are healthy
+ * the re-check brings the stack up automatically.
+ */
+async function preflightAndBringUp(opts?: {
+  check?: () => Promise<DepReport>;
+  bringUp?: () => Promise<void>;
+}): Promise<void> {
+  if (supervisorShuttingDown) return;
+  const check = opts?.check ?? checkDeps;
+  const bringUp = opts?.bringUp ?? bringUpStack;
+  let report: DepReport;
+  try {
+    report = await check();
+  } catch (err) {
+    // A preflight that itself errors must NOT silently block the stack — fail
+    // OPEN to the legacy behaviour (bring the stack up; the daemon's own
+    // fail-loud path still applies) rather than park on a probe bug.
+    logSupervisor("deps.preflight.error", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    clearBlockedState();
+    await bringUp();
+    return;
+  }
+
+  if (report.ok) {
+    clearBlockedState();
+    await bringUp();
+    return;
+  }
+
+  // Park: record the blocked state and re-check on an interval. The interval is
+  // the ONLY thing keeping the parked supervisor alive — do NOT unref it, or
+  // the process would exit and launchd KeepAlive would thrash-restart it.
+  writeBlockedState({ ts: new Date().toISOString(), hard: report.hard });
+  logSupervisor("deps.blocked", {
+    hard: report.hard.map((i) => i.name),
+    remedy: PROVISION_REMEDY,
+  });
+  if (depsRecheckTimer) return;
+  depsRecheckTimer = setInterval(() => {
+    void (async () => {
+      if (supervisorShuttingDown) return;
+      let r: DepReport;
+      try {
+        r = await check();
+      } catch {
+        return; // transient probe error — keep parked, try again next tick
+      }
+      if (!r.ok) {
+        // Refresh the remedy list in case the missing set changed.
+        writeBlockedState({ ts: new Date().toISOString(), hard: r.hard });
+        return;
+      }
+      if (depsRecheckTimer) {
+        clearInterval(depsRecheckTimer);
+        depsRecheckTimer = null;
+      }
+      logSupervisor("deps.unblocked", {});
+      clearBlockedState();
+      await bringUp();
+    })();
+  }, DEPS_RECHECK_MS);
+}
+
+/** Test-only: clear the park re-check timer and reset the one-shot bring-up
+ *  latch so a fresh `preflightAndBringUp` can run in the next test case. */
+function resetGateForTest(): void {
+  if (depsRecheckTimer) {
+    clearInterval(depsRecheckTimer);
+    depsRecheckTimer = null;
+  }
+  stackBroughtUp = false;
+}
+
 // ---- Main -------------------------------------------------------------
 
 async function main(): Promise<void> {
@@ -457,26 +573,21 @@ async function main(): Promise<void> {
     });
   }
 
-  // Spawn in order: daemon first (it owns migrations), then zero-cache
-  // (depends on daemon-applied schema being current), then dashboard
-  // (proxies WS to zero-cache via server-entry.mjs).
-  for (const name of ["daemon", "zero-cache", "dashboard"] as const) {
-    const state = children.get(name);
-    if (!state) continue;
-    await spawnChild(state);
-    // Small inter-spawn gap to let daemon settle before zero-cache
-    // probes its schema, and zero-cache settle before dashboard tries
-    // to proxy /api/sync.
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
+  // Register signal handlers BEFORE the preflight so a parked supervisor (deps
+  // missing, no children spawned) still shuts down cleanly on `friday stop` /
+  // `friday restart`'s kickstart.
   process.on("SIGTERM", () => void cascadeStop());
   process.on("SIGINT", () => void cascadeStop());
 
-  // Stay alive: the event loop is kept turning by the child stdio pipes
-  // and the spawn-retry timers. If every child has exited and shutdown
-  // hasn't fired, the supervisor exits naturally (and launchd will
-  // restart it via KeepAlive).
+  // Gate the whole stack on a read-only dependency preflight. If deps are
+  // healthy this brings the stack up immediately; if not, it parks (spawns
+  // nothing) with a clear remedy and self-heals on the re-check.
+  await preflightAndBringUp();
+
+  // Stay alive: the event loop is kept turning by the child stdio pipes and the
+  // spawn-retry timers (healthy path) or the deps re-check interval (parked
+  // path). If every child has exited and shutdown hasn't fired, the supervisor
+  // exits naturally (and launchd will restart it via KeepAlive).
 }
 
 // Only run when invoked as a script (not when imported by tests). The
@@ -504,10 +615,13 @@ if (invokedAsScript) {
 export {
   buildSpecs,
   killChildGroup,
+  preflightAndBringUp,
+  resetGateForTest,
   CRASH_LOOP_WINDOW_MS,
   CRASH_LOOP_MAX,
   BACKOFF_INITIAL_MS,
   BACKOFF_CAP_MS,
   CASCADE_STOP_DEADLINE_MS,
+  DEPS_RECHECK_MS,
 };
 export type { ChildSpec, ChildState };

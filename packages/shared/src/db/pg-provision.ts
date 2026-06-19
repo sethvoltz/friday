@@ -482,6 +482,44 @@ export async function ensureVectorExtension(
   }
 }
 
+/**
+ * Read-only check: is the pgvector `vector` extension installed in the friday
+ * DB? The inverse-free twin of {@link ensureVectorExtension} — it NEVER
+ * creates anything, so it is safe to call from boot-path preflights (the
+ * supervisor gate, `friday start`, `friday doctor`) that must only DETECT a
+ * missing dependency, never install one.
+ *
+ * Connects via the same admin-in-friday URL `ensureVectorExtension` uses (OS
+ * user = Homebrew-PG superuser) so the check and the create agree on the
+ * target DB; `pg_extension` is readable by any role, so the connection role is
+ * immaterial to the result. Returns `false` (never throws) on any connection
+ * failure — an unreachable Postgres is a separate hard dep that
+ * {@link probePostgresHealth} reports; this probe answers only "is the
+ * extension present" and a connection failure is reported as "not present"
+ * rather than crashing the preflight.
+ *
+ * `connectionString` overrides the target (tests point it at a scratch DB).
+ */
+export async function hasVectorExtension(connectionString?: string): Promise<boolean> {
+  const adminInFriday =
+    connectionString ??
+    `postgresql://${process.env.USER ?? "postgres"}@localhost:5432/${FRIDAY_DB}`;
+  const client = new Client({ connectionString: adminInFriday });
+  try {
+    await client.connect();
+  } catch {
+    return false;
+  }
+  try {
+    const r = await client.query(`SELECT 1 FROM pg_extension WHERE extname = 'vector'`);
+    return r.rows.length > 0;
+  } catch {
+    return false;
+  } finally {
+    await client.end();
+  }
+}
+
 async function ensurePublication(
   databaseUrl: string,
   log: (msg: string) => void,

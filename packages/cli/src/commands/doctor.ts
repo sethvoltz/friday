@@ -19,6 +19,7 @@ import {
   getDb,
   loadFridayConfig,
   probePostgresHealth,
+  hasVectorExtension,
   schema,
   warmVaultCache,
 } from "@friday/shared";
@@ -27,6 +28,7 @@ import { BANNER } from "../lib/branding.js";
 import { launchdJobStatus } from "./status.js";
 import { FRIDAY_FNM_BIN_ENV, FRIDAY_LAUNCHD_LABEL, plistPath } from "../lib/launchd.js";
 import { currentLink } from "../lib/install-paths.js";
+import { brewHas, resolveBrew } from "../lib/brew-deps.js";
 
 type Section = "Dependencies" | "Configuration" | "Runtime" | "PostgreSQL";
 type Status = "ok" | "warn" | "fail";
@@ -398,6 +400,7 @@ export async function runDependencies(): Promise<DoctorCheck[]> {
     "node in shell",
     "gh CLI",
     "postgres",
+    "pgvector",
     "cloudflared",
     "install tree",
   ]) {
@@ -505,15 +508,28 @@ export async function runDependencies(): Promise<DoctorCheck[]> {
   // postgres: postgresql@18 is keg-only, so psql often isn't on PATH even
   // though the formula is installed. Prefer `brew list postgresql@18` (which
   // reports whether the keg is installed regardless of linking) and fall back
-  // to `which psql` for non-brew installs.
+  // to `which psql` for non-brew installs. `resolveBrew()` finds brew by
+  // absolute path so this is correct even off an interactive PATH.
   const psqlOk =
-    spawnSync("brew", ["list", "postgresql@18"], { encoding: "utf8" }).status === 0 ||
+    spawnSync(resolveBrew(), ["list", "postgresql@18"], { encoding: "utf8" }).status === 0 ||
     spawnSync("which", ["psql"], { encoding: "utf8" }).status === 0;
   box.resolve(
     "postgres",
     psqlOk ? "ok" : "fail",
     psqlOk ? "installed" : "missing",
     psqlOk ? undefined : "install with `brew install postgresql@18`",
+  );
+
+  // pgvector binary (FRI-24): supplies the `vector` type/extension migration
+  // 0036 needs. Without it the daemon crash-loops at boot, so this is a HARD
+  // dep — the remedy is the one-shot `friday provision`. (The extension itself
+  // is checked in the PostgreSQL section once a DB connection is available.)
+  const pgvectorOk = brewHas("pgvector");
+  box.resolve(
+    "pgvector",
+    pgvectorOk ? "ok" : "fail",
+    pgvectorOk ? "installed" : "missing",
+    pgvectorOk ? undefined : "run `friday provision` (installs pgvector + enables the extension)",
   );
 
   // cloudflared (warn if missing — only required for the public tunnel)
@@ -776,7 +792,7 @@ async function runPostgres(): Promise<DoctorCheck[]> {
   const box = new LiveBox("PostgreSQL");
   // Declare the happy-path rows; if Postgres is unreachable (or the probe
   // throws) we drop the detail rows the probe can't answer.
-  const detailRows = ["role", "database", "migrations", "publication", "wal_level"];
+  const detailRows = ["role", "database", "migrations", "publication", "wal_level", "vector ext"];
   box.declare("daemon");
   for (const label of detailRows) box.declare(label);
   box.draw();
@@ -828,6 +844,19 @@ async function runPostgres(): Promise<DoctorCheck[]> {
           ? undefined
           : "run `friday setup`, then `brew services restart postgresql@18`",
       );
+      // pgvector `vector` extension (FRI-24) — the HARD dep migration 0036
+      // needs. Only meaningful once the database exists.
+      if (pg.databaseExists) {
+        const vectorExt = await hasVectorExtension();
+        box.resolve(
+          "vector ext",
+          vectorExt ? "ok" : "fail",
+          vectorExt ? "enabled" : "missing",
+          vectorExt ? undefined : "run `friday provision` (enables the pgvector extension)",
+        );
+      } else {
+        box.drop("vector ext");
+      }
     }
   } catch (err) {
     // Probe blew up entirely — collapse to a single health-probe failure row.

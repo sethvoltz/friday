@@ -14,7 +14,7 @@
  * pure data, no subprocess required.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,8 +25,11 @@ import {
   CRASH_LOOP_MAX,
   CRASH_LOOP_WINDOW_MS,
   killChildGroup,
+  preflightAndBringUp,
+  resetGateForTest,
   type ChildState,
 } from "./supervisor.js";
+import { clearBlockedState, readBlockedState, type DepReport } from "../lib/deps.js";
 
 // ---- fixture --------------------------------------------------------
 
@@ -569,5 +572,56 @@ describe("crash-loop guard arithmetic", () => {
     // false-positive on legitimate scattered transients.
     expect(CRASH_LOOP_WINDOW_MS).toBeGreaterThanOrEqual(30_000);
     expect(CRASH_LOOP_WINDOW_MS).toBeLessThanOrEqual(5 * 60_000);
+  });
+});
+
+describe("dependency preflight gate — whole-stack park, no crash-loop", () => {
+  const ok: DepReport = { ok: true, hard: [], soft: [] };
+  const blocked: DepReport = {
+    ok: false,
+    hard: [{ name: "pgvector:extension", present: false, remedy: "run `friday provision`" }],
+    soft: [],
+  };
+
+  beforeEach(() => {
+    resetGateForTest();
+    clearBlockedState();
+  });
+  afterEach(() => {
+    // Clear the park re-check interval so it can't leak across tests / hang vitest.
+    resetGateForTest();
+    clearBlockedState();
+  });
+
+  it("brings up the stack and clears any blocked state when deps are healthy", async () => {
+    const bringUp = vi.fn(async () => {});
+    await preflightAndBringUp({ check: async () => ok, bringUp });
+    expect(bringUp).toHaveBeenCalledTimes(1);
+    expect(readBlockedState()).toBeNull();
+  });
+
+  it("does NOT spawn the stack when a hard dep is missing — it parks + records why", async () => {
+    const bringUp = vi.fn(async () => {});
+    await preflightAndBringUp({ check: async () => blocked, bringUp });
+    // The crux: the daemon (and the whole stack) is never spawned — so there is
+    // no crash-loop and no cascade-stop of the healthy children.
+    expect(bringUp).not.toHaveBeenCalled();
+    // The reason is recorded for `friday status` to surface.
+    const state = readBlockedState();
+    expect(state?.hard.map((i) => i.name)).toEqual(["pgvector:extension"]);
+  });
+
+  it("fails OPEN (brings the stack up) if the preflight probe itself throws", async () => {
+    const bringUp = vi.fn(async () => {});
+    await preflightAndBringUp({
+      check: async () => {
+        throw new Error("probe blew up");
+      },
+      bringUp,
+    });
+    // A preflight bug must not permanently dark the box — degrade to the legacy
+    // behaviour (spawn; the daemon's own fail-loud still applies).
+    expect(bringUp).toHaveBeenCalledTimes(1);
+    expect(readBlockedState()).toBeNull();
   });
 });

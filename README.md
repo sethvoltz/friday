@@ -129,7 +129,7 @@ curl -fsSL https://raw.githubusercontent.com/sethvoltz/friday/main/Brewfile | br
 (Contributors with a local checkout can just `brew bundle --file=Brewfile`.) Installs:
 
 - **`postgresql@18`** — Friday's canonical store. Managed by `brew services`, lifecycle-independent of `friday start/stop`.
-- **`pgvector`** — Postgres extension backing semantic memory recall (`embedding vector(384)` on `memory_entries`). The Brewfile installs the extension binaries; `friday setup` / `friday update` create the `vector` extension in the `friday` database via an admin connection (it requires superuser, so it can't be created by daemon migrations). The embedding runtime is **onnxruntime-web (WASM)** — its `.wasm` files ride in the release tarball's `node_modules`, so there's **no per-platform native binary to fetch** and it runs cross-platform (Intel x64 and Apple Silicon). Only the quantized ONNX model + tokenizer (~30MB, under `~/.friday/models/`) are fetched at install/update time, and recall degrades fail-open to full-text-only if they're absent.
+- **`pgvector`** — Postgres extension backing semantic memory recall (`embedding vector(384)` on `memory_entries`). The Brewfile installs the extension binaries; `friday provision` (run by hand, or automatically by `friday update` after it flips to the new version) creates the `vector` extension in the `friday` database via an admin connection (it requires superuser, so it can't be created by daemon migrations). If the binary or extension is missing, the supervisor **parks the whole stack with a clear remedy instead of crash-looping** and `friday status` tells you to run `friday provision` (ADR-044). The embedding runtime is **onnxruntime-web (WASM)** — its `.wasm` files ride in the release tarball's `node_modules`, so there's **no per-platform native binary to fetch** and it runs cross-platform (Intel x64 and Apple Silicon). Only the quantized ONNX model + tokenizer (~30MB, under `~/.friday/models/`) are fetched at install/update time, and recall degrades fail-open to full-text-only if they're absent.
 - **`gh`** — GitHub CLI for Builders to clone and open PRs
 - **`fnm`** — Fast Node Manager; resolves the pinned Node from `.node-version` (`22.21.1`) and is how the launchd-supervised stack launches Node, ABI-matched to the pre-baked native modules (ADR-034)
 - **`pnpm`** — build/dev-time package manager (CI packs the release tarball, contributors build from source); not on Friday's runtime path
@@ -221,8 +221,9 @@ The `friday` CLI manages services and inspects state. Inspection commands work r
 ```bash
 # Lifecycle
 friday setup [--cloudflare] [--reset-password]
-friday doctor                                  # data dir, db, account, external CLIs
-friday start                                   # bootstrap/kickstart the launchd job (whole stack atomically)
+friday doctor                                  # data dir, db, account, external CLIs (incl. pgvector + the vector extension)
+friday provision                               # install/repair runtime deps: pgvector + vector extension + embedding model (idempotent)
+friday start                                   # preflight deps, then bootstrap/kickstart the launchd job (whole stack atomically)
 friday stop                                    # bootout the launchd job (cascade-stops every child; auto-launches again on reboot)
 friday restart                                 # launchctl kickstart -k the launchd job
 friday disable                                 # stop + remove the plist: keeps the install, NO auto-launch on reboot
@@ -233,7 +234,7 @@ friday attach <daemon|dashboard|zero-cache>    # `tail -F ~/.friday/logs/<servic
 friday logs [daemon|dashboard|zero-cache|tunnel] [--follow]
 
 # Install lifecycle (ADR-034)
-friday update [--check] [--rollback]           # download + verify + extract latest; flip symlink; restart ONLY if it was running
+friday update [--check] [--rollback]           # download + verify + extract latest; flip symlink; provision new deps; restart ONLY if it was running
 friday uninstall [--data=keep|delete] [--yes]  # remove the install tree + launchd job; ~/.friday preserved by default
 
 # Inspection (read-only; daemon optional)

@@ -54,13 +54,6 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import * as launchd from "../lib/launchd.js";
 import { currentLink, versionDir, versionsDir } from "../lib/install-paths.js";
-import { ensureBrewDeps as ensureBrewDepsImpl } from "../lib/brew-deps.js";
-import {
-  ensureEmbeddingAssets as ensureEmbeddingAssetsImpl,
-  type EnsureEmbeddingAssetsResult,
-} from "../lib/embedding-assets.js";
-import { ensureVectorExtension } from "@friday/shared";
-
 const RELEASE_BASE = "https://github.com/sethvoltz/friday/releases/latest/download";
 
 /**
@@ -407,27 +400,21 @@ export interface UpdateDeps {
    *  was stopped (but still autostart-armed): keeps the plist current (new
    *  version's shape) for the next `friday start` / reboot RunAtLoad. */
   writePlist(installDir: string): void;
-  /** Reconcile Homebrew deps (the TS twin of install.sh's ensure_brew_deps):
-   *  install any Brewfile dep that's missing (incl. pgvector), skip present
-   *  ones. Runs BEFORE the daemon restarts so a newly-added dep is on the box
-   *  before the post-update boot. Returns the per-dep partition so the caller
-   *  renders a ✓ (installed) / ⏭ (already present) / ✗ (failed) line. FRI-24. */
-  ensureBrewDeps(): { installed: string[]; alreadyPresent: string[]; failed: string[] };
-  /** Ensure the pgvector `vector` extension exists in the friday DB (via the
-   *  admin/superuser connection — the friday role can't CREATE EXTENSION). The
-   *  extension is a HARD schema dependency for migration 0036's `embedding
-   *  vector(384)` column, which the daemon runs on the NEXT boot — so it MUST
-   *  exist before the restart. Throws on failure (fail-loud — do NOT brick the
-   *  daemon by booting it into a missing-type migration). Resolves `true` when
-   *  this run created the extension, `false` when it already existed (so the
-   *  caller renders ✓ vs ⏭). FRI-24. */
-  ensureVectorExtension(): Promise<boolean>;
-  /** Best-effort, FAIL-OPEN: warm the embedding MODEL into the cache. Inference
-   *  runs on onnxruntime-web's WASM backend (no native binary to fetch), so this
-   *  only pulls the tokenizer + quantized ONNX model. A failure here degrades
-   *  recall to FTS-only; it MUST NOT fail the update — so it returns the warm
-   *  outcome rather than throwing. FRI-24. */
-  ensureEmbeddingAssets(installDir: string): Promise<EnsureEmbeddingAssetsResult>;
+  /**
+   * Provision runtime deps by exec'ing the NEW version's `friday provision`
+   * (`current/packages/cli/dist/index.js provision`), which runs ONLY after
+   * `current` has been flipped to the new version. Returns the child's exit
+   * code (0 = success). FRI-24 / dep-preflight.
+   *
+   * Why exec the new binary instead of calling ensureBrewDeps/
+   * ensureVectorExtension in THIS process: `friday update` runs the OUTGOING
+   * version's code, which cannot know about a dependency the NEW release
+   * introduced. Exec'ing the freshly-flipped `current` binary runs the new
+   * release's own provisioning, so every future update self-provisions its own
+   * new deps. (The hop INTO the introducing release is covered separately by
+   * the supervisor's boot-time preflight gate.)
+   */
+  provision(): number;
 }
 
 function defaultDownloadRelease(
@@ -533,25 +520,13 @@ export const defaultUpdateDeps: UpdateDeps = {
   writePlist(installDir: string): void {
     launchd.writePlist(installDir);
   },
-  ensureBrewDeps(): { installed: string[]; alreadyPresent: string[]; failed: string[] } {
-    // brew install streams its own (inherited) stdout; the spinner is paused
-    // around that by the caller. Return the partition so the caller renders the
-    // ✓/⏭/✗ outcome line.
-    return ensureBrewDepsImpl();
-  },
-  async ensureVectorExtension(): Promise<boolean> {
-    // Create the pgvector extension via the admin (OS-superuser) connection.
-    // ensureVectorExtension throws if it can't be created — propagate it so the
-    // update fails loudly rather than restarting the daemon into a 0036
-    // migration that references a missing `vector` type. Returns true when it
-    // created the extension this run, false when it already existed.
-    return ensureVectorExtension();
-  },
-  async ensureEmbeddingAssets(installDir: string): Promise<EnsureEmbeddingAssetsResult> {
-    // FAIL-OPEN: the model warm never throws (its outcome is returned, not
-    // raised); a cold model degrades recall to FTS-only and the daemon still
-    // boots. The WASM runtime needs no native binary.
-    return ensureEmbeddingAssetsImpl({ installDir });
+  provision(): number {
+    // Exec the NEW version's CLI (current already flipped) under the same
+    // pinned node this update process runs on. `friday provision` does the
+    // brew installs + CREATE EXTENSION + model warm, streaming its own output.
+    const entry = join(currentLink(), "packages", "cli", "dist", "index.js");
+    const r = spawnSync(process.execPath, [entry, "provision"], { stdio: "inherit" });
+    return r.status ?? 1;
   },
 };
 
@@ -636,95 +611,63 @@ export function flipCurrent(version: string): void {
 }
 
 /**
- * Run the post-extract provisioning steps in their LOAD-BEARING order, then
- * flip `current` and (re)activate the supervisor (FRI-24). Each step renders a
- * labeled spinner that lands a ✓ (did work) / ⏭ (already provisioned) / ✗
- * (failed) line — no silent multi-second hangs (the model download is the slow
- * one).
+ * Flip `current` to the new version, provision its deps by exec'ing the NEW
+ * binary's `friday provision`, then (re)activate the supervisor (FRI-24 /
+ * dep-preflight).
  *
- * Order matters:
- *   1. ensureBrewDeps — install any newly-added Brewfile dep (e.g. pgvector)
- *      so it's on the box before anything downstream needs it. ✓/⏭/✗.
- *   2. ensureVectorExtension — create the pgvector `vector` extension. This is
- *      a HARD schema dependency for migration 0036, which the daemon runs on
- *      the NEXT boot; it MUST exist before the restart. Throws on failure
- *      (fail-LOUD) so we never boot the daemon into a missing-type migration —
- *      the spinner lands a ✗ and the error propagates, aborting the update.
- *   3. ensureEmbeddingAssets — best-effort, FAIL-OPEN model warm. The WASM
- *      runtime ships its `.wasm` files in node_modules, so this only warms the
- *      model into the cache. A failure shows a NON-FATAL ✗ (recall → FTS-only)
- *      and the update continues.
- *   4. flipCurrent + activate — only now does the daemon get restarted into
- *      the new version, with the extension already present.
+ * The ORDER is the whole point of the design:
+ *   1. flipCurrent — point `current` at the new version FIRST, so step 2 runs
+ *      the new release's code.
+ *   2. deps.provision() — exec `current/.../index.js provision` (the new
+ *      binary). It `brew install`s missing deps (pgvector), creates the
+ *      `vector` extension, and warms the embedding model. Running the NEW
+ *      binary — not in-process logic from THIS outgoing version — is what lets
+ *      an update install a dependency the outgoing version never heard of.
+ *   3. On provision FAILURE: roll `current` back to the prior version (so the
+ *      box stays on the last-known-good, already-running tree) and abort
+ *      WITHOUT restarting — never boot the daemon into a half-provisioned tree
+ *      (and the supervisor's boot gate would park it anyway). The new tree
+ *      stays extracted for a retry.
+ *   4. On success: activate (restart into the provisioned new version).
  *
- * `installDir` is the new version's extracted tree, NOT the `current` symlink —
- * the flip happens AFTER.
+ * The new version's extracted tree equals `current`'s target after the flip,
+ * so `friday provision` resolves to it without a separate installDir arg.
  */
 async function provisionAndActivate(
   deps: UpdateDeps,
   reporter: UpdateReporter,
   latest: string,
-  installDir: string,
   wasRunning: boolean,
 ): Promise<void> {
-  // 1. pgvector (and any other missing Brewfile dep). brew install streams its
-  // own output below the spinner when it actually installs; the common
-  // idempotent path lands ⏭ "pgvector already installed".
-  const brewSpin = reporter.spinner("Installing pgvector…");
-  let brew: { installed: string[]; alreadyPresent: string[]; failed: string[] };
-  try {
-    brew = deps.ensureBrewDeps();
-  } catch (err) {
-    brewSpin.fail("Installing pgvector failed");
-    throw err;
-  }
-  if (brew.failed.includes("pgvector")) {
-    // pgvector failing is load-bearing — the extension step that follows will
-    // throw, so surface the brew failure as the immediate cause.
-    brewSpin.fail(`pgvector install failed (brew install ${brew.failed.join(", ")})`);
-  } else if (brew.installed.includes("pgvector")) {
-    brewSpin.done(
-      brew.installed.length > 1
-        ? `pgvector installed (+ ${brew.installed.filter((d) => d !== "pgvector").join(", ")})`
-        : "pgvector installed",
-    );
-  } else if (brew.installed.length > 0) {
-    // pgvector already present, but some OTHER missing dep was installed.
-    brewSpin.done(`installed ${brew.installed.join(", ")}; pgvector already installed`);
-  } else {
-    brewSpin.skip("pgvector already installed");
-  }
+  // Capture the prior version for rollback BEFORE the flip.
+  const previous = currentVersion();
 
-  // 2. pgvector EXTENSION — fail-LOUD (a missing `vector` type bricks the 0036
-  // migration the daemon runs on the next boot).
-  const extSpin = reporter.spinner("Enabling pgvector extension…");
-  let created: boolean;
-  try {
-    created = await deps.ensureVectorExtension();
-  } catch (err) {
-    extSpin.fail(
-      `pgvector extension could not be enabled: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    throw err; // abort before assets / flip / restart
-  }
-  if (created) extSpin.done("pgvector extension enabled");
-  else extSpin.skip("pgvector extension already enabled");
-
-  // 3. Embedding MODEL warm — fail-OPEN (recall degrades to FTS-only, daemon
-  // still boots). The WASM runtime needs no native binary.
-  const modelSpin = reporter.spinner("Downloading embedding model…");
-  const assets = await deps.ensureEmbeddingAssets(installDir);
-  if (assets.status === "warmed") {
-    modelSpin.done("embedding model ready");
-  } else if (assets.status === "warm-failed") {
-    modelSpin.fail("embedding model unavailable — recall falls back to FTS-only");
-  } else {
-    modelSpin.fail(`embedding model warm failed — recall falls back to FTS-only (${assets.error})`);
-  }
-
-  // 4. Only now: flip + (re)activate the supervisor.
-  reporter.step("Activating new version…");
+  // 1. Flip first so provision runs the NEW binary.
+  reporter.step("Switching to new version…");
   flipCurrent(latest);
+
+  // 2. Provision via the new version's `friday provision` (brew + extension +
+  // model warm). It streams its own ✓/⏭/✗ lines.
+  reporter.step("Provisioning dependencies…");
+  const provisionCode = deps.provision();
+
+  // 3. Provision failure → roll back the flip + abort without restarting.
+  if (provisionCode !== 0) {
+    if (previous) {
+      reporter.warn(`provisioning failed (exit ${provisionCode}) — rolled back to ${previous}`);
+      flipCurrent(previous);
+    } else {
+      reporter.warn(
+        `provisioning failed (exit ${provisionCode}) — ${latest} staged but not started`,
+      );
+    }
+    throw new Error(
+      `provisioning failed (exit ${provisionCode}); fix the reported dep(s), then run ` +
+        "`friday provision` and `friday restart`",
+    );
+  }
+
+  // 4. Only now: (re)activate the supervisor into the provisioned new version.
   activate(deps, reporter, wasRunning);
 }
 
@@ -755,7 +698,7 @@ async function doForwardUpdate(deps: UpdateDeps, reporter: UpdateReporter): Prom
     // Already extracted (interrupted prior run); reconcile deps + provision the
     // extension/assets against the existing tree, then flip + restart.
     reporter.note(`version ${latest} already downloaded — reusing`);
-    await provisionAndActivate(deps, reporter, latest, target, wasRunning);
+    await provisionAndActivate(deps, reporter, latest, wasRunning);
     reporter.success(`Updated to ${latest} ${elapsedSince(startedAt)}`);
     return;
   }
@@ -799,11 +742,11 @@ async function doForwardUpdate(deps: UpdateDeps, reporter: UpdateReporter): Prom
     await rm(stage, { recursive: true, force: true }).catch(() => {});
   }
 
-  // Provision the pinned Node for the new tree, then reconcile brew deps +
-  // pgvector extension + embedding assets (in that order) and flip + restart.
+  // Provision the pinned Node for the new tree, then flip + provision deps via
+  // the new binary + restart.
   reporter.step("Provisioning Node runtime…");
   deps.fnmInstall(target);
-  await provisionAndActivate(deps, reporter, latest, target, wasRunning);
+  await provisionAndActivate(deps, reporter, latest, wasRunning);
   reporter.success(`Updated to ${latest} ${elapsedSince(startedAt)}`);
 }
 
