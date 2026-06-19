@@ -1519,42 +1519,6 @@ ADR-039's bug needs a scrollable document behind the inner scroller. Here the bo
 - **Inner scroller WITHOUT body-lock:** reopens the exact ADR-039 touch-routing fight.
 - **Dismiss the keyboard on scroll** (an early spike): rejected outright — scrolling up to read while composing is the core chat gesture.
 
-## ADR-040 — Soft-keyboard geometry: fixed chat bars anchor to the visual viewport's edges via one focus-gated tracker
-
-**Status:** accepted (2026-06-10)
-
-### Context
-
-ADR-039 made the document the chat scroller, with the header, agent dropdown, composer, and pills as `position: fixed` bars. `position: fixed` anchors to the **layout viewport**, and the iOS soft keyboard's interaction with the layout viewport is both regime-dependent and (on iOS 26.5) partially misreported. Five successive fix commits (#220, #222, #224, #228, #230) each patched one symptom with a different formula or listener set and regressed another; this ADR's model was then itself iterated four times against **on-device telemetry** (geometry snapshots posted through `/api/_diag/client-error`, cross-checked against the composer's measured `getBoundingClientRect` and a `?kbdebug` probe ladder photographed on the device).
-
-Established facts (iOS 26.5 Safari, bottom URL bar):
-
-- Keyboard open in a tab starts as an **overlay** (`innerHeight` full, `vv.height` shrinks, vv pans for the focused-field reveal), then on scroll iOS **shrinks** `innerHeight` to ≈ `vv.height` and parks the layout viewport at the focus-time scroll position; further scrolling pans the vv **beyond the layout viewport's bottom** (`offsetTop + vv.height > innerHeight`). That is real renderable geometry — fixed elements positioned past `innerHeight` paint there.
-- **`vv.offsetTop` is the only honest pan source.** `vv.pageTop` mirrors `scrollY` and drops the pan (rect-verified in every captured sample). In the standalone PWA the layout viewport resizes and `offsetTop` stays ≈ 0.
-- Platform escape hatches absent: no `interactive-widget` on iOS (WebKit #259770), no VirtualKeyboard API / `env(keyboard-inset-height)` (WebKit #230225), `dvh` is spec-blind to the keyboard, `position: sticky` is layout-viewport-anchored like fixed.
-
-### Decision
-
-One tracker (`$lib/util/keyboard-inset.ts`, dependency-injected, with stateful unit tests that replay the captured device telemetry as fixtures) owns all soft-keyboard geometry. Full model in `docs/mobile-ux.md`; the essence:
-
-- **Presence is focus-derived, geometry is visualViewport-derived.** While a text-entry element is focused: `--vv-top-y = vv.offsetTop` (raw, unclamped) anchors the header and agent dropdown under the vv's top edge; `--vv-bottom-y = vv.offsetTop + vv.height` anchors the composer's bottom on the vv's bottom edge (`top:` + `translateY(-100%)`); `--kb-inset = max(0, innerHeight − vv.height)` (pan-free, scroll-stable) pads the transcript's scroll headroom. No field focused → vars cleared, zero keyboard JS influence.
-- Re-measures on `vv.resize` + `vv.scroll` + `window.resize`, rAF-coalesced, change-guarded, with timed post-focus settle probes; no transitions on anchors (they smear corrections into visible sliding). The tracker also owns the `keyboard-open` class (zeroes `--kb-safe-bottom`) and the WebKit #297779 post-dismissal wiggle. ChatShell's bottom re-pin is windowed to 1.6s after focus so regime-flip resize events mid-scroll can't yank the viewport.
-
-### Consequences
-
-- Header, dropdown, and composer stay on-screen and keyboard-adjacent through keyboard-up scrolling in both Safari-tab regimes, the standalone PWA, and Android; the unit suite replays each captured device state.
-- **Accepted platform ceiling (Safari tab):** in the parked first-tap state, iOS's claimed `vv.height` under-reports the truly visible area by an unexposed chrome allowance (~100–200px; CSSWG #7475). The composer sits exactly at the claimed boundary, which can leave a visible gap above the keyboard chrome. Photographically verified to be iOS's claim, not our math; no magic-constant compensation (it would rot with every iOS point release). The standalone PWA — the primary mobile mode — is unaffected.
-- `?kbdebug` (HUD + probe ladder) is kept as a documented diagnostic; dev builds also post geometry snapshots to the dashboard JSONL. When WebKit ships `interactive-widget` (#259770) or fixes its viewport reporting, the tracker degrades gracefully and becomes deletable.
-
-### Rejected alternatives
-
-- **One-shot measurement on `focusin`** (the #230 state): reads pre-keyboard geometry; structurally wrong in every regime.
-- **Pan from `pageTop − scrollY`** ("by definition" equal to offsetTop): pageTop drops the pan on iOS 26.5; froze the anchors. Rect-verification decided this, not spec text.
-- **Clamping the pan to `innerHeight − vv.height`:** the shrunk regime's beyond-the-layout pan is real; clamping threw every bar off the top of the screen.
-- **Sticky/monotonic padding inset:** held overlay-sized padding into the shrunk regime, rendering as an ever-growing blank band that eventually filled the screen.
-- **Dismissing the keyboard on scroll:** rejected outright — scrolling up to read while composing is the core chat gesture.
-- **`position: sticky` composer; counter-translate-on-every-frame without focus gating; inner-scroller app shell:** the first two fail as documented above; the app shell (how every major chat product avoids this class entirely) remains the documented fallback if the Safari-tab ceiling proves unacceptable in practice — it would reopen ADR-039 deliberately.
-
 ## ADR-042 — `friday start` reconciles the Cloudflare tunnel to a serve-intent flag; restore stages dark (split-brain guard)
 
 **Status:** accepted (2026-06-11). FRI-166.
@@ -1620,6 +1584,22 @@ Friday Apps (kitchen, reading-friend) are the established pattern for domain fea
 **Consequences.** A missing hard dep now produces a clean halt with an exact remedy (`friday provision`), visible in `friday status`, instead of a silent crash-loop. The brew/extension TUI moved out of `update.ts`'s narration into `friday provision`. `checkDeps` deliberately brew-checks only pgvector (the one boot-bricking, here-detectable dep) to keep the start/boot path fast — `friday doctor` still reports the full dependency set.
 
 **Rejected:** _`CREATE EXTENSION` inside migration 0036_ (the migration role isn't superuser); _daemon-boot self-heal as the daemon_ (same superuser problem; also can't `brew install`); _per-child "blocked daemon" state with the other children up_ (a half-up stack whose every mutator 502s is more confusing than a clean whole-stack park); _auto-`brew install` from the supervisor_ (a multi-minute, network-bound, non-interactive step on the launchd boot path).
+
+## ADR-045 — The Zero replication publication is reconciled on daemon boot, not only in `friday setup`
+
+**Status:** accepted (2026-06-19).
+
+**Context.** Zero replicates a **narrow** Postgres publication, `friday_pub` — an explicit `FOR TABLE` list (`SYNC_TABLES` in `pg-provision.ts`), not `FOR ALL TABLES` (ADR-023 narrowed it to keep high-frequency `usage`/`db_meta` churn out of Zero). Whenever a release adds a Zero-replicated table, that table must be (a) added to `SYNC_TABLES`, (b) created by a migration, **and** (c) added to the live `friday_pub` publication. Step (c) only ever ran inside `provisionPostgres()`, which only ever ran from `friday setup`.
+
+**The failure.** FRI-169 (1.28.0) shipped `habits` / `habit_checkins` as the first Zero-replicated tables added **after** the curl-install / `friday update` deploy pivot (FRI-146, 2026-06-02). A box upgraded via `friday update` runs migrations on daemon boot — so the tables existed — but `update` never runs `friday setup`, so `friday_pub` was never reconciled and stayed at the old 17-table set. zero-cache replicated 17 tables; the 1.28.0 client bundle's Zero schema knew 19. `checkClientSchema` rejected every client with `SchemaVersionNotSupported`, and the dashboard's schema-mismatch guard (`+layout.svelte`) reloaded the page on each rejection → an **infinite reload loop** on every client (page + tunnel healthy; only live sync broken). The same class bit once before — `313028c` added `evolve_proposals` to fix the identical loop — but every prior addition predated the pivot and was carried into the publication by a `friday setup` re-run, so it never recurred until an update-only deploy shipped a new replicated table.
+
+**The lever (same as ADR-044).** The launchd plist runs `current/.../friday-supervisor`, so after a flip the daemon is **always the new version's code**. Migrations already run on daemon boot, after the flip, as the durable place for "bring the schema to head regardless of which version's `update` initiated the flip." The publication is part of that schema surface, so its reconcile belongs in the same place.
+
+**Decision.** Factor the publication-reconcile body out of `ensurePublication` into an exported, idempotent `reconcileSyncPublication()` (create-if-missing / narrow-a-legacy-`FOR ALL TABLES` / `ALTER … ADD|DROP` to align). Call it on **daemon boot, immediately after `runMigrations()`** (`services/daemon/src/index.ts`) — the tables exist by then, so the existence filter sees them. `friday setup` still calls the same function via `provisionPostgres()`; the two paths now share one implementation. The daemon runs as the OS user (the Homebrew-PG superuser), so the same admin-in-friday peer-auth connection the function already used is available at boot — no secret, no new credential. The call is **best-effort**: a failure logs `publication.reconcile.error` and continues (degrading to the prior "new table not synced, recover via `friday setup`" behavior), never crashing boot.
+
+**Why this completes the upgrade.** Once the new table lands in `friday_pub`, zero-cache's `autoReset` (Zero default `true`) detects the replicated-table-set change, wipes its replica, and re-COPYs from Postgres — so `friday update` / `restart` / `start` all bring sync fully current with no manual `ALTER PUBLICATION` and no replica wipe. (The live 1.28.0 box was recovered by hand with exactly that `ALTER PUBLICATION friday_pub ADD TABLE habits, habit_checkins` + a zero-replica reset; this ADR makes it automatic.)
+
+**Rejected:** _reconcile in `friday provision` / `friday update`_ (runs **before** the restart, so the migration hasn't created the table yet — the existence filter would skip it; wrong ordering); _reconcile in the supervisor's pre-zero-cache hook_ (the supervisor doesn't wait for daemon-ready, so it races migrations); _keep it setup-only and document "re-run `friday setup` after adding a table"_ (the gap is exactly that a human/`friday update` won't, as FRI-169 proved); _make the daemon role own the publication so it needs no admin connection_ (the OS-superuser peer-auth connection already works at boot and keeps the slot-preserving ownership model from ADR-023).
 
 ## Watch list
 

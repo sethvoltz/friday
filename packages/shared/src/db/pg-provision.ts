@@ -80,10 +80,12 @@ export const SYNC_TABLES: readonly string[] = [
   // it but the publication didn't, so zero-cache served clients a
   // schema fingerprint the daemon's table set couldn't match and
   // every page load fell into a SchemaVersionNotSupported reload
-  // loop. `ensurePublication` reconciles via ALTER PUBLICATION ADD
-  // TABLE on the next `friday setup` invocation, so existing
-  // installs recover by re-running setup (no replication-slot
-  // rebuild needed).
+  // loop. Adding a table here is now self-healing: `reconcileSyncPublication`
+  // runs on every daemon boot (right after migrations), so a `friday update`
+  // deploy lands the new table in `friday_pub` automatically — no
+  // `friday setup` re-run, no replication-slot rebuild. (Before that boot-time
+  // reconcile, `habits`/`habit_checkins` reproduced this exact loop on the
+  // first update-only deploy that shipped them.)
   "evolve_proposals",
   // FRI-169: Habits. The Today card + /habits route read these reactively
   // via Zero; the `habitCheckin` mutator's INSERT replicates to clients
@@ -520,32 +522,68 @@ export async function hasVectorExtension(connectionString?: string): Promise<boo
   }
 }
 
-async function ensurePublication(
-  databaseUrl: string,
-  log: (msg: string) => void,
-): Promise<boolean> {
-  // Connect as admin (the OS-level Postgres owner on Homebrew) into the
-  // friday DB. CREATE PUBLICATION FOR TABLE requires ownership of the
-  // tables (which `friday` has) but the publication itself is owned by
-  // the connecting role — we keep ownership with the admin user so a
-  // future `friday setup` can reconcile it without dropping the
-  // long-running replication slot.
-  const adminInFriday = `postgresql://${process.env.USER ?? "postgres"}@localhost:5432/${FRIDAY_DB}`;
+/** Outcome of a {@link reconcileSyncPublication} run. */
+export interface PublicationReconcileResult {
+  /** Publication did not exist (or was a legacy FOR ALL TABLES form) and was
+   *  built/rebuilt from scratch this run. */
+  created: boolean;
+  /** Tables added to the publication this run (incl. the full set on create). */
+  added: string[];
+  /** Tables dropped from the publication this run. */
+  dropped: string[];
+  /** True when not one desired sync table exists in the DB yet — nothing to
+   *  reconcile (e.g. called before migrations on a fresh DB). */
+  noTables: boolean;
+}
+
+/**
+ * Reconcile the `friday_pub` logical-replication publication so it matches
+ * exactly the desired sync tables that currently exist in the DB. The single
+ * source of truth for "which tables Zero replicates"; idempotent:
+ *   - publication missing        → CREATE PUBLICATION FOR TABLE <list>
+ *   - legacy FOR ALL TABLES form → DROP + recreate as the narrow list
+ *   - otherwise                  → ALTER PUBLICATION ADD/DROP to align
+ *
+ * Connects as the OS-level Postgres superuser (peer auth into the friday DB —
+ * no secret involved). CREATE PUBLICATION FOR TABLE requires ownership of the
+ * tables (which `friday` has); we keep the publication owned by the admin user
+ * so the replication slot survives reconciliation.
+ *
+ * Called from BOTH `friday setup` (via {@link provisionPostgres}) AND daemon
+ * boot right after migrations. The daemon-boot call is what makes a `friday
+ * update` deploy "fully complete an upgrade": migrations create a new
+ * replicated table (e.g. FRI-169 `habits`) but, historically, ONLY setup added
+ * it to `friday_pub`. A box upgraded via `friday update` never re-ran setup, so
+ * the new table was absent from the publication and every client whose bundled
+ * Zero schema knew the table fell into a `SchemaVersionNotSupported` reload
+ * loop. Running it on every boot closes that gap for update/restart/start.
+ *
+ * `opts.connectionString` overrides the target (tests point it at a scratch
+ * DB); `opts.tables` overrides the desired set (tests use arbitrary names).
+ */
+export async function reconcileSyncPublication(
+  log: (msg: string) => void = () => {},
+  opts: { connectionString?: string; tables?: readonly string[] } = {},
+): Promise<PublicationReconcileResult> {
+  const adminInFriday =
+    opts.connectionString ??
+    `postgresql://${process.env.USER ?? "postgres"}@localhost:5432/${FRIDAY_DB}`;
+  const desired = opts.tables ?? SYNC_TABLES;
   const client = new Client({ connectionString: adminInFriday });
   await client.connect();
   try {
-    // Find which of SYNC_TABLES actually exist in the DB right now.
-    // First-time setup runs after migrations, so all should exist; this
-    // guard keeps the call safe if a future schema change drops a table
-    // before SYNC_TABLES is updated.
+    // Find which of the desired tables actually exist in the DB right now.
+    // Boot/setup run this after migrations, so all should exist; this guard
+    // keeps the call safe if a future schema change drops a table before the
+    // desired list is updated.
     const existingTables = await client.query<{ tablename: string }>(
       `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
-      [Array.from(SYNC_TABLES)],
+      [Array.from(desired)],
     );
     const wanted = new Set(existingTables.rows.map((r) => r.tablename));
     if (wanted.size === 0) {
       log(`  publication ${FRIDAY_PUBLICATION} skipped (no sync tables exist yet)`);
-      return false;
+      return { created: false, added: [], dropped: [], noTables: true };
     }
 
     const exists = await client.query<{ puballtables: boolean }>(
@@ -558,10 +596,10 @@ async function ensurePublication(
         .join(", ");
       await client.query(`CREATE PUBLICATION ${FRIDAY_PUBLICATION} FOR TABLE ${tableList}`);
       log(`  created publication ${FRIDAY_PUBLICATION} for ${wanted.size} table(s) (as admin)`);
-      return true;
+      return { created: true, added: Array.from(wanted), dropped: [], noTables: false };
     }
 
-    // Reconcile an existing publication to match SYNC_TABLES exactly.
+    // Reconcile an existing publication to match the desired set exactly.
     // If the existing one is FOR ALL TABLES, we drop + recreate (the
     // narrow form is incompatible). Otherwise we ALTER to ADD/DROP
     // specific tables so the replication slot survives.
@@ -575,7 +613,7 @@ async function ensurePublication(
       log(
         `  rebuilt publication ${FRIDAY_PUBLICATION} (was FOR ALL TABLES → FOR TABLE list of ${wanted.size}; admin)`,
       );
-      return true;
+      return { created: true, added: Array.from(wanted), dropped: [], noTables: false };
     }
 
     const have = await client.query<{ tablename: string }>(
@@ -594,13 +632,28 @@ async function ensurePublication(
     }
     if (toAdd.length === 0 && toDrop.length === 0) {
       log(`  publication ${FRIDAY_PUBLICATION} already aligned (${wanted.size} table(s))`);
-      return false;
+      return { created: false, added: [], dropped: [], noTables: false };
     }
     log(`  reconciled publication ${FRIDAY_PUBLICATION}: +${toAdd.length} -${toDrop.length}`);
-    return true;
+    return { created: false, added: toAdd, dropped: toDrop, noTables: false };
   } finally {
     await client.end();
   }
+}
+
+/**
+ * Thin wrapper kept for {@link provisionPostgres}. Returns the legacy
+ * "publication changed this run" boolean (true on create, rebuild, or any
+ * ADD/DROP) that flows into {@link ProvisionResult.createdPublication}.
+ * `databaseUrl` is unused — {@link reconcileSyncPublication} derives its own
+ * admin-in-friday connection.
+ */
+async function ensurePublication(
+  _databaseUrl: string,
+  log: (msg: string) => void,
+): Promise<boolean> {
+  const r = await reconcileSyncPublication(log);
+  return r.created || r.added.length > 0 || r.dropped.length > 0;
 }
 
 /** Ensure `wal_level = logical` (Zero needs it for logical replication).

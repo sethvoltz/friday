@@ -26,6 +26,7 @@ export { LISTEN_CHANNELS, type ListenChannel } from "./db/schema.js";
 export { EMBEDDING_DIM } from "./db/schema.js";
 export {
   provisionPostgres,
+  reconcileSyncPublication,
   probePostgresHealth,
   dropFridayDatabaseForTest,
   ensureVectorExtension,
@@ -35,6 +36,7 @@ export {
   FRIDAY_PG_CONSTANTS,
   type PgHealth,
   type ProvisionResult,
+  type PublicationReconcileResult,
 } from "./db/pg-provision.js";
 export { createTestDb, newTestClient, withTestDb, type TestDbHandle } from "./db/test-pg.js";
 // Item #50 scaffold. Subprocess-spawning extensions are TODO; the

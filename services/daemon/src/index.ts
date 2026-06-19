@@ -13,6 +13,7 @@ import {
   clearSecretsCache,
   resolveModelForRole,
   runMigrations,
+  reconcileSyncPublication,
 } from "@friday/shared";
 import { logger } from "./log.js";
 import { startServer } from "./api/server.js";
@@ -89,6 +90,34 @@ async function main(): Promise<void> {
   // — daemon process has no user-shell context, workers get the full
   // shell, MCP children get a restricted allowlist (see mcp/builder.ts).
   await runMigrations();
+  // Reconcile the Zero logical-replication publication to the just-migrated
+  // schema. Migrations create new replicated tables (e.g. FRI-169 `habits`),
+  // but historically ONLY `friday setup` added them to `friday_pub`. A box
+  // upgraded via `friday update` never re-ran setup, so a newly-shipped
+  // replicated table was absent from the publication and every client whose
+  // bundled Zero schema knew the table fell into a SchemaVersionNotSupported
+  // reload loop. Running it here — right after migrations, where the daemon
+  // already owns boot-time schema reconciliation — makes `friday update`
+  // /`restart`/`start` all fully complete an upgrade. zero-cache's autoReset
+  // (default on) re-COPYs the added table once it lands in the publication.
+  // Best-effort: a failure degrades to the prior "new table not synced"
+  // behavior (recoverable via `friday setup`), never a boot crash.
+  try {
+    const pub = await reconcileSyncPublication((msg) =>
+      logger.log("debug", "publication.reconcile.step", { msg }),
+    );
+    if (pub.created || pub.added.length > 0 || pub.dropped.length > 0) {
+      logger.log("info", "publication.reconcile.changed", {
+        created: pub.created,
+        added: pub.added,
+        dropped: pub.dropped,
+      });
+    }
+  } catch (err) {
+    logger.log("error", "publication.reconcile.error", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   // FRI-61: state migrations run AFTER schema migrations (Drizzle just
   // created the `_friday_state_migrations` table) and BEFORE any
   // dispatch / mail bridge / scheduler / recovery path that could spawn
