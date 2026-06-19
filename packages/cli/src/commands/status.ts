@@ -11,6 +11,7 @@ import {
 } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
 import { FRIDAY_LAUNCHD_LABEL } from "../lib/launchd.js";
+import { readBlockedState, formatRemedies } from "../lib/deps.js";
 
 /** A heartbeat older than this is treated as stale (heartbeat interval
  *  is 30s, so 60s gives one missed beat of grace before status falls
@@ -142,6 +143,19 @@ export const statusCommand = defineCommand({
       console.log(`  supervisor  ${pc.green("up")}  ${detail}  (launchd: ${FRIDAY_LAUNCHD_LABEL})`);
     } else {
       console.log(`  supervisor  ${pc.dim("down")}  (run ${pc.cyan("friday start")})`);
+    }
+
+    // Dependency-blocked park (the supervisor wrote this when it refused to
+    // bring up the stack on a missing hard dep — the daemon never spawned, so
+    // there's no daemon API to ask). Surface WHY the stack is dark and WHAT to
+    // run; the daemon/dashboard lines below will read down/not-responding.
+    const blocked = readBlockedState();
+    if (blocked && blocked.hard.length > 0) {
+      console.log(
+        `  ${pc.yellow("⚠ blocked")}    waiting on dependencies — the stack is parked, not crash-looping:`,
+      );
+      console.log(formatRemedies(blocked.hard));
+      console.log(`  run ${pc.cyan("friday provision")} to install them (self-heals within ~15s).`);
     }
 
     // cloudflared (its own user launch agent, reconciled to serve-intent +

@@ -10,6 +10,7 @@ import {
 import * as launchd from "../lib/launchd.js";
 import { reconcileTunnel } from "../lib/cloudflared.js";
 import { currentLink } from "../lib/install-paths.js";
+import { checkDeps, formatRemedies } from "../lib/deps.js";
 
 /**
  * `friday start` — thin alias over `launchctl bootstrap` (FRI-146 /
@@ -60,6 +61,23 @@ export const startCommand = defineCommand({
     // FRI-150 (pivot, ADR-037): trigger file-creation + autogen via the
     // new loader (no process.env mutation).
     loadFridayConfig();
+
+    // Dependency preflight (read-only): refuse to start into a known-bad state
+    // rather than bootstrap a supervisor that would park (or, pre-gate,
+    // crash-loop the daemon) on a missing hard dep. The supervisor runs the
+    // SAME check at boot and covers `friday restart` / launchd RunAtLoad (which
+    // don't pass through here); this is the fast, interactive "tell me what to
+    // run" surface. Installs never happen here — the remedy points at
+    // `friday provision`.
+    const deps = await checkDeps();
+    if (!deps.ok) {
+      console.error(pc.red("Friday can't start — missing dependencies:"));
+      console.error(formatRemedies(deps.hard));
+      console.error(
+        `\n  run ${pc.cyan("friday provision")} to install them, then ${pc.cyan("friday start")} again.`,
+      );
+      process.exit(1);
+    }
 
     // Always go through `launchd.bootstrap`: it rewrites the plist from the
     // current installDir (picking up shape changes between releases — e.g.

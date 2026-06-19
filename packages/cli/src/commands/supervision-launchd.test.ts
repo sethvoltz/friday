@@ -34,6 +34,15 @@ vi.mock("../lib/launchd.js", async (importOriginal) => {
   return { ...actual, bootstrap, bootout, kickstart, isBootstrapped };
 });
 
+// `friday start` runs a read-only checkDeps() before bootstrapping (dep
+// preflight). Mock it healthy by default so the launchd-dispatch assertions
+// reach bootstrap; the deps-missing gate flips it in its own test below.
+const checkDeps = vi.fn(async () => ({ ok: true, hard: [], soft: [] }));
+vi.mock("../lib/deps.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/deps.js")>();
+  return { ...actual, checkDeps };
+});
+
 const { startCommand } = await import("./start.js");
 const { stopCommand } = await import("./stop.js");
 const { restartCommand } = await import("./restart.js");
@@ -51,6 +60,8 @@ describe("supervision aliases → launchctl (AC#13)", () => {
     kickstart.mockClear();
     isBootstrapped.mockReset();
     isBootstrapped.mockReturnValue(false);
+    checkDeps.mockReset();
+    checkDeps.mockResolvedValue({ ok: true, hard: [], soft: [] });
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
@@ -59,14 +70,14 @@ describe("supervision aliases → launchctl (AC#13)", () => {
     vi.restoreAllMocks();
   });
 
-  it("friday start always goes through launchd.bootstrap (rewrites plist + boots or kickstarts)", async () => {
-    // start.ts unconditionally calls launchd.bootstrap so that updates to the
-    // plist shape between releases (ProgramArguments / EnvironmentVariables
-    // edits) reach an already-loaded job — a bare kickstart would never
-    // rewrite the plist. launchd.bootstrap internally branches on
-    // isBootstrapped: writePlist then either bootstrap or kickstart. We pin
-    // start.ts's contract here (calls bootstrap); the internal branching is
-    // covered in launchd's own tests.
+  it("friday start goes through launchd.bootstrap when deps are healthy (rewrites plist + boots or kickstarts)", async () => {
+    // With deps healthy (mocked), start.ts calls launchd.bootstrap so that
+    // updates to the plist shape between releases (ProgramArguments /
+    // EnvironmentVariables edits) reach an already-loaded job — a bare
+    // kickstart would never rewrite the plist. launchd.bootstrap internally
+    // branches on isBootstrapped: writePlist then either bootstrap or
+    // kickstart. We pin start.ts's contract here (calls bootstrap); the
+    // internal branching is covered in launchd's own tests.
     isBootstrapped.mockReturnValue(false);
     await runCmd(startCommand, {});
     expect(bootstrap).toHaveBeenCalledTimes(1);
@@ -76,6 +87,26 @@ describe("supervision aliases → launchctl (AC#13)", () => {
     await runCmd(startCommand, {});
     expect(bootstrap).toHaveBeenCalledTimes(1);
     expect(bootout).not.toHaveBeenCalled();
+  });
+
+  it("friday start REFUSES to bootstrap when a hard dep is missing (dep preflight)", async () => {
+    // The gate: rather than bootstrap a supervisor that would just park on a
+    // missing hard dep, start.ts prints the remedy and exits non-zero WITHOUT
+    // bootstrapping.
+    checkDeps.mockResolvedValue({
+      ok: false,
+      hard: [{ name: "pgvector:extension", present: false, remedy: "run `friday provision`" }],
+      soft: [],
+    });
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+    try {
+      await expect(runCmd(startCommand, {})).rejects.toThrow("process.exit(1)");
+      expect(bootstrap).not.toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+    }
   });
 
   it("friday stop boots out", async () => {

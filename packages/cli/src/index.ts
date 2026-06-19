@@ -4,6 +4,7 @@ import { clearFridayConfigCache, warmVaultCache } from "@friday/shared";
 import pkg from "../package.json" with { type: "json" };
 import { setupCommand } from "./commands/setup.js";
 import { doctorCommand } from "./commands/doctor.js";
+import { provisionCommand } from "./commands/provision.js";
 import { startCommand } from "./commands/start.js";
 import { stopCommand } from "./commands/stop.js";
 import { restartCommand } from "./commands/restart.js";
@@ -53,6 +54,7 @@ const main = defineCommand({
   subCommands: {
     setup: setupCommand,
     doctor: doctorCommand,
+    provision: provisionCommand,
     start: startCommand,
     stop: stopCommand,
     restart: restartCommand,
