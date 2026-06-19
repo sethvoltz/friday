@@ -9,7 +9,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { DAEMON_LOG_PATH, EVOLVE_PROPOSALS_DIR } from "@friday/shared";
+import { DAEMON_LOG_PATH } from "@friday/shared";
 import { listProposals, updateProposal } from "./store.js";
 
 export interface VersionBoundary {
@@ -60,7 +60,6 @@ export function readVersionBoundaries(logPath: string): VersionBoundary[] {
 
 export interface ResolveByUpgradeOptions {
   daemonLogPath?: string;
-  proposalDir?: string;
 }
 
 const GRACE_MS = 6 * 60 * 60 * 1000; // 6 hours

@@ -13,7 +13,6 @@ import {
   type AgentEntry,
   DAEMON_SECRET_HEADER,
   DAEMON_LOG_PATH,
-  EVOLVE_PROPOSALS_DIR,
   getDaemonSecret,
   isLocalHost,
   loadConfig,
@@ -1012,10 +1011,7 @@ async function handle(
         createdBy: callerName,
       });
       const reranked = rerankAll(DEFAULT_RULE);
-      const upgradeResult = await resolveByUpgrade({
-        daemonLogPath: DAEMON_LOG_PATH,
-        proposalDir: EVOLVE_PROPOSALS_DIR,
-      });
+      const upgradeResult = await resolveByUpgrade({ daemonLogPath: DAEMON_LOG_PATH });
       logger.log("info", "evolve.upgrade-resolved", {
         definitive: upgradeResult.definitive,
         tentative: upgradeResult.tentative,
