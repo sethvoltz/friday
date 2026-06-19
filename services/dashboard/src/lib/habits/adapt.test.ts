@@ -17,6 +17,7 @@ import {
   toCheckins,
   streakUnitLabel,
   isExpectedToday,
+  isCheckedOnDay,
   bucketKey,
   type ZeroHabitRow,
   type ZeroHabitCheckinRow,
@@ -336,5 +337,55 @@ describe("bucketKey", () => {
     expect(bucketKey(habitRow({ bucket: "morning" }))).toBe("morning");
     expect(bucketKey(habitRow({ bucket: null }))).toBe("anytime");
     expect(bucketKey(habitRow({ bucket: undefined }))).toBe("anytime");
+  });
+});
+
+describe("isCheckedOnDay — Today card 'checked today' semantics", () => {
+  // Fixed reference day: 2026-06-19 (the day the Today card renders).
+  const today = new Date(2026, 5, 19, 9, 0, 0);
+
+  it("is false when there are no Check-ins at all", () => {
+    expect(isCheckedOnDay([], today)).toBe(false);
+  });
+
+  it("is true when a Check-in lands on the reference day", () => {
+    // One Check-in today is enough even for a multi-per-Period habit whose
+    // Period is NOT yet satisfied — that is the whole point of the fix.
+    expect(isCheckedOnDay([ci(2026, 5, 19)], today)).toBe(true);
+  });
+
+  it("ignores Check-ins on other days (yesterday / tomorrow)", () => {
+    expect(isCheckedOnDay([ci(2026, 5, 18)], today)).toBe(false);
+    expect(isCheckedOnDay([ci(2026, 5, 20)], today)).toBe(false);
+  });
+
+  it("matches a Check-in at either end of the local day", () => {
+    const startOfDay: ZeroHabitCheckinRow = {
+      id: "edge-start",
+      habit_id: "h1",
+      ts: new Date(2026, 5, 19, 0, 0, 0).getTime(),
+      note: null,
+      created_at: 0,
+    };
+    const endOfDay: ZeroHabitCheckinRow = {
+      id: "edge-end",
+      habit_id: "h1",
+      ts: new Date(2026, 5, 19, 23, 59, 59).getTime(),
+      note: null,
+      created_at: 0,
+    };
+    expect(isCheckedOnDay([startOfDay], today)).toBe(true);
+    expect(isCheckedOnDay([endOfDay], today)).toBe(true);
+  });
+
+  it("excludes the next local midnight (half-open [start, next))", () => {
+    const nextMidnight: ZeroHabitCheckinRow = {
+      id: "edge-next",
+      habit_id: "h1",
+      ts: new Date(2026, 5, 20, 0, 0, 0).getTime(),
+      note: null,
+      created_at: 0,
+    };
+    expect(isCheckedOnDay([nextMidnight], today)).toBe(false);
   });
 });

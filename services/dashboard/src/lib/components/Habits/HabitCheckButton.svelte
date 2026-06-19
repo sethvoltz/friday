@@ -14,6 +14,7 @@
 
   import {
     habitStreak,
+    isCheckedOnDay,
     type ZeroHabitRow,
     type ZeroHabitCheckinRow,
   } from "$lib/habits/adapt";
@@ -40,9 +41,18 @@
   );
 
   const streak = $derived(habitStreak(row, checkins, now));
-  // Pressed iff the current (open) Period has reached Target.
-  const pressed = $derived(streak.state === "active_satisfied");
+  // Pressed iff the habit has been checked off TODAY — not iff the whole
+  // Period target is met. A multi-per-Period habit (e.g. 3×/week) stays
+  // unsatisfied after one Check-in, so keying the checkbox on satisfaction
+  // left a check-off invisible on the Today card (FRI-169 follow-up).
+  const pressed = $derived(isCheckedOnDay(checkins, now));
   const count = $derived(streak.count);
+
+  // Progress within the current (open) Period, shown for multi-target habits
+  // so partial progress (e.g. 1/3 this week) is visible even before the
+  // Period is satisfied.
+  const progress = $derived(streak.currentPeriodProgress);
+  const showProgress = $derived(row.target > 1);
 
   function toggle() {
     if (busy) return;
@@ -78,6 +88,13 @@
     {/if}
   </span>
   <span class="check-name">{row.name}</span>
+  {#if showProgress}
+    <span
+      class="check-progress"
+      title="{progress.filled} of {progress.target} this {row.period}"
+      >{progress.filled}/{progress.target}</span
+    >
+  {/if}
   {#if count > 0}
     <span class="check-streak" title="{count} period streak">{count}</span>
   {/if}
@@ -137,6 +154,13 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .check-progress {
+    flex: 0 0 auto;
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
   }
 
   .check-streak {

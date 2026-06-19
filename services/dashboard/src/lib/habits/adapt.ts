@@ -167,6 +167,26 @@ export function isExpectedToday(row: ZeroHabitRow, now: Date = new Date()): bool
 }
 
 /**
+ * Has this habit been checked off on the local calendar day containing `day`?
+ *
+ * The Today card uses this — NOT `state === 'active_satisfied'` — to decide
+ * whether its checkbox reads as done. A multi-per-Period habit (e.g. 3×/week)
+ * stays `active_pending` after a single Check-in, so keying the checkbox on
+ * Period-satisfaction made a check-off produce no visible change. "Checked
+ * today" flips the moment a Check-in lands, so the card reacts immediately;
+ * Period progress is surfaced separately via `currentPeriodProgress`.
+ */
+export function isCheckedOnDay(
+  checkinRows: ZeroHabitCheckinRow[],
+  day: Date = new Date(),
+): boolean {
+  const start = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime();
+  // Next local midnight (DST-safe — never "+24h").
+  const next = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1).getTime();
+  return checkinRows.some((c) => c.ts >= start && c.ts < next);
+}
+
+/**
  * Time-of-day bucket key for grouping the Today card. A null/absent bucket
  * groups under "anytime" (the glossary default).
  */
