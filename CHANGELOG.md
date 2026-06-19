@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.27.0](https://github.com/sethvoltz/friday/compare/v1.26.0...v1.27.0) (2026-06-19)
+
+
+### Features
+
+* **system:** habits — core habit/streak tracker (FRI-169) ([#294](https://github.com/sethvoltz/friday/issues/294)) ([160246b](https://github.com/sethvoltz/friday/commit/160246bd3e46a84ae1e0cba8a9a1b823db8b141e))
+
 ## [1.26.0](https://github.com/sethvoltz/friday/compare/v1.25.0...v1.26.0) (2026-06-18)
 
 
