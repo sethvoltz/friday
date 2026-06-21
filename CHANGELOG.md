@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.29.1](https://github.com/sethvoltz/friday/compare/v1.29.0...v1.29.1) (2026-06-21)
+
+
+### Bug Fixes
+
+* **daemon:** allow builder writes to ~/.friday/repos for git worktree metadata ([#305](https://github.com/sethvoltz/friday/issues/305)) ([a41a3b6](https://github.com/sethvoltz/friday/commit/a41a3b6372e9cd3b952ddbf56d194bc973a4eb79))
+* **evolve:** strip injected boilerplate before retry cosine comparison ([#303](https://github.com/sethvoltz/friday/issues/303)) ([b3554c0](https://github.com/sethvoltz/friday/commit/b3554c0ac78d228f54c8ad509c674c75905cc9d9))
+
 ## [1.29.0](https://github.com/sethvoltz/friday/compare/v1.28.1...v1.29.0) (2026-06-19)
 
 
