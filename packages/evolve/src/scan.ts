@@ -455,7 +455,7 @@ function collectTurnsAndBoundaries(
       message?: { role?: string; content?: unknown };
       timestamp?: string;
       ts?: string;
-      compact_metadata?: { trigger?: string };
+      compactMetadata?: { trigger?: string };
     };
     try {
       parsed = JSON.parse(line);
@@ -468,7 +468,7 @@ function collectTurnsAndBoundaries(
     if (
       parsed.type === "system" &&
       parsed.subtype === "compact_boundary" &&
-      parsed.compact_metadata?.trigger === "manual"
+      parsed.compactMetadata?.trigger === "manual"
     ) {
       const tsString = parsed.timestamp ?? parsed.ts;
       const ts = tsString ? Date.parse(tsString) : 0;
@@ -484,7 +484,7 @@ function collectTurnsAndBoundaries(
     const ts = tsString ? Date.parse(tsString) : 0;
     if (sinceMs && ts && ts < sinceMs) continue;
 
-    const text = extractText(message.content);
+    const text = stripInjectedBoilerplate(extractText(message.content));
     if (!text) continue;
     turns.push({ ts, text });
   }
@@ -521,6 +521,17 @@ function countRetries(
     if (cosine(tokenize(a.text), tokenize(b.text)) >= threshold) retries++;
   }
   return retries;
+}
+
+function stripInjectedBoilerplate(text: string): string {
+  return text
+    .replace(/<current-time>[\s\S]*?<\/current-time>/g, " ")
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, " ")
+    .replace(/<local-command-[a-z]+>[\s\S]*?<\/local-command-[a-z]+>/g, " ")
+    .replace(/<command-(?:name|message|args)>[\s\S]*?<\/command-(?:name|message|args)>/g, " ")
+    .replace(/You have \d+ pending mail items?\.\s[\s\S]*/g, " ")
+    .replace(/This session is being continued from a previous conversation[\s\S]*/g, " ")
+    .trim();
 }
 
 function tokenize(s: string): Map<string, number> {
