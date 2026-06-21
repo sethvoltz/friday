@@ -336,6 +336,44 @@ describe("searchMemories scoring", () => {
     expect(ids).not.toContain("person-1");
   });
 
+  // FRI-26 (AC11): the hygiene pass archives a memory by adding an `archived`
+  // tag (no schema status — Decision A). searchMemories has no status awareness;
+  // suppression rides the same tag-only excludeTags mechanism as the FRI-141
+  // person carve-out. This is the load-bearing half of AC11: it proves the
+  // mechanism only suppresses when the CALLER passes excludeTags:["archived"]
+  // (the recall-hook change). Same query + corpus, with and without the exclude.
+  it("FRI-26: excludeTags:['archived'] suppresses an archived entry that would otherwise match", async () => {
+    const { searchMemories } = await import("./search.js");
+    entries = [
+      mkEntry({
+        id: "live-1",
+        title: "daemon worker pool",
+        content: "the daemon forks workers",
+        tags: ["project"],
+      }),
+      mkEntry({
+        id: "archived-1",
+        title: "stale daemon notes",
+        content: "the daemon notes that were merged away",
+        tags: ["project", "archived"],
+      }),
+    ];
+
+    // Baseline: WITHOUT the exclude, the archived entry matches "daemon" and is
+    // returned — proving it is a genuine match the exclude must remove.
+    const withoutExclude = await searchMemories({ query: "daemon" });
+    const baselineIds = withoutExclude.map((r) => r.entry.id);
+    expect(baselineIds).toContain("archived-1");
+    expect(baselineIds).toContain("live-1");
+
+    // With excludeTags:["archived"] (what the recall hook now passes), the
+    // archived entry is suppressed while the live entry survives.
+    const withExclude = await searchMemories({ query: "daemon", excludeTags: ["archived"] });
+    const ids = withExclude.map((r) => r.entry.id);
+    expect(ids).toEqual(["live-1"]);
+    expect(ids).not.toContain("archived-1");
+  });
+
   // FRI-141 (AC#3): exclusion wins over inclusion for a dual-tagged entry —
   // the tag filter admits it, then excludeTags removes it.
   it("FRI-141: excludeTags removes a dual-tagged entry even when it satisfies the tag filter", async () => {

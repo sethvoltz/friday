@@ -95,7 +95,8 @@ Who can spawn whom:
 
 - **File-based memory + auto-recall.** Markdown entries with Postgres full-text search (`tsvector` + GIN), recall-frequency boosting, and an audit log. The daemon prepends a `<memory-context>` block at the major dispatch sites (user prompts, mail-driven turns, scheduled fires, scratch, agent spawn) — no `memory_search` tool call required for those paths. A `memory_search` MCP tool is still available for cases that build their own prompts.
 - **Slash commands and skills.** Daemon-registered system commands — `/kill`, `/restart`, `/status`, `/inspect`, `/clear`, `/scratch` — are TypeScript-deterministic and instant; `/jump` and `/archive` run client-side. Skills are markdown files in `~/.friday/skills/` (user-additive); the built-in slot at `packages/shared/src/prompts/skills/` is empty in v1.
-- **Evolve pipeline.** Scans daemon logs, transcripts, usage, and feedback for friction signals; ranks proposals; surfaces them in the dashboard at `/evolve` for review and apply. The full scan → enrich → cluster → apply loop is being lifted from the old Friday; the store + MCP surface are in place.
+- **Evolve pipeline.** Scans daemon logs, transcripts, usage, and feedback for friction signals; ranks proposals; surfaces them in the dashboard at `/evolve` for review and apply, with confident critical signals auto-spawning read-only triage helpers.
+- **Nightly memory dreaming.** As part of the daily maintenance pass, Friday re-reads the day's chat and consolidates it into memory — proposing the facts, preferences, and corrections worth keeping, auto-saving the confident ones (dedup-extending rather than duplicating on re-runs), and surfacing the rest — including anything about a _person_ — for your review at `/evolve` instead of writing it blind. The same pass keeps the memory corpus from rotting (merging near-duplicates, flagging cold entries) without ever deleting anything, and journals each night's run to `~/.friday/evolve/dream-diary.md`.
 
 ### Tickets and integrations
 
@@ -311,6 +312,7 @@ Operational files live at `~/.friday/`. Canonical state (blocks, mail, tickets, 
 ├── agents/<name>/                 Per-agent home (orchestrator/helper/scheduled cwd; ADR-029)
 ├── apps/<id>/                     Installed Friday Apps (ADR-021)
 ├── workspaces/<name>/             Builder git worktrees
+├── evolve/                        Evolve proposals + dream-diary.md (nightly memory-dreaming journal; ADR-046)
 ├── models/                        ONNX embedding-model cache (all-MiniLM-L6-v2; FRI-24)
 └── logs/*.jsonl                   Structured logs, rotated at 1 MiB
 ```

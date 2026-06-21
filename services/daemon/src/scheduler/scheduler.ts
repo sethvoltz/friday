@@ -405,13 +405,14 @@ function parseDuration(s: string): number {
 export const META_DAILY_PROMPT = [
   "You are the daily evolve meta-agent. Your job for this run:",
   "",
-  "1. Call `evolve_scan({ windowHours: 24 })` to walk the daemon log + usage + transcripts and create or merge proposals from any new signals.",
+  "1. Call `evolve_scan({ windowHours: 24, includeDreaming: true })` to walk the daemon log + usage + transcripts and create or merge proposals from any new signals. The `includeDreaming` flag also runs the nightly memory-dreaming sub-pass (transcript→memory consolidation + hygiene). If your previous `state.md` recorded a `lastDreamScannedTs`, pass it as `sinceTs` so the dreaming sub-pass only re-scans turns newer than that: `evolve_scan({ windowHours: 24, includeDreaming: true, sinceTs: <lastDreamScannedTs> })`. Propose-merge dedup is the overlap safety net, so a too-wide window is harmless — see step 7.",
   "2. Call `evolve_enrich({ limit: 20 })` to replace templated proposal bodies with Sonnet-generated root-cause analysis on the highest-priority unenriched items.",
   "3. Call `evolve_cluster({})` to group near-duplicate proposals.",
   "4. Call `evolve_list({ status: 'critical' })` and compare against the last run's `state.md` (auto-injected above).",
   "5. For any new `critical` proposals — or proposals that gained signals since yesterday — mail the orchestrator with a short summary (`mail_send({ to: 'friday', type: 'notification', body: ... })`). Include proposal ids so the orchestrator can `evolve_get` them. Note: if auto-triage is enabled (`evolve.autoSpawnTriageHelpers`), a read-only **triage helper** named `triage-<proposalId>` may already be investigating each newly-critical proposal and will mail the orchestrator its own root-cause findings — so mention that a triage helper is already on it rather than asking the orchestrator to spawn one.",
+  "5b. Dreaming sub-pass: the `evolve_scan` response carries `dreamPromoted` / `dreamReinforced` / `dreamMerged` / `dreamFlagged` counts. When `dreamPromoted` is nonzero, note how many memories were auto-promoted (and reinforced/merged) overnight. For deferred Dreaming proposals — `person`-category and other below-threshold memory candidates that stayed `open` — call `evolve_list({ type: 'memory', status: 'open' })`, count those tagged `memory:dreaming`, and surface them for human review when nonzero. Skip this line entirely when both the promoted and deferred counts are zero.",
   "6. Family-resolution: the `evolve_scan` response carries `familyResolved` and `familyRejected` counts. These represent variants auto-suppressed because a sibling proposal in the same `signal.key` family was applied or rejected within the last 14 days. Skip such proposals in your daily mail — they're already covered. Only call them out if `familyResolved >= 3` in a single scan (a fix that keeps re-triggering deserves a re-look at the underlying detector or the original fix).",
-  "7. Update `state.md` with the run's proposal counts + critical ids you saw, so tomorrow knows what's new.",
+  "7. Update `state.md` with the run's proposal counts + critical ids you saw, so tomorrow knows what's new. Also record `lastDreamScannedTs` set to this run's window end (the current time, ISO 8601) — the dreaming sub-pass uses it as the next run's `since` so each night only re-scans transcript turns newer than the last dream pass.",
   "8. Be quiet by default. Skip the mail if nothing actionable changed.",
   "",
   "Do NOT auto-apply or dismiss proposals — that is the orchestrator's call.",
@@ -432,12 +433,25 @@ const META_WEEKLY_PROMPT = [
 
 export async function seedMetaAgents(): Promise<void> {
   const db = getDb();
-  const existing = await db
+  // FRI-26: ship an edited META_DAILY_PROMPT on `friday update` WITHOUT clobbering
+  // an operator's deliberate customizations. `upsertSchedule`'s UPDATE branch
+  // re-passes paused/cron/runAt/kind/deliveryJson from the spec, so a plain
+  // upsert here would un-pause a deliberately-paused meta-agent and force its
+  // cron back to "0 4 * * *" on every boot (F3). So:
+  //   - row EXISTS  → refresh ONLY taskPrompt (+ updatedAt), preserving
+  //     paused/cron/runAt/kind/deliveryJson;
+  //   - row ABSENT  → first-seed via upsertSchedule with the canonical cron.
+  const dailyRows = await db
     .select()
     .from(schema.schedules)
     .where(eq(schema.schedules.name, "scheduled-meta-daily"))
     .limit(1);
-  if (!existing[0]) {
+  if (dailyRows[0]) {
+    await db
+      .update(schema.schedules)
+      .set({ taskPrompt: META_DAILY_PROMPT, updatedAt: new Date() })
+      .where(eq(schema.schedules.name, "scheduled-meta-daily"));
+  } else {
     await upsertSchedule({
       name: "scheduled-meta-daily",
       cron: "0 4 * * *",

@@ -195,6 +195,18 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
             .max(24 * 30)
             .optional()
             .describe("Look-back window in hours. Default 24 (the daily meta-agent's pass)."),
+          includeDreaming: z
+            .boolean()
+            .optional()
+            .describe(
+              "Run the nightly memory-dreaming sub-pass (transcript→memory consolidation + hygiene). Default true.",
+            ),
+          sinceTs: z
+            .string()
+            .optional()
+            .describe(
+              "ISO lower bound for the dreaming scan window (lastDreamScannedTs from prior run). Overrides windowHours for dreaming.",
+            ),
         },
         async (args, extra) => {
           const result = await daemonFetch({
@@ -202,7 +214,11 @@ export function buildEvolveServer(opts: BuildEvolveServerOptions) {
             signal: signalFrom(extra),
             path: "/api/evolve/scan",
             method: "POST",
-            body: { windowHours: args.windowHours },
+            body: {
+              windowHours: args.windowHours,
+              includeDreaming: args.includeDreaming,
+              sinceTs: args.sinceTs,
+            },
           });
           return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

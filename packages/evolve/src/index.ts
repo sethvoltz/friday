@@ -30,3 +30,8 @@ export * from "./llm.js";
 export * from "./triage-spawn.js";
 export * from "./builder-escalation.js";
 export * from "./scan-upgrade-resolution.js";
+export * from "./dreaming-thresholds.js";
+export * from "./scan-dreaming.js";
+export * from "./hygiene.js";
+export * from "./dream-diary.js";
+export * from "./dreaming-pipeline.js";

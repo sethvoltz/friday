@@ -15,6 +15,7 @@ import {
 } from "./store.js";
 import type { Proposal, ProposalStatus, Signal } from "./types.js";
 import { isCritical, scoreProposal, type CriticalityRule } from "./rank.js";
+import { decodeDreamPayload } from "./scan-dreaming.js";
 
 export interface ProposeOptions {
   rule: CriticalityRule;
@@ -73,7 +74,12 @@ export function proposeFromSignals(signals: Signal[], opts: ProposeOptions): Pro
         blastRadius: existing.blastRadius,
       });
       const wasCritical = existing.status === "critical";
-      const nowCritical = isCritical({ score, signals: mergedSignals }, opts.rule);
+      // FRI-26 dreaming: dream proposals never enter the code-evolution
+      // `critical` surface (see the create branch below) — their auto-apply is
+      // gated by the per-category threshold in `applyDreamProposals`, not by
+      // `isCritical`. Keep a recurring below-threshold dream proposal `open`.
+      const isDream = decodeDreamPayload(signal) !== null;
+      const nowCritical = !isDream && isCritical({ score, signals: mergedSignals }, opts.rule);
       // Severity-decay guard (FRI-79): a proposal that previously reached
       // `critical` but has never been enriched must not silently fall back
       // to `open`. Otherwise a failing enrichment pass masks severity — the
@@ -147,7 +153,14 @@ export function proposeFromSignals(signals: Signal[], opts: ProposeOptions): Pro
       continue;
     }
 
-    const critical = isCritical({ score, signals: [signal] }, opts.rule);
+    // FRI-26 dreaming: a dream proposal is gated by its per-category auto-apply
+    // threshold in `applyDreamProposals`, NOT by the code-evolution criticality
+    // ranker. It must never enter `critical` (that surface drives the
+    // FRI-40/FRI-149 triage/builder spawns, which are for code-shaped work) —
+    // a below-threshold dream proposal stays `open` for human review (AC7a),
+    // an at/above-threshold one is auto-applied by the dreaming hook.
+    const isDream = decodeDreamPayload(signal) !== null;
+    const critical = !isDream && isCritical({ score, signals: [signal] }, opts.rule);
     const status: ProposalStatus = critical ? "critical" : "open";
 
     const created = saveProposal({
@@ -192,6 +205,23 @@ interface Draft {
 }
 
 function draftFromSignal(signal: Signal): Draft {
+  // FRI-26 dreaming: a dream signal carries the LLM-proposed memory inline (in
+  // its first EvidencePointer) so it can auto-apply WITHOUT a later enrich pass.
+  // Build the memory proposal directly from the decoded payload rather than the
+  // "awaiting enrichment" template the non-dream path emits below.
+  const dream = decodeDreamPayload(signal);
+  if (dream) {
+    const tags = dedupe(["memory:dreaming", dream.category, ...dream.tags]);
+    const body = [
+      `# ${dream.title}`,
+      "",
+      dream.content.trim(),
+      "",
+      `_Proposed tags: ${dream.tags.join(", ")}_`,
+    ].join("\n");
+    return { title: dream.title, type: "memory", body, blastRadius: "low", appliesTo: tags };
+  }
+
   const agent = signal.agent ? ` for agent \`${signal.agent}\`` : "";
   const occurrences = `${signal.count} occurrence${signal.count === 1 ? "" : "s"} between ${signal.firstSeenAt} and ${signal.lastSeenAt}`;
 
@@ -232,6 +262,10 @@ function titleFor(event: string, agent?: string): string {
   return `${friendly} repeating`;
 }
 
+function dedupe(xs: string[]): string[] {
+  return [...new Set(xs)];
+}
+
 /**
  * Recompute scores + criticality for every open/critical proposal. Used at the
  * end of a scan run after merges.
@@ -247,7 +281,13 @@ export function rerankAll(rule: CriticalityRule): {
     if (p.status !== "open" && p.status !== "critical") continue;
     const score = scoreProposal(p);
     const wasCritical = p.status === "critical";
-    const nowCritical = isCritical({ score, signals: p.signals }, rule);
+    // FRI-26 dreaming: a dream proposal never enters the code-evolution
+    // `critical` surface (matches proposeFromSignals' create/merge branches) —
+    // its auto-apply is gated by the per-category threshold in
+    // `applyDreamProposals`, so re-ranking must keep a below-threshold dream
+    // proposal `open` for human review (AC7a) rather than re-promoting it.
+    const isDream = p.signals.some((s) => decodeDreamPayload(s) !== null);
+    const nowCritical = !isDream && isCritical({ score, signals: p.signals }, rule);
     // See severity-decay guard in proposeFromSignals: an un-enriched critical
     // sticks at critical until enrichment lands.
     const protectCritical = wasCritical && p.enrichedAt === null;
