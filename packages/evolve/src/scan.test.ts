@@ -157,7 +157,7 @@ function compactEntry(trigger: "manual" | "auto" | undefined, timestamp: string)
   return {
     type: "system",
     subtype: "compact_boundary",
-    compact_metadata: trigger !== undefined ? { trigger } : {},
+    compactMetadata: trigger !== undefined ? { trigger } : {},
     timestamp,
   };
 }
@@ -214,6 +214,56 @@ describe("scanTranscripts", () => {
         userEntry("fix the bug", "2026-05-01T00:00:00.000Z"),
         compactEntry(undefined, "2026-05-01T00:01:00.000Z"),
         userEntry("fix the bug", "2026-05-01T00:01:01.000Z"),
+      ]);
+
+      const signals = scanTranscripts({ projectsRoot: tmpRoot });
+      expect(signals.filter((s) => s.key === "transcript_user_retry")).toHaveLength(1);
+    });
+  });
+
+  describe("boilerplate stripping", () => {
+    it("does not fire when consecutive turns differ only in <current-time> value", () => {
+      writeJsonl(join(tmpRoot, "proj", "boilerplate1.jsonl"), [
+        userEntry(
+          "<current-time>2026-05-01T00:00:00Z</current-time>\nfix the bug",
+          "2026-05-01T00:00:00.000Z",
+        ),
+        userEntry(
+          "<current-time>2026-05-01T00:01:00Z</current-time>\ncheck the logs",
+          "2026-05-01T00:01:00.000Z",
+        ),
+      ]);
+
+      const signals = scanTranscripts({ projectsRoot: tmpRoot });
+      expect(signals.filter((s) => s.key === "transcript_user_retry")).toHaveLength(0);
+    });
+
+    it("does not fire when consecutive turns are both mail-notification blocks with different bodies", () => {
+      writeJsonl(join(tmpRoot, "proj", "boilerplate2.jsonl"), [
+        userEntry(
+          "You have 3 pending mail items.\nFrom friday: builder is done.\nFrom friday: another message.",
+          "2026-05-01T00:00:00.000Z",
+        ),
+        userEntry(
+          "You have 1 pending mail item.\nFrom friday: something completely different happened.",
+          "2026-05-01T00:01:00.000Z",
+        ),
+      ]);
+
+      const signals = scanTranscripts({ projectsRoot: tmpRoot });
+      expect(signals.filter((s) => s.key === "transcript_user_retry")).toHaveLength(0);
+    });
+
+    it("still fires for a genuine repeat after boilerplate is stripped", () => {
+      writeJsonl(join(tmpRoot, "proj", "boilerplate3.jsonl"), [
+        userEntry(
+          "<current-time>2026-05-01T00:00:00Z</current-time>\nfix the bug",
+          "2026-05-01T00:00:00.000Z",
+        ),
+        userEntry(
+          "<current-time>2026-05-01T00:01:00Z</current-time>\nfix the bug",
+          "2026-05-01T00:01:00.000Z",
+        ),
       ]);
 
       const signals = scanTranscripts({ projectsRoot: tmpRoot });
