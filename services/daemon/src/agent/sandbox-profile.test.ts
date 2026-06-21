@@ -13,6 +13,7 @@ const PARAMS = {
   dataDir: "/Users/test/.friday",
   worktree: "/Users/test/.friday/workspaces/alpha",
   logsDir: "/Users/test/.friday/logs",
+  reposDir: "/Users/test/.friday/repos",
 };
 
 describe("renderProfile", () => {
@@ -54,18 +55,22 @@ describe("renderProfile", () => {
     expect(out).toContain('(subpath "/Library/Keychains")');
   });
 
-  it("denies writes to DATA_DIR but carves out logs + this-worktree", () => {
+  it("denies writes to DATA_DIR but carves out logs + this-worktree + repos", () => {
     const out = renderProfile(PARAMS);
     // The deny line comes before the allow carve-outs so last-match-wins
-    // gives the worktree/logs allows.
+    // gives the worktree/logs/repos allows.
     const denyIdx = out.indexOf('(deny file-write* (subpath "/Users/test/.friday"))');
     const allowLogsIdx = out.indexOf('(allow file-write* (subpath "/Users/test/.friday/logs"))');
     const allowWorktreeIdx = out.indexOf(
       '(allow file-write* (subpath "/Users/test/.friday/workspaces/alpha"))',
     );
+    const allowReposDirIdx = out.indexOf(
+      '(allow file-write* (subpath "/Users/test/.friday/repos"))',
+    );
     expect(denyIdx).toBeGreaterThanOrEqual(0);
     expect(allowLogsIdx).toBeGreaterThan(denyIdx);
     expect(allowWorktreeIdx).toBeGreaterThan(denyIdx);
+    expect(allowReposDirIdx).toBeGreaterThan(denyIdx);
   });
 
   it("denies process-exec of persistence and privilege footguns", () => {

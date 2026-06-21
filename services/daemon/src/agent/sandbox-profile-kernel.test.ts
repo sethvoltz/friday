@@ -44,6 +44,7 @@ describeOnDarwin("M2 kernel-enforced sandbox", () => {
   const fakeDataDir = join(playground, "data");
   const fakeWorktree = join(fakeDataDir, "workspaces", "alpha");
   const fakeLogs = join(fakeDataDir, "logs");
+  const fakeRepos = join(fakeDataDir, "repos");
   const siblingWorktree = join(fakeDataDir, "workspaces", "beta");
 
   // Create the directory tree so writes attempt creation, not enumeration.
@@ -53,6 +54,7 @@ describeOnDarwin("M2 kernel-enforced sandbox", () => {
     join(fakeHome, "Library", "LaunchAgents"),
     fakeWorktree,
     fakeLogs,
+    fakeRepos,
     siblingWorktree,
   ]) {
     mkdirSync(d, { recursive: true });
@@ -66,6 +68,7 @@ describeOnDarwin("M2 kernel-enforced sandbox", () => {
       dataDir: fakeDataDir,
       worktree: fakeWorktree,
       logsDir: fakeLogs,
+      reposDir: fakeRepos,
     }),
   );
 
@@ -123,6 +126,13 @@ describeOnDarwin("M2 kernel-enforced sandbox", () => {
 
   it("allows writes to the carved-out logs dir", () => {
     const target = join(fakeLogs, "ok.log");
+    const r = runSandboxed(profilePath, `echo allowed > "${target}"`);
+    expect(r.code).toBe(0);
+    expect(existsSync(target)).toBe(true);
+  });
+
+  it("allows writes to the carved-out repos dir (git worktree metadata)", () => {
+    const target = join(fakeRepos, "index.lock");
     const r = runSandboxed(profilePath, `echo allowed > "${target}"`);
     expect(r.code).toBe(0);
     expect(existsSync(target)).toBe(true);

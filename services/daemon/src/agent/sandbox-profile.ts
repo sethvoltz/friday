@@ -33,6 +33,8 @@ export interface RenderInput {
   worktree: string;
   /** Logs dir; carved out of the DATA_DIR deny. */
   logsDir: string;
+  /** Bare mirrors dir; builders need write access for git worktree metadata (index.lock etc). */
+  reposDir: string;
 }
 
 /**
@@ -46,7 +48,7 @@ export interface RenderInput {
  * catch it, and we'd reject the workspace name before reaching this point.
  */
 export function renderProfile(input: RenderInput): string {
-  const { home, dataDir, worktree, logsDir } = input;
+  const { home, dataDir, worktree, logsDir, reposDir } = input;
   return `; Friday Builder sandbox profile — generated, do not edit
 (version 1)
 (allow default)
@@ -89,6 +91,7 @@ export function renderProfile(input: RenderInput): string {
 (deny file-write* (subpath "${dataDir}"))
 (allow file-write* (subpath "${logsDir}"))
 (allow file-write* (subpath "${worktree}"))
+(allow file-write* (subpath "${reposDir}"))
 
 ; ─── Process exec — block persistence + privilege footguns ────────────
 ; M1 already denies these at the PreToolUse layer; this is the kernel
@@ -191,6 +194,7 @@ export function profileInputsFor(worktreePath: string): RenderInput {
     dataDir: safeReal(DATA_DIR),
     worktree: safeReal(worktreePath),
     logsDir: safeReal(LOGS_DIR),
+    reposDir: safeReal(join(DATA_DIR, "repos")),
   };
 }
 
