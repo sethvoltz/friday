@@ -186,14 +186,14 @@ test.describe("FRI-172: Memories redesign", () => {
       await page.setViewportSize({ width: 1024, height: 900 });
       await page.goto(`${env.dashboardURL}/memory`, { waitUntil: "domcontentloaded" });
       await expect(page).not.toHaveURL(/\/login/);
-      await expect(page.locator(".railshell-desktop")).toBeVisible({ timeout: 15_000 });
+      await expect(page.locator("aside.rail")).toBeVisible({ timeout: 15_000 });
       await expect(page.locator("nav.filter-rail")).toBeVisible();
       await expect(page.getByRole("button", { name: /Filters/ })).toHaveCount(0);
 
       // Mobile (375px): the desktop rail column is gone, a `Filters` button
       // appears.
       await page.setViewportSize({ width: 375, height: 800 });
-      await expect(page.locator(".railshell-desktop")).toHaveCount(0);
+      await expect(page.locator("aside.rail")).toHaveCount(0);
       await expect(page.getByRole("button", { name: /Filters/ })).toBeVisible({
         timeout: 10_000,
       });
