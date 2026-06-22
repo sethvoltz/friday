@@ -82,8 +82,8 @@ describe("FRI-129: sync-harness deploys Zero permissions", () => {
              FROM jsonb_object_keys((SELECT permissions->'tables' FROM zero.permissions))`,
         );
         // node-postgres returns count() as a string; compare numerically.
-        // 15 base tables + habits + habit_checkins (FRI-169) = 17.
-        expect(Number(keyCount.rows[0]!.key_count)).toBe(17);
+        // 15 base tables + habits + habit_checkins (FRI-169) + inbox_items (FRI-171) = 18.
+        expect(Number(keyCount.rows[0]!.key_count)).toBe(18);
       } finally {
         await c.end();
       }

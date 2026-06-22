@@ -92,6 +92,11 @@ export const SYNC_TABLES: readonly string[] = [
   // the same way an MCP-originated Check-in does (same `friday_pub`).
   "habits",
   "habit_checkins",
+  // FRI-171 (ADR-047): Inbox. The bell + Inbox review surface read these
+  // reactively via Zero; the daemon writes one row per Capture and the
+  // inbox mutators flip `state`. `apikey` is NOT replicated (server-only,
+  // like `user`/`session`).
+  "inbox_items",
 ];
 
 export interface ProvisionResult {

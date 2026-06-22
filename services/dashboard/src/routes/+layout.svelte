@@ -22,6 +22,7 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog/ConfirmDialog.svelte";
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
   import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
+  import InboxBell from "$lib/components/Inbox/InboxBell.svelte";
   import { bindTheme } from "$lib/stores/theme.svelte";
   import { zeroSync } from "$lib/stores/zero.svelte";
   import posthog from "posthog-js";
@@ -497,6 +498,7 @@
             </a>
           {/each}
         </nav>
+        <InboxBell />
         <button
           type="button"
           class="cmd-k-chip"

@@ -259,6 +259,33 @@ const habitCheckins = table("habit_checkins")
   })
   .primaryKey("id");
 
+/* ---------------- inbox_items (FRI-171, ADR-047) ---------------- */
+// Mirrors `db/schema.ts:inboxItems`. Timestamps (created_at/resolved_at)
+// cross the wire as epoch-millis `number()`; nullable columns use
+// `.optional()`. The CHECK-constrained enums declare their union via
+// `string<...>()`. `payload` is `jsonb` in Postgres → `json()` here (same
+// shape as `memory_entries.tags_json`). `undoable` is a real pg boolean →
+// `boolean()`. The bell count + two-tone derivation read these reactively;
+// the inbox mutators flip `state`.
+const inboxItems = table("inbox_items")
+  .columns({
+    id: string(),
+    created_at: number(),
+    source: string(),
+    raw_text: string(),
+    cleaned_text: string().optional(),
+    target_id: string().optional(),
+    payload: json().optional(),
+    rationale: string().optional(),
+    kind: string<"done" | "proposed" | "unsorted">(),
+    state: string<"open" | "resolved">(),
+    resolved_at: number().optional(),
+    undoable: boolean(),
+    inverse_label: string().optional(),
+    deep_link: string().optional(),
+  })
+  .primaryKey("id");
+
 /* ---------------- memory_entries (Phase 3.3) ---------------- */
 // Mirrors `db/schema.ts:memoryEntries`. `tagsJson` is a `jsonb` array
 // of strings in Postgres; Zero exposes it as `json` and the dashboard
@@ -518,6 +545,7 @@ export const schema: ZeroSchema & { readonly enableLegacyQueries: true } = creat
     evolveProposals,
     habits,
     habitCheckins,
+    inboxItems,
   ],
   // Phase 3: enable the deprecated `z.query.<table>` field. The
   // createBuilder() path returns query objects that aren't bound to a
@@ -580,4 +608,9 @@ export const permissions = definePermissions(schema, () => ({
   // card + /habits route reactive queries can read the rows.
   habits: { row: { select: ANYONE_CAN } },
   habit_checkins: { row: { select: ANYONE_CAN } },
+  // FRI-171: Inbox. Writes flow through the daemon /api/intake path and the
+  // inbox mutators (approve/reject/dismiss/triage/undo/markViewed). Only
+  // `select` is configured here so the bell + Inbox review reactive queries
+  // can read the rows.
+  inbox_items: { row: { select: ANYONE_CAN } },
 }));

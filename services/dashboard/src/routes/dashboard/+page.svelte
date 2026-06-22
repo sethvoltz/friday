@@ -9,6 +9,7 @@
   import { zeroSync } from "$lib/stores/zero.svelte";
   import { isExpectedToday, bucketKey } from "$lib/habits/adapt";
   import HabitCheckButton from "$lib/components/Habits/HabitCheckButton.svelte";
+  import QuickAdd from "$lib/components/Inbox/QuickAdd.svelte";
   import type { ZeroHabitRow, ZeroHabitCheckinRow } from "$lib/habits/adapt";
   import type { PageData } from "./$types";
 
@@ -335,6 +336,10 @@
       </div>
     </div>
   </div>
+
+  <!-- Quick capture (FRI-171) — compact stateless-intake box near the Today
+       card (owner default placement). NOT the full chat. -->
+  <QuickAdd />
 
   <!-- Today (habits due) — FRI-169. Must precede .activity-card (AC15). -->
   <div class="card today-card" data-testid="today-card">

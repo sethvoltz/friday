@@ -37,7 +37,7 @@ flowchart LR
     zcache -->|"logical replication"| pg
 ```
 
-The daemon binds to `127.0.0.1`. zero-cache binds to `127.0.0.1`. The dashboard is the only thing the public internet ever sees, and it gates every request through BetterAuth before forwarding. Daemon and dashboard are peer writers to Postgres — neither owns the DB, each survives the other's reboot.
+The daemon binds to `127.0.0.1`. zero-cache binds to `127.0.0.1`. The dashboard is the only thing the public internet ever sees, and it gates every request through BetterAuth before forwarding — with one deliberate sessionless surface, `POST /api/capture`, gated by a write-scoped **Capture key** instead of a login cookie so the Apple Watch Shortcut / quick-add can fire a thought at Friday without a session (ADR-047). Daemon and dashboard are peer writers to Postgres — neither owns the DB, each survives the other's reboot.
 
 ## Key features
 
@@ -55,6 +55,7 @@ The daemon binds to `127.0.0.1`. zero-cache binds to `127.0.0.1`. The dashboard 
 - **Per-role and per-task model selection.** Route each agent role — and each evolve internal pass — to its own Claude model from the settings page, so an Opus planner can design the work while Sonnet builders execute and Haiku handles the scans. Roles without an override fall through to the global default.
 - **Mail as the universal delivery primitive.** Every user-visible reply, every cross-agent message, every scheduled-agent escalation flows through the same `mail` table. Priority field on each row; `priority='critical'` mid-turn-injects into a live worker so an interruption actually interrupts.
 - **Scheduled agents with state continuity.** Cron and one-shot runs persist `state.md` between fires (auto-injected on the next prompt) and `last-run.md` written by the daemon. Missed runs catch up on restart; cooperative abort on shutdown.
+- **Stateless capture & intake routing.** Fire a raw thought at Friday from anywhere — an Apple Watch Shortcut, the dashboard quick-add box, eventually voice — without opening the chat or burning an orchestrator turn. A key-gated `POST /api/capture` hands the text to a cheap single-turn classifier (Haiku) that cleans it, picks a route target (reminder, habit check-in, memory, ticket, or an agent), and decides whether to **act now** or **stage for approval**. High-confidence actions run immediately and land as **Done** (with a one-tap Undo); ambiguous ones land as **Proposed** for you to approve; anything it can't confidently place lands as **Unsorted** — nothing is ever silently dropped. Everything surfaces in an Inbox bell (a two-tone dot: attention when something needs you, low-key when it's just FYIs that auto-resolve on view). Triage is yours: tell Friday "work through my inbox" and she reads and acts on it via the orchestrator-only `friday-inbox` tools — there's no nightly auto-triage. Mint a Capture key with `friday capture-key create`.
 - **User-facing scheduled reminders.** Any agent can set a cron, one-shot, or day-scoped reminder (e.g. "thaw the chicken at midday Thursday", or just "remind me Friday" — a bare day fires at a configurable default hour, 09:00 local) that lands straight into your chat as a notification — no worker spawns, no turn, no tokens. The unread badge lights up cross-device; the reminder lands as a `mail`-like chat block without waking the orchestrator, and can be snoozed by name. `/schedules` shows an upcoming-reminders agenda alongside the full schedule list.
 
 #### Agent types
@@ -253,6 +254,11 @@ friday tickets update <id> --status ...
 friday tickets comment <id> --author ... --body ...
 friday mail send --from ... --to ... --type ... --body ...
 friday schedules <create|pause|resume|trigger|delete> ...
+
+# Capture keys (ADR-047) — write-scoped keys for the sessionless POST /api/capture
+friday capture-key create [--label "X"]        # mint a key; the plaintext is printed ONCE
+friday capture-key list                        # list keys (metadata only, never the secret)
+friday capture-key revoke <id|label> [--force] # disable a key immediately
 
 # Memory / Evolve
 friday memory <ls|show|add|edit|delete>

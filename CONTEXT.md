@@ -203,6 +203,199 @@ course, and a free-trial cadence equally.
 _Avoid_: challenge (too narrow — implies aspiration/fitness), fixed-duration
 (clunky), goal/sprint/season (carry foreign domain baggage).
 
+### Stateless intake
+
+**Capture**:
+A raw thought thrown at Friday from _outside_ the orchestrator chat flow — a
+Watch-shortcut transcription, a PWA quick-add blurb. The unprocessed artifact:
+text (audio later), plus its **Source**. A Capture is explicitly _not_ a chat
+message; it never enters the orchestrator's turn loop directly.
+_Avoid_: message (reserve for chat/mail), note, idea (too vague), inbox item
+(that's only one possible outcome of a Capture).
+
+**Source**:
+Where a **Capture** originated — `watch | quick_add | …`. Distinct from the
+`blocks.source` provenance enum (`user_chat`, `mail`, …). Source is **pure
+provenance** — recorded for audit and to stamp the resulting `blocks.source`,
+but it does **not** alter clean / classify / gate behavior. Typed and
+transcribed text are treated identically (a transcription can be _more_
+faithful than a typo-laden typed line), so there is no per-source policy.
+
+**Intake**:
+The stateless pipeline a **Capture** passes through: clean → classify → route.
+Holds no cross-Capture state — each Capture is processed independently. The new
+piece; today routing is 100% the orchestrator deciding in-context, with no
+classifier (`build-dispatch-prompt.ts`).
+_Avoid_: ingest (acceptable for the endpoint, but Intake is the processing),
+triage (that's the _inbox_ resurfacing step, a distinct later stage).
+
+**Intake router** (a.k.a. **the classifier**):
+The single cheap-model (Haiku) call at the heart of **Intake**. Stateless,
+deliberately terse — it (a) rewrites the blurb clean, (b) classifies intent,
+(c) picks a **Route**, (d) reports a **Confidence**. Returns a structured
+verdict; it does not converse. Contrast the rich _assistant_ persona
+(`SOUL.md`) — this is the stripped _intake_ persona.
+_Avoid_: orchestrator (the router is NOT the orchestrator; the orchestrator is
+just one possible **Route target**), agent (the router is a call, not a
+long-lived agent).
+
+**Intake persona**:
+The terse, **code-owned** system prompt the **Intake router** runs under —
+optimized for accurate cleanup and high-confidence routing, _not_ conversation.
+A separate, parallel prompt stack: it does **not** use the ADR-005 assistant
+stack (CONSTITUTION / SOUL / agent-base) — no warmth, no SOUL. It bakes in its
+own _constitution-like_ directives (the goals: clean faithfully, route only
+when confident, fall to **Unsorted** when not). It is not a user-editable
+`~/.friday/` file; the **only** behavioral tuning surface is the registry
+`guidance` per target.
+_Avoid_: SOUL (that's the assistant persona — the opposite end), system prompt
+(too generic).
+
+**Route** / **Route target**:
+The destination **Intake** picks for a cleaned **Capture**. One of three
+families: a **core system** (reminder, habit, memory, ticket — reached by a
+direct tool/mutator), an **agent** (an installed app's agent _or_ the
+orchestrator — reached by **mail**, ADR-017), or the **Inbox** (the low-
+confidence drop). Acting terminally on the Route is the router's job — it does
+_not_ defer execution to the orchestrator (the orchestrator is reached only by
+being mailed as a target).
+_Avoid_: handler, channel.
+
+Every **Route target** is a uniform **registry** entry — core and app alike —
+declaring four things:
+
+- **`id`**: `core:reminder | core:habit | core:memory | core:ticket` or
+  `agent:<name>` (an app's bare agent, or the orchestrator).
+- **`guidance`**: natural-language "route here when… / a complete action looks
+  like…" prose injected into the classifier prompt. Core targets author it in
+  code; app targets author it in `intakeRoutes[].describe`. This is the only
+  lever that tunes routing/act-vs-propose (Gate 2 has no policy override).
+- **`payloadSchema`**: the structured shape this target needs to act. For every
+  `agent:<name>` target (apps _and_ orchestrator) the payload is simply the
+  **mail message contents** to send that agent. Core targets define their own
+  (reminder `{ text, dueDate? }`, memory `{ text }`, …).
+- **`executor`**: the deterministic function that performs the action — the
+  existing reminder mutator, habit tool, `mail_send`, etc. It returns a
+  **result reference**: `{ undoable, inverseLabel?, deepLink }` — whether the
+  action can be reversed, the human label for the inverse ("Delete the
+  reminder"), and a deep-link to the artifact it created. This is what drives a
+  **Done** item's Undo-vs-View CTA.
+
+The menu is assembled at call time: core entries are baked in; **app** targets
+are declared opt-in via the manifest `intakeRoutes[]` field — `{ agent,
+describe }` pairs where `agent` must cross-ref a **`bare`-type** agent in the
+same manifest (mail delivers to message-driven agents; `scheduled` agents are
+cron-driven and not routable). An app with no `intakeRoutes` is not an intake
+target. This un-defers the capability declaration ADR-021 set aside.
+_Avoid_: capability (too broad — this is specifically a routing descriptor),
+handler, channel.
+
+**Intake verdict**:
+The single structured object the **Intake router** emits per **Capture**:
+`{ cleaned, targetId, payload, disposition, rationale }`. `targetId: null` ⇒
+Gate 1 failure ⇒ **Unsorted**. `disposition: "act"` with a payload that
+validates against the target's `payloadSchema` ⇒ run the executor, record a
+**Done** item. `disposition: "propose"` — or a payload that fails validation —
+⇒ record a **Proposed** item carrying the payload, so **approve** runs the same
+executor later. The verdict is data, not prose: the classifier emits the
+executable payload directly, which is what makes stateless "act now" possible
+without a second agent to structure prose.
+_Avoid_: classification, result.
+
+**Inbox**:
+The single **review surface** for everything **Intake** produces — not merely
+the classification-failure drop. Surfaced as a header bell with a count and a
+two-tone dot (low-priority tone when only reversible **Done** items await a
+glance; attention tone when any **Proposed** or **Unsorted** item needs a
+decision). Holds three **Inbox item** states:
+
+- **Done**: a reversible **core system** action the router already executed
+  (logged a habit, set a reminder, appended a memory, mailed an app agent).
+  Shown FYI, with **undo**. Low-priority.
+- **Proposed**: a higher-stakes action the router staged instead of firing
+  (create a ticket, mail the orchestrator, anything external). Carries the
+  full proposed action so **approve** executes it and **reject** discards it.
+  Attention.
+- **Unsorted**: a **Capture** the router could not confidently classify
+  (Gate 1 failure). Needs a route assigned. Attention.
+
+Each item has a fixed **`kind`** (set at creation) and a **`state`** that moves
+`open → resolved` (`state`, not `status` — `status` is already taken by Turn
+state / Status projection). Lifecycle:
+
+- **Unsorted** → _triage_ (assign a target, which then executes or becomes
+  Proposed) or _dismiss_ → `resolved`.
+- **Proposed** → _approve_ (runs the very executor the act-path would have) or
+  _reject_ → `resolved`.
+- **Done** → already executed at intake. Always carries a CTA driven by the
+  executor's **result reference**: if the executor is _undoable_, the CTA is
+  **Undo** (tooltip names the inverse — "Delete the reminder"); if not (a sent
+  mail can't be recalled), the CTA is **View**, a deep-link to the artifact
+  (e.g. the Mail page with that message selected). **Auto-resolves on view** —
+  opening the bell flips open Done items to `resolved` (undo stays available
+  from history for a window). FYI, never nags.
+
+The **bell count = open items**; two-tone by the most-urgent open kind present
+(attention if any Proposed/Unsorted, else low-priority for Done-only).
+
+**Triage** is **Seth's** job by default — he is the primary arbiter. There is
+**no timed / nightly / out-of-band triage pass**. The orchestrator may read and
+act on the Inbox (via tools) **only at Seth's explicit in-chat direction**
+("work through my inbox") — pull, user-initiated, never scheduled.
+
+Distinct from `mail_inbox` (inter-agent mail). Coordinates with the
+notification center from the push handoff — they are the same surface.
+_Avoid_: queue, backlog, drafts, notifications (the bell is the affordance;
+the Inbox is the concept), triage (for the _resurfacing_ step only — not a
+synonym for Intake).
+
+**Gate 1 / Gate 2**:
+The two questions **Intake** answers about a cleaned **Capture** — _where_ and
+_what_.
+
+- **Gate 1 — Where?** Does the router know which **Route** this belongs to?
+  No → **Unsorted** (Inbox, no CTA). Yes → continue to Gate 2.
+- **Gate 2 — What?** Given the Route, does the router know enough to construct
+  the _complete, safe_ action? Confident in the full action _and_ it's safe to
+  perform unattended → **Done** (act now, with undo). Knows the Route but not
+  the complete action — or the action is high-enough stakes to warrant a look
+  → **Proposed** (staged for approve/reject).
+
+Gate 2 is a _judgment over several heuristics_, not one static property:
+payload completeness is primary (does the router know what message to mail,
+what memory to save?); reversibility / stakes is a secondary modifier (a
+commitment like a ticket, or open-ended work like mailing the orchestrator,
+biases toward Proposed even when the payload is clear). Worked examples:
+
+- "I finished a bike ride, log it" → Route: habit; payload: the bike-ride
+  habit. Both clear → **Done**.
+- "Cool idea: <idea>" → Route unclear → **Unsorted**.
+- "Tell Kitchen we skipped dinner" → Route: mail Kitchen (clear); if the
+  message is clear → **Done**; if the Route is clear but the message isn't →
+  **Proposed**.
+- "Remember <fact>" → Route: memory; payload: the fact → **Done**.
+
+There is **no deterministic policy layer** over the classifier — act-vs-propose
+is the model's judgment, full stop. The levers are the classifier prompt plus
+the **routing guidance** each target contributes (core tools and apps alike);
+safety is dialed in through that guidance, not through a structural override.
+
+**Capture key**:
+A long-lived bearer credential an external client (the Watch shortcut) uses to
+POST a **Capture** — distinct from a BetterAuth login session. Implemented with
+the BetterAuth **API Key plugin** (it owns the `apikey` table + migrations, per
+ADR-015; hashed at rest, plaintext shown once at creation, rotation/expiry/
+rate-limit built in). Issued per device via `friday capture-key create` or a
+Settings card. Scoped with the plugin's permissions: `{ capture: ["write"] }`,
+verified explicitly via `verifyApiKey`. Crucially the plugin's
+`enableSessionForAPIKeys` is left at its default **`false`** — a Capture key
+mints **no session**, so a leaked key can file Captures and nothing else; it
+never grants dashboard access. The public entry point is a dashboard route
+(`POST /api/capture`, a `PUBLIC_PATH`) that validates the key then proxies over
+loopback to the daemon, which owns the classifier (ADR-002 — Claude SDK stays
+daemon-side).
+_Avoid_: token (overloaded — daemon-secret, Zero JWT), password, session.
+
 ## Relationships
 
 - A **Theme** is either **Single** (one **Palette**) or **Sync** (a pair

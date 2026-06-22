@@ -199,6 +199,9 @@ vi.mock("@rocicorp/zero", () => {
         blocks: makeQueryProxy(),
         evolve_proposals: makeQueryProxy(),
         read_cursors: makeQueryProxy(),
+        habits: makeQueryProxy(),
+        habit_checkins: makeQueryProxy(),
+        inbox_items: makeQueryProxy(),
       };
       // FRI-121: connection mock — subscribe captures the listener and fires
       // with 'connected' immediately (matches Zero's BehaviorSubject-like API).

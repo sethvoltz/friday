@@ -34,6 +34,18 @@ export const manifestMcpServerSchema = z.object({
   env: z.record(z.string(), z.string()).optional(),
 });
 
+// FRI-171 (ADR-047): an app's opt-in Intake Route targets. Each `{ agent,
+// describe }` pair declares that `agent` (which must cross-ref a `bare`-type
+// agent in this same manifest) is a routable Intake target; `describe` is the
+// `guidance` prose injected into the classifier prompt ("route here when… / a
+// complete action looks like…"). An app with no `intakeRoutes` is not an
+// intake target. Mail delivers to message-driven (`bare`) agents; `scheduled`
+// agents are cron-driven and not routable.
+export const manifestIntakeRouteSchema = z.object({
+  agent: z.string().regex(AGENT_NAME_RE),
+  describe: z.string().min(1).max(280),
+});
+
 export const manifestSchemaV1 = z.object({
   manifestVersion: z.literal(1),
   id: z.string().regex(APP_ID_RE),
@@ -45,12 +57,14 @@ export const manifestSchemaV1 = z.object({
   agents: z.array(manifestAgentSchema).min(1),
   schedules: z.array(manifestScheduleSchema).default([]),
   mcpServers: z.array(manifestMcpServerSchema).default([]),
+  intakeRoutes: z.array(manifestIntakeRouteSchema).default([]),
 });
 
 export type Manifest = z.infer<typeof manifestSchemaV1>;
 export type ManifestAgent = z.infer<typeof manifestAgentSchema>;
 export type ManifestSchedule = z.infer<typeof manifestScheduleSchema>;
 export type ManifestMcpServer = z.infer<typeof manifestMcpServerSchema>;
+export type ManifestIntakeRoute = z.infer<typeof manifestIntakeRouteSchema>;
 
 export class ManifestValidationError extends Error {
   constructor(message: string) {
@@ -103,6 +117,21 @@ export function parseManifest(raw: unknown, folderPath: string): Manifest {
     if (a.type !== "scheduled") {
       throw new ManifestValidationError(
         `schedule "${s.name}" references agent "${s.agent}" which is type "${a.type}"; schedules require a "scheduled"-type agent`,
+      );
+    }
+  }
+
+  // Cross-ref: every intakeRoute.agent must resolve to a `bare`-type agent
+  // (mail delivers to message-driven agents; `scheduled` agents are cron-
+  // driven and not routable). Mirrors the schedule cross-ref above.
+  for (const r of m.intakeRoutes) {
+    const a = agentByName.get(r.agent);
+    if (!a) {
+      throw new ManifestValidationError(`intakeRoute references unknown agent "${r.agent}"`);
+    }
+    if (a.type !== "bare") {
+      throw new ManifestValidationError(
+        `intakeRoute references agent "${r.agent}" which is type "${a.type}"; intakeRoutes require a "bare"-type agent`,
       );
     }
   }

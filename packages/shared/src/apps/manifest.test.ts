@@ -102,6 +102,75 @@ describe("parseManifest", () => {
     expect(m.schedules).toHaveLength(1);
   });
 
+  it("accepts intakeRoutes pointing at a bare agent", () => {
+    const folder = mkFolder();
+    const m = parseManifest(
+      {
+        ...minimal(),
+        agents: [
+          { name: "owner", type: "bare" as const },
+          { name: "weekly", type: "scheduled" as const },
+        ],
+        intakeRoutes: [{ agent: "owner", describe: "route here when the user wants the owner" }],
+      },
+      folder,
+    );
+    expect(m.intakeRoutes).toEqual([
+      { agent: "owner", describe: "route here when the user wants the owner" },
+    ]);
+  });
+
+  it("defaults intakeRoutes to an empty array when omitted", () => {
+    const folder = mkFolder();
+    const m = parseManifest(minimal(), folder);
+    expect(m.intakeRoutes).toEqual([]);
+  });
+
+  it("rejects intakeRoutes pointing at a scheduled agent with the exact message", () => {
+    const folder = mkFolder();
+    expect(() =>
+      parseManifest(
+        {
+          ...minimal(),
+          agents: [
+            { name: "owner", type: "bare" as const },
+            { name: "weekly", type: "scheduled" as const },
+          ],
+          intakeRoutes: [{ agent: "weekly", describe: "should be rejected" }],
+        },
+        folder,
+      ),
+    ).toThrowError(
+      'intakeRoute references agent "weekly" which is type "scheduled"; intakeRoutes require a "bare"-type agent',
+    );
+  });
+
+  it("rejects intakeRoutes referencing an unknown agent with the exact message", () => {
+    const folder = mkFolder();
+    expect(() =>
+      parseManifest(
+        {
+          ...minimal(),
+          intakeRoutes: [{ agent: "ghost", describe: "no such agent" }],
+        },
+        folder,
+      ),
+    ).toThrowError('intakeRoute references unknown agent "ghost"');
+  });
+
+  it("rejects an intakeRoute with an empty describe", () => {
+    const folder = mkFolder();
+    expect(() =>
+      parseManifest(
+        {
+          ...minimal(),
+          intakeRoutes: [{ agent: "owner", describe: "" }],
+        },
+        folder,
+      ),
+    ).toThrowError(ManifestValidationError);
+  });
+
   it("rejects duplicate agent names", () => {
     const folder = mkFolder();
     expect(() =>

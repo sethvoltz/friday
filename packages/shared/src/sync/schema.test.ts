@@ -14,6 +14,7 @@
 
 import { describe, expect, it } from "vitest";
 import { permissions, schema } from "./schema.js";
+import { SYNC_TABLES } from "../db/pg-provision.js";
 
 describe("FRI-143 Zero sync schema — schedules slice (AC8)", () => {
   const columns = schema.tables.schedules.columns as Record<
@@ -65,5 +66,51 @@ describe("ADR-024 Zero sync schema — schedule_runs slice", () => {
   it("grants select on schedule_runs (read-only history; no client mutator)", async () => {
     const resolved = await permissions;
     expect(resolved?.tables?.schedule_runs).toBeDefined();
+  });
+});
+
+describe("FRI-171 (ADR-047) Zero sync schema — inbox_items slice", () => {
+  // `inbox_items` must appear in BOTH SYNC_TABLES (logical-replication
+  // publication) AND the Zero client schema (createSchema tables array +
+  // definePermissions). Missing either reintroduces the SchemaVersionNotSupported
+  // reload loop (CLAUDE.md upgrade gotcha #2). `apikey` is deliberately NOT
+  // replicated (server-only, like `user`/`session`).
+  const columns = schema.tables.inbox_items.columns as Record<
+    string,
+    { type: string; optional: boolean }
+  >;
+
+  it("is in SYNC_TABLES AND NOT apikey", () => {
+    expect(SYNC_TABLES).toContain("inbox_items");
+    expect(SYNC_TABLES).not.toContain("apikey");
+  });
+
+  it("is registered as a synced table with id as the primary key", () => {
+    expect(schema.tables.inbox_items).toBeDefined();
+    expect(columns.id).toMatchObject({ type: "string", optional: false });
+  });
+
+  it("projects the NOT-NULL columns as non-optional", () => {
+    expect(columns.created_at).toMatchObject({ type: "number", optional: false });
+    expect(columns.source).toMatchObject({ type: "string", optional: false });
+    expect(columns.raw_text).toMatchObject({ type: "string", optional: false });
+    expect(columns.kind).toMatchObject({ type: "string", optional: false });
+    expect(columns.state).toMatchObject({ type: "string", optional: false });
+    expect(columns.undoable).toMatchObject({ type: "boolean", optional: false });
+  });
+
+  it("projects the nullable columns as optional", () => {
+    expect(columns.cleaned_text).toMatchObject({ type: "string", optional: true });
+    expect(columns.target_id).toMatchObject({ type: "string", optional: true });
+    expect(columns.payload).toMatchObject({ type: "json", optional: true });
+    expect(columns.rationale).toMatchObject({ type: "string", optional: true });
+    expect(columns.resolved_at).toMatchObject({ type: "number", optional: true });
+    expect(columns.inverse_label).toMatchObject({ type: "string", optional: true });
+    expect(columns.deep_link).toMatchObject({ type: "string", optional: true });
+  });
+
+  it("grants select on inbox_items so the bell + Inbox review can read rows", async () => {
+    const resolved = await permissions;
+    expect(resolved?.tables?.inbox_items).toBeDefined();
   });
 });

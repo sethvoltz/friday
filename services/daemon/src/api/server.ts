@@ -163,7 +163,16 @@ import {
 } from "../apps/installer.js";
 import { randomUUID } from "node:crypto";
 import { isValidAgentName } from "@friday/shared";
-import type { AgentType } from "@friday/shared";
+import type { AgentType, IntakeSource } from "@friday/shared";
+import {
+  runIntake,
+  approveInbox,
+  undoInbox,
+  triageInbox,
+  listOpenInbox,
+  actInbox,
+  type InboxAction,
+} from "../intake/intake.js";
 
 export const { version: DAEMON_VERSION } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -1515,6 +1524,110 @@ async function handle(
       return json(res, 500, {
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+
+  // --- Intake (FRI-171, ADR-047) ---
+  // Stateless Capture entrypoint. The dashboard's public `/api/capture` route
+  // (capture-key gated) proxies here over loopback with the daemon secret.
+  // Runs clean+classify+dispatch SYNCHRONOUSLY (bounded by INTAKE_TIMEOUT_MS):
+  // on a clean finish it returns the verdict; on classifier failure/timeout the
+  // Capture is NEVER dropped — it lands as a Proposed item in the bell and we
+  // return that "queued/staged" shape.
+  if (method === "POST" && path === "/api/intake") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    const body = await readJson<{ text?: unknown; source?: unknown }>(req);
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (!text) return json(res, 400, { error: "text is required" });
+    // `source` is an open set (Capture provenance); default to quick_add.
+    const source: IntakeSource = body.source === "watch" ? "watch" : "quick_add";
+    const result = await runIntake(source, text);
+    return json(res, 200, {
+      cleaned: result.cleaned,
+      disposition: result.disposition,
+      rationale: result.rationale,
+      kind: result.kind,
+    });
+  }
+
+  // Approve a staged Proposed item: run the SAME Route-target executor the act
+  // path would have, server-side (the dashboard's `inboxApprove` mutator then
+  // flips state). Loopback + daemon-secret gated (proxied from the dashboard's
+  // session-authenticated `/api/intake/approve` route).
+  if (method === "POST" && path === "/api/intake/approve") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    const body = await readJson<{ id?: unknown }>(req);
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!id) return json(res, 400, { error: "id is required" });
+    try {
+      const result = await approveInbox(id);
+      return json(res, 200, result);
+    } catch (err) {
+      return json(res, 409, { ok: false, error: (err as Error).message });
+    }
+  }
+
+  // Undo a Done item: run the inverse executor (delete the reminder/check-in/
+  // memory) server-side. The dashboard's `inboxUndo` mutator flips state after.
+  if (method === "POST" && path === "/api/intake/undo") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    const body = await readJson<{ id?: unknown }>(req);
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!id) return json(res, 400, { error: "id is required" });
+    try {
+      const result = await undoInbox(id);
+      return json(res, 200, result);
+    } catch (err) {
+      return json(res, 409, { ok: false, error: (err as Error).message });
+    }
+  }
+
+  // Triage an Unsorted item to a chosen `agent:<name>` target: mail the
+  // cleaned text to that agent server-side, then promote to Done.
+  if (method === "POST" && path === "/api/intake/triage") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    const body = await readJson<{ id?: unknown; targetId?: unknown }>(req);
+    const id = typeof body.id === "string" ? body.id : "";
+    const targetId = typeof body.targetId === "string" ? body.targetId : "";
+    if (!id || !targetId) return json(res, 400, { error: "id and targetId are required" });
+    try {
+      const result = await triageInbox(id, targetId);
+      return json(res, 200, result);
+    } catch (err) {
+      return json(res, 409, { ok: false, error: (err as Error).message });
+    }
+  }
+
+  // List OPEN Inbox items for the orchestrator's `friday-inbox` MCP tools
+  // (FRI-171). Read-only; used when Seth says "work through my inbox". Returns
+  // resolved items never — only `state='open'` rows, most-recent first.
+  if (method === "GET" && path === "/api/intake/inbox") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    return json(res, 200, { items: await listOpenInbox() });
+  }
+
+  // Act on one Inbox item from the orchestrator path (FRI-171): approve / reject
+  // / dismiss / triage / undo. Runs the SAME executor/dispatch the dashboard
+  // mutators use AND flips state open→resolved daemon-side (the orchestrator has
+  // no Zero session). This is an ordinary tool call at Seth's explicit
+  // direction — there is NO timer/cron wiring driving it.
+  if (method === "POST" && path === "/api/intake/act") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    const body = await readJson<{ id?: unknown; action?: unknown; targetId?: unknown }>(req);
+    const id = typeof body.id === "string" ? body.id : "";
+    const action = typeof body.action === "string" ? (body.action as InboxAction) : undefined;
+    const targetId = typeof body.targetId === "string" ? body.targetId : undefined;
+    const allowed: InboxAction[] = ["approve", "reject", "dismiss", "triage", "undo"];
+    if (!id || !action || !allowed.includes(action)) {
+      return json(res, 400, {
+        error: "id and a valid action (approve|reject|dismiss|triage|undo) are required",
+      });
+    }
+    try {
+      const result = await actInbox(id, action, targetId);
+      return json(res, 200, result);
+    } catch (err) {
+      return json(res, 409, { ok: false, error: (err as Error).message });
     }
   }
 

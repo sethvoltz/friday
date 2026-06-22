@@ -115,6 +115,61 @@ export const verifications = pgTable("verification", {
   updatedAt: timestamp("updatedAt", { withTimezone: true }),
 });
 
+// FRI-171 (ADR-047): the `apikey` table backs the BetterAuth API Key
+// plugin (`@better-auth/api-key@1.6.9`) that issues Capture keys for the
+// stateless `/api/capture` endpoint. Server-only — NOT in SYNC_TABLES,
+// gated the same way as `user`/`session`/`account`/`verification`.
+//
+// The exact field set is the plugin's `apiKeySchema` (probed from the
+// installed 1.6.9 `dist/index.mjs` `apiKeySchema(...)` factory). The
+// BetterAuth Drizzle adapter resolves a column by indexing this table
+// object with the plugin's *field key* (`field.fieldName || key`, no
+// snake_case conversion — see `@better-auth/drizzle-adapter` `getSchema`),
+// so the JS PROPERTY KEYS below MUST match the plugin field names verbatim
+// (camelCase). A key mismatch makes `verifyApiKey` silently fail. Physical
+// column names are kept camelCase to match the existing BetterAuth tables
+// above. Two fields differ from the FRI-171 contract §5 draft and are
+// load-bearing:
+//   * `configId` — required (default 'default'); the 1.6.9 plugin moved
+//     rate-limit/permission knobs under a config system and writes this
+//     column on every key. Omitting it breaks key creation.
+//   * `referenceId` — the owner id (the plugin's 1.6.9 name for what older
+//     docs called `userId`); conceptually references `user.id`. Declared as
+//     plain `text` with no Drizzle `.references()` to match how `session`/
+//     `account` declare their `userId` columns in this repo.
+export const apikeys = pgTable("apikey", {
+  id: text("id").primaryKey(),
+  // Owner of the key — the BetterAuth user id (references user.id; the
+  // existing BA tables don't declare a Drizzle FK, so neither does this).
+  referenceId: text("referenceId").notNull(),
+  // Config bucket the key belongs to (rate-limit/permission profile).
+  configId: text("configId").notNull().default("default"),
+  name: text("name"),
+  // First few chars of the plaintext key, shown in management UIs.
+  start: text("start"),
+  prefix: text("prefix"),
+  // The hashed key (SHA-256 base64url). Never the plaintext.
+  key: text("key").notNull(),
+  refillInterval: integer("refillInterval"),
+  refillAmount: integer("refillAmount"),
+  lastRefillAt: timestamp("lastRefillAt", { withTimezone: true }),
+  enabled: boolean("enabled").notNull().default(true),
+  rateLimitEnabled: boolean("rateLimitEnabled").notNull().default(true),
+  rateLimitTimeWindow: integer("rateLimitTimeWindow"),
+  rateLimitMax: integer("rateLimitMax"),
+  requestCount: integer("requestCount").notNull().default(0),
+  // null ⇒ unlimited remaining; a number ⇒ remaining quota.
+  remaining: integer("remaining"),
+  lastRequest: timestamp("lastRequest", { withTimezone: true }),
+  expiresAt: timestamp("expiresAt", { withTimezone: true }),
+  // JSON-stringified Record<string,string[]> (e.g. {"capture":["write"]}).
+  permissions: text("permissions"),
+  // JSON-stringified arbitrary metadata; the plugin transforms in/out.
+  metadata: text("metadata"),
+  createdAt: timestamp("createdAt", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true }).notNull(),
+});
+
 /* ---------------- Agents registry (ADR-013, ADR-022) ---------------- */
 
 export const agents = pgTable(
@@ -525,6 +580,58 @@ export const habitCheckins = pgTable(
   },
   (t) => ({
     habitTsIdx: index("habit_checkins_habit_ts").on(t.habitId, t.ts),
+  }),
+);
+
+/* ---------------- Inbox (FRI-171, ADR-047) ---------------- */
+// Stateless Capture & Intake routing. Each Capture (Watch quick-add, etc.)
+// is classified by a single-turn daemon-side classifier into an Intake
+// verdict; the daemon writes ONE `inbox_items` row recording the outcome:
+//   * kind='done'      — the executor ran (act path); `undoable`/`inverse_label`/
+//                        `deep_link` reference the created artifact.
+//   * kind='proposed'  — staged for review (propose path, or payload failed
+//                        validation and degraded — never dropped); `payload`
+//                        carries the executable verdict for approve/triage.
+//   * kind='unsorted'  — Gate 1 failure (no confident route); `target_id` null.
+// `state` (open|resolved) — NOT `status` (`status` is reserved per the glossary).
+// open Done items auto-resolve on bell view; Proposed/Unsorted resolve on an
+// explicit user action (approve/reject/dismiss/triage). Replicated to Zero.
+export const inboxItems = pgTable(
+  "inbox_items",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()::text`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    // Capture provenance (watch | quick_add | …). Open set — no CHECK.
+    source: text("source").notNull(),
+    // The original Capture text, verbatim.
+    rawText: text("raw_text").notNull(),
+    // The classifier's faithfully-cleaned form (null until classified).
+    cleanedText: text("cleaned_text"),
+    // Chosen Route target id (e.g. 'core:reminder', 'agent:foo'); null ⇒ Unsorted.
+    targetId: text("target_id"),
+    // The executable payload for the target's executor (approve/triage use it).
+    payload: jsonb("payload"),
+    // One-line human-readable reason for the route/disposition.
+    rationale: text("rationale"),
+    // FIXED at creation: which lane this Capture landed in.
+    kind: text("kind").notNull(),
+    // Lifecycle state. Defaults to 'open'; flips to 'resolved' on view/action.
+    state: text("state").notNull().default("open"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    // Drives the Undo-vs-View CTA on a Done item.
+    undoable: boolean("undoable").notNull().default(false),
+    // Human label for the inverse action (e.g. 'Delete the reminder').
+    inverseLabel: text("inverse_label"),
+    // Deep-link to the created artifact (e.g. '/habits', '/tickets/<id>').
+    deepLink: text("deep_link"),
+  },
+  (t) => ({
+    // Open-items / bell query: filter by state, order by recency.
+    stateCreatedIdx: index("inbox_items_state_created").on(t.state, t.createdAt),
+    kindCheck: check("inbox_items_kind_check", sql`${t.kind} IN ('done','proposed','unsorted')`),
+    stateCheck: check("inbox_items_state_check", sql`${t.state} IN ('open','resolved')`),
   }),
 );
 

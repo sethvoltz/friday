@@ -7,6 +7,7 @@
   import { theme, type ThemeKind } from "$lib/stores/theme.svelte";
   import { DEFAULTS, PALETTES, type PaletteName } from "$lib/theme/palettes";
   import PalettePreview from "$lib/components/Appearance/PalettePreview.svelte";
+  import CaptureKeys from "$lib/components/Settings/CaptureKeys.svelte";
 
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import {
@@ -615,6 +616,8 @@
       <button class="ghost" onclick={signOut}>Sign out</button>
     </div>
   </div>
+
+  <CaptureKeys />
 
   <div class="card">
     <div class="card-header"><h2>Apps</h2></div>
