@@ -84,7 +84,12 @@ export async function safeRecall(text: string, intent: IntentTag = "user_chat"):
     const entries = await listEntries();
     const allowTags = computePersonAllowTags(text, entries);
     return await buildAutoRecallBlock(text, {
-      excludeTags: ["person"],
+      // FRI-141 carve-out keeps "person"; FRI-26 (design D7 / Decision A) adds
+      // "archived" so hygiene-archived memories are suppressed from passive
+      // auto-recall (searchMemories has no status awareness — it only honors
+      // caller-supplied excludeTags, so the archive tag suppresses recall only
+      // because this caller passes it).
+      excludeTags: ["person", "archived"],
       allowTags,
       preloadedEntries: entries,
     });

@@ -102,10 +102,62 @@ vi.mock("./store.js", () => ({
 
 const { proposeFromSignals, rerankAll } = await import("./propose.js");
 const { DEFAULT_RULE } = await import("./rank.js");
+const { encodeDreamPayload } = await import("./scan-dreaming.js");
 
 beforeEach(() => {
   proposals.clear();
   bySignalHash.clear();
+});
+
+// ── FRI-26: dream proposals are gated by the per-category auto-apply threshold
+// in applyDreamProposals, NOT by the code-evolution criticality ranker. A
+// high-severity, frequent dream signal that WOULD trip isCritical for any other
+// source must stay `open` (so the dreaming hook decides) and must never enter
+// the `critical` surface that drives the FRI-40/FRI-149 triage/builder spawns.
+function dreamSignal(hash: string, count: number): Signal {
+  return {
+    hash,
+    source: "dream",
+    key: `dream:reinforce:${hash}`,
+    severity: "high",
+    count,
+    firstSeenAt: "2026-05-13T00:00:00.000Z",
+    lastSeenAt: "2026-05-15T00:00:00.000Z",
+    agent: "orchestrator",
+    evidencePointers: [
+      encodeDreamPayload({
+        title: `Memory ${hash}`,
+        content: "a durable fact worth remembering",
+        tags: ["topic"],
+        category: "feedback",
+      }),
+    ],
+  };
+}
+
+describe("FRI-26 dream proposals never enter the code-evolution `critical` surface", () => {
+  it("creates a high-severity, frequent dream proposal as `open`, not `critical`", () => {
+    // The identical severity+count via a daemon signal becomes `critical` (see
+    // the FRI-79 block); the dream guard is what keeps this one `open` so the
+    // per-category auto-apply gate in applyDreamProposals decides instead.
+    const result = proposeFromSignals([dreamSignal("d1", 8)], {
+      rule: DEFAULT_RULE,
+      createdBy: "test",
+    });
+    expect(result.created).toHaveLength(1);
+    // Score is high enough that, absent the guard, isCritical would fire.
+    expect(result.created[0].score).toBeGreaterThanOrEqual(DEFAULT_RULE.criticalScore);
+    expect(result.created[0].status).toBe("open");
+    expect(result.promotedToCritical).toHaveLength(0);
+  });
+
+  it("rerankAll never re-promotes a high-severity dream proposal to `critical`", () => {
+    proposeFromSignals([dreamSignal("d2", 8)], { rule: DEFAULT_RULE, createdBy: "test" });
+    const { promoted } = rerankAll(DEFAULT_RULE);
+    expect(promoted).toHaveLength(0);
+    const stored = [...proposals.values()].find((p) => p.signals.some((s) => s.source === "dream"));
+    expect(stored?.status).toBe("open");
+  });
 });
 
 function highSeveritySignal(hash: string, count: number): Signal {

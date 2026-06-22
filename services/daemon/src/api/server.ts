@@ -72,6 +72,12 @@ import {
   scanAll,
   scanFriction,
   scanPreferences,
+  scanDreaming,
+  applyDreamProposals,
+  runHygiene,
+  appendDreamEntry,
+  decodeDreamPayload,
+  slugify,
   sinceHoursAgo,
   appendRun,
   triageSpawnPlan,
@@ -81,6 +87,10 @@ import {
   type Proposal,
   type SaveProposalInput,
   type UpdateProposalInput,
+  type DreamEvidence,
+  type DreamRunReport,
+  type DreamDiaryItem,
+  type HygieneReport,
 } from "@friday/evolve";
 import { deleteProposalFromPg, syncProposalToPg } from "../evolve/projector.js";
 import { syncProposalsForClosedTickets } from "../services/proposal-sync.js";
@@ -980,12 +990,20 @@ async function handle(
       windowHours?: number;
       includeFriction?: boolean;
       includePreferences?: boolean;
+      includeDreaming?: boolean;
+      sinceTs?: string;
     }>(req);
     const windowHours = body.windowHours ?? 24;
     const includeFriction = body.includeFriction !== false;
     const includePreferences = body.includePreferences !== false;
+    const includeDreaming = body.includeDreaming !== false;
     const callerName = String(req.headers["x-friday-caller-name"] ?? "scan");
     const since = sinceHoursAgo(windowHours);
+    // FRI-26 AC6: the dreaming cursor. The meta-agent passes `sinceTs`
+    // (lastDreamScannedTs from its state.md) so each night re-scans only turns
+    // newer than the last dream pass; absent it, the dreaming sub-pass shares
+    // the regular `since` window. Propose-merge dedup is the overlap safety net.
+    const dreamSince = body.sinceTs ?? since;
     const windowEnd = new Date().toISOString();
     try {
       const syncSignals = await scanAll({ since });
@@ -1005,7 +1023,45 @@ async function handle(
             return [] as typeof syncSignals;
           })
         : [];
-      const signals = [...syncSignals, ...frictionSignals, ...preferenceSignals];
+      // FRI-26 Memory Dreaming (design D7): a daily sub-pass that mines the
+      // orchestrator transcript for new memories worth saving, deduped against
+      // the live corpus. Evidence (recall stats keyed by slug + co-occurring
+      // daemon-source friction signals) is assembled from a listEntries() read.
+      // The scanner is LLM-backed, so it fails soft to [] exactly like the
+      // friction/preference scanners.
+      const dreamEntries = includeDreaming ? await listEntries() : [];
+      // F2/F14: key recall stats by slugify(title) — the SAME identity used for
+      // dedup/apply — so the recall→severity bump is not dead in prod when the
+      // LLM's title formatting differs trivially from the existing memory's.
+      const recallStatsBySlug = new Map<
+        string,
+        { recallCount: number; lastRecalledAt: string | null }
+      >();
+      for (const e of dreamEntries) {
+        recallStatsBySlug.set(slugify(e.title), {
+          recallCount: e.recallCount,
+          lastRecalledAt: e.lastRecalledAt,
+        });
+      }
+      const evidence: DreamEvidence = {
+        recallStatsBySlug,
+        frictionSignalsInWindow: syncSignals.filter((s) => s.source === "daemon"),
+        // F2: friction co-occurrence matches the CONFIGURED orchestrator name —
+        // daemon.jsonl signals carry the real agent name, not the literal
+        // "orchestrator".
+        orchestratorName: cfg.orchestratorName,
+        existingMemories: dreamEntries.map((e) => ({ title: e.title, tags: e.tags })),
+      };
+      // F4/AC6: use the cursor (`dreamSince`) for the dreaming window — the
+      // meta-agent's lastDreamScannedTs narrows it to turns newer than the last
+      // pass, with propose-merge dedup as the overlap safety net.
+      const dreamSignals = includeDreaming
+        ? await scanDreaming({ since: dreamSince, evidence }).catch((err) => {
+            logger.log("warn", "evolve.scan.dreaming-error", { error: String(err) });
+            return [] as typeof syncSignals;
+          })
+        : [];
+      const signals = [...syncSignals, ...frictionSignals, ...preferenceSignals, ...dreamSignals];
       const propose = proposeFromSignals(signals, {
         rule: DEFAULT_RULE,
         createdBy: callerName,
@@ -1165,6 +1221,86 @@ async function handle(
           });
         }
       }
+      // FRI-26 Memory Dreaming (design D7): after the usual propose/rerank, hand
+      // the dream-shaped proposals (those whose signals carry a decodable
+      // DreamPayload) to applyDreamProposals — it dedup-extends an existing
+      // memory, auto-applies a proposal that clears its per-category threshold,
+      // or leaves it `open` for human review. Then a corpus-wide hygiene pass
+      // merges near-dups + flags cold entries (archive-by-tag, never
+      // hard-delete), and one diary block is appended. The dream proposals are
+      // `type:"memory"` so the FRI-40/FRI-149 spawn blocks above (which consume
+      // code-shaped promotions) never touch them. Each sub-step fails soft so a
+      // single LLM/dedup hiccup never aborts the nightly run.
+      let hygiene: HygieneReport | null = null;
+      let dreamPromoted = 0;
+      let dreamReinforced = 0;
+      if (includeDreaming) {
+        // F10/F16: re-read each dream proposal from the store via getProposal so
+        // the per-category gate inside applyDreamProposals sees the POST-rerank
+        // `score` (rerankAll mutates persisted rows; the in-memory propose.*
+        // copies predate it). We keep LIVE dream proposals only — `open` (fresh,
+        // gates on score), `critical` (escalated, still gateable), and `applied`
+        // (a prior run / family-resolution already wrote the memory). The
+        // `applied` ones MUST flow through: on the second nightly run the dream
+        // signal's stable hash re-hits the same proposal (now `applied`), and the
+        // dedup path inside applyDreamProposals finds the existing memory at
+        // score >= DREAM_DEDUP_MIN_SCORE and EXTENDS it (reinforce, AC4) — it
+        // never reaches applyProposal, so there is no "already applied" mislabel.
+        // Terminal-dead states (`rejected`/`superseded`/`auto-resolved`/
+        // `approved`) are excluded so a killed proposal is not resurrected.
+        const LIVE_DREAM_STATUSES = new Set(["open", "critical", "applied"]);
+        const dreamProps = [...propose.created, ...propose.updated]
+          .map((p) => getProposal(p.id) ?? p)
+          .filter(
+            (p) =>
+              p.signals.some((s) => decodeDreamPayload(s)) && LIVE_DREAM_STATUSES.has(p.status),
+          );
+        const dreamApply = await applyDreamProposals(dreamProps, callerName);
+        dreamPromoted = dreamApply.promoted.length;
+        dreamReinforced = dreamApply.reinforced.length;
+        // F20: a proposal that CLEARED its threshold but whose applyProposal
+        // returned ok:false is a genuine failure (distinct from a deliberate
+        // below-threshold deferral) — surface it so it is not silently dropped.
+        if (dreamApply.failed?.length) {
+          logger.log("warn", "evolve.scan.dream-apply-failed", { ids: dreamApply.failed });
+        }
+        try {
+          // Deliberate second listEntries() read: the hygiene pass runs over the
+          // corpus AFTER the dream applies/extends above, so it must see those
+          // post-write rows (not the pre-write `dreamEntries` snapshot).
+          hygiene = await runHygiene(await listEntries());
+          const mergedItems: DreamDiaryItem[] = hygiene.merged.map((m) => ({
+            action: "merged",
+            title: m.survivorId,
+            score: null,
+            evidence: m.reason,
+          }));
+          const flaggedItems: DreamDiaryItem[] = hygiene.decayCandidates.map((id) => ({
+            action: "pruned-flagged",
+            title: id,
+            score: null,
+            evidence: "cold entry flagged for decay",
+          }));
+          const report: DreamRunReport = {
+            ts: new Date().toISOString(),
+            promoted: dreamApply.promoted.length,
+            reinforced: dreamApply.reinforced.length,
+            merged: hygiene.merged.length,
+            prunedFlagged: hygiene.decayCandidates.length,
+            items: [
+              ...dreamApply.promoted,
+              ...dreamApply.reinforced,
+              ...mergedItems,
+              ...flaggedItems,
+            ],
+          };
+          appendDreamEntry(report);
+        } catch (err) {
+          logger.log("warn", "evolve.scan.dreaming-hygiene-error", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       return json(res, 200, {
         signals: signals.length,
         created: propose.created.length,
@@ -1174,6 +1310,10 @@ async function handle(
         promotedFromRerank: reranked.promoted.length,
         familyResolved: propose.familyResolved.length,
         familyRejected: propose.familyRejected.length,
+        dreamPromoted,
+        dreamReinforced,
+        dreamMerged: hygiene?.merged.length ?? 0,
+        dreamFlagged: hygiene?.decayCandidates.length ?? 0,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

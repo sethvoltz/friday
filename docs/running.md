@@ -106,6 +106,7 @@ Everything lives at `~/.friday/`:
 ├── uploads/<bucket>/          Content-addressed attachments
 ├── memory/entries/*.md        Memory entries (mirrored to memory_entries Postgres table)
 ├── evolve/proposals/*.md      Evolve proposals
+├── evolve/dream-diary.md      Nightly memory-dreaming journal (one block per dream run; ADR-046)
 ├── apps/<id>/                 Installed Friday Apps (ADR-021)
 ├── schedules/<name>/          Scheduled-agent state continuity (state.md + last-run.md)
 ├── workspaces/<name>/         Builder git worktrees

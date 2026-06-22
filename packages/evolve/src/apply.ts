@@ -153,7 +153,7 @@ function buildTicketBody(proposal: Proposal): string {
   return sections.join("\n\n");
 }
 
-function slugify(s: string): string {
+export function slugify(s: string): string {
   return s
     .toLowerCase()
     .replace(/[^\w\s-]/g, "")

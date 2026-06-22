@@ -173,15 +173,15 @@ agent-friday/
 
 ## Components
 
-| Path                           | Purpose                                                                                                                                           |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/shared`              | Types, config, logger, DB layer (Drizzle), wire schema, prompts, services (mail/tickets/attachments/turns/usage), markdown plugins, skills loader |
-| `packages/cli`                 | `friday` CLI (citty + clack + picocolors)                                                                                                         |
-| `packages/memory`              | File-based memory store + DB-backed FTS5 + auto-recall block                                                                                      |
-| `packages/evolve`              | Self-improvement proposals (store + types; full pipeline lifts in roadmap)                                                                        |
-| `packages/integrations/linear` | Optional Linear API integration (reconcile() pending)                                                                                             |
-| `services/daemon`              | Headless API. Owns SDK, agent registry, fork-per-agent workers, MCP servers, EventBus, SSE, scheduler, mail bridge, watchdog                      |
-| `services/dashboard`           | SvelteKit + Svelte 5 (runes). Auth-gated public surface, proxy + UI                                                                               |
+| Path                           | Purpose                                                                                                                                            |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/shared`              | Types, config, logger, DB layer (Drizzle), wire schema, prompts, services (mail/tickets/attachments/turns/usage), markdown plugins, skills loader  |
+| `packages/cli`                 | `friday` CLI (citty + clack + picocolors)                                                                                                          |
+| `packages/memory`              | File-based memory store + DB-backed FTS5 + auto-recall block                                                                                       |
+| `packages/evolve`              | Self-improvement pipeline: signal scanners (friction/preference/dreaming) → propose → rank → enrich → cluster → apply; memory hygiene; Dream Diary |
+| `packages/integrations/linear` | Optional Linear API integration (reconcile() pending)                                                                                              |
+| `services/daemon`              | Headless API. Owns SDK, agent registry, fork-per-agent workers, MCP servers, EventBus, SSE, scheduler, mail bridge, watchdog                       |
+| `services/dashboard`           | SvelteKit + Svelte 5 (runes). Auth-gated public surface, proxy + UI                                                                                |
 
 ## Data architecture
 
@@ -227,6 +227,23 @@ Habits are a **core** concept (not a Friday App — see ADR-043 for why: cross-a
 - **Streak is a derived projection, not a column.** `@friday/shared/habits` `computeStreak(habit, checkins, now)` is a pure function (`now` injected at the boundary) consumed identically by the daemon (`habit_list`/`habit_status`) and the browser (a single adapter mapping the `snake_case` Zero row + epoch-millis → `Date`). A streak breaks at the clock boundary when an unsatisfied Period closes, so a stored counter would be silently stale — the log is canonical, the streak is a view (the Turn-state-vs-Status-projection pattern). See ADR-043.
 - **MCP + routes.** A core `friday-habit` MCP server (`habit_add`/`checkin`/`list`/`status`/`update`/`archive`/`checkin_undo`) is registered **unconditionally for all caller types** (like `friday-reminder`), POSTing to daemon `/api/habits*` routes. The dashboard check-off/undo writes are Zero mutators (`habitCheckin`/`habitCheckinUndo`); management (create/update/archive) goes through the `/api/habits` proxy.
 - **Bounded archival is a reconcile, not a schedules row.** A bounded window closes on a clock boundary with no write event, so `reconcileBoundedHabits` (`services/daemon/src/habits/reconcile.ts`) flips closed-window active bounded habits to `completed`/`expired` (verdict from the engine's `terminal`) — run at boot and on a 60s daemon-internal interval (a `clearInterval`-on-shutdown timer like the scheduler tick — a daemon-internal timer, NOT a `schedules`-table row). Habits add no new `schedules.kind` and own no `schedules` rows; a reminder _about_ a habit is a separate `kind='reminder'` schedule (FRI-168).
+
+### Evolve pipeline and memory dreaming (FRI-26, ADR-046)
+
+`@friday/evolve` is the self-improvement loop. Its **signal scanners** read the system's own exhaust and emit `Signal[]`, deduped and merged by `signalHash`:
+
+- `scan-friction.ts` / `scan.ts` (`scanDaemonLog`) — daemon `logs/daemon.jsonl` events (e.g. `watchdog.stall.detected`), `source: "daemon"`.
+- `scan-preferences.ts` — Haiku pass over orchestrator transcripts inferring stable user preferences.
+- `scan-dreaming.ts` (FRI-26) — Haiku pass over orchestrator transcripts proposing **candidate memories** the orchestrator should have saved, `source: "dream"`.
+
+All scanners feed the same downstream: `proposeFromSignals` → `scoreProposal`/`rerankAll` → (`evolve_enrich` / cluster) → `applyProposal`, surfaced for review at the dashboard `/evolve` route and via the `evolve_*` MCP tools. The daily `scheduled-meta-daily` meta-agent drives the nightly run.
+
+**Memory dreaming is a sub-pass of that daily run, not a new agent** (ADR-046). It rides inside `POST /api/evolve/scan` behind an `includeDreaming` flag that defaults to **true at the daemon endpoint** (the meta-agent's path) but to **false on the dashboard's manual Scan button** — the LLM-backed dreaming pass (token cost + memory auto-writes) fires only on the scheduled nightly run, never as a side effect of clicking Scan. The scan window advances via a `lastDreamScannedTs` cursor recorded in `scheduled-meta-daily`'s own `state.md`: the meta-agent reads it back and passes it as `sinceTs`, and the endpoint forwards `dreamSince = body.sinceTs ?? since` so each night re-scans only newer turns. The cursor is a cost optimization, not a correctness boundary — propose-merge signal-hash dedup plus apply-time `searchMemories` dedup make an overlapping window harmless. The flow within one scan:
+
+- **Scan.** `scanDreaming` reads the window's orchestrator turns (`collectOrchestratorTurns` — the `blocks` table is canonical, no JSONL walker), is shown the existing corpus inline to skip already-covered facts, and emits one signal per candidate memory across the five Memory-protocol categories (`user`/`feedback`/`project`/`reference`/`person`). The LLM-authored memory payload (`{title, content, tags, category}`) rides JSON-encoded in the signal's first `EvidencePointer.path` (`kind: "dream"`), and recall/friction evidence rides additional `path` notes — the `Signal` type is **not** widened (ADR-046 Decision B). Friction co-occurrence is matched against the **configured orchestrator name** (`cfg.orchestratorName`), since `daemon.jsonl` signals carry the agent's real name, not the literal `"orchestrator"`; agentless daemon errors are not attributed. `draftFromSignal` has a dream branch that decodes the payload into a real `type:"memory"` proposal.
+- **Auto-apply, gated per category.** A post-propose hook (`applyDreamProposals`, `dreaming-pipeline.ts`) auto-applies dream proposals whose reranked `score` clears a per-category threshold (`feedback:60, user:55, project:50, reference:45, person:80` — `dreaming-thresholds.ts`); `person` sits highest as a PII review-gate (ADR-046 Decision C). Below-threshold proposals (and all sub-80 `person` candidates) stay `open` for human review via `evolve_list` / `/evolve`. Before promoting, the hook dedups against the live corpus via `searchMemories`; a strong match (`>= DREAM_DEDUP_MIN_SCORE`) extends the existing entry with `updateEntry` instead of creating a duplicate (ADR-025: dedup uses the existing REST/in-proc memory-search hop, no new search surface).
+- **Hygiene (anti-rot).** `runHygiene(listEntries())` then runs corpus-wide: merge near-duplicates (survivor keeps the higher `recallCount`; absorbed entry's content/tags fold in and it gains an `archived` tag) and flag cold entries as decay candidates. Hygiene is **preserve-over-delete** — it never calls `forgetEntry` (a static source assertion enforces this); pruning is tag-based archive only (ADR-046 Decision A). Archive suppresses recall because the daemon's passive-recall hook passes `excludeTags: ['person', 'archived']` (the `person` exclusion is FRI-141's PII carve-out; `searchMemories` honors only caller-supplied `excludeTags`, so this recall-side change is what makes the tag load-bearing).
+- **Dream Diary.** Each run appends one timestamped markdown block (counts + a per-item `action | title | score | evidence` table) to `DREAM_DIARY_PATH` (`~/.friday/evolve/dream-diary.md`) — a flat append-only journal of what dreaming did each night. No migration, no schema change: tag-based archive plus the recall exclude is the entire archive mechanism.
 
 ## Auth
 
@@ -648,5 +665,8 @@ Replaced:
 
 Pending lift (`docs/roadmap.md`):
 
-- Full evolve scan/enrich/cluster/apply pipeline (only the markdown store + MCP surface have been ported so far).
 - Linear `reconcile()` (interface ready; GraphQL queries pending).
+
+Lifted and extended beyond the old Friday:
+
+- Evolve scan/propose/rank/enrich/cluster/apply pipeline, plus friction/preference/dreaming signal scanners, memory hygiene, and the Dream Diary (FRI-26, ADR-046) — see "Evolve pipeline and memory dreaming" above.

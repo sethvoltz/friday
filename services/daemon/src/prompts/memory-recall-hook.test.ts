@@ -427,7 +427,10 @@ describe("person name-mention carve-out wiring (FRI-141, AC#8)", () => {
 
     expect(buildSpy).toHaveBeenCalledWith(
       "did Asher say anything about the move",
-      expect.objectContaining({ excludeTags: ["person"], allowTags: ["person:asher"] }),
+      expect.objectContaining({
+        excludeTags: ["person", "archived"],
+        allowTags: ["person:asher"],
+      }),
     );
   });
 
@@ -444,7 +447,7 @@ describe("person name-mention carve-out wiring (FRI-141, AC#8)", () => {
 
     expect(buildSpy).toHaveBeenCalledWith(
       "fix the daemon worker fork race",
-      expect.objectContaining({ excludeTags: ["person"], allowTags: [] }),
+      expect.objectContaining({ excludeTags: ["person", "archived"], allowTags: [] }),
     );
   });
 });
