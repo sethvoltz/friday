@@ -50,6 +50,48 @@ same overlay band — don't invent a bespoke floating chrome per surface. The
 pill's visibility is derived from a scroll/`IntersectionObserver` signal, never
 from a manual toggle.
 
+## Responsive rail layout (`RailShell`)
+
+Pages with a filter/nav rail beside a main pane use the reusable
+`$lib/components/RailShell/RailShell.svelte` scaffold rather than re-deriving the
+responsive chrome per surface. It mirrors Chat's floating-panel look while
+staying an **in-flow** page (not Chat's `position: fixed` viewport model):
+
+- **Desktop:** a CSS grid — a fixed-width **contained rail panel** (`--bg-card`
+  surface, `--border-subtle`, `--radius-lg`, `--shadow-lg`, its own
+  `overflow:auto`) beside a flexible main column. The rail is
+  `position: sticky; top: var(--header-clearance)` so it floats beside the
+  content like Chat's sidebar without sitting under the floating header.
+- **Mobile (≤ `breakpoint`, default 768px):** the rail collapses behind a rounded
+  `Filters (n)` **trigger row** (Sidebar `.trigger` look) that expands a rounded
+  anchored **dropdown sheet** — not a full-height drawer.
+- **a11y (net-new vs the chat Sidebar, which has none on its popover):** the sheet
+  is `role="dialog" aria-modal="true"`; Escape closes it; focus moves into the
+  sheet on open and is Tab-trapped; focus restores to the trigger on close; the
+  trigger carries `aria-expanded` + `aria-controls`.
+
+It is **content-agnostic** — everything is slotted via the `rail` / `main` /
+optional `topbar` snippets; the only state it owns is the breakpoint and the
+sheet-open flag (`sheetOpen`, `$bindable`). It imports nothing domain-specific
+(no store, no Memory/chat symbol). The **`main` snippet is rendered once**,
+outside the breakpoint branch, so a resize / device rotation swaps only the rail
+placement and never remounts the main pane — an in-progress inline edit survives
+the breakpoint flip.
+
+First consumer: the Memory page (`Memory/MemoryPage.svelte`). Tickets / Mail could
+adopt the same shell; the chat Sidebar stays bespoke (coupled to chat state) and
+is out of scope to migrate.
+
+## Page frame width
+
+Every in-flow page (`.app-main`) aligns to the same horizontal region as the
+floating header and Chat: full width with `--page-gutter` horizontal padding
+(`max(1rem, calc((100vw - 1200px) / 2))`, defined in `app.css :root`). Don't
+re-introduce a per-page `max-width` — that insets a page narrower than the header
+and reads as inconsistent across surfaces. `--header-clearance` (5.5rem) is the
+matching vertical band the floating header occupies (also `.app-main`'s
+`padding-top`); RailShell reuses it for the rail panel's sticky offset.
+
 ## Heatmap calendar (contribution grid)
 
 The GitHub-contribution-style square grid is a single reusable component:

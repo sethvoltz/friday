@@ -686,7 +686,11 @@
   .nav-more-panel a:hover { color: var(--text-primary); background: var(--bg-tertiary); }
   .nav-more-panel a.active { color: var(--accent-primary); background: var(--accent-glow); }
 
-  .app-main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; padding-top: 5.5rem; }
+  /* Every in-flow page aligns to the same 1200px region as Chat + the floating
+     header: full width with `--page-gutter` horizontal padding and the header
+     clearance on top. (Previously `max-width: 1200px` + 1.5rem padding, which
+     inset every page 1.5rem narrower than Chat — the reported inset.) */
+  .app-main { max-width: none; margin: 0; padding: var(--header-clearance) var(--page-gutter) 1.5rem; }
   .app-main.no-header { padding-top: 1.5rem; max-width: none; padding: 0; }
   .app-main.chat-route { max-width: none; margin: 0; padding: 0; }
 

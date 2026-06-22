@@ -18,6 +18,24 @@
   --radius-md: 10px;
   --radius-lg: 16px;
 
+  /* Header clearance for IN-FLOW pages (not the chat route). This is the
+     vertical band the floating `.app-header` occupies — it MUST equal
+     `.app-main`'s `padding-top` (see `+layout.svelte`: 5.5rem desktop). The
+     page frame already pushes content down by this amount; RailShell reuses
+     the token ONLY for its rail panel's `position: sticky; top` so the
+     floating panel re-clears the header during scroll, matching its first-
+     paint position. NOTE: this is the in-flow analogue of ChatShell's
+     `--chat-top` (5.3rem), which is intentionally Chat-scoped and is NOT
+     promoted here — fixed-viewport math doesn't belong on an in-flow page. */
+  --header-clearance: 5.5rem;
+
+  /* Horizontal page gutter. Content aligns to a 1200px centered region with a
+     1rem minimum gutter — the SAME formula ChatShell uses (scoped) for its
+     fixed layout. Promoted to :root so every in-flow page frame (`.app-main`)
+     aligns to the same region as Chat + the floating header, instead of each
+     page choosing its own max-width and reading as inset. */
+  --page-gutter: max(1rem, calc((100vw - 1200px) / 2));
+
   --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", "Cascadia Code", monospace;
   --font-sans: "Inter", system-ui, -apple-system, sans-serif;
 

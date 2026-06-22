@@ -12,6 +12,13 @@ declare global {
         expiresAt: Date;
       } | null;
     }
+    // FRI-172 (AC13): the shallow-routed open-memory id. `pushState(url, {
+    // memoryId })` carries the accordion-open entry on warm transitions; cold
+    // loads fall back to `$page.params.id` (page.state is empty across a full
+    // document load).
+    interface PageState {
+      memoryId?: string;
+    }
   }
 }
 
