@@ -2,6 +2,10 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // CI cold-start headroom: the first test in a file absorbs module
+    // transform/import time, which intermittently exceeds the 5s vitest
+    // default on the slow CI runner (flaked build-dispatch-prompt + wake-lock).
+    testTimeout: 20_000,
     setupFiles: ["../shared/src/test/vitest-setup.ts"],
     globalSetup: ["../shared/src/test/global-setup.ts"],
     // Connection-budget cap — see packages/shared/vitest.config.ts.
