@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.31.0](https://github.com/sethvoltz/friday/compare/v1.30.0...v1.31.0) (2026-06-22)
+
+
+### Features
+
+* **system:** stateless capture & intake routing (FRI-171, ADR-047) ([#308](https://github.com/sethvoltz/friday/issues/308)) ([8fe9412](https://github.com/sethvoltz/friday/commit/8fe9412bb6e9019b33d767d83578a26d46dde404))
+
 ## [1.30.0](https://github.com/sethvoltz/friday/compare/v1.29.1...v1.30.0) (2026-06-22)
 
 
