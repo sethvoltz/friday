@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.32.0](https://github.com/sethvoltz/friday/compare/v1.31.1...v1.32.0) (2026-06-22)
+
+
+### Features
+
+* **dashboard:** redesign Memories page — RailShell, faceted filter, infinite scroll, accordion (FRI-172) ([#312](https://github.com/sethvoltz/friday/issues/312)) ([20a6c82](https://github.com/sethvoltz/friday/commit/20a6c82e53794f464df3b411ab0c17bc078ced6b))
+
 ## [1.31.1](https://github.com/sethvoltz/friday/compare/v1.31.0...v1.31.1) (2026-06-22)
 
 
