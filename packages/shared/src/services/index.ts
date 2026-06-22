@@ -7,3 +7,4 @@ export * from "./rate-limit.js";
 export * from "./sessions.js";
 export * from "./usage.js";
 export * from "./usage-backfill.js";
+export * from "./capture-keys.js";

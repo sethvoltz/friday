@@ -51,7 +51,8 @@ packages/evolve              — Self-improvement pipeline (friction/preference/
 packages/integrations/linear — Linear API integration (optional)
 services/daemon              — Headless API tier; owns Claude SDK + agent registry
   src/apps/                  — Friday Apps installer + boot reconcile (ADR-021)
-  src/prompts/               — Dispatch-prompt assembly (FRI-123): buildSystemPrompt / buildDispatchPrompt + DispatchIntent union + memoryRecallHook
+  src/prompts/               — Dispatch-prompt assembly (FRI-123): buildSystemPrompt / buildDispatchPrompt + DispatchIntent union + memoryRecallHook; also the code-owned intake-persona (FRI-171)
+  src/intake/                — Stateless capture intake router (FRI-171, ADR-047): classifier + routing-target registry + executors + Gate 1/2 dispatch
 services/dashboard           — SvelteKit + Svelte 5; auth-gated public surface
 packaging/                   — pack.mjs: builds the pre-baked release tarball (ADR-034)
 install.sh                   — Curl-installable installer; writes the launchd plist directly (ADR-034)

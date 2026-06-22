@@ -35,7 +35,15 @@ export const init: ServerInit = async () => {
 // public /login page before a session exists, and because routing PostHog
 // through our own origin is what defeats content blockers that block
 // us.i.posthog.com outright. It forwards only to PostHog hosts.
-const PUBLIC_PATHS = new Set(["/login", "/api/auth", "/ingest"]);
+//
+// FRI-171 (ADR-047): `/api/capture` is the stateless Capture intake
+// endpoint. It is reached by the Apple Watch Shortcut / quick-add with NO
+// session cookie, so it MUST bypass the session-redirect gate — but it is
+// NOT unauthenticated: the route body verifies an `x-api-key` Capture key
+// (scope `capture:["write"]`) via BetterAuth's apiKey plugin and returns a
+// hard 401 on a missing/invalid key. Putting it here only exempts it from
+// the cookie gate; the per-key check inside the route is the real guard.
+const PUBLIC_PATHS = new Set(["/login", "/api/auth", "/ingest", "/api/capture"]);
 
 /**
  * Localhost-only loopback paths exempt from the session-redirect gate.
@@ -47,7 +55,14 @@ const PUBLIC_PATHS = new Set(["/login", "/api/auth", "/ingest"]);
  * call. Per-mutator authz lives in the mutator body via the JWT
  * claims zero-cache forwards.
  */
-const LOOPBACK_ONLY_PATHS = new Set(["/api/mutators"]);
+//
+// FRI-171 (ADR-047): `/api/internal/capture-keys` is the loopback twin of the
+// session-gated `/api/capture-keys` Settings route — the `friday capture-key`
+// CLI has no session cookie and reaches it from 127.0.0.1 carrying the shared
+// daemon secret. This exempts it from the session redirect for loopback
+// origins only; the route body still requires a constant-secret match on
+// `x-friday-daemon-secret` (the real guard).
+const LOOPBACK_ONLY_PATHS = new Set(["/api/mutators", "/api/internal/capture-keys"]);
 function isLoopbackOrigin(event: Parameters<Handle>[0]["event"]): boolean {
   const addr = event.getClientAddress();
   // SvelteKit normalizes IPv4-mapped IPv6 (::ffff:127.0.0.1) to 127.0.0.1

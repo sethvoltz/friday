@@ -15,6 +15,7 @@
     "test:playwright": "pnpm --filter \"@friday/shared...\" build && playwright test"
   },
   "dependencies": {
+    "@better-auth/api-key": "1.6.9",
     "@friday/evolve": "workspace:*",
     "@friday/integrations-linear": "workspace:*",
     "@friday/memory": "workspace:*",

@@ -28,6 +28,7 @@ import { buildScheduleServer, SCHEDULE_SERVER_NAME } from "./schedule.js";
 import { buildReminderServer, REMINDER_SERVER_NAME } from "./reminder.js";
 import { buildHabitServer, HABIT_SERVER_NAME } from "./habit.js";
 import { buildEvolveServer, EVOLVE_SERVER_NAME } from "./evolve.js";
+import { buildInboxServer, INBOX_SERVER_NAME } from "./inbox.js";
 import { buildIntegrationsServer, INTEGRATIONS_SERVER_NAME } from "./integrations.js";
 import { buildElicitationServer, ELICITATION_SERVER_NAME } from "./elicitation.js";
 import { buildSecretsServer, SECRETS_SERVER_NAME } from "./secrets.js";
@@ -179,6 +180,14 @@ export function buildMcpServers(opts: BuildMcpServersOptions): AssembledMcpServe
   // Sub-agents under an app can't pull the rug out from under themselves.
   if (opts.callerType === "orchestrator") {
     servers[APPS_SERVER_NAME] = buildAppsServer(ctx);
+  }
+
+  // friday-inbox: orchestrator only (FRI-171). Reads + acts on the stateless-
+  // intake Inbox when Seth says "work through my inbox". Sub-agents don't
+  // triage Captures — that's the orchestrator's job, at Seth's explicit
+  // direction. Ordinary tools: NO timer/cron drives them (build contract §1).
+  if (opts.callerType === "orchestrator") {
+    servers[INBOX_SERVER_NAME] = buildInboxServer(ctx);
   }
 
   // friday-integrations: every non-archived agent type. Cross-system imports

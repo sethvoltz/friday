@@ -60,3 +60,17 @@ export type {
 } from "./wire/events.js";
 
 export { stringifyToolResult } from "./wire/tool-result.js";
+
+// FRI-171 (ADR-047): cross-cutting Intake / Inbox data shapes. Type-only and
+// node-free, so they're safe to consume from both the daemon (classifier +
+// executors) and the dashboard (Inbox store + bell), and to re-export
+// `import type` from the client-bundled `sync/` surface.
+export type {
+  CoreRouteTargetId,
+  RouteTargetId,
+  IntakeSource,
+  InboxKind,
+  InboxState,
+  IntakeVerdict,
+  InboxItem,
+} from "./intake/types.js";

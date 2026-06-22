@@ -267,6 +267,20 @@
       "when": 1781841564074,
       "tag": "0037_certain_mysterio",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1782086531096,
+      "tag": "0038_brainy_richard_fisk",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1782086549325,
+      "tag": "0039_minor_nico_minoru",
+      "breakpoints": true
     }
   ]
 }

@@ -232,6 +232,15 @@ describe("buildMcpServers: per-app MCP (FRI-78)", () => {
       expect(s["friday-apps"]).toBeUndefined();
     }
   });
+
+  it("orchestrator-only friday-inbox server is wired for orchestrator and not other types (FRI-171)", () => {
+    const orch = buildMcpServers(baseOpts("orchestrator"));
+    expect(orch["friday-inbox"]).toBeDefined();
+    for (const t of ["builder", "helper", "scheduled", "bare", "planner"] as const) {
+      const s = buildMcpServers(baseOpts(t));
+      expect(s["friday-inbox"]).toBeUndefined();
+    }
+  });
 });
 
 describe("buildMcpServers: built-in surface", () => {

@@ -36,6 +36,7 @@ Local-first, headless agent daemon with a SvelteKit dashboard exposed via Cloudf
                     │  /api/sync/refresh ─ Zero JWT mint
                     │  /api/events   ─ SSE proxy → daemon
                     │  /api/mutators ─ Zero push-url
+                    │  /api/capture  ─ Capture-key-gated → daemon /api/intake
                     └────┬──────────────┬────┘
                          │              │
                          │              │ writes Postgres directly
@@ -53,6 +54,7 @@ Local-first, headless agent daemon with a SvelteKit dashboard exposed via Cloudf
                     │    Friday Daemon       │ ◄────► Claude API
                     │   (127.0.0.1 only)     │
                     │  /api/events  (SSE)    │
+                    │  /api/intake  (capture router)
                     │  /api/internal/* fast-paths
                     │  • Claude Agent SDK    │
                     │  • Agent registry      │
@@ -66,8 +68,8 @@ Local-first, headless agent daemon with a SvelteKit dashboard exposed via Cloudf
                     └─────────────────────┘
 ```
 
-- **Dashboard** is the only public-facing process; auth gates everything. Hosts Zero mutator execution, reverse-proxies the Zero WS, and proxies SSE.
-- **Daemon** is the sole runtime for the Claude Agent SDK. Writes runtime state to Postgres directly (block closes, agent status, mail-bridge rows, scheduler). LISTENs on Postgres NOTIFY channels for row-as-intent dispatch from dashboard mutators. Binds to `127.0.0.1`.
+- **Dashboard** is the only public-facing process; the BetterAuth session gates every request **except** the deliberately sessionless `POST /api/capture`, which is gated by a write-scoped **Capture key** (better-auth apiKey plugin, no session minted) and proxies to the daemon's loopback `/api/intake` (ADR-047). Hosts Zero mutator execution, reverse-proxies the Zero WS, and proxies SSE.
+- **Daemon** is the sole runtime for the Claude Agent SDK. Writes runtime state to Postgres directly (block closes, agent status, mail-bridge rows, scheduler). LISTENs on Postgres NOTIFY channels for row-as-intent dispatch from dashboard mutators. Owns the stateless **intake router** (`/api/intake`) that classifies and routes Captures (ADR-047). Binds to `127.0.0.1`.
 - **zero-cache** is the Zero sidecar process. Tails Postgres logical replication, serves clients over WS through the dashboard's reverse proxy. Binds to `127.0.0.1`.
 - **Postgres** is the canonical store. Host-managed (Homebrew + `brew services`), not owned by `friday start/stop`.
 - **CLI** talks to the daemon directly on localhost — no auth, the OS provides the boundary (`~/.friday/` is `0700`).
@@ -244,6 +246,18 @@ All scanners feed the same downstream: `proposeFromSignals` → `scoreProposal`/
 - **Auto-apply, gated per category.** A post-propose hook (`applyDreamProposals`, `dreaming-pipeline.ts`) auto-applies dream proposals whose reranked `score` clears a per-category threshold (`feedback:60, user:55, project:50, reference:45, person:80` — `dreaming-thresholds.ts`); `person` sits highest as a PII review-gate (ADR-046 Decision C). Below-threshold proposals (and all sub-80 `person` candidates) stay `open` for human review via `evolve_list` / `/evolve`. Before promoting, the hook dedups against the live corpus via `searchMemories`; a strong match (`>= DREAM_DEDUP_MIN_SCORE`) extends the existing entry with `updateEntry` instead of creating a duplicate (ADR-025: dedup uses the existing REST/in-proc memory-search hop, no new search surface).
 - **Hygiene (anti-rot).** `runHygiene(listEntries())` then runs corpus-wide: merge near-duplicates (survivor keeps the higher `recallCount`; absorbed entry's content/tags fold in and it gains an `archived` tag) and flag cold entries as decay candidates. Hygiene is **preserve-over-delete** — it never calls `forgetEntry` (a static source assertion enforces this); pruning is tag-based archive only (ADR-046 Decision A). Archive suppresses recall because the daemon's passive-recall hook passes `excludeTags: ['person', 'archived']` (the `person` exclusion is FRI-141's PII carve-out; `searchMemories` honors only caller-supplied `excludeTags`, so this recall-side change is what makes the tag load-bearing).
 - **Dream Diary.** Each run appends one timestamped markdown block (counts + a per-item `action | title | score | evidence` table) to `DREAM_DIARY_PATH` (`~/.friday/evolve/dream-diary.md`) — a flat append-only journal of what dreaming did each night. No migration, no schema change: tag-based archive plus the recall exclude is the entire archive mechanism.
+
+### Capture & stateless intake (FRI-171, ADR-047)
+
+A **Capture** is raw text plus a **Source** tag (`watch`, `quick_add`, …) fired at Friday from outside the chat — the Apple Watch Shortcut, the dashboard quick-add box, eventually voice. The flow is **capture → classify → route → land**, terminal and stateless (no orchestrator turn, no conversation history):
+
+1. **Capture surface.** The Watch Shortcut / quick-add POSTs `{ text, source }` to the dashboard's sessionless `POST /api/capture`, authenticated by a write-scoped **Capture key** (better-auth apiKey plugin, `enableSessionForAPIKeys: false`, scope `{ capture: ["write"] }`; missing/invalid key → 401, never a 302→login). The route proxies the body to the daemon's loopback `POST /api/intake` with `x-friday-daemon-secret`. The daemon is never exposed through the tunnel.
+2. **Intake router** (`services/daemon/src/intake/`). The daemon assembles a **routing-target registry** at call time — four core targets (`core:reminder`, `core:habit`, `core:memory`, `core:ticket`) baked in code with `guidance` prose + a zod `payloadSchema` + an executor over the existing primitive, plus one `agent:<name>` mail target per installed app's manifest `intakeRoutes[]`, plus the orchestrator as the catch-all `agent:<name>`. It then runs the **classifier**: the existing Claude Agent SDK `query()` single-turn (`maxTurns: 1`, `tools: []`, no MCP, thinking off) on the cheap `claude-haiku-4-5-20251001`, with a **code-owned Intake persona** (`INTAKE_PERSONA_PROMPT` — NOT the ADR-005 SOUL/CONSTITUTION stack). The model emits a strict-JSON `IntakeVerdict { cleaned, targetId, payload, disposition, rationale }`, JSON-parsed + zod-validated.
+3. **Two gates → an Inbox item.** Gate 1: `targetId === null` ⇒ **Unsorted**, no executor. Gate 2: `disposition === "act"` AND the payload validates AND the executor succeeds ⇒ run it now → **Done** (with a result reference: `undoable` flag + `inverse_label` + `deep_link`); otherwise (`propose`, payload-invalid, executor-throws, unknown target, or a classifier failure/timeout) ⇒ **Proposed** carrying the payload. Nothing is dropped — every Capture writes one `inbox_items` row.
+4. **`inbox_items`** (Zero-replicated, `ANYONE_CAN` select) holds `kind` (`done|proposed|unsorted`, CHECK-fixed at creation) and **`state`** (`open|resolved`, CHECK — named `state`, not `status`, which is reserved). The dashboard surfaces open items in an Inbox bell with a two-tone dot (attention iff any open Proposed/Unsorted; low-key when only Done FYIs, which auto-resolve on view). Lifecycle mutators (`inboxApprove`/`inboxReject`/`inboxDismiss`/`inboxTriage`/`inboxUndo`/`inboxMarkViewed`) flip state; `inboxApprove` runs the same executor the act-path would.
+5. **Triage is Seth's job.** The orchestrator-only `friday-inbox` MCP server (`inbox_list` / `inbox_act`) lets Friday read and act on the Inbox **only at explicit in-chat direction** ("work through my inbox") — there is no nightly or out-of-band triage pass.
+
+The `apikey` table backing the Capture key is declared in our Drizzle schema and provisioned by our own migration (no `@better-auth/cli` in this repo); it is server-only and NOT in `SYNC_TABLES`.
 
 ## Auth
 

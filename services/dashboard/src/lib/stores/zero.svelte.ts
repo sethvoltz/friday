@@ -27,7 +27,7 @@ import { Zero } from "@rocicorp/zero";
 // mutator-method return-type readable.
 import type { PromiseWithServerResult as MutatorResult } from "@rocicorp/zero";
 import { createMutators, schema, type Mutators, type Schema } from "@friday/shared/sync";
-import type { AgentTypeName, EvolveTaskName, ModelConfig } from "@friday/shared";
+import type { AgentTypeName, EvolveTaskName, ModelConfig, InboxItem } from "@friday/shared";
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
 import { awaitMutatorServer, type SendUserMessageOutcome } from "./mutator-result";
 import { reconcileWakeLock } from "./wake-lock.svelte";
@@ -415,6 +415,12 @@ class ZeroSyncStore {
    *  Check-in log the Streak is derived from on read. */
   habitCheckins = $state<ZeroHabitCheckinRow[]>([]);
 
+  /** Live inbox_items rows from Zero (FRI-171, ADR-047). Powers the header
+   *  bell + Inbox review panel. The `inbox` store derives open-item / by-kind
+   *  selectors + the two-tone bell from this set so they recompute reactively
+   *  as the daemon writes new Captures and the lifecycle mutators flip state. */
+  inboxItems = $state<InboxItem[]>([]);
+
   /** Live read_cursors rows from Zero (Phase 4.1). All devices for
    *  the current user — the per-device unread derivation filters
    *  client-side by `device_id === this.#deviceId`. */
@@ -718,6 +724,7 @@ class ZeroSyncStore {
       this.#bindApps();
       this.#bindHabits();
       this.#bindHabitCheckins();
+      this.#bindInboxItems();
       this.#bindMail();
       this.#bindReadCursors();
       this.#bindClientDevices();
@@ -990,6 +997,26 @@ class ZeroSyncStore {
     const view = this.#zero!.materialize(query);
     const update = (data: readonly unknown[]): void => {
       this.habitCheckins = data as ZeroHabitCheckinRow[];
+    };
+    update(view.data as readonly unknown[]);
+    view.addListener((data) => update(data as readonly unknown[]));
+    this.#unsubscribers.push(() => {
+      preload.cleanup();
+      view.destroy();
+    });
+  }
+
+  #bindInboxItems(): void {
+    if (!this.#zero) return;
+    // FRI-171: every inbox row, newest first. The bell + panel filter to
+    // `state === "open"` client-side (the `inbox` store's selectors); the full
+    // set is bound so a just-resolved item disappears optimistically and the
+    // panel can still show recent resolved items if a future view wants them.
+    const query = this.#zero!.query.inbox_items.orderBy("created_at", "desc");
+    const preload = this.#zero!.preload(query);
+    const view = this.#zero!.materialize(query);
+    const update = (data: readonly unknown[]): void => {
+      this.inboxItems = data as InboxItem[];
     };
     update(view.data as readonly unknown[]);
     view.addListener((data) => update(data as readonly unknown[]));
@@ -1773,6 +1800,34 @@ class ZeroSyncStore {
   habitCheckinUndo(args: { id: string }): MutatorResult | undefined {
     if (!this.#zero) return;
     return this.#zero!.mutate.habitCheckinUndo({ id: args.id });
+  }
+
+  /**
+   * FRI-171 (ADR-047): inbox lifecycle mutators — PURE state flips
+   * (open → resolved). The executor / inverse side effects for approve/undo run
+   * DAEMON-side and are orchestrated by the `inbox` store (it awaits the
+   * loopback proxy, then fires the matching flip here). Reject/Dismiss have no
+   * side effect; `resolveOnView` flips the passed open-Done ids on bell-open.
+   */
+  inboxApprove(id: string): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.inboxApprove({ id, ts: Date.now() });
+  }
+  inboxReject(id: string): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.inboxReject({ id, ts: Date.now() });
+  }
+  inboxDismiss(id: string): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.inboxDismiss({ id, ts: Date.now() });
+  }
+  inboxUndo(id: string): MutatorResult | undefined {
+    if (!this.#zero) return;
+    return this.#zero!.mutate.inboxUndo({ id, ts: Date.now() });
+  }
+  inboxResolveOnView(ids: string[]): MutatorResult | undefined {
+    if (!this.#zero || ids.length === 0) return;
+    return this.#zero!.mutate.inboxResolveOnView({ ids, ts: Date.now() });
   }
 
   /**

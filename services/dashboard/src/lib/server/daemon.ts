@@ -97,6 +97,52 @@ export async function daemonPost<T>(
   return (await r.json()) as T;
 }
 
+/** The outcome of a non-throwing daemon POST. */
+export type DaemonPostOutcome<T> =
+  | { kind: "ok"; status: number; body: T }
+  | { kind: "rejected"; status: number; body: unknown }
+  | { kind: "timeout" }
+  | { kind: "transport"; error: Error };
+
+/**
+ * Like {@link daemonPost} but never throws: it distinguishes a clean daemon
+ * domain rejection (a 4xx whose JSON body carries the reason — e.g. a 409
+ * `{ ok:false, error:"payload no longer valid…" }`) from a transport failure
+ * (connection refused, DNS, socket reset) and from a timeout/abort.
+ *
+ * Proxy routes use this so the daemon's SPECIFIC error reaches the UI instead
+ * of being flattened to a generic 502 (FRI-171 review #2), and so the capture
+ * route can tell "daemon slow → 202 queued" apart from "daemon down → 503
+ * retry" (review #3). `daemonPost` (which throws on any non-2xx) stays for
+ * callers that don't need the distinction.
+ */
+export async function daemonPostResult<T>(
+  path: string,
+  body: unknown,
+  opts?: DaemonFetchOpts,
+): Promise<DaemonPostOutcome<T>> {
+  let r: Response;
+  try {
+    r = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...daemonAuthHeaders() },
+      body: JSON.stringify(body),
+      signal: buildSignal(opts),
+    });
+  } catch (err) {
+    // `AbortSignal.timeout` aborts with a `TimeoutError`; a caller-signal abort
+    // surfaces as `AbortError`. Either means the daemon did not answer in the
+    // window — treat as a timeout. Anything else (ECONNREFUSED, socket reset)
+    // is a genuine transport failure: the daemon never received the request.
+    const name = err instanceof Error ? err.name : "";
+    if (name === "TimeoutError" || name === "AbortError") return { kind: "timeout" };
+    return { kind: "transport", error: err instanceof Error ? err : new Error(String(err)) };
+  }
+  const parsed = (await r.json().catch(() => undefined)) as unknown;
+  if (r.ok) return { kind: "ok", status: r.status, body: parsed as T };
+  return { kind: "rejected", status: r.status, body: parsed };
+}
+
 export async function daemonPatch<T>(
   path: string,
   body: unknown,

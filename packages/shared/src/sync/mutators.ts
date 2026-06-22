@@ -663,6 +663,48 @@ export interface CloseMailMutatorArgs {
   ts: number;
 }
 
+/* ---------------- FRI-171 (ADR-047): inbox lifecycle mutators ---------------- */
+// The Inbox bell's review surface. These mutators flip `inbox_items.state`
+// (open → resolved) and stamp `resolved_at` — PURE Postgres writes, identical
+// on both the optimistic (client) and canonical (server) runs, like the FRI-153
+// mail-delivery mutators.
+//
+// The act-vs-stage SIDE EFFECTS (running the Route-target executor for
+// Approve, running the inverse for Undo) are DAEMON-ONLY: the executor touches
+// `upsertSchedule`/`saveEntry`/`createTicket`/`sendMail` + the Claude SDK, none
+// of which may be reachable from this client-bundled module. So the dashboard's
+// client wrapper for `approve`/`undo` FIRST calls the daemon over the loopback
+// proxy (`/api/intake/approve`, `/api/intake/undo`) to run the executor
+// server-side via the SAME registry the intake used, and ONLY on success flips
+// the state via the matching mutator below. The executor logic is NEVER
+// duplicated in the browser (the mutator here writes no artifact, only state).
+//
+// `inboxResolveOnView` is the bell's auto-resolve: opening the bell flips every
+// OPEN Done item to resolved (the user has now seen them), while leaving open
+// Proposed/Unsorted items untouched (they need an explicit decision). It is the
+// one mutator that touches more than a single row — the client passes the exact
+// set of ids to resolve (derived from the open-Done selector) so the optimistic
+// and canonical runs converge on the same rows.
+//
+// Idempotency: every flip is UPDATE-to-resolved; re-running on an
+// already-resolved row writes the same value (Postgres row-level no-op). The
+// daemon executor paths are separately idempotent (Approve re-validates +
+// re-executes only an open row; the daemon flips it resolved on success).
+
+export interface InboxResolveArgs {
+  /** PK of the single `inbox_items` row to mark resolved. */
+  id: string;
+  /** Client-side wall clock (ms) → `resolved_at`. */
+  ts: number;
+}
+
+export interface InboxResolveManyArgs {
+  /** PKs of the open Done items the bell-open auto-resolve should flip. */
+  ids: string[];
+  /** Client-side wall clock (ms) → `resolved_at` for each. */
+  ts: number;
+}
+
 /* ---------------- Phase 4.11: sendUserMessage ---------------- */
 // The largest mutator. INSERTs a new user-chat block at
 // status='pending'; the Postgres trigger fires NOTIFY
@@ -1236,6 +1278,65 @@ export const createMutators = (userId?: string | null) =>
         delivery: "closed",
         closed_at: args.ts,
       });
+    },
+    /* ---------------- FRI-171 (ADR-047): inbox lifecycle ---------------- */
+    // Each of these is a PURE state flip (open → resolved). The executor /
+    // inverse-executor side effects for Approve/Undo run DAEMON-side BEFORE the
+    // matching flip is called (the dashboard wrapper awaits the loopback
+    // `/api/intake/approve|undo` call, then fires the mutator). Reject and
+    // Dismiss have NO side effect — they only resolve the item.
+    inboxApprove: async (tx: FridayTx, args: InboxResolveArgs): Promise<void> => {
+      // Approve: the executor has already run server-side (the dashboard
+      // wrapper awaited the daemon). Flip the Proposed item resolved. No
+      // artifact write here — the browser never duplicates executor logic.
+      await tx.mutate.inbox_items.update({
+        id: args.id,
+        state: "resolved",
+        resolved_at: args.ts,
+      });
+    },
+    inboxReject: async (tx: FridayTx, args: InboxResolveArgs): Promise<void> => {
+      // Reject: resolve without executing. The payload is preserved on the row
+      // (we never delete) — only `state` changes, so a rejected item is an
+      // auditable record of a Capture the user declined.
+      await tx.mutate.inbox_items.update({
+        id: args.id,
+        state: "resolved",
+        resolved_at: args.ts,
+      });
+    },
+    inboxDismiss: async (tx: FridayTx, args: InboxResolveArgs): Promise<void> => {
+      // Dismiss (Unsorted): resolve a Capture the router could not classify and
+      // the user chooses not to triage. Pure flip; the row is preserved.
+      await tx.mutate.inbox_items.update({
+        id: args.id,
+        state: "resolved",
+        resolved_at: args.ts,
+      });
+    },
+    inboxUndo: async (tx: FridayTx, args: InboxResolveArgs): Promise<void> => {
+      // Undo: the daemon has already run the inverse executor (deleted the
+      // reminder/check-in/memory) server-side; flip the Done item resolved so
+      // it leaves the bell. As with Approve, no inverse logic runs here.
+      await tx.mutate.inbox_items.update({
+        id: args.id,
+        state: "resolved",
+        resolved_at: args.ts,
+      });
+    },
+    inboxResolveOnView: async (tx: FridayTx, args: InboxResolveManyArgs): Promise<void> => {
+      // Bell auto-resolve-on-view: flip every open Done item the client passed
+      // to resolved. Done items are FYI-with-undo, so seeing them in the bell
+      // is the acknowledgement. Open Proposed/Unsorted are NOT in `ids` (the
+      // client's open-Done selector excludes them) — they require an explicit
+      // decision and stay open. An empty `ids` is a no-op.
+      for (const id of args.ids) {
+        await tx.mutate.inbox_items.update({
+          id,
+          state: "resolved",
+          resolved_at: args.ts,
+        });
+      }
     },
     updateSettings: async (tx: FridayTx, args: UpdateSettingsArgs): Promise<void> => {
       // UPSERT the singleton row. Only fields the user provided are
