@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.31.1](https://github.com/sethvoltz/friday/compare/v1.31.0...v1.31.1) (2026-06-22)
+
+
+### Bug Fixes
+
+* **dashboard:** reserve Inbox bell width in header priority+ overflow ([#310](https://github.com/sethvoltz/friday/issues/310)) ([20d11a2](https://github.com/sethvoltz/friday/commit/20d11a2207f5f69903958c8e9bef427c6e014d5b))
+
 ## [1.31.0](https://github.com/sethvoltz/friday/compare/v1.30.0...v1.31.0) (2026-06-22)
 
 
