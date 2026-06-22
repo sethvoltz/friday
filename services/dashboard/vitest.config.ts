@@ -4,6 +4,10 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [sveltekit()],
   test: {
+    // CI cold-start headroom: the first test in a file absorbs module
+    // transform/import time, which intermittently exceeds the 5s vitest
+    // default on the slow CI runner (flaked build-dispatch-prompt + wake-lock).
+    testTimeout: 20_000,
     exclude: ["**/node_modules/**", "**/dist/**", "**/*.e2e.test.ts", "e2e/**"],
     setupFiles: ["../../packages/shared/src/test/vitest-setup.ts"],
     globalSetup: ["../../packages/shared/src/test/global-setup.ts"],

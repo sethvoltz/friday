@@ -23,6 +23,7 @@
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
   import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
   import InboxBell from "$lib/components/Inbox/InboxBell.svelte";
+  import { computeVisibleCount } from "$lib/header-nav";
   import { bindTheme } from "$lib/stores/theme.svelte";
   import { zeroSync } from "$lib/stores/zero.svelte";
   import posthog from "posthog-js";
@@ -108,11 +109,13 @@
   let ghostNavRef: HTMLElement | undefined = $state();
   let cmdkRef: HTMLElement | undefined = $state();
   let navMoreRef: HTMLElement | undefined = $state();
+  let bellRef: HTMLElement | undefined = $state();
 
   let availWidth = $state(0); // header-right content width (overflow-invariant)
   let linkWidths = $state<number[]>([]); // per-link intrinsic widths (ghost-measured)
   let moreWidth = $state(0); // intrinsic width of the More button
   let cmdkWidth = $state(0); // live width of the ⌘K chip (0 when hidden)
+  let bellWidth = $state(0); // width of the always-present Inbox bell (FRI-171)
 
   // Read every measurement and the available width, writing each `$state`
   // ONLY when its value actually changed. The change-guards matter: an
@@ -137,38 +140,28 @@
     }
     const cw = cmdkRef?.offsetWidth ?? 0;
     if (cw !== cmdkWidth) cmdkWidth = cw;
+    const bw = bellRef?.offsetWidth ?? 0;
+    if (bw !== bellWidth) bellWidth = bw;
     const aw = headerRightRef?.clientWidth ?? 0;
     if (aw !== availWidth) availWidth = aw;
   }
 
   // How many links fit before we must start overflowing into More. Pure
-  // function of `availWidth` + cached widths → no resize feedback loop.
-  let visibleCount = $derived.by(() => {
-    if (availWidth === 0 || linkWidths.length !== navLinks.length) {
-      return navLinks.length;
-    }
-    const cmdkCost = cmdkWidth > 0 ? cmdkWidth + CLUSTER_GAP : 0;
-    const budget = availWidth - cmdkCost;
-
-    // Everything fits with no More button? Show it all (no reserve needed).
-    let sumAll = 0;
-    for (let i = 0; i < navLinks.length; i++) {
-      sumAll += linkWidths[i] + (i > 0 ? NAV_GAP : 0);
-    }
-    if (sumAll <= budget) return navLinks.length;
-
-    // Otherwise a More button is guaranteed — permanently reserve its width
-    // and greedily fit links to its left. Reserving unconditionally here is
-    // what keeps the 0↔1 overflow boundary from oscillating.
-    const moreCost = moreWidth + CLUSTER_GAP;
-    let used = 0;
-    for (let i = 0; i < navLinks.length; i++) {
-      const cost = linkWidths[i] + (i > 0 ? NAV_GAP : 0);
-      if (used + cost + moreCost > budget) return i;
-      used += cost;
-    }
-    return navLinks.length;
-  });
+  // function of `availWidth` + cached widths → no resize feedback loop. The
+  // math lives in `$lib/header-nav` (unit-tested). EVERY always-present
+  // `.header-right` cluster item — the Inbox bell AND the ⌘K chip — must be in
+  // `clusterReserves`, or a link believes it fits and clips (FRI-171 regression).
+  let visibleCount = $derived(
+    computeVisibleCount({
+      availWidth,
+      linkWidths,
+      navCount: navLinks.length,
+      moreWidth,
+      navGap: NAV_GAP,
+      clusterGap: CLUSTER_GAP,
+      clusterReserves: [bellWidth, cmdkWidth],
+    }),
+  );
 
   let visibleLinks = $derived(navLinks.slice(0, visibleCount));
   let overflowLinks = $derived(navLinks.slice(visibleCount));
@@ -193,6 +186,9 @@
     });
     ro.observe(hr);
     ro.observe(ghost);
+    // The Inbox bell is always present; observe it so a rem/zoom-driven width
+    // change re-runs the budget (its width is otherwise constant — 2rem).
+    if (bellRef) ro.observe(bellRef);
 
     // The ⌘K chip is hidden below 640px; that toggle doesn't resize
     // header-right (its box is flex leftover), so re-measure on the change.
@@ -498,7 +494,7 @@
             </a>
           {/each}
         </nav>
-        <InboxBell />
+        <span class="bell-slot" bind:this={bellRef}><InboxBell /></span>
         <button
           type="button"
           class="cmd-k-chip"
@@ -664,6 +660,9 @@
 
   /* Priority+ overflow ("More") menu. */
   .nav-more { position: relative; display: flex; align-items: center; flex-shrink: 0; }
+  /* Measurable wrapper for the always-present Inbox bell (its offsetWidth feeds
+     the priority+ overflow budget — see `clusterReserves`). */
+  .bell-slot { display: inline-flex; align-items: center; flex-shrink: 0; }
   .nav-more-panel {
     position: absolute;
     top: calc(100% + 0.5rem);
