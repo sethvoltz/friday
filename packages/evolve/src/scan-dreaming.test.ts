@@ -62,6 +62,19 @@ describe("scan-dreaming bucketByCandidate", () => {
     expect(payload?.tags).toContain("person:dana-chen");
   });
 
+  // Spec step 1 / Refinement 2: candidates the LLM judged already covered by an
+  // existing memory (already_covered: true) are dropped at bucketing time — the
+  // inline-dedup half of the dedup contract (the deterministic searchMemories
+  // post-pass is the other half).
+  it("drops candidates the LLM marked already_covered", () => {
+    const signals = bucketByCandidate([
+      turn(1, "feedback", 4, "Already-known fact", { already_covered: true }),
+      turn(2, "user", 3, "Genuinely new fact"),
+    ]);
+    expect(signals).toHaveLength(1);
+    expect(decodeDreamPayload(signals[0])?.title).toBe("Genuinely new fact");
+  });
+
   // AC13: same candidate recurring 3× in the window collapses to ONE signal
   // with count === 3 and a "dream:reinforce:" key, AND the recurrence-weighting
   // score delta is exactly the frequencyBoost delta between count-3 and count-1.

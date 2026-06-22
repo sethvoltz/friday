@@ -47,7 +47,7 @@ A docs-only change still warrants a commit with scope `docs`. A code change that
 packages/shared              — Shared types, config, logger, DB layer, prompts, wire schema
 packages/cli                 — friday CLI (citty + clack + picocolors)
 packages/memory              — File-based memory store + DB-backed FTS5 index
-packages/evolve              — Self-improvement pipeline
+packages/evolve              — Self-improvement pipeline (friction/preference/dreaming scanners, hygiene, Dream Diary)
 packages/integrations/linear — Linear API integration (optional)
 services/daemon              — Headless API tier; owns Claude SDK + agent registry
   src/apps/                  — Friday Apps installer + boot reconcile (ADR-021)

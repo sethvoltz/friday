@@ -20,7 +20,7 @@
  * Preserve-over-delete is absolute here: hygiene NEVER hard-deletes. It MUST
  * NOT import or reference the memory store's hard-delete primitive (AC10) —
  * pruning is only ever an `updateEntry` that adds the `archived` tag. The
- * daemon passive-recall hook passes `excludeTags: ['archived']`, so an archived
+ * daemon passive-recall hook passes `excludeTags: ['person', 'archived']`, so an archived
  * entry stops surfacing in recall while its row + markdown file stay on disk.
  */
 
