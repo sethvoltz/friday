@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.30.0](https://github.com/sethvoltz/friday/compare/v1.29.1...v1.30.0) (2026-06-22)
+
+
+### Features
+
+* **evolve:** memory dreaming — nightly session→memory consolidation (FRI-26) ([#306](https://github.com/sethvoltz/friday/issues/306)) ([a8ea2ea](https://github.com/sethvoltz/friday/commit/a8ea2ea70edd5e800a83b680bbb50879b433278e))
+
 ## [1.29.1](https://github.com/sethvoltz/friday/compare/v1.29.0...v1.29.1) (2026-06-21)
 
 
