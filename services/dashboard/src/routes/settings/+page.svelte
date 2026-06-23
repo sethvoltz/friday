@@ -8,6 +8,7 @@
   import { DEFAULTS, PALETTES, type PaletteName } from "$lib/theme/palettes";
   import PalettePreview from "$lib/components/Appearance/PalettePreview.svelte";
   import CaptureKeys from "$lib/components/Settings/CaptureKeys.svelte";
+  import NotificationSettings from "$lib/components/Settings/NotificationSettings.svelte";
 
   import Toggle from "$lib/components/Toggle/Toggle.svelte";
   import {
@@ -618,6 +619,8 @@
   </div>
 
   <CaptureKeys />
+
+  <NotificationSettings />
 
   <div class="card">
     <div class="card-header"><h2>Apps</h2></div>

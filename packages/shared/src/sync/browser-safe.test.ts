@@ -77,10 +77,17 @@ describe("@friday/shared/sync browser-safety contract", () => {
 
   it("pins the exact runtime import graph reachable from sync/index.ts", () => {
     expect(graph).toEqual({
-      "index.ts": ["./schema.js", "./mutators.js", "../model-ids.js"],
+      // FRI-142 (ADR-048): `../notify/types.js` is re-exported from the sync
+      // barrel so the dashboard's browser bundle can read the Notification
+      // runtime constants (DEFAULT_NOTIFY_POLICY, NOTIFY_EVENT_TYPES, CHANNELS,
+      // DELIVERY_RULES) through the client-safe `@friday/shared/sync` surface.
+      // It is node-free (type-only + `const` literals; no `node:*` / web-push
+      // imports), so the no-builtins assertion below still holds.
+      "index.ts": ["./schema.js", "./mutators.js", "../model-ids.js", "../notify/types.js"],
       "schema.ts": ["@rocicorp/zero"],
       "mutators.ts": ["../model-ids.js"],
       "../model-ids.ts": [],
+      "../notify/types.ts": [],
     });
   });
 

@@ -10,3 +10,12 @@
 export * from "./schema.js";
 export * from "./mutators.js";
 export * from "../model-ids.js";
+// FRI-142 (ADR-048): re-export the node-free Notification contracts so the
+// dashboard's browser bundle can consume the runtime constants
+// (DEFAULT_NOTIFY_POLICY, NOTIFY_EVENT_TYPES, CHANNELS, DELIVERY_RULES) +
+// types through the client-safe `@friday/shared/sync` surface — importing
+// them from the root `@friday/shared` barrel would drag node-only modules
+// (db/client → pg, config → node:os) into the page bundle. The module is
+// type-only + `const` literals with no `node:*` / `web-push` deps, so it is
+// safe here (same browser-safety contract as schema.ts / model-ids.ts).
+export * from "../notify/types.js";

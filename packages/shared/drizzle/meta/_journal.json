@@ -281,6 +281,20 @@
       "when": 1782086549325,
       "tag": "0039_minor_nico_minoru",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1782164679004,
+      "tag": "0040_sweet_mauler",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1782169216064,
+      "tag": "0041_silly_vampiro",
+      "breakpoints": true
     }
   ]
 }

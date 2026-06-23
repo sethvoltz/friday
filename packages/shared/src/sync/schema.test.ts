@@ -93,13 +93,18 @@ describe("FRI-171 (ADR-047) Zero sync schema — inbox_items slice", () => {
   it("projects the NOT-NULL columns as non-optional", () => {
     expect(columns.created_at).toMatchObject({ type: "number", optional: false });
     expect(columns.source).toMatchObject({ type: "string", optional: false });
-    expect(columns.raw_text).toMatchObject({ type: "string", optional: false });
     expect(columns.kind).toMatchObject({ type: "string", optional: false });
     expect(columns.state).toMatchObject({ type: "string", optional: false });
     expect(columns.undoable).toMatchObject({ type: "boolean", optional: false });
   });
 
   it("projects the nullable columns as optional", () => {
+    // raw_text went nullable in FRI-142/ADR-048 (AC8): Drizzle dropped NOT NULL
+    // (migration 0040) and `InboxItem.raw_text` is `string | null`, so the Zero
+    // projection MUST be `.optional()` too — a non-optional projection of a
+    // nullable replicated column is the SchemaVersionNotSupported class
+    // (CLAUDE.md gotcha #2/#4).
+    expect(columns.raw_text).toMatchObject({ type: "string", optional: true });
     expect(columns.cleaned_text).toMatchObject({ type: "string", optional: true });
     expect(columns.target_id).toMatchObject({ type: "string", optional: true });
     expect(columns.payload).toMatchObject({ type: "json", optional: true });

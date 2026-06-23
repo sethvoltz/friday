@@ -30,6 +30,7 @@ import type { ArchiveReason } from "../agents.js";
 // config.ts types are fine: `import type` is fully erased at compile time.
 import { coerceLegacyModelId } from "../model-ids.js";
 import type { AgentTypeName, EvolveTaskName, ModelConfig } from "../config.js";
+import type { NotifyPolicy } from "../notify/types.js";
 import type { Schema } from "./schema.js";
 
 export type { ArchiveReason };
@@ -168,6 +169,19 @@ export interface UpdateSettingsArgs {
   models?: Partial<Record<AgentTypeName, string | ModelConfig>> | null;
   /** FRI-16: per-evolve-task model overrides. Same convention as `models`. */
   evolveModels?: Partial<Record<EvolveTaskName, string | ModelConfig>> | null;
+  /** FRI-142 (ADR-048): Notification policy + DND. Same three-state
+   *  convention as the theme/model fields — omitted preserves the column,
+   *  a value sets it, `null` writes SQL NULL (the daemon's Notification
+   *  router reads a NULL `notify_policy` as DEFAULT_NOTIFY_POLICY, a NULL
+   *  DND bound as "no DND"). The presets in the Settings UI are pure sugar
+   *  that compute the `notifyPolicy` map written here — the map is the
+   *  truth. These columns drive the daemon's router DIRECTLY off the
+   *  `settings` row (NOT via config.json), so the settings listener leaves
+   *  them untouched. */
+  notifyPolicy?: NotifyPolicy | null;
+  dndStart?: string | null;
+  dndEnd?: string | null;
+  criticalBypassDnd?: boolean;
   /** Client-side wall clock for diagnostics; server overwrites. */
   ts: number;
 }
@@ -1355,6 +1369,10 @@ export const createMutators = (userId?: string | null) =>
         theme_palette_dark?: string | null;
         models?: Partial<Record<AgentTypeName, string | ModelConfig>> | null;
         evolve_models?: Partial<Record<EvolveTaskName, string | ModelConfig>> | null;
+        notify_policy?: NotifyPolicy | null;
+        dnd_start?: string | null;
+        dnd_end?: string | null;
+        critical_bypass_dnd?: boolean;
         updated_at: number;
       } = {
         id: "singleton",
@@ -1390,6 +1408,17 @@ export const createMutators = (userId?: string | null) =>
       if (args.models !== undefined) patch.models = args.models;
       if (args.evolveModels !== undefined) {
         patch.evolve_models = args.evolveModels;
+      }
+      // FRI-142 (ADR-048): Notification policy + DND. `undefined` = preserve;
+      // a value sets it; `null` = explicit clear (the router falls back to
+      // DEFAULT_NOTIFY_POLICY / "no DND"). Pure DB patch — these columns are
+      // read straight off the `settings` row by the daemon's Notification
+      // router, so there is no config.json mirror to keep in sync here.
+      if (args.notifyPolicy !== undefined) patch.notify_policy = args.notifyPolicy;
+      if (args.dndStart !== undefined) patch.dnd_start = args.dndStart;
+      if (args.dndEnd !== undefined) patch.dnd_end = args.dndEnd;
+      if (args.criticalBypassDnd !== undefined) {
+        patch.critical_bypass_dnd = args.criticalBypassDnd;
       }
       await tx.mutate.settings.update(patch);
     },

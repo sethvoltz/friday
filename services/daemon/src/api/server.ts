@@ -173,6 +173,15 @@ import {
   actInbox,
   type InboxAction,
 } from "../intake/intake.js";
+import { ensureVapidKeys } from "../notifications/vapid.js";
+import {
+  upsertSubscription,
+  dropSubscriptionsForDevice,
+} from "../notifications/push-subscriptions.js";
+import { reportPresence } from "../notifications/presence.js";
+import { notify } from "../notifications/notify.js";
+import type { PushSubscribePayload, PresenceReport, NotifyEventType } from "@friday/shared";
+import { NOTIFY_EVENT_TYPES } from "@friday/shared";
 
 export const { version: DAEMON_VERSION } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -1091,6 +1100,26 @@ async function handle(
         proposalsUpdated: propose.updated.length,
         promotedToCritical: propose.promotedToCritical.length,
       });
+      // FRI-142 / ADR-048 producer seam #5 — evolve_critical. A proposal was
+      // promoted to critical (across BOTH promote surfaces: fresh-create +
+      // rerank). Fire-and-forget; `evolve_critical` is the always-on critical
+      // class (toast always / push always, DND-bypass-eligible). One
+      // notification per scan that produced any critical promotion.
+      {
+        const criticalCount = propose.promotedToCritical.length + reranked.promoted.length;
+        if (criticalCount > 0) {
+          void notify({
+            type: "evolve_critical",
+            title: "Critical evolve proposal",
+            body:
+              criticalCount === 1
+                ? "A proposal was promoted to critical."
+                : `${criticalCount} proposals were promoted to critical.`,
+            deepLink: "/evolve",
+            priority: "critical",
+          });
+        }
+      }
       // FRI-40 Phase 1: when enabled, auto-spawn a read-only triage helper
       // for each proposal that just promoted to critical — across BOTH
       // promote surfaces (fresh-create + rerank). Read with a strict
@@ -1629,6 +1658,123 @@ async function handle(
     } catch (err) {
       return json(res, 409, { ok: false, error: (err as Error).message });
     }
+  }
+
+  // --- Push (FRI-142, ADR-048) ---
+  // The daemon is the single server-side holder of the VAPID private key + the
+  // push_subscriptions rows. The dashboard's session-gated `/api/push/*` routes
+  // proxy here over loopback with the daemon secret (the same contract as
+  // /api/intake — ADR-047). web-push is daemon-only; nothing here reaches the
+  // browser/service-worker bundle.
+
+  // Expose the PUBLIC VAPID key. The dashboard fetches it to pass as
+  // `applicationServerKey` to `pushManager.subscribe`. Public by design — it is
+  // the application server's public identity; the PRIVATE key never leaves the
+  // daemon. The keypair lives in the server-only `web_push_vapid` Postgres table
+  // (NOT a data-dir file — it must ride the same pg_dump as push_subscriptions;
+  // ADR-048). `ensureVapidKeys()` is called defensively so a never-pushed
+  // install (or a box whose boot-ensure failed) still seeds the keypair on the
+  // first public-key fetch, and we return ONLY the public half.
+  if (method === "GET" && path === "/api/push/vapid-public-key") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    const { publicKey } = await ensureVapidKeys();
+    return json(res, 200, { publicKey });
+  }
+
+  // Store/refresh a browser push registration. Body = PushSubscribePayload
+  // (`{ endpoint, keys: { p256dh, auth }, deviceId }`) + the session user's id
+  // (the dashboard reads it from `locals.user.id`, the same value
+  // `client_devices.user_id` carries). Deduped by the unique `endpoint`.
+  if (method === "POST" && path === "/api/push/subscribe") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    const body = await readJson<{
+      endpoint?: unknown;
+      keys?: unknown;
+      deviceId?: unknown;
+      userId?: unknown;
+    }>(req);
+    const endpoint = typeof body.endpoint === "string" ? body.endpoint : "";
+    const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
+    const userId = typeof body.userId === "string" ? body.userId : "";
+    const keys = body.keys as { p256dh?: unknown; auth?: unknown } | undefined;
+    const p256dh = typeof keys?.p256dh === "string" ? keys.p256dh : "";
+    const auth = typeof keys?.auth === "string" ? keys.auth : "";
+    if (!endpoint || !p256dh || !auth || !deviceId || !userId) {
+      return json(res, 400, {
+        error: "endpoint, keys.p256dh, keys.auth, deviceId, and userId are required",
+      });
+    }
+    const payload: PushSubscribePayload = { endpoint, keys: { p256dh, auth }, deviceId };
+    try {
+      const result = await upsertSubscription(payload, userId);
+      return json(res, 200, { ok: true, endpoint: result.endpoint });
+    } catch (err) {
+      return json(res, 500, { ok: false, error: (err as Error).message });
+    }
+  }
+
+  // Drop every push subscription for a device — the "Forget this device"
+  // cascade. The dashboard's `forgetDevice` mutator writes
+  // `client_devices.revoked_at` (a Zero mutator, no daemon LISTEN); its
+  // server-side body proxies here over loopback so a forgotten device stops
+  // receiving pushes. Scoped to `(deviceId, userId)`. Idempotent (a no-match
+  // drops zero rows).
+  if (method === "POST" && path === "/api/push/forget-device") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    const body = await readJson<{ deviceId?: unknown; userId?: unknown }>(req);
+    const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
+    const userId = typeof body.userId === "string" ? body.userId : "";
+    if (!deviceId || !userId) {
+      return json(res, 400, { error: "deviceId and userId are required" });
+    }
+    try {
+      await dropSubscriptionsForDevice(deviceId, userId);
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      return json(res, 500, { ok: false, error: (err as Error).message });
+    }
+  }
+
+  // --- Presence (FRI-142, ADR-048) ---
+  // Client→daemon presence heartbeat (on `visibilitychange` + a ~20s keepalive).
+  // Body = PresenceReport `{ deviceId, visible }`. The daemon keys an in-memory
+  // Map on deviceId (TTL 45s) and OR-aggregates per user; the Notification
+  // router reads it to choose Toast over Push. Stale/unknown/empty ⇒ away ⇒
+  // push (fail-safe). Loopback + daemon-secret gated; the dashboard's
+  // session-gated `/api/presence` route proxies here.
+  if (method === "POST" && path === "/api/presence") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    const body = await readJson<{ deviceId?: unknown; visible?: unknown }>(req);
+    const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
+    const visible = body.visible === true;
+    if (!deviceId) return json(res, 400, { error: "deviceId is required" });
+    const report: PresenceReport = { deviceId, visible };
+    reportPresence(report);
+    return json(res, 200, { ok: true });
+  }
+
+  // Fire a TEST Notification through the full router (policy × presence × DND →
+  // toast + push). Drives the Settings "Send test notification" button so Seth
+  // can verify the end-to-end push round-trip on his installed iPhone PWA. The
+  // `eventType` selects which policy row applies; defaults to `builder_archive`.
+  if (method === "POST" && path === "/api/notify/test") {
+    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
+    const body = await readJson<{ eventType?: unknown }>(req).catch(
+      () => ({}) as { eventType?: unknown },
+    );
+    const requested = typeof body.eventType === "string" ? body.eventType : "builder_archive";
+    const eventType: NotifyEventType = (NOTIFY_EVENT_TYPES as readonly string[]).includes(requested)
+      ? (requested as NotifyEventType)
+      : "builder_archive";
+    // Awaited so the response reflects that the router ran (it is internally
+    // fire-and-forget and never throws); the button surfaces success on 200.
+    await notify({
+      type: eventType,
+      title: "Friday test notification",
+      body: "If you can see this, notifications are working.",
+      deepLink: "/",
+    });
+    return json(res, 200, { ok: true, eventType });
   }
 
   // --- Mail ---

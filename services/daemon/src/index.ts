@@ -17,6 +17,8 @@ import {
 } from "@friday/shared";
 import { logger } from "./log.js";
 import { startServer, DAEMON_VERSION } from "./api/server.js";
+import { ensureVapidKeys } from "./notifications/vapid.js";
+import { registerIntakeTargets } from "./intake/registry.js";
 import { startHealthHeartbeat, clearHealth } from "./monitor/health.js";
 import { backfillUsageFromLegacyJsonl, replayPending } from "@friday/shared/services";
 import { seedMetaAgents, startScheduler } from "./scheduler/scheduler.js";
@@ -129,6 +131,20 @@ async function main(): Promise<void> {
   await runStateMigrations([agentCwdPinV1, embedBackfillV1]);
   ensureSoul();
 
+  // FRI-142 / ADR-048: ensure the server-only Web Push VAPID keypair exists in
+  // Postgres (atomic INSERT … ON CONFLICT DO NOTHING; generated once, never
+  // overwritten — regenerating would invalidate every existing subscription).
+  // Best-effort like reconcileSyncPublication: a failure degrades push to
+  // unavailable (the public-key endpoint re-ensures defensively), it is NOT a
+  // hard preflight — never crash boot over a missing keypair.
+  try {
+    await ensureVapidKeys();
+  } catch (err) {
+    logger.log("error", "vapid.ensure.boot.error", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   const backfill = await backfillUsageFromLegacyJsonl();
   if ("skipped" in backfill && backfill.skipped) {
     logger.log("info", "usage.backfill.skip", { reason: backfill.reason });
@@ -152,6 +168,12 @@ async function main(): Promise<void> {
   // chat 404s on GET /api/agents/<name> (→ 502) and hangs on the loading
   // skeleton until the user sends a message. Insert-only — no-op once it exists.
   await registry.ensureOrchestratorAgent(cfg.orchestratorName);
+  // FRI-142 / ADR-048 (Layer 3): populate the producer-agnostic Route-target
+  // registry with Intake's targets (core targets statically + a dynamic
+  // provider for app/orchestrator mail targets) BEFORE the API serves, so any
+  // inbox approve/undo/triage — Intake's or a future non-Intake producer's —
+  // resolves through the same registry. Idempotent.
+  registerIntakeTargets();
   const server = startServer({ port: daemonPort });
   const heartbeat = startHealthHeartbeat(daemonPort);
 

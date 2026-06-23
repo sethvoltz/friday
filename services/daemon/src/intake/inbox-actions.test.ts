@@ -121,10 +121,14 @@ vi.mock("drizzle-orm", async (importOriginal) => {
 
 vi.mock("../log.js", () => ({ logger: { log: vi.fn() } }));
 
-// The approve path re-validates the stored payload against the chosen target's
-// schema and runs its executor through assembleRegistry(). Mock the registry
-// with a single reminder-shaped target whose executor is a spy.
-import type { ResultReference } from "./executors.js";
+// FRI-142 / ADR-048 (Layer 3): the approve path now re-validates the stored
+// payload against the chosen target's schema and runs its executor through the
+// PRODUCER-AGNOSTIC registry (`resolveTarget` in ../inbox/route-registry.js),
+// not the Intake-bound `assembleRegistry`. Mock that resolver with a single
+// reminder-shaped target whose executor is a spy; stub `registerIntakeTargets`
+// (intake.ts calls it to populate the registry before resolving — a no-op here
+// since the resolver itself is mocked).
+import type { ResultReference } from "../inbox/route-registry.js";
 import { z } from "zod";
 
 const executeSpy = vi.fn<(payload: unknown) => Promise<ResultReference>>(async () => ({
@@ -133,15 +137,20 @@ const executeSpy = vi.fn<(payload: unknown) => Promise<ResultReference>>(async (
   deepLink: "/schedules",
 }));
 
+const reminderTarget = {
+  id: "core:reminder",
+  guidance: "test",
+  payloadSchema: z.object({ text: z.string().min(1) }).strict(),
+  execute: executeSpy,
+};
+
 vi.mock("./registry.js", () => ({
-  assembleRegistry: vi.fn(async () => [
-    {
-      id: "core:reminder",
-      guidance: "test",
-      payloadSchema: z.object({ text: z.string().min(1) }).strict(),
-      execute: executeSpy,
-    },
-  ]),
+  registerIntakeTargets: vi.fn(),
+  assembleRegistry: vi.fn(async () => [reminderTarget]),
+}));
+
+vi.mock("../inbox/route-registry.js", () => ({
+  resolveTarget: vi.fn(async (id: string) => (id === "core:reminder" ? reminderTarget : null)),
 }));
 
 import { listOpenInbox, actInbox } from "./intake.js";

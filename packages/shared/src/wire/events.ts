@@ -33,7 +33,8 @@ export type WireEvent =
   | CompactingEvent
   | WorkerNoMailBackEvent
   | WorkerForceKillDeadLetterEvent
-  | ElicitationRequestedEvent;
+  | ElicitationRequestedEvent
+  | ToastEvent;
 
 export interface BaseEvent {
   v: 1;
@@ -323,6 +324,37 @@ export interface ElicitationRequestedEvent extends BaseEvent {
    *  in-memory waiter map is keyed on; same id the dashboard POSTs
    *  to `/api/elicitation/<id>/submit` to resolve. */
   tool_use_id: string;
+  ts: number;
+}
+
+/**
+ * FRI-142 (ADR-048): an ephemeral in-app Notification toast.
+ *
+ * This is the **Toast** Channel — fired by the daemon's stateless Notification
+ * router (NOT a turn event) when policy × presence × DND resolves `toast` for an
+ * event and the user is present on this client. It has NO backing DB row BY
+ * DESIGN — a Notification is a transient delivery, never persisted (the durable
+ * record is the `inbox_items` row / OS tray / deep-linked artifact). This is
+ * why it rides SSE (ADR-024: SSE = ephemeral/live) rather than Zero; it is NOT
+ * a resurrection of the Phase-5-retired SSE notification events (those had rows
+ * and moved to Zero precisely because they were settled state).
+ *
+ * The dashboard renders a self-dismissing toast; clicking it navigates to
+ * `deep_link`. `event_type` is the originating `NotifyEventType` (for grouping /
+ * styling); `priority` mirrors the NotifyEvent priority.
+ */
+export interface ToastEvent extends BaseEvent {
+  type: "toast";
+  /** Short notification title (toast headline). */
+  title: string;
+  /** One-line body. */
+  body: string;
+  /** Route to navigate to on click; omitted when the toast is not actionable. */
+  deep_link?: string;
+  /** The originating Notification event id (a `NotifyEventType` value). */
+  event_type: string;
+  /** Mirrors NotifyEvent.priority ('normal' | 'critical'); omitted ⇒ normal. */
+  priority?: "normal" | "critical";
   ts: number;
 }
 

@@ -605,8 +605,11 @@ export const inboxItems = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     // Capture provenance (watch | quick_add | …). Open set — no CHECK.
     source: text("source").notNull(),
-    // The original Capture text, verbatim.
-    rawText: text("raw_text").notNull(),
+    // FRI-142 (ADR-048): NULLABLE. The original Capture text, verbatim —
+    // present for Intake-produced rows, NULL for a non-Intake producer that
+    // writes a Proposed/Done actionable item with no raw human input to clean.
+    // The Inbox is now the generic actionable-item store; Intake is producer #1.
+    rawText: text("raw_text"),
     // The classifier's faithfully-cleaned form (null until classified).
     cleanedText: text("cleaned_text"),
     // Chosen Route target id (e.g. 'core:reminder', 'agent:foo'); null ⇒ Unsorted.
@@ -855,6 +858,84 @@ export const clientDevices = pgTable(
   }),
 );
 
+/* ---------------- push_subscriptions (FRI-142, ADR-048) ---------------- */
+// Web Push subscriptions for native PWA notifications. SERVER-ONLY: NOT in
+// SYNC_TABLES, NOT in the Zero sync schema (the `apikey` precedent) — the
+// endpoint + keys are sensitive and the client learns its own subscription
+// state from `registration.pushManager.getSubscription()`, so there is no
+// reason to replicate this through Zero. The daemon's Notification router is
+// the single server-side holder of the VAPID private key + these rows.
+//
+// One row per browser push registration, keyed by the unique `endpoint`.
+// `device_id` FKs to `client_devices.device_id` so the "Forget this device"
+// path (which writes `client_devices.revoked_at`) can drop a device's
+// subscription(s). Stale endpoints are deleted on a 404/410 from the push
+// service (WebPushError.statusCode).
+export const pushSubscriptions = pgTable(
+  "push_subscriptions",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()::text`),
+    // The push service endpoint URL — globally unique per registration.
+    endpoint: text("endpoint").notNull().unique(),
+    // ECDH public key for payload encryption (URL-safe base64).
+    p256dh: text("p256dh").notNull(),
+    // Auth secret for payload encryption (URL-safe base64).
+    auth: text("auth").notNull(),
+    userId: text("user_id").notNull(),
+    // FK → client_devices.device_id. Nullable: a subscription can exist
+    // before the device row is reconciled; the revoke-cascade keys on it
+    // when present.
+    deviceId: text("device_id").references(() => clientDevices.deviceId),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    // Revoke-cascade + per-user fan-out both query by device / user.
+    deviceIdx: index("push_subscriptions_device").on(t.deviceId),
+    userIdx: index("push_subscriptions_user").on(t.userId),
+  }),
+);
+
+/* ---------------- web_push_vapid (FRI-142, ADR-048) ---------------- */
+// The daemon's single Web Push VAPID keypair. SERVER-ONLY: NOT in SYNC_TABLES,
+// NOT in the Zero sync schema (the `apikey` / `push_subscriptions` precedent) —
+// the PRIVATE key is a secret that must NEVER replicate to the browser. The
+// daemon is the only server-side holder; the dashboard learns only the PUBLIC
+// half via `GET /api/push/vapid-public-key`.
+//
+// Why Postgres, not a `~/.friday/vapid.json` file: the keypair MUST ride the
+// SAME `pg_dump` as `push_subscriptions`. A data-dir file is NOT in the default
+// `friday backup` whitelist, so a restore to a new machine would regenerate the
+// keypair — and because every existing `push_subscriptions` row subscribed
+// against the OLD public key (`applicationServerKey`), the push service returns
+// 410/404 for all of them and push silently dies. Co-locating the keypair with
+// the subscriptions in Postgres makes "subscriptions always match the current
+// public key" a structural invariant: they are dumped, restored, and migrated
+// together. Rotating the public key invalidates every existing subscription.
+//
+// Single-row table — the PK is the literal string "singleton", and a CHECK
+// pins it so a second row can never be inserted (mirrors the `settings`
+// singleton convention; here the CHECK makes it structural, not just a
+// by-convention UPSERT key). `ensureVapidKeys()` is the only writer:
+// `INSERT … ON CONFLICT (id) DO NOTHING` then SELECT — atomic + idempotent.
+export const webPushVapid = pgTable(
+  "web_push_vapid",
+  {
+    id: text("id").primaryKey().default("singleton"),
+    // URL-safe base64 VAPID public key. Shared with every subscriber.
+    publicKey: text("public_key").notNull(),
+    // URL-safe base64 VAPID private key. SECRET — never leaves the daemon,
+    // never replicated, never logged.
+    privateKey: text("private_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    singletonCheck: check("web_push_vapid_singleton_check", sql`${t.id} = 'singleton'`),
+  }),
+);
+
 /* ---------------- ADR-023: read_cursors (per-device, per-agent) ---------------- */
 // Replaces today's per-device localStorage badge state. Synced via Zero so
 // reads on one device update unread badges on all others.
@@ -939,6 +1020,20 @@ export const settings = pgTable("settings", {
   models: jsonb("models"),
   /** Partial<Record<EvolveTaskName, string | ModelConfig>> — see config.ts */
   evolveModels: jsonb("evolve_models"),
+  // FRI-142 (ADR-048): Notification policy + DND. `settings` is Zero-replicated
+  // (in SYNC_TABLES + sync/schema.ts) so these columns must also be declared in
+  // the Zero sync schema or the dashboard reload-loops on a schema-version
+  // mismatch (the evolve_proposals/habits failure mode — CLAUDE.md gotcha #2).
+  /** NotifyPolicy — `{ <eventType>: { <channel>: <rule> } }`. NULL ⇒ the
+   *  daemon/dashboard fall back to DEFAULT_NOTIFY_POLICY (see notify-policy.ts). */
+  notifyPolicy: jsonb("notify_policy"),
+  /** DND window start, "HH:MM" 24h local. NULL on either bound ⇒ no DND. */
+  dndStart: text("dnd_start"),
+  /** DND window end, "HH:MM" 24h local. NULL on either bound ⇒ no DND. */
+  dndEnd: text("dnd_end"),
+  /** Master toggle: when true, the critical class (evolve_critical, mail
+   *  priority='critical') bypasses the DND push-suppression. */
+  criticalBypassDnd: boolean("critical_bypass_dnd").notNull().default(true),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
 

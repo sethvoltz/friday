@@ -57,6 +57,8 @@ export type {
   BlockCompleteEvent,
   ConnectionEstablishedEvent,
   AppLifecycleEvent,
+  // FRI-142 (ADR-048): the ephemeral in-app Notification toast SSE event.
+  ToastEvent,
 } from "./wire/events.js";
 
 export { stringifyToolResult } from "./wire/tool-result.js";
@@ -74,3 +76,25 @@ export type {
   IntakeVerdict,
   InboxItem,
 } from "./intake/types.js";
+
+// FRI-142 (ADR-048): cross-cutting Notification contracts. Type-only + `const`
+// literals, node-free (no `web-push`, which is daemon-only), so they're safe to
+// consume from the daemon (router/presence/push), the dashboard (Settings
+// policy UI, toast renderer, presence + subscribe flows), and the service
+// worker. DEFAULT_NOTIFY_POLICY and the *_TYPES/CHANNELS/RULES tuples are
+// runtime values; the rest are types.
+export {
+  NOTIFY_EVENT_TYPES,
+  CHANNELS,
+  DELIVERY_RULES,
+  DEFAULT_NOTIFY_POLICY,
+} from "./notify/types.js";
+export type {
+  NotifyEventType,
+  Channel,
+  DeliveryRule,
+  NotifyPolicy,
+  NotifyEvent,
+  PresenceReport,
+  PushSubscribePayload,
+} from "./notify/types.js";
