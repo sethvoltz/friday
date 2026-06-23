@@ -49,10 +49,7 @@ const DEFAULT_VAPID_SUBJECT = "mailto:friday@localhost";
  * Pure: takes the publicUrl as an argument so it can be unit-tested without
  * touching disk or the shared-config loader.
  */
-export function resolveVapidSubject(
-  publicUrl: string | undefined,
-  override?: string,
-): string {
+export function resolveVapidSubject(publicUrl: string | undefined, override?: string): string {
   if (override) return override;
   if (publicUrl && /^https:\/\//.test(publicUrl)) return publicUrl;
   return DEFAULT_VAPID_SUBJECT;

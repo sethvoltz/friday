@@ -197,9 +197,9 @@ describe("resolveVapidSubject (pure)", () => {
       "mailto:override@example.com",
     );
     // Override wins even when a valid publicUrl is also available.
-    expect(
-      resolveVapidSubject("https://friday.example.com", "mailto:override@example.com"),
-    ).toBe("mailto:override@example.com");
+    expect(resolveVapidSubject("https://friday.example.com", "mailto:override@example.com")).toBe(
+      "mailto:override@example.com",
+    );
   });
 
   it("returns publicUrl when it's an https:// URL", () => {
