@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.33.0](https://github.com/sethvoltz/friday/compare/v1.32.0...v1.33.0) (2026-06-23)
+
+
+### Features
+
+* **system:** push + in-app notifications (FRI-142, ADR-048) ([#315](https://github.com/sethvoltz/friday/issues/315)) ([3024cb9](https://github.com/sethvoltz/friday/commit/3024cb928c08bb4196ff70b7a67fcbc4b7efd9d1))
+
 ## [1.32.0](https://github.com/sethvoltz/friday/compare/v1.31.1...v1.32.0) (2026-06-22)
 
 
