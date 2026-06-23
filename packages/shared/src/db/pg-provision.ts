@@ -97,6 +97,16 @@ export const SYNC_TABLES: readonly string[] = [
   // inbox mutators flip `state`. `apikey` is NOT replicated (server-only,
   // like `user`/`session`).
   "inbox_items",
+  // FRI-142 (ADR-048): `push_subscriptions` AND `web_push_vapid` are
+  // INTENTIONALLY ABSENT here. Both are server-only (the `apikey` precedent).
+  // `push_subscriptions` — the endpoint + encryption keys are sensitive and the
+  // client learns its own subscription from `pushManager.getSubscription()`.
+  // `web_push_vapid` — holds the VAPID PRIVATE key, a secret that must NEVER
+  // replicate to the browser; the dashboard only ever sees the PUBLIC half via
+  // `GET /api/push/vapid-public-key`. Both are also absent from the Zero sync
+  // schema (sync/schema.ts). Do NOT add either here. (`settings` IS replicated
+  // and already listed above — its new notify_policy/DND columns ride the
+  // existing `settings` entry.)
 ];
 
 export interface ProvisionResult {

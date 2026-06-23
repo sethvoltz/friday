@@ -81,7 +81,10 @@ export interface InboxItem {
   id: string;
   created_at: number;
   source: string;
-  raw_text: string;
+  // FRI-142 (ADR-048): NULLABLE — Intake-produced rows carry the verbatim
+  // Capture text; a non-Intake producer (Inbox as the generic actionable-item
+  // store) may write a row with no raw human input.
+  raw_text: string | null;
   cleaned_text: string | null;
   target_id: string | null;
   payload: Record<string, unknown> | null;

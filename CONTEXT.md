@@ -343,11 +343,20 @@ The **bell count = open items**; two-tone by the most-urgent open kind present
 act on the Inbox (via tools) **only at Seth's explicit in-chat direction**
 ("work through my inbox") — pull, user-initiated, never scheduled.
 
-Distinct from `mail_inbox` (inter-agent mail). Coordinates with the
-notification center from the push handoff — they are the same surface.
+Distinct from `mail_inbox` (inter-agent mail). The **Inbox** is the generic
+**persisted, synced** actionable-item store; **Intake** is merely its first
+**Producer**. It is _not_ the same thing as the **Notification** system: the
+two converge only at the **bell badge count** (derived from open
+attention-worthy Inbox items), never at storage — a Notification is
+fire-and-forget and persists nothing, an Inbox item is durable Zero-replicated
+state. The `inbox_items` action facet (`target_id`, `payload`, `undoable`,
+`inverse_label`, `deep_link`, `kind`, `state`) is already producer-agnostic;
+only `raw_text`/`cleaned_text`/`source` carry Intake provenance, so a future
+non-Intake Producer can write a **Proposed**/**Done** row that resolves its
+action through the same **Route target** registry.
 _Avoid_: queue, backlog, drafts, notifications (the bell is the affordance;
-the Inbox is the concept), triage (for the _resurfacing_ step only — not a
-synonym for Intake).
+the Inbox is the concept; Notifications are a _separate_ transient system),
+triage (for the _resurfacing_ step only — not a synonym for Intake).
 
 **Gate 1 / Gate 2**:
 The two questions **Intake** answers about a cleaned **Capture** — _where_ and
@@ -395,6 +404,62 @@ never grants dashboard access. The public entry point is a dashboard route
 loopback to the daemon, which owns the classifier (ADR-002 — Claude SDK stays
 daemon-side).
 _Avoid_: token (overloaded — daemon-secret, Zero JWT), password, session.
+
+### Notifications
+
+**Notification**:
+A **fire-and-forget**, machine→human surfacing of a system event (a Builder
+finished, mail arrived, a schedule fired, a low-confidence **Capture** needs a
+look). The mirror of a **Capture** — where a Capture is _human→machine_ messy
+input that gets cleaned, a Notification is _machine→human_ pre-authored output
+that needs no cleaning. It is **not persisted as its own entity** (v1): a
+transient _delivery_, never a row. The system that surfaces it is its own tier
+— separate pipeline from **Intake** (no cleaning) and from **Chat/mail** (no
+turn loop), even though all three share Postgres/Zero/the daemon under the hood.
+_Avoid_: notification (lowercase, when you mean the bell affordance — that's the
+**Inbox**), alert, message (reserve for chat/mail), event (too broad).
+
+**Notification router**:
+The **stateless, daemon-side** function that, per **Notification**, consults
+**Settings** + **DND** + **presence** and fires zero or more **Channel**s. The
+parallel to the **Intake router**, one tier up: it holds no cross-event state
+and stores nothing. Lives in the daemon because the daemon is the single
+server-side point that holds the VAPID key and the push subscriptions.
+_Avoid_: dispatcher, notifier, intake router (the opposite-direction sibling).
+
+**Channel**:
+A delivery surface a **Notification router** can fire — **Toast** (ephemeral
+in-app, self-dismissing, only for a present client) and **Push** (external Web
+Push + the app-icon **badge** bump). The **bell is _not_ a Channel** — it is
+the **Inbox**'s persistent surface; the two systems meet only at the shared
+**badge count**. **Channels fan out**: one Notification may fire any subset.
+_Avoid_: sink, output, bell (the bell belongs to the Inbox).
+
+**Presence**:
+Whether the user is actively viewing the app _right now_, used by the
+**Notification router** to choose **Toast** over **Push**. **User-global and
+OR-aggregated across all clients**: present on _any one_ client ⇒ present;
+absent requires _every_ client absent. The daemon tracks per-client liveness
+and reduces it to one user-level verdict. Reported client→daemon and treated
+**fail-safe**: stale or unknown ⇒ treat as away ⇒ **Push**. Presence can only
+ever _downgrade_ a Push to a Toast, never the reverse — a missed Toast is
+acceptable, a missed Push is not.
+_Avoid_: online, connected (an open transport is a coarse proxy, not Presence).
+
+**Notification policy**:
+The per-event-type **Setting** governing which **Channel**s a **Notification**
+fires. Stored as a `notify_policy` JSON map on the `settings` table —
+`{ <eventType>: { <channel>: <rule> } }` — where rule ∈ `never | present_only |
+absent_only | always`. The rule vocabulary is **presence-based and
+channel-agnostic**, so the open **Channel** set grows by adding a key, never by
+expanding the rule enum (adding `email` later is purely additive). The settings
+UI offers friendly presets (Auto / Always push / Toast only / Off) that are
+pure sugar writing these rules — presets are a view, the map is the truth. A
+global **DND** window overlays every policy (suppresses **Push**); one master
+toggle lets a _critical_ class (`evolve_critical`, mail `priority='critical'`)
+bypass DND.
+_Avoid_: preferences (too broad); the preset names as a stored enum (they are
+UX sugar, not the model — that was the rejected channel-hardcoded design).
 
 ## Relationships
 

@@ -26,9 +26,29 @@ import { desc, eq } from "drizzle-orm";
 import { getDb, schema } from "@friday/shared";
 import type { IntakeSource, IntakeVerdict } from "@friday/shared";
 import { logger } from "../log.js";
-import { assembleRegistry, type RouteTarget } from "./registry.js";
+import { assembleRegistry, registerIntakeTargets, type RouteTarget } from "./registry.js";
+import { resolveTarget } from "../inbox/route-registry.js";
 import { classifyCapture, IntakeClassifierError } from "./classifier.js";
-import { undoArtifact } from "./executors.js";
+import { notify } from "../notifications/notify.js";
+
+/**
+ * FRI-142 / ADR-048 producer seam #1 — capture_attention. Fire a fire-and-forget
+ * Notification when Intake writes an ATTENTION-worthy row (Proposed needs an
+ * approve/reject; Unsorted needs a triage). A Done row is FYI (it never bumps
+ * the badge) so it raises no Notification. Never blocks the intake response.
+ */
+function notifyCaptureAttention(kind: "proposed" | "unsorted", cleaned: string): void {
+  const title = kind === "proposed" ? "A capture needs your approval" : "A capture needs sorting";
+  // Terse body — the cleaned blurb, trimmed for a notification line. Push
+  // payloads are rebuilt terse downstream; this is the toast/headline text.
+  const body = cleaned.length > 120 ? `${cleaned.slice(0, 117)}…` : cleaned;
+  void notify({
+    type: "capture_attention",
+    title,
+    body,
+    deepLink: "/?inbox=1",
+  });
+}
 
 /** Wall-clock budget for the synchronous clean+classify+dispatch path. On
  *  timeout the classifier is aborted; the caller still returns a queued shape
@@ -90,6 +110,7 @@ export async function dispatchVerdict(
       kind: "unsorted",
       undoable: false,
     });
+    notifyCaptureAttention("unsorted", verdict.cleaned);
     return {
       cleaned: verdict.cleaned,
       kind: "unsorted",
@@ -177,7 +198,8 @@ export async function dispatchVerdict(
   };
 }
 
-/** Write a Proposed row carrying the (unexecuted) target + payload. */
+/** Write a Proposed row carrying the (unexecuted) target + payload, then fire
+ *  the capture_attention Notification (a Proposed item needs an approve/reject). */
 async function writeProposed(
   db: ReturnType<typeof getDb>,
   base: ReturnType<typeof baseRow>,
@@ -190,6 +212,7 @@ async function writeProposed(
     kind: "proposed",
     undoable: false,
   });
+  notifyCaptureAttention("proposed", verdict.cleaned);
 }
 
 /**
@@ -230,6 +253,7 @@ export async function runIntake(source: IntakeSource, text: string): Promise<Int
       kind: "proposed",
       undoable: false,
     });
+    notifyCaptureAttention("proposed", degraded.cleaned);
     logger.log("warn", "intake.run.degrade-propose", { err: (err as Error).message });
     return {
       cleaned: text,
@@ -275,8 +299,12 @@ export async function approveInbox(id: string): Promise<InboxActionResult> {
     return { ok: true };
   }
   if (!row.targetId) throw new Error(`inbox item ${id} has no route target to approve`);
-  const targets = await assembleRegistry();
-  const target = targets.find((t) => t.id === row.targetId);
+  // FRI-142 / ADR-048 (Layer 3): resolve through the PRODUCER-AGNOSTIC registry,
+  // so a non-Intake producer's `target_id` resolves + executes here too. Ensure
+  // Intake's targets are registered first (idempotent — boot wiring does this,
+  // but a direct call path / test may not have).
+  registerIntakeTargets();
+  const target = await resolveTarget(row.targetId);
   if (!target) throw new Error(`route target "${row.targetId}" is no longer available`);
   const validated = target.payloadSchema.safeParse(row.payload);
   if (!validated.success) {
@@ -324,7 +352,17 @@ export async function undoInbox(id: string): Promise<InboxActionResult> {
   if (!row.targetId || !row.deepLink) {
     throw new Error(`inbox item ${id} is undoable but has no target/deep-link to reverse`);
   }
-  const removed = await undoArtifact(row.targetId, row.deepLink);
+  // FRI-142 / ADR-048 (Layer 3): the inverse is the resolved target's OWN `undo`
+  // (no Intake-keyed switch), so a non-Intake producer's Done item reverses
+  // through the same registry. A target with no `undo` is not reversible — but
+  // the row carried `undoable=true`, so a missing inverse is a contract bug.
+  registerIntakeTargets();
+  const target = await resolveTarget(row.targetId);
+  if (!target) throw new Error(`route target "${row.targetId}" is no longer available`);
+  if (!target.undo) {
+    throw new Error(`route target "${row.targetId}" has no inverse to undo`);
+  }
+  const removed = await target.undo(row.deepLink);
   logger.log("info", "intake.undo", { id, targetId: row.targetId, removed });
   return { ok: true };
 }
@@ -349,8 +387,9 @@ export async function triageInbox(id: string, targetId: string): Promise<InboxAc
   if (!targetId.startsWith("agent:")) {
     throw new Error(`triage target "${targetId}" must be an agent target`);
   }
-  const targets = await assembleRegistry();
-  const target = targets.find((t) => t.id === targetId);
+  // FRI-142 / ADR-048 (Layer 3): resolve through the producer-agnostic registry.
+  registerIntakeTargets();
+  const target = await resolveTarget(targetId);
   if (!target) throw new Error(`route target "${targetId}" is no longer available`);
   const body = row.cleanedText ?? row.rawText;
   const ref = await target.execute({ body });
@@ -430,7 +469,10 @@ export async function listOpenInbox(): Promise<InboxItemView[]> {
     id: row.id,
     kind: row.kind as InboxItemView["kind"],
     source: row.source,
-    text: row.cleanedText ?? row.rawText,
+    // `raw_text` is now nullable (FRI-142/ADR-048: a non-Intake producer may
+    // write an actionable row with no raw human input). Fall back to "" so the
+    // orchestrator projection stays `text: string`.
+    text: row.cleanedText ?? row.rawText ?? "",
     targetId: row.targetId ?? null,
     rationale: row.rationale ?? null,
     ageSeconds: Math.max(0, Math.floor((now - row.createdAt.getTime()) / 1000)),

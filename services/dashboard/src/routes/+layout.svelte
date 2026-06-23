@@ -11,6 +11,7 @@
   import { onMount } from "svelte";
   import { sseConnected, startSSE, stopSSE } from "$lib/stores/sse.svelte";
   import { startConnectivity } from "$lib/stores/connectivity.svelte";
+  import { startPresence, stopPresence } from "$lib/stores/presence.svelte";
   import {
     startWakeLock,
     stopWakeLock,
@@ -23,6 +24,9 @@
   import CommandPalette from "$lib/components/CommandPalette/CommandPalette.svelte";
   import { commandPalette } from "$lib/components/CommandPalette/store.svelte";
   import InboxBell from "$lib/components/Inbox/InboxBell.svelte";
+  import ToastHost from "$lib/components/Toast/ToastHost.svelte";
+  import { inbox } from "$lib/stores/inbox.svelte";
+  import { setAppBadgeCount } from "$lib/stores/app-badge.svelte";
   import { computeVisibleCount } from "$lib/header-nav";
   import { bindTheme } from "$lib/stores/theme.svelte";
   import { zeroSync } from "$lib/stores/zero.svelte";
@@ -379,6 +383,7 @@
       clearInterval(i);
       stopSSE();
       stopWakeLock();
+      stopPresence();
       unbindTheme();
       window.removeEventListener("keydown", onKey);
       stopKeyboardInset();
@@ -386,6 +391,33 @@
         document.removeEventListener("click", onAnchorClick);
       }
     };
+  });
+
+  // FRI-142 (ADR-048): client presence heartbeat. The daemon's Notification
+  // router uses presence to choose Toast over Push. The device id is null
+  // until `/api/sync/refresh` resolves it, so start reactively once it lands
+  // (startPresence is idempotent — a later device-id change just re-asserts).
+  // Gated to the signed-in app; the login page has no presence to report.
+  $effect(() => {
+    if (!signedIn || isLogin) return;
+    const deviceId = zeroSync.currentDeviceId;
+    if (!deviceId) return;
+    startPresence(deviceId);
+  });
+
+  // FRI-142 (ADR-048): drive the home-screen app-icon badge from the SAME
+  // reactive open-attention-worthy Inbox count the daemon stamps into push
+  // payloads (`inbox.attentionCount` ↔ daemon `computeBadgeCount`). While the
+  // app is foregrounded the client owns the badge; `setAppBadgeCount` clears
+  // it at zero and is a silent no-op off a home-screen-installed PWA. Gated to
+  // the signed-in app — the login page has no Inbox to badge. Reading
+  // `inbox.attentionCount` inside the effect subscribes it to inbox churn.
+  $effect(() => {
+    if (!signedIn || isLogin) {
+      setAppBadgeCount(0);
+      return;
+    }
+    setAppBadgeCount(inbox.attentionCount);
   });
   // The "Daemon unreachable — retrying" banner used to live here, gated
   // on `sseConnected` with a 5 s debounce. The ConnectivityWidget's
@@ -550,6 +582,9 @@
 
 <ConfirmDialog />
 <CommandPalette />
+{#if signedIn && !isLogin}
+  <ToastHost />
+{/if}
 
 <style>
   .app-shell {

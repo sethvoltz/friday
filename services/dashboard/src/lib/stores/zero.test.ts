@@ -1690,6 +1690,24 @@ describe("Phase 4.2: reportClientStats + forgetDevice", () => {
     expect(args.ts).toBeLessThanOrEqual(Date.now());
   });
 
+  it("forgetDevice POSTs /api/push/forget-device with the deviceId to drop the device's push subscriptions (FRI-142 AC7 cascade)", async () => {
+    const { zeroSync } = await importStore();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(instances).toHaveLength(1);
+    const fetchSpy = global.fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchSpy.mockClear();
+
+    zeroSync.forgetDevice("dev-to-evict");
+    // Drain the synchronous fetch dispatch.
+    await Promise.resolve();
+
+    const dropCall = fetchSpy.mock.calls.find((c) => c[0] === "/api/push/forget-device");
+    expect(dropCall).toBeDefined();
+    const init = dropCall![1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ deviceId: "dev-to-evict" });
+  });
+
   it("forgetDevice is silent before Zero has finished initializing", async () => {
     vi.stubGlobal(
       "fetch",

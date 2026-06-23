@@ -36,6 +36,10 @@ vi.mock("../agent/registry.js", () => ({
   registerAgent: vi.fn(async () => {}),
 }));
 vi.mock("../agent/block-injectors.js", () => ({ recordUserBlock: vi.fn(async () => {}) }));
+// FRI-142 / ADR-048 producer seam #3 — schedule_fired. Mock the router so the
+// onExit test can assert the event fires ONLY on a clean completion.
+const notifySpy = vi.fn();
+vi.mock("../notifications/notify.js", () => ({ notify: (e: unknown) => notifySpy(e) }));
 
 let handle: TestDbHandle;
 let spawnScheduledRun: (typeof import("./spawn.js"))["spawnScheduledRun"];
@@ -54,6 +58,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await handle.truncate();
   dispatchTurn.mockReset();
+  notifySpy.mockClear();
 });
 
 function fakeScheduleRow(name: string): typeof schema.schedules.$inferSelect {
@@ -112,6 +117,13 @@ describe("ADR-024 spawn.ts onExit closes the schedule_runs row (async terminal t
     const row = await runRow(runRowId);
     expect(row.completedAt).toBeInstanceOf(Date);
     expect(row.error).toBeNull();
+
+    // Seam: a clean completion fires schedule_fired naming the schedule.
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+    expect(notifySpy.mock.calls[0]![0]).toMatchObject({
+      type: "schedule_fired",
+      deepLink: "/agents/nightly-ok",
+    });
   });
 
   it("error exit (status 'error') closes the row 'error' with a message", async () => {
@@ -125,6 +137,9 @@ describe("ADR-024 spawn.ts onExit closes the schedule_runs row (async terminal t
     const row = await runRow(runRowId);
     expect(row.error).toBe("worker exited with error");
     expect(row.completedAt).toBeInstanceOf(Date);
+
+    // Seam: an ERROR run is daemon-internal churn — NO schedule_fired.
+    expect(notifySpy).not.toHaveBeenCalled();
   });
 
   it("aborted exit (status 'aborted') closes the row 'error' with the explanatory message 'aborted'", async () => {
@@ -137,6 +152,9 @@ describe("ADR-024 spawn.ts onExit closes the schedule_runs row (async terminal t
 
     // LOW finding: an aborted run is NOT a bare failure-with-no-reason.
     expect((await runRow(runRowId)).error).toBe("aborted");
+
+    // Seam: an ABORTED run also fires no schedule_fired (not a user-facing result).
+    expect(notifySpy).not.toHaveBeenCalled();
   });
 
   it("onSpawnError (fork never started) closes the row 'error' with the throw message", async () => {

@@ -120,6 +120,34 @@ describe("InboxStore", () => {
     expect(store.tone).toBe(null);
   });
 
+  it("attentionCount = open Proposed+Unsorted (the badge source; excludes Done + resolved)", () => {
+    const store = new InboxStore({ zero, fetch: okFetch() });
+
+    // Empty ⇒ 0.
+    expect(store.attentionCount).toBe(0);
+
+    // Open Done items are FYI — they do NOT bump the badge (unlike openCount).
+    zero.inboxItems = [
+      item({ id: "d1", kind: "done", undoable: true }),
+      item({ id: "d2", kind: "done", undoable: true }),
+    ];
+    expect(store.openCount).toBe(2);
+    expect(store.attentionCount).toBe(0);
+
+    // Add open Proposed + Unsorted ⇒ they DO count.
+    zero.inboxItems = [
+      ...zero.inboxItems,
+      item({ id: "p1", kind: "proposed" }),
+      item({ id: "u1", kind: "unsorted" }),
+    ];
+    expect(store.openCount).toBe(4);
+    expect(store.attentionCount).toBe(2);
+
+    // A resolved Proposed never counts (matches the daemon's state='open' gate).
+    zero.inboxItems = [item({ id: "r1", kind: "proposed", state: "resolved" })];
+    expect(store.attentionCount).toBe(0);
+  });
+
   it("openByKind partitions only open items", () => {
     const store = new InboxStore({ zero, fetch: okFetch() });
     zero.inboxItems = [

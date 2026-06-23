@@ -272,7 +272,10 @@ const inboxItems = table("inbox_items")
     id: string(),
     created_at: number(),
     source: string(),
-    raw_text: string(),
+    // Nullable since FRI-142/ADR-048 (AC8): a non-Intake producer may write an
+    // inbox item with no raw capture text. Mirrors `db/schema.ts` (NOT NULL
+    // dropped in migration 0040) and `InboxItem.raw_text: string | null`.
+    raw_text: string().optional(),
     cleaned_text: string().optional(),
     target_id: string().optional(),
     payload: json().optional(),
@@ -368,6 +371,18 @@ const settings = table("settings")
     theme_palette_dark: string().optional(),
     models: json().optional(),
     evolve_models: json().optional(),
+    // FRI-142 (ADR-048): Notification policy + DND. `settings` is Zero-
+    // replicated, so these MUST mirror the Drizzle columns or the dashboard
+    // reload-loops on a schema-version mismatch (CLAUDE.md gotcha #2). The
+    // settings UI reads/writes notify_policy + DND reactively off this row.
+    // `notify_policy` is NULLable (NULL ⇒ DEFAULT_NOTIFY_POLICY fallback);
+    // the DND text columns are NULLable (NULL on either bound ⇒ no DND);
+    // `critical_bypass_dnd` is NOT NULL default true in Postgres so Zero
+    // always projects a value (no `.optional()`).
+    notify_policy: json().optional(),
+    dnd_start: string().optional(),
+    dnd_end: string().optional(),
+    critical_bypass_dnd: boolean(),
     updated_at: number(),
   })
   .primaryKey("id");

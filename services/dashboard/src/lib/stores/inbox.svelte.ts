@@ -75,6 +75,20 @@ export class InboxStore {
   }
 
   /**
+   * FRI-142 (ADR-048): the open ATTENTION-worthy count — open items whose
+   * `kind` needs a DECISION (`proposed` / `unsorted`). This is the single
+   * source the home-screen app-icon badge (`navigator.setAppBadge`) mirrors
+   * while the app is foregrounded, and it MUST equal the daemon's
+   * `computeBadgeCount()` (`state='open' AND kind IN ('proposed','unsorted')`,
+   * `notifications/badge.ts`) so the open-app and closed-app (push-stamped)
+   * badge agree. `done` items are FYI (auto-resolve on view) and excluded —
+   * the same partition the bell's `tone === 'attention'` signal uses.
+   */
+  get attentionCount(): number {
+    return this.open.filter((i) => i.kind === "proposed" || i.kind === "unsorted").length;
+  }
+
+  /**
    * The two-tone bell signal:
    *   - `"attention"` when ANY open Proposed/Unsorted item needs a decision;
    *   - `"low"` when only open Done items (FYI-with-undo) remain;

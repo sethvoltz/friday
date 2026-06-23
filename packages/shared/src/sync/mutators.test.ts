@@ -774,6 +774,86 @@ describe("updateSettings", () => {
     await mutators.updateSettings(tx, { model: "claude-opus-4-8", ts: 18 });
     expect(settingsUpdates[0]!.model).toBe("claude-opus-4-8");
   });
+
+  /* ---------------- FRI-142 (ADR-048): notify_policy + DND ---------------- */
+  // The Settings Notifications card writes notify_policy (preset sugar over the
+  // per-channel rules), the DND window, and the critical-bypass master toggle
+  // through this mutator. Same three-state convention as the theme/model fields
+  // (undefined preserves, null clears, value sets). These columns drive the
+  // daemon's Notification router DIRECTLY off the settings row (no config.json
+  // mirror), so the mutator is a pure DB patch onto the singleton.
+
+  it("UPDATEs notify_policy with the per-event/channel rule map verbatim", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, {
+      notifyPolicy: { builder_archive: { toast: "present_only", push: "never" } },
+      ts: 30,
+    });
+    expect(settingsUpdates).toEqual([
+      {
+        id: "singleton",
+        notify_policy: { builder_archive: { toast: "present_only", push: "never" } },
+        updated_at: 30,
+      },
+    ]);
+  });
+
+  it("UPDATEs the DND window + critical-bypass toggle together", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, {
+      dndStart: "22:30",
+      dndEnd: "07:00",
+      criticalBypassDnd: false,
+      ts: 31,
+    });
+    expect(settingsUpdates[0]).toEqual({
+      id: "singleton",
+      dnd_start: "22:30",
+      dnd_end: "07:00",
+      critical_bypass_dnd: false,
+      updated_at: 31,
+    });
+  });
+
+  it("null clears notify_policy + each DND bound (key present with null, not omitted)", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, {
+      notifyPolicy: null,
+      dndStart: null,
+      dndEnd: null,
+      ts: 32,
+    });
+    const patch = settingsUpdates[0] ?? {};
+    expect(patch.notify_policy).toBeNull();
+    expect(patch.dnd_start).toBeNull();
+    expect(patch.dnd_end).toBeNull();
+    expect("notify_policy" in patch).toBe(true);
+    expect("dnd_start" in patch).toBe(true);
+    expect("dnd_end" in patch).toBe(true);
+  });
+
+  it("omitting the notify fields leaves them absent from the patch (no clobber)", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { model: "claude-opus-4-8", ts: 33 });
+    const patch = settingsUpdates[0] ?? {};
+    expect("notify_policy" in patch).toBe(false);
+    expect("dnd_start" in patch).toBe(false);
+    expect("dnd_end" in patch).toBe(false);
+    expect("critical_bypass_dnd" in patch).toBe(false);
+  });
+
+  it("criticalBypassDnd=false is written (the boolean false is not treated as omitted)", async () => {
+    const mutators = createMutators();
+    const { tx, settingsUpdates } = makeMockTx();
+    await mutators.updateSettings(tx, { criticalBypassDnd: false, ts: 34 });
+    const patch = settingsUpdates[0] ?? {};
+    expect(patch.critical_bypass_dnd).toBe(false);
+    expect("critical_bypass_dnd" in patch).toBe(true);
+  });
 });
 
 describe("forgetDevice (plan §41 — JWT revocation tombstone)", () => {

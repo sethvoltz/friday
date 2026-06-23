@@ -46,6 +46,12 @@ vi.mock("../log.js", () => ({
   logger: { log: vi.fn() },
 }));
 
+// FRI-142 / ADR-048 producer seam #1: capture_attention. Mock the router so we
+// can assert WHICH event the dispatcher fires (and that it does NOT fire on the
+// Done/act path — a Done item is FYI and never raises a Notification).
+const notifySpy = vi.fn();
+vi.mock("../notifications/notify.js", () => ({ notify: (e: unknown) => notifySpy(e) }));
+
 import { dispatchVerdict } from "./intake.js";
 import type { RouteTarget } from "./registry.js";
 import type { ResultReference } from "./executors.js";
@@ -75,6 +81,7 @@ const REMINDER_REF: ResultReference = {
 beforeEach(() => {
   insertedRows.length = 0;
   insertSpy.mockClear();
+  notifySpy.mockClear();
 });
 
 afterEach(() => {
@@ -119,6 +126,9 @@ describe("dispatchVerdict — Gate 2 act path (AC7)", () => {
     });
 
     expect(result).toMatchObject({ kind: "done", disposition: "act" });
+
+    // Seam: a Done item is FYI and never bumps the badge — NO capture_attention.
+    expect(notifySpy).not.toHaveBeenCalled();
   });
 });
 
@@ -145,6 +155,10 @@ describe("dispatchVerdict — propose path", () => {
       undoable: false,
     });
     expect(result).toMatchObject({ kind: "proposed", disposition: "propose" });
+
+    // Seam: a Proposed item needs an approve/reject — capture_attention fires.
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+    expect(notifySpy.mock.calls[0]![0]).toMatchObject({ type: "capture_attention" });
   });
 });
 
@@ -227,6 +241,10 @@ describe("dispatchVerdict — Gate 1 Unsorted (null target)", () => {
       undoable: false,
     });
     expect(result).toMatchObject({ kind: "unsorted" });
+
+    // Seam: an Unsorted item needs triage — capture_attention fires.
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+    expect(notifySpy.mock.calls[0]![0]).toMatchObject({ type: "capture_attention" });
   });
 });
 

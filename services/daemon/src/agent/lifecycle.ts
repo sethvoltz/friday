@@ -34,6 +34,7 @@ import { logger } from "../log.js";
 import { captureFor } from "../posthog.js";
 import { type ArchiveReason } from "@friday/shared";
 import { closeTicketForArchive } from "../services/ticket-close.js";
+import { notify } from "../notifications/notify.js";
 import * as registry from "./registry.js";
 import {
   open as bsOpen,
@@ -1033,6 +1034,19 @@ export async function archiveAgent(
   await enqueueTransitionResult(agentName, () =>
     runAdminTransition(agentName, { kind: "archive", reason: opts.reason, ticketId }),
   );
+  // FRI-142 / ADR-048 producer seam #2 — builder_archive. A Builder finishing
+  // or failing is an async machine→human event worth surfacing. Fire-and-forget
+  // AFTER the archived projection lands; never blocks teardown. Only builders
+  // (the "your branch is ready" case) raise it — bare/scheduled/helper archives
+  // are routine lifecycle churn, not a notification.
+  if (agentRow?.type === "builder") {
+    void notify({
+      type: "builder_archive",
+      title: opts.reason === "completed" ? "A builder finished" : "A builder stopped",
+      body: `${agentName} archived (${opts.reason}).`,
+      deepLink: `/agents/${encodeURIComponent(agentName)}`,
+    });
+  }
   // Worker teardown sequences AFTER the status Transition resolves — off the
   // single-writer critical section (V3).
   if (!w) return [];

@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { loadConfig, resolveDaemonPort, resolveModelForRole, schema } from "@friday/shared";
 import { logger } from "../log.js";
 import { dispatchTurn } from "../agent/lifecycle.js";
+import { notify } from "../notifications/notify.js";
 import { recordUserBlock } from "../agent/block-injectors.js";
 import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
 import * as registry from "../agent/registry.js";
@@ -113,6 +114,17 @@ export async function spawnScheduledRun(
             ? "aborted"
             : undefined;
       void closeScheduleRun(runRowId, closeStatus, closeError);
+      // FRI-142 / ADR-048 producer seam #3 — schedule_fired. A scheduled agent
+      // surfaced a result. Fire-and-forget on a CLEAN completion only (an
+      // error/aborted run is daemon-internal churn, not a user-facing result).
+      if (info.status === "complete") {
+        void notify({
+          type: "schedule_fired",
+          title: "A scheduled agent finished",
+          body: `${scheduleRow.name} completed its run.`,
+          deepLink: `/agents/${encodeURIComponent(scheduleRow.name)}`,
+        });
+      }
       try {
         writeLastRun(scheduleRow.name, {
           timestamp: new Date().toISOString(),

@@ -81,8 +81,12 @@
     }
   }
 
-  function label(item: { cleaned_text: string | null; raw_text: string }): string {
-    return item.cleaned_text ?? item.raw_text;
+  // FRI-142 (ADR-048): `raw_text` is now nullable — a non-Intake producer
+  // (Layer-3 prep) may write a row with no captured raw text. Prefer the
+  // cleaned text, fall back to the raw text, and finally to an empty label so
+  // the return type stays a string.
+  function label(item: { cleaned_text: string | null; raw_text: string | null }): string {
+    return item.cleaned_text ?? item.raw_text ?? "";
   }
 </script>
 

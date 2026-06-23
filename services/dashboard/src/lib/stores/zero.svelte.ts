@@ -27,7 +27,13 @@ import { Zero } from "@rocicorp/zero";
 // mutator-method return-type readable.
 import type { PromiseWithServerResult as MutatorResult } from "@rocicorp/zero";
 import { createMutators, schema, type Mutators, type Schema } from "@friday/shared/sync";
-import type { AgentTypeName, EvolveTaskName, ModelConfig, InboxItem } from "@friday/shared";
+import type {
+  AgentTypeName,
+  EvolveTaskName,
+  ModelConfig,
+  InboxItem,
+  NotifyPolicy,
+} from "@friday/shared";
 import { chat, type AgentInfo, type ZeroBlocksRow } from "./chat.svelte";
 import { awaitMutatorServer, type SendUserMessageOutcome } from "./mutator-result";
 import { reconcileWakeLock } from "./wake-lock.svelte";
@@ -188,6 +194,15 @@ export interface ZeroSettingsRow {
    *  objects (hand-edited configs); `null` means no overrides. */
   models: Partial<Record<AgentTypeName, string | ModelConfig>> | null;
   evolve_models: Partial<Record<EvolveTaskName, string | ModelConfig>> | null;
+  /** FRI-142 (ADR-048): Notification policy + DND. `notify_policy` NULL ⇒ the
+   *  router falls back to DEFAULT_NOTIFY_POLICY; the settings UI's presets
+   *  write this map (the map is the truth, presets are sugar). DND text bounds
+   *  are "HH:MM"; NULL on either bound ⇒ no DND. `critical_bypass_dnd` is
+   *  NOT NULL default true in Postgres, so Zero always projects a boolean. */
+  notify_policy: NotifyPolicy | null;
+  dnd_start: string | null;
+  dnd_end: string | null;
+  critical_bypass_dnd: boolean | null;
   updated_at: number;
 }
 
@@ -1541,6 +1556,15 @@ class ZeroSyncStore {
    * for that device_id. The prior hard-DELETE behavior was cosmetic
    * — the next refresh just re-upserted the row.
    *
+   * FRI-142 (ADR-048), AC7 — the push-subscription cascade. The
+   * `revoked_at` write is a Zero mutator and fires no daemon LISTEN, so
+   * the device's server-only `push_subscriptions` rows are dropped via a
+   * separate hook: we POST `/api/push/forget-device` (the session-gated
+   * dashboard proxy stamps the verified `userId` and forwards over
+   * loopback to the daemon's drop endpoint). Fire-and-forget — a forgotten
+   * device must stop receiving pushes, but the drop is best-effort and
+   * never blocks the revoke.
+   *
    * Recovery: the user clears the `friday-device-id` cookie (the
    * dashboard does this implicitly when forgetting the CURRENT tab
    * via the sign-out coupling in `settings/+page.svelte`); the next
@@ -1561,6 +1585,19 @@ class ZeroSyncStore {
         console.warn(`forgetDevice mutator error: ${outcome.message}`);
       }
     });
+    // Drop the device's push subscriptions server-side (AC7). Best-effort:
+    // a transport failure leaves the (now-revoked) device unable to refresh
+    // its JWT anyway, so a stale subscription can never receive a fresh push
+    // payload past the next 410/404 stale-cleanup.
+    if (browser) {
+      void fetch("/api/push/forget-device", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceId }),
+      }).catch((err) => {
+        console.warn(`forgetDevice push-drop error: ${String(err)}`);
+      });
+    }
   }
 
   /**
@@ -1587,6 +1624,13 @@ class ZeroSyncStore {
      *  override, `undefined` preserves the existing map. */
     models?: Partial<Record<AgentTypeName, string | ModelConfig>> | null;
     evolveModels?: Partial<Record<EvolveTaskName, string | ModelConfig>> | null;
+    /** FRI-142 (ADR-048): Notification policy + DND. `undefined` preserves,
+     *  a value sets, `null` clears (router falls back to DEFAULT_NOTIFY_POLICY
+     *  / "no DND"). The Settings Notifications card writes these. */
+    notifyPolicy?: NotifyPolicy | null;
+    dndStart?: string | null;
+    dndEnd?: string | null;
+    criticalBypassDnd?: boolean;
   }): void {
     if (!this.#zero) return;
     const result = this.#zero!.mutate.updateSettings({

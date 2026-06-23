@@ -19,6 +19,7 @@ import { loadConfig, resolveDaemonPort, resolveModelForRole } from "@friday/shar
 import { inbox, isMailDeadLettered, mailBus, type MailRow } from "@friday/shared/services";
 import { logger } from "../log.js";
 import { dispatchTurn, isAgentLive, wakeAgent, wakeAgentCritical } from "../agent/lifecycle.js";
+import { notify } from "../notifications/notify.js";
 import { recordUserBlock } from "../agent/block-injectors.js";
 import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
 import * as registry from "../agent/registry.js";
@@ -64,6 +65,22 @@ export function startMailBridge(): void {
           to: row.toAgent,
           mailId: row.id,
           message: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      // FRI-142 / ADR-048 producer seam #4 — mail_delivered. Mail flowed
+      // through the bridge. Scoped to ORCHESTRATOR-bound mail (the user's
+      // chat): inter-agent internal mail is plumbing, not a user-facing event,
+      // and the default policy is toast `present_only` / push `never` — so this
+      // only ever raises a quiet in-app toast for a present user. A critical
+      // mail carries `priority: "critical"` so it participates in DND bypass.
+      if (row.toAgent === loadConfig().orchestratorName) {
+        void notify({
+          type: "mail_delivered",
+          title: row.subject ? `Mail: ${row.subject}` : "New mail",
+          body: `Mail from ${row.fromAgent}.`,
+          deepLink: `/mail?id=${row.id}`,
+          ...(row.priority === "critical" ? { priority: "critical" as const } : {}),
         });
       }
 

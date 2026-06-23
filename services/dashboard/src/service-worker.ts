@@ -62,6 +62,103 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+/**
+ * FRI-142 (ADR-048): Web Push handler. The daemon's stateless Notification
+ * router sends an encrypted push (via `web-push`) whose plaintext is a JSON
+ * `PushPayload`. We MUST call `showNotification` for EVERY push — WebKit
+ * requires a user-visible notification per push (the `userVisibleOnly: true`
+ * promise) and revokes the subscription on violation. The daemon already
+ * decided whether to push at all (server-side presence), so by the time a push
+ * arrives here it should always render.
+ *
+ * `payload.badge` is the open attention-worthy `inbox_items` count the daemon
+ * recomputed at send time, so the app-icon badge stays correct even while the
+ * app is closed. `setAppBadge` is feature-detected — it's a no-op outside an
+ * installed PWA, and absent in older WebKit.
+ */
+interface PushPayload {
+  title: string;
+  body: string;
+  /** Route to focus/open on notificationclick. */
+  deepLink?: string;
+  /** Open attention-worthy inbox count to stamp on the app icon. */
+  badge?: number;
+}
+
+function parsePushPayload(data: PushMessageData | null): PushPayload {
+  // A malformed / empty push must still render a notification (the
+  // userVisibleOnly promise), so fall back to a generic shape rather than
+  // throwing — a thrown handler skips showNotification and risks revocation.
+  if (!data) return { title: "Friday", body: "" };
+  try {
+    const parsed = data.json() as Partial<PushPayload>;
+    return {
+      title: typeof parsed.title === "string" ? parsed.title : "Friday",
+      body: typeof parsed.body === "string" ? parsed.body : "",
+      deepLink: typeof parsed.deepLink === "string" ? parsed.deepLink : undefined,
+      badge: typeof parsed.badge === "number" ? parsed.badge : undefined,
+    };
+  } catch {
+    return { title: "Friday", body: data.text() };
+  }
+}
+
+self.addEventListener("push", (event) => {
+  const payload = parsePushPayload(event.data);
+  event.waitUntil(
+    (async () => {
+      await self.registration.showNotification(payload.title, {
+        body: payload.body,
+        // Carried through to the notificationclick handler so the tap
+        // can deep-link without re-parsing the push.
+        data: { deepLink: payload.deepLink },
+      });
+      if (typeof payload.badge === "number" && "setAppBadge" in self.navigator) {
+        try {
+          await self.navigator.setAppBadge(payload.badge);
+        } catch {
+          // Best-effort — badge is decorative; never fail the push render.
+        }
+      }
+    })(),
+  );
+});
+
+/**
+ * Tapping a push focuses an already-open client (and navigates it to the
+ * deep-link) or opens a fresh window at the deep-link. We match same-origin
+ * clients only; the deep-link is a same-origin path stamped by the daemon.
+ */
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const deepLink = (event.notification.data as { deepLink?: string } | null)?.deepLink ?? "/";
+  const targetUrl = new URL(deepLink, self.location.origin).href;
+  event.waitUntil(
+    (async () => {
+      const clientList = await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      });
+      for (const client of clientList) {
+        // Reuse an existing tab: focus it and steer it to the deep-link.
+        if (new URL(client.url).origin === self.location.origin) {
+          await client.focus();
+          if ("navigate" in client) {
+            try {
+              await client.navigate(targetUrl);
+            } catch {
+              // `navigate` can reject for cross-document targets; the
+              // focus already surfaced the app, which is the priority.
+            }
+          }
+          return;
+        }
+      }
+      await self.clients.openWindow(targetUrl);
+    })(),
+  );
+});
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;

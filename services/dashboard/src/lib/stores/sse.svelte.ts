@@ -3,6 +3,7 @@ import { chat } from "./chat.svelte";
 import { connectivity } from "./connectivity.svelte";
 import { bumpDashboardData } from "./dashboard-data.svelte";
 import { loadString, saveJSON, saveString } from "./persistent";
+import { toasts } from "./toast.svelte";
 
 /**
  * SSE client (FIX_FORWARD 3.1). Backed by `fetch` + `response.body.getReader()`
@@ -42,6 +43,12 @@ const HANDLED_TYPES = new Set([
   // `mail_delivered`, `schedule_fired`, `agent_lifecycle`,
   // `agent_status`, `evolve_critical`, `system_banner`.
   "connection_established",
+  // FRI-142 (ADR-048): the ephemeral Notification Toast Channel. NOT a
+  // resurrection of the Phase-5 events above — a toast has NO backing row
+  // by design, so SSE (ephemeral/live) is its only correct home. Routed to
+  // the `toasts` queue, NOT `chat.applyEvent` (a toast has no `agent`, so the
+  // per-agent seq-dedup there would wrongly drop it).
+  "toast",
 ]);
 
 // Keepalive watchdog (FIX_FORWARD 3.3). Daemon writes `:keepalive` every
@@ -291,6 +298,13 @@ function handleEvent(evt: ParsedEvent, myId: number): void {
   }
   if (parsed.type === "connection_established") {
     acceptConnectionEstablished(parsed.boot_id, parsed.boot_ts);
+    return;
+  }
+  if (parsed.type === "toast") {
+    // FRI-142 (ADR-048): the ephemeral Toast Channel. Route to the live toast
+    // queue, NOT chat.applyEvent — a toast carries no `agent`, so chat's
+    // per-agent seq-dedup would bucket it under SYSTEM and wrongly drop it.
+    toasts.push(parsed);
     return;
   }
   chat.applyEvent(parsed);
