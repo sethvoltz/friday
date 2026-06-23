@@ -530,6 +530,42 @@
 </header>
 
 <div class="grid">
+  <div class="card">
+    <div class="card-header"><h2>Account</h2></div>
+    <div class="row">
+      <span class="row-label">Email</span>
+      <span class="row-value">{data.user.email}</span>
+    </div>
+    <div class="row">
+      <span class="row-label">Name</span>
+      <span class="row-value">{data.user.name}</span>
+    </div>
+    <div class="row">
+      <span class="row-label">Version</span>
+      <span class="row-value">v{PUBLIC_APP_VERSION}</span>
+    </div>
+    <div class="actions">
+      <button class="ghost" onclick={signOut}>Sign out</button>
+    </div>
+  </div>
+
+  <CaptureKeys />
+
+  <div class="card">
+    <div class="card-header"><h2>Watchdog</h2></div>
+    <p class="row-value">
+      When an agent's worker process crashes mid-turn the watchdog can re-fork
+      it automatically. Turn this off if you'd rather diagnose the cause by
+      hand before letting Friday retry.
+    </p>
+    <div class="toggle-row">
+      <Toggle
+        bind:checked={watchdogRefork}
+        label="Auto-refork crashed workers"
+        disabled={savingSettings} />
+    </div>
+  </div>
+
   <div class="card models-card">
     <div class="card-header"><h2>Models</h2></div>
     <p class="row-value">
@@ -599,27 +635,6 @@
     </div>
   </div>
 
-  <div class="card">
-    <div class="card-header"><h2>Account</h2></div>
-    <div class="row">
-      <span class="row-label">Email</span>
-      <span class="row-value">{data.user.email}</span>
-    </div>
-    <div class="row">
-      <span class="row-label">Name</span>
-      <span class="row-value">{data.user.name}</span>
-    </div>
-    <div class="row">
-      <span class="row-label">Version</span>
-      <span class="row-value">v{PUBLIC_APP_VERSION}</span>
-    </div>
-    <div class="actions">
-      <button class="ghost" onclick={signOut}>Sign out</button>
-    </div>
-  </div>
-
-  <CaptureKeys />
-
   <NotificationSettings />
 
   <div class="card">
@@ -679,21 +694,6 @@
         {/each}
       </ul>
     {/if}
-  </div>
-
-  <div class="card">
-    <div class="card-header"><h2>Watchdog</h2></div>
-    <p class="row-value">
-      When an agent's worker process crashes mid-turn the watchdog can re-fork
-      it automatically. Turn this off if you'd rather diagnose the cause by
-      hand before letting Friday retry.
-    </p>
-    <div class="toggle-row">
-      <Toggle
-        bind:checked={watchdogRefork}
-        label="Auto-refork crashed workers"
-        disabled={savingSettings} />
-    </div>
   </div>
 
   <div class="card">
