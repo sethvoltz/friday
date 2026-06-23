@@ -108,7 +108,6 @@ Everything lives at `~/.friday/`:
 ├── agents/<name>/             Per-agent home — orchestrator/helper/scheduled cwd (ADR-029)
 ├── uploads/<bucket>/          Content-addressed attachments
 ├── memory/entries/*.md        Memory entries (mirrored to memory_entries Postgres table)
-├── vapid.json                 Web Push VAPID keypair — private key daemon-only (FRI-142, ADR-048)
 ├── evolve/proposals/*.md      Evolve proposals
 ├── evolve/dream-diary.md      Nightly memory-dreaming journal (one block per dream run; ADR-046)
 ├── apps/<id>/                 Installed Friday Apps (ADR-021)

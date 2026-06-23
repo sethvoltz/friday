@@ -321,7 +321,6 @@ Operational files live at `~/.friday/`. Canonical state (blocks, mail, tickets, 
 ├── workspaces/<name>/             Builder git worktrees
 ├── evolve/                        Evolve proposals + dream-diary.md (nightly memory-dreaming journal; ADR-046)
 ├── models/                        ONNX embedding-model cache (all-MiniLM-L6-v2; FRI-24)
-├── vapid.json                     Web Push VAPID keypair (private key daemon-only; FRI-142, ADR-048)
 └── logs/*.jsonl                   Structured logs, rotated at 1 MiB
 ```
 
