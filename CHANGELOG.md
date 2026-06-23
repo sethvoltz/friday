@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.33.1](https://github.com/sethvoltz/friday/compare/v1.33.0...v1.33.1) (2026-06-23)
+
+
+### Bug Fixes
+
+* **daemon:** use cfg.publicUrl as VAPID `sub` so Apple stops rejecting pushes ([#317](https://github.com/sethvoltz/friday/issues/317)) ([3c1617d](https://github.com/sethvoltz/friday/commit/3c1617db1d9bff82a2740073ec53f86ebfaa5334))
+
 ## [1.33.0](https://github.com/sethvoltz/friday/compare/v1.32.0...v1.33.0) (2026-06-23)
 
 
