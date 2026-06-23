@@ -23,7 +23,16 @@
 
 import { spawnSync } from "node:child_process";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTestDb, findPgIsReady, getPool, type TestDbHandle } from "@friday/shared";
+import {
+  createTestDb,
+  findPgIsReady,
+  getPool,
+  loadConfig,
+  writeConfig,
+  type TestDbHandle,
+} from "@friday/shared";
+
+import { resolveVapidSubject } from "./vapid.js";
 
 // A monotonic counter so every generateVAPIDKeys() call yields a DISTINCT
 // keypair — that lets us assert "the same keypair came back" (no regen) and
@@ -80,6 +89,10 @@ describe.skipIf(skip)("FRI-142 ensureVapidKeys (scratch PG, server-only table)",
     generateSpy.mockClear();
     setVapidDetailsSpy.mockClear();
     vapid.__resetVapidCacheForTest();
+    // Reset config.json between tests so a prior test's publicUrl can't leak
+    // into the next — loadConfig() reads from FRIDAY_DATA_DIR/config.json each
+    // call (no cache), so a stale file would be picked up.
+    writeConfig({ ...loadConfig(), publicUrl: undefined });
   });
 
   afterEach(() => {
@@ -148,8 +161,47 @@ describe.skipIf(skip)("FRI-142 ensureVapidKeys (scratch PG, server-only table)",
     expect(setVapidDetailsSpy).toHaveBeenCalledWith("mailto:test@example.com", "PUB-1", "PRIV-1");
   });
 
-  it("ensureVapidConfigured defaults the subject when none is provided", async () => {
+  it("ensureVapidConfigured falls back to mailto:friday@localhost when no publicUrl is configured and no override is passed", async () => {
     await vapid.ensureVapidConfigured();
     expect(setVapidDetailsSpy).toHaveBeenCalledWith("mailto:friday@localhost", "PUB-1", "PRIV-1");
+  });
+
+  it("ensureVapidConfigured uses cfg.publicUrl as the VAPID `sub` when set — the Apple-acceptable form (https: URI)", async () => {
+    // The bug class: Apple's APNs Web Push rejects `mailto:friday@localhost`
+    // with HTTP 403 (non-routable domain). With publicUrl configured, the
+    // daemon must sign with the https: URL — which Apple accepts.
+    writeConfig({ ...loadConfig(), publicUrl: "https://friday.example.com" });
+    await vapid.ensureVapidConfigured();
+    expect(setVapidDetailsSpy).toHaveBeenCalledWith(
+      "https://friday.example.com",
+      "PUB-1",
+      "PRIV-1",
+    );
+  });
+});
+
+describe("resolveVapidSubject (pure)", () => {
+  it("returns the override unconditionally when one is passed", () => {
+    expect(resolveVapidSubject(undefined, "mailto:override@example.com")).toBe(
+      "mailto:override@example.com",
+    );
+    // Override wins even when a valid publicUrl is also available.
+    expect(
+      resolveVapidSubject("https://friday.example.com", "mailto:override@example.com"),
+    ).toBe("mailto:override@example.com");
+  });
+
+  it("returns publicUrl when it's an https:// URL", () => {
+    expect(resolveVapidSubject("https://friday.example.com")).toBe("https://friday.example.com");
+  });
+
+  it("falls back to mailto:friday@localhost when publicUrl is undefined", () => {
+    expect(resolveVapidSubject(undefined)).toBe("mailto:friday@localhost");
+  });
+
+  it("falls back when publicUrl is not an https:// URL (defensive — http: is not a valid VAPID `sub`)", () => {
+    expect(resolveVapidSubject("http://friday.example.com")).toBe("mailto:friday@localhost");
+    expect(resolveVapidSubject("friday.example.com")).toBe("mailto:friday@localhost");
+    expect(resolveVapidSubject("")).toBe("mailto:friday@localhost");
   });
 });

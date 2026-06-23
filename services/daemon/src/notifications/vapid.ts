@@ -16,7 +16,7 @@
 // dashboard browser bundle, or the service worker.
 
 import webpush from "web-push";
-import { getDb, schema } from "@friday/shared";
+import { getDb, loadConfig, schema } from "@friday/shared";
 import { logger } from "../log.js";
 
 /** The persisted VAPID keypair shape (URL-safe base64 strings). */
@@ -26,12 +26,37 @@ export interface VapidKeys {
 }
 
 /**
- * The VAPID `sub` claim — an identifier for the push sender (a `mailto:` or
- * `https:` URL). It is contact metadata for the push service, NOT a secret and
- * NOT security-critical. A stable placeholder is fine for a single-user daemon;
- * the public URL is preferred when one is configured.
+ * Last-resort `sub` claim for a fresh install with no `publicUrl` configured.
+ * Apple's APNs Web Push gateway rejects this with HTTP 403 (a `mailto:` with a
+ * non-routable domain — see `resolveVapidSubject`), but Mozilla/FCM accept it,
+ * so a box pre-tunnel can still reach those subscribers.
  */
 const DEFAULT_VAPID_SUBJECT = "mailto:friday@localhost";
+
+/**
+ * Resolve the VAPID `sub` claim. Apple's APNs Web Push gateway enforces VAPID
+ * strictly — it rejects a `mailto:` whose domain isn't routable (e.g.
+ * `localhost`) with HTTP 403, killing every push send to an iOS PWA. Mozilla
+ * and FCM are lenient, so this only ever surfaces on Apple devices.
+ *
+ * Resolution order (first match wins):
+ *   1. An explicit `override` from the caller.
+ *   2. `cfg.publicUrl` (the Cloudflare-exposed dashboard URL) if it's an
+ *      `https://...` URI — the production case, and an `https:` URI is one of
+ *      the two forms VAPID itself permits, so Apple accepts it.
+ *   3. `mailto:friday@localhost` fallback (will fail on Apple; works elsewhere).
+ *
+ * Pure: takes the publicUrl as an argument so it can be unit-tested without
+ * touching disk or the shared-config loader.
+ */
+export function resolveVapidSubject(
+  publicUrl: string | undefined,
+  override?: string,
+): string {
+  if (override) return override;
+  if (publicUrl && /^https:\/\//.test(publicUrl)) return publicUrl;
+  return DEFAULT_VAPID_SUBJECT;
+}
 
 /** The literal single-row PK for `web_push_vapid` (the `settings` precedent). */
 const SINGLETON_ID = "singleton";
@@ -103,7 +128,9 @@ export async function ensureVapidKeys(): Promise<VapidKeys> {
 export async function ensureVapidConfigured(subject?: string): Promise<VapidKeys> {
   const keys = await ensureVapidKeys();
   if (!configured) {
-    webpush.setVapidDetails(subject ?? DEFAULT_VAPID_SUBJECT, keys.publicKey, keys.privateKey);
+    const resolved = resolveVapidSubject(loadConfig().publicUrl, subject);
+    webpush.setVapidDetails(resolved, keys.publicKey, keys.privateKey);
+    logger.log("info", "vapid.configured", { sub: resolved });
     configured = true;
   }
   return keys;
