@@ -128,7 +128,20 @@ export async function ensureVapidKeys(): Promise<VapidKeys> {
 export async function ensureVapidConfigured(subject?: string): Promise<VapidKeys> {
   const keys = await ensureVapidKeys();
   if (!configured) {
-    const resolved = resolveVapidSubject(loadConfig().publicUrl, subject);
+    // Read publicUrl defensively: ADR-048 requires this path to "never crash
+    // boot" (it is boot-ensured best-effort), but `loadConfig` does a bare
+    // `JSON.parse(readFileSync(...))` and will throw SyntaxError on a corrupt
+    // config.json. Swallow any read/parse failure and fall through to the
+    // localhost fallback — push degrades, the daemon keeps running.
+    let publicUrl: string | undefined;
+    try {
+      publicUrl = loadConfig().publicUrl;
+    } catch (err) {
+      logger.log("warn", "vapid.config.read.error", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    const resolved = resolveVapidSubject(publicUrl, subject);
     webpush.setVapidDetails(resolved, keys.publicKey, keys.privateKey);
     logger.log("info", "vapid.configured", { sub: resolved });
     configured = true;

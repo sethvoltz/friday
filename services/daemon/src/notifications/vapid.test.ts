@@ -21,9 +21,11 @@
  * Skipped when Postgres is unreachable (mirrors store.pg.test.ts).
  */
 
+import { writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  CONFIG_PATH,
   createTestDb,
   findPgIsReady,
   getPool,
@@ -177,6 +179,15 @@ describe.skipIf(skip)("FRI-142 ensureVapidKeys (scratch PG, server-only table)",
       "PUB-1",
       "PRIV-1",
     );
+  });
+
+  it("ensureVapidConfigured swallows a corrupt config.json and falls back to the localhost subject (ADR-048: never crashes boot)", async () => {
+    // A bare `JSON.parse(readFileSync(...))` is the loadConfig() shape; corrupt
+    // bytes throw SyntaxError. The configure path must catch that so a wedged
+    // config.json doesn't take down the daemon at first-push.
+    writeFileSync(CONFIG_PATH, "{ this is not valid json", "utf8");
+    await expect(vapid.ensureVapidConfigured()).resolves.toBeDefined();
+    expect(setVapidDetailsSpy).toHaveBeenCalledWith("mailto:friday@localhost", "PUB-1", "PRIV-1");
   });
 });
 
