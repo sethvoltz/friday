@@ -1044,7 +1044,8 @@ export async function archiveAgent(
       type: "builder_archive",
       title: opts.reason === "completed" ? "A builder finished" : "A builder stopped",
       body: `${agentName} archived (${opts.reason}).`,
-      deepLink: `/agents/${encodeURIComponent(agentName)}`,
+      // No per-builder route exists; land on the dashboard root.
+      deepLink: "/",
     });
   }
   // Worker teardown sequences AFTER the status Transition resolves — off the

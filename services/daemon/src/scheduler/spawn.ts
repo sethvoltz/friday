@@ -122,7 +122,7 @@ export async function spawnScheduledRun(
           type: "schedule_fired",
           title: "A scheduled agent finished",
           body: `${scheduleRow.name} completed its run.`,
-          deepLink: `/agents/${encodeURIComponent(scheduleRow.name)}`,
+          deepLink: `/schedules/${encodeURIComponent(scheduleRow.name)}`,
         });
       }
       try {

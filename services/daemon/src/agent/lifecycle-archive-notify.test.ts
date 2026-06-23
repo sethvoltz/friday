@@ -74,7 +74,7 @@ describe("archiveAgent — builder_archive seam", () => {
     expect(notifySpy.mock.calls[0]![0]).toMatchObject({
       type: "builder_archive",
       title: "A builder finished",
-      deepLink: "/agents/builder-x",
+      deepLink: "/",
     });
     expect(notifySpy.mock.calls[0]![0]).toMatchObject({
       body: expect.stringContaining("completed"),

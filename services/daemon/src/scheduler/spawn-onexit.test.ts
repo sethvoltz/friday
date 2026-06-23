@@ -122,7 +122,7 @@ describe("ADR-024 spawn.ts onExit closes the schedule_runs row (async terminal t
     expect(notifySpy).toHaveBeenCalledTimes(1);
     expect(notifySpy.mock.calls[0]![0]).toMatchObject({
       type: "schedule_fired",
-      deepLink: "/agents/nightly-ok",
+      deepLink: "/schedules/nightly-ok",
     });
   });
 
