@@ -303,6 +303,9 @@ agent-friday/
 │   │                       MCP servers, EventBus, SSE, scheduler, watchdog
 │   └── dashboard/          @friday/dashboard — SvelteKit + Svelte 5 (runes),
 │                           BetterAuth, adapter-node, PWA
+├── apps/
+│   └── kitchen/            Kitchen Friday App — meal planning, copied to
+│                           `~/.friday/apps/kitchen/` at install
 ├── bin/                    friday + friday-supervisor shims — exec through fnm (ADR-034)
 ├── packaging/              pack.mjs — builds the pre-baked release tarball (ADR-034)
 ├── install.sh              Curl-installable installer (ADR-034)
