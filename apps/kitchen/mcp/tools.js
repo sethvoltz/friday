@@ -4,6 +4,8 @@
 // without booting a real MCP transport. Each entry: { name, description,
 // inputSchema, handler(args, storage) → JSON-serializable result }.
 
+import { mealieSearch, mealieGetRecipe } from "./mealie.js";
+
 export function buildTools() {
   return [
     {
@@ -34,6 +36,7 @@ export function buildTools() {
           tags: { type: "array", items: { type: "string" } },
           status: { type: "string", enum: ["active", "deferred"] },
           notes: { type: "string" },
+          mealieSlug: { type: "string" },
         },
         required: ["title"],
       },
@@ -55,6 +58,7 @@ export function buildTools() {
           status: { type: "string", enum: ["active", "deferred"] },
           notes: { type: "string" },
           lastUsedAt: { type: ["string", "null"] },
+          mealieSlug: { type: ["string", "null"] },
         },
         required: ["id"],
       },
@@ -190,6 +194,71 @@ export function buildTools() {
         },
       },
       handler: (args, storage) => storage.listHistory(args ?? {}),
+    },
+    {
+      name: "kitchen_mealie_search",
+      description:
+        "Search the Mealie recipe archive by name/keyword. Returns slug, name, description, tags, and totalTime for each match. Use for discovery when planning or exploring new recipes.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          perPage: { type: "number" },
+        },
+        required: ["query"],
+      },
+      handler: (args) => mealieSearch(args.query, args.perPage),
+    },
+    {
+      name: "kitchen_mealie_get_ingredients",
+      description:
+        "Fetch structured ingredient list from Mealie for a recipe slug. 'ingredients' is display-formatted strings (e.g. '3 tbsp sesame oil'). 'rawIngredients' includes quantity, unitName, foodName, note, title for structured use. Empty display strings (section headers) are filtered out.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          slug: { type: "string" },
+        },
+        required: ["slug"],
+      },
+      handler: async (args) => {
+        const recipe = await mealieGetRecipe(args.slug);
+        return {
+          name: recipe.name,
+          slug: recipe.slug,
+          ingredients: recipe.recipeIngredient.map((i) => i.display).filter((d) => d !== ""),
+          rawIngredients: recipe.recipeIngredient,
+        };
+      },
+    },
+    {
+      name: "kitchen_mealie_import",
+      description:
+        "Import a Mealie recipe into the local Kitchen library by slug. Fetches full recipe from Mealie, maps name/tags/description/ingredients. Uses the Mealie slug as the local recipe id (so duplicate imports are caught). Fails with duplicate_id if already imported. Optional extraTags[] and notes string prepended to description.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          slug: { type: "string" },
+          extraTags: { type: "array", items: { type: "string" } },
+          notes: { type: "string" },
+        },
+        required: ["slug"],
+      },
+      handler: async (args, storage) => {
+        const recipe = await mealieGetRecipe(args.slug);
+        const ingredients = recipe.recipeIngredient.map((i) => i.display).filter((d) => d !== "");
+        const tags = [...(args.extraTags ?? []), ...recipe.tags];
+        const notes = [args.notes, recipe.description].filter(Boolean).join("\n\n");
+        return storage.addRecipe({
+          id: args.slug,       // deterministic: enables duplicate_id guard on re-import
+          title: recipe.name,
+          ingredients,
+          mealieSlug: args.slug,
+          tags,
+          notes,
+          activeTime: null,   // Mealie time strings too variable to parse reliably
+          method: "",
+        });
+      },
     },
   ];
 }

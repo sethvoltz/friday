@@ -199,6 +199,7 @@ function validateRecipeInput(raw) {
     notes: typeof raw.notes === "string" ? raw.notes : "",
     addedAt: typeof raw.addedAt === "string" ? raw.addedAt : new Date().toISOString(),
     lastUsedAt: typeof raw.lastUsedAt === "string" ? raw.lastUsedAt : null,
+    mealieSlug: typeof raw.mealieSlug === "string" ? raw.mealieSlug : undefined,
   };
   validateRecipeShape(recipe);
   return recipe;
@@ -224,6 +225,8 @@ function sanitizeRecipePatch(patch) {
   if (patch.lastUsedAt !== undefined) {
     out.lastUsedAt = patch.lastUsedAt === null ? null : String(patch.lastUsedAt);
   }
+  if (patch.mealieSlug !== undefined)
+    out.mealieSlug = patch.mealieSlug === null ? null : String(patch.mealieSlug);
   return out;
 }
 

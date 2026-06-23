@@ -30,5 +30,10 @@
       "command": "node",
       "args": ["mcp/kitchen.js"]
     }
-  ]
+  ],
+  "env": {
+    "TRMNL_KITCHEN_WEBHOOK": "${TRMNL_KITCHEN_WEBHOOK}",
+    "MEALIE_URL": "${MEALIE_URL}",
+    "MEALIE_TOKEN": "${MEALIE_TOKEN}"
+  }
 }
