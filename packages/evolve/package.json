@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./scan-dreaming": "./dist/scan-dreaming.js"
   },
   "scripts": {
     "build": "tsc",

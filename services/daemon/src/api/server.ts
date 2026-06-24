@@ -12,7 +12,6 @@ import {
 import {
   type AgentEntry,
   DAEMON_SECRET_HEADER,
-  DAEMON_LOG_PATH,
   getDaemonSecret,
   isLocalHost,
   loadConfig,
@@ -60,37 +59,20 @@ import { buildDispatchPrompt } from "../prompts/build-dispatch-prompt.js";
 import { buildSystemPrompt } from "../prompts/build-system-prompt.js";
 import { resolveRecipient, validateRecipient } from "../comms/recipient.js";
 import {
-  DEFAULT_RULE,
   deleteProposal,
   enrichProposals,
   getProposal,
   listProposals,
   mergeClusters,
-  proposeFromSignals,
-  rerankAll,
   saveProposal,
-  scanAll,
-  scanFriction,
-  scanPreferences,
-  scanDreaming,
-  applyDreamProposals,
-  runHygiene,
-  appendDreamEntry,
-  decodeDreamPayload,
-  slugify,
   sinceHoursAgo,
   appendRun,
-  triageSpawnPlan,
-  builderEscalationPlan,
   updateProposal,
-  resolveByUpgrade,
+  runEvolveCycle,
   type Proposal,
   type SaveProposalInput,
   type UpdateProposalInput,
-  type DreamEvidence,
-  type DreamRunReport,
-  type DreamDiaryItem,
-  type HygieneReport,
+  type EvolveCycleEffects,
 } from "@friday/evolve";
 import { deleteProposalFromPg, syncProposalToPg } from "../evolve/projector.js";
 import { syncProposalsForClosedTickets } from "../services/proposal-sync.js";
@@ -1023,336 +1005,167 @@ async function handle(
     // the regular `since` window. Propose-merge dedup is the overlap safety net.
     const dreamSince = body.sinceTs ?? since;
     const windowEnd = new Date().toISOString();
-    try {
-      const syncSignals = await scanAll({ since });
-      const frictionSignals = includeFriction
-        ? await scanFriction({ since }).catch((err) => {
-            logger.log("warn", "evolve.scan.friction-error", {
-              message: err instanceof Error ? err.message : String(err),
-            });
-            return [] as typeof syncSignals;
-          })
-        : [];
-      const preferenceSignals = includePreferences
-        ? await scanPreferences({ since }).catch((err) => {
-            logger.log("warn", "evolve.scan.preferences-error", {
-              message: err instanceof Error ? err.message : String(err),
-            });
-            return [] as typeof syncSignals;
-          })
-        : [];
-      // FRI-26 Memory Dreaming (design D7): a daily sub-pass that mines the
-      // orchestrator transcript for new memories worth saving, deduped against
-      // the live corpus. Evidence (recall stats keyed by slug + co-occurring
-      // daemon-source friction signals) is assembled from a listEntries() read.
-      // The scanner is LLM-backed, so it fails soft to [] exactly like the
-      // friction/preference scanners.
-      const dreamEntries = includeDreaming ? await listEntries() : [];
-      // F2/F14: key recall stats by slugify(title) — the SAME identity used for
-      // dedup/apply — so the recall→severity bump is not dead in prod when the
-      // LLM's title formatting differs trivially from the existing memory's.
-      const recallStatsBySlug = new Map<
-        string,
-        { recallCount: number; lastRecalledAt: string | null }
-      >();
-      for (const e of dreamEntries) {
-        recallStatsBySlug.set(slugify(e.title), {
-          recallCount: e.recallCount,
-          lastRecalledAt: e.lastRecalledAt,
-        });
-      }
-      const evidence: DreamEvidence = {
-        recallStatsBySlug,
-        frictionSignalsInWindow: syncSignals.filter((s) => s.source === "daemon"),
-        // F2: friction co-occurrence matches the CONFIGURED orchestrator name —
-        // daemon.jsonl signals carry the real agent name, not the literal
-        // "orchestrator".
-        orchestratorName: cfg.orchestratorName,
-        existingMemories: dreamEntries.map((e) => ({ title: e.title, tags: e.tags })),
-      };
-      // F4/AC6: use the cursor (`dreamSince`) for the dreaming window — the
-      // meta-agent's lastDreamScannedTs narrows it to turns newer than the last
-      // pass, with propose-merge dedup as the overlap safety net.
-      const dreamSignals = includeDreaming
-        ? await scanDreaming({ since: dreamSince, evidence }).catch((err) => {
-            logger.log("warn", "evolve.scan.dreaming-error", { error: String(err) });
-            return [] as typeof syncSignals;
-          })
-        : [];
-      const signals = [...syncSignals, ...frictionSignals, ...preferenceSignals, ...dreamSignals];
-      const propose = proposeFromSignals(signals, {
-        rule: DEFAULT_RULE,
-        createdBy: callerName,
-      });
-      const reranked = rerankAll(DEFAULT_RULE);
-      const upgradeResult = await resolveByUpgrade({ daemonLogPath: DAEMON_LOG_PATH });
-      logger.log("info", "evolve.upgrade-resolved", {
-        definitive: upgradeResult.definitive,
-        tentative: upgradeResult.tentative,
-      });
-      appendRun({
-        ts: windowEnd,
-        by: callerName,
-        windowStart: since,
-        windowEnd,
-        signalsScanned: signals.length,
-        proposalsCreated: propose.created.length,
-        proposalsUpdated: propose.updated.length,
-        promotedToCritical: propose.promotedToCritical.length,
-      });
-      // FRI-142 / ADR-048 producer seam #5 — evolve_critical. A proposal was
-      // promoted to critical (across BOTH promote surfaces: fresh-create +
-      // rerank). Fire-and-forget; `evolve_critical` is the always-on critical
-      // class (toast always / push always, DND-bypass-eligible). One
-      // notification per scan that produced any critical promotion.
-      {
-        const criticalCount = propose.promotedToCritical.length + reranked.promoted.length;
-        if (criticalCount > 0) {
-          void notify({
-            type: "evolve_critical",
-            title: "Critical evolve proposal",
-            body:
-              criticalCount === 1
-                ? "A proposal was promoted to critical."
-                : `${criticalCount} proposals were promoted to critical.`,
-            deepLink: "/evolve",
-            priority: "critical",
-          });
-        }
-      }
-      // FRI-40 Phase 1: when enabled, auto-spawn a read-only triage helper
-      // for each proposal that just promoted to critical — across BOTH
-      // promote surfaces (fresh-create + rerank). Read with a strict
-      // `=== true` so the shallow-merge `{ evolve: {} }` case stays off.
-      // Spawn failures must never alter the scan's returned summary nor
-      // throw out of the handler (AC #7); the in-process `createAgent` 409
-      // gives idempotent dedup against an already-spawned triage helper
-      // (AC #6).
-      if (cfg.evolve?.autoSpawnTriageHelpers === true) {
-        try {
-          const triage = triageSpawnPlan([...propose.promotedToCritical, ...reranked.promoted]);
-          for (const t of triage) {
-            try {
-              const r = await createAgent(
-                {
-                  type: "helper",
+    // FRI-174: the ordered signal→propose→rerank→upgrade→audit→notify→spawn→
+    // dream cycle now lives in `runEvolveCycle` (shared with the CLI). The
+    // daemon supplies the side-effect boundary: the real `notify`, the
+    // config-gated triage/builder spawn loops (the `autoSpawn*` gate + the
+    // `createAgent`/`updateProposal`/`sendMail` escalation IO stay HERE — seam
+    // i / ADR-036), and the real `listEntries`.
+    const daemonEffects: EvolveCycleEffects = {
+      notify: (event) => {
+        // Fire-and-forget; `evolve_critical` is the always-on critical class
+        // (toast always / push always, DND-bypass-eligible).
+        void notify(event);
+      },
+      // FRI-40 Phase 1: when enabled, auto-spawn a read-only triage helper for
+      // each planned request. Read with a strict `=== true` so the shallow-merge
+      // `{ evolve: {} }` case stays off. Spawn failures must never throw out of
+      // the cycle (AC #7); the in-process `createAgent` 409 gives idempotent
+      // dedup against an already-spawned triage helper (AC #6).
+      spawnTriage: async (triage) => {
+        if (cfg.evolve?.autoSpawnTriageHelpers === true) {
+          try {
+            for (const t of triage) {
+              try {
+                const r = await createAgent(
+                  {
+                    type: "helper",
+                    name: t.name,
+                    parentName: "scheduled-meta-daily",
+                    prompt: t.prompt,
+                    reason: t.reason,
+                  },
+                  cfg,
+                );
+                if (r.status === 201)
+                  logger.log("info", "evolve.triage.spawn", { name: t.name, reason: t.reason });
+                else if (r.status === 409)
+                  logger.log("info", "evolve.triage.spawn.skip", { name: t.name, status: 409 });
+                else
+                  logger.log("warn", "evolve.triage.spawn.error", {
+                    name: t.name,
+                    status: r.status,
+                  });
+              } catch (err) {
+                logger.log("warn", "evolve.triage.spawn.error", {
                   name: t.name,
-                  parentName: "scheduled-meta-daily",
-                  prompt: t.prompt,
-                  reason: t.reason,
-                },
-                cfg,
-              );
-              if (r.status === 201)
-                logger.log("info", "evolve.triage.spawn", { name: t.name, reason: t.reason });
-              else if (r.status === 409)
-                logger.log("info", "evolve.triage.spawn.skip", { name: t.name, status: 409 });
-              else
-                logger.log("warn", "evolve.triage.spawn.error", { name: t.name, status: r.status });
-            } catch (err) {
-              logger.log("warn", "evolve.triage.spawn.error", {
-                name: t.name,
-                message: err instanceof Error ? err.message : String(err),
-              });
-            }
-          }
-        } catch (err) {
-          logger.log("warn", "evolve.triage.spawn.error", {
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      // FRI-149 Phase 2: when enabled, auto-spawn an auto-fixing Builder for
-      // each proposal that just promoted to critical AND is code-shaped AND
-      // carries a high-severity signal — across BOTH promote surfaces. The
-      // Builder iterates in its worktree, drives the fix to a GREEN review-ready
-      // PR, mails the orchestrator the PR URL, and STOPS (it never merges; the
-      // human approval gate moves to merge — ADR-036). Read with a strict
-      // `=== true` so the shallow-merge `{ evolve: {} }` case stays off. The
-      // carve-out that lets a `scheduled` caller spawn a builder is gated on the
-      // un-forgeable `evolveEscalation` arg passed ONLY here (never reachable
-      // from the wire — see validateSpawnPermissions / createAgent). Spawn
-      // failures are caught per-request AND for the whole block, so they never
-      // alter the scan's returned summary nor throw out of the handler; the
-      // in-process `createAgent` 409 gives idempotent dedup against an
-      // already-spawned `builder-<id>`.
-      if (cfg.evolve?.autoSpawnBuilders === true) {
-        try {
-          const builders = builderEscalationPlan([
-            ...propose.promotedToCritical,
-            ...reranked.promoted,
-          ]);
-          for (const b of builders) {
-            try {
-              const proposalId = b.name.slice("builder-".length);
-              const r = await createAgent(
-                {
-                  type: "builder",
-                  name: b.name,
-                  parentName: "scheduled-meta-daily",
-                  prompt: b.prompt,
-                  reason: b.reason,
-                  ticketId: proposalId,
-                  worktree: { repo: process.cwd() },
-                },
-                cfg,
-                { evolveEscalation: true },
-              );
-              if (r.status === 201) {
-                logger.log("info", "evolve.builder.spawn", {
-                  name: b.name,
-                  proposalId,
-                  reason: b.reason,
-                });
-                // Two-way linkage: record the in-flight builder on the proposal
-                // so the dashboard can connect a critical proposal to its
-                // builder. Branch is derivable as friday/builder-<id>; the PR
-                // URL arrives via the builder's mail.
-                try {
-                  updateProposal(proposalId, { builderAgent: b.name });
-                } catch (err) {
-                  logger.log("warn", "evolve.builder.linkage.error", {
-                    name: b.name,
-                    proposalId,
-                    message: err instanceof Error ? err.message : String(err),
-                  });
-                }
-                // Notify the orchestrator that an escalation builder is in
-                // flight; it surfaces this to the user, and the builder itself
-                // mails the review-ready PR URL once CI is green.
-                try {
-                  await sendMail({
-                    fromAgent: "scheduled-meta-daily",
-                    toAgent: cfg.orchestratorName,
-                    type: "notification",
-                    subject: `evolve escalation: ${proposalId}`,
-                    body:
-                      `Auto-escalated critical+code proposal \`${proposalId}\` to Builder \`${b.name}\`. ` +
-                      `It will drive a GREEN, review-ready PR (branch friday/${b.name}) and mail you the PR URL — it will NOT merge. ` +
-                      `You review and merge.`,
-                  });
-                } catch (err) {
-                  logger.log("warn", "evolve.builder.notify.error", {
-                    name: b.name,
-                    proposalId,
-                    message: err instanceof Error ? err.message : String(err),
-                  });
-                }
-              } else if (r.status === 409) {
-                logger.log("info", "evolve.builder.spawn.skip", { name: b.name, status: 409 });
-              } else {
-                logger.log("warn", "evolve.builder.spawn.error", {
-                  name: b.name,
-                  status: r.status,
+                  message: err instanceof Error ? err.message : String(err),
                 });
               }
-            } catch (err) {
-              logger.log("warn", "evolve.builder.spawn.error", {
-                name: b.name,
-                message: err instanceof Error ? err.message : String(err),
-              });
             }
+          } catch (err) {
+            logger.log("warn", "evolve.triage.spawn.error", {
+              message: err instanceof Error ? err.message : String(err),
+            });
           }
-        } catch (err) {
-          logger.log("warn", "evolve.builder.spawn.error", {
-            message: err instanceof Error ? err.message : String(err),
-          });
         }
-      }
-      // FRI-26 Memory Dreaming (design D7): after the usual propose/rerank, hand
-      // the dream-shaped proposals (those whose signals carry a decodable
-      // DreamPayload) to applyDreamProposals — it dedup-extends an existing
-      // memory, auto-applies a proposal that clears its per-category threshold,
-      // or leaves it `open` for human review. Then a corpus-wide hygiene pass
-      // merges near-dups + flags cold entries (archive-by-tag, never
-      // hard-delete), and one diary block is appended. The dream proposals are
-      // `type:"memory"` so the FRI-40/FRI-149 spawn blocks above (which consume
-      // code-shaped promotions) never touch them. Each sub-step fails soft so a
-      // single LLM/dedup hiccup never aborts the nightly run.
-      let hygiene: HygieneReport | null = null;
-      let dreamPromoted = 0;
-      let dreamReinforced = 0;
-      if (includeDreaming) {
-        // F10/F16: re-read each dream proposal from the store via getProposal so
-        // the per-category gate inside applyDreamProposals sees the POST-rerank
-        // `score` (rerankAll mutates persisted rows; the in-memory propose.*
-        // copies predate it). We keep LIVE dream proposals only — `open` (fresh,
-        // gates on score), `critical` (escalated, still gateable), and `applied`
-        // (a prior run / family-resolution already wrote the memory). The
-        // `applied` ones MUST flow through: on the second nightly run the dream
-        // signal's stable hash re-hits the same proposal (now `applied`), and the
-        // dedup path inside applyDreamProposals finds the existing memory at
-        // score >= DREAM_DEDUP_MIN_SCORE and EXTENDS it (reinforce, AC4) — it
-        // never reaches applyProposal, so there is no "already applied" mislabel.
-        // Terminal-dead states (`rejected`/`superseded`/`auto-resolved`/
-        // `approved`) are excluded so a killed proposal is not resurrected.
-        const LIVE_DREAM_STATUSES = new Set(["open", "critical", "applied"]);
-        const dreamProps = [...propose.created, ...propose.updated]
-          .map((p) => getProposal(p.id) ?? p)
-          .filter(
-            (p) =>
-              p.signals.some((s) => decodeDreamPayload(s)) && LIVE_DREAM_STATUSES.has(p.status),
-          );
-        const dreamApply = await applyDreamProposals(dreamProps, callerName);
-        dreamPromoted = dreamApply.promoted.length;
-        dreamReinforced = dreamApply.reinforced.length;
-        // F20: a proposal that CLEARED its threshold but whose applyProposal
-        // returned ok:false is a genuine failure (distinct from a deliberate
-        // below-threshold deferral) — surface it so it is not silently dropped.
-        if (dreamApply.failed?.length) {
-          logger.log("warn", "evolve.scan.dream-apply-failed", { ids: dreamApply.failed });
+      },
+      // FRI-149 Phase 2: when enabled, auto-spawn an auto-fixing Builder for each
+      // planned request. The Builder iterates in its worktree, drives the fix to
+      // a GREEN review-ready PR, mails the orchestrator the PR URL, and STOPS (it
+      // never merges; the human approval gate moves to merge — ADR-036). Read
+      // with a strict `=== true` so the shallow-merge `{ evolve: {} }` case stays
+      // off. The carve-out that lets a `scheduled` caller spawn a builder is
+      // gated on the un-forgeable `evolveEscalation` arg passed ONLY here (never
+      // reachable from the wire — see validateSpawnPermissions / createAgent).
+      // Spawn failures are caught per-request AND for the whole block, so they
+      // never throw out of the cycle; the in-process `createAgent` 409 gives
+      // idempotent dedup against an already-spawned `builder-<id>`.
+      spawnBuilder: async (builders) => {
+        if (cfg.evolve?.autoSpawnBuilders === true) {
+          try {
+            for (const b of builders) {
+              try {
+                const proposalId = b.name.slice("builder-".length);
+                const r = await createAgent(
+                  {
+                    type: "builder",
+                    name: b.name,
+                    parentName: "scheduled-meta-daily",
+                    prompt: b.prompt,
+                    reason: b.reason,
+                    ticketId: proposalId,
+                    worktree: { repo: process.cwd() },
+                  },
+                  cfg,
+                  { evolveEscalation: true },
+                );
+                if (r.status === 201) {
+                  logger.log("info", "evolve.builder.spawn", {
+                    name: b.name,
+                    proposalId,
+                    reason: b.reason,
+                  });
+                  // Two-way linkage: record the in-flight builder on the proposal
+                  // so the dashboard can connect a critical proposal to its
+                  // builder. Branch is derivable as friday/builder-<id>; the PR
+                  // URL arrives via the builder's mail.
+                  try {
+                    updateProposal(proposalId, { builderAgent: b.name });
+                  } catch (err) {
+                    logger.log("warn", "evolve.builder.linkage.error", {
+                      name: b.name,
+                      proposalId,
+                      message: err instanceof Error ? err.message : String(err),
+                    });
+                  }
+                  // Notify the orchestrator that an escalation builder is in
+                  // flight; it surfaces this to the user, and the builder itself
+                  // mails the review-ready PR URL once CI is green.
+                  try {
+                    await sendMail({
+                      fromAgent: "scheduled-meta-daily",
+                      toAgent: cfg.orchestratorName,
+                      type: "notification",
+                      subject: `evolve escalation: ${proposalId}`,
+                      body:
+                        `Auto-escalated critical+code proposal \`${proposalId}\` to Builder \`${b.name}\`. ` +
+                        `It will drive a GREEN, review-ready PR (branch friday/${b.name}) and mail you the PR URL — it will NOT merge. ` +
+                        `You review and merge.`,
+                    });
+                  } catch (err) {
+                    logger.log("warn", "evolve.builder.notify.error", {
+                      name: b.name,
+                      proposalId,
+                      message: err instanceof Error ? err.message : String(err),
+                    });
+                  }
+                } else if (r.status === 409) {
+                  logger.log("info", "evolve.builder.spawn.skip", { name: b.name, status: 409 });
+                } else {
+                  logger.log("warn", "evolve.builder.spawn.error", {
+                    name: b.name,
+                    status: r.status,
+                  });
+                }
+              } catch (err) {
+                logger.log("warn", "evolve.builder.spawn.error", {
+                  name: b.name,
+                  message: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+          } catch (err) {
+            logger.log("warn", "evolve.builder.spawn.error", {
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
-        try {
-          // Deliberate second listEntries() read: the hygiene pass runs over the
-          // corpus AFTER the dream applies/extends above, so it must see those
-          // post-write rows (not the pre-write `dreamEntries` snapshot).
-          hygiene = await runHygiene(await listEntries());
-          const mergedItems: DreamDiaryItem[] = hygiene.merged.map((m) => ({
-            action: "merged",
-            title: m.survivorId,
-            score: null,
-            evidence: m.reason,
-          }));
-          const flaggedItems: DreamDiaryItem[] = hygiene.decayCandidates.map((id) => ({
-            action: "pruned-flagged",
-            title: id,
-            score: null,
-            evidence: "cold entry flagged for decay",
-          }));
-          const report: DreamRunReport = {
-            ts: new Date().toISOString(),
-            promoted: dreamApply.promoted.length,
-            reinforced: dreamApply.reinforced.length,
-            merged: hygiene.merged.length,
-            prunedFlagged: hygiene.decayCandidates.length,
-            items: [
-              ...dreamApply.promoted,
-              ...dreamApply.reinforced,
-              ...mergedItems,
-              ...flaggedItems,
-            ],
-          };
-          appendDreamEntry(report);
-        } catch (err) {
-          logger.log("warn", "evolve.scan.dreaming-hygiene-error", {
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      return json(res, 200, {
-        signals: signals.length,
-        created: propose.created.length,
-        updated: propose.updated.length,
-        promotedToCritical: propose.promotedToCritical.length,
-        reranked: reranked.reranked.length,
-        promotedFromRerank: reranked.promoted.length,
-        familyResolved: propose.familyResolved.length,
-        familyRejected: propose.familyRejected.length,
-        dreamPromoted,
-        dreamReinforced,
-        dreamMerged: hygiene?.merged.length ?? 0,
-        dreamFlagged: hygiene?.decayCandidates.length ?? 0,
+      },
+      listEntries: () => listEntries(),
+    };
+    try {
+      const result = await runEvolveCycle({
+        since,
+        dreamSince,
+        includeFriction,
+        includePreferences,
+        includeDreaming,
+        callerName,
+        orchestratorName: cfg.orchestratorName,
+        effects: daemonEffects,
       });
+      return json(res, 200, result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       appendRun({

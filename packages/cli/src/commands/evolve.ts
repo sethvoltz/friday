@@ -5,15 +5,11 @@ import {
   getProposal,
   listProposals,
   mergeClusters,
-  proposeFromSignals,
-  rerankAll,
-  resolveByUpgrade,
-  scanAll,
+  runEvolveCycle,
   sinceHoursAgo,
-  appendRun,
-  DEFAULT_RULE,
 } from "@friday/evolve";
-import { DAEMON_LOG_PATH } from "@friday/shared";
+import { listEntries } from "@friday/memory";
+import { loadConfig } from "@friday/shared";
 import { DaemonClient } from "../lib/api.js";
 
 export const evolveCommand = defineCommand({
@@ -72,42 +68,29 @@ export const evolveCommand = defineCommand({
       async run({ args }) {
         const windowHours = args.windowHours ? Number(args.windowHours) : 24;
         const since = sinceHoursAgo(windowHours);
-        const windowEnd = new Date().toISOString();
-        const signals = await scanAll({ since });
-        const propose = proposeFromSignals(signals, {
-          rule: DEFAULT_RULE,
-          createdBy: "cli",
+        // The CLI has no dreaming cursor; the dreaming sub-pass shares the
+        // regular `since` window (propose-merge dedup is the overlap safety net).
+        const dreamSince = since;
+        // FRI-174: the CLI runs the SAME ordered cycle as the daemon endpoint
+        // via `runEvolveCycle`, with no-op spawn/notify effects (the CLI is not
+        // the orchestrator and does not auto-spawn) and the REAL `listEntries`
+        // for true parity. Errors propagate — citty prints + non-zero exit.
+        const result = await runEvolveCycle({
+          since,
+          dreamSince,
+          includeFriction: true,
+          includePreferences: true,
+          includeDreaming: true,
+          callerName: "cli",
+          orchestratorName: loadConfig().orchestratorName,
+          effects: {
+            notify() {},
+            spawnTriage() {},
+            spawnBuilder() {},
+            listEntries: () => listEntries(),
+          },
         });
-        const reranked = rerankAll(DEFAULT_RULE);
-        const upgradeResult = await resolveByUpgrade({ daemonLogPath: DAEMON_LOG_PATH });
-        appendRun({
-          ts: windowEnd,
-          by: "cli",
-          windowStart: since,
-          windowEnd,
-          signalsScanned: signals.length,
-          proposalsCreated: propose.created.length,
-          proposalsUpdated: propose.updated.length,
-          promotedToCritical: propose.promotedToCritical.length,
-        });
-        console.log(
-          JSON.stringify(
-            {
-              signals: signals.length,
-              created: propose.created.length,
-              updated: propose.updated.length,
-              promotedToCritical: propose.promotedToCritical.length,
-              reranked: reranked.reranked.length,
-              promotedFromRerank: reranked.promoted.length,
-              familyResolved: propose.familyResolved.length,
-              familyRejected: propose.familyRejected.length,
-              upgradeResolved: upgradeResult.definitive,
-              upgradeTentative: upgradeResult.tentative,
-            },
-            null,
-            2,
-          ),
-        );
+        console.log(JSON.stringify(result, null, 2));
       },
     }),
     enrich: defineCommand({

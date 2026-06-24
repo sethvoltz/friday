@@ -57,6 +57,17 @@ import type { OrchestratorTurn, DreamScoredCandidate, Signal } from "@friday/evo
 // ───────────────────────────────────────────────────────────────────────────
 let CANNED: Signal[] = [];
 
+// The dreaming sub-pass scanner. FRI-174 moved the scan→propose→…→dream spine
+// into `runEvolveCycle` (a deep module shared with the CLI), whose COMPILED body
+// imports `scanDreaming` from the package-internal `./scan-dreaming.js` — NOT via
+// the `@friday/evolve` barrel. So mocking the barrel alone no longer intercepts
+// the call. We mock BOTH: the barrel (for the bits the test imports + asserts
+// against) AND the dist-internal module that `runEvolveCycle` actually calls,
+// pointing both at the same per-test CANNED stub. Everything else downstream
+// (proposeFromSignals → applyDreamProposals → applyProposal/searchMemories/
+// updateEntry → runHygiene → appendDreamEntry) stays REAL.
+const scanDreamingStub = vi.fn(async () => CANNED);
+
 vi.mock("@friday/evolve", async (orig) => {
   const real = await orig<typeof import("@friday/evolve")>();
   return {
@@ -64,8 +75,16 @@ vi.mock("@friday/evolve", async (orig) => {
     // The endpoint calls scanDreaming({ since, evidence }); we ignore both and
     // return the per-test CANNED array (closure-captured `let`, re-assigned in
     // each describe's beforeAll).
-    scanDreaming: vi.fn(async () => CANNED),
+    scanDreaming: scanDreamingStub,
   };
+});
+
+// The module identity `runEvolveCycle` imports internally. Keep the real
+// encode/decode (propose.ts depends on decodeDreamPayload) — replace ONLY
+// scanDreaming with the same stub.
+vi.mock("@friday/evolve/scan-dreaming", async (orig) => {
+  const real = await orig<typeof import("@friday/evolve/scan-dreaming")>();
+  return { ...real, scanDreaming: scanDreamingStub };
 });
 
 let handle: import("@friday/shared").TestDbHandle;

@@ -35,3 +35,4 @@ export * from "./scan-dreaming.js";
 export * from "./hygiene.js";
 export * from "./dream-diary.js";
 export * from "./dreaming-pipeline.js";
+export * from "./run-cycle.js";
