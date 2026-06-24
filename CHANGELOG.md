@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.33.2](https://github.com/sethvoltz/friday/compare/v1.33.1...v1.33.2) (2026-06-24)
+
+
+### Bug Fixes
+
+* **dashboard:** reorder Settings cards ([#319](https://github.com/sethvoltz/friday/issues/319)) ([f730ad4](https://github.com/sethvoltz/friday/commit/f730ad402294f3fb4313f7925b1f51b267694327))
+
 ## [1.33.1](https://github.com/sethvoltz/friday/compare/v1.33.0...v1.33.1) (2026-06-23)
 
 
