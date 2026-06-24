@@ -431,6 +431,107 @@ export const WEDGE_ERROR_PAYLOAD: ErrorBlockPayload = {
 };
 
 /**
+ * The stale-turn force-kill error block (FRI-175). Moved here from the
+ * forceKillStuckWorker inline ternary so the four force-kill payloads live next
+ * to {@link WEDGE_ERROR_PAYLOAD} with a single source of truth — a copy edit in
+ * one place can no longer silently drift from the other author.
+ */
+export const STALE_TURN_ERROR_PAYLOAD: ErrorBlockPayload = {
+  code: "turn_timed_out",
+  headline: "Turn timed out — exceeded 4h ceiling, worker restarted",
+  rawMessage:
+    "Stale-turn ceiling exceeded: this worker stayed on the same turn " +
+    "for more than 4 hours. The agent has been killed; the next " +
+    "message will spawn a fresh worker.",
+};
+
+/** The FSM-violation force-kill error block (FRI-175). */
+export const FSM_VIOLATION_ERROR_PAYLOAD: ErrorBlockPayload = {
+  code: "block_fsm_violation",
+  headline: "Agent emitted invalid block transitions — restarted",
+  rawMessage:
+    "FSM violations exceeded threshold: the worker emitted " +
+    "FSM_VIOLATION_THRESHOLD invalid block transitions in this turn " +
+    "(delta-after-close, double-open, or similar). The worker's " +
+    "block bookkeeping is desynced from the daemon's; the agent has " +
+    "been killed; the next message will spawn a fresh worker.",
+};
+
+/** The forced-abort (SDK-didn't-honor-abort) force-kill error block (FRI-175). */
+export const FORCED_ABORT_ERROR_PAYLOAD: ErrorBlockPayload = {
+  code: "stopped_forced",
+  headline: "Stop forced — SDK did not honor abort, worker restarted",
+  rawMessage:
+    "Cooperative abort failed: the SDK iterator stayed wedged after 500ms " +
+    "(descendants already SIGTERMed at T+0; daemonFetch signal propagated " +
+    "to in-flight MCP handlers). The agent has been killed; the next message " +
+    "will spawn a fresh worker. Healthy turns clean up via the SDK's own " +
+    "abortController and never reach this path.",
+};
+
+/**
+ * FRI-175 — the pure intent constructor for the terminal "finalize a turn"
+ * sequence shared by `applyFail` (machine) and `forceKillStuckWorker`
+ * (lifecycle). It builds, in strict order:
+ *
+ *   [ record-error-block?, tear-down-turn, publish-error, publish-turn-done ]
+ *
+ * `record-error-block` is omitted iff `errorBlock === null` (a plain cooperative
+ * abort surfaces no chat error block). This is the load-bearing ordering
+ * invariant: tear-down-turn before publish-error before publish-turn-done.
+ *
+ * The builder is PURE and SYNCHRONOUS — no `apply`, no `runTransition`, no
+ * Generation gating, no transition queue, no I/O (FRI-145 single-writer safety:
+ * the builder never touches `agents.status`). It emits NO `set-status` intent
+ * (ADR-031: `registry.setStatus` is the only door — `applyFail` keeps its own
+ * `set-status{idle}` and force-kill keeps its direct `registry.setStatus(idle)`).
+ *
+ * Callers pre-resolve the `publish-error` triple (`errorEvent`) — the builder
+ * never derives the in-band error event from `errorBlock`; the two are
+ * independent per the force-kill per-reason message contract. The
+ * `publish-turn-done` element deliberately carries NO `usage`/`zeroBlockReason`
+ * key (the finalization family never emits them; the executor's `usage:
+ * undefined` downstream is wire-invisible under `JSON.stringify`).
+ */
+export function buildTurnFinalization(args: {
+  turnId: string;
+  agentName: string;
+  /** null => no record-error-block (plain cooperative abort). */
+  errorBlock: ErrorBlockPayload | null;
+  errorEvent: { code: string; message: string; recoverable: boolean };
+  turnStatus: "aborted" | "error";
+  /** turn_done tag — "cooperative" (applyFail abort) or "forced" (force-kill). */
+  abortReason?: "cooperative" | "forced";
+}): Intent[] {
+  const intents: Intent[] = [];
+
+  if (args.errorBlock !== null) {
+    intents.push({ kind: "record-error-block", payload: args.errorBlock });
+  }
+
+  intents.push({ kind: "tear-down-turn", turnId: args.turnId, status: args.turnStatus });
+
+  intents.push({
+    kind: "publish-error",
+    turnId: args.turnId,
+    agent: args.agentName,
+    code: args.errorEvent.code,
+    message: args.errorEvent.message,
+    recoverable: args.errorEvent.recoverable,
+  });
+
+  intents.push({
+    kind: "publish-turn-done",
+    turnId: args.turnId,
+    agent: args.agentName,
+    status: args.turnStatus,
+    ...(args.abortReason ? { abortReason: args.abortReason } : {}),
+  });
+
+  return intents;
+}
+
+/**
  * FRI-156 follow-up (SEV-0 safety net): the visible notice block emitted when
  * an INTERACTIVE (`user_chat`-origin) turn completes with zero content blocks.
  * Without this, such a turn is zero-blocked silently (FRI-156 suppresses the
@@ -654,53 +755,38 @@ function applyComplete(w: TurnContext, e: CompletePayload, deps: ApplyDeps): App
 }
 
 function applyFail(w: TurnContext, e: FailPayload, deps: ApplyDeps): ApplyResult {
-  const intents: Intent[] = [];
   const wasAbort = w.abortRequested;
 
-  // Materialize a chat-visible error block (skip plain aborts).
-  if (!wasAbort) {
-    intents.push({
-      kind: "record-error-block",
-      payload: {
+  // FRI-175: the terminal finalize core — record-error-block (skipped on plain
+  // abort) → tear-down-turn → publish-error → publish-turn-done — is now built
+  // by the shared pure constructor. The error block payload and the resolved
+  // publish-error code are pre-computed here (they differ per caller) and passed
+  // in. FRI-148 A ordering (tear-down-turn fused + immediately after the error
+  // block; error → turn_done SSE order) is preserved by the builder's contract.
+  const errorBlock: ErrorBlockPayload | null = wasAbort
+    ? null
+    : {
         code: e.code ?? "worker_error",
         headline: e.headline ?? e.message,
         httpStatus: e.httpStatus,
         retryAfterSeconds: e.retryAfterSeconds,
         requestId: e.requestId,
         rawMessage: e.rawMessage ?? e.message,
-      },
-    });
-  }
+      };
 
-  // FRI-148 A (A1-default reorder): the old order emitted finalize-blocks here,
-  // then publish-error/publish-turn-done/posthog/log, then end-turn at the tail.
-  // The pair is now fused into one tear-down-turn intent and MOVED to
-  // immediately follow record-error-block, so the boundary "finalize the
-  // streaming rows AND drop the turn accumulator" runs as one contiguous
-  // operation. The user-visible SSE order (error → turn_done) is preserved —
-  // tear-down-turn emits per-block `block_complete` SSEs (same as the old
-  // finalize) but does NOT emit the turn-level error/turn_done events.
-  intents.push({
-    kind: "tear-down-turn",
+  const intents: Intent[] = buildTurnFinalization({
     turnId: w.turnId,
-    status: wasAbort ? "aborted" : "error",
-  });
-
-  // Canonical TurnErrorEvent BEFORE turn_done.
-  intents.push({
-    kind: "publish-error",
-    turnId: w.turnId,
-    agent: w.agentName,
-    code: wasAbort ? "aborted" : (e.code ?? "worker_error"),
-    message: e.message,
-    recoverable: e.recoverable,
-  });
-
-  intents.push({
-    kind: "publish-turn-done",
-    turnId: w.turnId,
-    agent: w.agentName,
-    status: wasAbort ? "aborted" : "error",
+    agentName: w.agentName,
+    errorBlock,
+    // The publish-error code is pre-resolved at the call site: a plain abort
+    // publishes code "aborted"; otherwise the worker's error code (or the
+    // worker_error fallback).
+    errorEvent: {
+      code: wasAbort ? "aborted" : (e.code ?? "worker_error"),
+      message: e.message,
+      recoverable: e.recoverable,
+    },
+    turnStatus: wasAbort ? "aborted" : "error",
     ...(wasAbort ? { abortReason: "cooperative" as const } : {}),
   });
 
