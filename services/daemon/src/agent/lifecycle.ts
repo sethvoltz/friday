@@ -56,7 +56,12 @@ import { enqueueTransition, enqueueTransitionResult } from "./transition-queue.j
 import {
   apply as applyTransition,
   applyAdmin,
+  buildTurnFinalization,
   projectStatus,
+  FORCED_ABORT_ERROR_PAYLOAD,
+  FSM_VIOLATION_ERROR_PAYLOAD,
+  STALE_TURN_ERROR_PAYLOAD,
+  WEDGE_ERROR_PAYLOAD,
   type AdminTransition,
   type StatusProjection,
   type Transition,
@@ -1343,84 +1348,50 @@ async function forceKillStuckWorker(
     });
   }
 
+  // FRI-175: the four per-reason error block payloads now live as named exports
+  // in the turn-state machine (single source of truth — a copy edit can no
+  // longer drift from `applyFail`'s wedge path). Select one by reason.
   const errorPayload =
     reason === "stale"
-      ? {
-          code: "turn_timed_out",
-          headline: "Turn timed out — exceeded 4h ceiling, worker restarted",
-          rawMessage:
-            "Stale-turn ceiling exceeded: this worker stayed on the same turn " +
-            "for more than 4 hours. The agent has been killed; the next " +
-            "message will spawn a fresh worker.",
-        }
+      ? STALE_TURN_ERROR_PAYLOAD
       : reason === "wedge"
-        ? {
-            code: "worker_wedged",
-            headline: "Agent looped without producing output — restarted",
-            rawMessage:
-              "Wedge detected: the worker produced N consecutive turns with " +
-              "zero content blocks. Likely cause: SDK could not resume the " +
-              "prior session (transcript missing from the encoded-cwd " +
-              "project dir), or the model emitted nothing for N turns in a " +
-              "row. The agent has been killed; the next message will spawn " +
-              "a fresh worker.",
-          }
+        ? WEDGE_ERROR_PAYLOAD
         : reason === "fsm-violation"
-          ? {
-              code: "block_fsm_violation",
-              headline: "Agent emitted invalid block transitions — restarted",
-              rawMessage:
-                "FSM violations exceeded threshold: the worker emitted " +
-                "FSM_VIOLATION_THRESHOLD invalid block transitions in this turn " +
-                "(delta-after-close, double-open, or similar). The worker's " +
-                "block bookkeeping is desynced from the daemon's; the agent has " +
-                "been killed; the next message will spawn a fresh worker.",
-            }
-          : {
-              code: "stopped_forced",
-              headline: "Stop forced — SDK did not honor abort, worker restarted",
-              rawMessage:
-                "Cooperative abort failed: the SDK iterator stayed wedged after 500ms " +
-                "(descendants already SIGTERMed at T+0; daemonFetch signal propagated " +
-                "to in-flight MCP handlers). The agent has been killed; the next message " +
-                "will spawn a fresh worker. Healthy turns clean up via the SDK's own " +
-                "abortController and never reach this path.",
-            };
+          ? FSM_VIOLATION_ERROR_PAYLOAD
+          : FORCED_ABORT_ERROR_PAYLOAD;
   // Wedge, stale-turn, and fsm-violation all ride `error` status; only an
   // explicit abort synthesizes `abort_reason: "forced"`.
   const ridesError = reason === "stale" || reason === "wedge" || reason === "fsm-violation";
-  await bsRecordError(w, errorPayload);
-  // FRI-148 A: bsFinalize + bsEndTurn fused into bsTearDownTurn. The per-turn
-  // block-accumulator drop runs as part of the same op, so the upcoming
-  // child.exit handler's safety-net teardown sees an empty turn entry (also
-  // Generation-gated, so it never runs for this superseded `w` anyway).
-  await bsTearDownTurn(w, ridesError ? "error" : "aborted");
-  // Emit the in-band TurnErrorEvent so any consumers still listening for
-  // it know a force-kill happened (vs. a clean abort).
-  eventBus.publish({
-    v: 1,
-    type: "error",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    code: errorPayload.code,
-    message:
-      reason === "stale"
-        ? "Turn timed out — stale-turn ceiling exceeded"
-        : reason === "wedge"
-          ? "Wedge detected — agent looped without producing output"
-          : reason === "fsm-violation"
-            ? "FSM violations exceeded threshold — block bookkeeping desynced"
-            : "Stop forced — worker unresponsive",
-    recoverable: true,
-  });
-  eventBus.publish({
-    v: 1,
-    type: "turn_done",
-    turn_id: w.turnId,
-    agent: w.agentName,
-    status: ridesError ? "error" : "aborted",
-    ...(reason === "abort" ? { abort_reason: "forced" as const } : {}),
-  });
+  // The per-reason in-band `error` event message (distinct from the error
+  // block's rawMessage and from its code). Stays a local ternary feeding the
+  // builder's errorEvent.message.
+  const errorMessage =
+    reason === "stale"
+      ? "Turn timed out — stale-turn ceiling exceeded"
+      : reason === "wedge"
+        ? "Wedge detected — agent looped without producing output"
+        : reason === "fsm-violation"
+          ? "FSM violations exceeded threshold — block bookkeeping desynced"
+          : "Stop forced — worker unresponsive";
+  // FRI-175: the hand-rolled finalize core (record-error → tear-down → publish
+  // error → publish turn_done) is now the shared pure builder, executed through
+  // the prod ports. Same collaborator calls, same await structure (record-error
+  // + tear-down awaited; the two publishes synchronous), same array order — see
+  // FRI-175 §8 behaviour-preservation proof. The Generation `live.delete` above
+  // still precedes the first await here (record-error-block), preserving the
+  // FRI-145 happens-before.
+  await executeIntents(
+    w,
+    buildTurnFinalization({
+      turnId: w.turnId,
+      agentName: w.agentName,
+      errorBlock: errorPayload,
+      errorEvent: { code: errorPayload.code, message: errorMessage, recoverable: true },
+      turnStatus: ridesError ? "error" : "aborted",
+      ...(reason === "abort" ? { abortReason: "forced" as const } : {}),
+    }),
+    prodPorts,
+  );
   w.lastExitStatus = ridesError ? "error" : "aborted";
   setWorkerStatus(w, "idle", "forceKillStuckWorker");
   // FRI-110: keep the `turnStart` invariant universally true. After

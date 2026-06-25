@@ -13,7 +13,12 @@
 import { describe, expect, it } from "vitest";
 import {
   apply,
+  buildTurnFinalization,
   projectStatus,
+  FORCED_ABORT_ERROR_PAYLOAD,
+  FSM_VIOLATION_ERROR_PAYLOAD,
+  STALE_TURN_ERROR_PAYLOAD,
+  WEDGE_ERROR_PAYLOAD,
   ZERO_BLOCK_USER_CHAT_PAYLOAD,
   type ApplyDeps,
   type Intent,
@@ -673,5 +678,184 @@ describe("turn-state-machine: hard-exit (FRI-145 M5 — self-heal, Bug #2)", () 
       { kind: "set-status", name: "idle-agent", status: "idle" },
     ]);
     expect(r.intents.some((i) => i.kind === "publish-turn-done")).toBe(false);
+  });
+});
+
+/**
+ * FRI-175 — the pure intent constructor shared by `applyFail` and
+ * `forceKillStuckWorker`. These tests pin the EXACT `Intent[]` (positional,
+ * `toEqual<Intent[]>`) for the four force-kill reasons plus the cooperative
+ * null-errorBlock case. The load-bearing invariants: ordering
+ * (record-error-block? → tear-down-turn → publish-error → publish-turn-done),
+ * the error-vs-aborted turnStatus branch, the abort_reason tag, and the absence
+ * of a `usage`/`zeroBlockReason` key on publish-turn-done.
+ */
+describe("buildTurnFinalization", () => {
+  it("wedge — full error finalization, status error, ordered", () => {
+    const r = buildTurnFinalization({
+      turnId: "t",
+      agentName: "a",
+      errorBlock: WEDGE_ERROR_PAYLOAD,
+      errorEvent: {
+        code: "worker_wedged",
+        message: "Wedge detected — agent looped without producing output",
+        recoverable: true,
+      },
+      turnStatus: "error",
+    });
+    expect(r).toEqual<Intent[]>([
+      { kind: "record-error-block", payload: WEDGE_ERROR_PAYLOAD },
+      { kind: "tear-down-turn", turnId: "t", status: "error" },
+      {
+        kind: "publish-error",
+        turnId: "t",
+        agent: "a",
+        code: "worker_wedged",
+        message: "Wedge detected — agent looped without producing output",
+        recoverable: true,
+      },
+      { kind: "publish-turn-done", turnId: "t", agent: "a", status: "error" },
+    ]);
+    // No usage / zeroBlockReason / abortReason keys on turn_done.
+    const done = r[3];
+    expect(Object.keys(done).sort()).toEqual(["agent", "kind", "status", "turnId"]);
+  });
+
+  it("stale — error finalization, publish-error code turn_timed_out, no abortReason", () => {
+    const r = buildTurnFinalization({
+      turnId: "t",
+      agentName: "a",
+      errorBlock: STALE_TURN_ERROR_PAYLOAD,
+      errorEvent: {
+        code: "turn_timed_out",
+        message: "Turn timed out — stale-turn ceiling exceeded",
+        recoverable: true,
+      },
+      turnStatus: "error",
+    });
+    expect(r).toEqual<Intent[]>([
+      { kind: "record-error-block", payload: STALE_TURN_ERROR_PAYLOAD },
+      { kind: "tear-down-turn", turnId: "t", status: "error" },
+      {
+        kind: "publish-error",
+        turnId: "t",
+        agent: "a",
+        code: "turn_timed_out",
+        message: "Turn timed out — stale-turn ceiling exceeded",
+        recoverable: true,
+      },
+      { kind: "publish-turn-done", turnId: "t", agent: "a", status: "error" },
+    ]);
+    const err = r.find((i) => i.kind === "publish-error");
+    expect(err && err.kind === "publish-error" && err.code).toBe("turn_timed_out");
+    const done = r.find((i) => i.kind === "publish-turn-done");
+    expect(done && done.kind === "publish-turn-done" && done.status).toBe("error");
+    expect(done && "abortReason" in done).toBe(false);
+  });
+
+  it("fsm-violation — error finalization, no abortReason", () => {
+    const r = buildTurnFinalization({
+      turnId: "t",
+      agentName: "a",
+      errorBlock: FSM_VIOLATION_ERROR_PAYLOAD,
+      errorEvent: {
+        code: "block_fsm_violation",
+        message: "FSM violations exceeded threshold — block bookkeeping desynced",
+        recoverable: true,
+      },
+      turnStatus: "error",
+    });
+    expect(r).toEqual<Intent[]>([
+      { kind: "record-error-block", payload: FSM_VIOLATION_ERROR_PAYLOAD },
+      { kind: "tear-down-turn", turnId: "t", status: "error" },
+      {
+        kind: "publish-error",
+        turnId: "t",
+        agent: "a",
+        code: "block_fsm_violation",
+        message: "FSM violations exceeded threshold — block bookkeeping desynced",
+        recoverable: true,
+      },
+      { kind: "publish-turn-done", turnId: "t", agent: "a", status: "error" },
+    ]);
+    const done = r.find((i) => i.kind === "publish-turn-done");
+    expect(done && done.kind === "publish-turn-done" && done.status).toBe("error");
+    expect(done && "abortReason" in done).toBe(false);
+  });
+
+  it("forced — aborted finalization, abortReason forced, tear-down aborted", () => {
+    const r = buildTurnFinalization({
+      turnId: "t",
+      agentName: "a",
+      errorBlock: FORCED_ABORT_ERROR_PAYLOAD,
+      errorEvent: {
+        code: "stopped_forced",
+        message: "Stop forced — worker unresponsive",
+        recoverable: true,
+      },
+      turnStatus: "aborted",
+      abortReason: "forced",
+    });
+    expect(r).toEqual<Intent[]>([
+      { kind: "record-error-block", payload: FORCED_ABORT_ERROR_PAYLOAD },
+      { kind: "tear-down-turn", turnId: "t", status: "aborted" },
+      {
+        kind: "publish-error",
+        turnId: "t",
+        agent: "a",
+        code: "stopped_forced",
+        message: "Stop forced — worker unresponsive",
+        recoverable: true,
+      },
+      {
+        kind: "publish-turn-done",
+        turnId: "t",
+        agent: "a",
+        status: "aborted",
+        abortReason: "forced",
+      },
+    ]);
+    // The final element is the forced turn_done.
+    expect(r[r.length - 1]).toEqual<Intent>({
+      kind: "publish-turn-done",
+      turnId: "t",
+      agent: "a",
+      status: "aborted",
+      abortReason: "forced",
+    });
+    const teardown = r.find((i) => i.kind === "tear-down-turn");
+    expect(teardown && teardown.kind === "tear-down-turn" && teardown.status).toBe("aborted");
+  });
+
+  it("null errorBlock — plain cooperative abort, no record-error-block, length 3", () => {
+    const r = buildTurnFinalization({
+      turnId: "t",
+      agentName: "a",
+      errorBlock: null,
+      errorEvent: { code: "aborted", message: "stopped", recoverable: true },
+      turnStatus: "aborted",
+      abortReason: "cooperative",
+    });
+    // Exact, positional Intent[] — no record-error-block, and the middle
+    // publish-error is pinned too (not just the first/last elements).
+    expect(r).toEqual<Intent[]>([
+      { kind: "tear-down-turn", turnId: "t", status: "aborted" },
+      {
+        kind: "publish-error",
+        turnId: "t",
+        agent: "a",
+        code: "aborted",
+        message: "stopped",
+        recoverable: true,
+      },
+      {
+        kind: "publish-turn-done",
+        turnId: "t",
+        agent: "a",
+        status: "aborted",
+        abortReason: "cooperative",
+      },
+    ]);
+    expect(r.some((i) => i.kind === "record-error-block")).toBe(false);
   });
 });
