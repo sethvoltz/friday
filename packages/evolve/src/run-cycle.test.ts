@@ -184,6 +184,7 @@ function noopEffects() {
     spawnTriage: vi.fn(),
     spawnBuilder: vi.fn(),
     listEntries: vi.fn(async () => []),
+    onUpgradeResolved: vi.fn(),
   };
 }
 
@@ -321,6 +322,12 @@ describe("runEvolveCycle", () => {
     // empty store).
     expect(appendRunImpl).toHaveBeenCalledTimes(1);
     expect(appendRunImpl.mock.calls[0][0]).toMatchObject({ by: "cli", proposalsCreated: 1 });
+
+    // The daemon-only upgrade-resolution observer fires once with the resolver's
+    // counts (the daemon emits the `evolve.upgrade-resolved` log from it; the CLI
+    // omits the effect). resolveByUpgrade is mocked to { definitive: 0, tentative: 0 }.
+    expect(effects.onUpgradeResolved).toHaveBeenCalledTimes(1);
+    expect(effects.onUpgradeResolved.mock.calls[0][0]).toEqual({ definitive: 0, tentative: 0 });
   });
 
   it("critical-notify count math preserves promotedToCritical + reranked.promoted", async () => {

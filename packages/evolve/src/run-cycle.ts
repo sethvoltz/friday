@@ -14,8 +14,8 @@
  *  - RESULT SHAPE (decision b): `EvolveCycleResult` is the endpoint's exact
  *    12-field 200-summary. Both callers adopt it.
  *  - SEAM (i): the `autoSpawnTriageHelpers`/`autoSpawnBuilders` config gates +
- *    the `createAgent`/`updateProposal`/`sendMail` escalation IO STAY in the
- *    daemon's effect closure. This module always calls `effects.spawnTriage` /
+ *    the agent-spawning / proposal-linkage / mail-sending escalation IO STAY in
+ *    the daemon's effect closure. This module always calls `effects.spawnTriage` /
  *    `effects.spawnBuilder` with the unconditionally-built plan; the daemon
  *    closure checks the flag and no-ops when off. This module imports NO daemon
  *    config and NO daemon logger (console.warn for the soft-error path, matching
@@ -42,7 +42,7 @@ import { DEFAULT_RULE, type CriticalityRule } from "./rank.js";
 
 /**
  * The side-effect boundary `runEvolveCycle` drives. The daemon supplies the
- * real `notify`, the gated `createAgent` triage/builder loops, and the real
+ * real notify, the gated agent-spawning triage/builder loops, and the real
  * `listEntries`; the CLI supplies no-op spawn/notify effects + the real
  * `listEntries` (true parity).
  */
@@ -59,6 +59,11 @@ export interface EvolveCycleEffects {
   /** Read the live memory corpus (real `listEntries` from `@friday/memory` in
    *  BOTH callers). */
   listEntries(): Promise<MemoryEntry[]>;
+  /** Observe the upgrade-resolution counts. Daemon-only side effect: the daemon
+   *  emits the structured `evolve.upgrade-resolved` info log (preserving the
+   *  pre-extraction behaviour at the old `server.ts` call site); the CLI and
+   *  tests omit it. Optional so non-daemon callers carry no logging boilerplate. */
+  onUpgradeResolved?(counts: { definitive: number; tentative: number }): Promise<void> | void;
 }
 
 export interface EvolveCycleOptions {
@@ -171,7 +176,8 @@ export async function runEvolveCycle(opts: EvolveCycleOptions): Promise<EvolveCy
     createdBy: callerName,
   });
   const reranked = rerankAll(rule);
-  await resolveByUpgrade({ daemonLogPath: DAEMON_LOG_PATH });
+  const upgradeResult = await resolveByUpgrade({ daemonLogPath: DAEMON_LOG_PATH });
+  await effects.onUpgradeResolved?.(upgradeResult);
   appendRun({
     ts: windowEnd,
     by: callerName,
@@ -203,15 +209,15 @@ export async function runEvolveCycle(opts: EvolveCycleOptions): Promise<EvolveCy
   }
   // FRI-40 Phase 1: auto-spawn a read-only triage helper for each proposal
   // that just promoted to critical — across BOTH promote surfaces (fresh-create
-  // + rerank). The config gate + per-spawn createAgent IO lives in the daemon's
-  // effect closure (seam i); the plan is built unconditionally here (harmless
-  // when the effect no-ops).
+  // + rerank). The config gate + per-spawn agent-creation IO lives in the
+  // daemon's effect closure (seam i); the plan is built unconditionally here
+  // (harmless when the effect no-ops).
   await effects.spawnTriage(triageSpawnPlan([...propose.promotedToCritical, ...reranked.promoted]));
   // FRI-149 Phase 2: auto-spawn an auto-fixing Builder for each proposal that
   // just promoted to critical AND is code-shaped AND carries a high-severity
-  // signal — across BOTH promote surfaces. The config gate, the
-  // `evolveEscalation` flag, the createAgent, the updateProposal linkage, and
-  // the sendMail ALL live in the daemon's effect closure (seam i / ADR-036);
+  // signal — across BOTH promote surfaces. The config gate, the un-forgeable
+  // escalation flag, the agent-creation, the proposal-linkage update, and the
+  // orchestrator mail ALL live in the daemon's effect closure (seam i / ADR-036);
   // the plan is built unconditionally here.
   await effects.spawnBuilder(
     builderEscalationPlan([...propose.promotedToCritical, ...reranked.promoted]),

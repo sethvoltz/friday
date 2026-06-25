@@ -1153,6 +1153,9 @@ async function handle(
         }
       },
       listEntries: () => listEntries(),
+      onUpgradeResolved: ({ definitive, tentative }) => {
+        logger.log("info", "evolve.upgrade-resolved", { definitive, tentative });
+      },
     };
     try {
       const result = await runEvolveCycle({
