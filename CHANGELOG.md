@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.34.0](https://github.com/sethvoltz/friday/compare/v1.33.3...v1.34.0) (2026-06-26)
+
+
+### Features
+
+* **system:** typed intent seam between mutators and listeners (ADR-049) ([#325](https://github.com/sethvoltz/friday/issues/325)) ([a6c90f4](https://github.com/sethvoltz/friday/commit/a6c90f41351d3738e82923f43ba2ee0df1d02114))
+
 ## [1.33.3](https://github.com/sethvoltz/friday/compare/v1.33.2...v1.33.3) (2026-06-26)
 
 
