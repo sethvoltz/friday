@@ -8034,3 +8034,327 @@ describe("FRI-158: parseBlocks redacted thinking and queued-race", () => {
     expect(out.find((m) => m.id === "nr_t-y")).toBeDefined();
   });
 });
+
+describe("bubble-convergence integration: optimistic ↔ canonical (Steps 4–5)", () => {
+  // Both interleavings of the POST-confirm vs SSE-block_complete race must
+  // converge on exactly one user bubble at userBlockIdForTurn — the dup-id
+  // crash this whole module exists to prevent. Drives `new ChatState()` end
+  // to end (addUser → confirmPending → applyEvent/applyZeroBlocks); the merge
+  // logic lives in the pure core, but the regression guard is the rendered
+  // `.messages`.
+
+  it("A POST-then-SSE: confirmPending lands the bubble, a later SSE block_complete patches it in place (no dup)", async () => {
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    chat.addUser("hello", { queueId: "q1" });
+    expect(chat.messages.length).toBe(1);
+
+    // POST confirms first → canonical user bubble in legacy, optimistic gone.
+    chat.confirmPending("q1", "turn-1");
+    expect(chat.messages.map((m) => m.id)).toEqual([userBlockIdForTurn("turn-1")]);
+    expect(chat.optimistic.size).toBe(0);
+
+    // SSE block_complete arrives AFTER — must patch the existing bubble in
+    // place, never push a second one at the same id.
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      seq: 1,
+      turn_id: "turn-1",
+      agent: "friday",
+      block_id: "blk1",
+      kind: "text",
+      role: "user",
+      content_json: '{"text":"hello"}',
+      status: "complete",
+      source: "user_chat",
+      ts: 1000,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(chat.messages.filter((m) => m.id === userBlockIdForTurn("turn-1")).length).toBe(1);
+    expect(chat.messages.length).toBe(1);
+    expect(chat.optimistic.size).toBe(0);
+  });
+
+  it("B SSE-then-POST: SSE block_complete lands the bubble first, confirmPending drops the optimistic, Zero replicate does not resurrect", async () => {
+    const { ChatState, userBlockIdForTurn } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    // queueId === the pre-minted blockId the daemon will echo as block_id.
+    chat.addUser("hello", { queueId: "blk1" });
+
+    // SSE first → canonical bubble in legacy; the optimistic pending still
+    // lingers until confirmPending fires.
+    chat.applyEvent({
+      v: 1,
+      type: "block_complete",
+      seq: 1,
+      turn_id: "turn-1",
+      agent: "friday",
+      block_id: "blk1",
+      kind: "text",
+      role: "user",
+      content_json: '{"text":"hello"}',
+      status: "complete",
+      source: "user_chat",
+      ts: 1000,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    // Pin WHICH two bubbles exist, not just the count: the canonical user bubble
+    // (landed by the SSE) plus the still-lingering optimistic pending. A
+    // dup-user-bubble bug here would duplicate the canonical id and slip past a
+    // bare length check.
+    const idsAfterSse = chat.messages.map((m) => m.id);
+    expect(idsAfterSse).toContain(userBlockIdForTurn("turn-1"));
+    expect(idsAfterSse.filter((id) => id.startsWith("pending_")).length).toBe(1);
+    expect(idsAfterSse.length).toBe(2);
+
+    // POST returns → confirmPending sees the SSE bubble already landed and
+    // drops the optimistic without pushing a duplicate.
+    chat.confirmPending("blk1", "turn-1");
+    expect(chat.messages.map((m) => m.id)).toEqual([userBlockIdForTurn("turn-1")]);
+    expect(chat.optimistic.size).toBe(0);
+
+    // Zero replicates the canonical row — the merge must dedup by id, not
+    // resurrect a second user bubble. (A no-response safety-net bubble is
+    // expected for the unanswered user turn; the invariant under test is the
+    // single user bubble.)
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "1",
+          block_id: "blk1",
+          turn_id: "turn-1",
+          agent_name: "friday",
+          session_id: "s1",
+          message_id: null,
+          block_index: 0,
+          role: "user",
+          kind: "text",
+          source: "user_chat",
+          content_json: { text: "hello" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1000,
+        } as Parameters<typeof chat.applyZeroBlocks>[0][number],
+      ],
+      "friday",
+      "complete",
+    );
+
+    expect(chat.messages.filter((m) => m.id === userBlockIdForTurn("turn-1")).length).toBe(1);
+    expect(chat.messages.filter((m) => m.role === "user").length).toBe(1);
+    expect(chat.messages.some((m) => m.pending)).toBe(false);
+  });
+
+  it("block_canceled drops the overlay entry for EVERY agent sharing the block id (agent-agnostic shell apply, not just the focused one)", async () => {
+    const { ChatState, overlayKey } = await import("./chat.svelte");
+    const chat = new ChatState();
+
+    // Seed a streaming overlay for agent "friday" against block id "blk-x".
+    // block_start is focus-gated, so each overlay must be mounted while its
+    // agent is focused.
+    chat.focusedAgent = "friday";
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      seq: 1,
+      turn_id: "turn-f",
+      agent: "friday",
+      block_id: "blk-x",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      source: null,
+      ts: 1000,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    // Seed a SECOND overlay for a DIFFERENT agent against the SAME block id.
+    chat.focusedAgent = "scout";
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      seq: 1,
+      turn_id: "turn-s",
+      agent: "scout",
+      block_id: "blk-x",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      source: null,
+      ts: 1000,
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    const fridayKey = overlayKey("friday", "b_blk-x");
+    const scoutKey = overlayKey("scout", "b_blk-x");
+    expect(chat.streaming.has(fridayKey)).toBe(true);
+    expect(chat.streaming.has(scoutKey)).toBe(true);
+
+    // Cancel arrives for the focused agent (scout). The shell must delete BOTH
+    // overlay keys — the agent-agnostic `dropKeys` from `reconcileCanceled` —
+    // not merely the focused agent's, so a stale cross-agent overlay can't leak.
+    chat.applyEvent({
+      v: 1,
+      type: "block_canceled",
+      seq: 2,
+      turn_id: "turn-s",
+      agent: "scout",
+      block_id: "blk-x",
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    expect(chat.streaming.has(fridayKey)).toBe(false);
+    expect(chat.streaming.has(scoutKey)).toBe(false);
+    expect(chat.streaming.size).toBe(0);
+  });
+
+  it("C reload-mid-state: a live streaming overlay converges with the canonical Zero row into ONE terminal bubble (overlay pruned)", async () => {
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    // Live streaming assistant block via SSE.
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      seq: 1,
+      turn_id: "turn-1",
+      agent: "friday",
+      block_id: "blk1",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      source: null,
+      ts: 1000,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      seq: 2,
+      turn_id: "turn-1",
+      agent: "friday",
+      block_id: "blk1",
+      delta: { text: "partial" },
+    } as Parameters<typeof chat.applyEvent>[0]);
+    expect(chat.messages.map((m) => m.id)).toEqual(["b_blk1"]);
+    expect(chat.messages[0]!.status).toBe("streaming");
+    expect(chat.streaming.size).toBe(1);
+
+    // Zero replicates the canonical row at a terminal status — pruneConverged
+    // drops the now-redundant overlay; the bubble is the canonical one.
+    chat.applyZeroBlocks(
+      [
+        {
+          id: "1",
+          block_id: "blk1",
+          turn_id: "turn-1",
+          agent_name: "friday",
+          session_id: "s1",
+          message_id: null,
+          block_index: 0,
+          role: "assistant",
+          kind: "text",
+          source: null,
+          content_json: { text: "partial done" },
+          status: "complete",
+          streaming: false,
+          origin_mutation_id: null,
+          ts: 1000,
+        } as Parameters<typeof chat.applyZeroBlocks>[0][number],
+      ],
+      "friday",
+      "complete",
+    );
+
+    expect(chat.messages.map((m) => m.id)).toEqual(["b_blk1"]);
+    expect(chat.messages[0]!.status).toBe("complete");
+    expect(chat.messages[0]!.text).toBe("partial done");
+    expect(chat.streaming.size).toBe(0);
+  });
+
+  it("a streaming entry's text mutation is visible BY REFERENCE in place and never re-keys/re-orders/drops/dups the bubble list", async () => {
+    // SCOPE OF THIS PROBE (read carefully — it does NOT cover the
+    // perf-subscription contract). It pins two things: (a) the overlay entry is
+    // returned BY REFERENCE (never cloned), so `entry.text += delta` is visible
+    // in place on the same object; (b) that mutation does not re-key/re-order/
+    // drop/dup the merged list (structural invariance). These guard
+    // restructuring regressions.
+    //
+    // It deliberately does NOT assert `chat.messages === before` (array
+    // identity), and that omission is NOT a coverage gap papered over here: the
+    // perf-subscription contract — "mergeBubbles reads ONLY identity fields, so
+    // #derivedMessages never re-runs on a per-delta text/status mutation" — is
+    // pinned DISCRIMINATINGLY by the pure access-tracker test in
+    // bubble-convergence.test.ts ("reads ONLY identity fields …"). The structural
+    // + by-reference checks below pass whether or not that subscription bug is
+    // present (a mergeBubbles that read `entry.text` still returns the same
+    // entries by reference in the same order — text affects neither cloning nor
+    // ordering), so they cannot stand in for it.
+    //
+    // Why array identity is not assertable HERE: this repo's vitest compiles
+    // Svelte server-side (no reactive root is reachable — `$effect` never runs,
+    // `$effect.root` does not invoke its callback, `$derived` never memoizes), so
+    // `chat.messages` recomputes a FRESH outer array on every read regardless of
+    // the bug. The `=== before` check is therefore structurally unobservable in
+    // any test in this harness, not merely "meaningless" — hence the contract is
+    // pinned at its root cause (the pure function) instead.
+    const { ChatState } = await import("./chat.svelte");
+    const chat = new ChatState();
+    chat.focusedAgent = "friday";
+    attachSession(chat, "friday", "s1");
+
+    chat.applyEvent({
+      v: 1,
+      type: "block_start",
+      seq: 1,
+      turn_id: "turn-1",
+      agent: "friday",
+      block_id: "blk1",
+      block_index: 0,
+      role: "assistant",
+      kind: "text",
+      source: null,
+      ts: 1000,
+    } as Parameters<typeof chat.applyEvent>[0]);
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      seq: 2,
+      turn_id: "turn-1",
+      agent: "friday",
+      block_id: "blk1",
+      delta: { text: "par" },
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    const before = chat.messages;
+    const beforeIds = before.map((m) => m.id);
+    const entryBefore = before.find((m) => m.id === "b_blk1")!;
+    expect(entryBefore.text).toBe("par");
+
+    // Per-field $state mutation through the next delta.
+    chat.applyEvent({
+      v: 1,
+      type: "block_delta",
+      seq: 3,
+      turn_id: "turn-1",
+      agent: "friday",
+      block_id: "blk1",
+      delta: { text: "tial" },
+    } as Parameters<typeof chat.applyEvent>[0]);
+
+    const after = chat.messages;
+    const entryAfter = after.find((m) => m.id === "b_blk1")!;
+    // (a) Same object reference across reads → never cloned; mutation in place.
+    expect(entryAfter).toBe(entryBefore);
+    expect(entryAfter.text).toBe("partial");
+    expect(entryBefore.text).toBe("partial");
+    // (b) Structure (ids/length/order) invariant under the text mutation.
+    expect(after.map((m) => m.id)).toEqual(beforeIds);
+    expect(after.length).toBe(before.length);
+  });
+});
