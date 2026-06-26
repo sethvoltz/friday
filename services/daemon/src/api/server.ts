@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
+import { z } from "zod";
+import { handleRequest, matchRoute, type RouteRow, type RouterDeps } from "./router.js";
 import { logger } from "../log.js";
 import { eventBus, getBootId, getBootTs } from "../events/bus.js";
 import {
@@ -192,1727 +194,1900 @@ async function handle(
 
   res.setHeader("X-Friday-Version", DAEMON_VERSION);
 
-  // --- Health ---
-  if (method === "GET" && path === "/api/health") {
-    // FIX_FORWARD 5.8: gate /api/health behind the same-host secret so a
-    // local web page (or a DNS-rebind attacker) can't probe daemon status
-    // without first reading ~/.friday/.daemon-secret.
-    if (!authorizeSameHost(req)) {
-      return json(res, 401, { error: "unauthorized" });
-    }
-    return json(res, 200, {
-      ok: true,
-      ts: Date.now(),
-      secretsLocked: isSecretsLocked(),
-    });
-  }
-
-  if (method === "POST" && path === "/api/secrets/reload") {
-    if (!authorizeSameHost(req)) {
-      return json(res, 401, { error: "unauthorized" });
-    }
-    const { clearFridayConfigCache, clearSecretsCache, unlockVault } =
-      await import("@friday/shared");
-    clearSecretsCache();
-    clearFridayConfigCache();
-    const result = await unlockVault(true);
-    return json(res, 200, { ok: result.ok, reason: result.ok ? undefined : result.reason });
-  }
-
-  if (method === "POST" && path === "/api/secrets/audit") {
-    if (!authorizeSameHost(req)) {
-      return json(res, 401, { error: "unauthorized" });
-    }
-    const body = await readJson<{
-      secretName: string;
-      callerName: string;
-      callerType: string;
-      appId?: string | null;
-      reason: string;
-      source: "mcp" | "cli";
-    }>(req);
-    const { logSecretsFetch } = await import("../services/secrets-audit.js");
-    const logged = await logSecretsFetch(body);
-    if (!logged.ok) return json(res, 429, { error: logged.error });
-    return json(res, 200, { ok: true });
-  }
-
-  // --- Commands (system + skills, for chat autocomplete) ---
-  if (method === "GET" && path === "/api/commands") {
-    return json(res, 200, commandsApi());
-  }
-
-  // --- System command dispatch ---
-  if (method === "POST" && path === "/api/commands/dispatch") {
-    const body = await readJson<{ command: string; args?: string }>(req);
-    return await handleSystemCommand(res, body, cfg);
-  }
-
-  // --- SSE events ---
-  if (method === "GET" && path === "/api/events") {
-    return handleEvents(req, res, cfg);
-  }
-
-  // --- FRI-152 elicitation bridge ---
-  // The worker's `mcp__friday-elicitation__ask_user` handler calls:
-  //   1. POST /api/elicitation/wait { agentName, turnId, toolUseId }
-  //      — atomically register a waiter + emit SSE + block until answer.
-  // The dashboard's panel submit calls:
-  //   2. POST /api/elicitation/<id>/submit  — supply the answer.
-  // Together these implement the turn-pause property: the SDK is blocked
-  // inside the MCP handler's `await` for (1)'s response, which only
-  // returns after (2) fires the in-memory resolver.
-  if (method === "POST" && path === "/api/elicitation/wait") {
-    const body = await readJson<{
-      agentName?: string;
-      turnId?: string;
-      toolUseId?: string;
-    }>(req);
-    if (
-      typeof body.agentName !== "string" ||
-      typeof body.turnId !== "string" ||
-      typeof body.toolUseId !== "string" ||
-      body.toolUseId.length === 0
-    ) {
-      return json(res, 400, { error: "missing_fields" });
-    }
-    const promise = registerElicitation(body.toolUseId);
-    // Fire SSE AFTER registering the waiter so the dashboard's submit
-    // can't beat us to the resolver. (The submit handler returns 409
-    // if no waiter is registered; that would deadlock a fast user.)
-    eventBus.publish({
-      v: 1,
-      type: "elicitation_requested",
-      agent: body.agentName,
-      turn_id: body.turnId,
-      tool_use_id: body.toolUseId,
-      ts: Date.now(),
-    });
-    const onAbort = () => {
-      cancelElicitation(body.toolUseId!, new Error("client_aborted"));
-    };
-    req.on("close", onAbort);
-    try {
-      const answer = await promise;
-      req.off("close", onAbort);
-      return json(res, 200, answer);
-    } catch (err) {
-      req.off("close", onAbort);
-      return json(res, 499, { error: String((err as Error).message) });
-    }
-  }
-  if (method === "POST" && path.startsWith("/api/elicitation/") && path.endsWith("/submit")) {
-    const id = path.slice("/api/elicitation/".length, -"/submit".length);
-    if (id.length === 0) return json(res, 400, { error: "missing_id" });
-    const body = await readJson<ElicitationAnswer>(req);
-    if (!body || typeof body !== "object" || !body.answers) {
-      return json(res, 400, { error: "missing_answers" });
-    }
-    const resolved = resolveElicitation(id, body);
-    if (!resolved) return json(res, 409, { error: "no_waiter", id });
-    return json(res, 200, { ok: true });
-  }
-
-  // --- Chat turn (FRI-123 — all ADR-024 retired routes deleted) ---
-  // The legacy `POST /api/chat/turn`, `DELETE .../<id>/queued`,
-  // `POST .../<id>/abort`, and `POST .../<id>/resume` REST routes
-  // (ADR-024 retirement set) all retired in this PR. Live paths:
-  //   - send: `sendUserMessage` Zero mutator → dispatch-listener.
-  //   - cancel queued: `cancelQueued` Zero mutator → cancel-listener
-  //     + the internal `/api/internal/cancel-queued` fast-path
-  //     (below).
-  //   - abort: `abortTurn` Zero mutator → abort-listener + the
-  //     internal `/api/internal/abort-turn` fast-path (below).
-  //   - resume: `resumeTurn` Zero mutator → resume-listener.
-
-  // Phase 4.9 fast-path: synchronous in-memory splice of the worker's
-  // `nextPrompts` deque. Called by the dashboard's `cancelQueued`
-  // wrapper before / alongside dispatching the Zero mutator. The
-  // mutator UPDATEs the row to status='cancel_requested' which fires
-  // the Postgres trigger; the daemon's LISTEN handler then performs
-  // the canonical row DELETE. This endpoint deliberately does NOT
-  // delete the row — leaving the DELETE to the LISTEN-path keeps the
-  // cancel-row-delete pathway single-sourced and avoids racing the
-  // trigger.
-  //
-  // Idempotent on the in-memory state: re-running after the splice
-  // has already happened returns `{ ok: true, already_canceled: true,
-  // text: "" }`. The dashboard treats both responses the same way.
-  if (method === "POST" && path === "/api/internal/cancel-queued") {
-    const body = await readJson<{ block_id?: string }>(req);
-    const blockId = body.block_id;
-    if (typeof blockId !== "string" || blockId.length === 0) {
-      return json(res, 400, { error: "missing_block_id" });
-    }
-    const block = await getBlockById(blockId);
-    if (!block) {
-      // Row already deleted (LISTEN-path won the race, or legacy DELETE
-      // path already handled it). Idempotent return: nothing to splice,
-      // no text to recover.
-      return json(res, 200, { ok: true, already_canceled: true, text: "" });
-    }
-    if (block.status !== "queued" && block.status !== "cancel_requested") {
-      return json(res, 409, {
-        error: "not_queued",
-        block_id: blockId,
-        status: block.status,
-        message: "Block has already dispatched; use abort instead",
-      });
-    }
-    const removed = removeQueuedPrompt(block.agentName, block.turnId);
-    let recoveredText = "";
-    try {
-      const parsed = JSON.parse(block.contentJson) as { text?: unknown };
-      if (typeof parsed.text === "string") recoveredText = parsed.text;
-    } catch {
-      // Malformed content_json — return empty text; the user retypes.
-    }
-    return json(res, 200, {
-      ok: true,
-      already_canceled: removed === null,
-      text: recoveredText,
-      turn_id: block.turnId,
-      agent: block.agentName,
-    });
-  }
-
-  // Phase 4.10 fast-path: synchronously dispatch the lifecycle
-  // `abortTurn(agent)` so the worker's `AbortController` fires before
-  // the next SDK step lands. Called by the dashboard's `abortTurn`
-  // wrapper before / alongside dispatching the Zero mutator. Idempotent
-  // against the LISTEN-path (both call the same lifecycle function).
-  //
-  // Authenticated callers only (loopback + shared secret enforced at
-  // the dashboard's proxy layer).
-  if (method === "POST" && path === "/api/internal/abort-turn") {
-    const body = await readJson<{ turn_id?: string }>(req);
-    const turnId = body.turn_id;
-    if (typeof turnId !== "string" || turnId.length === 0) {
-      return json(res, 400, { error: "missing_turn_id" });
-    }
-    const agent = findAgentByTurnId(turnId);
-    const aborted = agent ? abortTurn(agent) : false;
-    // `aborted=false` means no live worker matched the turn (either
-    // it already finished or the abort-listener LISTEN-path already
-    // tore it down). The dashboard treats both as success.
-    return json(res, 200, { ok: true, aborted, turn_id: turnId, agent });
-  }
-
-  // --- Agents ---
-  if (method === "GET" && path === "/api/agents") {
-    const all: AgentEntry[] = await registry.listAgents();
-    // Prefer the in-memory live worker's status over the DB column whenever
-    // an agent has a forked worker — the DB lags by however long it takes
-    // for setStatus() to land between the worker's status-change and the
-    // next poll, which is enough to make the sidebar dot read "idle" while
-    // the agent is mid-turn. The live map is the real-time source of truth.
-    const merged: AgentEntry[] = all.map((a) => {
-      const live = peekLiveWorker(a.name);
-      return live ? { ...a, status: live.status } : a;
-    });
-    const typeFilter = url.searchParams.get("type");
-    const statusFilter = url.searchParams.get("status");
-    const filtered = merged.filter(
-      (a) => (!typeFilter || a.type === typeFilter) && (!statusFilter || a.status === statusFilter),
-    );
-    // Augment with past-session count so the dashboard sidebar can decide
-    // whether an agent has expandable history without N+1 follow-up calls.
-    const counts = await sessionCountsByAgent();
-    const augmented = filtered.map((a) => ({
-      ...a,
-      sessionCount: counts[a.name] ?? 0,
-    }));
-    return json(res, 200, augmented);
-  }
-  if (method === "GET" && /^\/api\/agents\/[^/]+\/sessions$/.test(path)) {
-    const agentName = path.split("/")[3];
-    return json(res, 200, await listAgentSessions(agentName));
-  }
-  if (method === "POST" && path === "/api/agents") {
-    const body = await readJson<CreateAgentInput>(req);
-    const r = await createAgent(body, cfg);
-    return json(res, r.status, r.body);
-  }
-  if (method === "GET" && /^\/api\/agents\/[^/]+$/.test(path)) {
-    const name = path.split("/")[3];
-    const a = await registry.getAgent(name);
-    if (!a) return json(res, 404, { error: "not found" });
-    return json(res, 200, a);
-  }
-  if (method === "POST" && /^\/api\/agents\/[^/]+\/archive$/.test(path)) {
-    // Archive an agent: stop it from receiving work, set status=archived,
-    // and (for builders) remove the worktree + force-delete the branch.
-    // Sessions persist in perpetuity — this just frees the disk and stops
-    // future work. Merged form of the old POST /kill + DELETE /workspace.
-    const name = path.split("/")[3];
-    const a = await registry.getAgent(name);
-    if (!a) return json(res, 404, { error: "not found" });
-    // Bare agents registered under an installed app are persistent user-facing
-    // interfaces (e.g. the kitchen agent). Archiving them resets the user's
-    // conversational context. Block the call.
-    if (a.type === "bare") {
-      const appId = await registry.getAppId(name);
-      if (appId) {
-        return json(res, 409, {
-          error: `cannot archive "${name}": it is a persistent bare agent registered under app "${appId}". Uninstall the app to remove it.`,
-          code: "app_agent_protected",
-        });
-      }
-    }
-    // `reason` is required and drives the linked-ticket close behavior
-    // (completed→done, abandoned/failed→closed). Refork is daemon-internal
-    // and never accepted over the wire.
-    const body = await readJson<{ reason?: string }>(req).catch(
-      () => ({ reason: undefined }) as { reason?: string },
-    );
-    const validReasons = ["completed", "abandoned", "failed"] as const;
-    type ApiReason = (typeof validReasons)[number];
-    if (!body.reason || !validReasons.includes(body.reason as ApiReason)) {
-      return json(res, 400, {
-        error: `reason required, one of: ${validReasons.join(", ")}`,
-      });
-    }
-    const reason = body.reason as ApiReason;
-    const branch = a.type === "builder" && "branch" in a ? a.branch : undefined;
-    // PR-271 BLOCKER 1: resolve teardown against the ORIGINAL source repo
-    // persisted on the agent row (the bare mirror, in remote mode), NOT
-    // `process.cwd()` (the daemon's own repo). Read it before archiveAgent in
-    // case archive ever mutates meta_json. Falls back to cwd only when absent
-    // (older builder rows), where the local-checkout behavior is unchanged.
-    const builderRepo =
-      a.type === "builder" ? ((await registry.getWorkspaceRepo(name)) ?? process.cwd()) : undefined;
-    // F1-B: await the archive so the response is a strong "actually
-    // archived" signal — no race against the worker's exit handler.
-    await archiveAgent(name, { reason });
-    // Workspace cleanup happens only for builders, after archive. Failure
-    // here (e.g., worktree dir locked) is non-fatal — log and return the
-    // archive result anyway; the agent is already off.
-    let workspacePathRemoved: string | undefined;
-    if (a.type === "builder") {
-      try {
-        workspacePathRemoved = workspacePath(name);
-        archiveWorkspace(name, builderRepo ?? process.cwd(), { branch, repo: builderRepo });
-      } catch (err) {
-        logger.log("warn", "agent.archive.workspace.fail", {
-          agent: name,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    return json(res, 200, { ok: true, workspacePath: workspacePathRemoved });
-  }
-  if (method === "POST" && /^\/api\/agents\/[^/]+\/unarchive$/.test(path)) {
-    const name = path.split("/")[3];
-    const a = await registry.getAgent(name);
-    if (!a) return json(res, 404, { error: "not found" });
-    if (a.status !== "archived") {
-      return json(res, 409, {
-        error: `"${name}" is not archived (status=${a.status})`,
-        code: "not_archived",
-      });
-    }
-    try {
-      await registry.unarchiveAgent(name);
-    } catch (err) {
-      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
-    }
-    return json(res, 200, { ok: true });
-  }
-  if (method === "POST" && /^\/api\/agents\/[^/]+\/abort$/.test(path)) {
-    const name = path.split("/")[3];
-    const aborted = abortTurn(name);
-    return json(res, 200, { aborted });
-  }
-
-  // --- Blocks (canonical transcript) ---
-  if (method === "GET" && /^\/api\/agents\/[^/]+\/blocks$/.test(path)) {
-    const agentName = path.split("/")[3];
-    const limit = numericParam(url, "limit");
-    const before = url.searchParams.get("before") ?? undefined;
-    const after = url.searchParams.get("after") ?? undefined;
-    const aroundTs = numericParam(url, "around_ts");
-    const beforeLimit = numericParam(url, "before_limit");
-    const afterLimit = numericParam(url, "after_limit");
-    const match = url.searchParams.get("match") ?? undefined;
-    const sessionId = url.searchParams.get("session_id") ?? undefined;
-    try {
-      const result = await fetchBlocksByAgent({
-        agentName,
-        sessionId,
-        limit,
-        beforeBlockId: before,
-        afterBlockId: after,
-        aroundTs,
-        beforeLimit,
-        afterLimit,
-        match,
-      });
-      return json(res, 200, {
-        blocks: result.blocks,
-      });
-    } catch (err) {
-      // FTS5 MATCH expressions can throw on syntactically invalid queries
-      // (e.g. unbalanced quotes). Return a clean 400 instead of a 500 so
-      // the dashboard can surface a "couldn't search" toast.
-      return json(res, 400, {
-        error: "invalid_query",
-        detail: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  // --- Tickets ---
-  if (method === "GET" && path === "/api/tickets") {
-    const TICKET_STATUSES = ["open", "in_progress", "done", "blocked", "closed"] as const;
-    const rawStatus = url.searchParams.get("status");
-    const status = (TICKET_STATUSES as readonly string[]).includes(rawStatus ?? "")
-      ? (rawStatus as (typeof TICKET_STATUSES)[number])
-      : undefined;
-    const assignee = url.searchParams.get("assignee") ?? undefined;
-    return json(res, 200, await listTickets({ status, assignee }));
-  }
-  if (method === "POST" && path === "/api/tickets") {
-    const body = await readJson<Parameters<typeof createTicket>[0]>(req);
-    return json(res, 200, await createTicket(body));
-  }
-  if (method === "GET" && /^\/api\/tickets\/[^/]+$/.test(path)) {
-    const id = path.split("/")[3];
-    const t = await getTicket(id);
-    if (!t) return json(res, 404, { error: "not found" });
-    const ext = await externalLinks(id);
-    const comments = await listComments(id);
-    return json(res, 200, { ...t, externalLinks: ext, comments });
-  }
-  if (method === "PATCH" && /^\/api\/tickets\/[^/]+$/.test(path)) {
-    const id = path.split("/")[3];
-    const body = await readJson<Parameters<typeof updateTicket>[1]>(req);
-    return json(res, 200, await updateTicket(id, body));
-  }
-  if (method === "POST" && /^\/api\/tickets\/[^/]+\/comments$/.test(path)) {
-    const id = path.split("/")[3];
-    const body = await readJson<{ author: string; body: string }>(req);
-    await addComment(id, body.author, body.body);
-    return json(res, 200, { ok: true });
-  }
-  if (method === "POST" && /^\/api\/tickets\/[^/]+\/links$/.test(path)) {
-    const id = path.split("/")[3];
-    if (!(await getTicket(id))) return json(res, 404, { error: "ticket not found" });
-    const body = await readJson<{
-      system: string;
-      externalId: string;
-      url?: string;
-      meta?: Record<string, unknown>;
-    }>(req);
-    if (!body.system || !body.externalId) {
-      return json(res, 400, { error: "system and externalId required" });
-    }
-    await linkExternal({
-      ticketId: id,
-      system: body.system,
-      externalId: body.externalId,
-      url: body.url,
-      meta: body.meta,
-    });
-    return json(res, 200, { ok: true });
-  }
-  if (method === "DELETE" && /^\/api\/tickets\/[^/]+\/links$/.test(path)) {
-    const id = path.split("/")[3];
-    if (!(await getTicket(id))) return json(res, 404, { error: "ticket not found" });
-    const system = url.searchParams.get("system");
-    const externalId = url.searchParams.get("externalId");
-    if (!system || !externalId) {
-      return json(res, 400, {
-        error: "system and externalId query params required",
-      });
-    }
-    const removed = await unlinkExternal({ ticketId: id, system, externalId });
-    if (!removed) return json(res, 404, { error: "link not found" });
-    return json(res, 200, { ok: true });
-  }
-
-  // --- Schedules ---
-  if (method === "GET" && path === "/api/schedules") {
-    return json(res, 200, await listSchedules());
-  }
-  if (method === "POST" && path === "/api/schedules") {
-    const body = await readJson<Parameters<typeof upsertSchedule>[0]>(req);
-    try {
-      await upsertSchedule(body);
-    } catch (err) {
-      if (err instanceof ScheduleNameCollisionError) {
-        return json(res, 409, { error: err.message });
-      }
-      return json(res, 400, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    return json(res, 200, { ok: true });
-  }
-  if (method === "POST" && /^\/api\/schedules\/[^/]+\/trigger$/.test(path)) {
-    const name = decodeURIComponent(path.split("/")[3]);
-    const runId = await triggerSchedule(name);
-    if (!runId)
-      return json(res, 409, {
-        error: "schedule not found or already running",
-      });
-    return json(res, 200, { runId });
-  }
-  if (method === "POST" && /^\/api\/schedules\/[^/]+\/(pause|resume)$/.test(path)) {
-    const name = decodeURIComponent(path.split("/")[3]);
-    const action = path.split("/")[4];
-    const ok = action === "pause" ? await pauseSchedule(name) : await resumeSchedule(name);
-    if (!ok) return json(res, 404, { error: "schedule not found" });
-    return json(res, 200, { ok: true });
-  }
-  // FRI-168: re-arm a fired/pending reminder to fire again after a delay.
-  if (method === "POST" && /^\/api\/schedules\/[^/]+\/snooze$/.test(path)) {
-    const name = decodeURIComponent(path.split("/")[3]);
-    const { duration } = await readJson<{ duration: string }>(req);
-    try {
-      const ok = await snoozeSchedule(name, duration);
-      if (!ok) return json(res, 404, { error: "schedule not found" });
-    } catch (err) {
-      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
-    }
-    return json(res, 200, { ok: true });
-  }
-  if (method === "GET" && /^\/api\/schedules\/[^/]+$/.test(path)) {
-    const name = decodeURIComponent(path.split("/")[3]);
-    const r = await getSchedule(name);
-    if (!r) return json(res, 404, { error: "schedule not found" });
-    return json(res, 200, r);
-  }
-  if (method === "GET" && /^\/api\/schedules\/[^/]+\/state$/.test(path)) {
-    const name = decodeURIComponent(path.split("/")[3]);
-    if (!(await getSchedule(name))) return json(res, 404, { error: "schedule not found" });
-    return json(res, 200, readScheduleArtifacts(name));
-  }
-  if (method === "DELETE" && /^\/api\/schedules\/[^/]+$/.test(path)) {
-    const name = decodeURIComponent(path.split("/")[3]);
-    const ok = await deleteSchedule(name);
-    if (!ok) return json(res, 404, { error: "schedule not found" });
-    return json(res, 200, { ok: true });
-  }
-
-  // --- Habits (FRI-169) ---
-  // Same loopback-bound, secret-header contract as /api/schedules above
-  // (no inline guard; the server binds 127.0.0.1 and daemonFetch injects the
-  // secret). The MCP `friday-habit` tools and the dashboard's management
-  // writes POST here; the Streak is derived on read via withStreak (now is
-  // injected at this boundary so the engine stays pure). Dynamic <id> /
-  // <checkinId> segments are matched by regex + path.split, mirroring the
-  // schedules routes — there is no express :param matcher.
-  //
-  // Order matters: the more-specific /checkin/<id>, /<id>/checkin and
-  // /<id>/archive paths are matched BEFORE the bare /<id> branches so the
-  // catch-all <id> regex doesn't swallow them.
-  if (method === "POST" && path === "/api/habits") {
-    // Raw body: window_* arrive as ISO strings over the wire (the store takes
-    // Date). Everything else maps straight onto CreateHabitInput.
-    const body = await readJson<
-      Omit<CreateHabitInput, "windowStart" | "windowEnd"> & {
-        windowStart?: string | null;
-        windowEnd?: string | null;
-      }
-    >(req);
-    if (!body?.name || !body?.mode || !body?.period) {
-      return json(res, 400, { error: "name, mode, and period are required" });
-    }
-    try {
-      const habit = await createHabit({
-        name: body.name,
-        mode: body.mode,
-        period: body.period,
-        target: body.target,
-        description: body.description,
-        daysOfWeek: body.daysOfWeek,
-        bucket: body.bucket,
-        colorIndex: body.colorIndex,
-        windowStart: body.windowStart != null ? new Date(body.windowStart) : null,
-        windowEnd: body.windowEnd != null ? new Date(body.windowEnd) : null,
-      });
-      return json(res, 200, habit);
-    } catch (err) {
-      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-  if (method === "GET" && path === "/api/habits") {
-    const filterParam = url.searchParams.get("filter");
-    const filter: HabitFilter = filterParam === "archived" ? "archived" : "active";
-    const habits = await listHabits(filter);
-    const now = new Date();
-    const withStreaks = await Promise.all(
-      habits.map(async (h) => withStreak(h, await listCheckins(h.id), now)),
-    );
-    return json(res, 200, withStreaks);
-  }
-  // DELETE one Check-in by id (habit_checkin_undo — the single allowed delete).
-  // Matched before /api/habits/<id> so "checkin" isn't read as a habit id.
-  if (method === "DELETE" && /^\/api\/habits\/checkin\/[^/]+$/.test(path)) {
-    const checkinId = decodeURIComponent(path.split("/")[4]);
-    const removed = await deleteCheckin(checkinId);
-    if (!removed) return json(res, 404, { error: "check-in not found" });
-    return json(res, 200, { ok: true });
-  }
-  // POST a Check-in for a habit (append-only insert).
-  if (method === "POST" && /^\/api\/habits\/[^/]+\/checkin$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[3]);
-    if (!(await getHabit(id))) return json(res, 404, { error: "habit not found" });
-    const body = await readJson<{ ts?: string; note?: string | null }>(req);
-    const checkin = await insertCheckin(id, {
-      ts: body?.ts != null ? new Date(body.ts) : undefined,
-      note: body?.note ?? null,
-    });
-    return json(res, 200, checkin);
-  }
-  // POST archive a habit (status='archived'; preserve data, never delete).
-  if (method === "POST" && /^\/api\/habits\/[^/]+\/archive$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[3]);
-    const habit = await archiveHabit(id);
-    if (!habit) return json(res, 404, { error: "habit not found" });
-    return json(res, 200, habit);
-  }
-  // GET one habit: live streak/progress + recent Check-ins (habit_status).
-  if (method === "GET" && /^\/api\/habits\/[^/]+$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[3]);
-    const habit = await getHabit(id);
-    if (!habit) return json(res, 404, { error: "habit not found" });
-    const checkins = await listCheckins(id);
-    const decorated = withStreak(habit, checkins, new Date());
-    return json(res, 200, { ...decorated, checkins });
-  }
-  // PATCH a habit definition (bumps updated_at).
-  if (method === "PATCH" && /^\/api\/habits\/[^/]+$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[3]);
-    // Raw body: window_* arrive as ISO strings over the wire and are parsed
-    // to Date here; the rest map straight through to the patch.
-    const body = await readJson<
-      Omit<UpdateHabitInput, "windowStart" | "windowEnd"> & {
-        windowStart?: string | null;
-        windowEnd?: string | null;
-      }
-    >(req);
-    const { windowStart, windowEnd, ...rest } = body;
-    const patch: UpdateHabitInput = { ...rest };
-    if (windowStart !== undefined) {
-      patch.windowStart = windowStart != null ? new Date(windowStart) : null;
-    }
-    if (windowEnd !== undefined) {
-      patch.windowEnd = windowEnd != null ? new Date(windowEnd) : null;
-    }
-    try {
-      const habit = await updateHabit(id, patch);
-      if (!habit) return json(res, 404, { error: "habit not found" });
-      return json(res, 200, habit);
-    } catch (err) {
-      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
-  // --- Memory ---
-  if (method === "GET" && path === "/api/memory") {
-    return json(res, 200, await listEntries());
-  }
-  if (method === "GET" && path === "/api/memory/search") {
-    const q = url.searchParams.get("q") ?? "";
-    const tagsParam = url.searchParams.get("tags");
-    const limitParam = url.searchParams.get("limit");
-    const tags = tagsParam
-      ? tagsParam
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean)
-      : undefined;
-    const limit = limitParam ? Math.max(1, Number(limitParam) || 10) : undefined;
-    if (!q.trim()) return json(res, 400, { error: "q parameter required" });
-    const results = await searchMemories({
-      query: q,
-      tags,
-      limit,
-      trackRecall: false,
-    });
-    return json(res, 200, results);
-  }
-  if (method === "POST" && path === "/api/memory") {
-    const body = await readJson<{
-      id?: string;
-      title: string;
-      content: string;
-      tags?: string[];
-    }>(req);
-    if (!body.title || !body.content) {
-      return json(res, 400, { error: "title and content required" });
-    }
-    const id = (body.id?.trim() || slugifyMemoryId(body.title)).slice(0, 64);
-    if (!id) return json(res, 400, { error: "could not derive id from title" });
-    const callerName = String(req.headers["x-friday-caller-name"] ?? "user");
-    const now = new Date().toISOString();
-    const existing = await getEntry(id);
-    const entry: MemoryEntry = {
-      id,
-      title: body.title,
-      content: body.content,
-      tags: body.tags ?? existing?.tags ?? [],
-      createdBy: existing?.createdBy ?? callerName,
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-      recallCount: existing?.recallCount ?? 0,
-      lastRecalledAt: existing?.lastRecalledAt ?? null,
-    };
-    await saveEntry(entry);
-    return json(res, existing ? 200 : 201, entry);
-  }
-  if (method === "GET" && /^\/api\/memory\/[^/]+$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[3]);
-    const e = await getEntry(id);
-    if (!e) return json(res, 404, { error: "not found" });
-    // FIX_FORWARD 6.8 follow-up: bumping `recallCount` on every dashboard
-    // page view (load, edit, delete, invalidateAll) pollutes the metric
-    // that's supposed to reflect agent-side recall frequency. Require an
-    // explicit `?recall=1` from callers that want the bump (the
-    // auto-recall block uses `searchMemories`, which touches on its own).
-    if (url.searchParams.get("recall") === "1") {
-      await touchRecall(id);
-    }
-    return json(res, 200, e);
-  }
-  if (method === "PATCH" && /^\/api\/memory\/[^/]+$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[3]);
-    if (!(await getEntry(id))) return json(res, 404, { error: "not found" });
-    const patch = await readJson<{
-      title?: string;
-      content?: string;
-      tags?: string[];
-    }>(req);
-    await updateEntry(id, patch);
-    return json(res, 200, await getEntry(id));
-  }
-  if (method === "DELETE" && /^\/api\/memory\/[^/]+$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[3]);
-    if (!(await getEntry(id))) return json(res, 404, { error: "not found" });
-    await forgetEntry(id);
-    return json(res, 200, { ok: true });
-  }
-
-  // --- Evolve ---
-  if (method === "GET" && path === "/api/evolve/proposals") {
-    const all = listProposals();
-    const statusFilter = url.searchParams.get("status");
-    const typeFilter = url.searchParams.get("type");
-    const filtered = all.filter(
-      (p) => (!statusFilter || p.status === statusFilter) && (!typeFilter || p.type === typeFilter),
-    );
-    return json(res, 200, filtered);
-  }
-  if (method === "POST" && path === "/api/evolve/proposals") {
-    const body = await readJson<Omit<SaveProposalInput, "createdBy">>(req);
-    if (!body.title || !body.proposedChange || !body.type) {
-      return json(res, 400, {
-        error: "title, type, and proposedChange are required",
-      });
-    }
-    const callerName = String(req.headers["x-friday-caller-name"] ?? "user");
-    const p = saveProposal({ ...body, createdBy: callerName });
-    // Item #54: project the FS write to Postgres so /evolve's Zero
-    // reactive query sees the new row. Fire-and-forget — FS stays
-    // canonical; a PG sync failure logs but doesn't fail the HTTP 201.
-    void syncProposalToPg(p.id);
-    return json(res, 201, p);
-  }
-  if (method === "GET" && /^\/api\/evolve\/proposals\/[^/]+$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[4]);
-    const p = getProposal(id);
-    if (!p) return json(res, 404, { error: "proposal not found" });
-    return json(res, 200, p);
-  }
-  if (method === "PATCH" && /^\/api\/evolve\/proposals\/[^/]+$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[4]);
-    if (!getProposal(id)) return json(res, 404, { error: "proposal not found" });
-    const patch = await readJson<UpdateProposalInput>(req);
-    const next = updateProposal(id, patch);
-    void syncProposalToPg(id);
-    return json(res, 200, next);
-  }
-  if (method === "DELETE" && /^\/api\/evolve\/proposals\/[^/]+$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[4]);
-    if (!deleteProposal(id)) return json(res, 404, { error: "proposal not found" });
-    void deleteProposalFromPg(id);
-    return json(res, 200, { ok: true });
-  }
-  if (method === "POST" && /^\/api\/evolve\/proposals\/[^/]+\/apply$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[4]);
-    const p = getProposal(id);
-    if (!p) return json(res, 404, { error: "proposal not found" });
-    if (p.status === "applied") {
-      return json(res, 409, {
-        error: `proposal already applied (ticket ${p.appliedTicketId ?? "<unknown>"})`,
-      });
-    }
-    const body = await readJson<{
-      ticketKind?: "task" | "epic" | "bug" | "chore";
-      assignee?: string;
-    }>(req);
-    const callerName = String(req.headers["x-friday-caller-name"] ?? "user");
-    const ticket = await createTicket({
-      title: p.title,
-      body: renderProposalForTicket(p),
-      kind: body.ticketKind ?? "task",
-      assignee: body.assignee,
-      meta: { evolveProposalId: p.id },
-    });
-    const updated = updateProposal(id, {
-      status: "applied",
-      appliedAt: new Date().toISOString(),
-      appliedBy: callerName,
-      appliedTicketId: ticket.id,
-    });
-    void syncProposalToPg(id);
-    return json(res, 200, { proposal: updated, ticket });
-  }
-  if (method === "POST" && /^\/api\/evolve\/proposals\/[^/]+\/dismiss$/.test(path)) {
-    const id = decodeURIComponent(path.split("/")[4]);
-    const p = getProposal(id);
-    if (!p) return json(res, 404, { error: "proposal not found" });
-    const body = await readJson<{ reason?: string }>(req);
-    const newBody = body.reason
-      ? `${p.proposedChange}\n\n---\n\n## Dismissed\n\n${body.reason}`
-      : p.proposedChange;
-    const updated = updateProposal(id, {
-      status: "rejected",
-      proposedChange: newBody,
-    });
-    void syncProposalToPg(id);
-    return json(res, 200, updated);
-  }
-
-  if (method === "POST" && path === "/api/evolve/scan") {
-    const body = await readJson<{
-      windowHours?: number;
-      includeFriction?: boolean;
-      includePreferences?: boolean;
-      includeDreaming?: boolean;
-      sinceTs?: string;
-    }>(req);
-    const windowHours = body.windowHours ?? 24;
-    const includeFriction = body.includeFriction !== false;
-    const includePreferences = body.includePreferences !== false;
-    const includeDreaming = body.includeDreaming !== false;
-    const callerName = String(req.headers["x-friday-caller-name"] ?? "scan");
-    const since = sinceHoursAgo(windowHours);
-    // FRI-26 AC6: the dreaming cursor. The meta-agent passes `sinceTs`
-    // (lastDreamScannedTs from its state.md) so each night re-scans only turns
-    // newer than the last dream pass; absent it, the dreaming sub-pass shares
-    // the regular `since` window. Propose-merge dedup is the overlap safety net.
-    const dreamSince = body.sinceTs ?? since;
-    const windowEnd = new Date().toISOString();
-    // FRI-174: the ordered signal→propose→rerank→upgrade→audit→notify→spawn→
-    // dream cycle now lives in `runEvolveCycle` (shared with the CLI). The
-    // daemon supplies the side-effect boundary: the real `notify`, the
-    // config-gated triage/builder spawn loops (the `autoSpawn*` gate + the
-    // `createAgent`/`updateProposal`/`sendMail` escalation IO stay HERE — seam
-    // i / ADR-036), and the real `listEntries`.
-    const daemonEffects: EvolveCycleEffects = {
-      notify: (event) => {
-        // Fire-and-forget; `evolve_critical` is the always-on critical class
-        // (toast always / push always, DND-bypass-eligible).
-        void notify(event);
-      },
-      // FRI-40 Phase 1: when enabled, auto-spawn a read-only triage helper for
-      // each planned request. Read with a strict `=== true` so the shallow-merge
-      // `{ evolve: {} }` case stays off. Spawn failures must never throw out of
-      // the cycle (AC #7); the in-process `createAgent` 409 gives idempotent
-      // dedup against an already-spawned triage helper (AC #6).
-      spawnTriage: async (triage) => {
-        if (cfg.evolve?.autoSpawnTriageHelpers === true) {
-          try {
-            for (const t of triage) {
-              try {
-                const r = await createAgent(
-                  {
-                    type: "helper",
-                    name: t.name,
-                    parentName: "scheduled-meta-daily",
-                    prompt: t.prompt,
-                    reason: t.reason,
-                  },
-                  cfg,
-                );
-                if (r.status === 201)
-                  logger.log("info", "evolve.triage.spawn", { name: t.name, reason: t.reason });
-                else if (r.status === 409)
-                  logger.log("info", "evolve.triage.spawn.skip", { name: t.name, status: 409 });
-                else
-                  logger.log("warn", "evolve.triage.spawn.error", {
-                    name: t.name,
-                    status: r.status,
-                  });
-              } catch (err) {
-                logger.log("warn", "evolve.triage.spawn.error", {
-                  name: t.name,
-                  message: err instanceof Error ? err.message : String(err),
-                });
-              }
-            }
-          } catch (err) {
-            logger.log("warn", "evolve.triage.spawn.error", {
-              message: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
-      },
-      // FRI-149 Phase 2: when enabled, auto-spawn an auto-fixing Builder for each
-      // planned request. The Builder iterates in its worktree, drives the fix to
-      // a GREEN review-ready PR, mails the orchestrator the PR URL, and STOPS (it
-      // never merges; the human approval gate moves to merge — ADR-036). Read
-      // with a strict `=== true` so the shallow-merge `{ evolve: {} }` case stays
-      // off. The carve-out that lets a `scheduled` caller spawn a builder is
-      // gated on the un-forgeable `evolveEscalation` arg passed ONLY here (never
-      // reachable from the wire — see validateSpawnPermissions / createAgent).
-      // Spawn failures are caught per-request AND for the whole block, so they
-      // never throw out of the cycle; the in-process `createAgent` 409 gives
-      // idempotent dedup against an already-spawned `builder-<id>`.
-      spawnBuilder: async (builders) => {
-        if (cfg.evolve?.autoSpawnBuilders === true) {
-          try {
-            for (const b of builders) {
-              try {
-                const proposalId = b.name.slice("builder-".length);
-                const r = await createAgent(
-                  {
-                    type: "builder",
-                    name: b.name,
-                    parentName: "scheduled-meta-daily",
-                    prompt: b.prompt,
-                    reason: b.reason,
-                    ticketId: proposalId,
-                    worktree: { repo: process.cwd() },
-                  },
-                  cfg,
-                  { evolveEscalation: true },
-                );
-                if (r.status === 201) {
-                  logger.log("info", "evolve.builder.spawn", {
-                    name: b.name,
-                    proposalId,
-                    reason: b.reason,
-                  });
-                  // Two-way linkage: record the in-flight builder on the proposal
-                  // so the dashboard can connect a critical proposal to its
-                  // builder. Branch is derivable as friday/builder-<id>; the PR
-                  // URL arrives via the builder's mail.
-                  try {
-                    updateProposal(proposalId, { builderAgent: b.name });
-                  } catch (err) {
-                    logger.log("warn", "evolve.builder.linkage.error", {
-                      name: b.name,
-                      proposalId,
-                      message: err instanceof Error ? err.message : String(err),
-                    });
-                  }
-                  // Notify the orchestrator that an escalation builder is in
-                  // flight; it surfaces this to the user, and the builder itself
-                  // mails the review-ready PR URL once CI is green.
-                  try {
-                    await sendMail({
-                      fromAgent: "scheduled-meta-daily",
-                      toAgent: cfg.orchestratorName,
-                      type: "notification",
-                      subject: `evolve escalation: ${proposalId}`,
-                      body:
-                        `Auto-escalated critical+code proposal \`${proposalId}\` to Builder \`${b.name}\`. ` +
-                        `It will drive a GREEN, review-ready PR (branch friday/${b.name}) and mail you the PR URL — it will NOT merge. ` +
-                        `You review and merge.`,
-                    });
-                  } catch (err) {
-                    logger.log("warn", "evolve.builder.notify.error", {
-                      name: b.name,
-                      proposalId,
-                      message: err instanceof Error ? err.message : String(err),
-                    });
-                  }
-                } else if (r.status === 409) {
-                  logger.log("info", "evolve.builder.spawn.skip", { name: b.name, status: 409 });
-                } else {
-                  logger.log("warn", "evolve.builder.spawn.error", {
-                    name: b.name,
-                    status: r.status,
-                  });
-                }
-              } catch (err) {
-                logger.log("warn", "evolve.builder.spawn.error", {
-                  name: b.name,
-                  message: err instanceof Error ? err.message : String(err),
-                });
-              }
-            }
-          } catch (err) {
-            logger.log("warn", "evolve.builder.spawn.error", {
-              message: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
-      },
-      listEntries: () => listEntries(),
-      onUpgradeResolved: ({ definitive, tentative }) => {
-        logger.log("info", "evolve.upgrade-resolved", { definitive, tentative });
-      },
-    };
-    try {
-      const result = await runEvolveCycle({
-        since,
-        dreamSince,
-        includeFriction,
-        includePreferences,
-        includeDreaming,
-        callerName,
-        orchestratorName: cfg.orchestratorName,
-        effects: daemonEffects,
-      });
-      return json(res, 200, result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      appendRun({
-        ts: windowEnd,
-        by: callerName,
-        windowStart: since,
-        windowEnd,
-        signalsScanned: 0,
-        proposalsCreated: 0,
-        proposalsUpdated: 0,
-        promotedToCritical: 0,
-        note: `error: ${message}`,
-      });
-      return json(res, 500, { error: message });
-    }
-  }
-  if (method === "POST" && path === "/api/evolve/enrich") {
-    const body = await readJson<{
-      id?: string;
-      retryFailed?: boolean;
-      force?: boolean;
-      limit?: number;
-    }>(req);
-    try {
-      const result = await enrichProposals(body);
-      return json(res, 200, {
-        enriched: result.enriched.length,
-        skipped: result.skipped,
-        failed: result.failed,
-      });
-    } catch (err) {
-      return json(res, 500, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-  if (method === "POST" && path === "/api/evolve/cluster") {
-    const body = await readJson<{ threshold?: number }>(req);
-    try {
-      const result = mergeClusters({ threshold: body.threshold });
-      return json(res, 200, {
-        clustersCreated: result.clustersCreated.length,
-        clustersUpdated: result.clustersUpdated.length,
-        proposalsAttached: result.proposalsAttached,
-      });
-    } catch (err) {
-      return json(res, 500, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  // --- Integrations: Linear ---
-  if (method === "POST" && path === "/api/integrations/linear/import") {
-    const body = await readJson<{ identifier?: string }>(req);
-    if (!body.identifier) {
-      return json(res, 400, { error: "identifier required" });
-    }
-    try {
-      const result = await linearImportIssue({ identifier: body.identifier });
-      return json(res, 200, result);
-    } catch (err) {
-      return json(res, 500, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-  if (method === "POST" && path === "/api/integrations/linear/create-issue") {
-    const body = await readJson<{
-      title?: string;
-      body?: string;
-      team?: string;
-      priority?: LinearPriority;
-    }>(req);
-    if (!body.title) {
-      return json(res, 400, { error: "title required" });
-    }
-    if (!loadFridayConfig().linearApiKey) {
-      return json(res, 400, { error: "LINEAR_API_KEY not set" });
-    }
-    const teamOverride = body.team;
-    const restore = teamOverride
-      ? (() => {
-          const prev = process.env.FRIDAY_LINEAR_TEAM;
-          process.env.FRIDAY_LINEAR_TEAM = teamOverride;
-          return () => {
-            if (prev === undefined) delete process.env.FRIDAY_LINEAR_TEAM;
-            else process.env.FRIDAY_LINEAR_TEAM = prev;
-          };
-        })()
-      : () => {};
-    try {
-      const { issue } = await linearCreateIssue({
-        title: body.title,
-        description: body.body,
-        priority: body.priority,
-      });
-      return json(res, 200, {
-        identifier: issue.identifier,
-        url: issue.url,
-        id: issue.id,
-      });
-    } catch (err) {
-      const status = err instanceof LinearApiError ? 502 : 500;
-      return json(res, status, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      restore();
-    }
-  }
-  if (method === "POST" && path === "/api/integrations/linear/update-issue") {
-    const body = await readJson<{
-      identifier?: string;
-      title?: string;
-      body?: string;
-      state?: LinearStateType;
-      priority?: LinearPriority;
-    }>(req);
-    if (!body.identifier) {
-      return json(res, 400, { error: "identifier required" });
-    }
-    const apiKey = loadFridayConfig().linearApiKey;
-    if (!apiKey) {
-      return json(res, 400, { error: "LINEAR_API_KEY not set" });
-    }
-    if (
-      body.title === undefined &&
-      body.body === undefined &&
-      body.state === undefined &&
-      body.priority === undefined
-    ) {
-      return json(res, 400, {
-        error: "at least one of title, body, state, priority must be provided",
-      });
-    }
-    const teamKeyMatch = body.identifier.match(/^([A-Z][A-Z0-9_]*)-(\d+)$/);
-    if (!teamKeyMatch) {
-      return json(res, 400, {
-        error: `invalid Linear identifier: ${body.identifier}`,
-      });
-    }
-    const teamKey = teamKeyMatch[1];
-    try {
-      const issueId = await linearResolveIssueIdByIdentifier({
-        apiKey,
-        identifier: body.identifier,
-      });
-      if (!issueId) {
-        return json(res, 404, {
-          error: `Linear issue not found: ${body.identifier}`,
-        });
-      }
-      const input: UpdateIssueInput = {};
-      if (body.title !== undefined) input.title = body.title;
-      if (body.body !== undefined) input.description = body.body;
-      if (body.priority !== undefined) input.priority = body.priority;
-      if (body.state !== undefined) {
-        const stateId = await linearGetStateIdByType({
-          apiKey,
-          teamKey,
-          stateType: body.state,
-        });
-        if (!stateId) {
-          return json(res, 400, {
-            error: `No Linear workflow state of type "${body.state}" on team "${teamKey}"`,
-          });
-        }
-        input.stateId = stateId;
-      }
-      const updated = await linearUpdateIssue({
-        apiKey,
-        id: issueId,
-        input,
-      });
-      return json(res, 200, {
-        identifier: updated.identifier,
-        title: updated.title,
-        url: updated.url,
-      });
-    } catch (err) {
-      const status = err instanceof LinearApiError ? 502 : 500;
-      return json(res, status, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-  if (method === "POST" && path === "/api/integrations/linear/reconcile") {
-    try {
-      const result = await linearReconcile();
-      // FRI-66: tickets reconcile just back-propagated to terminal need
-      // their originating evolve proposals flipped to `applied`.
-      if (result.closedTicketIds.length > 0) {
-        await syncProposalsForClosedTickets(result.closedTicketIds);
-      }
-      return json(res, 200, result);
-    } catch (err) {
-      return json(res, 500, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  // --- Intake (FRI-171, ADR-047) ---
-  // Stateless Capture entrypoint. The dashboard's public `/api/capture` route
-  // (capture-key gated) proxies here over loopback with the daemon secret.
-  // Runs clean+classify+dispatch SYNCHRONOUSLY (bounded by INTAKE_TIMEOUT_MS):
-  // on a clean finish it returns the verdict; on classifier failure/timeout the
-  // Capture is NEVER dropped — it lands as a Proposed item in the bell and we
-  // return that "queued/staged" shape.
-  if (method === "POST" && path === "/api/intake") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    const body = await readJson<{ text?: unknown; source?: unknown }>(req);
-    const text = typeof body.text === "string" ? body.text.trim() : "";
-    if (!text) return json(res, 400, { error: "text is required" });
-    // `source` is an open set (Capture provenance); default to quick_add.
-    const source: IntakeSource = body.source === "watch" ? "watch" : "quick_add";
-    const result = await runIntake(source, text);
-    return json(res, 200, {
-      cleaned: result.cleaned,
-      disposition: result.disposition,
-      rationale: result.rationale,
-      kind: result.kind,
-    });
-  }
-
-  // Approve a staged Proposed item: run the SAME Route-target executor the act
-  // path would have, server-side (the dashboard's `inboxApprove` mutator then
-  // flips state). Loopback + daemon-secret gated (proxied from the dashboard's
-  // session-authenticated `/api/intake/approve` route).
-  if (method === "POST" && path === "/api/intake/approve") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    const body = await readJson<{ id?: unknown }>(req);
-    const id = typeof body.id === "string" ? body.id : "";
-    if (!id) return json(res, 400, { error: "id is required" });
-    try {
-      const result = await approveInbox(id);
-      return json(res, 200, result);
-    } catch (err) {
-      return json(res, 409, { ok: false, error: (err as Error).message });
-    }
-  }
-
-  // Undo a Done item: run the inverse executor (delete the reminder/check-in/
-  // memory) server-side. The dashboard's `inboxUndo` mutator flips state after.
-  if (method === "POST" && path === "/api/intake/undo") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    const body = await readJson<{ id?: unknown }>(req);
-    const id = typeof body.id === "string" ? body.id : "";
-    if (!id) return json(res, 400, { error: "id is required" });
-    try {
-      const result = await undoInbox(id);
-      return json(res, 200, result);
-    } catch (err) {
-      return json(res, 409, { ok: false, error: (err as Error).message });
-    }
-  }
-
-  // Triage an Unsorted item to a chosen `agent:<name>` target: mail the
-  // cleaned text to that agent server-side, then promote to Done.
-  if (method === "POST" && path === "/api/intake/triage") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    const body = await readJson<{ id?: unknown; targetId?: unknown }>(req);
-    const id = typeof body.id === "string" ? body.id : "";
-    const targetId = typeof body.targetId === "string" ? body.targetId : "";
-    if (!id || !targetId) return json(res, 400, { error: "id and targetId are required" });
-    try {
-      const result = await triageInbox(id, targetId);
-      return json(res, 200, result);
-    } catch (err) {
-      return json(res, 409, { ok: false, error: (err as Error).message });
-    }
-  }
-
-  // List OPEN Inbox items for the orchestrator's `friday-inbox` MCP tools
-  // (FRI-171). Read-only; used when Seth says "work through my inbox". Returns
-  // resolved items never — only `state='open'` rows, most-recent first.
-  if (method === "GET" && path === "/api/intake/inbox") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    return json(res, 200, { items: await listOpenInbox() });
-  }
-
-  // Act on one Inbox item from the orchestrator path (FRI-171): approve / reject
-  // / dismiss / triage / undo. Runs the SAME executor/dispatch the dashboard
-  // mutators use AND flips state open→resolved daemon-side (the orchestrator has
-  // no Zero session). This is an ordinary tool call at Seth's explicit
-  // direction — there is NO timer/cron wiring driving it.
-  if (method === "POST" && path === "/api/intake/act") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    const body = await readJson<{ id?: unknown; action?: unknown; targetId?: unknown }>(req);
-    const id = typeof body.id === "string" ? body.id : "";
-    const action = typeof body.action === "string" ? (body.action as InboxAction) : undefined;
-    const targetId = typeof body.targetId === "string" ? body.targetId : undefined;
-    const allowed: InboxAction[] = ["approve", "reject", "dismiss", "triage", "undo"];
-    if (!id || !action || !allowed.includes(action)) {
-      return json(res, 400, {
-        error: "id and a valid action (approve|reject|dismiss|triage|undo) are required",
-      });
-    }
-    try {
-      const result = await actInbox(id, action, targetId);
-      return json(res, 200, result);
-    } catch (err) {
-      return json(res, 409, { ok: false, error: (err as Error).message });
-    }
-  }
-
-  // --- Push (FRI-142, ADR-048) ---
-  // The daemon is the single server-side holder of the VAPID private key + the
-  // push_subscriptions rows. The dashboard's session-gated `/api/push/*` routes
-  // proxy here over loopback with the daemon secret (the same contract as
-  // /api/intake — ADR-047). web-push is daemon-only; nothing here reaches the
-  // browser/service-worker bundle.
-
-  // Expose the PUBLIC VAPID key. The dashboard fetches it to pass as
-  // `applicationServerKey` to `pushManager.subscribe`. Public by design — it is
-  // the application server's public identity; the PRIVATE key never leaves the
-  // daemon. The keypair lives in the server-only `web_push_vapid` Postgres table
-  // (NOT a data-dir file — it must ride the same pg_dump as push_subscriptions;
-  // ADR-048). `ensureVapidKeys()` is called defensively so a never-pushed
-  // install (or a box whose boot-ensure failed) still seeds the keypair on the
-  // first public-key fetch, and we return ONLY the public half.
-  if (method === "GET" && path === "/api/push/vapid-public-key") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    const { publicKey } = await ensureVapidKeys();
-    return json(res, 200, { publicKey });
-  }
-
-  // Store/refresh a browser push registration. Body = PushSubscribePayload
-  // (`{ endpoint, keys: { p256dh, auth }, deviceId }`) + the session user's id
-  // (the dashboard reads it from `locals.user.id`, the same value
-  // `client_devices.user_id` carries). Deduped by the unique `endpoint`.
-  if (method === "POST" && path === "/api/push/subscribe") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    const body = await readJson<{
-      endpoint?: unknown;
-      keys?: unknown;
-      deviceId?: unknown;
-      userId?: unknown;
-    }>(req);
-    const endpoint = typeof body.endpoint === "string" ? body.endpoint : "";
-    const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
-    const userId = typeof body.userId === "string" ? body.userId : "";
-    const keys = body.keys as { p256dh?: unknown; auth?: unknown } | undefined;
-    const p256dh = typeof keys?.p256dh === "string" ? keys.p256dh : "";
-    const auth = typeof keys?.auth === "string" ? keys.auth : "";
-    if (!endpoint || !p256dh || !auth || !deviceId || !userId) {
-      return json(res, 400, {
-        error: "endpoint, keys.p256dh, keys.auth, deviceId, and userId are required",
-      });
-    }
-    const payload: PushSubscribePayload = { endpoint, keys: { p256dh, auth }, deviceId };
-    try {
-      const result = await upsertSubscription(payload, userId);
-      return json(res, 200, { ok: true, endpoint: result.endpoint });
-    } catch (err) {
-      return json(res, 500, { ok: false, error: (err as Error).message });
-    }
-  }
-
-  // Drop every push subscription for a device — the "Forget this device"
-  // cascade. The dashboard's `forgetDevice` mutator writes
-  // `client_devices.revoked_at` (a Zero mutator, no daemon LISTEN); its
-  // server-side body proxies here over loopback so a forgotten device stops
-  // receiving pushes. Scoped to `(deviceId, userId)`. Idempotent (a no-match
-  // drops zero rows).
-  if (method === "POST" && path === "/api/push/forget-device") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    const body = await readJson<{ deviceId?: unknown; userId?: unknown }>(req);
-    const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
-    const userId = typeof body.userId === "string" ? body.userId : "";
-    if (!deviceId || !userId) {
-      return json(res, 400, { error: "deviceId and userId are required" });
-    }
-    try {
-      await dropSubscriptionsForDevice(deviceId, userId);
-      return json(res, 200, { ok: true });
-    } catch (err) {
-      return json(res, 500, { ok: false, error: (err as Error).message });
-    }
-  }
-
-  // --- Presence (FRI-142, ADR-048) ---
-  // Client→daemon presence heartbeat (on `visibilitychange` + a ~20s keepalive).
-  // Body = PresenceReport `{ deviceId, visible }`. The daemon keys an in-memory
-  // Map on deviceId (TTL 45s) and OR-aggregates per user; the Notification
-  // router reads it to choose Toast over Push. Stale/unknown/empty ⇒ away ⇒
-  // push (fail-safe). Loopback + daemon-secret gated; the dashboard's
-  // session-gated `/api/presence` route proxies here.
-  if (method === "POST" && path === "/api/presence") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    const body = await readJson<{ deviceId?: unknown; visible?: unknown }>(req);
-    const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
-    const visible = body.visible === true;
-    if (!deviceId) return json(res, 400, { error: "deviceId is required" });
-    const report: PresenceReport = { deviceId, visible };
-    reportPresence(report);
-    return json(res, 200, { ok: true });
-  }
-
-  // Fire a TEST Notification through the full router (policy × presence × DND →
-  // toast + push). Drives the Settings "Send test notification" button so Seth
-  // can verify the end-to-end push round-trip on his installed iPhone PWA. The
-  // `eventType` selects which policy row applies; defaults to `builder_archive`.
-  if (method === "POST" && path === "/api/notify/test") {
-    if (!authorizeSameHost(req)) return json(res, 401, { error: "unauthorized" });
-    const body = await readJson<{ eventType?: unknown }>(req).catch(
-      () => ({}) as { eventType?: unknown },
-    );
-    const requested = typeof body.eventType === "string" ? body.eventType : "builder_archive";
-    const eventType: NotifyEventType = (NOTIFY_EVENT_TYPES as readonly string[]).includes(requested)
-      ? (requested as NotifyEventType)
-      : "builder_archive";
-    // Awaited so the response reflects that the router ran (it is internally
-    // fire-and-forget and never throws); the button surfaces success on 200.
-    await notify({
-      type: eventType,
-      title: "Friday test notification",
-      body: "If you can see this, notifications are working.",
-      deepLink: "/",
-    });
-    return json(res, 200, { ok: true, eventType });
-  }
-
-  // --- Mail ---
-  if (method === "GET" && /^\/api\/mail\/inbox\/[^/]+$/.test(path)) {
-    const agent = path.split("/")[4];
-    return json(res, 200, await inbox(agent));
-  }
-  if (method === "POST" && path === "/api/mail/send") {
-    const body = await readJson<Parameters<typeof sendMail>[0]>(req);
-    // FIX_FORWARD 5.7: per-agent mail rate limit — 50 mails / 5min / from.
-    // A runaway tool that spams the orchestrator can't drown the mail bus.
-    const fromAgent = body.fromAgent || "__unknown__";
-    const r = await consumeRateLimit({
-      key: `mail:${fromAgent}`,
-      windowMs: 5 * 60 * 1000,
-      max: 50,
-    });
-    if (!r.allowed) {
-      return json(res, 429, {
-        error: "rate_limited",
-        detail: `agent ${fromAgent} exceeded 50 mails / 5 min`,
-        retry_after_ms: r.retryAfterMs,
-      });
-    }
-    // FRI-11 F3: resolve symbolic recipients ("parent" / "self") against the
-    // caller's registry row before validation. Literal names pass through.
-    const resolved = await resolveRecipient(fromAgent, body.toAgent);
-    if (!resolved.ok) {
-      return json(res, 400, { error: resolved.error });
-    }
-    // FRI-11 F2: reject mail to unknown recipients before persisting the row.
-    // The MCP tool surfaces this 400 to the caller as a daemonFetch error —
-    // the agent sees the suggestion immediately instead of silently writing
-    // an undeliverable mail row.
-    const check = await validateRecipient(resolved.agent);
-    if (!check.ok) {
-      return json(res, 400, {
-        error: check.error,
-        suggestion: check.suggestion,
-      });
-    }
-    return json(res, 200, await sendMail({ ...body, toAgent: check.agent }));
-  }
-  if (method === "POST" && /^\/api\/mail\/\d+\/read$/.test(path)) {
-    const id = Number(path.split("/")[3]);
-    const row = await getMail(id);
-    if (!row) return json(res, 404, { error: "mail not found" });
-    await markRead(id);
-    return json(res, 200, { ...row, delivery: "read", readAt: Date.now() });
-  }
-  if (method === "POST" && /^\/api\/mail\/\d+\/close$/.test(path)) {
-    const id = Number(path.split("/")[3]);
-    const row = await getMail(id);
-    if (!row) return json(res, 404, { error: "mail not found" });
-    await closeMail(id);
-    return json(res, 200, { ok: true });
-  }
-
-  if (method === "GET" && path === "/api/mail/search") {
-    const q = url.searchParams.get("q") ?? undefined;
-    const from = url.searchParams.get("from") ?? undefined;
-    const to = url.searchParams.get("to") ?? undefined;
-    const involves = url.searchParams.get("involves") ?? undefined;
-    const typeRaw = url.searchParams.get("type");
-    const deliveryRaw = url.searchParams.get("delivery");
-    const priorityRaw = url.searchParams.get("priority");
-    const since = url.searchParams.get("since") ?? undefined;
-    const until = url.searchParams.get("until") ?? undefined;
-    const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "") || 100, 500);
-    const offset = parseInt(url.searchParams.get("offset") ?? "") || 0;
-
-    const type = typeRaw
-      ? (typeRaw.split(",").filter(Boolean) as Array<"message" | "notification" | "task">)
-      : undefined;
-    const delivery = deliveryRaw
-      ? (deliveryRaw.split(",").filter(Boolean) as Array<"pending" | "read" | "closed">)
-      : undefined;
-    const priority = priorityRaw
-      ? (priorityRaw.split(",").filter(Boolean) as Array<"normal" | "critical">)
-      : undefined;
-
-    try {
-      const result = await searchMail({
-        q,
-        from,
-        to,
-        involves,
-        type,
-        delivery,
-        priority,
-        since,
-        until,
-        limit,
-        offset,
-      });
-      return json(res, 200, result);
-    } catch (err) {
-      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
-  // --- Attachments / uploads ---
-  // Body is the raw file bytes; headers carry the metadata. Avoids the
-  // multipart-parsing complexity that adds nothing for a single-file form.
-  // Dashboard hits this with `fetch(url, { method: "POST", body: file,
-  // headers: { "content-type": file.type, "x-filename": file.name } })`.
-  //
-  // Auth: same-machine shared-secret header + Host-header check. The daemon
-  // binds 127.0.0.1, but that alone doesn't stop DNS-rebind attacks (a
-  // hostile page resolving an attacker hostname to 127.0.0.1) or other
-  // local processes. The shared secret is generated on first run, mode
-  // 0600, and read by the dashboard at startup so its proxy can inject the
-  // header.
-  if (method === "POST" && path === "/api/uploads") {
-    if (!authorizeSameHost(req)) {
-      return json(res, 401, { error: "unauthorized" });
-    }
-    const contentLength = Number(req.headers["content-length"] ?? 0);
-    // FIX_FORWARD 5.5: 15 MB hard cap, enforced at stream-receive so a
-    // pathological client can't pump gigabytes before sharp gets involved.
-    // Anthropic's vision API caps attachments around 20 MB; 15 MB leaves
-    // headroom for downstream re-encodes while still bounding daemon RAM.
-    const MAX_BYTES = 15 * 1024 * 1024;
-    if (contentLength > MAX_BYTES) {
-      return json(res, 413, {
-        error: `file exceeds ${MAX_BYTES} bytes`,
-      });
-    }
-    const filename = String(req.headers["x-filename"] ?? "upload").slice(0, 255);
-    const mime = String(req.headers["content-type"] ?? "application/octet-stream");
-    if (!ATTACHMENT_MIME_ALLOWLIST.has(mime.toLowerCase())) {
-      return json(res, 415, {
-        error: `unsupported mime: ${mime}`,
-        allowed: [...ATTACHMENT_MIME_ALLOWLIST],
-      });
-    }
-    const chunks: Buffer[] = [];
-    let received = 0;
-    let aborted = false;
-    try {
-      for await (const c of req) {
-        const buf = c as Buffer;
-        received += buf.length;
-        if (received > MAX_BYTES) {
-          // Tear down the connection. Without `req.destroy()` the loop's
-          // early return doesn't actually stop the client from sending; a
-          // chunked request that lies about content-length could keep
-          // amplifying memory until the network runs out of patience.
-          aborted = true;
-          req.destroy();
-          return json(res, 413, {
-            error: `file exceeds ${MAX_BYTES} bytes`,
-          });
-        }
-        chunks.push(buf);
-      }
-    } catch (err) {
-      if (aborted) return; // already responded
-      return json(res, 400, {
-        error: `read failed: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
-    const bytes = Buffer.concat(chunks);
-    if (bytes.length === 0) {
-      return json(res, 400, { error: "empty body" });
-    }
-    try {
-      const att = await uploadAttachment({ bytes, filename, mime });
-      return json(res, 200, {
-        sha256: att.sha256,
-        filename: att.filename,
-        mime: att.mime,
-        sizeBytes: att.sizeBytes,
-      });
-    } catch (err) {
-      return json(res, 500, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  if (method === "GET" && /^\/api\/uploads\/[a-f0-9]{64}$/.test(path)) {
-    if (!authorizeSameHost(req)) {
-      return json(res, 401, { error: "unauthorized" });
-    }
-    const sha = path.split("/")[3];
-    const bytes = await readAttachmentBytes(sha);
-    if (!bytes) return json(res, 404, { error: "not found" });
-    const meta = await getAttachment(sha);
-    const rawMime = (meta?.mime ?? "application/octet-stream").toLowerCase();
-    // Only allow inline rendering for a small, well-understood set of
-    // MIME types. Anything else is forced to `application/octet-stream`
-    // with `Content-Disposition: attachment` so the browser downloads
-    // rather than parses it. `nosniff` blocks browser MIME-sniffing,
-    // which would otherwise re-derive a dangerous type from the bytes.
-    const inlineSafe = INLINE_SERVE_MIME_ALLOWLIST.has(rawMime);
-    const contentType = inlineSafe ? rawMime : "application/octet-stream";
-    const safeFilename = sanitizeFilenameForHeader(meta?.filename ?? sha);
-    const headers: Record<string, string> = {
-      "content-type": contentType,
-      "content-length": String(bytes.length),
-      "cache-control": "private, max-age=31536000, immutable",
-      "x-content-type-options": "nosniff",
-    };
-    if (!inlineSafe) {
-      headers["content-disposition"] =
-        `attachment; filename="${safeFilename.ascii}"; filename*=UTF-8''${safeFilename.rfc5987}`;
-    }
-    res.writeHead(200, headers);
-    res.end(bytes);
-    return;
-  }
-
-  // --- Apps (FRI-78) ---
-  if (method === "GET" && path === "/api/apps") {
-    if (!authorizeSameHost(req)) {
-      return json(res, 401, { error: "unauthorized" });
-    }
-    const list = await listApps();
-    const rows = await Promise.all(
-      list.map(async (r) => {
-        const detail = await inspectApp(r.id);
-        return {
-          ...r,
-          agents: detail?.agents ?? [],
-          schedules: detail?.schedules ?? [],
-          mcpServers: detail?.mcpServers ?? [],
-        };
-      }),
-    );
-    return json(res, 200, rows);
-  }
-  if (method === "POST" && path === "/api/apps") {
-    if (!authorizeSameHost(req)) {
-      return json(res, 401, { error: "unauthorized" });
-    }
-    const body = await readJson<{ folderPath: string; adopt?: boolean }>(req);
-    if (!body.folderPath) {
-      return json(res, 400, { error: "folderPath required" });
-    }
-    try {
-      const result = await installApp(body.folderPath, { adopt: !!body.adopt });
-      return json(res, 201, result);
-    } catch (err) {
-      if (err instanceof AppInstallError) {
-        const status =
-          err.code === "already_installed"
-            ? 409
-            : err.code === "agent_name_collision" ||
-                err.code === "schedule_name_collision" ||
-                err.code === "mcp_name_collision"
-              ? 409
-              : 400;
-        return json(res, status, { error: err.message, code: err.code });
-      }
-      return json(res, 400, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-  if (method === "GET" && /^\/api\/apps\/[^/]+$/.test(path)) {
-    if (!authorizeSameHost(req)) {
-      return json(res, 401, { error: "unauthorized" });
-    }
-    const id = decodeURIComponent(path.split("/")[3]);
-    const row = await inspectApp(id);
-    if (!row) return json(res, 404, { error: "not found" });
-    return json(res, 200, row);
-  }
-  if (method === "DELETE" && /^\/api\/apps\/[^/]+$/.test(path)) {
-    if (!authorizeSameHost(req)) {
-      return json(res, 401, { error: "unauthorized" });
-    }
-    const id = decodeURIComponent(path.split("/")[3]);
-    const body = await readJson<{
-      folderDisposition?: "archive" | "keep" | "delete";
-    }>(req).catch(() => ({}) as { folderDisposition?: "archive" | "keep" | "delete" });
-    try {
-      const result = await uninstallApp(id, {
-        folderDisposition: body.folderDisposition,
-      });
-      return json(res, 200, result);
-    } catch (err) {
-      if (err instanceof AppInstallError) {
-        return json(res, 404, { error: err.message, code: err.code });
-      }
-      return json(res, 400, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-  if (method === "POST" && /^\/api\/apps\/[^/]+\/reload$/.test(path)) {
-    if (!authorizeSameHost(req)) {
-      return json(res, 401, { error: "unauthorized" });
-    }
-    const id = decodeURIComponent(path.split("/")[3]);
-    let result!: { id: string; changed: boolean };
-    try {
-      result = await reloadApp(id);
-    } catch (err) {
-      if (err instanceof AppInstallError) {
-        return json(res, 404, { error: err.message, code: err.code });
-      }
-      return json(res, 400, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    let stoppedWorkers = 0;
-    // Stop workers even when manifest unchanged — picks up rotated secrets.
-    try {
-      stoppedWorkers = await stopWorkersForApp(id);
-    } catch (err) {
-      logger.log("warn", "app.reload.stop-workers.fail", {
-        app: id,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-    return json(res, 200, { ...result, stoppedWorkers });
+  // FRI-router: dispatch through the route table + deep request adapter. The
+  // adapter (router.ts) owns the cross-cutting mechanics — auth gate, body
+  // parse, schema validation, the error envelope — so each route is one
+  // declarative row. A no-match falls through to the terminal 404 below.
+  const matched = matchRoute(ROUTES, method, path);
+  if (matched) {
+    return handleRequest(matched, { req, res, url, path, method, cfg }, routerDeps);
   }
 
   return json(res, 404, { error: "not found", path });
 }
+
+/**
+ * Memory upsert payload (POST /api/memory). The one route where the cascade's
+ * inline `if (!body.title || !body.content)` check is replaced by a declarative
+ * schema run by the adapter — demonstrating the schema path end-to-end. Every
+ * field the handler reads is covered, so the validated value the handler
+ * receives carries no surprises (zod strips unknown keys).
+ */
+const MemoryUpsertSchema = z.object({
+  id: z.string().optional(),
+  title: z.string().min(1),
+  content: z.string().min(1),
+  tags: z.array(z.string()).optional(),
+});
+
+/** IO the adapter depends on: the real same-host gate + the real body reader. */
+const routerDeps: RouterDeps = {
+  authorize: authorizeSameHost,
+  readBody: (req) => readJson<unknown>(req),
+};
+
+/**
+ * The daemon HTTP route table. ONE declarative row per endpoint, in DECLARATION
+ * ORDER (the only disambiguator for specific-before-broad regex routes — e.g.
+ * `/api/memory/search` MUST precede `^/api/memory/[^/]+$`, and the habits
+ * `/checkin`,`/<id>/checkin`,`/<id>/archive` paths MUST precede the bare
+ * `/<id>`). The adapter (router.ts) runs auth → parse → validate → handler →
+ * error-envelope; handlers return `{ status, body }` and the adapter serializes.
+ *
+ * `auth` is per-route and load-bearing: most routes rely on the daemon binding
+ * 127.0.0.1 + the dashboard proxy injecting the daemon secret (auth:false);
+ * health/secrets/intake/push/presence/notify/uploads/apps gate inline
+ * (auth:true). Streaming/binary/seam routes (`/api/events`, `/api/uploads`,
+ * `/api/evolve/scan`, `/api/commands/dispatch`) opt out of the JSON envelope via
+ * `raw` and own `req`/`res` themselves.
+ *
+ * Exported for the route-table contract test (`router-table.test.ts`), which
+ * pins the migration invariants: unique (method, match) keys, the full no-drop
+ * golden set, the specific-before-broad ordering, the auth-gated set, and the
+ * raw routes.
+ */
+export const ROUTES: RouteRow[] = [
+  // --- Health ---
+  {
+    method: "GET",
+    match: "/api/health",
+    // FIX_FORWARD 5.8: gate /api/health behind the same-host secret so a local
+    // web page (or a DNS-rebind attacker) can't probe daemon status.
+    auth: true,
+    handler: () => ({
+      status: 200,
+      body: { ok: true, ts: Date.now(), secretsLocked: isSecretsLocked() },
+    }),
+  },
+
+  // --- Secrets ---
+  {
+    method: "POST",
+    match: "/api/secrets/reload",
+    auth: true,
+    handler: async () => {
+      const { clearFridayConfigCache, clearSecretsCache, unlockVault } =
+        await import("@friday/shared");
+      clearSecretsCache();
+      clearFridayConfigCache();
+      const result = await unlockVault(true);
+      return {
+        status: 200,
+        body: { ok: result.ok, reason: result.ok ? undefined : result.reason },
+      };
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/secrets/audit",
+    auth: true,
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as {
+        secretName: string;
+        callerName: string;
+        callerType: string;
+        appId?: string | null;
+        reason: string;
+        source: "mcp" | "cli";
+      };
+      const { logSecretsFetch } = await import("../services/secrets-audit.js");
+      const logged = await logSecretsFetch(body);
+      if (!logged.ok) return { status: 429, body: { error: logged.error } };
+      return { status: 200, body: { ok: true } };
+    },
+  },
+
+  // --- Commands (system + skills, for chat autocomplete) ---
+  {
+    method: "GET",
+    match: "/api/commands",
+    handler: () => ({ status: 200, body: commandsApi() }),
+  },
+  // System command dispatch — handleSystemCommand owns the response.
+  {
+    method: "POST",
+    match: "/api/commands/dispatch",
+    raw: async (ctx) => {
+      const body = await readJson<{ command: string; args?: string }>(ctx.req);
+      return handleSystemCommand(ctx.res, body, ctx.cfg);
+    },
+  },
+
+  // --- SSE events --- (streaming; owns res for the connection lifetime)
+  {
+    method: "GET",
+    match: "/api/events",
+    raw: (ctx) => handleEvents(ctx.req, ctx.res, ctx.cfg),
+  },
+
+  // --- FRI-152 elicitation bridge ---
+  {
+    method: "POST",
+    match: "/api/elicitation/wait",
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as {
+        agentName?: string;
+        turnId?: string;
+        toolUseId?: string;
+      };
+      if (
+        typeof body.agentName !== "string" ||
+        typeof body.turnId !== "string" ||
+        typeof body.toolUseId !== "string" ||
+        body.toolUseId.length === 0
+      ) {
+        return { status: 400, body: { error: "missing_fields" } };
+      }
+      const promise = registerElicitation(body.toolUseId);
+      // Fire SSE AFTER registering the waiter so the dashboard's submit can't
+      // beat us to the resolver.
+      eventBus.publish({
+        v: 1,
+        type: "elicitation_requested",
+        agent: body.agentName,
+        turn_id: body.turnId,
+        tool_use_id: body.toolUseId,
+        ts: Date.now(),
+      });
+      const onAbort = () => {
+        cancelElicitation(body.toolUseId!, new Error("client_aborted"));
+      };
+      ctx.req.on("close", onAbort);
+      try {
+        const answer = await promise;
+        ctx.req.off("close", onAbort);
+        return { status: 200, body: answer };
+      } catch (err) {
+        ctx.req.off("close", onAbort);
+        return { status: 499, body: { error: String((err as Error).message) } };
+      }
+    },
+  },
+  {
+    method: "POST",
+    // Prefix+suffix matcher (the one route that is neither exact nor a single
+    // regex): `/api/elicitation/<id>/submit`.
+    match: (p) => p.startsWith("/api/elicitation/") && p.endsWith("/submit"),
+    body: "json",
+    handler: (ctx) => {
+      const id = ctx.path.slice("/api/elicitation/".length, -"/submit".length);
+      if (id.length === 0) return { status: 400, body: { error: "missing_id" } };
+      const body = ctx.body as ElicitationAnswer;
+      if (!body || typeof body !== "object" || !body.answers) {
+        return { status: 400, body: { error: "missing_answers" } };
+      }
+      const resolved = resolveElicitation(id, body);
+      if (!resolved) return { status: 409, body: { error: "no_waiter", id } };
+      return { status: 200, body: { ok: true } };
+    },
+  },
+
+  // --- Internal fast-paths (cancel-queued / abort-turn) ---
+  {
+    method: "POST",
+    match: "/api/internal/cancel-queued",
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as { block_id?: string };
+      const blockId = body.block_id;
+      if (typeof blockId !== "string" || blockId.length === 0) {
+        return { status: 400, body: { error: "missing_block_id" } };
+      }
+      const block = await getBlockById(blockId);
+      if (!block) {
+        return { status: 200, body: { ok: true, already_canceled: true, text: "" } };
+      }
+      if (block.status !== "queued" && block.status !== "cancel_requested") {
+        return {
+          status: 409,
+          body: {
+            error: "not_queued",
+            block_id: blockId,
+            status: block.status,
+            message: "Block has already dispatched; use abort instead",
+          },
+        };
+      }
+      const removed = removeQueuedPrompt(block.agentName, block.turnId);
+      let recoveredText = "";
+      try {
+        const parsed = JSON.parse(block.contentJson) as { text?: unknown };
+        if (typeof parsed.text === "string") recoveredText = parsed.text;
+      } catch {
+        // Malformed content_json — return empty text; the user retypes.
+      }
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          already_canceled: removed === null,
+          text: recoveredText,
+          turn_id: block.turnId,
+          agent: block.agentName,
+        },
+      };
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/internal/abort-turn",
+    body: "json",
+    handler: (ctx) => {
+      const body = ctx.body as { turn_id?: string };
+      const turnId = body.turn_id;
+      if (typeof turnId !== "string" || turnId.length === 0) {
+        return { status: 400, body: { error: "missing_turn_id" } };
+      }
+      const agent = findAgentByTurnId(turnId);
+      const aborted = agent ? abortTurn(agent) : false;
+      return { status: 200, body: { ok: true, aborted, turn_id: turnId, agent } };
+    },
+  },
+
+  // --- Agents ---
+  {
+    method: "GET",
+    match: "/api/agents",
+    handler: async (ctx) => {
+      const all: AgentEntry[] = await registry.listAgents();
+      // Prefer the in-memory live worker's status over the DB column whenever
+      // an agent has a forked worker — the live map is the real-time truth.
+      const merged: AgentEntry[] = all.map((a) => {
+        const live = peekLiveWorker(a.name);
+        return live ? { ...a, status: live.status } : a;
+      });
+      const typeFilter = ctx.url.searchParams.get("type");
+      const statusFilter = ctx.url.searchParams.get("status");
+      const filtered = merged.filter(
+        (a) =>
+          (!typeFilter || a.type === typeFilter) && (!statusFilter || a.status === statusFilter),
+      );
+      const counts = await sessionCountsByAgent();
+      const augmented = filtered.map((a) => ({
+        ...a,
+        sessionCount: counts[a.name] ?? 0,
+      }));
+      return { status: 200, body: augmented };
+    },
+  },
+  {
+    method: "GET",
+    match: /^\/api\/agents\/[^/]+\/sessions$/,
+    handler: async (ctx) => {
+      const agentName = ctx.path.split("/")[3];
+      return { status: 200, body: await listAgentSessions(agentName) };
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/agents",
+    body: "json",
+    handler: async (ctx) => {
+      const r = await createAgent(ctx.body as CreateAgentInput, ctx.cfg);
+      return { status: r.status, body: r.body };
+    },
+  },
+  {
+    method: "GET",
+    match: /^\/api\/agents\/[^/]+$/,
+    handler: async (ctx) => {
+      const name = ctx.path.split("/")[3];
+      const a = await registry.getAgent(name);
+      if (!a) return { status: 404, body: { error: "not found" } };
+      return { status: 200, body: a };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/agents\/[^/]+\/archive$/,
+    // `reason` is required and may arrive in a missing/empty body — tolerate a
+    // malformed body as `{}` (mirrors the cascade's `readJson(...).catch`).
+    body: "json-optional",
+    handler: async (ctx) => {
+      const name = ctx.path.split("/")[3];
+      const a = await registry.getAgent(name);
+      if (!a) return { status: 404, body: { error: "not found" } };
+      // Bare agents registered under an installed app are persistent user-facing
+      // interfaces (e.g. the kitchen agent). Block the call.
+      if (a.type === "bare") {
+        const appId = await registry.getAppId(name);
+        if (appId) {
+          return {
+            status: 409,
+            body: {
+              error: `cannot archive "${name}": it is a persistent bare agent registered under app "${appId}". Uninstall the app to remove it.`,
+              code: "app_agent_protected",
+            },
+          };
+        }
+      }
+      const body = ctx.body as { reason?: string };
+      const validReasons = ["completed", "abandoned", "failed"] as const;
+      type ApiReason = (typeof validReasons)[number];
+      if (!body.reason || !validReasons.includes(body.reason as ApiReason)) {
+        return {
+          status: 400,
+          body: { error: `reason required, one of: ${validReasons.join(", ")}` },
+        };
+      }
+      const reason = body.reason as ApiReason;
+      const branch = a.type === "builder" && "branch" in a ? a.branch : undefined;
+      // PR-271 BLOCKER 1: resolve teardown against the ORIGINAL source repo
+      // persisted on the agent row, NOT process.cwd().
+      const builderRepo =
+        a.type === "builder"
+          ? ((await registry.getWorkspaceRepo(name)) ?? process.cwd())
+          : undefined;
+      await archiveAgent(name, { reason });
+      let workspacePathRemoved: string | undefined;
+      if (a.type === "builder") {
+        try {
+          workspacePathRemoved = workspacePath(name);
+          archiveWorkspace(name, builderRepo ?? process.cwd(), { branch, repo: builderRepo });
+        } catch (err) {
+          logger.log("warn", "agent.archive.workspace.fail", {
+            agent: name,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      return { status: 200, body: { ok: true, workspacePath: workspacePathRemoved } };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/agents\/[^/]+\/unarchive$/,
+    handler: async (ctx) => {
+      const name = ctx.path.split("/")[3];
+      const a = await registry.getAgent(name);
+      if (!a) return { status: 404, body: { error: "not found" } };
+      if (a.status !== "archived") {
+        return {
+          status: 409,
+          body: { error: `"${name}" is not archived (status=${a.status})`, code: "not_archived" },
+        };
+      }
+      try {
+        await registry.unarchiveAgent(name);
+      } catch (err) {
+        return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+      return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/agents\/[^/]+\/abort$/,
+    handler: (ctx) => {
+      const name = ctx.path.split("/")[3];
+      const aborted = abortTurn(name);
+      return { status: 200, body: { aborted } };
+    },
+  },
+
+  // --- Blocks (canonical transcript) ---
+  {
+    method: "GET",
+    match: /^\/api\/agents\/[^/]+\/blocks$/,
+    handler: async (ctx) => {
+      const agentName = ctx.path.split("/")[3];
+      const limit = numericParam(ctx.url, "limit");
+      const before = ctx.url.searchParams.get("before") ?? undefined;
+      const after = ctx.url.searchParams.get("after") ?? undefined;
+      const aroundTs = numericParam(ctx.url, "around_ts");
+      const beforeLimit = numericParam(ctx.url, "before_limit");
+      const afterLimit = numericParam(ctx.url, "after_limit");
+      const matchQ = ctx.url.searchParams.get("match") ?? undefined;
+      const sessionId = ctx.url.searchParams.get("session_id") ?? undefined;
+      try {
+        const result = await fetchBlocksByAgent({
+          agentName,
+          sessionId,
+          limit,
+          beforeBlockId: before,
+          afterBlockId: after,
+          aroundTs,
+          beforeLimit,
+          afterLimit,
+          match: matchQ,
+        });
+        return { status: 200, body: { blocks: result.blocks } };
+      } catch (err) {
+        // FTS5 MATCH expressions can throw on syntactically invalid queries.
+        return {
+          status: 400,
+          body: {
+            error: "invalid_query",
+            detail: err instanceof Error ? err.message : String(err),
+          },
+        };
+      }
+    },
+  },
+
+  // --- Tickets ---
+  {
+    method: "GET",
+    match: "/api/tickets",
+    handler: async (ctx) => {
+      const TICKET_STATUSES = ["open", "in_progress", "done", "blocked", "closed"] as const;
+      const rawStatus = ctx.url.searchParams.get("status");
+      const status = (TICKET_STATUSES as readonly string[]).includes(rawStatus ?? "")
+        ? (rawStatus as (typeof TICKET_STATUSES)[number])
+        : undefined;
+      const assignee = ctx.url.searchParams.get("assignee") ?? undefined;
+      return { status: 200, body: await listTickets({ status, assignee }) };
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/tickets",
+    body: "json",
+    handler: async (ctx) => ({
+      status: 200,
+      body: await createTicket(ctx.body as Parameters<typeof createTicket>[0]),
+    }),
+  },
+  {
+    method: "GET",
+    match: /^\/api\/tickets\/[^/]+$/,
+    handler: async (ctx) => {
+      const id = ctx.path.split("/")[3];
+      const t = await getTicket(id);
+      if (!t) return { status: 404, body: { error: "not found" } };
+      const ext = await externalLinks(id);
+      const comments = await listComments(id);
+      return { status: 200, body: { ...t, externalLinks: ext, comments } };
+    },
+  },
+  {
+    method: "PATCH",
+    match: /^\/api\/tickets\/[^/]+$/,
+    body: "json",
+    handler: async (ctx) => {
+      const id = ctx.path.split("/")[3];
+      const body = ctx.body as Parameters<typeof updateTicket>[1];
+      return { status: 200, body: await updateTicket(id, body) };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/tickets\/[^/]+\/comments$/,
+    body: "json",
+    handler: async (ctx) => {
+      const id = ctx.path.split("/")[3];
+      const body = ctx.body as { author: string; body: string };
+      await addComment(id, body.author, body.body);
+      return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/tickets\/[^/]+\/links$/,
+    body: "json",
+    handler: async (ctx) => {
+      const id = ctx.path.split("/")[3];
+      if (!(await getTicket(id))) return { status: 404, body: { error: "ticket not found" } };
+      const body = ctx.body as {
+        system: string;
+        externalId: string;
+        url?: string;
+        meta?: Record<string, unknown>;
+      };
+      if (!body.system || !body.externalId) {
+        return { status: 400, body: { error: "system and externalId required" } };
+      }
+      await linkExternal({
+        ticketId: id,
+        system: body.system,
+        externalId: body.externalId,
+        url: body.url,
+        meta: body.meta,
+      });
+      return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    method: "DELETE",
+    match: /^\/api\/tickets\/[^/]+\/links$/,
+    handler: async (ctx) => {
+      const id = ctx.path.split("/")[3];
+      if (!(await getTicket(id))) return { status: 404, body: { error: "ticket not found" } };
+      const system = ctx.url.searchParams.get("system");
+      const externalId = ctx.url.searchParams.get("externalId");
+      if (!system || !externalId) {
+        return { status: 400, body: { error: "system and externalId query params required" } };
+      }
+      const removed = await unlinkExternal({ ticketId: id, system, externalId });
+      if (!removed) return { status: 404, body: { error: "link not found" } };
+      return { status: 200, body: { ok: true } };
+    },
+  },
+
+  // --- Schedules ---
+  {
+    method: "GET",
+    match: "/api/schedules",
+    handler: async () => ({ status: 200, body: await listSchedules() }),
+  },
+  {
+    method: "POST",
+    match: "/api/schedules",
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as Parameters<typeof upsertSchedule>[0];
+      try {
+        await upsertSchedule(body);
+      } catch (err) {
+        if (err instanceof ScheduleNameCollisionError) {
+          return { status: 409, body: { error: err.message } };
+        }
+        return { status: 400, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+      return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/schedules\/[^/]+\/trigger$/,
+    handler: async (ctx) => {
+      const name = decodeURIComponent(ctx.path.split("/")[3]);
+      const runId = await triggerSchedule(name);
+      if (!runId) {
+        return { status: 409, body: { error: "schedule not found or already running" } };
+      }
+      return { status: 200, body: { runId } };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/schedules\/[^/]+\/(pause|resume)$/,
+    handler: async (ctx) => {
+      const name = decodeURIComponent(ctx.path.split("/")[3]);
+      const action = ctx.path.split("/")[4];
+      const ok = action === "pause" ? await pauseSchedule(name) : await resumeSchedule(name);
+      if (!ok) return { status: 404, body: { error: "schedule not found" } };
+      return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    // FRI-168: re-arm a fired/pending reminder to fire again after a delay.
+    method: "POST",
+    match: /^\/api\/schedules\/[^/]+\/snooze$/,
+    body: "json",
+    handler: async (ctx) => {
+      const name = decodeURIComponent(ctx.path.split("/")[3]);
+      const { duration } = ctx.body as { duration: string };
+      try {
+        const ok = await snoozeSchedule(name, duration);
+        if (!ok) return { status: 404, body: { error: "schedule not found" } };
+      } catch (err) {
+        return { status: 400, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+      return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    method: "GET",
+    match: /^\/api\/schedules\/[^/]+$/,
+    handler: async (ctx) => {
+      const name = decodeURIComponent(ctx.path.split("/")[3]);
+      const r = await getSchedule(name);
+      if (!r) return { status: 404, body: { error: "schedule not found" } };
+      return { status: 200, body: r };
+    },
+  },
+  {
+    method: "GET",
+    match: /^\/api\/schedules\/[^/]+\/state$/,
+    handler: async (ctx) => {
+      const name = decodeURIComponent(ctx.path.split("/")[3]);
+      if (!(await getSchedule(name))) return { status: 404, body: { error: "schedule not found" } };
+      return { status: 200, body: readScheduleArtifacts(name) };
+    },
+  },
+  {
+    method: "DELETE",
+    match: /^\/api\/schedules\/[^/]+$/,
+    handler: async (ctx) => {
+      const name = decodeURIComponent(ctx.path.split("/")[3]);
+      const ok = await deleteSchedule(name);
+      if (!ok) return { status: 404, body: { error: "schedule not found" } };
+      return { status: 200, body: { ok: true } };
+    },
+  },
+
+  // --- Habits (FRI-169) ---
+  // Loopback-bound, secret-header contract (no inline guard). Dynamic <id> /
+  // <checkinId> segments are matched by regex + path.split. Order matters: the
+  // more-specific /checkin/<id>, /<id>/checkin and /<id>/archive paths are
+  // matched BEFORE the bare /<id> rows so the catch-all <id> regex doesn't
+  // swallow them.
+  {
+    method: "POST",
+    match: "/api/habits",
+    body: "json",
+    handler: async (ctx) => {
+      // Raw body: window_* arrive as ISO strings over the wire (the store takes
+      // Date). Everything else maps straight onto CreateHabitInput.
+      const body = ctx.body as Omit<CreateHabitInput, "windowStart" | "windowEnd"> & {
+        windowStart?: string | null;
+        windowEnd?: string | null;
+      };
+      if (!body?.name || !body?.mode || !body?.period) {
+        return { status: 400, body: { error: "name, mode, and period are required" } };
+      }
+      try {
+        const habit = await createHabit({
+          name: body.name,
+          mode: body.mode,
+          period: body.period,
+          target: body.target,
+          description: body.description,
+          daysOfWeek: body.daysOfWeek,
+          bucket: body.bucket,
+          colorIndex: body.colorIndex,
+          windowStart: body.windowStart != null ? new Date(body.windowStart) : null,
+          windowEnd: body.windowEnd != null ? new Date(body.windowEnd) : null,
+        });
+        return { status: 200, body: habit };
+      } catch (err) {
+        return { status: 400, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+  },
+  {
+    method: "GET",
+    match: "/api/habits",
+    handler: async (ctx) => {
+      const filterParam = ctx.url.searchParams.get("filter");
+      const filter: HabitFilter = filterParam === "archived" ? "archived" : "active";
+      const habits = await listHabits(filter);
+      const now = new Date();
+      const withStreaks = await Promise.all(
+        habits.map(async (h) => withStreak(h, await listCheckins(h.id), now)),
+      );
+      return { status: 200, body: withStreaks };
+    },
+  },
+  {
+    // DELETE one Check-in by id. Matched before /api/habits/<id> so "checkin"
+    // isn't read as a habit id.
+    method: "DELETE",
+    match: /^\/api\/habits\/checkin\/[^/]+$/,
+    handler: async (ctx) => {
+      const checkinId = decodeURIComponent(ctx.path.split("/")[4]);
+      const removed = await deleteCheckin(checkinId);
+      if (!removed) return { status: 404, body: { error: "check-in not found" } };
+      return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    // POST a Check-in for a habit (append-only insert).
+    method: "POST",
+    match: /^\/api\/habits\/[^/]+\/checkin$/,
+    body: "json",
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[3]);
+      if (!(await getHabit(id))) return { status: 404, body: { error: "habit not found" } };
+      const body = ctx.body as { ts?: string; note?: string | null };
+      const checkin = await insertCheckin(id, {
+        ts: body?.ts != null ? new Date(body.ts) : undefined,
+        note: body?.note ?? null,
+      });
+      return { status: 200, body: checkin };
+    },
+  },
+  {
+    // POST archive a habit (status='archived'; preserve data, never delete).
+    method: "POST",
+    match: /^\/api\/habits\/[^/]+\/archive$/,
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[3]);
+      const habit = await archiveHabit(id);
+      if (!habit) return { status: 404, body: { error: "habit not found" } };
+      return { status: 200, body: habit };
+    },
+  },
+  {
+    // GET one habit: live streak/progress + recent Check-ins.
+    method: "GET",
+    match: /^\/api\/habits\/[^/]+$/,
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[3]);
+      const habit = await getHabit(id);
+      if (!habit) return { status: 404, body: { error: "habit not found" } };
+      const checkins = await listCheckins(id);
+      const decorated = withStreak(habit, checkins, new Date());
+      return { status: 200, body: { ...decorated, checkins } };
+    },
+  },
+  {
+    // PATCH a habit definition (bumps updated_at).
+    method: "PATCH",
+    match: /^\/api\/habits\/[^/]+$/,
+    body: "json",
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[3]);
+      // Raw body: window_* arrive as ISO strings and are parsed to Date here.
+      const body = ctx.body as Omit<UpdateHabitInput, "windowStart" | "windowEnd"> & {
+        windowStart?: string | null;
+        windowEnd?: string | null;
+      };
+      const { windowStart, windowEnd, ...rest } = body;
+      const patch: UpdateHabitInput = { ...rest };
+      if (windowStart !== undefined) {
+        patch.windowStart = windowStart != null ? new Date(windowStart) : null;
+      }
+      if (windowEnd !== undefined) {
+        patch.windowEnd = windowEnd != null ? new Date(windowEnd) : null;
+      }
+      try {
+        const habit = await updateHabit(id, patch);
+        if (!habit) return { status: 404, body: { error: "habit not found" } };
+        return { status: 200, body: habit };
+      } catch (err) {
+        return { status: 400, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+  },
+
+  // --- Memory ---
+  {
+    method: "GET",
+    match: "/api/memory",
+    handler: async () => ({ status: 200, body: await listEntries() }),
+  },
+  {
+    // Exact /search MUST precede the bare /<id> regex below.
+    method: "GET",
+    match: "/api/memory/search",
+    handler: async (ctx) => {
+      const q = ctx.url.searchParams.get("q") ?? "";
+      const tagsParam = ctx.url.searchParams.get("tags");
+      const limitParam = ctx.url.searchParams.get("limit");
+      const tags = tagsParam
+        ? tagsParam
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean)
+        : undefined;
+      const limit = limitParam ? Math.max(1, Number(limitParam) || 10) : undefined;
+      if (!q.trim()) return { status: 400, body: { error: "q parameter required" } };
+      const results = await searchMemories({ query: q, tags, limit, trackRecall: false });
+      return { status: 200, body: results };
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/memory",
+    // The one schema-validated route: the cascade's inline title/content check
+    // becomes a declarative schema run by the adapter.
+    schema: MemoryUpsertSchema,
+    handler: async (ctx) => {
+      const body = ctx.body as { id?: string; title: string; content: string; tags?: string[] };
+      const id = (body.id?.trim() || slugifyMemoryId(body.title)).slice(0, 64);
+      if (!id) return { status: 400, body: { error: "could not derive id from title" } };
+      const callerName = String(ctx.req.headers["x-friday-caller-name"] ?? "user");
+      const now = new Date().toISOString();
+      const existing = await getEntry(id);
+      const entry: MemoryEntry = {
+        id,
+        title: body.title,
+        content: body.content,
+        tags: body.tags ?? existing?.tags ?? [],
+        createdBy: existing?.createdBy ?? callerName,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        recallCount: existing?.recallCount ?? 0,
+        lastRecalledAt: existing?.lastRecalledAt ?? null,
+      };
+      await saveEntry(entry);
+      return { status: existing ? 200 : 201, body: entry };
+    },
+  },
+  {
+    method: "GET",
+    match: /^\/api\/memory\/[^/]+$/,
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[3]);
+      const e = await getEntry(id);
+      if (!e) return { status: 404, body: { error: "not found" } };
+      // Require an explicit `?recall=1` to bump recallCount (page views must not
+      // pollute the agent-side recall metric).
+      if (ctx.url.searchParams.get("recall") === "1") {
+        await touchRecall(id);
+      }
+      return { status: 200, body: e };
+    },
+  },
+  {
+    method: "PATCH",
+    match: /^\/api\/memory\/[^/]+$/,
+    body: "json",
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[3]);
+      if (!(await getEntry(id))) return { status: 404, body: { error: "not found" } };
+      const patch = ctx.body as { title?: string; content?: string; tags?: string[] };
+      await updateEntry(id, patch);
+      return { status: 200, body: await getEntry(id) };
+    },
+  },
+  {
+    method: "DELETE",
+    match: /^\/api\/memory\/[^/]+$/,
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[3]);
+      if (!(await getEntry(id))) return { status: 404, body: { error: "not found" } };
+      await forgetEntry(id);
+      return { status: 200, body: { ok: true } };
+    },
+  },
+
+  // --- Evolve ---
+  {
+    method: "GET",
+    match: "/api/evolve/proposals",
+    handler: (ctx) => {
+      const all = listProposals();
+      const statusFilter = ctx.url.searchParams.get("status");
+      const typeFilter = ctx.url.searchParams.get("type");
+      const filtered = all.filter(
+        (p) =>
+          (!statusFilter || p.status === statusFilter) && (!typeFilter || p.type === typeFilter),
+      );
+      return { status: 200, body: filtered };
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/evolve/proposals",
+    body: "json",
+    handler: (ctx) => {
+      const body = ctx.body as Omit<SaveProposalInput, "createdBy">;
+      if (!body.title || !body.proposedChange || !body.type) {
+        return { status: 400, body: { error: "title, type, and proposedChange are required" } };
+      }
+      const callerName = String(ctx.req.headers["x-friday-caller-name"] ?? "user");
+      const p = saveProposal({ ...body, createdBy: callerName });
+      // Item #54: project the FS write to Postgres so /evolve's Zero reactive
+      // query sees the new row. Fire-and-forget — FS stays canonical.
+      void syncProposalToPg(p.id);
+      return { status: 201, body: p };
+    },
+  },
+  {
+    method: "GET",
+    match: /^\/api\/evolve\/proposals\/[^/]+$/,
+    handler: (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[4]);
+      const p = getProposal(id);
+      if (!p) return { status: 404, body: { error: "proposal not found" } };
+      return { status: 200, body: p };
+    },
+  },
+  {
+    method: "PATCH",
+    match: /^\/api\/evolve\/proposals\/[^/]+$/,
+    body: "json",
+    handler: (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[4]);
+      if (!getProposal(id)) return { status: 404, body: { error: "proposal not found" } };
+      const patch = ctx.body as UpdateProposalInput;
+      const next = updateProposal(id, patch);
+      void syncProposalToPg(id);
+      return { status: 200, body: next };
+    },
+  },
+  {
+    method: "DELETE",
+    match: /^\/api\/evolve\/proposals\/[^/]+$/,
+    handler: (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[4]);
+      if (!deleteProposal(id)) return { status: 404, body: { error: "proposal not found" } };
+      void deleteProposalFromPg(id);
+      return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/evolve\/proposals\/[^/]+\/apply$/,
+    body: "json",
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[4]);
+      const p = getProposal(id);
+      if (!p) return { status: 404, body: { error: "proposal not found" } };
+      if (p.status === "applied") {
+        return {
+          status: 409,
+          body: { error: `proposal already applied (ticket ${p.appliedTicketId ?? "<unknown>"})` },
+        };
+      }
+      const body = ctx.body as {
+        ticketKind?: "task" | "epic" | "bug" | "chore";
+        assignee?: string;
+      };
+      const callerName = String(ctx.req.headers["x-friday-caller-name"] ?? "user");
+      const ticket = await createTicket({
+        title: p.title,
+        body: renderProposalForTicket(p),
+        kind: body.ticketKind ?? "task",
+        assignee: body.assignee,
+        meta: { evolveProposalId: p.id },
+      });
+      const updated = updateProposal(id, {
+        status: "applied",
+        appliedAt: new Date().toISOString(),
+        appliedBy: callerName,
+        appliedTicketId: ticket.id,
+      });
+      void syncProposalToPg(id);
+      return { status: 200, body: { proposal: updated, ticket } };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/evolve\/proposals\/[^/]+\/dismiss$/,
+    body: "json",
+    handler: (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[4]);
+      const p = getProposal(id);
+      if (!p) return { status: 404, body: { error: "proposal not found" } };
+      const body = ctx.body as { reason?: string };
+      const newBody = body.reason
+        ? `${p.proposedChange}\n\n---\n\n## Dismissed\n\n${body.reason}`
+        : p.proposedChange;
+      const updated = updateProposal(id, { status: "rejected", proposedChange: newBody });
+      void syncProposalToPg(id);
+      return { status: 200, body: updated };
+    },
+  },
+  {
+    // ADR-036 seam: the inline `daemonEffects` (config-gated triage/builder
+    // spawn IO) is the daemon-side side-effect boundary and stays VERBATIM. The
+    // handler owns its own body read + response (raw) so the seam is untouched.
+    method: "POST",
+    match: "/api/evolve/scan",
+    raw: async (ctx) => {
+      const { req, res, cfg } = ctx;
+      const body = await readJson<{
+        windowHours?: number;
+        includeFriction?: boolean;
+        includePreferences?: boolean;
+        includeDreaming?: boolean;
+        sinceTs?: string;
+      }>(req);
+      const windowHours = body.windowHours ?? 24;
+      const includeFriction = body.includeFriction !== false;
+      const includePreferences = body.includePreferences !== false;
+      const includeDreaming = body.includeDreaming !== false;
+      const callerName = String(req.headers["x-friday-caller-name"] ?? "scan");
+      const since = sinceHoursAgo(windowHours);
+      // FRI-26 AC6: the dreaming cursor. The meta-agent passes `sinceTs`
+      // (lastDreamScannedTs from its state.md) so each night re-scans only turns
+      // newer than the last dream pass; absent it, the dreaming sub-pass shares
+      // the regular `since` window. Propose-merge dedup is the overlap safety net.
+      const dreamSince = body.sinceTs ?? since;
+      const windowEnd = new Date().toISOString();
+      // FRI-174: the ordered signal→propose→rerank→upgrade→audit→notify→spawn→
+      // dream cycle now lives in `runEvolveCycle` (shared with the CLI). The
+      // daemon supplies the side-effect boundary: the real `notify`, the
+      // config-gated triage/builder spawn loops (the `autoSpawn*` gate + the
+      // `createAgent`/`updateProposal`/`sendMail` escalation IO stay HERE — seam
+      // i / ADR-036), and the real `listEntries`.
+      const daemonEffects: EvolveCycleEffects = {
+        notify: (event) => {
+          // Fire-and-forget; `evolve_critical` is the always-on critical class
+          // (toast always / push always, DND-bypass-eligible).
+          void notify(event);
+        },
+        // FRI-40 Phase 1: when enabled, auto-spawn a read-only triage helper for
+        // each planned request. Read with a strict `=== true` so the shallow-merge
+        // `{ evolve: {} }` case stays off. Spawn failures must never throw out of
+        // the cycle (AC #7); the in-process `createAgent` 409 gives idempotent
+        // dedup against an already-spawned triage helper (AC #6).
+        spawnTriage: async (triage) => {
+          if (cfg.evolve?.autoSpawnTriageHelpers === true) {
+            try {
+              for (const t of triage) {
+                try {
+                  const r = await createAgent(
+                    {
+                      type: "helper",
+                      name: t.name,
+                      parentName: "scheduled-meta-daily",
+                      prompt: t.prompt,
+                      reason: t.reason,
+                    },
+                    cfg,
+                  );
+                  if (r.status === 201)
+                    logger.log("info", "evolve.triage.spawn", { name: t.name, reason: t.reason });
+                  else if (r.status === 409)
+                    logger.log("info", "evolve.triage.spawn.skip", { name: t.name, status: 409 });
+                  else
+                    logger.log("warn", "evolve.triage.spawn.error", {
+                      name: t.name,
+                      status: r.status,
+                    });
+                } catch (err) {
+                  logger.log("warn", "evolve.triage.spawn.error", {
+                    name: t.name,
+                    message: err instanceof Error ? err.message : String(err),
+                  });
+                }
+              }
+            } catch (err) {
+              logger.log("warn", "evolve.triage.spawn.error", {
+                message: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+        },
+        // FRI-149 Phase 2: when enabled, auto-spawn an auto-fixing Builder for each
+        // planned request. The Builder iterates in its worktree, drives the fix to
+        // a GREEN review-ready PR, mails the orchestrator the PR URL, and STOPS (it
+        // never merges; the human approval gate moves to merge — ADR-036). Read
+        // with a strict `=== true` so the shallow-merge `{ evolve: {} }` case stays
+        // off. The carve-out that lets a `scheduled` caller spawn a builder is
+        // gated on the un-forgeable `evolveEscalation` arg passed ONLY here (never
+        // reachable from the wire — see validateSpawnPermissions / createAgent).
+        // Spawn failures are caught per-request AND for the whole block, so they
+        // never throw out of the cycle; the in-process `createAgent` 409 gives
+        // idempotent dedup against an already-spawned `builder-<id>`.
+        spawnBuilder: async (builders) => {
+          if (cfg.evolve?.autoSpawnBuilders === true) {
+            try {
+              for (const b of builders) {
+                try {
+                  const proposalId = b.name.slice("builder-".length);
+                  const r = await createAgent(
+                    {
+                      type: "builder",
+                      name: b.name,
+                      parentName: "scheduled-meta-daily",
+                      prompt: b.prompt,
+                      reason: b.reason,
+                      ticketId: proposalId,
+                      worktree: { repo: process.cwd() },
+                    },
+                    cfg,
+                    { evolveEscalation: true },
+                  );
+                  if (r.status === 201) {
+                    logger.log("info", "evolve.builder.spawn", {
+                      name: b.name,
+                      proposalId,
+                      reason: b.reason,
+                    });
+                    // Two-way linkage: record the in-flight builder on the proposal
+                    // so the dashboard can connect a critical proposal to its
+                    // builder. Branch is derivable as friday/builder-<id>; the PR
+                    // URL arrives via the builder's mail.
+                    try {
+                      updateProposal(proposalId, { builderAgent: b.name });
+                    } catch (err) {
+                      logger.log("warn", "evolve.builder.linkage.error", {
+                        name: b.name,
+                        proposalId,
+                        message: err instanceof Error ? err.message : String(err),
+                      });
+                    }
+                    // Notify the orchestrator that an escalation builder is in
+                    // flight; it surfaces this to the user, and the builder itself
+                    // mails the review-ready PR URL once CI is green.
+                    try {
+                      await sendMail({
+                        fromAgent: "scheduled-meta-daily",
+                        toAgent: cfg.orchestratorName,
+                        type: "notification",
+                        subject: `evolve escalation: ${proposalId}`,
+                        body:
+                          `Auto-escalated critical+code proposal \`${proposalId}\` to Builder \`${b.name}\`. ` +
+                          `It will drive a GREEN, review-ready PR (branch friday/${b.name}) and mail you the PR URL — it will NOT merge. ` +
+                          `You review and merge.`,
+                      });
+                    } catch (err) {
+                      logger.log("warn", "evolve.builder.notify.error", {
+                        name: b.name,
+                        proposalId,
+                        message: err instanceof Error ? err.message : String(err),
+                      });
+                    }
+                  } else if (r.status === 409) {
+                    logger.log("info", "evolve.builder.spawn.skip", { name: b.name, status: 409 });
+                  } else {
+                    logger.log("warn", "evolve.builder.spawn.error", {
+                      name: b.name,
+                      status: r.status,
+                    });
+                  }
+                } catch (err) {
+                  logger.log("warn", "evolve.builder.spawn.error", {
+                    name: b.name,
+                    message: err instanceof Error ? err.message : String(err),
+                  });
+                }
+              }
+            } catch (err) {
+              logger.log("warn", "evolve.builder.spawn.error", {
+                message: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+        },
+        listEntries: () => listEntries(),
+        onUpgradeResolved: ({ definitive, tentative }) => {
+          logger.log("info", "evolve.upgrade-resolved", { definitive, tentative });
+        },
+      };
+      try {
+        const result = await runEvolveCycle({
+          since,
+          dreamSince,
+          includeFriction,
+          includePreferences,
+          includeDreaming,
+          callerName,
+          orchestratorName: cfg.orchestratorName,
+          effects: daemonEffects,
+        });
+        return json(res, 200, result);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        appendRun({
+          ts: windowEnd,
+          by: callerName,
+          windowStart: since,
+          windowEnd,
+          signalsScanned: 0,
+          proposalsCreated: 0,
+          proposalsUpdated: 0,
+          promotedToCritical: 0,
+          note: `error: ${message}`,
+        });
+        return json(res, 500, { error: message });
+      }
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/evolve/enrich",
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as {
+        id?: string;
+        retryFailed?: boolean;
+        force?: boolean;
+        limit?: number;
+      };
+      try {
+        const result = await enrichProposals(body);
+        return {
+          status: 200,
+          body: {
+            enriched: result.enriched.length,
+            skipped: result.skipped,
+            failed: result.failed,
+          },
+        };
+      } catch (err) {
+        return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/evolve/cluster",
+    body: "json",
+    handler: (ctx) => {
+      const body = ctx.body as { threshold?: number };
+      try {
+        const result = mergeClusters({ threshold: body.threshold });
+        return {
+          status: 200,
+          body: {
+            clustersCreated: result.clustersCreated.length,
+            clustersUpdated: result.clustersUpdated.length,
+            proposalsAttached: result.proposalsAttached,
+          },
+        };
+      } catch (err) {
+        return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+  },
+
+  // --- Integrations: Linear ---
+  {
+    method: "POST",
+    match: "/api/integrations/linear/import",
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as { identifier?: string };
+      if (!body.identifier) return { status: 400, body: { error: "identifier required" } };
+      try {
+        const result = await linearImportIssue({ identifier: body.identifier });
+        return { status: 200, body: result };
+      } catch (err) {
+        return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/integrations/linear/create-issue",
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as {
+        title?: string;
+        body?: string;
+        team?: string;
+        priority?: LinearPriority;
+      };
+      if (!body.title) return { status: 400, body: { error: "title required" } };
+      if (!loadFridayConfig().linearApiKey) {
+        return { status: 400, body: { error: "LINEAR_API_KEY not set" } };
+      }
+      const teamOverride = body.team;
+      const restore = teamOverride
+        ? (() => {
+            const prev = process.env.FRIDAY_LINEAR_TEAM;
+            process.env.FRIDAY_LINEAR_TEAM = teamOverride;
+            return () => {
+              if (prev === undefined) delete process.env.FRIDAY_LINEAR_TEAM;
+              else process.env.FRIDAY_LINEAR_TEAM = prev;
+            };
+          })()
+        : () => {};
+      try {
+        const { issue } = await linearCreateIssue({
+          title: body.title,
+          description: body.body,
+          priority: body.priority,
+        });
+        return {
+          status: 200,
+          body: { identifier: issue.identifier, url: issue.url, id: issue.id },
+        };
+      } catch (err) {
+        const status = err instanceof LinearApiError ? 502 : 500;
+        return { status, body: { error: err instanceof Error ? err.message : String(err) } };
+      } finally {
+        restore();
+      }
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/integrations/linear/update-issue",
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as {
+        identifier?: string;
+        title?: string;
+        body?: string;
+        state?: LinearStateType;
+        priority?: LinearPriority;
+      };
+      if (!body.identifier) return { status: 400, body: { error: "identifier required" } };
+      const apiKey = loadFridayConfig().linearApiKey;
+      if (!apiKey) return { status: 400, body: { error: "LINEAR_API_KEY not set" } };
+      if (
+        body.title === undefined &&
+        body.body === undefined &&
+        body.state === undefined &&
+        body.priority === undefined
+      ) {
+        return {
+          status: 400,
+          body: { error: "at least one of title, body, state, priority must be provided" },
+        };
+      }
+      const teamKeyMatch = body.identifier.match(/^([A-Z][A-Z0-9_]*)-(\d+)$/);
+      if (!teamKeyMatch) {
+        return { status: 400, body: { error: `invalid Linear identifier: ${body.identifier}` } };
+      }
+      const teamKey = teamKeyMatch[1];
+      try {
+        const issueId = await linearResolveIssueIdByIdentifier({
+          apiKey,
+          identifier: body.identifier,
+        });
+        if (!issueId) {
+          return { status: 404, body: { error: `Linear issue not found: ${body.identifier}` } };
+        }
+        const input: UpdateIssueInput = {};
+        if (body.title !== undefined) input.title = body.title;
+        if (body.body !== undefined) input.description = body.body;
+        if (body.priority !== undefined) input.priority = body.priority;
+        if (body.state !== undefined) {
+          const stateId = await linearGetStateIdByType({ apiKey, teamKey, stateType: body.state });
+          if (!stateId) {
+            return {
+              status: 400,
+              body: {
+                error: `No Linear workflow state of type "${body.state}" on team "${teamKey}"`,
+              },
+            };
+          }
+          input.stateId = stateId;
+        }
+        const updated = await linearUpdateIssue({ apiKey, id: issueId, input });
+        return {
+          status: 200,
+          body: { identifier: updated.identifier, title: updated.title, url: updated.url },
+        };
+      } catch (err) {
+        const status = err instanceof LinearApiError ? 502 : 500;
+        return { status, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/integrations/linear/reconcile",
+    handler: async () => {
+      try {
+        const result = await linearReconcile();
+        // FRI-66: tickets reconcile just back-propagated to terminal need their
+        // originating evolve proposals flipped to `applied`.
+        if (result.closedTicketIds.length > 0) {
+          await syncProposalsForClosedTickets(result.closedTicketIds);
+        }
+        return { status: 200, body: result };
+      } catch (err) {
+        return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+  },
+
+  // --- Intake (FRI-171, ADR-047) --- (loopback + daemon-secret gated)
+  {
+    method: "POST",
+    match: "/api/intake",
+    auth: true,
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as { text?: unknown; source?: unknown };
+      const text = typeof body.text === "string" ? body.text.trim() : "";
+      if (!text) return { status: 400, body: { error: "text is required" } };
+      // `source` is an open set (Capture provenance); default to quick_add.
+      const source: IntakeSource = body.source === "watch" ? "watch" : "quick_add";
+      const result = await runIntake(source, text);
+      return {
+        status: 200,
+        body: {
+          cleaned: result.cleaned,
+          disposition: result.disposition,
+          rationale: result.rationale,
+          kind: result.kind,
+        },
+      };
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/intake/approve",
+    auth: true,
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as { id?: unknown };
+      const id = typeof body.id === "string" ? body.id : "";
+      if (!id) return { status: 400, body: { error: "id is required" } };
+      try {
+        const result = await approveInbox(id);
+        return { status: 200, body: result };
+      } catch (err) {
+        return { status: 409, body: { ok: false, error: (err as Error).message } };
+      }
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/intake/undo",
+    auth: true,
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as { id?: unknown };
+      const id = typeof body.id === "string" ? body.id : "";
+      if (!id) return { status: 400, body: { error: "id is required" } };
+      try {
+        const result = await undoInbox(id);
+        return { status: 200, body: result };
+      } catch (err) {
+        return { status: 409, body: { ok: false, error: (err as Error).message } };
+      }
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/intake/triage",
+    auth: true,
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as { id?: unknown; targetId?: unknown };
+      const id = typeof body.id === "string" ? body.id : "";
+      const targetId = typeof body.targetId === "string" ? body.targetId : "";
+      if (!id || !targetId) return { status: 400, body: { error: "id and targetId are required" } };
+      try {
+        const result = await triageInbox(id, targetId);
+        return { status: 200, body: result };
+      } catch (err) {
+        return { status: 409, body: { ok: false, error: (err as Error).message } };
+      }
+    },
+  },
+  {
+    method: "GET",
+    match: "/api/intake/inbox",
+    auth: true,
+    handler: async () => ({ status: 200, body: { items: await listOpenInbox() } }),
+  },
+  {
+    method: "POST",
+    match: "/api/intake/act",
+    auth: true,
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as { id?: unknown; action?: unknown; targetId?: unknown };
+      const id = typeof body.id === "string" ? body.id : "";
+      const action = typeof body.action === "string" ? (body.action as InboxAction) : undefined;
+      const targetId = typeof body.targetId === "string" ? body.targetId : undefined;
+      const allowed: InboxAction[] = ["approve", "reject", "dismiss", "triage", "undo"];
+      if (!id || !action || !allowed.includes(action)) {
+        return {
+          status: 400,
+          body: {
+            error: "id and a valid action (approve|reject|dismiss|triage|undo) are required",
+          },
+        };
+      }
+      try {
+        const result = await actInbox(id, action, targetId);
+        return { status: 200, body: result };
+      } catch (err) {
+        return { status: 409, body: { ok: false, error: (err as Error).message } };
+      }
+    },
+  },
+
+  // --- Push (FRI-142, ADR-048) --- (loopback + daemon-secret gated)
+  {
+    method: "GET",
+    match: "/api/push/vapid-public-key",
+    auth: true,
+    handler: async () => {
+      const { publicKey } = await ensureVapidKeys();
+      return { status: 200, body: { publicKey } };
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/push/subscribe",
+    auth: true,
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as {
+        endpoint?: unknown;
+        keys?: unknown;
+        deviceId?: unknown;
+        userId?: unknown;
+      };
+      const endpoint = typeof body.endpoint === "string" ? body.endpoint : "";
+      const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
+      const userId = typeof body.userId === "string" ? body.userId : "";
+      const keys = body.keys as { p256dh?: unknown; auth?: unknown } | undefined;
+      const p256dh = typeof keys?.p256dh === "string" ? keys.p256dh : "";
+      const auth = typeof keys?.auth === "string" ? keys.auth : "";
+      if (!endpoint || !p256dh || !auth || !deviceId || !userId) {
+        return {
+          status: 400,
+          body: { error: "endpoint, keys.p256dh, keys.auth, deviceId, and userId are required" },
+        };
+      }
+      const payload: PushSubscribePayload = { endpoint, keys: { p256dh, auth }, deviceId };
+      try {
+        const result = await upsertSubscription(payload, userId);
+        return { status: 200, body: { ok: true, endpoint: result.endpoint } };
+      } catch (err) {
+        return { status: 500, body: { ok: false, error: (err as Error).message } };
+      }
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/push/forget-device",
+    auth: true,
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as { deviceId?: unknown; userId?: unknown };
+      const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
+      const userId = typeof body.userId === "string" ? body.userId : "";
+      if (!deviceId || !userId) {
+        return { status: 400, body: { error: "deviceId and userId are required" } };
+      }
+      try {
+        await dropSubscriptionsForDevice(deviceId, userId);
+        return { status: 200, body: { ok: true } };
+      } catch (err) {
+        return { status: 500, body: { ok: false, error: (err as Error).message } };
+      }
+    },
+  },
+
+  // --- Presence (FRI-142, ADR-048) --- (loopback + daemon-secret gated)
+  {
+    method: "POST",
+    match: "/api/presence",
+    auth: true,
+    body: "json",
+    handler: (ctx) => {
+      const body = ctx.body as { deviceId?: unknown; visible?: unknown };
+      const deviceId = typeof body.deviceId === "string" ? body.deviceId : "";
+      const visible = body.visible === true;
+      if (!deviceId) return { status: 400, body: { error: "deviceId is required" } };
+      const report: PresenceReport = { deviceId, visible };
+      reportPresence(report);
+      return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    // Fire a TEST Notification through the full router. Tolerant body.
+    method: "POST",
+    match: "/api/notify/test",
+    auth: true,
+    body: "json-optional",
+    handler: async (ctx) => {
+      const body = ctx.body as { eventType?: unknown };
+      const requested = typeof body.eventType === "string" ? body.eventType : "builder_archive";
+      const eventType: NotifyEventType = (NOTIFY_EVENT_TYPES as readonly string[]).includes(
+        requested,
+      )
+        ? (requested as NotifyEventType)
+        : "builder_archive";
+      // Awaited so the response reflects that the router ran.
+      await notify({
+        type: eventType,
+        title: "Friday test notification",
+        body: "If you can see this, notifications are working.",
+        deepLink: "/",
+      });
+      return { status: 200, body: { ok: true, eventType } };
+    },
+  },
+
+  // --- Mail ---
+  {
+    method: "GET",
+    match: /^\/api\/mail\/inbox\/[^/]+$/,
+    handler: async (ctx) => {
+      const agent = ctx.path.split("/")[4];
+      return { status: 200, body: await inbox(agent) };
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/mail/send",
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as Parameters<typeof sendMail>[0];
+      // FIX_FORWARD 5.7: per-agent mail rate limit — 50 mails / 5min / from.
+      const fromAgent = body.fromAgent || "__unknown__";
+      const r = await consumeRateLimit({
+        key: `mail:${fromAgent}`,
+        windowMs: 5 * 60 * 1000,
+        max: 50,
+      });
+      if (!r.allowed) {
+        return {
+          status: 429,
+          body: {
+            error: "rate_limited",
+            detail: `agent ${fromAgent} exceeded 50 mails / 5 min`,
+            retry_after_ms: r.retryAfterMs,
+          },
+        };
+      }
+      // FRI-11 F3: resolve symbolic recipients ("parent" / "self") before validation.
+      const resolved = await resolveRecipient(fromAgent, body.toAgent);
+      if (!resolved.ok) return { status: 400, body: { error: resolved.error } };
+      // FRI-11 F2: reject mail to unknown recipients before persisting the row.
+      const check = await validateRecipient(resolved.agent);
+      if (!check.ok) {
+        return { status: 400, body: { error: check.error, suggestion: check.suggestion } };
+      }
+      return { status: 200, body: await sendMail({ ...body, toAgent: check.agent }) };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/mail\/\d+\/read$/,
+    handler: async (ctx) => {
+      const id = Number(ctx.path.split("/")[3]);
+      const row = await getMail(id);
+      if (!row) return { status: 404, body: { error: "mail not found" } };
+      await markRead(id);
+      return { status: 200, body: { ...row, delivery: "read", readAt: Date.now() } };
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/mail\/\d+\/close$/,
+    handler: async (ctx) => {
+      const id = Number(ctx.path.split("/")[3]);
+      const row = await getMail(id);
+      if (!row) return { status: 404, body: { error: "mail not found" } };
+      await closeMail(id);
+      return { status: 200, body: { ok: true } };
+    },
+  },
+  {
+    method: "GET",
+    match: "/api/mail/search",
+    handler: async (ctx) => {
+      const url = ctx.url;
+      const q = url.searchParams.get("q") ?? undefined;
+      const from = url.searchParams.get("from") ?? undefined;
+      const to = url.searchParams.get("to") ?? undefined;
+      const involves = url.searchParams.get("involves") ?? undefined;
+      const typeRaw = url.searchParams.get("type");
+      const deliveryRaw = url.searchParams.get("delivery");
+      const priorityRaw = url.searchParams.get("priority");
+      const since = url.searchParams.get("since") ?? undefined;
+      const until = url.searchParams.get("until") ?? undefined;
+      const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "") || 100, 500);
+      const offset = parseInt(url.searchParams.get("offset") ?? "") || 0;
+      const type = typeRaw
+        ? (typeRaw.split(",").filter(Boolean) as Array<"message" | "notification" | "task">)
+        : undefined;
+      const delivery = deliveryRaw
+        ? (deliveryRaw.split(",").filter(Boolean) as Array<"pending" | "read" | "closed">)
+        : undefined;
+      const priority = priorityRaw
+        ? (priorityRaw.split(",").filter(Boolean) as Array<"normal" | "critical">)
+        : undefined;
+      try {
+        const result = await searchMail({
+          q,
+          from,
+          to,
+          involves,
+          type,
+          delivery,
+          priority,
+          since,
+          until,
+          limit,
+          offset,
+        });
+        return { status: 200, body: result };
+      } catch (err) {
+        return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+  },
+
+  // --- Attachments / uploads --- (binary; own req/res, same-host gated)
+  {
+    method: "POST",
+    match: "/api/uploads",
+    auth: true,
+    raw: async (ctx) => {
+      const { req, res } = ctx;
+      const contentLength = Number(req.headers["content-length"] ?? 0);
+      // FIX_FORWARD 5.5: 15 MB hard cap, enforced at stream-receive.
+      const MAX_BYTES = 15 * 1024 * 1024;
+      if (contentLength > MAX_BYTES) {
+        return json(res, 413, { error: `file exceeds ${MAX_BYTES} bytes` });
+      }
+      const filename = String(req.headers["x-filename"] ?? "upload").slice(0, 255);
+      const mime = String(req.headers["content-type"] ?? "application/octet-stream");
+      if (!ATTACHMENT_MIME_ALLOWLIST.has(mime.toLowerCase())) {
+        return json(res, 415, {
+          error: `unsupported mime: ${mime}`,
+          allowed: [...ATTACHMENT_MIME_ALLOWLIST],
+        });
+      }
+      const chunks: Buffer[] = [];
+      let received = 0;
+      let aborted = false;
+      try {
+        for await (const c of req) {
+          const buf = c as Buffer;
+          received += buf.length;
+          if (received > MAX_BYTES) {
+            // Tear down the connection so a client lying about content-length
+            // can't keep amplifying memory.
+            aborted = true;
+            req.destroy();
+            return json(res, 413, { error: `file exceeds ${MAX_BYTES} bytes` });
+          }
+          chunks.push(buf);
+        }
+      } catch (err) {
+        if (aborted) return; // already responded
+        return json(res, 400, {
+          error: `read failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      const bytes = Buffer.concat(chunks);
+      if (bytes.length === 0) {
+        return json(res, 400, { error: "empty body" });
+      }
+      try {
+        const att = await uploadAttachment({ bytes, filename, mime });
+        return json(res, 200, {
+          sha256: att.sha256,
+          filename: att.filename,
+          mime: att.mime,
+          sizeBytes: att.sizeBytes,
+        });
+      } catch (err) {
+        return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  },
+  {
+    method: "GET",
+    match: /^\/api\/uploads\/[a-f0-9]{64}$/,
+    auth: true,
+    raw: async (ctx) => {
+      const { res } = ctx;
+      const sha = ctx.path.split("/")[3];
+      const bytes = await readAttachmentBytes(sha);
+      if (!bytes) return json(res, 404, { error: "not found" });
+      const meta = await getAttachment(sha);
+      const rawMime = (meta?.mime ?? "application/octet-stream").toLowerCase();
+      // Only allow inline rendering for a small, well-understood set of MIME
+      // types. Anything else is forced to download. `nosniff` blocks sniffing.
+      const inlineSafe = INLINE_SERVE_MIME_ALLOWLIST.has(rawMime);
+      const contentType = inlineSafe ? rawMime : "application/octet-stream";
+      const safeFilename = sanitizeFilenameForHeader(meta?.filename ?? sha);
+      const headers: Record<string, string> = {
+        "content-type": contentType,
+        "content-length": String(bytes.length),
+        "cache-control": "private, max-age=31536000, immutable",
+        "x-content-type-options": "nosniff",
+      };
+      if (!inlineSafe) {
+        headers["content-disposition"] =
+          `attachment; filename="${safeFilename.ascii}"; filename*=UTF-8''${safeFilename.rfc5987}`;
+      }
+      res.writeHead(200, headers);
+      res.end(bytes);
+    },
+  },
+
+  // --- Apps (FRI-78) --- (same-host gated)
+  {
+    method: "GET",
+    match: "/api/apps",
+    auth: true,
+    handler: async () => {
+      const list = await listApps();
+      const rows = await Promise.all(
+        list.map(async (r) => {
+          const detail = await inspectApp(r.id);
+          return {
+            ...r,
+            agents: detail?.agents ?? [],
+            schedules: detail?.schedules ?? [],
+            mcpServers: detail?.mcpServers ?? [],
+          };
+        }),
+      );
+      return { status: 200, body: rows };
+    },
+  },
+  {
+    method: "POST",
+    match: "/api/apps",
+    auth: true,
+    body: "json",
+    handler: async (ctx) => {
+      const body = ctx.body as { folderPath: string; adopt?: boolean };
+      if (!body.folderPath) return { status: 400, body: { error: "folderPath required" } };
+      try {
+        const result = await installApp(body.folderPath, { adopt: !!body.adopt });
+        return { status: 201, body: result };
+      } catch (err) {
+        if (err instanceof AppInstallError) {
+          const status =
+            err.code === "already_installed"
+              ? 409
+              : err.code === "agent_name_collision" ||
+                  err.code === "schedule_name_collision" ||
+                  err.code === "mcp_name_collision"
+                ? 409
+                : 400;
+          return { status, body: { error: err.message, code: err.code } };
+        }
+        return { status: 400, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+  },
+  {
+    method: "GET",
+    match: /^\/api\/apps\/[^/]+$/,
+    auth: true,
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[3]);
+      const row = await inspectApp(id);
+      if (!row) return { status: 404, body: { error: "not found" } };
+      return { status: 200, body: row };
+    },
+  },
+  {
+    method: "DELETE",
+    match: /^\/api\/apps\/[^/]+$/,
+    auth: true,
+    body: "json-optional",
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[3]);
+      const body = ctx.body as { folderDisposition?: "archive" | "keep" | "delete" };
+      try {
+        const result = await uninstallApp(id, { folderDisposition: body.folderDisposition });
+        return { status: 200, body: result };
+      } catch (err) {
+        if (err instanceof AppInstallError) {
+          return { status: 404, body: { error: err.message, code: err.code } };
+        }
+        return { status: 400, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+    },
+  },
+  {
+    method: "POST",
+    match: /^\/api\/apps\/[^/]+\/reload$/,
+    auth: true,
+    handler: async (ctx) => {
+      const id = decodeURIComponent(ctx.path.split("/")[3]);
+      let result!: { id: string; changed: boolean };
+      try {
+        result = await reloadApp(id);
+      } catch (err) {
+        if (err instanceof AppInstallError) {
+          return { status: 404, body: { error: err.message, code: err.code } };
+        }
+        return { status: 400, body: { error: err instanceof Error ? err.message : String(err) } };
+      }
+      let stoppedWorkers = 0;
+      // Stop workers even when manifest unchanged — picks up rotated secrets.
+      try {
+        stoppedWorkers = await stopWorkersForApp(id);
+      } catch (err) {
+        logger.log("warn", "app.reload.stop-workers.fail", {
+          app: id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return { status: 200, body: { ...result, stoppedWorkers } };
+    },
+  },
+];
 
 /** Request shape for `createAgent` — the same object `POST /api/agents` parses. */
 export interface CreateAgentInput {
