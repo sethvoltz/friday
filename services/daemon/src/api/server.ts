@@ -240,8 +240,13 @@ const routerDeps: RouterDeps = {
  * (auth:true). Streaming/binary/seam routes (`/api/events`, `/api/uploads`,
  * `/api/evolve/scan`, `/api/commands/dispatch`) opt out of the JSON envelope via
  * `raw` and own `req`/`res` themselves.
+ *
+ * Exported for the route-table contract test (`router-table.test.ts`), which
+ * pins the migration invariants: unique (method, match) keys, the full no-drop
+ * golden set, the specific-before-broad ordering, the auth-gated set, and the
+ * raw routes.
  */
-const ROUTES: RouteRow[] = [
+export const ROUTES: RouteRow[] = [
   // --- Health ---
   {
     method: "GET",
