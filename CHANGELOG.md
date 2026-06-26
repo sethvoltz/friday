@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.33.3](https://github.com/sethvoltz/friday/compare/v1.33.2...v1.33.3) (2026-06-26)
+
+
+### Bug Fixes
+
+* **dashboard:** make optimistic↔canonical bubble convergence testable behind a pure seam ([#324](https://github.com/sethvoltz/friday/issues/324)) ([717d87a](https://github.com/sethvoltz/friday/commit/717d87a74cdf4cb6c2730ab0bfcf6e80cfdb1fd4))
+
 ## [1.33.2](https://github.com/sethvoltz/friday/compare/v1.33.1...v1.33.2) (2026-06-24)
 
 
