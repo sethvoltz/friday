@@ -29,8 +29,14 @@ import type { ArchiveReason } from "../agents.js";
 // and would crash the client bundle (node builtins are stubbed by Vite).
 // config.ts types are fine: `import type` is fully erased at compile time.
 import { coerceLegacyModelId } from "../model-ids.js";
+// ADR-049: centralized transient status tokens + the user-message content
+// constructor. Both are node-free, so they ride this browser-bundled module
+// safely (same contract as model-ids.ts above). The daemon LISTEN handlers
+// import the matching parse/const half from `@friday/shared`.
+import { INTENT_STATUS, buildUserMessageContent } from "./intents.js";
 import type { AgentTypeName, EvolveTaskName, ModelConfig } from "../config.js";
 import type { NotifyPolicy } from "../notify/types.js";
+import type { UserMessageAttachment } from "./intents.js";
 import type { Schema } from "./schema.js";
 
 export type { ArchiveReason };
@@ -771,8 +777,9 @@ export interface SendUserMessageArgs {
   /** The user's typed message. */
   text: string;
   /** Optional content attachments (sha256-keyed uploads from
-   *  `POST /api/uploads`). */
-  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
+   *  `POST /api/uploads`). ADR-049: the shared `UserMessageAttachment` shape
+   *  the daemon's `parseUserMessageContent` validates on the listener side. */
+  attachments?: UserMessageAttachment[];
   /** Client-side wall clock; daemon owns the canonical row.ts. */
   ts: number;
 }
@@ -930,7 +937,7 @@ export const createMutators = (userId?: string | null) =>
         file_mtime: args.ts,
         recall_count: 0,
         last_recalled_at: null,
-        status: "pending_file",
+        status: INTENT_STATUS.pendingFile,
       });
     },
     updateMemoryEntry: async (tx: FridayTx, args: UpdateMemoryEntryArgs): Promise<void> => {
@@ -947,7 +954,7 @@ export const createMutators = (userId?: string | null) =>
       } = {
         id: args.id,
         updated_at: args.ts,
-        status: "pending_file",
+        status: INTENT_STATUS.pendingFile,
       };
       if (args.title !== undefined) patch.title = args.title;
       if (args.content !== undefined) patch.content = args.content;
@@ -964,7 +971,7 @@ export const createMutators = (userId?: string | null) =>
       await tx.mutate.memory_entries.update({
         id: args.id,
         updated_at: args.ts,
-        status: "pending_delete",
+        status: INTENT_STATUS.pendingDelete,
       });
     },
     createSchedule: async (tx: FridayTx, args: CreateScheduleArgs): Promise<void> => {
@@ -987,7 +994,7 @@ export const createMutators = (userId?: string | null) =>
         last_run_id: null,
         meta_json: null,
         app_id: null,
-        status: "pending_register",
+        status: INTENT_STATUS.pendingRegister,
         created_at: args.ts,
         updated_at: args.ts,
       });
@@ -1011,7 +1018,7 @@ export const createMutators = (userId?: string | null) =>
       } = {
         name: args.name,
         updated_at: args.ts,
-        status: "reload_requested",
+        status: INTENT_STATUS.reloadRequested,
       };
       if (args.cron !== undefined) patch.cron = args.cron;
       if (args.runAt !== undefined) patch.run_at = args.runAt;
@@ -1029,7 +1036,7 @@ export const createMutators = (userId?: string | null) =>
       await tx.mutate.schedules.update({
         name: args.name,
         updated_at: args.ts,
-        status: "deleted",
+        status: INTENT_STATUS.scheduleDeleted,
       });
     },
     pauseSchedule: async (tx: FridayTx, args: PauseScheduleArgs): Promise<void> => {
@@ -1051,7 +1058,7 @@ export const createMutators = (userId?: string | null) =>
       await tx.mutate.schedules.update({
         name: args.name,
         paused: false,
-        status: "reload_requested",
+        status: INTENT_STATUS.reloadRequested,
         updated_at: args.ts,
       });
     },
@@ -1063,7 +1070,7 @@ export const createMutators = (userId?: string | null) =>
       // the check constraint.
       await tx.mutate.schedules.update({
         name: args.name,
-        status: "trigger_requested",
+        status: INTENT_STATUS.triggerRequested,
         updated_at: args.ts,
       });
     },
@@ -1152,7 +1159,7 @@ export const createMutators = (userId?: string | null) =>
       // daemon's handler is structured to tolerate this.
       await tx.mutate.agents.update({
         name: args.name,
-        status: "archive_requested",
+        status: INTENT_STATUS.archiveRequested,
         archive_reason: args.reason,
         updated_at: args.ts,
       });
@@ -1199,7 +1206,7 @@ export const createMutators = (userId?: string | null) =>
       // performs the delete.
       await tx.mutate.blocks.update({
         id: args.id,
-        status: "cancel_requested",
+        status: INTENT_STATUS.cancelRequested,
       });
     },
     sendUserMessage: async (tx: FridayTx, args: SendUserMessageArgs): Promise<void> => {
@@ -1216,10 +1223,10 @@ export const createMutators = (userId?: string | null) =>
       // session id. (FRI-125: the `last_event_seq` placeholder retired
       // alongside the column itself; the SSE event's own seq is the
       // only sequence anything reads.)
-      const content: Record<string, unknown> = { text: args.text };
-      if (args.attachments && args.attachments.length > 0) {
-        content.attachments = args.attachments;
-      }
+      // ADR-049: construct the content_json payload via the shared builder the
+      // daemon's `parseUserMessageContent` mirrors — the two sides no longer
+      // hand-agree on the `{ text, attachments? }` shape.
+      const content = buildUserMessageContent(args.text, args.attachments);
       await tx.mutate.blocks.insert({
         id: args.id,
         block_id: args.id,
@@ -1237,7 +1244,7 @@ export const createMutators = (userId?: string | null) =>
         // Postgres to attribute the turn's PostHog events to this user.
         user_id: userId ?? undefined,
         content_json: content,
-        status: "pending",
+        status: INTENT_STATUS.pending,
         streaming: false,
         origin_mutation_id: undefined,
         ts: args.ts,
@@ -1254,7 +1261,7 @@ export const createMutators = (userId?: string | null) =>
       // before performing the abort + flip-back.
       await tx.mutate.blocks.update({
         id: args.id,
-        status: "abort_requested",
+        status: INTENT_STATUS.abortRequested,
       });
     },
     resumeTurn: async (tx: FridayTx, args: ResumeTurnArgs): Promise<void> => {
@@ -1269,7 +1276,7 @@ export const createMutators = (userId?: string | null) =>
       // must be preserved so the listener can read them.
       await tx.mutate.blocks.update({
         id: args.id,
-        status: "resume_requested",
+        status: INTENT_STATUS.resumeRequested,
       });
     },
     markMailRead: async (tx: FridayTx, args: MarkMailReadArgs): Promise<void> => {

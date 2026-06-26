@@ -39,6 +39,7 @@ import {
   ensureDirs,
   getDb,
   getPool,
+  INTENT_STATUS,
   loadFridayConfig,
   MEMORY_DIR,
   MEMORY_ENTRIES_DIR,
@@ -88,7 +89,7 @@ async function processPendingMemoryRow(id: string): Promise<void> {
     return;
   }
 
-  if (row.status === "pending_file") {
+  if (row.status === INTENT_STATUS.pendingFile) {
     ensureMemoryDirs();
     const path = entryPath(row.id);
     // Reuse the canonical serializer from @friday/memory so the
@@ -114,7 +115,7 @@ async function processPendingMemoryRow(id: string): Promise<void> {
     return;
   }
 
-  if (row.status === "pending_delete") {
+  if (row.status === INTENT_STATUS.pendingDelete) {
     ensureMemoryDirs();
     const src = entryPath(row.id);
     const dst = trashPath(row.id);
@@ -147,7 +148,12 @@ export async function runMemoryBootScan(): Promise<void> {
     const rows = await db
       .select({ id: schema.memoryEntries.id })
       .from(schema.memoryEntries)
-      .where(inArray(schema.memoryEntries.status, ["pending_file", "pending_delete"]));
+      .where(
+        inArray(schema.memoryEntries.status, [
+          INTENT_STATUS.pendingFile,
+          INTENT_STATUS.pendingDelete,
+        ]),
+      );
     for (const row of rows) {
       await processPendingMemoryRow(row.id);
     }

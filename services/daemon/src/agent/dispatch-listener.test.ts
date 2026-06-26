@@ -19,7 +19,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 // Static `vi.mock` (not doMock + resetModules) so @friday/shared's module-level
 // Postgres pool isn't rebound mid-file. Mirrors resume-listener.test.ts — these
@@ -449,4 +449,71 @@ describe("processPendingBlockRow — claim guard (no double dispatch)", () => {
     expect(lifecycle.dispatchTurn).toHaveBeenCalledTimes(1);
     expect(await getStatus("blk-claim-single")).toBe("complete");
   });
+});
+
+describe("processPendingBlockRow — corrupt content_json forks empty (ADR-049)", () => {
+  // The dispatch listener IGNORES the `ok` discriminator from
+  // parseUserMessageContent: on unrecoverable content_json it still forks the
+  // worker, with an empty prompt and no attachments. This pins the dispatch
+  // side of the dispatch-vs-resume divergence (resume bails-corrupt instead),
+  // at the layer the branch lives in. content_json is `jsonb NOT NULL` and
+  // rowFromDb re-stringifies every value, so the only `ok:false`-reachable
+  // input is the jsonb `null` literal (JSON.stringify(null) -> "null" ->
+  // property access throws in the parser).
+  function orchestratorAgent(name: string) {
+    return {
+      name,
+      type: "orchestrator" as const,
+      status: "idle" as const,
+      sessionId: undefined,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  it("still dispatches (fork-empty) when content_json is the jsonb null literal", async () => {
+    await insertBlock("blk-corrupt-1", "pending");
+    // Overwrite with the jsonb null literal — the genuinely-corrupt input that
+    // survives the NOT NULL column and drives parseUserMessageContent ok:false.
+    await getDb()
+      .update(schema.blocks)
+      .set({ contentJson: sql`'null'::jsonb` })
+      .where(eq(schema.blocks.blockId, "blk-corrupt-1"));
+
+    const registry = await import("./registry.js");
+    const lifecycle = await import("./lifecycle.js");
+    const buildPrompt = await import("../prompts/build-dispatch-prompt.js");
+    const { _processPendingBlockRow } = await import("./dispatch-listener.js");
+
+    vi.mocked(registry.getAgent).mockResolvedValue(
+      orchestratorAgent("test-agent") as unknown as Awaited<ReturnType<typeof registry.getAgent>>,
+    );
+    vi.mocked(lifecycle.peekLiveWorker).mockReturnValue(null);
+
+    await _processPendingBlockRow("blk-corrupt-1");
+
+    // The fork still happens — the user may be signaling something even with no
+    // recoverable text.
+    expect(lifecycle.dispatchTurn).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(lifecycle.dispatchTurn).mock.calls[0]![0];
+    // ...but with an empty prompt and no attachments (the fork-empty contract).
+    expect(call.options.attachments).toBeUndefined();
+    expect(vi.mocked(buildPrompt.buildDispatchPrompt).mock.calls[0]![1]).toEqual({
+      kind: "user_chat",
+      userText: "",
+      skillMatch: undefined,
+    });
+    // Row was still claimed out of 'pending'.
+    expect(await getStatus("blk-corrupt-1")).toBe("complete");
+  });
+
+  async function getStatus(id: string): Promise<string | null> {
+    const db = getDb();
+    const rows = await db
+      .select({ status: schema.blocks.status })
+      .from(schema.blocks)
+      .where(eq(schema.blocks.blockId, id))
+      .limit(1);
+    return rows[0]?.status ?? null;
+  }
 });

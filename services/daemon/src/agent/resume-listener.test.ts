@@ -25,7 +25,8 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, getDb, schema, type TestDbHandle, newTestClient } from "@friday/shared";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { logger } from "../log.js";
 
 vi.mock("./registry.js", () => ({
   getAgent: vi.fn(),
@@ -529,19 +530,47 @@ describe("processResumeRequestedRow handler guards", () => {
     });
   });
 
-  it("flips back when content_json is corrupt (terminal — no retry)", async () => {
-    const db = getDb();
-    // Insert a row whose content_json column holds an invalid
-    // shape — JSON.parse will throw inside the handler.
-    await insertUserBlockWithContent("blk-resume-corrupt", { text: 42 }); // text is not a string
-    // The text-type guard above doesn't fire (text is not a string
-    // → userText stays "" → the empty-text guard fires).
-    // To exercise the actual JSON.parse throw, write a row with a
-    // string content_json that isn't JSON. The DB layer stringifies
-    // on read via rowFromDb, so we get a parse failure on a literal
-    // non-JSON string. Easiest: set the parsed value to something
-    // not parseable. Skip via the empty-text guard instead — same
-    // terminal-no-retry semantic.
+  it("flips back via the EMPTY-TEXT guard when text is a non-string (parser stays ok:true)", async () => {
+    // `{ text: 42 }` is valid JSON with a non-string text. parseUserMessageContent
+    // returns ok:TRUE with text="" (no throw), so this does NOT hit the
+    // content-corrupt branch — it falls through to the empty-text guard. Both
+    // bail terminal-no-retry and flip to 'complete'; the DISTINGUISHING signal
+    // is the log event, so assert on it (getStatus alone can't tell the two
+    // branches apart). The genuine content-corrupt branch is the next test.
+    await insertUserBlockWithContent("blk-resume-emptytext", { text: 42 });
+    await insertErrorBlock("blk-resume-emptytext");
+    const registry = await import("./registry.js");
+    const lifecycle = await import("./lifecycle.js");
+    const { _processResumeRequestedRow } = await import("./resume-listener.js");
+
+    vi.mocked(registry.getAgent).mockResolvedValue(stubAgent("test-agent"));
+    vi.mocked(lifecycle.findAgentByTurnId).mockReturnValue(null);
+    vi.mocked(lifecycle.peekLiveWorker).mockReturnValue({
+      status: "idle",
+    } as ReturnType<typeof lifecycle.peekLiveWorker>);
+    const logSpy = vi.spyOn(logger, "log");
+
+    await _processResumeRequestedRow("blk-resume-emptytext");
+
+    expect(lifecycle.dispatchTurn).not.toHaveBeenCalled();
+    expect(await getStatus("blk-resume-emptytext")).toBe("complete");
+    const events = logSpy.mock.calls.map((c) => c[1]);
+    expect(events).toContain("block.resume.skip.empty-text");
+    expect(events).not.toContain("block.resume.skip.content-corrupt");
+  });
+
+  it("flips back via the CONTENT-CORRUPT guard when content_json is unrecoverable (parser ok:false)", async () => {
+    // The genuinely-corrupt input reachable in prod: the jsonb null literal.
+    // content_json is `jsonb NOT NULL` and rowFromDb re-stringifies every value,
+    // so a malformed string can't reach the parser — but `'null'::jsonb` does:
+    // JSON.stringify(null) -> "null" -> property access throws -> parser ok:false.
+    // This pins the resume side of the dispatch-vs-resume divergence: resume
+    // HONORS ok (bails terminal-corrupt), where dispatch ignores it (forks empty).
+    await insertUserBlockWithContent("blk-resume-corrupt", { text: "placeholder" });
+    await getDb()
+      .update(schema.blocks)
+      .set({ contentJson: sql`'null'::jsonb` })
+      .where(eq(schema.blocks.blockId, "blk-resume-corrupt"));
     await insertErrorBlock("blk-resume-corrupt");
     const registry = await import("./registry.js");
     const lifecycle = await import("./lifecycle.js");
@@ -552,11 +581,15 @@ describe("processResumeRequestedRow handler guards", () => {
     vi.mocked(lifecycle.peekLiveWorker).mockReturnValue({
       status: "idle",
     } as ReturnType<typeof lifecycle.peekLiveWorker>);
+    const logSpy = vi.spyOn(logger, "log");
 
     await _processResumeRequestedRow("blk-resume-corrupt");
+
     expect(lifecycle.dispatchTurn).not.toHaveBeenCalled();
     expect(await getStatus("blk-resume-corrupt")).toBe("complete");
-    void db; // satisfies "no unused" — kept for the comment above
+    const events = logSpy.mock.calls.map((c) => c[1]);
+    expect(events).toContain("block.resume.skip.content-corrupt");
+    expect(events).not.toContain("block.resume.skip.empty-text");
   });
 
   it("dispatches a Resume of a user_chat block to a SCHEDULED-type agent long-lived (FRI-156 SEV-0)", async () => {
