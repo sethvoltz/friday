@@ -1,200 +1,54 @@
 import type { BlockKind, WireEvent } from "@friday/shared";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
-import { compactionDividerId } from "../components/Chat/compaction-render";
 import { fetchWithTimeout } from "../util/fetch-with-timeout";
 import { initialPageSize } from "../util/page-size";
 import { resolveSendTargetAgent } from "../util/send-target";
 import { randomUUID } from "../util/uuid";
 import type { SendUserMessageOutcome } from "./mutator-result";
 import { KEYS, loadJSON, removeKey, saveJSON } from "./persistent";
+import {
+  filterRowsToCurrentSession,
+  mergeBubbles,
+  mergeZeroSnapshot,
+  oldestBlockCursor,
+  overlayKey,
+  parseBlocks,
+  pruneConverged,
+  reconcileCanceled,
+  reconcileComplete,
+  userBlockIdForTurn,
+  userBubbleAlreadyLanded,
+  type AgentInfo,
+  type BlockRow,
+  type ChatMessage,
+  type OverlayKey,
+  type ReconcileSnapshot,
+  type ZeroBlocksRow,
+} from "./bubble-convergence";
 
-export interface ChatMessage {
-  /** turn_id for assistant; "u_<n>" for user; "t_<toolId>"; "th_<blockId>". */
-  id: string;
-  role: "user" | "assistant" | "tool" | "thinking";
-  /** user/assistant: rendered markdown body. thinking: streamed thoughts. tool: unused. */
-  text: string;
-  status:
-    | "streaming" // assistant turn still receiving deltas
-    | "stopping" // user clicked Stop; daemon hasn't confirmed yet
-    | "complete"
-    | "aborted"
-    | "error"
-    | "running" // tool/thinking still in progress
-    | "done"
-    // User block recorded by the daemon at status='queued' — sitting in the
-    // worker's `nextPrompts` FIFO behind an in-flight turn. Pinned to the
-    // bottom of the chat (alongside `pending`) until a `block_meta_update`
-    // event flips it to 'complete' with a fresh ts. Carries an X cancel
-    // affordance that yanks it from the daemon's queue and stuffs the
-    // text back into the input bar.
-    | "queued"
-    // FRI-95: Stop fired on a turn that completed before the abort took
-    // effect. Brief 1s transient on the user-block to acknowledge the click
-    // without falsely claiming "Stopped". Settles back to "complete".
-    | "already_finished";
-  agent?: string;
-  ts: number;
-
-  // Assistant-specific: the turn this bubble belongs to. Recorded on
-  // appendDelta so finishTurn can match bubbles whose primary id is keyed
-  // by the SDK message_id rather than the turn_id.
-  turnId?: string;
-
-  // Tool-specific
-  toolId?: string;
-  toolName?: string;
-  input?: unknown;
-  output?: string;
-  /** Mid-stream accumulator for `input_json_delta` chunks (FRI-84). The
-   *  SDK emits the tool's input as incremental JSON fragments via the
-   *  `block_delta` wire event's `partial_json` field; we concatenate them
-   *  here so the ToolBlock can render the live input under the headline
-   *  during the streaming phase. Cleared on `block_complete` once `input`
-   *  is populated from the canonical content_json. Best-effort:
-   *  intermediate values may be invalid JSON and the renderer falls back
-   *  to raw display. */
-  inputPartialJson?: string;
-
-  // Thinking-specific
-  blockId?: string;
-  /** True when thinking was redacted by Anthropic; renders a badge instead of text. */
-  isRedacted?: boolean;
-
-  /** Optimistic-send queue id. When set, this user bubble represents a
-   * message that is waiting to flush — render with a "queued" pill so the
-   * user can see it didn't actually reach the daemon yet. Cleared as soon
-   * as the queue successfully POSTs the message. */
-  queueId?: string;
-
-  /** Attachments included on the user message (rendered inline as chips
-   * for non-images, thumbnails for images). */
-  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
-
-  /** Where the bubble originated. Carries through to the canonical block
-   *  (matches the `source` column in the blocks table). FIX_FORWARD 2.6. */
-  source?:
-    | "user_chat"
-    | "mail"
-    | "queue_inject"
-    | "sdk"
-    | "scratch"
-    | "agent_spawn"
-    | "schedule"
-    | "refork_notice";
-
-  /** Sender attribution for `source='mail'` blocks. Pulled from
-   *  `content_json.from_agent`, written by `recordUserBlock` at
-   *  daemon/agent/lifecycle.ts when the mail-bridge materializes incoming
-   *  mail. Undefined for non-mail user blocks. */
-  fromAgent?: string;
-
-  /** Extra mail-row metadata for `source='mail'` blocks (id/subject/type/
-   *  priority/threadId/ts). Serialized into content_json by the daemon
-   *  so MailBlock can render rich detail without a separate fetch. */
-  mailMeta?: {
-    id: number;
-    subject: string | null;
-    type: string;
-    priority: string;
-    threadId: string | null;
-    ts: number;
-  };
-
-  /** True from the moment a user types until `/api/chat/turn` confirms
-   *  the dispatch with `{turn_id}`. Pending bubbles render pinned to the
-   *  bottom regardless of natural ts sort (FIX_FORWARD 2.6). */
-  pending?: boolean;
-
-  /** Set when the send-queue's flush returned a 4xx — surface a
-   *  retry/discard affordance (FIX_FORWARD 2.6). */
-  failed?: boolean;
-
-  /** When set to `"error"`, this bubble is a synthetic error notification
-   *  (FRI-12) emitted by the daemon when the SDK throws (529, 429, 401,
-   *  network) or the stop force-kill safety net fires. The bubble's
-   *  `role` stays `"assistant"` so it slots into the assistant lane;
-   *  ChatMessages discriminates on `kind` to render the ErrorBlock with
-   *  Resend / Resume / Details affordances.
-   *
-   *  When set to `"no-response"`, this bubble is a synthetic
-   *  "agent didn't reply" affordance (FRI-85). Emitted either because
-   *  the model produced its trained "No response requested." end-of-
-   *  turn sentinel (deliberate no-reply) or because the turn finished
-   *  with zero assistant-side content blocks (worker died early,
-   *  Task-only response, etc.). Replaces FRI-9's silent suppression
-   *  so the user is never left staring at their own message wondering
-   *  whether the system swallowed the turn. Single bubble per turn
-   *  (id `nr_<turnId>`) regardless of which producer wins.
-   *
-   *  When set to `"compaction"`, this message is the durable full-width
-   *  "Context compacted · 779K → 50K tokens" divider (FRI-156 §E). It is
-   *  derived from a persisted `kind:'compaction'` block row, so it
-   *  survives reload (unlike the retired in-memory `compactionTurnIds`
-   *  inline notice). `role` is `"assistant"` so it rides the existing
-   *  agent filter + full-width continuation grouping; `preTokens` /
-   *  `postTokens` carry the humanized token deltas. Stable id
-   *  `cb_<blockId>` so reload + live converge on a single divider. */
-  kind?: "error" | "no-response" | "compaction";
-
-  /** FRI-156 §E: pre/post context-window token counts on a
-   *  `kind:"compaction"` divider message, read from the durable
-   *  compaction block's `content_json` (`pre_tokens` / `post_tokens`).
-   *  Humanized via `fmtTokensCompact` at render time. Undefined on every
-   *  other message kind. */
-  preTokens?: number;
-  postTokens?: number;
-
-  /** True when the synthetic no-response bubble was produced by the
-   *  SDK sentinel specifically — distinguishes "agent deliberately
-   *  decided no reply was needed" (verbose: "Agent acknowledged — no
-   *  reply needed") from "turn ended with zero assistant content"
-   *  (verbose: "Agent didn't respond"). FRI-85. */
-  noResponseSentinel?: boolean;
-  errorCode?: string;
-  errorHeadline?: string;
-  httpStatus?: number;
-  retryAfterSeconds?: number;
-  requestId?: string;
-  rawErrorMessage?: string;
-
-  /** FRI-95: set on the user-block message when its turn ends in an
-   *  aborted state, so the bubble's terminal footer can distinguish
-   *  "Stopped" (cooperative — worker honored the abort cleanly) from
-   *  "Stopped — worker had to be force-killed" (forced — the daemon's
-   *  500ms deadline elapsed and the worker was SIGTERMed). Sourced from
-   *  the daemon's `turn_done.abort_reason` field. Undefined for
-   *  non-user-block messages and for turns that didn't end in abort. */
-  abortReason?: "cooperative" | "forced";
-  /** FRI-60: set on no-response bubbles to convey why the turn produced
-   *  zero content blocks. Drives the display copy in ChatMessages. */
-  zeroBlockReason?: "abort" | "compaction" | "sdk-resume-failure";
-}
-
-export interface AgentInfo {
-  name: string;
-  type: string;
-  status: string;
-  /** Current SDK session id, when one is active. Used to distinguish
-   * "current chat" from "past sessions" in the sidebar's expand-history view. */
-  sessionId?: string;
-  /** Distinct session count, populated by /api/agents. Indicates whether
-   * the sidebar should show an expand-history button for this agent. */
-  sessionCount?: number;
-  /** ISO timestamps from the agents table. Sidebar uses `updatedAt`
-   * (fallback `createdAt`) to bucket rows by age. Optional because SSE-
-   * synthesized entries that arrive before the first /api/agents poll
-   * don't carry them yet. */
-  createdAt?: string;
-  updatedAt?: string;
-  /** Epoch-millis when the daemon began compacting this agent's context;
-   * undefined when not compacting. Replicated from `agents.compacting_since`
-   * via Zero. The DURABLE half of the compaction-in-progress signal — lets the
-   * "Compacting context…" indicator reconstruct on reload/reconnect and drives
-   * the sidebar dot + elapsed-time readout. See {@link compactingAgents} for
-   * the transient SSE half this is unioned with. */
-  compactingSince?: number;
-}
+// Re-export the bubble-convergence presentation core's public surface so
+// existing importers — zero.svelte.ts, the Chat components, CommandPalette,
+// and the chat.test.ts dynamic imports — keep resolving these symbols
+// against "./chat.svelte" after the convergence-core extraction.
+export {
+  dropSupersededNoResponseSafetyNet,
+  filterRowsToCurrentSession,
+  noResponseIdForTurn,
+  oldestBlockCursor,
+  overlayKey,
+  parseBlocks,
+  PENDING_SESSION_SENTINEL,
+  userBlockIdForTurn,
+  zeroBlockRowToBlockRow,
+} from "./bubble-convergence";
+export type {
+  AgentInfo,
+  BlockRow,
+  ChatMessage,
+  OverlayKey,
+  ParsedErrorContent,
+  ZeroBlocksRow,
+} from "./bubble-convergence";
 
 /** Shape returned by `/api/agents/:name/sessions` and cached on the chat
  *  store for the sidebar's history submenu. */
@@ -208,50 +62,6 @@ export interface SidebarSessionSummary {
 /** Sentinel agent bucket for SSE events that don't carry an `agent` field
  *  (system_banner, mail_delivered, schedule_fired, evolve_critical). */
 export const SYSTEM_BUCKET = "__system__";
-
-/** Claude Agent SDK tombstone for turns that ended without assistant output.
- *  The SDK writes this literal into the session JSONL so resumed sessions
- *  preserve the "this turn happened but produced nothing" signal. The
- *  daemon's jsonl-mirror faithfully ingests it as a `text` block; we keep
- *  the row on disk (preserve-over-delete) but suppress it from the chat
- *  UI so it doesn't render as a ghost assistant bubble. */
-const SDK_NO_RESPONSE_SENTINEL = "No response requested.";
-
-function isNoResponseSentinel(role: string, text: string | undefined): boolean {
-  return role !== "user" && text?.trim() === SDK_NO_RESPONSE_SENTINEL;
-}
-
-/**
- * Stable bubble id for a user-role chat message keyed by its turn_id. Used
- * both client-side (when `/api/chat/turn` confirms a dispatch) and on the
- * SSE handler (when the daemon emits the canonical `block_complete` for the
- * user-role block) so the two paths converge on the same ChatMessage row.
- * FIX_FORWARD 2.6.
- */
-export function userBlockIdForTurn(turnId: string): string {
-  return `user_${turnId}`;
-}
-
-/**
- * Stable bubble id for the synthetic "agent didn't respond" affordance
- * keyed by turn_id (FRI-85). One per turn — both the sentinel-text path
- * and the zero-assistant-content safety-net path converge on the same id
- * so live SSE replacing the streaming bubble and reload reconstructing
- * from blocks produce identical message rows.
- */
-export function noResponseIdForTurn(turnId: string): string {
-  return `nr_${turnId}`;
-}
-
-/**
- * Sentinel session_id the dashboard's `sendUserMessage` mutator writes
- * on user blocks before the daemon has resolved the SDK's real session
- * id. Matches `PENDING_SESSION_SENTINEL` in
- * `packages/shared/src/services/blocks.ts` — duplicated here to keep
- * the client free of a runtime dependency on the daemon-side service
- * module (the constant is used in a hot reactive path).
- */
-export const PENDING_SESSION_SENTINEL = "__pending__";
 
 /**
  * FRI-139 review-6: lifecycle event for transport-failure fallback
@@ -285,83 +95,6 @@ function transportFailureLog(
   if (typeof console === "undefined") return;
   const payload = { event, queueId, ts: Date.now(), ...(extra ?? {}) };
   console.debug("[chat.transport-failure]", payload);
-}
-
-/**
- * Drop rows whose session id doesn't match the focused agent's current
- * SDK session. Used at the two ingest points where multi-session
- * agent-scoped data shows up in the live transcript:
- *
- *   1. {@link ChatState.applyZeroBlocks} — Zero's blocks slice is
- *      agent-scoped, so prior-session rows ride along.
- *   2. {@link ChatState.loadAgentTurns} — the localStorage transcript
- *      cache pre-dates Zero and can contain blocks from whatever
- *      session was active when it was last written.
- *
- * Rows tagged with the `__pending__` sentinel pass through **only if
- * their `turn_id` matches the focused agent's current inflight turn**.
- * The sentinel is the dashboard mutator's "no SDK session yet" marker;
- * the daemon's lifecycle `session-update` sweep rewrites those rows
- * to the real id once the worker announces a session, but the sweep
- * is scoped to a single turn. When a turn dies before its
- * `session-update` arrives (worker SIGTERM, daemon crash, `/clear`
- * mid-turn), the `__pending__` block becomes a historical orphan that
- * the sweep will never claim. Without the turn-id gate the orphan
- * keeps rendering as live content every time the user reloads —
- * which is exactly the "Yesterday at 4:23 PM bug message keeps
- * reappearing post-`/clear`" repro. Gating on `turn_id ===
- * inflightTurn` keeps the just-typed user bubble visible during the
- * brief mutator-write → daemon-sweep window without resurrecting dead
- * orphans.
- *
- * **STRICT contract:** when `agents` does not contain a row for the
- * focused agent, return `[]`. The earlier permissive fallback
- * (return rows unfiltered) was the load-bearing leak behind the
- * post-`/clear` reload bug — Zero's `agents` and `blocks` slices
- * materialize independently, and on a cold reload the `blocks`
- * listener can fire `applyZeroBlocks` before the `agents` query has
- * replicated. With the permissive fallback that meant the prior
- * session's full transcript got rendered in the window between
- * blocks-arriving and agents-arriving. Callers must therefore
- * either ensure `chat.agents` is populated before they invoke the
- * filter, or accept "render nothing yet" and re-invoke once Zero
- * pushes the agents row — see the `#bindAgents` update callback in
- * `zero.svelte.ts` which now re-fires `applyZeroBlocks` for the
- * focused agent whenever `chat.agents` updates.
- *
- * Duck-types over both row shapes — Zero rows expose `session_id` /
- * `turn_id` (snake_case), `BlockRow` exposes `sessionId` / `turnId`
- * (camelCase).
- */
-export function filterRowsToCurrentSession<
-  T extends {
-    sessionId?: string;
-    session_id?: string;
-    turnId?: string;
-    turn_id?: string;
-  },
->(
-  rows: readonly T[],
-  agent: string,
-  agents: readonly AgentInfo[],
-  currentInflightTurnId: string | null,
-): T[] {
-  const agentRow = agents.find((a) => a.name === agent);
-  if (!agentRow) return [];
-  const currentSessionId = agentRow.sessionId;
-  return rows.filter((r) => {
-    const sid = r.session_id ?? r.sessionId;
-    if (sid === undefined) return false;
-    if (sid === PENDING_SESSION_SENTINEL) {
-      // Only pass the sentinel for rows belonging to the turn the user
-      // is actively in. Historical orphans from dead turns that the
-      // daemon's session-update sweep will never claim are dropped.
-      if (currentInflightTurnId === null) return false;
-      const tid = r.turn_id ?? r.turnId;
-      return tid === currentInflightTurnId;
-    }
-    return currentSessionId !== undefined && sid === currentSessionId;
-  });
 }
 
 /**
@@ -493,14 +226,6 @@ export class OptimisticEntry implements ChatMessage {
   }
 }
 
-/** Overlay-map key. Globally unique because message ids (`b_<blockId>`,
- *  `t_<toolId>`, `th_<blockId>`, `u_queue_<qid>`, `userBlockIdForTurn(...)`)
- *  are themselves unique within an agent. */
-export type OverlayKey = string;
-export function overlayKey(agent: string, id: string): OverlayKey {
-  return `${agent}|${id}`;
-}
-
 export class ChatState {
   /**
    * Legacy bucket for canonical Zero-replicated bubbles + a handful of
@@ -560,38 +285,19 @@ export class ChatState {
    * latency stays at one paint frame even on long sessions.
    */
   #derivedMessages = $derived.by<ChatMessage[]>(() => {
+    // Rune reads stay in the shell; the merge is the pure read-time core.
+    // `streaming.values()` / `optimistic.values()` are iterated synchronously
+    // inside `mergeBubbles` (during this derivation), so the SvelteMap
+    // structural dependency is registered here. `mergeBubbles` reads only
+    // identity fields off the entries, so per-delta `$state` mutations don't
+    // re-run this derivation (see the reactivity contract above).
     const focused = this._focusedAgent;
     const agentRow = this.agents.find((a) => a.name === focused);
     const sid = agentRow?.sessionId ?? null;
-
-    const overlayIds = new Set<string>();
-    const overlayEntries: ChatMessage[] = [];
-    for (const entry of this.streaming.values()) {
-      if (entry.agent !== focused) continue;
-      if (entry.sessionId !== sid) continue;
-      overlayEntries.push(entry);
-      overlayIds.add(entry.id);
-    }
-    for (const entry of this.optimistic.values()) {
-      if (entry.agent !== focused) continue;
-      if (entry.sessionId !== sid) continue;
-      overlayEntries.push(entry);
-      overlayIds.add(entry.id);
-    }
-    // Legacy filter:
-    //   - skip overlay-shadowed ids
-    //   - skip entries explicitly tagged for a different agent
-    //   - pass through untagged entries (defensive — test fixtures /
-    //     pre-migration synth bubbles whose pushLocal call now stamps
-    //     the focused agent automatically)
-    const out: ChatMessage[] = [];
-    for (const m of this.#legacyMessages) {
-      if (overlayIds.has(m.id)) continue;
-      if (m.agent && m.agent !== focused) continue;
-      out.push(m);
-    }
-    for (const e of overlayEntries) out.push(e);
-    return out;
+    return mergeBubbles(this.#legacyMessages, this.streaming.values(), this.optimistic.values(), {
+      agent: focused,
+      sessionId: sid,
+    });
   });
 
   /**
@@ -1173,9 +879,11 @@ export class ChatState {
     // `userBlockIdForTurn(turnId)`. Pushing another one would surface
     // two bubbles sharing the same id and crash the keyed `{#each}`.
     // Drop the optimistic in that case — the SSE bubble is canonical.
-    const sseAlreadyHere =
-      this.#legacyMessages.some((m) => m.id === targetId) ||
-      [...this.streaming.values()].some((s) => s.id === targetId);
+    const sseAlreadyHere = userBubbleAlreadyLanded(
+      this.#legacyMessages,
+      [...this.streaming.values()],
+      targetId,
+    );
     this.optimistic.delete(entryKey);
     if (sseAlreadyHere) return;
     this.#legacyMessages.push({
@@ -1522,6 +1230,7 @@ export class ChatState {
     const parsed = parseBlocks(rawBlocks, agent, {
       inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
       noResponseGraceUntil: this.noResponseGraceUntil,
+      now: Date.now(),
     });
 
     // Find the scroll target BEFORE the merge so we can compute it
@@ -2423,6 +2132,7 @@ export class ChatState {
           noResponseGraceUntil: this.noResponseGraceUntil,
           reconnectGraceUntil: this.reconnectGraceUntil,
           zeroBlockReasonByTurn: this.zeroBlockReasonByTurn,
+          now: Date.now(),
         });
         this.oldestBlockId = oldestBlockCursor(blocks);
         // FRI-125: the REST-payload `lastEventSeq` seed of
@@ -2631,170 +2341,85 @@ export class ChatState {
       return;
     }
 
-    const blockRows: BlockRow[] = rows.map(zeroBlockRowToBlockRow);
-    const parsed = parseBlocks(blockRows, forAgent, {
+    // Capture the cursor's PRIOR value before the merge so the core computes
+    // `oldestCursorChanged` against it (fix #3) instead of a post-assignment
+    // value — comparing after the assignment would make the check always false
+    // and silently break scroll-back pagination.
+    const priorOldestBlockId = this.oldestBlockId;
+    // The genuine convergence (parse + merge loop + dropSuperseded compose +
+    // cursors) is the pure core; the shell keeps the gates, the $state
+    // pre-sets, the session filter + empty-rows branch (above), and the
+    // write-backs (below). `rows` is already session-filtered.
+    const result = mergeZeroSnapshot({
+      rows,
+      forAgent,
+      agents: this.agents,
       inflightTurnId: this.inflightTurnIdByAgent[forAgent] ?? null,
-      // FRI-54: pass DB-derived working status so the sentinel is
-      // suppressed on refresh/mail-triggered turns even when the local
-      // inflightTurnId is null and the Zero replica is already complete.
-      agentWorking: this.agents.find((a) => a.name === forAgent)?.status === "working",
-      // FRI-91 Part A: complete the bf34884 grace-map plumbing on this
-      // call site — `applyZeroBlocks` runs on every Zero snapshot frame
-      // and was the only of the four parseBlocks callers that skipped
-      // the grace map. Covers the SSE-cleared-inflight-but-Zero-hasn't-
-      // landed-the-block-yet flash, mirroring the REST fetch path.
+      legacyMessages: this.#legacyMessages,
+      zeroSeenBlockIds: this.zeroSeenBlockIds,
       noResponseGraceUntil: this.noResponseGraceUntil,
       reconnectGraceUntil: this.reconnectGraceUntil,
-      // FRI-91 Part B: until Zero confirms the local replica matches
-      // upstream, a user-only turn may just be waiting for replication.
-      zeroResultIncomplete: resultType !== "complete",
-      // FRI-60: pass reason map so the synthesized no-response bubble gets
-      // the right display copy.
       zeroBlockReasonByTurn: this.zeroBlockReasonByTurn,
+      resultType,
+      fullWindow,
+      priorOldestBlockId,
+      // Clock pinned here at the IO boundary; the core stays deterministic.
+      now: Date.now(),
     });
-    const parsedById = new Map<string, ChatMessage>();
-    for (const m of parsed) parsedById.set(m.id, m);
 
-    // Track which block_ids the current snapshot contains so we can
-    // detect deletes: a `blockId` previously delivered by Zero but
-    // absent now is a real upstream removal (cancel-queued mutator,
-    // daemon `block_canceled`). Without this, deleted rows would
-    // linger as ghost bubbles on receivers' devices until they
-    // reload. The `zeroSeenBlockIds` tracker grows as new block_ids
-    // appear (bounded by distinct blocks ever surfaced for this
-    // agent in this session); it resets on focus switch in
-    // `loadAgentTurns`.
-    const snapshotBlockIds = new Set<string>();
-    for (const r of rows) snapshotBlockIds.add(r.block_id);
+    // Update the seen tracker AFTER consuming the result (gotcha 1) so the
+    // core's delete-detection compared against the PRIOR seen-set; the next
+    // snapshot recognizes these block_ids as "seen via Zero".
+    for (const bid of result.snapshotBlockIds) this.zeroSeenBlockIds.add(bid);
 
-    // Drop any optimistic-pending bubble whose `queueId` matches a
-    // user block_id now in the Zero snapshot — the canonical row has
-    // landed in the local replica, so the pending bubble is superseded.
-    // `queueId` is set to the pre-minted blockId at `addUser()` time
-    // and equals the Zero row's `block_id` by construction.
+    this.#legacyMessages = result.nextLegacyMessages;
 
-    const merged: ChatMessage[] = [];
-    const seen = new Set<string>();
-    // Iterate the legacy bucket only — overlay entries (streaming and
-    // optimistic) render via the `messages` derivation and don't belong
-    // in legacy. The optimistic-overlay drop below mirrors the in-merge
-    // snapshotBlockIds drop, keeping the overlay map clean of entries
-    // whose canonical row just landed.
-    for (const m of this.#legacyMessages) {
-      // Structural cross-agent isolation: drop legacy entries explicitly
-      // tagged for a different agent. loadAgentTurns no longer wipes
-      // the legacy bucket on focus switch, so the previous agent's
-      // entries sit here until this snapshot replaces them. The
-      // derivation also filters by agent for the brief window before
-      // the first snapshot lands; this drop makes the persistence
-      // permanent (subsequent snapshots don't re-include them).
-      if (m.agent && m.agent !== forAgent) continue;
-      const parsedMatch = parsedById.get(m.id);
-      if (parsedMatch) {
-        merged.push(parsedMatch);
-        seen.add(m.id);
-        continue;
-      }
-      // Drop optimistic-pending bubbles whose queueId (= pre-minted blockId)
-      // now appears in the Zero snapshot as a canonical block_id.
-      // parseBlocks already emitted the canonical version in `parsed`.
-      if (m.queueId !== undefined && snapshotBlockIds.has(m.queueId)) continue;
-      // No parsed counterpart. Decide whether to keep or drop.
-      if (
-        m.blockId !== undefined &&
-        this.zeroSeenBlockIds.has(m.blockId) &&
-        !snapshotBlockIds.has(m.blockId)
-      ) {
-        // The bubble's `blockId` was in a prior Zero snapshot but is
-        // missing now — the upstream row was deleted. Drop the
-        // bubble so cancel-queued / block_canceled propagate.
-        continue;
-      }
-      // Otherwise preserve. Covers in-flight SSE streams (no
-      // blockId yet, or blockId-having streaming row that Zero will
-      // deliver as `complete` on the next snapshot), optimistic-
-      // pending user bubbles, and scroll-back rows older than the
-      // 50-row Zero window (blockId-having but not previously seen
-      // via Zero — they came from the REST `?before=…` fallback).
-      merged.push(m);
-    }
-    for (const m of parsed) {
-      if (!seen.has(m.id)) merged.push(m);
-    }
-    merged.sort((a, b) => a.ts - b.ts);
-
-    // Update the seen tracker AFTER the merge so this snapshot's
-    // block_ids are recognized as "seen via Zero" on the next call.
-    for (const bid of snapshotBlockIds) this.zeroSeenBlockIds.add(bid);
-
-    this.#legacyMessages = dropSupersededNoResponseSafetyNet(merged);
-    // Overlay companion to the in-merge snapshotBlockIds drop above:
-    // drop any optimistic overlay entry whose queueId just appeared as
-    // a canonical Zero row in this snapshot. Without this, the
-    // pending_<uuid> overlay entry and the canonical legacy entry
-    // would surface as two distinct ids for the same text.
-    if (snapshotBlockIds.size > 0) {
+    // Overlay companion to the in-merge snapshotBlockIds drop: drop any
+    // optimistic overlay entry whose queueId just appeared as a canonical Zero
+    // row this snapshot. Without it the pending_<uuid> overlay entry and the
+    // canonical legacy entry would surface as two distinct ids for one text.
+    if (result.snapshotBlockIds.size > 0) {
       for (const [key, entry] of this.optimistic.entries()) {
-        if (entry.queueId && snapshotBlockIds.has(entry.queueId)) {
-          // FRI-139: cancel any armed transport-failure fallback for
-          // this queueId — the canonical row arrived, the bubble is
-          // about to disappear, and a stale timer firing later would
-          // flip a non-existent entry's `failed` flag.
+        if (entry.queueId && result.snapshotBlockIds.has(entry.queueId)) {
+          // FRI-139: cancel any armed transport-failure fallback for this
+          // queueId — the canonical row arrived, the bubble is about to
+          // disappear, and a stale timer firing later would flip a
+          // non-existent entry's `failed` flag.
           this.clearTransportFailureTimer(entry.queueId);
           this.optimistic.delete(key);
         }
       }
     }
-    // Reload-heal convergence: drop streaming overlay entries whose
-    // canonical row just landed in legacy with a terminal status. The
-    // overlay shadowed the (in-flight) legacy entry while SSE was
-    // driving deltas; now that Zero has delivered the terminal version
-    // the overlay is no longer load-bearing and would otherwise hold
-    // memory + render-state forever past the turn's end.
+    // Reload-heal convergence: drop streaming overlay entries whose canonical
+    // row just landed in legacy at a terminal status. Runs over a snapshot,
+    // OUTSIDE any derivation (see pruneConverged's doc).
     this.pruneConvergedStreamingOverlay(forAgent);
-    const newOldest = oldestBlockCursor(blockRows);
-    if (newOldest !== this.oldestBlockId) {
-      // The Zero snapshot shifted the scroll-back cursor. Re-arm
-      // pagination: if a prior stale-cursor `loadOlderTurns` set
-      // `reachedOldest=true` (cursor pointed at an actually-oldest row,
-      // server returned empty), the user would otherwise be stuck —
-      // any rows that landed between the stale cursor and the new
-      // Zero window would be permanently unreachable via scroll-back.
-      this.reachedOldest = false;
-    }
-    this.oldestBlockId = newOldest;
 
-    // FRI-125: the Zero-row `last_event_seq` aggregator seed for
-    // `lastSeqByAgent` retired alongside the column. The cursor is
-    // now seeded exclusively from SSE event seqs at apply time
-    // (`acceptEvent` — still load-bearing for transient-reconnect dedup).
+    // reachedOldest two-writer (fix #3): the pre-merge `$state` pre-set above
+    // is the set-true writer (gated on resultType complete && fullWindow);
+    // here the cursor-shift false-writer re-arms pagination so rows between a
+    // stale cursor and the new Zero window stay reachable. `oldestCursorChanged`
+    // was computed in the core against `priorOldestBlockId`, so this is
+    // independent of the assignment order below. (`result.reachedOldest`
+    // mirrors the pre-set's condition and is asserted by the pure test.)
+    if (result.oldestCursorChanged) this.reachedOldest = false;
+    this.oldestBlockId = result.newOldestCursor;
 
-    // Phase 4.1: advance the per-device read cursor for this agent to
-    // the newest block in the snapshot. While the user is focused on
-    // this agent's chat, every new block delivery advances the cursor
-    // — the semantic is "if you're looking at it, you've seen it."
-    // The mutator is idempotent on the (device, agent, block) PK so a
-    // re-fire with the same args is a server-side no-op; the
-    // `lastMarkedBlockIdByAgent` memo dedups at the client to avoid
-    // even sending the redundant push. The first frame after a focus
-    // switch always sends a fresh write because `loadAgentTurns`
-    // clears the memo for the new agent.
-    if (this.markReadFn) {
-      // Find the chronologically newest row. Bare `r.id > newest.id`
-      // would be a lex-string comparison and Phase 4.11's mixed
-      // numeric-string + UUID alphabet makes that meaningless (see
-      // `oldestBlockCursor` for the full writeup). Use `(ts, id)`
-      // tuple, same as the materialized-view query now orders by.
-      let newest: ZeroBlocksRow | null = null;
-      for (const r of rows) {
-        if (!newest || r.ts > newest.ts || (r.ts === newest.ts && r.id > newest.id)) newest = r;
-      }
-      if (newest) {
-        const prev = this.lastMarkedBlockIdByAgent.get(forAgent);
-        if (prev !== newest.block_id) {
-          this.lastMarkedBlockIdByAgent.set(forAgent, newest.block_id);
-          this.markReadFn(forAgent, newest.block_id);
-        }
+    // FRI-125: `lastSeqByAgent` is seeded exclusively from SSE event seqs at
+    // apply time (`acceptEvent`), not from Zero rows.
+
+    // Phase 4.1: advance the per-device read cursor to the newest snapshot row
+    // ("if you're looking at it, you've seen it"). The mutator is idempotent on
+    // the (device, agent, block) PK; the `lastMarkedBlockIdByAgent` memo dedups
+    // the redundant push client-side. The core picked the newest by (ts, id)
+    // tuple (Phase 4.11's mixed numeric/UUID alphabet defeats a bare lexical
+    // id compare — see `oldestBlockCursor`).
+    if (this.markReadFn && result.newestRowForReadCursor) {
+      const newest = result.newestRowForReadCursor;
+      const prev = this.lastMarkedBlockIdByAgent.get(forAgent);
+      if (prev !== newest.block_id) {
+        this.lastMarkedBlockIdByAgent.set(forAgent, newest.block_id);
+        this.markReadFn(forAgent, newest.block_id);
       }
     }
   }
@@ -2858,6 +2483,7 @@ export class ChatState {
       const older = parseBlocks(blocks, agent, {
         inflightTurnId: this.inflightTurnIdByAgent[agent] ?? null,
         noResponseGraceUntil: this.noResponseGraceUntil,
+        now: Date.now(),
       });
       // FRI-81 D2/D3: older history is, by definition, from past turns —
       // no streaming/running bubble in this page is the active turn. Heal
@@ -3037,22 +2663,12 @@ export class ChatState {
    *  for the focused agent. */
   private pruneConvergedStreamingOverlay(agent: string): void {
     if (this.streaming.size === 0) return;
-    const terminalIds = new Set<string>();
-    for (const m of this.#legacyMessages) {
-      if (
-        m.status === "complete" ||
-        m.status === "aborted" ||
-        m.status === "error" ||
-        m.status === "done"
-      ) {
-        terminalIds.add(m.id);
-      }
-    }
-    if (terminalIds.size === 0) return;
-    for (const [key, entry] of this.streaming.entries()) {
-      if (entry.agent !== agent) continue;
-      if (terminalIds.has(entry.id)) this.streaming.delete(key);
-    }
+    // Partition over an eager snapshot of the overlay, OUTSIDE any reactive
+    // scope (pruneConverged reads legacy `status`; see its doc), then apply
+    // the converged drops. `overlayKey(e.agent, e.id)` reconstructs the exact
+    // insertion key, so this deletes the same entries the inline scan did.
+    const { drop } = pruneConverged(this.#legacyMessages, [...this.streaming.values()], agent);
+    for (const e of drop) this.streaming.delete(overlayKey(e.agent, e.id));
   }
 
   /** Find the overlay tool entry matching a SSE block_id. Tool overlay
@@ -3255,242 +2871,52 @@ export class ChatState {
     source: string | null;
     ts: number;
   }): void {
+    // Resolve the SSE frame into one discriminated plan against a snapshot of
+    // the read surface, then apply it. The merge logic (overlay-first
+    // precedence, in-place backfills, late-mount, FRI-85 sentinel, FRI-81 D4
+    // ghost-drop) lives in `reconcileComplete`; the shell only mutates state.
     const agent = this.focusedAgent;
-    if (event.kind === "error") {
-      const errPayload = parseErrorContent(event.content_json);
-      const id = `e_${event.block_id}`;
-      // Idempotent — ring-buffer replay or reload-mid-error must not double-add.
-      const existing = this.messages.find((m) => m.id === id);
-      if (existing) {
-        existing.errorCode = errPayload.code;
-        existing.errorHeadline = errPayload.headline;
-        existing.httpStatus = errPayload.httpStatus;
-        existing.retryAfterSeconds = errPayload.retryAfterSeconds;
-        existing.requestId = errPayload.requestId;
-        existing.rawErrorMessage = errPayload.rawMessage;
+    const snapshot: ReconcileSnapshot = {
+      // `this.messages` (the derived view) folds in overlay+optimistic+session
+      // filter and carries the live object references the `inplace` plan
+      // patches. Snapshotted once: nothing below mutates state before the plan
+      // is computed, so a single read is equivalent to the old lazy re-reads.
+      merged: this.messages,
+      overlay: this.streaming,
+      focus: { agent, sessionId: this.currentSessionFor(agent) },
+    };
+    const plan = reconcileComplete(snapshot, event);
+    switch (plan.kind) {
+      case "overlay-finalize": {
+        // Re-fetch the overlay entry by key — synchronous, so it is the same
+        // entry `reconcileComplete` inspected. Object.assign fires the
+        // StreamingEntry's per-field $state setters (text/status/etc).
+        const entry = this.streaming.get(plan.key);
+        if (entry) Object.assign(entry, plan.patch);
         return;
       }
-      this.#legacyMessages.push({
-        id,
-        role: "assistant",
-        kind: "error",
-        text: errPayload.headline,
-        status: "error",
-        agent,
-        turnId: event.turn_id,
-        ts: event.ts,
-        errorCode: errPayload.code,
-        errorHeadline: errPayload.headline,
-        httpStatus: errPayload.httpStatus,
-        retryAfterSeconds: errPayload.retryAfterSeconds,
-        requestId: errPayload.requestId,
-        rawErrorMessage: errPayload.rawMessage,
-      });
-      return;
-    }
-    const parsed = parseBlockContent(event.content_json);
-    if (event.kind === "text") {
-      if (isNoResponseSentinel(event.role, parsed.text)) {
-        // FRI-85 supersedes FRI-81 D5: the sentinel's terminal state used to
-        // be handled by dropping the placeholder block_start pushed (D5's
-        // convergence with parseBlocks). FRI-85 changed the contract — the
-        // reload path now synthesizes a "no-response" affordance instead of
-        // continuing past the row, so live must do the same. Removing the
-        // streaming bubble at `b_<id>` still satisfies D5's cleanup intent;
-        // the new affordance bubble at `nr_<turnId>` is the converged shape.
-        const streamingId = `b_${event.block_id}`;
-        this.streaming.delete(overlayKey(this.focusedAgent, streamingId));
-        const idx = this.#legacyMessages.findIndex((m) => m.id === streamingId);
+      case "inplace":
+        // fix #5: patch the live merged-view object the plan matched directly
+        // (it may be an overlay/optimistic entry, not a #legacyMessages
+        // member — re-finding by id in legacy alone would silently no-op).
+        Object.assign(plan.target, plan.patch);
+        return;
+      case "legacy-push":
+        this.#legacyMessages.push(plan.row);
+        return;
+      case "no-response": {
+        this.streaming.delete(plan.overlayKeyToDelete);
+        const idx = this.#legacyMessages.findIndex((m) => m.id === plan.legacyIdToSplice);
         if (idx !== -1) this.#legacyMessages.splice(idx, 1);
-        const nrId = noResponseIdForTurn(event.turn_id);
-        if (!this.messages.some((m) => m.id === nrId)) {
-          this.#legacyMessages.push({
-            id: nrId,
-            role: "assistant",
-            kind: "no-response",
-            noResponseSentinel: true,
-            text: "",
-            status: "complete",
-            agent: this.focusedAgent,
-            turnId: event.turn_id,
-            ts: event.ts,
-          });
-        }
+        if (plan.pushRow) this.#legacyMessages.push(plan.pushRow);
         return;
       }
-      const id = event.role === "user" ? userBlockIdForTurn(event.turn_id) : `b_${event.block_id}`;
-      const mappedStatus: ChatMessage["status"] =
-        event.status === "complete"
-          ? "complete"
-          : event.status === "aborted"
-            ? "aborted"
-            : event.status === "queued"
-              ? "queued"
-              : "error";
-      // Streaming overlay update first. The overlay holds the live bubble
-      // during the streaming phase; finalizing in place keeps the user's
-      // view stable until Zero replicates the canonical row (which is
-      // pruned by pruneConvergedStreamingOverlay on the next snapshot).
-      const overlayEntry =
-        event.role === "user" ? undefined : this.streaming.get(overlayKey(agent, id));
-      if (overlayEntry && overlayEntry.role === "assistant") {
-        if (typeof parsed.text === "string") overlayEntry.text = parsed.text;
-        overlayEntry.status = mappedStatus;
+      case "ghost-drop":
+        this.streaming.delete(plan.overlayKeyToDelete);
+        this.#legacyMessages = this.#legacyMessages.filter((m) => m.id !== plan.legacyIdToFilter);
         return;
-      }
-      const liveRole = event.role === "user" ? "user" : "assistant";
-      for (const m of this.messages) {
-        if (m.id !== id) continue;
-        if (typeof parsed.text === "string") m.text = parsed.text;
-        m.status = mappedStatus;
-        // Backfill source/fromAgent if a prior block_start mounted the row
-        // without them. recordUserBlock for mail emits only block_complete
-        // (no block_start), so today this path is not hit for mail; the
-        // defensive backfill protects against future churn.
-        if (m.source === undefined && event.source) {
-          m.source = event.source as ChatMessage["source"];
-        }
-        if (m.fromAgent === undefined && parsed.from_agent) {
-          m.fromAgent = parsed.from_agent;
-        }
-        if (m.attachments === undefined && parsed.attachments) {
-          m.attachments = parsed.attachments;
-        }
-        // Hand off the turn id and block id so cancelQueued and the
-        // cancel-X affordance can target this bubble even after
-        // `confirmPending` has cleared the optimistic queueId. block_id
-        // also lets handleBlockMetaUpdate locate the bubble directly.
-        if (!m.turnId && event.turn_id) m.turnId = event.turn_id;
-        if (!m.blockId && event.block_id) m.blockId = event.block_id;
+      case "noop":
         return;
-      }
-      // Late mount: block_start was evicted from the ring (or — for mail
-      // — was never emitted in the first place). Land canonical in the
-      // legacy bucket so Zero's eventual replicate dedupes on id.
-      this.#legacyMessages.push({
-        id,
-        role: liveRole,
-        text: parsed.text ?? "",
-        status: mappedStatus,
-        agent,
-        turnId: event.turn_id,
-        blockId: event.block_id,
-        ts: event.ts,
-        source: (event.source as ChatMessage["source"]) ?? undefined,
-        fromAgent: parsed.from_agent,
-        mailMeta: extractMailMeta(parsed),
-        attachments: parsed.attachments,
-      });
-      return;
-    }
-    if (event.kind === "thinking") {
-      const id = `th_${event.block_id}`;
-      // FRI-81 D4: converge with parseBlocks's ghost-filter. An empty
-      // thinking block that completes (rather than being cancelled via
-      // block_canceled IPC) is a ghost; drop the placeholder that
-      // block_start created. Aborted/error preserve their bubble so the
-      // user sees a "stopped" affordance.
-      const hasText = typeof parsed.text === "string" && parsed.text.length > 0;
-      // Redacted blocks legitimately have no text — exempt from the ghost filter.
-      if (!hasText && !parsed.isRedacted && event.status === "complete") {
-        this.streaming.delete(overlayKey(this.focusedAgent, id));
-        this.#legacyMessages = this.#legacyMessages.filter((m) => m.id !== id);
-        return;
-      }
-      // For thinking blocks, 'complete' (and the un-aborted retry path)
-      // both surface as the user-visible "done" state. Terminal abort/error
-      // — emitted by the worker's tear-down on iterator failure or
-      // `api_retry` — gets the matching state so the bubble isn't left
-      // spinning.
-      const status: ChatMessage["status"] =
-        event.status === "aborted" ? "aborted" : event.status === "error" ? "error" : "done";
-      const thinkOverlay = this.streaming.get(overlayKey(agent, id));
-      if (thinkOverlay && thinkOverlay.role === "thinking") {
-        if (typeof parsed.text === "string") thinkOverlay.text = parsed.text;
-        if (parsed.isRedacted) thinkOverlay.isRedacted = true;
-        thinkOverlay.status = status;
-        return;
-      }
-      for (const m of this.messages) {
-        if (m.id !== id) continue;
-        if (typeof parsed.text === "string") m.text = parsed.text;
-        if (parsed.isRedacted) m.isRedacted = true;
-        m.status = status;
-        return;
-      }
-      this.#legacyMessages.push({
-        id,
-        role: "thinking",
-        text: parsed.text ?? "",
-        isRedacted: parsed.isRedacted === true,
-        status,
-        agent,
-        blockId: event.block_id,
-        turnId: event.turn_id,
-        ts: event.ts,
-      });
-      return;
-    }
-    if (event.kind === "tool_use") {
-      const toolId = parsed.tool_use_id ?? "";
-      const id = `t_${toolId}`;
-      const toolOverlay = this.streaming.get(overlayKey(agent, id));
-      if (toolOverlay && toolOverlay.role === "tool") {
-        toolOverlay.input = parsed.input;
-        toolOverlay.inputPartialJson = undefined;
-        if (parsed.name && !toolOverlay.toolName) toolOverlay.toolName = parsed.name;
-        if (event.status === "aborted") toolOverlay.status = "aborted";
-        else if (event.status === "error") toolOverlay.status = "error";
-        return;
-      }
-      for (const m of this.messages) {
-        if (m.id !== id) continue;
-        m.input = parsed.input;
-        m.inputPartialJson = undefined;
-        if (parsed.name && !m.toolName) m.toolName = parsed.name;
-        if (event.status === "aborted") m.status = "aborted";
-        else if (event.status === "error") m.status = "error";
-        return;
-      }
-      // Late mount.
-      const status: ChatMessage["status"] =
-        event.status === "aborted" ? "aborted" : event.status === "error" ? "error" : "running";
-      this.#legacyMessages.push({
-        id,
-        role: "tool",
-        text: "",
-        status,
-        agent,
-        toolId,
-        toolName: parsed.name ?? "",
-        input: parsed.input,
-        turnId: event.turn_id,
-        ts: event.ts,
-      });
-      return;
-    }
-    if (event.kind === "tool_result") {
-      const toolId = parsed.tool_use_id ?? "";
-      const id = `t_${toolId}`;
-      const resultOverlay = this.streaming.get(overlayKey(agent, id));
-      if (resultOverlay && resultOverlay.role === "tool") {
-        resultOverlay.status = parsed.is_error ? "error" : "done";
-        if (typeof parsed.text === "string") resultOverlay.output = parsed.text;
-        return;
-      }
-      for (const m of this.messages) {
-        if (m.id !== id) continue;
-        m.status = parsed.is_error ? "error" : "done";
-        if (typeof parsed.text === "string") m.output = parsed.text;
-        return;
-      }
-      // No preceding tool_use bubble — likely a ring eviction OR the
-      // first 50-row Zero window cut mid-turn. A "(unknown)" tool card
-      // with just the result text ("mail 154 closed", a bare exit code,
-      // …) is more noise than signal; the user already lost the tool
-      // call's input, name, and motivation. Drop the orphan; if its
-      // tool_use later arrives via scroll-back, parseBlocks's
-      // tool_result branch will produce a paired bubble at that point.
     }
   }
 
@@ -3512,13 +2938,17 @@ export class ChatState {
    * to disclose.
    */
   private handleBlockCanceled(event: { block_id: string }): void {
-    // Drop matching streaming overlay entries — the overlay key is
-    // (agent, id) and id can be `b_<bid>` / `th_<bid>` / `t_<toolId>`,
-    // so scan-by-blockId is the only correct match for the tool case.
-    for (const [key, entry] of this.streaming.entries()) {
-      if (entry.blockId === event.block_id) this.streaming.delete(key);
-    }
-    this.#legacyMessages = this.#legacyMessages.filter((m) => m.blockId !== event.block_id);
+    // Agent-agnostic (fix #4): drop every overlay entry AND legacy bubble
+    // mounted against this block id, across all agents. `reconcileCanceled`
+    // matches overlay entries by blockId and reconstructs their exact map
+    // keys (overlayKey(agent, id)); the legacy filter is likewise untagged.
+    const { nextLegacy, dropKeys } = reconcileCanceled(
+      this.#legacyMessages,
+      [...this.streaming.values()],
+      event.block_id,
+    );
+    for (const key of dropKeys) this.streaming.delete(key);
+    this.#legacyMessages = nextLegacy;
   }
 
   // Phase 5: `handleBlockMetaUpdate` removed — Zero replicates the
@@ -3536,280 +2966,6 @@ export const chat = new ChatState();
 // spec uses this to force the `focusedAgent`-lags-URL race deterministically.
 if (typeof window !== "undefined") {
   (globalThis as unknown as { __fridayChat?: ChatState }).__fridayChat = chat;
-}
-
-/** Parsed shape of a block row's `content_json`. Mirrors what the daemon
- *  writes for each block kind (FIX_FORWARD 1.2 + 1.3). */
-interface ParsedBlockContent {
-  text?: string;
-  thinking?: string;
-  tool_use_id?: string;
-  name?: string;
-  input?: unknown;
-  is_error?: boolean;
-  from_agent?: string;
-  /** Mail-source block extras (see daemon/agent/lifecycle.ts
-   *  recordUserBlock). */
-  mail_id?: number;
-  mail_subject?: string | null;
-  mail_type?: string;
-  mail_priority?: string;
-  mail_thread_id?: string | null;
-  mail_ts?: number;
-  /** user_chat blocks for paste/drop/file-pick sends carry the attachment
-   *  metadata the daemon persisted alongside the text. Reload reads this
-   *  back so the bubble's image thumb / file chip survives across page
-   *  loads (FRI-6). */
-  attachments?: Array<{ sha256: string; filename: string; mime: string }>;
-  /** FRI-156 §E: durable `kind:'compaction'` marker block payload
-   *  (snake_case, written by the daemon's compaction-boundary handler).
-   *  `pre_tokens`/`post_tokens` are the context-window size before/after
-   *  compaction; `duration_ms` is unused by the divider render but kept
-   *  for parity with the daemon's `content_json` shape. */
-  pre_tokens?: number;
-  post_tokens?: number;
-  duration_ms?: number;
-  /** True when the thinking block was redacted by Anthropic. */
-  isRedacted?: boolean;
-  /** Opaque encrypted payload from a `redacted_thinking` content block. */
-  data?: string;
-}
-
-function parseBlockContent(contentJson: string): ParsedBlockContent {
-  try {
-    return JSON.parse(contentJson) as ParsedBlockContent;
-  } catch {
-    return {};
-  }
-}
-
-/** Parsed shape of a `kind="error"` block's content_json. Mirrors the
- *  daemon-side `ErrorBlockPayload` (services/daemon/src/agent/block-stream.ts).
- *  Defensive defaults so a malformed/legacy row still renders something. */
-export interface ParsedErrorContent {
-  code: string;
-  headline: string;
-  httpStatus?: number;
-  retryAfterSeconds?: number;
-  requestId?: string;
-  rawMessage: string;
-}
-
-function parseErrorContent(contentJson: string): ParsedErrorContent {
-  try {
-    const raw = JSON.parse(contentJson) as Partial<ParsedErrorContent>;
-    return {
-      code: typeof raw.code === "string" ? raw.code : "unknown",
-      headline:
-        typeof raw.headline === "string" && raw.headline.length > 0
-          ? raw.headline
-          : "Something went wrong",
-      httpStatus: typeof raw.httpStatus === "number" ? raw.httpStatus : undefined,
-      retryAfterSeconds:
-        typeof raw.retryAfterSeconds === "number" && raw.retryAfterSeconds >= 0
-          ? raw.retryAfterSeconds
-          : undefined,
-      requestId: typeof raw.requestId === "string" ? raw.requestId : undefined,
-      rawMessage: typeof raw.rawMessage === "string" ? raw.rawMessage : contentJson,
-    };
-  } catch {
-    return { code: "unknown", headline: "Something went wrong", rawMessage: contentJson };
-  }
-}
-
-/** Pull the mail metadata out of a parsed content_json, if present. The
- *  daemon writes these fields only for `source='mail'` blocks; older mail
- *  rows persisted before the schema gained these fields will return
- *  undefined and MailBlock will fall back to a header-only view. */
-function extractMailMeta(parsed: ParsedBlockContent): ChatMessage["mailMeta"] | undefined {
-  if (typeof parsed.mail_id !== "number") return undefined;
-  return {
-    id: parsed.mail_id,
-    subject: parsed.mail_subject ?? null,
-    type: parsed.mail_type ?? "message",
-    priority: parsed.mail_priority ?? "normal",
-    threadId: parsed.mail_thread_id ?? null,
-    ts: parsed.mail_ts ?? 0,
-  };
-}
-
-/** Wire shape of a row from `GET /api/agents/:name/blocks`. Mirrors the
- *  `blocks` table columns (FIX_FORWARD 1.1). */
-export interface BlockRow {
-  /** Phase 4.11: text UUID (was bigserial number). Equal to
-   *  blockId for mutator-INSERTed rows; for legacy daemon-written
-   *  rows the column still holds the original bigserial value as
-   *  text (e.g. "123"). */
-  id: string;
-  blockId: string;
-  turnId: string;
-  agentName: string;
-  sessionId: string;
-  messageId: string | null;
-  blockIndex: number;
-  role: string;
-  kind: string;
-  source: string | null;
-  contentJson: string;
-  status: string;
-  ts: number;
-}
-
-/** Phase 3.7: snake_case Zero row shape mirrors the Postgres `blocks`
- *  table — exposed here (not imported from `zero.svelte.ts`) to avoid
- *  the chat → zero circular dependency. Aligned with `ZeroBlockRow`
- *  in `stores/zero.svelte.ts`. */
-export interface ZeroBlocksRow {
-  /** Phase 4.11: flipped from `number` → `string` alongside the
-   *  Drizzle bigserial→text(uuid) migration. */
-  id: string;
-  block_id: string;
-  turn_id: string;
-  agent_name: string;
-  session_id: string;
-  message_id: string | null;
-  block_index: number;
-  role: string;
-  kind: string;
-  source: string | null;
-  content_json: unknown;
-  status: string;
-  streaming: boolean;
-  origin_mutation_id: string | null;
-  ts: number;
-}
-
-/** Convert a Zero row (snake_case, jsonb columns auto-parsed) to the
- *  `BlockRow` shape `parseBlocks` consumes (camelCase, `content_json`
- *  re-serialized to a JSON string). The string round-trip is load-
- *  bearing: parseBlocks runs `parseBlockContent` which calls JSON.parse
- *  on `contentJson` — passing a parsed object would double-parse and
- *  throw. */
-export function zeroBlockRowToBlockRow(r: ZeroBlocksRow): BlockRow {
-  return {
-    id: r.id,
-    blockId: r.block_id,
-    turnId: r.turn_id,
-    agentName: r.agent_name,
-    sessionId: r.session_id,
-    messageId: r.message_id,
-    blockIndex: r.block_index,
-    role: r.role,
-    kind: r.kind,
-    source: r.source,
-    contentJson:
-      typeof r.content_json === "string" ? r.content_json : JSON.stringify(r.content_json ?? null),
-    status: r.status,
-    ts: r.ts,
-  };
-}
-
-/** Strip safety-net "Agent didn't respond" bubbles that are no longer
- *  load-bearing. Two cases:
- *
- *   1. **Superseded**: the turn has since produced real assistant
- *      content. parseBlocks emits `nr_<turnId>` with
- *      `noResponseSentinel=false` for any user_chat turn that lacks
- *      assistant blocks at parse time — a fundamentally stateful
- *      inference that's wrong during the brief race where the user
- *      message lands in Zero before the first assistant block does.
- *   2. **Orphaned**: the user_chat user bubble that anchored the
- *      affordance is gone. Happens when the upstream blocks row was
- *      deleted (cancel-queued mutator, daemon block_canceled) but the
- *      nr_ synth from a prior parse run is still in `messages`.
- *
- *  Sentinel-driven nr_ bubbles (`noResponseSentinel=true`) come from
- *  the SDK's trained marker block and are authoritative; we never
- *  drop those. */
-export function dropSupersededNoResponseSafetyNet(messages: ChatMessage[]): ChatMessage[] {
-  const respondedTurns = new Set<string>();
-  const userChatTurns = new Set<string>();
-  for (const m of messages) {
-    if (!m.turnId) continue;
-    if (m.role === "assistant" && m.kind !== "no-response") {
-      respondedTurns.add(m.turnId);
-    } else if (m.role === "thinking" || m.role === "tool") {
-      respondedTurns.add(m.turnId);
-    } else if (m.role === "user" && (m.source ?? "user_chat") === "user_chat") {
-      userChatTurns.add(m.turnId);
-    }
-  }
-  return messages.filter((m) => {
-    if (
-      m.role === "assistant" &&
-      m.kind === "no-response" &&
-      m.noResponseSentinel === false &&
-      m.turnId
-    ) {
-      if (respondedTurns.has(m.turnId)) return false;
-      if (!userChatTurns.has(m.turnId)) return false;
-    }
-    return true;
-  });
-}
-
-/**
- * Convert BlockRow[] (from /api/agents/:name/blocks) into the ChatMessage[]
- * the chat UI renders. Mirrors `handleBlockComplete`'s id scheme so a
- * canonical block row + a live block_complete SSE event converge on the
- * same bubble id (FIX_FORWARD 3.7 + 2.6).
- */
-/**
- * FRI-81 D2/D3: a thinking or tool_use row left at status='streaming' in
- * the DB is an orphan when the worker died or the daemon restarted before
- * any teardown could finalize it. Heuristic to decide which streaming rows
- * are orphans without an authoritative "is this turn active" signal:
- *
- *   - Compute the max ts across all rows ("global high-water"). The active
- *     turn, if one exists, is by definition the turn that produced the
- *     newest block.
- *   - For each turn, compute the turn's max ts.
- *   - A streaming row is an orphan if EITHER:
- *       (a) Its turn's max ts is strictly less than the global high-water —
- *           i.e. a later turn has produced blocks since, so this turn
- *           cannot still be live.
- *       (b) Its own ts is strictly less than its turn's max ts — i.e. a
- *           sibling block in the same turn landed later (possibly already
- *           terminal), so the worker moved past this block.
- *
- * The streaming-mid-current-turn case (this block IS the latest activity
- * we know about) is preserved so reload-during-stream resumes cleanly —
- * `handleBlockDelta` gates on `m.status === "streaming"` / "running" and
- * would otherwise reject the next SSE delta.
- *
- * `loadAgentTurns`'s post-render `/api/agents/:name` probe handles the
- * remaining case (this is the only/latest turn AND the agent is idle)
- * via `healOrphanStreamingBubbles` on the live message array.
- *
- * Known race (PR #22 review N1): rule (b) compares `ts` values. The
- * daemon's `block_complete` write bumps the row's `ts` to `Date.now()`
- * when `block-stream.close()` INSERTs the canonical row; if a sibling
- * block in the same turn has already completed AND its ts is later
- * than this still-streaming block's `ts`, this block is classified as
- * orphan even though it might still be receiving deltas. The window
- * is bounded — the next SSE `block_complete` event flips the bubble to a real
- * terminal status and overrides the misclassification — but the user
- * sees a brief "Stopped" affordance on a block that wasn't stopped.
- * Acceptable for now; a full fix would require tracking the daemon's
- * live-turn map on the dashboard side, which is more state than the
- * symptom warrants.
- */
-function classifyOrphanRows(blocks: BlockRow[]): Set<string> {
-  const orphans = new Set<string>();
-  if (blocks.length === 0) return orphans;
-  const maxTsByTurn = new Map<string, number>();
-  let globalMax = -Infinity;
-  for (const b of blocks) {
-    const prev = maxTsByTurn.get(b.turnId);
-    if (prev === undefined || b.ts > prev) maxTsByTurn.set(b.turnId, b.ts);
-    if (b.ts > globalMax) globalMax = b.ts;
-  }
-  for (const b of blocks) {
-    if (b.status !== "streaming") continue;
-    const turnMax = maxTsByTurn.get(b.turnId) ?? b.ts;
-    if (turnMax < globalMax || b.ts < turnMax) orphans.add(b.blockId);
-  }
-  return orphans;
 }
 
 /**
@@ -3859,424 +3015,6 @@ export function healOrphanStreamingBubbles(
   }
 }
 
-export function parseBlocks(
-  blocks: BlockRow[],
-  agent: string,
-  opts: {
-    inflightTurnId?: string | null;
-    /** When true, the focused agent's `status` is `'working'` in the
-     *  DB/Zero snapshot. Suppresses the "Agent didn't respond" safety-net
-     *  for ALL pending turns — the missing assistant block is still being
-     *  generated. Covers page-refresh and mail-triggered turns where
-     *  `inflightTurnId` is null but the agent is actively producing output.
-     *  Must be checked BEFORE `zeroResultIncomplete` so a complete-replica
-     *  frame with a still-working agent doesn't fire the sentinel. */
-    agentWorking?: boolean;
-    /** Per-turn grace deadline (epoch ms) for the FRI-85 safety net.
-     *  Owned by ChatState.noResponseGraceUntil; covers the SSE-faster-
-     *  than-Zero race where the inflight slot has cleared but the
-     *  assistant block hasn't replicated to this client yet. */
-    noResponseGraceUntil?: Record<string, number>;
-    /** FRI-91: the input came from a Zero snapshot whose `resultType` is
-     *  not yet `"complete"` (initial bootstrap still streaming in, or the
-     *  local IndexedDB replica is behind upstream). The safety-net loop
-     *  must NOT synthesize "Agent didn't respond" for user-only turns
-     *  while this is true — the missing assistant blocks may simply not
-     *  have replicated yet. Only call sites that hand parseBlocks a
-     *  partial view (applyZeroBlocks) set this; REST-driven paths pass
-     *  full server payloads and leave it falsy. */
-    zeroResultIncomplete?: boolean;
-    /** Epoch ms; no-response guard is suppressed while now < this. */
-    reconnectGraceUntil?: number;
-    /** FRI-60: maps turn_id → zero_block_reason. When the safety-net
-     *  synthesizes a no-response bubble, attaches the reason so
-     *  ChatMessages can show the right copy (abort / compaction /
-     *  sdk-resume-failure). Owned by ChatState.zeroBlockReasonByTurn. */
-    zeroBlockReasonByTurn?: Record<string, "abort" | "compaction" | "sdk-resume-failure">;
-  } = {},
-): ChatMessage[] {
-  const orphans = classifyOrphanRows(blocks);
-  const out: ChatMessage[] = [];
-  const toolByToolId = new Map<string, ChatMessage>();
-  // Pre-scan: which tool_use_ids actually have a tool_use row in this
-  // batch. The 50-row Zero window — and the `?before=` scroll-back
-  // batches that share the same shape — often slice between a tool_use
-  // and its tool_result; we want to drop the orphan tool_result rather
-  // than render a `toolName="(unknown)"` card with just the result text
-  // ("mail 154 closed", a bare exit code, …) which is noise without the
-  // tool name + input. FRI-81 D1 still has to work: when both rows ARE
-  // in the batch but `finalizeStreamingBlocks` bumped the tool_use past
-  // the tool_result's ts, the sort processes tool_result first and the
-  // fold-in-existing path needs to materialize a placeholder. So:
-  // window-cut orphan ⇒ drop, ts-reorder orphan ⇒ synth-then-fold.
-  const toolUseIdsInBatch = new Set<string>();
-  for (const b of blocks) {
-    if (b.kind === "tool_use") {
-      const p = parseBlockContent(b.contentJson);
-      const tid = p.tool_use_id ?? b.blockId;
-      toolUseIdsInBatch.add(tid);
-    }
-  }
-  // FRI-85: track which turns produced any assistant-side content, and
-  // which turns we've already synthesized a no-response affordance for
-  // (sentinel-driven). After the main pass we scan user-only turns and
-  // backfill a "Agent didn't respond" affordance for any that ended with
-  // no assistant content at all (covers worker-died-before-block_start,
-  // Task-only responses filtered at the worker, etc.).
-  const userTurns = new Map<string, { ts: number; index: number }>();
-  const assistantTurns = new Set<string>();
-  const noResponseTurns = new Set<string>();
-  // Newest-first arrives from the API; chronological for rendering. Sort by
-  // `ts` first so boot-time jsonl-recovery rows — which receive a fresh
-  // autoincrement `id` strictly greater than the live retry blocks that came
-  // after the recovered failure — slot into the correct chronological position
-  // (failed attempt before its retry) instead of trailing the successful
-  // retry. `id` stays as the tiebreaker for blocks sharing a ts (a single
-  // live message's thinking + tool_use can land within the same ms).
-  // Phase 4.11: id is now a text UUID, so the chronological
-  // tiebreak switches from numeric subtraction to lexical
-  // comparison. Within a millisecond the lexical order is
-  // arbitrary-but-stable — same property bigserial provided.
-  const sorted = [...blocks].sort(
-    (a, b) => a.ts - b.ts || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
-  );
-  for (const b of sorted) {
-    const parsed = parseBlockContent(b.contentJson);
-    if (b.kind === "text") {
-      const role = b.role === "user" ? "user" : "assistant";
-      if (isNoResponseSentinel(b.role, parsed.text)) {
-        // FRI-85: the SDK's trained end-of-turn marker. Instead of FRI-9's
-        // silent suppression (which left the user staring at their own
-        // message), render a faint "Agent acknowledged — no reply needed"
-        // affordance. Single bubble per turn; idempotent on duplicate
-        // sentinels (a refork can produce two).
-        if (b.turnId && !noResponseTurns.has(b.turnId)) {
-          noResponseTurns.add(b.turnId);
-          assistantTurns.add(b.turnId);
-          out.push({
-            id: noResponseIdForTurn(b.turnId),
-            role: "assistant",
-            kind: "no-response",
-            noResponseSentinel: true,
-            text: "",
-            status: "complete",
-            agent,
-            turnId: b.turnId,
-            ts: b.ts,
-          });
-        }
-        continue;
-      }
-      if (role === "assistant" && b.turnId) assistantTurns.add(b.turnId);
-      if (role === "user" && b.turnId) {
-        // user_chat is the only source that carries the "I sent something
-        // and expected a reply" semantics — mail / queue_inject / scratch
-        // / agent_spawn / schedule are agent-driven traffic where a silent
-        // turn is fine. The safety-net synth below only fires for
-        // user_chat-sourced user blocks.
-        // Queued blocks haven't been dispatched yet; don't expect a response.
-        if (b.source === "user_chat" && b.status !== "queued") {
-          userTurns.set(b.turnId, { ts: b.ts, index: out.length });
-        }
-      }
-      const id = role === "user" ? userBlockIdForTurn(b.turnId) : `b_${b.blockId}`;
-      // Preserve the row's `streaming` state. On reload during a turn,
-      // the assistant block is still being filled — collapsing it to
-      // `complete` here would make `handleBlockDelta` reject every
-      // subsequent SSE delta (it gates on `m.status === "streaming"`)
-      // and the user would see a frozen replay instead of a live
-      // resumption. User blocks are always finalized at insert time
-      // so they map cleanly to `complete`.
-      const isOrphan = orphans.has(b.blockId);
-      const status: ChatMessage["status"] =
-        role === "user"
-          ? b.status === "queued"
-            ? "queued"
-            : "complete"
-          : b.status === "streaming"
-            ? isOrphan
-              ? "aborted"
-              : "streaming"
-            : b.status === "complete"
-              ? "complete"
-              : b.status === "aborted"
-                ? "aborted"
-                : "error";
-      out.push({
-        id,
-        role,
-        text: parsed.text ?? "",
-        status,
-        agent,
-        turnId: b.turnId,
-        blockId: b.blockId,
-        ts: b.ts,
-        source: (b.source as ChatMessage["source"]) ?? undefined,
-        fromAgent: parsed.from_agent,
-        mailMeta: extractMailMeta(parsed),
-        attachments: parsed.attachments,
-      });
-    } else if (b.kind === "thinking") {
-      // FRI-81 D4: an empty thinking row at status='complete' is a ghost
-      // — typically an SDK-opened block the worker abandoned before the
-      // FRI-78 block-cancel IPC existed. The dashboard's ThinkingBlock
-      // renders empty text as "redacted by Anthropic", which is not what
-      // these rows are. Drop them on reload. Aborted / error empties are
-      // preserved because they carry the user-visible "stopped" affordance
-      // (the worker explicitly tore the block down). Streaming rows are
-      // preserved so reload-mid-turn deltas still attach.
-      const hasText = typeof parsed.text === "string" && parsed.text.length > 0;
-      // Redacted blocks legitimately have no text — exempt from the ghost filter.
-      if (!hasText && !parsed.isRedacted && b.status === "complete") continue;
-      // FRI-85: only count rows that survive the D4 filter as assistant
-      // content. A dropped ghost thinking row should not suppress the
-      // user-only-turn safety-net no-response affordance below.
-      if (b.turnId) assistantTurns.add(b.turnId);
-      // Same shape for thinking blocks. `handleBlockDelta` gates on
-      // `m.status === "running"` for thinking; preserve "running"
-      // for streaming rows so reload-mid-turn deltas append.
-      const isOrphan = orphans.has(b.blockId);
-      const status: ChatMessage["status"] =
-        b.status === "streaming"
-          ? isOrphan
-            ? "aborted"
-            : "running"
-          : b.status === "aborted"
-            ? "aborted"
-            : b.status === "error"
-              ? "error"
-              : "done";
-      out.push({
-        id: `th_${b.blockId}`,
-        role: "thinking",
-        text: parsed.text ?? "",
-        isRedacted: parsed.isRedacted === true,
-        status,
-        blockId: b.blockId,
-        turnId: b.turnId,
-        ts: b.ts,
-      });
-    } else if (b.kind === "tool_use") {
-      if (b.turnId) assistantTurns.add(b.turnId);
-      const toolId = parsed.tool_use_id ?? b.blockId;
-      const isOrphan = orphans.has(b.blockId);
-      const status: ChatMessage["status"] =
-        b.status === "aborted"
-          ? "aborted"
-          : b.status === "error"
-            ? "error"
-            : b.status === "streaming" && isOrphan
-              ? "aborted"
-              : "running";
-      // FRI-81 D1: a tool_result row may have been sorted (and processed)
-      // before its tool_use sibling when `finalizeStreamingBlocks` updates
-      // the tool_use's `ts` past the tool_result's original insert `ts`.
-      // The earlier code path skipped the tool_use entirely, leaving the
-      // tool-card with toolName="(unknown)" and no input. Instead, fold
-      // the tool_use's authoritative name/input into the existing synth.
-      const existing = toolByToolId.get(toolId);
-      if (existing) {
-        if (parsed.name) existing.toolName = parsed.name;
-        if (parsed.input !== undefined) existing.input = parsed.input;
-        if (!existing.turnId) existing.turnId = b.turnId;
-        // Don't downgrade a terminal tool_result status with a tool_use
-        // "running" — but DO honor a tool_use-side aborted/error since
-        // those won't have a tool_result follow-up.
-        if (status === "aborted" || status === "error") existing.status = status;
-        continue;
-      }
-      const msg: ChatMessage = {
-        id: `t_${toolId}`,
-        role: "tool",
-        text: "",
-        status,
-        toolId,
-        toolName: parsed.name ?? "",
-        input: parsed.input,
-        // FRI-84: blockId on reload mirrors the live handleBlockStart
-        // setter so any reload-mid-stream delta routing finds this row.
-        blockId: b.blockId,
-        turnId: b.turnId,
-        ts: b.ts,
-      };
-      out.push(msg);
-      toolByToolId.set(toolId, msg);
-    } else if (b.kind === "error") {
-      if (b.turnId) assistantTurns.add(b.turnId);
-      // FRI-12: synthetic error bubble persisted by the daemon when the
-      // SDK throws or the stop force-kill safety net fires. Mirror the
-      // SSE `block_complete` materialization shape so reload-mid-error
-      // and live-error converge on the same id (e_<blockId>).
-      const errPayload = parseErrorContent(b.contentJson);
-      out.push({
-        id: `e_${b.blockId}`,
-        role: "assistant",
-        kind: "error",
-        text: errPayload.headline,
-        status: "error",
-        agent,
-        turnId: b.turnId,
-        ts: b.ts,
-        errorCode: errPayload.code,
-        errorHeadline: errPayload.headline,
-        httpStatus: errPayload.httpStatus,
-        retryAfterSeconds: errPayload.retryAfterSeconds,
-        requestId: errPayload.requestId,
-        rawErrorMessage: errPayload.rawMessage,
-      });
-    } else if (b.kind === "tool_result") {
-      if (b.turnId) assistantTurns.add(b.turnId);
-      const toolId = parsed.tool_use_id ?? "";
-      const status = parsed.is_error ? "error" : "done";
-      const existing = toolByToolId.get(toolId);
-      if (existing) {
-        existing.status = status;
-        existing.output = parsed.text ?? "";
-      } else if (toolUseIdsInBatch.has(toolId)) {
-        // FRI-81 D1: the tool_use IS in this batch but hasn't been
-        // processed yet because `finalizeStreamingBlocks` bumped its
-        // ts past the tool_result's. Materialize a placeholder so the
-        // upcoming tool_use can fold its name + input in.
-        const synth: ChatMessage = {
-          id: `t_${toolId}`,
-          role: "tool",
-          text: "",
-          status,
-          toolId,
-          toolName: "(unknown)",
-          output: parsed.text ?? "",
-          turnId: b.turnId,
-          ts: b.ts,
-        };
-        out.push(synth);
-        toolByToolId.set(toolId, synth);
-      }
-      // Else: window-cut orphan — drop. See `toolUseIdsInBatch`
-      // pre-scan comment at the top of parseBlocks.
-    } else if (b.kind === "compaction") {
-      // FRI-156 §E: durable compaction marker block. Materialize the
-      // full-width "Context compacted · 779K → 50K tokens" divider. The
-      // row is persisted (kind:'compaction', role:'system') and replicates
-      // via Zero, so this branch fires on BOTH the live insert and every
-      // reload — the stable `cb_<blockId>` id makes the two converge on a
-      // single divider (a duplicated id would crash the keyed {#each}).
-      // role:'assistant' so the divider rides the existing focused-agent
-      // filter and the chat-grouping continuation guard treats it as a
-      // full-width continuation row (no spurious author/timestamp header).
-      // The marker is the turn's visible artifact, so count it toward
-      // assistantTurns: a user-typed `/compact` writes a user_chat block and
-      // typically emits no assistant TEXT block, so on reload the turn would
-      // otherwise be in userTurns, absent from assistantTurns, and the FRI-85
-      // net would synthesize a spurious "Agent didn't respond" bubble next to
-      // the divider. (The daemon's marker bumps blocksThisTurn so the live
-      // zeroBlockReason path already handles this — but reload rebuilds
-      // assistantTurns purely from block kinds, where blocksThisTurn has no
-      // effect, so the divider itself must register as the artifact.)
-      if (b.turnId) assistantTurns.add(b.turnId);
-      out.push({
-        id: compactionDividerId(b.blockId),
-        role: "assistant",
-        kind: "compaction",
-        text: "",
-        status: "complete",
-        agent,
-        turnId: b.turnId,
-        ts: b.ts,
-        preTokens: typeof parsed.pre_tokens === "number" ? parsed.pre_tokens : undefined,
-        postTokens: typeof parsed.post_tokens === "number" ? parsed.post_tokens : undefined,
-      });
-    }
-  }
-  // FRI-85 safety net: for any user_chat-sourced user message whose turn
-  // produced zero assistant-side blocks (text/thinking/tool/error), synth
-  // an "Agent didn't respond" affordance so the user is never left staring
-  // at an unanswered message. Covers H3 (worker died before block_start),
-  // H5 (entire response was Task sub-agent traffic filtered at the worker),
-  // and any other "turn completed silently" path that doesn't already
-  // leave a visible artifact. Inserted just after the user block by ts so
-  // the natural chronological sort keeps it adjacent.
-  let synthesized = false;
-  // Suppress the synth for the agent's currently in-flight turn.
-  // The Claude SDK's first stream_event can land anywhere from
-  // hundreds of ms to many seconds after submit (model latency,
-  // queue depth, tool-call subprocess startup). A blanket time
-  // grace would either flash the "Agent didn't respond" affordance
-  // for slow turns or hide it for genuinely-failed-fast turns; the
-  // chat store's `inflightTurnIdByAgent` is the unambiguous signal.
-  // While a turn is the agent's in-flight turn, the safety-net
-  // never fires; once it stops being in-flight (turn_done from
-  // SSE or agents.status flip to idle), the next parseBlocks run
-  // will see no inflight match and the synth can fire if the turn
-  // genuinely produced no assistant content.
-  const inflight = opts.inflightTurnId;
-  const grace = opts.noResponseGraceUntil;
-  const zeroReasons = opts.zeroBlockReasonByTurn;
-  const reconnectGrace = opts.reconnectGraceUntil ?? 0;
-  const now = Date.now();
-  for (const [turnId, info] of userTurns) {
-    if (assistantTurns.has(turnId)) continue;
-    if (inflight && turnId === inflight) continue;
-    if (reconnectGrace > now) continue;
-    // Post-clear grace: SSE turn_done cleared the inflight slot, but
-    // Zero may still be pushing the assistant block over WS. Without
-    // this check, the next parseBlocks pass on a frame between SSE
-    // turn_done and Zero block-landing flashes a spurious
-    // "Agent didn't respond" bubble that vanishes ~1 frame later.
-    const graceDeadline = grace?.[turnId];
-    if (graceDeadline && graceDeadline > now) continue;
-    // FRI-54: agent.status = 'working' in the DB means a turn is
-    // actively in progress. Suppress the sentinel regardless of whether
-    // we have a local inflightTurnId — covers page refresh and mail-
-    // triggered turns where ephemeral state was never set.
-    if (opts.agentWorking) continue;
-    // FRI-91: while Zero hasn't confirmed the local replica matches
-    // upstream, a missing assistant block is indistinguishable from
-    // "the worker died" vs. "the row just hasn't replicated yet."
-    // The in-memory grace map can't cover this on page reload (it's
-    // wiped on every load); the resultType signal is the only thing
-    // that survives. Skip synthesis until Zero says "complete."
-    if (opts.zeroResultIncomplete) continue;
-    synthesized = true;
-    out.push({
-      id: noResponseIdForTurn(turnId),
-      role: "assistant",
-      kind: "no-response",
-      noResponseSentinel: false,
-      // FRI-60: attach the reason so ChatMessages shows the right copy.
-      zeroBlockReason: zeroReasons?.[turnId],
-      text: "",
-      status: "complete",
-      agent,
-      turnId,
-      // +1ms keeps it strictly after its user message even when ts
-      // collisions occur (a fast turn can land sub-millisecond).
-      ts: info.ts + 1,
-    });
-  }
-  // Final ts-sort so the safety-net synth lands chronologically adjacent
-  // to its user message rather than at the trailing edge. Stable on
-  // existing entries (their ts ordering already matches the input-block
-  // sort one level up); only nr_<turnId> rows actually move.
-  if (synthesized) {
-    out.sort((a, b) => a.ts - b.ts);
-  }
-  // Cross-agent isolation depends on every bubble carrying its owning
-  // agent: `#derivedMessages` (`if (m.agent && m.agent !== focused)`) and
-  // `applyZeroBlocks`'s merge (`if (m.agent && m.agent !== forAgent)`) only
-  // drop a legacy bubble when its `agent` tag is truthy AND mismatched.
-  // Most push sites above (text/thinking/tool/tool_result/user) omit the
-  // tag, so without this stamp those bubbles are untagged and leak into
-  // EVERY agent's chat — e.g. a builder's tool calls surface in Friday's
-  // thread even though their canonical rows are correctly attributed in
-  // the DB. parseBlocks always parses exactly one agent's rows (`agent`),
-  // so tagging the whole batch here is unambiguous and idempotent (the
-  // error / no-response synths already set the same value).
-  for (const m of out) m.agent = agent;
-  return out;
-}
-
-/** Lowest block_id across an array. Used as the next `before` cursor for
- *  scroll-up pagination (FIX_FORWARD 3.7). */
 /**
  * Test-only hook. The per-turn parseBlocks memoization (the cache itself)
  * was on this branch via commit b3efab5 but was overwritten when the
@@ -4287,22 +3025,6 @@ export function parseBlocks(
  */
 export function __resetParseCache(): void {
   // intentionally empty — placeholder for the per-turn parse cache.
-}
-
-export function oldestBlockCursor(blocks: BlockRow[]): string | null {
-  // Compare by `(ts, id)` tuple, NOT by bare `id`. Phase 4.11 made
-  // `blocks.id` a text UUID; the pre-migration rows that came in via
-  // legacy_sqlite restore kept their old bigserial ids as strings
-  // ("9943", "9942", …). A bare lexical `b.id < oldest.id` is meaningless
-  // across that mixed alphabet — e.g. `"2241..." < "9943" < "ebec..."` —
-  // and chooses an "oldest" that has nothing to do with chronology, then
-  // hands that anchor to the daemon's `?before=` pagination which
-  // dutifully fetches rows older than the wrong row.
-  let oldest: BlockRow | null = null;
-  for (const b of blocks) {
-    if (oldest === null || b.ts < oldest.ts || (b.ts === oldest.ts && b.id < oldest.id)) oldest = b;
-  }
-  return oldest?.blockId ?? null;
 }
 
 /**
