@@ -33,9 +33,11 @@ import pgPkg from "pg";
 import {
   getDb,
   getPool,
+  INTENT_STATUS,
   LISTEN_CHANNELS,
   loadConfig,
   loadFridayConfig,
+  parseUserMessageContent,
   resolveDaemonPort,
   resolveModelForRole,
   schema,
@@ -66,7 +68,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
     // NOTIFY and the handler read. Nothing to do.
     return;
   }
-  if (row.status !== "pending") {
+  if (row.status !== INTENT_STATUS.pending) {
     // Already handled by a prior dispatch or boot-scan invocation.
     return;
   }
@@ -82,31 +84,16 @@ async function processPendingBlockRow(id: string): Promise<void> {
     return;
   }
 
-  // Parse the user's text + attachments out of the row's content_json.
-  // The mutator stored it as a structured object; rowFromDb stringifies
-  // it for stable API shape.
-  let userText = "";
-  let attachments: Array<{ sha256: string; filename: string; mime: string }> | undefined;
-  try {
-    const parsed = JSON.parse(row.contentJson) as {
-      text?: unknown;
-      attachments?: unknown;
-    };
-    if (typeof parsed.text === "string") userText = parsed.text;
-    if (Array.isArray(parsed.attachments)) {
-      attachments = parsed.attachments.filter(
-        (a): a is { sha256: string; filename: string; mime: string } =>
-          a !== null &&
-          typeof a === "object" &&
-          typeof (a as { sha256?: unknown }).sha256 === "string" &&
-          /^[a-f0-9]{64}$/.test((a as { sha256: string }).sha256),
-      );
-    }
-  } catch {
-    // Malformed content_json — daemon takes "no text, no attachments"
-    // path. The worker fork still happens (in case the user is
-    // signaling something) but with an empty prompt.
-  }
+  // Parse the user's text + attachments out of the row's content_json via the
+  // shared view the `sendUserMessage` mutator constructs (ADR-049). Malformed
+  // content_json (`ok: false`) is deliberately NOT a bail here — the daemon
+  // takes the "no text, no attachments" path and the worker fork still happens
+  // (in case the user is signaling something) but with an empty prompt. (The
+  // resume listener treats the same `ok: false` as a terminal corrupt bail —
+  // the discriminator is what lets one parser serve both behaviors.)
+  const { content } = parseUserMessageContent(row.contentJson);
+  const userText = content.text;
+  const attachments = content.attachments;
 
   const cfg = loadConfig();
   const agentName = row.agentName;
@@ -155,7 +142,7 @@ async function processPendingBlockRow(id: string): Promise<void> {
       status: willQueue ? "queued" : "complete",
       sessionId: resumeSessionId ?? "__pending__",
     })
-    .where(and(eq(schema.blocks.id, row.id), eq(schema.blocks.status, "pending")));
+    .where(and(eq(schema.blocks.id, row.id), eq(schema.blocks.status, INTENT_STATUS.pending)));
   if ((claim.rowCount ?? 0) === 0) {
     // Lost the claim race — another caller flipped this row off 'pending'
     // between our line-69 read and this UPDATE. That caller owns the dispatch.
@@ -238,7 +225,7 @@ export async function runDispatchBootScan(): Promise<void> {
     const rows = await db
       .select({ id: schema.blocks.id })
       .from(schema.blocks)
-      .where(and(eq(schema.blocks.status, "pending"), eq(schema.blocks.role, "user")));
+      .where(and(eq(schema.blocks.status, INTENT_STATUS.pending), eq(schema.blocks.role, "user")));
     for (const row of rows) {
       await processPendingBlockRow(row.id);
     }

@@ -32,7 +32,15 @@
 
 import { and, eq, inArray } from "drizzle-orm";
 import pgPkg from "pg";
-import { getDb, getPool, loadFridayConfig, nextRun, schema, LISTEN_CHANNELS } from "@friday/shared";
+import {
+  getDb,
+  getPool,
+  INTENT_STATUS,
+  loadFridayConfig,
+  nextRun,
+  schema,
+  LISTEN_CHANNELS,
+} from "@friday/shared";
 import * as registry from "../agent/registry.js";
 import { logger } from "../log.js";
 import { fireSchedule, nextRunAfterFire } from "./scheduler.js";
@@ -66,7 +74,7 @@ export async function processPendingScheduleRow(name: string): Promise<void> {
   const row = rows[0];
   if (!row) return;
 
-  if (row.status === "pending_register") {
+  if (row.status === INTENT_STATUS.pendingRegister) {
     // Ensure the registry stub exists. The legacy
     // `upsertSchedule` flow registers eagerly so mail to the
     // scheduled agent is routable before the first fire — the
@@ -98,7 +106,7 @@ export async function processPendingScheduleRow(name: string): Promise<void> {
     return;
   }
 
-  if (row.status === "reload_requested") {
+  if (row.status === INTENT_STATUS.reloadRequested) {
     // ASYMMETRY (FRI-168): computeNext re-arms nextRunAt from runAt — correct on
     // the spec-change/reload path. The one-shot-drop semantics (a fired one-shot
     // reminder must NOT re-arm) live ONLY in nextRunAfterFire on the fire/trigger
@@ -117,7 +125,7 @@ export async function processPendingScheduleRow(name: string): Promise<void> {
     return;
   }
 
-  if (row.status === "trigger_requested") {
+  if (row.status === INTENT_STATUS.triggerRequested) {
     // Item #53: dashboard wants this schedule to fire NOW. Call the
     // existing fireSchedule path (same code the in-process tick uses)
     // then flip status back to 'active' so the trigger doesn't re-enter.
@@ -151,7 +159,7 @@ export async function processPendingScheduleRow(name: string): Promise<void> {
     return;
   }
 
-  if (row.status === "deleted") {
+  if (row.status === INTENT_STATUS.scheduleDeleted) {
     // Tombstone — clean up the registry stub if it's unused.
     // Mirrors the legacy `deleteSchedule` semantic: once the
     // schedule has fired, the stub holds audit history (sessionId,
@@ -187,10 +195,10 @@ export async function runScheduleBootScan(): Promise<void> {
       .from(schema.schedules)
       .where(
         inArray(schema.schedules.status, [
-          "pending_register",
-          "reload_requested",
-          "deleted",
-          "trigger_requested",
+          INTENT_STATUS.pendingRegister,
+          INTENT_STATUS.reloadRequested,
+          INTENT_STATUS.scheduleDeleted,
+          INTENT_STATUS.triggerRequested,
         ]),
       );
     for (const row of rows) {

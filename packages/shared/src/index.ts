@@ -20,6 +20,21 @@ export * as schema from "./db/schema.js";
 // and daemon — re-export the constant + type so daemon-side LISTEN
 // handlers don't have to drill through the schema namespace.
 export { LISTEN_CHANNELS, type ListenChannel } from "./db/schema.js";
+// ADR-049: the typed intent seam. Re-exported from the root barrel so daemon
+// LISTEN handlers `import { INTENT_STATUS, parseUserMessageContent } from
+// "@friday/shared"` instead of re-spelling status literals / hand-parsing
+// content_json. The module is node-free and also reachable via the client-safe
+// `@friday/shared/sync` surface (where the mutators consume it).
+export {
+  INTENT_STATUS,
+  INTENT_STATUS_TABLE,
+  buildUserMessageContent,
+  parseUserMessageContent,
+  type IntentStatus,
+  type UserMessageAttachment,
+  type UserMessageContent,
+  type ParsedUserMessageContent,
+} from "./sync/intents.js";
 // FRI-24: pgvector column dimensionality. Surfaced as a top-level named
 // export so @friday/memory's embedder can size its output vector against the
 // same single source of truth the schema's `vector(N)` column uses.

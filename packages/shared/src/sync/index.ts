@@ -9,6 +9,11 @@
 
 export * from "./schema.js";
 export * from "./mutators.js";
+// ADR-049: the typed intent seam (transient status tokens + the user-message
+// content view) the dashboard mutators construct and the daemon LISTEN handlers
+// parse. Node-free (string consts + JSON), so safe on this browser-bundled
+// surface — same contract as schema.ts / model-ids.ts above.
+export * from "./intents.js";
 export * from "../model-ids.js";
 // FRI-142 (ADR-048): re-export the node-free Notification contracts so the
 // dashboard's browser bundle can consume the runtime constants

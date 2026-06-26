@@ -29,6 +29,7 @@ import {
   type ArchiveReason,
   getDb,
   getPool,
+  INTENT_STATUS,
   loadFridayConfig,
   schema,
   LISTEN_CHANNELS,
@@ -55,7 +56,9 @@ async function processPendingArchiveRow(name: string): Promise<void> {
   const rows = await db
     .select()
     .from(schema.agents)
-    .where(and(eq(schema.agents.name, name), eq(schema.agents.status, "archive_requested")))
+    .where(
+      and(eq(schema.agents.name, name), eq(schema.agents.status, INTENT_STATUS.archiveRequested)),
+    )
     .limit(1);
   const row = rows[0];
   if (!row) {
@@ -86,7 +89,7 @@ export async function runArchiveBootScan(): Promise<void> {
     const rows = await db
       .select({ name: schema.agents.name })
       .from(schema.agents)
-      .where(eq(schema.agents.status, "archive_requested"));
+      .where(eq(schema.agents.status, INTENT_STATUS.archiveRequested));
     for (const row of rows) {
       await processPendingArchiveRow(row.name);
     }

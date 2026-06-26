@@ -60,8 +60,10 @@ import pgPkg from "pg";
 import {
   getDb,
   getPool,
+  INTENT_STATUS,
   loadConfig,
   loadFridayConfig,
+  parseUserMessageContent,
   resolveDaemonPort,
   resolveModelForRole,
   schema,
@@ -89,7 +91,7 @@ async function processResumeRequestedRow(blockId: string): Promise<void> {
     // Row deleted out from under us. Nothing to do.
     return;
   }
-  if (row.status !== "resume_requested") {
+  if (row.status !== INTENT_STATUS.resumeRequested) {
     // Status moved on (handler ran already, or another path
     // overwrote it). No-op.
     return;
@@ -171,21 +173,12 @@ async function processResumeRequestedRow(blockId: string): Promise<void> {
     return;
   }
 
-  let userText = "";
-  let attachments: Array<{ sha256: string; filename: string; mime: string }> | undefined;
-  try {
-    const parsed = JSON.parse(row.contentJson) as { text?: unknown; attachments?: unknown };
-    if (typeof parsed.text === "string") userText = parsed.text;
-    if (Array.isArray(parsed.attachments)) {
-      attachments = parsed.attachments.filter(
-        (a): a is { sha256: string; filename: string; mime: string } =>
-          a !== null &&
-          typeof a === "object" &&
-          typeof (a as { sha256?: unknown }).sha256 === "string" &&
-          /^[a-f0-9]{64}$/.test((a as { sha256: string }).sha256),
-      );
-    }
-  } catch {
+  // Parse the original user prompt out of content_json via the shared view
+  // (ADR-049) — the same parser the dispatch listener uses. Unlike dispatch,
+  // a malformed payload (`ok: false`) is a TERMINAL no-retry bail here: a
+  // resume re-fires a historical prompt, and a corrupt one can't be rebuilt.
+  const parsed = parseUserMessageContent(row.contentJson);
+  if (!parsed.ok) {
     logger.log("warn", "block.resume.skip.content-corrupt", {
       block_id: blockId,
       turn_id: turnId,
@@ -193,6 +186,8 @@ async function processResumeRequestedRow(blockId: string): Promise<void> {
     await flipBackToComplete(blockId);
     return;
   }
+  const userText = parsed.content.text;
+  const attachments = parsed.content.attachments;
   if (!userText.trim()) {
     logger.log("warn", "block.resume.skip.empty-text", {
       block_id: blockId,
@@ -212,7 +207,12 @@ async function processResumeRequestedRow(blockId: string): Promise<void> {
   const claim = await db
     .update(schema.blocks)
     .set({ status: "complete" })
-    .where(and(eq(schema.blocks.blockId, blockId), eq(schema.blocks.status, "resume_requested")))
+    .where(
+      and(
+        eq(schema.blocks.blockId, blockId),
+        eq(schema.blocks.status, INTENT_STATUS.resumeRequested),
+      ),
+    )
     .returning({ blockId: schema.blocks.blockId });
   if (claim.length === 0) {
     logger.log("debug", "block.resume.skip.claim-lost", {
@@ -293,7 +293,7 @@ export async function runResumeBootScan(): Promise<void> {
     const rows = await db
       .select({ blockId: schema.blocks.blockId })
       .from(schema.blocks)
-      .where(eq(schema.blocks.status, "resume_requested"));
+      .where(eq(schema.blocks.status, INTENT_STATUS.resumeRequested));
     for (const row of rows) {
       await processResumeRequestedRow(row.blockId);
     }

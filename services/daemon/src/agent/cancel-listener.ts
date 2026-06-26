@@ -26,7 +26,14 @@
 
 import { eq } from "drizzle-orm";
 import pgPkg from "pg";
-import { getDb, getPool, loadFridayConfig, schema, LISTEN_CHANNELS } from "@friday/shared";
+import {
+  getDb,
+  getPool,
+  INTENT_STATUS,
+  loadFridayConfig,
+  schema,
+  LISTEN_CHANNELS,
+} from "@friday/shared";
 import { deleteBlockById, getBlockById } from "@friday/shared/services";
 import { removeQueuedPrompt } from "./lifecycle.js";
 import { logger } from "../log.js";
@@ -45,7 +52,7 @@ async function processCancelRequestedRow(blockId: string): Promise<void> {
     // legacy REST DELETE path). No-op.
     return;
   }
-  if (row.status !== "cancel_requested") {
+  if (row.status !== INTENT_STATUS.cancelRequested) {
     // Status moved on (e.g. legacy REST DELETE handled it inline and
     // its UPDATE→DELETE race left us reading the row mid-flight). The
     // trigger's predicate guarantees we only get NOTIFY on transition
@@ -79,7 +86,7 @@ export async function runCancelBootScan(): Promise<void> {
     const rows = await db
       .select({ blockId: schema.blocks.blockId })
       .from(schema.blocks)
-      .where(eq(schema.blocks.status, "cancel_requested"));
+      .where(eq(schema.blocks.status, INTENT_STATUS.cancelRequested));
     for (const row of rows) {
       await processCancelRequestedRow(row.blockId);
     }

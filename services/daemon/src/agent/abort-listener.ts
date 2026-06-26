@@ -31,7 +31,14 @@
 
 import { eq } from "drizzle-orm";
 import pgPkg from "pg";
-import { getDb, getPool, loadFridayConfig, schema, LISTEN_CHANNELS } from "@friday/shared";
+import {
+  getDb,
+  getPool,
+  INTENT_STATUS,
+  loadFridayConfig,
+  schema,
+  LISTEN_CHANNELS,
+} from "@friday/shared";
 import { getBlockById } from "@friday/shared/services";
 import { abortTurn } from "./lifecycle.js";
 import { logger } from "../log.js";
@@ -51,7 +58,7 @@ async function processAbortRequestedRow(blockId: string): Promise<void> {
     // path on a queued-then-cancelled turn). Nothing to do.
     return;
   }
-  if (row.status !== "abort_requested") {
+  if (row.status !== INTENT_STATUS.abortRequested) {
     // Status moved on (the daemon flipped it back to 'complete' on a
     // prior handler run, or another path overwrote it). No-op.
     return;
@@ -86,7 +93,7 @@ export async function runAbortBootScan(): Promise<void> {
     const rows = await db
       .select({ blockId: schema.blocks.blockId })
       .from(schema.blocks)
-      .where(eq(schema.blocks.status, "abort_requested"));
+      .where(eq(schema.blocks.status, INTENT_STATUS.abortRequested));
     for (const row of rows) {
       await processAbortRequestedRow(row.blockId);
     }

@@ -83,9 +83,22 @@ describe("@friday/shared/sync browser-safety contract", () => {
       // DELIVERY_RULES) through the client-safe `@friday/shared/sync` surface.
       // It is node-free (type-only + `const` literals; no `node:*` / web-push
       // imports), so the no-builtins assertion below still holds.
-      "index.ts": ["./schema.js", "./mutators.js", "../model-ids.js", "../notify/types.js"],
+      // ADR-049: `./intents.js` is re-exported from the sync barrel and
+      // imported by mutators.ts so the dashboard constructs the typed intent
+      // (INTENT_STATUS tokens + buildUserMessageContent) through the same
+      // client-safe surface. It is node-free (string consts + JSON; no `node:*`
+      // imports — its own runtime import list is empty below), so the
+      // no-builtins assertion still holds.
+      "index.ts": [
+        "./schema.js",
+        "./mutators.js",
+        "./intents.js",
+        "../model-ids.js",
+        "../notify/types.js",
+      ],
       "schema.ts": ["@rocicorp/zero"],
-      "mutators.ts": ["../model-ids.js"],
+      "mutators.ts": ["../model-ids.js", "./intents.js"],
+      "intents.ts": [],
       "../model-ids.ts": [],
       "../notify/types.ts": [],
     });
