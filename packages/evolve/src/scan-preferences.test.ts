@@ -4,7 +4,7 @@ import {
   type PreferenceCategory,
   type PreferenceScoredTurn,
 } from "./scan-preferences.js";
-import type { OrchestratorTurn } from "./scan-friction.js";
+import type { OrchestratorTurn } from "./collect.js";
 
 function turn(
   i: number,

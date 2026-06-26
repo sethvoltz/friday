@@ -4,7 +4,7 @@ import {
   type FrictionCategory,
   type ScoredTurn,
 } from "./scan-friction.js";
-import type { OrchestratorTurn } from "./scan-friction.js";
+import type { OrchestratorTurn } from "./collect.js";
 
 function turn(
   i: number,
