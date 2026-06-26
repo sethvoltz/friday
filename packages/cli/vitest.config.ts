@@ -6,6 +6,11 @@ export default defineConfig({
     // transform/import time, which intermittently exceeds the 5s vitest
     // default on the slow CI runner (flaked build-dispatch-prompt + wake-lock).
     testTimeout: 20_000,
+    // Same cold-start headroom for beforeAll/beforeEach: a `createTestDb`
+    // (scratch Postgres + full migrations) or heavy dynamic imports inside a
+    // hook can exceed vitest's 10s hook default on a cold runner (flaked
+    // evolve-dreaming.test.ts's beforeAll).
+    hookTimeout: 20_000,
     setupFiles: ["../shared/src/test/vitest-setup.ts"],
     globalSetup: ["../shared/src/test/global-setup.ts"],
     // Connection-budget cap — see packages/shared/vitest.config.ts.
