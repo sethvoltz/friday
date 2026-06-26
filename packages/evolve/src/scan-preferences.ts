@@ -10,15 +10,23 @@
  * erosion, and "from now on use pnpm" is a calm score-0 turn that would be
  * filtered out — but it's exactly the kind of statement that should become a
  * memory. Different signal, different prompt, different bucketing.
+ *
+ * The collect → batch → score → bucket pipeline lives in run-scanner.ts; this
+ * file contributes only the preference `Taxonomy` (payload projection, default
+ * LLM scorer, and the per-category bucketing rule).
  */
 
-import { loadConfig, resolveModelForEvolveTask } from "@friday/shared";
-import type { EvidencePointer, Signal, SignalSeverity } from "./types.js";
+import type { EvidencePointer, Signal } from "./types.js";
+import { dbTurnIdToLine, type OrchestratorTurn } from "./collect.js";
 import {
-  collectOrchestratorTurns,
-  dbTurnIdToLine,
-  type OrchestratorTurn,
-} from "./scan-friction.js";
+  runScanner,
+  truncate,
+  clamp,
+  severityFor,
+  severityRank,
+  type RunScannerOptions,
+  type Taxonomy,
+} from "./run-scanner.js";
 import { signalHash } from "./scan.js";
 import { chat, extractJson } from "./llm.js";
 
@@ -31,18 +39,10 @@ export type PreferenceCategory =
   | "external_pointer"
   | "none";
 
-export interface PreferenceScanOptions {
-  /** ISO string lower bound — turns earlier than this are skipped. */
-  since?: string;
-  /** Maximum user turns to evaluate per scan. Default 1000. */
-  maxTurns?: number;
-  /** Turns per LLM batch. Default 30. */
-  batchSize?: number;
-  /** Model id override. Default resolves via `cfg.evolve.models.scanPreferences`. */
-  model?: string;
-  /** Inject for tests — replaces the real LLM call. */
-  scoreFn?: PreferenceScoreFn;
-}
+export type PreferenceScanOptions = RunScannerOptions<
+  TurnForPreferenceScoring,
+  PreferenceScoredTurn
+>;
 
 export interface PreferenceScoredTurn {
   turn_id: string;
@@ -64,42 +64,7 @@ export type PreferenceScoreFn = (
 ) => Promise<PreferenceScoredTurn[]>;
 
 export async function scanPreferences(opts: PreferenceScanOptions = {}): Promise<Signal[]> {
-  const sinceMs = opts.since ? Date.parse(opts.since) : 0;
-  const maxTurns = opts.maxTurns ?? 1000;
-  const batchSize = opts.batchSize ?? 30;
-  const model = opts.model ?? resolveModelForEvolveTask(loadConfig(), "scanPreferences").name;
-  const score = opts.scoreFn ?? defaultScoreFn;
-
-  const turns = await collectOrchestratorTurns(sinceMs, maxTurns);
-  if (turns.length === 0) return [];
-
-  const scored: Array<OrchestratorTurn & PreferenceScoredTurn> = [];
-  for (let i = 0; i < turns.length; i += batchSize) {
-    const batch = turns.slice(i, i + batchSize);
-    const payload: TurnForPreferenceScoring[] = batch.map((t) => ({
-      turn_id: t.turnId,
-      user_text: truncate(t.userText, 800),
-    }));
-    let results: PreferenceScoredTurn[];
-    try {
-      results = await score(payload, model);
-    } catch (err) {
-      console.error(
-        `preference scoring batch ${i}-${i + batch.length - 1} failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      continue;
-    }
-    const byId = new Map(results.map((r) => [r.turn_id, r]));
-    for (const turn of batch) {
-      const r = byId.get(turn.turnId);
-      if (!r) continue;
-      scored.push({ ...turn, ...r });
-    }
-  }
-
-  return bucketByCategory(scored);
+  return runScanner(preferenceTaxonomy, opts, undefined);
 }
 
 export function bucketByCategory(scored: Array<OrchestratorTurn & PreferenceScoredTurn>): Signal[] {
@@ -147,21 +112,6 @@ export function bucketByCategory(scored: Array<OrchestratorTurn & PreferenceScor
   }
 
   return [...buckets.values()];
-}
-
-function severityFor(score: number): SignalSeverity {
-  if (score >= 4) return "high";
-  if (score >= 3) return "medium";
-  return "low";
-}
-
-function severityRank(s: SignalSeverity): number {
-  return s === "high" ? 3 : s === "medium" ? 2 : 1;
-}
-
-function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
 }
 
 const SCORING_SYSTEM_PROMPT = [
@@ -239,6 +189,14 @@ const defaultScoreFn: PreferenceScoreFn = async (batch, model) => {
     }));
 };
 
-function clamp(n: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, n));
-}
+/** The preference adapter fed to the deep `runScanner` core. */
+const preferenceTaxonomy: Taxonomy<TurnForPreferenceScoring, PreferenceScoredTurn> = {
+  name: "preference",
+  modelTask: "scanPreferences",
+  buildPayload: (t) => ({
+    turn_id: t.turnId,
+    user_text: truncate(t.userText, 800),
+  }),
+  defaultScoreFn,
+  bucket: (scored) => bucketByCategory(scored),
+};

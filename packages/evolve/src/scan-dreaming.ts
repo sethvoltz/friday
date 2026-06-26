@@ -17,15 +17,25 @@
  * The promote-vs-reinforce distinction rides in the signal `key`
  * (`dream:promote:<slug>` / `dream:reinforce:<slug>`); the category is NOT in
  * the key — it is recovered from the decoded payload downstream (design D3).
+ *
+ * The collect → batch → score → bucket pipeline lives in run-scanner.ts; this
+ * file contributes the dreaming `Taxonomy` plus its richer bucketing (payload
+ * encoding, recall→severity bump, separate note-pointer cap, and the post-merge
+ * promote/reinforce verb decision). The per-scanner `evidence` context is
+ * threaded through `runScanner` opaquely to both `buildPayload` and `bucket`.
  */
 
-import { loadConfig, resolveModelForEvolveTask } from "@friday/shared";
 import type { EvidencePointer, Signal, SignalSeverity } from "./types.js";
+import { dbTurnIdToLine, type OrchestratorTurn } from "./collect.js";
 import {
-  collectOrchestratorTurns,
-  dbTurnIdToLine,
-  type OrchestratorTurn,
-} from "./scan-friction.js";
+  runScanner,
+  truncate,
+  clamp,
+  severityFor,
+  severityRank,
+  type RunScannerOptions,
+  type Taxonomy,
+} from "./run-scanner.js";
 import { signalHash } from "./scan.js";
 import { chat, extractJson } from "./llm.js";
 import { slugify } from "./apply.js";
@@ -78,17 +88,10 @@ export type DreamScoreFn = (
   model: string,
 ) => Promise<DreamScoredCandidate[]>;
 
-export interface DreamScanOptions {
-  /** ISO string lower bound (Date.parse'd to ms; mirrors scanPreferences). */
-  since?: string;
-  /** Maximum user turns to evaluate per scan. Default 1000. */
-  maxTurns?: number;
-  /** Turns per LLM batch. Default 30. */
-  batchSize?: number;
-  /** Model id override. Default resolves via `cfg.evolve.models.scanPreferences`. */
-  model?: string;
-  /** Inject for tests — replaces the real LLM call. */
-  scoreFn?: DreamScoreFn;
+export interface DreamScanOptions extends RunScannerOptions<
+  TurnForDreamScoring,
+  DreamScoredCandidate
+> {
   /** Recall/friction evidence assembled by the endpoint; optional. */
   evidence?: DreamEvidence;
 }
@@ -136,43 +139,7 @@ export function decodeDreamPayload(signal: Signal): DreamPayload | null {
 }
 
 export async function scanDreaming(opts: DreamScanOptions = {}): Promise<Signal[]> {
-  const sinceMs = opts.since ? Date.parse(opts.since) : 0;
-  const maxTurns = opts.maxTurns ?? 1000;
-  const batchSize = opts.batchSize ?? 30;
-  const model = opts.model ?? resolveModelForEvolveTask(loadConfig(), "scanPreferences").name;
-  const score = opts.scoreFn ?? defaultScoreFn;
-
-  const turns = await collectOrchestratorTurns(sinceMs, maxTurns);
-  if (turns.length === 0) return [];
-
-  const scored: Array<OrchestratorTurn & DreamScoredCandidate> = [];
-  for (let i = 0; i < turns.length; i += batchSize) {
-    const batch = turns.slice(i, i + batchSize);
-    const payload: TurnForDreamScoring[] = batch.map((t) => ({
-      turn_id: t.turnId,
-      user_text: truncate(t.userText, 800),
-      evidence: renderEvidenceForTurn(t, opts.evidence),
-    }));
-    let results: DreamScoredCandidate[];
-    try {
-      results = await score(payload, model);
-    } catch (err) {
-      console.error(
-        `dream scoring batch ${i}-${i + batch.length - 1} failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      continue;
-    }
-    const byId = new Map(results.map((r) => [r.turn_id, r]));
-    for (const turn of batch) {
-      const r = byId.get(turn.turnId);
-      if (!r) continue;
-      scored.push({ ...turn, ...r });
-    }
-  }
-
-  return bucketByCandidate(scored, opts.evidence);
+  return runScanner(dreamTaxonomy, opts, opts.evidence);
 }
 
 /**
@@ -320,23 +287,8 @@ function renderEvidenceForTurn(_t: OrchestratorTurn, evidence?: DreamEvidence): 
   return lines.length > 0 ? lines.join("\n") : undefined;
 }
 
-function severityFor(score: number): SignalSeverity {
-  if (score >= 4) return "high";
-  if (score >= 3) return "medium";
-  return "low";
-}
-
 function bumpSeverity(s: SignalSeverity): SignalSeverity {
   return s === "low" ? "medium" : "high";
-}
-
-function severityRank(s: SignalSeverity): number {
-  return s === "high" ? 3 : s === "medium" ? 2 : 1;
-}
-
-function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
 }
 
 const SCORING_SYSTEM_PROMPT = [
@@ -422,6 +374,21 @@ const defaultScoreFn: DreamScoreFn = async (batch, model) => {
     }));
 };
 
-function clamp(n: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, n));
-}
+/** The dreaming adapter fed to the deep `runScanner` core. The opaque context
+ *  is `DreamEvidence` (or undefined) — threaded into both `buildPayload`
+ *  (for per-turn evidence rendering) and `bucket` (for recall/friction notes). */
+const dreamTaxonomy: Taxonomy<
+  TurnForDreamScoring,
+  DreamScoredCandidate,
+  DreamEvidence | undefined
+> = {
+  name: "dream",
+  modelTask: "scanPreferences",
+  buildPayload: (t, evidence) => ({
+    turn_id: t.turnId,
+    user_text: truncate(t.userText, 800),
+    evidence: renderEvidenceForTurn(t, evidence),
+  }),
+  defaultScoreFn,
+  bucket: (scored, evidence) => bucketByCandidate(scored, evidence),
+};

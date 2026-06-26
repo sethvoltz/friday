@@ -10,7 +10,7 @@ import {
 } from "./scan-dreaming.js";
 import { scoreProposal } from "./rank.js";
 import { slugify } from "./apply.js";
-import type { OrchestratorTurn } from "./scan-friction.js";
+import type { OrchestratorTurn } from "./collect.js";
 
 function turn(
   i: number,
