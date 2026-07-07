@@ -652,20 +652,20 @@ class ZeroSyncStore {
     void this.#init();
   }
 
-  async #init(): Promise<void> {
+  async #init(): Promise<boolean> {
     try {
       // Mint the first JWT eagerly so the WS handshake succeeds on
       // first connect. The Zero `auth` callback re-fetches on every
       // reconnect — TTL is 15 minutes so the auth callback fires on
       // a long-running session occasionally.
       const r = await fetch("/api/sync/refresh", { method: "POST" });
-      if (this.#destroying) return;
+      if (this.#destroying) return false;
       if (!r.ok) {
         this.status = "error";
-        return;
+        return false;
       }
       const { token, userId, deviceId, expiresAt } = (await r.json()) as RefreshResponse;
-      if (this.#destroying) return;
+      if (this.#destroying) return false;
       this.#deviceId = deviceId;
       // Zero 1.5: `auth` is a JWT string, not a callback. Token
       // rotation happens via `zero.connection.connect({auth})` when
@@ -802,7 +802,7 @@ class ZeroSyncStore {
         // tiered dance + backfill still runs and self-heals on completion.
         this.#warmReplica = false;
       }
-      if (this.#destroying) return;
+      if (this.#destroying) return false;
 
       this.#bindAgents();
       this.#bindTickets();
@@ -871,6 +871,7 @@ class ZeroSyncStore {
         this.#pendingBlocksAgent = null;
         this.bindBlocksFor(agent);
       }
+      return true;
     } catch (err) {
       this.status = "error";
       this.errorMessage = err instanceof Error ? err.message : String(err);
@@ -895,6 +896,7 @@ class ZeroSyncStore {
       }).catch(() => {
         /* best-effort — we're already in the error path */
       });
+      return false;
     }
   }
 
@@ -2433,11 +2435,18 @@ class ZeroSyncStore {
     if (this.#falseLiveAttempts >= FALSE_LIVE_MAX_ATTEMPTS) return;
     this.#falseLiveHandling = true;
     this.#falseLiveAttempts++;
-    this.status = "pending";
-    this.destroy();
-    await this.#init();
-    this.#falseLiveHandling = false;
-    this.#falseLiveAttempts = 0;
+    try {
+      this.status = "pending";
+      this.destroy();
+      const completed = await this.#init();
+      // Only reset the attempt counter when init ran to completion —
+      // early exits via #destroying guard (concurrent destroy) don't
+      // count as a successful recovery.
+      if (completed) this.#falseLiveAttempts = 0;
+    } finally {
+      // Always ungate so the watchdog can attempt recovery again next cycle.
+      this.#falseLiveHandling = false;
+    }
   }
 
   /**
