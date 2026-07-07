@@ -385,6 +385,20 @@ export function backfillChunkFloor(ts: number): number {
  *  dance and bind the full window directly on a warm replica. */
 export const BLOCKS_BACKFILL_COMPLETE_KEY = "friday.zero.blocksBackfillComplete";
 
+/** FRI-180: inbound-data staleness threshold. If no view listener has fired
+ *  and no `connected` event has landed for this long, the session is
+ *  considered a false-live wedge and recovery kicks in. Background timer
+ *  throttling on mobile/PWA means the heartbeat may not fire during
+ *  backgrounding, so the 120s window catches genuine data-pipe failures
+ *  that Zero's own state machine doesn't surface. */
+const ZERO_STALE_MS = 120_000;
+/** FRI-180: heartbeat cadence. Stamps `#lastInboundAt` every 60s while
+ *  Zero reports 'live', preventing false-stale detection when the
+ *  connection is healthy but no actual mutations are flowing. */
+const HEARTBEAT_INTERVAL_MS = 60_000;
+/** FRI-180: maximum automatic false-live recovery attempts per session. */
+const FALSE_LIVE_MAX_ATTEMPTS = 3;
+
 class ZeroSyncStore {
   /** Live agent rows from Zero, filtered server-side to non-archived. */
   agents = $state<ZeroAgentRow[]>([]);
@@ -498,6 +512,25 @@ class ZeroSyncStore {
     return this.#deviceId;
   }
 
+  /** FRI-180 Bug 1: true iff this client has completed a full backfill for
+   *  the current client group at least once. Used by SyncOverlay to suppress
+   *  the 500ms pending→show timer on warm relaunches. */
+  get hydratedBefore(): boolean {
+    return this.#hydratedBefore;
+  }
+
+  /** FRI-180 Bug 2: true when no view listener or `connected` event has
+   *  fired for longer than ZERO_STALE_MS. Signals a potential false-live
+   *  wedge to the connectivity watchdog. */
+  get dataStalled(): boolean {
+    return Date.now() - this.#lastInboundAt > ZERO_STALE_MS;
+  }
+
+  /** FRI-180: epoch-ms of the last inbound data event. Exposed for tests. */
+  get lastInboundAt(): number {
+    return this.#lastInboundAt;
+  }
+
   /** When `status === "error"`, the message captured from the
    *  exception that put us there. Exposed for the dev devtools probe
    *  + a future Settings → Sync health surface. */
@@ -554,6 +587,34 @@ class ZeroSyncStore {
    *  terminal-state recovery (needs-auth / error). */
   #lastSendAt: number = 0;
 
+  /** FRI-180 Bug 1: true iff this client has completed a full backfill at
+   *  least once (= the BLOCKS_BACKFILL_COMPLETE_KEY is set in localStorage).
+   *  Phase 1 (constructor): synchronous `!== null` seed. Phase 2 (#init after
+   *  clientGroupID resolves): corrected to `=== cgid` — on a schema bump the
+   *  stored cgid won't match so the overlay may briefly appear after mount. */
+  #hydratedBefore = $state(false);
+
+  /** FRI-180 Bug 2: epoch-ms of the last inbound data event (view listener
+   *  fire or `connected` state transition). Used by `dataStalled` to detect
+   *  a false-live wedge where Zero reports 'live' but data has stopped
+   *  flowing (typically: PWA backgrounded past TCP keepalive, Zero's state
+   *  machine didn't observe the disconnect). */
+  #lastInboundAt: number = Date.now();
+  /** FRI-180: true while a false-live recovery cycle is in progress. Guards
+   *  against concurrent recovery attempts from the connectivity watchdog. */
+  #falseLiveHandling: boolean = false;
+  /** FRI-180: number of false-live recovery attempts this session. Capped at
+   *  FALSE_LIVE_MAX_ATTEMPTS to prevent infinite reconnect loops. */
+  #falseLiveAttempts: number = 0;
+  /** FRI-180: heartbeat interval that keeps `#lastInboundAt` fresh while
+   *  Zero is live and no data is actually flowing (idle session). Cleared in
+   *  `destroy()` alongside the other timers. */
+  #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** FRI-180: true while `destroy()` is executing. Guards `#init()` after
+   *  each await so a `handleFalseLiveRecovery()` call (destroy → init) does
+   *  not let an old in-flight init continue past the tear-down boundary. */
+  #destroying: boolean = false;
+
   /** Self-healing JWT rotation. The store mints a 15-minute JWT on init;
    *  zero-cache disconnects the WS with `needs-auth` once the token's
    *  `exp` passes. Two recovery paths:
@@ -584,6 +645,10 @@ class ZeroSyncStore {
   constructor() {
     if (!browser) return;
     if (!useZero()) return;
+    // FRI-180 Bug 1 Phase 1: synchronous seed. !==null means a backfill has
+    // completed at some point (possibly for a different client group). Phase 2
+    // in #init() corrects it to ===cgid once the clientGroupID resolves.
+    this.#hydratedBefore = localStorage.getItem(BLOCKS_BACKFILL_COMPLETE_KEY) !== null;
     void this.#init();
   }
 
@@ -594,11 +659,13 @@ class ZeroSyncStore {
       // reconnect — TTL is 15 minutes so the auth callback fires on
       // a long-running session occasionally.
       const r = await fetch("/api/sync/refresh", { method: "POST" });
+      if (this.#destroying) return;
       if (!r.ok) {
         this.status = "error";
         return;
       }
       const { token, userId, deviceId, expiresAt } = (await r.json()) as RefreshResponse;
+      if (this.#destroying) return;
       this.#deviceId = deviceId;
       // Zero 1.5: `auth` is a JWT string, not a callback. Token
       // rotation happens via `zero.connection.connect({auth})` when
@@ -647,6 +714,7 @@ class ZeroSyncStore {
             this.status = "live";
             this.errorMessage = null;
             this.#reactiveReauthAttempts = 0;
+            this.#lastInboundAt = Date.now();
             if (this.#reactiveReauthTimer) {
               clearTimeout(this.#reactiveReauthTimer);
               this.#reactiveReauthTimer = null;
@@ -722,12 +790,19 @@ class ZeroSyncStore {
       try {
         const cgid = await this.#zero.clientGroupID;
         this.#clientGroupId = cgid;
-        this.#warmReplica = localStorage.getItem(BLOCKS_BACKFILL_COMPLETE_KEY) === cgid;
+        const storedCgid = localStorage.getItem(BLOCKS_BACKFILL_COMPLETE_KEY);
+        this.#warmReplica = storedCgid === cgid;
+        // FRI-180 Bug 1 Phase 2: correct #hydratedBefore for the current
+        // client group. Phase 1 (!==null) was the synchronous seed; Phase 2
+        // (===cgid) corrects it — on a schema bump the stored cgid won't match
+        // the new cgid so the overlay may appear briefly after mount.
+        this.#hydratedBefore = storedCgid === cgid;
       } catch {
         // No clientGroupID (or storage access denied) ⇒ treat as cold; the
         // tiered dance + backfill still runs and self-heals on completion.
         this.#warmReplica = false;
       }
+      if (this.#destroying) return;
 
       this.#bindAgents();
       this.#bindTickets();
@@ -774,6 +849,12 @@ class ZeroSyncStore {
         () => void this.#reportClientStats(),
         STATS_REPORT_INTERVAL_MS,
       );
+      // FRI-180 Bug 2: heartbeat keeps #lastInboundAt fresh while Zero is
+      // live but idle (no data flowing). Without this, a healthy connected
+      // idle session would trigger false-stale detection after 120s.
+      this.#heartbeatTimer = setInterval(() => {
+        if (this.status === "live") this.#lastInboundAt = Date.now();
+      }, HEARTBEAT_INTERVAL_MS);
       // Apply any blocks-binding the chat shell asked for while
       // `#init` was still running. Cold-load order is:
       //   1. ChatShell mounts, $effect fires, calls
@@ -878,7 +959,7 @@ class ZeroSyncStore {
       reconcileWakeLock();
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -895,7 +976,7 @@ class ZeroSyncStore {
       this.tickets = rows as ZeroTicketRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -919,7 +1000,7 @@ class ZeroSyncStore {
       this.ticketComments = data as ZeroTicketCommentRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -935,7 +1016,7 @@ class ZeroSyncStore {
       this.ticketExternalLinks = data as ZeroTicketExternalLinkRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -955,7 +1036,7 @@ class ZeroSyncStore {
       this.evolveProposals = data as ZeroEvolveProposalRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -975,7 +1056,7 @@ class ZeroSyncStore {
       this.schedules = rows as ZeroScheduleRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -995,7 +1076,7 @@ class ZeroSyncStore {
       this.habits = data as ZeroHabitRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1014,7 +1095,7 @@ class ZeroSyncStore {
       this.habitCheckins = data as ZeroHabitCheckinRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1034,7 +1115,7 @@ class ZeroSyncStore {
       this.inboxItems = data as InboxItem[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1060,7 +1141,7 @@ class ZeroSyncStore {
       this.memory = rows as ZeroMemoryEntryRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1083,7 +1164,7 @@ class ZeroSyncStore {
       this.apps = rows as ZeroAppRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1102,7 +1183,7 @@ class ZeroSyncStore {
       this.mail = data as ZeroMailRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1123,7 +1204,7 @@ class ZeroSyncStore {
       this.readCursors = rows as ZeroReadCursorRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1143,7 +1224,7 @@ class ZeroSyncStore {
       this.clientDevices = rows as ZeroClientDeviceRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1162,7 +1243,7 @@ class ZeroSyncStore {
       this.settings = rows as ZeroSettingsRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => update(data as readonly unknown[]));
+    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1287,7 +1368,7 @@ class ZeroSyncStore {
       for (const listener of this.#blocksListeners) listener(this.blocks, resultType);
     };
     update(view.data as readonly unknown[], "unknown");
-    view.addListener((data, resultType) => update(data as readonly unknown[], resultType));
+    view.addListener((data, resultType) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[], resultType); });
     this.#blocksTeardown = (): void => {
       preload.cleanup();
       view.destroy();
@@ -1471,7 +1552,7 @@ class ZeroSyncStore {
     // old view — no empty frame in between.
     this.blocksFullWindow = true;
     update(view.data as readonly unknown[], "unknown");
-    view.addListener((data, resultType) => update(data as readonly unknown[], resultType));
+    view.addListener((data, resultType) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[], resultType); });
     this.#blocksTeardown = (): void => {
       preload.cleanup();
       view.destroy();
@@ -2245,6 +2326,10 @@ class ZeroSyncStore {
   }
 
   destroy(): void {
+    // FRI-180: flag in-progress destroy so any concurrent #init() (from
+    // handleFalseLiveRecovery) bails out at its await points rather than
+    // continuing to set up bindings on the torn-down client.
+    this.#destroying = true;
     // FRI-161: supersede any in-flight backfill loop so it stops between
     // chunks instead of applying preloads to a closed client.
     this.#backfillGen++;
@@ -2264,12 +2349,44 @@ class ZeroSyncStore {
       clearTimeout(this.#reactiveReauthTimer);
       this.#reactiveReauthTimer = null;
     }
+    if (this.#heartbeatTimer) {
+      clearInterval(this.#heartbeatTimer);
+      this.#heartbeatTimer = null;
+    }
     for (const unsub of this.#unsubscribers) unsub();
     this.#unsubscribers = [];
     this.unbindBlocks();
-    this.#blocksListeners.clear();
+    // FRI-180: do NOT clear #blocksListeners here. The module-level
+    // onBlocksUpdate registration at the bottom of this file must survive
+    // hard reconnects (destroy → init cycles). Clearing would sever the
+    // chat store's block-update integration permanently.
     void this.#zero?.close();
     this.#zero = null;
+    this.#destroying = false;
+  }
+
+  /**
+   * FRI-180 Bug 2: recover from a false-live wedge. Called by the
+   * connectivity watchdog when `zeroStatus === 'live' && dataStalled`.
+   * Tears down and re-initialises the Zero client to re-establish a
+   * working data pipe.
+   *
+   * Guards:
+   *   - `#falseLiveHandling`: prevents concurrent recovery attempts.
+   *   - `#falseLiveAttempts >= FALSE_LIVE_MAX_ATTEMPTS`: caps retries
+   *     to avoid infinite reconnect loops on a fundamentally broken
+   *     connection (e.g., expired BetterAuth session, offline device).
+   */
+  async handleFalseLiveRecovery(): Promise<void> {
+    if (this.#falseLiveHandling) return;
+    if (this.#falseLiveAttempts >= FALSE_LIVE_MAX_ATTEMPTS) return;
+    this.#falseLiveHandling = true;
+    this.#falseLiveAttempts++;
+    this.status = "pending";
+    this.destroy();
+    await this.#init();
+    this.#falseLiveHandling = false;
+    this.#falseLiveAttempts = 0;
   }
 
   /**

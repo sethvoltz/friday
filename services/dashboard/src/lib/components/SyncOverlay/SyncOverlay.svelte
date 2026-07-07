@@ -45,6 +45,12 @@
       return;
     }
     // status === "pending"
+    // FRI-180 Bug 1: on a warm PWA relaunch the local IndexedDB replica is
+    // intact — data paints from cache before the WS handshake completes.
+    // Skip the overlay timer entirely when the client has hydrated before
+    // for this client group; the chat renders immediately from cache and
+    // the overlay would be a false alarm.
+    if (zeroSync.hydratedBefore) return;
     const t = setTimeout(() => {
       // Re-check at fire time — status could have flipped during the
       // delay window. If it's live, do nothing.
