@@ -959,7 +959,10 @@ class ZeroSyncStore {
       reconcileWakeLock();
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -976,7 +979,10 @@ class ZeroSyncStore {
       this.tickets = rows as ZeroTicketRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1000,7 +1006,10 @@ class ZeroSyncStore {
       this.ticketComments = data as ZeroTicketCommentRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1016,7 +1025,10 @@ class ZeroSyncStore {
       this.ticketExternalLinks = data as ZeroTicketExternalLinkRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1036,7 +1048,10 @@ class ZeroSyncStore {
       this.evolveProposals = data as ZeroEvolveProposalRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1056,7 +1071,10 @@ class ZeroSyncStore {
       this.schedules = rows as ZeroScheduleRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1076,7 +1094,10 @@ class ZeroSyncStore {
       this.habits = data as ZeroHabitRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1095,7 +1116,10 @@ class ZeroSyncStore {
       this.habitCheckins = data as ZeroHabitCheckinRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1115,7 +1139,10 @@ class ZeroSyncStore {
       this.inboxItems = data as InboxItem[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1141,7 +1168,10 @@ class ZeroSyncStore {
       this.memory = rows as ZeroMemoryEntryRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1164,7 +1194,10 @@ class ZeroSyncStore {
       this.apps = rows as ZeroAppRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1183,7 +1216,10 @@ class ZeroSyncStore {
       this.mail = data as ZeroMailRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1204,7 +1240,10 @@ class ZeroSyncStore {
       this.readCursors = rows as ZeroReadCursorRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1224,7 +1263,10 @@ class ZeroSyncStore {
       this.clientDevices = rows as ZeroClientDeviceRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1243,7 +1285,10 @@ class ZeroSyncStore {
       this.settings = rows as ZeroSettingsRow[];
     };
     update(view.data as readonly unknown[]);
-    view.addListener((data) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[]); });
+    view.addListener((data) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[]);
+    });
     this.#unsubscribers.push(() => {
       preload.cleanup();
       view.destroy();
@@ -1368,7 +1413,10 @@ class ZeroSyncStore {
       for (const listener of this.#blocksListeners) listener(this.blocks, resultType);
     };
     update(view.data as readonly unknown[], "unknown");
-    view.addListener((data, resultType) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[], resultType); });
+    view.addListener((data, resultType) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[], resultType);
+    });
     this.#blocksTeardown = (): void => {
       preload.cleanup();
       view.destroy();
@@ -1552,7 +1600,10 @@ class ZeroSyncStore {
     // old view — no empty frame in between.
     this.blocksFullWindow = true;
     update(view.data as readonly unknown[], "unknown");
-    view.addListener((data, resultType) => { this.#lastInboundAt = Date.now(); update(data as readonly unknown[], resultType); });
+    view.addListener((data, resultType) => {
+      this.#lastInboundAt = Date.now();
+      update(data as readonly unknown[], resultType);
+    });
     this.#blocksTeardown = (): void => {
       preload.cleanup();
       view.destroy();
