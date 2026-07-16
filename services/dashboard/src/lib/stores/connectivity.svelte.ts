@@ -74,6 +74,13 @@ export function startConnectivity(): void {
   }
   tickInterval = setInterval(() => {
     connectivity.tick += 1;
+    // FRI-180 Bug 2: false-live wedge detection. If Zero reports 'live'
+    // but no data has flowed for ZERO_STALE_MS (typically: PWA
+    // backgrounded past TCP keepalive, Zero's state machine missed the
+    // disconnect), trigger a full reconnect.
+    if (zeroSync.status === "live" && zeroSync.dataStalled) {
+      void zeroSync.handleFalseLiveRecovery();
+    }
   }, 5_000);
   // Node returns a Timeout object; the browser returns a number. The
   // `in` check would throw `TypeError` on the primitive, so probe via
@@ -140,6 +147,10 @@ export function resolveWidget(): WidgetView {
   let sync: StageStatus;
   if (internet !== "live") {
     sync = "unknown";
+  } else if (zeroStatus === "live" && zeroSync.dataStalled) {
+    // FRI-180 Bug 2: Zero thinks it's live but data has stalled —
+    // false-live wedge. Show reconnecting while recovery runs.
+    sync = "reconnecting";
   } else if (zeroStatus === "live") {
     sync = "live";
   } else if (zeroStatus === "pending") {
